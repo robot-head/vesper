@@ -4,6 +4,10 @@ A Rust implementation of the Vesper language described in [the supplied specific
 
 This repository now contains an executable language implementation rather than the original Hello World program. It is a research compiler, **not yet a complete implementation of every backend, runtime, and proof obligation in the document**. See [implementation coverage](docs/implementation.md) for the exact boundaries.
 
+GitHub highlights `.ves` files with its Rust grammar through [.gitattributes](.gitattributes).
+This is approximate highlighting and classifies those files as Rust until
+[GitHub Linguist](https://github.com/github-linguist/linguist) adds native Vesper support.
+
 ## Run
 
 Install stable Rust and a C linker, then:
@@ -110,3 +114,8 @@ Baseline128 delimiter/XOR scanner. See [SIMD support and limits](docs/simd-scann
 See [CAS workflows](docs/cas-workflows.md).
 
 `vesper emit --emit interface --package @org/name` and `vesper semver` now compare experimental checked source contracts. `vesper resolve --catalog ...` resolves local Loom metadata into an exact solution snapshot. See [package workflows and runnable examples](docs/package-workflows.md).
+
+`vesper audit` checks declared dependencies against local advisory/license policy
+with explicit findings and unknown results; see [offline audits](docs/package-audits.md).
+`vesper attest import` verifies the current configured builder quorum and exact
+blob bytes before CAS ingestion; see [signed artifact admission](docs/builder-attestations.md#importing-verified-blob-bytes).

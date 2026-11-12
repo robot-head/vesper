@@ -1,0 +1,6 @@
+[package]
+name = "vesper-aura"
+version = "0.1.0"
+edition = "2024"
+description = "Bounded keyed Aura view reconciliation and transactional retained backend contract"
+publish = false
