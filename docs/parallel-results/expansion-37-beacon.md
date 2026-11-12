@@ -50,7 +50,9 @@ Fixed-capacity span pools mint monotonically increasing local IDs, skip a direct
 parent-ID collision, and stop before wraparound. Explicit parent contexts and
 caller clocks avoid TLS/evidence changes. Active spans are non-Clone owners;
 finish_ok/finish_err consume once on success, return the live owner on queue-full
-or end-before-start errors, and cancel explicitly without emitting completion.
+or end-before-start errors. `cancel(queue, end_mono_ns)` emits exactly one
+`Error(Cancelled)` record and uses those same recoverable checks; it never frees
+a slot silently.
 Dropped/forgotten owners remain visible as occupied slots. Rust does not enforce
 Vesper's total exhaustion, and ID uniqueness is scoped to one pool lifetime.
 
@@ -75,10 +77,10 @@ All commands used `CARGO_TARGET_DIR=/tmp/vesper-beacon-target`,
 `CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_INCREMENTAL=0`.
 
 - `cargo test --manifest-path crates/vesper-beacon/Cargo.toml --all-targets`:
-  10 tests passed. Header tests include real bytes, every truncation, invalid
+  11 tests passed. Header tests include real bytes, every truncation, invalid
   bytes at every hex position, separators/version/zero IDs, and all 256 flag
   bytes. Lifecycle tests cover explicit ancestry, error attribution, recoverable
-  full queues, retry/cancel, abandoned owners, bounded slots, max-ID exhaustion,
+  full queues, retry/cancel (including cancellation backpressure), abandoned owners, bounded slots, max-ID exhaustion,
   imported-parent collision, FIFO wraparound and independent owned drains.
   Histogram tests cover every bin's bounds/midpoint, contiguous full-u64
   coverage, low-value regression, footprint and transactional counter overflow.
@@ -88,7 +90,7 @@ All commands used `CARGO_TARGET_DIR=/tmp/vesper-beacon-target`,
   passed.
 - `cargo fmt --manifest-path crates/vesper-beacon/Cargo.toml -- --check`: passed.
 - `cargo run --manifest-path crates/vesper-beacon/Cargo.toml --example bounded_trace`:
-  passed; output `completed 2 spans; histogram count=1, bytes=7944`.
+  passed; output `completed 3 spans; histogram count=1, bytes=7944`.
 
 These are host-library results on the available Linux environment. No native
 Pulse execution, compiler effects, hardware/register evidence, formal proof,

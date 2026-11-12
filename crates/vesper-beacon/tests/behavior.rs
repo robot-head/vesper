@@ -171,7 +171,21 @@ fn backpressure_returns_same_owner_retry_is_exactly_once_and_cancel_is_explicit(
         .finish_ok(&mut full, 10, PrimaryAttribute::None)
         .unwrap_err();
     assert_eq!(failed.error, FinishError::QueueFull);
-    let id_c = failed.span.cancel().span_id();
+    let id_c = failed.span.context().span_id();
+    let failed = failed.span.cancel(&mut full, 9).unwrap_err();
+    assert_eq!(failed.error, FinishError::EndBeforeStart);
+    let failed = failed.span.cancel(&mut full, 10).unwrap_err();
+    assert_eq!(failed.error, FinishError::QueueFull);
+    assert_eq!(failed.span.context().span_id(), id_c);
+    assert_eq!(pool.unclosed_count(), 1);
+    failed.span.cancel(&mut queue, 10).unwrap();
+    let cancellation = queue.drain::<2>();
+    assert_eq!(cancellation.span_ids(), &[id_c]);
+    assert_eq!(
+        cancellation.statuses(),
+        &[SpanStatus::Error(ErrorCode::Cancelled)]
+    );
+    assert!(queue.drain::<2>().is_empty());
     assert!(id_c > id_b && id_b > id_a);
     assert_eq!(pool.unclosed_count(), 0);
     assert!(full.drain::<1>().is_empty());
@@ -203,7 +217,9 @@ fn abandoned_spans_stay_observable_and_capacity_is_bounded() {
 fn ids_never_wrap_or_repeat_and_imported_self_parent_is_skipped() {
     let pool = SpanPool::<1>::new(1, nz(u64::MAX), 0).unwrap();
     let final_span = pool.start_span(None, SpanSchema::Request, 0, 0).unwrap();
-    assert_eq!(final_span.cancel().span_id(), u64::MAX);
+    let mut queue = TelemetryRing::<1>::default();
+    final_span.cancel(&mut queue, 0).unwrap();
+    assert_eq!(queue.drain::<1>().span_ids(), &[u64::MAX]);
     assert_eq!(
         pool.start_span(None, SpanSchema::Request, 0, 0)
             .unwrap_err(),
@@ -216,14 +232,13 @@ fn ids_never_wrap_or_repeat_and_imported_self_parent_is_skipped() {
         .unwrap();
     assert_eq!(child.context().span_id(), 6);
     assert_eq!(child.context().trace_flags(), 0xfe);
-    child.cancel();
-    assert_eq!(
-        pool.start_span(None, SpanSchema::Request, 0, 0)
-            .unwrap()
-            .cancel()
-            .span_id(),
-        7
-    );
+    child.cancel(&mut queue, 0).unwrap();
+    assert_eq!(queue.drain::<1>().span_ids(), &[6]);
+    pool.start_span(None, SpanSchema::Request, 0, 0)
+        .unwrap()
+        .cancel(&mut queue, 0)
+        .unwrap();
+    assert_eq!(queue.drain::<1>().span_ids(), &[7]);
     let pool = SpanPool::<1>::new(1, nz(u64::MAX), 0).unwrap();
     let parent = W3cSpanContext::new(1, u64::MAX, 0).unwrap();
     assert_eq!(
@@ -264,4 +279,30 @@ fn redaction_marker_does_not_depend_on_payload() {
     assert_eq!(a.redact(), b.redact());
     assert_eq!(a.redact().as_bytes(), b"[REDACTED]");
     assert_eq!(a.declassify(), "password A");
+}
+
+#[test]
+fn cancellation_cannot_bypass_full_queue_or_duplicate_records() {
+    let pool = pool::<1>();
+    let mut ring = TelemetryRing::<1>::default();
+    pool.start_span(None, SpanSchema::Request, 0, 0)
+        .unwrap()
+        .finish_ok(&mut ring, 1, PrimaryAttribute::None)
+        .unwrap();
+    let cancelled = pool.start_span(None, SpanSchema::Request, 0, 2).unwrap();
+    let context = cancelled.context();
+    let failed = cancelled.cancel(&mut ring, 3).unwrap_err();
+    assert_eq!(failed.error, FinishError::QueueFull);
+    assert_eq!(failed.span.context(), context);
+    assert_eq!(pool.unclosed_count(), 1);
+    let existing = ring.drain::<2>();
+    assert_eq!(existing.span_ids(), &[1]);
+    assert_eq!(existing.statuses(), &[SpanStatus::Ok]);
+    failed.span.cancel(&mut ring, 3).unwrap();
+    assert_eq!(pool.unclosed_count(), 0);
+    let owned = ring.drain::<2>();
+    assert_eq!(owned.span_ids(), &[context.span_id()]);
+    assert_eq!(owned.statuses(), &[SpanStatus::Error(ErrorCode::Cancelled)]);
+    assert_eq!(owned.duration_ns(), &[1]);
+    assert!(ring.drain::<2>().is_empty());
 }

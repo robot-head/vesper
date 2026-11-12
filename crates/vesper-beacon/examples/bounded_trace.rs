@@ -37,6 +37,16 @@ fn main() {
         child_columns.statuses(),
         &[SpanStatus::Error(ErrorCode::Storage)]
     );
+    // Cancellation follows the same bounded enqueue/error-attribution contract.
+    pool.start_span(Some(parent), SpanSchema::Background, 1_040, 140)
+        .unwrap()
+        .cancel(&mut queue, 150)
+        .unwrap();
+    let cancelled_columns = queue.drain::<16>();
+    assert_eq!(
+        cancelled_columns.statuses(),
+        &[SpanStatus::Error(ErrorCode::Cancelled)]
+    );
     assert_eq!(pool.unclosed_count(), 0);
     let mut histogram = FastLogHistogram::default();
     histogram
@@ -47,7 +57,7 @@ fn main() {
         .unwrap();
     println!(
         "completed {} spans; histogram count={}, bytes={}",
-        child_columns.len() + root_columns.len(),
+        child_columns.len() + root_columns.len() + cancelled_columns.len(),
         histogram.total_count(),
         FastLogHistogram::FOOTPRINT_BYTES
     );

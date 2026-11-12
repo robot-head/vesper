@@ -17,7 +17,10 @@ scalar parsing nor formatting has a timing or branchlessness guarantee.
 owners have explicit parents and caller-supplied Unix/monotonic timestamps.
 Successful `finish_ok`/`finish_err` enqueue one record and consume the owner;
 queue-full or backwards-clock errors return that same live owner for retry or
-explicit `cancel`. A cancelled ID is never reused. ID exhaustion never wraps.
+explicit `cancel(queue, end_mono_ns)`. Cancellation emits one
+`Error(Cancelled)` record through the same queue and timestamp checks; full
+queues and backwards timestamps return the live owner. There is no silent
+cancellation path. A cancelled ID is never reused. ID exhaustion never wraps.
 A direct imported-parent ID collision is skipped. IDs are only unique within a
 pool's lifetime; callers must coordinate trace/ID namespaces between pools and
 with remote producers. No entropy, globally unique ID generation, or nesting
@@ -54,5 +57,6 @@ caller declassification, zeroize payloads, or fence hardware memory.
 
 Run `cargo run --manifest-path crates/vesper-beacon/Cargo.toml --example bounded_trace`.
 The self-checking example parses actual header bytes, completes an error child,
-recovers a parent from queue backpressure, drains owned columns, and records a
+recovers a parent from queue backpressure, attributes explicit cancellation,
+drains owned columns, and records a
 trace-linked latency exemplar. There are no performance claims or benchmarks.

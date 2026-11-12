@@ -103,7 +103,7 @@ impl<const ACTIVE: usize> SpanPool<ACTIVE> {
         })
     }
 }
-/// Non-Clone owner. Successful finish/cancel consumes it; failed finish returns it.
+/// Non-Clone owner. Successful finish/cancel consumes it; failed finish/cancel returns it.
 /// A second successful finish cannot reuse the consumed owner:
 ///
 /// ```compile_fail
@@ -146,9 +146,20 @@ impl<const ACTIVE: usize> ActiveSpan<'_, ACTIVE> {
     pub const fn context(&self) -> W3cSpanContext {
         self.context
     }
-    pub fn cancel(self) -> W3cSpanContext {
-        self.pool.occupied[self.slot].set(false);
-        self.context
+    /// Completes with explicit cancellation attribution. Backpressure and invalid
+    /// timestamps return the live owner exactly as `finish_err` does; cancellation
+    /// never silently releases a slot or discards a completed record.
+    pub fn cancel<const QUEUE: usize>(
+        self,
+        queue: &mut TelemetryRing<QUEUE>,
+        end_mono_ns: u64,
+    ) -> Result<(), FinishFailure<Self>> {
+        self.finish_err(
+            queue,
+            end_mono_ns,
+            ErrorCode::Cancelled,
+            PrimaryAttribute::None,
+        )
     }
     pub fn finish_ok<const QUEUE: usize>(
         self,
