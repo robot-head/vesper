@@ -83,7 +83,7 @@ pub enum Rejection {
 }
 #[derive(Debug)]
 enum Verdict {
-    Accepted(AcceptedExpansion),
+    Accepted(Box<AcceptedExpansion>),
     Rejected(Rejection),
 }
 #[derive(Debug)]
@@ -225,7 +225,7 @@ pub fn expand_fragment(
         }
     };
     let verdict = match check_authority(host.session(), body.into_fragment(), graph, policies) {
-        Ok(v) => Verdict::Accepted(v),
+        Ok(v) => Verdict::Accepted(Box::new(v)),
         Err(e) => Verdict::Rejected(Rejection::Authority(e)),
     };
     Ok(FragmentOutcome { execution, verdict })

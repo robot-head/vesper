@@ -96,6 +96,11 @@ ignores before the final filesystem guard test. It includes unchanged legacy fla
 runtime/cache/session behavior, actual Wasmtime structured execution and typed
 hygiene. Final raw7cache+4codec tests and strict all-target Clippy are checked
 again after the guard addition; results are recorded in the follow-up below.
+Final seven raw-cache and four codec tests pass with zero ignores, including
+static Unix FIFO/final-symlink rejection without execution and fresh current-host,
+stale-expansion, invalid-slot, metadata and repeated-copy guard cleanup. Strict
+all-target Clippy passes for Forge, Forge runner and sandbox. Its private verdict
+stores the accepted fragment behind a Box, matching the existing flat session.
 All heavy verification uses private /tmp/vesper-editor41-protocol-target, one job,
 debug0/incremental0. A mistaken lock-update command briefly started an independent
 worktree default target and was stopped; no coordinator cache was written.
