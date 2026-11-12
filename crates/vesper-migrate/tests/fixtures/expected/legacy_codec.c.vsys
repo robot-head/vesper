@@ -1,0 +1,22 @@
+// vesper.migrate/1: synthesized by vesper migrate from C header `legacy_codec.h`.
+// Review every `assumed:` line; finite shadow tests do not prove equivalence.
+sys library LegacyCodecAbi (
+    target = "x86_64-unknown-linux-gnu", abi = "sysv64",
+    link = "static", name = "legacy_codec",
+    artifact = "blake3:abababababababababababababababababababababababababababababababab",
+    header = "legacy_codec.h",
+    pkg_config = "legacy-codec ^0.8.0"
+) {
+    // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+    // assumed: `out` + `out_len` lifted to a nocapture unique slice: a C header cannot show that the callee does not retain the pointer
+    fn legacy_parse_batch_header_into(nocapture in raw_bytes: CSlice[u8], nocapture inout out: CSlice[u32]) -> ForeignVal[i32];
+    // assumed: `data` + `len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+    fn legacy_crc32c(nocapture in data: CSlice[u8], seed: u32) -> ForeignVal[u32];
+    // assumed: `src` + `src_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+    // assumed: `dst` + `dst_len` lifted to a nocapture unique slice: a C header cannot show that the callee does not retain the pointer
+    fn legacy_encode(nocapture in src: CSlice[u8], nocapture inout dst: CSlice[u8]) -> ForeignVal[usize];
+    fn legacy_status() -> ForeignVal[u32];
+    fn legacy_version() -> ForeignVal[u32];
+    fn legacy_reset() -> ForeignVal[Unit];
+    fn legacy_crc_table() -> ForeignVal[NullablePtr[u32]];
+}

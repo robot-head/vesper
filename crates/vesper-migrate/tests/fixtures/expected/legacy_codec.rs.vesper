@@ -1,0 +1,22 @@
+// vesper.migrate/1: Vesper declarations lifted by vesper migrate from Rust crate `legacy_codec`.
+// Modes summarize signatures and body field accesses; they are not a check of Vesper typing rules.
+
+@wire_layout(native)
+struct DecoderStats {
+    last_crc: u32,
+    record_count: i32,
+    bytes_seen: u64,
+}
+
+enum ParseError: u32 { Short = 1, BadMagic = 2 }
+
+extern fn DecoderStats::into_parts(sink self: DecoderStats) -> (u32, i32);
+extern fn DecoderStats::observe(inout self.{bytes_seen}: DecoderStats, len: usize) -> Unit;
+extern fn DecoderStats::reset(inout self: DecoderStats) -> Unit;
+extern fn DecoderStats::summary(in self.{bytes_seen, last_crc}: DecoderStats) -> u64;
+extern fn legacy_classify(code: u32) -> ParseError;
+extern fn legacy_header_len() -> usize;
+extern fn legacy_parse_batch_header(in raw_bytes: ByteSlice, inout out_crc: u32, inout out_count: i32) -> i32;
+extern fn legacy_parse_batch_header_into(in raw_bytes: ByteSlice, inout out: Slice[u32]) -> i32;
+extern fn parse_batch_header(in raw_bytes: ByteSlice, inout state.{last_crc, record_count}: DecoderStats) -> Result[i64, ParseError];
+extern fn record_bytes_hint(in state.{record_count}: DecoderStats, per_record: u32) -> u64;
