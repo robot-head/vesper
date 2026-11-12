@@ -98,7 +98,7 @@ pub fn hash_world(tick: u64, bodies: &TiledBodies) -> WorldHashes {
             bodies.collider(i),
             bodies.layer_mask(i),
         ];
-        for (chunk, w) in record.chunks_exact_mut(4).zip(words) {
+        for (chunk, w) in record.as_chunks_mut::<4>().0.iter_mut().zip(words) {
             chunk.copy_from_slice(&w.to_le_bytes());
         }
         feed(&record);

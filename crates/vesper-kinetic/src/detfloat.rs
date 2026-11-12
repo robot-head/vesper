@@ -526,12 +526,17 @@ fn nan_generating_libcall(func: &Function, data: &InstructionData) -> bool {
 
 fn canonical_nan_bits(ty: Type, bits: &[u8]) -> bool {
     match ty.lane_type().bits() {
-        32 => bits
-            .chunks_exact(4)
-            .all(|c| u32::from_le_bytes(c.try_into().expect("4")) == 0x7fc0_0000),
-        64 => bits
-            .chunks_exact(8)
-            .all(|c| u64::from_le_bytes(c.try_into().expect("8")) == 0x7ff8_0000_0000_0000),
+        32 => {
+            let (lanes, rest) = bits.as_chunks::<4>();
+            rest.is_empty() && lanes.iter().all(|c| u32::from_le_bytes(*c) == 0x7fc0_0000)
+        }
+        64 => {
+            let (lanes, rest) = bits.as_chunks::<8>();
+            rest.is_empty()
+                && lanes
+                    .iter()
+                    .all(|c| u64::from_le_bytes(*c) == 0x7ff8_0000_0000_0000)
+        }
         _ => false,
     }
 }
