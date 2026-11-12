@@ -90,3 +90,15 @@ Text output shows versions, features, declared ceilings, required capabilities a
 `--json` emits a schema-versioned report with `status: "graph"`, `basis: "declared_metadata"`, the direction/focus, original snapshot roots, visible package/native nodes and edges, and unused selection lists. Dependency records retain their original `dependent`/`dependency` identities in both directions. `--dot` emits deterministic Graphviz DOT with distinct Vesper/native node identities; `--invert` reverses its arrows. The two output flags are mutually exclusive.
 
 Invalid snapshots and unknown focus packages produce nonzero exits with structured errors in JSON mode. Arguments, file reads and JSON parsing errors use stderr. No output files are created or rewritten by this command; use shell redirection to save its output. Report schema 1 is an inspection format, not an interface fingerprint, authenticated SBOM or provenance certificate. Resolver trust/optimization policy is not enforced by graph inspection.
+
+## CycloneDX inventory export
+
+```sh
+cargo run -- sbom /tmp/Loom.lock > /tmp/vesper-bom.json
+```
+
+`sbom` emits CycloneDX 1.6 JSON by default; its input defaults to `Loom.lock`. It validates the complete snapshot before producing any output and includes only reachable Vesper/native components and their direct dependencies. Shared dependencies appear once, cycles remain graph edges, and every dependency reference resolves to an emitted component. Valid unused selections are disclosed in metadata properties.
+
+Deterministic generic Package URLs preserve Vesper namespaces, reserved `std/*` identities, native identity domains and SemVer build metadata. The document records active features, declared/required capability metadata, edge budgets, FFI policy and native requirements as namespaced properties. Free-form license text is preserved without claiming SPDX-expression validation. No random UUID, timestamp, fabricated source hash or installed-system inventory is added.
+
+This is a standard-format inventory of supplied declarations, not an authenticated source SBOM, CVE scan, ABI check or compiler authority audit. Native identities still use the local catalog's SemVer model, not Debian/RPM versions. Generation performs no network calls, builds, code execution or file writes. Invalid snapshots, malformed JSON and option errors exit nonzero on stderr without a partial BOM. Use `resolve --locked` beforehand to check current manifest/catalog consistency.

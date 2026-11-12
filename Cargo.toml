@@ -12,6 +12,7 @@ members = [
     "crates/vesper-simpulse",
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
+    "crates/vesper-loom-trust",
     "crates/vesper-alloc",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
@@ -31,6 +32,7 @@ default-members = [
     "crates/vesper-simpulse",
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
+    "crates/vesper-loom-trust",
     "crates/vesper-alloc",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
@@ -63,6 +65,8 @@ vesper-pulse = { path = "crates/vesper-pulse" }
 vesper-semver = { path = "crates/vesper-semver" }
 vesper-loom-calculus = { path = "crates/vesper-loom-calculus" }
 vesper-loom-solver = { path = "crates/vesper-loom-solver" }
+vesper-loom-trust = { path = "crates/vesper-loom-trust" }
+vesper-loom-cas = { path = "crates/vesper-loom-cas" }
 ariadne = "0.5"
 petgraph = "0.8"
 egg = "0.10"
