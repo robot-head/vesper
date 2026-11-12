@@ -5,7 +5,21 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 
 ## Next implementation batch
 
-Seven new assignments are ready in the [next-wave prompt index](agent-prompts/next-wave/README.md). Each prompt is self-contained and has a separate implementation boundary. They can start together from `origin/main`; only the checked-arithmetic lane edits compiler semantics. Source-native suspension and source trait/model syntax follow that migration. These prompts have been prepared for assignment; implementation sessions have not been launched by creating them.
+The user has launched all seven assignments in the [next-wave prompt index](agent-prompts/next-wave/README.md). Their paths are now reserved for those active sessions; do not launch duplicate implementations. Only the checked-arithmetic lane edits compiler semantics. Source-native suspension and source trait/model syntax follow that migration.
+
+| Active lane | Requested branch | Reserved paths |
+| --- | --- | --- |
+| Checked arithmetic | `next/checked-arithmetic` | Numeric/checker/IR/evaluator/optimizer/native/Lean/interface code and assigned source fixtures |
+| Native lifecycle | `next/native-lifecycle` | Fiber ABI, native experiment, compatible scheduler changes if needed |
+| Cached sandbox builds | `next/loom-cached-builds` | New `crates/vesper-loom-build/**` |
+| Pact compiler bridge | `next/pact-compiler-bridge` | New `crates/vesper-pact-bridge/**` |
+| Strata collections | `next/strata-collections` | `crates/vesper-alloc/**` |
+| Source simulation | `next/source-simulation` | New `crates/vesper-sim-session/**` |
+| Forge hygiene/authority | `next/forge-hygiene-authority` | New `crates/vesper-forge/**` |
+
+The names above are the requested branch names, not confirmed remote refs. Record actual branches/PRs, base SHAs, commits and validation evidence when handoffs arrive. The individual prompts define exact ownership, including report files and fixture-only exceptions.
+
+The coordinator retains root workspace/dependency registration, lockfile, CLI/module wiring, CI and global documentation. Do not pre-register unfinished crates or connect macros to caching before the provenance/authority gate is reviewed. Recheck compiler consumers against the arithmetic migration before integration; do not merge a partial arithmetic backend update.
 
 ## First-wave results
 
@@ -22,7 +36,7 @@ Each agent used a distinct worktree under `/workspace/vesper-worktrees/`. Agents
 
 ## External agent prompts
 
-All seven feature handoff sessions are complete and their contributions are merged into `main`. The additional platform-CI handoff (`claude/project-thread-hlbvro`) is integrated too. The prompts below record their original scope. No lane remains reserved for a running external session.
+All seven original feature handoff sessions are complete and their contributions are merged into `main`. The additional platform-CI handoff (`claude/project-thread-hlbvro`) is integrated too. The prompts below record their original scope; current reservations are listed in the active batch above.
 
 | Assignment | Prompt |
 | --- | --- |

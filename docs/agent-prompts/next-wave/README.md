@@ -1,6 +1,8 @@
 # Next parallel implementation wave
 
-Start all seven lanes from a fresh `origin/main` in separate worktrees or cloud checkouts. Minimum implementation baseline: `0e6caf9`. Each file contains a complete, copyable prompt; send one file's fenced text to one agent. These are assignments for new work, not claims that the remaining features are already implemented. Generating this batch does not launch implementation sessions.
+Status: **all seven sessions launched by the user**. Their implementation paths are reserved; do not assign a second agent to the same lane. Actual branch/PR and validation details will be recorded on handoff.
+
+Each lane starts from a fresh `origin/main` in a separate worktree or cloud checkout. Minimum implementation baseline: `0e6caf9`. Each file contains the complete, copyable prompt for its assigned agent. These are assignments for new work, not claims that the remaining features are already implemented.
 
 | Lane | Copyable prompt | Exclusive implementation boundary |
 | --- | --- | --- |
