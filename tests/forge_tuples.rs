@@ -248,6 +248,12 @@ fn malformed_deep_and_tight_output_tuples_never_return_partial_artifacts() {
 // This exercises the real sealed lowering independently of the editor aggregate
 // admission guard. It does not construct or claim an accepted CheckedSource.
 fn lower_actual(source: &str) -> (lower::LoweredBody, String) {
+    lower_actual_with_limits(source, Default::default()).unwrap()
+}
+fn lower_actual_with_limits(
+    source: &str,
+    limits: lower::LowerLimits,
+) -> Result<(lower::LoweredBody, String), lower::LowerError> {
     use vesper::forge_frontend::authority::{self, AuthorityLimits};
     use vesper_forge::{
         HygieneHost, InvocationSite, SessionId,
@@ -315,7 +321,7 @@ fn lower_actual(source: &str) -> (lower::LoweredBody, String) {
     let resolved = host
         .resolve_expr_function_body(&imported, &syntax, function.id, replacements, &mut budget)
         .unwrap();
-    let lowered = lower::lower_body(&resolved, &host, &bindings, Default::default()).unwrap();
+    let lowered = lower::lower_body(&resolved, &host, &bindings, limits)?;
     let mut edits = syntax
         .definitions()
         .iter()
@@ -338,7 +344,7 @@ fn lower_actual(source: &str) -> (lower::LoweredBody, String) {
         cursor = span.end;
     }
     candidate.push_str(&source[cursor..]);
-    (lowered, candidate)
+    Ok((lowered, candidate))
 }
 #[test]
 fn actual_sealed_lowering_reparses_and_matches_real_tuple_checker_asts() {
@@ -370,5 +376,34 @@ fn actual_sealed_lowering_reparses_and_matches_real_tuple_checker_asts() {
         for segment in lowered.segments() {
             assert!(lowered.source().get(segment.span.clone()).is_some());
         }
+    }
+}
+
+#[test]
+fn sealed_tuple_lowering_prepays_child_depth_vector_output_and_work_limits() {
+    let source = "macro v()->expr{quote{((1,2),())}} fn target()->((i64,i64),()){v!()}";
+    for limits in [
+        lower::LowerLimits {
+            max_nodes: 2,
+            ..Default::default()
+        },
+        lower::LowerLimits {
+            max_depth: 1,
+            ..Default::default()
+        },
+        lower::LowerLimits {
+            max_output_bytes: 1,
+            ..Default::default()
+        },
+        lower::LowerLimits {
+            max_work: 1,
+            ..Default::default()
+        },
+        lower::LowerLimits {
+            max_map_entries: 1,
+            ..Default::default()
+        },
+    ] {
+        assert!(lower_actual_with_limits(source, limits).is_err());
     }
 }
