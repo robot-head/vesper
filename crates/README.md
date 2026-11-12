@@ -20,6 +20,7 @@ The first extraction preserves the existing `vesper` API and executable behavior
 | `vesper-loom-cas` | Immutable BLAKE3 store, derivation records and independent materialization | None |
 | `vesper-loom-sandbox` | Wasmtime component build/macro host with deterministic inputs and resource limits | None |
 | `vesper-ignis` | GPU-independent render graph, barriers and queue synchronization | None |
+| `vesper-loom-trust` | Offline Ed25519 builder signatures and configured-operator quorum | Loom calculus, CAS |
 
 ```mermaid
 flowchart LR
