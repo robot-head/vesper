@@ -29,6 +29,7 @@ members = [
     "crates/vesper-loom-cas",
     "crates/vesper-loom-sandbox",
     "crates/vesper-loom-build",
+    "crates/vesper-forge-runner",
     "crates/vesper-ignis",
     "experiments/native-pulse",
 ]
@@ -60,11 +61,15 @@ default-members = [
     "crates/vesper-loom-cas",
     "crates/vesper-loom-sandbox",
     "crates/vesper-loom-build",
+    "crates/vesper-forge-runner",
     "crates/vesper-ignis",
     "experiments/native-pulse",
 ]
 
-exclude = ["crates/vesper-loom-sandbox/fixtures/guest"]
+exclude = [
+    "crates/vesper-loom-sandbox/fixtures/guest",
+    "crates/vesper-forge-runner/fixtures/guest",
+]
 
 [workspace.dependencies]
 logos = "0.15"

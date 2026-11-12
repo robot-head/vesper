@@ -6,19 +6,13 @@ description = "Cached WASI Forge macro execution with fresh per-session hygiene 
 publish = false
 build = "build.rs"
 
-# Temporary standalone workspace until the coordinator registers this crate
-# (see docs/parallel-results/cached-forge-runner.md). Integration removes this
-# table and the nested Cargo.lock.
-[workspace]
-exclude = ["fixtures/guest"]
-
 [dependencies]
 vesper-forge = { path = "../vesper-forge", features = ["sandbox-transport"] }
 vesper-loom-cas = { path = "../vesper-loom-cas" }
 vesper-loom-sandbox = { path = "../vesper-loom-sandbox" }
 blake3 = "1.8"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
