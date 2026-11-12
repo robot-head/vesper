@@ -523,6 +523,45 @@ async fn symlinks_and_special_files_are_rejected_without_following() {
     assert!(verify_target(fixture.request(None)).await.is_err());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn symlink_ancestor_in_writable_directory_is_rejected() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+    let fixture = Fixture::new(Spec::default()).await;
+    // A link inside a world-writable directory could be replaced by any local user, so it is
+    // never trusted, whoever owns it. This also holds when the tests run as root.
+    let shared = fixture.dir.path().join("shared");
+    fs::create_dir(&shared).unwrap();
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o777)).unwrap();
+    let link = shared.join("repo");
+    symlink(fixture.dir.path(), &link).unwrap();
+    let mut request = fixture.request(None);
+    request.metadata_dir = link.join("metadata");
+    let error = verify_target(request).await.unwrap_err().to_string();
+    assert!(error.contains("symlink directory ancestor"), "{error}");
+    let mut request = fixture.request(None);
+    request.targets_dir = link.join("targets");
+    let error = verify_target(request).await.unwrap_err().to_string();
+    assert!(error.contains("symlink directory ancestor"), "{error}");
+}
+
+/// Regression: macOS temporary directories live under `/var`, a root-owned link to
+/// `/private/var`. Verification must accept repositories below such system links.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn system_symlink_ancestor_is_accepted() {
+    let fixture = Fixture::new(Spec::default()).await;
+    let request = fixture.request(None);
+    assert!(
+        request
+            .metadata_dir
+            .ancestors()
+            .any(|a| fs::symlink_metadata(a).unwrap().file_type().is_symlink()),
+        "expected the temporary directory to sit below a system symlink"
+    );
+    verify_target(request).await.unwrap();
+}
+
 #[tokio::test]
 async fn metadata_directory_must_be_flat_bounded_json() {
     for name in ["nested", "not-json.txt"] {
