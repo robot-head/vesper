@@ -173,6 +173,11 @@ pub enum ExprShape {
     Literal {
         token: usize,
     },
+    Tuple {
+        open: usize,
+        close: usize,
+        values: Vec<ExprShape>,
+    },
     Call {
         callee: Box<ExprShape>,
         open: usize,
@@ -430,6 +435,11 @@ enum Node {
     Ref(Vec<usize>),
     Lit(usize),
     Slot(u32),
+    Tuple {
+        open: usize,
+        close: usize,
+        values: Vec<Node>,
+    },
     Call {
         callee: Box<Node>,
         open: usize,
@@ -453,13 +463,14 @@ struct View<'a> {
     text: &'a str,
     slot: Option<u32>,
 }
-struct Parser<'a> {
+struct Parser<'a, 'b> {
     tokens: &'a [View<'a>],
     pos: usize,
     depth: usize,
     max: usize,
+    budget: &'b mut TypedBudget,
 }
-impl Parser<'_> {
+impl Parser<'_, '_> {
     fn text(&self) -> Option<&str> {
         self.tokens.get(self.pos).map(|t| t.text)
     }
@@ -515,12 +526,7 @@ impl Parser<'_> {
                     self.pos += 1;
                     Node::Lit(i)
                 }
-                Some(Some(TokenKind::Open(Delim::Paren))) => {
-                    self.pos += 1;
-                    let n = self.expr()?;
-                    self.expect(")")?;
-                    n
-                }
+                Some(Some(TokenKind::Open(Delim::Paren))) => self.paren()?,
                 Some(Some(TokenKind::Open(Delim::Brace))) => return self.block(),
                 _ => {
                     let mut path = vec![self.ident()?];
@@ -589,6 +595,66 @@ impl Parser<'_> {
             tail,
         })
     }
+    fn tuple_push(&mut self, values: &mut Vec<Node>, value: Node) -> Result<(), TypedError> {
+        if values.len() == values.capacity() {
+            let capacity = values
+                .capacity()
+                .max(1)
+                .checked_mul(2)
+                .ok_or(TypedError::Budget("metadata"))?;
+            // Reserve the tuple's parser/shape/lexical vectors and structural
+            // fences before allocating. Child subtrees retain their own costs.
+            let element_bytes = std::mem::size_of::<Node>()
+                + std::mem::size_of::<ExprShape>()
+                + std::mem::size_of::<crate::syntax::Term>()
+                + 4 * std::mem::size_of::<Sem>();
+            self.budget.metadata(
+                (capacity - values.capacity())
+                    .checked_mul(element_bytes)
+                    .ok_or(TypedError::Budget("metadata"))?,
+            )?;
+            self.budget.charge_work(
+                values
+                    .len()
+                    .checked_mul(std::mem::size_of::<Node>())
+                    .ok_or(TypedError::Budget("work"))?,
+            )?;
+            values
+                .try_reserve_exact(capacity - values.len())
+                .map_err(|_| TypedError::Budget("allocation"))?;
+        }
+        values.push(value);
+        Ok(())
+    }
+    fn paren(&mut self) -> Result<Node, TypedError> {
+        let open = self.expect("(")?;
+        if self.text() == Some(")") {
+            return Ok(Node::Tuple {
+                open,
+                close: self.expect(")")?,
+                values: Vec::new(),
+            });
+        }
+        let first = self.expr()?;
+        if !self.eat(",") {
+            self.expect(")")?;
+            return Ok(first); // Grouping never creates a tuple node.
+        }
+        let mut values = Vec::new();
+        self.tuple_push(&mut values, first)?;
+        while self.text() != Some(")") {
+            let value = self.expr()?;
+            self.tuple_push(&mut values, value)?;
+            if !self.eat(",") {
+                break;
+            }
+        }
+        Ok(Node::Tuple {
+            open,
+            close: self.expect(")")?,
+            values,
+        })
+    }
 }
 fn parse(tokens: &[View<'_>], budget: &mut TypedBudget) -> Result<Node, TypedError> {
     budget.parse(tokens.len())?;
@@ -597,6 +663,7 @@ fn parse(tokens: &[View<'_>], budget: &mut TypedBudget) -> Result<Node, TypedErr
         pos: 0,
         depth: 0,
         max: budget.limits.max_depth,
+        budget,
     };
     let n = p.expr()?;
     if p.pos != tokens.len() {
@@ -609,6 +676,15 @@ fn shape(node: Node) -> Result<ExprShape, TypedError> {
         Node::Ref(tokens) => ExprShape::Ref { tokens },
         Node::Lit(token) => ExprShape::Literal { token },
         Node::Slot(_) => return Err(TypedError::Slot),
+        Node::Tuple {
+            open,
+            close,
+            values,
+        } => ExprShape::Tuple {
+            open,
+            close,
+            values: values.into_iter().map(shape).collect::<Result<_, _>>()?,
+        },
         Node::Call {
             callee,
             open,
@@ -1122,6 +1198,14 @@ fn emit_shape(n: &ExprShape, host: &HygieneHost, tokens: &[HostToken], out: &mut
             out.push(Sem::Tag(3));
             out.push(Sem::Text(host.text(tokens[*token].text()).to_owned()));
         }
+        ExprShape::Tuple { values, .. } => {
+            out.push(Sem::Tag(13));
+            for value in values {
+                out.push(Sem::Tag(14));
+                emit_shape(value, host, tokens, out);
+            }
+            out.push(Sem::Tag(15));
+        }
         ExprShape::Call { callee, args, .. } => {
             out.push(Sem::Tag(4));
             emit_shape(callee, host, tokens, out);
@@ -1198,6 +1282,14 @@ fn canonical_template(
                 let input = inputs.get(*i as usize).ok_or(TypedError::Slot)?;
                 emit_shape(&input.shape, host, &input.tokens, out);
             }
+            Node::Tuple { values, .. } => {
+                out.push(Sem::Tag(13));
+                for value in values {
+                    out.push(Sem::Tag(14));
+                    emit(value, items, inputs, host, out)?;
+                }
+                out.push(Sem::Tag(15));
+            }
             Node::Call { callee, args, .. } => {
                 out.push(Sem::Tag(4));
                 emit(callee, items, inputs, host, out)?;
@@ -1258,6 +1350,12 @@ fn to_term(
             })
         }
         ExprShape::Literal { token } => Term::Lit(*token),
+        ExprShape::Tuple { values, .. } => Term::Block(
+            values
+                .iter()
+                .map(|value| to_term(value, host, all_tokens))
+                .collect::<Result<_, _>>()?,
+        ),
         ExprShape::Call {
             callee,
             open,
@@ -1663,6 +1761,11 @@ fn pre_resolve(
                     walk(host, module, package, a, items, locals, budget)?
                 }
             }
+            Node::Tuple { values, .. } => {
+                for value in values {
+                    walk(host, module, package, value, items, locals, budget)?;
+                }
+            }
             Node::Block {
                 statements, tail, ..
             } => {
@@ -1690,6 +1793,13 @@ fn pre_resolve(
 fn term_height(n: &ExprShape) -> Result<usize, TypedError> {
     Ok(match n {
         ExprShape::Ref { .. } | ExprShape::Literal { .. } => 1,
+        ExprShape::Tuple { values, .. } => {
+            let mut height = 0;
+            for value in values {
+                height = height.max(term_height(value)?);
+            }
+            add(height, 1)?
+        }
         ExprShape::Call { callee, args, .. } => {
             let mut h = term_height(callee)?;
             for a in args {
@@ -1766,7 +1876,12 @@ fn resolution_work(
                     binders(a, out)
                 }
             }
-            _ => {}
+            ExprShape::Tuple { values, .. } => {
+                for value in values {
+                    binders(value, out);
+                }
+            }
+            ExprShape::Ref { .. } | ExprShape::Literal { .. } => {}
         }
     }
     let mut locals = Vec::new();
