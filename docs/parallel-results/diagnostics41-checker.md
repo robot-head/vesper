@@ -32,14 +32,21 @@ invent callable abort/commit methods, unchecked rewrites, proof authority or
 automatic fixes. Existing E-codes are used as implemented; they are not renumbered
 to resemble specification examples.
 
-Diagnostic-only evidence is checker-private. `Binding` stores at most four actual
-move events, with at most 64 path components and 1024 aggregate path bytes per
-stored event. Evidence is recorded only at the existing non-copy ownership-taking
-operation; oversized/full histories stay absent. New/shadowing bindings start
+Diagnostic-only evidence is checker-private. It describes compiler ownership
+transfer events, not proof of successful execution of a whole source program. `Binding` stores at most four actual
+admissible transfer witnesses, with at most 64 path components and 1024 aggregate path bytes per
+stored event. Evidence is retained only when the place's ownership preconditions
+hold: no prior overlapping move, valid projections/field, no conflicting active
+loan, owned sink access, and no forbidden linear aggregate field move. Existing
+error-recovery moved paths remain unchanged, but rejected attempts cannot become
+successful-transfer witnesses. Oversized/full histories stay absent. New/shadowing bindings start
 with empty histories. Branch propagation requires the same binding declaration
 span and does not participate in moved-state comparisons. Loans retain their
 actual source argument span, and state guards retain their actual initializer
-span. No new public AST/type/World/IR/interface/native ABI schema is introduced.
+span. Nested blocks preserve matching binding evidence through the existing Env.
+The existing checker does not reinitialize an already moved place by assignment:
+such a write stays rejected and retains the original cause, without inventing a
+new initialized state. New bindings/shadowing reset the evidence. No new public AST/type/World/IR/interface/native ABI schema is introduced.
 
 Each emitted diagnostic receives at most eight related labels and one fixed,
 short help string. A cap can omit genuine evidence, never replace it with an
@@ -60,7 +67,7 @@ Validation used private `/tmp/vesper-target-tooling41-doctest`, one build job,
 dev/test debug disabled and incremental compilation disabled:
 
 - `cargo check -p vesper --lib --offline`: passed.
-- `cargo test -p vesper --test diagnostic_causes --offline`: 11 passed.
+- `cargo test -p vesper --test diagnostic_causes --offline`: 14 passed.
 - `cargo test -p vesper --test language --test syntax_and_ir --offline`:
   107 existing language tests and four syntax/IR tests passed.
 - `cargo clippy -p vesper --lib --test diagnostic_causes --offline -- -D warnings`:
@@ -72,7 +79,10 @@ and shadowed bindings, moved field paths and disjoint valid moves, branch joins,
 borrowed parameters, argument aliases/loans, live linear/inout abort frames and
 handler-state initializers. Unicode/CRLF sources retain real byte offsets. The
 shadowing regression excludes outer declarations/consumptions from an inner
-binding's causes. Caps and unchanged primary deduplication are checked. Existing
+binding's causes. Caps and unchanged primary deduplication are checked. Invalid borrowed/loan/
+linear-field/repeated attempts do not become transfer witnesses; separate valid
+field transfers exercise the actual history cap. Nested-block and rejected
+reinitialization cases preserve real origins without changing recovery. Existing
 language tests also exercise control flow, capability inference and source/PCG
 acceptance. Tests use parser/checker and the existing interpreter; no JIT, native
 source execution, WASM, macro, proof or ambient URI read is performed.

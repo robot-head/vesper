@@ -210,7 +210,11 @@ fn evidence_caps_and_primary_deduplication_do_not_claim_complete_history() {
     let diagnostics = errors(source);
     validate(source, &diagnostics);
     let last = diagnostics.iter().rfind(|d| d.code == "E0303").unwrap();
-    assert_eq!(last.related.len(), 5); // declaration + at most four actual earlier uses
+    assert_eq!(last.related.len(), 2); // declaration + first valid transfer only
+    assert_eq!(
+        last.related[1].span,
+        span(source, "x;").start..span(source, "x;").start + 1
+    );
     let mut keys = std::collections::BTreeSet::new();
     for d in &diagnostics {
         assert!(keys.insert((&d.code, &d.message, d.span.start, d.span.end)));
@@ -256,4 +260,60 @@ fn overlapping_projections_of_one_argument_do_not_claim_an_earlier_argument() {
         d.related[0].message,
         "overlapping projection of this argument introduced here"
     );
+}
+
+#[test]
+fn rejected_moves_are_not_successful_transfer_witnesses() {
+    for source in [
+        "fn bad(in x:String){let a=x;let b=x;}",
+        "linear struct L{} fn bad(in x:L,in yes:bool){if yes{let L{}=x;}else{};let L{}=x;}",
+        "linear struct L{field:String} fn bad(sink x:L){let a=x.field;let b=x.field;}",
+        "struct A{} fn both(in x:A,sink y:A){} fn bad(sink x:A){both(in x,sink x);let z=x;}",
+    ] {
+        let diagnostics = errors(source);
+        validate(source, &diagnostics);
+        for d in diagnostics.iter().filter(|d| d.code == "E0303") {
+            assert_eq!(
+                d.related.len(),
+                1,
+                "rejected move acquired a transfer witness: {d:?}"
+            );
+        }
+        assert!(diagnostics.iter().any(|d| d.code == "E0303"));
+    }
+}
+#[test]
+fn distinct_valid_field_moves_are_capped_and_missing_evidence_stays_absent() {
+    let source = "struct Many{a:String,b:String,c:String,d:String,e:String} fn bad(sink x:Many){let a=x.a;let b=x.b;let c=x.c;let d=x.d;let e=x.e;let again=x.e;let twice=x.a;}";
+    let diagnostics = errors(source);
+    validate(source, &diagnostics);
+    let e = one(&diagnostics, "E0303", "use of moved place 'x.e'");
+    assert_eq!(e.related.len(), 1); // fifth valid transfer was deliberately not retained
+    let a = one(&diagnostics, "E0303", "use of moved place 'x.a'");
+    assert_eq!(a.related[1].span, span(source, "x.a"));
+}
+#[test]
+fn nested_block_moves_preserve_origin_and_writes_do_not_reinitialize_recovery_state() {
+    let source = "struct A{} fn bad(sink x:A){{let a=x;};let b=x;}";
+    let diagnostics = errors(source);
+    validate(source, &diagnostics);
+    let d = one(&diagnostics, "E0303", "use of moved place 'x'");
+    let start = source.find("=x;").unwrap() + 1;
+    assert_eq!(d.related[1].span, start..start + 1);
+    // The unchanged checker rejects assignment to an already moved place; it
+    // does not implement reinitialization. Do not invent a new initialized state
+    // or turn that rejected write into an ownership-transfer witness.
+    let source = "fn bad(){let x=\"old\";let a=x;x=\"new\";let b=x;}";
+    let diagnostics = errors(source);
+    validate(source, &diagnostics);
+    let ds = diagnostics
+        .iter()
+        .filter(|d| d.code == "E0303")
+        .collect::<Vec<_>>();
+    assert_eq!(ds.len(), 2);
+    let start = source.find("=x;").unwrap() + 1;
+    for d in ds {
+        assert_eq!(d.related.len(), 2);
+        assert_eq!(d.related[1].span, start..start + 1);
+    }
 }

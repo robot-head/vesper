@@ -832,10 +832,12 @@ impl Checker<'_> {
             self.error("E0201", format!("unknown binding '{}'", p.root), span);
             return Type::Infer;
         };
+        let mut transfer_allowed = true;
         if b.moved
             .iter()
             .any(|path| path.starts_with(&p.path) || p.path.starts_with(path))
         {
+            transfer_allowed = false;
             self.error(
                 "E0303",
                 format!("use of moved place '{}'", p.display()),
@@ -853,6 +855,7 @@ impl Checker<'_> {
             self.help("A moved non-copy place cannot be used again, including through an overlapping projection.");
         }
         if !b.projections.is_empty() && !b.projections.iter().any(|path| p.path.starts_with(path)) {
+            transfer_allowed = false;
             self.error(
                 "E0304",
                 format!(
@@ -863,6 +866,7 @@ impl Checker<'_> {
             );
         }
         let ty = self.world.field(&b.ty, &p.path).unwrap_or_else(|| {
+            transfer_allowed = false;
             self.error(
                 "E0202",
                 format!("unknown field in '{}'", p.display()),
@@ -875,6 +879,7 @@ impl Checker<'_> {
                 || matches!(usage, Usage::Borrow(Pass::Inout))
                 || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy);
             if exclusive && loan.overlaps(p) {
+                transfer_allowed = false;
                 self.error(
                     "E0301",
                     format!(
@@ -892,6 +897,7 @@ impl Checker<'_> {
         match usage {
             Usage::Own if self.mode(&ty) != Mode::Copy => {
                 if b.pass != Pass::Sink {
+                    transfer_allowed = false;
                     self.error(
                         "E0305",
                         format!("cannot move '{}' through a borrowed parameter", p.display()),
@@ -901,6 +907,7 @@ impl Checker<'_> {
                     self.help("Borrowed parameters do not transfer ownership of non-copy values.");
                 }
                 if !p.path.is_empty() && self.mode(&b.ty) == Mode::Linear {
+                    transfer_allowed = false;
                     self.error(
                         "E0306",
                         "destructure a linear aggregate before moving its fields",
@@ -910,7 +917,11 @@ impl Checker<'_> {
                 }
                 if let Some(b) = env.bindings.get_mut(&p.root) {
                     b.moved.push(p.path.clone());
-                    b.remember_move(&p.path, span.clone());
+                    // Keep error recovery unchanged, but failed move attempts
+                    // are not witnesses of a preceding ownership transfer.
+                    if transfer_allowed {
+                        b.remember_move(&p.path, span.clone());
+                    }
                 }
             }
             Usage::Borrow(Pass::Inout) if b.pass == Pass::In => {
@@ -2620,7 +2631,7 @@ impl Checker<'_> {
                         }
                     }
                     self.help(
-                        "Every returning control-flow path must consume the same linear places.",
+                        "Returning control-flow paths must agree on linear ownership state; borrowed parameters do not transfer ownership.",
                     );
                 }
                 binding.moved = x.moved.iter().chain(&y.moved).cloned().collect();
