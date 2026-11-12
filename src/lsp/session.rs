@@ -1,5 +1,5 @@
 //! In-memory bounded editor lifecycle. URIs are labels, never filesystem paths.
-use super::{actions, navigation, search};
+use super::{actions, macro_preview, navigation, search};
 use crate::{
     database::{self, Database, RecoveryFile, SourceFile, SyntaxSnapshot},
     tooling::{
@@ -160,7 +160,10 @@ impl Session {
                 "documentSymbolProvider":true,"workspaceSymbolProvider":true,
                 "documentFormattingProvider":true,
                 "codeActionProvider":code_actions,
-                "experimental":{"vesperRecoveryStatus":{"scope":"syntax_only","version":1}}
+                "experimental":{
+                    "vesperRecoveryStatus":{"scope":"syntax_only","version":1},
+                    "vesperMacroPreview":{"version":1,"tier":1,"scope":"expanded_source_only"}
+                }
             },"serverInfo":{"name":"vesper","version":env!("CARGO_PKG_VERSION")}}));
         }
         self.running()?;
@@ -181,6 +184,7 @@ impl Session {
                 | "workspace/symbol"
                 | "vesper/signatureSearch"
                 | "vesper/recoveryStatus"
+                | "vesper/macroPreview"
                 | "textDocument/formatting"
                 | "textDocument/codeAction"
         ) {
@@ -188,6 +192,7 @@ impl Session {
         }
         let params = object(params.as_ref())?;
         match method {
+            "vesper/macroPreview" => self.macro_preview(params),
             "vesper/recoveryStatus" => self.recovery_status(document_uri(params)?),
             "textDocument/hover" | "textDocument/definition" => {
                 let uri = document_uri(params)?;
@@ -370,6 +375,49 @@ impl Session {
         self.documents
             .get(uri)
             .ok_or_else(|| ServerError::params("document URI is not open"))
+    }
+    fn macro_preview(
+        &self,
+        params: &serde_json::Map<String, Value>,
+    ) -> Result<Value, ServerError> {
+        if params.len() != 1 || !params.contains_key("textDocument") {
+            return Err(ServerError::params("macro preview takes only textDocument"));
+        }
+        let text_document = object(Some(field(params, "textDocument")?))?;
+        if text_document.keys().any(|key| key != "uri" && key != "version") {
+            return Err(ServerError::params("unknown macro preview document field"));
+        }
+        let uri = string(field(text_document, "uri")?, "uri")?;
+        let expected = text_document.get("version").map(version).transpose()?;
+        let current = self.document(uri)?;
+        if expected.is_some_and(|expected| expected != current.version()) {
+            return Err(ServerError::new(-32801, "Document version has changed"));
+        }
+        let unavailable = || ServerError {
+            code: ANALYSIS_UNAVAILABLE,
+            message: "Macro preview is unavailable".into(),
+            data: Some(json!({"status":"preview_unavailable","scope":"expanded_source_only"})),
+        };
+        let limits = macro_preview::Limits::default();
+        // Bound the exact mirror comparison before traversing either source.
+        // URI labels never cause filesystem access or execution.
+        if current.text().len() > limits.max_source_bytes || uri.len() > limits.max_uri_bytes {
+            return Err(unavailable());
+        }
+        let file = *self.files.get(uri).ok_or_else(unavailable)?;
+        if file.text(&self.db) != current.text() {
+            return Err(unavailable());
+        }
+        let snapshot = database::macro_preview::preview(&self.db, file);
+        let document = macro_preview::Document::new(
+            uri,
+            current.version(),
+            current.text(),
+            snapshot,
+        )
+        .map_err(|_| unavailable())?;
+        // This result never replaces guarded_analysis or changes diagnostics.
+        macro_preview::render(&document, limits).map_err(|_| unavailable())
     }
     fn snapshot(&self, uri: &str) -> Result<Arc<CheckedSource>, ServerError> {
         let document = self.document(uri)?;

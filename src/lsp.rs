@@ -1,5 +1,6 @@
 //! Bounded synchronous stdio language server over open in-memory buffers.
 pub mod actions;
+pub mod macro_preview;
 pub mod navigation;
 mod search;
 mod session;
