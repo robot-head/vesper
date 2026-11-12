@@ -13,5 +13,3 @@ arrow-ipc = { version = "=56.2.0", default-features = false }
 
 [dev-dependencies]
 arrow2 = { version = "=0.18.0", default-features = false, features = ["io_ipc"] }
-
-[workspace]
