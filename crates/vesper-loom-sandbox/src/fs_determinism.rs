@@ -8,7 +8,9 @@
 //! functions with wrappers that call the stock implementation and then
 //! normalize what the guest sees:
 //!
-//! * `stat`/`stat-at`: all three timestamps become the configured wall clock.
+//! * `stat`/`stat-at`: all three timestamps become the configured wall clock,
+//!   link counts are one, and directory sizes are zero (host inode metadata
+//!   must not become an undeclared build input).
 //! * `metadata-hash`/`metadata-hash-at`: host hashes are renumbered in order
 //!   of first observation within the run, preserving "same object" equality.
 //! * `read-directory`: entries are read eagerly and yielded sorted by name.
@@ -19,7 +21,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use wasmtime::StoreContextMut;
-use wasmtime::component::{Linker, Resource};
+use wasmtime::component::{Linker, Resource, ResourceType};
 use wasmtime_wasi::filesystem::WasiFilesystemView;
 use wasmtime_wasi::p2::FsResult;
 use wasmtime_wasi::p2::bindings::filesystem::types::{
@@ -51,10 +53,26 @@ impl FsNormalizer {
     }
 
     fn stat(&self, mut s: DescriptorStat) -> DescriptorStat {
+        s.link_count = 1;
+        if s.type_ == fs::DescriptorType::Directory {
+            s.size = 0;
+        }
         s.data_access_timestamp = self.timestamp;
         s.data_modification_timestamp = self.timestamp;
         s.status_change_timestamp = self.timestamp;
         s
+    }
+
+    fn next_directory_entry(
+        &mut self,
+        rep: u32,
+    ) -> wasmtime::Result<Result<Option<DirectoryEntry>, ErrorCode>> {
+        let Some(queue) = self.sorted_dirs.get_mut(&rep) else {
+            wasmtime::bail!("unknown directory-entry-stream");
+        };
+        // An exhausted stream remains valid until the guest drops it. In
+        // particular, repeated reads after EOF must continue returning None.
+        Ok(queue.pop_front().transpose())
     }
 
     fn identity(&mut self, h: MetadataHashValue) -> MetadataHashValue {
@@ -179,21 +197,77 @@ pub(crate) fn add_to_linker<T: HasFsNormalizer>(linker: &mut Linker<T>) -> wasmt
         |mut store: StoreContextMut<'_, T>,
          (stream,): (Resource<fs::DirectoryEntryStream>,)|
          -> wasmtime::Result<(Result<Option<DirectoryEntry>, ErrorCode>,)> {
-            let dirs = &mut store.data_mut().normalizer().sorted_dirs;
-            let Some(queue) = dirs.get_mut(&stream.rep()) else {
-                // Every stream is created by the wrapper above.
-                wasmtime::bail!("unknown directory-entry-stream");
-            };
-            Ok((match queue.pop_front() {
-                Some(Ok(e)) => Ok(Some(e)),
-                Some(Err(e)) => Err(e),
-                None => {
-                    dirs.remove(&stream.rep());
-                    Ok(None)
-                }
-            },))
+            Ok((store
+                .data_mut()
+                .normalizer()
+                .next_directory_entry(stream.rep())?,))
+        },
+    )?;
+    inst.resource(
+        "directory-entry-stream",
+        ResourceType::host::<fs::DirectoryEntryStream>(),
+        |mut store, rep| {
+            HostDirectoryEntryStream::drop(
+                &mut store.data_mut().filesystem(),
+                Resource::new_own(rep),
+            )?;
+            store.data_mut().normalizer().sorted_dirs.remove(&rep);
+            Ok(())
         },
     )?;
     linker.allow_shadowing(false);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inode_metadata_is_not_an_observable_build_input() {
+        let fs = FsNormalizer::new(123);
+        let stat = |type_, size, link_count| DescriptorStat {
+            type_,
+            size,
+            link_count,
+            data_access_timestamp: None,
+            data_modification_timestamp: None,
+            status_change_timestamp: None,
+        };
+        for (size, links) in [(4096, 2), (16384, 7)] {
+            let normalized = fs.stat(stat(fs::DescriptorType::Directory, size, links));
+            assert_eq!(normalized.size, 0);
+            assert_eq!(normalized.link_count, 1);
+            assert_eq!(normalized.data_access_timestamp.unwrap().nanoseconds, 123);
+            assert_eq!(
+                normalized.data_modification_timestamp.unwrap().nanoseconds,
+                123
+            );
+            assert_eq!(normalized.status_change_timestamp.unwrap().nanoseconds, 123);
+        }
+        let file = fs.stat(stat(fs::DescriptorType::RegularFile, 42, 8));
+        assert_eq!(file.size, 42);
+        assert_eq!(file.link_count, 1);
+    }
+
+    #[test]
+    fn directory_stream_remains_exhausted_until_dropped() {
+        let mut fs = FsNormalizer::default();
+        fs.sorted_dirs.insert(
+            7,
+            VecDeque::from([Ok(DirectoryEntry {
+                type_: fs::DescriptorType::RegularFile,
+                name: "input.txt".into(),
+            })]),
+        );
+        assert_eq!(
+            fs.next_directory_entry(7).unwrap().unwrap().unwrap().name,
+            "input.txt"
+        );
+        for _ in 0..3 {
+            assert!(fs.next_directory_entry(7).unwrap().unwrap().is_none());
+        }
+        fs.sorted_dirs.remove(&7);
+        assert!(fs.next_directory_entry(7).is_err());
+    }
 }
