@@ -90,8 +90,12 @@ inputs and rejects inconsistent internal integrals. Only after all checks does
 it publish integrals, ticks and source offsets together. Every returned error
 preserves the existing live executor.
 
-Creation runs the same consistency validation before emitting an image. This is
-a conservative boundary: a valid incremental state can be rejected if complete
+Creation runs the same consistency validation and preflights the exact charged
+v1 restore parsing work before allocating the output image. Therefore an emitted
+image can be restored with identical checkpoint/query limits and matching graph
+and policy. Row decoding charges every cell/weight read and checks the complete
+encoded row before allocating its vector; source entries are read completely
+before their vectors grow. This is a conservative boundary: a valid incremental state can be rejected if complete
 batch validation exceeds row/product/work budgets. Consequently a successfully
 emitted image is not an unconditional promise of restoration under arbitrarily
 smaller checkpoint budgets. Checksum hashing is bounded by the image byte cap;
@@ -135,7 +139,7 @@ CARGO_TARGET_DIR=/tmp/vesper-flux-checkpoint-target CARGO_BUILD_JOBS=1 \
   --example checkpoint_resume --offline
 ```
 
-There are **22 passing tests**: the 11 foundation tests plus 11 new integration
+There are **23 passing tests**: the 11 foundation tests plus 12 new integration
 tests. New evidence includes exact header bytes/signed extrema; malformed row
 and header framing; source/schema/partition/flags/weight/LSN policy; byte/record/
 work budgets; early differentiated join overflow and late input-integral
@@ -143,6 +147,11 @@ overflow with unchanged offsets; every checkpoint truncation; corrupted/versione
 images; deliberately rechecksummed bad counts, widths, zero/duplicate rows,
 inconsistent integrals and offsets; same-shape predicate/constant/edge/output/
 limit identity changes; all checkpoint budgets; and external frontier ownership.
+A review-discovered tight-budget regression is fixed: an empty one-input image
+formerly emitted with max_work=24 but needed 33 work units to restore. Creation
+now rejects 24/32, while exact 33 succeeds in both directions. Tests also cover
+one-row boundaries 34/35 and source-mode empty/populated boundaries 49/50 and
+51/52, plus unchanged live state after failures.
 
 The main differential resume test checkpoints a real nested/shared join after
 three ticks, reconstructs a fresh matching circuit, restores, then compares

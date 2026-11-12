@@ -476,3 +476,98 @@ fn failed_late_integral_and_decode_work_limits_do_not_commit_source_offsets() {
     assert_eq!(e.ticks(), 0);
     assert!(e.materialized().is_empty());
 }
+
+#[test]
+fn checkpoint_preflights_exact_same_budget_restore_cost_before_emitting() {
+    let mut e = single().executor();
+    let unchanged = e.checkpoint(cp()).unwrap();
+    // Regression: the old writer charged only 23 identity + 1 state operations,
+    // while restoring also needs nine metadata reads. It must not emit at 24.
+    for work in [24, 32] {
+        let tight = CheckpointLimits {
+            max_work: work,
+            ..cp()
+        };
+        assert_eq!(e.checkpoint(tight), Err(Error::Limit("work")));
+        assert_eq!(e.checkpoint(cp()).unwrap(), unchanged);
+    }
+    let exact = CheckpointLimits {
+        max_work: 33,
+        ..cp()
+    };
+    let image = e.checkpoint(exact).unwrap();
+    let mut restored = single().executor();
+    restored.restore_checkpoint(&image, exact).unwrap();
+    assert_eq!(restored.checkpoint(exact).unwrap(), image);
+    // One width-one row requires exactly two more charged reads, checked before
+    // allocating the row. Failed tight restores retain the live nonempty owner.
+    e.tick(&TickInput {
+        deltas: vec![set(&[(vec![7], 1)])],
+    })
+    .unwrap();
+    let nonempty = e.checkpoint(cp()).unwrap();
+    assert_eq!(
+        e.checkpoint(CheckpointLimits {
+            max_work: 34,
+            ..cp()
+        }),
+        Err(Error::Limit("work"))
+    );
+    assert_eq!(
+        e.restore_checkpoint(
+            &nonempty,
+            CheckpointLimits {
+                max_work: 34,
+                ..cp()
+            }
+        ),
+        Err(Error::Limit("work"))
+    );
+    assert_eq!(e.checkpoint(cp()).unwrap(), nonempty);
+    let exact = CheckpointLimits {
+        max_work: 35,
+        ..cp()
+    };
+    let image = e.checkpoint(exact).unwrap();
+    restored.restore_checkpoint(&image, exact).unwrap();
+    assert_eq!(restored.materialized(), e.materialized());
+    assert_eq!(restored.checkpoint(exact).unwrap(), image);
+    // The exact preflight also includes source policy fields/next offsets.
+    let policy = CdcPolicy {
+        bindings: vec![SourceBinding {
+            partition_id: 1,
+            schema_id: 1,
+            input: 0,
+            first_lsn: 0,
+            weights: WeightPolicy::Unit,
+        }],
+        max_batch_bytes: 1024,
+        max_records: 8,
+    };
+    let mut source = single().executor();
+    source.bind_sources(&policy).unwrap();
+    let mut target = single().executor();
+    target.bind_sources(&policy).unwrap();
+    for (weight, boundary) in [(None, 50), (Some(1), 52)] {
+        if let Some(weight) = weight {
+            let bytes = source
+                .encode_cdc_record(header(1, 1, 0, weight), &[7])
+                .unwrap();
+            source.ingest_cdc(&bytes).unwrap();
+        }
+        assert_eq!(
+            source.checkpoint(CheckpointLimits {
+                max_work: boundary - 1,
+                ..cp()
+            }),
+            Err(Error::Limit("work"))
+        );
+        let exact = CheckpointLimits {
+            max_work: boundary,
+            ..cp()
+        };
+        let image = source.checkpoint(exact).unwrap();
+        target.restore_checkpoint(&image, exact).unwrap();
+        assert_eq!(target.checkpoint(exact).unwrap(), image);
+    }
+}

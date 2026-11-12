@@ -98,6 +98,9 @@ struct Reader<'a, 'b> {
 impl<'a> Reader<'a, '_> {
     fn take(&mut self, n: usize) -> Result<&'a [u8], Error> {
         self.budget.charge(1)?;
+        self.take_prepaid(n)
+    }
+    fn take_prepaid(&mut self, n: usize) -> Result<&'a [u8], Error> {
         let end = self.cursor.checked_add(n).ok_or(Error::Overflow)?;
         let bytes = self
             .bytes
@@ -105,6 +108,27 @@ impl<'a> Reader<'a, '_> {
             .ok_or(Error::Checkpoint("truncated"))?;
         self.cursor = end;
         Ok(bytes)
+    }
+    /// Charge all scalar reads and validate the complete encoded row before
+    /// allocating its vector; no partial row growth precedes those checks.
+    fn row(&mut self, width: usize) -> Result<(Vec<i64>, i64), Error> {
+        let reads = width.checked_add(1).ok_or(Error::Overflow)?;
+        self.budget.charge(reads)?;
+        let size = reads.checked_mul(8).ok_or(Error::Overflow)?;
+        let bytes = self.take_prepaid(size)?;
+        let cells = width.checked_mul(8).ok_or(Error::Overflow)?;
+        let row = bytes[..cells]
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|cell| i64::from_le_bytes(*cell))
+            .collect();
+        let weight = i64::from_le_bytes(
+            bytes[cells..]
+                .try_into()
+                .map_err(|_| Error::Checkpoint("weight"))?,
+        );
+        Ok((row, weight))
     }
     fn u8(&mut self) -> Result<u8, Error> {
         Ok(self.take(1)?[0])
@@ -132,13 +156,6 @@ impl<'a> Reader<'a, '_> {
     }
     fn usize(&mut self) -> Result<usize, Error> {
         usize::try_from(self.u64()?).map_err(|_| Error::Overflow)
-    }
-    fn i64(&mut self) -> Result<i64, Error> {
-        Ok(i64::from_le_bytes(
-            self.take(8)?
-                .try_into()
-                .map_err(|_| Error::Checkpoint("i64"))?,
-        ))
     }
 }
 struct Identity<'a> {
@@ -319,6 +336,37 @@ fn count_rows(prior: &[ZSet], limits: CheckpointLimits) -> Result<(), Error> {
     }
     Ok(())
 }
+/// Exact charged reads of the v1 parser for a canonical image. Creation
+/// reserves this instead of its smaller serialization walk, so the same work
+/// budget admits restore (identity + parsing + relational validation).
+fn parse_work(prior: &[ZSet], source: Option<&SourceState>) -> Result<usize, Error> {
+    // Magic/version/flags/identity/ticks/source tag/node count, then width/count
+    // per node. Source metadata adds two policy limits, count and six fields
+    // per binding. A row adds one scalar read per cell and one weight read.
+    let mut work = 7usize
+        .checked_add(prior.len().checked_mul(2).ok_or(Error::Overflow)?)
+        .ok_or(Error::Overflow)?;
+    if let Some(source) = source {
+        work = work
+            .checked_add(3)
+            .and_then(|n| {
+                source
+                    .policy
+                    .bindings
+                    .len()
+                    .checked_mul(6)
+                    .and_then(|count| n.checked_add(count))
+            })
+            .ok_or(Error::Overflow)?;
+    }
+    for set in prior {
+        let reads = set.width.checked_add(1).ok_or(Error::Overflow)?;
+        work = work
+            .checked_add(set.len().checked_mul(reads).ok_or(Error::Overflow)?)
+            .ok_or(Error::Overflow)?;
+    }
+    Ok(work)
+}
 fn validate_state(
     c: &Circuit,
     prior: &[ZSet],
@@ -378,6 +426,8 @@ impl Executor {
     /// count and source offsets in one bounded image. Frontier owners are absent.
     /// Creation revalidates relational consistency, so it can reject a state if
     /// full batch validation exceeds the configured row/product/work bounds.
+    /// Reserves exact v1 restore parse work before output allocation, so a
+    /// successful image is resumable under the same limits and matching graph.
     pub fn checkpoint(&self, limits: CheckpointLimits) -> Result<Vec<u8>, Error> {
         limits.validate()?;
         let mut budget = limits.budget(&self.circuit);
@@ -390,6 +440,7 @@ impl Executor {
             limits,
             &mut budget,
         )?;
+        budget.charge(parse_work(&self.prior, self.source.as_ref())?)?;
         let mut w = Writer {
             bytes: Vec::new(),
             limit: limits.max_bytes,
@@ -407,7 +458,6 @@ impl Executor {
                 w.usize(s.policy.max_records)?;
                 w.u32(u32::try_from(s.policy.bindings.len()).map_err(|_| Error::Overflow)?)?;
                 for (b, next) in s.policy.bindings.iter().zip(&s.next) {
-                    budget.charge(1)?;
                     w.u32(b.partition_id)?;
                     w.u16(b.schema_id)?;
                     w.usize(b.input)?;
@@ -425,7 +475,6 @@ impl Executor {
             w.u32(u32::try_from(set.width).map_err(|_| Error::Overflow)?)?;
             w.usize(set.len())?;
             for (row, weight) in set.entries() {
-                budget.charge(row.len().checked_add(1).ok_or(Error::Overflow)?)?;
                 for value in row {
                     w.i64(*value)?;
                 }
@@ -492,6 +541,7 @@ impl Executor {
                         1 => WeightPolicy::NonZero,
                         _ => return Err(Error::Checkpoint("weight policy")),
                     };
+                    let next_lsn = r.u64()?;
                     bindings.push(SourceBinding {
                         partition_id,
                         schema_id,
@@ -499,7 +549,7 @@ impl Executor {
                         first_lsn,
                         weights,
                     });
-                    next.push(r.u64()?);
+                    next.push(next_lsn);
                 }
                 let policy = CdcPolicy {
                     bindings,
@@ -536,11 +586,7 @@ impl Executor {
             }
             let mut rows = BTreeMap::new();
             for _ in 0..count {
-                let mut row = Vec::with_capacity(width);
-                for _ in 0..width {
-                    row.push(r.i64()?);
-                }
-                let weight = r.i64()?;
+                let (row, weight) = r.row(width)?;
                 if weight == 0 || rows.last_key_value().is_some_and(|(last, _)| last >= &row) {
                     return Err(Error::Checkpoint("noncanonical rows"));
                 }
