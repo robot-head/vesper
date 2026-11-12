@@ -574,7 +574,7 @@ mod assembly {
                     actual_token(
                         &syntax,
                         projection,
-                        &[TokenKind::Lower, TokenKind::Int],
+                        &[TokenKind::Lower, TokenKind::Int, TokenKind::SelfKw],
                         &mut budget,
                     )?;
                     previous = projection.end;

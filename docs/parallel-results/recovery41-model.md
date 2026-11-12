@@ -91,3 +91,13 @@ adds `blake3 = "1.8"`, reusing the existing registry dependency. Root registers
 `pub mod recovery;` and updates the existing root lock package dependency edge.
 No standalone executable is meaningful for this sealed model; the parser and
 incremental lanes provide real original-source entry points and oracle tests.
+
+Compatibility follow-up: actual legacy `parser.lower` accepts SelfKw as a
+projection name, so `tx.self.` must retain real `self` token metadata. The model
+now accepts SelfKw alongside Lower/Int for projection tokens. A model regression
+builds actual token bytes `tx.self.`, validates its zero-width missing-member
+site, and checks exact root/projection source slices. The parser owner was asked
+to add the complete real `fn broken(){tx.self.}` recovery fixture; no existing
+grammar changed here. Revalidation passed 13 model tests, 10 existing syntax
+limits tests, one compile-fail doctest, strict all-target Clippy and formatting.
+Temporary lib/standalone manifest wiring was restored again before committing.

@@ -568,3 +568,44 @@ fn eligible_context_requires_actual_block_kind_and_module_root() {
         Error::CstMismatch
     );
 }
+
+#[test]
+fn legacy_self_keyword_projection_remains_real_receiver_syntax() {
+    let source = "tx.self.";
+    let mut builder = GreenNodeBuilder::new();
+    builder.start_node(MODULE);
+    for (kind, text) in [
+        (TokenKind::Lower, "tx"),
+        (TokenKind::Dot, "."),
+        (TokenKind::SelfKw, "self"),
+        (TokenKind::Dot, "."),
+    ] {
+        builder.token(SyntaxKind(kind as u16), text);
+    }
+    builder.finish_node();
+    let site = RecoverySite {
+        span: 8..8,
+        kind: SiteKind::MissingMember,
+        owner: None,
+        receiver: Some(Receiver {
+            root: 0..2,
+            projections: std::iter::once(3..7).collect(),
+        }),
+    };
+    let snapshot = assemble(
+        Arc::from(source),
+        builder.finish(),
+        vec![],
+        vec![],
+        vec![site],
+        Limits::default(),
+    )
+    .unwrap();
+    let receiver = snapshot.sites()[0].receiver.as_ref().unwrap();
+    assert_eq!(snapshot.source().get(receiver.root.clone()), Some("tx"));
+    assert_eq!(
+        snapshot.source().get(receiver.projections[0].clone()),
+        Some("self")
+    );
+    assert_eq!(snapshot.syntax().to_string(), source);
+}
