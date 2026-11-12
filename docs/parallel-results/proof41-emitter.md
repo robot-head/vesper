@@ -63,3 +63,23 @@ debug0/incremental0. The coordinator cache was not written. Owned commits are
 25ad710 (initial emitter),362942a (temporary bounds and tests), and this report;
 other lane checkpoints were dependencies only. No unrelated production paths
 changed.
+
+## Kernel-compatible logical declaration follow-up
+
+The stricter artifact auditor exposed model code-generation helpers and the
+nested-inductive concat recursor. The model owner replaced that internal
+representation with binary append and a total noncomputable `Doc.concat` fold,
+preserving the emitter's exact callable API and theorem. Root published the
+matching typed `DefinitionKind::NoncomputableDef` AST amendment before edits.
+The generated document now uses that kind; the two hash metadata definitions
+remain ordinary definitions. No raw Lean syntax, global noncomputable mode,
+axiom exception or auditor policy change was introduced. The existing fixed
+header envelope covers the extra keyword without relaxing any limit.
+
+Owned follow-up5c634ff changes only the declaration kind and its regression
+assertions. With actual model44444ed and AST48128fe, all seven emitter tests pass,
+including real Lean4.24.0 elaboration of three generated witnesses and rejection
+of their three corrupted theorem references. Final all-target formatter Clippy,
+owned rustfmt and diff checks pass. Root's explicit verification command performs
+the final kernel artifact replay; these elaboration results are not represented
+as that separate acceptance step.
