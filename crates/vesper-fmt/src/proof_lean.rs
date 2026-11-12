@@ -225,13 +225,18 @@ fn hex(bytes: [u8; 32]) -> Result<String, ProofError> {
     }
     Ok(value)
 }
-fn definition(value: &str, result: Term, body: Term) -> Result<Declaration, ProofError> {
+fn definition(
+    value: &str,
+    result: Term,
+    body: Term,
+    kind: DefinitionKind,
+) -> Result<Declaration, ProofError> {
     Ok(Declaration::Definition(Definition {
         name: Name::single(value).map_err(syntax)?,
         binders: Vec::new(),
         result,
         body,
-        kind: DefinitionKind::Def,
+        kind,
     }))
 }
 fn rendered_comments(mode: &str) -> Result<Term, ProofError> {
@@ -264,16 +269,19 @@ pub(crate) fn emit(
             "document",
             reference(&["Vesper", "StylusSafety", "Doc"])?,
             doc_term(model.doc())?,
+            DefinitionKind::NoncomputableDef,
         )?,
         definition(
             "source_blake3",
             reference(&["String"])?,
             Term::String(hex(source)?),
+            DefinitionKind::Def,
         )?,
         definition(
             "output_blake3",
             reference(&["String"])?,
             Term::String(hex(output)?),
+            DefinitionKind::Def,
         )?,
         Declaration::Theorem {
             name: Name::single("comments_preserved").map_err(syntax)?,

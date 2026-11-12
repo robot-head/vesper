@@ -35,6 +35,11 @@ fn exact_source_and_formatted_hashes_are_metadata_for_the_actual_doc() {
     assert!(lean.contains("«Vesper».«StylusGenerated»"));
     assert!(lean.contains("«comments_preserved»"));
     assert!(lean.contains("«comments_render_invariant»"));
+    assert!(lean.contains("noncomputable def «document»"));
+    assert!(lean.contains("def «source_blake3»"));
+    assert!(lean.contains("def «output_blake3»"));
+    assert!(!lean.contains("noncomputable def «source_blake3»"));
+    assert!(!lean.contains("noncomputable def «output_blake3»"));
     assert!(lean.contains(&blake3::hash(source.as_bytes()).to_hex().to_string()));
     assert!(lean.contains(&blake3::hash(value.output().as_bytes()).to_hex().to_string()));
 }
