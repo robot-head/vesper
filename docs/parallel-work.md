@@ -11,7 +11,7 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 | SemVer | `parallel/semver` | `crates/vesper-semver/**` | Running: §9 interface compatibility |
 | Bridge wire layouts | `parallel/ffi-wire` | `crates/vesper-ffi/**` | Integrated: §13.2 byte layouts/views; 9 tests |
 | Loom calculus | `parallel/loom-calculus` | `crates/vesper-loom-calculus/**` | Integrated: manifest/solution validation; 17 tests + doctest |
-| SimPulse | `parallel/simpulse` | `crates/vesper-simpulse/**` | Running: deterministic scheduling/replay |
+| SimPulse | `parallel/simpulse` | `crates/vesper-simpulse/**` | Integrated: deterministic scheduling/replay; 18 tests + 2 doctests |
 | Contract audit | `parallel/contracts` | `docs/rfcs/parallel-contracts.md` | Reviewed: [contract audit](rfcs/parallel-contracts.md) |
 
 Each agent uses a distinct worktree under `/workspace/vesper-worktrees/`. Agents commit only to their own branch. The coordinator reviews and cherry-picks; a completed subagent turn does not by itself mark a design section complete.
