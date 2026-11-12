@@ -1,0 +1,1400 @@
+{
+  "schema": {
+    "major": 0,
+    "minor": 1
+  },
+  "packages": [
+    {
+      "id": 0
+    },
+    {
+      "id": 1
+    },
+    {
+      "id": 2
+    },
+    {
+      "id": 3
+    }
+  ],
+  "type_ctors": [
+    {
+      "id": 0,
+      "package": 0,
+      "params": [],
+      "mode": {
+        "base": "Copy",
+        "joins": []
+      }
+    },
+    {
+      "id": 1,
+      "package": 0,
+      "params": [],
+      "mode": {
+        "base": "Copy",
+        "joins": []
+      }
+    },
+    {
+      "id": 2,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "mode": {
+        "base": "Affine",
+        "joins": [
+          0
+        ]
+      }
+    },
+    {
+      "id": 3,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "mode": {
+        "base": "Copy",
+        "joins": [
+          0
+        ]
+      }
+    },
+    {
+      "id": 4,
+      "package": 2,
+      "params": [],
+      "mode": {
+        "base": "Linear",
+        "joins": []
+      }
+    },
+    {
+      "id": 5,
+      "package": 2,
+      "params": [],
+      "mode": {
+        "base": "Affine",
+        "joins": []
+      }
+    },
+    {
+      "id": 6,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "mode": {
+        "base": "Affine",
+        "joins": [
+          0
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "package": 2,
+      "params": [
+        "Type"
+      ],
+      "mode": {
+        "base": "Copy",
+        "joins": [
+          0
+        ]
+      }
+    },
+    {
+      "id": 8,
+      "package": 2,
+      "params": [],
+      "mode": {
+        "base": "Affine",
+        "joins": []
+      }
+    },
+    {
+      "id": 9,
+      "package": 0,
+      "params": [
+        "Type",
+        "Type",
+        "Brand"
+      ],
+      "mode": {
+        "base": "Affine",
+        "joins": [
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "id": 10,
+      "package": 0,
+      "params": [
+        "Type",
+        "Type"
+      ],
+      "mode": {
+        "base": "Copy",
+        "joins": [
+          0,
+          1
+        ]
+      }
+    },
+    {
+      "id": 11,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "mode": {
+        "base": "Affine",
+        "joins": [
+          0
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "mode": {
+        "base": "Affine",
+        "joins": [
+          0
+        ]
+      }
+    },
+    {
+      "id": 13,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "mode": {
+        "base": "Affine",
+        "joins": [
+          0
+        ]
+      }
+    },
+    {
+      "id": 14,
+      "package": 0,
+      "params": [],
+      "mode": {
+        "base": "Copy",
+        "joins": []
+      }
+    },
+    {
+      "id": 15,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "mode": {
+        "base": "Affine",
+        "joins": [
+          0
+        ]
+      }
+    },
+    {
+      "id": 16,
+      "package": 0,
+      "params": [],
+      "mode": {
+        "base": "Copy",
+        "joins": []
+      }
+    },
+    {
+      "id": 17,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "mode": {
+        "base": "Copy",
+        "joins": [
+          0
+        ]
+      }
+    }
+  ],
+  "effects": [
+    {
+      "id": 0,
+      "package": 0,
+      "params": []
+    },
+    {
+      "id": 1,
+      "package": 0,
+      "params": []
+    },
+    {
+      "id": 2,
+      "package": 0,
+      "params": [
+        "Type"
+      ]
+    }
+  ],
+  "traits": [
+    {
+      "id": 0,
+      "package": 0,
+      "params": [],
+      "assoc": [],
+      "coinductive": false
+    },
+    {
+      "id": 1,
+      "package": 0,
+      "params": [],
+      "assoc": [],
+      "coinductive": true
+    },
+    {
+      "id": 2,
+      "package": 0,
+      "params": [],
+      "assoc": [],
+      "coinductive": false
+    },
+    {
+      "id": 3,
+      "package": 1,
+      "params": [],
+      "assoc": [],
+      "coinductive": false
+    },
+    {
+      "id": 4,
+      "package": 0,
+      "params": [
+        "Row"
+      ],
+      "assoc": [
+        {
+          "mode_bound": {
+            "Const": "Linear"
+          },
+          "bounds": []
+        }
+      ],
+      "coinductive": false
+    },
+    {
+      "id": 5,
+      "package": 0,
+      "params": [
+        "Mode"
+      ],
+      "assoc": [
+        {
+          "mode_bound": {
+            "Var": {
+              "Bound": 1
+            }
+          },
+          "bounds": []
+        }
+      ],
+      "coinductive": false
+    },
+    {
+      "id": 6,
+      "package": 0,
+      "params": [],
+      "assoc": [
+        {
+          "mode_bound": {
+            "Const": "Affine"
+          },
+          "bounds": [
+            {
+              "trait_id": 0,
+              "args": [],
+              "brand": "Canonical"
+            }
+          ]
+        }
+      ],
+      "coinductive": false
+    },
+    {
+      "id": 7,
+      "package": 0,
+      "params": [],
+      "assoc": [],
+      "coinductive": false
+    },
+    {
+      "id": 8,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "assoc": [],
+      "coinductive": false
+    },
+    {
+      "id": 9,
+      "package": 0,
+      "params": [],
+      "assoc": [],
+      "coinductive": false
+    }
+  ],
+  "impls": [
+    {
+      "id": 0,
+      "package": 0,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 0,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 0,
+            "args": []
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [],
+      "assoc_values": []
+    },
+    {
+      "id": 1,
+      "package": 0,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 0,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 1,
+            "args": []
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [],
+      "assoc_values": []
+    },
+    {
+      "id": 2,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 0,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 2,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 0,
+              "self_ty": {
+                "Var": {
+                  "Bound": 0
+                }
+              },
+              "args": []
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": []
+    },
+    {
+      "id": 3,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 0,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 3,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 0,
+              "self_ty": {
+                "Var": {
+                  "Bound": 0
+                }
+              },
+              "args": []
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": []
+    },
+    {
+      "id": 4,
+      "package": 0,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 1,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 0,
+            "args": []
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [],
+      "assoc_values": []
+    },
+    {
+      "id": 5,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 1,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 6,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 1,
+              "self_ty": {
+                "Var": {
+                  "Bound": 0
+                }
+              },
+              "args": []
+            },
+            "brand": "Canonical"
+          }
+        },
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 1,
+              "self_ty": {
+                "Ctor": {
+                  "ctor": 6,
+                  "args": [
+                    {
+                      "Ty": {
+                        "Var": {
+                          "Bound": 0
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "args": []
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": []
+    },
+    {
+      "id": 6,
+      "package": 0,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 2,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 1,
+            "args": []
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [],
+      "assoc_values": []
+    },
+    {
+      "id": 7,
+      "package": 2,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 4,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 7,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": [
+          {
+            "Row": {
+              "labels": [],
+              "tail": null
+            }
+          }
+        ]
+      },
+      "where_clauses": [],
+      "assoc_values": [
+        {
+          "Var": {
+            "Bound": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "package": 2,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 4,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 8,
+            "args": []
+          }
+        },
+        "args": [
+          {
+            "Row": {
+              "labels": [
+                {
+                  "Effect": {
+                    "effect": 0,
+                    "args": []
+                  }
+                },
+                {
+                  "Effect": {
+                    "effect": 1,
+                    "args": []
+                  }
+                }
+              ],
+              "tail": null
+            }
+          }
+        ]
+      },
+      "where_clauses": [],
+      "assoc_values": [
+        {
+          "Ctor": {
+            "ctor": 5,
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "package": 0,
+      "params": [
+        "Type",
+        "Row"
+      ],
+      "trait_ref": {
+        "trait_id": 4,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 11,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": [
+          {
+            "Row": {
+              "labels": [],
+              "tail": {
+                "Bound": 1
+              }
+            }
+          }
+        ]
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 4,
+              "self_ty": {
+                "Var": {
+                  "Bound": 0
+                }
+              },
+              "args": [
+                {
+                  "Row": {
+                    "labels": [],
+                    "tail": {
+                      "Bound": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": [
+        {
+          "Projection": {
+            "trait_ref": {
+              "trait_id": 4,
+              "self_ty": {
+                "Var": {
+                  "Bound": 0
+                }
+              },
+              "args": [
+                {
+                  "Row": {
+                    "labels": [],
+                    "tail": {
+                      "Bound": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "brand": "Canonical",
+            "assoc": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "package": 0,
+      "params": [
+        "Type",
+        "Row"
+      ],
+      "trait_ref": {
+        "trait_id": 4,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 12,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": [
+          {
+            "Row": {
+              "labels": [
+                {
+                  "Effect": {
+                    "effect": 2,
+                    "args": [
+                      {
+                        "Ty": {
+                          "Ctor": {
+                            "ctor": 16,
+                            "args": []
+                          }
+                        }
+                      }
+                    ]
+                  }
+                }
+              ],
+              "tail": {
+                "Bound": 1
+              }
+            }
+          }
+        ]
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 4,
+              "self_ty": {
+                "Var": {
+                  "Bound": 0
+                }
+              },
+              "args": [
+                {
+                  "Row": {
+                    "labels": [],
+                    "tail": {
+                      "Bound": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": [
+        {
+          "Projection": {
+            "trait_ref": {
+              "trait_id": 4,
+              "self_ty": {
+                "Var": {
+                  "Bound": 0
+                }
+              },
+              "args": [
+                {
+                  "Row": {
+                    "labels": [],
+                    "tail": {
+                      "Bound": 1
+                    }
+                  }
+                }
+              ]
+            },
+            "brand": "Canonical",
+            "assoc": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": 11,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 5,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 2,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": [
+          {
+            "Mode": {
+              "Const": "Linear"
+            }
+          }
+        ]
+      },
+      "where_clauses": [],
+      "assoc_values": [
+        {
+          "Var": {
+            "Bound": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": 12,
+      "package": 0,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 5,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 14,
+            "args": []
+          }
+        },
+        "args": [
+          {
+            "Mode": {
+              "Const": "Copy"
+            }
+          }
+        ]
+      },
+      "where_clauses": [],
+      "assoc_values": [
+        {
+          "Ctor": {
+            "ctor": 0,
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "id": 13,
+      "package": 0,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 5,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 14,
+            "args": []
+          }
+        },
+        "args": [
+          {
+            "Mode": {
+              "Const": "Affine"
+            }
+          }
+        ]
+      },
+      "where_clauses": [],
+      "assoc_values": [
+        {
+          "Ctor": {
+            "ctor": 0,
+            "args": []
+          }
+        }
+      ]
+    },
+    {
+      "id": 14,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 7,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 15,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 7,
+              "self_ty": {
+                "Ctor": {
+                  "ctor": 15,
+                  "args": [
+                    {
+                      "Ty": {
+                        "Var": {
+                          "Bound": 0
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "args": []
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": []
+    },
+    {
+      "id": 15,
+      "package": 0,
+      "params": [
+        "Type",
+        "Type",
+        "Brand"
+      ],
+      "trait_ref": {
+        "trait_id": 8,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 9,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              },
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 1
+                  }
+                }
+              },
+              {
+                "Brand": {
+                  "Var": {
+                    "Bound": 2
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": [
+          {
+            "Ty": {
+              "Ctor": {
+                "ctor": 9,
+                "args": [
+                  {
+                    "Ty": {
+                      "Var": {
+                        "Bound": 0
+                      }
+                    }
+                  },
+                  {
+                    "Ty": {
+                      "Var": {
+                        "Bound": 1
+                      }
+                    }
+                  },
+                  {
+                    "Brand": {
+                      "Var": {
+                        "Bound": 2
+                      }
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 2,
+              "self_ty": {
+                "Var": {
+                  "Bound": 0
+                }
+              },
+              "args": []
+            },
+            "brand": {
+              "Var": {
+                "Bound": 2
+              }
+            }
+          }
+        }
+      ],
+      "assoc_values": []
+    },
+    {
+      "id": 16,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 1,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 15,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 0,
+              "self_ty": {
+                "Ctor": {
+                  "ctor": 15,
+                  "args": [
+                    {
+                      "Ty": {
+                        "Var": {
+                          "Bound": 0
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "args": []
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": []
+    },
+    {
+      "id": 17,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 0,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 15,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 1,
+              "self_ty": {
+                "Ctor": {
+                  "ctor": 15,
+                  "args": [
+                    {
+                      "Ty": {
+                        "Var": {
+                          "Bound": 0
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "args": []
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": []
+    },
+    {
+      "id": 18,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 9,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 17,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 9,
+              "self_ty": {
+                "Ctor": {
+                  "ctor": 17,
+                  "args": [
+                    {
+                      "Ty": {
+                        "Ctor": {
+                          "ctor": 17,
+                          "args": [
+                            {
+                              "Ty": {
+                                "Var": {
+                                  "Bound": 0
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  ]
+                }
+              },
+              "args": []
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": []
+    },
+    {
+      "id": 19,
+      "package": 0,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 6,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 14,
+            "args": []
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [],
+      "assoc_values": [
+        {
+          "Ctor": {
+            "ctor": 2,
+            "args": [
+              {
+                "Ty": {
+                  "Ctor": {
+                    "ctor": 0,
+                    "args": []
+                  }
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "package": 0,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 1,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 1,
+            "args": []
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [],
+      "assoc_values": []
+    },
+    {
+      "id": 21,
+      "package": 0,
+      "params": [
+        "Type"
+      ],
+      "trait_ref": {
+        "trait_id": 0,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 6,
+            "args": [
+              {
+                "Ty": {
+                  "Var": {
+                    "Bound": 0
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [
+        {
+          "Implements": {
+            "trait_ref": {
+              "trait_id": 0,
+              "self_ty": {
+                "Var": {
+                  "Bound": 0
+                }
+              },
+              "args": []
+            },
+            "brand": "Canonical"
+          }
+        }
+      ],
+      "assoc_values": []
+    }
+  ],
+  "models": [
+    {
+      "id": 0,
+      "package": 2,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 2,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 1,
+            "args": []
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [],
+      "assoc_values": []
+    },
+    {
+      "id": 1,
+      "package": 2,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 3,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 1,
+            "args": []
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [],
+      "assoc_values": []
+    },
+    {
+      "id": 2,
+      "package": 3,
+      "params": [],
+      "trait_ref": {
+        "trait_id": 3,
+        "self_ty": {
+          "Ctor": {
+            "ctor": 1,
+            "args": []
+          }
+        },
+        "args": []
+      },
+      "where_clauses": [],
+      "assoc_values": []
+    }
+  ]
+}
