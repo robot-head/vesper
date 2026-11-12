@@ -53,6 +53,7 @@ members = [
     "crates/vesper-warp-umem",
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
+    "crates/vesper-warp-tcp",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -107,6 +108,7 @@ default-members = [
     "crates/vesper-warp-umem",
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
+    "crates/vesper-warp-tcp",
     "experiments/native-pulse",
 ]
 
