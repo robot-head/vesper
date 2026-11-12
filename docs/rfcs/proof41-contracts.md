@@ -15,7 +15,7 @@ at41sections/AppendixA, modified2026-11-12T09:18:30.204Z; §39.4 was reread.
 | #117 | proof41/projection | new fmt/src/proof_model.rs, doc.rs narrow actual-arena projection API, tests/proof_model.rs, projection report |
 | #118 | proof41/emitter | new fmt/src/proof_lean.rs, tests/proof_lean.rs, emitter report |
 | #119 | proof41/acceptance | new tests/format_proof_cli.rs, check/test-format-proof scripts, format-proof.yml, fixtures/format_proof, acceptance report |
-| #120 | proof41/integration | new fmt/src/proof_source.rs, fmt/lib.rs capture/export hooks, new src/verify_commands.rs + main routing, proof_commands.rs narrow reusable kernel/execution helpers, Lean syntax Term::List and DefinitionKind::NoncomputableDef/printer/tests, manifests/lock/path filters, contract/integration report |
+| #120 | proof41/integration | new fmt/src/proof_source.rs, fmt/lib.rs capture/export hooks, new src/verify_commands.rs + main routing, proof_commands.rs narrow reusable kernel/execution helpers, Lean syntax Term::List and DefinitionKind::NoncomputableDef/printer/tests, formatter/Lean-syntax README proof sections, manifests/lock/path filters, contract/integration report |
 
 Separate worktrees from this contract, lightweight private caches only, one job,
 debug0/incremental0; target/parallel-next is coordinator-only. Initially3.6GiB free:
@@ -131,6 +131,8 @@ one further finite allowance. CLI defaults128Mi formatting+64Mi projection+64Mi
 emission, total256Mi logical envelope; unused failed stages never reset. Public
 source-proof profile validates finite caps (input128KiB/output256KiB/tokens8192/
 Docnodes100000/depth24/formatwork128Mi) and the checked sum of proof stages.
+Ordinary formatter defaults clamp to this stricter source-proof profile, retaining
+any tighter caller limits; zero format limits and invalid ProofLimits reject.
 
 Emitter crate-private API:
 `proof_lean::emit(model:&DocumentModel, source:[u8;32], output:[u8;32], limits:ProofLimits)
