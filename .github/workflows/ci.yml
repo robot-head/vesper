@@ -37,6 +37,8 @@ jobs:
           scripts/test-aarch64.sh
       - name: Validate host native executables
         run: scripts/test-native-host.sh
+      - name: Test standalone milestone crates
+        run: scripts/test-standalone-crates.sh
 
   # Per-platform lanes build and test every workspace member on the host OS.
   # Platform-specific code is gated with cfg in the crates themselves (for
@@ -62,7 +64,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install Lean toolchain manager (Unix)
         if: runner.os != 'Windows'
@@ -86,8 +88,10 @@ jobs:
       - run: lean lean/Foundations.lean
       - run: lean lean/RuntimeFrames.lean
       - run: lean lean/SpecificationCounterexample.lean
-      # On Apple silicon the host is real AArch64 hardware, so the fiber and
-      # continuation ABI runs natively here rather than under QEMU.
+      # On Apple silicon the host is real AArch64 hardware, so native code
+      # runs here rather than under QEMU. On Windows, `vesper build` links
+      # with the runner's MinGW `cc`.
       - name: Validate host native executables
-        if: runner.os != 'Windows'
         run: scripts/test-native-host.sh
+      - name: Test standalone milestone crates
+        run: scripts/test-standalone-crates.sh
