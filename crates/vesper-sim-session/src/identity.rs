@@ -1,6 +1,6 @@
 //! Replay binding: which executable, program, scenario and semantics produced a run.
 use crate::{
-    model::MODEL_SEMANTICS,
+    model::{MODEL_SEMANTICS, WARP_MODEL_SEMANTICS},
     program::{CheckedProgram, sha256_hex},
     scenario::{Plan, canonical, param_name},
     value::type_name,
@@ -22,7 +22,8 @@ pub const SEMANTICS: &str = "vesper-reference-cek+simpulse-journal-v1+sim-sessio
 pub struct ExecutionIdentity {
     pub executable_sha256: String,
     pub semantics: String,
-    /// The process/WAL/network model semantics ([`MODEL_SEMANTICS`]).
+    /// The model semantics ([`MODEL_SEMANTICS`], or [`WARP_MODEL_SEMANTICS`]
+    /// for scenario version 3).
     pub model_semantics: String,
     pub source_sha256: String,
     pub scenario_sha256: String,
@@ -63,7 +64,12 @@ impl ExecutionIdentity {
         Ok(Self {
             executable_sha256: executable_sha256()?,
             semantics: SEMANTICS.into(),
-            model_semantics: MODEL_SEMANTICS.into(),
+            model_semantics: if plan.model.as_ref().is_some_and(|m| m.spec.warp.is_some()) {
+                WARP_MODEL_SEMANTICS
+            } else {
+                MODEL_SEMANTICS
+            }
+            .into(),
             source_sha256: program.source_sha256().into(),
             scenario_sha256: sha256_hex(canonical(&scenario_json).as_bytes()),
             bindings_sha256: sha256_hex(canonical(&json!(bindings)).as_bytes()),
