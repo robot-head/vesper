@@ -6,7 +6,7 @@ Owned slice on `editor41/stdio`, fresh base `bbd19af`: only
 implementation remain coordinator/Quarry-owned. Read the editor contracts and
 actual span/protocol/navigation/action/query APIs before forming the traffic.
 
-The three Rust integration tests launch the actual `CARGO_BIN_EXE_vesper lsp`
+The four Rust integration tests launch the actual `CARGO_BIN_EXE_vesper lsp`
 child, write real Content-Length frames, concurrently drain bounded stdout and
 stderr, enforce a 45-second child timeout, and parse actual framed replies:
 
@@ -19,15 +19,17 @@ stderr, enforce a 45-second child timeout, and parse actual framed replies:
   known-length JSON with continuation, unsupported method, missing query,
   truthful analysis-unavailable feature errors, shutdown-phase request refusal,
   and shutdown/exit completion.
+- Hierarchical-capable clients receive DocumentSymbol; legacy absent/false
+  capability clients receive flat SymbolInformation locations.
 - Fatal duplicate lengths, bad CRLF, truncated body, oversized header and exit
   before shutdown produce process failure.
 
 The standalone Python harness independently parses response framing and rejects
 JSON decoded duplicate keys. It sends actual requests and applies actual
 returned UTF-16 edits. It covers capabilities/navigation/current positions,
-formatting/token-comment sample/idempotence/four-space behavior, freshly checked
+legacy symbol shape negotiation, formatting/token-comment sample/idempotence/four-space behavior, freshly checked
 quick fixes and explicit fix-all with versioned documentChanges and SemVer/
-source/candidate metadata, and sends returned candidates back through checked
+source/candidate metadata (including parent `source`/`source.fixAll` kind filters), and sends returned candidates back through checked
 server analysis. Forged client diagnostics/fix/verified payloads on lint-free
 source must return no actions. Structural signature search must match only the
 actual compatible return type, include source identity and unverified proof

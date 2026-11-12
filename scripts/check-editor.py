@@ -51,7 +51,7 @@ def notice(method, params):
 
 
 def initialize():
-    return request(1, "initialize", {"capabilities": {"general": {"positionEncodings": ["utf-16"]}}})
+    return request(1, "initialize", {"capabilities": {"general": {"positionEncodings": ["utf-16"]}, "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}}})
 
 
 def open_doc(uri, source, version=1):
@@ -178,6 +178,22 @@ def capabilities_and_navigation(h, work):
     assert changed != source and disk.read_text(encoding="utf-8") == "fn disk_only()->u64{9}"
 
 
+def legacy_document_symbols(h):
+    uri = "opaque:legacy"
+    for supported in [None, False]:
+        init = initialize()
+        caps = init["params"]["capabilities"]
+        if supported is None:
+            del caps["textDocument"]
+        else:
+            caps["textDocument"]["documentSymbol"]["hierarchicalDocumentSymbolSupport"] = supported
+        replies = h.run([init, open_doc(uri, "fn main()->u64{42}"), request(2, "textDocument/documentSymbol", document(uri))])
+        symbols = result(replies, 2)
+        assert len(symbols) == 1 and symbols[0]["name"] == "main"
+        assert symbols[0]["location"]["uri"] == uri and "range" in symbols[0]["location"]
+        assert "selectionRange" not in symbols[0], "legacy client needs SymbolInformation"
+
+
 def formatting_and_forgery(h):
     uri = "untitled:format/🦀"
     source = "// Unicode 🦀 é\r\nfn main( )->i64{/* keep */let x=1;// next\n x}"
@@ -197,9 +213,9 @@ def checked_actions(h):
     source = "// Unicode 🦀 é\neffect Audit{fn event();}\nfn selected(x:u64)->u64 eff[/* keep 🦀 */ Audit]{x}\nfn other()->u64 eff[Audit]{42}\n"
     selected = selection(source, "Audit]{x}")
     context = lambda kind: {**document(uri), "range": selected, "context": {"only": [kind], "diagnostics": []}}
-    replies = h.run([initialize(), open_doc(uri, source, 7), request(2, "textDocument/codeAction", context("quickfix")), request(3, "textDocument/codeAction", context("source.fixAll.vesper"))])
+    replies = h.run([initialize(), open_doc(uri, source, 7), request(2, "textDocument/codeAction", context("quickfix")), request(3, "textDocument/codeAction", context("source.fixAll.vesper")), request(4, "textDocument/codeAction", context("source")), request(5, "textDocument/codeAction", context("source.fixAll"))])
     candidates = []
-    for identifier, kind in [(2, "quickfix"), (3, "source.fixAll.vesper")]:
+    for identifier, kind in [(2, "quickfix"), (3, "source.fixAll.vesper"), (4, "source.fixAll.vesper"), (5, "source.fixAll.vesper")]:
         actions = result(replies, identifier)
         assert len(actions) == 1 and actions[0]["kind"] == kind, actions
         action = actions[0]
@@ -272,6 +288,7 @@ def main():
     harness = Harness(binary)
     with tempfile.TemporaryDirectory(prefix="vesper-editor-", dir=args.work) as temp:
         capabilities_and_navigation(harness, pathlib.Path(temp))
+        legacy_document_symbols(harness)
         formatting_and_forgery(harness)
         checked_actions(harness)
         search_and_failures(harness)

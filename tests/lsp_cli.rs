@@ -108,7 +108,7 @@ fn initialize() -> Value {
     request(
         1,
         "initialize",
-        json!({"capabilities":{"general":{"positionEncodings":["utf-16"]}}}),
+        json!({"capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}}}),
     )
 }
 fn shutdown() -> [Value; 2] {
@@ -270,5 +270,42 @@ fn actual_stdio_framing_errors_and_early_exit_fail_the_process() {
     ] {
         let (ok, replies, _) = run(input);
         assert!(!ok, "fatal input unexpectedly succeeded: {replies:?}");
+    }
+}
+
+#[test]
+fn actual_stdio_document_symbols_respect_legacy_client_shape() {
+    for flag in [None, Some(false)] {
+        let mut init = initialize();
+        match flag {
+            None => {
+                init["params"]["capabilities"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("textDocument");
+            }
+            Some(flag) => {
+                init["params"]["capabilities"]["textDocument"]["documentSymbol"]["hierarchicalDocumentSymbolSupport"] =
+                    json!(flag)
+            }
+        }
+        let uri = "opaque:legacy";
+        let mut messages = vec![
+            init,
+            notice(
+                "textDocument/didOpen",
+                json!({"textDocument":{"uri":uri,"version":1,"text":"fn main()->u64{42}"}}),
+            ),
+            request(2, "textDocument/documentSymbol", doc(uri)),
+        ];
+        messages.extend(shutdown());
+        let (ok, replies, stderr) = run(stream(&messages));
+        assert!(ok, "{stderr}");
+        let symbols = result(&replies, 2).as_array().unwrap();
+        assert_eq!(symbols.len(), 1);
+        assert_eq!(symbols[0]["name"], "main");
+        assert_eq!(symbols[0]["location"]["uri"], uri);
+        assert!(symbols[0]["location"]["range"]["start"]["line"].is_u64());
+        assert!(symbols[0].get("selectionRange").is_none());
     }
 }
