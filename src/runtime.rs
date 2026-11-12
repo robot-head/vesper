@@ -183,7 +183,7 @@ enum Frame {
         env: Env,
     },
     Coerce(Type, Env),
-    Unary(String),
+    Unary(String, Env),
     BinaryLeft {
         op: String,
         right: Expr,
@@ -192,10 +192,12 @@ enum Frame {
     BinaryRight {
         op: String,
         left: Value,
+        evidence: Env,
     },
     Assign {
         slot: Slot,
         op: String,
+        evidence: Env,
     },
     Field(String),
     IndexBase {
@@ -320,6 +322,9 @@ pub struct Runtime<'a> {
     pub optimize: bool,
     optimized: bool,
     external: BTreeMap<u64, Effect>,
+    /// The checked call site of the function being invoked, used to
+    /// instantiate generic effect arguments for typed instance selection.
+    call_site: Option<(usize, usize)>,
 }
 impl<'a> Runtime<'a> {
     pub fn new(world: &'a World) -> Self {
@@ -332,6 +337,7 @@ impl<'a> Runtime<'a> {
             optimize: true,
             optimized: false,
             external: BTreeMap::new(),
+            call_site: None,
         }
     }
     pub fn run(&mut self, entry: &str, args: Vec<Value>) -> Result<Value, String> {
@@ -383,6 +389,9 @@ impl<'a> Runtime<'a> {
                 format!("$effect:{}", effect.name),
                 Slot::new(Value::Capability(id)),
             );
+            if let Some(key) = crate::numeric::instance_key(&effect.name, &effect.args) {
+                caller.insert(key, Slot::new(Value::Capability(id)));
+            }
             if let Some(label) = &effect.label {
                 caller.insert(format!("$label:{label}"), Slot::new(Value::Capability(id)));
             }
@@ -525,14 +534,6 @@ impl<'a> Runtime<'a> {
             }
             Op::Write { place, op, value } => {
                 let value = get(value)?;
-                if matches!(op.as_str(), "/=" | "%=") && integer_zero(&value) {
-                    return self.primitive_failure(
-                        state,
-                        instruction.dest,
-                        instruction.ty,
-                        "DivisionByZero",
-                    );
-                }
                 let mut path = place.split('.');
                 let root = path.next().ok_or("empty IR place")?;
                 let mut slot = state
@@ -541,36 +542,47 @@ impl<'a> Runtime<'a> {
                     .cloned()
                     .ok_or("undefined IR assignment place")?;
                 slot.path.extend(path.map(str::to_owned));
+                // A failing compound assignment raises before its write.
                 let value = if op == "=" {
                     value
                 } else {
-                    binary(&op[..1], slot.get()?, value)?
+                    match binary(&op[..1], slot.get()?, value) {
+                        Err(Fault::Raise(failure)) => {
+                            return self.primitive_failure(
+                                state,
+                                instruction.dest,
+                                instruction.ty,
+                                failure,
+                            );
+                        }
+                        result => result?,
+                    }
                 };
                 slot.set(value)?;
                 Value::Tuple(vec![])
             }
-            Op::Unary(op, v) => {
-                let v = get(v)?;
-                match (op.as_str(), v) {
-                    ("-", Value::Int(n)) => Value::Int(n.wrapping_neg()),
-                    ("-", Value::UInt(n, bits)) => Value::UInt(n.wrapping_neg() & mask(bits), bits),
-                    ("-", Value::Float(n)) => Value::Float(-n),
-                    ("!", Value::Bool(b)) => Value::Bool(!b),
-                    _ => return Err("invalid IR unary operands".into()),
-                }
-            }
-            Op::Binary(op, a, b) => {
-                let right = get(b)?;
-                if matches!(op.as_str(), "/" | "%") && integer_zero(&right) {
+            Op::Unary(op, v) => match unary(&op, get(v)?) {
+                Err(Fault::Raise(failure)) => {
                     return self.primitive_failure(
                         state,
                         instruction.dest,
                         instruction.ty,
-                        "DivisionByZero",
+                        failure,
                     );
                 }
-                binary(&op, get(a)?, right)?
-            }
+                result => result?,
+            },
+            Op::Binary(op, a, b) => match binary(&op, get(a)?, get(b)?) {
+                Err(Fault::Raise(failure)) => {
+                    return self.primitive_failure(
+                        state,
+                        instruction.dest,
+                        instruction.ty,
+                        failure,
+                    );
+                }
+                result => result?,
+            },
             Op::Tuple(ids) => {
                 Value::Tuple(ids.into_iter().map(get).collect::<Result<Vec<_>, _>>()?)
             }
@@ -616,7 +628,7 @@ impl<'a> Runtime<'a> {
                                 state,
                                 instruction.dest,
                                 instruction.ty,
-                                "IndexOutOfBounds",
+                                Failure::IndexOutOfBounds,
                             );
                         }
                     },
@@ -627,7 +639,7 @@ impl<'a> Runtime<'a> {
                 callee,
                 args,
                 capability,
-                ..
+                types,
             } => {
                 let values = args
                     .iter()
@@ -645,6 +657,7 @@ impl<'a> Runtime<'a> {
                     })
                     .collect();
                 let callee = if self.world.functions.contains_key(&callee) {
+                    self.call_site = Some((instruction.span.start, instruction.span.end));
                     Value::Function(callee)
                 } else if let Some((effect, op)) = callee.split_once("::") {
                     Value::EffectOp {
@@ -653,9 +666,7 @@ impl<'a> Runtime<'a> {
                             .and_then(|l| {
                                 crate::runtime::capability(&state.env, &format!("$label:{l}"))
                             })
-                            .or_else(|| {
-                                crate::runtime::capability(&state.env, &format!("$effect:{effect}"))
-                            }),
+                            .or_else(|| instance_capability(&state.env, effect, &types)),
                         effect: effect.into(),
                         label: capability,
                         op: op.into(),
@@ -698,7 +709,12 @@ impl<'a> Runtime<'a> {
             }
             Op::Try(v) => {
                 let value = get(v)?;
-                let target = capability(&state.env, "$effect:Fail");
+                let error = self.program.functions[&state.function]
+                    .values
+                    .get(&v)
+                    .and_then(result_error);
+                let target =
+                    instance_capability(&state.env, "Fail", &error.into_iter().collect::<Vec<_>>());
                 self.stack.push(Frame::IrResume {
                     state: Box::new(state),
                     dest: instruction.dest,
@@ -818,7 +834,8 @@ impl<'a> Runtime<'a> {
                             self.block(statements, tail, env)?
                         }
                         ExprKind::Unary(op, v) => {
-                            self.stack.push(Frame::Unary(op));
+                            self.stack
+                                .push(Frame::Unary(op, evidence_environment(&env)));
                             Control::Eval(*v, env)
                         }
                         ExprKind::Binary(op, left, right) => {
@@ -831,7 +848,11 @@ impl<'a> Runtime<'a> {
                         }
                         ExprKind::Assign(op, left, right) => {
                             let slot = place_slot(&left, &env)?;
-                            self.stack.push(Frame::Assign { slot, op });
+                            self.stack.push(Frame::Assign {
+                                slot,
+                                op,
+                                evidence: evidence_environment(&env),
+                            });
                             Control::Eval(*right, env)
                         }
                         ExprKind::Field(base, field) => {
@@ -903,8 +924,16 @@ impl<'a> Runtime<'a> {
                             Control::Eval(*value, env)
                         }
                         ExprKind::Try(v) => {
-                            self.stack
-                                .push(Frame::Try(capability(&env, "$effect:Fail")));
+                            let error = self
+                                .world
+                                .types
+                                .get(&(v.span.start, v.span.end))
+                                .and_then(result_error);
+                            self.stack.push(Frame::Try(instance_capability(
+                                &env,
+                                "Fail",
+                                &error.into_iter().collect::<Vec<_>>(),
+                            )));
                             Control::Eval(*v, env)
                         }
                         ExprKind::Closure {
@@ -1072,36 +1101,48 @@ impl<'a> Runtime<'a> {
                             self.qualify_value(value, &ty, &env, false),
                             &ty,
                         )),
-                        Frame::Unary(op) => Control::Return(match (op.as_str(), value) {
-                            ("-", Value::Int(n)) => Value::Int(n.wrapping_neg()),
-                            ("-", Value::UInt(n, bits)) => {
-                                Value::UInt(n.wrapping_neg() & mask(bits), bits)
+                        Frame::Unary(op, evidence) => match unary(&op, value) {
+                            Err(Fault::Raise(failure)) => {
+                                self.raise_primitive(&evidence, failure)?
                             }
-                            ("-", Value::Float(n)) => Value::Float(-n),
-                            ("!", Value::Bool(b)) => Value::Bool(!b),
-                            _ => return Err("invalid unary operands".into()),
-                        }),
+                            result => Control::Return(result?),
+                        },
                         Frame::BinaryLeft { op, right, env } => {
                             if (op == "&&" && matches!(value, Value::Bool(false)))
                                 || (op == "||" && matches!(value, Value::Bool(true)))
                             {
                                 Control::Return(value)
                             } else {
-                                self.stack.push(Frame::BinaryRight { op, left: value });
+                                self.stack.push(Frame::BinaryRight {
+                                    op,
+                                    left: value,
+                                    evidence: evidence_environment(&env),
+                                });
                                 Control::Eval(right, env)
                             }
                         }
-                        Frame::BinaryRight { op, left } => {
-                            Control::Return(binary(&op, left, value)?)
-                        }
-                        Frame::Assign { slot, op } => {
+                        Frame::BinaryRight { op, left, evidence } => match binary(&op, left, value)
+                        {
+                            Err(Fault::Raise(failure)) => {
+                                self.raise_primitive(&evidence, failure)?
+                            }
+                            result => Control::Return(result?),
+                        },
+                        Frame::Assign { slot, op, evidence } => {
                             let value = if op == "=" {
-                                value
+                                Ok(value)
                             } else {
-                                binary(&op[..1], slot.get()?, value)?
+                                binary(&op[..1], slot.get()?, value)
                             };
-                            slot.set(value)?;
-                            Control::Return(Value::Tuple(vec![]))
+                            match value {
+                                Err(Fault::Raise(failure)) => {
+                                    self.raise_primitive(&evidence, failure)?
+                                }
+                                value => {
+                                    slot.set(value?)?;
+                                    Control::Return(Value::Tuple(vec![]))
+                                }
+                            }
                         }
                         Frame::Field(field) => Control::Return(match value {
                             Value::Data { mut fields, .. } => {
@@ -1347,11 +1388,22 @@ impl<'a> Runtime<'a> {
                 } else {
                     Env::new()
                 };
+                let vars = self
+                    .call_site
+                    .take()
+                    .and_then(|site| self.world.calls.get(&site))
+                    .cloned()
+                    .unwrap_or_default();
                 for (index, effect) in f.effects.instances.iter().enumerate() {
                     let target = if let Some(label) = &effect.label {
                         capability(caller, &format!("$label:{label}"))
                     } else {
-                        capability(caller, &format!("$effect:{}", effect.name))
+                        let args = effect
+                            .args
+                            .iter()
+                            .map(|t| substitute(t, &vars))
+                            .collect::<Vec<_>>();
+                        instance_capability(caller, &effect.name, &args)
                     };
                     if let Some(id) = target {
                         env.insert(
@@ -1362,6 +1414,10 @@ impl<'a> Runtime<'a> {
                             format!("$effect:{}", effect.name),
                             Slot::new(Value::Capability(id)),
                         );
+                        if let Some(key) = crate::numeric::instance_key(&effect.name, &effect.args)
+                        {
+                            env.insert(key, Slot::new(Value::Capability(id)));
+                        }
                         if let Some(label) = &effect.label {
                             env.insert(format!("$label:{label}"), Slot::new(Value::Capability(id)));
                         }
@@ -1592,21 +1648,35 @@ impl<'a> Runtime<'a> {
         state: IrState,
         dest: u32,
         ty: Type,
-        variant: &str,
+        failure: Failure,
     ) -> Result<Control, String> {
-        let target = capability(&state.env, "$effect:Fail");
+        let env = evidence_environment(&state.env);
         self.stack.push(Frame::IrResume {
             state: Box::new(state),
             dest,
             ty,
         });
+        self.raise_primitive(&env, failure)
+    }
+    /// Raise a primitive failure through the typed Fail instance in scope.
+    fn raise_primitive(&mut self, env: &Env, failure: Failure) -> Result<Control, String> {
+        let (ty, constructor) = match failure {
+            Failure::Arith(crate::numeric::ArithFailure::Overflow) => {
+                (crate::numeric::OVERFLOW_TYPE, crate::numeric::OVERFLOW_TYPE)
+            }
+            Failure::Arith(crate::numeric::ArithFailure::DivisionByZero) => {
+                ("RuntimeError", "DivisionByZero")
+            }
+            Failure::IndexOutOfBounds => ("RuntimeError", "IndexOutOfBounds"),
+        };
+        let target = instance_capability(env, "Fail", &[Type::named(ty)]);
         self.perform(
             "Fail",
             None,
             "raise",
             vec![Value::Data {
-                ty: "RuntimeError".into(),
-                constructor: variant.into(),
+                ty: ty.into(),
+                constructor: constructor.into(),
                 fields: BTreeMap::new(),
             }],
             vec![None],
@@ -1764,53 +1834,95 @@ fn bind_pattern_slot(p: &Pattern, slot: &Slot, env: &mut Env) -> Result<bool, St
     }
     Ok(true)
 }
-fn integer_zero(value: &Value) -> bool {
-    matches!(value, Value::Int(0) | Value::UInt(0, _))
+/// A primitive operation either fails with a raisable source failure or with
+/// an internal evaluator error.
+enum Fault {
+    Raise(Failure),
+    Error(String),
 }
-fn binary(op: &str, a: Value, b: Value) -> Result<Value, String> {
-    if let (Some((a, ab)), Some((b, bb))) = (unsigned_value(&a), unsigned_value(&b))
-        && (ab != 0 || bb != 0)
-    {
-        let bits = ab.max(bb);
-        let m = mask(bits);
+#[derive(Clone, Copy)]
+enum Failure {
+    Arith(crate::numeric::ArithFailure),
+    IndexOutOfBounds,
+}
+impl From<String> for Fault {
+    fn from(e: String) -> Self {
+        Self::Error(e)
+    }
+}
+impl From<&str> for Fault {
+    fn from(e: &str) -> Self {
+        Self::Error(e.into())
+    }
+}
+impl From<Fault> for String {
+    fn from(f: Fault) -> Self {
+        match f {
+            Fault::Error(e) => e,
+            Fault::Raise(_) => "unraised primitive failure".into(),
+        }
+    }
+}
+/// The integer kind carried by a coerced runtime value.
+fn value_kind(v: &Value) -> Option<(crate::numeric::IntegerKind, i128)> {
+    use crate::numeric::IntegerKind as K;
+    Some(match v {
+        Value::Int(n) => (K::I64, *n as i128),
+        Value::UInt(n, 8) => (K::U8, *n as i128),
+        Value::UInt(n, 32) => (K::U32, *n as i128),
+        Value::UInt(n, _) => (K::U64, *n as i128),
+        _ => return None,
+    })
+}
+fn integer_value(kind: crate::numeric::IntegerKind, n: i128) -> Value {
+    if kind.unsigned() {
+        Value::UInt(n as u64, kind.bits())
+    } else {
+        Value::Int(n as i64)
+    }
+}
+fn unary(op: &str, v: Value) -> Result<Value, Fault> {
+    Ok(match (op, v) {
+        ("-", Value::Float(n)) => Value::Float(-n),
+        ("!", Value::Bool(b)) => Value::Bool(!b),
+        ("-", v) => {
+            let (kind, n) = value_kind(&v).ok_or("invalid unary operands")?;
+            integer_value(
+                kind,
+                kind.checked_neg(n).ok_or(Fault::Raise(Failure::Arith(
+                    crate::numeric::ArithFailure::Overflow,
+                )))?,
+            )
+        }
+        _ => return Err("invalid unary operands".into()),
+    })
+}
+/// Binary operators under `vesper.arith.checked/1`. Integer operands share a
+/// kind; an untyped `Int` operand adopts its unsigned partner's kind.
+fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
+    if let (Some((ak, x)), Some((bk, y))) = (value_kind(&a), value_kind(&b)) {
+        let kind = if ak.unsigned() { ak } else { bk };
+        let (x, y) = (kind.wrap(x), kind.wrap(y));
         return Ok(match op {
-            "+" => Value::UInt(a.wrapping_add(b) & m, bits),
-            "-" => Value::UInt(a.wrapping_sub(b) & m, bits),
-            "*" => Value::UInt(a.wrapping_mul(b) & m, bits),
-            "/" => Value::UInt(a.checked_div(b).ok_or("integer division by zero")?, bits),
-            "%" => Value::UInt(a.checked_rem(b).ok_or("integer remainder by zero")?, bits),
-            "==" => Value::Bool(a == b),
-            "!=" => Value::Bool(a != b),
-            "<" => Value::Bool(a < b),
-            "<=" => Value::Bool(a <= b),
-            ">" => Value::Bool(a > b),
-            ">=" => Value::Bool(a >= b),
-            _ => return Err("invalid unsigned integer operator".into()),
+            "+" | "-" | "*" | "/" | "%" => integer_value(
+                kind,
+                kind.checked(op, x, y)
+                    .map_err(|f| Fault::Raise(Failure::Arith(f)))?,
+            ),
+            _ if crate::numeric::wrapping_intrinsic(op).is_some() => integer_value(
+                kind,
+                kind.wrapping(crate::numeric::wrapping_intrinsic(op).unwrap(), x, y),
+            ),
+            "==" => Value::Bool(x == y),
+            "!=" => Value::Bool(x != y),
+            "<" => Value::Bool(x < y),
+            "<=" => Value::Bool(x <= y),
+            ">" => Value::Bool(x > y),
+            ">=" => Value::Bool(x >= y),
+            _ => return Err("invalid integer operator".into()),
         });
     }
     Ok(match (a, b) {
-        (Value::Int(a), Value::Int(b)) => match op {
-            "+" => Value::Int(a.wrapping_add(b)),
-            "-" => Value::Int(a.wrapping_sub(b)),
-            "*" => Value::Int(a.wrapping_mul(b)),
-            "/" => Value::Int(if b == 0 {
-                return Err("integer division by zero".into());
-            } else {
-                a.wrapping_div(b)
-            }),
-            "%" => Value::Int(if b == 0 {
-                return Err("integer remainder by zero".into());
-            } else {
-                a.wrapping_rem(b)
-            }),
-            "==" => Value::Bool(a == b),
-            "!=" => Value::Bool(a != b),
-            "<" => Value::Bool(a < b),
-            "<=" => Value::Bool(a <= b),
-            ">" => Value::Bool(a > b),
-            ">=" => Value::Bool(a >= b),
-            _ => return Err("invalid integer operator".into()),
-        },
         (Value::Float(a), Value::Float(b)) => match op {
             "+" => Value::Float(a + b),
             "-" => Value::Float(a - b),
@@ -1876,20 +1988,6 @@ fn equal(a: &Value, b: &Value) -> bool {
     }
 }
 
-fn mask(bits: u32) -> u64 {
-    if bits >= 64 {
-        u64::MAX
-    } else {
-        (1u64 << bits) - 1
-    }
-}
-fn unsigned_value(v: &Value) -> Option<(u64, u32)> {
-    match v {
-        Value::UInt(n, b) => Some((*n, *b)),
-        Value::Int(n) => Some((*n as u64, 0)),
-        _ => None,
-    }
-}
 fn coerce_value(v: Value, t: &Type) -> Value {
     let Some(kind) = crate::numeric::IntegerKind::from_type(t) else {
         return v;
@@ -1960,8 +2058,24 @@ fn handler_body_environment(mut env: Env, effect: &Effect, id: u64, static_label
         format!("$effect:{}", effect.name),
         Slot::new(Value::Capability(id)),
     );
+    if let Some(key) = crate::numeric::instance_key(&effect.name, &effect.args) {
+        env.insert(key, Slot::new(Value::Capability(id)));
+    }
     if let Some(label) = &effect.label {
         env.insert(format!("$label:{label}"), Slot::new(Value::Capability(id)));
     }
     env
+}
+/// Typed instance selection (`vesper.arith.checked/1`): prefer the innermost
+/// capability with exactly these concrete arguments, else the innermost by name.
+fn instance_capability(env: &Env, effect: &str, args: &[Type]) -> Option<u64> {
+    crate::numeric::instance_key(effect, args)
+        .and_then(|key| capability(env, &key))
+        .or_else(|| capability(env, &format!("$effect:{effect}")))
+}
+fn result_error(t: &Type) -> Option<Type> {
+    match t {
+        Type::Named(n, args) if n == "Result" && args.len() == 2 => Some(args[1].clone()),
+        _ => None,
+    }
 }

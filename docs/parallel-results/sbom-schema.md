@@ -2,6 +2,8 @@
 
 Coordinator-owned `src/sbom_commands.rs` exposes `run(Vec<String>)` for `vesper sbom [Loom.lock]`. It validates the complete snapshot before emitting CycloneDX 1.6 JSON and performs no package execution, network access or file writes. The parent coordinator wires CLI routing and end-to-end tests.
 
+CLI integration is complete. Five new end-to-end tests and 20 graph/package/binary unit regressions passed, with clean formatting and strict workspace Clippy. The integrated CLI's output also passed the official schema and format checks described below. The prior full 17-package suite passed 742 tests; this CLI-only addition was checked with the targeted suite.
+
 Reachable Vesper and native components have distinct deterministic generic PURLs/bom-refs and sorted direct dependencies, including leaf/native entries. Cycles remain graph edges rather than recursive tree expansion. Namespace encoding preserves `@std/lib` versus reserved `std/lib`, native identities and SemVer build metadata. Original root identities and valid unused selections remain metadata properties. Features, declared/required capabilities, FFI policy, dependency ceilings and native constraints are namespaced properties; free-form license text is preserved as a property without asserting SPDX validity.
 
 No UUID, timestamp, fabricated source/hash or synthetic project identity is emitted. This inventories declared metadata only, not authenticated source contents, actual native installations, ABI/CVE findings, compiler-body authority or an authenticated SBOM.

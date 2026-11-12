@@ -1,5 +1,10 @@
 name: CI
-on: [push, pull_request]
+# Run on pushes to main and on pull requests. A push trigger on every branch
+# would start a second, duplicate run for each commit pushed to a PR branch.
+on:
+  push:
+    branches: [main]
+  pull_request:
 
 # Both compiler and sandbox Cranelift versions are intentional. Keep clean
 # hosted-runner builds within their memory/disk budget; assertions stay enabled.
@@ -8,9 +13,12 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
 
+# One run per PR (refs/pull/N/merge) or branch; a newer push to a PR cancels
+# its older run. Runs on main are queued rather than cancelled so every merge
+# gets a result.
 concurrency:
   group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Linux is the reference lane: formatting, Clippy, the full workspace tests,

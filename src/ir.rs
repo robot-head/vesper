@@ -26,6 +26,10 @@ pub struct Instruction {
     pub ty: Type,
     pub span: Span,
     pub token: Option<(u32, u32)>,
+    /// The checker could not prove this primitive operation total: it may
+    /// raise `Fail[RuntimeError]` or `Fail[ArithOverflow]`. Fallible
+    /// operations are ordered state-token actions and abortable frames.
+    pub fallible: bool,
 }
 #[derive(Debug, Clone, Serialize)]
 pub enum Op {
@@ -259,6 +263,22 @@ fn block() -> Block {
         terminator: Terminator::Unreachable,
     }
 }
+/// Whether an instruction consumes and produces state-token evidence: writes,
+/// ownership binds, calls, handlers and every potentially failing primitive.
+pub fn state_action(i: &Instruction) -> bool {
+    matches!(
+        i.op,
+        Op::Bind { .. }
+            | Op::Write { .. }
+            | Op::Call { .. }
+            | Op::Indirect { .. }
+            | Op::Try(_)
+            | Op::Handle { .. }
+            | Op::Closure { .. }
+            | Op::Index(..)
+    ) || i.fallible
+        || matches!(&i.op, Op::Binary(op, ..) if matches!(op.as_str(), "/" | "%"))
+}
 /// Give each CFG merge a state-token parameter and attach predecessor evidence.
 /// Reads observe a token; writes, ownership binds and calls produce fresh ones.
 pub fn thread_tokens(program: &mut Program) {
@@ -270,17 +290,7 @@ pub fn thread_tokens(program: &mut Program) {
             let mut current = b.entry_token;
             for i in &mut b.instructions {
                 let observation = matches!(i.op, Op::Read { .. });
-                let action = matches!(
-                    i.op,
-                    Op::Bind { .. }
-                        | Op::Write { .. }
-                        | Op::Call { .. }
-                        | Op::Indirect { .. }
-                        | Op::Try(_)
-                        | Op::Handle { .. }
-                        | Op::Closure { .. }
-                ) || matches!(i.op, Op::Index(..))
-                    || matches!(&i.op, Op::Binary(op, ..) if matches!(op.as_str(), "/" | "%"));
+                let action = state_action(i);
                 i.token = if action {
                     let output = next;
                     next += 1;
@@ -582,6 +592,12 @@ impl Lower<'_> {
         if matches!(op, Op::Bind { .. } | Op::Write { .. }) {
             ty = Type::unit();
         }
+        let key = (e.span.start, e.span.end);
+        let fallible = matches!(
+            op,
+            Op::Binary(..) | Op::Unary(..) | Op::Write { .. } | Op::Index(..)
+        ) && (self.world.partial_ops.contains(&key)
+            || self.world.overflow_ops.contains(&key));
         self.values.insert(dest, ty.clone());
         self.blocks[self.current].instructions.push(Instruction {
             dest,
@@ -589,6 +605,7 @@ impl Lower<'_> {
             ty,
             span: e.span.clone(),
             token,
+            fallible,
         });
         dest
     }
@@ -902,6 +919,15 @@ impl Lower<'_> {
                     _ => None,
                 };
                 if let Some(name) = name {
+                    // Wrapping intrinsics are total binary operators in IR.
+                    if crate::numeric::wrapping_intrinsic(&name).is_some()
+                        && !self.world.functions.contains_key(&name)
+                        && args.len() == 2
+                    {
+                        let a = self.expr(&args[0].expr);
+                        let b = self.expr(&args[1].expr);
+                        return self.emit(Op::Binary(name, a, b), e, false);
+                    }
                     if self.world.constructor(&name).is_some() {
                         let fields = args
                             .iter()

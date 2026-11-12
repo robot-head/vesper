@@ -1,10 +1,17 @@
 linear effect Counter { fn next() -> i64; }
 
 fn main() -> i64 {
-    handle Counter state counter = 0 in {
-        Counter::next() + Counter::next()
+    handle Fail[ArithOverflow] in {
+        handle Counter state counter = 0 in {
+            Counter::next() + Counter::next()
+        } with {
+            return (value, counter) => value + counter,
+            // A failure here would abandon the live one-shot continuation,
+            // so the handler's own counter is explicitly modular.
+            next(counter, resume) => resume(counter, wrapping_add(counter, 1)),
+        }
     } with {
-        return (value, counter) => value + counter,
-        next(counter, resume) => resume(counter, counter + 1),
+        return value => value,
+        raise(overflow, resume) => -1,
     }
 }

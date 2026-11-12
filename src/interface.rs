@@ -134,7 +134,10 @@ impl Exporter<'_> {
         // Builtins are compiler-provided declarations, not local definitions.
         let builtin = matches!(
             (kind, name),
-            ("type", "Option" | "Result" | "RuntimeError") | ("effect", "Fail")
+            (
+                "type",
+                "Option" | "Result" | "RuntimeError" | "ArithOverflow"
+            ) | ("effect", "Fail")
         );
         let package = if builtin { "std/core" } else { self.package };
         format!("{package}::{kind}::{name}")

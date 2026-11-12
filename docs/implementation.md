@@ -35,12 +35,16 @@ The executable pipeline checks HIR, runs CFG ownership analysis on typed Place I
 | `vesper-loom-solver` | Bounded iterative offline resolution, transitive features/native requirements, `vesper resolve`, atomic solution snapshots and read-only `--locked` validation against current inputs | CDCL/Max-SMT, authenticated lockfiles, optimization/trust policies |
 | `vesper-alloc` | Externally implemented host-region allocator; registered for workspace testing after upstream merge | Source Region/Alloc typing/lowering, exhaustion policy, ShardSlab and collection integration |
 | `vesper-simpulse` | Seeded scheduling, virtual timers, actual completion ownership, strict journal replay | Production adapters, source/CLI simulation, DPOR, network/WAL models |
+| `vesper-simd` | Runtime-checked Baseline128 native scanner, bounded file-scanning CLI and x86_64/AArch64 ELF emission; [details](simd-scanner.md) | Source ISA effects/vector types, scalable profiles, vector saturation and Lean equivalence proofs |
 | `vesper-fiber-abi` | Versioned evidence ABI, pinned-stack native CLIF park/resume prototype and Pulse adapter | Compiler source lowering, stack growth, portable scheduling, physical relocation |
 | `vesper-pact` | Canonical trait goals, bounded tabled solver, named models, coherence and proof DTOs | Source traits/models, checker integration, complete higher-rank reasoning |
 | `vesper-loom-cas` | BLAKE3 blob/tree store, atomic ingestion, independent materialization, distinct artifact/proof records | CLI/build graph, compiler-derived keys, registry/proof verification |
 | `vesper-loom-sandbox` | Real Wasmtime component execution, denied ambient access, deterministic inputs, fuel/memory limits | Forge hygiene/provenance, Loom/CAS integration, enforced disk quota |
 | `vesper-ignis` | Deterministic resource hazards, enhanced-barrier plans and queue fence streams | Windows/D3D12 executor and hardware validation, source lowering, full engine |
 | `vesper-loom-trust` | Real offline Ed25519 verification, configured-operator quorum, exact signed build identities and actual-blob CLI checks | Sigstore/OIDC/TUF, authenticated registry/source lineage, real builder execution and cache-trust integration |
+| `vesper-loom-tuf` | Bounded offline signed target verification, retained root chains, expiry checks, completed-call failure progress and Unix locked checkpoint storage | Durable per-step/cancellation-safe updater, registry/package binding and network transport |
+| `vesper-prism` | Bounded incremental HTTP/1.1 request framing, strict ambiguity rejection and exact pipeline remainder | Server/I/O integration, source linear responses, routing, HTTP/2/3, TLS and WebSocket |
+| `vesper-forge` | Host-owned quotation scopes/splices, lexical-fragment hygiene and provenance, transitive emitted-code authority gate, real WASI fixture through flat transport and gate | Full compiler CST/HIR graph integration, typed guest splice ABI, user macro workflows and cache policy binding |
 
 The [contract audit](rfcs/parallel-contracts.md) records checked-arithmetic migration, scoped child loans, native relocation/DMA rules, region aliasing/rewind, and distinct interface/artifact/proof cache keys. These are integration gates, not new proof claims.
 

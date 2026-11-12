@@ -5,7 +5,7 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 
 ## Next implementation batch
 
-The user has launched all seven assignments in the [next-wave prompt index](agent-prompts/next-wave/README.md). Their paths are now reserved for those active sessions; do not launch duplicate implementations. Only the checked-arithmetic lane edits compiler semantics. Source-native suspension and source trait/model syntax follow that migration.
+The user has launched all seven assignments in the [next-wave prompt index](agent-prompts/next-wave/README.md). Forge landed through remote PR #14; the other paths remain reserved for their active sessions. Do not launch duplicate implementations. Only the checked-arithmetic lane edits compiler semantics. Source-native suspension and source trait/model syntax follow that migration.
 
 | Active lane | Requested branch | Reserved paths |
 | --- | --- | --- |
@@ -15,7 +15,7 @@ The user has launched all seven assignments in the [next-wave prompt index](agen
 | Pact compiler bridge | `next/pact-compiler-bridge` | New `crates/vesper-pact-bridge/**` |
 | Strata collections | `next/strata-collections` | `crates/vesper-alloc/**` |
 | Source simulation | `next/source-simulation` | New `crates/vesper-sim-session/**` |
-| Forge hygiene/authority | `next/forge-hygiene-authority` | New `crates/vesper-forge/**` |
+| Forge hygiene/authority (landed) | Actual branch `claude/project-thread-1z4nx8`, PR #14 | `crates/vesper-forge/**`; coordinator registration/testing |
 
 The names above are the requested branch names, not confirmed remote refs. Record actual branches/PRs, base SHAs, commits and validation evidence when handoffs arrive. The individual prompts define exact ownership, including report files and fixture-only exceptions.
 
@@ -32,6 +32,15 @@ Local Lean artifact auditing is coordinator-owned in the new `src/proof_commands
 Declared-permission upgrade checks in `crates/vesper-loom-calculus/src/upgrade.rs`, the package-command adapter and `tests/upgrade_cli.rs` are coordinator-owned. Offline builder-attestation verification is being implemented separately in the new `crates/vesper-loom-trust/**`; neither task edits the active cached-build, Forge or compiler lanes.
 
 CycloneDX export in `src/sbom_commands.rs`/`tests/sbom_cli.rs` and the independent native scanner milestone in new `crates/vesper-simd/**` are also coordinator-owned. The scanner does not edit source ISA capability typing or the reserved native compiler backend.
+
+The independent offline TUF verifier in new `crates/vesper-loom-tuf/**` and bounded
+HTTP/1.1 framing in new `crates/vesper-prism/**` are coordinator subagent lanes.
+Neither is a source compiler or runtime integration. Root registration remains
+with the coordinator after review and validation.
+
+Structured Lean syntax is being implemented independently in new
+`crates/vesper-lean-syntax/**`. It does not edit the arithmetic lane's emitter
+files or change the pinned Lean toolchain. Emitter migration follows handoff.
 
 ## First-wave results
 

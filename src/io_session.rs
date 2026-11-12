@@ -153,7 +153,7 @@ mod tests {
         parser,
         scheduler::{Driver, Finished, Nursery, PollError},
     };
-    const SOURCE: &str = "linear struct Ticket { id: u64 } linear effect IO { fn read() -> Result[u64, u32]; } fn main() -> u64 eff [IO] { let ticket = Ticket { id: 41 }; let count: u64 = match IO::read() { Ok(n) => n, Err(_) => 0, }; let Ticket { id } = ticket; id + count }";
+    const SOURCE: &str = "linear struct Ticket { id: u64 } linear effect IO { fn read() -> Result[u64, u32]; } fn main() -> u64 eff [IO] { let ticket = Ticket { id: 41 }; let count: u64 = match IO::read() { Ok(n) => n, Err(_) => 0, }; let Ticket { id } = ticket; wrapping_add(id, count) }";
     fn world() -> check::World {
         let parsed = parser::parse(SOURCE);
         assert!(parsed.diagnostics.is_empty());

@@ -224,7 +224,9 @@ pub(crate) fn extract_function(world: &World, f: &FunctionIr) -> Option<Result<S
         || !f.effects.instances.is_empty()
         || f.effects.tail.is_some()
         || f.blocks.iter().flat_map(|b| &b.instructions).any(|i| {
-            world.partial_ops.contains(&(i.span.start, i.span.end))
+            i.fallible
+                || world.partial_ops.contains(&(i.span.start, i.span.end))
+                || world.overflow_ops.contains(&(i.span.start, i.span.end))
                 || match &i.op {
                     Op::Handle { .. } | Op::Try(_) | Op::Index(..) => true,
                     Op::Call { callee, .. } => world.functions.get(callee).is_none_or(|f| {
@@ -645,11 +647,19 @@ impl Emitter<'_> {
             }
             Op::Unary(op, v) => format!("({op}{})", value(*v)),
             Op::Binary(op, a, b) => {
-                let inner = format!("{} {op} {}", value(*a), value(*b));
-                if matches!(op.as_str(), "<" | "<=" | ">" | ">=") {
-                    format!("(decide ({inner}))")
+                // Only proved-in-range checked operations reach pure IR
+                // extraction, so they share Lean's modular operators with
+                // the wrapping intrinsics.
+                let op = crate::numeric::wrapping_intrinsic(op).unwrap_or(op);
+                if matches!(op, "<" | "<=" | ">" | ">=") {
+                    format!("(decide ({} {op} {}))", value(*a), value(*b))
                 } else {
-                    format!("({inner})")
+                    let kind = self
+                        .f
+                        .values
+                        .get(a)
+                        .and_then(crate::numeric::IntegerKind::from_type);
+                    super::lean::arith_term(op, kind, &value(*a), &value(*b))
                 }
             }
             Op::Tuple(vs) => format!(
@@ -694,11 +704,16 @@ impl Emitter<'_> {
                 let new = if op == "=" {
                     value(*v)
                 } else {
-                    format!(
-                        "({} {} {})",
-                        project(name(&p.root), &p.path, self.f.locals.get(&p.root)),
+                    let kind = self
+                        .f
+                        .values
+                        .get(v)
+                        .and_then(crate::numeric::IntegerKind::from_type);
+                    super::lean::arith_term(
                         &op[..1],
-                        value(*v)
+                        kind,
+                        &project(name(&p.root), &p.path, self.f.locals.get(&p.root)),
+                        &value(*v),
                     )
                 };
                 out.push_str(&format!(

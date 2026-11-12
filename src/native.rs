@@ -56,6 +56,10 @@ fn signature<M: Module>(m: &M, world: &World, f: &Function) -> Result<ir::Signat
             },
         ));
     }
+    if fail_only(world, f) {
+        sig.params
+            .push(AbiParam::new(m.target_config().pointer_type()));
+    }
     sig.returns.push(AbiParam::new(if result.aggregate() {
         types::I64
     } else {
@@ -199,10 +203,35 @@ fn contains_function(world: &World, t: &Type) -> bool {
     visit(world, t, &mut BTreeSet::new())
 }
 fn specialized_function(world: &World, f: &Function) -> bool {
-    !f.effects.instances.is_empty()
+    (!f.effects.instances.is_empty()
         || f.effects.tail.is_some()
         || contains_function(world, &f.result)
-        || f.params.iter().any(|p| contains_function(world, &p.ty))
+        || f.params.iter().any(|p| contains_function(world, &p.ty)))
+        && !fail_only(world, f)
+}
+/// A function whose only effects are unlabeled `Fail` instances, such as a
+/// recursive function using checked arithmetic. `raise` never resumes (its
+/// continuation takes `Never`), so instead of inlining the function into its
+/// handlers it is compiled once with a hidden failure-record pointer: the
+/// callee stores the instance index and error value and returns, and the
+/// caller re-raises through the capability it would have passed.
+fn fail_only(world: &World, f: &Function) -> bool {
+    f.effects.tail.is_none()
+        && !f.effects.instances.is_empty()
+        && f.effects
+            .instances
+            .iter()
+            .all(|e| e.name == "Fail" && e.label.is_none() && e.args.len() == 1)
+        && !contains_function(world, &f.result)
+        && !f.params.iter().any(|p| contains_function(world, &p.ty))
+}
+/// Bytes of a failure record: an instance tag followed by the error payload.
+fn fail_record_size(world: &World, f: &Function) -> Result<u32, String> {
+    let mut payload = 8;
+    for e in &f.effects.instances {
+        payload = payload.max(Layout::of(world, &e.args[0])?.size);
+    }
+    Ok(8 + payload.div_ceil(8) * 8)
 }
 type InstanceMap = BTreeMap<String, (String, BTreeMap<String, Type>)>;
 fn instances(world: &World, entry: &str) -> Result<InstanceMap, String> {
@@ -330,6 +359,11 @@ fn compile<M: Module>(
             b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
             let mut values = b.block_params(entry).to_vec();
+            let fail_record = if fail_only(world, &f) {
+                values.pop()
+            } else {
+                None
+            };
             let result_layout = Layout::of(world, &f.result)?;
             let sret = if result_layout.aggregate() {
                 Some(values.remove(0))
@@ -376,7 +410,29 @@ fn compile<M: Module>(
                 pointers,
                 handlers: vec![],
                 inline_depth: 0,
+                fail_record: fail_record.map(|record| {
+                    (
+                        record,
+                        f.effects
+                            .instances
+                            .iter()
+                            .map(|e| e.args[0].clone())
+                            .collect(),
+                    )
+                }),
             };
+            if fail_record.is_some() {
+                for (index, effect) in f.effects.instances.iter().enumerate() {
+                    let identity = format!("native-fail-exit:{index}");
+                    c.capabilities
+                        .insert(format!("$effect:{}", effect.name), identity.clone());
+                    c.capabilities
+                        .insert(format!("$static:$fncap:{name}:{index}"), identity.clone());
+                    if let Some(key) = crate::numeric::instance_key(&effect.name, &effect.args) {
+                        c.capabilities.insert(key, identity);
+                    }
+                }
+            }
             c.ir_function(
                 program
                     .functions
@@ -573,6 +629,9 @@ struct Codegen<'a, 'b, M: Module> {
     pointers: BTreeMap<u32, Variable>,
     handlers: Vec<Handler>,
     inline_depth: usize,
+    /// The failure-record pointer of a `fail_only` function being compiled,
+    /// with the error type of each of its `Fail` instances.
+    fail_record: Option<(ir::Value, Vec<Type>)>,
 }
 impl<M: Module> Codegen<'_, '_, M> {
     fn info(&self, value: ir::Value) -> NativeInfo {
@@ -1394,7 +1453,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         callee,
                         args,
                         capability,
-                        ..
+                        types: instance,
                     } => {
                         let es = args
                             .iter()
@@ -1424,7 +1483,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         if self.world.functions.contains_key(callee) {
                             self.call_function(callee, &es, &site)?
                         } else if let Some((effect, op)) = callee.split_once("::") {
-                            self.perform(effect, capability.as_deref(), op, &es)?
+                            self.perform(effect, capability.as_deref(), instance, op, &es)?
                         } else {
                             return Err("unknown IR native callee".into());
                         }
@@ -2097,8 +2156,24 @@ impl<M: Module> Codegen<'_, '_, M> {
                 out
             }
             ExprKind::Unary(op, v) => {
+                let kind = crate::numeric::IntegerKind::from_type(&self.ty(v));
                 let v = self.expr(v)?;
                 let float = self.b.func.dfg.value_type(v) == types::F64;
+                if op == "-"
+                    && let Some(kind) = kind
+                    && self
+                        .world
+                        .overflow_ops
+                        .contains(&(e.span.start, e.span.end))
+                {
+                    // Signed MIN and every nonzero unsigned value overflow.
+                    let overflow = if kind.unsigned() {
+                        self.b.ins().icmp_imm(IntCC::NotEqual, v, 0)
+                    } else {
+                        self.b.ins().icmp_imm(IntCC::Equal, v, i64::MIN)
+                    };
+                    self.check_overflow(overflow)?;
+                }
                 match (op.as_str(), float) {
                     ("-", false) => self.b.ins().ineg(v),
                     ("-", true) => self.b.ins().fneg(v),
@@ -2144,14 +2219,23 @@ impl<M: Module> Codegen<'_, '_, M> {
                     };
                     self.b.ins().uextend(types::I64, eq)
                 } else {
-                    let unsigned =
-                        crate::numeric::IntegerKind::from_type(&ty).is_some_and(|k| k.unsigned());
+                    let kind = crate::numeric::IntegerKind::from_type(&ty);
+                    let unsigned = kind.is_some_and(|k| k.unsigned());
                     if matches!(op.as_str(), "/" | "%")
                         && self.world.partial_ops.contains(&(e.span.start, e.span.end))
                     {
                         self.check_divisor(bv)?;
                     }
-                    self.binary(op, av, bv, unsigned)?
+                    if let Some(kind) = kind
+                        && self
+                            .world
+                            .overflow_ops
+                            .contains(&(e.span.start, e.span.end))
+                    {
+                        self.checked_arithmetic(op, kind, av, bv)
+                    } else {
+                        self.binary(op, av, bv, unsigned)
+                    }?
                 }
             }
             ExprKind::Assign(op, l, r) => {
@@ -2163,6 +2247,12 @@ impl<M: Module> Codegen<'_, '_, M> {
                 {
                     self.check_divisor(value)?;
                 }
+                // Checked compound assignment raises before its store.
+                let checked = crate::numeric::IntegerKind::from_type(&ty).filter(|_| {
+                    self.world
+                        .overflow_ops
+                        .contains(&(e.span.start, e.span.end))
+                });
                 if let ExprKind::Name(n) = &l.kind {
                     let var = *self.vars.get(n).ok_or("unknown native local")?;
                     let value = if op == "=" {
@@ -2171,7 +2261,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let old = self.use_var(var);
                         let unsigned = crate::numeric::IntegerKind::from_type(&ty)
                             .is_some_and(|k| k.unsigned());
-                        let v = self.binary(&op[..1], old, value, unsigned)?;
+                        let v = if let Some(kind) = checked {
+                            self.checked_arithmetic(&op[..1], kind, old, value)?
+                        } else {
+                            self.binary(&op[..1], old, value, unsigned)?
+                        };
                         self.coerce(v, Some(&ty))
                     };
                     if layout.aggregate() {
@@ -2191,7 +2285,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let old = self.load(ptr, &ty)?;
                         let unsigned = crate::numeric::IntegerKind::from_type(&ty)
                             .is_some_and(|k| k.unsigned());
-                        self.binary(&op[..1], old, value, unsigned)?
+                        if let Some(kind) = checked {
+                            self.checked_arithmetic(&op[..1], kind, old, value)?
+                        } else {
+                            self.binary(&op[..1], old, value, unsigned)?
+                        }
                     };
                     self.store(ptr, value, &ty)?;
                 }
@@ -2284,11 +2382,24 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.local_types = type_scope;
                 self.b.block_params(join)[0]
             }
-            ExprKind::Call { callee, args, .. } => {
+            ExprKind::Call {
+                callee,
+                args,
+                types: instance,
+            } => {
                 if let ExprKind::Name(n) = &callee.kind {
                     if let Some(var) = self.vars.get(n) {
                         let tag = self.use_var(*var);
                         return self.invoke_tag(tag, &self.ty(callee), args, e);
+                    }
+                    if crate::numeric::wrapping_intrinsic(n).is_some()
+                        && !self.world.functions.contains_key(n)
+                        && args.len() == 2
+                    {
+                        let a = self.expr(&args[0].expr)?;
+                        let b = self.expr(&args[1].expr)?;
+                        let v = self.binary(n, a, b, false)?;
+                        return Ok(self.coerce(v, Some(&self.ty(e))));
                     }
                     if self.world.constructor(n).is_some() {
                         self.data(
@@ -2302,7 +2413,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     } else if self.world.functions.contains_key(n) {
                         self.call_function(n, args, e)?
                     } else if let Some((effect, op)) = n.split_once("::") {
-                        self.perform(effect, None, op, args)?
+                        self.perform(effect, None, instance, op, args)?
                     } else {
                         return Err(format!("unknown native callee '{n}'"));
                     }
@@ -2323,7 +2434,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                         })
                         .map(|h| h.effect.name.clone())
                     {
-                        self.perform(&effect, label, method, args)?
+                        self.perform(&effect, label, &[], method, args)?
                     } else {
                         let target = format!("{}::{method}", self.ty(base).name());
                         if !self.world.functions.contains_key(&target) {
@@ -2366,7 +2477,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.b.switch_to_block(no);
                 let error_ptr = self.offset(ptr, err[0].offset);
                 let error = self.load(error_ptr, &err[0].ty)?;
-                self.perform_values("Fail", None, "raise", vec![error], vec![])?;
+                let instance = [err[0].ty.clone()];
+                self.perform_values("Fail", None, &instance, "raise", vec![error], vec![])?;
                 let unreachable = self.default_value(&ok[0].ty)?;
                 self.jump(join, &[unreachable.into()]);
                 self.b.switch_to_block(join);
@@ -2443,6 +2555,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 self.next_capability += 1;
                 self.capabilities
                     .insert(format!("$effect:{}", effect.name), identity.clone());
+                if let Some(key) = crate::numeric::instance_key(&effect.name, &effect.args) {
+                    self.capabilities.insert(key, identity.clone());
+                }
                 self.capabilities
                     .insert(format!("$static:$cap{}", e.span.start), identity.clone());
                 if let Some(label) = &effect.label {
@@ -2523,12 +2638,113 @@ impl<M: Module> Codegen<'_, '_, M> {
         v
     }
     fn primitive_failure(&mut self, variant: &str) -> Result<(), String> {
-        let error = self.data(
-            Some(&format!("RuntimeError::{variant}")),
-            vec![],
-            &Type::named("RuntimeError"),
-        )?;
-        self.perform_values("Fail", None, "raise", vec![error], vec![])?;
+        let ty = Type::named("RuntimeError");
+        let error = self.data(Some(&format!("RuntimeError::{variant}")), vec![], &ty)?;
+        self.perform_values("Fail", None, &[ty], "raise", vec![error], vec![])?;
+        Ok(())
+    }
+    /// Raise `Fail[ArithOverflow]` when `overflow` is set, else continue.
+    fn check_overflow(&mut self, overflow: ir::Value) -> Result<(), String> {
+        let good = self.b.create_block();
+        let bad = self.b.create_block();
+        self.branch(overflow, bad, &[], good, &[]);
+        self.b.switch_to_block(bad);
+        let ty = Type::named(crate::numeric::OVERFLOW_TYPE);
+        let error = self.data(Some(crate::numeric::OVERFLOW_TYPE), vec![], &ty)?;
+        self.perform_values("Fail", None, &[ty], "raise", vec![error], vec![])?;
+        self.jump(good, &[]);
+        self.b.switch_to_block(good);
+        Ok(())
+    }
+    /// `vesper.arith.checked/1` for one integer kind. Narrow unsigned kinds
+    /// are zero-extended i64 values, so their exact sums and products fit.
+    fn checked_arithmetic(
+        &mut self,
+        op: &str,
+        kind: crate::numeric::IntegerKind,
+        a: ir::Value,
+        b: ir::Value,
+    ) -> Result<ir::Value, String> {
+        use crate::numeric::IntegerKind as K;
+        let overflow = match (op, kind) {
+            ("+" | "*", K::U8 | K::U32) => {
+                let r = if op == "+" {
+                    self.b.ins().iadd(a, b)
+                } else {
+                    self.b.ins().imul(a, b)
+                };
+                Some(
+                    self.b
+                        .ins()
+                        .icmp_imm(IntCC::UnsignedGreaterThan, r, kind.mask() as i64),
+                )
+            }
+            ("-", K::U8 | K::U32 | K::U64) => {
+                Some(self.b.ins().icmp(IntCC::UnsignedLessThan, a, b))
+            }
+            ("+", K::U64) => {
+                let r = self.b.ins().iadd(a, b);
+                Some(self.b.ins().icmp(IntCC::UnsignedLessThan, r, a))
+            }
+            ("*", K::U64) => {
+                let high = self.b.ins().umulhi(a, b);
+                Some(self.b.ins().icmp_imm(IntCC::NotEqual, high, 0))
+            }
+            ("+" | "-", K::I64) => {
+                let r = if op == "+" {
+                    self.b.ins().iadd(a, b)
+                } else {
+                    self.b.ins().isub(a, b)
+                };
+                // Signed overflow iff the result's sign differs from both
+                // addends (addition) or from the minuend while the operand
+                // signs differ (subtraction).
+                let x = self.b.ins().bxor(a, r);
+                let y = if op == "+" {
+                    self.b.ins().bxor(b, r)
+                } else {
+                    self.b.ins().bxor(a, b)
+                };
+                let both = self.b.ins().band(x, y);
+                Some(self.b.ins().icmp_imm(IntCC::SignedLessThan, both, 0))
+            }
+            ("*", K::I64) => {
+                let r = self.b.ins().imul(a, b);
+                let high = self.b.ins().smulhi(a, b);
+                let sign = self.b.ins().sshr_imm(r, 63);
+                Some(self.b.ins().icmp(IntCC::NotEqual, high, sign))
+            }
+            ("/", K::I64) => {
+                let min = self.b.ins().icmp_imm(IntCC::Equal, a, i64::MIN);
+                let minus_one = self.b.ins().icmp_imm(IntCC::Equal, b, -1);
+                Some(self.b.ins().band(min, minus_one))
+            }
+            _ => None,
+        };
+        if let Some(overflow) = overflow {
+            self.check_overflow(overflow)?;
+        }
+        self.binary(op, a, b, kind.unsigned())
+    }
+    /// After a call to a `fail_only` function, raise its recorded failure
+    /// through the capability selected for that effect instance.
+    fn reraise(&mut self, f: &Function, record: ir::Value) -> Result<(), String> {
+        let tag = self
+            .b
+            .ins()
+            .load(types::I64, ir::MemFlags::new(), record, 0);
+        for (index, effect) in f.effects.instances.iter().enumerate() {
+            let failed = self.b.ins().icmp_imm(IntCC::Equal, tag, index as i64 + 1);
+            let bad = self.b.create_block();
+            let good = self.b.create_block();
+            self.branch(failed, bad, &[], good, &[]);
+            self.b.switch_to_block(bad);
+            let payload = self.offset(record, 8);
+            let error = self.load(payload, &effect.args[0])?;
+            self.perform_values("Fail", None, &effect.args, "raise", vec![error], vec![])?;
+            self.jump(good, &[]);
+            self.b.switch_to_block(good);
+        }
         Ok(())
     }
     fn check_divisor(&mut self, divisor: ir::Value) -> Result<(), String> {
@@ -2602,9 +2818,11 @@ impl<M: Module> Codegen<'_, '_, M> {
             self.b.ins().uextend(types::I64, v)
         } else {
             match (op, float) {
-                ("+", false) => self.b.ins().iadd(a, b),
-                ("-", false) => self.b.ins().isub(a, b),
-                ("*", false) => self.b.ins().imul(a, b),
+                // Wrapping intrinsics share the 64-bit operation; callers
+                // reduce narrow unsigned results with `coerce`.
+                ("+" | "wrapping_add", false) => self.b.ins().iadd(a, b),
+                ("-" | "wrapping_sub", false) => self.b.ins().isub(a, b),
+                ("*" | "wrapping_mul", false) => self.b.ins().imul(a, b),
                 ("/", false) => {
                     if unsigned {
                         self.b.ins().udiv(a, b)
@@ -2697,10 +2915,17 @@ impl<M: Module> Codegen<'_, '_, M> {
             let generic_scope = std::mem::replace(&mut self.generic_vars, vars);
             let mut incoming_caps = BTreeMap::new();
             for (index, effect) in f.effects.instances.iter().enumerate() {
-                let key = effect_key(effect);
+                let key = if effect.label.is_none() {
+                    self.instance_capability_key(&effect.name, &effect.args)
+                } else {
+                    effect_key(effect)
+                };
                 if let Some(id) = self.capabilities.get(&key) {
                     incoming_caps.insert(key.clone(), id.clone());
                     incoming_caps.insert(format!("$effect:{}", effect.name), id.clone());
+                    if let Some(typed) = crate::numeric::instance_key(&effect.name, &effect.args) {
+                        incoming_caps.insert(typed, id.clone());
+                    }
                     incoming_caps.insert(format!("$static:$fncap:{name}:{index}"), id.clone());
                     if let Some(label) = &effect.label {
                         incoming_caps.insert(format!("$label:{label}"), id.clone());
@@ -2767,6 +2992,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             if let Some(out) = output {
                 values.insert(0, out);
             }
+            let record = if fail_only(self.world, &f) {
+                let record = self.alloc(fail_record_size(self.world, &f)?);
+                values.push(record);
+                Some(record)
+            } else {
+                None
+            };
             let fun = self.m.declare_func_in_func(id, self.b.func);
             let sig = self.b.func.dfg.ext_funcs[fun].signature;
             let params = &self.b.func.dfg.signatures[sig].params;
@@ -2779,7 +3011,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                 return Err(format!("native call ABI mismatch in '{name}'"));
             }
             let call = self.b.ins().call(fun, &values);
-            output.unwrap_or_else(|| self.b.inst_results(call)[0])
+            let result = output.unwrap_or_else(|| self.b.inst_results(call)[0]);
+            if let Some(record) = record {
+                self.reraise(&f, record)?;
+            }
+            result
         };
         for (var, ptr, ty) in restores {
             let value = self.load(ptr, &ty)?;
@@ -2792,10 +3028,58 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         Ok(result)
     }
+    /// Abort the current `fail_only` function: record the raised instance and
+    /// error value for the caller, then return a placeholder result.
+    fn fail_exit(
+        &mut self,
+        index: i64,
+        effect: &str,
+        instance: &[Type],
+        values: Vec<ir::Value>,
+    ) -> Result<ir::Value, String> {
+        let (record, errors) = self
+            .fail_record
+            .clone()
+            .ok_or("native failure exit outside its function")?;
+        if effect != "Fail" || values.len() != 1 {
+            return Err("native failure exit requires Fail::raise".into());
+        }
+        let _ = instance;
+        let ty = errors
+            .get(index as usize)
+            .cloned()
+            .ok_or("native failure exit names an unknown instance")?;
+        let tag = self.b.ins().iconst(types::I64, index + 1);
+        self.b.ins().store(ir::MemFlags::new(), tag, record, 0);
+        let payload = self.offset(record, 8);
+        self.store(payload, values[0], &ty)?;
+        let returns = self.b.func.signature.returns[0].value_type;
+        let placeholder = if returns == types::F64 {
+            self.b.ins().f64const(0.0)
+        } else {
+            self.b.ins().iconst(returns, 0)
+        };
+        self.b.ins().return_(&[placeholder]);
+        let dead = self.b.create_block();
+        self.b.switch_to_block(dead);
+        Ok(self.zero())
+    }
+    /// Typed instance selection: the innermost capability with exactly these
+    /// concrete arguments when one is in scope, else the innermost by name.
+    fn instance_capability_key(&self, effect: &str, args: &[Type]) -> String {
+        let args = args
+            .iter()
+            .map(|t| substitute(t, &self.generic_vars))
+            .collect::<Vec<_>>();
+        crate::numeric::instance_key(effect, &args)
+            .filter(|key| self.capabilities.contains_key(key))
+            .unwrap_or_else(|| format!("$effect:{effect}"))
+    }
     fn perform(
         &mut self,
         effect: &str,
         label: Option<&str>,
+        instance: &[Type],
         op: &str,
         args: &[Arg],
     ) -> Result<ir::Value, String> {
@@ -2828,7 +3112,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             };
             refs.push(ptr);
         }
-        let result = self.perform_values(effect, label, op, values, refs)?;
+        let result = self.perform_values(effect, label, instance, op, values, refs)?;
         for (var, ptr, ty) in restores {
             let value = self.load(ptr, &ty)?;
             self.def_var(var, value);
@@ -2844,6 +3128,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         &mut self,
         effect: &str,
         label: Option<&str>,
+        instance: &[Type],
         op: &str,
         values: Vec<ir::Value>,
         refs: Vec<Option<ir::Value>>,
@@ -2852,12 +3137,16 @@ impl<M: Module> Codegen<'_, '_, M> {
         let key = if let Some(l) = label {
             format!("$label:{l}")
         } else {
-            format!("$effect:{effect}")
+            self.instance_capability_key(effect, instance)
         };
         let identity = self
             .capabilities
             .get(&key)
             .ok_or("native effect lacks scoped evidence")?;
+        if let Some(index) = identity.strip_prefix("native-fail-exit:") {
+            let index = index.parse::<i64>().map_err(|e| e.to_string())?;
+            return self.fail_exit(index, effect, instance, values);
+        }
         let index = self
             .handlers
             .iter()
