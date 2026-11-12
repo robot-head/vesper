@@ -174,7 +174,55 @@ struct Pass {
     edits: Vec<RecoveryEdit>,
     formatted_declarations: usize,
 }
-fn once(snapshot: &RecoverySyntax, limits: Limits, work: &mut Work) -> Result<Pass, Error> {
+fn top_level_starts(
+    tokens: &[Token],
+    limits: Limits,
+    work: &mut Work,
+) -> Result<Vec<usize>, Error> {
+    let mut starts = reserve::<usize>(tokens.len(), work)?;
+    let mut stack = reserve::<K>(limits.max_depth.min(24), work)?;
+    for token in tokens {
+        work.charge(1)?;
+        if token.kind.trivia() || token.kind == K::Eof {
+            continue;
+        }
+        if stack.is_empty() {
+            starts.push(token.span.start);
+        }
+        match token.kind {
+            K::LParen | K::LBracket | K::LBrace => {
+                if stack.len() >= limits.max_depth.min(24) {
+                    return Err(Error::DepthLimit);
+                }
+                stack.push(token.kind);
+            }
+            K::RParen | K::RBracket | K::RBrace => {
+                let expected = match token.kind {
+                    K::RParen => K::LParen,
+                    K::RBracket => K::LBracket,
+                    _ => K::LBrace,
+                };
+                if stack.pop() != Some(expected) {
+                    return Err(Error::Syntax {
+                        offset: token.span.start,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    // Unclosed delimiters are deliberately not repaired. Any apparent sibling
+    // starting inside that open group is excluded, even if recovery resync gives
+    // it a Complete declaration status.
+    Ok(starts)
+}
+fn once(
+    snapshot: &RecoverySyntax,
+    tokens: &[Token],
+    limits: Limits,
+    work: &mut Work,
+) -> Result<Pass, Error> {
+    let top_level = top_level_starts(tokens, limits, work)?;
     let declarations = snapshot.declarations();
     let mut indices = reserve::<usize>(declarations.len(), work)?;
     for (index, declaration) in declarations.iter().enumerate() {
@@ -182,6 +230,7 @@ fn once(snapshot: &RecoverySyntax, limits: Limits, work: &mut Work) -> Result<Pa
         if declaration.kind == DeclarationKind::Function
             && declaration.status == DeclarationStatus::Complete
             && declaration.body_span.is_some()
+            && top_level.binary_search(&declaration.span.start).is_ok()
         {
             indices.push(index);
         }
@@ -307,7 +356,7 @@ pub fn format_recovery_source(source: &str, limits: Limits) -> Result<RecoveryFo
     let mut work = Work::new(limits.max_work);
     let before_tokens = lex(source, limits, &mut work)?;
     let before = snapshot(source, limits, &mut work)?;
-    let first = once(&before, limits, &mut work)?;
+    let first = once(&before, &before_tokens, limits, &mut work)?;
     let after_tokens = lex(
         &first.output,
         Limits {
@@ -345,6 +394,7 @@ pub fn format_recovery_source(source: &str, limits: Limits) -> Result<RecoveryFo
     }
     let second = once(
         &after,
+        &after_tokens,
         Limits {
             max_input_bytes: limits.max_output_bytes,
             ..limits

@@ -219,3 +219,32 @@ fn actual_utf8_prefixes_never_rewrite_opaque_or_damaged_gaps() {
         }
     }
 }
+
+#[test]
+fn recovery_resynchronization_does_not_authorize_nested_fake_functions() {
+    let source = "fn broken(){let x=; fn fake( )->i64{42}}\nfn real( )->i64{42}";
+    let output = verify(source);
+    assert!(output.starts_with("fn broken(){let x=; fn fake( )->i64{42}}\n"));
+    assert!(output.ends_with("fn real() -> i64 {\n    42\n}"));
+    let result = format_recovery_source(source, Limits::default()).unwrap();
+    assert_eq!(result.formatted_declarations(), 1);
+    assert_eq!(result.edits().len(), 1);
+    assert_eq!(&source[result.edits()[0].span()], "fn real( )->i64{42}");
+}
+
+#[test]
+fn missing_outer_delimiter_leaves_apparent_siblings_ambiguous() {
+    let source =
+        "fn prior( )->i64{1}\nfn broken(){let x=; fn fake( )->i64{42}\nfn real( )->i64{42}";
+    let output = verify(source);
+    assert!(output.starts_with("fn prior() -> i64 {\n    1\n}\n"));
+    assert!(output.ends_with("fn broken(){let x=; fn fake( )->i64{42}\nfn real( )->i64{42}"));
+    let result = format_recovery_source(source, Limits::default()).unwrap();
+    assert_eq!(result.formatted_declarations(), 1);
+}
+
+#[test]
+fn mismatched_delimiters_refuse_the_entire_recovery_proposal() {
+    let source = "fn good( )->i64{42}\nfn bad(){[)}\nfn later( )->i64{42}";
+    assert!(format_recovery_source(source, Limits::default()).is_err());
+}
