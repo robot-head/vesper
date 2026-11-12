@@ -883,15 +883,13 @@ pub fn expand_source(
                 .origins
                 .iter()
                 .any(|o| matches!(o, Origin::Expansion(_)))
+                && let OperationKind::Use { def } = operation.kind
+                && derived.unsupported_emitted_def(def)
             {
-                if let OperationKind::Use { def } = operation.kind {
-                    if derived.unsupported_emitted_def(def) {
-                        return Err(failure(
-                            Stage::Unsupported,
-                            "macro-generated generic effect or unsupported definition",
-                        ));
-                    }
-                }
+                return Err(failure(
+                    Stage::Unsupported,
+                    "macro-generated generic effect or unsupported definition",
+                ));
             }
         }
         overhead.charge(mul(
