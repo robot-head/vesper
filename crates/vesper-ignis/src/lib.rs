@@ -16,6 +16,11 @@
 //!   edges, and per-queue command streams of `Wait`, `Barriers`, `Execute`, and
 //!   `Signal`, or a structured [`PlanError`].
 //!
+//! [`lifecycle`] adds consuming recording/closed command batches, original-fence
+//! retirement and owned bounded shutdown above immutable planner output.
+//! [`recording`] is a deterministic CPU backend for that protocol; it does not
+//! execute shaders. Scratch initialization produces Ready only after retirement.
+//!
 //! This crate does not call D3D12. Its rules are modeled on the published
 //! Enhanced Barriers specification and have not been validated by the D3D12
 //! debug layer or on hardware. It does not prove barrier soundness; the tests
@@ -39,7 +44,9 @@
 
 mod d3d12;
 mod graph;
+pub mod lifecycle;
 mod plan;
+pub mod recording;
 
 pub use d3d12::{Access, Layout, QueueKind, Sync};
 pub use graph::{
