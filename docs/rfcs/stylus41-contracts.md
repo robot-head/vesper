@@ -15,7 +15,7 @@ modified2026-11-12T09:18:30.204Z; §39.1 was reread.
 | #111 | stylus41/macro | fmt/src/lib.rs, new macro_source.rs, tests/macro_source.rs, macro report |
 | #112 | stylus41/recovery | new fmt/src/recovery.rs, tests/recovery.rs, recovery report |
 | #113 | stylus41/acceptance | new tests/stylus_cli.rs, scripts/check-stylus.py/test-stylus.sh, fixtures/stylus, workflows/stylus.yml, acceptance report |
-| #114 | stylus41/integration | fmt_commands.rs, lsp/actions.rs, optional help routing, shared registrations/path filters, this contract and integration report |
+| #114 | stylus41/integration | fmt_commands.rs, lsp/actions.rs, fmt/README.md, optional help routing, shared registrations/path filters, this contract and integration report |
 
 Root alone registers `pub mod recovery`/public reexports in fmt lib after the macro
 owner's checkpoint; no concurrent edits to that file. Other existing compiler,

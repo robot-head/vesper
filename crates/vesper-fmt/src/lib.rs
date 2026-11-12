@@ -6,7 +6,9 @@
 #![forbid(unsafe_code)]
 mod doc;
 mod macro_source;
+pub mod recovery;
 pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
+pub use recovery::{RecoveryEdit, RecoveryFormatResult, format_recovery_source};
 use vesper_syntax::{
     lexer::{self, Token, TokenKind as K},
     parser,
