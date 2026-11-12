@@ -17,6 +17,7 @@ unchanged41sections/AppendixA, modified2026-11-12T09:18:30.204Z; §16.4 was rere
 | #168 | tuple41/host | typed_quote.rs, new typed_tuple tests, host report; obsolete typed-profile tuple-negative fixtures only |
 | #169 | tuple41/lower | forge_frontend/lower.rs, new forge_tuples tests, lower report |
 | #170 | tuple41/acceptance | new forge_tuples_cli.rs, source_macro_tuples fixtures, check-source-macro-tuples.py, acceptance report |
+| #171 | tuple41/admission | frontend.rs narrow bounded-admission integration, new private frontend/tuple_growth.rs, tuple_analysis tests, admission report |
 
 No core AST/IR/native ABI, header/authority-policy, guest WIT/raw record, root CLI
 registration, workflow/build or test-wrapper changes. No new language macro
@@ -126,6 +127,17 @@ field-type mismatches must reach the actual checker. Include generated-helper
 effect drift inside nested tuple elements and a distinct caller-origin effect
 case, without inventing runtime grants. All malformed/depth/output/metadata/work
 refusals fail without partial acceptance.
+
+Actual end-to-end tests discovered the existing frontend's blanket nonempty-tuple
+refusal, which protects against exponential inferred type construction. Claim171
+adds a separate bounded pre-checker admission step; never simply remove that
+guard. Track compact size/depth/metadata bounds for actual tuple/let/parameter/
+known-result inference without constructing inferred Type trees. Preserve all
+generic, nominal and closure restrictions and explicitly refuse uncertain unsafe
+combinations. Keep existing AnalysisLimits caps and post-check guards. The actual
+25-step doubling-tuple adversary must still refuse before checker traversal;
+bounded tuples must reach the unchanged real checker. No public bypass flag,
+caller World, synthesized semantic types or larger budget is introduced.
 
 Explicit unsaved editor previews use current bytes/version/hash; original hover
 and diagnostics remain unexpanded/unavailable. Actual formatting conserves all
