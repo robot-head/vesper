@@ -5,7 +5,20 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 
 ## Next implementation batch
 
-The previous seven sessions are complete and integrated. The [third-wave prompt index](agent-prompts/wave-three/README.md) is ready for new sessions; its [frozen contracts](rfcs/wave-three-contracts.md) separate frontend, native and platform ownership. Do not assign duplicate writers to those lanes.
+The previous seven sessions are complete and integrated. The [third-wave prompt index](agent-prompts/wave-three/README.md) is **assigned to the user's external agent**; its [frozen contracts](rfcs/wave-three-contracts.md) separate frontend, native and platform ownership. Do not assign duplicate writers to those lanes. Locally started duplicates were stopped and preserved as [unmerged spikes](parallel-results/paused-wave-three-spikes.md).
+
+Six additional implementation lanes now run alongside that external wave:
+
+| Independent lane | Branch | Exclusive boundary |
+| --- | --- | --- |
+| Bridge sys-specs | `parallel-next/bridge-sys-specs` | `crates/vesper-ffi/**` |
+| Strata slab allocation | `parallel-next/strata-slab` | `crates/vesper-alloc/**` |
+| Aura reconciliation | `parallel-next/aura-delta` | New `crates/vesper-aura/**` |
+| Ignis command lifetimes | `parallel-next/ignis-lifetimes` | `crates/vesper-ignis/**` |
+| Offline dependency audit | `parallel-next/loom-audit` | New `crates/vesper-loom-audit/**` |
+| Signed artifact admission | `parallel-next/artifact-admission` | New `crates/vesper-loom-admission/**` |
+
+Their [ownership and acceptance contracts](rfcs/parallel-next-contracts.md) keep wave-three paths read-only. Each uses a separate worktree and target; integration, root registration, CLI wiring and shared schemas stay coordinator-owned. These are subagents on this executor, not separately provisioned cloud sessions: the current app tool surface does not offer session creation.
 
 | Next lane | Requested branch | Exclusive boundary |
 | --- | --- | --- |
