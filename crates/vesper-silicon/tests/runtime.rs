@@ -315,7 +315,8 @@ fn transfers_are_bound_to_their_engine_and_slot() {
     // The slot is free again.
     let x = a.submit_rx(1, buf).unwrap();
     a.device_complete(1, 0, None).unwrap();
-    a.poll_complete(x).unwrap();
+    let (res, _) = a.poll_complete(x).unwrap();
+    assert_eq!(res, Ok(0));
     assert_eq!(ledger.total_leaked(), 0);
 }
 
