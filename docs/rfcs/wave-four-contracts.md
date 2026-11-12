@@ -46,9 +46,13 @@ integration writes thin adapters instead of reconciling semantics.
   is_app_limited) is owned by lane 2 and attached per packet at integration.
 - **Packet-protection boundary** (lanes 1, 5): after header parsing, lane 1
   reports `pn_offset: usize` (start of the protected packet-number field) and
-  the header length; lane 5 removes header protection in place, returns the
-  pn length (1–4) and truncated value, and opens the payload with the header
-  as AAD. Lane 1 decodes the full packet number afterwards.
+  the header length. Receive order is fixed in three steps: (1) lane 5
+  removes header protection in place and returns the pn length (1–4) and the
+  truncated value; (2) lane 1 reconstructs the full packet number (RFC 9000
+  A.3) from the space's largest received pn; (3) lane 5 opens the payload
+  with the header as AAD and the nonce built from that full packet number
+  (RFC 9001 §5.3). Lane 5's open API therefore takes the full pn as input;
+  it never reconstructs or guesses it.
 - **UMEM frames and leases** (lanes 3, 4, 8): a frame is identified by
   `chunk_idx: u32`; a lease carries `pkt_num_full`, `edt_departure_ns` and the
   owned TX frame. Lane 4's wheel is generic over the payload, so it never

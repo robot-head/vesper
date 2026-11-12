@@ -37,8 +37,9 @@ needed.
 
 Once lanes 1–6 are merged, one follow-up thread assembles the end-to-end
 §35.3 path inside `crates/vesper-warp`: software NIC (lane 3) → header split
-(lane 1) → CID lookup in a shard (lane 6) → header-protection removal and
-AEAD open (lane 5) → PN decode and ACK/loss events (lane 1) → BBRv3 EDT
+(lane 1) → CID lookup in a shard (lane 6) → header-protection removal
+(lane 5) → full PN decode (lane 1) → AEAD open with the full-PN nonce
+(lane 5) → ACK/loss events (lane 1) → BBRv3 EDT
 schedule (lane 2) → turn-around, seal, paced submit and lease parking in the
 wheel (lanes 3, 4), with a counting-allocator zero-allocation test and the
 contract's event adapters. TCP (lane 7) gets the same BBRv3 adapter. The
