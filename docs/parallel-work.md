@@ -3,6 +3,10 @@
 Base checkpoint: `c5328d0`. Integration branch: `main` (the `work` branch was merged in PR #9). Remote: https://github.com/robot-head/vesper.
 The expanded design lives in [specification.txt](specification.txt); the implemented core baseline is [core-specification-baseline.txt](core-specification-baseline.txt).
 
+## Next implementation batch
+
+Seven new assignments are ready in the [next-wave prompt index](agent-prompts/next-wave/README.md). Each prompt is self-contained and has a separate implementation boundary. They can start together from `origin/main`; only the checked-arithmetic lane edits compiler semantics. Source-native suspension and source trait/model syntax follow that migration. These prompts have been prepared for assignment; implementation sessions have not been launched by creating them.
+
 ## First-wave results
 
 | Lane | Branch | Exclusive ownership | Status |
