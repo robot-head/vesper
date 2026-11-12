@@ -386,12 +386,15 @@ impl SourceParser<'_> {
         self.budget.metadata(size_of::<MacroDefinition>())?;
         let start = self.word_expect("macro")?.start;
         let name_span = self.expect(K::Lower)?;
-        if self
-            .definitions
-            .iter()
-            .any(|d| self.source[d.name_span.clone()] == self.source[name_span.clone()])
-        {
-            return Err(Error::new(ErrorKind::DuplicateName, Some(name_span)));
+        for definition in &self.definitions {
+            self.budget.work(add(
+                definition.name_span.len(),
+                name_span.len(),
+                Resource::Work,
+            )?)?;
+            if self.source[definition.name_span.clone()] == self.source[name_span.clone()] {
+                return Err(Error::new(ErrorKind::DuplicateName, Some(name_span)));
+            }
         }
         self.expect(K::LParen)?;
         let mut parameters: Vec<MacroParameter> = Vec::new();
@@ -406,11 +409,15 @@ impl SourceParser<'_> {
             let name_span = self.expect(K::Lower)?;
             self.expect(K::Colon)?;
             let end = self.word_expect("expr")?.end;
-            if parameters
-                .iter()
-                .any(|p| self.source[p.name_span.clone()] == self.source[name_span.clone()])
-            {
-                return Err(Error::new(ErrorKind::DuplicateName, Some(name_span)));
+            for parameter in &parameters {
+                self.budget.work(add(
+                    parameter.name_span.len(),
+                    name_span.len(),
+                    Resource::Work,
+                )?)?;
+                if self.source[parameter.name_span.clone()] == self.source[name_span.clone()] {
+                    return Err(Error::new(ErrorKind::DuplicateName, Some(name_span)));
+                }
             }
             parameters
                 .try_reserve(1)
@@ -587,6 +594,14 @@ impl SourceParser<'_> {
         Ok(())
     }
     fn support(&mut self) -> Result<(), Error> {
+        if matches!(self.kind(), K::Copy | K::Affine | K::Linear)
+            && !matches!(
+                self.tokens[self.significant[self.pos + 1]].kind,
+                K::Struct | K::Enum | K::Effect
+            )
+        {
+            return Err(self.fail(ErrorKind::Unsupported));
+        }
         let begin = self.pos;
         let mut at = self.pos;
         while at < self.significant.len() {
@@ -644,11 +659,19 @@ impl SourceParser<'_> {
                 };
                 self.bump()?;
                 let name = self.expect(K::Lower)?;
-                if !self.definitions[definition]
-                    .parameters
-                    .iter()
-                    .any(|p| self.source[p.name_span.clone()] == self.source[name.clone()])
-                {
+                let mut found = false;
+                for parameter in &self.definitions[definition].parameters {
+                    self.budget.work(add(
+                        parameter.name_span.len(),
+                        name.len(),
+                        Resource::Work,
+                    )?)?;
+                    if self.source[parameter.name_span.clone()] == self.source[name.clone()] {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
                     return Err(Error::new(ErrorKind::Syntax, Some(name)));
                 }
             }
@@ -847,18 +870,25 @@ pub fn parse(source: &str, limits: Limits) -> Result<MacroSource, Error> {
         }
     }
     for invocation in &mut p.invocations {
-        p.budget.work(p.definitions.len())?;
-        let Some((index, definition)) =
-            p.definitions.iter().enumerate().find(|(_, d)| {
-                p.source[d.name_span.clone()] == p.source[invocation.name_span.clone()]
-            })
-        else {
+        let mut found = None;
+        for (index, definition) in p.definitions.iter().enumerate() {
+            p.budget.work(add(
+                definition.name_span.len(),
+                invocation.name_span.len(),
+                Resource::Work,
+            )?)?;
+            if p.source[definition.name_span.clone()] == p.source[invocation.name_span.clone()] {
+                found = Some((index, definition.parameters.len()));
+                break;
+            }
+        }
+        let Some((index, arity)) = found else {
             return Err(Error::new(
                 ErrorKind::UnknownMacro,
                 Some(invocation.name_span.clone()),
             ));
         };
-        if invocation.arguments.len() != definition.parameters.len() {
+        if invocation.arguments.len() != arity {
             return Err(Error::new(ErrorKind::Arity, Some(invocation.span.clone())));
         }
         invocation.definition.index = index;
