@@ -6,14 +6,10 @@ on:
     branches: [main]
     paths:
       - 'crates/vesper-core/**'
+      - 'crates/vesper-syntax/**'
       - 'crates/vesper-span/**'
       - 'crates/vesper-diagnostics/**'
-      - 'src/check.rs'
-      - 'src/ir_check.rs'
-      - 'src/tooling/**'
-      - 'src/lsp/**'
-      - 'src/lsp.rs'
-      - 'src/main.rs'
+      - 'src/**'
       - 'tests/diagnostic_causes.rs'
       - 'tests/ir_diagnostic_causes.rs'
       - 'tests/diagnostic_bounds.rs'
@@ -26,14 +22,10 @@ on:
   pull_request:
     paths:
       - 'crates/vesper-core/**'
+      - 'crates/vesper-syntax/**'
       - 'crates/vesper-span/**'
       - 'crates/vesper-diagnostics/**'
-      - 'src/check.rs'
-      - 'src/ir_check.rs'
-      - 'src/tooling/**'
-      - 'src/lsp/**'
-      - 'src/lsp.rs'
-      - 'src/main.rs'
+      - 'src/**'
       - 'tests/diagnostic_causes.rs'
       - 'tests/ir_diagnostic_causes.rs'
       - 'tests/diagnostic_bounds.rs'

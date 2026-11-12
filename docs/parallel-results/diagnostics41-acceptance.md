@@ -105,6 +105,13 @@ permissions, one Cargo job, debug information off, incremental compilation off
 and a bounded job timeout. This workflow configures future native observations;
 local Linux results do not claim native Windows/macOS success.
 
+Workflow dependency filters cover `crates/vesper-syntax/**` and all `src/**`
+for both push and pull requests, including actual IR lowering and Pact frontend
+changes as well as checker, source adapters and host routing. Existing diagnostic
+test/script/package filters remain present. This filter-only follow-up was
+validated by parsing the YAML and checking both event filter lists; no compiler
+runtime behavior changed or required another Cargo run.
+
 ## Verification
 
 Private target `/tmp/tooling41-lint-target`, one build job, debug0/incremental off.
