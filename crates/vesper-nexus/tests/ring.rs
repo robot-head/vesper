@@ -63,8 +63,10 @@ fn fill(buf: &mut [u8], records: &[(u64, u64)]) -> u32 {
 }
 
 fn decode(bytes: &[u8]) -> Vec<(u64, u64)> {
-    bytes
-        .chunks_exact(16)
+    let (records, rest) = bytes.as_chunks::<16>();
+    assert!(rest.is_empty(), "partial record");
+    records
+        .iter()
         .map(|c| {
             (
                 u64::from_le_bytes(c[..8].try_into().unwrap()),
