@@ -8,6 +8,8 @@
 //! memory; padding canonicality is a separate explicit validation operation.
 #![forbid(unsafe_code)]
 
+pub mod sys;
+
 use std::{collections::BTreeMap, fmt};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
