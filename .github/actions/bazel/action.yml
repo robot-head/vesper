@@ -29,6 +29,10 @@ runs:
           if [[ "$RUNNER_OS" == Windows ]]; then
             # Short output root: Windows paths are limited to 260 characters.
             echo 'startup --output_user_root=C:/_bzl'
+            # The hermetic LLVM toolchain links against the MSVC runtime of the
+            # Visual Studio on GitHub's Windows images; the owner accepted its
+            # license for CI.
+            echo 'common --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1'
           fi
           if [[ -n "$BUILDBUDDY_API_KEY" ]]; then
             echo 'common --config=buildbuddy'

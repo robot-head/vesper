@@ -23,6 +23,11 @@ bazel build //:bin/vesper && bazel-bin/bin/vesper --help
 bazel run @rules_rust//:rustfmt                   # reformat every Rust target
 ```
 
+On Windows, the hermetic toolchain uses the MSVC runtime and asks you to accept
+the [Visual Studio license](https://visualstudio.microsoft.com/license-terms):
+if you may use it, add `common --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1`
+to `user.bazelrc`. CI does this on GitHub's Windows runners.
+
 Tests that run Lean use `VESPER_LEAN` when it is set; give it the real binary
 (`VESPER_LEAN=$(elan which lean) bazel test //...`), because Bazel runs tests
 with a temporary `HOME` where the elan proxy cannot find its toolchains.
