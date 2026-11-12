@@ -333,6 +333,8 @@ pub struct EndpointStats {
     pub backpressured_replies: u64,
     /// ACK-only replies deferred because the launch queue was full.
     pub deferred_acks: u64,
+    /// PTO probes that could not be sent.
+    pub probes_failed: u64,
     /// Packets the launch queue refused after sealing (abandoned, never
     /// sent early).
     pub launch_refused: u64,
@@ -1068,8 +1070,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let action = recovery.on_timeout(now_ns, &mut |ev| record_event(cc, events, ev, now_ns));
         self.resolve_events(slot, fired);
         if let TimeoutAction::SendProbe { packets, .. } = action {
+            // A probe that cannot be built (no tx frame, recovery full) is
+            // counted, not returned: the fired lease must still be re-parked
+            // and recovery has already backed its PTO off.
             for _ in 0..packets {
-                self.send_probe(slot, now_ns)?;
+                if self.send_probe(slot, now_ns).is_err() {
+                    self.stats.probes_failed += 1;
+                    break;
+                }
             }
         }
         self.write_tile(slot);
@@ -1118,9 +1126,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
 
     fn send_probe(&mut self, slot: SlotHandle, now_ns: u64) -> Result<(), WarpError> {
         let n = Frame::Ping.encode(&mut self.app_out)?;
-        self.stats.probes_sent += 1;
         let ack = self.conn(slot)?.received.largest().is_some();
         self.send(slot, Source::Fresh, ack, n, true, now_ns)?;
+        self.stats.probes_sent += 1;
         Ok(())
     }
 

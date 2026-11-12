@@ -192,3 +192,30 @@ fn time_threshold_loss_fires_from_the_recovery_timer_before_pto() {
     assert_clean(&mut p.client);
     assert_clean(&mut p.server);
 }
+
+#[test]
+fn a_probe_that_cannot_be_sent_keeps_its_lease() {
+    // One tracked packet per connection: the PTO probe for a lost packet
+    // cannot be tracked and fails.
+    let cfg = EndpointConfig {
+        max_tracked_per_conn: 1,
+        ..config()
+    };
+    let mut p = Pair::new(cfg, Discard::default(), Discard::default());
+    p.client.tap_mut().drop_pn = Some(0);
+    p.client
+        .send_stream(p.c_conn, 0, 0, b"a", false, p.now)
+        .unwrap();
+    for _ in 0..400 {
+        p.step();
+    }
+    let c = p.client.stats();
+    assert!(c.pto_fired > 0, "{c:?}");
+    assert!(c.probes_failed > 0, "{c:?}");
+    // The lost packet's lease survives every failed probe.
+    assert_eq!(p.client.parked_leases(), 1, "{c:?}");
+    assert_eq!(c.leases_orphaned, 0);
+    let census = p.client.xsk_mut().census();
+    assert_eq!(census.leaked, 0, "{census:?}");
+    assert_eq!(p.client.xsk().leaked_owners(), 0);
+}

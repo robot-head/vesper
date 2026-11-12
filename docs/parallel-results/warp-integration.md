@@ -80,6 +80,8 @@ step.
 * Send keys are updated (RFC 9001 §6) every `key_update_interval` packets
   (2^22 by default, under the AES-GCM confidentiality limit), or on
   `initiate_key_update`.
+* A PTO probe that cannot be sent is counted (`probes_failed`); the
+  expired lease is still re-parked at recovery's backed-off deadline.
 * Each connection's RFC 9002 loss/PTO deadline is kept in a per-endpoint
   timer wheel and re-armed after every step, so time-threshold loss fires
   on time and not only when a lease's PTO comes due.
@@ -103,7 +105,7 @@ step.
 * `tests/review_fixes.rs`: key updates on the interval and on demand,
   launch backpressure with deferred ACKs and no early sends, the ACK-only
   fallback for an oversize echo, and time-threshold loss from the recovery
-  timer before any PTO.
+  timer before any PTO, and a failed PTO probe keeping its lease.
 * `tests/tcp_bbr.rs`: TCP bulk and lossy, reordering transfers with
   BBRv3 and no adapter errors; partial and late acknowledgements.
 
