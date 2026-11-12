@@ -78,9 +78,9 @@ Potentially failing integer division/remainder and dynamic tuple indexing use `F
 ## Validation
 
 ```sh
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --locked
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --locked
 ```
 
 Install the Lean version pinned in `lean-toolchain` to check extracted code and the foundation lemmas:
@@ -99,3 +99,5 @@ With QEMU and AArch64 binutils installed, `scripts/test-aarch64.sh` links and ex
 The test suite includes positive/negative ownership cases, nested pattern coverage, projection overlap, effect row instantiation, capability escape, parser recovery/losslessness, interpreter/JIT comparisons, executable linking, UTF-16 LSP updates, state-token verification, effectful read/write optimization, AArch64 object generation, and Lean compilation plus scalar execution comparisons.
 
 The Linux embedding API connects `Runtime::begin_external` and `io_session::Session` to owned io_uring requests, a completion scheduler, and nursery joins/cancellation. Segmented data frames use checked relative addresses so their storage can move. Native parked execution still needs to be connected to these runtime components.
+
+Parallel implementation ownership and ready-to-send external agent prompts are listed in [docs/parallel-work.md](docs/parallel-work.md).
