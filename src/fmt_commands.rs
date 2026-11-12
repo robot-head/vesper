@@ -72,6 +72,10 @@ impl Drop for Staging {
             // that bit only on this invocation-owned staging path. Unix mode
             // bits are never broadened. Cleanup remains best effort on OS error.
             #[cfg(windows)]
+            #[allow(
+                clippy::permissions_set_readonly_false,
+                reason = "Windows-only owned-stage cleanup clears the readonly attribute; Unix permission bits are untouched"
+            )]
             if let Ok(metadata) = fs::metadata(&self.path) {
                 let mut permissions = metadata.permissions();
                 if permissions.readonly() {
