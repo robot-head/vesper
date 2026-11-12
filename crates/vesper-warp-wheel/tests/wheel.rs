@@ -120,8 +120,10 @@ fn far_jump_with_overflow_entry_is_cheap_and_exact() {
     assert_eq!(w.poll(1 << 60).unwrap().unwrap().deadline_ns, 1 << 60);
 }
 
+/// The leak counter is process-global, so both cases live in one test: a
+/// parallel test dropping a non-empty wheel would otherwise race with it.
 #[test]
-fn drained_wheel_drops_quietly() {
+fn leak_reporting_on_drop() {
     let before = leaked_timer_entries();
     let mut w = small(4);
     let _ = w.insert(1, "x".into()).unwrap();
@@ -129,14 +131,25 @@ fn drained_wheel_drops_quietly() {
     w.drain(|d, p| got.push((d, p)));
     drop(w);
     assert_eq!(got, vec![(1, "x".to_string())]);
-    assert_eq!(leaked_timer_entries(), before);
-}
+    assert_eq!(
+        leaked_timer_entries(),
+        before,
+        "drained wheel reported a leak"
+    );
 
-#[cfg(debug_assertions)]
-#[test]
-#[should_panic(expected = "timing wheel dropped with 1 pending entries")]
-fn dropping_a_non_empty_wheel_is_reported() {
     let mut w = small(4);
     let _ = w.insert(1, "leak".into()).unwrap();
-    drop(w);
+    let _ = w.insert(2, "leak".into()).unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || drop(w)));
+    assert_eq!(leaked_timer_entries(), before + 2);
+    if cfg!(debug_assertions) {
+        let err = outcome.expect_err("debug builds panic on a non-empty drop");
+        let msg = err
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .unwrap_or("");
+        assert!(msg.contains("dropped with 2 pending entries"), "{msg}");
+    } else {
+        assert!(outcome.is_ok());
+    }
 }

@@ -101,8 +101,9 @@ sleeps or threads.
 - `tests/wheel.rs`: stale handles after cancel, after fire and after slot
   reuse; foreign handles; `Full` and out-of-range return the payload;
   clock-backwards and out-of-range rejection; config validation; a 2^60-tick
-  jump with an overflow entry; drained wheel drops without a leak report; a
-  non-empty drop panics in debug builds.
+  jump with an overflow entry; a drained wheel drops without a leak report,
+  while a non-empty drop is counted and panics in debug builds (one test,
+  because the counter is process-global).
 - `tests/layers.rs`: leases use a linear stand-in that panics if dropped
   unconsumed. ACK removes leases, duplicate/unknown ACKs are errors, PTO fires
   the rest in deadline order, `rearm` moves a deadline, park refusals return
@@ -115,7 +116,7 @@ sleeps or threads.
 
 ```sh
 cargo fmt --all -- --check
-cargo test -p vesper-warp-wheel                # 18 tests + 1 doctest
+cargo test -p vesper-warp-wheel                # 17 tests + 1 doctest
 cargo test -p vesper-warp-wheel --release
 cargo clippy -p vesper-warp-wheel --all-targets -- -D warnings
 cargo test --workspace --locked
