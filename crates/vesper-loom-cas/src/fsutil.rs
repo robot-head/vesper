@@ -67,15 +67,15 @@ pub(crate) fn unique_name(prefix: &str) -> String {
     format!("{prefix}{:x}-{seq:x}-{nanos:x}", std::process::id())
 }
 
-/// Atomically make `staged` visible at `dest` unless `dest` already exists.
+/// Atomically make the staged file visible at `dest` unless `dest` already
+/// exists. This never replaces an existing entry.
 ///
 /// Linux: `renameat2(RENAME_NOREPLACE)`. Elsewhere, or when the file system
 /// does not support it: `link(2)` (which also never replaces) followed by
-/// unlinking the staged name. Only when hard links are unsupported as well
-/// does this fall back to an existence check followed by `rename`, which can
-/// replace a concurrently published object. That replacement is harmless
-/// for content-addressed objects because both writers verified identical
-/// contents, but it is weaker than the primary paths and is documented.
+/// unlinking the staged name. If neither primitive is available the call
+/// fails with `ErrorKind::Unsupported` instead of falling back to an
+/// overwriting rename, because derivation records with different outputs
+/// share this path and must never silently replace one another.
 pub(crate) fn publish_noreplace(staged: &Path, dest: &Path) -> io::Result<Publish> {
     #[cfg(target_os = "linux")]
     {
@@ -89,11 +89,38 @@ pub(crate) fn publish_noreplace(staged: &Path, dest: &Path) -> io::Result<Publis
     match fs::hard_link(staged, dest) {
         Ok(()) => {
             fs::remove_file(staged)?;
-            return Ok(Publish::Published);
+            Ok(Publish::Published)
         }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(Publish::Exists),
-        Err(e) if is_unsupported(&e) || e.kind() == io::ErrorKind::PermissionDenied => {}
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(Publish::Exists),
+        Err(e) if is_unsupported(&e) || e.kind() == io::ErrorKind::PermissionDenied => {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!(
+                    "file system supports neither RENAME_NOREPLACE nor hard links ({e}); \
+                     refusing a non-atomic publish"
+                ),
+            ))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Publish a staged workspace directory at `dest` unless `dest` exists.
+///
+/// Linux uses `renameat2(RENAME_NOREPLACE)`. Directories cannot be hard
+/// linked, so other platforms (and Linux file systems without the flag) use
+/// an existence check followed by `rename(2)`. POSIX `rename` cannot replace
+/// a file or a non-empty directory, so the residual race is limited to a
+/// concurrently created *empty* directory at `dest` being replaced.
+pub(crate) fn publish_dir_noreplace(staged: &Path, dest: &Path) -> io::Result<Publish> {
+    #[cfg(target_os = "linux")]
+    {
+        match rename_noreplace_linux(staged, dest) {
+            Ok(()) => return Ok(Publish::Published),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Ok(Publish::Exists),
+            Err(e) if is_unsupported(&e) => {}
+            Err(e) => return Err(e),
+        }
     }
     match fs::symlink_metadata(dest) {
         Ok(_) => Ok(Publish::Exists),

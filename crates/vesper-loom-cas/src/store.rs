@@ -8,6 +8,7 @@
 //! derivations/v1/<aa>/<hex>               derivation key -> output records
 //! tmp/                                    private staging files
 //! quarantine/                             objects/records that failed verification
+//! locks/                                  per-key lock files used only while repairing
 //! ```
 //!
 //! Writers stage into `tmp/`, hash while writing, `fsync`, and then publish
@@ -119,6 +120,7 @@ pub struct Store {
     derivations: PathBuf,
     tmp: PathBuf,
     quarantine: PathBuf,
+    locks: PathBuf,
 }
 
 /// Removes a staging path on drop unless disarmed.
@@ -168,6 +170,7 @@ impl Store {
             derivations: root.join("derivations").join("v1"),
             tmp: root.join("tmp"),
             quarantine: root.join("quarantine"),
+            locks: root.join("locks"),
             root,
         };
         for dir in [
@@ -177,6 +180,7 @@ impl Store {
             store.derivations.clone(),
             store.tmp.clone(),
             store.quarantine.clone(),
+            store.locks.clone(),
         ] {
             ensure_plain_dir(&dir)?;
         }
@@ -454,7 +458,12 @@ impl Store {
                     // Identical verified contents: deduplicate. The staged
                     // copy is removed by the guard.
                     Existing::Valid => return Ok(false),
-                    Existing::Invalid => self.quarantine(&dest)?,
+                    Existing::Invalid => self.repair(&dest, &object_lock_name(id), || {
+                        Ok(matches!(
+                            self.check_existing_object(id, &dest)?,
+                            Existing::Invalid
+                        ))
+                    })?,
                     Existing::Gone => {}
                 },
             }
@@ -474,7 +483,33 @@ impl Store {
     }
 
     /// Move a failed object or record out of the addressable namespace.
-    fn quarantine(&self, path: &Path) -> Result<()> {
+    ///
+    /// Repairs are serialized per key with an exclusive lock, and the entry
+    /// is re-validated while the lock is held. Without this, two writers that
+    /// both saw the same corrupt entry could race: the first quarantines it
+    /// and publishes a valid replacement, and the second, acting on its stale
+    /// check, would quarantine that valid replacement. Ordinary publication
+    /// needs no lock: it can only succeed while the path is empty, and only a
+    /// lock holder ever empties an occupied path.
+    fn repair(
+        &self,
+        path: &Path,
+        lock_name: &str,
+        still_invalid: impl FnOnce() -> Result<bool>,
+    ) -> Result<()> {
+        let lock_path = self.locks.join(lock_name);
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| CasError::io("open repair lock", &lock_path, e))?;
+        lock.lock()
+            .map_err(|e| CasError::io("acquire repair lock", &lock_path, e))?;
+        if !still_invalid()? {
+            // Already repaired (or removed) by another writer.
+            return Ok(());
+        }
         let name = path
             .file_name()
             .and_then(|n| n.to_str())
@@ -484,10 +519,10 @@ impl Store {
             .join(format!("{name}.{}", fsutil::unique_name("q-")));
         match fs::rename(path, &target) {
             Ok(()) => Ok(()),
-            // Another writer quarantined it first.
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(CasError::io("quarantine", path, e)),
         }
+        // `lock` is released when dropped here.
     }
 
     // ----------------------------------------------------------------------
@@ -649,7 +684,14 @@ impl Store {
                         });
                     }
                     Ok(None) => {}
-                    Err(CasError::CorruptDerivationRecord { .. }) => self.quarantine(&dest)?,
+                    Err(CasError::CorruptDerivationRecord { .. }) => {
+                        let lock = format!("drv-{}", key.0.to_hex());
+                        self.repair(&dest, &lock, || match self.read_record(&key, &dest) {
+                            Err(CasError::CorruptDerivationRecord { .. }) => Ok(true),
+                            Ok(_) => Ok(false),
+                            Err(e) => Err(e),
+                        })?
+                    }
                     Err(e) => return Err(e),
                 },
             }
@@ -773,7 +815,7 @@ impl Store {
             ..MaterializeReport::default()
         };
         self.materialize_tree(tree, &staging, 0, options, &mut report)?;
-        match fsutil::publish_noreplace(&staging, dest)
+        match fsutil::publish_dir_noreplace(&staging, dest)
             .map_err(|e| CasError::io("publish workspace", dest, e))?
         {
             Publish::Published => {
@@ -997,6 +1039,10 @@ impl Store {
         }
         Ok(report)
     }
+}
+
+fn object_lock_name(id: &ObjectId) -> String {
+    format!("obj-{}-{}-{}", id.domain, id.kind, id.digest.to_hex())
 }
 
 /// List `<base>/<aa>/<hex>` files, reporting anything misplaced as stray.

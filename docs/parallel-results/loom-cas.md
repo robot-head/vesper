@@ -16,9 +16,9 @@ Owned paths: `crates/vesper-loom-cas/**` and this file. No root workspace, lockf
 | Versioned derivation inputs | `DerivationInputs` (schema `InputSchema::V1`): output domain (`Interface` or `Artifact`; `Source` is rejected because source is only ingested), builder, builder version, optional target, option map, and a nonempty named input map of `ObjectId`s. The canonical length-prefixed encoding has a strict decoder. `DerivationKey` = BLAKE3 `derive_key("vesper-loom-cas 2026-11 v1 derivation key", encoding)`. |
 | Contract-audit cache keys | Implementation inputs are part of the key alongside the interface. A body-only change with an unchanged interface misses, and so does a different target (`body_change_with_same_interface_misses_the_cache`). Every field changes the key (`every_field_changes_the_key`). |
 | Verified ingestion | `put_blob`, `put_blob_reader`, `put_file`, `put_tree`, and `ingest_dir` hash while writing to a private staging file. `put_blob_expected` refuses contents that do not match a caller-supplied id, and in that case nothing is published. `put_tree` requires every child to be present with matching kind and size. |
-| Atomic publish | Staging file → `fsync` → read-only mode → no-replace publication → parent directory `fsync`. On Linux publication uses `renameat2(RENAME_NOREPLACE)`. Elsewhere, or on file systems without it, it falls back to `link(2)` then unlink, and only after that to check-then-rename (see limitations). An object therefore appears complete or not at all. |
+| Atomic publish | Staging file → `fsync` → read-only mode → no-replace publication → parent directory `fsync`. On Linux publication uses `renameat2(RENAME_NOREPLACE)`. Elsewhere, or on file systems without it, it falls back to `link(2)` then unlink. If neither is available, publication fails with `Unsupported` rather than risk an overwriting rename. An object therefore appears complete or not at all, and nothing is ever replaced. |
 | Verified readback | `read_blob`, `read_tree` and `verify_object` always rehash. Object files are opened with `O_NOFOLLOW` and must be regular files, so a symlink planted at an object path is refused rather than followed. |
-| Corruption rejection | Bit flips, truncation and symlink substitution produce `Corrupt` or `UnsafeStoreLayout` errors. When the true contents are ingested again, the bad file is moved to `quarantine/` and the object is republished. `verify_all` rehashes every object, decodes every tree, revalidates every derivation record, and reports stray files. |
+| Corruption rejection | Bit flips, truncation and symlink substitution produce `Corrupt` or `UnsafeStoreLayout` errors. When the true contents are ingested again, the bad file is moved to `quarantine/` and the object is republished. Repairs are serialized per key with an exclusive `File::lock` under `locks/`, and the entry is re-validated while the lock is held. A writer acting on a stale corruption check therefore cannot quarantine another writer's fresh replacement. Ordinary publication takes no lock. `verify_all` rehashes every object, decodes every tree, revalidates every derivation record, and reports stray files. |
 | Concurrent writers | Any number of `Store` handles, threads and processes can share a root. Duplicate writers deduplicate: exactly one publishes and the rest verify the existing object. Derivation records are never replaced: the same mapping is idempotent, and a different output for an existing key returns `DerivationConflict` naming both outputs. |
 | Interrupted writes | Reader errors and panics remove the staging file through a drop guard. A writer process killed by SIGKILL leaves only an unaddressable file in `tmp/`. `sweep_temporaries(min_age)` removes such files. |
 | Safe materialization | `materialize(tree, dest, options)` requires `dest` not to exist, including as a dangling symlink. It builds the tree in a uniquely named sibling staging directory and publishes it with a no-replace rename, so a corrupt or invalid tree leaves no partial workspace. Files are created with `O_EXCL|O_NOFOLLOW`. Workspace files are never hard links or symlinks into the store, so editing a workspace cannot change a stored object. Modes are 0644, or 0755 for executable entries. |
@@ -86,7 +86,7 @@ pub enum CasError { Io, Corrupt, DigestMismatch, SizeMismatch, NotFound, WrongKi
 pub enum NameError { … }  pub enum TreeError { … }  pub enum DerivationError { … }
 ```
 
-On-disk layout (v1): `LAYOUT`, `objects/v1/<domain>/<kind>/<aa>/<hex>`, `derivations/v1/<aa>/<hex>`, `tmp/`, `quarantine/`. A derivation record is `"VLDR" | u32 1 | 34-byte output id | canonical input encoding`. On read, the stored inputs must decode strictly and hash to the record's key.
+On-disk layout (v1): `LAYOUT`, `objects/v1/<domain>/<kind>/<aa>/<hex>`, `derivations/v1/<aa>/<hex>`, `tmp/`, `quarantine/`, `locks/`. A derivation record is `"VLDR" | u32 1 | 34-byte output id | canonical input encoding`. On read, the stored inputs must decode strictly and hash to the record's key.
 
 ## Validation
 
@@ -95,14 +95,14 @@ Run from `crates/vesper-loom-cas` with Rust 1.97.0:
 ```sh
 cargo fmt -- --check                              # clean
 cargo clippy --all-targets -- -D warnings         # clean
-cargo test                                        # 9 unit + 31 integration + 1 doctest passed
+cargo test                                        # 9 unit + 33 integration + 1 doctest passed
 cargo doc --no-deps                               # clean
 ```
 
 The default host temp directory is on ext4, which does not support FICLONE (`EOPNOTSUPP`), so that run exercised the copy fallback and the clean `ReflinkUnavailable` path. To exercise real clones, the suite was also run on an XFS loop mount with `reflink=1`:
 
 ```sh
-TMPDIR=/mnt/casxfs VESPER_CAS_EXPECT_REFLINK=1 cargo test   # 9 + 31 + 1 passed
+TMPDIR=/mnt/casxfs VESPER_CAS_EXPECT_REFLINK=1 cargo test   # 9 + 33 + 1 passed
 ```
 
 With `VESPER_CAS_EXPECT_REFLINK` set, the tests require every file in `ReflinkOrCopy` and `ReflinkOnly` to have been cloned. That includes the corruption test: a clone of a corrupted object is caught by the post-clone rehash. The three concurrency tests (threads, processes, and derivation races) were also run 15 times in a row without failure. That is evidence against flakiness on this host, not a proof of race freedom.
@@ -115,7 +115,7 @@ The golden vectors in `golden_hashes_are_stable` (one blob per domain, a two-ent
 | Ingestion/readback | round trip, dedupe, read-only objects, expected-digest mismatch, missing children/size mismatch in `put_tree`, cross-domain children refused |
 | Interrupted writes | failing reader, panicking reader, simulated crash residue and sweep, **real SIGKILL of a writer process mid-stream** |
 | Corruption | bit flip (read, verify, `verify_all`, quarantine + repair), truncation, symlink substitution at an object path, corrupt and dangling derivation records, stray files |
-| Concurrency | 16 threads × duplicate and distinct writes; 6 processes × 40 writes; 12 threads racing to record two different outputs for one key (exactly one wins, the rest get `DerivationConflict`) |
+| Concurrency | 16 threads × duplicate and distinct writes; 6 processes × 40 writes; 12 threads racing to record two different outputs for one key (exactly one wins, the rest get `DerivationConflict`); 8 threads × 20 rounds racing to repair the same corrupt record or object (one winner, one quarantined file; both tests fail reliably when the repair lock and re-check are removed) |
 | Adversarial paths | `..`, `.`, `../escape`, `/abs`, `a/../../escape`, `..\escape`, `C:escape`, NUL, empty, invalid UTF-8, `CON`, unknown entry kind, duplicate names, case collision, lying size, all in crafted tree objects; symlink/dir-symlink/dangling-symlink/FIFO/symlinked-root ingestion; non-portable names; depth limit; existing/dangling-symlink destinations; symlinked store internals; unknown layout marker |
 | Materialization | round trip with exec bits, empty files and directories under both strategies; independence from the store (inode and nlink checks, workspace edits); hard-linked inputs materialize as independent files; corruption leaves no partial workspace; `ReflinkOnly` clones or fails cleanly |
 
@@ -144,7 +144,7 @@ The golden vectors in `golden_hashes_are_stable` (one blob per domain, a two-ent
 - **Scope:** There is no registry, substituter, HTTP/3 or zstd client, and no build or sandbox execution. No garbage collection or reference tracking beyond `sweep_temporaries`, and no `redb` index.
 - **Threat model:** The store root is assumed to be writable only by its owner. The store defends against corruption, crashes, hostile input trees and paths, and pre-existing destinations. It does not defend against a concurrent local attacker who can write inside the store or inside a materialization parent directory while an operation runs (for example, swapping a just-created staging subdirectory for a symlink). Defending against that would need `openat`/`O_NOFOLLOW` traversal (`cap-std`-style).
 - **Unicode:** Case folding uses `to_lowercase`. Unicode normalization collisions (for example NFC vs NFD on APFS) are not detected.
-- **Platforms:** Only Linux (ext4, plus XFS with reflink) was tested. On non-Linux unix, publication uses `link`+`unlink`. On Windows, and on file systems with neither `RENAME_NOREPLACE` nor hard links, it falls back to check-then-rename, which can replace an identical concurrently published object. Workspace publication on Windows and macOS is untested, and Windows executable bits are not represented.
+- **Platforms:** Only Linux (ext4, plus XFS with reflink) was tested. On non-Linux unix, objects and records are published with `link`+`unlink`. File systems with neither `RENAME_NOREPLACE` nor hard links are refused with `Unsupported`. Workspace directories cannot be hard linked, so outside Linux they are published with check-then-rename, and a concurrently created *empty* directory at the destination could be replaced. Repair locks rely on `File::lock` (flock/LockFileEx) and may fail on file systems without advisory locking. Windows and macOS are untested, and Windows executable bits are not represented. Lock files under `locks/` are not cleaned up.
 - **Durability:** Objects and records are fsynced before publish and parent directories after. Materialized workspace files are not fsynced individually.
 - **Memory:** `read_blob` and `read_tree` load the whole object into memory. Streaming verification is used for ingestion, copying and `verify_object`.
 - **Evidence:** The concurrency claims rest on the tests above, not on a formal argument about every interleaving.

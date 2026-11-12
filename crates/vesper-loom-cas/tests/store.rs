@@ -1183,3 +1183,100 @@ fn stray_files_are_reported_not_trusted() {
     assert_eq!(report.stray_paths.len(), 1);
     assert!(!report.is_clean());
 }
+
+/// Many writers find the same corrupt record and race to repair it with
+/// different outputs. Exactly one repair may win; a stale corruption check
+/// must never quarantine the winner's fresh record.
+#[test]
+fn concurrent_repair_of_a_corrupt_record_has_one_winner() {
+    for _ in 0..20 {
+        let (_d, store) = store();
+        let (inputs, out_a, out_b) = derivation_fixture(&store);
+        let out_c = store
+            .put_blob(Domain::Artifact, b"object code C")
+            .unwrap()
+            .id;
+        let key = store.publish_derivation(&inputs, out_c).unwrap().key;
+        let hex = key.0.to_hex();
+        let record = store
+            .root()
+            .join("derivations/v1")
+            .join(&hex[..2])
+            .join(&hex);
+        let len = fs::metadata(&record).unwrap().len() as usize;
+        corrupt_byte(&record, len - 1);
+
+        let threads = 8;
+        let barrier = Arc::new(Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
+            .map(|i| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                let inputs = inputs.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    let output = if i % 2 == 0 { out_a } else { out_b };
+                    store.publish_derivation(&inputs, output)
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let winner = store.lookup_derivation(&inputs).unwrap().unwrap();
+        let mut newly = 0;
+        for r in results {
+            match r {
+                Ok(o) => {
+                    assert_eq!(o.output, winner, "a reported success was replaced");
+                    newly += o.newly_recorded as usize;
+                }
+                Err(CasError::DerivationConflict { existing, .. }) => {
+                    assert_eq!(existing, winner)
+                }
+                Err(e) => panic!("unexpected error {e}"),
+            }
+        }
+        assert_eq!(newly, 1);
+        assert_eq!(
+            fs::read_dir(store.root().join("quarantine"))
+                .unwrap()
+                .count(),
+            1,
+            "only the corrupt record is quarantined"
+        );
+    }
+}
+
+#[test]
+fn concurrent_repair_of_a_corrupt_object_quarantines_once() {
+    for _ in 0..20 {
+        let (_d, store) = store();
+        let data = vec![0x42u8; 100_000];
+        let id = store.put_blob(Domain::Source, &data).unwrap().id;
+        corrupt_byte(&store.object_path(&id), 10);
+        let threads = 8;
+        let barrier = Arc::new(Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
+            .map(|_| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                let data = data.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    store.put_blob(Domain::Source, &data).unwrap()
+                })
+            })
+            .collect();
+        let newly: usize = handles
+            .into_iter()
+            .map(|h| h.join().unwrap().newly_stored as usize)
+            .sum();
+        assert_eq!(newly, 1);
+        assert_eq!(store.read_blob(&id).unwrap(), data);
+        assert_eq!(
+            fs::read_dir(store.root().join("quarantine"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+}
