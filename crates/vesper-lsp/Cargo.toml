@@ -1,0 +1,12 @@
+[package]
+name = "vesper-lsp"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Bounded LSP transport and transactional UTF-16 in-memory documents"
+
+[dependencies]
+vesper-span = { path = "../vesper-span" }
+vesper-serde = { path = "../vesper-serde" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

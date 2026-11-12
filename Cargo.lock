@@ -3481,12 +3481,14 @@ dependencies = [
  "vesper-loom-cas",
  "vesper-loom-solver",
  "vesper-loom-trust",
+ "vesper-lsp",
  "vesper-pact",
  "vesper-pact-binding",
  "vesper-pulse",
  "vesper-semver",
  "vesper-serde",
  "vesper-simd",
+ "vesper-span",
  "vesper-syntax",
 ]
 
@@ -3753,6 +3755,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-lsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vesper-serde",
+ "vesper-span",
+]
+
+[[package]]
 name = "vesper-pact"
 version = "0.1.0"
 dependencies = [
@@ -3841,6 +3853,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "vesper-span"
+version = "0.1.0"
 
 [[package]]
 name = "vesper-syntax"
