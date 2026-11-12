@@ -1082,3 +1082,96 @@ fn named_model_bounds_of_generic_code_are_assumptions() {
         .is_proven()
     );
 }
+
+#[test]
+fn malformed_certificate_inputs_return_errors_without_panicking() {
+    let p = world();
+    let env = Env::default();
+    let o = solve_goal(&p, implements(CLONE, t1(VEC, c(U64)), vec![]));
+    let valid = proven(&o).derivation.clone();
+
+    for source in [
+        ConformanceSource::Impl(ImplId(u32::MAX)),
+        ConformanceSource::Model(ModelId(u32::MAX)),
+    ] {
+        let mut d = valid.clone();
+        d.step = Step::Conformance {
+            source,
+            args: vec![a(c(U64))],
+        };
+        assert!(check_derivation(&p, &env, &d).is_err());
+    }
+
+    // Malformed goals and instantiation arguments must be validated before
+    // mode computation or template substitution indexes their components.
+    let malformed = [
+        Goal::ModeBound {
+            ty: c(TypeCtorId(u32::MAX)),
+            bound: ModeTerm::Const(Mode::Linear),
+        },
+        Goal::ModeBound {
+            ty: t1(
+                VEC,
+                Ty::Ctor {
+                    ctor: VEC,
+                    args: vec![],
+                },
+            ),
+            bound: ModeTerm::Const(Mode::Linear),
+        },
+        Goal::ModeBound {
+            ty: Ty::Var(Var::Placeholder(u32::MAX)),
+            bound: ModeTerm::Const(Mode::Linear),
+        },
+        Goal::ModeBound {
+            ty: proj_ty(proj(SOURCE, c(PULSE_TCP), vec![row(vec![])], u32::MAX)),
+            bound: ModeTerm::Const(Mode::Linear),
+        },
+        implements(TraitId(u32::MAX), c(U64), vec![]),
+    ];
+    for goal in malformed {
+        let d = Derivation::leaf(goal, Step::Mode);
+        assert!(check_derivation(&p, &env, &d).is_err());
+    }
+    let mut d = valid.clone();
+    if let Step::Conformance { args, .. } = &mut d.step {
+        *args = vec![a(c(TypeCtorId(u32::MAX)))];
+    }
+    assert!(check_derivation(&p, &env, &d).is_err());
+
+    let mut nested = valid;
+    nested.children[0].goal = implements(CLONE, c(TypeCtorId(u32::MAX)), vec![]);
+    assert_eq!(
+        check_derivation(&p, &env, &nested).unwrap_err().path,
+        vec![0]
+    );
+}
+
+#[test]
+fn certificate_validation_accepts_sparse_existentials_without_allocating_by_id() {
+    let p = world();
+    let d = Derivation::leaf(
+        Goal::ModeBound {
+            ty: Ty::Var(Var::Infer(u32::MAX)),
+            bound: ModeTerm::Const(Mode::Linear),
+        },
+        Step::Mode,
+    );
+    check_derivation(&p, &Env::default(), &d).unwrap();
+}
+
+#[test]
+fn coinductive_hypotheses_must_be_leaves() {
+    fn add_child_to_hypothesis(d: &mut Derivation) -> bool {
+        if d.step == Step::CoinductiveHypothesis {
+            d.children.push(d.clone());
+            return true;
+        }
+        d.children.iter_mut().any(add_child_to_hypothesis)
+    }
+    let p = world();
+    let o = solve_goal(&p, implements(SEND, t1(LIST, c(U64)), vec![]));
+    let mut d = proven(&o).derivation.clone();
+    assert!(add_child_to_hypothesis(&mut d));
+    assert!(check_derivation(&p, &Env::default(), &d).is_err());
+}

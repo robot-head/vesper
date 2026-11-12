@@ -551,7 +551,7 @@ impl Validator<'_> {
         }
     }
 
-    fn arg(&mut self, a: &GenericArg, scope: Scope, subj: Subject) {
+    pub(crate) fn arg(&mut self, a: &GenericArg, scope: Scope, subj: Subject) {
         match a {
             GenericArg::Ty(t) => self.ty(t, scope, subj),
             GenericArg::Mode(m) => self.mode(m, scope, subj),

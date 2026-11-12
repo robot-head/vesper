@@ -7,7 +7,7 @@
 
 use crate::ids::*;
 use crate::mode::{ModeVerdict, decide, mode_atoms};
-use crate::program::{ConformanceDecl, Env, Program};
+use crate::program::{ConformanceDecl, Env, Program, QueryDto, Scope, Validator, validate_query};
 use crate::term::*;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -169,13 +169,68 @@ pub fn check_derivation(
     env: &Env,
     d: &Derivation,
 ) -> Result<(), DerivationError> {
+    // Certificates are public DTOs, not trusted solver internals. Rename
+    // sparse inference ids densely before validation to avoid allocating by
+    // an attacker-controlled id, while retaining sharing and kind checks.
+    let mut canonicalizer = crate::canon::Canonicalizer::new(None);
+    let d = d.fold(&mut canonicalizer).map_err(|_| DerivationError {
+        path: vec![],
+        message: "duplicate effect label in derivation".into(),
+    })?;
+    validate_query(
+        program,
+        &QueryDto::new(env.clone(), canonicalizer.binders.clone(), d.goal.clone()),
+    )
+    .map_err(|diags| DerivationError {
+        path: vec![],
+        message: crate::diag::render(&diags),
+    })?;
+    validate_nodes(program, env, &canonicalizer.binders, &d, &mut vec![])?;
     Checker {
         program,
         env,
         ancestors: vec![],
         path: vec![],
     }
-    .check(d)
+    .check(&d)
+}
+
+// Validate every goal and recorded instantiation before any declaration lookup
+// or modal computation in the structural checker.
+fn validate_nodes(
+    program: &Program,
+    env: &Env,
+    binders: &[ParamKind],
+    d: &Derivation,
+    path: &mut Vec<usize>,
+) -> Result<(), DerivationError> {
+    let mut diags = vec![];
+    let mut validator = Validator {
+        dto: program.dto(),
+        diags: &mut diags,
+    };
+    let scope = Scope::Query {
+        placeholders: &env.placeholders,
+        binders,
+    };
+    validator.goal(&d.goal, scope, crate::diag::Subject::Query);
+    if let Step::Conformance { args, .. } | Step::ProjectionConformance { args, .. } = &d.step {
+        for arg in args {
+            validator.arg(arg, scope, crate::diag::Subject::Query);
+        }
+    }
+    if !diags.is_empty() {
+        return Err(DerivationError {
+            path: path.clone(),
+            message: crate::diag::render(&diags),
+        });
+    }
+    for (i, child) in d.children.iter().enumerate() {
+        path.push(i);
+        validate_nodes(program, env, binders, child, path)?;
+        path.pop();
+    }
+    Ok(())
 }
 
 struct Checker<'a> {
@@ -208,11 +263,20 @@ impl<'a> Checker<'a> {
         Ok(())
     }
 
-    fn conformance(&self, source: ConformanceSource) -> &'a ConformanceDecl {
-        match source {
-            ConformanceSource::Impl(i) => &self.program.impl_decl(i).decl,
-            ConformanceSource::Model(m) => &self.program.model(m).decl,
-        }
+    fn conformance(
+        &self,
+        source: ConformanceSource,
+    ) -> Result<&'a ConformanceDecl, DerivationError> {
+        let decl = match source {
+            ConformanceSource::Impl(i) => self.program.dto().impls.get(i.index()).map(|d| &d.decl),
+            ConformanceSource::Model(m) => {
+                self.program.dto().models.get(m.index()).map(|d| &d.decl)
+            }
+        };
+        decl.ok_or_else(|| DerivationError {
+            path: self.path.clone(),
+            message: format!("unknown conformance {source}"),
+        })
     }
 
     fn kinds_match(
@@ -250,7 +314,7 @@ impl<'a> Checker<'a> {
     fn node(&self, d: &Derivation) -> Result<(), DerivationError> {
         match (&d.step, &d.goal) {
             (Step::Conformance { source, args }, Goal::Implements { trait_ref, brand }) => {
-                let decl = self.conformance(*source);
+                let decl = self.conformance(*source)?;
                 self.kinds_match(decl, args)?;
                 let expected_brand = match source {
                     ConformanceSource::Impl(_) => Brand::Canonical,
@@ -308,7 +372,7 @@ impl<'a> Checker<'a> {
                 },
                 Goal::ProjectionEq { projection, ty },
             ) => {
-                let decl = self.conformance(*source);
+                let decl = self.conformance(*source)?;
                 self.kinds_match(decl, args)?;
                 let expected_brand = match source {
                     ConformanceSource::Impl(_) => Brand::Canonical,
@@ -388,6 +452,9 @@ impl<'a> Checker<'a> {
                 Ok(())
             }
             (Step::CoinductiveHypothesis, g) => {
+                if !d.children.is_empty() {
+                    return self.fail("coinductive hypothesis has children");
+                }
                 let key = alpha(g);
                 let Some(pos) = self.ancestors.iter().rposition(|a| alpha(a) == key) else {
                     return self.fail("coinductive hypothesis without a matching ancestor");
