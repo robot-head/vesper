@@ -1,0 +1,7 @@
+[package]
+name = "vesper-pulse"
+version = "0.1.0"
+edition = "2024"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = { workspace = true }

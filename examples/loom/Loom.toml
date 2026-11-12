@@ -1,0 +1,8 @@
+[package]
+name = "@example/app"
+version = "0.1.0"
+edition = "2026"
+capability_ceiling = []
+
+[dependencies]
+"@example/math" = { version = "^1.0", effects = [] }

@@ -1,0 +1,12 @@
+[package]
+name = "vesper-loom-solver"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+vesper-loom-calculus = { path = "../vesper-loom-calculus" }
+semver = { version = "1", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

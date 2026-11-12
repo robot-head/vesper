@@ -1,0 +1,13 @@
+fn offset(sink amount: i64) -> fn@copy(i64) -> i64 {
+    |value| value + amount
+}
+
+fn compose(sink first: fn@copy(i64) -> i64, sink second: fn@copy(i64) -> i64)
+    -> fn@copy(i64) -> i64 {
+    |value| first(second(value))
+}
+
+fn main() -> i64 {
+    let transform = compose(offset(20), offset(20));
+    transform(2)
+}

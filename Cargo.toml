@@ -1,6 +1,66 @@
+# Extracted leaf crates form the first workspace boundary. The checker and
+# Place IR remain in the facade until their shared World dependency is split.
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "crates/vesper-core",
+    "crates/vesper-syntax",
+    "crates/vesper-pulse",
+    "crates/vesper-ffi",
+    "crates/vesper-loom-calculus",
+    "crates/vesper-simpulse",
+    "crates/vesper-semver",
+    "crates/vesper-loom-solver",
+    "crates/vesper-alloc",
+]
+# Preserve the pre-extraction `cargo test` coverage of moved unit tests.
+default-members = [
+    ".",
+    "crates/vesper-core",
+    "crates/vesper-syntax",
+    "crates/vesper-pulse",
+    "crates/vesper-ffi",
+    "crates/vesper-loom-calculus",
+    "crates/vesper-simpulse",
+    "crates/vesper-semver",
+    "crates/vesper-loom-solver",
+    "crates/vesper-alloc",
+]
+
+[workspace.dependencies]
+logos = "0.15"
+rowan = "0.16"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+io-uring = "0.7"
+
 [package]
 name = "vesper"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+vesper-core = { path = "crates/vesper-core" }
+vesper-syntax = { path = "crates/vesper-syntax" }
+vesper-pulse = { path = "crates/vesper-pulse" }
+vesper-semver = { path = "crates/vesper-semver" }
+vesper-loom-calculus = { path = "crates/vesper-loom-calculus" }
+vesper-loom-solver = { path = "crates/vesper-loom-solver" }
+ariadne = "0.5"
+petgraph = "0.8"
+egg = "0.10"
+egglog = { version = "3", default-features = false }
+cranelift-codegen = { version = "0.125", features = ["arm64"] }
+cranelift-frontend = "0.125"
+cranelift-module = "0.125"
+cranelift-jit = "0.125"
+cranelift-object = "0.125"
+cranelift-native = "0.125"
+target-lexicon = "0.13"
+serde = { workspace = true }
+serde_json = { workspace = true }
+salsa = "0.24"
+
+[profile.release]
+lto = "thin"

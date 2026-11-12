@@ -1,0 +1,123 @@
+/// Vesper Loom sandbox step protocol.
+///
+/// This is an experimental transport contract shared by hermetic `build.vsp`
+/// steps and Tier 2 Forge macros. It is versioned twice: the WIT package
+/// version is part of every export name, so an incompatible component fails
+/// to link, and `invocation.protocol-version` versions payload semantics.
+///
+/// Hygiene is *transported*, not decided, here: `scopes` and `pre-resolved`
+/// are opaque values that the Forge expander assigns and checks.
+///
+/// Results are *packed*: every string and scope list in a result is a
+/// `slice` into one `text` byte table or one `scopes` table. A guest
+/// therefore cannot make the host allocate more than it returned in flat
+/// lists (whose size is bounded by guest linear memory); the host bounds
+/// the sum of referenced slices before it copies any of them.
+package vesper:sandbox@0.1.0;
+
+interface types {
+    /// Byte range in a compiler-assigned source file.
+    record span {
+        file: u32,
+        start: u32,
+        end: u32,
+    }
+
+    /// Definition resolved when the macro package was compiled.
+    record def-id {
+        %package: u32,
+        item: u32,
+    }
+
+    enum delimiter {
+        paren,
+        bracket,
+        brace,
+    }
+
+    variant token-kind {
+        ident,
+        punct,
+        int-literal,
+        string-literal,
+        open(delimiter),
+        close(delimiter),
+    }
+
+    /// One flat token. Trees are encoded with balanced open/close tokens
+    /// because WIT has no recursive types.
+    record token {
+        kind: token-kind,
+        text: string,
+        span: span,
+        /// Opaque Forge scope marks (`ScopeMark(k)` values).
+        scopes: list<u32>,
+        pre-resolved: option<def-id>,
+    }
+
+    enum step-kind {
+        build-script,
+        proc-macro,
+        derive-macro,
+    }
+
+    record invocation {
+        protocol-version: u32,
+        step: step-kind,
+        /// Entry point exported by the component (macro or build step name).
+        entry: string,
+        args: list<string>,
+        tokens: list<token>,
+    }
+
+    enum severity {
+        error,
+        warning,
+        note,
+    }
+
+    /// `offset..offset+len` in a packed table.
+    record slice {
+        offset: u32,
+        len: u32,
+    }
+
+    record packed-token {
+        kind: token-kind,
+        /// Into `packed-result.text`; must be UTF-8.
+        text: slice,
+        span: span,
+        /// Into `packed-result.scopes`.
+        scopes: slice,
+        pre-resolved: option<def-id>,
+    }
+
+    record packed-diagnostic {
+        severity: severity,
+        /// Into `packed-result.text`; must be UTF-8.
+        message: slice,
+        span: option<span>,
+    }
+
+    record packed-result {
+        tokens: list<packed-token>,
+        diagnostics: list<packed-diagnostic>,
+        text: list<u8>,
+        scopes: list<u32>,
+    }
+}
+
+interface step {
+    use types.{invocation, packed-result};
+
+    /// Payload protocol version this component implements.
+    protocol-version: func() -> u32;
+
+    /// `ok`: output tokens plus notes/warnings. `error`: diagnostics only
+    /// (`tokens` must be empty).
+    run: func(invocation: invocation) -> result<packed-result, packed-result>;
+}
+
+world sandboxed-step {
+    export step;
+}

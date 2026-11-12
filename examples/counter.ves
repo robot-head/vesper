@@ -1,0 +1,10 @@
+linear effect Counter { fn next() -> i64; }
+
+fn main() -> i64 {
+    handle Counter state counter = 0 in {
+        Counter::next() + Counter::next()
+    } with {
+        return (value, counter) => value + counter,
+        next(counter, resume) => resume(counter, counter + 1),
+    }
+}

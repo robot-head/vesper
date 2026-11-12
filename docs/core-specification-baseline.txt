@@ -1,0 +1,474 @@
+Vesper Programming Language: Research Foundations, Language Design & Formal Specification
+Executive Summary
+Programming language scholarship across POPL, PLDI, ICFP, and OOPSLA (2025–2026) has converged on a clear post-Rust systems agenda: preserving zero-GC memory safety and data-race freedom while eliminating lifetime annotation noise, async function coloring, Pin self-referential boilerplate, and high formal verification overhead.
+
+
+Vesper is a zero-GC systems programming language designed to be implemented in Rust (targeting Cranelift SSA IR and Lean 4 verification) that advances beyond Rust along three orthogonal axes:
+
+
+1. Modal True Linearity (copy, affine, linear): Solves Rust's !Destruct and "Async Drop" gaps by guaranteeing exact-once consumption of linear obligations across all control-flow and error paths, paired with OxCaml-style automatic mode crossing.
+2. One-Shot Lexical Effect Capabilities (eff): Unifies async I/O (io_uring), structured concurrency, checked fallibility (Fail), and custom allocators under stack-allocated, one-shot algebraic effect handlers—eliminating Pin, Future polling boilerplate, and colored higher-order combinators.
+3. Second-Class Disjoint Place Projections (in, inout, sink): Replaces lifetime-annotated pointer types (&'a T, 'a mut T) with parameter passing modes and field-tree projections (inout broker.{index, metrics}), enabling alias-XOR-mutability without 'a lifetime soup.
+1. The 2025–2026 Programming Languages Research Landscape
+Across flagship SIGPLAN venues, five research thrusts directly inform Vesper's design:
+
+
+Research Thrust
+	Landmark Work (2025–2026)
+	Core Breakthrough
+	Modal & Substructural Ownership
+	OxCaml Mode Crossing (ICFP 2026); Tree Borrows (PLDI 2025); Verified Polonius (2026)
+	Replaces rigid syntactic lifetimes with modal axes (local, portable, contended), tree-structured aliasing, and lazy abstract interpretation of pointer aliases.
+	Mutable Value Semantics (MVS)
+	Hylo & MVS (IWACO 2026); Transient Sequences (ICFP 2026 Distinguished Paper)
+	Achieves zero-GC, zero-ARC memory safety via second-class parameter projections (let, inout, sink) without first-class lifetime-annotated references.
+	Affine & Lexical Algebraic Effects
+	Affect (POPL 2025); Selection Monad (PLDI 2025); Lexical Capabilities
+	Reconciles algebraic effect handlers with affine/linear ownership by restricting continuations to one-shot resumptions, compiling handlers via stack evidence-passing.
+	Foundational Rust Verification
+	RefinedRust 2.0 (OOPSLA 2026); Charon + Aeneas (2026); Place Capability Graphs
+	Translates borrow-checked mutable code directly into pure functional Lean 4 or Rocq proofs, extending separation-logic refinement types to traits and iterators.
+	Effectful Equality Saturation
+	Effectful E-Graphs / eggcc (OOPSLA 2026); EggMind / EqSatL (2026)
+	Extends Datalog-backed equality saturation (egglog) from pure expressions to stateful, side-effecting compiler IRs while slashing peak e-graph RAM by 69%.
+	Key Synthesis from Recent Literature
+* Beyond Stacked Borrows and Syntactic Lifetimes: Tree Borrows (Villani, Hostert, Dreyer, and Jung, PLDI 2025) replaces Stacked Borrows with a tree-structured aliasing model validating real-world two-phase borrows and unsafe pointer patterns. Concurrently, 2026 formalizations recast rustc's next-generation borrow checker Polonius as lazy forward abstract interpretation over stacked Aliasing-XOR-Mutability (AXM), while Place Capability Graphs (PCGs) model fine-grained field borrows for downstream verifiers.
+* Modalities Without Annotation Soup: In Mode Crossing (ICFP 2026), the OxCaml team demonstrates how modal type axes can automatically strengthen a value's mode based on its concrete type structure, eliminating redundant trait/modality bounds. Meanwhile, Lazy Linearity (POPL 2026) explores ergonomics for delayed linear consumption.
+* Solving the Linear + Effect Handler Soundness Trap: Standard multi-shot algebraic effect handlers break ownership because resuming a captured delimited continuation twice duplicates unique heap pointers on the suspended stack. Affect: An Affine Type and Effect System (van Rooij and Krebbers, POPL 2025; see the POPL 2025 talk on Affect's affine type and effect system) solves this by tracking continuation linearity alongside capability-based effects.
+* Verification & Semantics Tooling: Charon and Aeneas exploit borrow checking to extract imperative MIR into Low-Level Borrow Calculus (LLBC) and pure Lean 4 functions without re-proving memory safety, complemented by KMIR (executable K-framework semantics of Stable MIR) and Soteria Rust symbolic execution. Adjacent advances include ChopChop (POPL 2026) for semantic constraints on LLM code generation, Proofs Promptly (ICFP 2026), Roulette (PLDI 2025) for exact discrete probabilistic inference, RapunSL (POPL 2026) for quantum separation logic, and Choreographic Programming (PLDI 2026).
+2. Core Language Overview & How Vesper Improves on Rust
+Rust's ownership system is affine (at-most-once), not linear (exactly-once): because mem::forget is safe and Drop::drop(&mut self) runs synchronously without returning errors or suspending, Rust cannot statically enforce that a database transaction is committed, an io_uring buffer is harvested, or an async socket is flushed before scope exit.
+Three Pillars of Vesper
+1. True linear Obligations (!Destruct Done Right):
+Values default to Rust-like affine semantics (implicit scope-exit cleanup), while types marked linear cannot be implicitly dropped or forgotten. Every control-flow path—including early error propagation—must consume a linear value via explicit destructuring or a consuming transition (tx.commit() or tx.abort()). Cleanup becomes an ordinary consuming function that can perform I/O effects and return errors, eliminating the "Async Drop" problem. Using OxCaml-style mode crossing, generic wrappers (Option[T], Slice[T]) automatically inherit linear status only when instantiated with a linear payload.
+2. One-Shot Lexical Effects Replace async, Pin, and Colored APIs:
+Vesper unifies async suspension, structured concurrency, checked fallibility (Fail), and arena allocation as lexical effect capabilities (eff). Because handlers crossing linear or inout frames are restricted to one-shot resumptions, suspended stack frames never duplicate unique pointers—requiring zero Pin, zero Future state-machine polling boilerplate, and enabling effect-polymorphic higher-order combinators (items.map(f)).
+3. Second-Class Place Projections (in, inout, sink) Eliminate 'a Soup:
+Synthesizing Hylo's Mutable Value Semantics with Place Capability Graphs, borrows are second-class parameter modes rather than first-class lifetime-parameterized references. Functions declare disjoint field projections (inout broker.{index, metrics}), allowing callers to retain a shared in view of broker.config while mutating broker.index across helper calls with zero lifetime parameters.
+Vesper by Example
+// A `linear` type cannot go out of scope unconsumed; no implicit Drop or forget() exists.
+linear struct WriteTxn {
+    wal_slot: u64,
+    dirty_pages: BufferPoolSlice,
+}
+
+
+impl WriteTxn {
+    // Consumes `sink self` (ownership transfer), performing lexical `Storage` and `Fail` effects.
+    // Solves Rust's "Async Drop" naturally: cleanup is an explicit effectful consumption!
+    fn commit(sink self) -> CommitReceipt eff [Storage, Fail[IoError]] {
+        let WriteTxn { wal_slot, dirty_pages } = self; // Linear destructuring discharges obligation
+        Storage::flush_wal(wal_slot, in dirty_pages)?;
+        Storage::release_slice(sink dirty_pages);
+        CommitReceipt { wal_slot }
+    }
+
+
+    fn abort(sink self) eff [Storage] {
+        let WriteTxn { wal_slot, dirty_pages } = self;
+        Storage::discard_wal(wal_slot);
+        Storage::release_slice(sink dirty_pages);
+    }
+}
+
+
+// Disjoint place projection: mutates ONLY `broker.index` and `broker.metrics`,
+// leaving `broker.config` freely readable by the caller without `'a` lifetime annotations.
+fn append_batch(
+    inout broker.{index, metrics}: Broker,
+    in config: BrokerConfig,
+    sink batch: RecordBatch,
+) -> CommitReceipt eff [Storage, Fail[IoError]] {
+    let tx: WriteTxn = Storage::begin_txn(config.max_batch_bytes);
+
+
+    // If validation fails early, the compiler REJECTS returning via `?` unless `tx` is consumed!
+    match validate_crc(in batch) {
+        Ok(()) => {
+            broker.index.insert_in_place(sink batch);
+            broker.metrics.batches_written += 1;
+            tx.commit() // `tx` linearly consumed on the happy path
+        }
+        Err(err) => {
+            Storage::recycle_batch(sink batch);
+            tx.abort(); // `tx` linearly consumed on the error path
+            Fail::raise(err)
+        }
+    }
+}
+3. Formal Surface Grammar (LL(2) EBNF)
+Vesper's surface syntax is engineered for deterministic LL(2) parsing into lossless rowan Red-Green Concrete Syntax Trees:
+
+
+   1. Turbofish-Free Square-Bracket Generics: Type parameters and type arguments use [...] rather than <...>, while lexical rules separate UpperIdent (types, effects, variants) from LowerIdent (values, fields, lexical capability labels, effect row variables). Thus foo[WriteTxn](x) (generic instantiation call) vs. arr[idx](x) (slice index returning a closure) resolves in LL(2) without ::<T>.
+   2. Disjoint Place Projection Trees: Parameters carry passing modes (in, inout, sink, defaulting to in) and field-tree selectors (inout broker.{index, metrics}).
+   3. Resumption-Moded Effects: Effects declare whether handlers may abort (effect Fail[E], binding affine continuations) or must resume (linear effect Storage, binding linear continuations).
+
+
+(* ==================== 1. MODULE & TOP-LEVEL ITEMS ==================== *)
+Module        ::= Item* ;
+Item          ::= StructDecl
+                | EnumDecl
+                | EffectDecl
+                | FnDecl
+                | ImplDecl ;
+
+
+Mode          ::= 'copy' | 'affine' | 'linear' ;     (* default nominal floor: 'affine' *)
+
+
+TypeParams    ::= '[' TypeParam ( ',' TypeParam )* ','? ']' ;
+TypeParam     ::= UpperIdent ( ':' 'mod' Mode )?     (* modal kind bound, e.g. T: mod copy *)
+                | LowerIdent ':' 'eff' ;             (* effect row variable *)
+
+
+(* ==================== 2. DATA & EFFECT DECLARATIONS ================== *)
+StructDecl    ::= Mode? 'struct' UpperIdent TypeParams? '{' FieldDeclList? '}' ;
+FieldDeclList ::= FieldDecl ( ',' FieldDecl )* ','? ;
+FieldDecl     ::= LowerIdent ':' Type ( '@@' Mode )? ; (* optional field modality override *)
+
+
+EnumDecl      ::= Mode? 'enum' UpperIdent TypeParams? '{' VariantList? '}' ;
+VariantList   ::= Variant ( ',' Variant )* ','? ;
+Variant       ::= UpperIdent ( '(' TypeList? ')' | '{' FieldDeclList? '}' )? ;
+
+
+(* 'linear effect' requires handlers to resume continuations exactly once;
+   plain 'effect' permits handlers to resume at most once (abortable). *)
+EffectDecl    ::= 'linear'? 'effect' UpperIdent TypeParams? '{' EffectOp* '}' ;
+EffectOp      ::= 'fn' LowerIdent '(' ParamList? ')' ( '->' Type )? ';' ;
+
+
+ImplDecl      ::= 'impl' TypeParams? Type '{' FnDecl* '}' ;
+
+
+(* ==================== 3. FUNCTIONS & PLACE PROJECTIONS =============== *)
+FnDecl        ::= 'fn' LowerIdent TypeParams? '(' ParamList? ')'
+                  ( '->' Type )? EffClause? Block ;
+
+
+ParamList     ::= Param ( ',' Param )* ','? ;
+Param         ::= PassMode? 'self' ( '.' PlaceTree )?
+                | PassMode? LowerIdent ( '.' PlaceTree )? ( ':' Type )? ;
+
+
+PassMode      ::= 'in' | 'inout' | 'sink' ;          (* omitted PassMode defaults to 'in' *)
+
+
+(* Disjoint field projection tree: e.g. broker.{index, metrics.counters} *)
+PlaceTree     ::= LowerIdent ( '.' PlaceTree )?
+                | '{' PlaceTree ( ',' PlaceTree )* ','? '}' ;
+
+
+(* ==================== 4. TYPES & LEXICAL EFFECT ROWS ================= *)
+Type          ::= FnType | BaseType ;
+FnType        ::= 'fn' ( '@' Mode )? '(' ParamTypeList? ')' ( '->' Type )? EffClause? ;
+ParamTypeList ::= ParamType ( ',' ParamType )* ','? ;
+ParamType     ::= PassMode? Type ;
+
+
+BaseType      ::= PrimType
+                | '(' TypeList? ')'
+                | UpperIdent TypeArgs? ;
+
+
+TypeArgs      ::= '[' TypeArg ( ',' TypeArg )* ','? ']' ;
+TypeArg       ::= Type | EffRow ;
+TypeList      ::= Type ( ',' Type )* ','? ;
+PrimType      ::= 'u8' | 'u32' | 'u64' | 'i64' | 'f64' | 'bool' | 'Unit' | 'Never' ;
+
+
+EffClause     ::= 'eff' '[' EffRow? ']' ;
+EffRow        ::= EffInst ( ',' EffInst )* ( '|' LowerIdent )?
+                | LowerIdent ;
+EffInst       ::= ( LowerIdent ':' )? UpperIdent TypeArgs? ; (* optional lexical cap label *)
+
+
+(* ==================== 5. STATEMENTS, EXPRESSIONS & HANDLERS ========== *)
+Block         ::= '{' Stmt* Expr? '}' ;
+Stmt          ::= LetStmt | Expr ';' ;
+LetStmt       ::= 'let' Pat ( ':' Type )? '=' Expr ';' ;
+
+
+Expr          ::= HandleExpr
+                | MatchExpr
+                | IfExpr
+                | ClosureExpr
+                | AssignExpr ;
+
+
+(* One-shot lexical handler with optional linear/affine state threading *)
+HandleExpr    ::= 'handle' ( LowerIdent ':' )? UpperIdent TypeArgs?
+                  ( 'state' Pat '=' Expr )?
+                  'in' Block
+                  'with' '{' ReturnClause ','? OpClause* '}' ;
+
+
+ReturnClause  ::= 'return' Pat '=>' Expr ;
+OpClause      ::= LowerIdent '(' PatList? ')' '=>' Expr ','? ;
+
+
+MatchExpr     ::= 'match' Expr '{' ( Pat '=>' Expr ','? )* '}' ;
+IfExpr        ::= 'if' Expr Block ( 'else' ( IfExpr | Block ) )? ;
+ClosureExpr   ::= '|' ParamList? '|' ( '@' Mode )? ( '->' Type )? EffClause? Expr ;
+
+
+AssignExpr    ::= BinaryExpr ( ( '=' | '+=' | '-=' ) BinaryExpr )? ;
+BinaryExpr    ::= PostfixExpr ( BinOp PostfixExpr )* ;
+
+
+PostfixExpr   ::= PrimaryExpr PostfixOp* ;
+PostfixOp     ::= '(' ArgList? ')'                   (* value/effect call *)
+                | '[' TypeList ']' '(' ArgList? ')'  (* LL(2) generic call: UpperIdent/Prim *)
+                | '[' Expr ']'                       (* LL(2) slice index: LowerIdent/Lit *)
+                | '.' LowerIdent                     (* field access / method receiver *)
+                | '?' ;                              (* desugars to Fail::raise on Err *)
+
+
+ArgList       ::= Arg ( ',' Arg )* ','? ;
+Arg           ::= PassMode? Expr ;
+
+
+PrimaryExpr   ::= Literal
+                | LowerIdent
+                | UpperIdent ( '::' LowerIdent | '{' FieldInitList? '}' )?
+                | '(' ExprList? ')'
+                | Block ;
+
+
+FieldInitList ::= FieldInit ( ',' FieldInit )* ','? ;
+FieldInit     ::= FieldNameOrShorthand ;
+FieldNameOrShorthand ::= LowerIdent ( ':' Expr )? ;
+ExprList      ::= Expr ( ',' Expr )* ','? ;
+
+
+(* ==================== 6. PATTERNS & LEXICAL TOKENS =================== *)
+Pat           ::= '_'
+                | LowerIdent
+                | UpperIdent ( '(' PatList? ')' | '{' FieldPatList? '}' )?
+                | '(' PatList? ')'
+                | Literal ;
+PatList       ::= Pat ( ',' Pat )* ','? ;
+FieldPatList  ::= FieldPat ( ',' FieldPat )* ','? ;
+FieldPat      ::= LowerIdent ( ':' Pat )? ;
+
+
+UpperIdent    ::= /[A-Z][A-Za-z0-9_]*/ ;
+LowerIdent    ::= /[a-z_][A-Za-z0-9_]*/ ;
+4. Core Calculus (λ_Vesper) & Modal Kind Lattice
+Surface programs elaborate into λ_Vesper, where all effect invocations target an explicit lexical capability l, methods desugar into functions taking in/inout/sink place projections, and ? desugars into match + Fail::raise.
+The Substructural Mode Lattice
+Modes m ∈ {copy, affine, linear} form a bounded total lattice ordered by decreasing structural permission (copy ⊑ affine ⊑ linear):
+
+
+Mode (m)
+	Allowed Dynamic Uses U(m)
+	Weakening (Implicit Drop)
+	Contraction (Bitwise Alias/Copy)
+	Composite Join (m ⊔ affine)
+	copy (⊥)
+	{0, 1, 2, ...} = N
+	Permitted
+	Permitted
+	affine
+	affine
+	{0, 1}
+	Permitted (runs sync cleanup)
+	Forbidden
+	affine
+	linear (⊤)
+	{1} (exact-once)
+	Forbidden (must unpack/consume)
+	Forbidden
+	linear
+
+
+Lattice join (⊔, maximum restriction) corresponds to intersection of permitted dynamic uses: U(m1 ⊔ m2) = U(m1) ∩ U(m2). Because {1} ⊂ {0, 1} ⊂ N, sub-moding is covariant along ⊑: a value available at mode m1 satisfies an expectation of m2 whenever m1 ⊑ m2 (e.g., passing a copy scalar or affine buffer to a linear consumer), whereas relaxing linear down to affine is unsound and forbidden unless justified by concrete modal kinding.
+OxCaml-Style Modal Kinds & Mode Crossing
+Every type τ carries a modal kind bound Δ ⊢ τ : mod m0, computing the strongest (lowest in ⊑) mode to which τ can safely strengthen based on its declared nominal floor m_decl and component types:
+
+
+[K-Prim]
+  scalar(τ)
+  ──────────────────────
+  Δ ⊢ τ : mod copy
+
+
+[K-Var]
+  (α : mod m) ∈ Δ
+  ──────────────────────
+  Δ ⊢ α : mod m
+
+
+[K-Adt]
+  decl(T[ᾱ]) = (m_decl, { f_i : τ_i @@ m_i })    ∀i, Δ ⊢ τ_i[σ̄/ᾱ] : mod k_i    ∀i, k_i ⊑ m_i (field modality well-formedness)
+  ────────────────────────────────────────────────────────────────────────────
+  Δ ⊢ T[σ̄] : mod (m_decl ⊔ ⊔_i (k_i ⊓ m_i))
+
+
+[K-Fn]
+  m ∈ {copy, affine, linear}
+  ───────────────────────────
+  Δ ⊢ (τ1 -[ε]@m-> τ2) : mod m
+
+Field modality well-formedness (required by [K-Adt]): For every declared field f_i : τ_i @@ m_i, its component kind under the declaration's generic bounds must satisfy k_i ⊑ m_i. An override must never relax a component's ownership obligations. Therefore @@ copy accepts only components known to be copy, and @@ affine accepts only components known to be at most affine. Unannotated fields default to linear and satisfy this premise automatically. A copy wrapper containing a linear Ticket @@ copy is rejected; it cannot hide or discard the Ticket's obligation. This restriction preserves Theorem 2 (Total Linear Exhaustion).
+
+
+Unannotated ADT fields default to m_i = linear (identity for meet: k_i ⊓ linear = k_i), whereas an explicit override like @@ copy caps that field's mode contribution. For copy enum Option[T] { None, Some(T) }, m_decl = copy, so [K-Adt] computes copy ⊔ k_T = k_T:
+
+
+   * Option[u64] has kind mod copy (freely copied and dropped).
+   * Option[BufferPoolSlice] has kind mod affine (droppable, non-copyable).
+   * Option[WriteTxn] has kind mod linear (cannot go out of scope without matching Some(tx)).
+5. Core Typing Judgments: Modal Linearity & Place Projections
+Typing judgments have the shape:
+
+
+Δ; Σ; Γ ⊢ e : τ @ m | ε
+
+   * Δ (Kind & Row Context): Type variable modal bounds (α : mod m) and effect row variables (ρ : Row).
+   * Σ (Lexical Capability Context): Scoped handler capabilities l : Cap_q[E], where q ∈ {affine, linear} is the effect's resumption guarantee.
+   * Γ (Substructural Place Context): Owned bindings x :_m^own τ and second-class borrowed projections x :_m^μ τ (μ ∈ {shr, mut}).
+   * ε (Lexical Effect Row): {l_1 : E_1^(q_1), ..., l_n : E_n^(q_n) | ρ}. The row resumption guarantee res(ε) ∈ {affine, linear} is defined as the meet ⊓_i q_i, with res(∅) = linear.
+Discardability & Context Splitting (⊛)
+   1. Discardability (discard(Γ)): Unused bindings at AST leaves may be implicitly dropped iff every binding is at most affine (∀ (x :_m^μ τ) ∈ Γ, m ⊑ affine). Active linear values and active mut borrows cannot be discarded.
+   2. Context Split (Γ = Γ1 ⊛ Γ2): copy bindings contract into both sub-contexts; affine and linear owned bindings partition exclusively into either Γ1 or Γ2:
+
+
+∅ = ∅ ⊛ ∅
+
+
+Γ = Γ1 ⊛ Γ2
+────────────────────────────────────────────────────────────
+Γ, x :_copy^μ τ = (Γ1, x :_copy^μ τ) ⊛ (Γ2, x :_copy^μ τ)
+
+
+Γ = Γ1 ⊛ Γ2    m ∈ {affine, linear}
+────────────────────────────────────────────────────────────
+Γ, x :_m^own τ = (Γ1, x :_m^own τ) ⊛ Γ2     (and symmetrically into Γ2)
+Core Substructural & Mode-Crossing Rules
+[T-Var]
+  discard(Γ)
+  ────────────────────────────────────
+  Δ; Σ; Γ, x :_m^μ τ ⊢ x : τ @ m | ∅
+
+
+[T-SubMode]
+  Δ; Σ; Γ ⊢ e : τ @ m1 | ε    m1 ⊑ m2
+  ────────────────────────────────────
+  Δ; Σ; Γ ⊢ e : τ @ m2 | ε
+
+
+[T-Cross]
+  Δ; Σ; Γ ⊢ e : τ @ m | ε    Δ ⊢ τ : mod m0    m0 ⊑ m
+  ─────────────────────────────────────────────────────
+  Δ; Σ; Γ ⊢ e : τ @ m0 | ε
+
+
+[T-Abs]
+  Δ; Σ; Γ, x :_(m_x)^own τ1 ⊢ e : τ2 @ m2 | ε
+  ∀ (z :_(m_z)^own τ_z) ∈ Γ,  m_z ⊑ m_fn      (no shr/mut borrows in Γ)
+  ──────────────────────────────────────────────────────────────────────
+  Δ; Σ; Γ ⊢ (λx : τ1. e) : (τ1 -[ε]@m_fn-> τ2) @ m_fn | ∅
+
+   * [T-Cross] enforces OxCaml-style mode crossing: even when generic code yields a value at linear mode, if its concrete type τ satisfies Δ ⊢ τ : mod copy, it immediately strengthens down to copy.
+   * [T-Abs] prevents second-class borrows (shr/mut) from escaping into closures and ensures any closure capturing a linear variable is itself linear (m_fn = linear, invoked exactly once).
+Sequencing, Branching & The Resumption Frame Condition
+[T-Let]
+  Δ; Σ; Γ1 ⊢ e1 : τ1 @ m1 | ε1
+  Δ; Σ; Γ2, x :_m1^own τ1 ⊢ e2 : τ2 @ m2 | ε2
+  ∀ (z :_(m_z)^μ τ_z) ∈ Γ2,  m_z ⊑ res(ε1)          <-- Resumption Frame Condition
+  ─────────────────────────────────────────────────────────────────────────────────
+  Δ; Σ; Γ1 ⊛ Γ2 ⊢ (let x = e1 in e2) : τ2 @ m2 | ε1 ∪ ε2
+
+
+[T-Match]
+  Δ; Σ; Γ0 ⊢ e0 : T[σ̄] @ m0 | ε0
+  ∀i,  Δ; Σ; Γ, x̄_ij :_(m0 ⊔ k_ij)^own τ_ij ⊢ e_i : τ @ m | ε
+  ─────────────────────────────────────────────────────────────────────────
+  Δ; Σ; Γ0 ⊛ Γ ⊢ (match e0 { C_i(x̄_i) => e_i }) : τ @ m | ε0 ∪ ε
+
+   * The Resumption Frame Condition (m_z ⊑ res(ε1) in [T-Let]):
+   * When e1 is pure or performs only linear effect operations (res(ε1) = linear), m_z ⊑ linear holds for all modes, allowing live linear obligations in Γ2 to survive across Storage suspensions.
+   * When e1 performs an abortable effect like Fail (res(ε1) = affine), m_z ⊑ affine rejects any live linear variable in Γ2 (linear ⊑ affine is false!). Thus linear obligations can never be silently dropped by an early ? unwind.
+   * Uniform Arm Consumption ([T-Match]): Every match arm receives the exact same residual environment Γ, guaranteeing that every linear binding is consumed along 100% of branches. Unpacking a linear struct transfers obligations to its fields, where scalar fields (u64) immediately strengthen back to copy via [T-Cross].
+Second-Class Disjoint Place Projections (in, inout, sink)
+Let p = x.π denote a field-tree projection on root variable x, with p_i ⊥ p_j denoting field-tree disjointness (x_i ≠ x_j or π_i ∩ π_j = ∅):
+
+
+[T-CallProj]
+  Δ; Σ; Γ_f ⊢ f : ((μ̄_i τ̄_i) -[ε]@m_f-> τ_ret) @ m_f | ∅
+  ∀ i ≠ j,  (p_i ⊥ p_j  ∨  μ_i = μ_j = in)
+  Γ_args supplies owned capability for each μ_i = sink (consuming p_i)
+  and reborrows ν_i >= μ_i for each μ_i ∈ {in, inout} (restoring p_i upon return)
+  ──────────────────────────────────────────────────────────────────────────────
+  Δ; Σ; Γ_f ⊛ Γ_args ⊢ f(μ̄_i p̄_i) : τ_ret @ linear | ε
+6. One-Shot Lexical Effects & Metatheoretic Soundness
+Effect Perform and Stateful Lexical Handler Rules
+[T-Perform]
+  (l : Cap_q[E]) ∈ Σ    (op : τ_arg -> τ_res) ∈ E
+  Δ; Σ; Γ ⊢ e : τ_arg @ linear | ε
+  ───────────────────────────────────────────────────────────
+  Δ; Σ; Γ ⊢ perform l.op(e) : τ_res @ linear | ε ∪ {l : E^q}
+
+
+[T-Handle]
+  Δ; Σ; Γ_s ⊢ e_init : τ_s @ m_s | ε
+  Δ; (Σ, l : Cap_q[E]); Γ_body ⊢ e_body : τ_b @ m_b | {l : E^q} ∪ ε
+  ∀ (z :_(m_z)^μ τ_z) ∈ Γ_h,  m_z = copy
+  Δ; Σ; Γ_h, x :_(m_b)^own τ_b, s :_(m_s)^own τ_s ⊢ e_ret : τ_out @ m_out | ε
+  ∀ (op_i : τ_i -> σ_i) ∈ E:
+    Δ; Σ; Γ_h, y :_linear^own τ_i, s :_(m_s)^own τ_s,
+          k :_q^own ((σ_i, τ_s) -[ε]@q-> τ_out) ⊢ e_i : τ_out @ m_out | ε
+  ──────────────────────────────────────────────────────────────────────────────
+  Δ; Σ; Γ_s ⊛ Γ_body ⊛ Γ_h ⊢
+    (handle l : E^q state s = e_init in e_body with {
+       return(x, s) => e_ret,
+       op_i(y, s, k) => e_i
+     }) : τ_out @ m_out | ε
+
+Three invariants in [T-Handle] guarantee soundness without garbage collection or Pin:
+
+
+   1. Continuation Mode Matches q: Captured delimited continuations k carry mode q ∈ {affine, linear}—never copy!
+   * For effect Fail[Err] (q = affine), k is affine: raise(err, s, k) => Err(err) drops k cleanly via discard.
+   * For linear effect Storage (q = linear), k is linear: every handler clause must resume k once (either inline or by parking the linear fiber handle in an io_uring completion table).
+   2. Multi-Invocation Safety via Linear State Threading: Because e_body may invoke op_i multiple times in a loop, ambient variables Γ_h captured directly by clauses must be copy, while unique/linear resources (such as an io_uring submission ring) thread safely through the explicit state parameter s :_(m_s) τ_s.
+   3. Lexical Escape Prevention: The capability label l is scoped to e_body and discharged from ε; any closure capturing l carries l : E^q in its arrow type ([T-Abs]), preventing l from escaping its defining handle block.
+Worked Derivation: Catching an Unconsumed WriteTxn Across ?
+Consider why Vesper rejects an unguarded ? while a WriteTxn is live:
+
+
+let tx: WriteTxn = Storage::begin_txn(max_bytes); // q(Storage) = linear
+validate_crc(in batch)?;                          // performs Fail::raise; q(Fail) = affine
+tx.commit()
+
+   1. After let tx = ..., the environment holds tx :_linear^own WriteTxn.
+   2. Desugaring validate_crc(in batch)?; tx.commit() yields let _ = e_crc in tx.commit(), where e_crc has effect row ε1 = { l_fail : Fail[IoError]^affine }.
+   3. Context splitting (⊛) places tx :_linear^own WriteTxn into Γ2 because tx.commit() consumes it.
+   4. [T-Let] checks the Resumption Frame Condition m_tx ⊑ res(ε1), which evaluates to linear ⊑ affine — FALSE. Typechecking fails with an actionable error explaining that tx would leak if validate_crc raises Fail.
+   5. By contrast, inside WriteTxn::commit, calling Storage::flush_wal(...) while dirty_pages is live produces res(ε1) = linear, satisfying m ⊑ linear.
+Metatheoretic Guarantees
+Modeling types via step-indexed separation logic (Iris style) yields three core guarantees:
+
+
+   * Theorem 1 (Type & Mode Preservation): Well-typed closed configurations step without stuck states while preserving types, lexical effect rows, and disjoint place capabilities.
+   * Theorem 2 (Total Linear Exhaustion): In any closed program ∅; ∅; ∅ ⊢ e : τ @ copy | ∅ that terminates at value v, every dynamically constructed linear struct instance is unpacked by [T-Match] exactly once—never leaked on an early error edge and never duplicated across a continuation.
+   * Corollary (Zero-Pin Stack Relocation): Because every continuation k has mode q >= affine (at-most-once resumption) and second-class in/inout projections cannot be stored as first-class pointers inside suspended locals, suspended fiber stacks contain no self-referential &'a borrows across yield points and can be relocated or pooled without Pin.
+7. 5-Stage Rust Implementation Architecture
+Implementing Vesper in Rust bypasses LLVM compile-time bottlenecks during development by lowering into Cranelift (cranelift_codegen) while supporting direct verification extraction to Lean 4:
+
+
+   1. Resilient Lexing & Lossless CST (logos + rowan + salsa + ariadne):
+Zero-copy SIMD-accelerated lexing (logos) feeds an LL(2) recursive-descent parser constructing a lossless rowan Red-Green CST, memoized inside salsa incremental queries for sub-millisecond LSP diagnostics.
+   2. Bidirectional Mode & Effect Inference:
+Lowers CST to HIR and runs bidirectional inference with OxCaml-style mode crossing ([T-Cross]), lexical effect row unification (eff [E1, E2 | r]), and resumption frame verification ([T-Let]).
+   3. Place Capability Graph (PCG) Linearity & Borrow Checker (petgraph / polonius-engine):
+Lowers HIR to basic-block Place IR and builds a Place Capability Graph over field trees (broker.index vs. broker.config) to verify:
+      * Exclusivity: No active inout place overlaps any active in or inout place.
+      * Linear Exhaustion: Every linear binding reaches an explicit destructuring or sink call on 100% of CFG paths (including Fail unwind edges).
+      4. Effectful Equality Saturation (egglog):
+Feeds Place IR into egglog using effect-token threading (Effectful E-Graphs, OOPSLA 2026) to perform evidence-passing specialization: statically known tail-resumptive handlers (like Fail or arena allocation) fuse directly into inline branches or pointer bumps with zero closure/coroutine allocation, while suspending linear handlers (io_uring) lower to lightweight segmented stack switches (wasmtime-fiber style).
+      5. Dual Backend (cranelift-codegen + Lean 4 Verification Extractor):
+         * Native Codegen & JIT: Emits Cranelift SSA IR (CLIF) to cranelift-codegen / cranelift-jit / cranelift-object for fast x86_64 and AArch64 machine code generation.
+         * Lean 4 Proof Extraction: Because Vesper replaces unrestricted &'a mut pointer aliasing with second-class inout and sink value projections, a compact backend pass translates Vesper functions 1-to-1 into pure state-passing Lean 4 definitions (achieving Aeneas-grade verification without needing Charon lifetime reconstruction).

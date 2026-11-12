@@ -1,0 +1,8 @@
+[package]
+name = "vesper-alloc"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Strata region allocator core (design section 15)"
+publish = false
+
+[dependencies]

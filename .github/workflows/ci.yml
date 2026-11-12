@@ -1,0 +1,30 @@
+name: CI
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Lean toolchain manager
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o /tmp/elan-init.sh
+          sh /tmp/elan-init.sh -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - run: lean --version
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --locked --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
+        env:
+          VESPER_LEAN: lean
+      - run: lean lean/Foundations.lean
+      - run: lean lean/RuntimeFrames.lean
+      - run: lean lean/SpecificationCounterexample.lean
+      - name: Validate AArch64 executables
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user binutils-aarch64-linux-gnu
+          scripts/test-aarch64.sh
