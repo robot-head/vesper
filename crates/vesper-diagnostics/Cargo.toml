@@ -1,0 +1,12 @@
+[package]
+name = "vesper-diagnostics"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Bounded shared compiler diagnostic rendering for terminal and LSP"
+
+[dependencies]
+vesper-core = { path = "../vesper-core" }
+vesper-span = { path = "../vesper-span" }
+serde_json = "1"
+ariadne = "0.5"
