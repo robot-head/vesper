@@ -22,8 +22,12 @@ spans, strict duplicate-key/framing decoding and UTF-8 byte anchors. It compares
 successful preview artifacts/maps/audits with a separate actual `forge check`
 invocation. A real on-disk program deliberately differs from the current open
 unsaved program; responses must use the latter and leave the file untouched.
-The harness invokes normal `check` and `run` separately on positive expanded
-artifacts to obtain42. Preview itself never invokes execution. Unsupported WASI
+The harness invokes normal `check` and `run` separately on the three positive
+hygiene/repeated-input expanded artifacts to obtain42. The same-header authority
+fixture deliberately retains its declared `Fail[ArithOverflow]` row; its expanded
+program passes ordinary checking but a separate normal execution attempt must
+refuse with `entry must handle all effects`. A checked preview grants no entry
+execution capability. Preview itself never invokes execution. Unsupported WASI
 source annotation refuses rather than loading a referenced component.
 
 The native Linux, macOS and Windows workflow runs actual query/provider/stdio
@@ -33,8 +37,23 @@ fake executable, manufactured checked artifact, ignored test or timing claim is
 used. The wrapper accepts `VESPER_MACRO_PREVIEW_BINARY` for a read-only actual
 integration executable; ordinary Cargo tests use the actual Cargo binary.
 
-Validation so far: standalone Rust test compilation and strict Clippy against
-the existing serde_json/blake3 artifacts passed; rustfmt, Python compilation,
-Bash syntax, framing UTF-8 roundtrip, duplicate-key guard and whitespace checks
-passed. Actual runtime acceptance is pending the real #155 integrated executable.
-These static checks are not reported as executable macro-preview acceptance.
+Validation against the actual #155 integrated executable at
+`/workspace/vesper/target/parallel-next/debug/vesper` passed:
+
+- Five independent Rust stdio tests, zero failures and zero ignored tests.
+- Twenty actual commands: eight stdio sessions,70 JSON-RPC requests, three
+  separate normal expanded-source runs to42 and one declared-unhandled-entry
+  execution refusal. All four accepted cases also matched separate actual
+  `forge check` artifacts, hashes, provenance and audits exactly.
+- The3197-byte function-inventory input independently returned a real Forge
+  structured resource refusal, without violating the editor store byte cap.
+- Standalone Rust test compilation and strict Clippy against existing
+  serde_json/blake3 artifacts, rustfmt, Python compilation, Bash syntax, framing
+  UTF-8 roundtrip, duplicate-key guard and whitespace checks passed.
+
+The existing envelope parser rejects whole-request `params:null` before routing
+with null-id `-32600`; nested `version:null` remains a routed `-32602` error.
+Acceptance preserves both existing protocol and strict preview parameter rules.
+The root coordinator runs integrated Cargo tests and workspace checks separately.
+Native macOS/Windows execution remains the responsibility of the published
+three-platform workflow; local Linux results do not claim those hosted results.

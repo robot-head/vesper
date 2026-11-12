@@ -144,11 +144,14 @@ class Harness:
     def __init__(self, binary, work):
         self.binary, self.work = str(binary), work
         self.commands, self.sessions, self.runs, self.requests = 0, 0, 0, 0
+        self.unhandled_refusals = 0
 
-    def execute(self, *args, input_data=None):
+    def execute(self, *args, input_data=None, expected_error=None):
         output = subprocess.run([self.binary, *(str(a) for a in args)], input=input_data, capture_output=True, timeout=60, check=False)
-        assert output.returncode == 0, (args, output.returncode, output.stdout.decode(errors="replace"), output.stderr.decode(errors="replace"))
+        assert output.returncode == (1 if expected_error else 0), (args, output.returncode, output.stdout.decode(errors="replace"), output.stderr.decode(errors="replace"))
         assert len(output.stdout) <= 16 * MAX_FRAME and len(output.stderr) <= MAX_FRAME
+        if expected_error:
+            assert output.stdout == b"" and expected_error in output.stderr.decode("utf-8"), output
         self.commands += 1
         return output.stdout
 
@@ -171,6 +174,17 @@ class Harness:
         assert self.execute("run", path).decode("utf-8").strip() == "42"
         assert path.read_bytes() == data
         self.runs += 1
+
+    def explicit_unhandled_refusal(self, expanded):
+        # This authority-drift fixture deliberately preserves a declared Fail row.
+        # A checked preview is not an entry-point execution capability.
+        path = self.work / "unhandled-entry.ves"
+        data = expanded.encode("utf-8")
+        path.write_bytes(data)
+        assert load(self.execute("check", path, "--json")) == []
+        self.execute("run", path, expected_error="entry must handle all effects")
+        assert path.read_bytes() == data
+        self.unhandled_refusals += 1
 
     def compare_forge(self, preview_value, source):
         path = self.work / f"comparison-{self.commands}.ves"
@@ -208,7 +222,10 @@ def run(binary, work):
             copies = sorted({(m["expanded"]["start"], m["expanded"]["end"]) for m in value["source_map"]
                              if m["original"] == {"start": start, "end": start + 1} and m["expanded"]["start"] < m["expanded"]["end"]})
             assert len(copies) >= 2 and all(a[1] <= b[0] for a, b in zip(copies, copies[1:])), "repeated input lost distinct expanded spans"
-        harness.explicit_run(expanded)  # preview itself never executes this program.
+        if name == "helper_pure":
+            harness.explicit_unhandled_refusal(expanded)
+        else:
+            harness.explicit_run(expanded)  # preview itself never executes this program.
 
     pure, fallible, linear = fixture("helper_pure"), fixture("helper_fallible"), fixture("linear_duplicate")
     assert pure.split("{")[0] == fallible.split("{")[0], "authority drift must preserve the helper header"
@@ -245,16 +262,21 @@ def run(binary, work):
     error(replies, 8, -32602)
     accepted(result(replies, 9), uri, 1, pure)
 
-    invalid = [{}, None, [], {"textDocument": {}}, {"textDocument": {"uri": uri, "version": None}},
+    invalid = [{}, [], {"textDocument": {}}, {"textDocument": {"uri": uri, "version": None}},
                *({"textDocument": {"uri": uri, "version": v}} for v in [True, "1", 1.5, 2147483648, -2147483649])]
     for field in ["source", "policy", "graph", "world", "approved", "package"]:
         invalid += [{"textDocument": {"uri": uri}, field: True}, {"textDocument": {"uri": uri, field: True}}]
     messages = [open_document(uri, 1, repeated)]
     messages += [request(10 + i, "vesper/macroPreview", value) for i, value in enumerate(invalid)]
+    messages.append(request(89, "vesper/macroPreview", None))
     messages.append(preview(90, uri))
     replies = harness.session(messages)
     for i in range(len(invalid)):
         error(replies, 10 + i, -32602)
+    # The existing envelope parser rejects null params before request routing.
+    malformed = [r for r in replies if r.get("id") is None and "error" in r]
+    assert len(malformed) == 1 and malformed[0]["error"]["code"] == -32600
+    assert not any(r.get("id") == 89 for r in replies)
     accepted(result(replies, 90), uri, 1, repeated)
 
     malformed = fixture("malformed")
@@ -279,6 +301,7 @@ def run(binary, work):
     assert existing.read_bytes() == b"fn main()->u64{99}\n"
     print(json.dumps({"status": "passed", "commands": harness.commands, "stdio_sessions": harness.sessions,
                       "jsonrpc_requests": harness.requests, "explicit_normal_source_runs": harness.runs,
+                      "declared_unhandled_entry_refusals": harness.unhandled_refusals,
                       "scope": "actual pure Tier1 expanded-source preview; ordinary semantics remain original-source"}))
 
 
