@@ -145,6 +145,10 @@ fn budget_exits_retain_every_owner_and_resume_identically() {
         }
     };
     assert!(exits > 4);
+    let paused = Session::record(&program, scenario(&scenario_json()))
+        .unwrap()
+        .run(0);
+    assert!(matches!(paused.finish(0), RunResult::Budget(_)));
     assert_eq!(report, whole);
 }
 
@@ -442,6 +446,15 @@ fn altered_journals_and_trace_data_are_explicit_mismatches() {
         error,
         SessionError::OutputMismatch {
             task: "alpha".into()
+        }
+    );
+    let mut forged = report.recording.clone();
+    forged.outputs.insert("phantom".into(), json!(0));
+    let (_, error) = interrupted(replay(&program, &scenario_json(), forged).unwrap());
+    assert_eq!(
+        error,
+        SessionError::OutputMismatch {
+            task: "phantom".into()
         }
     );
 }

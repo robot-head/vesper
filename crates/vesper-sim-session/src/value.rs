@@ -242,12 +242,12 @@ fn encode_at(world: &World, ty: &Type, value: &Value, depth: usize) -> Result<Js
                         encode_at(world, &substitute(&field.ty, &vars), v, depth + 1)?,
                     ));
                 }
-                let payload = if variant.named {
+                let payload = if encoded.is_empty() {
+                    None
+                } else if variant.named {
                     Some(Json::Object(encoded.into_iter().collect::<Map<_, _>>()))
                 } else if encoded.len() == 1 {
                     encoded.pop().map(|(_, v)| v)
-                } else if encoded.is_empty() {
-                    None
                 } else {
                     Some(Json::Array(encoded.into_iter().map(|(_, v)| v).collect()))
                 };
@@ -273,7 +273,7 @@ mod tests {
 
     fn world() -> World {
         let parsed = vesper::parser::parse(
-            "copy struct Point { x: i64, y: i64 } copy enum Shape { Dot, Line(Point, Point), Named { label: String } } linear effect E { fn f(p: Option[(u8, Shape)]) -> bool; }",
+            "copy struct Point { x: i64, y: i64 } copy enum Shape { Dot, Empty {}, Line(Point, Point), Named { label: String } } linear effect E { fn f(p: Option[(u8, Shape)]) -> bool; }",
         );
         assert!(parsed.diagnostics.is_empty());
         let checked = vesper::check::check(&parsed.module);
@@ -288,6 +288,7 @@ mod tests {
         for json in [
             json!("None"),
             json!({"Some": [255, "Dot"]}),
+            json!({"Some": [7, "Empty"]}),
             json!({"Some": [1, {"Line": [{"x": -1, "y": 2}, {"x": 3, "y": 4}]}]}),
             json!({"Some": [0, {"Named": {"label": "a"}}]}),
         ] {

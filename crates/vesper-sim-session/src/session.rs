@@ -267,8 +267,12 @@ impl std::fmt::Debug for RunResult<'_> {
     }
 }
 impl<'w> RunResult<'w> {
-    /// Drive budget exits to completion; any other result is returned.
+    /// Drive budget exits to completion; any other result is returned. A zero
+    /// budget makes no progress, so the result is returned unchanged.
     pub fn finish(self, steps_per_call: u64) -> Self {
+        if steps_per_call == 0 {
+            return self;
+        }
         let mut result = self;
         while let Self::Budget(session) = result {
             result = session.run(steps_per_call);
@@ -561,6 +565,13 @@ impl<'w> Session<'w> {
                 .iter()
                 .find(|(k, v)| recording.outputs.get(*k) != Some(v))
                 .map(|(k, _)| k.clone())
+                .or_else(|| {
+                    recording
+                        .outputs
+                        .keys()
+                        .find(|k| !outputs.contains_key(*k))
+                        .cloned()
+                })
             {
                 return self.interrupt(SessionError::OutputMismatch { task });
             }
