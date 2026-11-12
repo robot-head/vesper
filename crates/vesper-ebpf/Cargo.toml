@@ -1,0 +1,18 @@
+[package]
+name = "vesper-ebpf"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper eBPF: instruction codec, pre-flight abstract verifier, BPF ELF emission, userspace interpreter and the XDP SYN-flood mitigator (design section 27)"
+publish = false
+
+[dependencies]
+object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }
+
+# The one gated unsafe module (`kernel`) issues the bpf() syscall on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.177"
+
+[dev-dependencies]
+# An independent loader-side parser (the aya project's object reader) checks
+# that emitted objects are what aya-style loaders accept.
+aya-obj = "=0.3.0"
