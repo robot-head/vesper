@@ -626,8 +626,13 @@ impl SourceParser<'_> {
         self.functions
             .try_reserve(1)
             .map_err(|_| self.fail(ErrorKind::Allocation))?;
+        self.budget.work(mul(
+            add(self.parameter_names.len(), 1, Resource::Work)?,
+            size_of::<Vec<Span>>(),
+            Resource::Work,
+        )?)?;
         self.parameter_names
-            .try_reserve(1)
+            .try_reserve_exact(1)
             .map_err(|_| self.fail(ErrorKind::Allocation))?;
         self.parameter_names.push(parameter_names);
         self.functions.push(SourceFunction {
