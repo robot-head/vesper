@@ -1,0 +1,120 @@
+name: Explicit source expression macros
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/vesper-syntax/**'
+      - 'crates/vesper-core/**'
+      - 'crates/vesper-forge/**'
+      - 'crates/vesper-span/**'
+      - 'crates/vesper-diagnostics/**'
+      - 'crates/vesper-lsp/**'
+      - 'crates/vesper-doc/**'
+      - 'crates/vesper-loom-sandbox/**'
+      - 'crates/vesper-forge-runner/**'
+      - 'src/**'
+      - 'wit/forge-quote/**'
+      - 'tests/forge_cli.rs'
+      - 'tests/forge_authority.rs'
+      - 'tests/forge_lower.rs'
+      - 'tests/fixtures/source_macros/**'
+      - 'scripts/check-source-macros.py'
+      - 'scripts/test-source-macros.sh'
+      - '.github/workflows/source-macros.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/vesper-syntax/**'
+      - 'crates/vesper-core/**'
+      - 'crates/vesper-forge/**'
+      - 'crates/vesper-span/**'
+      - 'crates/vesper-diagnostics/**'
+      - 'crates/vesper-lsp/**'
+      - 'crates/vesper-doc/**'
+      - 'crates/vesper-loom-sandbox/**'
+      - 'crates/vesper-forge-runner/**'
+      - 'src/**'
+      - 'wit/forge-quote/**'
+      - 'tests/forge_cli.rs'
+      - 'tests/forge_authority.rs'
+      - 'tests/forge_lower.rs'
+      - 'tests/fixtures/source_macros/**'
+      - 'scripts/check-source-macros.py'
+      - 'scripts/test-source-macros.sh'
+      - '.github/workflows/source-macros.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: source-macros-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  native-tier1-source:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Assert default CLI graph does not require Wasmtime
+        run: >-
+          cargo tree --locked -p vesper --edges normal --prefix none |
+          python -c 'import sys; names={line.split()[0] for line in sys.stdin if line.strip()}; assert not names.intersection({"wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"})'
+      - name: Test real pure host quotations and actual source parser
+        run: cargo test --locked -p vesper-forge -p vesper-syntax --no-default-features --all-targets
+      - name: Test compiler authority, resolved lowering and actual CLI/stdio
+        run: >-
+          cargo test --locked -p vesper --lib --test forge_authority
+          --test forge_lower --test forge_cli --test lsp_cli --test recovery_cli
+      - name: Check strict source compiler and pure host Clippy
+        run: >-
+          cargo clippy --locked --all-targets --no-default-features
+          -p vesper -p vesper-forge -p vesper-syntax -p vesper-core
+          -p vesper-span -p vesper-diagnostics -- -D warnings
+      - name: Execute actual source expansion and checked normal artifacts
+        run: scripts/test-source-macros.sh
+
+  structured-component-foundation:
+    name: Separate structured WASI foundation (not source Tier2)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Test actual committed structured component and hostile wire controls
+        run: cargo test --locked -p vesper-loom-sandbox --test quotation_execution --test quotation_transport
+      - name: Test bounded raw records and fresh host cache imports
+        run: cargo test --locked -p vesper-forge-runner --test quote_record --test quote_cache
+      - name: Check structured runtime and runner Clippy
+        run: cargo clippy --locked -p vesper-loom-sandbox -p vesper-forge-runner --all-targets -- -D warnings

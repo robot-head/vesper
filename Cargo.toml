@@ -148,6 +148,7 @@ edition = "2024"
 [dependencies]
 blake3 = "1.8"
 vesper-core = { path = "crates/vesper-core" }
+vesper-forge = { path = "crates/vesper-forge", default-features = false }
 vesper-simd = { path = "crates/vesper-simd" }
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }

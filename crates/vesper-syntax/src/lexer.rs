@@ -144,6 +144,10 @@ pub enum TokenKind {
     Pipe,
     Error,
     Eof,
+    // Append only: existing token discriminants are stable. Batch parsing still
+    // rejects macro source and does not gain macro execution.
+    #[token("$")]
+    Dollar,
 }
 fn block_comment(lex: &mut logos::Lexer<TokenKind>) -> bool {
     let rest = lex.remainder();

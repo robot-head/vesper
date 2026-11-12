@@ -26,7 +26,9 @@ pub const TYPE: SyntaxKind = SyntaxKind(204);
 pub const BLOCK: SyntaxKind = SyntaxKind(205);
 pub const ERROR_NODE: SyntaxKind = SyntaxKind(206);
 pub const INCOMPLETE: SyntaxKind = SyntaxKind(207);
+mod macro_driver;
 mod recovery_driver;
+pub(crate) use macro_driver::{parse_source_header, parse_source_item};
 #[allow(
     unused_imports,
     reason = "consumed by separately integrated incremental module"
@@ -775,13 +777,11 @@ impl Parser<'_> {
             _ => None,
         }
     }
-    fn function(&mut self, op: bool) -> Function {
+    fn function_header(&mut self) -> crate::macro_source::FunctionHeader {
         let start = self.start();
-        let diagnostics_before = self.diagnostics.len();
         self.expect(K::Fn);
+        let name_span = self.span();
         let name = self.lower();
-        let old_rows = self.row_names.clone();
-        let old_values = self.bound_values.clone();
         let generics = self.generics();
         self.trait_bounds.append(&mut self.pending_bounds);
         self.row_names
@@ -807,6 +807,31 @@ impl Parser<'_> {
                 });
             }
         }
+        crate::macro_source::FunctionHeader {
+            name,
+            name_span,
+            generics,
+            params,
+            result,
+            effects,
+            span: start..self.start(),
+        }
+    }
+    fn function(&mut self, op: bool) -> Function {
+        let diagnostics_before = self.diagnostics.len();
+        let old_rows = self.row_names.clone();
+        let old_values = self.bound_values.clone();
+        let header = self.function_header();
+        let crate::macro_source::FunctionHeader {
+            name,
+            generics,
+            params,
+            result,
+            effects,
+            span,
+            ..
+        } = header;
+        let start = span.start;
         if self.editor && !op {
             self.headers.push(HeaderNote {
                 start,
