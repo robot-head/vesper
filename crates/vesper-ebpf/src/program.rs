@@ -244,6 +244,10 @@ impl Asm {
             .ok_or_else(|| AsmError::UnknownMap(name.to_owned()))
     }
 
+    pub(crate) fn map_def(&self, index: usize) -> Option<&MapDef> {
+        self.maps.get(index)
+    }
+
     /// Emit an arbitrary typed instruction (jump offsets taken literally).
     pub fn insn(&mut self, i: Insn) -> &mut Self {
         self.slots.extend(encode(&i));
