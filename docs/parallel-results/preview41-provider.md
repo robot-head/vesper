@@ -25,6 +25,10 @@ linear rejection; parse/unsupported diagnostic spaces; repeated argument byte
 provenance; all invalid/tight resource profiles and exact encoded-size boundary;
 and oversized legacy input without retained bytes or hash promotion.
 
-Validation pending actual database dependency and sequential use of an existing
-facade cache; no stub compiler or manufactured snapshot is used. Root owns module
-registration/session routing and integration acceptance.
+Validation: all seven actual snapshot/provider tests pass (zero ignored), strict
+targeted Clippy passes, and rustfmt passes. Tests use the real database dependency
+at `86c6793`, root module registration at `dd31caf`, and the published `a450203`
+metadata profile amendment (2 MiB compiler metadata; provider output still 1 MiB).
+An existing facade cache was reused sequentially after the database writer
+released it; no stub compiler or manufactured snapshot was used. Root owns
+session integration and real stdio/native-platform acceptance.
