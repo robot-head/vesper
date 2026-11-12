@@ -34,6 +34,8 @@ mod error;
 mod host;
 mod identity;
 mod lex;
+#[cfg(feature = "sandbox-transport")]
+pub mod quote_transport;
 mod registry;
 mod resolve;
 pub mod syntax;
