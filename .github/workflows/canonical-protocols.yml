@@ -1,0 +1,93 @@
+name: Canonical protocols and observed evidence
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/vesper-grammar/**'
+      - 'crates/vesper-lint/**'
+      - 'crates/vesper-bench/**'
+      - 'crates/vesper-bench-pmu/**'
+      - 'crates/vesper-serde/**'
+      - 'crates/vesper-core/**'
+      - 'crates/vesper-syntax/**'
+      - 'src/**'
+      - 'tests/grammar_cli.rs'
+      - 'tests/lint_cli.rs'
+      - 'tests/bench_cli.rs'
+      - 'scripts/test-canonical-protocols.sh'
+      - 'scripts/check-canonical-protocols.py'
+      - '.github/workflows/canonical-protocols.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/vesper-grammar/**'
+      - 'crates/vesper-lint/**'
+      - 'crates/vesper-bench/**'
+      - 'crates/vesper-bench-pmu/**'
+      - 'crates/vesper-serde/**'
+      - 'crates/vesper-core/**'
+      - 'crates/vesper-syntax/**'
+      - 'src/**'
+      - 'tests/grammar_cli.rs'
+      - 'tests/lint_cli.rs'
+      - 'tests/bench_cli.rs'
+      - 'scripts/test-canonical-protocols.sh'
+      - 'scripts/check-canonical-protocols.py'
+      - '.github/workflows/canonical-protocols.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: canonical-protocols-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  host-protocols:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test protocol, policy and observed benchmark libraries
+        run: >-
+          cargo test --locked -p vesper-grammar -p vesper-lint
+          -p vesper-bench -p vesper-bench-pmu
+      - name: Execute actual codec, policy and benchmark CLI tests
+        run: >-
+          cargo test --locked -p vesper
+          --test grammar_cli --test lint_cli --test bench_cli
+      - name: Check strict selected library and root Clippy
+        run: >-
+          cargo clippy --locked --all-targets -p vesper
+          -p vesper-grammar -p vesper-lint -p vesper-bench -p vesper-bench-pmu
+          -- -D warnings
+      - name: Run disposable protocol/policy/PMU acceptance and actual examples
+        run: scripts/test-canonical-protocols.sh
