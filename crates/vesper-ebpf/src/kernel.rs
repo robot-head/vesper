@@ -19,6 +19,7 @@ const BPF_MAP_CREATE: libc::c_long = 0;
 const BPF_MAP_LOOKUP_ELEM: libc::c_long = 1;
 const BPF_PROG_LOAD: libc::c_long = 5;
 const BPF_PROG_TEST_RUN: libc::c_long = 10;
+const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
 const BPF_BTF_LOAD: libc::c_long = 18;
 const ATTR_SIZE: usize = 128;
 const LOG_SIZE: usize = 1 << 22;
@@ -294,9 +295,42 @@ pub fn possible_cpus() -> Result<usize, LoadError> {
     Ok(n)
 }
 
-/// `BPF_MAP_LOOKUP_ELEM`; for per-CPU maps `value_len` must cover every
-/// possible CPU (8-byte aligned values). `None` when the key is absent.
-pub fn lookup(map: &Fd, key: &[u8], value_len: usize) -> Result<Option<Vec<u8>>, LoadError> {
+/// Key size, value size and type of a map, from `BPF_OBJ_GET_INFO_BY_FD`.
+fn map_info(map: &Fd) -> Result<(u32, u32, u32), LoadError> {
+    // struct bpf_map_info: type, id, key_size, value_size, ... (80 bytes
+    // in current kernels; the kernel fills at most `info_len` bytes)
+    let mut info = [0u8; 80];
+    let mut a = [0u8; ATTR_SIZE];
+    put_u32(&mut a, 0, map.raw() as u32);
+    put_u32(&mut a, 4, info.len() as u32);
+    put_u64(&mut a, 8, info.as_mut_ptr() as u64);
+    bpf(BPF_OBJ_GET_INFO_BY_FD, &mut a)
+        .map_err(|e| LoadError::Invalid(format!("map info failed: errno {e}")))?;
+    let u = |at: usize| u32::from_ne_bytes(info[at..at + 4].try_into().expect("4 bytes"));
+    Ok((u(0), u(8), u(12)))
+}
+
+/// `BPF_MAP_LOOKUP_ELEM`. The key and value buffer sizes come from the
+/// kernel's own description of the map, so the syscall never reads or
+/// writes past them: `key` must be exactly the map's key size, and the
+/// returned value is `value_size` bytes, or for per-CPU maps the value
+/// rounded up to 8 bytes times the number of possible CPUs. `None` when
+/// the key is absent.
+pub fn lookup(map: &Fd, key: &[u8]) -> Result<Option<Vec<u8>>, LoadError> {
+    let (ty, key_size, value_size) = map_info(map)?;
+    if key.len() != key_size as usize {
+        return Err(LoadError::Invalid(format!(
+            "key of {} bytes for a map with {key_size}-byte keys",
+            key.len()
+        )));
+    }
+    // BPF_MAP_TYPE_PERCPU_HASH, _PERCPU_ARRAY, _LRU_PERCPU_HASH,
+    // _PERCPU_CGROUP_STORAGE
+    let value_len = if matches!(ty, 5 | 6 | 10 | 21) {
+        (value_size as usize).div_ceil(8) * 8 * possible_cpus()?
+    } else {
+        value_size as usize
+    };
     let mut value = vec![0u8; value_len];
     let mut a = [0u8; ATTR_SIZE];
     put_u32(&mut a, 0, map.raw() as u32);

@@ -1958,12 +1958,8 @@ impl<'a> Verifier<'a> {
             }
         };
         st.cur_mut().regs[1..=5].fill(RegType::NotInit);
-        let ret = if matches!(ret, RegType::NotInit) {
-            // void helpers still clobber r0
-            RegType::Scalar(Scalar::UNKNOWN)
-        } else {
-            ret
-        };
+        // void helpers (ringbuf submit/discard) leave r0 unreadable, as the
+        // kernel's RET_VOID does
         st.set(Reg::R0, ret);
         Ok(())
     }

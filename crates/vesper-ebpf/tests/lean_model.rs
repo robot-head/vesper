@@ -19,9 +19,9 @@ fn source() -> String {
     std::fs::read_to_string(lean_file()).expect("lean/EbpfFirewall.lean")
 }
 
-/// The Lean fixture rows `(ether_type, proto, flags, src)`, parsed from the
-/// source so the two sides cannot drift.
-fn fixture_rows(src: &str) -> Vec<[u64; 4]> {
+/// The Lean fixture rows `(ether_type, proto, flags, src, ihl)`, parsed
+/// from the source so the two sides cannot drift.
+fn fixture_rows(src: &str) -> Vec<[u64; 5]> {
     let start = src.find("def fixture").expect("fixture");
     let body = &src[start..];
     let body = &body[body.find('[').expect("[") + 1..body.find(']').expect("]")];
@@ -41,29 +41,30 @@ fn fixture_rows(src: &str) -> Vec<[u64; 4]> {
                     }
                 })
                 .collect();
-            Some([v[0], v[1], v[2], v[3]])
+            Some([v[0], v[1], v[2], v[3], v[4]])
         })
         .collect()
 }
 
 /// `mkPacket` in the Lean file.
-fn mk_packet([ether, proto, flags, src]: [u64; 4]) -> Vec<u8> {
+fn mk_packet([ether, proto, flags, src, ihl]: [u64; 5]) -> Vec<u8> {
     let mut p = vec![2u8; 12];
-    p.extend([(ether >> 8) as u8, ether as u8, 0x45, 0]);
+    p.extend([(ether >> 8) as u8, ether as u8, 0x40 + (ihl % 16) as u8, 0]);
     p.extend([0u8; 7]);
     p.push(proto as u8);
     p.extend([0, 0]);
     p.extend((src as u32).to_be_bytes());
-    p.extend([0u8; 6]);
-    p.extend([0x01, 0xbb]);
+    p.extend([0u8; 4]);
+    p.extend(vec![0u8; 4 * ihl.saturating_sub(5) as usize]);
+    p.extend([0, 0, 0x01, 0xbb]);
     p.extend([0u8; 8]);
     p.extend([0x50, flags as u8]);
     p.extend([0u8; 6]);
-    assert_eq!(p.len(), 54);
+    assert_eq!(p.len(), 54 + 4 * ihl.saturating_sub(5) as usize);
     p
 }
 
-fn interpreter_codes(rows: &[[u64; 4]]) -> Vec<u64> {
+fn interpreter_codes(rows: &[[u64; 5]]) -> Vec<u64> {
     let prog = build(&MitigatorConfig {
         pps_threshold: 2,
         ..MitigatorConfig::default()
@@ -91,6 +92,7 @@ fn source_is_complete() {
     for (name, off) in [
         ("offEtherType", o::ETHER_TYPE),
         ("offProto", o::PROTO),
+        ("offVerIhl", o::VER_IHL),
         ("offSrc", o::SRC_IPV4),
         ("offDstPort", o::DST_PORT),
         ("offFlags", o::DATA_OFFSET_FLAGS),
@@ -100,7 +102,17 @@ fn source_is_complete() {
             "{name}"
         );
     }
-    assert_eq!(fixture_rows(&src).len(), 15);
+    // TCP-relative offsets: the fixed ones above are these plus 34 (IHL 5)
+    for (name, off) in [
+        ("tcpDstPort", o::DST_PORT - o::SRC_PORT),
+        ("tcpFlags", o::DATA_OFFSET_FLAGS - o::SRC_PORT),
+    ] {
+        assert!(
+            src.contains(&format!("def {name} : Nat := {off}\n")),
+            "{name}"
+        );
+    }
+    assert_eq!(fixture_rows(&src).len(), 21);
 }
 
 #[test]
@@ -157,9 +169,12 @@ fn lean_checks_and_fixture_matches_the_program() {
 #[test]
 fn fixture_rows_run_in_the_interpreter() {
     let rows = fixture_rows(&source());
-    // threshold 2: the third and fourth SYN-only packets from source 7 drop
+    // threshold 2: the third and fourth SYN-only packets from source 7
+    // drop; source 11's SYNs carry IPv4 options and are counted all the same
     assert_eq!(
         interpreter_codes(&rows),
-        vec![2, 2, 1, 1, 2, 2, 2, 2, 2, 1, 2, 1, 1, 2, 2]
+        vec![
+            2, 2, 1, 1, 2, 2, 2, 2, 2, 1, 2, 1, 1, 2, 2, 2, 2, 1, 2, 2, 2
+        ]
     );
 }

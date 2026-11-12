@@ -5,13 +5,16 @@
 //! 1. Packets shorter than the 54-byte [`EthIpv4TcpWire`] prefix pass
 //!    (the canonical `data + 54 <= data_end` guard).
 //! 2. Non-IPv4 or non-TCP packets pass.
-//! 3. Unless the TCP flags (low 6 bits of `data_offset_flags`) have SYN set
+//! 3. The TCP header is located from the IPv4 IHL field, so IPv4 options
+//!    cannot hide the flags. An IHL below 5, or a frame too short to hold
+//!    the 20-byte TCP header at that offset, passes.
+//! 4. Unless the TCP flags (low 6 bits of `data_offset_flags`) have SYN set
 //!    and ACK clear, the packet passes.
-//! 4. The per-source SYN counter (per-CPU hash keyed by the source address
+//! 5. The per-source SYN counter (per-CPU hash keyed by the source address
 //!    in network byte order) is incremented; a source not yet in the map
 //!    is inserted with count 1.
-//! 5. While the count is at most the threshold, the packet passes.
-//! 6. Above the threshold the packet is dropped. A [`SynDropAlertWire`]
+//! 6. While the count is at most the threshold, the packet passes.
+//! 7. Above the threshold the packet is dropped. A [`SynDropAlertWire`]
 //!    event is written to the ring buffer when a record can be reserved;
 //!    when the ring is full the packet is still dropped.
 //!
@@ -39,6 +42,13 @@ use crate::wire::{
     ETH_P_IPV4, EthIpv4TcpWire, IPPROTO_TCP, SynDropAlertWire, TCP_FLAG_ACK, TCP_FLAG_SYN,
     WireFrame, XdpAction, eth_ipv4_tcp as o, syn_drop_alert as a,
 };
+
+/// Offsets inside the TCP header, which starts `14 + IHL * 4` bytes into
+/// the frame (IPv4 options shift it).
+const TCP_DST_PORT_OFF: usize = o::DST_PORT - o::SRC_PORT;
+const TCP_FLAGS_OFF: usize = o::DATA_OFFSET_FLAGS - o::SRC_PORT;
+/// A TCP header without options.
+const TCP_HDR_MIN: usize = 20;
 
 /// Index of the per-source counter map in [`Program::maps`].
 pub const COUNTS_MAP: usize = 0;
@@ -96,8 +106,20 @@ pub fn build(cfg: &MitigatorConfig) -> Result<Program, AsmError> {
     asm.jmp(JmpOp::Ne, Reg::R5, ETH_P_IPV4 as i32, pass);
     asm.ldx(Size::B, Reg::R5, Reg::R2, o::PROTO as i16);
     asm.jmp(JmpOp::Ne, Reg::R5, IPPROTO_TCP as i32, pass);
+    // r5 = IPv4 header length in bytes (IHL * 4); IHL below 5 is malformed
+    asm.ldx(Size::B, Reg::R5, Reg::R2, o::VER_IHL as i16);
+    asm.alu64(AluOp::And, Reg::R5, 0x0f);
+    asm.jmp(JmpOp::Lt, Reg::R5, 5, pass);
+    asm.alu64(AluOp::Lsh, Reg::R5, 2);
+    // r4 = start of the TCP header; pass unless all 20 bytes are present
+    asm.mov64(Reg::R4, Reg::R2);
+    asm.add64(Reg::R4, Reg::R5);
+    asm.add64(Reg::R4, o::VER_IHL as i32);
+    asm.mov64(Reg::R5, Reg::R4);
+    asm.add64(Reg::R5, TCP_HDR_MIN as i32);
+    asm.jmp(JmpOp::Gt, Reg::R5, Reg::R3, pass);
     // r7 = flags = data_offset_flags & 0x3f (host order)
-    asm.ldx(Size::H, Reg::R7, Reg::R2, o::DATA_OFFSET_FLAGS as i16);
+    asm.ldx(Size::H, Reg::R7, Reg::R4, TCP_FLAGS_OFF as i16);
     asm.endian(Endian::ToBe, 16, Reg::R7);
     asm.alu64(AluOp::And, Reg::R7, 0x3f);
     // SYN set and ACK clear, else pass
@@ -106,7 +128,7 @@ pub fn build(cfg: &MitigatorConfig) -> Result<Program, AsmError> {
     asm.jmp(JmpOp::Ne, Reg::R5, TCP_FLAG_SYN as i32, pass);
     // r6 = src_ipv4 and r8 = dst_port, kept in wire byte order
     asm.ldx(Size::W, Reg::R6, Reg::R2, o::SRC_IPV4 as i16);
-    asm.ldx(Size::H, Reg::R8, Reg::R2, o::DST_PORT as i16);
+    asm.ldx(Size::H, Reg::R8, Reg::R4, TCP_DST_PORT_OFF as i16);
     // key at fp-4
     asm.stx(Size::W, Reg::R10, -4, Reg::R6);
     // r0 = lookup(&syn_counts, fp-4)
@@ -176,7 +198,13 @@ pub fn reference_decision(
     if hdr.ether_type != ETH_P_IPV4 || hdr.proto != IPPROTO_TCP {
         return (XdpAction::Pass, None);
     }
-    let flags = hdr.data_offset_flags & 0x3f;
+    let ihl = usize::from(hdr.ver_ihl & 0x0f);
+    let tcp = o::VER_IHL + ihl * 4;
+    if ihl < 5 || packet.len() < tcp + TCP_HDR_MIN {
+        return (XdpAction::Pass, None);
+    }
+    let flags =
+        u16::from_be_bytes([packet[tcp + TCP_FLAGS_OFF], packet[tcp + TCP_FLAGS_OFF + 1]]) & 0x3f;
     if flags & TCP_FLAG_SYN == 0 || flags & TCP_FLAG_ACK != 0 {
         return (XdpAction::Pass, None);
     }

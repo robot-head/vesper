@@ -236,21 +236,32 @@ impl RingBuf {
     /// Reserve `len` payload bytes; `None` when full.
     fn reserve(&mut self, len: usize) -> Option<(usize, usize)> {
         let total = (len + RINGBUF_HDR_SZ).div_ceil(8) * 8;
-        let used = self.producer - self.consumer;
-        if used + total as u64 > self.data.len() as u64 {
+        if len > self.data.len() - RINGBUF_HDR_SZ {
             return None;
         }
+        // the kernel keeps the producer at most `size - 1` bytes ahead of
+        // the consumer (`new_prod_pos - cons_pos > rb->mask` fails)
+        let new_prod = self.producer + total as u64;
+        if new_prod - self.consumer > self.mask() {
+            return None;
+        }
+        // headers are 8-byte aligned in a power-of-two area, so a header
+        // never wraps; the payload may, as in the kernel's double mapping
         let hdr = (self.producer & self.mask()) as usize;
-        // records never wrap in this model: the kernel maps the data area
-        // twice so a record is contiguous; emulate that by refusing.
-        if hdr + total > self.data.len() {
-            return None;
-        }
         let hlen = (len as u32) | RINGBUF_BUSY_BIT;
         self.data[hdr..hdr + 4].copy_from_slice(&hlen.to_le_bytes());
         self.data[hdr + 4..hdr + 8].copy_from_slice(&0u32.to_le_bytes());
-        self.producer += total as u64;
-        Some((hdr, hdr + RINGBUF_HDR_SZ))
+        self.producer = new_prod;
+        Some((hdr, (hdr + RINGBUF_HDR_SZ) & self.mask() as usize))
+    }
+
+    /// Copy a payload into the data area starting at `at`, wrapping at the
+    /// end as the kernel's second mapping of the data pages does.
+    fn write_payload(&mut self, at: usize, bytes: &[u8]) {
+        let n = self.data.len();
+        for (i, b) in bytes.iter().enumerate() {
+            self.data[(at + i) % n] = *b;
+        }
     }
 
     fn commit(&mut self, hdr: usize, discard: bool) {
@@ -344,6 +355,10 @@ pub struct XdpEnv {
     regions: Vec<Region>,
     next_base: u64,
     persistent: usize,
+    /// Map values deleted during the current run. The kernel frees them
+    /// after an RCU grace period, so pointers the program already holds
+    /// stay readable until the run ends.
+    deferred: Vec<RegionId>,
     /// Offset of `data` inside the packet region (headroom before it).
     pkt_start: usize,
 }
@@ -360,6 +375,7 @@ impl XdpEnv {
             regions: Vec::new(),
             next_base: 0x1000_0000,
             persistent: 0,
+            deferred: Vec::new(),
             pkt_start: 0,
         };
         for def in &prog.maps {
@@ -441,6 +457,12 @@ impl XdpEnv {
             }
         }
         self.persistent = self.regions.len();
+        for r in std::mem::take(&mut self.deferred) {
+            let r = &mut self.regions[r as usize];
+            r.live = false;
+            r.bytes = Vec::new();
+            r.init = Vec::new();
+        }
     }
 }
 
@@ -779,6 +801,9 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
     result
 }
 
+const BPF_NOEXIST: u64 = 1;
+const BPF_EXIST: u64 = 2;
+
 const MAP_TAG: u64 = 0xbbf0_0000_0000_0000;
 
 fn resolve(
@@ -923,8 +948,23 @@ fn call_helper(
                 h::MAP_UPDATE_ELEM => {
                     let val = read_mem(env, pc, a[2], def.value_size as usize)?;
                     let exists = matches!(&env.maps[m], MapState::Kv { entries, .. } if entries.contains_key(&key));
-                    if def.kind.is_array() && !exists {
-                        return Ok(Value::scalar((-7i64) as u64)); // -E2BIG
+                    // flags: BPF_ANY 0, BPF_NOEXIST 1, BPF_EXIST 2; anything
+                    // else (including BPF_F_LOCK without a spin lock) is -EINVAL
+                    let flags = a[3].v;
+                    if flags > BPF_EXIST {
+                        return Ok(Value::scalar((-22i64) as u64)); // -EINVAL
+                    }
+                    if def.kind.is_array() {
+                        if !exists {
+                            return Ok(Value::scalar((-7i64) as u64)); // -E2BIG
+                        }
+                        if flags == BPF_NOEXIST {
+                            return Ok(Value::scalar((-17i64) as u64)); // -EEXIST
+                        }
+                    } else if flags == BPF_NOEXIST && exists {
+                        return Ok(Value::scalar((-17i64) as u64)); // -EEXIST
+                    } else if flags == BPF_EXIST && !exists {
+                        return Ok(Value::scalar((-2i64) as u64)); // -ENOENT
                     }
                     let len = matches!(&env.maps[m], MapState::Kv { entries, .. } if entries.len() >= def.max_entries as usize);
                     if !exists && len {
@@ -946,7 +986,8 @@ fn call_helper(
                     if let MapState::Kv { entries, .. } = &mut env.maps[m]
                         && let Some(r) = entries.remove(&key)
                     {
-                        env.regions[r as usize].live = false;
+                        // reclaimed when the run ends (RCU), not now
+                        env.deferred.push(r);
                         return Ok(Value::scalar(0));
                     }
                     Ok(Value::scalar((-2i64) as u64)) // -ENOENT
@@ -1025,7 +1066,7 @@ fn call_helper(
                 return Err(bad("not a ringbuf record"));
             };
             let ring = env.ring_mut(map).ok_or_else(|| bad("ring"))?;
-            ring.data[data_off..data_off + reg.bytes.len()].copy_from_slice(&reg.bytes);
+            ring.write_payload(data_off, &reg.bytes);
             ring.commit(hdr_off, id == h::RINGBUF_DISCARD);
             env.regions[r as usize].live = false;
             Ok(Value::scalar(0))
@@ -1037,7 +1078,7 @@ fn call_helper(
             let ring = env.ring_mut(m).ok_or_else(|| bad("ring"))?;
             match ring.reserve(size) {
                 Some((hdr, data)) => {
-                    ring.data[data..data + size].copy_from_slice(&bytes);
+                    ring.write_payload(data, &bytes);
                     ring.commit(hdr, false);
                     Ok(Value::scalar(0))
                 }

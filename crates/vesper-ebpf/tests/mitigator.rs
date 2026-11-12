@@ -45,6 +45,19 @@ fn tcp(src: u32, dport: u16, flags: u16) -> Vec<u8> {
     h.encode()
 }
 
+/// The same packet with an IPv4 header of `ihl` 32-bit words: options
+/// (zero bytes) are inserted after the 20-byte base header, so the TCP
+/// header starts at `14 + 4 * ihl`. `ihl` below 5 only rewrites the field.
+fn tcp_ihl(src: u32, dport: u16, flags: u16, ihl: u8) -> Vec<u8> {
+    let mut p = tcp(src, dport, flags);
+    p[14] = 0x40 | (ihl & 0x0f);
+    if ihl > 5 {
+        let opts = vec![0u8; (usize::from(ihl) - 5) * 4];
+        p.splice(34..34, opts);
+    }
+    p
+}
+
 fn alerts(env: &XdpEnv) -> Vec<SynDropAlertWire> {
     let ring = env.ring(ALERTS_MAP).expect("ring");
     let mut r = RingBufReader::new(&ring.data, ring.consumer, ring.producer).expect("reader");
@@ -137,6 +150,60 @@ fn fixtures_follow_the_specification() {
 }
 
 #[test]
+fn ipv4_options_do_not_hide_the_tcp_flags() {
+    let p = build(&cfg()).unwrap();
+    let mut env = XdpEnv::new(&p);
+    let src = 0xc633_6408;
+    // SYN after 4 bytes of options; the ack number (where a fixed offset
+    // would look for flags) is zero
+    for n in 1..=5u64 {
+        let pkt = tcp_ihl(src, 443, TCP_FLAG_SYN, 6);
+        let r = run_xdp(&p, &mut env, &pkt).unwrap();
+        let want = if n <= THRESHOLD {
+            XdpAction::Pass
+        } else {
+            XdpAction::Drop
+        };
+        assert_eq!(r.ret, want as u64, "SYN {n} with options");
+    }
+    let a = alerts(&env);
+    assert_eq!(a.len(), 2);
+    assert!(
+        a.iter()
+            .all(|al| al.dst_port == 443 && al.tcp_flags == TCP_FLAG_SYN)
+    );
+    // ACK with options passes even though the first four option bytes
+    // would look like SYN at the fixed offset
+    let mut ack = tcp_ihl(src, 443, TCP_FLAG_ACK, 6);
+    ack[46] = 0x50;
+    ack[47] = TCP_FLAG_SYN as u8;
+    let r = run_xdp(&p, &mut env, &ack).unwrap();
+    assert_eq!(r.ret, XdpAction::Pass as u64);
+    // maximal options (IHL 15)
+    let r = run_xdp(&p, &mut env, &tcp_ihl(src, 443, TCP_FLAG_SYN, 15)).unwrap();
+    assert_eq!(r.ret, XdpAction::Drop as u64);
+    let count = |env: &XdpEnv| {
+        u64::from_le_bytes(
+            env.map_get(COUNTS_MAP, &src.to_be_bytes())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+    };
+    assert_eq!(count(&env), 6);
+    // malformed IHL, or a TCP header cut off by the options: pass, uncounted
+    for pkt in [
+        tcp_ihl(src, 443, TCP_FLAG_SYN, 4),
+        tcp_ihl(src, 443, TCP_FLAG_SYN, 0),
+        tcp_ihl(src, 443, TCP_FLAG_SYN, 15)[..93].to_vec(),
+    ] {
+        let r = run_xdp(&p, &mut env, &pkt).unwrap();
+        assert_eq!(r.ret, XdpAction::Pass as u64);
+    }
+    assert_eq!(count(&env), 6);
+}
+
+#[test]
 fn a_full_ring_still_drops() {
     let p = build(&cfg()).unwrap();
     let mut env = XdpEnv::new(&p);
@@ -161,7 +228,12 @@ fn random_packets_match_the_reference_decision() {
     let mut rng = Rng(77);
     for _ in 0..20_000 {
         let src = rng.pick(&[1u32, 2, 3, 0xffff_ffff]);
-        let mut pkt = tcp(src, rng.below(65536) as u16, rng.below(64) as u16);
+        let ihl = if rng.chance(25) {
+            rng.below(16) as u8
+        } else {
+            5
+        };
+        let mut pkt = tcp_ihl(src, rng.below(65536) as u16, rng.below(64) as u16, ihl);
         if rng.chance(10) {
             pkt[12] = rng.next() as u8;
         }
@@ -200,7 +272,8 @@ fn kernel_runs_the_mitigator_identically() {
     for _ in 0..200 {
         let src = rng.pick(&srcs);
         let flags = rng.pick(&[TCP_FLAG_SYN, TCP_FLAG_SYN, TCP_FLAG_ACK, 0x12]);
-        let pkt = tcp(src, 8080, flags);
+        let ihl = rng.pick(&[5u8, 5, 6, 15, 4]);
+        let pkt = tcp_ihl(src, 8080, flags, ihl);
         let k = kernel::test_run(&loaded.prog, &pkt).expect("test run");
         let u = run_xdp(&p, &mut env, &pkt).unwrap();
         assert_eq!(k.retval as u64, u.ret);
@@ -210,7 +283,10 @@ fn kernel_runs_the_mitigator_identically() {
     let cpus = kernel::possible_cpus().unwrap();
     for src in srcs {
         let key = src.to_be_bytes();
-        let kv = kernel::lookup(&loaded.maps[COUNTS_MAP], &key, 8 * cpus).unwrap();
+        let kv = kernel::lookup(&loaded.maps[COUNTS_MAP], &key).unwrap();
+        if let Some(v) = &kv {
+            assert_eq!(v.len(), 8 * cpus, "one 8-byte slot per possible CPU");
+        }
         let ksum: u64 = kv
             .map(|v| {
                 v.chunks(8)
@@ -223,6 +299,8 @@ fn kernel_runs_the_mitigator_identically() {
             .map_or(0, |v| u64::from_le_bytes(v.try_into().unwrap()));
         assert_eq!(ksum, mine, "count for {src:#x}");
     }
+    // a key of the wrong size is refused before the syscall
+    assert!(kernel::lookup(&loaded.maps[COUNTS_MAP], &[0u8; 2]).is_err());
     // the kernel ring holds exactly the interpreter's alerts
     let (data, cons, prod) = ring.snapshot();
     let mut r = RingBufReader::new(&data, cons, prod).unwrap();

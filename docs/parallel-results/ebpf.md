@@ -101,11 +101,31 @@ kernel rejection.
 - Interpreter: releasing transient regions was quadratic in the number of
   runs on one environment.
 
+## Fixed after review of PR #163
+
+- Mitigator: flags and destination port were read at fixed offsets, so a
+  SYN with IPv4 options bypassed the filter and ACK-number bytes could be
+  taken for flags. The program, `reference_decision` and the Lean model
+  now locate the TCP header from IHL (`ipv4_options_do_not_hide_the_tcp_flags`,
+  random packets with random IHL, kernel run with IHL 4/5/6/15).
+- Verifier: `ringbuf_submit`/`ringbuf_discard` return void; r0 is now left
+  unreadable after them, as the kernel does (`reject/void_helper_r0`).
+- `kernel::lookup` sized its buffer from a caller argument; it now reads
+  the key size, value size and type with `BPF_OBJ_GET_INFO_BY_FD`, refuses
+  a key of the wrong length and allocates the full per-CPU value.
+- Interpreter, each checked against the kernel in `tests/interp_semantics.rs`:
+  a deleted map value stays readable until the run ends (RCU); update
+  honours `BPF_NOEXIST`/`BPF_EXIST` and returns -EINVAL for other flags;
+  ring records wrap the end of the data area, and the producer stays at
+  most `size - 1` bytes ahead of the consumer.
+
 ## Item 3 (linear `BpfRingSlot`/`BpfSocketRef` builders): not delivered
 
 The previous thread's attempt to write this module was stopped by an
 automated safety filter, and the project owner then said to skip the
-builder and finish the rest. This lane did not attempt it again. The
+builder and finish the rest. When the owner later asked for it again, this
+lane's attempt was stopped by the same filter, so it is still not
+delivered. The
 mitigator is assembled with `Asm`, and the release obligation is enforced
 on the emitted bytecode by the verifier's `ref.leak` rule (rejection
 corpus: `reject/ringbuf_leak`, `reject/socket_leak`; random programs that
@@ -117,12 +137,14 @@ linear API and not an implementation of the Vesper source typing rules
 
 Per-CPU hash `syn_counts` (u32 source address in network order → u64
 count) and ringbuf `syn_alerts`. Short (< 54 bytes), non-IPv4 and non-TCP
-packets pass; a packet passes unless its flags (`data_offset_flags & 0x3f`)
+packets pass. The TCP header is located at `14 + 4 * IHL`, so IPv4 options
+cannot hide the flags; an IHL below 5 or a frame too short for the 20-byte
+TCP header at that offset passes. A packet passes unless its flags (`data_offset_flags & 0x3f`)
 have SYN set and ACK clear; otherwise the source's count is incremented (or
 inserted as 1) and the packet drops once the count exceeds the threshold,
 with a `SynDropAlertWire` reserved, filled and submitted when the ring has
-room (a full ring still drops). 60 instructions, 16 bytes of stack (32
-after kernel rounding), 68 instructions processed by this verifier.
+room (a full ring still drops). 70 instructions, 16 bytes of stack (32
+after kernel rounding), 82 instructions processed by this verifier.
 
 Corrections to the design text: the threshold is a build-time constant
 (`MitigatorConfig::pps_threshold`) baked in as a 64-bit immediate because
@@ -170,8 +192,9 @@ scope. libbpf itself was not tried (not installed here).
 EbpfFirewall.lean`), no `sorry`/`admit`/axioms beyond `propext` and
 `Quot.sound`. It models the filter over a packet as a byte list and the
 counters as a function; packet bytes are read only through an accessor
-that demands a proof the index is in bounds, discharged from the same
-54-byte guard. Proved about the model: `reads_within_checked_bounds`,
+that demands a proof the index is in bounds, discharged from the same two
+guards the program issues (54 bytes; IHL ≥ 5 and the TCP header present at
+`14 + 4 * IHL`). Proved about the model: `reads_within_checked_bounds`,
 `short_packets_pass`, `filter_action`, `drop_iff_spec` (drop exactly when
 IPv4 ∧ TCP ∧ SYN ∧ ¬ACK ∧ count after the packet > threshold),
 `syn_mitigator_never_drops_ack_packets` (the §27.4 theorem),
@@ -179,8 +202,8 @@ IPv4 ∧ TCP ∧ SYN ∧ ¬ACK ∧ count after the packet > threshold),
 naturals (the program's u64 would wrap after 2^64 SYNs from one source).
 These are theorems about the model, not about the Rust code or the
 bytecode; `tests/lean_model.rs` compiles the file under `VESPER_LEAN`,
-audits the axiom report and compares the model's fixture table (15
-packets, threshold 2) with the real program in the interpreter.
+audits the axiom report and compares the model's fixture table (21
+packets including IPv4 options and malformed IHL, threshold 2) with the real program in the interpreter.
 
 ## Tests
 
@@ -191,6 +214,7 @@ packets, threshold 2) with the real program in the interpreter.
 | `verifier_rules.rs` | accepted corpus programs; one rejection per rule with the exact rule id; contract-shaped findings |
 | `soundness.rs` | 4,000 random programs (40,000 × 3 seeds run here): every accepted program runs over 12 random packets without an interpreter fault |
 | `mitigator.rs` | wire layouts; fixtures (threshold, ACK never dropped, other sources, short/non-IPv4/non-TCP, full ring); 20k random packets against `reference_decision`; kernel run |
+| `interp_semantics.rs` | ring records wrapping the data area, ring capacity, a deleted value read in the same run, update flags; each also run in the kernel |
 | `elf.rs` | round trip of the accepted corpus; aya-obj parse and relocation; BTF parser robustness; kernel BTF and object load |
 | `kernel_diff.rs` | the two kernel differentials above |
 | `lean_model.rs` | Lean source audit, compile, axiom report, fixture agreement |

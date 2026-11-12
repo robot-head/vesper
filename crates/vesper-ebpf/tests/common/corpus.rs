@@ -183,6 +183,25 @@ pub fn corpus() -> Vec<Case> {
         add("accept/ringbuf_discard", None, Kernel::Accepts, fin(a));
     }
     {
+        // ringbuf_discard returns void: r0 is unreadable after it, so
+        // exiting without setting r0 is rejected on the non-null path
+        let (mut a, _, _, rb) = with_maps();
+        let none = a.label();
+        reserve(&mut a, rb, 16);
+        a.jmp(JmpOp::Eq, Reg::R0, 0, none);
+        a.mov64(Reg::R1, Reg::R0);
+        a.mov64(Reg::R2, 0);
+        a.call(h::RINGBUF_DISCARD);
+        a.bind(none).unwrap();
+        a.exit();
+        add(
+            "reject/void_helper_r0",
+            Some("reg.uninit_read"),
+            Kernel::Rejects,
+            fin(a),
+        );
+    }
+    {
         // socket lookup on a stack tuple, release on the non-null path
         let mut a = Asm::new();
         for off in [-16, -8] {
