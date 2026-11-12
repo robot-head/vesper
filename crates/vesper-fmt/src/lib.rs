@@ -60,7 +60,7 @@ pub struct FormatResult {
     pub output: String,
     pub changed: bool,
 }
-struct Work {
+pub(crate) struct Work {
     used: usize,
     max: usize,
 }
@@ -236,13 +236,20 @@ fn once(source: &str, limits: Limits, work: &mut Work) -> Result<String, Error> 
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
 /// token/comment bytes are never wrapped, so those leaves may exceed the ribbon.
 pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error> {
+    let mut work = Work::new(limits.max_work);
+    format_with_work(source, limits, &mut work)
+}
+pub(crate) fn format_with_work(
+    source: &str,
+    limits: Limits,
+    work: &mut Work,
+) -> Result<FormatResult, Error> {
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }
-    let mut work = Work::new(limits.max_work);
-    let output = once(source, limits, &mut work)?;
-    let original = guarded_lex(source, limits, &mut work)?;
-    let rewritten = guarded_lex(&output, limits, &mut work)?;
+    let output = once(source, limits, work)?;
+    let original = guarded_lex(source, limits, work)?;
+    let rewritten = guarded_lex(&output, limits, work)?;
     let a = pieces(source, &original);
     let b = pieces(&output, &rewritten);
     if a.len() != b.len()
@@ -252,7 +259,7 @@ pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error
     {
         return Err(Error::Conservation);
     }
-    let second = once(&output, limits, &mut work)?;
+    let second = once(&output, limits, work)?;
     if second != output {
         return Err(Error::NotIdempotent);
     }
