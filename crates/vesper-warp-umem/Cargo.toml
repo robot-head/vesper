@@ -1,0 +1,26 @@
+[package]
+name = "vesper-warp-umem"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Warp linear UMEM frames, AF_XDP four-ring model, software NIC and conservation auditor (design section 35)"
+publish = false
+
+[features]
+default = []
+# Real Linux AF_XDP backend (one audited unsafe module, Linux only).
+af-xdp = ["dep:libc"]
+
+[dependencies]
+vesper-ffi = { path = "../vesper-ffi" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true }
+
+# Builds the gated Linux backend in every Linux test/clippy run (CI does not
+# pass features); its tests probe the host and report "unavailable" when the
+# kernel or privileges refuse AF_XDP.
+[dev-dependencies]
+vesper-warp-umem = { path = ".", features = ["af-xdp"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = "0.2"
