@@ -20,6 +20,12 @@ use std::mem;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod string;
+mod vec;
+
+pub use string::{RegionStr, RegionString};
+pub use vec::{RegionSlice, RegionVec};
+
 /// Minimum alignment of every chunk base.
 pub const CHUNK_ALIGN: usize = 16;
 
@@ -186,6 +192,27 @@ impl Watermark {
 enum SlotKind {
     Bytes,
     Value,
+    /// Growable element buffer owned by a unique [`RegionVec`].
+    Elements,
+    /// Element buffer frozen into copyable, read-only [`RegionSlice`] handles.
+    Frozen,
+}
+
+/// Element metadata of an `Elements`/`Frozen` slot. The region, not the
+/// handle, records how many leading elements are initialized, so rewind,
+/// reset and region drop finalize exactly those even if every handle was
+/// dropped or forgotten.
+struct Elems {
+    /// Number of initialized leading elements.
+    len: usize,
+    /// Element capacity (`usize::MAX` for zero-sized elements).
+    cap: usize,
+    elem_size: usize,
+    /// Drops `len` initialized elements at the base pointer, highest index
+    /// first. `None` when the element type has no drop glue.
+    drop: Option<unsafe fn(*mut u8, usize)>,
+    /// Elements are linear: a nonempty buffer is a live linear obligation.
+    linear: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +233,10 @@ struct Slot {
     kind: SlotKind,
     state: SlotState,
     finalizer: Option<unsafe fn(*mut u8)>,
+    /// Whether the slot currently holds a live linear obligation (for element
+    /// buffers: linear elements and a nonzero length).
     linear: bool,
+    elems: Option<Elems>,
 }
 
 struct Chunk {
@@ -502,6 +532,7 @@ impl<B: ChunkBacking> Region<B> {
             state: SlotState::Live,
             finalizer: None,
             linear: false,
+            elems: None,
         });
         (self.slots.len() - 1) as u32
     }
@@ -567,12 +598,14 @@ impl<B: ChunkBacking> Region<B> {
             });
         }
         let index = slot as usize;
+        // Serials are unique per region, so a matching serial with another
+        // kind only arises when an element buffer was frozen; the consumed
+        // unique handle can no longer name it.
         let s = self
             .slots
             .get(index)
-            .filter(|s| s.serial == serial)
+            .filter(|s| s.serial == serial && s.kind == kind)
             .ok_or(HandleError::Stale)?;
-        debug_assert_eq!(s.kind, kind, "serials are unique per region");
         match s.state {
             SlotState::Live => Ok(index),
             SlotState::Moved => Err(HandleError::Moved),
@@ -924,6 +957,18 @@ impl<B: ChunkBacking> Region<B> {
                     // SAFETY: the slot was live and is now removed, so this is
                     // the only finalization of the initialized value.
                     unsafe { finalize(ptr.as_ptr()) };
+                }
+                if let Some(Elems {
+                    len,
+                    drop: Some(drop_elems),
+                    ..
+                }) = s.elems
+                    && len > 0
+                {
+                    let ptr = self.ptr_at(s.chunk, s.start);
+                    // SAFETY: as above; the region recorded exactly `len`
+                    // initialized elements in this removed buffer.
+                    unsafe { drop_elems(ptr.as_ptr(), len) };
                 }
             }
         }

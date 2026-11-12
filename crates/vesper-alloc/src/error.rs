@@ -73,6 +73,34 @@ pub struct ValueAllocError<T> {
     pub error: AllocError,
 }
 
+/// Failure to insert into a region collection; ownership of the value that
+/// was not inserted is returned and the collection is unchanged.
+pub struct InsertError<T> {
+    pub value: T,
+    pub error: RegionError,
+}
+
+/// Failure of an operation that takes a handle by value. The handle is
+/// returned so that the caller keeps the owner (for example, to drain linear
+/// elements and retry a release).
+#[derive(Debug)]
+pub struct OwnerError<H> {
+    pub owner: H,
+    pub error: RegionError,
+}
+
+/// Failure of a region string operation. The string is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringError {
+    /// The input bytes are not UTF-8.
+    Utf8(std::str::Utf8Error),
+    /// The byte index does not fall on a `char` boundary.
+    NotCharBoundary {
+        index: usize,
+    },
+    Region(RegionError),
+}
+
 /// Rewind failure. When live linear payloads block the rewind, the watermark
 /// is returned so that the caller can consume them and retry.
 #[derive(Debug)]
@@ -104,8 +132,47 @@ display_debug!(
     AllocError,
     HandleError,
     RegionError,
-    RewindError
+    RewindError,
+    StringError
 );
+
+impl<T> fmt::Debug for InsertError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InsertError")
+            .field("error", &self.error)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T> fmt::Display for InsertError<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.error)
+    }
+}
+impl<T> std::error::Error for InsertError<T> {}
+
+impl<H: fmt::Debug> fmt::Display for OwnerError<H> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self.error)
+    }
+}
+impl<H: fmt::Debug> std::error::Error for OwnerError<H> {}
+
+impl From<RegionError> for StringError {
+    fn from(e: RegionError) -> Self {
+        Self::Region(e)
+    }
+}
+impl From<AllocError> for StringError {
+    fn from(e: AllocError) -> Self {
+        Self::Region(e.into())
+    }
+}
+impl From<HandleError> for StringError {
+    fn from(e: HandleError) -> Self {
+        Self::Region(e.into())
+    }
+}
 
 impl<T> fmt::Display for ValueAllocError<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

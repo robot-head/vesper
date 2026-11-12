@@ -27,6 +27,29 @@
 //! assert_eq!(out, Ok(3));
 //! ```
 //!
+//! Region collections ([`RegionVec`], [`RegionString`]) keep every element
+//! byte in region chunks and the initialized length in region metadata, so
+//! rewind, reset and drop finalize exactly the live elements:
+//!
+//! ```
+//! use vesper_alloc::{Region, RegionConfig, RegionError};
+//!
+//! let mut r = Region::new(RegionConfig::bounded(4096)).unwrap();
+//! let mut names = r.vec_with_capacity::<&'static str>(2).unwrap();
+//! r.vec_push(&mut names, "ada").unwrap();
+//! let mut s = r.string_from_str("grüß").unwrap();
+//! r.string_push(&mut s, '!').unwrap();
+//! assert_eq!(r.string_as_str(&s), Ok("grüß!"));
+//! // A buffer allocated before a watermark cannot grow inside it: the new
+//! // capacity would be discarded by the rewind while the vector survives.
+//! r.vec_push(&mut names, "bob").unwrap();
+//! let mark = r.checkpoint().unwrap();
+//! let err = r.vec_push(&mut names, "eve").unwrap_err();
+//! assert_eq!((err.value, err.error), ("eve", RegionError::ProtectedByWatermark));
+//! r.rewind(mark).unwrap();
+//! assert_eq!(r.vec_as_slice(&names).unwrap(), ["ada", "bob"]);
+//! ```
+//!
 //! `RegionBox<T>` is invariant in `T`, so a handle cannot be reinterpreted at
 //! a shorter lifetime and used to store a dangling borrow:
 //!
@@ -52,12 +75,23 @@ mod error;
 mod region;
 
 pub use backing::{ChunkBacking, SystemBacking};
-pub use error::{AllocError, ConfigError, HandleError, RegionError, RewindError, ValueAllocError};
+pub use error::{
+    AllocError, ConfigError, HandleError, InsertError, OwnerError, RegionError, RewindError,
+    StringError, ValueAllocError,
+};
 pub use region::{
-    CHUNK_ALIGN, Region, RegionBox, RegionBytes, RegionConfig, RegionId, RegionStats, Watermark,
+    CHUNK_ALIGN, Region, RegionBox, RegionBytes, RegionConfig, RegionId, RegionSlice, RegionStats,
+    RegionStr, RegionString, RegionVec, Watermark,
 };
 
 /// Version of the proposed Alloc/Region lowering contract described in
 /// `docs/parallel-results/strata-regions.md`. Experimental; not yet consumed
 /// by the compiler.
 pub const REGION_LOWERING_CONTRACT_VERSION: u32 = 0;
+
+/// Version of the proposed `RegionAccess` contract (allocation origin,
+/// exclusive mutation, generation/watermark invalidation and linear payload
+/// obligations for region collections) described in
+/// `docs/parallel-results/strata-collections.md`. Experimental; not yet
+/// consumed by the compiler.
+pub const REGION_ACCESS_CONTRACT_VERSION: u32 = 1;
