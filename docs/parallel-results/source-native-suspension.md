@@ -4,8 +4,9 @@ Status: implemented on branch `claude/project-thread-kgl1yh`, PR against `main`
 (not merged). Base: `1ffd0aec27dfcc24c5564585ae9068255490bf61` (descendant of
 the required `02b3a1d175efb5d2561b7fa5b0aaf80121ae1bc6`).
 
-**The branch needs the one-line coordinator dependency patch below to build.**
-It was applied uncommitted for every check reported here.
+The root dependency patch below was committed onto this branch with the
+user's approval (2026-11-12) so CI can run; it was applied for every check
+reported here.
 
 ## What now works
 

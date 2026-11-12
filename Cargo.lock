@@ -3181,6 +3181,7 @@ dependencies = [
  "serde_json",
  "target-lexicon",
  "vesper-core",
+ "vesper-fiber-abi",
  "vesper-lean-syntax",
  "vesper-loom-admission",
  "vesper-loom-audit",
