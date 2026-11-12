@@ -3325,4 +3325,5 @@ extern "C" fn native_float_remainder(a: f64, b: f64) -> f64 {
     a % b
 }
 
-#[path = "native_batch.rs"] pub mod batch;
+#[path = "native_batch.rs"]
+pub mod batch;

@@ -15,6 +15,7 @@ external Claude Warp issues #36–#45 and their production PRs #53/#55–#60/#62
 | [#67](https://github.com/robot-head/vesper/issues/67) | `tooling41/doctest` | New `src/native_batch.rs`, `src/doctest.rs`, `src/doctest_commands.rs`, matching new integration tests; one-line batch module registration in `src/native.rs` |
 | [#68](https://github.com/robot-head/vesper/issues/68) | `tooling41/bench` | New `crates/vesper-bench/**`, optional `lean/MetronomeArithmetic.lean` |
 | [#69](https://github.com/robot-head/vesper/issues/69) | `tooling41/integration` | Root package/module/CLI/workflow wiring, new `src/bench_commands.rs`/`tests/bench_cli.rs`, optional shared tooling I/O helper, acceptance workflow/scripts and integration report |
+| [#70](https://github.com/robot-head/vesper/issues/70) | `tooling41/parser` | Explicit lexer/parser budgets in existing syntax implementation, new syntax limit tests and dedicated report |
 
 Each lane owns only its matching `docs/parallel-results/tooling41-<lane>.md`.
 All unlisted production paths are read-only. Source/core AST, checker, Place IR,
@@ -24,6 +25,13 @@ is `vesper.arith.checked/1`, interface semantics v2 and native ABI v2. Preserve
 the user-approved `k_i ⊑ m_i` field premise.
 
 ## Dependency and source evidence
+
+The parser-limits claim followed a fresh issue/PR check, including the actual
+file list of source-Warp PR #57 (simulation-only). It adds bounded recursive
+descent and token/diagnostic accounting while preserving ordinary AST/CST
+behavior. Delimiter nesting alone cannot bound unary, right-assignment,
+function-result type, dotted place or else-if recursion. Other lanes keep syntax
+read-only and the coordinator validates all compiler consumers after integration.
 
 New leaf crates depend on existing root-free crates and typed DTOs. A facade
 adapter may consume checked `World`/IR/interface information above them; it must

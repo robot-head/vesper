@@ -6,6 +6,11 @@ members = [
     ".",
     "crates/vesper-core",
     "crates/vesper-syntax",
+    "crates/vesper-grammar",
+    "crates/vesper-fmt",
+    "crates/vesper-lint",
+    "crates/vesper-bench",
+    "crates/vesper-doc",
     "crates/vesper-pulse",
     "crates/vesper-prism",
     "crates/vesper-ffi",
@@ -46,6 +51,11 @@ default-members = [
     ".",
     "crates/vesper-core",
     "crates/vesper-syntax",
+    "crates/vesper-grammar",
+    "crates/vesper-fmt",
+    "crates/vesper-lint",
+    "crates/vesper-bench",
+    "crates/vesper-doc",
     "crates/vesper-pulse",
     "crates/vesper-prism",
     "crates/vesper-ffi",
@@ -106,6 +116,10 @@ vesper-core = { path = "crates/vesper-core" }
 vesper-simd = { path = "crates/vesper-simd" }
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }
+vesper-fmt = { path = "crates/vesper-fmt" }
+vesper-lint = { path = "crates/vesper-lint" }
+vesper-bench = { path = "crates/vesper-bench" }
+vesper-doc = { path = "crates/vesper-doc" }
 vesper-beacon = { path = "crates/vesper-beacon" }
 vesper-serde = { path = "crates/vesper-serde" }
 vesper-pulse = { path = "crates/vesper-pulse" }

@@ -22,6 +22,29 @@ fn invoke(source: &str) -> std::process::Output {
     output
 }
 #[test]
+fn help_and_argument_errors_follow_the_requested_output_contract() {
+    let help = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .args(["test", "--help"])
+        .output()
+        .unwrap();
+    assert!(help.status.success());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("test --doc FILE"));
+    for args in [
+        vec!["test", "--json"],
+        vec!["test", "--unknown", "--json"],
+        vec!["test", "--doc", "--json"],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let value: Value = serde_json::from_slice(&out.stdout).unwrap();
+        assert_eq!(value["passed"], false);
+        assert!(value["error"].is_string());
+    }
+}
+#[test]
 fn cli_runs_multiple_entries_once_with_shared_helper_and_exact_locations() {
     let source = "//! ```vesper,entry=first\n//! fn first() -> i64 { helper(41) }\n//! ```\n/// ```vesper,entry=second\n/// fn second() -> i64 { helper(8) }\n/// ```\nfn helper(x: i64) -> i64 { wrapping_add(x, 1) }\n";
     let out = invoke(source);

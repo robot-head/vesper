@@ -257,10 +257,12 @@ fn parsed_ast_depth_is_audited_before_checker_world_cloning() {
     }
     let source = format!("fn f() -> i64 {{ {expression} }}");
     vesper_doc::source_preflight(&source, Limits::default()).unwrap();
+    let error = adapter::document_source(&source, Limits::default()).unwrap_err();
+    // The integrated bounded parser can refuse this before the adapter's AST
+    // audit. Both are explicit resource errors preceding checker/World cloning.
     assert!(
-        adapter::document_source(&source, Limits::default())
-            .unwrap_err()
-            .contains("AST node/depth")
+        error.contains("AST node/depth") || error.starts_with("source parse failed: E0003:"),
+        "{error}"
     );
 }
 

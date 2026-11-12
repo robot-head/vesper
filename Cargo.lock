@@ -3466,9 +3466,13 @@ dependencies = [
  "serde_json",
  "target-lexicon",
  "vesper-beacon",
+ "vesper-bench",
  "vesper-core",
+ "vesper-doc",
  "vesper-fiber-abi",
+ "vesper-fmt",
  "vesper-lean-syntax",
+ "vesper-lint",
  "vesper-loom-admission",
  "vesper-loom-audit",
  "vesper-loom-calculus",
@@ -3517,10 +3521,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-bench"
+version = "0.1.0"
+
+[[package]]
 name = "vesper-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "vesper-doc"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vesper-core",
+ "vesper-syntax",
 ]
 
 [[package]]
@@ -3554,6 +3572,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-fmt"
+version = "0.1.0"
+dependencies = [
+ "vesper-syntax",
+]
+
+[[package]]
 name = "vesper-forge"
 version = "0.1.0"
 dependencies = [
@@ -3578,12 +3603,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-grammar"
+version = "0.1.0"
+
+[[package]]
 name = "vesper-ignis"
 version = "0.1.0"
 
 [[package]]
 name = "vesper-lean-syntax"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-lint"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "vesper-core",
+]
 
 [[package]]
 name = "vesper-loom-admission"

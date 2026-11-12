@@ -1,22 +1,42 @@
 use std::{fs::OpenOptions, io::Read};
 use vesper::doctest::{self, DocTestLimits};
 
+const HELP: &str = "Usage: vesper test --doc FILE [--json]\n\nExtract actual Vesper doc-comment fences, fully check examples, and run supported finite scalar entries in one owned JIT module.\ncompile_fail(E...) must match exact example diagnostics; base errors and unsupported execution never count as success.\nSource/check/module budgets apply; this is not general SimPulse I/O, an execution sandbox or a hard deadline.\n";
+
 pub fn run(args: Vec<String>) -> Result<(), String> {
-    let mut file = None;
-    let mut json = false;
-    let mut doc = false;
-    for argument in args {
-        match argument.as_str() {
-            "--doc" if !doc => doc = true,
-            "--json" if !json => json = true,
-            value if !value.starts_with('-') && file.is_none() => file = Some(value.to_string()),
-            _ => return Err("usage: vesper test --doc FILE [--json]".into()),
+    if args.iter().any(|arg| arg == "--help" || arg == "-h") {
+        print!("{HELP}");
+        return Ok(());
+    }
+    let requested_json = args.iter().any(|arg| arg == "--json");
+    let parsed = || -> Result<(String, bool), String> {
+        let mut file = None;
+        let mut json = false;
+        let mut doc = false;
+        for argument in args {
+            match argument.as_str() {
+                "--doc" if !doc => doc = true,
+                "--json" if !json => json = true,
+                value if !value.starts_with('-') && file.is_none() => {
+                    file = Some(value.to_string())
+                }
+                _ => return Err("usage: vesper test --doc FILE [--json]".into()),
+            }
         }
-    }
-    if !doc {
-        return Err("usage: vesper test --doc FILE [--json]".into());
-    }
-    let file = file.ok_or("missing doctest source file")?;
+        if !doc {
+            return Err("usage: vesper test --doc FILE [--json]".into());
+        }
+        Ok((file.ok_or("missing doctest source file")?, json))
+    };
+    let (file, json) = match parsed() {
+        Ok(options) => options,
+        Err(error) => {
+            if requested_json {
+                println!("{}", serde_json::json!({"passed":false,"error":error}));
+            }
+            return Err(error);
+        }
+    };
     let limits = DocTestLimits::default();
     let operation = || -> Result<_, String> {
         if !std::fs::metadata(&file)
