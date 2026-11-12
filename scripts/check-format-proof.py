@@ -87,7 +87,7 @@ class Harness:
         env["LEAN_PATH"] = str(directory)
         for module in ["StylusAndLintSafety", "Witness"]:
             self.execute([self.lean, "--trust=0", "-o", module + ".olean", module + ".lean"], cwd=directory, env=env)
-        (directory / "Inspect.lean").write_text("import Witness\n#print axioms Vesper.StylusGenerated.comments_preserved\n#print axioms Vesper.StylusSafety.projection_narrowing_preserves_disjointness\n", encoding="utf-8")
+        (directory / "Inspect.lean").write_text("import Witness\n#check Vesper.StylusGenerated.comments_preserved\n#print axioms Vesper.StylusGenerated.comments_preserved\n#print axioms Vesper.StylusSafety.projection_narrowing_preserves_disjointness\n", encoding="utf-8")
         result = self.execute([self.lean, "--trust=0", "Inspect.lean"], cwd=directory, env=env)
         assert result.stdout.count(b"does not depend on any axioms") == 2 and b"sorryAx" not in result.stdout
         (directory / "NoInjection.lean").write_text("import Witness\n#check injected\n", encoding="utf-8")
@@ -110,7 +110,7 @@ def run(binary, lean, model, work):
     assert macro["comment_tokens"] == 2
     hostile = h.source((FIXTURES / "hostile.ves").read_bytes())
     witness = h.verify(hostile, "--format", "--emit-lean", "--lean", lean, "--timeout", "300").stdout
-    assert b"comments_preserved" in witness and b"Vesper.StylusGenerated" in witness and not witness.lstrip().startswith(b"{")
+    assert b"comments_preserved" in witness and "Vesper.StylusGenerated" in witness.decode("utf-8").replace("«", "").replace("»", "") and not witness.lstrip().startswith(b"{")
     h.replay(witness)
 
     for data in [b"fn main(){let x=;", b"fn main(){/* unclosed", b"fn main(){unknown!{raw}}", b"fn main(){\xff}", b" " * (128 * 1024 + 1)]:

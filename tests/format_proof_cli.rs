@@ -274,7 +274,10 @@ fn emitted_ast_witness_compiles_independently_with_hostile_payload_as_literals()
     );
     let text = String::from_utf8(emitted.stdout).unwrap();
     assert!(text.contains("comments_preserved"));
-    assert!(text.contains("Vesper.StylusGenerated"));
+    assert!(
+        text.replace(['«', '»'], "")
+            .contains("Vesper.StylusGenerated")
+    );
     assert!(!text.trim_start().starts_with('{'));
     let model = std::env::var_os("VESPER_FORMAT_PROOF_MODEL")
         .map(PathBuf::from)
@@ -301,7 +304,7 @@ fn emitted_ast_witness_compiles_independently_with_hostile_payload_as_literals()
     };
     compile("StylusAndLintSafety.lean", "StylusAndLintSafety.olean");
     compile("Witness.lean", "Witness.olean");
-    fs::write(f.root.join("Inspect.lean"),"import Witness\n#print axioms Vesper.StylusGenerated.comments_preserved\n#print axioms Vesper.StylusSafety.projection_narrowing_preserves_disjointness\n").unwrap();
+    fs::write(f.root.join("Inspect.lean"),"import Witness\n#check Vesper.StylusGenerated.comments_preserved\n#print axioms Vesper.StylusGenerated.comments_preserved\n#print axioms Vesper.StylusSafety.projection_narrowing_preserves_disjointness\n").unwrap();
     let inspect = output(
         Command::new(&lean)
             .current_dir(&f.root)

@@ -15,7 +15,9 @@ macro source may receive a document-model proof while ordinary batch checking
 still rejects that unexpanded program.
 
 The emitted AST module must compile independently with the actual bundled model
-under Lean4.24.0/trust0, with two printed empty-axiom results. Lean-looking comment
+under Lean4.24.0/trust0, with an actual qualified theorem-name check and two
+printed empty-axiom results. Text checks allow canonical quoted Lean names;
+independent elaboration establishes the real namespace and declaration. Lean-looking comment
 and escaped string payloads remain literal: an independent #check injected probe
 must fail, rather than introducing an axiom from source contents. No fake Lean
 executable or forged version output is used. Invalid/opaque/lexical/UTF8/oversized
