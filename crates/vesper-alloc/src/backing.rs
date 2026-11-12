@@ -11,7 +11,7 @@ use std::ptr::NonNull;
 /// aligned to `layout.align()`, exclusively owned by the caller until it is
 /// passed back to `deallocate` with the same layout. The region only calls
 /// `allocate` with a nonzero size and calls `deallocate` at most once per
-/// returned pointer.
+/// returned pointer. A zero-sized request should return `None`.
 pub unsafe trait ChunkBacking {
     fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>>;
     /// # Safety
@@ -30,8 +30,12 @@ pub struct SystemBacking;
 // SAFETY: forwards to the global allocator with the caller's nonzero layout.
 unsafe impl ChunkBacking for SystemBacking {
     fn allocate(&mut self, layout: Layout) -> Option<NonNull<u8>> {
-        debug_assert!(layout.size() > 0);
-        // SAFETY: the region never requests a zero-sized layout.
+        // `allocate` is a safe method that any caller may use, so the
+        // nonzero-size precondition of `alloc::alloc` is checked here.
+        if layout.size() == 0 {
+            return None;
+        }
+        // SAFETY: `layout` has a nonzero size.
         NonNull::new(unsafe { alloc::alloc(layout) })
     }
 

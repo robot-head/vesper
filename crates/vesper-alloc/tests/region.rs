@@ -863,3 +863,150 @@ fn panicking_finalizer_does_not_leak_chunks_or_double_drop() {
     assert_eq!(*log.borrow(), [1], "remaining payloads still finalized");
     assert_eq!(ledger.live.get(), 0, "chunks freed despite the panic");
 }
+
+// ----- review follow-ups ---------------------------------------------------------------
+
+#[test]
+fn releasing_across_a_chunk_boundary_reclaims_both_chunks() {
+    let (mut r, ledger) = counting(RegionConfig {
+        max_allocations: 2,
+        ..small(4096)
+    });
+    let a = r.alloc_bytes(64, 1).unwrap(); // fills chunk 0
+    let b = r.alloc_bytes(128, 1).unwrap(); // fills chunk 1
+    r.release_bytes(a).unwrap();
+    r.release_bytes(b).unwrap();
+    assert_eq!(r.stats().tracked_allocations, 0);
+    assert_eq!(r.stats().used_bytes, 0);
+    let allocs = ledger.allocations.get();
+    let c = r.alloc_bytes(64, 1).unwrap();
+    let d = r.alloc_bytes(128, 1).unwrap();
+    assert_eq!(
+        ledger.allocations.get(),
+        allocs,
+        "emptied chunk reused as a spare"
+    );
+    assert_eq!((r.len(&c), r.len(&d)), (Ok(64), Ok(128)));
+}
+
+#[test]
+fn cross_chunk_reclaim_stops_at_a_watermark_in_the_emptied_chunk() {
+    let (mut r, _) = counting(small(4096));
+    let a = r.alloc_bytes(64, 1).unwrap();
+    let b = r.alloc_bytes(16, 1).unwrap(); // chunk 1
+    let mark = r.checkpoint().unwrap();
+    r.release_bytes(a).unwrap();
+    r.release_bytes(b).unwrap();
+    // `b` is protected by the watermark, so nothing is reclaimed yet.
+    assert_eq!(r.stats().tracked_allocations, 2);
+    r.commit(mark).unwrap();
+    assert_eq!(r.stats().tracked_allocations, 0);
+    assert_eq!(r.stats().used_bytes, 0);
+
+    // A watermark taken at the start of an emptied chunk pins that chunk.
+    let a = r.alloc_bytes(64, 1).unwrap();
+    let b = r.alloc_bytes(16, 1).unwrap();
+    r.release_bytes(b).unwrap(); // chunk 1 empties; chunk 0 becomes active again
+    let mark = r.checkpoint().unwrap();
+    r.release_bytes(a).unwrap();
+    assert_eq!(r.stats().used_bytes, 64, "watermark pins the earlier chunk");
+    let c = r.alloc_bytes(8, 1).unwrap();
+    r.rewind(mark).unwrap();
+    assert_eq!(r.len(&c), Err(HandleError::Stale));
+    assert_eq!(r.stats().used_bytes, 64);
+}
+
+#[test]
+fn failed_allocation_keeps_spare_chunks() {
+    let (mut r, ledger) = counting(small(192));
+    let mark = r.checkpoint().unwrap();
+    r.alloc_bytes(60, 1).unwrap(); // chunk 0 (64)
+    r.alloc_bytes(100, 1).unwrap(); // chunk 1 (128)
+    r.rewind(mark).unwrap();
+    r.alloc_bytes(64, 1).unwrap(); // fill chunk 0 again
+    let before = r.stats();
+    assert!(matches!(
+        r.alloc_bytes(193, 1),
+        Err(AllocError::CapacityExceeded { .. })
+    ));
+    assert_eq!(r.stats(), before);
+    assert_eq!(ledger.live.get(), 2, "spare kept on capacity failure");
+
+    ledger.fail_after.set(Some(ledger.allocations.get()));
+    let (mut r2, ledger2) = counting(small(4096));
+    let mark = r2.checkpoint().unwrap();
+    r2.alloc_bytes(60, 1).unwrap();
+    r2.alloc_bytes(100, 1).unwrap();
+    r2.rewind(mark).unwrap();
+    r2.alloc_bytes(64, 1).unwrap();
+    ledger2.fail_after.set(Some(ledger2.allocations.get()));
+    let before = r2.stats();
+    assert!(matches!(
+        r2.alloc_bytes(200, 1),
+        Err(AllocError::OutOfMemory { .. })
+    ));
+    assert_eq!(r2.stats(), before);
+    assert_eq!(ledger2.live.get(), 2, "spare kept on backing failure");
+    // The spare still serves a request that fits it, with no backing call.
+    let h2 = r2.alloc_bytes(100, 1).unwrap();
+    assert_eq!(r2.len(&h2), Ok(100));
+    let h = r.alloc_bytes(100, 1).unwrap();
+    assert_eq!(r.len(&h), Ok(100));
+}
+
+#[test]
+fn spare_capacity_counts_toward_a_replacement_chunk() {
+    let (mut r, ledger) = counting(small(256));
+    let mark = r.checkpoint().unwrap();
+    r.alloc_bytes(60, 1).unwrap(); // 64
+    r.alloc_bytes(100, 1).unwrap(); // 128
+    r.rewind(mark).unwrap();
+    r.alloc_bytes(64, 1).unwrap();
+    // 64 + 128 + 150 would exceed 256; replacing the unusable spare fits.
+    let big = r.alloc_bytes(150, 1).unwrap();
+    assert_eq!(r.len(&big), Ok(150));
+    assert_eq!(ledger.live.get(), 2);
+    assert!(r.stats().reserved_bytes <= 256);
+    assert_eq!(r.stats().reserved_bytes, ledger.live_bytes.get());
+}
+
+#[test]
+fn system_backing_rejects_zero_sized_layouts() {
+    assert!(SystemBacking.allocate(Layout::new::<()>()).is_none());
+    let layout = Layout::from_size_align(8, 8).unwrap();
+    let p = SystemBacking.allocate(layout).unwrap();
+    unsafe { SystemBacking.deallocate(p, layout) };
+}
+
+#[test]
+fn zero_sized_allocations_pin_their_chunk() {
+    #[repr(align(4096))]
+    struct Page;
+    let config = RegionConfig {
+        initial_chunk_bytes: 1,
+        max_chunk_bytes: 1 << 12,
+        retained_bytes: 1,
+        ..small(1 << 16)
+    };
+    let (mut r, _) = counting(config);
+    let first = r.alloc_bytes(1, 1).unwrap();
+    let empty = r.alloc_bytes(0, 4096).unwrap(); // opens a chunk, cursor stays 0
+    let page = r.alloc_value(Page).unwrap();
+    let p_empty = r.bytes_ptr(&empty).unwrap();
+    let p_page = r.get(&page).unwrap() as *const Page;
+    r.release_bytes(first).unwrap();
+    r.alloc_bytes(3, 1).unwrap();
+    assert_eq!(r.bytes_ptr(&empty).unwrap(), p_empty);
+    assert_eq!(r.get(&page).unwrap() as *const Page, p_page);
+    assert_eq!(p_empty.as_ptr().addr() % 4096, 0);
+    assert_eq!(p_page.addr() % 4096, 0);
+
+    // Releasing the zero-sized tip first lets the cascade reclaim everything.
+    let (mut r, _) = counting(config);
+    let first = r.alloc_bytes(1, 1).unwrap();
+    let empty = r.alloc_bytes(0, 4096).unwrap();
+    r.release_bytes(empty).unwrap();
+    r.release_bytes(first).unwrap();
+    assert_eq!(r.stats().tracked_allocations, 0);
+    assert_eq!(r.stats().used_bytes, 0);
+}

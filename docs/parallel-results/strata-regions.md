@@ -1,6 +1,6 @@
 # Strata region allocator core (design §15)
 
-Lane: Strata region allocator. Branch: `claude/project-thread-d6page`, based on `origin/work` at `3be6891`.
+Lane: Strata region allocator. Initial core merged as PR #1 (`c09c014`); review follow-up on branch `claude/project-thread-d6page`, based on `origin/work` at `72493b8`.
 Owned paths: `crates/vesper-alloc/**` and this file. No root workspace, lockfile, CLI, CI, syntax, checker, IR, or codegen file is changed.
 
 ## What is implemented
@@ -14,10 +14,10 @@ Owned paths: `crates/vesper-alloc/**` and this file. No root workspace, lockfile
 | Checked size arithmetic | Every cursor, padding, length, growth, and reservation computation is checked; sizes above `isize::MAX` and overflowing extensions return `SizeOverflow`. Padding is part of the fit computation. |
 | Growth | Chunks start at `initial_chunk_bytes`, double up to `max_chunk_bytes`, and an oversized request gets a dedicated chunk if the reservation allows it. Chunks never move, so addresses are stable. |
 | Owned identity/generation | Each region has a process-unique `RegionId`. Each tracked allocation and each watermark has a serial that the region never reuses. `RegionStats::epoch` counts rewinds and resets. |
-| Reset/reclamation | `checkpoint`/`rewind` give LIFO O(1) bump reset (plus finalizer work); spare chunks obtained after the watermark are retained for reuse. `reset` keeps up to `retained_bytes` of chunks and returns the rest to the backing. Releasing or taking the newest allocation reclaims its bytes (and padding) immediately, cascading through earlier released slots. |
+| Reset/reclamation | `checkpoint`/`rewind` give LIFO O(1) bump reset (plus finalizer work); spare chunks obtained after the watermark are retained for reuse. A request that fits no spare replaces the unusable spares (their capacity counts toward the replacement), but they are returned only after the backing supplies the replacement, so a failed request keeps them. `reset` keeps up to `retained_bytes` of chunks and returns the rest to the backing. Releasing or taking the newest allocation reclaims its bytes (and padding) immediately, cascading through earlier released slots and across emptied chunks, stopping at the newest watermark and at untracked raw allocations. |
 | Stale/cross-region rejection | Handles carry `(RegionId, slot, serial)`. Another region's handle yields `CrossRegion` even when its slot index and serial coincide with a local allocation. A rewound, reset, released, or relocated allocation yields `Stale` even after its slot index and bytes are reused. Watermarks invalidated by an outer rewind or reset are also `Stale`. |
 | Byte buffers | `RegionBytes` (`RegionSlice[r, u8]`): zero-initialized or copied allocations, `bytes`/`bytes_mut`, disjoint `bytes_mut_pair`, and `extend_bytes`, which grows the unprotected tip in place or relocates (old handle becomes stale; on failure the handle and contents are unchanged). |
-| Region boxes | `RegionBox<T>` (`RegionBox[r, T]`): `alloc_value` (copy/affine) and `alloc_linear`; `get`, `get_mut`, `take`. A failed allocation returns the value (`ValueAllocError { value, error }`). Values needing drop go on the region's LIFO finalizer list; `take` unregisters them. |
+| Region boxes | `RegionBox<T>` (`RegionBox[r, T]`, invariant in `T`): `alloc_value` (copy/affine) and `alloc_linear`; `get`, `get_mut`, `take`. A failed allocation returns the value (`ValueAllocError { value, error }`). Values needing drop go on the region's LIFO finalizer list; `take` unregisters them. |
 | Linear payloads | A live linear payload makes `rewind` over it fail (the watermark is returned so the caller can consume the payload and retry), makes `reset` fail, and makes `close`/`scoped` report `LinearObligationsLive`. |
 | Cleanup on error | `Region::scoped`/`scoped_in` close the region on return; unwinding drops it. Drop finalizes remaining payloads in LIFO order, continues after a panicking finalizer (a second panic aborts, as for `Vec`), and always returns every chunk. Finalizer slots are removed before their finalizer runs, so a panic cannot double-drop. |
 | Explicit ownership, no GC/ARC | A region is uniquely owned, has no `Clone`, and is `!Send`/`!Sync` (shard-confined). Payloads are not reference-counted. The only atomic is the process-wide `RegionId` counter. Region metadata (chunk list, slot table, watermark stack) uses ordinary `Vec`s on the host heap. |
@@ -84,10 +84,10 @@ All run from `crates/vesper-alloc` on the cloud host (rustc 1.97.0 stable; Miri 
 | --- | --- |
 | `cargo fmt --check` | clean |
 | `cargo clippy --all-targets -- -D warnings` | clean |
-| `cargo test` | 30 integration tests + 1 doctest pass |
-| `cargo +nightly miri test` (Stacked Borrows, leak check on) | 30 + 1 pass |
-| `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test` | 30 + 1 pass |
-| `MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri test` | 30 + 1 pass |
+| `cargo test` | 36 integration tests + 2 doctests (one `compile_fail`) pass |
+| `cargo +nightly miri test` (Stacked Borrows, leak check on) | 36 + 2 pass |
+| `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test` | 36 + 2 pass |
+| `MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri test` | 36 + 2 pass |
 | `cargo metadata --no-deps --locked` at the repository root | root workspace unaffected |
 
 Tests (`tests/region.rs`) use a counting backing with failure injection, so chunk reclamation is observed rather than assumed:
@@ -102,6 +102,15 @@ Tests (`tests/region.rs`) use a counting backing with failure injection, so chun
 - Cleanup on error: `scoped` with an `Err` body, with an abandoned linear payload, with invalid config, a panicking body, and a panicking finalizer (no double drop, remaining payloads finalized, all chunks returned).
 
 Not validated here: the root workspace acceptance commands (`cargo test --workspace --locked` etc.), because the crate is not yet registered; behavior on AArch64 or non-Linux hosts; any performance property.
+
+## Review follow-up (Codex review of PR #1)
+
+Four findings were verified and fixed, each with a regression test that failed before the fix:
+
+1. **Soundness (P1):** `RegionBox<T>` used `PhantomData<fn() -> T>` and was therefore covariant. Because `get_mut` writes through `&RegionBox<T>`, safe code could view a `RegionBox<&'static str>` as `RegionBox<&'a str>`, store a local borrow, and read it back as `'static`. The marker is now `PhantomData<fn(T) -> T>` (invariant). A `compile_fail` doctest checks that the coercion is rejected; the same snippet was confirmed to compile with the old marker.
+2. **Soundness (P1):** `SystemBacking::allocate` is a safe method that any caller can use, and it guarded the nonzero-size precondition of `std::alloc::alloc` only with `debug_assert!`. It now returns `None` for zero-sized layouts.
+3. **Failure atomicity (P2):** a request that fit no spare chunk released the spares before asking for a replacement, so a failed request could still discard retained capacity. Spares are now released only after the replacement chunk is obtained.
+4. **Reclamation (P2):** tail reclamation stopped at a chunk boundary because the active chunk index stayed on the emptied chunk, so released slots in the earlier chunk stayed tracked and counted against `max_allocations`. The active chunk now steps back over emptied chunks, never below the newest watermark's chunk. A follow-up review found that a zero-sized allocation can open a chunk without advancing its cursor; a chunk that still holds any slot is now never treated as empty (regression test with a 4096-aligned zero-sized byte allocation and `RegionBox`).
 
 ## Proposed Alloc/Region lowering contract (v0, for compiler-owner review)
 
@@ -122,13 +131,14 @@ Rust ownership is not a proof of Vesper's linear discipline. A Rust caller can d
 - Exactly-once consumption of each linear payload and each watermark on every CFG path, including `Fail` and aborts, using the existing exact-once analysis.
 - No region exit, rewind, or reset while a linear payload in its span is live.
 - No use of a handle after a covering rewind/reset/release.
+- Aliasing is decided by allocation origin, not by source variable. Copies of a `RegionBytes` (and any future copyable `RegionRef`) name the same cell even when they flow from distinct source roots, so place-disjointness for two mutable region accesses needs either evidence that the handles have distinct `(region, allocation)` origins or exclusive (`inout r`) access to the whole region with a runtime distinctness check, as `bytes_mut_pair` does.
 
 ## Ambiguities and proposed decisions
 
 1. **Region exhaustion semantics.** §15.2 types `bump_alloc` as infallible, but a bounded `Region::scoped(256.kib(), …)` can be exhausted. Proposal: exhaustion aborts the enclosing scope with a typed `RegionExhausted` code in v0; a later `Fail[AllocError]` row entry needs language review.
 2. **Growing pre-watermark collections.** The §15.5 example pushes into `entries` (allocated before `checkpoint`) between `checkpoint` and `rewind`. In a bump region, growth after the watermark lands above it and would be discarded by the rewind while the collection survives. The runtime rejects that growth with `ProtectedByWatermark` instead of losing data. Proposal: the checker rejects growth of pre-watermark region collections inside a watermark window unless capacity was reserved before the checkpoint (a `reserve` API is future work), or the collection lives in an outer region.
 3. **Linear payloads at forced teardown.** On drop or unwinding, abandoned linear payloads are finalized rather than leaked, and `close` reports the violation. Leaking was rejected because linear payloads typically own OS resources.
-4. **Allocation-table bound.** Released and moved slots that are not at the tip count against `max_allocations` until a covering rewind or reset. This keeps handle checks O(1) and memory proportional to tracked allocations.
+4. **Allocation-table bound.** Released and moved slots that are not at the tip (or are protected by a watermark) count against `max_allocations` until a covering rewind or reset. This keeps handle checks O(1) and memory proportional to tracked allocations.
 5. **Chunk provisioning.** The design specifies `mmap(MAP_NORESERVE)` reservations with `MADV_FREE`. This milestone uses `ChunkBacking` (global allocator by default) and chunked growth. Contiguous virtual reservation is a later backing, not a change to the handle semantics.
 6. **Mode crossing.** `RegionBytes` is `Copy`; `RegionBox<T>` is move-only even for `T: Copy`, since the runtime cannot see Vesper modes. The checker decides crossing.
 
