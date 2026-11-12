@@ -22,6 +22,32 @@ pub const ITEM: SyntaxKind = SyntaxKind(201);
 pub const EXPR: SyntaxKind = SyntaxKind(202);
 pub const PATTERN: SyntaxKind = SyntaxKind(203);
 pub const TYPE: SyntaxKind = SyntaxKind(204);
+/// Editor-only CST kinds. Legacy batch parsing never inserts these wrappers.
+pub const BLOCK: SyntaxKind = SyntaxKind(205);
+pub const ERROR_NODE: SyntaxKind = SyntaxKind(206);
+pub const INCOMPLETE: SyntaxKind = SyntaxKind(207);
+mod recovery_driver;
+#[allow(
+    unused_imports,
+    reason = "consumed by separately integrated incremental module"
+)]
+pub(crate) use recovery_driver::{BodyContext, capture_body_context, parse_body_fragment};
+pub use recovery_driver::{parse_complete_items, parse_recovery};
+
+#[derive(Clone)]
+struct HeaderNote {
+    start: usize,
+    body_start: usize,
+    clean: bool,
+    nongeneric: bool,
+    row_names: std::collections::BTreeSet<String>,
+    bound_values: std::collections::BTreeSet<String>,
+}
+struct TraceSite {
+    span: Span,
+    kind: crate::recovery::SiteKind,
+    receiver: Option<crate::recovery::Receiver>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Parse {
@@ -132,6 +158,11 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
         depth: 0,
         halted: false,
         expr_heights: Default::default(),
+        editor: false,
+        site_limit: 0,
+        site_exhausted: false,
+        sites: vec![],
+        headers: vec![],
     };
     p.builder.start_node(MODULE);
     let mut module = Module::default();
@@ -177,6 +208,11 @@ struct Parser<'a> {
     depth: usize,
     halted: bool,
     expr_heights: std::collections::BTreeMap<(usize, usize), usize>,
+    editor: bool,
+    site_limit: usize,
+    site_exhausted: bool,
+    sites: Vec<TraceSite>,
+    headers: Vec<HeaderNote>,
 }
 impl Parser<'_> {
     fn index(&self, n: usize) -> usize {
@@ -247,8 +283,41 @@ impl Parser<'_> {
     }
     fn expect(&mut self, k: K) {
         if !self.eat(k) {
+            if self.editor {
+                let delimiter = matches!(k, K::RParen | K::RBracket | K::RBrace);
+                let span = if delimiter {
+                    self.start()..self.start()
+                } else {
+                    self.span()
+                };
+                self.site(
+                    span,
+                    if delimiter {
+                        crate::recovery::SiteKind::MissingDelimiter
+                    } else {
+                        crate::recovery::SiteKind::Unexpected
+                    },
+                    None,
+                );
+            }
             self.error(format!("expected {k:?}, found {:?}", self.kind()));
         }
+    }
+    fn site(
+        &mut self,
+        span: Span,
+        kind: crate::recovery::SiteKind,
+        receiver: Option<crate::recovery::Receiver>,
+    ) {
+        if self.sites.len() >= self.site_limit {
+            self.site_exhausted = true;
+            return;
+        }
+        self.sites.push(TraceSite {
+            span,
+            kind,
+            receiver,
+        });
     }
     fn error(&mut self, msg: impl Into<String>) {
         if self.halted {
@@ -705,6 +774,7 @@ impl Parser<'_> {
     }
     fn function(&mut self, op: bool) -> Function {
         let start = self.start();
+        let diagnostics_before = self.diagnostics.len();
         self.expect(K::Fn);
         let name = self.lower();
         let old_rows = self.row_names.clone();
@@ -733,6 +803,16 @@ impl Parser<'_> {
                     span: w.span,
                 });
             }
+        }
+        if self.editor && !op {
+            self.headers.push(HeaderNote {
+                start,
+                body_start: self.start(),
+                clean: self.diagnostics.len() == diagnostics_before,
+                nongeneric: generics.is_empty(),
+                row_names: self.row_names.clone(),
+                bound_values: self.bound_values.clone(),
+            });
         }
         let body = if op {
             self.expect(K::Semi);
@@ -1199,6 +1279,34 @@ impl Parser<'_> {
         self.expect(K::RBracket);
         out
     }
+    fn statement_anchor(&self) -> bool {
+        matches!(
+            self.kind(),
+            K::Let | K::Match | K::Handle | K::Return | K::If
+        )
+    }
+    fn recover_statement(&mut self) {
+        if self.at(K::Semi) {
+            self.bump();
+            return;
+        }
+        if self.statement_anchor() || matches!(self.kind(), K::RBrace | K::Eof) {
+            return;
+        }
+        let start = self.start();
+        self.builder.start_node(ERROR_NODE);
+        while !self.statement_anchor() && !matches!(self.kind(), K::Semi | K::RBrace | K::Eof) {
+            self.bump();
+        }
+        let end = self.end();
+        self.builder.finish_node();
+        if start < end {
+            self.site(start..end, crate::recovery::SiteKind::Unexpected, None);
+        }
+        if self.at(K::Semi) {
+            self.bump();
+        }
+    }
     fn block(&mut self) -> Expr {
         let previous = self.depth;
         if !self.enter() {
@@ -1209,6 +1317,10 @@ impl Parser<'_> {
         self.record_expr(result)
     }
     fn block_inner(&mut self) -> Expr {
+        if self.editor {
+            self.trivia();
+            self.builder.start_node(BLOCK);
+        }
         let outer_values = self.bound_values.clone();
         let start = self.start();
         self.expect(K::LBrace);
@@ -1230,12 +1342,26 @@ impl Parser<'_> {
                 };
                 self.expect(K::Eq);
                 let value = self.expr();
+                let missing_semi = self.editor && !self.at(K::Semi);
                 self.expect(K::Semi);
+                if missing_semi {
+                    self.recover_statement();
+                }
                 pattern_bindings(&pat, &mut self.bound_values);
                 statements.push(Statement::Let { pat, ty, value });
             } else {
+                let diagnostics_before = self.diagnostics.len();
                 let e = self.expr();
                 if self.eat(K::Semi) {
+                    statements.push(Statement::Expr(e));
+                } else if self.editor
+                    && !matches!(self.kind(), K::RBrace | K::Eof)
+                    && (self.diagnostics.len() > diagnostics_before || self.statement_anchor())
+                {
+                    if self.diagnostics.len() == diagnostics_before {
+                        self.error("expected ';' before following statement");
+                    }
+                    self.recover_statement();
                     statements.push(Statement::Expr(e));
                 } else {
                     tail = Some(Box::new(e));
@@ -1253,6 +1379,9 @@ impl Parser<'_> {
             if u.scope == (start..start) {
                 u.scope = span.clone();
             }
+        }
+        if self.editor {
+            self.builder.finish_node();
         }
         Expr {
             kind: ExprKind::Block { statements, tail },
@@ -1519,6 +1648,7 @@ impl Parser<'_> {
         self.record_expr(result)
     }
     fn postfix_inner(&mut self) -> Expr {
+        let checkpoint = self.builder.checkpoint();
         let mut e = self.primary();
         loop {
             if !matches!(self.kind(), K::LParen | K::LBracket | K::Dot | K::Question) {
@@ -1577,7 +1707,17 @@ impl Parser<'_> {
                 }
                 K::Dot => {
                     self.bump();
-                    ExprKind::Field(Box::new(e), self.lower())
+                    if self.editor && !matches!(self.kind(), K::Lower | K::SelfKw) {
+                        let span = self.end()..self.end();
+                        let receiver = recovery_driver::receiver(&e);
+                        self.site(span, crate::recovery::SiteKind::MissingMember, receiver);
+                        self.error("expected a lower-case member name after '.'");
+                        self.builder.start_node_at(checkpoint, INCOMPLETE);
+                        self.builder.finish_node();
+                        ExprKind::Field(Box::new(e), "<incomplete>".into())
+                    } else {
+                        ExprKind::Field(Box::new(e), self.lower())
+                    }
                 }
                 K::Question => {
                     self.bump();
@@ -1716,8 +1856,32 @@ impl Parser<'_> {
                 K::LBrace => return self.block(),
                 _ => {
                     self.error("expected expression");
+                    if self.editor
+                        && matches!(
+                            self.kind(),
+                            K::Semi
+                                | K::RBrace
+                                | K::RParen
+                                | K::RBracket
+                                | K::Comma
+                                | K::Eof
+                                | K::Let
+                        )
+                    {
+                        self.site(start..start, crate::recovery::SiteKind::Unexpected, None);
+                        return Expr {
+                            kind: ExprKind::Tuple(vec![]),
+                            span: start..start,
+                        };
+                    }
                     if !self.at(K::Eof) {
+                        if self.editor {
+                            self.builder.start_node(ERROR_NODE);
+                        }
                         self.bump();
+                        if self.editor {
+                            self.builder.finish_node();
+                        }
                     }
                     ExprKind::Tuple(vec![])
                 }
