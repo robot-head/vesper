@@ -496,13 +496,15 @@ impl RecvBuf {
         if end > self.read + self.data.len() as u64 {
             return Err(WindowExceeded);
         }
+        // An empty frame (e.g. FIN only) still moves the highest offset
+        // that flow control and final-size checks count.
+        self.highest = self.highest.max(end);
         let start = off.max(self.read);
         if start >= end {
             return Ok(());
         }
         ring_write(&mut self.data, start, &data[(start - off) as usize..]);
         self.have.set(start, end);
-        self.highest = self.highest.max(end);
         if start <= self.contig {
             self.contig = self
                 .have

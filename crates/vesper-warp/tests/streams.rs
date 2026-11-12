@@ -499,6 +499,20 @@ fn peer_violations_are_typed_transport_errors() {
         })),
         TransportErrorCode::FlowControlError
     );
+    // Empty FIN-only frames count their final size against connection
+    // credit (two streams of 1000 > 1500), even before any data arrived.
+    let mut s = set(Role::Server, cfg);
+    s.on_frame(&stream_frame(0, 1000, &[], true)).unwrap();
+    assert_eq!(s.recv_credit(), (1500, 1000));
+    assert_eq!(
+        code(s.on_frame(&stream_frame(4, 1000, &[], true))),
+        TransportErrorCode::FlowControlError
+    );
+    // ... and later data must stay within the final size it set.
+    assert_eq!(
+        code(s.on_frame(&stream_frame(0, 990, &[0; 20], false))),
+        TransportErrorCode::FinalSizeError
+    );
     // CRYPTO past the buffer.
     let mut s = set(Role::Server, cfg);
     assert_eq!(

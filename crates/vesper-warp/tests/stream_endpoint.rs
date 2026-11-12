@@ -592,3 +592,66 @@ fn sweep_seeds() {
         }
     }
 }
+
+#[test]
+fn closing_suppresses_queued_packets() {
+    // A reliable client with paced stream packets queued receives a
+    // violation from a raw server and closes: nothing but
+    // CONNECTION_CLOSE may leave afterwards (RFC 9000 §10.2).
+    let mut p = Pair::new(config(), Discard::default(), Discard::default());
+    p.server = endpoint(
+        EndpointConfig {
+            stream_mode: StreamMode::Raw,
+            role: vesper_warp::stream::Role::Server,
+            ..config()
+        },
+        Discard::default(),
+    );
+    p.s_conn = p
+        .server
+        .open_connection(&SERVER_CID, &CLIENT_CID, server_keys(), 0)
+        .unwrap();
+    let id = p.client.open_stream(p.c_conn, false).unwrap();
+    let data = vec![3u8; 60_000];
+    let mut sent = 0;
+    for _ in 0..3 {
+        sent += p.client.stream_write(p.c_conn, id, &data[sent..]).unwrap();
+        p.step();
+    }
+    sent += p.client.stream_write(p.c_conn, id, &data[sent..]).unwrap();
+    p.client.flush(p.c_conn, p.now).unwrap();
+    assert!(p.client.queued_launches() > 0, "paced packets are queued");
+    // Stream 2 is a client unidirectional stream the client never opened.
+    p.server
+        .send_stream(p.s_conn, 2, 0, b"x", false, p.now)
+        .unwrap();
+    p.step();
+    let Some(ConnectionError::Local(e)) = p.client.connection_error(p.c_conn) else {
+        panic!("client should have closed")
+    };
+    assert_eq!(e.code, TransportErrorCode::StreamStateError);
+    let before = p.client.stats();
+    for _ in 0..50 {
+        p.step();
+    }
+    let after = p.client.stats();
+    assert!(
+        after.tx_suppressed_closed > 0,
+        "queued packets were abandoned"
+    );
+    assert_eq!(p.client.queued_launches(), 0);
+    // Only CONNECTION_CLOSE packets (not ack-eliciting) were sent.
+    assert_eq!(
+        after.packets_sent - before.packets_sent,
+        after.closes_sent - before.closes_sent
+    );
+    assert_eq!(after.probes_sent, before.probes_sent);
+    assert_eq!(
+        p.server.connection_error(p.s_conn),
+        Some(ConnectionError::Peer {
+            error_code: 0x05,
+            frame_type: Some(0x0a)
+        })
+    );
+    assert!(sent > 0);
+}

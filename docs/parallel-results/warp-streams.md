@@ -189,6 +189,24 @@ Commands run: `cargo fmt --all -- --check`, `cargo test -p vesper-warp
 warnings`, `cargo test --workspace --locked` and `cargo clippy --workspace
 --locked --all-targets -- -D warnings`. The results are in the PR.
 
+## Review fixes
+
+Codex reviewed `2414cc4` and found two problems. Both are fixed in the
+follow-up commit, and each has a regression test.
+
+* An empty STREAM frame, such as a FIN alone, did not move the highest
+  received offset. So FIN-only frames could take a stream past
+  connection credit unnoticed. `RecvBuf::insert` now counts the frame's
+  end offset even when the frame carries no data. The regression test is
+  in `peer_violations_are_typed_transport_errors`.
+* When a connection started closing or draining, it still sent the paced
+  packets it had already queued, and its deferred ACKs. `submit` now
+  abandons every packet except CONNECTION_CLOSE once the connection has
+  an error, and counts them in `tx_suppressed_closed`. Deferred ACKs are
+  dropped too, and CONNECTION_CLOSE leaves at once instead of waiting
+  behind the queue. The regression test is
+  `closing_suppresses_queued_packets`.
+
 ## Decisions
 
 * Retransmission state is a bitmap over each ring, not a range list. Its

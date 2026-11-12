@@ -427,6 +427,8 @@ pub struct EndpointStats {
     pub closes_received: u64,
     /// Received packets dropped because their connection was closed.
     pub rx_dropped_closed: u64,
+    /// Queued packets abandoned because their connection closed first.
+    pub tx_suppressed_closed: u64,
 }
 
 /// A connection's non-tile state. The tile (lane 6) holds the hot scalars:
@@ -468,6 +470,9 @@ struct Staged {
     /// The application/stream frames made it into the packet (a reply
     /// whose frames did not fit is sent ACK-only).
     carried: bool,
+    /// A CONNECTION_CLOSE packet: the only one sent once a connection is
+    /// closing.
+    close: bool,
 }
 
 /// A parked in-flight packet (§35.2 `park_for_ack_or_pto`).
@@ -1349,7 +1354,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             let owed = match self.conns.get_mut(slot.index() as usize) {
                 Some(Some(c)) if c.handle == slot => {
                     c.ack_deferred = false;
-                    c.received.ack_deadline().is_some()
+                    // No ACKs once closing or draining.
+                    c.error.is_none() && c.received.ack_deadline().is_some()
                 }
                 _ => continue,
             };
@@ -1784,6 +1790,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         // packet-threshold rule would then declare the queued ones lost.
         let edt_ns = if ack_eliciting {
             conn.cc.schedule_edt_ns(total as u32, now_ns)
+        } else if kind == Kind::Close {
+            // Closing: queued packets are suppressed, so CONNECTION_CLOSE
+            // leaves now rather than behind them.
+            now_ns
         } else {
             now_ns.max(conn.last_edt_ns)
         };
@@ -1832,6 +1842,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             park: ack_eliciting,
             tapped: false,
             carried: data_len > 0,
+            close: kind == Kind::Close,
         })
     }
 
@@ -1886,9 +1897,19 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             edt_ns,
             park,
             tapped,
+            close,
             ..
         } = staged;
-        if self.conn(conn).is_err() {
+        // Closing or draining (RFC 9000 §10.2): nothing but CONNECTION_CLOSE
+        // leaves, including packets queued before the close.
+        let suppressed = match self.conn(conn) {
+            Err(_) => true,
+            Ok(c) => c.error.is_some() && !close,
+        };
+        if suppressed {
+            if self.conn(conn).is_ok() {
+                self.stats.tx_suppressed_closed += 1;
+            }
             let _ = self.xsk.abandon_tx(frame);
             return;
         }
@@ -1915,6 +1936,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     park,
                     tapped: true,
                     carried: true,
+                    close,
                 };
                 let at = retry.edt_ns;
                 if let Err(refused) = self.launch.submit(now_ns, at, retry) {
