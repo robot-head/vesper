@@ -12,6 +12,8 @@ pub struct AnalysisLimits {
     pub max_identifier_bytes: usize,
     pub max_printed_type_bytes: usize,
     pub max_diagnostics: usize,
+    /// Aggregate logical occupied Diagnostic/DiagnosticLabel record metadata
+    /// plus all primary, secondary and help UTF-8 payload bytes (not RSS).
     pub max_diagnostic_bytes: usize,
     /// Serialized AST/type metadata bytes; a logical bound, not RSS.
     pub max_metadata_bytes: usize,
@@ -120,6 +122,34 @@ impl CheckedSource {
         &self.checked.world
     }
 }
+/// Finite per-diagnostic secondary-label ceiling for the editor profile. The
+/// aggregate ceiling is `max_diagnostics * 8`; this adds no Limits field and
+/// does not alter the independent legacy doc/lint profiles.
+pub const MAX_RELATED_LABELS_PER_DIAGNOSTIC: usize = 8;
+
+fn charge_diagnostic_bytes(
+    bytes: &mut usize,
+    amount: usize,
+    limit: usize,
+) -> Result<(), AnalysisFailure> {
+    *bytes = bytes
+        .checked_add(amount)
+        .ok_or_else(|| resource("analysis diagnostic size overflow"))?;
+    if *bytes > limit {
+        return Err(resource("analysis diagnostic metadata exceeded"));
+    }
+    Ok(())
+}
+fn diagnostic_span_bounded(span: &Span, source: &str) -> Result<(), AnalysisFailure> {
+    if span.start > span.end
+        || span.end > source.len()
+        || !source.is_char_boundary(span.start)
+        || !source.is_char_boundary(span.end)
+    {
+        return Err(resource("analysis diagnostic span metadata exceeded"));
+    }
+    Ok(())
+}
 fn diagnostics_bounded(
     diagnostics: &[Diagnostic],
     source: &str,
@@ -128,23 +158,50 @@ fn diagnostics_bounded(
     if diagnostics.len() > limits.max_diagnostics {
         return Err(resource("analysis diagnostic count exceeded"));
     }
+    let max_related = limits
+        .max_diagnostics
+        .checked_mul(MAX_RELATED_LABELS_PER_DIAGNOSTIC)
+        .ok_or_else(|| resource("analysis diagnostic count overflow"))?;
+    let mut related_count = 0usize;
     let mut bytes = 0usize;
     for d in diagnostics {
-        bytes = bytes
-            .checked_add(d.code.len())
-            .and_then(|n| n.checked_add(d.message.len()))
+        if d.related.len() > MAX_RELATED_LABELS_PER_DIAGNOSTIC {
+            return Err(resource("analysis related diagnostic count exceeded"));
+        }
+        related_count = related_count
+            .checked_add(d.related.len())
+            .ok_or_else(|| resource("analysis diagnostic count overflow"))?;
+        if related_count > max_related {
+            return Err(resource("analysis related diagnostic count exceeded"));
+        }
+        // Logical occupied records include every span and String/Vec/Option
+        // control, plus UTF-8 payload lengths below. Caller-owned spare capacity
+        // and allocator overhead are excluded; this is not an RSS guarantee.
+        charge_diagnostic_bytes(
+            &mut bytes,
+            core::mem::size_of::<Diagnostic>(),
+            limits.max_diagnostic_bytes,
+        )?;
+        charge_diagnostic_bytes(&mut bytes, d.code.len(), limits.max_diagnostic_bytes)?;
+        charge_diagnostic_bytes(&mut bytes, d.message.len(), limits.max_diagnostic_bytes)?;
+        diagnostic_span_bounded(&d.span, source)?;
+        let label_bytes = d
+            .related
+            .len()
+            .checked_mul(core::mem::size_of::<DiagnosticLabel>())
             .ok_or_else(|| resource("analysis diagnostic size overflow"))?;
-        if bytes > limits.max_diagnostic_bytes
-            || d.span.start > d.span.end
-            || d.span.end > source.len()
-            || !source.is_char_boundary(d.span.start)
-            || !source.is_char_boundary(d.span.end)
-        {
-            return Err(resource("analysis diagnostic metadata exceeded"));
+        charge_diagnostic_bytes(&mut bytes, label_bytes, limits.max_diagnostic_bytes)?;
+        for label in &d.related {
+            charge_diagnostic_bytes(&mut bytes, label.message.len(), limits.max_diagnostic_bytes)?;
+            diagnostic_span_bounded(&label.span, source)?;
+        }
+        if let Some(help) = &d.help {
+            charge_diagnostic_bytes(&mut bytes, help.len(), limits.max_diagnostic_bytes)?;
         }
     }
     Ok(())
 }
+
 struct Bytes {
     remaining: usize,
 }
@@ -918,5 +975,211 @@ mod tests {
             ),
             Err(AnalysisFailure::Resource { .. })
         ));
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_bound_tests {
+    use super::*;
+    const SOURCE: &str = "a🙂z\n";
+    fn fixture() -> Diagnostic {
+        Diagnostic::new("E1234", "primary 🙂", 1..5)
+            .with_related(0..1, "first")
+            .with_related(5..6, "last 🙂")
+            .with_help("preserve the actual source")
+    }
+    fn occupied_bytes(diagnostics: &[Diagnostic]) -> usize {
+        diagnostics
+            .iter()
+            .map(|d| {
+                core::mem::size_of::<Diagnostic>()
+                    + d.code.len()
+                    + d.message.len()
+                    + d.related.len() * core::mem::size_of::<DiagnosticLabel>()
+                    + d.related
+                        .iter()
+                        .map(|label| label.message.len())
+                        .sum::<usize>()
+                    + d.help.as_ref().map_or(0, String::len)
+            })
+            .sum()
+    }
+    fn resource_failure(result: Result<(), AnalysisFailure>) {
+        assert!(matches!(result, Err(AnalysisFailure::Resource { .. })));
+    }
+    #[test]
+    fn exact_aggregate_logical_metadata_boundary_preserves_all_ordered_labels_and_help() {
+        let diagnostics = [fixture(), fixture()];
+        let original = diagnostics.clone();
+        let bytes = occupied_bytes(&diagnostics);
+        let limits = AnalysisLimits {
+            max_diagnostics: 2,
+            max_diagnostic_bytes: bytes,
+            ..AnalysisLimits::default()
+        };
+        diagnostics_bounded(&diagnostics, SOURCE, limits).unwrap();
+        resource_failure(diagnostics_bounded(
+            &diagnostics,
+            SOURCE,
+            AnalysisLimits {
+                max_diagnostic_bytes: bytes - 1,
+                ..limits
+            },
+        ));
+        assert_eq!(diagnostics, original);
+        assert_eq!(
+            diagnostics[0]
+                .related
+                .iter()
+                .map(|l| l.span.clone())
+                .collect::<Vec<_>>(),
+            [0..1, 5..6]
+        );
+        assert_eq!(
+            diagnostics[0].help.as_deref(),
+            Some("preserve the actual source")
+        );
+        // Byte length, not Unicode scalar count, is the accounted text quantity.
+        let all_text_chars = diagnostics
+            .iter()
+            .map(|d| {
+                d.code.chars().count()
+                    + d.message.chars().count()
+                    + d.related
+                        .iter()
+                        .map(|l| l.message.chars().count())
+                        .sum::<usize>()
+                    + d.help.as_ref().unwrap().chars().count()
+            })
+            .sum::<usize>();
+        let fixed =
+            2 * core::mem::size_of::<Diagnostic>() + 4 * core::mem::size_of::<DiagnosticLabel>();
+        resource_failure(diagnostics_bounded(
+            &diagnostics,
+            SOURCE,
+            AnalysisLimits {
+                max_diagnostic_bytes: fixed + all_text_chars,
+                ..limits
+            },
+        ));
+    }
+    #[test]
+    fn every_primary_and_secondary_span_is_strict_and_utf8_safe() {
+        let bad_spans = [
+            Span { start: 5, end: 1 },
+            0..SOURCE.len() + 1,
+            0..usize::MAX,
+            2..5,
+            1..4,
+        ];
+        for span in bad_spans {
+            let mut primary = fixture();
+            primary.span = span.clone();
+            resource_failure(diagnostics_bounded(
+                &[primary],
+                SOURCE,
+                AnalysisLimits::default(),
+            ));
+            let mut secondary = fixture();
+            secondary.related[1].span = span;
+            resource_failure(diagnostics_bounded(
+                &[secondary],
+                SOURCE,
+                AnalysisLimits::default(),
+            ));
+        }
+        let eof = Diagnostic::new("E", "EOF", SOURCE.len()..SOURCE.len())
+            .with_related(0..0, "origin")
+            .with_related(SOURCE.len()..SOURCE.len(), "end");
+        diagnostics_bounded(&[eof], SOURCE, AnalysisLimits::default()).unwrap();
+    }
+    #[test]
+    fn oversized_secondary_help_and_fixed_metadata_fail_without_partial_success() {
+        let limits = AnalysisLimits::default();
+        let mut label = fixture();
+        label.related[0].message = "x".repeat(limits.max_diagnostic_bytes + 1);
+        resource_failure(diagnostics_bounded(&[fixture(), label], SOURCE, limits));
+        let help = fixture().with_help("x".repeat(limits.max_diagnostic_bytes + 1));
+        resource_failure(diagnostics_bounded(&[fixture(), help], SOURCE, limits));
+        let mut many = Diagnostic::new("E", "", 0..0);
+        for _ in 0..MAX_RELATED_LABELS_PER_DIAGNOSTIC + 1 {
+            many = many.with_related(0..0, "");
+        }
+        resource_failure(diagnostics_bounded(&[many], SOURCE, limits));
+        let mut exact = Diagnostic::new("E", "", 0..0);
+        for _ in 0..MAX_RELATED_LABELS_PER_DIAGNOSTIC {
+            exact = exact.with_related(0..0, "");
+        }
+        diagnostics_bounded(std::slice::from_ref(&exact), SOURCE, limits).unwrap();
+        resource_failure(diagnostics_bounded(
+            &[exact],
+            SOURCE,
+            AnalysisLimits {
+                max_diagnostic_bytes: 1,
+                ..limits
+            },
+        ));
+        resource_failure(diagnostics_bounded(
+            &[fixture(), fixture()],
+            SOURCE,
+            AnalysisLimits {
+                max_diagnostics: 1,
+                ..limits
+            },
+        ));
+    }
+    #[test]
+    fn aggregate_text_is_not_a_per_label_or_per_diagnostic_allowance() {
+        let mut d = Diagnostic::new("E", "", 0..0);
+        d = d
+            .with_related(0..0, "x".repeat(100))
+            .with_related(0..0, "x".repeat(100))
+            .with_help("x".repeat(100));
+        let fixed =
+            core::mem::size_of::<Diagnostic>() + 2 * core::mem::size_of::<DiagnosticLabel>() + 1;
+        resource_failure(diagnostics_bounded(
+            &[d],
+            SOURCE,
+            AnalysisLimits {
+                max_diagnostic_bytes: fixed + 299,
+                ..AnalysisLimits::default()
+            },
+        ));
+        let diagnostics = [fixture(), fixture()];
+        let one = occupied_bytes(&diagnostics[..1]);
+        resource_failure(diagnostics_bounded(
+            &diagnostics,
+            SOURCE,
+            AnalysisLimits {
+                max_diagnostic_bytes: one,
+                ..AnalysisLimits::default()
+            },
+        ));
+    }
+    #[test]
+    fn accounting_overflow_returns_resource_without_allocating_hostile_payloads() {
+        let mut bytes = usize::MAX;
+        resource_failure(charge_diagnostic_bytes(&mut bytes, 1, usize::MAX));
+        resource_failure(diagnostics_bounded(
+            &[],
+            "",
+            AnalysisLimits {
+                max_diagnostics: usize::MAX,
+                ..AnalysisLimits::default()
+            },
+        ));
+        let source = "fn f()->i64{true}";
+        assert!(matches!(
+            check_source(
+                source,
+                AnalysisLimits {
+                    max_diagnostic_bytes: 1,
+                    ..AnalysisLimits::default()
+                }
+            ),
+            Err(AnalysisFailure::Resource { .. })
+        ));
+        let snapshot = check_source("fn f()->i64{1}", AnalysisLimits::default()).unwrap();
+        assert!(snapshot.checked().diagnostics.is_empty());
     }
 }
