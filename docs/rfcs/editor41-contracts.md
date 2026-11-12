@@ -22,6 +22,16 @@ Cargo/lock patches remain allowed. All unlisted production files are read-only.
 Core AST/checker/Place IR/interface/native ABI schemas, arithmetic semantics,
 `k_i ⊑ m_i` and the AST-based Lean extractor remain unchanged.
 
+Within #85, the coordinator delegates only `src/lsp/session.rs` and its report
+to `editor41/session`, and only `tests/lsp_cli.rs`, `scripts/test-editor.sh`,
+`scripts/check-editor.py`, `.github/workflows/editor.yml` and its report to
+`editor41/stdio`. Root retains `src/lsp.rs`, `src/lsp/search.rs`, the existing
+CLI stdio regression, global registration and integration report. These are
+subdivisions of the same issue claim, with separate worktrees and private targets.
+The issue and PR board was checked again before these assignments; the external
+Warp lanes remained unchanged. A claim stays reserved through integration and
+validation and closes with its reviewed PR; source delivery is not a new vacancy.
+
 ## Shared spans and protocol
 
 The span owner supplies safe, root-free typed positions/ranges and source edits.
