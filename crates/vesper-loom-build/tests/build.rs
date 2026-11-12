@@ -483,6 +483,58 @@ fn mutating_the_original_after_snapshot_does_not_affect_execution() {
 }
 
 #[test]
+fn execution_needs_only_the_snapshots_not_the_original_inputs() {
+    let env = Env::new();
+    let runner = env.runner();
+    let prepared = runner.prepare(&env.codegen()).unwrap();
+    fs::rename(env.path("proto"), env.path("gone")).unwrap();
+    let out = runner.execute(&prepared, env.path("d1"), rw()).unwrap();
+    assert_eq!(out.cache, CacheStatus::Miss);
+    fs::remove_dir_all(env.path("gone")).unwrap();
+    let hit = runner.execute(&prepared, env.path("d2"), rw()).unwrap();
+    assert_eq!(hit.cache, CacheStatus::Hit);
+    assert_eq!(read(&env.path("d2/generated.vsp")), GENERATED);
+}
+
+#[test]
+fn a_prepared_build_runs_only_under_the_identity_that_keyed_it() {
+    let env = Env::new();
+    let prepared = env.runner().prepare(&env.codegen()).unwrap();
+    for mutate in [
+        (|i: &mut ExecutionIdentity| i.host_target = Some("aarch64-apple-darwin".into()))
+            as fn(&mut ExecutionIdentity),
+        |i| i.engine_dependencies = None,
+    ] {
+        let mut id = ExecutionIdentity::current();
+        mutate(&mut id);
+        let other = env.runner().with_identity_unchecked(id);
+        for cache in [CachePolicy::ReadWrite, CachePolicy::Uncached] {
+            let opts = RunOptions {
+                cache,
+                ..RunOptions::default()
+            };
+            let err = other
+                .execute(&prepared, env.path("dest"), opts)
+                .unwrap_err();
+            assert!(matches!(err, BuildError::IdentityMismatch), "{err:?}");
+        }
+    }
+    // Prepared with an incomplete identity, it cannot be recorded by a
+    // complete runner either.
+    let mut id = ExecutionIdentity::current();
+    id.rustc = None;
+    let incomplete = env.runner().with_identity_unchecked(id);
+    let prepared = incomplete.prepare(&env.codegen()).unwrap();
+    let err = env
+        .runner()
+        .execute(&prepared, env.path("dest"), rw())
+        .unwrap_err();
+    assert!(matches!(err, BuildError::IdentityMismatch), "{err:?}");
+    assert!(!env.path("dest").exists());
+    assert_eq!(recorded(&env.runner(), &prepared), None);
+}
+
+#[test]
 fn inputs_are_read_only_and_ambient_authority_is_denied() {
     let env = Env::new();
     let runner = env.runner();
@@ -663,6 +715,29 @@ fn create_new_refuses_an_existing_destination_before_executing() {
         .unwrap_err();
     assert!(matches!(err, BuildError::Destination { .. }), "{err:?}");
     assert_eq!(read(&env.path("file")), "x");
+
+    // Replacing an ancestor of the store or scratch area would delete it.
+    let err = runner
+        .execute(&prepared, env.root.path(), replace())
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            BuildError::Destination { .. }
+                | BuildError::Request(RequestError::LayoutOverlap { .. })
+        ),
+        "{err:?}"
+    );
+    fs::create_dir(env.path("cache")).unwrap();
+    let nested =
+        Runner::open(engine(), env.path("cache/store"), env.path("cache/scratch")).unwrap();
+    let prepared_nested = nested.prepare(&env.codegen()).unwrap();
+    let err = nested
+        .execute(&prepared_nested, env.path("cache"), replace())
+        .unwrap_err();
+    assert!(matches!(err, BuildError::Destination { .. }), "{err:?}");
+    assert!(nested.store().verify_all().unwrap().is_clean());
+    assert!(env.path("cache/store").is_dir());
 
     // Destinations inside an input or the store are refused.
     for bad in ["proto/gen", "store/gen", "scratch/gen"] {

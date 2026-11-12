@@ -8,7 +8,8 @@
 //! * `VLB_SANDBOX_SRC`  BLAKE3 over `vesper-loom-sandbox`'s `Cargo.toml`, `src/`, `wit/`.
 //! * `VLB_CAS_SRC`      BLAKE3 over `vesper-loom-cas`'s `Cargo.toml`, `src/`.
 //! * `VLB_ENGINE_DEPS`  BLAKE3 over the locked name/version/source/checksum of
-//!   every Wasmtime/Cranelift/WASI/cap-std package in the nearest `Cargo.lock`.
+//!   every Wasmtime/Cranelift/WASI/cap-std package in the lockfile of the
+//!   workspace being built (see `active_lock`).
 //! * `VLB_RUSTC`        `rustc -vV` of the compiler building this crate.
 //! * `VLB_HOST_TARGET`  the target triple this runner is compiled for.
 
@@ -58,7 +59,7 @@ fn main() {
         ),
         None => (None, None),
     };
-    let engine = engine_deps(&manifest);
+    let engine = engine_deps();
     let rustc = rustc_version();
     let target = env::var("TARGET").ok();
 
@@ -116,9 +117,22 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
     Ok(())
 }
 
-/// The nearest `Cargo.lock` at or above the manifest directory.
-fn find_lock(start: &Path) -> Option<PathBuf> {
-    let mut dir = Some(start);
+/// The lockfile of the workspace actually being built.
+///
+/// A path dependency is resolved by the *consuming* workspace's lockfile,
+/// not by a lockfile next to this crate, so the search starts from the
+/// target directory (`OUT_DIR` is `<target>/[<triple>/]<profile>/build/
+/// <pkg>-<hash>/out`) and walks up from there. With the default target
+/// directory inside the workspace, the first lockfile found is the one
+/// Cargo used. The lockfile must also list this package; otherwise (for
+/// example a `CARGO_TARGET_DIR` outside the workspace) the resolution is
+/// unknown and the fingerprint fails closed.
+fn active_lock() -> Option<PathBuf> {
+    let out = PathBuf::from(env::var_os("OUT_DIR")?);
+    let build = out
+        .ancestors()
+        .find(|a| a.file_name() == Some("build".as_ref()))?;
+    let mut dir = build.parent()?.parent();
     while let Some(d) = dir {
         let lock = d.join("Cargo.lock");
         if lock.is_file() {
@@ -129,10 +143,14 @@ fn find_lock(start: &Path) -> Option<PathBuf> {
     None
 }
 
-fn engine_deps(manifest: &Path) -> Option<String> {
-    let lock = find_lock(manifest)?;
+fn engine_deps() -> Option<String> {
+    let lock = active_lock()?;
     println!("cargo:rerun-if-changed={}", lock.display());
     let text = fs::read_to_string(&lock).ok()?;
+    let own = format!("name = \"{}\"", env::var("CARGO_PKG_NAME").ok()?);
+    if !text.lines().any(|l| l.trim() == own) {
+        return None;
+    }
     let mut entries = Vec::new();
     for block in text.split("[[package]]").skip(1) {
         let field = |key: &str| {

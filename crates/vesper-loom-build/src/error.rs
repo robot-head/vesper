@@ -68,6 +68,9 @@ pub enum BuildError {
     UnknownFingerprint {
         missing: Vec<&'static str>,
     },
+    /// The build was prepared by a runner with a different execution
+    /// identity, so its key does not describe this runner.
+    IdentityMismatch,
     /// An input could not be snapshotted (symlink, special file,
     /// non-portable name, I/O failure, ...).
     Snapshot {

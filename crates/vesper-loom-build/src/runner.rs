@@ -168,6 +168,10 @@ impl BuildEngine {
 #[derive(Clone, Debug)]
 pub struct PreparedBuild {
     request: BuildRequest,
+    /// Canonical host paths of the inputs, resolved once at preparation.
+    hosts: Vec<PathBuf>,
+    /// The identity the key was computed with.
+    identity: ExecutionIdentity,
     component: ObjectId,
     invocation: ObjectId,
     mounts: Vec<(String, ObjectId)>,
@@ -304,6 +308,8 @@ impl Runner {
             .map_err(|e| BuildError::from(CasError::InvalidDerivation(e)))?;
         Ok(PreparedBuild {
             request: request.clone(),
+            hosts,
+            identity: self.identity.clone(),
             component,
             invocation,
             mounts,
@@ -334,6 +340,9 @@ impl Runner {
         options: RunOptions,
     ) -> Result<BuildOutcome, BuildError> {
         let dest = destination.as_ref();
+        if prepared.identity != self.identity {
+            return Err(BuildError::IdentityMismatch);
+        }
         self.check_destination(prepared, dest, options.destination)?;
         if options.cache != CachePolicy::Uncached && !self.identity.is_complete() {
             return Err(BuildError::UnknownFingerprint {
@@ -448,19 +457,27 @@ impl Runner {
             .canonicalize()
             .map_err(|e| bad(&format!("parent unavailable: {e}")))?;
         let full = parent.join(name);
-        let store_root = self.store.root().canonicalize().unwrap_or_default();
-        for host in prepared.request.canonical_inputs()? {
-            if full.starts_with(&host) || host.starts_with(&full) {
+        let store_root = self
+            .store
+            .root()
+            .canonicalize()
+            .map_err(io("canonicalize store", self.store.root()))?;
+        for host in &prepared.hosts {
+            if full.starts_with(host) || host.starts_with(&full) {
                 return Err(RequestError::LayoutOverlap {
                     what: "destination",
                     path: full,
-                    input: host,
+                    input: host.clone(),
                 }
                 .into());
             }
         }
-        if full.starts_with(&store_root) || full.starts_with(&self.scratch) {
-            return Err(bad("lies inside the store or scratch area"));
+        // Both directions: replacing an ancestor of the store or scratch
+        // area would delete it along with the old destination.
+        for area in [&store_root, &self.scratch] {
+            if full.starts_with(area) || area.starts_with(&full) {
+                return Err(bad("overlaps the store or scratch area"));
+            }
         }
         match fs::symlink_metadata(dest) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -491,8 +508,7 @@ impl Runner {
             return Err(format!("manifest {id} belongs to {}", manifest.key));
         }
         let tree = parse_id(&manifest.output_tree, ObjectKind::Tree)?;
-        let mut listing = Vec::new();
-        self.verify_tree(&tree, "", &mut listing)?;
+        let listing = self.list_tree(&tree)?;
         if listing != manifest.outputs {
             return Err("output tree does not match the manifest's file list".into());
         }
@@ -511,7 +527,16 @@ impl Runner {
         }))
     }
 
-    /// Rehashes every object under `tree` and lists its files.
+    /// Rehashes every object under `tree` and lists its files sorted by
+    /// full `/`-separated path (the order of the sandbox's output scan, which
+    /// differs from depth-first entry order: `a.txt` sorts before `a/x`).
+    fn list_tree(&self, tree: &ObjectId) -> Result<Vec<OutputFile>, String> {
+        let mut out = Vec::new();
+        self.verify_tree(tree, "", &mut out)?;
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
     fn verify_tree(
         &self,
         tree: &ObjectId,
@@ -590,9 +615,7 @@ impl Runner {
             .ingest_dir(Domain::Artifact, &config.output_dir)
             .map_err(|e| BuildError::OutputRejected(e.to_string()))?
             .id;
-        let mut listing = Vec::new();
-        self.verify_tree(&tree, "", &mut listing)
-            .map_err(BuildError::OutputRejected)?;
+        let listing = self.list_tree(&tree).map_err(BuildError::OutputRejected)?;
         let mut scanned = report.outputs.clone();
         scanned.sort_by(|a, b| a.path.cmp(&b.path));
         if listing != scanned {
@@ -774,6 +797,30 @@ mod tests {
         })
         .unwrap_err();
         assert!(matches!(err, BuildError::InputChangedDuringSnapshot { .. }));
+    }
+
+    #[test]
+    fn tree_listing_uses_full_path_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("out");
+        fs::create_dir_all(out.join("a")).unwrap();
+        fs::write(out.join("a/x"), b"1").unwrap();
+        fs::write(out.join("a.txt"), b"22").unwrap();
+        let runner = Runner::open(
+            Arc::new(BuildEngine::new().unwrap()),
+            dir.path().join("store"),
+            dir.path().join("scratch"),
+        )
+        .unwrap();
+        let tree = runner.store.ingest_dir(Domain::Artifact, &out).unwrap().id;
+        let paths: Vec<String> = runner
+            .list_tree(&tree)
+            .unwrap()
+            .into_iter()
+            .map(|f| f.path)
+            .collect();
+        // Depth-first entry order would give ["a/x", "a.txt"].
+        assert_eq!(paths, ["a.txt", "a/x"]);
     }
 
     #[test]
