@@ -1,8 +1,8 @@
-# Quarry host SQL core
+# Quarry host SQL and page core
 
 `vesper-quarry` is a dependency-free, bounded host library implementing the catalog,
-query checking, relational optimization, and reference row execution slice of
-specification §24. It performs no I/O. It is **not** an embedded transactional
+query checking, relational optimization, reference row execution, and recoverable
+slotted-page/pin slices of specification §24. It performs no I/O. It is **not** an embedded transactional
 storage engine, source `@sql` macro, WASI component, or compiler integration.
 
 Run the self-checking example from the repository after workspace registration:
@@ -161,5 +161,107 @@ bag joins, multi-join nullability, typed scalar/bind validation, stale catalogs,
 atomic failures, unsupported SQL, resource exhaustion, and 3,584 before/after
 optimizer comparisons (64 nullable input subsets × four joins × 14 predicates).
 No source-mode safety, allocation-free execution, SIMD/AoSoA, egglog integration,
-WAL/ARIES/MVCC, buffer-pool pins, crash recovery, tenant capability enforcement,
+WAL/ARIES/MVCC, crash recovery, tenant capability enforcement,
 network/database service, or Lean proof is provided by this host slice.
+
+
+## Slotted pages and recoverable buffer-pool pins (§24.2)
+
+The independent `page` and `pool` modules add actual in-memory page operations.
+They do not connect SQL rows to a disk format. Run the self-checking lifecycle:
+
+```sh
+cargo run -p vesper-quarry --example quarry_pages
+```
+
+`page::SlottedPage` owns exactly 16,384 bytes, with no Rust-struct wire casts.
+`SlottedPage::decode(&bytes)` validates size, CRC32C, supported header values,
+and the complete slot layout before copying borrowed input. CRC32C uses the
+Castagnoli reflected polynomial `0x82f63b78`, initial/final XOR `0xffffffff`,
+and treats checksum bytes 16–19 as zero. It covers every other byte, including
+unused space. This is portable software CRC, not an authenticated hash or a
+hardware-acceleration claim.
+
+| Header byte offset | Field | Little-endian width |
+| --- | --- | --- |
+| 0 | page_lsn | u64 |
+| 8 | page_id | u64 |
+| 16 | checksum_crc32c | u32 |
+| 20 | slot_count | u16 |
+| 22 | free_space_offset | u16 |
+| 24 | page_kind_tag | u8 |
+| 25 | level | u8 |
+| 26 | flags | u16 |
+| 28 | right_sibling_page | u32 |
+
+Kind 1 is the supported opaque-record slotted format; level and flags must be
+zero. The sibling ID is stored metadata. No tree traversal or PAX interpretation
+is implemented. Slots start at byte 32 and each encode `(offset: u16le,
+length: u16le)` in four bytes. The directory grows upward and record payloads
+grow downward. The free interval is `[32 + 4*slot_count, free_space_offset)`.
+Every record is nonempty, wholly within `[free_space_offset, 16384)`, and disjoint
+from all other records. The free offset equals the minimum live record offset
+(or 16,384 for an empty page). Interior payload holes are accepted and reclaimed
+on update; no slot may overlap the directory or declared free interval.
+
+`new(page_id, sibling_id)`, `insert(&record)`, `read(slot)`, and
+`update(slot, &record)` operate on real bytes. Slot indices survive updates.
+Updates preflight total packed capacity, build and compact a fresh page, then
+replace the old page only on success. Inserts preflight their directory/payload
+ranges before writing. Mutation failures leave exact prior bytes and borrowed
+record inputs intact. Raw mutable page bytes are never exposed. Maximum record
+size is 16,348 bytes, with at most 3,270 one-byte records. Insert/update each copy
+at most one page's payload; checksum work is fixed at 16,384 bytes × eight CRC
+steps. Decode sorts at most 3,270 checked ranges, avoiding unbounded or quadratic
+slot-overlap scanning. Page buffers, range scratch, and update staging allocate
+on the host heap.
+
+`pool::BufferPool::new(PoolLimits { frames, pins })` permits 1–256 resident frames
+and 1–4,096 total pins (defaults 16/256). No implicit eviction occurs. Each frame
+holds one page image and either multiple distinct shared pins or one exclusive
+pin. Every pin carries a private pool identity, frame slot, slot generation,
+page ID, and active-pin serial. Checked u64 identity/generation/serial exhaustion
+returns an error. Nonclone handles have `#[must_use]` diagnostics; compile-fail
+doctests verify the missing Clone implementation.
+
+- `install(&PageImage)` borrows/copies a validated image and rejects full pools
+  and duplicate page IDs without changing either input or resident frames.
+- `fix_shared(id)` / `view_shared(&pin)` provide committed-page reads.
+  `unpin_clean(pin)` consumes a shared pin. This does not clear dirty metadata.
+- `fix_exclusive(id)` creates a private staged copy. `insert(&mut pin, record)`,
+  `update(&mut pin, slot, record)`, and `view_exclusive(&pin)` access that stage.
+  Readers and other writers conflict until release.
+- `unpin_dirty(pin, wal_lsn)` requires changed bytes, a nonzero LSN, and strict
+  advancement over the committed page LSN. It updates header bytes/checksum,
+  publishes the stage, and releases the pin atomically. The frame's dirty LSN is
+  the first dirty commit LSN; later commits advance page LSN and retain that
+  earliest dirty LSN. LSN `u64::MAX` permits no further advancement.
+- `unpin_aborted(pin)` discards staging and releases the exclusive pin. Committed
+  bytes, page LSN, and prior dirty LSN remain exactly as before the write.
+- All release errors return `ReleaseError { error, pin }` with the original
+  supplied owner/stage intact for retry or abort. Read/stage operations borrow
+  handles and preserve them on error. Wrong-pool, stale-generation, and inactive
+  serial checks never release a different live pin.
+- `evict(id)` refuses every pinned frame and returns an owned `PageImage`,
+  including its dirty metadata. Reinstalling that image preserves the dirty LSN.
+  It neither writes nor acknowledges persistence. `PageImage::clean(page)` is an
+  explicit caller designation for an initial clean image; no writeback or
+  dirty-acknowledgment operation is implemented.
+
+Resident page bytes total at most 4 MiB per pool. Exclusive staging adds at most
+another 4 MiB, plus bounded pin/frame metadata and temporary one-page compaction
+buffers. Caller-owned images/clones and multiple independently created pools
+are outside this per-pool bound. Pin handles can be moved, but private fields
+prevent safe Rust callers from cloning/forging them. Internal adversarial tests
+construct stale keys to exercise runtime defenses that safe public usage cannot
+otherwise manufacture.
+
+Rust callers can still drop/forget handles or tear down a pool with live pins.
+Dropping a pin does not silently unpin: that frame stays unavailable until pool
+teardown, deliberately favoring retained ownership/state over unsafe reuse.
+Maintain the pool while its pins are live and explicitly commit/abort/release.
+This is a host protocol, not Vesper compile-time linear exhaustion, automatic
+cancellation recovery, latch-free optimistic traversal, zero-copy DMA, io_uring,
+durable WAL/ARIES, MVCC, B+Tree storage, tenant isolation, or a formal pin proof.
+LSN checks validate numeric ordering only; they do not prove a WAL record exists
+or reached durable storage.
