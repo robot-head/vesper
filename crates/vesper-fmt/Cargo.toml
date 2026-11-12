@@ -1,0 +1,21 @@
+[package]
+name = "vesper-fmt"
+version = "0.1.0"
+edition = "2024"
+description = "Bounded lossless-CST canonical source formatting"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+vesper-syntax = { path = "../vesper-syntax" }
+
+[workspace]
+
+[dev-dependencies]
+serde_json = "1"
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"
+
+[[test]]
+name = "fmt_cli"
+path = "../../tests/fmt_cli.rs"
