@@ -601,3 +601,19 @@ fn implicit_mutable_modes_and_handlers_inside_closures() {
         "102020",
     );
 }
+
+#[test]
+fn handlers_preserve_implicit_method_argument_mutations() {
+    agrees(
+        "copy struct Actor { value: i64 } impl Actor { fn bump(in self, inout x: i64) { x += 2; } } fn main() -> i64 { let a = Actor { value: 0 }; let x = 40; handle Fail[RuntimeError] in { a.bump(x); } with { return v => v, raise(e, k) => (), }; x }",
+        "42",
+    );
+}
+
+#[test]
+fn handler_frames_merge_selectors_with_different_arities() {
+    agrees(
+        "linear effect A { fn change(in n: i64); } linear effect B { fn change(in n: i64, inout x: i64); } fn main() -> i64 { let x = 40; handle a: A in { handle b: B in { b.change(0, x); } with { return v => v, change(n, x, k) => { x += 2; k(()) }, }; } with { return v => v, change(n, k) => k(()), }; x }",
+        "42",
+    );
+}

@@ -506,19 +506,36 @@ fn written_names(world: &World, e: &Expr, out: &mut BTreeSet<String>) {
         ExprKind::Call { callee, args, .. } => {
             // Argument modes may be omitted, so resolve the callee's declared
             // passes: functions, effect operations, then checked arrow types.
-            let op_passes = |op: &str| {
-                world
+            let field_passes = |op: &str| {
+                // The checker does not record a callable type for method
+                // sugar. Include matching methods, omitting their receiver,
+                // as well as labeled effect operations. Different selectors
+                // may have different arities, so retain every argument index.
+                // This conservative union only enlarges the saved frame.
+                let mut passes = None::<Vec<Pass>>;
+                let selectors = world
                     .effects
                     .values()
                     .flat_map(|e| &e.ops)
                     .filter(|f| f.name == op)
                     .map(|f| f.params.iter().map(|p| p.pass).collect::<Vec<_>>())
-                    .reduce(|a, b| {
-                        a.iter()
-                            .zip(b.iter().chain(std::iter::repeat(&Pass::In)))
-                            .map(|(x, y)| if *y == Pass::Inout { *y } else { *x })
-                            .collect()
-                    })
+                    .chain(
+                        world
+                            .functions
+                            .iter()
+                            .filter(|(n, _)| n.rsplit_once("::").is_some_and(|(_, m)| m == op))
+                            .map(|(_, f)| f.params.iter().skip(1).map(|p| p.pass).collect()),
+                    );
+                for selector in selectors {
+                    let merged = passes.get_or_insert_with(Vec::new);
+                    merged.resize(merged.len().max(selector.len()), Pass::In);
+                    for (index, pass) in selector.into_iter().enumerate() {
+                        if pass == Pass::Inout {
+                            merged[index] = pass;
+                        }
+                    }
+                }
+                passes
             };
             let arrow = world
                 .types
@@ -542,7 +559,7 @@ fn written_names(world: &World, e: &Expr, out: &mut BTreeSet<String>) {
                             .map(|f| f.params.iter().map(|p| p.pass).collect())
                     })
                     .or(arrow),
-                ExprKind::Field(_, op) => arrow.or_else(|| op_passes(op)),
+                ExprKind::Field(_, op) => arrow.or_else(|| field_passes(op)),
                 _ => arrow,
             };
             for (index, a) in args.iter().enumerate() {

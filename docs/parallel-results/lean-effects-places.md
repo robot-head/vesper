@@ -114,3 +114,24 @@ Regression sweep (not committed): every `fn main` program literal in `tests/*.rs
 * One-shot use is guaranteed by the checker, not by the Lean types.
 * Writes after resumption via helpers, callbacks, or closures, and first-class continuations with nonempty frames, are rejected rather than modeled.
 * The effectful path still translates the checked AST rather than shared Place IR CFGs, for the reason given above.
+
+## Integration review (2026-11-12)
+
+The review found two omissions in handler-frame discovery for argument modes
+that callers leave implicit. Method sugar does not have a checked arrow type,
+so mutable method arguments were absent from the frame. Also, merging
+same-named labeled effect operations truncated the parameter list to the first
+operation's arity. Both could generate Lean that tries to mutate an outer
+binding from a nested computation.
+
+Frame discovery now includes method signatures after omitting the receiver and
+merges selectors across all argument indices. This remains a conservative
+saved-frame analysis. Two new evaluator-versus-Lean regressions each return
+`42`: an implicit mutable method argument inside a handler, and same-named
+labeled operations with different arities.
+
+Validation used actual Lean 4.24.0. The method regression reproduced the invalid
+Lean before the fix; both targeted regressions pass afterward. The other 50
+Lean tests passed during the review, including the axiom audit for
+`EffectPlaces.lean`. Workspace formatting is clean. The integration owner runs
+the final combined workspace checks after applying this review.
