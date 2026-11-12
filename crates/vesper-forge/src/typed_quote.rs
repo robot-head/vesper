@@ -1337,11 +1337,6 @@ impl HygieneHost {
             .parameter_name_spans(function)
             .map_err(|_| TypedError::Structural)?;
         if !parsed.header.generics.is_empty()
-            || parsed
-                .header
-                .params
-                .iter()
-                .any(|p| !p.projections.is_empty())
             || spans.len() != parsed.header.params.len()
             || spans.len() > vesper_syntax::macro_source::Limits::HARD.max_parameters
         {
@@ -1357,6 +1352,14 @@ impl HygieneHost {
                 .checked_mul(add(spans.len(), 1)?)
                 .ok_or(TypedError::Budget("work"))?,
         )?;
+        if parsed
+            .header
+            .params
+            .iter()
+            .any(|p| !p.projections.is_empty())
+        {
+            return Err(TypedError::Unsupported);
+        }
         for (ordinal, (span, parameter)) in spans.iter().zip(&parsed.header.params).enumerate() {
             let index = source
                 .tokens
