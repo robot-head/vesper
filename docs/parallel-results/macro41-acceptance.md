@@ -48,8 +48,11 @@ The native workflow runs Linux, Windows and macOS parser/host/compiler/CLI tests
 strict Clippy, formatting and the executable Python harness. Its symmetric
 push/pull-request filters include all `src/**`, consumed syntax/core/Forge/span/
 diagnostics/LSP/doc/runtime/runner crates, WIT, fixtures and scripts. It checks that
-the default CLI's normal dependency graph contains neither Wasmtime nor the
-sandbox crate.
+the default CLI's normal dependency graph contains no exact `wasmtime`,
+`wasmtime-wasi` or `vesper-loom-sandbox` package. Exact package names permit the
+existing native Cranelift math and instruction-cache helpers, whose names include
+`wasmtime-internal-`; those helpers are not the Wasmtime engine. The actual root
+dependency-tree assertion passed locally.
 
 A separate Ubuntu job runs the actual structured WASI component, hostile wire,
 raw record and fresh-host cache suites. This is a standalone foundation; it does

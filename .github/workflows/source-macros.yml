@@ -86,8 +86,8 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Assert default CLI graph does not require Wasmtime
         run: >-
-          cargo tree --locked -p vesper --edges normal |
-          python -c 'import sys; text=sys.stdin.read(); assert "wasmtime" not in text.lower(); assert "vesper-loom-sandbox" not in text'
+          cargo tree --locked -p vesper --edges normal --prefix none |
+          python -c 'import sys; names={line.split()[0] for line in sys.stdin if line.strip()}; assert not names.intersection({"wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"})'
       - name: Test real pure host quotations and actual source parser
         run: cargo test --locked -p vesper-forge -p vesper-syntax --no-default-features --all-targets
       - name: Test compiler authority, resolved lowering and actual CLI/stdio
