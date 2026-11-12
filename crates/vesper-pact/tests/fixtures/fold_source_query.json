@@ -1,0 +1,124 @@
+{
+  "schema": {
+    "major": 0,
+    "minor": 1
+  },
+  "env": {
+    "placeholders": [
+      {
+        "kind": "Type",
+        "mode_bound": null
+      },
+      {
+        "kind": "Type",
+        "mode_bound": "Copy"
+      },
+      {
+        "kind": "Row",
+        "mode_bound": null
+      }
+    ],
+    "assumptions": [
+      {
+        "Implements": {
+          "trait_ref": {
+            "trait_id": 4,
+            "self_ty": {
+              "Var": {
+                "Placeholder": 0
+              }
+            },
+            "args": [
+              {
+                "Row": {
+                  "labels": [],
+                  "tail": {
+                    "Placeholder": 2
+                  }
+                }
+              }
+            ]
+          },
+          "brand": "Canonical"
+        }
+      },
+      {
+        "ProjectionEq": {
+          "projection": {
+            "trait_ref": {
+              "trait_id": 4,
+              "self_ty": {
+                "Var": {
+                  "Placeholder": 0
+                }
+              },
+              "args": [
+                {
+                  "Row": {
+                    "labels": [],
+                    "tail": {
+                      "Placeholder": 2
+                    }
+                  }
+                }
+              ]
+            },
+            "brand": "Canonical",
+            "assoc": 0
+          },
+          "ty": {
+            "Var": {
+              "Placeholder": 1
+            }
+          }
+        }
+      }
+    ],
+    "model_scopes": [
+      [
+        1
+      ]
+    ]
+  },
+  "binders": [],
+  "goal": {
+    "ModeBound": {
+      "ty": {
+        "Ctor": {
+          "ctor": 2,
+          "args": [
+            {
+              "Ty": {
+                "Projection": {
+                  "trait_ref": {
+                    "trait_id": 4,
+                    "self_ty": {
+                      "Var": {
+                        "Placeholder": 0
+                      }
+                    },
+                    "args": [
+                      {
+                        "Row": {
+                          "labels": [],
+                          "tail": {
+                            "Placeholder": 2
+                          }
+                        }
+                      }
+                    ]
+                  },
+                  "brand": "Canonical",
+                  "assoc": 0
+                }
+              }
+            }
+          ]
+        }
+      },
+      "bound": {
+        "Const": "Affine"
+      }
+    }
+  }
+}
