@@ -830,13 +830,39 @@ fn snapshot_tree(
     {
         return fail("repository directory contains parent traversal");
     }
-    for ancestor in source.ancestors() {
-        if is_link(&fs::symlink_metadata(ancestor)?) {
+    for (index, ancestor) in source.ancestors().enumerate() {
+        // The source directory itself must never be a link. A proper ancestor may be one only
+        // when it is a system-managed link such as macOS's `/var -> private/var`.
+        if is_link(&fs::symlink_metadata(ancestor)?)
+            && (index == 0 || !trusted_system_link(ancestor)?)
+        {
             return fail("symlink directory ancestor");
         }
     }
     let mut total = 0;
     copy_directory(&source, output, limits, metadata, files, &mut total, 0)
+}
+/// Returns whether `link` is a symlink an unprivileged process cannot create or replace: the
+/// link and its parent directory are owned by root, and the parent is not group- or
+/// world-writable. This admits operating-system links such as macOS's `/var`, `/tmp` and `/etc`
+/// while still rejecting links planted in caller-writable directories.
+#[cfg(unix)]
+fn trusted_system_link(link: &Path) -> Result<bool, TufError> {
+    use std::os::unix::fs::MetadataExt;
+    let Some(parent) = link.parent() else {
+        return Ok(false);
+    };
+    let info = fs::symlink_metadata(link)?;
+    let parent_info = fs::symlink_metadata(parent)?;
+    Ok(info.uid() == 0
+        && parent_info.is_dir()
+        && !is_link(&parent_info)
+        && parent_info.uid() == 0
+        && parent_info.mode() & 0o022 == 0)
+}
+#[cfg(not(unix))]
+fn trusted_system_link(_link: &Path) -> Result<bool, TufError> {
+    Ok(false)
 }
 fn is_link(info: &fs::Metadata) -> bool {
     #[cfg(windows)]

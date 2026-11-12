@@ -1,4 +1,4 @@
-//! Cranelift emission helpers for ABI v1. These are the only places that
+//! Cranelift emission helpers for the native ABI (layouts unchanged since v1). These are the only places that
 //! encode context/evidence offsets into generated code, so a source-lowering
 //! adapter can target the ABI without duplicating layout knowledge.
 use crate::abi::{ResumeKind, exit, offsets};
