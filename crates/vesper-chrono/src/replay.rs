@@ -266,7 +266,7 @@ impl ReplaySession {
         let layouts = ChronoLayouts::new();
         for (hop, out) in chain
             .iter()
-            .zip(scratch.chunks_exact_mut(OBLIGATION_HOP_BYTES))
+            .zip(scratch.as_chunks_mut::<OBLIGATION_HOP_BYTES>().0)
         {
             ObligationHopWire {
                 lamport_seq: hop.lamport_seq,
@@ -274,7 +274,7 @@ impl ReplaySession {
                 source_span_id: hop.source_span_id,
                 hop_kind_tag: hop.kind.tag(),
             }
-            .encode(&layouts, out)
+            .encode(&layouts, &mut out[..])
             .map_err(|_| ReplayError::Bundle(BundleError::Malformed("hop encode")))?;
         }
         Ok(chain.len())

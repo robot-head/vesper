@@ -95,7 +95,9 @@ fn decode_state(bytes: &[u8]) -> Result<BTreeMap<u64, u64>, String> {
         return Err("state image length".into());
     }
     Ok(bytes
-        .chunks_exact(16)
+        .as_chunks::<16>()
+        .0
+        .iter()
         .map(|c| {
             (
                 u64::from_le_bytes(c[..8].try_into().unwrap()),
