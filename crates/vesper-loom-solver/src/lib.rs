@@ -37,6 +37,7 @@ pub enum ErrorKind {
     UnsupportedPolicy,
     Unsatisfiable,
     BudgetExhausted,
+    LockedMismatch,
 }
 
 /// Diagnostics describe encountered conflicts; they are not a minimal unsat proof.
@@ -331,6 +332,174 @@ fn solution(
             })
             .collect(),
         system_packages: systems,
+    }
+}
+
+/// Validate an existing snapshot against the supplied request without search.
+///
+/// The snapshot must contain exactly the requested root and its minimal feature,
+/// dependency and native-package closure. Package metadata must match the current
+/// root/catalog in full; matching names and versions alone are insufficient.
+/// Older catalog selections remain valid when they still satisfy the request.
+/// `max_decisions` is ignored and every error reports zero decisions.
+///
+/// This checks offline declaration consistency, not source identity, provenance,
+/// signatures, compiler authority or the availability of native installations.
+pub fn validate_locked(request: &ResolveRequest, locked: &Solution) -> Result<(), ResolveError> {
+    let inputs = inputs(request)?;
+    if let Some(policy) = unsupported_policy(&request.root) {
+        return Err(error(ErrorKind::UnsupportedPolicy, 0, vec![policy]));
+    }
+    let root = &request.root.package.name;
+    let expected_root = RootRequirement {
+        name: root.clone(),
+        version: VersionReq::parse(&format!("={}", request.root.package.version))
+            .expect("Version formats as a valid exact requirement"),
+        features: request.features.clone(),
+    };
+    let mut failures = vec![];
+    if locked.roots.as_slice() != [expected_root] {
+        failures.push(diagnostic(
+            "locked_root_mismatch",
+            Some(root),
+            "roots",
+            "snapshot must contain one exact root requirement with the requested features",
+        ));
+    }
+
+    let validation = validate_solution(locked);
+    failures.extend(validation.diagnostics.into_iter().map(from_calculus));
+    // Only validated request/catalog manifests enter closure computation. An
+    // untrusted snapshot may contain malformed feature edges, so it must not
+    // supply the manifests that closure() indexes after input validation.
+    let mut assigned = Assigned::from([(root.clone(), &request.root)]);
+    let mut policies = vec![];
+    for selected in &locked.packages {
+        let name = &selected.manifest.package.name;
+        let expected = if name == root {
+            Some(&request.root)
+        } else {
+            inputs.packages.get(name).and_then(|candidates| {
+                candidates
+                    .iter()
+                    .copied()
+                    .find(|m| m.package.version == selected.manifest.package.version)
+            })
+        };
+        match expected {
+            Some(manifest) => {
+                if manifest != &selected.manifest {
+                    failures.push(diagnostic(
+                        "locked_manifest_mismatch",
+                        Some(name),
+                        name.as_str(),
+                        "snapshot manifest differs from the current root/catalog metadata",
+                    ));
+                }
+                if let Some(policy) = unsupported_policy(manifest) {
+                    policies.push(policy);
+                }
+                assigned.insert(name.clone(), manifest);
+            }
+            None => failures.push(diagnostic(
+                "locked_candidate_missing",
+                Some(name),
+                name.as_str(),
+                format!(
+                    "snapshot version {} is absent from the current local catalog",
+                    selected.manifest.package.version
+                ),
+            )),
+        }
+    }
+    if !policies.is_empty() {
+        return Err(error(ErrorKind::UnsupportedPolicy, 0, policies));
+    }
+
+    match closure(request, &assigned) {
+        Ok(expected) => {
+            let selected_names = locked
+                .packages
+                .iter()
+                .map(|s| &s.manifest.package.name)
+                .collect::<BTreeSet<_>>();
+            for selected in &locked.packages {
+                let name = &selected.manifest.package.name;
+                match expected.features.get(name) {
+                    Some(features) if features == &selected.features => {}
+                    Some(_) => failures.push(diagnostic(
+                        "locked_features_mismatch",
+                        Some(name),
+                        "features",
+                        "snapshot features differ from the request's transitive feature closure",
+                    )),
+                    None => failures.push(diagnostic(
+                        "locked_unused_package",
+                        Some(name),
+                        name.as_str(),
+                        "snapshot selects a package outside the request's dependency closure",
+                    )),
+                }
+            }
+            for name in expected.features.keys() {
+                if !selected_names.contains(name) {
+                    failures.push(diagnostic(
+                        "locked_package_missing",
+                        Some(name),
+                        name.as_str(),
+                        "snapshot is missing a package required by the request",
+                    ));
+                }
+            }
+            let selected_systems = locked
+                .system_packages
+                .iter()
+                .map(|s| &s.name)
+                .collect::<BTreeSet<_>>();
+            for name in expected.systems.keys() {
+                if !selected_systems.contains(name) {
+                    failures.push(diagnostic(
+                        "locked_system_missing",
+                        None,
+                        name,
+                        "snapshot is missing a native package required by the request",
+                    ));
+                }
+            }
+            for selected in &locked.system_packages {
+                if !expected.systems.contains_key(&selected.name) {
+                    failures.push(diagnostic(
+                        "locked_unused_system",
+                        None,
+                        &selected.name,
+                        "snapshot selects a native package outside the request's closure",
+                    ));
+                }
+            }
+        }
+        Err(errors) => failures.extend(errors),
+    }
+    for selected in &locked.system_packages {
+        if !inputs
+            .systems
+            .get(&selected.name)
+            .is_some_and(|candidates| candidates.contains(&selected))
+        {
+            failures.push(diagnostic(
+                "locked_system_candidate_missing",
+                None,
+                &selected.name,
+                format!(
+                    "snapshot native version {} is absent from the current local catalog",
+                    selected.version
+                ),
+            ));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(error(ErrorKind::LockedMismatch, 0, failures))
     }
 }
 

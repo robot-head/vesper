@@ -5,6 +5,12 @@ use semver::{Version, VersionReq};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+mod upgrade;
+pub use upgrade::{
+    AuthorityChange, AuthorityScope, UPGRADE_SCHEMA_VERSION, UpgradeDiagnostic, UpgradeReport,
+    UpgradeSnapshot, check_upgrade,
+};
+
 pub const SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]

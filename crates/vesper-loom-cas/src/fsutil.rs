@@ -151,6 +151,13 @@ pub(crate) fn publish_dir_noreplace(staged: &Path, dest: &Path) -> io::Result<Pu
 /// readonly files, so clear the attribute before deletion. Windows publication
 /// renames rather than hard-links staging files; this cannot change the
 /// attributes of an already-published object.
+#[cfg_attr(
+    windows,
+    allow(
+        clippy::permissions_set_readonly_false,
+        reason = "Windows-only: clears the readonly attribute, which has no Unix mode semantics"
+    )
+)]
 pub(crate) fn remove_staged_file(path: &Path) -> io::Result<()> {
     #[cfg(windows)]
     if let Ok(meta) = fs::symlink_metadata(path)

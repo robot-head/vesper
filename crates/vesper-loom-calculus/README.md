@@ -37,3 +37,22 @@ Capabilities are canonical identity strings compared exactly. Required capabilit
 Native requirements currently use `name SemVerRequirement` (for example `liburing ^2.6.0`). They never alias Vesper package names. Debian/RPM-specific versions, platform predicates, native dependency closure, and real sysroot resolution require later schema/solver work.
 
 This crate does not provide CDCL/Max-SMT resolution, namespace/OIDC ownership verification, registry downloads, Sigstore/TUF checks, CVE policy optimization, cryptographic hashes, compiler SemVer checks, SBOMs, or hermetic build execution. Resolver/trust/verification configuration is retained as declarative data, not treated as verified evidence.
+
+
+## Declared-authority upgrade guard
+
+`check_upgrade(&baseline, &candidate)` validates both complete solution snapshots
+and compares their reachable graphs under report schema 1. Root identities must
+be the same nonempty set; root versions may change. New required capabilities,
+package ceilings, dependency-edge budgets, or a relaxed `forbid_unsafe_ffi`
+setting block the guard. Capabilities are compared as exact strings, including
+arguments. New packages/edges start with an empty prior budget; new pure
+packages are permitted, while moving authority between packages is blocked even
+when the root's overall capability union is unchanged. Removals/tightening are
+allowed and remain visible in `changes`.
+
+Valid unreachable selections do not grant authority, but malformed unreachable
+metadata still fails snapshot validation. Native version changes alone do not
+imply FFI authority or native ABI compatibility. The result covers declared
+metadata only: it is not a compiler-body audit, version/SemVer approval, source
+identity, namespace/provenance authentication or resolver trust-policy check.

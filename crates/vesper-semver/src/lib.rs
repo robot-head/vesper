@@ -8,6 +8,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod release;
+pub use release::{
+    RELEASE_POLICY_VERSION, ReleaseBump, ReleaseIssue, ReleaseIssueCode, ReleaseReport,
+    ReleaseVersionError, ReleaseVersionSide, check_release,
+};
+
 fn unique_map<'de, D, V>(deserializer: D) -> Result<BTreeMap<String, V>, D::Error>
 where
     D: serde::Deserializer<'de>,
