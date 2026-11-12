@@ -1,0 +1,3 @@
+macro keep($x: expr) -> expr { quote { $x } }
+fn forward(in self: i64) -> i64 { keep!(self) }
+fn main() -> i64 { forward(42) }

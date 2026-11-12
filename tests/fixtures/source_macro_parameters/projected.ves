@@ -1,0 +1,4 @@
+copy struct Pair { value: i64 }
+macro keep($x: expr) -> expr { quote { $x } }
+fn forward(in value.{value}: Pair) -> Pair { keep!(value) }
+fn main() -> i64 { 42 }
