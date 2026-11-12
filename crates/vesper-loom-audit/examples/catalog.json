@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "catalog_id": "example-local-catalog",
+  "advisories": [
+    {
+      "id": "LOCAL-2026-001",
+      "package": {"ecosystem": "native", "name": "libdemo"},
+      "affected": [{"introduced": "1.0.0", "fixed": "1.1.0", "include_prerelease": true}],
+      "severity": "high",
+      "summary": "Illustrative local advisory, not a real CVE claim"
+    }
+  ],
+  "native_licenses": [{"name": "libdemo", "version": "1.0.0", "expression": "MIT"}]
+}
