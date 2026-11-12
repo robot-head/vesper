@@ -1,6 +1,6 @@
 # Implementation coverage
 
-This checkpoint implements the core compiler and runtime baseline from sections 1–7 of the design. The current [expanded specification](specification.txt) also contains sections 8–19: Loom, SemVer checking, workspace architecture, a larger Lean extractor, Pulse, Bridge, Vector, Strata, Pact/Forge, Prism, Aura, and Ignis. Those additions require a separate implementation plan; this coverage report does not claim they are implemented. The [original core baseline](core-specification-baseline.txt) is retained for comparison.
+This checkpoint implements the core compiler and runtime baseline from sections 1–7 of the design. The current [expanded specification](specification.txt) also contains sections 8–19: Loom, SemVer checking, workspace architecture, a larger Lean extractor, Pulse, Bridge, Vector, Strata, Pact/Forge, Prism, Aura, and Ignis. Selected additions now have bounded standalone library implementations listed below; their source-language and CLI integrations remain future work. The [original core baseline](core-specification-baseline.txt) is retained for comparison.
 
 The first workspace extraction now separates `vesper-core`, `vesper-syntax`, and `vesper-pulse` while preserving the root facade. See [parallel lanes](parallel-work.md) for active assignments and handoff prompts.
 
@@ -23,6 +23,17 @@ The first workspace extraction now separates `vesper-core`, `vesper-syntax`, and
 | Formal foundations | `lean/Foundations.lean`: checked mode lattice, submoding, exact-use, and one-shot transition lemmas. |
 
 The executable pipeline checks HIR, runs CFG ownership analysis on typed Place IR, optimizes pure expressions, rechecks, then executes or generates Cranelift from that IR. The evaluator and native backend share hygienic slot identities, value types, control flow, and projected call arguments. Lexical handler and closure installation remain explicit high-level nodes in the IR; their bodies and clauses are independently lowered, checked, optimized, and executed as shared CFGs. Native effect-helper specialization now lowers its shared CFG to a local return join with scoped capability evidence. State tokens have separate block parameters and predecessor phis, checked before and after effectful optimization. Native one-shot continuations use resume blocks and return dispatch within a specialized activation. External parking and relocatable fiber frames remain pending.
+
+## Expanded-design library milestones
+
+| Workspace library | Implemented and validated | Remaining connection |
+| --- | --- | --- |
+| `vesper-semver` | Versioned interface DTOs, conservative compatibility rules and structured diagnostics | Compiler `.vhir` export, CLI, canonical MIF, executable witnesses |
+| `vesper-ffi` | Validated wire layouts, endian access, safe zero-copy byte views | Source syntax, HIR/PCG, CLIF, `.vsys`, hardware isolation |
+| `vesper-loom-calculus` | Manifests, monotonic feature closure, exact-version solution and declared ceiling validation | Resolver, compiler authority audit, registry/trust/build execution |
+| `vesper-simpulse` | Seeded scheduling, virtual timers, actual completion ownership, strict journal replay | Production adapters, source/CLI simulation, DPOR, network/WAL models |
+
+The [contract audit](rfcs/parallel-contracts.md) records checked-arithmetic migration, scoped child loans, native relocation/DMA rules, region aliasing/rewind, and distinct interface/artifact/proof cache keys. These are integration gates, not new proof claims.
 
 ## Backend boundaries
 

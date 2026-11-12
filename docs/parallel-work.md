@@ -3,7 +3,7 @@
 Base checkpoint: `c5328d0`. Integration branch: `work`. Remote: https://github.com/robot-head/vesper.
 The expanded design lives in [specification.txt](specification.txt); the implemented core baseline is [core-specification-baseline.txt](core-specification-baseline.txt).
 
-## First wave running in this environment
+## First-wave results
 
 | Lane | Branch | Exclusive ownership | Status |
 | --- | --- | --- | --- |
@@ -14,7 +14,7 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 | SimPulse | `parallel/simpulse` | `crates/vesper-simpulse/**` | Integrated: deterministic scheduling/replay; 18 tests + 2 doctests |
 | Contract audit | `parallel/contracts` | `docs/rfcs/parallel-contracts.md` | Reviewed: [contract audit](rfcs/parallel-contracts.md) |
 
-Each agent uses a distinct worktree under `/workspace/vesper-worktrees/`. Agents commit only to their own branch. The coordinator reviews and cherry-picks; a completed subagent turn does not by itself mark a design section complete.
+Each agent used a distinct worktree under `/workspace/vesper-worktrees/`. Agents commit only to their own branch. The coordinator reviews and cherry-picks; a completed subagent turn does not by itself mark a design section complete.
 
 ## External agent prompts
 
