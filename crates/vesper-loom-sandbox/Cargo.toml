@@ -1,0 +1,23 @@
+[package]
+name = "vesper-loom-sandbox"
+version = "0.1.0"
+edition = "2024"
+description = "Hermetic Wasmtime component host for Vesper build steps and Forge macros"
+publish = false
+
+[dependencies]
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "async", "runtime", "std", "wat", "parallel-compilation", "addr2line"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
+wasmparser = { version = "0.261", default-features = false, features = ["std", "component-model"] }
+tokio = { version = "1", features = ["rt", "time", "macros"] }
+serde = { version = "1", features = ["derive"] }
+rand_core = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+wat = "1"
+
+# Temporary standalone workspace until the integration owner registers this crate.
+[workspace]
