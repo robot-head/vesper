@@ -36,6 +36,7 @@ mod artifact;
 mod fs_determinism;
 mod host;
 mod policy;
+pub mod quote_transport;
 pub mod transport;
 
 pub use artifact::{ArtifactKind, classify};
