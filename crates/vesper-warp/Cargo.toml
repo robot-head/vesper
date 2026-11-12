@@ -7,3 +7,11 @@ publish = false
 
 [dependencies]
 vesper-ffi = { path = "../vesper-ffi" }
+# Wave-four integration (issue #45): the end-to-end §35.3 path wires every
+# Warp lane together here. No lane crate depends back on this one.
+vesper-warp-bbr = { path = "../vesper-warp-bbr" }
+vesper-warp-crypto = { path = "../vesper-warp-crypto" }
+vesper-warp-shard = { path = "../vesper-warp-shard" }
+vesper-warp-tcp = { path = "../vesper-warp-tcp" }
+vesper-warp-umem = { path = "../vesper-warp-umem" }
+vesper-warp-wheel = { path = "../vesper-warp-wheel" }
