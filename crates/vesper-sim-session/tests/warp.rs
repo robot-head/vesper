@@ -707,6 +707,29 @@ fn warp_scenarios_are_validated_at_load() {
     j["model"]["warp"]["events"][0]["event"]["nat_rebind"]["flow"] = json!("nope");
     reject(j, "unknown flow");
 
+    // Two NICs may not share frame types: a frame of one could be passed to
+    // the other's operations and alias an unrelated chunk.
+    let two = program_with(
+        "linear effect XdpNic2 { fn recycle_other(sink frame: UmemFrame[RxHarvested]) -> Unit; }",
+    );
+    let mut j = small();
+    let mut nic1 = j["model"]["warp"]["nics"][0].clone();
+    nic1["name"] = json!("nic1");
+    j["model"]["warp"]["nics"]
+        .as_array_mut()
+        .unwrap()
+        .push(nic1);
+    j["bindings"].as_array_mut().unwrap().push(json!({
+        "effect": "XdpNic2", "operation": "recycle_other",
+        "params": ["sink UmemFrame[RxHarvested]"], "result": "()",
+        "action": { "xdp_recycle": { "nic": "nic1" } }
+    }));
+    let message = match Session::record(&two, scenario(&j)) {
+        Ok(_) => "ok".into(),
+        Err(e) => format!("{e:?}"),
+    };
+    assert!(message.contains("each NIC needs its own"), "{message}");
+
     // Structural signature checks against the checked declarations.
     let shapes = [
         (
@@ -731,4 +754,74 @@ fn warp_scenarios_are_validated_at_load() {
         };
         assert!(message.contains(needle), "{needle}: {message}");
     }
+}
+
+/// Egress queueing follows launch order: a reply paced far into the future
+/// does not occupy the egress bottleneck before it launches, and each
+/// delivered egress copy counts against `max_in_flight` until its ACK.
+#[test]
+fn egress_follows_launch_order_and_counts_against_the_in_flight_budget() {
+    let program = program_with(
+        r#"
+fn paced(late_ns: u64) -> u64 eff [XdpNic, RxWait, Clock] {
+    let ready = RxWait::wait_rx(10000000);
+    match XdpNic::harvest_rx_single() {
+        None => 0,
+        Some(first) => {
+            let now = Clock::now();
+            let tx = XdpNic::turn_around_tx_in_place(first, 64);
+            let late = XdpNic::submit_paced_tx(tx, 1, wrapping_add(now, late_ns));
+            XdpNic::park_for_ack_or_pto(late);
+            let more = RxWait::wait_rx(10000000);
+            match XdpNic::harvest_rx_single() {
+                None => 1,
+                Some(second) => {
+                    let tx2 = XdpNic::turn_around_tx_in_place(second, 64);
+                    let soon = XdpNic::submit_paced_tx(tx2, 2, Clock::now());
+                    XdpNic::park_for_ack_or_pto(soon);
+                    2
+                },
+            }
+        },
+    }
+}
+"#,
+    );
+    let mut json = small();
+    json["tasks"][0]["entry"] = json!("paced");
+    json["tasks"][0]["arguments"] = json!([1_000_000]);
+    let warp = &mut json["model"]["warp"];
+    warp["flows"][1]["bursts"] = json!(1);
+    let up = &mut warp["links"][1];
+    up["bottleneck"]["buffer_packets"] = json!(1);
+    up["loss_ppm"] = json!(0);
+    up["duplicate_ppm"] = json!(0);
+    let report = record(&program, &json);
+    assert_eq!(server(&report), &json!(2));
+    let launched: Vec<(u64, usize)> = warp_events(&report)
+        .filter_map(|e| match e {
+            WarpEvent::Launched {
+                lease, ack_at_ns, ..
+            } => Some((*lease, ack_at_ns.len())),
+            _ => None,
+        })
+        .collect();
+    // The immediate reply (lease 2) launches first and is delivered even
+    // though the paced one was submitted earlier on a one-packet buffer.
+    assert_eq!(launched, [(2, 1), (1, 1)]);
+    trace_conserves_frames(&report, 64);
+    assert_eq!(report.model.unwrap().warp.unwrap().in_flight, 0);
+
+    // With room for one datagram in flight, a delivered reply plus any
+    // in-flight ingress datagram exceeds the budget: a ModelBudget error.
+    json["model"]["warp"]["limits"]["max_in_flight"] = json!(1);
+    let (_, error) = interrupted(
+        Session::record(&program, scenario(&json))
+            .unwrap()
+            .run(u64::MAX),
+    );
+    assert!(
+        matches!(&error, SessionError::ModelBudget { message, .. } if message.contains("in flight")),
+        "{error:?}"
+    );
 }

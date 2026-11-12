@@ -111,7 +111,9 @@ pub struct Lease {
     pub pkt_num_full: u64,
     pub edt_ns: u64,
     pub state: LeaseState,
-    /// Times at which copies of the reply are acknowledged.
+    /// Whether the reply has entered the egress link.
+    pub launched: bool,
+    /// Times at which copies of the reply are acknowledged (once launched).
     pub ack_at_ns: Vec<u64>,
     pub pto_at_ns: u64,
 }
@@ -423,7 +425,6 @@ impl Umem {
         frame: FrameDesc,
         pkt_num_full: u64,
         edt_ns: u64,
-        ack_at_ns: Vec<u64>,
         pto_at_ns: u64,
     ) -> Result<(u64, LeaseDesc), UmemError> {
         let tx_len = self.check_submit(task, frame, pkt_num_full)?;
@@ -441,7 +442,8 @@ impl Umem {
                 pkt_num_full,
                 edt_ns,
                 state: LeaseState::Leased,
-                ack_at_ns,
+                launched: false,
+                ack_at_ns: vec![],
                 pto_at_ns,
             },
         );
@@ -480,6 +482,14 @@ impl Umem {
         let id = lease.id;
         self.bump(chunk);
         Ok(id)
+    }
+
+    /// Record the reply's launch and its ACK times.
+    pub fn launch(&mut self, lease: u64, ack_at_ns: Vec<u64>) {
+        if let Some(l) = self.leases.get_mut(&lease) {
+            l.launched = true;
+            l.ack_at_ns = ack_at_ns;
+        }
     }
 
     /// ACK or PTO for a parked lease: return its frame to the fill ring.
@@ -619,7 +629,7 @@ mod tests {
             Err(UmemError::StaleView { chunk: 0 })
         );
         assert!(u.recycle("t", frame).is_err());
-        let (lease, desc) = u.submit("t", tx, 5, 10, vec![20], 30).unwrap();
+        let (lease, desc) = u.submit("t", tx, 5, 10, 30).unwrap();
         assert_eq!(u.held_by("t"), vec![0]);
         assert_eq!(u.retire(lease), None, "an unparked lease cannot retire");
         u.park("t", desc).unwrap();
@@ -664,7 +674,7 @@ mod tests {
                 pkt_num_full: 1 << 62
             })
         );
-        let (_, desc) = u.submit("t", tx, 1, 0, vec![], 5).unwrap();
+        let (_, desc) = u.submit("t", tx, 1, 0, 5).unwrap();
         u.set_bug(Some(HostBug::DropOnRecycle { occurrence: 1 }));
         u.recycle("t", b).unwrap();
         assert_eq!(

@@ -9,9 +9,11 @@
 //! header), packet number and source address are recorded. A NAT rebinding
 //! event changes a flow's source address mid-flow.
 //!
-//! Each parked lease gets an ACK timer per delivered copy of its reply
-//! (egress arrival plus `ack_return_ns`) and a PTO timer at launch plus
-//! `pto_ns`. Whichever fires first returns the frame to the fill ring; the
+//! A submitted reply enters the egress link at its launch time
+//! (`max(edt, now)`), so egress queueing follows launch order. Each parked
+//! lease gets an ACK timer per delivered copy of its reply (egress arrival
+//! plus `ack_return_ns`) and a PTO timer at launch plus `pto_ns`. A
+//! delivered copy counts against `max_in_flight` until its ACK fires. Whichever fires first returns the frame to the fill ring; the
 //! other is recorded as a stale timer. Retransmission is not modelled.
 //!
 //! Every choice is a [`WarpEvent`] in the model trace and is checked on
@@ -185,8 +187,14 @@ pub enum WarpEvent {
         pkt_num_full: u64,
         edt_ns: u64,
         launch_ns: u64,
-        ack_at_ns: Vec<u64>,
         pto_at_ns: u64,
+        at_ns: u64,
+    },
+    /// The reply entered the egress link; one ACK per delivered copy.
+    Launched {
+        nic: String,
+        lease: u64,
+        ack_at_ns: Vec<u64>,
         at_ns: u64,
     },
     Parked {
@@ -250,6 +258,10 @@ pub(crate) enum WarpTimer {
         packet: u64,
     },
     Fault(usize),
+    Launch {
+        nic: String,
+        lease: u64,
+    },
     Lease {
         nic: String,
         lease: u64,
@@ -266,6 +278,7 @@ impl WarpTimer {
             Self::Burst { flow, burst } => format!("warp:flow#{flow}:burst#{burst}"),
             Self::Arrive { packet } => format!("warp:arrive#{packet}"),
             Self::Fault(i) => format!("warp:event#{i}"),
+            Self::Launch { nic, lease } => format!("warp:{nic}:launch#{lease}"),
             Self::Lease { nic, lease, timer } => format!("warp:{nic}:{timer:?}#{lease}"),
             Self::WaitTimeout { nic, request } => format!("warp:{nic}:wait#{request}"),
         }
@@ -339,6 +352,8 @@ pub(crate) struct WarpState {
     pub in_flight: BTreeMap<u64, (String, Datagram)>,
     pub next_packet: u64,
     pub max_in_flight: u64,
+    /// Delivered egress copies whose ACK has not fired yet.
+    pub egress_in_flight: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -563,6 +578,7 @@ impl WarpState {
             in_flight: BTreeMap::new(),
             next_packet: 1,
             max_in_flight: spec.limits.max_in_flight,
+            egress_in_flight: 0,
         }
     }
 
@@ -606,7 +622,7 @@ impl WarpState {
                     )
                 })
                 .collect(),
-            in_flight: self.in_flight.len() as u64,
+            in_flight: self.in_flight.len() as u64 + self.egress_in_flight,
             links_bad: self
                 .links
                 .iter()
@@ -728,7 +744,9 @@ impl WarpState {
                         self.send_on_link(&ingress, packet, now_ns, now_ns, len, &mut events)?
                     {
                         if let Fate::Delivered { arrive_at_ns, .. } = t.fate {
-                            if self.in_flight.len() as u64 >= self.max_in_flight {
+                            if self.in_flight.len() as u64 + self.egress_in_flight
+                                >= self.max_in_flight
+                            {
                                 return Err(WarpError::Budget(format!(
                                     "more than {} datagrams in flight",
                                     self.max_in_flight
@@ -809,7 +827,64 @@ impl WarpState {
                     at_ns: now_ns,
                 });
             }
+            WarpTimer::Launch { nic, lease } => {
+                let state = &self.nics[nic];
+                let (egress, ack_return) = (state.egress.clone(), state.ack_return_ns);
+                let l = state
+                    .umem
+                    .leases()
+                    .get(lease)
+                    .expect("a lease launches before its PTO");
+                let (tx_len, parked) = (l.tx_len, l.state == umem::LeaseState::Parked);
+                let packet = self.next_packet;
+                self.next_packet += 1;
+                let sent =
+                    self.send_on_link(&egress, packet, now_ns, now_ns, tx_len, &mut events)?;
+                let mut ack_at_ns = vec![];
+                for (_, t) in sent {
+                    if let Fate::Delivered { arrive_at_ns, .. } = t.fate {
+                        ack_at_ns.push(arrive_at_ns.checked_add(ack_return).ok_or_else(|| {
+                            WarpError::Budget(format!("{nic}: ACK time overflows"))
+                        })?);
+                    }
+                }
+                let outstanding = self.in_flight.len() as u64 + self.egress_in_flight;
+                if outstanding + ack_at_ns.len() as u64 > self.max_in_flight {
+                    return Err(WarpError::Budget(format!(
+                        "more than {} datagrams in flight",
+                        self.max_in_flight
+                    )));
+                }
+                self.egress_in_flight += ack_at_ns.len() as u64;
+                if parked {
+                    for at in &ack_at_ns {
+                        effects.push(WarpEffect::Spawn(
+                            WarpTimer::Lease {
+                                nic: nic.clone(),
+                                lease: *lease,
+                                timer: LeaseTimer::Ack,
+                            },
+                            *at,
+                        ));
+                    }
+                }
+                let state = self.nics.get_mut(nic).expect("validated NIC");
+                state.umem.launch(*lease, ack_at_ns.clone());
+                events.push(WarpEvent::Launched {
+                    nic: nic.clone(),
+                    lease: *lease,
+                    ack_at_ns,
+                    at_ns: now_ns,
+                });
+            }
             WarpTimer::Lease { nic, lease, timer } => {
+                if *timer == LeaseTimer::Ack {
+                    // This copy's ACK arrived: it no longer counts as in flight.
+                    self.egress_in_flight = self
+                        .egress_in_flight
+                        .checked_sub(1)
+                        .expect("each delivered egress copy has one ACK timer");
+                }
                 let state = self.nics.get_mut(nic).expect("validated NIC");
                 match state.umem.retire(*lease) {
                     Some(l) => events.push(WarpEvent::Retired {
@@ -945,7 +1020,8 @@ impl WarpState {
                         .map_err(|e| WarpError::Misuse(format!("{nic}: lease: {e}")))?;
                     let lease = umem.park(task, desc).map_err(misuse)?;
                     let l = &umem.leases()[&lease];
-                    for at in &l.ack_at_ns {
+                    let launched_acks: &[u64] = if l.launched { &l.ack_at_ns } else { &[] };
+                    for at in launched_acks {
                         effects.push(WarpEffect::Spawn(
                             WarpTimer::Lease {
                                 nic: nic.into(),
@@ -1001,68 +1077,48 @@ impl WarpState {
                 WarpOp::Submit => None,
             }
         };
-        let response =
-            if op == WarpOp::Submit {
-                let frame = parse(arg(0)?)?;
-                let pkt_num_full = u64_arg(1)?;
-                let edt_ns = u64_arg(2)?;
-                let state = &self.nics[nic];
-                let tx_len = state
-                    .umem
-                    .check_submit(task, frame, pkt_num_full)
-                    .map_err(misuse)?;
-                let (egress, ack_return, pto) =
-                    (state.egress.clone(), state.ack_return_ns, state.pto_ns);
-                let launch_ns = edt_ns.max(now_ns);
-                let lease_packet = self.next_packet;
-                self.next_packet += 1;
-                let sent = self.send_on_link(
-                    &egress,
-                    lease_packet,
-                    now_ns,
-                    launch_ns,
-                    tx_len,
-                    &mut events,
-                )?;
-                let mut ack_at_ns = vec![];
-                for (_, t) in sent {
-                    if let Fate::Delivered { arrive_at_ns, .. } = t.fate {
-                        ack_at_ns.push(arrive_at_ns.checked_add(ack_return).ok_or_else(|| {
-                            WarpError::Budget(format!("{nic}: ACK time overflows"))
-                        })?);
-                    }
-                }
-                let pto_at_ns = launch_ns
-                    .checked_add(pto)
-                    .ok_or_else(|| WarpError::Budget(format!("{nic}: PTO time overflows")))?;
-                let state = self.nics.get_mut(nic).expect("validated NIC");
-                let (lease, desc) = state
-                    .umem
-                    .submit(
-                        task,
-                        frame,
-                        pkt_num_full,
-                        edt_ns,
-                        ack_at_ns.clone(),
-                        pto_at_ns,
-                    )
-                    .map_err(misuse)?;
-                events.push(WarpEvent::Submitted {
+        let response = if op == WarpOp::Submit {
+            let frame = parse(arg(0)?)?;
+            let pkt_num_full = u64_arg(1)?;
+            let edt_ns = u64_arg(2)?;
+            let state = &self.nics[nic];
+            state
+                .umem
+                .check_submit(task, frame, pkt_num_full)
+                .map_err(misuse)?;
+            let pto = state.pto_ns;
+            let launch_ns = edt_ns.max(now_ns);
+            let pto_at_ns = launch_ns
+                .checked_add(pto)
+                .ok_or_else(|| WarpError::Budget(format!("{nic}: PTO time overflows")))?;
+            let state = self.nics.get_mut(nic).expect("validated NIC");
+            let (lease, desc) = state
+                .umem
+                .submit(task, frame, pkt_num_full, edt_ns, pto_at_ns)
+                .map_err(misuse)?;
+            events.push(WarpEvent::Submitted {
+                nic: nic.into(),
+                task: task.into(),
+                lease,
+                chunk: frame.chunk_idx,
+                pkt_num_full,
+                edt_ns,
+                launch_ns,
+                pto_at_ns,
+                at_ns: now_ns,
+            });
+            // The reply enters the egress link at its launch time.
+            effects.push(WarpEffect::Spawn(
+                WarpTimer::Launch {
                     nic: nic.into(),
-                    task: task.into(),
                     lease,
-                    chunk: frame.chunk_idx,
-                    pkt_num_full,
-                    edt_ns,
-                    launch_ns,
-                    ack_at_ns,
-                    pto_at_ns,
-                    at_ns: now_ns,
-                });
-                Some(serde_json::to_value(desc).expect("serializable"))
-            } else {
-                response
-            };
+                },
+                launch_ns,
+            ));
+            Some(serde_json::to_value(desc).expect("serializable"))
+        } else {
+            response
+        };
         self.check_conservation()?;
         Ok(OpResult {
             events,

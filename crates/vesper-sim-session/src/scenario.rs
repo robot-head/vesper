@@ -548,6 +548,22 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
             ));
         }
     }
+    // A NIC's frames, leases and views identify chunks only within that
+    // NIC, so no source type may serve two NICs: a value of one NIC can then
+    // never be passed to another's operations.
+    let mut role_owner: BTreeMap<&String, &String> = BTreeMap::new();
+    for ((nic, role), ty) in &warp_roles {
+        if *role == "header" {
+            continue;
+        }
+        if let Some(other) = role_owner.insert(ty, nic)
+            && other != nic
+        {
+            return fail(format!(
+                "NICs {other} and {nic} both use {ty}; each NIC needs its own frame, lease and view types"
+            ));
+        }
+    }
     let mut names = BTreeSet::new();
     let mut tasks = vec![];
     for task in &scenario.tasks {
@@ -765,11 +781,21 @@ fn lease_type(world: &World, ty: &Type) -> Result<(String, String), String> {
     let Type::Named(name, _) = ty else {
         return Err(err());
     };
-    let field_ty = world.adts[name].variants[0]
+    let Type::Named(_, args) = ty else {
+        return Err(err());
+    };
+    let adt = &world.adts[name];
+    let vars = adt
+        .generics
+        .iter()
+        .zip(args)
+        .map(|(g, t)| (g.name.clone(), t.clone()))
+        .collect();
+    let field_ty = adt.variants[0]
         .fields
         .iter()
         .find(|f| f.name == "held_frame")
-        .map(|f| f.ty.clone())
+        .map(|f| vesper::ast::substitute(&f.ty, &vars))
         .ok_or_else(err)?;
     Ok((type_name(ty), frame_type(world, &field_ty)?))
 }
