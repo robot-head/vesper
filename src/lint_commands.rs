@@ -908,10 +908,25 @@ fn read_source(path: &Path) -> Result<(String, fs::Permissions), String> {
         metadata.permissions(),
     ))
 }
-struct Staging(PathBuf);
+struct Staging(Option<PathBuf>);
+impl Staging {
+    fn publish(&mut self, destination: &Path) -> Result<(), String> {
+        let path = self
+            .0
+            .as_deref()
+            .ok_or("staging path ownership already transferred")?;
+        fs::rename(path, destination).map_err(|e| e.to_string())?;
+        // The vacated temporary name is no longer ours. Another process may
+        // create a new file there before this guard is dropped.
+        self.0 = None;
+        Ok(())
+    }
+}
 impl Drop for Staging {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_file(path);
+        }
     }
 }
 fn replace_source(
@@ -950,7 +965,7 @@ fn replace_at(
         options.mode(0o600);
     }
     let mut file = options.open(&temporary_path).map_err(|e| e.to_string())?;
-    let temporary = Staging(temporary_path);
+    let mut temporary = Staging(Some(temporary_path));
     file.write_all(candidate.as_bytes())
         .map_err(|e| e.to_string())?;
     file.set_permissions(permissions)
@@ -963,7 +978,7 @@ fn replace_at(
             "source changed while lint was validating; original path left untouched".into(),
         );
     }
-    fs::rename(&temporary.0, path).map_err(|e| e.to_string())
+    temporary.publish(path)
 }
 pub fn run(args: Vec<String>) -> Result<(), String> {
     let json = args.iter().any(|a| a == "--json");
@@ -1105,6 +1120,41 @@ mod tests {
             fs::read_to_string(&temporary).unwrap(),
             "preexisting staging owner"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn published_staging_guard_preserves_a_new_owner_at_its_vacated_path() {
+        let (dir, destination) = fixture();
+        let temporary = dir.join("stage");
+        fs::write(&temporary, "validated candidate").unwrap();
+        let mut guard = Staging(Some(temporary.clone()));
+        guard.publish(&destination).unwrap();
+        fs::write(&temporary, "new owner after rename").unwrap();
+        drop(guard);
+        assert_eq!(
+            fs::read_to_string(&temporary).unwrap(),
+            "new owner after rename"
+        );
+        assert_eq!(
+            fs::read_to_string(&destination).unwrap(),
+            "validated candidate"
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn failed_staging_publication_keeps_cleanup_ownership() {
+        let (dir, original) = fixture();
+        let temporary = dir.join("stage");
+        let blocked = dir.join("directory");
+        fs::create_dir(&blocked).unwrap();
+        fs::write(&temporary, "candidate").unwrap();
+        let mut guard = Staging(Some(temporary.clone()));
+        assert!(guard.publish(&blocked).is_err());
+        assert!(temporary.exists());
+        drop(guard);
+        assert!(!temporary.exists());
+        assert!(blocked.is_dir());
+        assert_eq!(fs::read_to_string(&original).unwrap(), "current");
         fs::remove_dir_all(dir).unwrap();
     }
     #[test]

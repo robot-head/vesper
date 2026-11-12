@@ -157,3 +157,18 @@ formal ownership theorem, or broad zero-false-positive claim is implemented.
 Filesystem publication assumes cooperative paths: no hostile parent-directory
 or final compare/rename race defense, hardlink preservation, full Windows ACL
 copy, directory-fsync/durable transaction, or general cross-platform ACL proof.
+
+
+## Publication guard follow-up
+
+The private staging guard now relinquishes temporary-path ownership immediately
+when its rename succeeds. Drop therefore cannot unlink a different file created
+at that vacated name. A failed rename keeps cleanup ownership, and exclusive
+creation failures still never construct an owning guard.
+
+Two focused regressions exercise success followed by a new owner at the old
+path, and failed publication followed by cleanup. Together with the existing
+stale-source/creation-collision regression, all six adapter unit tests pass.
+The nineteen CLI integration tests and strict selected Clippy checks also pass
+with temporary root wiring restored afterward. No source-analysis guards or
+unrelated implementation changed in this follow-up.
