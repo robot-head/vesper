@@ -97,8 +97,11 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
     let mut manifest_path = None;
     let mut catalog_path = None;
     let mut output = None;
+    let mut locked = false;
+    let mut lockfile = None;
     let mut features = BTreeSet::new();
     let mut max_decisions = 100_000usize;
+    let mut explicit_budget = false;
     let mut json = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -113,6 +116,15 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
                     args.next().ok_or("-o requires a lockfile path")?,
                 ))
             }
+            "--locked" => locked = true,
+            "--lockfile" => {
+                if lockfile.is_some() {
+                    return Err("--lockfile may only be specified once".into());
+                }
+                lockfile = Some(PathBuf::from(
+                    args.next().ok_or("--lockfile requires a path")?,
+                ));
+            }
             "--features" => {
                 let requested = args
                     .next()
@@ -125,6 +137,7 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
                 }
             }
             "--max-decisions" => {
+                explicit_budget = true;
                 max_decisions = args
                     .next()
                     .ok_or("--max-decisions requires a positive integer")?
@@ -137,7 +150,7 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
             "--json" => json = true,
             "--help" | "-h" => {
                 println!(
-                    "Usage: vesper resolve [Loom.toml] --catalog <catalog.json> [--features a,b] [--max-decisions N] [-o Loom.lock] [--json]"
+                    "Usage: vesper resolve [Loom.toml] --catalog <catalog.json> [--features a,b] [--json]\n  Fresh resolution: [--max-decisions N] [-o Loom.lock]\n  Read-only validation: --locked [--lockfile Loom.lock]"
                 );
                 return Ok(());
             }
@@ -148,6 +161,19 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
                 }
             }
         }
+    }
+    if !locked && lockfile.is_some() {
+        return Err("--lockfile requires --locked; use -o for fresh resolution".into());
+    }
+    if locked && output.is_some() {
+        return Err(
+            "--locked cannot be combined with -o; use --lockfile for the input snapshot".into(),
+        );
+    }
+    if locked && explicit_budget {
+        return Err(
+            "--max-decisions applies only to fresh resolution; --locked performs no search".into(),
+        );
     }
     let manifest_path = manifest_path.unwrap_or_else(|| "Loom.toml".into());
     let catalog_path =
@@ -168,37 +194,57 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
         catalog,
         max_decisions,
     };
+    if locked {
+        let path = lockfile.unwrap_or_else(|| PathBuf::from("Loom.lock"));
+        let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let solution = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("{}: invalid lockfile: {e}", path.display()))?;
+        if let Err(error) = vesper_loom_solver::validate_locked(&request, &solution) {
+            return resolution_error(error, json, "lock validation");
+        }
+        return print_solution(&solution, json, "locked");
+    }
     let solution = match vesper_loom_solver::resolve(&request) {
         Ok(solution) => solution,
-        Err(error) => {
-            let error = serde_json::to_value(error).map_err(|e| e.to_string())?;
-            if json {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(
-                        &serde_json::json!({"status":"error","error":error})
-                    )
-                    .map_err(|e| e.to_string())?
-                );
-            }
-            return Err(format!("offline resolution failed: {error}"));
-        }
+        Err(error) => return resolution_error(error, json, "resolution"),
     };
     let bytes = serde_json::to_vec_pretty(&solution).map_err(|e| e.to_string())?;
     if let Some(path) = output {
         atomic_write(&path, &bytes)?;
     }
+    print_solution(&solution, json, "resolved")
+}
+
+fn resolution_error(
+    error: vesper_loom_solver::ResolveError,
+    json: bool,
+    action: &str,
+) -> Result<(), String> {
+    let error = serde_json::to_value(error).map_err(|e| e.to_string())?;
     if json {
         println!(
             "{}",
-            serde_json::to_string_pretty(
-                &serde_json::json!({"status":"resolved","solution":solution})
-            )
-            .map_err(|e| e.to_string())?
+            serde_json::to_string_pretty(&serde_json::json!({"status":"error","error":error}))
+                .map_err(|e| e.to_string())?
+        );
+    }
+    Err(format!("offline {action} failed: {error}"))
+}
+
+fn print_solution(
+    solution: &vesper_loom_calculus::Solution,
+    json: bool,
+    status: &str,
+) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({"status":status,"solution":solution}))
+                .map_err(|e| e.to_string())?
         );
     } else {
         println!(
-            "resolved {} package(s), {} native package(s)",
+            "{status} {} package(s), {} native package(s)",
             solution.packages.len(),
             solution.system_packages.len()
         );

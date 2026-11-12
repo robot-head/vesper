@@ -29,3 +29,37 @@ Successful JSON output is `{"status":"resolved","solution":...}`. Solver errors 
 Lockfiles are written via a temporary file and atomic replacement after successful resolution and serialization. A resolution or temporary-write failure leaves an existing lockfile intact. As with the standalone calculus, capability checks validate declared metadata, not actual compiler-body authority. Package-qualified authority analysis and provenance verification remain separate integration gates. Unsupported optimization/attestation/vetting policies fail closed rather than being reported as enforced.
 
 The first resolver uses bounded deterministic backtracking, not the design's planned CDCL/Max-SMT engines or its performance targets. The source ceiling, feature and version constraints are useful now while those engines and external trust services remain future work.
+
+## Read-only locked resolution
+
+After creating a solution snapshot with `resolve -o`, check it without resolving again:
+
+```sh
+cargo run -- resolve examples/loom/Loom.toml --catalog examples/loom/catalog.json --locked --lockfile /tmp/Loom.lock --json
+```
+
+`--locked` reads `Loom.lock` in the current working directory by default; `--lockfile` chooses another input path. It never writes or replaces the snapshot, and a missing snapshot is an error. It cannot be combined with `-o` or `--max-decisions`, and `--lockfile` requires `--locked`.
+
+Validation checks the current root manifest and requested features, every selected manifest's exact metadata against the local catalog, native versions, and the complete dependency/capability graph. It recomputes the reachable feature closure from the request rather than trusting features embedded in the snapshot. Extra roots, unused packages/native selections and injected features are rejected. A valid older selection remains pinned when the catalog gains newer versions; no search is performed.
+
+Successful JSON output is `{"status":"locked","solution":...}`. Invalid or stale snapshots return an error with kind `locked_mismatch`, distinct from a failed search's `unsatisfiable`. Invalid catalog/manifest inputs and unsupported policy remain `invalid_input` and `unsupported_policy`. Structured validation errors use the existing `{"status":"error","error":...}` envelope with zero search decisions. Argument, file and JSON parsing errors go to stderr. Failed validation leaves all files untouched.
+
+Locked validation checks consistency with supplied local metadata. It does not authenticate that metadata, verify package source bytes, audit compiler authority, execute builds or establish provenance. The snapshot format remains the experimental exact `Solution` DTO described above.
+
+## Inspecting the package graph
+
+```sh
+cargo run -- graph /tmp/Loom.lock
+cargo run -- graph /tmp/Loom.lock --package @example/math --invert --json
+cargo run -- graph /tmp/Loom.lock --dot > /tmp/loom.dot
+```
+
+`graph` reads `Loom.lock` by default and validates the entire snapshot before displaying it. No catalog, source compiler, search or build execution is involved. Use `resolve --locked` first when you need to check that the snapshot still agrees with a current manifest/catalog.
+
+The default view includes all reachable packages and native requirements. `--package @org/name` follows that package's dependency closure; adding `--invert` follows its dependents instead. Cycles terminate and shared dependencies appear once. Native requirements of the displayed packages remain visible. Unknown or unreachable focus packages are errors. Unreachable package/native selections in an otherwise valid snapshot are reported separately and excluded from the graph.
+
+Text output shows versions, features, declared ceilings, required capabilities and dependency constraints. Required capabilities are the calculus's conservative union of declared metadata across the complete reachable graph; filtering the view does not recalculate them over a smaller subgraph. They are not an audit of compiler-body authority.
+
+`--json` emits a schema-versioned report with `status: "graph"`, `basis: "declared_metadata"`, the direction/focus, original snapshot roots, visible package/native nodes and edges, and unused selection lists. Dependency records retain their original `dependent`/`dependency` identities in both directions. `--dot` emits deterministic Graphviz DOT with distinct Vesper/native node identities; `--invert` reverses its arrows. The two output flags are mutually exclusive.
+
+Invalid snapshots and unknown focus packages produce nonzero exits with structured errors in JSON mode. Arguments, file reads and JSON parsing errors use stderr. No output files are created or rewritten by this command; use shell redirection to save its output. Report schema 1 is an inspection format, not an interface fingerprint, authenticated SBOM or provenance certificate. Resolver trust/optimization policy is not enforced by graph inspection.
