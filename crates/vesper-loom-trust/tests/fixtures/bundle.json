@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "attestations": [
+    {
+      "statement": {
+        "schema_version": 1,
+        "key_id": "key-a",
+        "identity": {
+          "package": "@test/package",
+          "version": "1.2.3+source",
+          "source_tree": "b3v1:source:tree:6830b0c5e0481e76f6e2db81cec956649bc2b7cf29b8da00917df1353d287844",
+          "derivation": "drv:b3v1:76a4a6bf926a02128ec5b8bdf8430a76126a633323a5ff19071d5c4f6af2b0f4",
+          "target": "x86_64-unknown-linux-gnu",
+          "builder_blake3": "c4c9c208c14c9cc29905a385c1cf7c93be57b8d2b98b8983bc9b1cde61ab2a48",
+          "sandbox_contract": "vesper:sandbox/step@0.1.0",
+          "output": "b3v1:artifact:blob:8dcf0460049a0a16a51cafcf33facd9d53d4ac90744a780f641937b55f8036f3"
+        },
+        "issued_at": 100,
+        "expires_at": 300
+      },
+      "signature": "ff35c37d881de989f25291066e63ad1e3418e9939acd2093c5151e80f3203a73540bbd9a1271227a1210cb5f0a46bb992ef4107cb1d75221f4c4a40934efa604"
+    },
+    {
+      "statement": {
+        "schema_version": 1,
+        "key_id": "key-b",
+        "identity": {
+          "package": "@test/package",
+          "version": "1.2.3+source",
+          "source_tree": "b3v1:source:tree:6830b0c5e0481e76f6e2db81cec956649bc2b7cf29b8da00917df1353d287844",
+          "derivation": "drv:b3v1:76a4a6bf926a02128ec5b8bdf8430a76126a633323a5ff19071d5c4f6af2b0f4",
+          "target": "x86_64-unknown-linux-gnu",
+          "builder_blake3": "c4c9c208c14c9cc29905a385c1cf7c93be57b8d2b98b8983bc9b1cde61ab2a48",
+          "sandbox_contract": "vesper:sandbox/step@0.1.0",
+          "output": "b3v1:artifact:blob:8dcf0460049a0a16a51cafcf33facd9d53d4ac90744a780f641937b55f8036f3"
+        },
+        "issued_at": 100,
+        "expires_at": 300
+      },
+      "signature": "24cf8a3f24441e896aa66400f7783f4771e9fce24e17348bb89b7378922067fd77a7ae191d0160b4d6b4ffa529ca8d3057602910791be46a5ddf33d22df36f03"
+    }
+  ]
+}
