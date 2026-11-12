@@ -18,6 +18,9 @@ use tough::{
 };
 use url::Url;
 
+#[cfg(unix)]
+pub mod state;
+
 /// Local verification request. `repository_id` is a stable, caller-configured registry identity.
 pub struct LocalRequest {
     pub repository_id: String,

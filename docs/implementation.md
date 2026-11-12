@@ -42,6 +42,8 @@ The executable pipeline checks HIR, runs CFG ownership analysis on typed Place I
 | `vesper-loom-sandbox` | Real Wasmtime component execution, denied ambient access, deterministic inputs, fuel/memory limits | Forge hygiene/provenance, Loom/CAS integration, enforced disk quota |
 | `vesper-ignis` | Deterministic resource hazards, enhanced-barrier plans and queue fence streams | Windows/D3D12 executor and hardware validation, source lowering, full engine |
 | `vesper-loom-trust` | Real offline Ed25519 verification, configured-operator quorum, exact signed build identities and actual-blob CLI checks | Sigstore/OIDC/TUF, authenticated registry/source lineage, real builder execution and cache-trust integration |
+| `vesper-loom-tuf` | Bounded offline signed target verification, retained root chains, expiry checks and Unix locked checkpoint storage | Failed-step progression integration, complete crash-safe updater, registry/package binding and network transport |
+| `vesper-prism` | Bounded incremental HTTP/1.1 request framing, strict ambiguity rejection and exact pipeline remainder | Server/I/O integration, source linear responses, routing, HTTP/2/3, TLS and WebSocket |
 
 The [contract audit](rfcs/parallel-contracts.md) records checked-arithmetic migration, scoped child loans, native relocation/DMA rules, region aliasing/rewind, and distinct interface/artifact/proof cache keys. These are integration gates, not new proof claims.
 

@@ -83,3 +83,8 @@ Remaining Prism work includes chunked/trailer handling, responses and linear
 response/upgrade lifecycles, routing/middleware, source/runtime integration,
 HTTP/2/3, WebSocket, TLS, cancellation, region allocation, SIMD parsing and Lean
 security proofs. None is implied by this milestone.
+
+Coordinator registered the crate in both root workspace lists, removed its
+standalone workspace/lockfile and reran all 14 integration tests plus the
+executable doctest in the shared workspace. Independent framing/security review
+is in progress before adding any server/runtime consumer.

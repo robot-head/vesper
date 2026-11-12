@@ -72,6 +72,28 @@ Target names must be canonical UTF-8 relative paths with no empty, `.` or `..` s
 
 The OS wall clock and its integrity remain trust assumptions. Tough's accepted metadata encodings and canonicalization rules also apply; fixtures use whole-second RFC3339 expiries for portable signature round trips. A detected backward clock fails verification, but a falsified host clock is not a trusted time service.
 
+## Unix checkpoint store
+
+`state::CheckpointStore` provides explicit `create` and `open`, bounded
+`load_checkpoint`, and `commit_checkpoint`. Keep its exclusive OS-lock guard
+through loading, verification and committing. State directories must belong to
+the current user with mode 0700 (or stricter); state/lock files must have no
+group/other permissions. Parent directories must be protected against concurrent
+replacement, and the persistent lock file must never be deleted. Missing state
+in an existing directory, corrupt JSON, symlinks and unsafe permissions fail;
+they never trigger implicit bootstrap initialization.
+
+Commits write a private same-directory temporary file, sync it, rename over the
+checkpoint, then sync the directory. A write failure poisons the guard: reopen
+to inspect recovered state before another attempt. This requires a filesystem
+with working file/directory sync and atomic same-directory rename. Tested on
+Linux, including replacement under an exclusive lock and child-process exit
+without Rust cleanup. It does not protect against a state-directory owner
+rewriting or deleting files, and does not make in-flight verification steps
+durable. In particular, storing only `verify_target` successes does not fix
+the failed-verification limitation above. Release target bytes only after all
+required checkpoint persistence succeeds.
+
 ## Guarantees outside this crate
 
 Successful TUF verification authenticates bytes under the configured repository root. It does not establish OIDC identity, Sigstore/transparency evidence, namespace ownership outside the configured repository, source-tree correspondence, builder independence, hermeticity, ABI compatibility, vulnerabilities, or cache eligibility. Builder attestation quorum verification remains a separate crate and policy.

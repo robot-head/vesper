@@ -5,8 +5,6 @@ edition = "2024"
 publish = false
 description = "Bounded offline TUF target verification with caller-persisted rollback checkpoints"
 
-[workspace]
-
 [dependencies]
 tough = { version = "=0.24.0", default-features = false }
 tokio = { version = "1", features = ["fs", "rt", "macros"] }
@@ -23,6 +21,3 @@ olpc-cjson = "0.1"
 [dev-dependencies]
 aws-lc-rs = "1"
 hex = "0.4"
-
-[profile.dev]
-debug = 0
