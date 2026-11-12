@@ -61,3 +61,4 @@ actions:
       - run: "scripts/test-expansion-foundations.sh"
       - run: "scripts/test-recovery.sh"
       - run: "scripts/test-source-tooling.sh"
+      - run: "scripts/test-source-macros.sh"

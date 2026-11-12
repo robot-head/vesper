@@ -88,3 +88,4 @@ jobs:
           scripts/test-expansion-foundations.sh
           scripts/test-recovery.sh
           scripts/test-source-tooling.sh
+          scripts/test-source-macros.sh
