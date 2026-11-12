@@ -32,13 +32,17 @@ The coordinator's correction from the PR #36 review is followed. On receive:
    remove header protection in place.
 2. Lane 5 removes header protection.
 3. `ProtectedHeader::packet_number_field(&packet)` reads the unprotected
-   first byte. It rejects nonzero reserved bits and returns the `TruncatedPn`
-   (length 1–4 and value), the key phase, `header_len` (the AEAD AAD is
-   `packet[..header_len]`) and the payload span.
+   first byte. It returns the `TruncatedPn` (length 1–4 and value), the key
+   phase, `header_len` (the AEAD AAD is `packet[..header_len]`) and the
+   payload span. It does not check the reserved bits.
 4. `TruncatedPn::decode(largest)` reconstructs the full packet number.
 5. Lane 5's AEAD open takes the full packet number, since RFC 9001 §5.3 builds
    the nonce from it.
-6. `frame::scan_payload` / `frame::frames` run on the opened payload.
+6. Only after the AEAD open succeeds,
+   `UnprotectedHeader::check_reserved_bits` rejects nonzero reserved bits.
+   RFC 9000 §17.3.1 forbids acting on them earlier, because a forged header
+   must not pass as a protocol violation.
+7. `frame::scan_payload` / `frame::frames` run on the opened payload.
 
 The 4-byte `pkt_num_trunc` field of `QuicShortHdrWire` is the protected
 window. The unprotected first byte says how many of its bytes, 1 to 4, are the
@@ -150,6 +154,15 @@ This lane's root patch is its own commit. It adds `crates/vesper-warp` to
 - **Offsets instead of borrows.** `ProtectedHeader` stores offsets, not slices,
   so in-place header-protection removal can borrow the buffer mutably between
   the two parsing steps.
+- **Review fixes (Codex on PR #60).**
+  - `ReceivedPackets::largest()` is now stored separately from the retained
+    ranges, so ACK-of-ACK pruning or eviction never loses the context needed
+    to decode packet numbers.
+  - Recovery no longer records ACK-only (not in flight) packets, so
+    receive-only traffic cannot fill the tracking bound.
+  - The Lean differential test writes stdin from a separate thread, so a
+    small pipe buffer cannot deadlock it.
+  - Reserved bits are checked after authentication, not before.
 - **Bounded tracking with conservative eviction.** ACK tracking evicts the
   lowest range when full and reports anything at or below it as `TooOld`, so a
   duplicate is never accepted. Recovery tracking is bounded per space

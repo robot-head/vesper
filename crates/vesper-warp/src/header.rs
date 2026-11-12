@@ -14,6 +14,9 @@
 //!    reconstructs the full number with
 //!    [`crate::packet_number::TruncatedPn::decode`] and hands it to the AEAD
 //!    open, whose AAD is `packet[..header_len]`.
+//! 3. Only after the AEAD open succeeds,
+//!    [`UnprotectedHeader::check_reserved_bits`] rejects nonzero reserved
+//!    bits (RFC 9000 §17.3.1).
 //!
 //! The short header is the §35.2 `QuicShortHdrWire` (`flags_spin_keyphase:
 //! u8, dest_conn_id: ByteArray[n], pkt_num_trunc: u32be`), compiled through
@@ -198,6 +201,24 @@ pub struct UnprotectedHeader {
     pub payload: Span,
 }
 
+impl UnprotectedHeader {
+    /// Step 4, after the AEAD open succeeded: nonzero reserved bits are a
+    /// PROTOCOL_VIOLATION (RFC 9000 §17.2, §17.3.1). Checking them before
+    /// authentication would let a forged header masquerade as a violation.
+    pub const fn check_reserved_bits(&self) -> Result<(), HeaderError> {
+        let reserved = if self.key_phase.is_some() {
+            SHORT_RESERVED
+        } else {
+            LONG_RESERVED
+        };
+        if self.first_byte & reserved != 0 {
+            Err(HeaderError::ReservedBitsSet)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl ProtectedHeader {
     pub fn dcid<'a>(&self, packet: &'a [u8]) -> &'a [u8] {
         self.dcid.of(packet)
@@ -221,21 +242,16 @@ impl ProtectedHeader {
         if self.version.is_none() { 0x1f } else { 0x0f }
     }
     /// Step 2: read the packet-number field from `packet` *after* header
-    /// protection has been removed in place.
+    /// protection has been removed in place. Reserved bits are deliberately
+    /// not checked here: RFC 9000 §17.2/§17.3.1 requires that check only
+    /// after packet protection is also removed, so call
+    /// [`UnprotectedHeader::check_reserved_bits`] after a successful AEAD open.
     pub fn packet_number_field(&self, packet: &[u8]) -> Result<UnprotectedHeader, HeaderError> {
         let available = packet.len().min(self.packet_end);
         let first = *packet.first().ok_or(HeaderError::Truncated {
             needed: 1,
             available,
         })?;
-        let reserved = if self.version.is_none() {
-            SHORT_RESERVED
-        } else {
-            LONG_RESERVED
-        };
-        if first & reserved != 0 {
-            return Err(HeaderError::ReservedBitsSet);
-        }
         let len = PnLen::from_first_byte(first);
         let header_len = self.pn_offset + len.bytes();
         let pn = packet

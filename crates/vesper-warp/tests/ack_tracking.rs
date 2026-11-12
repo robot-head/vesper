@@ -177,3 +177,28 @@ fn random_arrivals_match_set_model() {
         assert_eq!(from_ranges, model);
     }
 }
+
+/// ACK-of-ACK pruning must not lose the packet-number decoding context.
+#[test]
+fn largest_survives_ack_of_ack_pruning() {
+    use vesper_warp::packet_number::decode_with_largest;
+    let mut r = ReceivedPackets::<4>::new(PnSpace::ApplicationData, 0);
+    for pn in 0..=255 {
+        r.on_packet_received(pn, 0, true, Ecn::NotEct).unwrap();
+    }
+    r.on_ack_of_ack(255);
+    assert!(r.ranges().is_empty());
+    assert_eq!(r.largest(), Some(255));
+    assert_eq!(r.ack_frame(0, 3).unwrap(), None);
+    // One-byte truncated 256 (0x00) decodes to 256, not 0.
+    assert_eq!(decode_with_largest(r.largest(), 0x00, 8), Ok(256));
+    let got = r.on_packet_received(256, 1, true, Ecn::NotEct).unwrap();
+    assert!(got.largest && !got.out_of_order);
+    assert_eq!(r.largest(), Some(256));
+    // Eviction by the range bound keeps it too.
+    let mut r = ReceivedPackets::<2>::new(PnSpace::ApplicationData, 0);
+    for pn in [10, 8, 6, 4] {
+        let _ = r.on_packet_received(pn, 0, true, Ecn::NotEct);
+    }
+    assert_eq!(r.largest(), Some(10));
+}

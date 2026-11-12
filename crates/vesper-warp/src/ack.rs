@@ -58,6 +58,10 @@ pub struct ReceivedPackets<const N: usize = DEFAULT_MAX_RANGES> {
     len: usize,
     /// Packet numbers `<= floor` are no longer tracked.
     floor: Option<u64>,
+    /// Largest packet number ever received, kept independently of the
+    /// retained ranges so ACK-of-ACK pruning never loses the packet-number
+    /// reconstruction context.
+    largest: Option<u64>,
     largest_received_ns: u64,
     last_received_ns: u64,
     ecn: EcnCounts,
@@ -79,6 +83,7 @@ impl<const N: usize> ReceivedPackets<N> {
             }; N],
             len: 0,
             floor: None,
+            largest: None,
             largest_received_ns: 0,
             last_received_ns: 0,
             ecn: EcnCounts {
@@ -92,8 +97,10 @@ impl<const N: usize> ReceivedPackets<N> {
         }
     }
 
-    pub fn largest(&self) -> Option<u64> {
-        (self.len > 0).then(|| self.ranges[0].largest)
+    /// Largest packet number received in this space (the `largest_pn` for
+    /// packet-number decoding); unaffected by range eviction or pruning.
+    pub const fn largest(&self) -> Option<u64> {
+        self.largest
     }
     pub fn ranges(&self) -> &[AckRange] {
         &self.ranges[..self.len]
@@ -145,6 +152,7 @@ impl<const N: usize> ReceivedPackets<N> {
             Some(l) => pn < l || pn > l + 1,
         };
         if largest {
+            self.largest = Some(pn);
             self.largest_received_ns = now_ns;
         }
         self.insert(pn);

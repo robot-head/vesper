@@ -176,13 +176,12 @@ fn rust_decoder_matches_executable_lean_model() {
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn Lean fixture");
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    // Feed stdin from a thread while wait_with_output drains stdout, so a
+    // small pipe buffer cannot deadlock the fixture's line-by-line replies.
+    let mut stdin = child.stdin.take().unwrap();
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
     let output = child.wait_with_output().unwrap();
+    writer.join().unwrap().unwrap();
     assert!(
         output.status.success(),
         "fixture failed: {}",

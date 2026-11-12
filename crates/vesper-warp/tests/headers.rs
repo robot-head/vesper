@@ -72,7 +72,7 @@ fn short_header_matches_section_35_2_wire_struct() {
 }
 
 #[test]
-fn reserved_bits_after_unprotect_are_rejected() {
+fn reserved_bits_are_checked_only_after_authentication() {
     let parser = HeaderParser::new(8).unwrap();
     let mut packet = [0u8; 40];
     parser
@@ -82,9 +82,17 @@ fn reserved_bits_after_unprotect_are_rejected() {
     let ParsedPacket::Protected(h) = parser.parse(&packet).unwrap() else {
         panic!()
     };
+    // Not rejected before authentication (RFC 9000 §17.3.1)...
+    let u = h.packet_number_field(&packet).unwrap();
+    assert_eq!(u.pn.value, 7);
+    // ...only by the explicit post-AEAD check.
+    assert_eq!(u.check_reserved_bits(), Err(HeaderError::ReservedBitsSet));
+    packet[0] &= !0x08;
     assert_eq!(
-        h.packet_number_field(&packet),
-        Err(HeaderError::ReservedBitsSet)
+        h.packet_number_field(&packet)
+            .unwrap()
+            .check_reserved_bits(),
+        Ok(())
     );
 }
 

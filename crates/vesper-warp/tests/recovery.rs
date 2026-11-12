@@ -342,9 +342,10 @@ fn no_rtt_sample_without_new_largest_or_ack_eliciting() {
     r.on_packet_sent(APP, pkt(0, 0)).unwrap();
     r.on_packet_sent(
         APP,
+        // PADDING-only: in flight but not ack-eliciting.
         SentPacket {
             ack_eliciting: false,
-            in_flight: false,
+            in_flight: true,
             ..pkt(1, 0)
         },
     )
@@ -446,4 +447,37 @@ fn typed_errors_and_space_discard() {
         .unwrap();
     small.on_packet_sent(APP, pkt(2, 1)).unwrap();
     assert_eq!(small.tracked(APP), 2);
+}
+
+#[test]
+fn ack_only_traffic_cannot_exhaust_tracking() {
+    let mut r = LossRecovery::new(
+        RecoveryConfig {
+            max_tracked_per_space: 2,
+            ..RecoveryConfig::default()
+        },
+        confirmed(),
+    );
+    for pn in 0..5_000 {
+        r.on_packet_sent(
+            APP,
+            SentPacket {
+                ack_eliciting: false,
+                in_flight: false,
+                ..pkt(pn, pn)
+            },
+        )
+        .unwrap();
+    }
+    assert_eq!(r.tracked(APP), 0);
+    assert_eq!(r.bytes_in_flight(), 0);
+    // An ack-eliciting probe can still be sent and arms the PTO.
+    r.on_packet_sent(APP, pkt(5_000, 5_000)).unwrap();
+    assert_eq!(r.timer().unwrap().kind, TimerKind::Pto(APP));
+    // ACKs covering the untracked packet numbers are valid.
+    let range = single(4_990, 5_000);
+    let out = r
+        .on_ack_received(APP, &ack(&range), 0, 10 * MS, &mut |_| {})
+        .unwrap();
+    assert_eq!(out.newly_acked, 1);
 }

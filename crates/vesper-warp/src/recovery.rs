@@ -12,6 +12,8 @@
 //!
 //! Sent-packet records live in per-space ring buffers preallocated at
 //! construction (`max_tracked_per_space`); the steady state allocates nothing.
+//! Only in-flight packets are recorded: ACK-only packets are not, so
+//! receive-only traffic cannot fill the bound.
 //! Exceeding the bound is [`RecoveryError::TooManyTracked`].
 //!
 //! Limitations: persistent congestion is evaluated per space and per loss
@@ -405,6 +407,15 @@ impl LossRecovery {
         }
         if pkt.sent_ns < self.last_sent_ns {
             return Err(RecoveryError::ClockWentBackwards);
+        }
+        if !pkt.in_flight {
+            // ACK-only (non-in-flight) packets need no loss detection and
+            // need not be promptly acknowledged (RFC 9002 §3); recording
+            // them would let receive-only traffic exhaust the bounded
+            // queue. Only the packet number is kept, for ACK validation.
+            s.last_sent_pn = Some(pkt.pn);
+            self.last_sent_ns = pkt.sent_ns;
+            return Ok(());
         }
         s.pop_tombstones();
         if s.sent.len() >= self.config.max_tracked_per_space {
