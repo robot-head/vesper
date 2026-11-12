@@ -1,10 +1,11 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "numbered_section_count": 41,
   "document_url": "https://docs.google.com/document/d/1zO7boUVwNTHRA-1ZNL4bDYi68OjQZBCimLWkETH6bso/edit",
   "title": "Vesper Language Design & Formal Specification",
-  "document_revision": "AHj4eMRNKqpG49ptnYMT2P35Ci3DoTOSu-ksbay32mOfGeUCerr8tak3VMjlpAyeSVTQ9vKPp11rJ-C4vWy1rYx3vhisB6O4o5EO_Y3TT9Y",
-  "modified_time_utc": "2026-11-12T08:13:57.039Z",
-  "snapshot_sha256": "04c1d5975c031a1dd9be11c3fbfb0c70e973d1c36fefa662ce775cd39dca61c3",
+  "document_revision": "AHj4eMRg35hVwN07Ww4ah8QktN80KS_xgnyZypmazCIeUl-0B2N9N-ucp4P_nKYdwQMnGLpzGw3DjIaQE3liPaE18kxN9vW5Y-9PERTVdhw",
+  "modified_time_utc": "2026-11-12T09:18:30.204Z",
+  "snapshot_sha256": "8e0f05ae32a6c87a8ce25fb339f66c760fe5d5f3fd3cb05e58236d291fa62207",
   "snapshot_transform": "Indexed document paragraph text, LF joined, HTML entities decoded once. Document section order preserved.",
   "sections": {
     "1": {
@@ -145,7 +146,7 @@
     },
     "35": {
       "title": "35. Vesper Warp: User-Space Kernel-Bypass QUIC/TCP Networking, Linear AF_XDP/DPDK UMEM Descriptor Rings, and Verified BBRv3 Loss Recovery",
-      "sha256": "2b918c2b37a67ad56f2a76791a3e2c65ad275e1d5aeaac82f6caafd8a41d5e06"
+      "sha256": "027ab833fc2a9c3e2ea7ba1eb747c09e0f8f1ad187926734841133efbaf61b9d"
     },
     "36": {
       "title": "36. Vesper Kinetic: Cross-Architecture Bit-Deterministic XPBD Physics, Capability-Verified IEEE-754 Determinism, and Tri-Backend GPU Broadphase",
@@ -153,7 +154,23 @@
     },
     "37": {
       "title": "37. Vesper Aether: Sub-Millisecond Content-Addressed Unikernels, Hermetic Containerless KVM MicroVMs, and Clone-Safe UFFD Snapshot Forking",
-      "sha256": "49dd7726b83cfd6ec54000ef705b5550a2e9aa06a202d80309c1ca83a04d0af8"
+      "sha256": "e82b7f8d75248082d918330107591b8d91f3eac0ec3583526b9c78f07794d52f"
+    },
+    "38": {
+      "title": "38. Vesper Grammar: Verified Non-Malleable Binary and LL/PEG Parsers, Zero-Copy Protobuf and Arrow IPC Codecs, and Lean 4 Mutual-Inverse Proofs",
+      "sha256": "e86ef66e6ce08aea8f2ba5f661582a96b0a016371890e67973f73490f3b8b293"
+    },
+    "39": {
+      "title": "39. Vesper Stylus and Lint: Lossless Rowan CST Formatting, Substructural and Effect-Row Static Analysis, and MIF-Verified Autofixes (vesper fmt and vesper lint)",
+      "sha256": "e6bd59d38514a323610de57d8d9a75f8713e268ef2ce2308b58ec8672baa2b88"
+    },
+    "40": {
+      "title": "40. Vesper Codex: Hermetic Living API Documentation, Substructural Mode/Effect/FieldTree Footprints, Single-JIT-Module Doctests, and Linked Lean 4 Proof Certificates (vesper doc and vesper test --doc)",
+      "sha256": "f0fa8e7c8b6e83121e490e4c4ad3a8e6094c7bb5b3af6552d05d7c1d53e4b539"
+    },
+    "41": {
+      "title": "41. Vesper Metronome: User-Space Hardware PMU Microbenchmarking, Paired Interleaved A/B Regression Gates, Stabilizer Layout Randomization, and Fiber Causal Profiling (vesper bench)",
+      "sha256": "6b8e81c34925039207ce877e677b38a5575629b8b5c18a6fe014182bda1a5dd2"
     }
   },
   "document_heading_order": [
@@ -194,6 +211,17 @@
     "33. Vesper Aegis: Hardware Confidential Computing (TDX, SEV-SNP, and Arm CCA), Iago-Safe Bounce Buffers, and Supply-Chain-Bound Remote Attestation",
     "34. Vesper Flux: Incremental Differential Stream Processing, Zero-GC DBSP Z-Set Materialized Views, and Linear Watermark Progress",
     "36. Vesper Kinetic: Cross-Architecture Bit-Deterministic XPBD Physics, Capability-Verified IEEE-754 Determinism, and Tri-Backend GPU Broadphase",
-    "37. Vesper Aether: Sub-Millisecond Content-Addressed Unikernels, Hermetic Containerless KVM MicroVMs, and Clone-Safe UFFD Snapshot Forking"
-  ]
+    "37. Vesper Aether: Sub-Millisecond Content-Addressed Unikernels, Hermetic Containerless KVM MicroVMs, and Clone-Safe UFFD Snapshot Forking",
+    "38. Vesper Grammar: Verified Non-Malleable Binary and LL/PEG Parsers, Zero-Copy Protobuf and Arrow IPC Codecs, and Lean 4 Mutual-Inverse Proofs",
+    "39. Vesper Stylus and Lint: Lossless Rowan CST Formatting, Substructural and Effect-Row Static Analysis, and MIF-Verified Autofixes (vesper fmt and vesper lint)",
+    "40. Vesper Codex: Hermetic Living API Documentation, Substructural Mode/Effect/FieldTree Footprints, Single-JIT-Module Doctests, and Linked Lean 4 Proof Certificates (vesper doc and vesper test --doc)",
+    "41. Vesper Metronome: User-Space Hardware PMU Microbenchmarking, Paired Interleaved A/B Regression Gates, Stabilizer Layout Randomization, and Fiber Causal Profiling (vesper bench)",
+    "Appendix A. Mechanized Lean 4 Metatheory of lambda_Vesper and Place Capability Graphs (VesperMetatheory.lean)"
+  ],
+  "appendices": {
+    "A": {
+      "title": "Appendix A. Mechanized Lean 4 Metatheory of lambda_Vesper and Place Capability Graphs (VesperMetatheory.lean)",
+      "sha256": "180fa0a761eccfc1862a9b3445f1669513f8623697b821a5366fc4f05a2dfd84"
+    }
+  }
 }

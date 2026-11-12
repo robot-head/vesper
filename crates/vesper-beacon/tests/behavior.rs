@@ -306,3 +306,36 @@ fn cancellation_cannot_bypass_full_queue_or_duplicate_records() {
     assert_eq!(owned.duration_ns(), &[1]);
     assert!(ring.drain::<2>().is_empty());
 }
+
+#[test]
+fn prefix_consumer_failure_preserves_fifo_after_partial_inspection() {
+    let pool = pool::<1>();
+    let mut ring = TelemetryRing::<3>::default();
+    for _ in 0..3 {
+        pool.start_span(None, SpanSchema::Request, 0, 0)
+            .unwrap()
+            .cancel(&mut ring, 1)
+            .unwrap();
+    }
+    let before: Vec<_> = ring.records().collect();
+    let error = ring
+        .try_consume_prefix(2, |mut records| {
+            assert_eq!(records.len(), 2);
+            assert_eq!(records.next(), Some(before[0]));
+            Err::<(), _>("retry")
+        })
+        .unwrap_err();
+    assert_eq!(error, "retry");
+    assert_eq!(ring.records().collect::<Vec<_>>(), before);
+    let copied = ring
+        .try_consume_prefix(2, |records| Ok::<_, ()>(records.collect::<Vec<_>>()))
+        .unwrap();
+    assert_eq!(copied, before[..2]);
+    assert_eq!(ring.records().collect::<Vec<_>>(), before[2..]);
+    ring.try_consume_prefix(0, |records| {
+        assert_eq!(records.count(), 0);
+        Ok::<_, ()>(())
+    })
+    .unwrap();
+    assert_eq!(ring.len(), 1);
+}

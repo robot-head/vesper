@@ -1,3 +1,10 @@
+#[path = "cdc.rs"]
+mod cdc;
+#[path = "checkpoint.rs"]
+mod checkpoint;
+pub use cdc::{CdcHeader, CdcPolicy, Ingested, SourceBinding, WeightPolicy};
+pub use checkpoint::CheckpointLimits;
+
 use crate::{
     Budget, Error, Limits, Row, ZSet, identity,
     zset::{Accumulator, union},
@@ -329,6 +336,7 @@ impl Circuit {
             circuit: self,
             prior,
             ticks: 0,
+            source: None,
         }
     }
 }
@@ -342,6 +350,7 @@ pub struct Executor {
     circuit: Circuit,
     prior: Vec<ZSet>,
     ticks: u64,
+    source: Option<cdc::SourceState>,
 }
 impl Executor {
     pub fn ticks(&self) -> u64 {
@@ -353,6 +362,12 @@ impl Executor {
     /// Commits only after every differentiated operator and integral passes.
     /// Borrowed input remains caller-owned on both success and failure.
     pub fn tick(&mut self, input: &TickInput) -> Result<ZSet, Error> {
+        if self.source.is_some() {
+            return Err(Error::SourceMode);
+        }
+        self.tick_inner(input)
+    }
+    fn tick_inner(&mut self, input: &TickInput) -> Result<ZSet, Error> {
         let c = &self.circuit;
         c.validate_inputs(&input.deltas)?;
         let next_tick = self.ticks.checked_add(1).ok_or(Error::Overflow)?;

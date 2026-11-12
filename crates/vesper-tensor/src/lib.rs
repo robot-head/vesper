@@ -5,6 +5,7 @@
 #![forbid(unsafe_code)]
 
 pub mod host;
+pub mod kv;
 pub mod shape;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

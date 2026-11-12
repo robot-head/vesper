@@ -60,3 +60,10 @@ The self-checking example parses actual header bytes, completes an error child,
 recovers a parent from queue backpressure, attributes explicit cancellation,
 drains owned columns, and records a
 trace-linked latency exemplar. There are no performance claims or benchmarks.
+
+An optional allocating sibling, `vesper-beacon-arrow`, exports these records as
+standard Apache Arrow IPC with a versioned custom span schema. The core adds
+only a nonmutating `records()` iterator and transactional `try_consume_prefix`
+callback. The callback borrows the current ring, preventing mutation between
+prefix selection and successful removal; errors leave the FIFO intact. Arrow
+dependencies, schema/serialization and logical export budgets stay in the adapter.

@@ -7,12 +7,14 @@ on:
     paths:
       - 'crates/vesper-serde/**'
       - 'crates/vesper-beacon/**'
+      - 'crates/vesper-beacon-arrow/**'
       - 'crates/vesper-quarry/**'
       - 'crates/vesper-tensor/**'
       - 'crates/vesper-flux/**'
       - 'crates/vesper-aether/**'
       - 'lean/FluxDbsp.lean'
       - 'lean/AetherMemory.lean'
+      - 'lean/MetatheoryAppendix.lean'
       - 'scripts/test-expansion-foundations.sh'
       - 'scripts/check-specification-snapshot.py'
       - 'scripts/tests/test_specification_snapshot.py'
@@ -24,12 +26,14 @@ on:
     paths:
       - 'crates/vesper-serde/**'
       - 'crates/vesper-beacon/**'
+      - 'crates/vesper-beacon-arrow/**'
       - 'crates/vesper-quarry/**'
       - 'crates/vesper-tensor/**'
       - 'crates/vesper-flux/**'
       - 'crates/vesper-aether/**'
       - 'lean/FluxDbsp.lean'
       - 'lean/AetherMemory.lean'
+      - 'lean/MetatheoryAppendix.lean'
       - 'scripts/test-expansion-foundations.sh'
       - 'scripts/check-specification-snapshot.py'
       - 'scripts/tests/test_specification_snapshot.py'
@@ -81,12 +85,12 @@ jobs:
       - name: Check host-library contracts
         run: >-
           cargo test --locked
-          -p vesper-serde -p vesper-beacon -p vesper-quarry
+          -p vesper-serde -p vesper-beacon -p vesper-beacon-arrow -p vesper-quarry
           -p vesper-tensor -p vesper-flux -p vesper-aether
       - name: Check strict host-library Clippy
         run: >-
           cargo clippy --locked --all-targets
-          -p vesper-serde -p vesper-beacon -p vesper-quarry
+          -p vesper-serde -p vesper-beacon -p vesper-beacon-arrow -p vesper-quarry
           -p vesper-tensor -p vesper-flux -p vesper-aether
           -- -D warnings
       - name: Execute host acceptance examples
@@ -107,3 +111,5 @@ jobs:
         run: lean lean/FluxDbsp.lean
       - name: Check interval/page model and axiom reports
         run: lean lean/AetherMemory.lean
+      - name: Check scoped Appendix A model and axiom reports
+        run: lean lean/MetatheoryAppendix.lean
