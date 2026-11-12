@@ -173,7 +173,7 @@ fn over_budget_and_contract_violations_are_typed_errors() {
     ));
     let cap = b.ring().payload_capacity();
     assert!(matches!(
-        b.apply(&la, cap + 1, 1, 0),
+        b.apply(&la, (cap / RECORD_BYTES + 1) * RECORD_BYTES, 1, 0),
         Err(FilterError::Ring(
             vesper_nexus::ring::RingError::PayloadTooLarge { .. }
         ))
@@ -243,4 +243,44 @@ fn host_steady_state_allocates_nothing() {
     );
     let (ma, mb) = (b.metrics(A).unwrap(), b.metrics(B).unwrap());
     assert_eq!(ma.udf_invocations + mb.udf_invocations, 10_064);
+}
+
+#[test]
+fn partial_records_are_rejected_before_the_guest_runs() {
+    let mut b = broker();
+    let l = b.lease(A).unwrap();
+    // A rejected record followed by one that would pass the filter: with
+    // len = 17 the second record lies outside the published input.
+    let n = fill(b.payload_mut(&l).unwrap(), &[(1, 5), (2, 500)]);
+    assert_eq!(n, 32);
+    assert_eq!(
+        b.apply(&l, 17, 1, 0),
+        Err(FilterError::UnalignedInput { len: 17 })
+    );
+    assert_eq!(b.metrics(A).unwrap().udf_invocations, 0);
+    assert_eq!(
+        decode(b.payload(&l, 32).unwrap()),
+        vec![(1, 5), (2, 500)],
+        "untouched"
+    );
+    b.release(l).unwrap();
+}
+
+#[test]
+fn looping_start_function_is_bounded_by_the_call_budget() {
+    let mut b = StreamFilterBroker::new(2, 4096).unwrap();
+    let looping = br#"(module (import "nexus" "ring" (memory 1))
+        (func $s (loop $l (br $l))) (start $s)
+        (func (export "filter") (param i32) (result i32) (i32.const 0)))"#;
+    assert_eq!(
+        b.add_tenant(A, looping, 10_000),
+        Err(FilterError::InitOutOfFuel)
+    );
+    // The broker still serves other tenants.
+    b.add_tenant(B, FILTER_EVEN_DOUBLE_WAT.as_bytes(), 1_000_000)
+        .unwrap();
+    let l = b.lease(B).unwrap();
+    let n = fill(b.payload_mut(&l).unwrap(), &[(2, 3)]);
+    assert_eq!(b.apply(&l, n, 1, 0), Ok(16));
+    b.release(l).unwrap();
 }

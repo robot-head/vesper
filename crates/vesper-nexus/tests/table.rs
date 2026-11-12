@@ -247,6 +247,11 @@ fn owners_from_another_table_are_refused() {
     assert_eq!(a.handle(), b.handle());
     let (a, e) = t2.drop_own(a).unwrap_err();
     assert_eq!(e, WitTableError::ForeignOwner);
+    // A lend from t1 cannot read t2's payload at the same (idx, generation).
+    let lend = t1.begin_borrow(1, a.handle()).unwrap();
+    assert_eq!(t2.get(&lend), Err(WitTableError::ForeignOwner));
+    assert_eq!(t1.get(&lend), Ok(&10));
+    t1.end_borrow(lend).unwrap();
     assert_eq!(t1.drop_own(a).unwrap(), 10);
     assert_eq!(t2.drop_own(b).unwrap(), 20);
 }

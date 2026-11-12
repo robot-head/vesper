@@ -306,12 +306,13 @@ pub struct TenantUdfMetrics {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FilterError {
     InitFailed(String),
-    UnknownTenant(TenantId),
-    /// The lease belongs to a different tenant than the filter being run.
-    LeaseTenantMismatch {
-        lease: TenantId,
-        filter: TenantId,
+    /// The module's start function exhausted the per-call budget.
+    InitOutOfFuel,
+    /// The input length is not a whole number of records.
+    UnalignedInput {
+        len: u32,
     },
+    UnknownTenant(TenantId),
     Ring(RingError),
     OutOfFuel,
     GuestTrapped(String),
@@ -376,9 +377,14 @@ impl StreamFilterBroker {
     ) -> Result<(), FilterError> {
         let init = |e: wasmtime::Error| FilterError::InitFailed(format!("{e:?}"));
         let module = Module::new(self.store.engine(), module_text_or_binary).map_err(init)?;
-        self.store.set_fuel(u64::MAX).map_err(init)?;
-        let instance =
-            Instance::new(&mut self.store, &module, &[self.ring.memory().into()]).map_err(init)?;
+        // A start function runs during instantiation: bound it by the same
+        // per-call budget so a looping start cannot hang the broker.
+        self.store.set_fuel(fuel_per_call).map_err(init)?;
+        let instance = Instance::new(&mut self.store, &module, &[self.ring.memory().into()])
+            .map_err(|e| match e.downcast_ref::<Trap>() {
+                Some(Trap::OutOfFuel) => FilterError::InitOutOfFuel,
+                _ => init(e),
+            })?;
         let filter = instance
             .get_typed_func::<i32, i32>(&mut self.store, "filter")
             .map_err(init)?;
@@ -439,6 +445,9 @@ impl StreamFilterBroker {
             .iter()
             .position(|t| t.tenant == lease.tenant)
             .ok_or(FilterError::UnknownTenant(lease.tenant))?;
+        if !len.is_multiple_of(RECORD_BYTES) {
+            return Err(FilterError::UnalignedInput { len });
+        }
         let grant_offset = self.ring.grant_offset(lease);
         self.ring.publish(
             &mut self.store,

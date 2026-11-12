@@ -26,7 +26,9 @@ fn run_once(config: NexusConfig, jobs: &[(u64, u32, u64, u64)]) -> Run {
         })
         .collect();
     let mut rr = RoundRobin::with_capacity(jobs.len());
-    let (outcomes, trace) = e.run_scheduled(calls, &mut rr).unwrap();
+    let run = e.run_scheduled(calls, &mut rr).unwrap();
+    assert_eq!(run.scheduler_violations, 0);
+    let (outcomes, trace) = (run.outcomes, run.trace);
     let mut results = Vec::new();
     let mut usage = Vec::new();
     for o in outcomes {
@@ -185,7 +187,9 @@ fn custom_scheduler_drives_the_order() {
         })
         .collect();
     let mut p = Priority { queue: Vec::new() };
-    let (outcomes, trace) = e.run_scheduled(calls, &mut p).unwrap();
+    let run = e.run_scheduled(calls, &mut p).unwrap();
+    assert_eq!(run.scheduler_violations, 0);
+    let (outcomes, trace) = (run.outcomes, run.trace);
     let first_one = trace
         .iter()
         .position(|ev| {
@@ -207,4 +211,77 @@ fn custom_scheduler_drives_the_order() {
         assert_eq!(o.result, Ok(6_000));
         e.destroy_instance(o.instance);
     }
+}
+
+#[test]
+fn invalid_calls_hand_every_instance_back() {
+    let mut e = NexusEngine::new(NexusConfig::default()).unwrap();
+    let c = e.compile(BLOB_PLUGIN.as_bytes()).unwrap();
+    let mut a = e.instantiate_with_fuel(&c, 1, 10_000_000).unwrap();
+    // Leave a resource in tenant 1 so a lost instance would strand it.
+    e.call_run(&mut a, scenario::LEAK_RAW, 5).unwrap();
+    let b = e.instantiate_with_fuel(&c, 2, 10_000_000).unwrap();
+    let calls = vec![
+        ScheduledCall {
+            instance: a,
+            scenario: scenario::SPIN,
+            arg: 10,
+            quantum: QUANTUM,
+        },
+        ScheduledCall {
+            instance: b,
+            scenario: scenario::SPIN,
+            arg: 10,
+            quantum: 0,
+        },
+    ];
+    let err = e
+        .run_scheduled(calls, &mut RoundRobin::with_capacity(2))
+        .unwrap_err();
+    assert_eq!(err.error, PluginError::Config("zero quantum".into()));
+    assert_eq!(err.instances.len(), 2);
+    let reclaimed: usize = err
+        .instances
+        .into_iter()
+        .map(|i| e.destroy_instance(i).reclaimed_resources)
+        .sum();
+    assert_eq!(reclaimed, 1);
+    assert_eq!(e.leaked_instances(), 0);
+}
+
+/// Names job 0 forever, even after it finished, then goes idle early.
+struct Broken {
+    calls: u32,
+}
+impl QuantumScheduler for Broken {
+    type Token = ();
+    fn admit(&mut self, _job: usize, _tenant: u64) {}
+    fn next_job(&mut self) -> Option<((), usize)> {
+        self.calls += 1;
+        (self.calls < 50).then_some(((), 0))
+    }
+    fn preempted(&mut self, _token: ()) {}
+    fn finished(&mut self, _token: ()) {}
+}
+
+#[test]
+fn misbehaving_scheduler_cannot_strand_instances() {
+    let mut e = NexusEngine::new(NexusConfig::default()).unwrap();
+    let c = e.compile(BLOB_PLUGIN.as_bytes()).unwrap();
+    let calls = [(1, 3_000), (2, 30_000)]
+        .into_iter()
+        .map(|(t, n)| ScheduledCall {
+            instance: e.instantiate_with_fuel(&c, t, 10_000_000).unwrap(),
+            scenario: scenario::SPIN,
+            arg: n,
+            quantum: QUANTUM,
+        })
+        .collect();
+    let run = e.run_scheduled(calls, &mut Broken { calls: 0 }).unwrap();
+    assert!(run.scheduler_violations > 0);
+    for (o, want) in run.outcomes.into_iter().zip([3_000, 30_000]) {
+        assert_eq!(o.result, Ok(want));
+        e.destroy_instance(o.instance);
+    }
+    assert_eq!(e.leaked_instances(), 0);
 }

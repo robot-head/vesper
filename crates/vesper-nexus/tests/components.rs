@@ -212,3 +212,70 @@ fn out_of_fuel_traps_and_teardown_still_reclaims() {
     let report = e.destroy_instance(inst);
     assert_eq!(report.fuel_consumed, 5_000);
 }
+
+#[test]
+fn one_live_instance_per_tenant() {
+    let (mut e, c) = engine();
+    let a = e.instantiate_with_fuel(&c, A, FUEL).unwrap();
+    assert!(matches!(
+        e.instantiate_with_fuel(&c, A, FUEL),
+        Err(PluginError::TenantBusy(A))
+    ));
+    e.destroy_instance(a);
+    let a = e.instantiate_with_fuel(&c, A, FUEL).unwrap();
+    e.destroy_instance(a);
+}
+
+/// Mints a blob in its start-up path, then traps.
+const CTOR_THEN_TRAP: &str = r#"
+(component
+  (import "vesper:nexus/host@0.1.0" (instance $host
+    (export "blob" (type $blob (sub resource)))
+    (export "[constructor]blob" (func (param "tag" u32) (result (own $blob))))
+  ))
+  (core func $ctor (canon lower (func $host "[constructor]blob")))
+  (core module $m
+    (import "h" "ctor" (func $ctor (param i32) (result i32)))
+    (func $start (drop (call $ctor (i32.const 1))) unreachable)
+    (start $start))
+  (core instance $hi (export "ctor" (func $ctor)))
+  (core instance $i (instantiate $m (with "h" (instance $hi))))
+)
+"#;
+
+/// Mints a blob during start-up but has no `run` export.
+const CTOR_NO_RUN: &str = r#"
+(component
+  (import "vesper:nexus/host@0.1.0" (instance $host
+    (export "blob" (type $blob (sub resource)))
+    (export "[constructor]blob" (func (param "tag" u32) (result (own $blob))))
+  ))
+  (core func $ctor (canon lower (func $host "[constructor]blob")))
+  (core module $m
+    (import "h" "ctor" (func $ctor (param i32) (result i32)))
+    (func $start (drop (call $ctor (i32.const 1))))
+    (start $start))
+  (core instance $hi (export "ctor" (func $ctor)))
+  (core instance $i (instantiate $m (with "h" (instance $hi))))
+)
+"#;
+
+#[test]
+fn failed_instantiation_rolls_back_its_resources() {
+    let (mut e, _) = engine();
+    for text in [CTOR_THEN_TRAP, CTOR_NO_RUN] {
+        let c = e.compile(text.as_bytes()).expect("component compiles");
+        for _ in 0..3 {
+            assert!(matches!(
+                e.instantiate_with_fuel(&c, A, FUEL),
+                Err(PluginError::Instantiate(_))
+            ));
+            assert_eq!(e.shared().table.live_count(), 0);
+        }
+    }
+    // The tenant is free again after the failures.
+    let c = e.compile(BLOB_PLUGIN.as_bytes()).unwrap();
+    let a = e.instantiate_with_fuel(&c, A, FUEL).unwrap();
+    e.destroy_instance(a);
+    assert_eq!(e.shared().table.leaked_obligations(), 0);
+}

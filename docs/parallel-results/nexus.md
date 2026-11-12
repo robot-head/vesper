@@ -41,6 +41,23 @@ present any integer.
 * A trapped component instance is poisoned (Wasmtime refuses re-entry);
   `call_run` reports `PluginError::Poisoned`.
 
+## Review fixes (Codex review of 15a3900)
+
+* Filter modules instantiate under their per-call fuel budget, so a looping
+  start function fails with `FilterError::InitOutOfFuel` instead of hanging
+  the broker.
+* `WitResourceTable::get` rejects a borrow from another table (`ForeignOwner`).
+* `run_scheduled` validates every call before starting and hands all
+  instances back in `ScheduleError`; a scheduler that names unknown/finished
+  jobs or idles early is counted in `scheduler_violations` and the remaining
+  jobs are drained round robin, so no instance is stranded.
+* One live instance per tenant (`PluginError::TenantBusy`), because teardown
+  reclaims by tenant.
+* A failed instantiation (start-up trap, missing `run`) rolls back resources
+  and lends its start-up created.
+* `apply` rejects input lengths that are not whole records
+  (`FilterError::UnalignedInput`) before publishing the grant.
+
 ## Lean: what is proved, about the model only
 
 `lookup_ok_sound` (non-forgery: any `(idx, gen)` pair resolves for tenant `t`

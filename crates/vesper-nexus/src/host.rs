@@ -75,6 +75,9 @@ pub struct HostShared {
     pub table: WitResourceTable<Blob>,
     lends: WitResourceTable<WitBorrow>,
     pub rejections: Vec<BoundaryRejection>,
+    /// Tenants with a live (or leaked) instance. Teardown reclaims by
+    /// tenant, so at most one instance per tenant may exist.
+    live_tenants: Vec<TenantId>,
 }
 
 impl HostShared {
@@ -83,11 +86,26 @@ impl HostShared {
             table: WitResourceTable::with_capacity(capacity),
             lends: WitResourceTable::with_capacity(capacity),
             rejections: Vec::new(),
+            live_tenants: Vec::new(),
         }
     }
     /// Outstanding long lends for `tenant`.
     pub fn open_lends(&self, tenant: TenantId) -> usize {
         self.lends.live_count_for(tenant)
+    }
+    /// Release every lend, then every resource, `tenant` holds.
+    fn reclaim(&mut self, tenant: TenantId) -> (usize, usize) {
+        let HostShared { table, lends, .. } = self;
+        let reclaimed_lends = lends.reclaim_tenant(tenant, |lend| {
+            // Lends are only ever taken on the tenant's own resources, which
+            // are reclaimed next, so ending them cannot fail; if it somehow
+            // did, the resource reclaim below still releases the slot.
+            let _ = table
+                .end_borrow(lend)
+                .map_err(|(lend, _)| table.forget_reclaimed_borrow(lend));
+        });
+        let reclaimed_resources = table.reclaim_tenant(tenant, |_| {});
+        (reclaimed_resources, reclaimed_lends)
     }
     fn reject(&mut self, tenant: TenantId, operation: &'static str, error: WitTableError) {
         self.rejections.push(BoundaryRejection {
@@ -143,6 +161,8 @@ pub enum PluginError {
     GuestTrap(String),
     /// The instance trapped earlier and cannot be re-entered.
     Poisoned,
+    /// The tenant already has a live instance (teardown reclaims by tenant).
+    TenantBusy(TenantId),
     /// Fuel or epoch configuration was rejected.
     Config(String),
 }
@@ -430,6 +450,30 @@ impl NexusEngine {
         tenant: TenantId,
         fuel_budget: u64,
     ) -> Result<PluginInstance, PluginError> {
+        {
+            let mut sh = self.shared();
+            if sh.live_tenants.contains(&tenant) {
+                return Err(PluginError::TenantBusy(tenant));
+            }
+            sh.live_tenants.push(tenant);
+        }
+        let r = self.instantiate_inner(compiled, tenant, fuel_budget);
+        if r.is_err() {
+            // Roll back whatever the failed start-up created: resources and
+            // lends minted by guest initialization, and the tenant slot.
+            let mut sh = self.shared();
+            sh.reclaim(tenant);
+            sh.live_tenants.retain(|t| *t != tenant);
+        }
+        r
+    }
+
+    fn instantiate_inner(
+        &mut self,
+        compiled: &CompiledComponent,
+        tenant: TenantId,
+        fuel_budget: u64,
+    ) -> Result<PluginInstance, PluginError> {
         let mut store = Store::new(
             &self.engine,
             TenantState {
@@ -495,16 +539,8 @@ impl NexusEngine {
         let instance_id = inst.instance_id;
         drop(inst);
         let mut sh = self.shared();
-        let HostShared { table, lends, .. } = &mut *sh;
-        let reclaimed_lends = lends.reclaim_tenant(tenant, |lend| {
-            // Lends are only ever taken on the tenant's own resources, which
-            // are reclaimed next, so ending them cannot fail; if it somehow
-            // did, the resource reclaim below still releases the slot.
-            let _ = table
-                .end_borrow(lend)
-                .map_err(|(lend, _)| table.forget_reclaimed_borrow(lend));
-        });
-        let reclaimed_resources = table.reclaim_tenant(tenant, |_| {});
+        let (reclaimed_resources, reclaimed_lends) = sh.reclaim(tenant);
+        sh.live_tenants.retain(|t| *t != tenant);
         DestroyReport {
             instance_id,
             tenant,
@@ -523,8 +559,35 @@ impl NexusEngine {
         &self,
         calls: Vec<ScheduledCall>,
         scheduler: &mut S,
-    ) -> Result<(Vec<ScheduledOutcome>, Vec<SliceEvent>), PluginError> {
+    ) -> Result<ScheduledRun, ScheduleError> {
         type Job = Pin<Box<dyn Future<Output = (PluginInstance, wasmtime::Result<(i64,)>)>>>;
+        // Validate everything before any job starts, so a bad parameter hands
+        // every instance back instead of stranding it.
+        let invalid = calls.iter().find_map(|c| {
+            if c.quantum == 0 {
+                Some(PluginError::Config("zero quantum".into()))
+            } else if c.instance.poisoned {
+                Some(PluginError::Poisoned)
+            } else {
+                None
+            }
+        });
+        let mut calls = calls;
+        let mut config_error = invalid;
+        if config_error.is_none() {
+            for c in &mut calls {
+                if let Err(e) = c.instance.store.fuel_async_yield_interval(Some(c.quantum)) {
+                    config_error = Some(PluginError::Config(format!("{e:?}")));
+                    break;
+                }
+            }
+        }
+        if let Some(error) = config_error {
+            return Err(ScheduleError {
+                error,
+                instances: calls.into_iter().map(|c| c.instance).collect(),
+            });
+        }
         let n = calls.len();
         let mut jobs: Vec<Option<Job>> = Vec::with_capacity(n);
         let mut slices = vec![0u32; n];
@@ -535,18 +598,8 @@ impl NexusEngine {
                 mut instance,
                 scenario,
                 arg,
-                quantum,
+                ..
             } = call;
-            if quantum == 0 {
-                return Err(PluginError::Config("zero quantum".into()));
-            }
-            if instance.poisoned {
-                return Err(PluginError::Poisoned);
-            }
-            instance
-                .store
-                .fuel_async_yield_interval(Some(quantum))
-                .map_err(|e| PluginError::Config(format!("{e:?}")))?;
             tenants.push(instance.tenant);
             scheduler.admit(i, instance.tenant);
             let run = instance.run;
@@ -556,11 +609,36 @@ impl NexusEngine {
             })));
         }
         let mut trace = Vec::new();
+        let mut scheduler_violations = 0u32;
         let mut cx = Context::from_waker(Waker::noop());
-        while let Some((token, job)) = scheduler.next_job() {
-            let fut = jobs.get_mut(job).and_then(Option::as_mut).ok_or_else(|| {
-                PluginError::Config(format!("scheduler returned unknown job {job}"))
-            })?;
+        let mut fallback = 0usize;
+        loop {
+            // A scheduler that names an unknown or finished job, or goes idle
+            // with runnable jobs, must not strand instances inside their
+            // futures: count the violation and drain the rest round robin.
+            let (token, job) = match scheduler.next_job() {
+                Some((token, job)) if jobs.get(job).is_some_and(Option::is_some) => {
+                    (Some(token), job)
+                }
+                other => {
+                    if !jobs.iter().any(Option::is_some) && other.is_none() {
+                        break;
+                    }
+                    scheduler_violations += 1;
+                    if let Some((token, _)) = other {
+                        scheduler.finished(token);
+                    }
+                    let Some(next) = (0..n)
+                        .map(|k| (fallback + k) % n)
+                        .find(|&j| jobs[j].is_some())
+                    else {
+                        break;
+                    };
+                    fallback = next + 1;
+                    (None, next)
+                }
+            };
+            let fut = jobs[job].as_mut().expect("job checked runnable");
             slices[job] += 1;
             let slice = slices[job];
             let tenant = tenants[job];
@@ -571,7 +649,9 @@ impl NexusEngine {
             match polled {
                 Poll::Pending => {
                     trace.push(SliceEvent::Preempted { tenant, slice });
-                    scheduler.preempted(token);
+                    if let Some(token) = token {
+                        scheduler.preempted(token);
+                    }
                 }
                 Poll::Ready((mut instance, r)) => {
                     jobs[job] = None;
@@ -581,7 +661,9 @@ impl NexusEngine {
                     } else {
                         SliceEvent::Trapped { tenant, slice }
                     });
-                    scheduler.finished(token);
+                    if let Some(token) = token {
+                        scheduler.finished(token);
+                    }
                     done[job] = Some(ScheduledOutcome {
                         usage: TenantUsage {
                             tenant,
@@ -594,17 +676,14 @@ impl NexusEngine {
                 }
             }
         }
-        if jobs.iter().any(Option::is_some) {
-            return Err(PluginError::Config(
-                "scheduler went idle with runnable jobs".into(),
-            ));
-        }
-        Ok((
-            done.into_iter()
+        Ok(ScheduledRun {
+            outcomes: done
+                .into_iter()
                 .map(|o| o.expect("every job finished"))
                 .collect(),
             trace,
-        ))
+            scheduler_violations,
+        })
     }
 }
 
@@ -624,6 +703,40 @@ pub struct ScheduledCall {
     pub scenario: u32,
     pub arg: u64,
     pub quantum: u64,
+}
+
+/// Result of [`NexusEngine::run_scheduled`].
+pub struct ScheduledRun {
+    /// One outcome per call, in input order.
+    pub outcomes: Vec<ScheduledOutcome>,
+    pub trace: Vec<SliceEvent>,
+    /// Times the scheduler named an unknown or finished job or went idle with
+    /// runnable jobs; those slices were run round robin instead.
+    pub scheduler_violations: u32,
+}
+
+impl fmt::Debug for ScheduledRun {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScheduledRun")
+            .field("outcomes", &self.outcomes.len())
+            .field("trace", &self.trace)
+            .field("scheduler_violations", &self.scheduler_violations)
+            .finish()
+    }
+}
+
+/// `run_scheduled` refused to start; every instance is handed back.
+pub struct ScheduleError {
+    pub error: PluginError,
+    pub instances: Vec<PluginInstance>,
+}
+impl fmt::Debug for ScheduleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ScheduleError")
+            .field("error", &self.error)
+            .field("instances", &self.instances.len())
+            .finish()
+    }
 }
 
 pub struct ScheduledOutcome {

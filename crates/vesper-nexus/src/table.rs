@@ -371,6 +371,9 @@ impl<T> WitResourceTable<T> {
 
     /// Read through a live lend.
     pub fn get(&self, borrow: &WitBorrow) -> Result<&T, WitTableError> {
+        if !self.auditor.same(&borrow.obligation.auditor) {
+            return Err(WitTableError::ForeignOwner);
+        }
         self.lookup(borrow.tenant, borrow.handle)
     }
 

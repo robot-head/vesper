@@ -27,6 +27,6 @@ pub mod wasmfx;
 pub use fuel::{FuelAccountant, FuelError, QuantumScheduler, RoundRobin, SliceEvent, TenantUsage};
 pub use host::{
     Blob, CompiledComponent, DestroyReport, HOST_INTERFACE, NexusConfig, NexusEngine, PLUGIN_WIT,
-    PluginError, PluginInstance, ScheduledCall, ScheduledOutcome,
+    PluginError, PluginInstance, ScheduleError, ScheduledCall, ScheduledOutcome, ScheduledRun,
 };
 pub use table::{TenantId, WitBorrow, WitHandle, WitOwn, WitResourceTable, WitTableError};
