@@ -1,0 +1,8 @@
+[package]
+name = "vesper-warp-wheel"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Warp hierarchical hashed timing wheel, PTO lease table and EDT launch queue (design section 35)"
+publish = false
+
+[dependencies]
