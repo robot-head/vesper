@@ -1,0 +1,388 @@
+//! Linear DMA transfers, the 16-byte scatter-gather descriptor and the
+//! per-architecture cache-maintenance sequence (§26.1 item 5, §26.2).
+//!
+//! [`DmaEngine::submit_rx`]/[`DmaEngine::submit_tx`] take the buffer by value
+//! and return a linear [`DmaTransfer`]; the CPU cannot touch the buffer
+//! until [`DmaEngine::poll_complete`] hands it back after the (modelled)
+//! device signalled completion. Failed submissions return the buffer. The
+//! engine is a software model: it records the descriptor bytes it would
+//! write and the barrier instructions it would execute, which
+//! [`dma_barriers`] computes per architecture:
+//!
+//! * AArch64 (non-coherent): `DC CVAC` per cache line + `DSB SY` before the
+//!   device reads or writes the buffer; after a device write, `DC IVAC` per
+//!   line + `DSB SY` before the CPU reads it.
+//! * RISC-V: `FENCE IORW, IORW` at both points. Cache-block management
+//!   (Zicbom) is not modelled; this is the ordering the design names.
+//! * x86_64: none; DMA is cache-coherent.
+
+use crate::Arch;
+use crate::frames::{PAGE_BYTES, PhysFrame4K};
+use crate::ledger::{Ledger, OwnerKind, Token};
+
+/// A buffer a bus master may own: physical start and length in bytes.
+pub trait DmaBuffer {
+    fn dma_region(&self) -> (u64, u32);
+}
+
+impl DmaBuffer for PhysFrame4K {
+    fn dma_region(&self) -> (u64, u32) {
+        (self.phys_addr(), PAGE_BYTES as u32)
+    }
+}
+
+/// A statically reserved SRAM buffer at a fixed physical address.
+#[derive(Debug)]
+pub struct StaticDmaBuf<const N: usize> {
+    phys: u64,
+    pub data: [u8; N],
+}
+
+impl<const N: usize> StaticDmaBuf<N> {
+    pub fn new(phys: u64) -> Self {
+        Self { phys, data: [0; N] }
+    }
+
+    /// The first `n` received bytes (clamped to the buffer).
+    pub fn prefix(&self, n: u32) -> &[u8] {
+        &self.data[..(n as usize).min(N)]
+    }
+}
+
+impl<const N: usize> DmaBuffer for StaticDmaBuf<N> {
+    fn dma_region(&self) -> (u64, u32) {
+        (self.phys, u32::try_from(N).unwrap_or(u32::MAX))
+    }
+}
+
+/// §26.2 `SgDmaDescWire`: exactly 16 little-endian bytes, no padding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SgDmaDescWire {
+    pub phys_addr: u64,
+    pub byte_len: u32,
+    pub flags: u16,
+    pub next_idx: u16,
+}
+
+impl SgDmaDescWire {
+    pub const SIZE: usize = 16;
+    pub const FLAG_DEVICE_WRITES: u16 = 1 << 1;
+    pub const FLAG_NEXT: u16 = 1 << 0;
+
+    pub fn to_bytes(&self) -> [u8; 16] {
+        let mut b = [0u8; 16];
+        b[0..8].copy_from_slice(&self.phys_addr.to_le_bytes());
+        b[8..12].copy_from_slice(&self.byte_len.to_le_bytes());
+        b[12..14].copy_from_slice(&self.flags.to_le_bytes());
+        b[14..16].copy_from_slice(&self.next_idx.to_le_bytes());
+        b
+    }
+
+    /// Parses exactly 16 bytes; any other length is an error.
+    pub fn from_bytes(b: &[u8]) -> Result<Self, DmaError> {
+        let b: &[u8; 16] = b
+            .try_into()
+            .map_err(|_| DmaError::BadDescriptorLength(b.len()))?;
+        Ok(Self {
+            phys_addr: u64::from_le_bytes(b[0..8].try_into().expect("8")),
+            byte_len: u32::from_le_bytes(b[8..12].try_into().expect("4")),
+            flags: u16::from_le_bytes(b[12..14].try_into().expect("2")),
+            next_idx: u16::from_le_bytes(b[14..16].try_into().expect("2")),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DmaError {
+    NoSuchChannel(u8),
+    ChannelBusy(u8),
+    EmptyBuffer,
+    RegionOverflow,
+    BadLineSize(u32),
+    BadDescriptorLength(usize),
+    /// Device reported more bytes than the buffer holds.
+    DeviceOverrun {
+        reported: u32,
+        capacity: u32,
+    },
+    DeviceFault(u8),
+    NotInFlight(u8),
+}
+
+/// One barrier / cache-maintenance instruction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BarrierInst {
+    /// AArch64 `DC CVAC, Xt` (clean to point of coherency) for one line.
+    DcCvac(u64),
+    /// AArch64 `DC IVAC, Xt` (invalidate to point of coherency) for one line.
+    DcIvac(u64),
+    /// AArch64 `DSB SY`.
+    DsbSy,
+    /// RISC-V `FENCE IORW, IORW`.
+    FenceIorwIorw,
+}
+
+impl std::fmt::Display for BarrierInst {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            BarrierInst::DcCvac(a) => write!(f, "dc cvac, {a:#x}"),
+            BarrierInst::DcIvac(a) => write!(f, "dc ivac, {a:#x}"),
+            BarrierInst::DsbSy => f.write_str("dsb sy"),
+            BarrierInst::FenceIorwIorw => f.write_str("fence iorw, iorw"),
+        }
+    }
+}
+
+/// When the barrier sequence runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmaPhase {
+    /// Before handing the buffer to the device (both directions).
+    BeforeDevice,
+    /// After a device write completed, before the CPU reads.
+    AfterDeviceWrite,
+}
+
+/// The barrier sequence for `[phys, phys + len)` with `line`-byte cache lines.
+pub fn dma_barriers(
+    arch: Arch,
+    phase: DmaPhase,
+    phys: u64,
+    len: u32,
+    line: u32,
+) -> Result<Vec<BarrierInst>, DmaError> {
+    if line == 0 || !line.is_power_of_two() {
+        return Err(DmaError::BadLineSize(line));
+    }
+    if len == 0 {
+        return Err(DmaError::EmptyBuffer);
+    }
+    let end = phys
+        .checked_add(u64::from(len))
+        .ok_or(DmaError::RegionOverflow)?;
+    Ok(match arch {
+        Arch::X86_64 => Vec::new(),
+        Arch::Riscv64 => vec![BarrierInst::FenceIorwIorw],
+        Arch::Aarch64 => {
+            let line = u64::from(line);
+            let mut a = phys & !(line - 1);
+            let mut out = Vec::new();
+            while a < end {
+                out.push(match phase {
+                    DmaPhase::BeforeDevice => BarrierInst::DcCvac(a),
+                    DmaPhase::AfterDeviceWrite => BarrierInst::DcIvac(a),
+                });
+                a = a.checked_add(line).ok_or(DmaError::RegionOverflow)?;
+            }
+            out.push(BarrierInst::DsbSy);
+            out
+        }
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// Device writes memory (receive).
+    FromDevice,
+    /// Device reads memory (transmit).
+    ToDevice,
+}
+
+/// An in-flight bus-master transfer owning `B`.
+#[must_use = "a DmaTransfer must be completed with DmaEngine::poll_complete"]
+#[derive(Debug)]
+pub struct DmaTransfer<B> {
+    channel: u8,
+    desc_slot: u16,
+    owned_buf: B,
+    direction: Direction,
+    token: Token,
+}
+
+impl<B> DmaTransfer<B> {
+    pub fn channel(&self) -> u8 {
+        self.channel
+    }
+
+    pub fn desc_slot(&self) -> u16 {
+        self.desc_slot
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Channel {
+    Idle,
+    Busy {
+        slot: u16,
+        capacity: u32,
+    },
+    Done {
+        slot: u16,
+        result: Result<u32, DmaError>,
+    },
+}
+
+/// Model of a DMA engine with a descriptor ring.
+#[derive(Debug)]
+pub struct DmaEngine {
+    arch: Arch,
+    line: u32,
+    channels: Vec<Channel>,
+    ring: Vec<[u8; 16]>,
+    next_slot: u16,
+    barriers: Vec<BarrierInst>,
+    ledger: Ledger,
+}
+
+impl DmaEngine {
+    pub fn new(
+        arch: Arch,
+        channels: u8,
+        ring_slots: u16,
+        line: u32,
+        ledger: &Ledger,
+    ) -> Result<Self, DmaError> {
+        if line == 0 || !line.is_power_of_two() {
+            return Err(DmaError::BadLineSize(line));
+        }
+        Ok(Self {
+            arch,
+            line,
+            channels: vec![Channel::Idle; channels as usize],
+            ring: vec![[0; 16]; ring_slots.max(1) as usize],
+            next_slot: 0,
+            barriers: Vec::new(),
+            ledger: ledger.clone(),
+        })
+    }
+
+    /// Barrier instructions executed so far, in order.
+    pub fn barriers(&self) -> &[BarrierInst] {
+        &self.barriers
+    }
+
+    pub fn descriptor(&self, slot: u16) -> Option<SgDmaDescWire> {
+        self.ring
+            .get(slot as usize)
+            .and_then(|b| SgDmaDescWire::from_bytes(b).ok())
+    }
+
+    pub fn in_flight(&self) -> usize {
+        self.channels
+            .iter()
+            .filter(|c| !matches!(c, Channel::Idle))
+            .count()
+    }
+
+    pub fn submit_rx<B: DmaBuffer>(
+        &mut self,
+        channel: u8,
+        buf: B,
+    ) -> Result<DmaTransfer<B>, (B, DmaError)> {
+        self.submit(channel, buf, Direction::FromDevice)
+    }
+
+    pub fn submit_tx<B: DmaBuffer>(
+        &mut self,
+        channel: u8,
+        buf: B,
+    ) -> Result<DmaTransfer<B>, (B, DmaError)> {
+        self.submit(channel, buf, Direction::ToDevice)
+    }
+
+    fn submit<B: DmaBuffer>(
+        &mut self,
+        channel: u8,
+        buf: B,
+        direction: Direction,
+    ) -> Result<DmaTransfer<B>, (B, DmaError)> {
+        match self.channels.get(channel as usize) {
+            None => return Err((buf, DmaError::NoSuchChannel(channel))),
+            Some(Channel::Idle) => {}
+            Some(_) => return Err((buf, DmaError::ChannelBusy(channel))),
+        }
+        let (phys, len) = buf.dma_region();
+        let seq = match dma_barriers(self.arch, DmaPhase::BeforeDevice, phys, len, self.line) {
+            Ok(s) => s,
+            Err(e) => return Err((buf, e)),
+        };
+        let slot = self.next_slot;
+        self.next_slot = (self.next_slot + 1) % self.ring.len() as u16;
+        let flags = match direction {
+            Direction::FromDevice => SgDmaDescWire::FLAG_DEVICE_WRITES,
+            Direction::ToDevice => 0,
+        };
+        self.ring[slot as usize] = SgDmaDescWire {
+            phys_addr: phys,
+            byte_len: len,
+            flags,
+            next_idx: 0,
+        }
+        .to_bytes();
+        // The descriptor and buffer must be visible before the doorbell.
+        self.barriers.extend(seq);
+        self.channels[channel as usize] = Channel::Busy {
+            slot,
+            capacity: len,
+        };
+        Ok(DmaTransfer {
+            channel,
+            desc_slot: slot,
+            owned_buf: buf,
+            direction,
+            token: self.ledger.open(OwnerKind::DmaTransfer),
+        })
+    }
+
+    /// The modelled device finishes `channel` having moved `bytes`, or
+    /// faulting with `fault`.
+    pub fn device_complete(
+        &mut self,
+        channel: u8,
+        bytes: u32,
+        fault: Option<u8>,
+    ) -> Result<(), DmaError> {
+        let Some(Channel::Busy { slot, capacity }) = self.channels.get(channel as usize).cloned()
+        else {
+            return Err(DmaError::NotInFlight(channel));
+        };
+        let result = match fault {
+            Some(code) => Err(DmaError::DeviceFault(code)),
+            None if bytes > capacity => Err(DmaError::DeviceOverrun {
+                reported: bytes,
+                capacity,
+            }),
+            None => Ok(bytes),
+        };
+        self.channels[channel as usize] = Channel::Done { slot, result };
+        Ok(())
+    }
+
+    /// `DmaEngine::await_complete`: if the device finished, returns the
+    /// status and the buffer (after the post-DMA invalidation for receives);
+    /// otherwise gives the transfer back (a fiber would suspend here).
+    #[allow(clippy::type_complexity)]
+    pub fn poll_complete<B: DmaBuffer>(
+        &mut self,
+        xfer: DmaTransfer<B>,
+    ) -> Result<(Result<u32, DmaError>, B), DmaTransfer<B>> {
+        let result = match self.channels.get(xfer.channel as usize) {
+            Some(Channel::Done { slot, result }) if *slot == xfer.desc_slot => result.clone(),
+            _ => return Err(xfer),
+        };
+        if xfer.direction == Direction::FromDevice {
+            let (phys, len) = xfer.owned_buf.dma_region();
+            // Region was validated at submit; recomputing cannot fail.
+            if let Ok(seq) =
+                dma_barriers(self.arch, DmaPhase::AfterDeviceWrite, phys, len, self.line)
+            {
+                self.barriers.extend(seq);
+            }
+        }
+        self.channels[xfer.channel as usize] = Channel::Idle;
+        let DmaTransfer {
+            owned_buf, token, ..
+        } = xfer;
+        token.discharge();
+        Ok((result, owned_buf))
+    }
+}
