@@ -102,4 +102,7 @@ The Linux embedding API connects `Runtime::begin_external` and `io_session::Sess
 
 Parallel implementation ownership and ready-to-send external agent prompts are listed in [docs/parallel-work.md](docs/parallel-work.md).
 
+`vesper simd scan input.bin --delimiter 10 --json` runs the independent native
+Baseline128 delimiter/XOR scanner. See [SIMD support and limits](docs/simd-scanner.md).
+
 `vesper emit --emit interface --package @org/name` and `vesper semver` now compare experimental checked source contracts. `vesper resolve --catalog ...` resolves local Loom metadata into an exact solution snapshot. See [package workflows and runnable examples](docs/package-workflows.md).

@@ -10,6 +10,7 @@ members = [
     "crates/vesper-ffi",
     "crates/vesper-loom-calculus",
     "crates/vesper-simpulse",
+    "crates/vesper-simd",
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
     "crates/vesper-loom-trust",
@@ -30,6 +31,7 @@ default-members = [
     "crates/vesper-ffi",
     "crates/vesper-loom-calculus",
     "crates/vesper-simpulse",
+    "crates/vesper-simd",
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
     "crates/vesper-loom-trust",
@@ -60,6 +62,7 @@ edition = "2024"
 [dependencies]
 blake3 = "1.8"
 vesper-core = { path = "crates/vesper-core" }
+vesper-simd = { path = "crates/vesper-simd" }
 vesper-syntax = { path = "crates/vesper-syntax" }
 vesper-pulse = { path = "crates/vesper-pulse" }
 vesper-semver = { path = "crates/vesper-semver" }

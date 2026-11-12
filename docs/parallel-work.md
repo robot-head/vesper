@@ -33,6 +33,11 @@ Declared-permission upgrade checks in `crates/vesper-loom-calculus/src/upgrade.r
 
 CycloneDX export in `src/sbom_commands.rs`/`tests/sbom_cli.rs` and the independent native scanner milestone in new `crates/vesper-simd/**` are also coordinator-owned. The scanner does not edit source ISA capability typing or the reserved native compiler backend.
 
+The independent offline TUF verifier in new `crates/vesper-loom-tuf/**` and bounded
+HTTP/1.1 framing in new `crates/vesper-prism/**` are coordinator subagent lanes.
+Neither is a source compiler or runtime integration. Root registration remains
+with the coordinator after review and validation.
+
 ## First-wave results
 
 | Lane | Branch | Exclusive ownership | Status |

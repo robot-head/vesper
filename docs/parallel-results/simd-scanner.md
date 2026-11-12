@@ -89,3 +89,22 @@ egglog vectorization, float FMA equivalence, wire-layout integration, or Lean
 SIMD proofs. It makes no performance, zero-heap, scheduling portability, or
 compiler-correctness claim. These limits preserve the shared-contract audit's
 separation of runtime ISA evidence, ownership, and thread portability.
+
+## Coordinator integration
+
+Registered the crate in both root workspace lists and removed its standalone
+workspace/lockfile. The safe JIT capability now also rejects non-64-bit pointer
+ABIs, including x86_64-x32. Added `vesper simd scan`, bounded streaming reads,
+actual code metadata in JSON, and four CLI tests covering scalar comparisons,
+chunk boundaries, explicit unsupported profiles and error paths.
+
+`scripts/test-simd-aarch64.sh` now links the emitted object with a libc-free
+assembly harness and executes it under QEMU. All 9,600 independently computed
+scalar-reference cases passed: offsets 0–31, lengths 0–95 and four large sizes,
+with delimiter bytes 0, 7 and 255. This supersedes the handoff's emission-only
+AArch64 validation boundary; it does not establish hardware performance.
+
+Integrated validation: 762 workspace tests/doctests passed across 75 suites with
+the actual pinned Lean toolchain available; formatting and strict workspace
+Clippy passed. The root CLI and all its targets also passed Windows GNU cross
+compilation with the pure BLAKE3 feature; Windows runtime execution was not tested.

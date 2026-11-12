@@ -2760,6 +2760,7 @@ dependencies = [
  "vesper-loom-trust",
  "vesper-pulse",
  "vesper-semver",
+ "vesper-simd",
  "vesper-syntax",
 ]
 
@@ -2880,6 +2881,20 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "vesper-simd"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-object",
+ "libc",
+ "object 0.37.3",
+ "target-lexicon",
 ]
 
 [[package]]

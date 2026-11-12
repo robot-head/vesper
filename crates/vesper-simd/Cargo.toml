@@ -5,9 +5,6 @@ edition = "2024"
 description = "Checked Baseline128 JIT byte scanner and explicitly targeted SIMD objects"
 publish = false
 
-# Temporary handoff boundary: integration removes this when registering the crate.
-[workspace]
-
 [dependencies]
 cranelift-codegen = { version = "0.125", features = ["arm64", "x86"] }
 cranelift-frontend = "0.125"

@@ -38,7 +38,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UnsupportedProfile(p) => write!(f, "SIMD profile {p:?} is not implemented"),
-            Self::UnsupportedHost => f.write_str("SIMD JIT requires an x86_64 or AArch64 host"),
+            Self::UnsupportedHost => {
+                f.write_str("SIMD JIT requires an x86_64 or AArch64 host with 64-bit pointers")
+            }
             Self::MissingBaselineFeatures => f.write_str("host lacks the Baseline128 CPU features"),
             Self::Codegen(e) => write!(f, "SIMD code generation failed: {e}"),
         }
@@ -116,6 +118,11 @@ fn host_features() -> Features {
 pub fn profile_support(profile: IsaProfileKind) -> Result<(), Error> {
     if profile != IsaProfileKind::Baseline128 {
         return Err(Error::UnsupportedProfile(profile));
+    }
+    // x86_64-x32 and arm64_32 still report the corresponding target_arch,
+    // but this generated C ABI requires 64-bit pointer arguments.
+    if !cfg!(target_pointer_width = "64") {
+        return Err(Error::UnsupportedHost);
     }
     check_features(host_features())
 }
