@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::{collections::BTreeMap, fs};
 use tempfile::TempDir;
 use tough::sign::Sign;
-use vesper_loom_tuf::{Checkpoint, Limits, LocalRequest, verify_target};
+use vesper_loom_tuf::{Checkpoint, Limits, LocalRequest, verify_target, verify_target_attempt};
 
 const PAYLOAD: &[u8] = b"authenticated source archive fixture\n";
 
@@ -588,4 +588,270 @@ async fn numeric_role_names_cannot_disconnect_preflight_depth_or_cycle_edges() {
         let error = verify_target(request).await.unwrap_err().to_string();
         assert!(error.contains("delegation graph depth or cycle"), "{error}");
     }
+}
+
+fn corrupt_signature(fixture: &Fixture, filename: &str) {
+    let path = fixture.dir.path().join("metadata").join(filename);
+    let mut document: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    document["signatures"][0]["sig"] = json!("00".repeat(64));
+    fs::write(path, serde_json::to_vec(&document).unwrap()).unwrap();
+}
+
+fn version_two() -> Spec {
+    Spec {
+        versions: Versions {
+            timestamp: 2,
+            snapshot: 2,
+            targets: 2,
+            delegated: 2,
+        },
+        ..Spec::default()
+    }
+}
+
+#[tokio::test]
+async fn attempt_retains_root_advancement_when_timestamp_fails() {
+    let newer = Fixture::new(Spec {
+        rotated: true,
+        ..Spec::default()
+    })
+    .await;
+    corrupt_signature(&newer, "timestamp.json");
+    let attempt = verify_target_attempt(newer.request(None)).await;
+    assert!(attempt.result.is_err());
+    let checkpoint = attempt.checkpoint.expect("authenticated root progression");
+    assert_eq!(checkpoint.root_version().unwrap(), 2);
+    let wire: Value = serde_json::from_slice(&checkpoint.to_json().unwrap()).unwrap();
+    assert_eq!(wire["state"]["schema_version"], 2);
+    assert_eq!(wire["state"]["timestamp_version"], 0);
+    assert_eq!(wire["state"]["snapshot_version"], 0);
+    assert_eq!(wire["state"]["role_versions"], json!({}));
+    let checkpoint =
+        Checkpoint::from_json(&checkpoint.to_json().unwrap(), &Limits::default()).unwrap();
+    let old = Fixture::new(Spec::default()).await;
+    assert!(
+        verify_target_attempt(old.request(Some(checkpoint.clone())))
+            .await
+            .result
+            .is_err()
+    );
+    let valid = Fixture::new(Spec {
+        rotated: true,
+        ..Spec::default()
+    })
+    .await;
+    fs::remove_file(valid.dir.path().join("metadata/1.root.json")).unwrap();
+    fs::remove_file(valid.dir.path().join("metadata/2.root.json")).unwrap();
+    assert_eq!(
+        verify_target_attempt(valid.request(Some(checkpoint)))
+            .await
+            .result
+            .unwrap()
+            .bytes,
+        PAYLOAD
+    );
+}
+
+#[tokio::test]
+async fn attempt_retains_timestamp_and_snapshot_pin_when_snapshot_body_fails() {
+    let old = Fixture::new(Spec::default()).await;
+    let previous = verify_target(old.request(None)).await.unwrap().checkpoint;
+    let newer = Fixture::new(version_two()).await;
+    corrupt_signature(&newer, "snapshot.json");
+    let attempt = verify_target_attempt(newer.request(Some(previous))).await;
+    assert!(attempt.result.is_err());
+    let checkpoint = attempt.checkpoint.unwrap();
+    let wire: Value = serde_json::from_slice(&checkpoint.to_json().unwrap()).unwrap();
+    assert_eq!(wire["state"]["timestamp_version"], 2);
+    assert_eq!(wire["state"]["snapshot_version"], 2);
+    assert_eq!(wire["state"]["role_versions"]["packages.json"], 1);
+    assert!(
+        verify_target_attempt(old.request(Some(checkpoint.clone())))
+            .await
+            .result
+            .is_err()
+    );
+    let rollback_pin = Fixture::new(Spec {
+        versions: Versions {
+            timestamp: 3,
+            snapshot: 1,
+            targets: 3,
+            delegated: 3,
+        },
+        ..Spec::default()
+    })
+    .await;
+    let replay = verify_target_attempt(rollback_pin.request(Some(checkpoint.clone()))).await;
+    assert!(
+        replay
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("pinned snapshot rollback")
+    );
+    let valid = Fixture::new(version_two()).await;
+    verify_target_attempt(valid.request(Some(checkpoint)))
+        .await
+        .result
+        .unwrap();
+}
+
+#[tokio::test]
+async fn attempt_retains_snapshot_role_floors_when_delegation_or_target_fails() {
+    for fail_delegation in [true, false] {
+        let old = Fixture::new(Spec::default()).await;
+        let previous = verify_target(old.request(None)).await.unwrap().checkpoint;
+        let newer = Fixture::new(version_two()).await;
+        if fail_delegation {
+            corrupt_signature(&newer, "packages.json");
+        } else {
+            fs::write(
+                newer.dir.path().join("targets/pkg/artifact.bin"),
+                b"corrupt",
+            )
+            .unwrap();
+        }
+        let attempt = verify_target_attempt(newer.request(Some(previous))).await;
+        assert!(attempt.result.is_err());
+        let checkpoint = attempt.checkpoint.unwrap();
+        let wire: Value = serde_json::from_slice(&checkpoint.to_json().unwrap()).unwrap();
+        assert_eq!(wire["state"]["timestamp_version"], 2);
+        assert_eq!(wire["state"]["snapshot_version"], 2);
+        assert_eq!(wire["state"]["role_versions"]["packages.json"], 2);
+        assert!(
+            verify_target_attempt(old.request(Some(checkpoint.clone())))
+                .await
+                .result
+                .is_err()
+        );
+        let rollback = Fixture::new(Spec {
+            versions: Versions {
+                timestamp: 3,
+                snapshot: 3,
+                targets: 3,
+                delegated: 1,
+            },
+            ..Spec::default()
+        })
+        .await;
+        let replay = verify_target_attempt(rollback.request(Some(checkpoint))).await;
+        assert!(
+            replay
+                .result
+                .unwrap_err()
+                .to_string()
+                .contains("role rollback")
+        );
+    }
+}
+
+#[tokio::test]
+async fn attempt_does_not_promote_unauthenticated_metadata_or_unverified_state() {
+    let fixture = Fixture::new(Spec::default()).await;
+    corrupt_signature(&fixture, "timestamp.json");
+    let attempt = verify_target_attempt(fixture.request(None)).await;
+    assert!(attempt.result.is_err());
+    let checkpoint = attempt.checkpoint.unwrap();
+    let valid = Fixture::new(Spec::default()).await;
+    let update = verify_target_attempt(valid.request(Some(checkpoint)))
+        .await
+        .result
+        .unwrap();
+    assert_eq!(update.metadata.timestamp, 1);
+    let invalid = edited_checkpoint(
+        &update.checkpoint,
+        |value| value["state"]["repository_id"] = json!("different-registry"),
+        true,
+    );
+    let attempt = verify_target_attempt(valid.request(Some(invalid))).await;
+    assert!(attempt.result.is_err());
+    assert!(attempt.checkpoint.is_none());
+    let legacy = edited_checkpoint(
+        &update.checkpoint,
+        |value| value["state"]["schema_version"] = json!(1),
+        true,
+    );
+    verify_target_attempt(valid.request(Some(legacy)))
+        .await
+        .result
+        .unwrap();
+}
+
+#[tokio::test]
+async fn checkpoint_budget_is_reserved_before_remote_root_authentication() {
+    let bad = Fixture::new(Spec::default()).await;
+    corrupt_signature(&bad, "timestamp.json");
+    let baseline = verify_target_attempt(bad.request(None))
+        .await
+        .checkpoint
+        .unwrap();
+    let newer = Fixture::new(Spec {
+        rotated: true,
+        ..Spec::default()
+    })
+    .await;
+    let mut request = newer.request(Some(baseline.clone()));
+    request.limits.checkpoint_bytes = baseline.to_json().unwrap().len() + 64;
+    let attempt = verify_target_attempt(request).await;
+    assert!(
+        attempt
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("checkpoint exceeds limit")
+    );
+    assert_eq!(attempt.checkpoint.unwrap().root_version().unwrap(), 1);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn store_persists_failure_progress_across_reopen_then_allows_verified_success() {
+    use vesper_loom_tuf::state::CheckpointStore;
+    let state_root = tempfile::tempdir().unwrap();
+    let path = state_root.path().join("registry");
+    let limits = Limits::default();
+    let mut store = CheckpointStore::create(&path).unwrap();
+    let newer = Fixture::new(version_two()).await;
+    corrupt_signature(&newer, "packages.json");
+    let attempt =
+        verify_target_attempt(newer.request(store.load_checkpoint(&limits).unwrap())).await;
+    assert!(attempt.result.is_err());
+    store
+        .commit_checkpoint(&attempt.checkpoint.unwrap(), &limits)
+        .unwrap();
+    drop(store);
+    let mut store = CheckpointStore::open(&path).unwrap();
+    let old = Fixture::new(Spec::default()).await;
+    let attempt = verify_target_attempt(old.request(store.load_checkpoint(&limits).unwrap())).await;
+    assert!(attempt.result.is_err());
+    store
+        .commit_checkpoint(&attempt.checkpoint.unwrap(), &limits)
+        .unwrap();
+    drop(store);
+    let mut store = CheckpointStore::open(&path).unwrap();
+    let valid = Fixture::new(version_two()).await;
+    let attempt =
+        verify_target_attempt(valid.request(store.load_checkpoint(&limits).unwrap())).await;
+    assert_eq!(attempt.result.unwrap().bytes, PAYLOAD);
+    store
+        .commit_checkpoint(&attempt.checkpoint.unwrap(), &limits)
+        .unwrap();
+    drop(store);
+    let store = CheckpointStore::open(&path).unwrap();
+    let attempt =
+        verify_target_attempt(valid.request(store.load_checkpoint(&limits).unwrap())).await;
+    assert_eq!(attempt.result.unwrap().bytes, PAYLOAD);
+}
+
+#[tokio::test]
+async fn source_directory_spaces_do_not_require_encoded_temporary_paths() {
+    let fixture = Fixture::new(Spec::default()).await;
+    let metadata = fixture.dir.path().join("metadata with space é %");
+    let targets = fixture.dir.path().join("targets with space é %");
+    fs::rename(fixture.dir.path().join("metadata"), &metadata).unwrap();
+    fs::rename(fixture.dir.path().join("targets"), &targets).unwrap();
+    let mut request = fixture.request(None);
+    request.metadata_dir = metadata;
+    request.targets_dir = targets;
+    verify_target_attempt(request).await.result.unwrap();
 }

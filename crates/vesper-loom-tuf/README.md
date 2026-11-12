@@ -4,37 +4,47 @@
 
 ## Security boundary
 
-The caller supplies an independently trusted bootstrap root and stable configured repository identity. A successful result contains authenticated owned target bytes, their exact signed length and SHA-256, opaque signed custom metadata, verified metadata versions, a verification time, and a checkpoint. The checkpoint carries the original-root binding, authenticated consecutive root chain, last successful timestamp/snapshot/role version floors, and last successful time sample. Next verification starts from its latest root. It never silently falls back to bootstrap when previous state is malformed.
+The caller supplies an independently trusted bootstrap root and stable configured repository identity. A successful result contains authenticated owned target bytes, their exact signed length and SHA-256, opaque signed custom metadata, verified metadata versions, a verification time, and a checkpoint. Next verification starts from the checkpoint's latest authenticated root. It never silently falls back to bootstrap when previous state is malformed.
 
-**Failed verification does not return checkpoint advancement.** If newer authenticated root/timestamp/snapshot/targets metadata is followed by a failed later metadata load or target download, the caller retains the previous successful checkpoint. Older still-valid metadata can then be accepted again up to that checkpoint's version floors. This is a rollback/freeze security limitation even with perfect atomic checkpoint persistence, not merely a crash-durability limitation. The regression test `failed_target_leaves_older_checkpoint_usable_despite_newer_authenticated_metadata` demonstrates it. A full updater must durably retain each authenticated TUF step, including advancement on later failure; that state machine is not implemented here.
+**Use `verify_target_attempt` and persist its checkpoint even on error.** It returns `VerificationAttempt { checkpoint: Option<Checkpoint>, result: Result<VerifiedUpdate, TufError> }`. After Tough finishes or fails, authenticated steps in its private datastore are reverified before promotion: consecutive root continuity, timestamp signatures and snapshot-version pins, then snapshot signatures/source hash pins and all snapshot-role floors. A valid newer timestamp establishes its snapshot-version floor even when the snapshot body fails. Root-only checkpoints have absent timestamp/snapshot floors. No failed result exposes target bytes. Invalid request identity/bootstrap/previous state cannot become a new checkpoint.
 
-Checkpoints are caller-protected trusted state. Their checksum detects accidental corruption; it is not a MAC, signature, provenance certificate, or defense against someone rewriting state and recomputing the checksum. Protect state against deletion, tampering, and rewind; serialize operations and persist a successful checkpoint before using its target. This library writes only private temporary snapshots/state, not persistent checkpoints. It does not guarantee crash-safe client updates. Passing `previous: None` explicitly initializes a fresh verifier with no previous version floors and must not be a recovery fallback for lost state.
+Progress is returned **only at call completion**, not durably at each internal TUF step. Cancellation, process termination, crash, extraction failure, or a caller failing to persist the returned checkpoint can still lose advancement. A full updater must durably retain each authenticated TUF step before continuing; this library does not implement that transaction state machine. Do not describe an atomic final checkpoint file as a complete crash-safe TUF updater.
 
-Root key rotation does not reset successful timestamp/snapshot/role floors in this API. This deliberately conservative policy can reject a legitimate repository recovery that requires resetting compromised fast-forwarded versions. Every previous snapshot role must remain and cannot decrease in version, including unrequested delegated roles. Root chain retention is bounded; a long-lived registry can require an explicit trusted bootstrap policy migration after exhausting the configured chain limit.
+The compatibility `verify_target` function returns only a successful update and **discards error progress**. Newer authenticated metadata followed by a later failure can then be replayed at older still-valid versions using the previous checkpoint. This is a rollback/freeze security limitation beyond crash durability. The regression `failed_target_leaves_older_checkpoint_usable_despite_newer_authenticated_metadata` deliberately demonstrates this legacy behavior. Stateful callers should use the attempt API instead.
+
+Checkpoints are caller-protected trusted state. Their checksum detects accidental corruption; it is not a MAC, signature, provenance certificate, or defense against someone rewriting state and recomputing the checksum. Protect state against deletion, tampering, and rewind; serialize operations and persist returned checkpoints on both success and failure before using any target. The core writes only private temporary snapshots/state. The separate Unix `state::CheckpointStore` holds a cooperating-process lock and atomically persists opaque checkpoints; it does not make internal verifier steps durable. Passing `previous: None` explicitly initializes a fresh verifier with no previous version floors and must not be a recovery fallback for lost state.
+
+Checkpoint schema 2 retains a bootstrap fingerprint/repository identity, authenticated root chain, monotonic timestamp version floor, snapshot version floor from authenticated timestamp pins, snapshot-role floors, and observed host time. Zero timestamp/snapshot floors denote root-only state; role floors can remain from an earlier snapshot while a newer timestamp pins a snapshot whose body failed. Complete schema-1 checkpoints remain readable. No partial checkpoint represents target acceptance or package identity authentication.
+
+Root key rotation does not reset authenticated timestamp/snapshot/role floors in this API. This deliberately conservative policy can reject a legitimate repository recovery that requires resetting compromised fast-forwarded versions. Every previous snapshot role must remain and cannot decrease in version, including unrequested delegated roles. Root chain retention is bounded; a long-lived registry can require an explicit trusted bootstrap policy migration after exhausting the configured chain limit.
 
 ## Usage
 
 ```rust,no_run
-use std::path::PathBuf;
-use vesper_loom_tuf::{verify_target, Checkpoint, Limits, LocalRequest};
+use std::path::{Path, PathBuf};
+use vesper_loom_tuf::{verify_target_attempt, Limits, LocalRequest};
 
+# #[cfg(unix)]
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use vesper_loom_tuf::state::CheckpointStore;
 let limits = Limits::default();
-// Read any existing checkpoint with an independently bounded, protected file reader.
-let previous: Option<Checkpoint> = None; // Only an explicitly new state starts with None.
-let update = verify_target(LocalRequest {
+// Explicit one-time initialization uses CheckpointStore::create; open never resets lost state.
+let mut store = CheckpointStore::open(Path::new("protected-registry-state"))?;
+let previous = store.load_checkpoint(&limits)?;
+let attempt = verify_target_attempt(LocalRequest {
     repository_id: "configured-example-registry".into(),
     bootstrap_root: std::fs::read("trusted-bootstrap-root.json")?,
     metadata_dir: PathBuf::from("repository/metadata"),
     targets_dir: PathBuf::from("repository/targets"),
     target_name: "packages/example-1.0.0.tar".into(),
     previous,
-    limits,
-}).await?;
-let next_checkpoint = update.checkpoint.to_json()?;
-// Caller must persist next_checkpoint safely before consuming update.bytes.
-// It must separately implement per-step advancement on failure for complete updater guarantees.
-# let _ = next_checkpoint;
+    limits: limits.clone(),
+}).await;
+if let Some(checkpoint) = &attempt.checkpoint {
+    store.commit_checkpoint(checkpoint, &limits)?; // Includes failed verification progress.
+}
+let update = attempt.result?; // Bytes can be used only after successful state persistence.
+# let _ = update.bytes;
 # Ok(())
 # }
 ```
@@ -43,7 +53,7 @@ let next_checkpoint = update.checkpoint.to_json()?;
 
 ## Verification and bounds
 
-The implementation snapshots both directories into a private temporary directory before handing them to `tough::FilesystemTransport`. Safe expiry enforcement is unconditional. Tough verifies root threshold continuity, top-level and delegated signatures, snapshot version/hash pins, target authorization through delegation paths/termination, and the target SHA-256. Only a completely consumed successful target stream is returned. A separate exact-length comparison rejects a target shorter than its signed length even when its hash matches. Post-read checks sample real host time again, reject detected clock regression, and check root, timestamp, snapshot, top-level targets, and every loaded delegated expiry. No expiration-disable or injected-clock option exists.
+The implementation snapshots both directories into a private temporary directory before handing them to `tough::FilesystemTransport`. Safe expiry enforcement is unconditional. Tough verifies root threshold continuity, top-level and delegated signatures, snapshot version/hash pins, target authorization through delegation paths/termination, and the target SHA-256. Only a completely consumed successful target stream is returned. A separate exact-length comparison rejects a target shorter than its signed length even when its hash matches. Post-read checks sample real host time again, reject detected clock regression, and check root, timestamp, snapshot, top-level targets, and every loaded delegated expiry. No expiration-disable or injected-clock option exists. Before Tough runs, the core reserves worst-case checkpoint wire space for every prospective root and role floor in the bounded immutable snapshot, so a normal accepted step cannot exceed the configured return budget.
 
 Defaults:
 
@@ -65,6 +75,8 @@ The `files` limit also caps every JSON collection, including signed `targets`, `
 ## Filesystem and platform assumptions
 
 Tested on Linux. Unix opens regular input files with `O_NOFOLLOW | O_NONBLOCK`; symlinks, special files, and symlink directory ancestors are rejected. Windows code uses `FILE_FLAG_OPEN_REPARSE_POINT` and rejects reparse attributes, but Windows runtime behavior has not been tested in this milestone. Build dependencies include native AWS-LC C code, even with Tough's HTTP feature disabled. No macOS or Windows runtime verification is claimed.
+
+Tough's file transport preserves URL escapes in filesystem paths. Private staging therefore requires an ASCII temporary-directory ancestry without spaces or percent characters. The core checks URL/path round-trip equivalence and rejects an unsupported temporary path with an explicit diagnostic before Tough starts. Configure `TMPDIR` (or the platform temporary directory setting) accordingly. Original source directory paths with spaces/non-ASCII/percent characters are supported through snapshotting; encoded or unusual target/role filenames remain subject to Tough's file-repository conventions.
 
 The caller must prevent concurrent replacement of source directory ancestors during snapshot construction. The implementation checks ancestors, rejects symlinks/reparse points, and opens leaf files without following them, but does not implement directory-handle-relative traversal resistant to an adversary replacing parent directories between checks. Once constructed, Tough reads only the private immutable snapshot, so later input mutations cannot alter accepted target bytes. Mixed source-file versions fail signed hash/version checks; unauthenticated source filenames never become trust anchors.
 
@@ -106,4 +118,4 @@ Successful TUF verification authenticates bytes under the configured repository 
 
 ## Validation
 
-Tests generate real Ed25519-signed TUF repositories with fixed public test seeds. They exercise delegated targets, distinct-key root rotation, loading checkpoint root 2 after old root files disappear, successful-operation version floors across all metadata roles, expired metadata, signature and snapshot hash mutations, scope rejection, target corruption/truncation/oversize, exact-length mismatch, state corruption/mismatched identities, resource limits, filesystem links, graph cycles, and the failed-update security limitation above.
+Tests generate real Ed25519-signed TUF repositories with fixed public test seeds. They exercise delegated targets, distinct-key root rotation, loading checkpoint root 2 after old root files disappear, successful and failed-attempt version floors across metadata roles, expired metadata, signature and snapshot hash mutations, scope rejection, target corruption/truncation/oversize, exact-length mismatch, state corruption/mismatched identities, resource limits, filesystem links, numeric role graph cycles/depth, temporary-path constraints, and the legacy failed-update limitation above. A Unix integration commits failure progress, drops/reopens the store, rejects older metadata, then persists a valid successful target and reopens again.

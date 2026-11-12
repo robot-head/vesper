@@ -1,7 +1,7 @@
 //! Offline TUF target verification, not a complete stateful TUF updater.
-//! Checkpoints are trusted caller state, not signed attestations. Failed operations do not
-//! advance state, so authenticated metadata observed before a later failure can be replayed
-//! at older versions on retry. See the crate README for this rollback/freeze limitation.
+//! Checkpoints are trusted caller state, not signed attestations. The attempt API retains
+//! authenticated metadata progress on later failures, but only returns it when the call completes.
+//! The legacy verify_target API drops error progress. See the README for update-state limits.
 #![doc = include_str!("../README.md")]
 
 use serde::{Deserialize, Serialize};
@@ -14,7 +14,7 @@ use std::{
 };
 use tough::{
     IntoVec, RepositoryLoader, TargetName,
-    schema::{Root, Signed, Targets},
+    schema::{Root, Signed, Snapshot, Targets, Timestamp},
 };
 use url::Url;
 
@@ -141,6 +141,14 @@ pub struct VerifiedUpdate {
     pub verified_at: String,
 }
 
+/// Complete-call progress, including authenticated metadata accepted before a later failure.
+/// Persist `checkpoint` on both success and failure. Cancellation/process failure returns no progress.
+#[derive(Debug)]
+pub struct VerificationAttempt {
+    pub checkpoint: Option<Checkpoint>,
+    pub result: Result<VerifiedUpdate, TufError>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MetadataVersions {
     pub root: u64,
@@ -223,6 +231,25 @@ fn safe_component(part: &str) -> bool {
 /// This permits rollback to the previous successful checkpoint on retry, a security limitation
 /// beyond crash durability. This API does not implement the complete per-step TUF update protocol.
 pub async fn verify_target(request: LocalRequest) -> Result<VerifiedUpdate, TufError> {
+    verify_target_attempt(request).await.result
+}
+
+/// Preserve authenticated metadata advancement even when later metadata/target verification fails.
+/// This returns progress only when the call completes; it is not durable per-step state or a
+/// cancellation/crash-safe complete TUF updater. No failed result contains target bytes.
+pub async fn verify_target_attempt(request: LocalRequest) -> VerificationAttempt {
+    let mut checkpoint = None;
+    let result = verify_target_inner(request, &mut checkpoint).await;
+    if let Ok(update) = &result {
+        checkpoint = Some(update.checkpoint.clone());
+    }
+    VerificationAttempt { checkpoint, result }
+}
+
+async fn verify_target_inner(
+    request: LocalRequest,
+    progress: &mut Option<Checkpoint>,
+) -> Result<VerifiedUpdate, TufError> {
     let LocalRequest {
         repository_id,
         bootstrap_root,
@@ -271,6 +298,20 @@ pub async fn verify_target(request: LocalRequest) -> Result<VerifiedUpdate, TufE
         }
         roots = old.state.roots.clone();
     }
+    let initial = previous
+        .as_ref()
+        .map(|checkpoint| checkpoint.state.clone())
+        .unwrap_or_else(|| State {
+            schema_version: 2,
+            repository_id: repository_id.clone(),
+            bootstrap_sha256: bootstrap_sha256.clone(),
+            roots: roots.clone(),
+            timestamp_version: 0,
+            snapshot_version: 0,
+            role_versions: BTreeMap::new(),
+            verified_at: started.to_string(),
+        });
+    *progress = Some(make_checkpoint(initial, &limits)?);
 
     let staging = tempfile::tempdir()?;
     let metadata = staging.path().join("metadata");
@@ -279,6 +320,11 @@ pub async fn verify_target(request: LocalRequest) -> Result<VerifiedUpdate, TufE
     snapshot_tree(&metadata_dir, &metadata, &limits, true, &mut files)?;
     snapshot_tree(&targets_dir, &targets, &limits, false, &mut files)?;
     preflight_metadata(&metadata, &limits)?;
+    reserve_checkpoint_budget(
+        &metadata,
+        &progress.as_ref().expect("initialized progress").state,
+        &limits,
+    )?;
     let current = roots.last().expect("root chain is nonempty");
     if parse_root(current)?
         .signed
@@ -291,20 +337,31 @@ pub async fn verify_target(request: LocalRequest) -> Result<VerifiedUpdate, TufE
     }
     let datastore = staging.path().join("state");
     fs::create_dir(&datastore)?;
-    let repo = RepositoryLoader::new(current, directory_url(&metadata)?, directory_url(&targets)?)
-        .transport(tough::FilesystemTransport)
-        .expiration_enforcement(tough::ExpirationEnforcement::Safe)
-        .limits(tough::Limits {
-            max_root_size: limits.metadata_file_bytes,
-            max_targets_size: limits.metadata_file_bytes,
-            max_timestamp_size: limits.metadata_file_bytes,
-            max_snapshot_size: limits.metadata_file_bytes,
-            max_root_updates: limits.root_updates as u64,
-        })
-        .datastore(&datastore)
-        .load()
-        .await
-        .map_err(|e| TufError(format!("TUF metadata verification: {e}")))?;
+    let loaded =
+        RepositoryLoader::new(current, directory_url(&metadata)?, directory_url(&targets)?)
+            .transport(tough::FilesystemTransport)
+            .expiration_enforcement(tough::ExpirationEnforcement::Safe)
+            .limits(tough::Limits {
+                max_root_size: limits.metadata_file_bytes,
+                max_targets_size: limits.metadata_file_bytes,
+                max_timestamp_size: limits.metadata_file_bytes,
+                max_snapshot_size: limits.metadata_file_bytes,
+                max_root_updates: limits.root_updates as u64,
+            })
+            .datastore(&datastore)
+            .load()
+            .await;
+    // Tough writes each successfully authenticated step before attempting the next one.
+    // Inspect that private datastore even when load() failed, and reauthenticate before promotion.
+    harvest_progress(
+        &datastore,
+        &metadata,
+        &bootstrap_root,
+        started,
+        &limits,
+        progress,
+    )?;
+    let repo = loaded.map_err(|e| TufError(format!("TUF metadata verification: {e}")))?;
     let role_versions: BTreeMap<_, _> = repo
         .snapshot()
         .signed
@@ -346,14 +403,15 @@ pub async fn verify_target(request: LocalRequest) -> Result<VerifiedUpdate, TufE
     if target.length > limits.target_bytes {
         return fail("signed target length exceeds limit");
     }
-    let bytes = repo
-        .read_target(&name)
-        .await
+    let stream = repo.read_target(&name).await;
+    refresh_progress_clock(&datastore, &limits, progress)?;
+    let bytes = stream
         .map_err(|e| TufError(e.to_string()))?
         .ok_or_else(|| TufError("target not found".into()))?
         .into_vec()
-        .await
-        .map_err(|e| TufError(format!("target verification: {e}")))?;
+        .await;
+    refresh_progress_clock(&datastore, &limits, progress)?;
+    let bytes = bytes.map_err(|e| TufError(format!("target verification: {e}")))?;
     if bytes.len() as u64 != target.length {
         return fail("target length differs from signed length");
     }
@@ -361,7 +419,14 @@ pub async fn verify_target(request: LocalRequest) -> Result<VerifiedUpdate, TufE
     let last_clock: jiff::Timestamp =
         serde_json::from_slice(&fs::read(datastore.join("latest_known_time.json"))?)
             .map_err(|e| TufError(format!("invalid private clock sample: {e}")))?;
-    if now < started || now < last_clock {
+    let progress_time: jiff::Timestamp = progress
+        .as_ref()
+        .expect("initialized progress")
+        .state
+        .verified_at
+        .parse()
+        .map_err(|_| TufError("invalid progress time".into()))?;
+    if now < started || now < last_clock || now < progress_time {
         return fail("system clock moved backward during verification");
     }
     for expiry in [
@@ -382,7 +447,7 @@ pub async fn verify_target(request: LocalRequest) -> Result<VerifiedUpdate, TufE
         roles: role_versions.clone(),
     };
     let state = State {
-        schema_version: 1,
+        schema_version: 2,
         repository_id,
         bootstrap_sha256,
         roots,
@@ -391,13 +456,7 @@ pub async fn verify_target(request: LocalRequest) -> Result<VerifiedUpdate, TufE
         role_versions,
         verified_at: verified_at.clone(),
     };
-    let checkpoint = Checkpoint {
-        checksum: state_checksum(&state)?,
-        state,
-    };
-    if checkpoint.to_json()?.len() > limits.checkpoint_bytes {
-        return fail("result checkpoint exceeds limit");
-    }
+    let checkpoint = make_checkpoint(state, &limits)?;
     Ok(VerifiedUpdate {
         length: target.length,
         sha256: hash(&bytes),
@@ -434,6 +493,230 @@ fn validate_limits(l: &Limits) -> Result<(), TufError> {
     }
     Ok(())
 }
+
+fn make_checkpoint(mut state: State, limits: &Limits) -> Result<Checkpoint, TufError> {
+    state.schema_version = 2;
+    let checkpoint = Checkpoint {
+        checksum: state_checksum(&state)?,
+        state,
+    };
+    if checkpoint.to_json()?.len() > limits.checkpoint_bytes {
+        return fail("result checkpoint exceeds limit");
+    }
+    Ok(checkpoint)
+}
+
+/// Reserve enough wire space for every root/floor this immutable snapshot could authenticate.
+/// This runs before Tough, so a later accepted step cannot exceed the configured return budget.
+fn reserve_checkpoint_budget(
+    metadata: &Path,
+    previous: &State,
+    limits: &Limits,
+) -> Result<(), TufError> {
+    let mut upper = previous.clone();
+    let current_root = parse_root(upper.roots.last().expect("validated root chain"))?
+        .signed
+        .version
+        .get();
+    for entry in fs::read_dir(metadata)? {
+        let path = entry?.path();
+        if let Some(version) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".root.json"))
+            .and_then(|n| n.parse::<u64>().ok())
+            && version > current_root
+        {
+            upper.roots.push(fs::read(&path)?);
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path)?).map_err(|e| TufError(e.to_string()))?;
+        if value["signed"]["_type"] == "snapshot"
+            && let Some(meta) = value["signed"]["meta"].as_object()
+        {
+            for name in meta.keys() {
+                upper.role_versions.insert(name.clone(), u64::MAX);
+            }
+        }
+    }
+    if upper.roots.len() > limits.root_updates || upper.role_versions.len() > limits.roles {
+        return fail("prospective checkpoint collection limit exceeded");
+    }
+    for value in upper.role_versions.values_mut() {
+        *value = u64::MAX;
+    }
+    upper.timestamp_version = u64::MAX;
+    upper.snapshot_version = u64::MAX;
+    upper.verified_at = "9999-12-31T23:59:59.999999999Z".into();
+    make_checkpoint(upper, limits).map(|_| ())
+}
+
+fn private_file(path: &Path, limits: &Limits) -> Result<Option<Vec<u8>>, TufError> {
+    match fs::File::open(path) {
+        Ok(file) => {
+            let mut bytes = Vec::new();
+            // Tough reserializes accepted metadata. Allow bounded encoding overhead here;
+            // original repository files already passed the strict source-file ceiling.
+            let ceiling = limits
+                .metadata_file_bytes
+                .saturating_mul(4)
+                .saturating_add(1024);
+            file.take(ceiling.saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > ceiling {
+                return fail("private metadata exceeds limit");
+            }
+            Ok(Some(bytes))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn refresh_progress_clock(
+    datastore: &Path,
+    limits: &Limits,
+    progress: &mut Option<Checkpoint>,
+) -> Result<(), TufError> {
+    let bytes = private_file(&datastore.join("latest_known_time.json"), limits)?
+        .ok_or_else(|| TufError("missing private clock sample".into()))?;
+    let sampled: jiff::Timestamp = serde_json::from_slice(&bytes)
+        .map_err(|e| TufError(format!("invalid private clock sample: {e}")))?;
+    let mut state = progress
+        .as_ref()
+        .expect("initialized progress")
+        .state
+        .clone();
+    let old: jiff::Timestamp = state
+        .verified_at
+        .parse()
+        .map_err(|_| TufError("invalid progress time".into()))?;
+    let now = jiff::Timestamp::now();
+    state.verified_at = old.max(sampled).max(now).to_string();
+    *progress = Some(make_checkpoint(state, limits)?);
+    if now < old || now < sampled {
+        return fail("system clock moved backward during verification");
+    }
+    Ok(())
+}
+
+fn harvest_progress(
+    datastore: &Path,
+    metadata: &Path,
+    bootstrap: &[u8],
+    started: jiff::Timestamp,
+    limits: &Limits,
+    progress: &mut Option<Checkpoint>,
+) -> Result<(), TufError> {
+    let clock_result = refresh_progress_clock(datastore, limits, progress);
+    let Some(root_bytes) = private_file(&datastore.join("root.json"), limits)? else {
+        return clock_result;
+    };
+    let persisted_root = bounded_root(&root_bytes, limits)?;
+    let mut state = progress
+        .as_ref()
+        .expect("initialized progress")
+        .state
+        .clone();
+    let old_root = parse_root(state.roots.last().expect("validated root chain"))?;
+    if persisted_root.signed.version < old_root.signed.version {
+        return fail("private root version rollback");
+    }
+    for version in old_root.signed.version.get() + 1..=persisted_root.signed.version.get() {
+        let bytes = private_file(&metadata.join(format!("{version}.root.json")), limits)?
+            .ok_or_else(|| TufError("missing authenticated root chain member".into()))?;
+        state.roots.push(bytes);
+    }
+    validate_root_chain(&state.roots, bootstrap, limits)?;
+    if parse_root(state.roots.last().expect("validated root chain"))? != persisted_root {
+        return fail("private root does not match authenticated chain");
+    }
+    // Root authentication survives expiry or any subsequent metadata failure.
+    *progress = Some(make_checkpoint(state.clone(), limits)?);
+    let Some(timestamp_bytes) = private_file(&datastore.join("timestamp.json"), limits)? else {
+        return clock_result;
+    };
+    let timestamp: Signed<Timestamp> = serde_json::from_slice(&timestamp_bytes)
+        .map_err(|e| TufError(format!("invalid private timestamp: {e}")))?;
+    persisted_root
+        .signed
+        .verify_role(&timestamp)
+        .map_err(|e| TufError(format!("private timestamp authentication: {e}")))?;
+    let pin = timestamp
+        .signed
+        .meta
+        .get("snapshot.json")
+        .ok_or_else(|| TufError("private timestamp lacks snapshot pin".into()))?;
+    if timestamp.signed.meta.len() != 1 || timestamp.signed.expires < started {
+        return fail("invalid accepted timestamp metadata");
+    }
+    if timestamp.signed.version.get() < state.timestamp_version
+        || pin.version.get() < state.snapshot_version
+    {
+        return fail("timestamp or pinned snapshot rollback");
+    }
+    state.timestamp_version = timestamp.signed.version.get();
+    // A verified timestamp already authenticates this snapshot version floor even when its body
+    // cannot be retrieved or verified. Do not wait for a complete snapshot before retaining it.
+    state.snapshot_version = pin.version.get();
+    *progress = Some(make_checkpoint(state.clone(), limits)?);
+    let Some(snapshot_bytes) = private_file(&datastore.join("snapshot.json"), limits)? else {
+        return clock_result;
+    };
+    let snapshot: Signed<Snapshot> = serde_json::from_slice(&snapshot_bytes)
+        .map_err(|e| TufError(format!("invalid private snapshot: {e}")))?;
+    persisted_root
+        .signed
+        .verify_role(&snapshot)
+        .map_err(|e| TufError(format!("private snapshot authentication: {e}")))?;
+    if snapshot.signed.version != pin.version
+        || snapshot.signed.expires < started
+        || !snapshot.signed.meta.contains_key("targets.json")
+    {
+        return fail("invalid accepted snapshot metadata");
+    }
+    let name = if persisted_root.signed.consistent_snapshot {
+        format!("{}.snapshot.json", pin.version)
+    } else {
+        "snapshot.json".into()
+    };
+    let original = private_file(&metadata.join(name), limits)?
+        .ok_or_else(|| TufError("missing pinned snapshot source".into()))?;
+    let original_snapshot: Signed<Snapshot> = serde_json::from_slice(&original)
+        .map_err(|e| TufError(format!("invalid pinned snapshot source: {e}")))?;
+    if original_snapshot != snapshot
+        || pin
+            .length
+            .is_some_and(|length| original.len() as u64 > length)
+        || pin
+            .hashes
+            .as_ref()
+            .is_some_and(|hashes| hash(&original) != hex_digest(hashes.sha256.as_ref()))
+    {
+        return fail("private snapshot source pin mismatch");
+    }
+    let floors: BTreeMap<_, _> = snapshot
+        .signed
+        .meta
+        .iter()
+        .map(|(name, meta)| (name.clone(), meta.version.get()))
+        .collect();
+    if floors.len() > limits.roles {
+        return fail("snapshot role count exceeds limit");
+    }
+    for (name, floor) in &state.role_versions {
+        if floors.get(name).is_none_or(|version| version < floor) {
+            return fail(format!("role rollback or removal: {name}"));
+        }
+    }
+    state.role_versions = floors;
+    *progress = Some(make_checkpoint(state, limits)?);
+    clock_result
+}
+
+fn hex_digest(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
 fn validate_checkpoint(
     old: &Checkpoint,
     repository: &str,
@@ -442,16 +725,20 @@ fn validate_checkpoint(
     limits: &Limits,
 ) -> Result<(), TufError> {
     if old.to_json()?.len() > limits.checkpoint_bytes
-        || old.state.schema_version != 1
+        || !matches!(old.state.schema_version, 1 | 2)
         || old.state.repository_id != repository
         || old.state.bootstrap_sha256 != bootstrap_hash
         || old.checksum != state_checksum(&old.state)?
-        || old.state.timestamp_version == 0
-        || old.state.snapshot_version == 0
-        || old.state.role_versions.is_empty()
+        || (old.state.schema_version == 1
+            && (old.state.timestamp_version == 0
+                || old.state.snapshot_version == 0
+                || old.state.role_versions.is_empty()))
+        || ((old.state.timestamp_version == 0) != (old.state.snapshot_version == 0))
+        || (old.state.snapshot_version == 0 && !old.state.role_versions.is_empty())
         || old.state.role_versions.len() > limits.roles
         || old.state.role_versions.values().any(|x| *x == 0)
-        || !old.state.role_versions.contains_key("targets.json")
+        || (!old.state.role_versions.is_empty()
+            && !old.state.role_versions.contains_key("targets.json"))
     {
         return fail("corrupt or mismatched checkpoint");
     }
@@ -488,7 +775,15 @@ fn validate_root_chain(
     Ok(())
 }
 fn directory_url(path: &Path) -> Result<Url, TufError> {
-    Url::from_directory_path(path).map_err(|_| TufError("invalid directory URL".into()))
+    use tough::SafeUrlPath;
+    let url =
+        Url::from_directory_path(path).map_err(|_| TufError("invalid directory URL".into()))?;
+    if url.safe_url_filepath() != path {
+        return fail(
+            "unsupported temporary staging path: Tough file transport preserves URL escapes; configure an ASCII temporary directory without spaces or percent characters",
+        );
+    }
+    Ok(url)
 }
 
 fn check_targets_expiry(
@@ -803,5 +1098,17 @@ mod tests {
         let before = expiry - jiff::SignedDuration::from_secs(1);
         assert!(check_targets_expiry(&top, before, 0, &mut 0, &Limits::default()).is_ok());
         assert!(check_targets_expiry(&top, expiry, 0, &mut 0, &Limits::default()).is_err());
+    }
+
+    #[test]
+    fn escaped_private_staging_paths_fail_with_explicit_transport_limit() {
+        for prefix in ["space in staging-", "nonASCII-é-", "percent%-"] {
+            let directory = tempfile::Builder::new().prefix(prefix).tempdir().unwrap();
+            let error = directory_url(directory.path()).unwrap_err().to_string();
+            assert!(
+                error.contains("unsupported temporary staging path"),
+                "{error}"
+            );
+        }
     }
 }
