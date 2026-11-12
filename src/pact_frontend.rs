@@ -163,6 +163,7 @@ pub fn check_package_with(
         fe,
         session,
         evidence: RefCell::new(BTreeMap::new()),
+        normalizing: RefCell::new(vec![]),
     };
     // Pass 1: generated functions plus normalized source, trait calls
     // resolved through Pact.
@@ -208,6 +209,7 @@ pub fn check_package_with(
         fe,
         session,
         evidence,
+        ..
     } = fe;
     let evidence = evidence
         .into_inner()
@@ -799,22 +801,33 @@ impl Frontend {
             vars: &BTreeMap<String, Type>,
             tr: &TraitDecl,
             assoc: &dyn Fn(&str) -> Option<Type>,
+            stack: &mut Vec<String>,
         ) -> Type {
+            // `stack` holds the associated types being expanded on this
+            // path; a cyclic binding (rejected with E0601 by
+            // `validate_conformance`) is left unexpanded instead of
+            // recursing forever.
             if let Some(p) = as_projection(t)
                 && *p.self_ty == Type::named("Self")
                 && p.trait_name.is_none_or(|n| n == tr.name)
                 && tr.assoc.iter().any(|a| a.name == p.assoc)
+                && !stack.iter().any(|s| s == p.assoc)
                 && let Some(v) = assoc(p.assoc)
             {
-                return go(&v, vars, tr, assoc);
+                stack.push(p.assoc.to_owned());
+                let out = go(&v, vars, tr, assoc, stack);
+                stack.pop();
+                return out;
             }
             match t {
                 Type::Named(n, args) if args.is_empty() && vars.contains_key(n) => vars[n].clone(),
                 Type::Named(n, args) => Type::Named(
                     n.clone(),
-                    args.iter().map(|a| go(a, vars, tr, assoc)).collect(),
+                    args.iter().map(|a| go(a, vars, tr, assoc, stack)).collect(),
                 ),
-                Type::Tuple(ts) => Type::Tuple(ts.iter().map(|a| go(a, vars, tr, assoc)).collect()),
+                Type::Tuple(ts) => {
+                    Type::Tuple(ts.iter().map(|a| go(a, vars, tr, assoc, stack)).collect())
+                }
                 Type::Function {
                     params,
                     result,
@@ -823,13 +836,13 @@ impl Frontend {
                 } => Type::Function {
                     params: params
                         .iter()
-                        .map(|(p, t)| (*p, go(t, vars, tr, assoc)))
+                        .map(|(p, t)| (*p, go(t, vars, tr, assoc, stack)))
                         .collect(),
-                    result: Box::new(go(result, vars, tr, assoc)),
-                    effects: go_effects(effects, vars, tr, assoc),
+                    result: Box::new(go(result, vars, tr, assoc, stack)),
+                    effects: go_effects(effects, vars, tr, assoc, stack),
                     mode: *mode,
                 },
-                Type::Row(e) => Type::Row(go_effects(e, vars, tr, assoc)),
+                Type::Row(e) => Type::Row(go_effects(e, vars, tr, assoc, stack)),
                 _ => t.clone(),
             }
         }
@@ -838,6 +851,7 @@ impl Frontend {
             vars: &BTreeMap<String, Type>,
             tr: &TraitDecl,
             assoc: &dyn Fn(&str) -> Option<Type>,
+            stack: &mut Vec<String>,
         ) -> Effects {
             let mapped = Effects {
                 instances: e
@@ -846,14 +860,18 @@ impl Frontend {
                     .map(|i| Effect {
                         label: i.label.clone(),
                         name: i.name.clone(),
-                        args: i.args.iter().map(|a| go(a, vars, tr, assoc)).collect(),
+                        args: i
+                            .args
+                            .iter()
+                            .map(|a| go(a, vars, tr, assoc, stack))
+                            .collect(),
                     })
                     .collect(),
                 tail: e.tail.clone(),
             };
             substitute_effects(&mapped, vars)
         }
-        go(t, vars, tr, &assoc)
+        go(t, vars, tr, &assoc, &mut vec![])
     }
 
     fn conform_effects(&self, e: &Effects, c: &ConfInfo, vars: &BTreeMap<String, Type>) -> Effects {
@@ -945,6 +963,13 @@ impl Frontend {
                     span,
                 ));
             }
+        }
+        if let Some(cycle) = assoc_cycle(t, c) {
+            self.diagnostics.push(d(
+                "E0601",
+                format!("associated type binding cycle: {}", cycle.join(" -> ")),
+                span,
+            ));
         }
         // Methods: exactly the trait's, with matching signatures.
         let vars = self.trait_substitution(c);
@@ -1168,7 +1193,20 @@ impl Frontend {
         for t in traits {
             b.traits.push(TraitDto {
                 name: t.decl.name.clone(),
-                params: t.decl.generics.iter().map(param_dto).collect(),
+                // Pact trait parameters carry kinds only; their modal bounds
+                // are checked by `validate_conformance` (E0606).
+                params: t
+                    .decl
+                    .generics
+                    .iter()
+                    .map(|g| {
+                        if g.row {
+                            param_dto(g)
+                        } else {
+                            ParamDto::ty(g.name.clone(), None)
+                        }
+                    })
+                    .collect(),
                 assoc: t
                     .decl
                     .assoc
@@ -1216,12 +1254,7 @@ impl Frontend {
                     where_clauses.push(GoalDto::Implements {
                         self_ty: self.dto(&w.ty, &c.decl.generics)?,
                         trait_ref: self.trait_def_ref(&key, site),
-                        args: w
-                            .trait_ref
-                            .args
-                            .iter()
-                            .map(|a| self.dto(a, &c.decl.generics).map(ArgDto::Type))
-                            .collect::<Result<_, _>>()?,
+                        args: self.where_args(&key, &w.trait_ref.args, &c.decl.generics)?,
                         brand: None,
                     });
                 }
@@ -1258,6 +1291,37 @@ impl Frontend {
             }
         }
         b
+    }
+
+    /// Lowers the arguments of a where-clause trait reference by the
+    /// referenced trait's parameter kinds (effect rows as rows, like the
+    /// arguments of a conformance head).
+    fn where_args(
+        &self,
+        key: &TraitKey,
+        args: &[Type],
+        generics: &[Generic],
+    ) -> Result<Vec<ArgDto>, String> {
+        let params = &self.traits[key].decl.generics;
+        if params.len() != args.len() {
+            return Err(format!(
+                "trait '{}' takes {} arguments, found {}",
+                key.1,
+                params.len(),
+                args.len()
+            ));
+        }
+        params
+            .iter()
+            .zip(args)
+            .map(|(g, a)| {
+                if g.row {
+                    ArgDto::from_source(&row_arg(a))
+                } else {
+                    self.dto(a, generics).map(ArgDto::Type)
+                }
+            })
+            .collect()
     }
 
     fn where_key(&self, r: &TraitRef) -> Option<TraitKey> {
@@ -1356,6 +1420,73 @@ impl Frontend {
     }
 }
 
+/// The first cycle among conformance `c`'s associated type bindings through
+/// `Self::A` / `<Self as Trait>::A`, as the path of names that closes it.
+fn assoc_cycle(tr: &TraitDecl, c: &ConfInfo) -> Option<Vec<String>> {
+    fn refs(t: &Type, tr: &TraitDecl, out: &mut Vec<String>) {
+        if let Some(p) = as_projection(t)
+            && *p.self_ty == Type::named("Self")
+            && p.trait_name.is_none_or(|n| n == tr.name)
+            && tr.assoc.iter().any(|a| a.name == p.assoc)
+        {
+            out.push(p.assoc.to_owned());
+            return;
+        }
+        let row = |e: &Effects, out: &mut Vec<String>| {
+            for a in e.instances.iter().flat_map(|i| &i.args) {
+                refs(a, tr, out);
+            }
+        };
+        match t {
+            Type::Named(_, ts) | Type::Tuple(ts) => ts.iter().for_each(|a| refs(a, tr, out)),
+            Type::Function {
+                params,
+                result,
+                effects,
+                ..
+            } => {
+                params.iter().for_each(|(_, a)| refs(a, tr, out));
+                refs(result, tr, out);
+                row(effects, out);
+            }
+            Type::Row(e) => row(e, out),
+            _ => {}
+        }
+    }
+    fn visit(
+        name: &str,
+        tr: &TraitDecl,
+        c: &ConfInfo,
+        path: &mut Vec<String>,
+        done: &mut BTreeSet<String>,
+    ) -> Option<Vec<String>> {
+        if let Some(i) = path.iter().position(|p| p == name) {
+            let mut cycle = path[i..].to_vec();
+            cycle.push(name.to_owned());
+            return Some(cycle);
+        }
+        if !done.insert(name.to_owned()) {
+            return None;
+        }
+        let binding = c.decl.assoc.iter().find(|a| a.name == name)?;
+        let mut next = vec![];
+        refs(&binding.ty, tr, &mut next);
+        path.push(name.to_owned());
+        for n in next {
+            if let Some(cycle) = visit(&n, tr, c, path, done) {
+                return Some(cycle);
+            }
+        }
+        path.pop();
+        None
+    }
+    let mut done = BTreeSet::new();
+    c.decl
+        .assoc
+        .iter()
+        .find_map(|a| visit(&a.name, tr, c, &mut vec![], &mut done))
+}
+
 fn row_arg(a: &Type) -> Type {
     match a {
         Type::Row(_) => a.clone(),
@@ -1412,6 +1543,8 @@ struct Elaborator {
     fe: Frontend,
     session: CoherentSession,
     evidence: RefCell<BTreeMap<(usize, usize), ResolvedCall>>,
+    /// Projections being normalized on the current path (cycle guard).
+    normalizing: RefCell<Vec<String>>,
 }
 
 /// Lexical model scopes in effect at `pos`, outermost first.
@@ -1456,12 +1589,12 @@ impl Elaborator {
                     self.fe.where_key(&w.trait_ref),
                     self.fe.dto(&w.ty, &c.decl.generics),
                 ) {
-                    let args = w
-                        .trait_ref
-                        .args
-                        .iter()
-                        .filter_map(|a| self.fe.dto(a, &c.decl.generics).ok().map(ArgDto::Type))
-                        .collect();
+                    let Ok(args) = self
+                        .fe
+                        .where_args(&key, &w.trait_ref.args, &c.decl.generics)
+                    else {
+                        continue;
+                    };
                     cx.assumptions.push(GoalDto::Implements {
                         self_ty,
                         trait_ref: self.fe.trait_def_ref(&key, self.identity()),
@@ -1525,11 +1658,16 @@ impl Elaborator {
 
     /// Solves `receiver: trait` (optionally branded) and returns the
     /// selected conformance index together with its evidence.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "The inputs mirror the selection goal and its query context"
+    )]
     fn select(
         &self,
         key: &TraitKey,
         receiver: &Type,
         brand: Option<&str>,
+        trait_args: &[Type],
         generics: &[Generic],
         function: &str,
         span: &Span,
@@ -1540,7 +1678,15 @@ impl Elaborator {
         let mut args = vec![];
         for (i, g) in info.decl.generics.iter().enumerate() {
             let name = format!("_arg{i}");
-            if g.row {
+            // Arguments the source states constrain the goal; the rest are
+            // inferred.
+            if let Some(a) = trait_args.get(i) {
+                args.push(if g.row {
+                    ArgDto::from_source(&row_arg(a)).map_err(|m| (0, m))?
+                } else {
+                    ArgDto::Type(self.query_type(a, &mut cx).map_err(|m| (0, m))?)
+                });
+            } else if g.row {
                 cx.infer.push(ParamDto::of(name.clone(), ParamKindDto::Row));
                 args.push(ArgDto::Row(vesper_pact_binding::RowDto {
                     labels: vec![],
@@ -1722,9 +1868,26 @@ impl Elaborator {
                     span,
                 ));
             }
-            let what = format!("<{self_ty} as {}>::{}", key.1, p.assoc);
+            let trait_args = p
+                .trait_args
+                .iter()
+                .map(|a| self.normalize(a, generics, function, at, span))
+                .collect::<Result<Vec<_>, _>>()?;
+            let what = if trait_args.is_empty() {
+                format!("<{self_ty} as {}>::{}", key.1, p.assoc)
+            } else {
+                let args: Vec<String> = trait_args.iter().map(ToString::to_string).collect();
+                format!("<{self_ty} as {}[{}]>::{}", key.1, args.join(", "), p.assoc)
+            };
+            if self.normalizing.borrow().contains(&what) {
+                return Err(d(
+                    "E0612",
+                    format!("projection {what} is defined in terms of itself"),
+                    span,
+                ));
+            }
             let (index, certificate, selection) = self
-                .select(&key, &self_ty, None, generics, function, span)
+                .select(&key, &self_ty, None, &trait_args, generics, function, span)
                 .map_err(|(tag, m)| match tag {
                     1 | 4 => d(
                         "E0612",
@@ -1762,7 +1925,10 @@ impl Elaborator {
             vars.insert("Self".into(), self_ty.clone());
             let value = substitute(&self.fe.conform_type(&binding, c, &vars), &vars);
             self.record(span, &what, certificate, selection);
-            return self.normalize(&value, generics, function, at, span);
+            self.normalizing.borrow_mut().push(what);
+            let out = self.normalize(&value, generics, function, at, span);
+            self.normalizing.borrow_mut().pop();
+            return out;
         }
         Ok(match t {
             Type::Named(n, args) => Type::Named(
@@ -1824,8 +1990,15 @@ impl Elaborator {
     }
 
     /// Normalizes all types of a function in place.
-    fn normalize_function(&self, f: &mut Function, errors: &mut Vec<Diagnostic>) {
-        let generics = f.generics.clone();
+    /// `outer` holds the generics of an enclosing inherent `impl`, which
+    /// scope over the method but are only added to it by `World::collect`.
+    fn normalize_function(
+        &self,
+        f: &mut Function,
+        outer: &[Generic],
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        let generics: Vec<Generic> = outer.iter().chain(&f.generics).cloned().collect();
         let name = f.name.clone();
         let span = f.span.clone();
         walk_function_at(f, &span, &mut |t, at| {
@@ -1862,10 +2035,12 @@ impl Elaborator {
         let mut module = self.fe.base.clone();
         for item in &mut module.items {
             match item {
-                Item::Function(f) => self.normalize_function(f, &mut errors),
-                Item::Impl { methods, .. } => {
+                Item::Function(f) => self.normalize_function(f, &[], &mut errors),
+                Item::Impl {
+                    methods, generics, ..
+                } => {
                     for f in methods {
-                        self.normalize_function(f, &mut errors);
+                        self.normalize_function(f, generics, &mut errors);
                     }
                 }
                 _ => {}
@@ -1874,7 +2049,7 @@ impl Elaborator {
         for c in self.fe.confs.iter().filter(|c| c.local) {
             for m in &c.decl.methods {
                 let mut f = self.generate(c, m);
-                self.normalize_function(&mut f, &mut errors);
+                self.normalize_function(&mut f, &[], &mut errors);
                 module.items.push(Item::Function(Box::new(f)));
             }
         }
@@ -1967,7 +2142,15 @@ impl TraitCalls for Elaborator {
         let mut found = vec![];
         let mut failures = vec![];
         for key in &keys {
-            match self.select(key, &receiver, brand, call.generics, call.function, span) {
+            match self.select(
+                key,
+                &receiver,
+                brand,
+                &[],
+                call.generics,
+                call.function,
+                span,
+            ) {
                 Ok(ok) => found.push((key.clone(), ok)),
                 Err(e) => failures.push((key.clone(), e)),
             }

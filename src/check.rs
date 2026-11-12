@@ -1731,6 +1731,85 @@ impl Checker<'_> {
     /// Resolves a trait call through the frontend. `None`: not a trait call.
     /// `Some(None)`: a trait call that failed (diagnosed). `Some(Some(f))`:
     /// the selected generated function, recorded for elaboration.
+    /// The static type of a trait-call receiver, determined without
+    /// checking the expression (its ownership and effects are checked once,
+    /// when the call is applied). Chained method calls are typed through
+    /// the inherent method or the trait conformance their own receiver
+    /// selects.
+    fn receiver_type(&mut self, e: &Expr, env: &Env) -> Type {
+        if let ExprKind::Literal(l) = &e.kind {
+            return crate::numeric::default_type(&literal_type(l));
+        }
+        let t = self.peek_type(e, env);
+        if t != Type::Infer {
+            return t;
+        }
+        if let Some(t) = self.world.types.get(&(e.span.start, e.span.end))
+            && *t != Type::Infer
+        {
+            return t.clone();
+        }
+        // Receivers that are not places: calls and struct literals have a
+        // declared type.
+        match &e.kind {
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Name(n) if !env.bindings.contains_key(n) => self
+                    .world
+                    .functions
+                    .get(n)
+                    .filter(|f| f.generics.is_empty())
+                    .map(|f| f.result.clone())
+                    .unwrap_or(Type::Infer),
+                ExprKind::Field(base, method) => {
+                    let base_ty = self.receiver_type(base, env);
+                    if base_ty == Type::Infer {
+                        return Type::Infer;
+                    }
+                    let inherent = format!("{}::{method}", base_ty.name());
+                    let f = match self.world.functions.get(&inherent) {
+                        Some(f) => Some(f.clone()),
+                        None => self.traits.and_then(|traits| {
+                            let generics = self.generics.clone();
+                            let current = self.current.clone();
+                            let call = TraitCall {
+                                callee: method,
+                                path: false,
+                                receiver: base_ty.clone(),
+                                generics: &generics,
+                                function: &current,
+                                span: e.span.clone(),
+                            };
+                            match traits.resolve(&call)? {
+                                Ok(name) => self.world.functions.get(&name).cloned(),
+                                Err(_) => None,
+                            }
+                        }),
+                    };
+                    let Some(f) = f else {
+                        return Type::Infer;
+                    };
+                    let Some(first) = f.params.first() else {
+                        return Type::Infer;
+                    };
+                    let mut vars = BTreeMap::new();
+                    infer(&first.ty, &base_ty, &f.generics, &mut vars);
+                    if f.generics.iter().any(|g| !vars.contains_key(&g.name)) {
+                        return Type::Infer;
+                    }
+                    substitute(&f.result, &vars)
+                }
+                _ => Type::Infer,
+            },
+            ExprKind::Struct { name, .. } => self
+                .world
+                .adts
+                .get(name)
+                .filter(|a| a.generics.is_empty() && !a.is_enum)
+                .map(|a| Type::named(&a.name))
+                .unwrap_or(Type::Infer),
+            _ => Type::Infer,
+        }
+    }
     fn trait_call(
         &mut self,
         callee: &str,
@@ -1741,41 +1820,7 @@ impl Checker<'_> {
     ) -> Option<Option<Function>> {
         let traits = self.traits?;
         let receiver = match receiver {
-            Some(Expr {
-                kind: ExprKind::Literal(l),
-                ..
-            }) => crate::numeric::default_type(&literal_type(l)),
-            Some(e) => {
-                let t = self.peek_type(e, env);
-                if t != Type::Infer {
-                    t
-                } else if let Some(t) = self.world.types.get(&(e.span.start, e.span.end)) {
-                    t.clone()
-                } else {
-                    // Receivers that are not places: non-generic calls and
-                    // struct literals have a declared type.
-                    match &e.kind {
-                        ExprKind::Call { callee, .. } => match &callee.kind {
-                            ExprKind::Name(n) if !env.bindings.contains_key(n) => self
-                                .world
-                                .functions
-                                .get(n)
-                                .filter(|f| f.generics.is_empty())
-                                .map(|f| f.result.clone())
-                                .unwrap_or(Type::Infer),
-                            _ => Type::Infer,
-                        },
-                        ExprKind::Struct { name, .. } => self
-                            .world
-                            .adts
-                            .get(name)
-                            .filter(|a| a.generics.is_empty() && !a.is_enum)
-                            .map(|a| Type::named(&a.name))
-                            .unwrap_or(Type::Infer),
-                        _ => Type::Infer,
-                    }
-                }
-            }
+            Some(e) => self.receiver_type(e, env),
             None => Type::Infer,
         };
         let generics = self.generics.clone();

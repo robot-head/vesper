@@ -56,11 +56,11 @@ The surface metadata is additive in `vesper-core::ast`: `Item::Trait(TraitDecl)`
 
 ## Supported static fragment
 
-* **Declarations.** Traits with type and row parameters, associated types with modal bounds, and methods that take a `self` receiver (`in`, `inout` or `sink`). Canonical impls and named models may be generic over modally bounded type parameters, with where-clauses on impl/model parameters.
+* **Declarations.** Traits with type and row parameters, associated types with modal bounds, and methods that take a `self` receiver (`in`, `inout` or `sink`). Canonical impls and named models may be generic over modally bounded type parameters, with where-clauses on impl/model parameters (row arguments in where clauses are lowered as rows, like those in a conformance head). Trait type parameters lower to kind-only Pact parameters; their modal bounds are enforced by the frontend (`E0606`).
 * **Signature checking.** Each impl or model must give exactly the trait's methods and associated types. After substituting `Self`, the trait arguments and its own associated types, each method must match the trait signature: same arity, the same pass mode and place projections for every parameter, the same parameter and result types, and effects included in the trait's. Each associated type binding must satisfy its modal bound, and each trait argument its parameter bound. Then the generated function's body is typechecked against its signature by the ordinary checker, including ownership, effects, handlers, checked arithmetic and the abort/loan/one-shot rules.
 * **Lowering.** Traits, impls and models become `TraitDto`/`ImplDto`/`ModelDto`. Identities are package-qualified `DefPath`s: traits and models by name; impls by an injective key built from the trait and self-type head, such as `Score.Point` or `Show.Box-0-T-2`. Never by span or allocation order. Pact `Program::new` and `check_coherence` gate everything, so orphan and overlap rejection is unchanged. Named models are never canonical.
-* **Calls.** For `x.m(...)`, an inherent `T::m` keeps priority, so original method syntax is unchanged. Otherwise every trait declaring `m` is queried with `Implements(T, Trait[?args])` under the call's `use model` scopes. Exactly one proven trait must remain. `Trait::m(x, ...)` names the trait. `Model::m(x, ...)` queries with an explicit model brand. The consumed `Selection` must be a concrete impl or model of this package. Its generated function is then called with the receiver as the first argument (pass mode from the declaration). Method choice never uses the printed name. Receiver types come from places, literals, non-generic calls and struct literals.
-* **Projections.** Projections in function signatures, `let` annotations, explicit call types and closure and handler types are normalized. `Self::A` inside a conformance uses that conformance's own binding. Any other projection is solved by Pact under the lexical model scopes in effect, and then instantiated from the selected declaration, so under `use model ByB;` the projection `<Key as Rank>::Weight` is `bool`.
+* **Calls.** For `x.m(...)`, an inherent `T::m` keeps priority, so original method syntax is unchanged. Otherwise every trait declaring `m` is queried with `Implements(T, Trait[?args])` under the call's `use model` scopes. Exactly one proven trait must remain. `Trait::m(x, ...)` names the trait. `Model::m(x, ...)` queries with an explicit model brand. The consumed `Selection` must be a concrete impl or model of this package. Its generated function is then called with the receiver as the first argument (pass mode from the declaration). Method choice never uses the printed name. Receiver types come from places, literals, non-generic calls, struct literals and chained method calls (typed through the inherent method or conformance their own receiver selects).
+* **Projections.** Projections in function signatures, `let` annotations, explicit call types and closure and handler types are normalized. `Self::A` inside a conformance uses that conformance's own binding. Any other projection is solved by Pact under the lexical model scopes in effect, and then instantiated from the selected declaration, so under `use model ByB;` the projection `<Key as Rank>::Weight` is `bool`. Explicit trait arguments (`<X as Convert[bool]>::Output`) constrain the selection goal; omitted ones are inferred. Methods of a generic inherent `impl[T] Box[T]` normalize with the impl's parameters in scope.
 * **Generated functions.** They are named `impl$<key>$<method>` or `model$<Name>$<method>` (not spellable in source). They are recorded in `World::elaboration.generated` with `public: false`. Interface export omits them and exports each trait, impl and model as `Unsupported`, so no SemVer certificate can claim compatibility for them (tested: an interface with them is not compatible with itself).
 * **Dependencies (API only).** `FrontendOptions::dependencies` adds already-written packages whose declarations join the coherence check. Source may name their traits as `@scope/name::Trait`. This is what makes the orphan rule observable from source.
 
@@ -71,7 +71,7 @@ Explicitly rejected, before any World is accepted: trait bounds on function gene
 | Code | Meaning |
 | --- | --- |
 | E0600 | Invalid trait declaration: name clash, duplicate parameter, associated type or method, misplaced `self` |
-| E0601 | Malformed conformance: unknown trait or package, arity, missing or extra methods or associated types |
+| E0601 | Malformed conformance: unknown trait or package, arity, missing or extra methods or associated types, cyclic associated type bindings |
 | E0602 | Method signature mismatch: arity, parameter or result type |
 | E0603 | Pass mode or projection mismatch |
 | E0604 | Effect not permitted by the trait signature |
@@ -133,13 +133,13 @@ All commands were run with the coordinator patch applied, `CARGO_TARGET_DIR` set
 cargo fmt --all -- --check                                    ok
 cargo clippy --workspace --locked --all-targets -- -D warnings ok
 cargo test -p vesper --test source_traits --test source_models
-    source_traits: 19 passed (one is the real-Lean test, which skipped: no lean binary)
+    source_traits: 24 passed (one is the real-Lean test, which skipped: no lean binary)
     source_models: 10 passed
 cargo test -p vesper-pact-bridge                              6 modes + 24 session + 4 source_bindings passed
 cargo run -p vesper-pact-bridge --example bridge              ok, unchanged output
 cargo test -p vesper --locked (before the new tests)          all existing root suites passed
 cargo test --workspace --locked --no-fail-fast --exclude vesper-loom-build
-                                                              1059 passed, 0 failed, 0 ignored, 114 suites
+                                                              1064 passed, 0 failed, 0 ignored, 114 suites
 vesper run|jit examples/traits/shapes.ves                     4304070304 on both
 vesper emit … --emit object --target aarch64-unknown-linux-gnu  ELF 64-bit, ARM aarch64
 vesper check examples/traits/overlap_rejected.ves             E0605 (PACT0102)
@@ -221,6 +221,16 @@ The bridge no longer needs `serde` or `sha2` directly; its manifest change is co
 
 No shared schema change is requested. A richer interface schema for traits and models would need, at least, trait declarations (parameters, associated types with bounds, method signatures over `Self`), public named models with their brands, and a canonical-impl inventory, so that adding a blanket impl can be classified as Major. That stays coordinator-owned; until then these exports remain `Unsupported`.
 
+### Review fixes (second commit)
+
+Automated review of the first commit raised five findings. All five reproduced and are fixed, each with a regression test in `tests/source_traits.rs`:
+
+* Cyclic associated type bindings (`type A = Self::A`, mutual, or through a constructor) overflowed the stack during lowering. Expansion now stops on a cycle and the conformance is rejected with `E0601`. A cycle through the concrete self type (`type A = <i64 as T>::A`) is rejected by the coherence gate (`E0605`), and normalization also guards against re-entering a projection (`E0612`).
+* Explicit projection trait arguments were ignored by selection. They are now part of the goal. Fixing this also showed that any trait with a type parameter failed to lower (Pact trait parameters take no modal bound); they now lower kind-only, with bounds still enforced by the frontend.
+* Where-clause arguments for row parameters were lowered as types. They now follow the referenced trait's parameter kinds, in both the declaration and the query assumptions.
+* Chained calls such as `x.next().value()` failed with `E0609`. Receivers are now typed through the inner call's selected function without checking the inner expression twice.
+* Projections in methods of a generic inherent impl did not see the impl's parameters. They now do.
+
 ## Decisions
 
 * **Two-pass elaboration instead of new core nodes.** The first pass resolves trait calls inside the normal checker and records them by call span, with Place-IR validation skipped because surface calls remain. The rewrite then produces plain `Call { callee: Name(generated) }` nodes, and a second ordinary check builds the accepted World. Backends therefore see only nodes they already supported. The same safety checks run twice; nothing is weakened.
@@ -228,7 +238,7 @@ No shared schema change is requested. A richer interface schema for traits and m
 * **Lexical shadowing maps directly to Pact scopes.** Each `use model` is its own scope, ordered outer to inner (and earlier to later within a block). Pact selects from the innermost matching scope.
 * **Generic impls without dictionaries.** A generic impl or model becomes a generic generated function that the existing checker and monomorphizing native backend instantiate. Bodies that would need a where-clause assumption at run time are rejected, not approximated.
 * **Model bodies resolve their own calls lexically.** Inside a model method, `self.other()` resolves like any other call: canonical unless a `use model` is in scope.
-* **Receivers.** A receiver must have a statically known type: a place, a literal, a non-generic call, or a struct literal. Underdetermined receivers are ambiguous (`E0609`) and the diagnostic suggests an annotation.
+* **Receivers.** A receiver must have a statically known type: a place, a literal, a non-generic call, a struct literal, or a chained method call on such a receiver. Underdetermined receivers are ambiguous (`E0609`) and the diagnostic suggests an annotation.
 
 ## Remaining gaps
 
@@ -238,3 +248,4 @@ No shared schema change is requested. A richer interface schema for traits and m
 * Interface export of trait and model contracts beyond `Unsupported`.
 * Lean emits generated functions as ordinary `partial def`s, not Lean classes and instances. Real Lean validation is pending on a host with Lean, and AArch64 execution on a host with QEMU.
 * Function-value use of trait methods (`let f = Show::show;`) is not elaborated.
+* An inherent method called on a chained receiver (`x.next().bump()` with `bump` inherent) still goes through the checker's existing inherent dispatch, which only types place receivers. Trait methods on chained receivers work.

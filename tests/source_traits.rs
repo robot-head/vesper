@@ -509,3 +509,100 @@ fn main() -> i64 { let b = Box { v: 40 }; let x = b.unwrap(); use model Plus; wr
         );
     }
 }
+
+#[test]
+fn cyclic_associated_type_bindings_are_rejected() {
+    // Direct, mutual and through-a-constructor cycles are diagnosed instead
+    // of overflowing the compiler's stack.
+    for assoc in [
+        "type A = Self::A; type B = i64;",
+        "type A = Self::B; type B = <Self as T>::A;",
+        "type A = Box[Self::A]; type B = i64;",
+    ] {
+        let src = format!(
+            "struct Box[X] {{ v: X }} trait T {{ type A; type B; fn get(in self) -> i64; }}
+impl T for i64 {{ {assoc} fn get(in self) -> i64 {{ self }} }}
+fn main() -> i64 {{ 0 }}"
+        );
+        let ds = rejects(&src, "E0601");
+        assert!(
+            ds.iter().any(|d| d.message.contains("cycle")),
+            "{assoc}: {ds:?}"
+        );
+    }
+    // A binding through a projection of the concrete self type is a cycle
+    // the coherence gate reports.
+    rejects(
+        "trait T { type A; fn get(in self) -> i64; }
+impl T for i64 { type A = <i64 as T>::A; fn get(in self) -> i64 { self } }
+fn f(in x: <i64 as T>::A) -> i64 { 0 } fn main() -> i64 { 0 }",
+        "E0605",
+    );
+}
+
+#[test]
+fn qualified_projection_arguments_constrain_selection() {
+    let src = "struct X { v: i64 }
+trait Convert[U] { type Output; fn convert(in self) -> i64; }
+impl Convert[i64] for X { type Output = i64; fn convert(in self) -> i64 { self.v } }
+impl Convert[bool] for X { type Output = bool; fn convert(in self) -> i64 { 0 } }
+fn f(in b: <X as Convert[bool]>::Output, in n: <X as Convert[i64]>::Output) -> i64 { if b { n } else { 0 } }
+fn main() -> i64 { f(true, 42) }";
+    assert_eq!(execute(src), "42");
+    // A conformance with other arguments does not satisfy the projection.
+    rejects(
+        "struct X { v: i64 }
+trait Convert[U] { type Output; fn convert(in self) -> i64; }
+impl Convert[i64] for X { type Output = i64; fn convert(in self) -> i64 { self.v } }
+fn f(in b: <X as Convert[bool]>::Output) -> i64 { 0 } fn main() -> i64 { 0 }",
+        "E0612",
+    );
+}
+
+#[test]
+fn effect_row_arguments_in_where_clauses() {
+    let src = "struct Counter { n: i64 } struct Wrap[C] { c: C }
+linear effect Log { fn log(x: i64) -> Unit; }
+trait Step[r: eff] { fn step(inout self) -> i64 eff [r]; }
+trait Twice { fn twice(in self) -> i64; }
+impl Step[Log] for Counter {
+    fn step(inout self) -> i64 eff [Log] { Log::log(self.n); self.n = wrapping_add(self.n, 1); self.n }
+}
+impl[C] Twice for Wrap[C] where C: Step[Log] { fn twice(in self) -> i64 { 2 } }
+fn main() -> i64 { let w = Wrap { c: Counter { n: 1 } }; w.twice() }";
+    assert_eq!(execute(src), "2");
+}
+
+#[test]
+fn chained_trait_calls_type_their_receivers() {
+    let src = "struct Cell { v: i64 } struct Wrapper { c: Cell }
+trait Next { fn next(in self) -> Cell; }
+trait Grow { fn grow(in self) -> Cell; }
+trait Value { fn value(in self) -> i64; }
+impl Next for Wrapper { fn next(in self) -> Cell { Cell { v: wrapping_add(self.c.v, 1) } } }
+impl Grow for Cell { fn grow(in self) -> Cell { Cell { v: wrapping_add(self.v, 10) } } }
+impl Value for Cell { fn value(in self) -> i64 { wrapping_mul(self.v, 2) } }
+fn main() -> i64 {
+    let x = Wrapper { c: Cell { v: 20 } };
+    let y = Wrapper { c: Cell { v: 0 } };
+    wrapping_add(x.next().value(), wrapping_mul(y.next().grow().value(), 100))
+}";
+    // 21 * 2 = 42; (0 + 1 + 10) * 2 * 100 = 2200.
+    assert_eq!(execute(src), "2242");
+    // The chain behaves like its let-bound form.
+    let bound = src.replace(
+        "wrapping_add(x.next().value()",
+        "let n = x.next(); wrapping_add(n.value()",
+    );
+    assert_eq!(execute(&bound), "2242");
+}
+
+#[test]
+fn inherent_impl_generics_scope_over_method_projections() {
+    let src = "copy struct Box[T: mod copy] { v: T }
+trait Unwrap { type Inner: mod copy; fn unwrap(in self) -> Self::Inner; }
+impl[T: mod copy] Unwrap for Box[T] { type Inner = T; fn unwrap(in self) -> T { self.v } }
+impl[T: mod copy] Box[T] { fn get(in self) -> <Box[T] as Unwrap>::Inner { self.v } }
+fn main() -> i64 { let b = Box { v: 42 }; b.get() }";
+    assert_eq!(execute(src), "42");
+}
