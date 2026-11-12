@@ -152,7 +152,7 @@ the models in that file only (not about the Rust code):
 
 ```
 cargo fmt --all -- --check
-VESPER_LEAN=…/lean-4.24.0-linux/bin/lean cargo test -p vesper-silicon      # 46 tests + 6 doctests
+VESPER_LEAN=…/lean-4.24.0-linux/bin/lean cargo test -p vesper-silicon      # 38 tests + 6 doctests
 VESPER_LEAN=…/lean cargo test --workspace --locked
 cargo clippy --workspace --locked --all-targets -- -D warnings
 lean lean/SiliconFrames.lean
