@@ -73,7 +73,7 @@ class SnapshotTests(unittest.TestCase):
     def test_legacy_37_section_inventory_still_passes(self):
         headings = [f"{number}. Legacy section" for number in range(1, 38)]
         text = "\n".join(f"{heading}\nlegacy" for heading in headings)
-        (self.root / "docs/specification.txt").write_text(text, encoding="utf-8")
+        (self.root / "docs/specification.txt").write_bytes(text.encode("utf-8"))
         self.metadata = {
             "schema_version": 1,
             "snapshot_sha256": hashlib.sha256(text.encode()).hexdigest(),

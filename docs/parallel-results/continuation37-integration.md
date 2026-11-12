@@ -98,6 +98,14 @@ to the root checkout; source-divergent agent worktrees use separate targets.
 Hosted results for the final PR head are tracked on the PR and its workflow
 runs after publication; the earlier PR #35 results do not certify this new batch.
 
+The first [published foundation run](https://github.com/robot-head/vesper/actions/runs/43195786583)
+at `f862902` passed native Ubuntu/macOS contracts, Clippy and all examples, plus
+the Lean model job. Windows caught a portability error in the new legacy Python
+fixture: text-mode output translated LF to CRLF after computing an LF hash.
+The fixture now writes explicit UTF-8 bytes, preserving canonical bytes on every
+platform. Its fourteen regressions pass locally; updated hosted results are
+tracked on [PR #61](https://github.com/robot-head/vesper/pull/61).
+
 ## Remaining boundaries
 
 The archive supports its explicit host tree schema; source derives and general
