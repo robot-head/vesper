@@ -3510,6 +3510,13 @@ name = "vesper-tensor"
 version = "0.1.0"
 
 [[package]]
+name = "vesper-warp"
+version = "0.1.0"
+dependencies = [
+ "vesper-ffi",
+]
+
+[[package]]
 name = "walkdir"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
