@@ -102,6 +102,22 @@ fn exponential_growth_refuses_before_semantic_diagnostics() {
 }
 #[test]
 fn tight_type_depth_and_metadata_limits_refuse_without_snapshots() {
+    let mut deep = "fn f(){let x=0;".to_owned();
+    for _ in 0..15 {
+        deep.push_str("let x=(x,);");
+    }
+    deep.push('}');
+    let failure = check_source(
+        &deep,
+        AnalysisLimits {
+            max_depth: 12,
+            ..Default::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        matches!(failure, AnalysisFailure::Resource { ref reason } if reason.contains("before checking"))
+    );
     let source = "fn f(){let x=0;let x=(x,x);let x=(x,x);let x=(x,x);let x=(x,x);}";
     for limits in [
         AnalysisLimits {
@@ -130,6 +146,9 @@ fn unresolved_calls_higher_order_and_generic_projection_refuse_explicitly() {
         "fn f(in g:fn()->(i64,i64)){let x=g();(x,x)}",
         "fn f(in p:Option[(i64,i64)]){(p.value,)}",
         "fn f(){let x=(1,2);(x[0],)}",
+        "trait Pair{fn pair(in self)->(i64,i64);} fn f()->(i64,){(1,)}",
+        "copy struct P{} impl P{fn pair(in self)->(i64,i64){(1,2)}}",
+        "fn helper()->i64{1} fn helper()->(i64,i64){(1,2)} fn f(){(helper(),)}",
     ] {
         assert!(
             matches!(
@@ -154,6 +173,7 @@ fn ill_typed_wrapping_calls_cannot_hide_tuple_growth() {
 }
 #[test]
 fn bounded_function_values_include_parameters_results_and_effect_arguments() {
+    accepted("fn helper(in p:i64)->i64 eff[Fail[ArithOverflow]]{p} fn f(){(helper,helper);}");
     accepted(
         "fn helper(in p:(i64,i64))->(i64,i64){p} fn f()->((i64,i64),){let g=helper;(g((1,42)),)}",
     );

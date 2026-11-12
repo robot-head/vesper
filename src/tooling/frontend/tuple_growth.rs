@@ -56,6 +56,25 @@ pub(super) fn guard(items: &[&Item], limits: AnalysisLimits) -> Result<(), Strin
         fields_safe: true,
     };
     for item in items {
+        a.step()?;
+        // Pact substitutes Self/associated types into generated methods before
+        // checking. Implicit inherent self types are also replaced by collect.
+        // These are not the closed headers this numeric envelope reasons over.
+        match item {
+            Item::Trait(_) | Item::Conformance(_) => return Err(UNCERTAIN.into()),
+            Item::Impl { methods, .. } => {
+                for f in methods {
+                    a.step()?;
+                    for p in &f.params {
+                        a.step()?;
+                        if p.name == "self" && p.ty == Type::Infer {
+                            return Err(UNCERTAIN.into());
+                        }
+                    }
+                }
+            }
+            _ => (),
+        }
         if let Item::Adt(adt) = item {
             if !adt.generics.is_empty() {
                 continue;
@@ -68,6 +87,7 @@ pub(super) fn guard(items: &[&Item], limits: AnalysisLimits) -> Result<(), Strin
         }
     }
     for item in items {
+        a.step()?;
         match item {
             Item::Function(f) => a.function(f)?,
             Item::Effect(e) => {
@@ -212,10 +232,11 @@ impl<'a> Admission<'a> {
         })
     }
     fn memory(&mut self) -> Result<(), String> {
+        let env = self.env_bytes()?;
         let bytes = self
             .retained_bytes
             .checked_add(self.snapshot_bytes)
-            .and_then(|n| self.env_bytes().ok().and_then(|e| n.checked_add(e)))
+            .and_then(|n| n.checked_add(env))
             .ok_or(BUDGET)?;
         if bytes > self.limits.max_metadata_bytes {
             return Err(BUDGET.into());
@@ -266,10 +287,15 @@ impl<'a> Admission<'a> {
         Ok(None)
     }
     fn known(&mut self, name: &str) -> Result<Option<&'a Function>, String> {
+        let mut found = None;
         for item in self.items {
             self.step()?;
             match item {
-                Item::Function(f) if f.name == name => return Ok(Some(f)),
+                Item::Function(f) if f.name == name => {
+                    if found.replace(f.as_ref()).is_some() {
+                        return Err(UNCERTAIN.into());
+                    }
+                }
                 Item::Effect(e) => {
                     if let Some((prefix, op)) = name.split_once("::")
                         && prefix == e.name
@@ -279,8 +305,8 @@ impl<'a> Admission<'a> {
                         }
                         for f in &e.ops {
                             self.step()?;
-                            if f.name == op {
-                                return Ok(Some(f));
+                            if f.name == op && found.replace(f).is_some() {
+                                return Err(UNCERTAIN.into());
                             }
                         }
                     }
@@ -290,7 +316,7 @@ impl<'a> Admission<'a> {
                     methods,
                     generics,
                 } => {
-                    if let Some((prefix, method)) = name.split_once("::")
+                    if let Some((prefix, method)) = name.rsplit_once("::")
                         && prefix == ty.name()
                     {
                         if !generics.is_empty() {
@@ -298,8 +324,8 @@ impl<'a> Admission<'a> {
                         }
                         for f in methods {
                             self.step()?;
-                            if f.name == method {
-                                return Ok(Some(f));
+                            if f.name == method && found.replace(f).is_some() {
+                                return Err(UNCERTAIN.into());
                             }
                         }
                     }
@@ -307,7 +333,7 @@ impl<'a> Admission<'a> {
                 _ => (),
             }
         }
-        Ok(None)
+        Ok(found)
     }
     fn constructor(&mut self, name: &str) -> Result<bool, String> {
         for item in self.items {
@@ -378,10 +404,10 @@ impl<'a> Admission<'a> {
         if !v.projection_safe {
             return Err(UNCERTAIN.into());
         }
-        if let Some(Type::Tuple(ts)) = v.exact {
-            if let Some(t) = name.parse::<usize>().ok().and_then(|i| ts.get(i)) {
-                return self.ty(t);
-            }
+        if let Some(Type::Tuple(ts)) = v.exact
+            && let Some(t) = name.parse::<usize>().ok().and_then(|i| ts.get(i))
+        {
+            return self.ty(t);
         }
         if let Some(Type::Named(n, _)) = v.exact {
             for item in self.items {

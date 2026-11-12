@@ -23,7 +23,11 @@ The guard checks vector storage before reserve_exact; tracks environment-copy
 and retained expression metadata envelopes; caps type size/depth with existing
 limits; and bounds recursive visits and borrowed scans. Unknown calls,
 higher-order/latent arrow refinement, handlers, dynamic indexing and unsafe
-generic projections explicitly refuse. Existing programs without nonempty tuple
+generic projections explicitly refuse. Trait/conformance elaboration and
+implicit inherent self replacement also refuse because their generated headers
+require substitution outside this envelope. Referenced duplicate functions or
+effect operations refuse, including semantically invalid declarations whose
+last checker header differs from an earlier declaration. Existing programs without nonempty tuple
 construction retain their previous admission behavior. This conservative subset
 can refuse larger or uncertain tuple programs even when the ordinary checker
 would accept them. Post-check type/metadata guards remain in place.
@@ -38,5 +42,14 @@ incremental0):
   verifies it without checker entry.
 - New tests compare real tuple error diagnostics byte-for-byte with the unchanged
   ordinary checker, and verify real source/hash/AST/type/World identity.
-- Strict Clippy, focused existing frontend unit tests and formatting checks are
-  pending in this initial report.
+- `cargo test -p vesper --lib tooling::frontend::tests --quiet`: all 5 existing
+  frontend unit tests pass.
+- `cargo clippy -p vesper --lib --test tuple_analysis --test forge_tuples -- -D
+  warnings`: passes after fixing three style-only collapsible-if findings.
+- Follow-up hardening and regressions for substituted/duplicate headers, inferred
+  depth from flat source, and latent-effect function values retain all 9+11
+  passing actual tuple integration tests.
+- `cargo test -p vesper --test recovery_analysis --quiet`: all 8 existing
+  recovery tests pass.
+- Final strict targeted Clippy, `cargo fmt --all -- --check` and
+  `git diff --check` pass. No checks were bypassed or limits raised.
