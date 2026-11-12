@@ -12,6 +12,8 @@ implement JSON codecs, Beacon, Quarry, Tensor, Flux and Aether under the
 [expanded ownership contracts](rfcs/expansion-37-contracts.md). Their source paths
 are independent of externally merging wave three. The coordinator supplies CLI
 wiring, root registration and the new `Expanded foundation contracts` workflow.
+[Integrated results and validation](parallel-results/expansion-37-integration.md)
+record the completed slices and remaining boundaries.
 
 | Lane | Branch | Exclusive implementation |
 | --- | --- | --- |
