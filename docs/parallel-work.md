@@ -1,6 +1,6 @@
 # Parallel implementation lanes
 
-Base checkpoint: `c5328d0`. Integration branch: `work`. Remote: https://github.com/robot-head/vesper.
+Base checkpoint: `c5328d0`. Integration branch: `main` (the `work` branch was merged in PR #9). Remote: https://github.com/robot-head/vesper.
 The expanded design lives in [specification.txt](specification.txt); the implemented core baseline is [core-specification-baseline.txt](core-specification-baseline.txt).
 
 ## First-wave results
@@ -34,7 +34,7 @@ Do not assign a prompt to two agents simultaneously. Record the external branch/
 
 ## Integration rules
 
-1. Fetch `origin/work` and create a separate branch/checkout. Rebase once before integration rather than repeatedly rewriting a running lane.
+1. Fetch `origin/main` and create a separate branch/checkout. Rebase once before integration rather than repeatedly rewriting a running lane.
 2. Keep root `Cargo.toml`, `Cargo.lock`, shared compiler representations, CLI routing, and CI under one integration owner.
 3. New independent crates may temporarily declare their own `[workspace]` to test before registration. Integration removes that table and nested lockfile, registers the crate in both workspace members/default-members, and updates the root lockfile.
 4. Transport DTOs and experimental contracts must carry a schema/ABI version. Do not pretend they are already the compiler's canonical `.vhir` representation. Adapters are separate integration milestones.
@@ -68,7 +68,7 @@ The coordinator owns source-interface export, CLI adapters, and offline local-ca
 | --- | --- | --- |
 | Checked interface export | `parallel/interface-export` | Integrated: `src/interface.rs`, 13 focused tests |
 | Offline solver | `parallel/loom-solver` | Integrated: `crates/vesper-loom-solver/**`, 19 focused tests |
-| CLI/integration | `work` | Integrated: source-interface/SemVer/offline resolve commands, 7 end-to-end tests |
+| CLI/integration | `main` | Integrated: source-interface/SemVer/offline resolve commands, 7 end-to-end tests |
 
 Usage and guarantees are in [package-workflows.md](package-workflows.md).
 
