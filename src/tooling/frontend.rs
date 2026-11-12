@@ -150,12 +150,25 @@ fn diagnostic_span_bounded(span: &Span, source: &str) -> Result<(), AnalysisFail
     }
     Ok(())
 }
-fn diagnostics_bounded(
+pub(super) fn diagnostics_bounded(
     diagnostics: &[Diagnostic],
     source: &str,
     limits: AnalysisLimits,
 ) -> Result<(), AnalysisFailure> {
-    if diagnostics.len() > limits.max_diagnostics {
+    diagnostic_parts_bounded(&[diagnostics], source, limits)
+}
+// Shared aggregate gate for original syntax plus scoped diagnostic components.
+// Borrowed parts avoid cloning any labels/help before validation.
+pub(super) fn diagnostic_parts_bounded(
+    parts: &[&[Diagnostic]],
+    source: &str,
+    limits: AnalysisLimits,
+) -> Result<(), AnalysisFailure> {
+    let count = parts
+        .iter()
+        .try_fold(0usize, |n, part| n.checked_add(part.len()))
+        .ok_or_else(|| resource("analysis diagnostic count overflow"))?;
+    if count > limits.max_diagnostics {
         return Err(resource("analysis diagnostic count exceeded"));
     }
     let max_related = limits
@@ -164,7 +177,7 @@ fn diagnostics_bounded(
         .ok_or_else(|| resource("analysis diagnostic count overflow"))?;
     let mut related_count = 0usize;
     let mut bytes = 0usize;
-    for d in diagnostics {
+    for d in parts.iter().flat_map(|part| part.iter()) {
         if d.related.len() > MAX_RELATED_LABELS_PER_DIAGNOSTIC {
             return Err(resource("analysis related diagnostic count exceeded"));
         }
@@ -217,7 +230,10 @@ impl io::Write for Bytes {
         Ok(())
     }
 }
-fn metadata<T: serde::Serialize>(value: &T, remaining: &mut usize) -> Result<(), AnalysisFailure> {
+pub(super) fn metadata<T: serde::Serialize>(
+    value: &T,
+    remaining: &mut usize,
+) -> Result<(), AnalysisFailure> {
     let mut writer = Bytes {
         remaining: *remaining,
     };
@@ -410,6 +426,34 @@ pub fn check_source(
 }
 
 fn editor_ast_guard(module: &crate::ast::Module, limits: AnalysisLimits) -> Result<(), String> {
+    if module.items.len() > limits.max_ast_nodes {
+        return Err("parsed AST node/depth budget exceeded".into());
+    }
+    let items = module.items.iter().collect::<Vec<_>>();
+    ast_items_guard(
+        &items,
+        &module.trait_bounds,
+        module.model_uses.len(),
+        limits,
+    )
+}
+/// Same immutable AST/inference gate for source-matched recovery components,
+/// before any owned component Module is cloned for the normal checker.
+pub(super) fn recovery_items_guard(
+    items: &[&Item],
+    limits: AnalysisLimits,
+) -> Result<(), AnalysisFailure> {
+    limits.validate()?;
+    ast_items_guard(items, &[], 0, limits).map_err(guard_failure)?;
+    let mut bytes = limits.max_metadata_bytes;
+    metadata(&items, &mut bytes)
+}
+fn ast_items_guard(
+    items: &[&Item],
+    trait_bounds: &[TraitBoundSyntax],
+    model_uses: usize,
+    limits: AnalysisLimits,
+) -> Result<(), String> {
     use crate::ast::{
         Clause, Expr, ExprKind as E, Function, Item, Pattern, PatternKind as P, Statement,
     };
@@ -436,7 +480,7 @@ fn editor_ast_guard(module: &crate::ast::Module, limits: AnalysisLimits) -> Resu
     .into_iter()
     .map(str::to_owned)
     .collect();
-    for item in &module.items {
+    for item in items.iter().copied() {
         match item {
             Item::Function(f) if !f.generics.is_empty() => {
                 generic_values.insert(f.name.clone());
@@ -486,20 +530,18 @@ fn editor_ast_guard(module: &crate::ast::Module, limits: AnalysisLimits) -> Resu
         }
     }
     let mut allowed_closures = BTreeSet::new();
-    let mut stack: Vec<_> = module
-        .items
+    let mut stack: Vec<_> = items
         .iter()
+        .copied()
         .map(|item| (Node::Item(item), 0usize))
         .collect();
-    for bound in &module.trait_bounds {
+    for bound in trait_bounds {
         for arg in &bound.trait_ref.args {
             stack.push((Node::Type(arg), 0));
         }
     }
-    let mut count = module
-        .model_uses
-        .len()
-        .checked_add(module.trait_bounds.len())
+    let mut count = model_uses
+        .checked_add(trait_bounds.len())
         .ok_or("analysis AST metadata overflow")?;
     if count > limits.max_ast_nodes {
         return Err("analysis AST metadata budget exceeded".into());

@@ -2,3 +2,4 @@
 pub mod doc;
 pub mod frontend;
 pub mod lint;
+pub mod recovery;

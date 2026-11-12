@@ -4034,6 +4034,7 @@ version = "0.1.0"
 name = "vesper-syntax"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "logos",
  "rowan",
  "serde_json",

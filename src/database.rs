@@ -1,7 +1,8 @@
 //! Salsa-backed revisioned source inputs and memoized frontend queries.
 //!
-//! Editor consumers must use [`guarded_analysis`]. The original parse/check/
-//! diagnostics queries below retain their historical batch behavior.
+//! Semantic editor consumers must use [`guarded_analysis`]. Recovery inputs
+//! support diagnostic-only analysis; the original parse/check/diagnostics queries
+//! below retain their historical batch behavior.
 use crate::{
     ast::{self, Diagnostic},
     check::{self, Checked},
@@ -505,4 +506,80 @@ mod tests {
         file.set_text(&mut db).to("fn main() { unknown }".into());
         assert!(diagnostics(&db, file).iter().any(|d| d.code == "E0201"));
     }
+}
+
+/// A sealed AST-free recovery snapshot. Equality is allocation identity, keeping
+/// Salsa input updates bounded and preventing accidental deep CST comparisons.
+#[derive(Clone, Debug)]
+pub struct SyntaxSnapshot(Arc<vesper_syntax::recovery::RecoverySyntax>);
+impl SyntaxSnapshot {
+    pub fn new(syntax: Arc<vesper_syntax::recovery::RecoverySyntax>) -> Self {
+        Self(syntax)
+    }
+    pub fn syntax(&self) -> &vesper_syntax::recovery::RecoverySyntax {
+        &self.0
+    }
+    pub fn syntax_arc(&self) -> &Arc<vesper_syntax::recovery::RecoverySyntax> {
+        &self.0
+    }
+}
+impl PartialEq for SyntaxSnapshot {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for SyntaxSnapshot {}
+#[salsa::input]
+pub struct RecoveryFile {
+    #[returns(ref)]
+    pub snapshot: SyntaxSnapshot,
+}
+#[derive(Debug)]
+struct RecoveryQuery {
+    input: SyntaxSnapshot,
+    result: Result<
+        Arc<crate::tooling::recovery::RecoveryDiagnostics>,
+        crate::tooling::recovery::RecoveryFailure,
+    >,
+}
+impl PartialEq for RecoveryQuery {
+    fn eq(&self, other: &Self) -> bool {
+        self.input == other.input
+            && match (&self.result, &other.result) {
+                (Ok(a), Ok(b)) => Arc::ptr_eq(a, b),
+                (Err(a), Err(b)) => a == b,
+                _ => false,
+            }
+    }
+}
+// Salsa input setters invalidate unconditionally. This actual tracked identity
+// boundary backdates identical sealed Arc values without comparing source/CSTs.
+#[salsa::tracked(returns(ref))]
+fn recovery_input(db: &dyn salsa::Database, file: RecoveryFile) -> SyntaxSnapshot {
+    file.snapshot(db).clone()
+}
+#[salsa::tracked(returns(ref), no_eq)]
+fn recovery_query(db: &dyn salsa::Database, file: RecoveryFile) -> RecoveryQuery {
+    let input = recovery_input(db, file);
+    let result = crate::tooling::recovery::analyze(
+        input.syntax(),
+        crate::tooling::recovery::RecoveryLimits::default(),
+    )
+    .map(Arc::new);
+    RecoveryQuery {
+        input: input.clone(),
+        result,
+    }
+}
+/// Diagnostic-only analysis of the actual sealed snapshot carried by this input.
+/// Consumers must match its exact source/hash to their current document. Neither
+/// this query nor RecoverySyntax can authorize semantic editor operations.
+pub fn recovery_diagnostics(
+    db: &dyn salsa::Database,
+    file: RecoveryFile,
+) -> &Result<
+    Arc<crate::tooling::recovery::RecoveryDiagnostics>,
+    crate::tooling::recovery::RecoveryFailure,
+> {
+    &recovery_query(db, file).result
 }

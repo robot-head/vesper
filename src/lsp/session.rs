@@ -1,7 +1,7 @@
 //! In-memory bounded editor lifecycle. URIs are labels, never filesystem paths.
 use super::{actions, navigation, search};
 use crate::{
-    database::{self, Database, SourceFile},
+    database::{self, Database, RecoveryFile, SourceFile, SyntaxSnapshot},
     tooling::{
         frontend::{AnalysisFailure, CheckedSource},
         lint::ConfigProvenance,
@@ -12,6 +12,10 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 use vesper_lint::policy::Policy;
 use vesper_lsp::{ContentChange, DocumentStore, Envelope, Position, Range, StoreLimits};
+use vesper_syntax::{
+    incremental::{SyntaxDocument, UpdateKind},
+    recovery::{self, RecoverySyntax},
+};
 
 const RESET_REVISIONS: usize = 64;
 const ANALYSIS_UNAVAILABLE: i32 = -32003;
@@ -50,11 +54,25 @@ enum Lifecycle {
     Exited,
 }
 
+/// Syntax and database inputs always advance together after a successful store
+/// transaction. A failed syntax update drops the old mirror for that new text.
+enum RecoveryMirror {
+    Ready {
+        document: SyntaxDocument,
+        file: RecoveryFile,
+        update_kind: &'static str,
+    },
+    Unavailable {
+        reason: String,
+    },
+}
+
 pub(crate) struct Session {
     state: Lifecycle,
     documents: DocumentStore,
     db: Database,
     files: BTreeMap<String, SourceFile>,
+    recovery: BTreeMap<String, RecoveryMirror>,
     accepted_revisions: usize,
     policy: Policy,
     hierarchical_symbols: bool,
@@ -69,6 +87,7 @@ impl Session {
             documents: DocumentStore::new(StoreLimits::default()).map_err(|e| e.to_string())?,
             db: Database::default(),
             files: BTreeMap::new(),
+            recovery: BTreeMap::new(),
             accepted_revisions: 0,
             policy: Policy::default(),
             hierarchical_symbols: false,
@@ -140,7 +159,8 @@ impl Session {
                 "hoverProvider":true,"definitionProvider":true,
                 "documentSymbolProvider":true,"workspaceSymbolProvider":true,
                 "documentFormattingProvider":true,
-                "codeActionProvider":code_actions
+                "codeActionProvider":code_actions,
+                "experimental":{"vesperRecoveryStatus":{"scope":"syntax_only","version":1}}
             },"serverInfo":{"name":"vesper","version":env!("CARGO_PKG_VERSION")}}));
         }
         self.running()?;
@@ -160,6 +180,7 @@ impl Session {
                 | "textDocument/documentSymbol"
                 | "workspace/symbol"
                 | "vesper/signatureSearch"
+                | "vesper/recoveryStatus"
                 | "textDocument/formatting"
                 | "textDocument/codeAction"
         ) {
@@ -167,6 +188,7 @@ impl Session {
         }
         let params = object(params.as_ref())?;
         match method {
+            "vesper/recoveryStatus" => self.recovery_status(document_uri(params)?),
             "textDocument/hover" | "textDocument/definition" => {
                 let uri = document_uri(params)?;
                 let at = position(field(params, "position")?)?;
@@ -399,19 +421,98 @@ impl Session {
                 SourceFile::new(&self.db, document.text().to_owned()),
             );
         }
+        let text = document.text();
+        let mirror = match self.recovery.remove(uri) {
+            Some(RecoveryMirror::Ready {
+                mut document, file, ..
+            }) => match document.update(text) {
+                Ok(kind) => {
+                    file.set_snapshot(&mut self.db)
+                        .to(SyntaxSnapshot::new(Arc::clone(document.snapshot())));
+                    RecoveryMirror::Ready {
+                        document,
+                        file,
+                        update_kind: update_label(kind),
+                    }
+                }
+                Err(error) => RecoveryMirror::Unavailable {
+                    reason: error.to_string(),
+                },
+            },
+            _ => open_recovery(&self.db, text),
+        };
+        self.recovery.insert(uri.to_owned(), mirror);
     }
     fn reset_database(&mut self) {
         // Every old SourceFile is discarded with its database. No stale IDs
         // survive in the mirror, including IDs of still-open documents.
         self.files.clear();
+        self.recovery.clear();
         self.db = Database::default();
         for document in self.documents.iter() {
             self.files.insert(
                 document.uri().to_owned(),
                 SourceFile::new(&self.db, document.text().to_owned()),
             );
+            self.recovery.insert(
+                document.uri().to_owned(),
+                open_recovery(&self.db, document.text()),
+            );
         }
         self.accepted_revisions = 0;
+    }
+
+    fn recovery_snapshot(
+        &self,
+        uri: &str,
+    ) -> Result<(&RecoverySyntax, RecoveryFile, &'static str), ServerError> {
+        let current = self.document(uri)?;
+        let unavailable = |reason: &str| ServerError {
+            code: ANALYSIS_UNAVAILABLE,
+            message: "Recovery syntax is unavailable".into(),
+            data: Some(json!({"status":"analysis_unavailable","kind":"recovery",
+                "reason":reason,"uri":uri,"version":current.version(),
+                "source_blake3":blake3::hash(current.text().as_bytes()).to_hex().as_str()})),
+        };
+        match self.recovery.get(uri) {
+            Some(RecoveryMirror::Ready {
+                document,
+                file,
+                update_kind,
+            }) => {
+                let syntax = document.snapshot().as_ref();
+                if syntax.source() != current.text() {
+                    return Err(unavailable("current source identity mismatch"));
+                }
+                Ok((syntax, *file, *update_kind))
+            }
+            Some(RecoveryMirror::Unavailable { reason }) => Err(unavailable(reason)),
+            None => Err(unavailable("current recovery mirror is missing")),
+        }
+    }
+
+    fn recovery_status(&self, uri: &str) -> Result<Value, ServerError> {
+        let current = self.document(uri)?;
+        let (syntax, _, update_kind) = self.recovery_snapshot(uri)?;
+        let declarations: Vec<_> = syntax.declarations().iter().map(|declaration| {
+            json!({"kind":declaration.kind.as_str(),
+                "name":declaration.name_span.as_ref().map(|span| &syntax.source()[span.clone()]),
+                "span":byte_range(&declaration.span),"header_span":byte_range(&declaration.header_span),
+                "body_span":declaration.body_span.as_ref().map(byte_range),
+                "status":declaration.status.as_str()})
+        }).collect();
+        let sites: Vec<_> = syntax.sites().iter().map(|site| {
+            json!({"kind":site.kind.as_str(),"span":byte_range(&site.span),
+                "declaration_index":site.owner,"receiver":site.receiver.as_ref().map(|receiver| {
+                    json!({"root":byte_range(&receiver.root),
+                        "projections":receiver.projections.iter().map(byte_range).collect::<Vec<_>>()})
+                })})
+        }).collect();
+        Ok(
+            json!({"scope":"syntax_only","uri":uri,"version":current.version(),
+            "source_blake3":hash_text(Some(syntax.source_hash())),"byte_length":syntax.source().len(),
+            "update_kind":update_kind,"declarations":declarations,"sites":sites}),
+        )
     }
     fn diagnostics(&self, uri: &str) -> Result<Envelope, ServerError> {
         let document = self.document(uri)?;
@@ -420,8 +521,21 @@ impl Session {
             .get(uri)
             .ok_or_else(|| ServerError::internal("source mirror missing"))?;
         let analysis = database::guarded_analysis(&self.db, file);
+        let mut recovery = None;
         let (mut diagnostics, status, kind) = match analysis.checked() {
             Ok(_) => (Vec::new(), "checked", None),
+            Err(failure @ AnalysisFailure::Parse { .. }) => match self.recovery_payload(uri) {
+                Ok((payload, metadata)) => {
+                    recovery = Some(metadata);
+                    payload
+                }
+                Err(error) => {
+                    recovery = Some(json!({"scope":"unavailable",
+                            "reason":error.data.as_ref().and_then(|value| value.get("reason"))
+                                .cloned().unwrap_or_else(|| json!(error.message))}));
+                    diagnostic_payload(uri, document.index(), failure)?
+                }
+            },
             Err(failure) => diagnostic_payload(uri, document.index(), failure)?,
         };
         // Validation covers every supplied span before optional presentation
@@ -440,12 +554,73 @@ impl Session {
                 }
             }
         }
+        let mut metadata = json!({"status":status,"kind":kind,
+            "source_blake3":hash_text(analysis.source_identity().blake3())});
+        if let Some(recovery) = recovery {
+            metadata["recovery"] = recovery;
+        }
         Ok(notification(
             "textDocument/publishDiagnostics",
             json!({"uri":uri,"version":document.version(),
-            "diagnostics":diagnostics,"vesper":{"status":status,"kind":kind,
-                "source_blake3":hash_text(analysis.source_identity().blake3())}}),
+            "diagnostics":diagnostics,"vesper":metadata}),
         ))
+    }
+    fn recovery_payload(&self, uri: &str) -> Result<(DiagnosticPayload, Value), ServerError> {
+        let current = self.document(uri)?;
+        let (syntax, file, _) = self.recovery_snapshot(uri)?;
+        if syntax.diagnostics().is_empty() {
+            // A disagreement between the editor and strict parser cannot make
+            // the original parse failure disappear or become checked authority.
+            return Err(ServerError::internal("strict and recovery syntax disagree"));
+        }
+        let scoped = database::recovery_diagnostics(&self.db, file);
+        let (semantic, metadata) = match scoped {
+            Ok(scoped) => {
+                if scoped.source() != current.text() || scoped.source_hash() != syntax.source_hash()
+                {
+                    return Err(ServerError::internal(
+                        "recovery diagnostics source identity mismatch",
+                    ));
+                }
+                let analyzed: Vec<_> = scoped
+                    .analyzed_functions()
+                    .iter()
+                    .map(|coverage| json!({"span":byte_range(&coverage.span),"name":coverage.name}))
+                    .collect();
+                let unavailable: Vec<_> = scoped.unavailable().iter().map(|region| {
+                    json!({"span":byte_range(&region.span),"reason":region.reason.as_str()})
+                }).collect();
+                (
+                    scoped.diagnostics(),
+                    json!({"scope":"independent_functions",
+                    "analyzed_functions":analyzed,"unavailable":unavailable}),
+                )
+            }
+            Err(error) => (
+                &[][..],
+                json!({"scope":"unavailable","reason":error.to_string(),
+                "analyzed_functions":[],"unavailable":[{"span":{"start":0,"end":current.text().len()},
+                    "reason":"scoped_analysis_unavailable"}]}),
+            ),
+        };
+        // Both producers have finite independent budgets. The shared renderer
+        // then validates their combined spans, labels, text and output limits.
+        let mut diagnostics = syntax.diagnostics().to_vec();
+        diagnostics.extend_from_slice(semantic);
+        let payload = diagnostic_payload(
+            uri,
+            current.index(),
+            &AnalysisFailure::Parse { diagnostics },
+        )?;
+        if payload.1 == "analysis_unavailable" {
+            return Ok((
+                payload,
+                json!({"scope":"unavailable","reason":"diagnostic_metadata",
+                "analyzed_functions":[],"unavailable":[{"span":{"start":0,"end":current.text().len()},
+                    "reason":"diagnostic_metadata"}]}),
+            ));
+        }
+        Ok((payload, metadata))
     }
     fn code_actions(&self, params: &serde_json::Map<String, Value>) -> Result<Value, ServerError> {
         if !self.code_actions_supported {
@@ -525,6 +700,31 @@ fn notification(method: &str, params: Value) -> Envelope {
         method: method.into(),
         params: Some(params),
     }
+}
+fn update_label(kind: UpdateKind) -> &'static str {
+    match kind {
+        UpdateKind::Unchanged => "unchanged",
+        UpdateKind::BodyReparse => "body_reparse",
+        UpdateKind::FullReparse => "full_reparse",
+    }
+}
+fn open_recovery(db: &Database, text: &str) -> RecoveryMirror {
+    match SyntaxDocument::open(text, recovery::Limits::default()) {
+        Ok(document) => {
+            let file = RecoveryFile::new(db, SyntaxSnapshot::new(Arc::clone(document.snapshot())));
+            RecoveryMirror::Ready {
+                document,
+                file,
+                update_kind: "opened",
+            }
+        }
+        Err(error) => RecoveryMirror::Unavailable {
+            reason: error.to_string(),
+        },
+    }
+}
+fn byte_range(span: &std::ops::Range<usize>) -> Value {
+    json!({"start":span.start,"end":span.end})
 }
 fn object(value: Option<&Value>) -> Result<&serde_json::Map<String, Value>, ServerError> {
     value
@@ -939,6 +1139,7 @@ mod tests {
         }
         assert_eq!(session.accepted_revisions, 0);
         assert_eq!(session.files.len(), 2);
+        assert_eq!(session.recovery.len(), 2);
         for document in session.documents.iter() {
             assert_eq!(
                 session.files[document.uri()].text(&session.db),
@@ -948,6 +1149,9 @@ mod tests {
                 session.snapshot(document.uri()).unwrap().source(),
                 document.text()
             );
+            let (syntax, _, update_kind) = session.recovery_snapshot(document.uri()).unwrap();
+            assert_eq!(syntax.source(), document.text());
+            assert_eq!(update_kind, "opened");
         }
         let cleared = publish(
             session
@@ -959,7 +1163,9 @@ mod tests {
         );
         assert_eq!(cleared["diagnostics"], json!([]));
         assert_eq!(session.files.len(), 1);
+        assert_eq!(session.recovery.len(), 1);
         assert!(!session.files.contains_key("opaque:a"));
+        assert!(!session.recovery.contains_key("opaque:a"));
         assert_eq!(
             session.snapshot("opaque:b").unwrap().source(),
             "//later\nfn b()->u64{2}"
@@ -968,6 +1174,56 @@ mod tests {
         let snapshot = session.snapshot("opaque:a").unwrap();
         assert!(snapshot.world().functions.contains_key("fresh"));
         assert!(!snapshot.world().functions.contains_key("a"));
+    }
+    #[test]
+    fn failed_recovery_update_discards_old_snapshot_for_accepted_new_source() {
+        let mut session = running(true);
+        open(&mut session, "opaque:a", "fn a()->u64{1}");
+        assert_eq!(
+            session.recovery_status("opaque:a").unwrap()["update_kind"],
+            "opened"
+        );
+        // Accepted by the document byte budget, rejected by recovery's smaller
+        // token budget. The prior complete tree must not answer this revision.
+        let new_source = format!("fn a(){{{}}}", ";".repeat(20_000));
+        change(&mut session, "opaque:a", 2, &new_source);
+        assert_eq!(session.document("opaque:a").unwrap().text(), new_source);
+        assert!(matches!(
+            session.recovery["opaque:a"],
+            RecoveryMirror::Unavailable { .. }
+        ));
+        let error = session.recovery_status("opaque:a").unwrap_err();
+        assert_eq!(error.code, ANALYSIS_UNAVAILABLE);
+        let data = error.data.unwrap();
+        assert_eq!(data["version"], 2);
+        assert_eq!(
+            data["source_blake3"],
+            blake3::hash(new_source.as_bytes()).to_hex().as_str()
+        );
+        change(&mut session, "opaque:a", 3, "fn restored(){}");
+        let restored = session.recovery_status("opaque:a").unwrap();
+        assert_eq!(restored["version"], 3);
+        assert_eq!(restored["declarations"][0]["name"], "restored");
+        assert_eq!(restored["update_kind"], "opened");
+    }
+    #[test]
+    fn recovery_requests_reject_stale_mirror_and_non_open_uris() {
+        let mut session = running(true);
+        open(&mut session, "opaque:a", "fn a(){}");
+        open(&mut session, "opaque:b", "fn b(){}");
+        let mirror = session.recovery.remove("opaque:a").unwrap();
+        session.recovery.insert("opaque:b".into(), mirror);
+        assert_eq!(
+            session.recovery_status("opaque:b").unwrap_err().code,
+            ANALYSIS_UNAVAILABLE
+        );
+        let error = session
+            .request(
+                "vesper/recoveryStatus",
+                Some(json!({"textDocument":{"uri":"file:///never/read.vsp"}})),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, -32602);
     }
     #[test]
     fn unsupported_and_invalid_spans_publish_explicit_unavailable_warnings() {
