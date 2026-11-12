@@ -128,3 +128,153 @@ fn legacy_self_names_and_projections_retain_actual_token_ranges() {
     assert_eq!(receiver.projections.len(), 1);
     assert_eq!(&source[receiver.projections[0].clone()], "self");
 }
+
+#[test]
+fn missing_calls_and_braces_recover_only_unambiguous_real_siblings() {
+    for source in [
+        "fn damaged(sink tx:Tx){unknown(}\r\nfn leak(sink other:Tx){}",
+        "fn damaged(sink tx:Tx){\r\nfn leak(sink other:Tx){}",
+    ] {
+        let r = parser::parse_recovery(source, Limits::default()).unwrap();
+        assert_eq!(r.syntax().text().to_string(), source);
+        assert_eq!(r.declarations().len(), 2, "{source}");
+        assert_eq!(r.declarations()[0].status, DS::Recovered);
+        assert_eq!(r.declarations()[1].status, DS::Complete);
+    }
+}
+
+#[test]
+fn lexical_and_macro_contexts_do_not_mint_declarations_from_text() {
+    for source in [
+        "fn payload(){opaque!(fn forged(){})}\r\nfn real(){}",
+        "fn payload(){let s=\"fn forged(){}\";} // fn fake(){}\nfn real(){}",
+        "/* fn forged(){} */ fn real(){}",
+    ] {
+        let r = parser::parse_recovery(source, Limits::default()).unwrap();
+        assert_eq!(r.syntax().text().to_string(), source);
+        assert!(r.declarations().iter().all(|d| {
+            d.name_span
+                .as_ref()
+                .is_none_or(|span| &source[span.clone()] != "forged")
+        }));
+        if source.contains("opaque!") {
+            assert!(r.sites().iter().any(|s| s.kind == SiteKind::OpaqueMacro));
+        }
+    }
+    let source = "fn payload(){let s=\"unterminated\nfn forged(){}";
+    let r = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(r.syntax().text().to_string(), source);
+    assert_eq!(r.declarations().len(), 1);
+    assert_eq!(r.declarations()[0].status, DS::Opaque);
+    assert!(r.sites().iter().any(|s| s.kind == SiteKind::OpaqueLexical));
+}
+
+#[test]
+fn complete_item_authority_rejects_recovered_duplicate_reversed_and_foreign_indices() {
+    let r = parser::parse_recovery("fn bad(){x.} fn first(){} fn second(){}", Limits::default())
+        .unwrap();
+    for indices in [&[0][..], &[1, 1], &[2, 1], &[3]] {
+        assert!(parser::parse_complete_items(&r, indices, Limits::default()).is_err());
+    }
+    let m = parser::parse_complete_items(&r, &[1, 2], Limits::default()).unwrap();
+    assert_eq!(m.items.len(), 2);
+}
+
+#[test]
+fn configured_budgets_reject_before_publishing_partial_snapshots() {
+    use vesper_syntax::recovery::{Error, Resource};
+    let mut limits = Limits {
+        max_declarations: 1,
+        ..Limits::default()
+    };
+    assert_eq!(
+        parser::parse_recovery("fn a(){} fn b(){}", limits).unwrap_err(),
+        Error::Budget(Resource::Declarations)
+    );
+    limits = Limits::default();
+    limits.max_identifier_bytes = 1;
+    assert_eq!(
+        parser::parse_recovery("fn long(){}", limits).unwrap_err(),
+        Error::Budget(Resource::Identifier)
+    );
+    limits = Limits::default();
+    limits.max_sites = 1;
+    assert_eq!(
+        parser::parse_recovery("fn a(){x.;y.}", limits).unwrap_err(),
+        Error::Budget(Resource::Sites)
+    );
+    limits = Limits::default();
+    limits.parse.max_diagnostics = 1;
+    assert_eq!(
+        parser::parse_recovery("fn a(){let = ; let = ;}", limits).unwrap_err(),
+        Error::Budget(Resource::Diagnostics)
+    );
+    limits = Limits::default();
+    limits.max_work = 16;
+    assert_eq!(
+        parser::parse_recovery("fn a(){}", limits).unwrap_err(),
+        Error::Budget(Resource::Work)
+    );
+    limits = Limits::default();
+    limits.parse.max_depth = 2;
+    assert_eq!(
+        parser::parse_recovery("fn a(){((((1))))}", limits).unwrap_err(),
+        Error::Budget(Resource::Depth)
+    );
+    limits = Limits::default();
+    limits.max_metadata_bytes = 1;
+    assert_eq!(
+        parser::parse_recovery("fn a(){}", limits).unwrap_err(),
+        Error::Budget(Resource::Metadata)
+    );
+}
+
+#[test]
+fn bounded_malformed_corpus_never_publishes_guessed_complete_items() {
+    for source in [
+        "fn",
+        "fn f",
+        "fn f(",
+        "fn f{",
+        "fn f(){",
+        "fn f(){match x {A=>",
+        "fn f(){handle x with {",
+        "fn f(){let x = ; let y=2;y}",
+        "fn f(){return (;} fn g(){}",
+        "fn f(){[1,2;} fn g(){}",
+        "fn f(){x. fn g(){}",
+        "effect E{fn f(",
+        "linear struct",
+        "trait T{",
+        "use model ;",
+        "fn f(){/* unterminated fn false(){}",
+        "fn f(){\"é🦀",
+        "fn f(){x.0.}",
+    ] {
+        let r = parser::parse_recovery(source, Limits::default())
+            .unwrap_or_else(|e| panic!("{source:?}: {e:?}"));
+        assert_eq!(r.syntax().text().to_string(), source);
+        for (i, d) in r.declarations().iter().enumerate() {
+            if d.status != DS::Complete {
+                assert!(parser::parse_complete_items(&r, &[i], Limits::default()).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn every_original_prefix_of_contextual_sources_remains_lossless() {
+    for source in [
+        "// 🦀 é\r\nlinear struct Tx{}\r\nfn f(sink tx:Tx){let n=1;tx.finish()}\r\nfn sibling()->u64{42}",
+        "effect E{fn op()->u64;} fn f()->u64 eff e:E{handle e.op() with e {return x=>x}}",
+        "copy struct S{x:u64} impl S{fn get(in self)->u64{self.x}} fn f(){}",
+        "fn f[inert](in x:Vec[u64])->u64{match x {A=>1,B=>2}}",
+    ] {
+        for end in source.char_indices().map(|(i, _)| i).chain([source.len()]) {
+            let prefix = &source[..end];
+            let r = parser::parse_recovery(prefix, Limits::default())
+                .unwrap_or_else(|e| panic!("{prefix:?}: {e:?}"));
+            assert_eq!(r.syntax().text().to_string(), prefix);
+        }
+    }
+}

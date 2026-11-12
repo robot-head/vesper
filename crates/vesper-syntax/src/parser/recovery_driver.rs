@@ -66,6 +66,7 @@ fn parser<'a>(source: &'a str, tokens: Vec<Token>, limits: Limits) -> Parser<'a>
         limits: limits.parse,
         depth: 0,
         halted: false,
+        halt_kind: None,
         expr_heights: Default::default(),
         editor: true,
         site_limit: limits.max_sites,
@@ -351,7 +352,10 @@ fn parse_item(source: &str, tokens: Vec<Token>, limits: Limits) -> Result<Parsed
     p.trivia();
     p.builder.finish_node();
     if p.halted {
-        return Err(Error::Budget(Resource::Depth));
+        return Err(Error::Budget(match p.halt_kind {
+            Some(lexer::LexLimitKind::Diagnostics) => Resource::Diagnostics,
+            _ => Resource::Depth,
+        }));
     }
     if p.site_exhausted {
         return Err(Error::Budget(Resource::Sites));
@@ -389,6 +393,8 @@ fn push_site(
     Ok(())
 }
 
+/// Parse editor syntax from the exact original source without producing a checked AST.
+/// Damaged, opaque, and complete declarations remain distinct; quotas fail atomically.
 pub fn parse_recovery(source: &str, limits: Limits) -> Result<RecoverySyntax, Error> {
     limits.preflight(source)?;
     let mut work = Work(limits.max_work);
@@ -485,11 +491,14 @@ pub fn parse_recovery(source: &str, limits: Limits) -> Result<RecoverySyntax, Er
             work.parse(end - start, span.len())?;
             let parsed = parse_item(source, ranged_tokens(tokens, start, end, span.end), limits)?;
             if kind == DK::Function {
-                if let Some(header) = &parsed.header {
+                if let Some(header) = &parsed.header
+                    && header.clean
+                    && ext
+                        .body
+                        .as_ref()
+                        .is_some_and(|b| b.start == header.body_start)
+                {
                     header_span = header.start..header.body_start;
-                    if !header.clean {
-                        status = DS::Opaque;
-                    }
                 } else {
                     status = DS::Opaque;
                 }
@@ -623,6 +632,9 @@ pub(super) fn receiver(expr: &Expr) -> Option<recovery::Receiver> {
     })
 }
 
+/// Reparse selected complete declarations from a sealed original-source snapshot.
+/// Indices must be strictly increasing. Recovered/opaque productions are unavailable;
+/// successful ASTs retain original absolute spans and still require normal checking.
 pub fn parse_complete_items(
     snapshot: &RecoverySyntax,
     indices: &[usize],
@@ -661,7 +673,7 @@ pub fn parse_complete_items(
             .partition_point(|t| t.span.start < declaration.span.start);
         let end = lexed
             .tokens
-            .partition_point(|t| t.span.end <= declaration.span.end);
+            .partition_point(|t| t.kind != K::Eof && t.span.end <= declaration.span.end);
         if start >= end
             || lexed.tokens[start].span.start != declaration.span.start
             || lexed.tokens[end - 1].span.end != declaration.span.end
@@ -778,7 +790,9 @@ pub(crate) fn parse_body_fragment(
         return Err(Error::Unsupported);
     }
     let start = lexed.tokens.partition_point(|t| t.span.start < body.start);
-    let end = lexed.tokens.partition_point(|t| t.span.end <= body.end);
+    let end = lexed
+        .tokens
+        .partition_point(|t| t.kind != K::Eof && t.span.end <= body.end);
     if start >= end
         || lexed.tokens[start].kind != K::LBrace
         || lexed.tokens[end - 1].kind != K::RBrace
@@ -807,4 +821,80 @@ pub(crate) fn parse_body_fragment(
         return Err(Error::Unsupported);
     }
     Ok(p.builder.finish())
+}
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    #[test]
+    fn last_body_fragment_is_actual_block_and_matches_full_parse_oracle() {
+        let old = "// 🦀\r\nfn first()->u64{7}\r\nfn f(in arr:Vec[u64], in idx:u64)->u64{arr[idx]}";
+        let snapshot = parse_recovery(old, Limits::default()).unwrap();
+        let context = capture_body_context(&snapshot, 1, Limits::default()).unwrap();
+        let new = old.replace("arr[idx]}", "arr[idx]+1}");
+        let start = snapshot.declarations()[1].body_span.as_ref().unwrap().start;
+        let actual =
+            parse_body_fragment(&new, start..new.len(), &context, Limits::default()).unwrap();
+        let oracle = parse_recovery(&new, Limits::default()).unwrap();
+        let expected = oracle
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == BLOCK && usize::from(n.text_range().start()) == start)
+            .unwrap();
+        assert_eq!(actual, expected.green().into_owned());
+        assert_eq!(actual.to_string(), &new[start..]);
+        assert!(
+            parse_body_fragment(
+                &new.replace("fn f", "fn g"),
+                start..new.len(),
+                &context,
+                Limits::default()
+            )
+            .is_err()
+        );
+        assert!(
+            parse_body_fragment(
+                &new.replace("in idx", "in other"),
+                start..new.len() + 2,
+                &context,
+                Limits::default()
+            )
+            .is_err()
+        );
+        let tight = Limits {
+            max_work: new.len(),
+            ..Limits::default()
+        };
+        assert_eq!(
+            parse_body_fragment(&new, start..new.len(), &context, tight).unwrap_err(),
+            Error::Budget(Resource::Work)
+        );
+    }
+
+    #[test]
+    fn statement_sync_does_not_anchor_inside_nested_skipped_tokens() {
+        let source = "junk(let hidden=1;) let after=2;";
+        let mut work = Work(Limits::default().max_work);
+        let tokens = lex(source, Limits::default(), &mut work).unwrap().tokens;
+        let mut p = parser(source, tokens, Limits::default());
+        p.builder.start_node(MODULE);
+        p.recover_statement();
+        assert_eq!(&source[p.start()..], "let after=2;");
+        p.builder.finish_node();
+        let green = p.builder.finish();
+        assert_eq!(green.to_string(), "junk(let hidden=1;)");
+        assert_eq!(p.sites.len(), 1);
+    }
+
+    #[test]
+    fn context_is_not_available_for_generic_or_recovered_functions() {
+        for source in ["fn f[T](in x:T)->T{x}", "fn f(){x.}"] {
+            let snapshot = parse_recovery(source, Limits::default()).unwrap();
+            assert!(matches!(
+                capture_body_context(&snapshot, 0, Limits::default()),
+                Err(Error::Unsupported)
+            ));
+        }
+    }
 }

@@ -157,6 +157,7 @@ pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lex
         limits,
         depth: 0,
         halted: false,
+        halt_kind: None,
         expr_heights: Default::default(),
         editor: false,
         site_limit: 0,
@@ -207,6 +208,7 @@ struct Parser<'a> {
     limits: ParseLimits,
     depth: usize,
     halted: bool,
+    halt_kind: Option<lexer::LexLimitKind>,
     expr_heights: std::collections::BTreeMap<(usize, usize), usize>,
     editor: bool,
     site_limit: usize,
@@ -352,6 +354,7 @@ impl Parser<'_> {
         }
         let at = self.start();
         self.halted = true;
+        self.halt_kind = Some(kind);
         let exceeded = lexer::LexLimit {
             kind,
             limit,
@@ -1295,7 +1298,34 @@ impl Parser<'_> {
         }
         let start = self.start();
         self.builder.start_node(ERROR_NODE);
-        while !self.statement_anchor() && !matches!(self.kind(), K::Semi | K::RBrace | K::Eof) {
+        let mut closing = Vec::new();
+        while !self.at(K::Eof) {
+            let kind = self.kind();
+            if closing.is_empty()
+                && (self.statement_anchor() || matches!(kind, K::Semi | K::RBrace))
+            {
+                break;
+            }
+            let expected = match kind {
+                K::LParen => Some(K::RParen),
+                K::LBracket => Some(K::RBracket),
+                K::LBrace => Some(K::RBrace),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                if closing.len() >= self.limits.max_depth {
+                    self.exhaust(lexer::LexLimitKind::Depth, self.limits.max_depth);
+                    break;
+                }
+                closing.push(expected);
+            } else if matches!(kind, K::RParen | K::RBracket | K::RBrace) {
+                if closing.last() == Some(&kind) {
+                    closing.pop();
+                } else if kind == K::RBrace {
+                    // A mismatched function closer is a boundary, never a guessed inner anchor.
+                    break;
+                }
+            }
             self.bump();
         }
         let end = self.end();
