@@ -134,11 +134,61 @@ values near `u64::MAX`), which is a differential test only.
 
 ## Acceptance evidence
 
-RESULTS_PLACEHOLDER
+All numbers are from `cargo test -p vesper-crucible -- --nocapture` on the
+cloud container (x86_64 Linux, test profile, one thread per test), with
+`FuzzConfig::default()` seeds noted in the tests; they are deterministic.
+
+| Planted bug (`tests/fuzzing.rs`) | Guided (20,000-exec budget) | Pure random (same budget) | Shrunk tape |
+| --- | --- | --- | --- |
+| 8-byte magic `"!VESPER!"` at offset 0 | found after 65 execs (1 solver run) | not found in 20,000 | 17 choices: the 8 magic bytes, nothing else |
+| 4-byte LE length prefix == body length, body ≥ 4 | found after 65 execs (1 solver run) | not found in 20,000 | prefix `04 00 00 00`, four zero body bytes |
+| `"VC"` tag, command byte `'!'`, CRC-32 equality | found after 67 execs (3 solver runs) | not found in 20,000 | `"VC"`, valid CRC, payload `"!"` |
+
+- **SimPulse interleaving** (`tests/shrinking.rs`): a lost-update race
+  between two read-then-write incrementers plus 0–4 drawn noise fibers.
+  Found on the first execution (the race is not hard to hit); shrunk from a
+  26-dispatch schedule (8 deferred, 32-choice tape, seed
+  7715421508079507883) to 7 dispatches with 1 deferral, no noise fibers,
+  seed 0, 9 choices: the shortest losing schedule for these fibers. Replaying
+  the shrunk tape three times gives the identical SimPulse journal, and
+  `Simulator::replay` (via `replay_fibers`) validates every transition of it;
+  a truncated journal is rejected.
+- **WriteTxn linear protocol**: a generator that only offers legal next
+  operations (`Read`/`Begin` when idle, `Write`/`Commit`/`Abort` inside a
+  transaction, abort at the end) and a store that drops the last write of
+  any commit with ≥ 3 writes. The 18-op counterexample shrank to 6 ops
+  `[Begin, Write(0,0), Write(0,0), Write(1,0), Commit, Read(1)]`. Across all
+  360 executed sequences (fuzzing and 413 shrinker runs, including discarded
+  invalid candidates) an independent protocol checker found 0 illegal
+  sequences, and the drop auditor on the non-Clone `#[must_use]` `WriteTxn`
+  counted 0 leaked transactions and opened == closed. Contrast: deleting a
+  single op from the decoded 18-op list (what a type-directed `Vec`
+  shrinker does) gives an illegal sequence in 10 of 18 cases.
+- **refute**: the claim "wrapping midpoint of two bytes ≥ the smaller byte"
+  is refuted with a locally minimal pair summing to exactly 256; a probe-
+  reported 64-bit secret equality is pierced within 5,000 execs; a true
+  predicate survives with its corpus returned as witnesses.
+- **Shrinker contract**: 200 random tapes against a non-monotone parity
+  property: the result never grows, never exceeds the run budget, always
+  replays as a failure, and with an adequate budget is `[1, 1]`.
+- **Throughput (measured, not a design claim)**: 50,000 guided executions of
+  a trivial target in 0.11 s, about 430,000–450,000 execs/s in the
+  unoptimized test profile on one core. This says nothing about Vesper code
+  under Cranelift instrumentation.
 
 ## Checks
 
-CHECKS_PLACEHOLDER
+Run on the cloud container, Rust 1.100, with an isolated target directory
+and `VESPER_LEAN` pointing at Lean 4.24.0:
+
+- `cargo fmt --all -- --check`: clean.
+- `cargo test -p vesper-crucible --locked`: 23 tests pass (9 api, 6
+  fuzzing, 2 lean_model, 6 shrinking); the Lean model compiles and the
+  2000-pair differential agrees.
+- `lean CrucibleShrink.lean` from `lean/`: 8 axiom-report lines, standard
+  axioms only.
+- `cargo clippy --workspace --locked --all-targets -- -D warnings`: clean.
+- `cargo test --workspace --locked`: 2275 passed, 0 failed.
 
 ## Root patch
 
