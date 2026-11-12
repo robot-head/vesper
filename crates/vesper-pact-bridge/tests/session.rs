@@ -1229,3 +1229,229 @@ fn example_fixture_binds_real_source() {
         "impl @demo/geometry@1.0.0::eq.layer[@demo/geometry@1.0.0::Point]"
     );
 }
+
+const WF_SOURCE: &str = "
+copy struct CopyBox[T: mod copy] { t: T }
+copy struct Uuid { hi: u64 }
+struct Index[K, V] { key: Option[K], value: Option[V] }
+effect Emit[T: mod copy] { fn emit(x: T) -> Unit; }
+";
+
+fn wf_session() -> (PackageIdentity, CoherentSession) {
+    let pkg = PackageIdentity::new("@test/wf", "1.0.0");
+    let mut b = BindingsDto::empty(pkg.clone());
+    b.branded_types = vec![BrandedTypeDto {
+        ty: "Index".into(),
+        brands: vec![BrandParamDto {
+            name: "M".into(),
+            trait_ref: tr("Ord"),
+        }],
+    }];
+    b.traits = vec![
+        simple_trait("Eq"),
+        simple_trait("Ord"),
+        // PickA[A, B] { type Out }
+        TraitDto {
+            name: "PickA".into(),
+            params: vec![tparam("A"), tparam("B")],
+            assoc: vec![AssocDto {
+                name: "Out".into(),
+                mode_bound: ModeDto::Const(Mode::Linear),
+                bounds: vec![],
+            }],
+            coinductive: false,
+        },
+        TraitDto {
+            name: "Two".into(),
+            params: vec![tparam("A"), ParamDto::of("r", ParamKindDto::Row)],
+            assoc: vec![],
+            coinductive: false,
+        },
+        TraitDto {
+            name: "PickB".into(),
+            params: vec![ParamDto::of("M", ParamKindDto::Brand), tparam("T")],
+            assoc: vec![],
+            coinductive: false,
+        },
+    ];
+    b.models = vec![model(
+        "UuidEq",
+        conf(vec![], "Eq", ty("Uuid", vec![]), vec![]),
+    )];
+    b.impls = vec![
+        imp(
+            "picka.string",
+            ConformanceDto {
+                args: vec![ArgDto::Type(ty("String", vec![])), ArgDto::Type(p("T"))],
+                assoc: vec![("Out".into(), ty("u8", vec![]))],
+                ..conf(vec![tparam("T")], "PickA", ty("u8", vec![]), vec![])
+            },
+        ),
+        imp(
+            "two.string",
+            ConformanceDto {
+                args: vec![
+                    ArgDto::Type(ty("String", vec![])),
+                    ArgDto::Row(RowDto {
+                        labels: vec![],
+                        tail: Some("r".into()),
+                    }),
+                ],
+                ..conf(
+                    vec![ParamDto::of("r", ParamKindDto::Row)],
+                    "Two",
+                    ty("u8", vec![]),
+                    vec![],
+                )
+            },
+        ),
+        imp(
+            "pickb.eqmodel",
+            ConformanceDto {
+                args: vec![
+                    ArgDto::Brand(BrandDto::Model(tr("UuidEq"))),
+                    ArgDto::Type(p("T")),
+                ],
+                ..conf(vec![tparam("T")], "PickB", ty("u8", vec![]), vec![])
+            },
+        ),
+    ];
+    let s = SessionBuilder::new()
+        .package(check(pkg.clone(), WF_SOURCE), b)
+        .build()
+        .unwrap_or_else(|e| panic!("{e}"));
+    (pkg, s)
+}
+
+fn assert_rejected_solution(s: &CoherentSession, q: &QueryBindingDto) {
+    let o = s.solve(q).unwrap();
+    assert!(
+        matches!(&o, BridgeOutcome::Unsupported { pact: None, explanation } if explanation.contains("well-formed")),
+        "{o:?}"
+    );
+}
+
+#[test]
+fn solutions_are_rechecked_inside_projection_effect_and_brand_arguments() {
+    let (pkg, s) = wf_session();
+    // Projection trait arguments: X := String makes CopyBox[X] ill-formed.
+    let q = QueryBindingDto::new(
+        pkg.clone(),
+        EnvDto::default(),
+        vec![tparam("X")],
+        GoalDto::ProjectionEq {
+            projection: ProjectionDto {
+                self_ty: ty("u8", vec![]),
+                trait_ref: tr("PickA"),
+                args: vec![
+                    ArgDto::Type(p("X")),
+                    ArgDto::Type(ty("CopyBox", vec![p("X")])),
+                ],
+                brand: None,
+                assoc: "Out".into(),
+            },
+            ty: ty("u8", vec![]),
+        },
+    );
+    assert_rejected_solution(&s, &q);
+    // Effect-label arguments: Emit[X] with X := String violates `T: mod copy`.
+    let emit = |arg: TypeDto| {
+        ArgDto::Row(RowDto {
+            labels: vec![LabelDto {
+                capability: None,
+                effect: tr("Emit"),
+                args: vec![ArgDto::Type(arg)],
+            }],
+            tail: None,
+        })
+    };
+    let q = QueryBindingDto::new(
+        pkg.clone(),
+        EnvDto::default(),
+        vec![tparam("X")],
+        GoalDto::Implements {
+            self_ty: ty("u8", vec![]),
+            trait_ref: tr("Two"),
+            args: vec![ArgDto::Type(p("X")), emit(p("X"))],
+            brand: None,
+        },
+    );
+    assert_rejected_solution(&s, &q);
+    // Constructor brands: M := UuidEq (a model of Eq) for an Ord brand.
+    let q = QueryBindingDto::new(
+        pkg.clone(),
+        EnvDto::default(),
+        vec![ParamDto::of("M", ParamKindDto::Brand)],
+        GoalDto::Implements {
+            self_ty: ty("u8", vec![]),
+            trait_ref: tr("PickB"),
+            args: vec![
+                ArgDto::Brand(BrandDto::Param("M".into())),
+                ArgDto::Type(TypeDto::Def {
+                    def: tr("Index"),
+                    args: vec![
+                        ArgDto::Type(ty("Uuid", vec![])),
+                        ArgDto::Type(ty("u8", vec![])),
+                        ArgDto::Brand(BrandDto::Param("M".into())),
+                    ],
+                }),
+            ],
+            brand: None,
+        },
+    );
+    assert_rejected_solution(&s, &q);
+}
+
+#[test]
+fn source_effect_bounds_are_enforced() {
+    let (pkg, s) = wf_session();
+    let row = |arg: &str| {
+        ArgDto::Row(RowDto {
+            labels: vec![LabelDto {
+                capability: None,
+                effect: tr("Emit"),
+                args: vec![ArgDto::Type(ty(arg, vec![]))],
+            }],
+            tail: None,
+        })
+    };
+    let goal = |arg| GoalDto::Implements {
+        self_ty: ty("u8", vec![]),
+        trait_ref: tr("Two"),
+        args: vec![ArgDto::Type(ty("String", vec![])), row(arg)],
+        brand: None,
+    };
+    let e = s.solve(&query(pkg.clone(), goal("String"))).unwrap_err();
+    assert!(e.mentions("of `effect @test/wf@1.0.0::Emit`"), "{e}");
+    s.consume(&s_proven(&s, &query(pkg, goal("u64")))).unwrap();
+}
+
+#[test]
+fn bridge_only_constraints_change_the_revision() {
+    let base = std_session();
+    // Same lowered ProgramDto, different brand trait.
+    let other = std_with(|b| b.branded_types[0].brands[0].trait_ref = tr("Eq"))
+        .build()
+        .unwrap();
+    assert_eq!(base.program_dto(), other.program_dto());
+    assert_ne!(base.revision(), other.revision());
+    let e = s_proven(&base, &query(std_pkg(), implements(uuid(), "Eq")));
+    assert_eq!(
+        other.consume(&e).unwrap_err().kind,
+        ErrorKind::StaleEvidence
+    );
+    // A source parameter bound that leaves the mode scheme unchanged.
+    let build = |extra: &str| {
+        SessionBuilder::new()
+            .package(
+                check(std_pkg(), &format!("{STD_SOURCE}{extra}")),
+                std_bindings(),
+            )
+            .build()
+            .unwrap()
+    };
+    let loose = build("struct Spare[T] { s: u64 }");
+    let tight = build("struct Spare[T: mod affine] { s: u64 }");
+    assert_eq!(loose.program_dto(), tight.program_dto());
+    assert_ne!(loose.revision(), tight.revision());
+}

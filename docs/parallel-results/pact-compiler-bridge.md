@@ -74,7 +74,7 @@ pub enum BridgeOutcome { Proven(Box<Evidence>), Ambiguous { .. }, NoSolution { .
      * solution values have the binders' count and kinds;
      * the substituted goal validates and equals the derivation's root goal;
      * `check_derivation` passes against the query environment;
-     * the substituted goal is well-formed.
+     * the substituted goal is well-formed: every constructor and effect application, including projection trait arguments, effect-label arguments and constructor brands, meets its declared bounds and brand traits.
    * `consume` runs the same checks again, then returns the selected impl or model (`Selection`), the named substitution and the rendered derivation.
    * Brands are kept in the type: `CacheBTree[K, V]` from source becomes `CacheBTree[K, V, Canonical]`, while a binding can name `CacheBTree[K, V, ReverseUuidOrd]`. Their layouts and modes agree but their types differ (tested). A named brand must identify a model of the declared trait.
 6. **Diagnostics.** Names and spans appear only in `BridgeDiagnostic`s and in rendered explanations. A test checks that the Pact query JSON contains none of the source names.
@@ -86,7 +86,7 @@ Run in `crates/vesper-pact-bridge`:
 ```text
 cargo fmt -- --check                                   ok
 cargo clippy --locked --all-targets -- -D warnings     ok
-cargo test --locked                                    27 tests: 6 modes + 21 session, all pass
+cargo test --locked                                    30 tests: 6 modes + 24 session, all pass
 cargo run --locked --example bridge                    ok (output below, abridged)
 ```
 
@@ -121,6 +121,7 @@ Test coverage against the acceptance list:
   * Pact `Unsupported` for a duplicate effect label after row merging.
   * A solver proof whose solution violates a parameter bound becomes `Unsupported`, without evidence.
 * **Invalidation.** Evidence is stale after a binding change or a source change, and accepted again after an identical rebuild.
+* **Post-solution well-formedness** (review follow-up). Every constructor and effect application in the substituted goal is re-checked, including projection trait arguments, effect-label arguments and constructor brand arguments. Source effect parameter bounds (`effect E[T: mod copy]`) are enforced. The revision also hashes bridge-only constraints: parameter bounds, brand traits and effect bounds.
 * **Certificates.** Malformed certificates are diagnosed without panics: tampered revision, step, impl id, brand, values, goal id, names or schema, a derivation for a different goal, and garbage JSON. A JSON round trip is accepted.
 
 Not run: the root workspace suite, Lean and AArch64 checks. No root, compiler or Lean file changed. The crate is not registered in the root workspace.
@@ -140,7 +141,7 @@ No cross-boundary patch is required.
 * **Implicit brands** exist only in query goals. In templates, environment assumptions and associated-type bounds, an absent brand is `Canonical`, because Pact requires explicit template brands.
 * **Mode assumptions** in environments are rejected. Bounds belong on parameters, as Pact requires. Inference variables cannot carry bounds.
 * **Unit:** `Unit` and `()` are one constructor.
-* **Revision** is SHA-256 over the lowered `ProgramDto`, the package list and all table `DefPath`s. It identifies the declaration set and is not provenance. A colliding revision still cannot pass the derivation re-check.
+* **Revision** is SHA-256 over the lowered `ProgramDto`, the package list and all table `DefPath`s. It also covers the bridge-only constraints that the DTO lacks: source parameter bounds, brand traits and effect parameter bounds. It identifies the declaration set and is not provenance. A colliding revision still cannot pass the derivation re-check.
 
 ## Remaining limits
 

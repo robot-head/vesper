@@ -101,6 +101,8 @@ impl SessionBuilder {
     }
 }
 
+type TypeMeta<'a> = (Vec<(&'a str, ParamKind, Mode)>, Vec<(&'a str, u32)>);
+
 fn revision_of(dto: &ProgramDto, tables: &IdTables) -> Revision {
     let mut paths: Vec<&DefPath> = vec![];
     paths.extend(tables.types.iter().map(|t| &t.path));
@@ -108,9 +110,29 @@ fn revision_of(dto: &ProgramDto, tables: &IdTables) -> Revision {
     paths.extend(tables.traits.iter().map(|t| &t.path));
     paths.extend(tables.impls.iter().map(|t| &t.path));
     paths.extend(tables.models.iter().map(|t| &t.path));
+    // Bridge-only constraints (source parameter bounds, brand traits and
+    // effect bounds) are not in the ProgramDto but gate evidence, so they
+    // are part of the revision too.
+    let type_meta: Vec<TypeMeta<'_>> = tables
+        .types
+        .iter()
+        .map(|t| {
+            (
+                t.params
+                    .iter()
+                    .map(|p| (p.name.as_str(), p.kind, p.bound))
+                    .collect(),
+                t.brands.iter().map(|(n, tr)| (n.as_str(), tr.0)).collect(),
+            )
+        })
+        .collect();
+    let effect_meta: Vec<&[Mode]> = tables.effects.iter().map(|e| e.bounds.as_slice()).collect();
     let mut h = Sha256::new();
-    h.update(b"vesper-pact-bridge/revision/v1\0");
-    h.update(serde_json::to_vec(&(dto, &tables.packages, paths)).expect("DTOs serialize"));
+    h.update(b"vesper-pact-bridge/revision/v2\0");
+    h.update(
+        serde_json::to_vec(&(dto, &tables.packages, paths, type_meta, effect_meta))
+            .expect("DTOs serialize"),
+    );
     Revision(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 

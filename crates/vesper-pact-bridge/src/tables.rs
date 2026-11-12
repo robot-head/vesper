@@ -53,6 +53,8 @@ pub struct EffectEntry {
     pub path: DefPath,
     pub package: PackageId,
     pub params: Vec<(String, ParamKind)>,
+    /// Declared modal bound of each parameter (`linear` for rows).
+    pub bounds: Vec<Mode>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

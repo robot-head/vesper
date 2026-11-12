@@ -75,6 +75,8 @@ pub(crate) struct Lowered {
 // ---------------------------------------------------------------------------
 // Phase 1: identities and dense tables
 
+type PendingEffect = (DefPath, Vec<(String, ParamKind)>, Vec<Mode>);
+
 struct PendingType<'a> {
     path: DefPath,
     origin: TypeOrigin,
@@ -208,11 +210,12 @@ pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
     pending.sort_by(|a, b| a.path.cmp(&b.path));
 
     // Effects.
-    let mut pending_effects: Vec<(DefPath, Vec<(String, ParamKind)>)> = vec![];
+    let mut pending_effects: Vec<PendingEffect> = vec![];
     for e in prelude.effects.values() {
         pending_effects.push((
             DefPath::new(builtin.clone(), DefKind::Effect, e.name.clone()),
             generic_kinds(&e.generics),
+            generic_bounds(&e.generics),
         ));
     }
     for i in inputs {
@@ -222,11 +225,12 @@ pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
                 pending_effects.push((
                     DefPath::new(i.package.identity().clone(), DefKind::Effect, name),
                     generic_kinds(&e.generics),
+                    generic_bounds(&e.generics),
                 ));
             }
         }
     }
-    pending_effects.sort();
+    pending_effects.sort_by(|a, b| a.0.cmp(&b.0));
 
     // Traits, impls and models.
     let mut traits: Vec<(DefPath, &TraitDto)> = vec![];
@@ -313,12 +317,13 @@ pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
             trait_id: None,
         });
     }
-    for (i, (path, params)) in pending_effects.iter().enumerate() {
+    for (i, (path, params, bounds)) in pending_effects.iter().enumerate() {
         tables.effect_index.insert(path.clone(), EffectId(i as u32));
         tables.effects.push(EffectEntry {
             path: path.clone(),
             package: tables.package_index[&path.package],
             params: params.clone(),
+            bounds: bounds.clone(),
         });
     }
     // Conformance traits are resolved now so brand checks can use them.
@@ -487,6 +492,12 @@ fn scheme(base: Mode, joins: Vec<u32>) -> ModeScheme {
         base: to_pact(base),
         joins,
     }
+}
+
+fn generic_bounds(g: &[vesper::ast::Generic]) -> Vec<Mode> {
+    g.iter()
+        .map(|g| if g.row { Mode::Linear } else { g.bound })
+        .collect()
 }
 
 fn generic_kinds(g: &[vesper::ast::Generic]) -> Vec<(String, ParamKind)> {
@@ -809,24 +820,36 @@ impl<'t> Cx<'t> {
             return Ok(());
         };
         let entry = &self.tables.types[ctor.index()];
-        for (p, a) in entry.params.iter().zip(args) {
-            if p.kind != ParamKind::Type || p.bound == Mode::Linear {
+        let bounds: Vec<(&str, Mode)> = entry
+            .params
+            .iter()
+            .map(|p| (p.name.as_str(), p.bound))
+            .collect();
+        self.check_arg_bounds(&bounds, args, &entry.path)
+    }
+
+    fn check_arg_bounds(
+        &self,
+        bounds: &[(&str, Mode)],
+        args: &[GenericArg],
+        what: &DefPath,
+    ) -> R<()> {
+        for ((name, bound), a) in bounds.iter().zip(args) {
+            if *bound == Mode::Linear {
                 continue;
             }
             let GenericArg::Ty(t) = a else { continue };
             match upper_mode(self.tables, t, &|v| self.var_bound(v)) {
-                ModeKnowledge::Known(m) if m > p.bound => {
+                ModeKnowledge::Known(m) if m > *bound => {
                     return invalid(format!(
-                        "argument of mode {m:?} for parameter `{}: mod {:?}` of `{}`",
-                        p.name, p.bound, entry.path
+                        "argument of mode {m:?} for parameter `{name}: mod {bound:?}` of `{what}`"
                     ));
                 }
                 ModeKnowledge::Known(_) => {}
                 ModeKnowledge::Unknown if self.position == Position::Goal => {}
                 ModeKnowledge::Unknown => {
                     return unsupported(format!(
-                        "cannot establish the bound `{}: mod {:?}` of `{}` for a projection argument",
-                        p.name, p.bound, entry.path
+                        "cannot establish the bound `{name}: mod {bound:?}` of `{what}` for a projection argument"
                     ));
                 }
             }
@@ -897,7 +920,15 @@ impl<'t> Cx<'t> {
         let entry = &self.tables.effects[id.index()];
         let kinds: Vec<ParamKind> = entry.params.iter().map(|p| p.1).collect();
         let what = format!("effect `{}`", entry.path);
-        self.args_for(&kinds, args, &what)
+        let out = self.args_for(&kinds, args, &what)?;
+        let bounds: Vec<(&str, Mode)> = entry
+            .params
+            .iter()
+            .zip(&entry.bounds)
+            .map(|(p, b)| (p.0.as_str(), *b))
+            .collect();
+        self.check_arg_bounds(&bounds, &out, &entry.path)?;
+        Ok(out)
     }
 
     pub fn mode(&mut self, m: &ModeDto) -> R<ModeTerm> {
@@ -1071,78 +1102,127 @@ pub(crate) fn upper_mode(
     }
 }
 
-/// Checks every constructor application in `goal` against declared bounds.
-/// Unknown modes count as violations (used on solutions and certificates).
+/// Checks every constructor and effect application in `goal`, including
+/// trait, projection and effect-label arguments, against declared mode bounds
+/// and brand traits. Unknown modes and unresolved inference brands count as
+/// violations (used on solutions and certificates).
 pub(crate) fn well_formed_goal(
     tables: &IdTables,
     goal: &Goal,
     var: &dyn Fn(Var) -> Option<Mode>,
 ) -> Result<(), String> {
-    let mut err = None;
-    let mut check = |t: &Ty| {
-        if err.is_some() {
-            return;
-        }
-        if let Err(e) = well_formed_ty(tables, t, var) {
-            err = Some(e);
-        }
-    };
+    let w = Wf { tables, var };
     match goal {
-        Goal::Implements { trait_ref, .. } => {
-            check(&trait_ref.self_ty);
-            for a in &trait_ref.args {
-                if let GenericArg::Ty(t) = a {
-                    check(t);
+        Goal::Implements { trait_ref, .. } => w.trait_ref(trait_ref),
+        Goal::ProjectionEq { projection, ty } => {
+            w.trait_ref(&projection.trait_ref)?;
+            w.ty(ty)
+        }
+        Goal::ModeBound { ty, .. } => w.ty(ty),
+    }
+}
+
+struct Wf<'a> {
+    tables: &'a IdTables,
+    var: &'a dyn Fn(Var) -> Option<Mode>,
+}
+
+impl Wf<'_> {
+    fn trait_ref(&self, t: &TraitRef) -> Result<(), String> {
+        self.ty(&t.self_ty)?;
+        t.args.iter().try_for_each(|a| self.arg(a))
+    }
+
+    fn arg(&self, a: &GenericArg) -> Result<(), String> {
+        match a {
+            GenericArg::Ty(t) => self.ty(t),
+            GenericArg::Row(r) => {
+                for l in &r.labels {
+                    if let EffectLabel::Effect { effect, args } = l {
+                        let Some(e) = self.tables.effects.get(effect.index()) else {
+                            return Err(format!("unknown {effect}"));
+                        };
+                        for a in args {
+                            self.arg(a)?;
+                        }
+                        let names: Vec<&str> = e.params.iter().map(|p| p.0.as_str()).collect();
+                        self.bounds(&names, &e.bounds, args, &e.path)?;
+                    }
+                }
+                Ok(())
+            }
+            GenericArg::Mode(_) | GenericArg::Brand(_) | GenericArg::Capability(_) => Ok(()),
+        }
+    }
+
+    fn bounds(
+        &self,
+        names: &[&str],
+        bounds: &[Mode],
+        args: &[GenericArg],
+        what: &DefPath,
+    ) -> Result<(), String> {
+        for ((name, bound), a) in names.iter().zip(bounds).zip(args) {
+            let GenericArg::Ty(t) = a else { continue };
+            if *bound == Mode::Linear {
+                continue;
+            }
+            match upper_mode(self.tables, t, self.var) {
+                ModeKnowledge::Known(m) if m <= *bound => {}
+                k => {
+                    return Err(format!(
+                        "argument {} for parameter `{name}: mod {bound:?}` of `{what}`",
+                        match k {
+                            ModeKnowledge::Known(m) => format!("of mode {m:?}"),
+                            ModeKnowledge::Unknown => "of unknown mode".into(),
+                        },
+                    ));
                 }
             }
         }
-        Goal::ProjectionEq { projection, ty } => {
-            check(&projection.trait_ref.self_ty);
-            check(ty);
-        }
-        Goal::ModeBound { ty, .. } => check(ty),
+        Ok(())
     }
-    err.map_or(Ok(()), Err)
-}
 
-fn well_formed_ty(
-    tables: &IdTables,
-    ty: &Ty,
-    var: &dyn Fn(Var) -> Option<Mode>,
-) -> Result<(), String> {
-    match ty {
-        Ty::Ctor { ctor, args } => {
-            let Some(e) = tables.types.get(ctor.index()) else {
-                return Err(format!("unknown {ctor}"));
-            };
-            for (i, a) in args.iter().enumerate() {
-                if let GenericArg::Ty(t) = a {
-                    well_formed_ty(tables, t, var)?;
-                    if let Some(p) = e.params.get(i)
-                        && p.bound != Mode::Linear
-                    {
-                        match upper_mode(tables, t, var) {
-                            ModeKnowledge::Known(m) if m <= p.bound => {}
-                            k => {
+    fn ty(&self, ty: &Ty) -> Result<(), String> {
+        match ty {
+            Ty::Ctor { ctor, args } => {
+                let Some(e) = self.tables.types.get(ctor.index()) else {
+                    return Err(format!("unknown {ctor}"));
+                };
+                for a in args {
+                    self.arg(a)?;
+                }
+                let names: Vec<&str> = e.params.iter().map(|p| p.name.as_str()).collect();
+                let bounds: Vec<Mode> = e.params.iter().map(|p| p.bound).collect();
+                self.bounds(&names, &bounds, args, &e.path)?;
+                for ((bname, trait_id), a) in e.brands.iter().zip(args.iter().skip(e.params.len()))
+                {
+                    match a {
+                        GenericArg::Brand(Brand::Named(m)) => {
+                            let ok = self
+                                .tables
+                                .models
+                                .get(m.index())
+                                .is_some_and(|me| me.trait_id == Some(*trait_id));
+                            if !ok {
                                 return Err(format!(
-                                    "argument {} for parameter `{}: mod {:?}` of `{}`",
-                                    match k {
-                                        ModeKnowledge::Known(m) => format!("of mode {m:?}"),
-                                        ModeKnowledge::Unknown => "of unknown mode".into(),
-                                    },
-                                    p.name,
-                                    p.bound,
-                                    e.path
+                                    "brand `{bname}` of `{}` names {m}, which is not a model of {}",
+                                    e.path,
+                                    self.tables.traits[trait_id.index()].path
                                 ));
                             }
                         }
+                        GenericArg::Brand(Brand::Var(Var::Infer(_))) => {
+                            return Err(format!("brand `{bname}` of `{}` is unresolved", e.path));
+                        }
+                        _ => {}
                     }
                 }
+                Ok(())
             }
-            Ok(())
+            Ty::Var(_) => Ok(()),
+            Ty::Projection(p) => self.trait_ref(&p.trait_ref),
         }
-        Ty::Var(_) => Ok(()),
-        Ty::Projection(p) => well_formed_ty(tables, &p.trait_ref.self_ty, var),
     }
 }
 
