@@ -1,0 +1,125 @@
+// A one-record replicated put. A client sends Put(value) to a server and waits
+// for Ack(lsn). Each server variant appends the value to its write-ahead log;
+// they differ only in when they acknowledge relative to the durable flush.
+// `audit` runs in the server process after a restart and reports what
+// recovery kept. Servers hold a linear Lease across every suspension, so a
+// crash visibly loses a linear owner instead of consuming it.
+// No implicit arithmetic; the batch server uses total wrapping_add.
+copy enum Msg { Put(u64), Ack(u64), Nack(u32) }
+copy struct Audit { records: u64, first: u64, last: u64 }
+linear struct Lease { id: u64 }
+linear effect Disk {
+    fn recover() -> u64;
+    fn append(value: u64) -> Result[u64, u32];
+    fn flush() -> Result[u64, u32];
+    fn read(index: u64) -> Option[u64];
+}
+linear effect Net {
+    fn send(to: u64, message: Msg) -> Result[u64, u32];
+    fn recv(timeout_ns: u64) -> Result[Msg, u32];
+}
+
+fn lsn_of(r: Result[u64, u32]) -> u64 { match r { Ok(n) => n, Err(_) => 0 } }
+fn put_of(r: Result[Msg, u32]) -> Option[u64] {
+    match r { Ok(m) => match m { Put(v) => Some(v), Ack(_) => None, Nack(_) => None }, Err(_) => None }
+}
+fn ack_of(r: Result[Msg, u32]) -> u64 {
+    match r { Ok(m) => match m { Ack(n) => n, Put(_) => 0, Nack(_) => 0 }, Err(_) => 0 }
+}
+fn value_of(r: Option[u64]) -> u64 { match r { Some(v) => v, None => 0 } }
+
+// Unsafe: the acknowledgement leaves before the record is durable.
+fn serve_ack_first(client: u64) -> u64 eff [Disk, Net] {
+    let lease = Lease { id: client };
+    let recovered = Disk::recover();
+    let acked = match put_of(Net::recv(200)) {
+        Some(v) => {
+            let lsn = lsn_of(Disk::append(v));
+            let sent = Net::send(client, Ack(lsn));
+            let flushed = Disk::flush();
+            lsn
+        },
+        None => 0,
+    };
+    let Lease { id } = lease;
+    acked
+}
+
+// Corrected: acknowledge only after the flush made the record durable.
+fn serve_flush_first(client: u64) -> u64 eff [Disk, Net] {
+    let lease = Lease { id: client };
+    let recovered = Disk::recover();
+    let acked = match put_of(Net::recv(200)) {
+        Some(v) => {
+            let lsn = lsn_of(Disk::append(v));
+            match Disk::flush() {
+                Ok(durable) => {
+                    let sent = Net::send(client, Ack(lsn));
+                    lsn
+                },
+                Err(code) => {
+                    let sent = Net::send(client, Nack(code));
+                    0
+                },
+            }
+        },
+        None => 0,
+    };
+    let Lease { id } = lease;
+    acked
+}
+
+// Acknowledges, then waits for more work before flushing: the record stays
+// volatile for the whole wait.
+fn serve_lazy(client: u64) -> u64 eff [Disk, Net] {
+    let recovered = Disk::recover();
+    match put_of(Net::recv(200)) {
+        Some(v) => {
+            let lsn = lsn_of(Disk::append(v));
+            let sent = Net::send(client, Ack(lsn));
+            let more = Net::recv(50);
+            let flushed = Disk::flush();
+            lsn
+        },
+        None => 0,
+    }
+}
+
+// Two records in one flush, acknowledged after the flush.
+fn serve_batch(client: u64) -> u64 eff [Disk, Net] {
+    let recovered = Disk::recover();
+    match put_of(Net::recv(200)) {
+        Some(v) => {
+            let first = Disk::append(v);
+            let second = Disk::append(wrapping_add(v, 1));
+            let durable = lsn_of(Disk::flush());
+            let sent = Net::send(client, Ack(durable));
+            durable
+        },
+        None => 0,
+    }
+}
+
+fn client(server: u64, value: u64) -> u64 eff [Net] {
+    let sent = Net::send(server, Put(value));
+    ack_of(Net::recv(100))
+}
+
+// Retries once if the first attempt is not acknowledged.
+fn client_retry(server: u64, value: u64) -> u64 eff [Net] {
+    let sent = Net::send(server, Put(value));
+    let first = ack_of(Net::recv(100));
+    if first == 0 {
+        let again = Net::send(server, Put(value));
+        ack_of(Net::recv(100))
+    } else {
+        first
+    }
+}
+
+fn audit() -> Audit eff [Disk] {
+    let records = Disk::recover();
+    let first = value_of(Disk::read(0));
+    let last = value_of(Disk::read(1));
+    Audit { records: records, first: first, last: last }
+}

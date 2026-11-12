@@ -3,7 +3,8 @@
 //!
 //! Runs checked source on the reference evaluator under SimPulse. Recordings
 //! are bound to this executable's SHA-256 digest; replay with a different
-//! build, source, scenario or options is rejected.
+//! build, source, scenario, model semantics or options is rejected. Version 2
+//! scenarios also print lost tasks and the final durable log bytes.
 use std::process::ExitCode;
 use vesper_sim_session::{CheckedProgram, Recording, RunResult, Scenario, Session};
 
@@ -52,8 +53,24 @@ fn run(args: &[String]) -> Result<(), String> {
             for (task, value) in &report.outputs {
                 println!("{task}: {value}");
             }
+            for lost in &report.lost {
+                println!(
+                    "lost: {} (process {} epoch {} at {} ns, {:?})",
+                    lost.task, lost.process, lost.epoch, lost.at_ns, lost.state
+                );
+            }
+            for (log, durable) in &report.recording.durable {
+                println!(
+                    "durable {log}: {} bytes sha256 {}",
+                    durable.bytes_hex.len() / 2,
+                    durable.sha256
+                );
+            }
             println!("virtual time: {} ns", report.virtual_ns);
             println!("source events: {}", report.recording.trace.len());
+            if !report.recording.model_trace.is_empty() {
+                println!("model events: {}", report.recording.model_trace.len());
+            }
             if mode == "replay" {
                 println!("replay matched the recording");
             } else if let Some(path) = recording {

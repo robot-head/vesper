@@ -48,3 +48,39 @@ fn record_then_replay_through_the_command() {
     assert!(!ok);
     assert!(stderr.contains("usage"), "{stderr}");
 }
+
+#[test]
+fn model_scenarios_record_and_replay_through_the_command() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("vesper-sim-cli-kv");
+    std::fs::create_dir_all(&dir).unwrap();
+    let recording = dir.join("kv.recording.json");
+    let recording = recording.to_str().unwrap();
+    let (source, scenario) = (fixture("kv.ves"), fixture("kv_ack_first.json"));
+
+    let (ok, stdout, stderr) = sim(&["record", &source, &scenario, recording]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("client: 1"), "{stdout}");
+    assert!(
+        stdout.contains(r#"audit@1: {"first":0,"last":0,"records":0}"#),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("lost: server (process server epoch 0 at 12 ns"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("durable kv: 0 bytes"), "{stdout}");
+
+    let (ok, stdout, stderr) = sim(&["replay", &source, &scenario, recording]);
+    assert!(ok, "{stderr}");
+    assert!(stdout.contains("replay matched the recording"), "{stdout}");
+
+    // A changed crash choice is a different scenario.
+    let changed = dir.join("changed.json");
+    let text = std::fs::read_to_string(&scenario)
+        .unwrap()
+        .replace(r#""at_ns": 12"#, r#""at_ns": 13"#);
+    std::fs::write(&changed, text).unwrap();
+    let (ok, _, stderr) = sim(&["replay", &source, changed.to_str().unwrap(), recording]);
+    assert!(!ok);
+    assert!(stderr.contains("scenario_sha256"), "{stderr}");
+}

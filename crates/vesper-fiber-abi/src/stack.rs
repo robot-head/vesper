@@ -1,11 +1,20 @@
 //! Pinned fiber stacks: an anonymous private mapping with a `PROT_NONE` guard
-//! page below the usable region. A guard page turns most overflows into a
+//! page below the usable region. Sizes round to the host page (4 KiB on
+//! typical Linux, 16 KiB on Apple silicon), so the guard is one host page. A guard page turns most overflows into a
 //! fault instead of silent corruption; it is not a substitute for stack-size
 //! analysis (a frame larger than one page can skip it, and no stack probes are
 //! inserted into generated code by this prototype).
 use std::io;
 
 pub const DEFAULT_STACK_SIZE: usize = 256 * 1024;
+
+// Linux: do not reserve swap for the (lazily committed) stack. Darwin has no
+// overcommit accounting to opt out of; its `MAP_NORESERVE` is a documented
+// no-op, so it is not passed.
+#[cfg(target_os = "linux")]
+const MAP_FLAGS: libc::c_int = libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE;
+#[cfg(target_os = "macos")]
+const MAP_FLAGS: libc::c_int = libc::MAP_PRIVATE | libc::MAP_ANON;
 
 pub struct FiberStack {
     mapping: *mut u8,
@@ -38,7 +47,7 @@ impl FiberStack {
                 std::ptr::null_mut(),
                 mapping_len,
                 libc::PROT_NONE,
-                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                MAP_FLAGS,
                 -1,
                 0,
             )
@@ -83,6 +92,10 @@ impl FiberStack {
     }
     pub fn guard_len(&self) -> usize {
         self.guard_len
+    }
+    /// Host page size used for rounding and for the guard.
+    pub fn page_size() -> usize {
+        page_size()
     }
     pub fn contains(&self, address: u64) -> bool {
         (self.base() as u64..self.top() as u64).contains(&address)
