@@ -40,10 +40,19 @@ inductive Doc where
   | nil | text (value : String) | comment (value : String)
   | hardLine | softLineOrSpace | softLineOrEmpty
   | nest (indent : Nat) (inner : Doc)
-  | concat (children : List Doc)
+  | append (left right : Doc)
   | group (inner : Doc)
 inductive Mode where | flat | broken
 ```
+
+Actual kernel replay requires the non-nested binary append representation above:
+the existing auditor does not replay Lean's generated nested Doc.rec_1 recursor.
+Expose the same public callable `Doc.concat : List Doc -> Doc` as an explicitly
+noncomputable total foldr append nil. The Rust ModelDoc::Concat and emitter's
+Doc.concat ListAST call stay unchanged; only the Lean internal representation
+normalizes lists into ordered binary concatenation. All logical definitions that
+would emit unsafe codegen auxiliaries use explicit noncomputable def. There is no
+auditor-policy relaxation, extra axiom, partial definition or public API change.
 
 Provide tagged rendered pieces, `commentsOf`, and a total `render` whose public
 signature is `render (width col : Nat) (mode : Mode) (doc : Doc)` (piece result may
