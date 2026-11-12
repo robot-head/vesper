@@ -322,6 +322,8 @@ struct Layer {
     frame: Vec<usize>,
     frame_ty: String,
     ops: BTreeMap<String, OpInfo>,
+    /// Closure nesting at installation; lenses cannot cross a closure.
+    closures: usize,
 }
 #[derive(Clone)]
 struct OpInfo {
@@ -502,12 +504,46 @@ fn written_names(world: &World, e: &Expr, out: &mut BTreeSet<String>) {
             written_names(world, value, out);
         }
         ExprKind::Call { callee, args, .. } => {
+            // Argument modes may be omitted, so resolve the callee's declared
+            // passes: functions, effect operations, then checked arrow types.
+            let op_passes = |op: &str| {
+                world
+                    .effects
+                    .values()
+                    .flat_map(|e| &e.ops)
+                    .filter(|f| f.name == op)
+                    .map(|f| f.params.iter().map(|p| p.pass).collect::<Vec<_>>())
+                    .reduce(|a, b| {
+                        a.iter()
+                            .zip(b.iter().chain(std::iter::repeat(&Pass::In)))
+                            .map(|(x, y)| if *y == Pass::Inout { *y } else { *x })
+                            .collect()
+                    })
+            };
+            let arrow = world
+                .types
+                .get(&(callee.span.start, callee.span.end))
+                .and_then(|t| match t {
+                    Type::Function { params, .. } => {
+                        Some(params.iter().map(|(p, _)| *p).collect::<Vec<_>>())
+                    }
+                    _ => None,
+                });
             let params = match &callee.kind {
                 ExprKind::Name(n) => world
                     .functions
                     .get(n)
-                    .map(|f| f.params.iter().map(|p| p.pass).collect::<Vec<_>>()),
-                _ => None,
+                    .map(|f| f.params.iter().map(|p| p.pass).collect::<Vec<_>>())
+                    .or_else(|| {
+                        n.split_once("::")
+                            .and_then(|(e, op)| {
+                                world.effects.get(e)?.ops.iter().find(|f| f.name == op)
+                            })
+                            .map(|f| f.params.iter().map(|p| p.pass).collect())
+                    })
+                    .or(arrow),
+                ExprKind::Field(_, op) => arrow.or_else(|| op_passes(op)),
+                _ => arrow,
             };
             for (index, a) in args.iter().enumerate() {
                 let inout = a.pass == Pass::Inout
@@ -1742,7 +1778,7 @@ impl Generator<'_> {
             .map(|(g, t)| (g.name.clone(), t.clone()))
             .collect::<BTreeMap<_, _>>();
         let direct = layer.filter(|i| {
-            self.closures == 0
+            self.closures == self.layers[*i].closures
                 && self.layers[*i]
                     .ops
                     .get(op)
@@ -2375,6 +2411,7 @@ impl Generator<'_> {
             frame: frame_ids.clone(),
             frame_ty: frame_ty.clone(),
             ops: infos,
+            closures: self.closures,
         });
         let index = self.layers.len() - 1;
         self.body_layers.push(index);

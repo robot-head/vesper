@@ -583,3 +583,21 @@ fn effect_places_lemmas_are_axiom_free() {
         "{stdout}"
     );
 }
+
+#[test]
+fn implicit_mutable_modes_and_handlers_inside_closures() {
+    // Omitted argument modes still resolve to the operation's `inout`.
+    agrees(
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(x); } with { return v => v, inc(n, k) => { n += 2; k(()) }, }; x }",
+        "42",
+    );
+    agrees(
+        "fn inc(inout x: i64) { x += 2; } fn main() -> i64 { let x = 40; let f = |inout y: i64| { y += 1; }; handle Fail[RuntimeError] in { inc(x); f(x); } with { return v => v, raise(e, k) => (), }; x }",
+        "43",
+    );
+    // A handler installed inside a closure still passes frame lenses.
+    agrees(
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let f = || { let x = 1; handle Mut in { let y = Mut::change(inout x); x += 100; y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x * 1000 + result }, } }; f() }",
+        "102020",
+    );
+}
