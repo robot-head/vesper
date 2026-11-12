@@ -269,6 +269,10 @@ impl SandboxHost {
                 });
             }
             Ok(Err(Failure::Link(e))) => {
+                // Instantiation runs guest start code, which is metered too.
+                if let Some(Trap::OutOfFuel) = e.downcast_ref::<Trap>() {
+                    return Err(SandboxError::FuelExhausted { limit: limits.fuel });
+                }
                 if let Some(err) = limiter.denial() {
                     return Err(err);
                 }
