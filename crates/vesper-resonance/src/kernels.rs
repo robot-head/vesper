@@ -318,6 +318,8 @@ pub struct PidGains {
 pub enum PidFault {
     /// Setpoint or measurement was NaN or infinite.
     NonFiniteInput,
+    /// A finite input overflowed inside the controller; state is unchanged.
+    NonFiniteIntermediate,
     /// Gains are non-finite, negative, or `dt <= 0`.
     BadGains,
 }
@@ -357,15 +359,25 @@ impl PidController {
             return Err(PidFault::NonFiniteInput);
         }
         let g = self.gains;
+        // Compute every intermediate first; commit state only if all are
+        // finite, so an overflow (e.g. `f32::MAX - -f32::MAX`) is a fault and
+        // never poisons the integrator or yields an unclamped NaN torque.
         let error = setpoint - measurement;
-        self.integral =
+        let integral =
             (self.integral + g.ki * error * g.dt).clamp(-g.integral_limit, g.integral_limit);
         let derivative = match self.prev_measurement {
             Some(prev) => -(measurement - prev) / g.dt,
             None => 0.0,
         };
+        let u = g.kp * error + integral + g.kd * derivative;
+        if ![error, integral, derivative, u]
+            .iter()
+            .all(|x| x.is_finite())
+        {
+            return Err(PidFault::NonFiniteIntermediate);
+        }
+        self.integral = integral;
         self.prev_measurement = Some(measurement);
-        let u = g.kp * error + self.integral + g.kd * derivative;
         Ok(u.clamp(-g.torque_limit, g.torque_limit))
     }
 

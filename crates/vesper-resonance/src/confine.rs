@@ -323,6 +323,10 @@ fn adjacency(graph: &CallGraph, policy: &RealtimePolicy) -> Result<Adjacency, Gr
         check(ic.caller)?;
         sites.insert((ic.caller, ic.site));
         match policy.indirect_targets.get(&(ic.caller, ic.site)) {
+            // An empty target list resolves nothing: still unresolved.
+            Some(targets) if targets.is_empty() => {
+                unresolved[ic.caller.0 as usize].push(ic.site);
+            }
             Some(targets) => {
                 for &t in targets {
                     check(t)?;

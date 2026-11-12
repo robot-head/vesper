@@ -261,6 +261,35 @@ fn loops_found_by_cranelift_loop_analysis() {
     assert!(verify_realtime(&g, &root(&g, None)).unwrap().is_empty());
 }
 
+/// `entry -> A | B`, `A -> B`, `B -> A`: neither block dominates the other,
+/// so natural-loop analysis finds no loop; the cycle must still count.
+#[test]
+fn irreducible_cycles_count_as_loops() {
+    let mut func = Function::with_name_signature(UserFuncName::user(0, 0), sig());
+    let mut ctx = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut func, &mut ctx);
+    let entry = b.create_block();
+    let a = b.create_block();
+    let bb = b.create_block();
+    b.append_block_params_for_function_params(entry);
+    b.switch_to_block(entry);
+    let arg = b.block_params(entry)[0];
+    b.ins().brif(arg, a, &[], bb, &[]);
+    b.switch_to_block(a);
+    b.ins().jump(bb, &[]);
+    b.switch_to_block(bb);
+    b.ins().jump(a, &[]);
+    b.seal_all_blocks();
+    b.finalize();
+    let flags = cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
+    verify_function(&func, &flags).expect("valid IR");
+    let fns = vec![("process_quantum".to_string(), func)];
+    let g = call_graph_from_clif(&fns, &table()).unwrap();
+    assert_eq!(g.functions[0].loops, LoopBound::Unbounded);
+    let f = verify_realtime(&g, &root(&g, None)).unwrap();
+    assert_eq!(f[0].rule, rules::UNBOUNDED_LOOP);
+}
+
 #[test]
 fn declared_effect_rows_of_defined_functions_are_used() {
     let fns = vec![

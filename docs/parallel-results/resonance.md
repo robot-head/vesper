@@ -147,7 +147,7 @@ or about `rtrb`; the Rust tests check the same properties on concrete runs
 
 ## Tests
 
-`crates/vesper-resonance/tests/` (55 tests):
+`crates/vesper-resonance/tests/` (57 tests):
 
 - `confinement.rs` (14): allocation two calls deep with its path, the
   allowlist counterexample, every forbidden effect kind, unknown callees,
@@ -155,7 +155,7 @@ or about `rtrb`; the Rust tests check the same properties on concrete runs
   recursion, worst-case stack exactly at and over budget, u64 overflow,
   a 200,000-deep chain (no native recursion), independent roots, malformed
   graphs.
-- `cranelift.rs` (8): verifier-checked IR built with `cranelift-frontend`:
+- `cranelift.rs` (9): an irreducible two-block cycle (no natural loop) counted as a loop, verifier-checked IR built with `cranelift-frontend`:
   transitive `malloc` three calls deep with the root's call instruction,
   stack slots and budget, tail call to a mutex, undeclared symbol and
   libcall, `call_indirect` with and without listed targets, loops via
@@ -166,7 +166,7 @@ or about `rtrb`; the Rust tests check the same properties on concrete runs
   feedback errors, delay limits, buffer reuse, and 40 random shuffled DAGs
   with feedback where every enumerated path has equal compensated latency
   and the executor matches the per-sample reference at block sizes 1 and 32.
-- `spsc_stress.rs` (4): 1,000,000 heap values retired across threads through
+- `spsc_stress.rs` (5): per-call swap budget fixed at entry; 1,000,000 heap values retired across threads through
   a 64-slot ring, in order, none dropped on the realtime thread; a
   200,000-state mailbox stress with monotone swaps and exact accounting.
 - `realtime.rs` (11): lease rules, wire layout bytes, malformed events,
@@ -202,14 +202,26 @@ Toolchain: Rust 1.100.0 (stable, as in CI), Lean 4.24.0.
 
 - `cargo fmt --all -- --check`: clean.
 - `cargo clippy --workspace --locked --all-targets -- -D warnings`: clean.
-- `VESPER_LEAN=lean cargo test -p vesper-resonance`: 55 passed.
+- `VESPER_LEAN=lean cargo test -p vesper-resonance`: 57 passed.
 - `cargo test -p vesper-resonance --release --test denorm`: passed.
 - `cargo test -p vesper-resonance --target aarch64-unknown-linux-gnu` under
-  `qemu-aarch64`: 55 passed.
+  `qemu-aarch64`: 55 passed (before the review fixes below).
 - `VESPER_LEAN=lean cargo test --workspace --locked`: 2,307 passed, 0 failed
   (302 test binaries).
 - `lean lean/ResonanceSpsc.lean` (from `lean/`): compiles; 11 axiom report
   lines, standard axioms only.
+
+## Review fixes (Codex review on PR #147)
+
+- CFG cycles: natural-loop analysis misses irreducible cycles, so the
+  Cranelift builder also runs a DFS cycle check; any cycle is a loop.
+- An empty indirect-target list in the policy is treated as unresolved.
+- `try_swap_in_latest` takes at most `min(queued, free sink slots)`
+  measured at entry, so its work per quantum is bounded even while the
+  sender and janitor run concurrently.
+- `PidController::step` checks every intermediate for finiteness before
+  committing state (`PidFault::NonFiniteIntermediate`), so finite inputs that
+  overflow cannot return NaN or poison the integrator.
 
 ## Root patch
 

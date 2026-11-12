@@ -515,6 +515,23 @@ fn pid_rejects_bad_inputs_and_gains() {
     let mut pid = PidController::new(gains()).unwrap();
     assert_eq!(pid.step(f32::NAN, 0.0), Err(PidFault::NonFiniteInput));
     assert_eq!(pid.step(0.0, f32::INFINITY), Err(PidFault::NonFiniteInput));
+    // Finite inputs whose difference overflows: a fault, and the state is
+    // not poisoned for later steps.
+    let mut p = PidController::new(PidGains {
+        kp: 1.0,
+        ki: 0.0,
+        kd: 0.0,
+        dt: 0.001,
+        torque_limit: 1.0,
+        integral_limit: 1.0,
+    })
+    .unwrap();
+    assert_eq!(
+        p.step(f32::MAX, -f32::MAX),
+        Err(PidFault::NonFiniteIntermediate)
+    );
+    assert_eq!(p.integral(), 0.0);
+    assert_eq!(p.step(0.5, 0.0), Ok(0.5));
     let mut bad = gains();
     bad.dt = 0.0;
     assert_eq!(PidController::new(bad).err(), Some(PidFault::BadGains));

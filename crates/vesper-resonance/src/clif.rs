@@ -10,9 +10,10 @@
 //!   rejects when reachable;
 //! * an [`IndirectCall`] for every `call_indirect`, `return_call_indirect`
 //!   and `try_call_indirect`, keyed by the instruction index;
-//! * loops found by Cranelift's own loop analysis (dominator-based natural
-//!   loops), reported as [`LoopBound::Unbounded`] unless the policy gives a
-//!   bound for that function;
+//! * loops: natural loops from Cranelift's own loop analysis plus any other
+//!   CFG cycle (irreducible control flow) found by DFS, reported as
+//!   [`LoopBound::Unbounded`] unless the policy gives a bound for that
+//!   function;
 //! * the frame size as the sum of the function's sized stack slots. This is
 //!   the IR-visible lower bound; spill slots and the ABI frame added by
 //!   register allocation are not visible in IR and are not counted.
@@ -23,7 +24,7 @@ use crate::confine::{CallGraph, Effect, FnId, FnNode, GraphError, IndirectCall, 
 use cranelift_codegen::dominator_tree::DominatorTree;
 use cranelift_codegen::flowgraph::ControlFlowGraph;
 use cranelift_codegen::ir::instructions::CallInfo;
-use cranelift_codegen::ir::{ExternalName, Function};
+use cranelift_codegen::ir::{Block, ExternalName, Function};
 use cranelift_codegen::loop_analysis::LoopAnalysis;
 use std::collections::BTreeMap;
 use std::fmt;
@@ -239,10 +240,41 @@ fn callee_symbol(
     }
 }
 
+/// `true` if the reachable CFG has any cycle. Natural loops come from
+/// Cranelift's `LoopAnalysis`; an iterative DFS additionally catches
+/// irreducible cycles (no header dominating the cycle), which natural-loop
+/// analysis does not report.
 fn has_loops(func: &Function) -> bool {
     let cfg = ControlFlowGraph::with_function(func);
     let domtree = DominatorTree::with_function(func, &cfg);
     let mut la = LoopAnalysis::new();
     la.compute(func, &cfg, &domtree);
-    la.loops().next().is_some()
+    if la.loops().next().is_some() {
+        return true;
+    }
+    let Some(entry) = func.layout.entry_block() else {
+        return false;
+    };
+    // 0 = unvisited, 1 = on the DFS stack, 2 = finished.
+    let mut state: BTreeMap<Block, u8> = BTreeMap::new();
+    let mut stack: Vec<(Block, Vec<Block>)> = vec![(entry, cfg.succ_iter(entry).collect())];
+    state.insert(entry, 1);
+    while let Some((block, succs)) = stack.last_mut() {
+        match succs.pop() {
+            Some(next) => match state.get(&next).copied().unwrap_or(0) {
+                0 => {
+                    state.insert(next, 1);
+                    let s = cfg.succ_iter(next).collect();
+                    stack.push((next, s));
+                }
+                1 => return true,
+                _ => {}
+            },
+            None => {
+                state.insert(*block, 2);
+                stack.pop();
+            }
+        }
+    }
+    false
 }

@@ -146,6 +146,11 @@ fn indirect_calls_are_rejected_unless_targets_are_listed_and_then_checked() {
     let f = verify_realtime(&g, &policy).unwrap();
     assert_eq!(rules_of(&f), vec![rules::UNRESOLVED_INDIRECT]);
 
+    // An empty target list resolves nothing.
+    policy.indirect_targets.insert((FnId(0), 7), vec![]);
+    let f = verify_realtime(&g, &policy).unwrap();
+    assert_eq!(rules_of(&f), vec![rules::UNRESOLVED_INDIRECT]);
+
     policy.indirect_targets.insert((FnId(0), 7), vec![FnId(1)]);
     assert!(verify_realtime(&g, &policy).unwrap().is_empty());
 

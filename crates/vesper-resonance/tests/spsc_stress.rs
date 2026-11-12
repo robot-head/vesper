@@ -44,6 +44,23 @@ fn full_sink_hands_the_value_back() {
     assert!(sink.janitor_gone());
 }
 
+#[test]
+fn swaps_per_call_are_bounded_by_entry_snapshot() {
+    let (mut tx, mut rx) = mailbox::<u32>(8).unwrap();
+    let (mut sink, mut janitor) = retirement_channel::<u32>(2).unwrap();
+    for i in 1..=5 {
+        tx.send(i).unwrap();
+    }
+    let mut current = 0;
+    let out = rx.try_swap_in_latest(&mut current, &mut sink);
+    assert_eq!((out.swapped, out.deferred, current), (2, 3, 2));
+    // Sink full: nothing swapped until the janitor drains.
+    assert_eq!(rx.try_swap_in_latest(&mut current, &mut sink).swapped, 0);
+    assert_eq!(janitor.drain(), 2);
+    let out = rx.try_swap_in_latest(&mut current, &mut sink);
+    assert_eq!((out.swapped, current), (2, 4));
+}
+
 /// The realtime thread retires a million heap values through a small ring
 /// while the janitor drains them. Every value arrives once, in order, and no
 /// destructor runs on the realtime thread.

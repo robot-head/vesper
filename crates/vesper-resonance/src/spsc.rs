@@ -185,9 +185,10 @@ pub struct SwapOutcome {
 
 impl<T> MailboxReceiver<T> {
     /// Swap in pending states, newest last, retiring each superseded value
-    /// to `sink`. Only takes a state while the sink has a free slot, so the
-    /// realtime thread never has to drop one; states that do not fit stay
-    /// queued for the next period.
+    /// to `sink`. Takes at most `min(queued, free sink slots)` states, both
+    /// measured once at entry, so the call does bounded work even while the
+    /// sender and janitor keep running; the realtime thread never has to drop
+    /// a state, and states that do not fit stay queued for the next period.
     pub fn try_swap_in_latest(
         &mut self,
         current: &mut T,
@@ -201,7 +202,11 @@ impl<T> MailboxReceiver<T> {
             out.deferred = self.consumer.slots();
             return out;
         }
-        while sink.free_slots() > 0 {
+        // Bounded work per call: at most the states queued when the call
+        // starts, and at most the sink slots free then. States that arrive
+        // (or slots the janitor frees) during the call wait for the next one.
+        let budget = self.consumer.slots().min(sink.free_slots());
+        for _ in 0..budget {
             let Ok(new) = self.consumer.pop() else { break };
             let old = std::mem::replace(current, new);
             // Cannot fail: this thread is the only producer and saw a free
