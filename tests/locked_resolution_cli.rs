@@ -87,6 +87,13 @@ impl Fixture {
 }
 
 impl Drop for Fixture {
+    #[cfg_attr(
+        windows,
+        allow(
+            clippy::permissions_set_readonly_false,
+            reason = "Windows-only: clears the readonly attribute, which has no Unix mode semantics"
+        )
+    )]
     fn drop(&mut self) {
         // Test snapshots may be read-only, which prevents deletion on Windows.
         #[cfg(windows)]
