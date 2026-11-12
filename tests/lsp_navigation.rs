@@ -391,3 +391,33 @@ fn nominal_mode_cost_is_bounded_and_recursive_sources_have_no_snapshot() {
         .is_err()
     );
 }
+
+#[test]
+fn effect_capability_receiver_never_resolves_a_same_named_global_function() {
+    let (snapshot, index) = checked(
+        "effect E{fn act(in value:u64);} fn local()->u64{1} fn f() eff[local:E]{local.act(local());}",
+    );
+    assert!(definition(&snapshot, &index, "{local.act", 1).is_none());
+    assert_eq!(
+        target_start(&definition(&snapshot, &index, "(local())", 1).unwrap()),
+        at(&index, "fn local()", 3)
+    );
+}
+#[test]
+fn actual_value_receivers_keep_parameter_and_local_binding_precedence() {
+    let (snapshot, index) = checked(
+        "copy struct S{n:u64} effect E{fn act()->u64;} impl S{fn act(in self)->u64{self.n}} fn local()->u64{99} fn param(in local:S)->u64 eff[local:E]{local.act()} fn bound(in input:S)->u64 eff[local:E]{let local=input;local.act()} fn direct()->u64{local()}",
+    );
+    assert_eq!(
+        target_start(&definition(&snapshot, &index, "{local.act", 1).unwrap()),
+        at(&index, "in local:S", 3)
+    );
+    assert_eq!(
+        target_start(&definition(&snapshot, &index, ";local.act", 1).unwrap()),
+        at(&index, "let local=input", 4)
+    );
+    assert_eq!(
+        target_start(&definition(&snapshot, &index, "{local()", 1).unwrap()),
+        at(&index, "fn local()", 3)
+    );
+}

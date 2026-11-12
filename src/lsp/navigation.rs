@@ -398,7 +398,21 @@ impl<'a> Index<'a> {
                 }
             }
             ExprKind::Call { callee, args, .. } => {
-                self.expr(callee, f, env, depth + 1, resolve)?;
+                // A bare method receiver can denote a lexical effect capability
+                // instead of a value. The checker gives actual value bindings
+                // precedence, but a same-named global function does not establish
+                // that receiver's identity. Without resolver evidence, suppress
+                // the global guess only for this unbound callee receiver; keep
+                // real local/parameter bindings and argument references intact.
+                let callee_resolve = resolve
+                    && !matches!(
+                        &callee.kind,
+                        ExprKind::Field(base, _) if matches!(
+                            &base.kind, ExprKind::Name(name)
+                                if !env.iter().any(|binding|binding.name==name)
+                        )
+                    );
+                self.expr(callee, f, env, depth + 1, callee_resolve)?;
                 for a in args {
                     self.expr(&a.expr, f, env, depth + 1, resolve)?;
                 }

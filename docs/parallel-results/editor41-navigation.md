@@ -79,3 +79,31 @@ later declarations, open-document workspace locations, parse/check/unsupported
 snapshot rejection, source mismatch, nominal mode-work limits, recursive-source
 rejection and nested function/effect arguments. They execute no
 JIT, native kernel, WASM, macro, proof or ambient file read.
+
+## Independent review followup: capability receiver identity
+
+A real checked source reproduced an incorrect definition before the fix:
+`effect E{fn act();} fn local()->u64{1} fn f() eff[local:E]{local.act();}`.
+The checker treats `local` in that field-call receiver as an effect capability
+when no value binding exists; the navigation index had guessed the same-named
+global function. Source spelling alone did not establish that target.
+
+The provider now suppresses global fallback for a direct bare method receiver
+without a lexical value binding. This conservative boundary also covers effect
+labels introduced by closure contexts without duplicating checker capability
+scope logic. Actual parameter/let receiver bindings retain precedence, and
+ordinary global references in the method's arguments remain resolved. A global
+function used as an unbound method receiver is likewise unresolved until actual
+resolver evidence can distinguish it; direct ordinary global calls/references
+continue to resolve. Handler/trait/model/field dispatch limits remain unchanged.
+
+Validation on registered integration baseline `bbd19af`, with the private action
+worktree/cache (one job, debug0, incremental off): the new checked collision
+regression failed before the fix; afterward all 14 navigation tests pass,
+including parameter and let receiver precedence and same-named global calls in
+arguments. `cargo clippy -p vesper --lib --test lsp_navigation --locked --offline
+-- -D warnings` and owned-file rustfmt checks pass. Only navigation source,
+matching tests and this report changed; the temporary local lock resolution was
+restored. Independent review found no further concrete navigation blocker. Type
+modes remain type properties, not current ownership or proof evidence; checked
+snapshot/index identity and strict UTF-16 output remain required.
