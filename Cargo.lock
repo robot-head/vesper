@@ -3885,6 +3885,13 @@ name = "vesper-tensor"
 version = "0.1.0"
 
 [[package]]
+name = "vesper-warp"
+version = "0.1.0"
+dependencies = [
+ "vesper-ffi",
+]
+
+[[package]]
 name = "vesper-warp-shard"
 version = "0.1.0"
 

@@ -1,0 +1,9 @@
+[package]
+name = "vesper-warp"
+version = "0.1.0"
+edition = "2024"
+description = "Sans-IO QUIC packet core (RFC 9000 headers, frames, packet numbers) and RFC 9002 loss recovery for Vesper Warp"
+publish = false
+
+[dependencies]
+vesper-ffi = { path = "../vesper-ffi" }
