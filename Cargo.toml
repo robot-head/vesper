@@ -4,3 +4,25 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+logos = "0.15"
+rowan = "0.16"
+ariadne = "0.5"
+petgraph = "0.8"
+egg = "0.10"
+egglog = { version = "3", default-features = false }
+cranelift-codegen = { version = "0.125", features = ["arm64"] }
+cranelift-frontend = "0.125"
+cranelift-module = "0.125"
+cranelift-jit = "0.125"
+cranelift-object = "0.125"
+cranelift-native = "0.125"
+target-lexicon = "0.13"
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+salsa = "0.24"
+
+[profile.release]
+lto = "thin"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+io-uring = "0.7"

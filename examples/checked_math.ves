@@ -1,0 +1,15 @@
+fn divide(divisor: i64) -> i64 eff [Fail[RuntimeError]] {
+    84 / divisor
+}
+
+fn main() -> i64 {
+    handle Fail[RuntimeError] in {
+        divide(0)
+    } with {
+        return value => value,
+        raise(error, _) => match error {
+            RuntimeError::DivisionByZero => 42,
+            RuntimeError::IndexOutOfBounds => 0,
+        },
+    }
+}
