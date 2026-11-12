@@ -29,9 +29,12 @@ shared occurrence statistics, equal numeric foreign IDs, abandoned document IDs,
 exponential DAGs, aliased text bytes, separately retained comment metadata,
 zero/above-HARD limits, and unchanged rendering after successful/failed projection.
 
-The root owns crate registration; local registration is uncommitted wiring.
-Strict all-target Clippy will be completed with the separately owned actual
-emitter wired in, since the crate-private model getter is intentionally consumed
-by that module. No production stub or broadened lint allowance is introduced.
+The root owns crate registration; the initial local registration was uncommitted
+wiring. With actual root source capture675b70a, emitter25ad710 and structured Lean
+list support3287fa2 cherry-picked into the private worktree, the combined formatter
+suite passes41tests across6suites, no ignores, including three private-construction
+compile-fail cases. Strict all-target formatter Clippy passes with warnings denied;
+owned rustfmt and diff checks pass. No production stub or broadened lint allowance
+was introduced; the actual emitter consumes the crate-private model getter.
 Verification uses only private /tmp/stylus41-recovery-target, one job/debug0/
 incremental0. The coordinator's target cache is untouched.
