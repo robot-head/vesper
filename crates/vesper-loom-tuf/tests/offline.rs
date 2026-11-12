@@ -561,3 +561,31 @@ async fn delegation_cycles_and_depth_are_bounded_before_signature_work() {
             .contains("directory depth")
     );
 }
+
+#[tokio::test]
+async fn numeric_role_names_cannot_disconnect_preflight_depth_or_cycle_edges() {
+    for cycle in [false, true] {
+        let fixture = Fixture::new(Spec::default()).await;
+        let graph = if cycle {
+            vec![("targets", "1.a"), ("1.a", "1.a")]
+        } else {
+            vec![("targets", "1.a"), ("1.a", "2.b"), ("2.b", "3.c")]
+        };
+        for (name, child) in graph {
+            let document = json!({"signed":{"delegations":{"roles":[{"name":child}]}}});
+            fs::write(
+                fixture
+                    .dir
+                    .path()
+                    .join("metadata")
+                    .join(format!("{name}.json")),
+                serde_json::to_vec(&document).unwrap(),
+            )
+            .unwrap();
+        }
+        let mut request = fixture.request(None);
+        request.limits.directory_depth = 1;
+        let error = verify_target(request).await.unwrap_err().to_string();
+        assert!(error.contains("delegation graph depth or cycle"), "{error}");
+    }
+}

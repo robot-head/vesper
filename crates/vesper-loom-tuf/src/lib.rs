@@ -673,23 +673,35 @@ fn preflight_metadata(directory: &Path, limits: &Limits) -> Result<(), TufError>
                 .file_stem()
                 .and_then(|name| name.to_str())
                 .ok_or_else(|| TufError("invalid metadata filename".into()))?;
-            let stem = stem
-                .split_once('.')
-                .filter(|(version, _)| version.parse::<u64>().is_ok())
-                .map_or(stem, |(_, name)| name);
-            let name = percent_encoding::percent_decode_str(stem)
-                .decode_utf8()
-                .map_err(|_| TufError("invalid encoded metadata filename".into()))?
-                .into_owned();
+            // A numeric prefix may be part of a role name (non-consistent snapshots),
+            // or a consistent-snapshot version. Conservatively attach both aliases;
+            // dropping the raw name would disconnect genuine outgoing graph edges.
+            let mut stems = vec![stem];
+            if let Some((version, name)) = stem.split_once('.')
+                && version.parse::<u64>().is_ok()
+            {
+                stems.push(name);
+            }
+            let names: Result<Vec<_>, _> = stems
+                .into_iter()
+                .map(|stem| {
+                    percent_encoding::percent_decode_str(stem)
+                        .decode_utf8()
+                        .map(|name| name.into_owned())
+                })
+                .collect();
+            let names = names.map_err(|_| TufError("invalid encoded metadata filename".into()))?;
             for role in delegations {
                 let child = role
                     .get("name")
                     .and_then(|name| name.as_str())
                     .ok_or_else(|| TufError("invalid delegated role name".into()))?;
-                graph
-                    .entry(name.clone())
-                    .or_default()
-                    .push(child.to_owned());
+                for name in &names {
+                    graph
+                        .entry(name.clone())
+                        .or_default()
+                        .push(child.to_owned());
+                }
             }
         }
         for key in ["targets", "meta", "keys"] {
