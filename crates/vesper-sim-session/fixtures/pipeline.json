@@ -1,0 +1,35 @@
+{
+  "format": "vesper-sim-scenario",
+  "version": 1,
+  "seed": 7,
+  "limits": { "max_operations_per_task": 64, "max_virtual_ns": 1000000, "max_dispatches": 256 },
+  "runtime": { "fuel": 1000000, "optimize": true },
+  "bindings": [
+    { "effect": "Clock", "operation": "now", "params": [], "result": "u64", "action": "clock" },
+    { "effect": "Clock", "operation": "sleep", "params": ["u64"], "result": "()", "action": { "sleep": { "duration_argument": 0 } } },
+    { "effect": "Sched", "operation": "yield_now", "params": [], "result": "()", "action": "yield" },
+    { "effect": "Sched", "operation": "cancelled", "params": [], "result": "bool", "action": "cancel_requested" },
+    { "effect": "Net", "operation": "recv", "params": ["u64"], "result": "Result[u64, u32]", "action": "script" },
+    { "effect": "Net", "operation": "fill", "params": ["inout u64"], "result": "bool", "action": "script" }
+  ],
+  "tasks": [
+    {
+      "name": "alpha",
+      "entry": "worker",
+      "arguments": [1, 80, 5],
+      "script": [
+        { "effect": "Net", "operation": "recv", "arguments": [80], "delay_ns": 7, "outcome": { "success": { "bytes": 8 } }, "response": { "Ok": 99 } },
+        { "effect": "Net", "operation": "fill", "arguments": [0], "delay_ns": 2, "outcome": { "success": { "bytes": 8 } }, "response": true, "writes": [{ "argument": 0, "value": 1234 }] }
+      ]
+    },
+    {
+      "name": "beta",
+      "entry": "worker",
+      "arguments": [2, 81, 3],
+      "script": [
+        { "effect": "Net", "operation": "recv", "arguments": [81], "delay_ns": 1, "outcome": { "error": { "code": 111 } }, "response": { "Err": 111 } },
+        { "effect": "Net", "operation": "fill", "arguments": [0], "delay_ns": 4, "outcome": { "success": { "bytes": 0 } }, "response": false }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,28 @@
+// Two source tasks under SimPulse: virtual clock, virtual sleep, yields and
+// scripted network I/O. Each holds a linear Ticket across every suspension and
+// consumes it exactly once after its last resumption. No implicit arithmetic.
+linear struct Ticket { id: u64 }
+copy struct Report { ticket: u64, started: u64, woke: u64, received: u64, finished: u64, cancelled: bool }
+linear effect Clock { fn now() -> u64; fn sleep(ns: u64); }
+linear effect Sched { fn yield_now(); fn cancelled() -> bool; }
+linear effect Net { fn recv(port: u64) -> Result[u64, u32]; fn fill(inout slot: u64) -> bool; }
+
+fn received(r: Result[u64, u32]) -> u64 {
+    match r { Ok(n) => n, Err(_) => 0 }
+}
+
+fn worker(id: u64, port: u64, delay: u64) -> Report eff [Clock, Sched, Net] {
+    let ticket = Ticket { id: id };
+    let started = Clock::now();
+    Clock::sleep(delay);
+    let woke = Clock::now();
+    let first = Net::recv(port);
+    Sched::yield_now();
+    let slot: u64 = 0;
+    let filled = Net::fill(inout slot);
+    let value = if filled { slot } else { received(first) };
+    let cancelled = Sched::cancelled();
+    let finished = Clock::now();
+    let Ticket { id } = ticket;
+    Report { ticket: id, started: started, woke: woke, received: value, finished: finished, cancelled: cancelled }
+}
