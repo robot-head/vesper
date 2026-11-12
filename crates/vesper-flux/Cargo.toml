@@ -4,13 +4,3 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 description = "Bounded checked host DBSP circuits and owned frontier holds"
-
-[workspace]
-
-[profile.dev]
-debug = 0
-incremental = false
-
-[profile.test]
-debug = 0
-incremental = false

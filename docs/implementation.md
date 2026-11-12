@@ -1,6 +1,6 @@
 # Implementation coverage
 
-This checkpoint implements the core compiler and runtime baseline from sections 1–7 of the design. The current [expanded specification](specification.txt) also contains sections 8–19: Loom, SemVer checking, workspace architecture, a larger Lean extractor, Pulse, Bridge, Vector, Strata, Pact/Forge, Prism, Aura, and Ignis. Selected additions now have bounded workspace library implementations listed below; source-interface comparison and offline-resolution CLI adapters are now implemented, while other source integrations remain future work. The [original core baseline](core-specification-baseline.txt) is retained for comparison.
+This checkpoint implements the core compiler and runtime baseline from sections 1–7 of the design. The current [expanded specification](specification.txt) also contains sections 8–37: Loom, SemVer checking, workspace architecture, a larger Lean extractor, Pulse, Bridge, Vector, Strata, Pact/Forge, Prism, Aura, Ignis and the newer codec, observability, storage, compute, streaming and microVM proposals. Selected additions now have bounded workspace library implementations listed below; source-interface comparison and offline-resolution CLI adapters are now implemented, while other source integrations remain future work. The [original core baseline](core-specification-baseline.txt) is retained for comparison.
 
 The first workspace extraction now separates `vesper-core`, `vesper-syntax`, and `vesper-pulse` while preserving the root facade. See [parallel lanes](parallel-work.md) for active assignments and handoff prompts.
 
@@ -52,6 +52,12 @@ The executable pipeline checks HIR, runs CFG ownership analysis on typed Place I
 | `vesper-prism` | Bounded incremental HTTP/1.1 request framing and fixed-length responses, strict ambiguity rejection, HEAD/body rules and exact pipeline remainder | Server/I/O integration, source linear responses, routing, HTTP/2/3, TLS and WebSocket |
 | `vesper-forge` | Host-owned quotation scopes/splices, lexical-fragment hygiene and provenance, transitive emitted-code authority gate, real WASI fixture through flat transport and gate | Full compiler CST/HIR graph integration, typed guest splice ABI, user macro workflows and cache policy binding |
 | `vesper-lean-syntax` | Full compiler emission through syntax nodes, validated names/literals, one printer and actual Lean 4.24 checks | Lean elaboration, semantic correspondence and compiler-correctness proofs remain separate |
+| `vesper-serde` | Strict bounded JSON index/cursor, borrowed plain strings, caller-scratch escapes, checked encoding/size helpers and `vesper json check` | Source derives/region typing/linear rollback, SIMD kernels and relative archives |
+| `vesper-beacon` | TraceContext v00 codec/CLI, fixed owned spans/ring/columns and checked full-u64 histogram | Source Trace/evidence propagation, Arrow/OTAP transport, global ID orchestration and compiler privacy proofs |
+| `vesper-quarry` | Parsed typed SQL/catalog, bounded row execution, outer-join/null-aware optimization and schema-bound plans | WASI @sql/source macros, durable engine/page pool, AoSoA/SIMD and ARIES proofs |
+| `vesper-tensor` | Checked symbolic dimensions/obligations, owner-tagged host IR, actual FP32/Q4_0 kernels and arithmetic-order-preserving fusion | Source shape types/egglog, SIMD/GPU and full LLM/KV-cache inference |
+| `vesper-flux` | Bounded exact Z-sets/DBSP circuits, transactional ticks, owned frontier holds and Lean algebra/monotonicity model | Source operators, distributed durable checkpoints, AoSoA/SIMD and end-to-end compiler proofs |
+| `vesper-aether` | Checked immutable snapshot maps, bounded actual CAS page validation and interval/page model lemmas | KVM/UFFD/physical isolation, unikernel target, VMGENID entropy and clone/boot timing |
 
 The [contract audit](rfcs/parallel-contracts.md) records checked-arithmetic migration, scoped child loans, native relocation/DMA rules, region aliasing/rewind, and distinct interface/artifact/proof cache keys. These are integration gates, not new proof claims.
 

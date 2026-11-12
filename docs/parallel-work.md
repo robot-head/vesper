@@ -3,7 +3,26 @@
 Base checkpoint: `c5328d0`. Integration branch: `main` (the `work` branch was merged in PR #9). Remote: https://github.com/robot-head/vesper.
 The expanded design lives in [specification.txt](specification.txt); the implemented core baseline is [core-specification-baseline.txt](core-specification-baseline.txt).
 
-## Next implementation batch
+## Current independent batch: sections 20–37
+
+The [design snapshot](specification.txt) has been refreshed through section 37;
+[revision metadata](specification-source.json) and a [full-section review](rfcs/expansion-37-review.md)
+record its identity, changes and scaffold limitations. Six new isolated lanes
+implement JSON codecs, Beacon, Quarry, Tensor, Flux and Aether under the
+[expanded ownership contracts](rfcs/expansion-37-contracts.md). Their source paths
+are independent of externally merging wave three. The coordinator supplies CLI
+wiring, root registration and the new `Expanded foundation contracts` workflow.
+
+| Lane | Branch | Exclusive implementation |
+| --- | --- | --- |
+| JSON/codecs (§20) | `expansion37/serde` | New `crates/vesper-serde/**` |
+| Beacon (§22) | `expansion37/beacon` | New `crates/vesper-beacon/**` |
+| Quarry (§24) | `expansion37/quarry` | New `crates/vesper-quarry/**` |
+| Tensor (§28) | `expansion37/tensor` | New `crates/vesper-tensor/**` |
+| Flux (§34) | `expansion37/flux` | New crate and `lean/FluxDbsp.lean` |
+| Aether (§37) | `expansion37/aether` | New crate and `lean/AetherMemory.lean` |
+
+## Earlier independent batch and external wave three
 
 The previous seven sessions are complete and integrated. The [third-wave prompt index](agent-prompts/wave-three/README.md) is **assigned to the user's external agent**; its [frozen contracts](rfcs/wave-three-contracts.md) separate frontend, native and platform ownership. Do not assign duplicate writers to those lanes. Locally started duplicates were stopped and preserved as [unmerged spikes](parallel-results/paused-wave-three-spikes.md).
 

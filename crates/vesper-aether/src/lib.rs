@@ -1,7 +1,7 @@
 //! Host-only snapshot metadata validation and owned page resolution (§37).
 //!
 //! HVA interval checks do not prove physical/EPT isolation. Actions are plans:
-//! this crate executes no KVM, userfaultfd, memfd, crypto or guest boot operations.
+//! this crate executes no KVM, userfaultfd, memfd, encryption/key derivation or guest boot operations.
 //! Immutable output copies remove writable file aliases after verification; CAS
 //! filesystem permissions are not a defence against a privileged concurrent writer.
 

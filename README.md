@@ -119,3 +119,9 @@ See [CAS workflows](docs/cas-workflows.md).
 with explicit findings and unknown results; see [offline audits](docs/package-audits.md).
 `vesper attest import` verifies the current configured builder quorum and exact
 blob bytes before CAS ingestion; see [signed artifact admission](docs/builder-attestations.md#importing-verified-blob-bytes).
+
+Strict host-data tools are available as `vesper json check FILE --json` and
+`vesper traceparent HEADER --json`. The refreshed [37-section design snapshot](docs/specification.txt)
+has [revision metadata](docs/specification-source.json) and a
+[review of the newer sections](docs/rfcs/expansion-37-review.md). The independent
+foundation libraries have self-checking examples under `scripts/test-expansion-foundations.sh`.
