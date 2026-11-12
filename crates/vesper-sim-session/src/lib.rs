@@ -15,6 +15,11 @@
 //! replay reproduces outputs, lost tasks and exact durable bytes or rejects
 //! the first mismatch.
 //!
+//! Scenario version 3 adds the Vesper Warp model: source `XdpNic` frames over
+//! a conserved UMEM (`umem-v1`) and adversarial datagram links (`datagram-v1`:
+//! Gilbert–Elliott burst loss, independent loss, reordering, duplication, a
+//! finite bottleneck queue and NAT rebinding). See [`model::warp`].
+//!
 //! This executes the reference evaluator under deterministic simulated
 //! effects. It is not native execution, kernel I/O, exhaustive scheduling or
 //! DPOR, not a crash-consistency check of any real filesystem or kernel I/O
@@ -30,7 +35,7 @@ pub use identity::{ExecutionIdentity, IdentityMismatch, SEMANTICS, executable_sh
 pub use model::{
     CrashChoice, DurableLog, DurableState, FailOp, FailureSpec, Fault, LinkSpec, LogSpec,
     LostState, MODEL_SEMANTICS, ModelEvent, ModelLimits, ModelSnapshot, ModelSpec, NetworkSpec,
-    ProcessSpec, StaleSource, TimedFault,
+    ProcessSpec, StaleSource, TimedFault, WARP_MODEL_SEMANTICS,
 };
 pub use program::{CheckedProgram, SourceRejected};
 pub use scenario::{

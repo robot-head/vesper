@@ -8,8 +8,13 @@
 //! Version 1 has no model. Version 2 adds a required `model` section
 //! (processes, virtual WAL logs, networks, timed faults and injected
 //! failures), per-task `process` membership and the model actions.
+//!
+//! Version 3 additionally requires `model.warp` (UMEM NICs, datagram links,
+//! flows and NAT events) and adds the `xdp_*` actions that bind the §35.2
+//! `XdpNic` operations. Their signatures are checked structurally against the
+//! checked source declarations at load (see [`warp_signature`]).
 use crate::{
-    model::{self, ModelPlan, ModelSpec},
+    model::{self, ModelPlan, ModelSpec, warp::WarpOp},
     value::{self, type_name},
 };
 use serde::{Deserialize, Serialize};
@@ -26,6 +31,8 @@ pub const SCENARIO_FORMAT: &str = "vesper-sim-scenario";
 pub const SCENARIO_VERSION: u32 = 1;
 /// Scenario version with a crash/storage/network model section.
 pub const MODEL_SCENARIO_VERSION: u32 = 2;
+/// Scenario version whose model has a `warp` section.
+pub const WARP_SCENARIO_VERSION: u32 = 3;
 /// Hard upper bounds applied regardless of scenario limits.
 pub const MAX_SCENARIO_BYTES: usize = 1 << 20;
 pub const MAX_TASKS: usize = 64;
@@ -110,6 +117,22 @@ pub enum Action {
     /// `fn op(timeout_ns: u64) -> Result[T, u32]`: oldest message, or
     /// `Err(timeout_code)` once the timeout elapses.
     NetRecv { network: String },
+    /// `harvest_rx_single() -> Option[UmemFrame[Rx]]`.
+    XdpHarvest { nic: String },
+    /// `view_frame_bytes(in frame: UmemFrame[Rx]) -> ByteSlice`.
+    XdpView { nic: String },
+    /// `recycle_to_fill_ring(sink frame: UmemFrame[Rx])`.
+    XdpRecycle { nic: String },
+    /// `turn_around_tx_in_place(sink frame: UmemFrame[Rx], tx_len: u32) -> UmemFrame[Tx]`.
+    XdpTurnAround { nic: String },
+    /// `submit_paced_tx(sink frame: UmemFrame[Tx], pkt_num_full: u64, edt_launch_ns: u64) -> InFlightQuicPkt`.
+    XdpSubmit { nic: String },
+    /// `park_for_ack_or_pto(sink inflight: InFlightQuicPkt)`.
+    XdpPark { nic: String },
+    /// `split_short_header(bytes: ByteSlice) -> Result[QuicShortHdr, u32]`.
+    XdpSplitShortHeader { nic: String },
+    /// `wait_rx(timeout_ns: u64) -> u64`: RX ring occupancy, 0 on timeout.
+    XdpWaitRx { nic: String },
 }
 impl Action {
     pub fn is_model(&self) -> bool {
@@ -121,7 +144,21 @@ impl Action {
                 | Self::WalRead { .. }
                 | Self::NetSend { .. }
                 | Self::NetRecv { .. }
-        )
+        ) || self.warp().is_some()
+    }
+    /// The Warp operation and NIC of an `xdp_*` action.
+    pub fn warp(&self) -> Option<(WarpOp, &str)> {
+        Some(match self {
+            Self::XdpHarvest { nic } => (WarpOp::Harvest, nic),
+            Self::XdpView { nic } => (WarpOp::View, nic),
+            Self::XdpRecycle { nic } => (WarpOp::Recycle, nic),
+            Self::XdpTurnAround { nic } => (WarpOp::TurnAround, nic),
+            Self::XdpSubmit { nic } => (WarpOp::Submit, nic),
+            Self::XdpPark { nic } => (WarpOp::Park, nic),
+            Self::XdpSplitShortHeader { nic } => (WarpOp::SplitShortHeader, nic),
+            Self::XdpWaitRx { nic } => (WarpOp::WaitRx, nic),
+            _ => return None,
+        })
     }
 }
 
@@ -280,13 +317,22 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
     if scenario.format != SCENARIO_FORMAT {
         return fail(format!("unknown format {:?}", scenario.format));
     }
-    match (scenario.version, scenario.model.is_some()) {
-        (SCENARIO_VERSION, false) | (MODEL_SCENARIO_VERSION, true) => {}
-        (SCENARIO_VERSION, true) => {
+    let warp = scenario.model.as_ref().map(|m| m.warp.is_some());
+    match (scenario.version, warp) {
+        (SCENARIO_VERSION, None)
+        | (MODEL_SCENARIO_VERSION, Some(false))
+        | (WARP_SCENARIO_VERSION, Some(true)) => {}
+        (SCENARIO_VERSION, Some(_)) => {
             return fail("scenario version 1 has no model section; use version 2");
         }
-        (MODEL_SCENARIO_VERSION, false) => {
+        (MODEL_SCENARIO_VERSION, None) => {
             return fail("scenario version 2 requires a model section");
+        }
+        (MODEL_SCENARIO_VERSION, Some(true)) => {
+            return fail("a warp section needs scenario version 3");
+        }
+        (WARP_SCENARIO_VERSION, _) => {
+            return fail("scenario version 3 requires a model with a warp section");
         }
         (version, _) => return fail(format!("unsupported scenario version {version}")),
     }
@@ -344,6 +390,8 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
     let mut bindings = BTreeMap::new();
     // Payload type of each log and network, fixed by the first binding.
     let mut payloads: BTreeMap<(bool, String), String> = BTreeMap::new();
+    // Source types of each NIC's frames, lease, view and header.
+    let mut warp_roles: BTreeMap<(String, &'static str), String> = BTreeMap::new();
     for binding in &scenario.bindings {
         let key = (binding.effect.clone(), binding.operation.clone());
         let effect = world
@@ -407,6 +455,31 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
                         .is_some_and(|(p, t)| *p != Pass::Inout && type_name(t) == "u64")
             }
             Action::Script | Action::External => true,
+            action if action.warp().is_some() => {
+                let (op, nic) = action.warp().expect("warp action");
+                let known = model
+                    .as_ref()
+                    .and_then(|m| m.spec.warp.as_ref())
+                    .is_some_and(|w| w.nics.iter().any(|n| n.name == nic));
+                if !known {
+                    return fail(format!(
+                        "{signature}: unknown NIC {nic} (warp needs version 3)"
+                    ));
+                }
+                for (role, ty) in warp_signature(world, op, &params, &result)
+                    .map_err(|e| ScenarioError(format!("{signature}: {e}")))?
+                {
+                    let fixed = warp_roles
+                        .entry((nic.to_string(), role))
+                        .or_insert(ty.clone());
+                    if *fixed != ty {
+                        return fail(format!(
+                            "{signature}: NIC {nic} uses {fixed} as its {role}, not {ty}"
+                        ));
+                    }
+                }
+                true
+            }
             action => {
                 let payload = model_payload(action, &params, &result).ok_or_else(|| {
                     ScenarioError(format!(
@@ -459,6 +532,22 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
         }
     }
 
+    for nic in model
+        .iter()
+        .filter_map(|m| m.spec.warp.as_ref())
+        .flat_map(|w| &w.nics)
+    {
+        if let (Some(rx), Some(tx)) = (
+            warp_roles.get(&(nic.name.clone(), "rx_frame")),
+            warp_roles.get(&(nic.name.clone(), "tx_frame")),
+        ) && rx == tx
+        {
+            return fail(format!(
+                "NIC {}: RX and TX frames need distinct typestates, both are {rx}",
+                nic.name
+            ));
+        }
+    }
     let mut names = BTreeSet::new();
     let mut tasks = vec![];
     for task in &scenario.tasks {
@@ -566,6 +655,222 @@ fn model_payload(
     }
 }
 
+/// Named fields of a non-generic-or-instantiated struct `ty` with `mode`,
+/// sorted by name, as `(name, type)` strings.
+fn struct_fields(world: &World, ty: &Type, linear: bool) -> Option<Vec<(String, String)>> {
+    let Type::Named(name, args) = ty else {
+        return None;
+    };
+    let adt = world.adts.get(name)?;
+    let mode_ok = if linear {
+        adt.mode == vesper::ast::Mode::Linear
+    } else {
+        adt.mode == vesper::ast::Mode::Copy
+    };
+    if adt.is_enum || !mode_ok || adt.generics.len() != args.len() || adt.variants.len() != 1 {
+        return None;
+    }
+    let vars = adt
+        .generics
+        .iter()
+        .zip(args)
+        .map(|(g, t)| (g.name.clone(), t.clone()))
+        .collect();
+    let mut fields: Vec<(String, String)> = adt.variants[0]
+        .fields
+        .iter()
+        .map(|f| {
+            (
+                f.name.clone(),
+                type_name(&vesper::ast::substitute(&f.ty, &vars)),
+            )
+        })
+        .collect();
+    fields.sort();
+    Some(fields)
+}
+fn has_fields(actual: Option<Vec<(String, String)>>, expected: &[(&str, &str)]) -> bool {
+    let mut expected: Vec<(String, String)> = expected
+        .iter()
+        .map(|(n, t)| (n.to_string(), t.to_string()))
+        .collect();
+    expected.sort();
+    actual == Some(expected)
+}
+/// `UmemFrame[State]`: a linear struct with one typestate parameter, a copy
+/// struct with no fields, and exactly the descriptor fields.
+fn frame_type(world: &World, ty: &Type) -> Result<String, String> {
+    let ok = match ty {
+        Type::Named(_, args) if args.len() == 1 => {
+            has_fields(struct_fields(world, &args[0], false), &[])
+                && has_fields(
+                    struct_fields(world, ty, true),
+                    &[
+                        ("chunk_idx", "u32"),
+                        ("data_offset", "u32"),
+                        ("pkt_len", "u32"),
+                    ],
+                )
+        }
+        _ => false,
+    };
+    if ok {
+        Ok(type_name(ty))
+    } else {
+        Err(format!(
+            "{} is not a linear frame struct[State] {{ chunk_idx: u32, data_offset: u32, pkt_len: u32 }} with a field-less copy typestate",
+            type_name(ty)
+        ))
+    }
+}
+fn view_type(world: &World, ty: &Type) -> Result<String, String> {
+    let fields = [
+        ("chunk_idx", "u32"),
+        ("generation", "u64"),
+        ("offset", "u32"),
+        ("len", "u32"),
+    ];
+    if has_fields(struct_fields(world, ty, false), &fields) {
+        Ok(type_name(ty))
+    } else {
+        Err(format!(
+            "{} is not a copy view struct {{ chunk_idx: u32, generation: u64, offset: u32, len: u32 }}",
+            type_name(ty)
+        ))
+    }
+}
+fn lease_type(world: &World, ty: &Type) -> Result<(String, String), String> {
+    let err = || {
+        format!(
+            "{} is not a linear lease struct {{ pkt_num_full: u64, edt_departure_ns: u64, held_frame: <TX frame> }}",
+            type_name(ty)
+        )
+    };
+    let fields = struct_fields(world, ty, true).ok_or_else(err)?;
+    let held = fields
+        .iter()
+        .find(|(n, _)| n == "held_frame")
+        .map(|(_, t)| t.clone())
+        .ok_or_else(err)?;
+    if !has_fields(
+        Some(fields),
+        &[
+            ("edt_departure_ns", "u64"),
+            ("held_frame", held.as_str()),
+            ("pkt_num_full", "u64"),
+        ],
+    ) {
+        return Err(err());
+    }
+    let Type::Named(name, _) = ty else {
+        return Err(err());
+    };
+    let field_ty = world.adts[name].variants[0]
+        .fields
+        .iter()
+        .find(|f| f.name == "held_frame")
+        .map(|f| f.ty.clone())
+        .ok_or_else(err)?;
+    Ok((type_name(ty), frame_type(world, &field_ty)?))
+}
+fn header_type(world: &World, ty: &Type) -> Result<String, String> {
+    let fields = [
+        ("first_byte", "u8"),
+        ("dcid", "u64"),
+        ("pkt_num_trunc", "u64"),
+        ("payload_len", "u32"),
+        ("peer_addr", "u32"),
+        ("peer_port", "u32"),
+    ];
+    if has_fields(struct_fields(world, ty, false), &fields) {
+        Ok(type_name(ty))
+    } else {
+        Err(format!(
+            "{} is not a copy header struct {{ first_byte: u8, dcid: u64, pkt_num_trunc: u64, payload_len: u32, peer_addr: u32, peer_port: u32 }}",
+            type_name(ty)
+        ))
+    }
+}
+
+/// Check an `xdp_*` binding against the §35.2 shape and return the source
+/// type it fixes for each NIC role (`rx_frame`, `tx_frame`, `lease`, `view`,
+/// `header`).
+pub(crate) fn warp_signature(
+    world: &World,
+    op: WarpOp,
+    params: &[(Pass, Type)],
+    result: &Type,
+) -> Result<Vec<(&'static str, String)>, String> {
+    let unit = value::is_unit(result);
+    let scalar = |p: &(Pass, Type), name: &str| p.0 == Pass::In && type_name(&p.1) == name;
+    let shape = |ok: bool| {
+        if ok {
+            Ok(())
+        } else {
+            Err(format!(
+                "{op:?} has the wrong parameter passing or result shape"
+            ))
+        }
+    };
+    Ok(match (op, params) {
+        (WarpOp::Harvest, []) => match result {
+            Type::Named(n, args) if n == "Option" && args.len() == 1 => {
+                vec![("rx_frame", frame_type(world, &args[0])?)]
+            }
+            _ => return Err("harvest must return Option[<RX frame>]".into()),
+        },
+        (WarpOp::View, [frame]) => {
+            shape(frame.0 == Pass::In)?;
+            vec![
+                ("rx_frame", frame_type(world, &frame.1)?),
+                ("view", view_type(world, result)?),
+            ]
+        }
+        (WarpOp::Recycle, [frame]) => {
+            shape(frame.0 == Pass::Sink && unit)?;
+            vec![("rx_frame", frame_type(world, &frame.1)?)]
+        }
+        (WarpOp::TurnAround, [frame, len]) => {
+            shape(frame.0 == Pass::Sink && scalar(len, "u32"))?;
+            vec![
+                ("rx_frame", frame_type(world, &frame.1)?),
+                ("tx_frame", frame_type(world, result)?),
+            ]
+        }
+        (WarpOp::Submit, [frame, pn, edt]) => {
+            shape(frame.0 == Pass::Sink && scalar(pn, "u64") && scalar(edt, "u64"))?;
+            let tx = frame_type(world, &frame.1)?;
+            let (lease, held) = lease_type(world, result)?;
+            if held != tx {
+                return Err(format!("the lease holds {held}, not the submitted {tx}"));
+            }
+            vec![("tx_frame", tx), ("lease", lease)]
+        }
+        (WarpOp::Park, [lease]) => {
+            shape(lease.0 == Pass::Sink && unit)?;
+            let (lease, held) = lease_type(world, &lease.1)?;
+            vec![("lease", lease), ("tx_frame", held)]
+        }
+        (WarpOp::SplitShortHeader, [view]) => {
+            shape(view.0 == Pass::In)?;
+            let header = match result {
+                Type::Named(n, args)
+                    if n == "Result" && args.len() == 2 && type_name(&args[1]) == "u32" =>
+                {
+                    header_type(world, &args[0])?
+                }
+                _ => return Err("split_short_header must return Result[<header>, u32]".into()),
+            };
+            vec![("view", view_type(world, &view.1)?), ("header", header)]
+        }
+        (WarpOp::WaitRx, [timeout]) => {
+            shape(scalar(timeout, "u64") && type_name(result) == "u64")?;
+            vec![]
+        }
+        _ => return Err(format!("{op:?} has the wrong number of parameters")),
+    })
+}
+
 fn task_plan(
     world: &World,
     bindings: &BTreeMap<(String, String), BoundOperation>,
@@ -610,8 +915,23 @@ fn task_plan(
                         bound.signature
                     )));
                 };
-                let (network, target) = model_target(&bound.action);
                 let spec = &model.spec;
+                if let Some((_, nic)) = bound.action.warp() {
+                    let owner = spec
+                        .warp
+                        .iter()
+                        .flat_map(|w| &w.nics)
+                        .find(|n| n.name == nic)
+                        .map(|n| model.process_index[&n.process]);
+                    if owner != Some(process) {
+                        return Err(context(format!(
+                            "{} uses NIC {nic}, which process {} does not own",
+                            bound.signature, spec.processes[process].name
+                        )));
+                    }
+                    continue;
+                }
+                let (network, target) = model_target(&bound.action);
                 let owned = if network {
                     spec.processes[process].endpoints.contains_key(&target)
                 } else {

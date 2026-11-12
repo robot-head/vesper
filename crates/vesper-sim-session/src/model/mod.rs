@@ -12,11 +12,16 @@
 //!   spawns the process's restart tasks.
 //! - `wal-frame-v1`: see [`wal`].
 //! - `net-v1`: see [`net`].
+//! - `umem-v1` and `datagram-v1` (scenario version 3 only): see [`warp`],
+//!   [`umem`] and [`link`].
 //!
 //! Every fault, failure, crash choice, recovery and model transition is a
 //! [`ModelEvent`] in a model trace kept separate from the SimPulse v1 journal.
+pub mod link;
 pub mod net;
+pub mod umem;
 pub mod wal;
+pub mod warp;
 
 use crate::scenario::TaskSpec;
 use net::{DropReason, Message, NetLimits, Network};
@@ -25,6 +30,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use wal::{CrashApplied, TailDamage, Wal, WalLimits, WalRecord};
 
 pub const MODEL_SEMANTICS: &str = "vesper-sim-models-v1(process-epochs-v1,wal-frame-v1,net-v1)";
+/// Model semantics of scenario version 3 (with a `warp` section).
+pub const WARP_MODEL_SEMANTICS: &str =
+    "vesper-sim-models-v2(process-epochs-v1,wal-frame-v1,net-v1,umem-v1,datagram-v1)";
 
 /// Hard upper bounds applied regardless of model limits.
 pub const MAX_PROCESSES: usize = 16;
@@ -54,6 +62,9 @@ pub struct ModelSpec {
     pub faults: Vec<TimedFault>,
     #[serde(default)]
     pub failures: Vec<FailureSpec>,
+    /// Required by scenario version 3 and rejected by version 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warp: Option<warp::WarpSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,6 +374,8 @@ pub enum ModelEvent {
         epoch: u32,
         at_ns: u64,
     },
+    /// A Warp (UMEM, datagram link or flow) transition.
+    Warp(warp::WarpEvent),
 }
 
 /// Exact durable bytes of each log.
@@ -405,6 +418,8 @@ pub struct ModelSnapshot {
     pub processes: Vec<ProcessSnapshot>,
     pub logs: BTreeMap<String, LogSnapshot>,
     pub networks: BTreeMap<String, NetworkSnapshot>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warp: Option<warp::WarpSnapshot>,
 }
 
 /// A model spec checked for internal consistency (bindings and tasks are
@@ -446,10 +461,11 @@ pub(crate) struct ModelState {
     pub networks: BTreeMap<String, NetState>,
     pub occurrences: BTreeMap<(String, FailOp), u64>,
     pub crashes: u32,
+    pub warp: Option<warp::WarpState>,
 }
 
 impl ModelState {
-    pub fn new(plan: &ModelPlan) -> Self {
+    pub fn new(plan: &ModelPlan, seed: u64) -> Self {
         let spec = &plan.spec;
         let processes = spec
             .processes
@@ -516,6 +532,10 @@ impl ModelState {
             networks,
             occurrences: BTreeMap::new(),
             crashes: 0,
+            warp: spec
+                .warp
+                .as_ref()
+                .map(|w| warp::WarpState::new(w, &plan.process_index, seed)),
         }
     }
 
@@ -597,6 +617,10 @@ impl ModelState {
                     )
                 })
                 .collect(),
+            warp: self.warp.as_ref().map(|w| {
+                let names: Vec<String> = self.processes.iter().map(|p| p.name.clone()).collect();
+                w.snapshot(&names)
+            }),
         }
     }
 }
@@ -796,6 +820,17 @@ pub(crate) fn validate(
             "{instances} task instances exceed model max_instances {}",
             limits.max_instances
         ));
+    }
+    if let Some(w) = &spec.warp {
+        let crashing: BTreeSet<String> = spec
+            .faults
+            .iter()
+            .filter_map(|f| match &f.fault {
+                Fault::Crash { process, .. } => Some(process.clone()),
+                _ => None,
+            })
+            .collect();
+        warp::validate(w, &process_index, &crashing, max_virtual_ns)?;
     }
     let mut failures = BTreeMap::new();
     for f in &spec.failures {
