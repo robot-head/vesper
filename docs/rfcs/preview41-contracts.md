@@ -54,7 +54,11 @@ cutoff. The query must not call legacy parse_file/check_file/signature queries.
 New public module `database::macro_preview`:
 
 `compile_limits()->forge_frontend::CompileLimits` returns fixed editor limits:
-source128KiB, expanded128KiB, maps1024, metadata256KiB, identifier256, work128Mi.
+source128KiB, expanded128KiB, maps1024, metadata2MiB, identifier256, work128Mi.
+The metadata cap was amended before dependent writers changed it: actual small
+helper/linear fixtures exceeded the initial256KiB cumulative syntax preflight
+and refused before their authority/checker stages. The new cap matches the
+existing compiler default; provider output remains independently capped at1MiB.
 `#[salsa::tracked(returns(ref), no_eq)] pub fn preview(db:&dyn salsa::Database,
 file:SourceFile)->MacroSnapshot`.
 
@@ -65,7 +69,11 @@ MacroSnapshot has private fields/no constructor/Deserialize. Methods:
 Retain bounded actual original bytes as Option<Arc<str>> plus actual complete
 compiler result. Equality compares source identity and Arc allocation identities,
 never deep Worlds. Salsa unchanged-input caching retains the real Arc; changed
-input recomputes all compiler guards. SourceIdentity remains parent-sealed.
+input recomputes all compiler guards. Session no-op text changes keep the existing
+SourceFile input while advancing document version. A direct caller forcing an
+input setter, even with equal bytes, explicitly creates a fresh input revision
+and reruns the full compiler; no interned side cache is introduced.
+SourceIdentity remains parent-sealed.
 
 Legacy SourceFile can contain oversized strings: refuse through the actual
 compiler before copying/hashing such input, keep source=None and opaque identity.

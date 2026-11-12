@@ -458,7 +458,11 @@ impl Session {
             .get(uri)
             .expect("accepted transaction retained document");
         if let Some(file) = self.files.get(uri) {
-            file.set_text(&mut self.db).to(document.text().to_owned());
+            // The store already bounded both texts. Preserve the actual input
+            // and its memoized results for byte-identical version-only changes.
+            if file.text(&self.db) != document.text() {
+                file.set_text(&mut self.db).to(document.text().to_owned());
+            }
         } else {
             self.files.insert(
                 uri.to_owned(),
