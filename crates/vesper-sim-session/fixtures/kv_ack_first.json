@@ -1,0 +1,36 @@
+{
+  "format": "vesper-sim-scenario",
+  "version": 2,
+  "seed": 5,
+  "limits": { "max_operations_per_task": 32, "max_virtual_ns": 1000, "max_dispatches": 512 },
+  "runtime": { "fuel": 1000000, "optimize": true },
+  "bindings": [
+    { "effect": "Disk", "operation": "recover", "params": [], "result": "u64", "action": { "wal_recover": { "log": "kv" } } },
+    { "effect": "Disk", "operation": "append", "params": ["u64"], "result": "Result[u64, u32]", "action": { "wal_append": { "log": "kv" } } },
+    { "effect": "Disk", "operation": "flush", "params": [], "result": "Result[u64, u32]", "action": { "wal_flush": { "log": "kv" } } },
+    { "effect": "Disk", "operation": "read", "params": ["u64"], "result": "Option[u64]", "action": { "wal_read": { "log": "kv" } } },
+    { "effect": "Net", "operation": "send", "params": ["u64", "Msg"], "result": "Result[u64, u32]", "action": { "net_send": { "network": "lan" } } },
+    { "effect": "Net", "operation": "recv", "params": ["u64"], "result": "Result[Msg, u32]", "action": { "net_recv": { "network": "lan" } } }
+  ],
+  "tasks": [
+    { "name": "client", "entry": "client", "arguments": [2, 42], "process": "client" },
+    { "name": "server", "entry": "serve_ack_first", "arguments": [1], "process": "server" }
+  ],
+  "model": {
+    "limits": { "max_events": 4096, "max_epochs": 4, "max_instances": 8 },
+    "processes": [
+      { "name": "client", "endpoints": { "lan": 1 } },
+      { "name": "server", "endpoints": { "lan": 2 }, "restart": [ { "name": "audit", "entry": "audit", "arguments": [] } ] }
+    ],
+    "logs": [
+      { "name": "kv", "process": "server", "flush_delay_ns": 10, "limits": { "max_records": 64, "max_bytes": 4096, "max_record_bytes": 64 } }
+    ],
+    "networks": [
+      { "name": "lan", "delay_ns": 5, "max_in_flight": 16, "max_inbox": 8, "max_message_bytes": 64, "timeout_code": 110, "unreachable_code": 113 }
+    ],
+    "faults": [
+      { "at_ns": 12, "fault": { "crash": { "process": "server" } } },
+      { "at_ns": 20, "fault": { "restart": { "process": "server" } } }
+    ]
+  }
+}

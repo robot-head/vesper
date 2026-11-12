@@ -7,12 +7,22 @@
 //! self-referential. Adapter errors detected before a consuming runtime call
 //! leave the owner in the session; failures reported by `begin_external` or
 //! `Suspension::resume` are terminal because those calls consume the machine.
+//!
+//! Scenario version 2 adds model-internal SimPulse tasks (fault timers,
+//! message arrivals, receive timeouts and flush completions) and process
+//! epochs. A crashed task's owner is never resumed: when SimPulse next hands
+//! it out, the session retires the token and keeps the owner as explicit
+//! [`LostOwner`] state. See [`crate::model`].
+mod model_ops;
+
 use crate::{
     identity::{ExecutionIdentity, IdentityMismatch},
+    model::{DurableState, LostState, ModelEvent, ModelSnapshot, ModelState},
     program::CheckedProgram,
     scenario::{Action, ArgumentWrite, Outcome, Plan, Scenario, ScenarioError, validate},
     value::{self, unit},
 };
+use model_ops::{Internal, ModelStep};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::collections::BTreeMap;
@@ -22,7 +32,8 @@ use vesper_simpulse::{
 };
 
 pub const RECORDING_FORMAT: &str = "vesper-sim-recording";
-pub const RECORDING_VERSION: u32 = 1;
+/// Version 2 adds the model trace, final durable state and lost tasks.
+pub const RECORDING_VERSION: u32 = 2;
 
 /// Source-level events, kept separate from the SimPulse journal schema.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -57,15 +68,31 @@ pub enum SourceEvent {
     },
 }
 
+/// A task instance whose process crashed before it finished.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LostTask {
+    pub task: String,
+    pub process: String,
+    pub epoch: u32,
+    pub at_ns: u64,
+    pub state: LostState,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Recording {
     pub format: String,
     pub version: u32,
     pub identity: ExecutionIdentity,
+    /// The unmodified SimPulse v1 journal, including model-internal tasks.
     pub journal: Journal,
     pub trace: Vec<SourceEvent>,
     pub outputs: BTreeMap<String, Json>,
+    pub model_trace: Vec<ModelEvent>,
+    /// Exact durable bytes of every log at completion.
+    pub durable: DurableState,
+    pub lost: Vec<LostTask>,
 }
 impl Recording {
     pub fn to_json(&self) -> String {
@@ -160,6 +187,42 @@ pub enum SessionError {
     DispatchLimit,
     /// The session was already interrupted; inspect or recover its owners.
     Interrupted,
+    /// A model operation the model does not support in this state, such as
+    /// appending before recovery or a second concurrent flush.
+    Model {
+        task: String,
+        message: String,
+    },
+    /// A payload, log, queue or in-flight bound would be exceeded.
+    ModelBudget {
+        task: String,
+        message: String,
+    },
+    /// Source plus model events would exceed `model.limits.max_events`.
+    EventLimit,
+    InstanceLimit,
+    EpochLimit,
+    /// The task's process crashed; its owner is lost process state.
+    TaskLost {
+        task: String,
+    },
+    /// A completion addressed to a request of an earlier process epoch.
+    StaleCompletion {
+        request: u64,
+        epoch: u32,
+    },
+    ModelTraceMismatch {
+        index: usize,
+        expected: Option<Box<ModelEvent>>,
+        actual: Box<ModelEvent>,
+    },
+    ModelTraceUnconsumed {
+        remaining: usize,
+    },
+    DurableMismatch {
+        log: String,
+    },
+    LostMismatch,
 }
 impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -168,11 +231,23 @@ impl std::fmt::Display for SessionError {
 }
 impl std::error::Error for SessionError {}
 
+/// A host completion the session refused. The submitted response is handed
+/// back unchanged, so the host still owns it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RejectedCompletion {
+    pub error: SessionError,
+    pub outcome: Outcome,
+    pub response: Json,
+    pub writes: Vec<ArgumentWrite>,
+}
+
 enum Wait {
     Yield,
     Timer,
     Script(usize),
     External,
+    /// A parked model operation; its response is in `deliveries`.
+    Model(u64),
 }
 enum Owner<'w> {
     Start(Runtime<'w>),
@@ -180,6 +255,8 @@ enum Owner<'w> {
     Parked(Suspension<'w>, Wait),
     /// Received from the runtime but not yet parked (only seen when stalled).
     Routing(Suspension<'w>),
+    /// A model-internal timer task that fires at the given virtual time.
+    Internal(Internal, u64),
     Empty,
 }
 /// SimPulse payload. It is opaque outside this crate.
@@ -193,9 +270,19 @@ pub enum RecoveredOwner<'w> {
     Suspended(Suspension<'w>),
     /// The task's runtime had already completed or been consumed.
     None,
+    /// A model-internal timer task (fault, arrival, timeout or flush); it
+    /// owns no source state.
+    Internal(String),
 }
 pub struct StalledOwner<'w> {
     pub task: String,
+    pub owner: RecoveredOwner<'w>,
+}
+/// The owner of a task whose process crashed. It is never resumed; holding
+/// it here makes the loss explicit instead of a silent drop.
+pub struct LostOwner<'w> {
+    pub task: String,
+    pub epoch: u32,
     pub owner: RecoveredOwner<'w>,
 }
 
@@ -206,7 +293,13 @@ pub struct PendingOperation {
     pub operation: String,
     pub arguments: Json,
     pub external: bool,
+    /// Unique per session; host completions may address it.
+    pub request: u64,
+    /// The task's process epoch when the operation was submitted.
+    pub epoch: u32,
     completion: CompletionId,
+    /// Whether SimPulse holds no scheduled event for this wait.
+    unscheduled: bool,
 }
 
 #[derive(Default)]
@@ -214,6 +307,19 @@ struct Progress {
     script: usize,
     operations: u64,
     submissions: u64,
+}
+
+/// One spawned source task: an initial task or a restarted one.
+struct Instance {
+    name: String,
+    spec: usize,
+    process: Option<usize>,
+    epoch: u32,
+    id: TaskId,
+    started: bool,
+    lost: bool,
+    progress: Progress,
+    output: Option<Json>,
 }
 
 struct ExternalResponse {
@@ -225,10 +331,13 @@ struct ExternalResponse {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Report {
-    /// Entry results in scenario task order.
+    /// Results of completed task instances in spawn order.
     pub outputs: Vec<(String, Json)>,
     pub virtual_ns: u64,
     pub recording: Recording,
+    pub lost: Vec<LostTask>,
+    /// Final model state (version 2 scenarios).
+    pub model: Option<ModelSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -239,6 +348,7 @@ pub struct TerminalFailure {
     /// baseline `begin_external`/`resume` API and cannot be recovered.
     pub message: String,
     pub trace: Vec<SourceEvent>,
+    pub model_trace: Vec<ModelEvent>,
 }
 
 pub enum RunResult<'w> {
@@ -296,21 +406,36 @@ fn stall<'w>(error: TransitionError<TaskSlot<'w>>) -> Fault<'w> {
     Fault::stall(error.token, SessionError::Simulator(error.error))
 }
 
+struct Expected {
+    recording: Recording,
+    source: usize,
+    model: usize,
+}
+
 pub struct Session<'w> {
     program: &'w CheckedProgram,
     plan: Plan,
     identity: ExecutionIdentity,
     sim: Simulator<TaskSlot<'w>>,
+    /// Source task instances by SimPulse id; internal tasks are absent.
     tasks: BTreeMap<TaskId, usize>,
-    progress: Vec<Progress>,
-    outputs: Vec<Option<Json>>,
+    instances: Vec<Instance>,
     waits: BTreeMap<TaskId, PendingOperation>,
     external: BTreeMap<CompletionId, ExternalResponse>,
     trace: Vec<SourceEvent>,
-    expected: Option<(Recording, usize)>,
+    expected: Option<Expected>,
     dispatches: u64,
     stalled: Option<RunToken<TaskSlot<'w>>>,
     interrupted: bool,
+    model: Option<ModelState>,
+    model_trace: Vec<ModelEvent>,
+    next_request: u64,
+    /// Requests of crashed epochs, with that epoch.
+    stale: BTreeMap<u64, u32>,
+    /// Responses for parked model operations, by request.
+    deliveries: BTreeMap<u64, (Outcome, Json)>,
+    lost: Vec<LostTask>,
+    lost_owners: Vec<LostOwner<'w>>,
 }
 
 impl<'w> Session<'w> {
@@ -341,37 +466,29 @@ impl<'w> Session<'w> {
             return Err(SessionError::Recording("journal seed differs".into()));
         }
         let sim = Simulator::replay(recording.journal.clone()).map_err(SessionError::Simulator)?;
-        Self::start(program, plan, identity, sim, Some((recording, 0)))
+        let expected = Expected {
+            recording,
+            source: 0,
+            model: 0,
+        };
+        Self::start(program, plan, identity, sim, Some(expected))
     }
 
     fn start(
         program: &'w CheckedProgram,
         plan: Plan,
         identity: ExecutionIdentity,
-        mut sim: Simulator<TaskSlot<'w>>,
-        expected: Option<(Recording, usize)>,
+        sim: Simulator<TaskSlot<'w>>,
+        expected: Option<Expected>,
     ) -> Result<Self, SessionError> {
-        let mut tasks = BTreeMap::new();
-        for (index, _) in plan.tasks.iter().enumerate() {
-            let mut runtime = Runtime::new(program.world());
-            runtime.fuel = plan.scenario().runtime.fuel;
-            runtime.optimize = plan.scenario().runtime.optimize;
-            let id = sim
-                .spawn(TaskSlot {
-                    owner: Owner::Start(runtime),
-                })
-                .map_err(|e| SessionError::Simulator(e.error))?;
-            tasks.insert(id, index);
-        }
-        let count = plan.tasks.len();
-        Ok(Self {
+        let model = plan.model.as_ref().map(ModelState::new);
+        let mut session = Self {
             program,
             plan,
             identity,
             sim,
-            tasks,
-            progress: (0..count).map(|_| Progress::default()).collect(),
-            outputs: vec![None; count],
+            tasks: BTreeMap::new(),
+            instances: vec![],
             waits: BTreeMap::new(),
             external: BTreeMap::new(),
             trace: vec![],
@@ -379,7 +496,70 @@ impl<'w> Session<'w> {
             dispatches: 0,
             stalled: None,
             interrupted: false,
-        })
+            model,
+            model_trace: vec![],
+            next_request: 1,
+            stale: BTreeMap::new(),
+            deliveries: BTreeMap::new(),
+            lost: vec![],
+            lost_owners: vec![],
+        };
+        for spec in 0..session.plan.tasks.len() {
+            if !session.plan.tasks[spec].restart {
+                let name = session.plan.tasks[spec].name.clone();
+                session.spawn_instance(spec, name, 0)?;
+            }
+        }
+        let faults: Vec<u64> = session
+            .plan
+            .model
+            .iter()
+            .flat_map(|m| m.spec.faults.iter().map(|f| f.at_ns))
+            .collect();
+        for (index, at_ns) in faults.into_iter().enumerate() {
+            session.spawn_internal(Internal::Fault(index), at_ns)?;
+        }
+        Ok(session)
+    }
+
+    fn spawn_instance(
+        &mut self,
+        spec: usize,
+        name: String,
+        epoch: u32,
+    ) -> Result<(), SessionError> {
+        let options = &self.plan.scenario().runtime;
+        let mut runtime = Runtime::new(self.program.world());
+        runtime.fuel = options.fuel;
+        runtime.optimize = options.optimize;
+        let id = self
+            .sim
+            .spawn(TaskSlot {
+                owner: Owner::Start(runtime),
+            })
+            .map_err(|e| SessionError::Simulator(e.error))?;
+        self.tasks.insert(id, self.instances.len());
+        self.instances.push(Instance {
+            name,
+            spec,
+            process: self.plan.tasks[spec].process,
+            epoch,
+            id,
+            started: false,
+            lost: false,
+            progress: Progress::default(),
+            output: None,
+        });
+        Ok(())
+    }
+
+    fn spawn_internal(&mut self, internal: Internal, at_ns: u64) -> Result<(), SessionError> {
+        self.sim
+            .spawn(TaskSlot {
+                owner: Owner::Internal(internal, at_ns),
+            })
+            .map(|_| ())
+            .map_err(|e| SessionError::Simulator(e.error))
     }
 
     pub fn identity(&self) -> &ExecutionIdentity {
@@ -391,31 +571,50 @@ impl<'w> Session<'w> {
     pub fn trace(&self) -> &[SourceEvent] {
         &self.trace
     }
+    pub fn model_trace(&self) -> &[ModelEvent] {
+        &self.model_trace
+    }
     pub fn journal(&self) -> &Journal {
         self.sim.journal()
+    }
+    /// The current process, log and network state (version 2 scenarios).
+    pub fn model_snapshot(&self) -> Option<ModelSnapshot> {
+        self.model.as_ref().map(|m| m.snapshot(self.sim.now_ns()))
+    }
+    /// Tasks lost to process crashes so far.
+    pub fn lost(&self) -> &[LostTask] {
+        &self.lost
+    }
+    /// Take the owners of crashed tasks that SimPulse has already retired.
+    pub fn take_lost_owners(&mut self) -> Vec<LostOwner<'w>> {
+        std::mem::take(&mut self.lost_owners)
     }
     /// Parked operations still owned by the simulator, in task order.
     pub fn pending(&self) -> Vec<PendingOperation> {
         self.waits.values().cloned().collect()
     }
+    fn token_name(&self, token: &RunToken<TaskSlot<'w>>) -> String {
+        match (&token.payload().owner, self.tasks.get(&token.task())) {
+            (Owner::Internal(internal, _), _) => internal.describe(),
+            (_, Some(index)) => self.instances[*index].name.clone(),
+            (_, None) => "unknown".into(),
+        }
+    }
     /// The task and operation of the owner held after a pre-transition error.
-    pub fn stalled_task(&self) -> Option<&str> {
+    pub fn stalled_task(&self) -> Option<String> {
         let token = self.stalled.as_ref()?;
-        Some(&self.plan.tasks[self.tasks[&token.task()]].name)
+        Some(self.token_name(token))
     }
 
     /// Take the owner that was checked out when the session was interrupted.
     /// Owners parked inside the simulator stay there and are dropped with it.
     pub fn take_stalled(&mut self) -> Option<StalledOwner<'w>> {
         let mut token = self.stalled.take()?;
-        let task = self.plan.tasks[self.tasks[&token.task()]].name.clone();
-        let owner = match std::mem::replace(&mut token.payload_mut().owner, Owner::Empty) {
-            Owner::Start(runtime) => RecoveredOwner::NotStarted(runtime),
-            Owner::Parked(continuation, _) | Owner::Routing(continuation) => {
-                RecoveredOwner::Suspended(continuation)
-            }
-            Owner::Empty => RecoveredOwner::None,
-        };
+        let task = self.token_name(&token);
+        let owner = recovered(std::mem::replace(
+            &mut token.payload_mut().owner,
+            Owner::Empty,
+        ));
         Some(StalledOwner { task, owner })
     }
 
@@ -430,12 +629,14 @@ impl<'w> Session<'w> {
         writes: Vec<ArgumentWrite>,
     ) -> Result<(), SessionError> {
         let index = self
-            .plan
-            .tasks
+            .instances
             .iter()
             .position(|t| t.name == task)
             .ok_or_else(|| SessionError::UnknownTask(task.into()))?;
-        let id = *self.tasks.iter().find(|(_, i)| **i == index).unwrap().0;
+        if self.instances[index].lost {
+            return Err(SessionError::TaskLost { task: task.into() });
+        }
+        let id = self.instances[index].id;
         let pending = self
             .waits
             .get(&id)
@@ -487,6 +688,51 @@ impl<'w> Session<'w> {
             },
         );
         Ok(())
+    }
+
+    /// Deliver a host completion addressed by request id. A request of a
+    /// crashed epoch is recorded as a stale completion and rejected; every
+    /// rejection hands the submitted response back.
+    pub fn complete_request(
+        &mut self,
+        request: u64,
+        outcome: Outcome,
+        response: Json,
+        writes: Vec<ArgumentWrite>,
+    ) -> Result<(), Box<RejectedCompletion>> {
+        let reject = |error| {
+            Box::new(RejectedCompletion {
+                error,
+                outcome,
+                response: response.clone(),
+                writes: writes.clone(),
+            })
+        };
+        if let Some(&epoch) = self.stale.get(&request) {
+            let event = ModelEvent::StaleRejected {
+                source: crate::model::StaleSource::HostCompletion,
+                request,
+                epoch,
+                at_ns: self.sim.now_ns(),
+            };
+            if let Err(error) = self.check_model(std::slice::from_ref(&event)) {
+                return Err(reject(error));
+            }
+            self.commit_model(vec![event]);
+            return Err(reject(SessionError::StaleCompletion { request, epoch }));
+        }
+        let Some(task) = self
+            .waits
+            .values()
+            .find(|p| p.request == request && p.external)
+            .map(|p| p.task.clone())
+        else {
+            return Err(reject(SessionError::NoExternalOperation {
+                task: format!("request {request}"),
+            }));
+        };
+        self.complete_external(&task, outcome, response.clone(), writes.clone())
+            .map_err(reject)
     }
 
     /// Run at most `max_steps` scheduler dispatches.
@@ -549,19 +795,28 @@ impl<'w> Session<'w> {
         if let Err(error) = self.sim.finish_replay() {
             return self.interrupt(SessionError::Simulator(error));
         }
-        let outputs: BTreeMap<String, Json> = self
-            .plan
-            .tasks
+        let outputs: Vec<(String, Json)> = self
+            .instances
             .iter()
-            .zip(&self.outputs)
-            .map(|(t, o)| (t.name.clone(), o.clone().unwrap_or(Json::Null)))
+            .filter_map(|i| i.output.clone().map(|o| (i.name.clone(), o)))
             .collect();
-        if let Some((recording, cursor)) = &self.expected {
-            if *cursor != recording.trace.len() {
-                let remaining = recording.trace.len() - cursor;
+        let output_map: BTreeMap<String, Json> = outputs.iter().cloned().collect();
+        let durable = self
+            .model
+            .as_ref()
+            .map(ModelState::durable)
+            .unwrap_or_default();
+        if let Some(expected) = &self.expected {
+            let recording = &expected.recording;
+            if expected.source != recording.trace.len() {
+                let remaining = recording.trace.len() - expected.source;
                 return self.interrupt(SessionError::TraceUnconsumed { remaining });
             }
-            if let Some(task) = outputs
+            if expected.model != recording.model_trace.len() {
+                let remaining = recording.model_trace.len() - expected.model;
+                return self.interrupt(SessionError::ModelTraceUnconsumed { remaining });
+            }
+            if let Some(task) = output_map
                 .iter()
                 .find(|(k, v)| recording.outputs.get(*k) != Some(v))
                 .map(|(k, _)| k.clone())
@@ -569,11 +824,28 @@ impl<'w> Session<'w> {
                     recording
                         .outputs
                         .keys()
-                        .find(|k| !outputs.contains_key(*k))
+                        .find(|k| !output_map.contains_key(*k))
                         .cloned()
                 })
             {
                 return self.interrupt(SessionError::OutputMismatch { task });
+            }
+            if let Some(log) = durable
+                .iter()
+                .find(|(k, v)| recording.durable.get(*k) != Some(v))
+                .map(|(k, _)| k.clone())
+                .or_else(|| {
+                    recording
+                        .durable
+                        .keys()
+                        .find(|k| !durable.contains_key(*k))
+                        .cloned()
+                })
+            {
+                return self.interrupt(SessionError::DurableMismatch { log });
+            }
+            if recording.lost != self.lost {
+                return self.interrupt(SessionError::LostMismatch);
             }
         }
         let recording = Recording {
@@ -582,44 +854,105 @@ impl<'w> Session<'w> {
             identity: self.identity.clone(),
             journal: self.sim.journal().clone(),
             trace: self.trace.clone(),
-            outputs,
+            outputs: output_map,
+            model_trace: self.model_trace.clone(),
+            durable,
+            lost: self.lost.clone(),
         };
         RunResult::Complete(Report {
-            outputs: self
-                .plan
-                .tasks
-                .iter()
-                .zip(&self.outputs)
-                .map(|(t, o)| (t.name.clone(), o.clone().unwrap_or(Json::Null)))
-                .collect(),
+            outputs,
             virtual_ns: self.sim.now_ns(),
             recording,
+            lost: self.lost.clone(),
+            model: self.model_snapshot(),
         })
+    }
+
+    fn event_budget(&self, additional: usize) -> Result<(), SessionError> {
+        if let Some(model) = &self.plan.model {
+            let used = (self.trace.len() + self.model_trace.len() + additional) as u64;
+            if used > model.spec.limits.max_events {
+                return Err(SessionError::EventLimit);
+            }
+        }
+        Ok(())
     }
 
     /// Record (or, when replaying, check) one source event before the
     /// transition it describes.
     fn event(&mut self, event: SourceEvent) -> Result<(), SessionError> {
-        if let Some((recording, cursor)) = &mut self.expected {
-            let expected = recording.trace.get(*cursor);
-            if expected != Some(&event) {
+        self.event_budget(1)?;
+        if let Some(expected) = &mut self.expected {
+            let recorded = expected.recording.trace.get(expected.source);
+            if recorded != Some(&event) {
                 return Err(SessionError::TraceMismatch {
-                    index: *cursor,
-                    expected: expected.cloned().map(Box::new),
+                    index: expected.source,
+                    expected: recorded.cloned().map(Box::new),
                     actual: Box::new(event),
                 });
             }
-            *cursor += 1;
+            expected.source += 1;
         }
         self.trace.push(event);
         Ok(())
     }
 
+    /// Check model events against the event budget and, when replaying, the
+    /// recorded model trace, without committing them.
+    fn check_model(&self, events: &[ModelEvent]) -> Result<(), SessionError> {
+        self.event_budget(events.len())?;
+        if let Some(expected) = &self.expected {
+            for (offset, event) in events.iter().enumerate() {
+                let index = expected.model + offset;
+                let recorded = expected.recording.model_trace.get(index);
+                if recorded != Some(event) {
+                    return Err(SessionError::ModelTraceMismatch {
+                        index,
+                        expected: recorded.cloned().map(Box::new),
+                        actual: Box::new(event.clone()),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+    fn commit_model(&mut self, events: Vec<ModelEvent>) {
+        if let Some(expected) = &mut self.expected {
+            expected.model += events.len();
+        }
+        self.model_trace.extend(events);
+    }
+
     fn dispatch(&mut self, mut token: RunToken<TaskSlot<'w>>) -> Step<'w> {
         let id = token.task();
-        let index = self.tasks[&id];
-        let name = self.plan.tasks[index].name.clone();
         let at_ns = self.sim.now_ns();
+        if let Owner::Internal(..) = token.payload().owner {
+            return self.dispatch_internal(token);
+        }
+        let Some(&index) = self.tasks.get(&id) else {
+            return Err(Fault::stall(
+                token,
+                SessionError::UnexpectedWake {
+                    task: "unknown".into(),
+                },
+            ));
+        };
+        let name = self.instances[index].name.clone();
+        if self.instances[index].lost {
+            // Retire the crashed task's SimPulse token without resuming it.
+            let owner = recovered(std::mem::replace(
+                &mut token.payload_mut().owner,
+                Owner::Empty,
+            ));
+            self.lost_owners.push(LostOwner {
+                task: name,
+                epoch: self.instances[index].epoch,
+                owner,
+            });
+            self.sim.finish(token).map_err(stall)?;
+            return Ok(());
+        }
+        let spec = self.instances[index].spec;
         let owner = std::mem::replace(&mut token.payload_mut().owner, Owner::Empty);
         let execution = match (owner, token.reason()) {
             (Owner::Start(runtime), WakeReason::Start) => {
@@ -630,7 +963,8 @@ impl<'w> Session<'w> {
                     token.payload_mut().owner = Owner::Start(runtime);
                     return Err(Fault::stall(token, error));
                 }
-                let task = &self.plan.tasks[index];
+                self.instances[index].started = true;
+                let task = &self.plan.tasks[spec];
                 runtime.begin_external(&task.entry, task.arguments.clone())
             }
             (Owner::Parked(mut continuation, wait), reason) => {
@@ -642,10 +976,10 @@ impl<'w> Session<'w> {
                     }
                     (Wait::Script(step), WakeReason::Io { completion, result })
                         if pending == Some(completion)
-                            && self.plan.tasks[index].script[*step].outcome.io_result()
+                            && self.plan.tasks[spec].script[*step].outcome.io_result()
                                 == result =>
                     {
-                        let step = &self.plan.tasks[index].script[*step];
+                        let step = &self.plan.tasks[spec].script[*step];
                         Some((
                             step.response.clone(),
                             step.response_json.clone(),
@@ -662,6 +996,21 @@ impl<'w> Session<'w> {
                     {
                         let r = self.external.remove(&completion).unwrap();
                         Some((r.response, r.response_json, r.writes, Some(r.outcome)))
+                    }
+                    (Wait::Model(request), WakeReason::Io { completion, result })
+                        if pending == Some(completion)
+                            && self
+                                .deliveries
+                                .get(request)
+                                .is_some_and(|(o, _)| o.io_result() == result) =>
+                    {
+                        let p = &self.waits[&id];
+                        let bound = &self.plan.bindings[&(p.effect.clone(), p.operation.clone())];
+                        let (outcome, json) = &self.deliveries[request];
+                        match value::decode(self.program.world(), &bound.result, json) {
+                            Ok(value) => Some((value, json.clone(), vec![], Some(*outcome))),
+                            Err(_) => None,
+                        }
                     }
                     _ => None,
                 };
@@ -702,6 +1051,9 @@ impl<'w> Session<'w> {
                         ));
                     }
                 }
+                if let Wait::Model(request) = wait {
+                    self.deliveries.remove(&request);
+                }
                 self.waits.remove(&id);
                 continuation.resume(response)
             }
@@ -716,6 +1068,35 @@ impl<'w> Session<'w> {
         self.drive(token, index, execution)
     }
 
+    fn dispatch_internal(&mut self, mut token: RunToken<TaskSlot<'w>>) -> Step<'w> {
+        let Owner::Internal(internal, at_ns) =
+            std::mem::replace(&mut token.payload_mut().owner, Owner::Empty)
+        else {
+            unreachable!("checked by dispatch")
+        };
+        match token.reason() {
+            WakeReason::Start => {
+                let delay = at_ns.saturating_sub(self.sim.now_ns());
+                token.payload_mut().owner = Owner::Internal(internal, at_ns);
+                self.sim.sleep(token, delay).map_err(stall)?;
+                Ok(())
+            }
+            WakeReason::Timer(_) => {
+                if let Err(error) = self.fire(&internal) {
+                    token.payload_mut().owner = Owner::Internal(internal, at_ns);
+                    return Err(Fault::stall(token, error));
+                }
+                self.sim.finish(token).map_err(stall)?;
+                Ok(())
+            }
+            _ => {
+                let task = internal.describe();
+                token.payload_mut().owner = Owner::Internal(internal, at_ns);
+                Err(Fault::stall(token, SessionError::UnexpectedWake { task }))
+            }
+        }
+    }
+
     fn drive(
         &mut self,
         mut token: RunToken<TaskSlot<'w>>,
@@ -723,7 +1104,9 @@ impl<'w> Session<'w> {
         mut execution: Result<Execution<'w>, String>,
     ) -> Step<'w> {
         let id = token.task();
-        let name = self.plan.tasks[index].name.clone();
+        let name = self.instances[index].name.clone();
+        let spec = self.instances[index].spec;
+        let epoch = self.instances[index].epoch;
         let world = self.program.world();
         loop {
             let at_ns = self.sim.now_ns();
@@ -734,10 +1117,11 @@ impl<'w> Session<'w> {
                         at_ns,
                         message,
                         trace: std::mem::take(&mut self.trace),
+                        model_trace: std::mem::take(&mut self.model_trace),
                     }));
                 }
                 Ok(Execution::Complete(value)) => {
-                    let value = match value::encode(world, &self.plan.tasks[index].result, &value) {
+                    let value = match value::encode(world, &self.plan.tasks[spec].result, &value) {
                         Ok(value) => value,
                         Err(message) => {
                             return Err(Fault::stall(
@@ -756,10 +1140,10 @@ impl<'w> Session<'w> {
                     }) {
                         return Err(Fault::stall(token, error));
                     }
-                    self.outputs[index] = Some(value);
+                    self.instances[index].output = Some(value);
                     self.sim.finish(token).map_err(stall)?;
                     let remaining =
-                        self.plan.tasks[index].script.len() - self.progress[index].script;
+                        self.plan.tasks[spec].script.len() - self.instances[index].progress.script;
                     if remaining != 0 {
                         return Err(Fault::Interrupt(SessionError::UnconsumedScript {
                             task: name,
@@ -803,7 +1187,7 @@ impl<'w> Session<'w> {
                 }
                 _ => None,
             };
-            let progress = &mut self.progress[index];
+            let progress = &mut self.instances[index].progress;
             progress.operations += 1;
             if progress.operations > self.plan.scenario().limits.max_operations_per_task {
                 token.payload_mut().owner = Owner::Routing(continuation);
@@ -836,16 +1220,71 @@ impl<'w> Session<'w> {
                 return Err(Fault::stall(token, error));
             }
             let action = bound.action.clone();
-            let immediate = match action {
+            let mut spawn = None;
+            let immediate = match &action {
                 Action::Clock => Some(Value::UInt(at_ns, 64)),
                 Action::CancelRequested => {
                     Some(Value::Bool(self.sim.cancel_requested(id).unwrap_or(false)))
                 }
+                action if action.is_model() => match self.model_op(index, &bound, &arguments) {
+                    Ok(ModelStep::Immediate { response, internal }) => {
+                        spawn = internal;
+                        match value::decode(world, &bound.result, &response) {
+                            Ok(value) => Some(value),
+                            Err(message) => {
+                                token.payload_mut().owner = Owner::Routing(continuation);
+                                return Err(Fault::stall(
+                                    token,
+                                    SessionError::InvalidResponse {
+                                        task: name,
+                                        message,
+                                    },
+                                ));
+                            }
+                        }
+                    }
+                    Ok(ModelStep::Park {
+                        request,
+                        internal,
+                        at_ns: fires_at,
+                    }) => {
+                        token.payload_mut().owner =
+                            Owner::Parked(continuation, Wait::Model(request));
+                        let completion = self.sim.park_io(token).map_err(stall)?;
+                        self.waits.insert(
+                            id,
+                            PendingOperation {
+                                task: name.clone(),
+                                effect: key.0.clone(),
+                                operation: key.1.clone(),
+                                arguments: arguments.clone(),
+                                external: false,
+                                request,
+                                epoch,
+                                completion,
+                                unscheduled: true,
+                            },
+                        );
+                        self.spawn_internal(internal, fires_at)
+                            .map_err(Fault::Interrupt)?;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        token.payload_mut().owner = Owner::Routing(continuation);
+                        return Err(Fault::stall(token, error));
+                    }
+                },
                 _ => None,
             };
             if let Some(response) = immediate {
                 let response_json = value::encode(world, &bound.result, &response)
                     .expect("immediate responses match their validated signatures");
+                if let Some((internal, fires_at)) = spawn
+                    && let Err(error) = self.spawn_internal(internal, fires_at)
+                {
+                    token.payload_mut().owner = Owner::Routing(continuation);
+                    return Err(Fault::stall(token, error));
+                }
                 if let Err(error) = self.event(SourceEvent::Resume {
                     task: name.clone(),
                     at_ns,
@@ -859,13 +1298,17 @@ impl<'w> Session<'w> {
                 execution = continuation.resume(response);
                 continue;
             }
-            let pending = |completion, external| PendingOperation {
+            let request = self.next_request;
+            let pending = |completion, external, unscheduled| PendingOperation {
                 task: name.clone(),
                 effect: key.0.clone(),
                 operation: key.1.clone(),
                 arguments: arguments.clone(),
                 external,
+                request,
+                epoch,
                 completion,
+                unscheduled,
             };
             match action {
                 Action::Yield => {
@@ -885,11 +1328,12 @@ impl<'w> Session<'w> {
                     };
                     token.payload_mut().owner = Owner::Parked(continuation, Wait::Timer);
                     let completion = self.sim.sleep(token, duration).map_err(stall)?;
-                    self.waits.insert(id, pending(completion, false));
+                    self.next_request += 1;
+                    self.waits.insert(id, pending(completion, false, false));
                 }
                 Action::Script => {
-                    let cursor = self.progress[index].script;
-                    let Some(step) = self.plan.tasks[index].script.get(cursor) else {
+                    let cursor = self.instances[index].progress.script;
+                    let Some(step) = self.plan.tasks[spec].script.get(cursor) else {
                         token.payload_mut().owner = Owner::Routing(continuation);
                         return Err(Fault::stall(
                             token,
@@ -920,17 +1364,19 @@ impl<'w> Session<'w> {
                     let (delay, result) = (step.delay_ns, step.outcome.io_result());
                     token.payload_mut().owner = Owner::Parked(continuation, Wait::Script(cursor));
                     let completion = self.sim.schedule_io(token, delay, result).map_err(stall)?;
-                    self.progress[index].script += 1;
-                    self.waits.insert(id, pending(completion, false));
+                    self.next_request += 1;
+                    self.instances[index].progress.script += 1;
+                    self.waits.insert(id, pending(completion, false, false));
                     self.submitted(id, index)?;
                 }
                 Action::External => {
                     token.payload_mut().owner = Owner::Parked(continuation, Wait::External);
                     let completion = self.sim.park_io(token).map_err(stall)?;
-                    self.waits.insert(id, pending(completion, true));
+                    self.next_request += 1;
+                    self.waits.insert(id, pending(completion, true, true));
                     self.submitted(id, index)?;
                 }
-                Action::Clock | Action::CancelRequested => unreachable!(),
+                _ => unreachable!("immediate actions resumed above"),
             }
             return Ok(());
         }
@@ -938,11 +1384,12 @@ impl<'w> Session<'w> {
 
     /// Apply the scenario's cancellation policy after a parked submission.
     fn submitted(&mut self, id: TaskId, index: usize) -> Step<'w> {
-        self.progress[index].submissions += 1;
-        let task = &self.plan.tasks[index];
-        if task.cancel_after == Some(self.progress[index].submissions) {
+        let instance = &mut self.instances[index];
+        instance.progress.submissions += 1;
+        let task = &self.plan.tasks[instance.spec];
+        if task.cancel_after == Some(instance.progress.submissions) {
             let event = SourceEvent::CancelRequested {
-                task: task.name.clone(),
+                task: instance.name.clone(),
                 at_ns: self.sim.now_ns(),
             };
             self.event(event).map_err(Fault::Interrupt)?;
@@ -951,5 +1398,16 @@ impl<'w> Session<'w> {
                 .map_err(|e| Fault::Interrupt(SessionError::Simulator(e)))?;
         }
         Ok(())
+    }
+}
+
+fn recovered(owner: Owner<'_>) -> RecoveredOwner<'_> {
+    match owner {
+        Owner::Start(runtime) => RecoveredOwner::NotStarted(runtime),
+        Owner::Parked(continuation, _) | Owner::Routing(continuation) => {
+            RecoveredOwner::Suspended(continuation)
+        }
+        Owner::Internal(internal, _) => RecoveredOwner::Internal(internal.describe()),
+        Owner::Empty => RecoveredOwner::None,
     }
 }
