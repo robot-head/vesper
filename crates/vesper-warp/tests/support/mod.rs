@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 use vesper_warp::endpoint::{EndpointConfig, Responder, RxOutcome, TxTap, WarpEndpoint};
+use vesper_warp::stream::Role;
 use vesper_warp_crypto::{Cipher, OneRttKeys, TrafficSecret};
 use vesper_warp_shard::SlotHandle;
 use vesper_warp_umem::{SoftNic, SoftNicMode, UmemConfig};
@@ -116,8 +117,20 @@ pub struct Pair<C: Responder, S: Responder> {
 
 impl<C: Responder, S: Responder> Pair<C, S> {
     pub fn new(config: EndpointConfig, client_app: C, server_app: S) -> Self {
-        let mut client = endpoint(config, client_app);
-        let mut server = endpoint(config, server_app);
+        let mut client = endpoint(
+            EndpointConfig {
+                role: Role::Client,
+                ..config
+            },
+            client_app,
+        );
+        let mut server = endpoint(
+            EndpointConfig {
+                role: Role::Server,
+                ..config
+            },
+            server_app,
+        );
         let c_conn = client
             .open_connection(&CLIENT_CID, &SERVER_CID, client_keys(), 0)
             .unwrap();

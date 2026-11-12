@@ -27,11 +27,27 @@
 //! turn-around) before an error is returned, so no `?` runs while it is
 //! live. Leases are retired only on acknowledgement or loss.
 //!
+//! Streams (wave five, issue #133): in [`StreamMode::Reliable`] (the
+//! default) every connection has a [`StreamSet`]. Received STREAM,
+//! RESET_STREAM, STOP_SENDING, MAX_*, *_BLOCKED and CRYPTO frames go to
+//! it; the application writes and reads through
+//! [`WarpEndpoint::stream_write`] and [`WarpEndpoint::stream_read`];
+//! [`WarpEndpoint::poll`] (or [`WarpEndpoint::flush`]) packs pending
+//! control frames and stream data into paced packets under the congestion
+//! window, both flow-control credits and the launch queue, and replies to
+//! received packets carry them too. RFC 9002 acknowledgements and losses
+//! are fed back to the stream layer's per-packet frame record, so lost
+//! stream ranges are retransmitted (RFC 9000 §13.3) and acknowledged ones
+//! free buffer space. PTO probes carry stream data when there is some. A
+//! peer violation closes the connection with CONNECTION_CLOSE carrying the
+//! RFC 9000 error code. [`StreamMode::Raw`] keeps the wave-four behaviour:
+//! STREAM frames go to the [`Responder`] and [`WarpEndpoint::send_stream`]
+//! sends unreliable raw frames.
+//!
 //! What this is not: there is no TLS handshake (connections are opened
-//! with application traffic secrets the caller supplies), no stream
-//! reassembly or retransmission of lost stream data (loss is reported to
-//! the [`Responder`]), no connection migration, and no hardware EDT, RSS
-//! or crypto offload. With [`SoftNic`](vesper_warp_umem::SoftNic) the
+//! with application traffic secrets and the peer's stream transport
+//! parameters supplied by the caller), no connection migration, and no
+//! hardware EDT, RSS or crypto offload. With [`SoftNic`](vesper_warp_umem::SoftNic) the
 //! "NIC" is lane 3's deterministic model; with lane 3's gated AF_XDP
 //! backend it is a real socket, which this crate's tests do not exercise.
 
@@ -56,6 +72,10 @@ use crate::packet_number::{PnLen, TruncatedPn, encoded_len};
 use crate::recovery::{
     self, CongestionEvent, HandshakeStatus, LossRecovery, RecoveryConfig, RecoveryError,
     TimeoutAction,
+};
+use crate::stream::{
+    PacketFrames, PeerParams, ReadOutcome, Role, StreamConfig, StreamError, StreamEvent, StreamSet,
+    TransportError,
 };
 use crate::{PacketType, PnSpace};
 
@@ -82,9 +102,27 @@ pub enum CidLookup {
     TileScan,
 }
 
+/// How STREAM frames are handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamMode {
+    /// RFC 9000 streams: reassembly, flow control and retransmission.
+    #[default]
+    Reliable,
+    /// Wave-four behaviour: received STREAM frames go to the [`Responder`]
+    /// and [`WarpEndpoint::send_stream`] sends one raw, unreliable frame.
+    Raw,
+}
+
 /// Endpoint parameters.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EndpointConfig {
+    /// Client or server: decides which stream IDs are ours.
+    pub role: Role,
+    pub stream_mode: StreamMode,
+    /// Per-connection stream limits and buffers (also assumed to be the
+    /// peer's transport parameters unless given to
+    /// [`WarpEndpoint::open_connection_with_params`]).
+    pub streams: StreamConfig,
     /// Length of every connection ID, ours and the peer's (1..=20).
     pub cid_len: u8,
     /// Connection slots, at most [`MAX_CONNECTIONS`].
@@ -126,6 +164,9 @@ pub struct EndpointConfig {
 impl Default for EndpointConfig {
     fn default() -> Self {
         Self {
+            role: Role::Client,
+            stream_mode: StreamMode::Reliable,
+            streams: StreamConfig::default(),
             cid_len: 8,
             max_connections: 64,
             cid_lookup: CidLookup::Index,
@@ -165,6 +206,23 @@ pub enum DropReason {
     Recovery(RecoveryError),
     /// The frame's bytes could not be read or written.
     Umem(UmemError),
+    /// The peer violated the stream protocol; the connection is closed.
+    Transport(TransportError),
+    /// The connection is closed or closing.
+    Closed,
+}
+
+/// Why a connection was closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionError {
+    /// We detected a peer violation and sent CONNECTION_CLOSE with it.
+    Local(TransportError),
+    /// The peer sent CONNECTION_CLOSE.
+    Peer {
+        error_code: u64,
+        /// `Some` for a transport close, `None` for an application close.
+        frame_type: Option<u64>,
+    },
 }
 
 /// Result of one [`WarpEndpoint::poll_and_step_quic_rx_one`].
@@ -211,6 +269,12 @@ pub enum WarpError {
     },
     /// The connection used up [`MAX_SEND_PN`] packet numbers.
     PacketNumbersExhausted,
+    /// A stream API error.
+    Stream(StreamError),
+    /// The operation needs the other [`StreamMode`].
+    StreamMode,
+    /// The connection was closed.
+    ConnectionClosed(ConnectionError),
 }
 
 impl fmt::Display for WarpError {
@@ -233,7 +297,8 @@ warp_from!(
     Header(HeaderError),
     Frame(FrameError),
     Recovery(RecoveryError),
-    Cc(CcError)
+    Cc(CcError),
+    Stream(StreamError)
 );
 
 /// The application side: what to send back for received stream data.
@@ -243,9 +308,9 @@ pub trait Responder {
     /// length (0 for none). Frames that do not fit must not be written.
     fn on_stream(&mut self, conn: SlotHandle, frame: &StreamFrame<'_>, out: &mut [u8]) -> usize;
 
-    /// A packet carrying this connection's data was declared lost. The
-    /// endpoint has no stream layer, so retransmitting is the
-    /// application's choice.
+    /// A packet carrying this connection's data was declared lost. In
+    /// [`StreamMode::Raw`] retransmitting is the application's choice; in
+    /// [`StreamMode::Reliable`] the stream layer already requeued it.
     fn on_lost(&mut self, _conn: SlotHandle, _pn: u64) {}
 }
 
@@ -351,6 +416,17 @@ pub struct EndpointStats {
     pub tx_abandoned: u64,
     pub completions_leased: u64,
     pub completions_freed: u64,
+    /// Packets carrying stream-layer frames (data or control).
+    pub stream_packets_sent: u64,
+    /// PTO probes that carried stream data instead of a PING.
+    pub data_probes_sent: u64,
+    /// Peer violations that closed a connection.
+    pub transport_errors: u64,
+    /// CONNECTION_CLOSE frames sent and received.
+    pub closes_sent: u64,
+    pub closes_received: u64,
+    /// Received packets dropped because their connection was closed.
+    pub rx_dropped_closed: u64,
 }
 
 /// A connection's non-tile state. The tile (lane 6) holds the hot scalars:
@@ -373,6 +449,10 @@ struct Conn {
     send_generation: u64,
     /// Listed in `deferred_acks`.
     ack_deferred: bool,
+    streams: StreamSet,
+    error: Option<ConnectionError>,
+    /// When CONNECTION_CLOSE was last sent (closing state, RFC 9000 §10.2.1).
+    close_sent_ns: Option<u64>,
 }
 
 /// A packet waiting for its earliest departure time.
@@ -385,6 +465,9 @@ struct Staged {
     park: bool,
     /// The tap already saw it (a resubmission after a full tx ring).
     tapped: bool,
+    /// The application/stream frames made it into the packet (a reply
+    /// whose frames did not fit is sent ACK-only).
+    carried: bool,
 }
 
 /// A parked in-flight packet (§35.2 `park_for_ack_or_pto`).
@@ -400,6 +483,8 @@ pub struct ConnectionView<'a> {
     pub cc: &'a QuicBbr,
     pub received: &'a ReceivedPackets<ACK_RANGES>,
     pub keys: &'a OneRttKeys,
+    pub streams: &'a StreamSet,
+    pub error: Option<ConnectionError>,
 }
 
 /// What [`WarpEndpoint::poll`] did.
@@ -431,6 +516,8 @@ pub struct WarpEndpoint<B: XskBackend, R: Responder, T: TxTap = ()> {
     scratch: Box<[u8]>,
     /// The application's reply frames.
     app_out: Box<[u8]>,
+    /// Frames of the packet being built from the stream layer.
+    record: PacketFrames,
     app: R,
     tap: T,
     stats: EndpointStats,
@@ -460,6 +547,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if u32::from(config.max_datagram) > frame_room {
             return Err(WarpError::Config("max_datagram exceeds the UMEM frame"));
         }
+        config.streams.validate().map_err(WarpError::Config)?;
         let parser = HeaderParser::new(usize::from(config.cid_len))?;
         let table = ConnTable::new(TableConfig::new(config.max_connections, config.cid_len))
             .map_err(|_| WarpError::Shard("invalid table configuration"))?;
@@ -489,6 +577,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             events: Vec::with_capacity(config.max_tracked_per_conn + 8),
             scratch: vec![0u8; buf].into_boxed_slice(),
             app_out: vec![0u8; buf].into_boxed_slice(),
+            record: PacketFrames::default(),
             app,
             tap,
             stats: EndpointStats::default(),
@@ -539,7 +628,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
 
     /// Opens an established 1-RTT connection: we receive on `local_cid`,
     /// send to `peer_cid`, and protect with `keys` (from a TLS stack; no
-    /// handshake is implemented).
+    /// handshake is implemented). The peer's stream transport parameters
+    /// are assumed equal to ours.
     pub fn open_connection(
         &mut self,
         local_cid: &[u8],
@@ -547,6 +637,27 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         keys: OneRttKeys,
         now_ns: u64,
     ) -> Result<SlotHandle, WarpError> {
+        let peer = self.config.streams.local_params();
+        self.open_connection_with_params(local_cid, peer_cid, keys, peer, now_ns)
+    }
+
+    /// [`WarpEndpoint::open_connection`] with the peer's stream transport
+    /// parameters (as a handshake would learn them).
+    pub fn open_connection_with_params(
+        &mut self,
+        local_cid: &[u8],
+        peer_cid: &[u8],
+        keys: OneRttKeys,
+        peer: PeerParams,
+        now_ns: u64,
+    ) -> Result<SlotHandle, WarpError> {
+        if peer.initial_max_streams_bidi > crate::frame::MAX_STREAM_COUNT
+            || peer.initial_max_streams_uni > crate::frame::MAX_STREAM_COUNT
+        {
+            return Err(WarpError::Config("peer stream limits out of range"));
+        }
+        let streams = StreamSet::new(self.config.role, self.config.streams, peer)
+            .map_err(WarpError::Config)?;
         let len = usize::from(self.config.cid_len);
         if local_cid.len() != len || peer_cid.len() != len {
             return Err(WarpError::Config("connection IDs must have cid_len bytes"));
@@ -592,6 +703,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             sent_under_key: 0,
             send_generation: 0,
             ack_deferred: false,
+            streams,
+            error: None,
+            close_sent_ns: None,
         });
         self.write_tile(handle);
         Ok(handle)
@@ -635,7 +749,92 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             cc: &c.cc,
             received: &c.received,
             keys: &c.keys,
+            streams: &c.streams,
+            error: c.error,
         })
+    }
+
+    fn conn_mut(&mut self, h: SlotHandle) -> Result<&mut Conn, WarpError> {
+        match self.conns.get_mut(h.index() as usize) {
+            Some(Some(c)) if c.handle == h => Ok(c),
+            _ => Err(WarpError::StaleConnection),
+        }
+    }
+
+    /// The connection's stream layer, for a reliable-mode connection that
+    /// is not closed.
+    pub fn streams_mut(&mut self, conn: SlotHandle) -> Result<&mut StreamSet, WarpError> {
+        if self.config.stream_mode != StreamMode::Reliable {
+            return Err(WarpError::StreamMode);
+        }
+        let c = self.conn_mut(conn)?;
+        if let Some(e) = c.error {
+            return Err(WarpError::ConnectionClosed(e));
+        }
+        Ok(&mut c.streams)
+    }
+
+    /// Opens a stream of ours; returns its ID (RFC 9000 §2.1).
+    pub fn open_stream(&mut self, conn: SlotHandle, uni: bool) -> Result<u64, WarpError> {
+        Ok(self.streams_mut(conn)?.open(uni)?)
+    }
+
+    /// Buffers stream data; returns the bytes accepted (up to the send
+    /// buffer's free space). [`WarpEndpoint::poll`] sends it.
+    pub fn stream_write(
+        &mut self,
+        conn: SlotHandle,
+        stream_id: u64,
+        data: &[u8],
+    ) -> Result<usize, WarpError> {
+        Ok(self.streams_mut(conn)?.write(stream_id, data)?)
+    }
+
+    /// Ends a stream's sending part (FIN after the data written).
+    pub fn stream_finish(&mut self, conn: SlotHandle, stream_id: u64) -> Result<(), WarpError> {
+        Ok(self.streams_mut(conn)?.finish(stream_id)?)
+    }
+
+    /// Reads in-order stream data.
+    pub fn stream_read(
+        &mut self,
+        conn: SlotHandle,
+        stream_id: u64,
+        out: &mut [u8],
+    ) -> Result<ReadOutcome, WarpError> {
+        Ok(self.streams_mut(conn)?.read(stream_id, out)?)
+    }
+
+    /// Abandons a stream's sending part (RESET_STREAM).
+    pub fn stream_reset(
+        &mut self,
+        conn: SlotHandle,
+        stream_id: u64,
+        error_code: u64,
+    ) -> Result<(), WarpError> {
+        Ok(self.streams_mut(conn)?.reset(stream_id, error_code)?)
+    }
+
+    /// Asks the peer to stop sending on a stream (STOP_SENDING).
+    pub fn stream_stop_sending(
+        &mut self,
+        conn: SlotHandle,
+        stream_id: u64,
+        error_code: u64,
+    ) -> Result<(), WarpError> {
+        Ok(self
+            .streams_mut(conn)?
+            .stop_sending(stream_id, error_code)?)
+    }
+
+    /// The next stream event of a connection.
+    pub fn poll_stream_event(&mut self, conn: SlotHandle) -> Option<StreamEvent> {
+        self.conn_mut(conn).ok()?.streams.poll_event()
+    }
+
+    /// Why a connection was closed, if it was.
+    pub fn connection_error(&self, conn: SlotHandle) -> Option<ConnectionError> {
+        self.conn(conn).ok()?.error
     }
 
     fn conn(&self, h: SlotHandle) -> Result<&Conn, WarpError> {
@@ -754,6 +953,22 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let (Ok(tile), Ok(_)) = (self.table.get(slot), self.conn(slot)) else {
             return self.drop_rx(frame, DropReason::UnknownCid);
         };
+        if let Some(error) = self.conn(slot)?.error {
+            // Closing (RFC 9000 §10.2.1): answer with CONNECTION_CLOSE again,
+            // at most once per PTO; draining: stay silent.
+            self.stats.rx_dropped_closed += 1;
+            let out = self.drop_rx(frame, DropReason::Closed);
+            if let ConnectionError::Local(e) = error {
+                let c = self.conn(slot)?;
+                let gap = c.recovery.rtt().pto_base_ns();
+                if c.close_sent_ns
+                    .is_none_or(|t| now_ns >= t.saturating_add(gap))
+                {
+                    let _ = self.send_close(slot, e, now_ns);
+                }
+            }
+            return out;
+        }
 
         // 3-5. Header-protection removal (lane 5), full PN decode from the
         // tile's largest received PN (lane 1), AEAD open with the full-PN
@@ -793,16 +1008,40 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             pn,
             now_ns,
             self.config.ack_delay_exponent,
+            self.config.stream_mode,
         );
         // Retire the leases recovery resolved (lanes 3, 4).
         self.resolve_events(slot, None);
         let (ack_eliciting, app_len) = match scanned {
             Ok(v) => v,
+            Err(DropReason::Transport(e)) => {
+                // A peer violation: close with its error code.
+                self.write_tile(slot);
+                self.stats.transport_errors += 1;
+                self.conn_mut(slot)?.error = Some(ConnectionError::Local(e));
+                let out = self.drop_rx(frame, DropReason::Transport(e));
+                let _ = self.send_close(slot, e, now_ns);
+                return out;
+            }
             Err(reason) => {
                 self.write_tile(slot);
                 return self.drop_rx(frame, reason);
             }
         };
+        if self.conn(slot)?.error.is_some() {
+            // The peer closed the connection (draining): no reply.
+            self.stats.closes_received += 1;
+            self.stats.rx_processed += 1;
+            self.write_tile(slot);
+            return match self.xsk.recycle_to_fill_ring(frame) {
+                Ok(()) => Ok(RxOutcome::Processed {
+                    conn: slot,
+                    pn,
+                    replied: false,
+                }),
+                Err(refused) => Err(WarpError::Umem(refused.error)),
+            };
+        }
         self.stats.rx_processed += 1;
         if let Ok(mut st) = self.table.get(slot) {
             st.idle_deadline_ns = now_ns.saturating_add(self.config.idle_timeout_ns);
@@ -832,6 +1071,22 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.stats.backpressured_replies += 1;
             data_len = 0;
         }
+        // Reliable streams: the reply also carries pending stream frames.
+        let mut from_streams = false;
+        if self.config.stream_mode == StreamMode::Reliable
+            && self.conn(slot)?.cc.can_send()
+            && self.launch_has_room(slot, now_ns)
+            && self.conns[slot.index() as usize]
+                .as_mut()
+                .is_some_and(|c| c.streams.has_pending())
+        {
+            let budget = self.frame_budget(slot, true, now_ns);
+            let c = self.conns[slot.index() as usize].as_mut().expect("live");
+            data_len = c
+                .streams
+                .fill(&mut self.app_out[..budget], &mut self.record);
+            from_streams = data_len > 0;
+        }
         // An ACK-only reply waits behind the connection's queued paced
         // packets (see `stage`). With the launch queue full it cannot, and
         // sending it now would overtake them, so the ACK is deferred.
@@ -847,14 +1102,18 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             };
         }
         self.stats.replies += 1;
-        self.send(
+        let sent = self.send_carrying(
             slot,
             Source::TurnAround(frame),
             true,
             data_len,
-            false,
+            Kind::Normal,
             now_ns,
-        )?;
+        );
+        if from_streams {
+            self.settle_record(slot, &sent);
+        }
+        sent?;
         Ok(RxOutcome::Processed {
             conn: slot,
             pn,
@@ -873,6 +1132,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         fin: bool,
         now_ns: u64,
     ) -> Result<u64, WarpError> {
+        if self.config.stream_mode != StreamMode::Raw {
+            return Err(WarpError::StreamMode);
+        }
+        if let Some(e) = self.conn(conn)?.error {
+            return Err(WarpError::ConnectionClosed(e));
+        }
         if !self.conn(conn)?.cc.can_send() {
             return Err(WarpError::CwndLimited);
         }
@@ -892,7 +1157,121 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 len: data.len() + 16,
             })?;
         let ack = self.conn(conn)?.received.ack_deadline().is_some();
-        self.send(conn, Source::Fresh, ack, len, false, now_ns)
+        self.send(conn, Source::Fresh, ack, len, Kind::Normal, now_ns)
+    }
+
+    /// Room for frames in a fresh packet after the short header, the
+    /// connection's owed ACK (when `with_ack`) and the AEAD tag.
+    fn frame_budget(&mut self, slot: SlotHandle, with_ack: bool, now_ns: u64) -> usize {
+        let exponent = self.config.ack_delay_exponent;
+        let fixed = 1 + usize::from(self.config.cid_len) + 4 + TAG_LEN;
+        let mut ack_len = 0;
+        if with_ack
+            && let Some(Some(c)) = self.conns.get(slot.index() as usize)
+            && let Ok(Some(ack)) = c.received.ack_frame(now_ns, exponent)
+        {
+            ack_len = Frame::Ack(ack).encode(&mut self.scratch).unwrap_or(0);
+        }
+        usize::from(self.config.max_datagram)
+            .saturating_sub(fixed + ack_len)
+            .min(self.app_out.len())
+    }
+
+    /// Commits the stream frames in `self.record` to the packet that
+    /// carried them, or requeues them when they were not sent.
+    fn settle_record(&mut self, slot: SlotHandle, sent: &Result<(u64, bool), WarpError>) {
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            return;
+        };
+        match sent {
+            Ok((pn, true)) => {
+                c.streams.commit(*pn, &self.record);
+                self.stats.stream_packets_sent += 1;
+            }
+            _ => c.streams.requeue(&self.record),
+        }
+        self.record.clear();
+    }
+
+    /// Sends the stream layer's pending frames on one connection in fresh
+    /// packets while the congestion window, the launch queue and the
+    /// transmit frames allow. Returns the packets sent.
+    pub fn flush(&mut self, conn: SlotHandle, now_ns: u64) -> Result<u32, WarpError> {
+        if self.config.stream_mode != StreamMode::Reliable {
+            return Err(WarpError::StreamMode);
+        }
+        if let Some(e) = self.conn(conn)?.error {
+            return Err(WarpError::ConnectionClosed(e));
+        }
+        let mut sent = 0;
+        // Bounded per call; congestion control normally stops it first.
+        for _ in 0..self.config.max_tracked_per_conn {
+            let c = self.conn(conn)?;
+            if !c.cc.can_send() || !self.launch_has_room(conn, now_ns) {
+                break;
+            }
+            if self.xsk.free_list().is_empty() {
+                break;
+            }
+            let ack = c.received.ack_deadline().is_some();
+            let c = self.conns[conn.index() as usize].as_mut().expect("live");
+            if !c.streams.has_pending() {
+                break;
+            }
+            let budget = self.frame_budget(conn, ack, now_ns);
+            let c = self.conns[conn.index() as usize].as_mut().expect("live");
+            let len = c
+                .streams
+                .fill(&mut self.app_out[..budget], &mut self.record);
+            if len == 0 {
+                self.record.clear();
+                break;
+            }
+            let result = self.send_carrying(conn, Source::Fresh, ack, len, Kind::Normal, now_ns);
+            self.settle_record(conn, &result);
+            if result.is_err() {
+                break;
+            }
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
+    fn flush_all(&mut self, now_ns: u64) -> Result<(), WarpError> {
+        if self.config.stream_mode != StreamMode::Reliable {
+            return Ok(());
+        }
+        for i in 0..self.conns.len() {
+            let Some(c) = self.conns[i].as_ref() else {
+                continue;
+            };
+            if c.error.is_some() {
+                continue;
+            }
+            let h = c.handle;
+            self.flush(h, now_ns)?;
+        }
+        Ok(())
+    }
+
+    /// Sends CONNECTION_CLOSE for a peer violation (not ack-eliciting, so
+    /// never retransmitted; the closing state answers later packets).
+    fn send_close(
+        &mut self,
+        slot: SlotHandle,
+        e: TransportError,
+        now_ns: u64,
+    ) -> Result<(), WarpError> {
+        let n = Frame::ConnectionClose(crate::frame::ConnectionClose {
+            error_code: e.code.code(),
+            frame_type: Some(e.frame_type),
+            reason: b"",
+        })
+        .encode(&mut self.app_out)?;
+        self.send(slot, Source::Fresh, false, n, Kind::Close, now_ns)?;
+        self.stats.closes_sent += 1;
+        self.conn_mut(slot)?.close_sent_ns = Some(now_ns);
+        Ok(())
     }
 
     /// Releases due launches, harvests completions, replenishes the fill
@@ -934,6 +1313,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.sync_timer(slot);
         }
         self.flush_deferred_acks(now_ns)?;
+        self.flush_all(now_ns)?;
         Ok(report)
     }
 
@@ -976,7 +1356,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             // Out of tx frames: keep it owed and try on a later poll.
             if owed
                 && self
-                    .send(slot, Source::Fresh, true, 0, false, now_ns)
+                    .send(slot, Source::Fresh, true, 0, Kind::Normal, now_ns)
                     .is_err()
             {
                 self.defer_ack(slot);
@@ -1063,13 +1443,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if conn.handle != slot || !due {
             return Ok(());
         }
+        let closed = conn.error.is_some();
         self.stats.recovery_timeouts += 1;
         self.events.clear();
         let Conn { recovery, cc, .. } = conn;
         let events = &mut self.events;
         let action = recovery.on_timeout(now_ns, &mut |ev| record_event(cc, events, ev, now_ns));
         self.resolve_events(slot, fired);
-        if let TimeoutAction::SendProbe { packets, .. } = action {
+        if let TimeoutAction::SendProbe { packets, .. } = action
+            && !closed
+        {
             // A probe that cannot be built (no tx frame, recovery full) is
             // counted, not returned: the fired lease must still be re-parked
             // and recovery has already backed its PTO off.
@@ -1103,6 +1486,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 self.stats.packets_lost += 1;
                 self.app.on_lost(slot, pn);
             }
+            if let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) {
+                if acked {
+                    c.streams.on_packet_acked(pn);
+                } else {
+                    c.streams.on_packet_lost(pn);
+                }
+            }
             let held = fired
                 .as_deref_mut()
                 .filter(|l| l.as_ref().is_some_and(|l| l.pkt.pkt_num_full() == pn))
@@ -1124,10 +1514,33 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
     }
 
+    /// A PTO probe (RFC 9002 §6.2.4): stream data when there is some
+    /// to send, else a PING.
     fn send_probe(&mut self, slot: SlotHandle, now_ns: u64) -> Result<(), WarpError> {
-        let n = Frame::Ping.encode(&mut self.app_out)?;
         let ack = self.conn(slot)?.received.largest().is_some();
-        self.send(slot, Source::Fresh, ack, n, true, now_ns)?;
+        if self.config.stream_mode == StreamMode::Reliable {
+            let budget = self.frame_budget(slot, ack, now_ns);
+            let c = self.conns[slot.index() as usize]
+                .as_mut()
+                .ok_or(WarpError::StaleConnection)?;
+            if c.streams.has_pending() {
+                let len = c
+                    .streams
+                    .fill(&mut self.app_out[..budget], &mut self.record);
+                if len > 0 {
+                    let sent =
+                        self.send_carrying(slot, Source::Fresh, ack, len, Kind::Probe, now_ns);
+                    self.settle_record(slot, &sent);
+                    sent?;
+                    self.stats.probes_sent += 1;
+                    self.stats.data_probes_sent += 1;
+                    return Ok(());
+                }
+                self.record.clear();
+            }
+        }
+        let n = Frame::Ping.encode(&mut self.app_out)?;
+        self.send(slot, Source::Fresh, ack, n, Kind::Probe, now_ns)?;
         self.stats.probes_sent += 1;
         Ok(())
     }
@@ -1141,14 +1554,30 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         source: Source,
         with_ack: bool,
         data_len: usize,
-        probe: bool,
+        kind: Kind,
         now_ns: u64,
     ) -> Result<u64, WarpError> {
-        match self.build(slot, source, with_ack, data_len, probe, now_ns) {
+        self.send_carrying(slot, source, with_ack, data_len, kind, now_ns)
+            .map(|(pn, _)| pn)
+    }
+
+    /// [`Self::send`], also reporting whether `app_out[..data_len]` made it
+    /// into the packet.
+    fn send_carrying(
+        &mut self,
+        slot: SlotHandle,
+        source: Source,
+        with_ack: bool,
+        data_len: usize,
+        kind: Kind,
+        now_ns: u64,
+    ) -> Result<(u64, bool), WarpError> {
+        match self.build(slot, source, with_ack, data_len, kind, now_ns) {
             Ok(staged) => {
                 let pn = staged.pn;
+                let carried = staged.carried;
                 self.launch_or_queue(staged, now_ns);
-                Ok(pn)
+                Ok((pn, carried))
             }
             Err((Some(rx), error)) => match self.xsk.recycle_to_fill_ring(rx) {
                 Ok(()) => Err(error),
@@ -1261,9 +1690,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         source: Source,
         with_ack: bool,
         data_len: usize,
-        probe: bool,
+        kind: Kind,
         now_ns: u64,
     ) -> Result<Staged, (Option<UmemFrame<RxHarvested>>, WarpError)> {
+        let probe = kind == Kind::Probe;
         let rx = match source {
             Source::TurnAround(rx) => Some(rx),
             Source::Fresh => None,
@@ -1292,7 +1722,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 Err(e) => return Err((rx, e)),
             };
         let total = plain_len + TAG_LEN;
-        let ack_eliciting = data_len > 0 || probe;
+        let ack_eliciting = probe || (data_len > 0 && kind != Kind::Close);
 
         // The received frame turned around in place (same chunk and data
         // offset), or a fresh frame (lane 3).
@@ -1401,6 +1831,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             edt_ns,
             park: ack_eliciting,
             tapped: false,
+            carried: data_len > 0,
         })
     }
 
@@ -1455,6 +1886,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             edt_ns,
             park,
             tapped,
+            ..
         } = staged;
         if self.conn(conn).is_err() {
             let _ = self.xsk.abandon_tx(frame);
@@ -1482,6 +1914,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     edt_ns: edt_ns.max(now_ns.saturating_add(self.config.tick_ns)),
                     park,
                     tapped: true,
+                    carried: true,
                 };
                 let at = retry.edt_ns;
                 if let Err(refused) = self.launch.submit(now_ns, at, retry) {
@@ -1546,6 +1979,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> Drop for WarpEndpoint<B, R, T> {
     }
 }
 
+/// What a packet is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Normal,
+    /// An RFC 9002 PTO probe: ack-eliciting, bypasses the congestion window.
+    Probe,
+    /// CONNECTION_CLOSE: not ack-eliciting.
+    Close,
+}
+
 /// Where a packet's frame comes from.
 enum Source {
     TurnAround(UmemFrame<RxHarvested>),
@@ -1602,11 +2045,13 @@ fn scan_in_place<B: XskBackend, R: Responder>(
     pn: u64,
     now_ns: u64,
     exponent: u8,
+    mode: StreamMode,
 ) -> Result<(bool, usize), DropReason> {
     let buf = xsk.rx_bytes_mut(frame).map_err(DropReason::Umem)?;
     let payload = &buf[payload];
     let mut app_len = 0usize;
     let mut failure: Option<DropReason> = None;
+    let mut peer_close = None;
     let info = scan_payload(payload, PacketType::OneRtt, |f| {
         if failure.is_some() {
             return;
@@ -1617,7 +2062,7 @@ fn scan_in_place<B: XskBackend, R: Responder>(
                     failure = Some(reason);
                 }
             }
-            Frame::Stream(s) => {
+            Frame::Stream(s) if mode == StreamMode::Raw => {
                 // At most what one datagram can carry after a header and
                 // the tag; a reply that still does not fit with its ACK
                 // falls back to the ACK alone.
@@ -1626,12 +2071,37 @@ fn scan_in_place<B: XskBackend, R: Responder>(
                     app_len += app.on_stream(slot, s, &mut app_out[app_len..budget]);
                 }
             }
+            Frame::ConnectionClose(c) => {
+                peer_close = Some(ConnectionError::Peer {
+                    error_code: c.error_code,
+                    frame_type: c.frame_type,
+                });
+            }
+            Frame::Stream(_)
+            | Frame::ResetStream { .. }
+            | Frame::StopSending { .. }
+            | Frame::MaxData(_)
+            | Frame::MaxStreamData { .. }
+            | Frame::MaxStreams { .. }
+            | Frame::DataBlocked(_)
+            | Frame::StreamDataBlocked { .. }
+            | Frame::StreamsBlocked { .. }
+            | Frame::Crypto { .. }
+                if mode == StreamMode::Reliable =>
+            {
+                if let Err(e) = conn.streams.on_frame(f) {
+                    failure = Some(DropReason::Transport(e));
+                }
+            }
             _ => {}
         }
     })
     .map_err(DropReason::Frame)?;
     if let Some(reason) = failure {
         return Err(reason);
+    }
+    if let Some(close) = peer_close {
+        conn.error = Some(close);
     }
     conn.received
         .on_packet_received(pn, now_ns, info.ack_eliciting, Ecn::NotEct)
