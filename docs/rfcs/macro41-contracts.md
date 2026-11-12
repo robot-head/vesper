@@ -11,7 +11,7 @@ frontend collision. Shared Cargo registrations remain coordinated, not exclusive
 | Claim | Branch / owner | Exclusive production paths |
 | --- | --- | --- |
 | #103 | macro41/syntax / Beacon | New syntax macro_source.rs/private parser child, parser.rs/lexer.rs narrow actual-header/token adapters, syntax tests |
-| #104 | macro41/typed / Flux | New Forge typed_quote.rs/children, host.rs/syntax.rs/token.rs narrow adapters, typed tests |
+| #104 | macro41/typed / Flux | New Forge typed_quote.rs/children, host.rs/syntax.rs/token.rs narrow adapters, private resolve.rs preparsed adapter, typed tests |
 | #105 | macro41/authority / Tensor | New src/forge_frontend/authority.rs and authority tests |
 | #106 | macro41/lower / Aether | New src/forge_frontend/lower.rs/children and lowering tests |
 | #107 | macro41/structured / Serde | New sandbox quote_transport/quote_host + wit/forge-quote + new real fixture/tests; host.rs shared-runtime adapters; new runner quote_* modules/tests/fixture; Forge quote_transport adapter |
@@ -89,6 +89,10 @@ original-source evidence. Every repeated slot charges its full copied token/text
 scope cost before growth. All failures close the expansion; counters never wrap.
 Resolve the WHOLE expanded function body, including its original let bindings,
 not each invocation independently. The binder excludes its own initializer.
+The narrow private resolve_preparsed adapter may reuse existing resolution for a
+Term built from the sealed validated rich shape. It does not expose a public
+arbitrary-Term authority path or change legacy resolve grammar; empty Block only
+represents actual trailing-let/unit syntax, never parser repair.
 
 ## Identity lowering and the final checked artifact
 
