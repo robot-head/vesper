@@ -49,7 +49,7 @@ impl TypedLimits {
         max_metadata_bytes: 16 * 1024 * 1024,
         max_work: 128 * 1024 * 1024,
     };
-    fn validate(self) -> Result<(), TypedError> {
+    pub fn validate(self) -> Result<(), TypedError> {
         let h = Self::HARD;
         for (n, max) in [
             (self.max_slots, h.max_slots),
@@ -300,6 +300,9 @@ pub struct ResolvedBody {
     provenance: Vec<TokenProvenance>,
 }
 impl ResolvedBody {
+    pub fn into_fragment(self) -> ResolvedFragment {
+        self.fragment
+    }
     pub fn validate_host(&self, host: &HygieneHost) -> Result<(), TypedError> {
         owner(&self.owner, host)
     }
@@ -667,6 +670,17 @@ impl HygieneHost {
     ) -> Result<ExprSource, TypedError> {
         cap(source.len(), budget.limits.max_input_bytes, "input bytes")?;
         budget.charge_work(source.len())?;
+        let lexer_bound = source
+            .len()
+            .checked_add(1)
+            .ok_or(TypedError::Budget("metadata"))?
+            .min(budget.limits.max_input_tokens + 1);
+        budget.metadata(add(
+            source.len(),
+            lexer_bound
+                .checked_mul(32)
+                .ok_or(TypedError::Budget("metadata"))?,
+        )?)?;
         let lexed = lexer::lex_with_limits(
             source,
             lexer::LexLimits {
@@ -682,14 +696,6 @@ impl HygieneHost {
         if !lexed.diagnostics.is_empty() {
             return Err(TypedError::Lexical);
         }
-        budget.metadata(add(
-            source.len(),
-            lexed
-                .tokens
-                .len()
-                .checked_mul(32)
-                .ok_or(TypedError::Budget("metadata"))?,
-        )?)?;
         self.module_scope(package)?;
         Ok(ExprSource {
             owner: Arc::clone(&self.typed_owner),
@@ -1186,14 +1192,22 @@ fn canonical_template(
     emit(n, items, inputs, host, &mut out)?;
     Ok(out)
 }
-fn to_term(n: &ExprShape, host: &mut HygieneHost) -> Result<crate::syntax::Term, TypedError> {
+fn to_term(
+    n: &ExprShape,
+    host: &mut HygieneHost,
+    all_tokens: &[HostToken],
+) -> Result<crate::syntax::Term, TypedError> {
     use crate::syntax::{Path, Term};
     Ok(match n {
         ExprShape::Ref { tokens } => {
-            let name = tokens.clone();
+            let name = tokens
+                .iter()
+                .map(|i| host.text(all_tokens[*i].text()))
+                .collect::<Vec<_>>()
+                .join("::");
             Term::Ref(Path {
-                tokens: name,
-                symbol: host.intern("")?,
+                tokens: tokens.clone(),
+                symbol: host.intern(&name)?,
             })
         }
         ExprShape::Literal { token } => Term::Lit(*token),
@@ -1203,19 +1217,19 @@ fn to_term(n: &ExprShape, host: &mut HygieneHost) -> Result<crate::syntax::Term,
             close,
             args,
         } => Term::Call {
-            callee: Box::new(to_term(callee, host)?),
+            callee: Box::new(to_term(callee, host, all_tokens)?),
             open: *open,
             close: *close,
             args: args
                 .iter()
-                .map(|a| to_term(a, host))
+                .map(|a| to_term(a, host, all_tokens))
                 .collect::<Result<_, _>>()?,
         },
         ExprShape::Block {
             statements, tail, ..
         } => {
             let mut body = if let Some(t) = tail {
-                to_term(t, host)?
+                to_term(t, host, all_tokens)?
             } else {
                 Term::Block(vec![])
             };
@@ -1223,51 +1237,17 @@ fn to_term(n: &ExprShape, host: &mut HygieneHost) -> Result<crate::syntax::Term,
                 body = match statement {
                     ExprStatement::Let { binder, value } => Term::Let {
                         binder: *binder,
-                        value: Box::new(to_term(value, host)?),
+                        value: Box::new(to_term(value, host, all_tokens)?),
                         body: Box::new(body),
                     },
-                    ExprStatement::Expr(e) => Term::Block(vec![to_term(e, host)?, body]),
+                    ExprStatement::Expr(e) => {
+                        Term::Block(vec![to_term(e, host, all_tokens)?, body])
+                    }
                 };
             }
             Term::Block(vec![body])
         }
     })
-}
-fn fix_paths(
-    term: &mut crate::syntax::Term,
-    tokens: &[HostToken],
-    host: &mut HygieneHost,
-) -> Result<(), TypedError> {
-    use crate::syntax::Term;
-    match term {
-        Term::Ref(p) => {
-            let name = p
-                .tokens
-                .iter()
-                .map(|i| host.text(tokens[*i].text()))
-                .collect::<Vec<_>>()
-                .join("::");
-            p.symbol = host.intern(&name)?;
-        }
-        Term::Let { value, body, .. } => {
-            fix_paths(value, tokens, host)?;
-            fix_paths(body, tokens, host)?
-        }
-        Term::Call { callee, args, .. } => {
-            fix_paths(callee, tokens, host)?;
-            for a in args {
-                fix_paths(a, tokens, host)?
-            }
-        }
-        Term::Block(items) => {
-            for n in items {
-                fix_paths(n, tokens, host)?
-            }
-        }
-        Term::Lit(_) => {}
-        Term::Handle { .. } => return Err(TypedError::Unsupported),
-    }
-    Ok(())
 }
 impl HygieneHost {
     /// Assemble only actual body ranges and sealed expression outputs, then resolve the whole body.
@@ -1367,8 +1347,8 @@ impl HygieneHost {
         }
         budget.parse(tokens.len())?;
         cap(term_height(&shape)?, budget.limits.max_depth, "depth")?;
-        let mut term = to_term(&shape, self)?;
-        fix_paths(&mut term, &tokens, self)?;
+        resolution_work(self, &shape, &tokens, budget)?;
+        let term = to_term(&shape, self, &tokens)?;
         let scope_bound = tokens
             .len()
             .checked_mul(budget.limits.max_depth + 2)
@@ -1380,6 +1360,13 @@ impl HygieneHost {
         )?;
         budget.scopes_used = add(budget.scopes_used, scope_bound)?;
         let fragment = self.resolve_preparsed(tokens, term)?;
+        if fragment
+            .operations
+            .iter()
+            .any(|o| matches!(o.kind, crate::OperationKind::IndirectCall))
+        {
+            return Err(TypedError::Unsupported);
+        }
         Ok(ResolvedBody {
             owner: Arc::clone(&self.typed_owner),
             session: self.session(),
@@ -1537,4 +1524,77 @@ fn term_height(n: &ExprShape) -> Result<usize, TypedError> {
             add(h, 1)?
         }
     })
+}
+fn resolution_work(
+    host: &HygieneHost,
+    shape: &ExprShape,
+    tokens: &[HostToken],
+    budget: &mut TypedBudget,
+) -> Result<(), TypedError> {
+    let globals = host.globals.len();
+    cap(globals, budget.limits.max_input_tokens, "global bindings")?;
+    budget.charge_work(
+        globals
+            .checked_mul(globals)
+            .ok_or(TypedError::Budget("work"))?,
+    )?;
+    let global_duplicates = host
+        .globals
+        .iter()
+        .map(|g| host.globals.iter().filter(|h| h.symbol == g.symbol).count())
+        .max()
+        .unwrap_or(0);
+    budget.metadata(
+        tokens
+            .len()
+            .checked_mul(std::mem::size_of::<usize>())
+            .ok_or(TypedError::Budget("metadata"))?,
+    )?;
+    fn binders(n: &ExprShape, out: &mut Vec<usize>) {
+        match n {
+            ExprShape::Block {
+                statements, tail, ..
+            } => {
+                for s in statements {
+                    match s {
+                        ExprStatement::Let { binder, value } => {
+                            out.push(*binder);
+                            binders(value, out)
+                        }
+                        ExprStatement::Expr(e) => binders(e, out),
+                    }
+                }
+                if let Some(t) = tail {
+                    binders(t, out)
+                }
+            }
+            ExprShape::Call { callee, args, .. } => {
+                binders(callee, out);
+                for a in args {
+                    binders(a, out)
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut locals = Vec::new();
+    binders(shape, &mut locals);
+    let local_duplicates = locals
+        .iter()
+        .map(|i| {
+            locals
+                .iter()
+                .filter(|j| tokens[**j].text() == tokens[*i].text())
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    let candidates = add(global_duplicates, local_duplicates)?.max(1);
+    let cost = tokens
+        .len()
+        .checked_mul(candidates)
+        .and_then(|n| n.checked_mul(candidates))
+        .and_then(|n| n.checked_mul(budget.limits.max_depth + 2))
+        .ok_or(TypedError::Budget("work"))?;
+    budget.charge_work(cost)
 }
