@@ -1,0 +1,15 @@
+[package]
+name = "vesper-aether"
+version = "0.1.0"
+edition = "2024"
+description = "Bounded host memory-layout and verified CAS snapshot-page planning"
+publish = false
+
+[dependencies]
+vesper-loom-cas = { path = "../vesper-loom-cas" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

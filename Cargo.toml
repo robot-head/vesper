@@ -23,6 +23,12 @@ members = [
     "crates/vesper-loom-tuf",
     "crates/vesper-alloc",
     "crates/vesper-aura",
+    "crates/vesper-beacon",
+    "crates/vesper-serde",
+    "crates/vesper-quarry",
+    "crates/vesper-tensor",
+    "crates/vesper-flux",
+    "crates/vesper-aether",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
     "crates/vesper-pact-bridge",
@@ -57,6 +63,12 @@ default-members = [
     "crates/vesper-loom-tuf",
     "crates/vesper-alloc",
     "crates/vesper-aura",
+    "crates/vesper-beacon",
+    "crates/vesper-serde",
+    "crates/vesper-quarry",
+    "crates/vesper-tensor",
+    "crates/vesper-flux",
+    "crates/vesper-aether",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
     "crates/vesper-pact-bridge",
@@ -94,6 +106,8 @@ vesper-core = { path = "crates/vesper-core" }
 vesper-simd = { path = "crates/vesper-simd" }
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }
+vesper-beacon = { path = "crates/vesper-beacon" }
+vesper-serde = { path = "crates/vesper-serde" }
 vesper-pulse = { path = "crates/vesper-pulse" }
 vesper-fiber-abi = { path = "crates/vesper-fiber-abi" }
 vesper-semver = { path = "crates/vesper-semver" }
