@@ -782,15 +782,12 @@ impl Store {
                 expected: ObjectKind::Tree,
             });
         }
-        let name = match dest.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n.to_owned(),
-            None => {
-                return Err(CasError::InvalidName {
-                    path: dest.to_owned(),
-                    reason: NameError::DotOrDotDot,
-                });
-            }
-        };
+        if dest.file_name().and_then(|n| n.to_str()).is_none() {
+            return Err(CasError::InvalidName {
+                path: dest.to_owned(),
+                reason: NameError::DotOrDotDot,
+            });
+        }
         match fs::symlink_metadata(dest) {
             Ok(_) => return Err(CasError::DestinationExists(dest.to_owned())),
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
@@ -800,10 +797,9 @@ impl Store {
             Some(p) if !p.as_os_str().is_empty() => p.to_owned(),
             _ => PathBuf::from("."),
         };
-        let staging = parent.join(format!(
-            ".{name}.{}",
-            fsutil::unique_name("vesper-staging-")
-        ));
+        // Do not include the destination's leaf: a valid NAME_MAX-sized
+        // destination would make a suffixed staging name exceed NAME_MAX.
+        let staging = parent.join(fsutil::unique_name(".vesper-staging-"));
         fs::create_dir(&staging)
             .map_err(|e| CasError::io("create staging directory", &staging, e))?;
         let mut guard = StagedDir {

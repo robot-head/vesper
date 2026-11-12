@@ -830,6 +830,19 @@ fn reflink_only_either_clones_or_fails_cleanly() {
     assert!(staging_leftovers(dir.path()).is_empty());
 }
 
+#[cfg(unix)]
+#[test]
+fn materialize_accepts_a_maximum_length_destination_name() {
+    let (dir, store) = store();
+    let root = store.put_tree(&Tree::new(Domain::Source)).unwrap();
+    let dest = dir.path().join("a".repeat(255));
+    store
+        .materialize(&root.id, &dest, MaterializeOptions::default())
+        .unwrap();
+    assert!(dest.is_dir());
+    assert!(staging_leftovers(dir.path()).is_empty());
+}
+
 #[test]
 fn materialize_refuses_existing_destinations() {
     let (dir, store) = store();
