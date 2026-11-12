@@ -1,0 +1,2 @@
+macro addone($x: expr) -> expr { quote { wrapping_add($x, 1) } }
+fn main() -> i64 { addone!(41) }

@@ -121,7 +121,32 @@ impl MacroEngine {
         self.executions.load(Ordering::SeqCst)
     }
 
-    fn component(&self, id: ObjectId, bytes: &[u8]) -> Result<StepComponent, RunnerError> {
+    pub(crate) fn quotation_host(&self) -> &SandboxHost {
+        &self.host
+    }
+    pub(crate) fn begin_quotation_execution(&self) -> Result<(), RunnerError> {
+        let mut n = self.executions.load(Ordering::SeqCst);
+        loop {
+            let next = n.checked_add(1).ok_or_else(|| {
+                RunnerError::Sandbox(vesper_loom_sandbox::SandboxError::Host {
+                    message: "quotation execution counter exhausted".into(),
+                })
+            })?;
+            match self
+                .executions
+                .compare_exchange_weak(n, next, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return Ok(()),
+                Err(now) => n = now,
+            }
+        }
+    }
+
+    pub(crate) fn component(
+        &self,
+        id: ObjectId,
+        bytes: &[u8],
+    ) -> Result<StepComponent, RunnerError> {
         if let Some(c) = self.compiled.lock().expect("compile cache").get(&id) {
             return Ok(c.clone());
         }
