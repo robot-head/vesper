@@ -8,7 +8,7 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 | Lane | Branch | Exclusive ownership | Status |
 | --- | --- | --- | --- |
 | Workspace extraction | `parallel/workspace` | Root workspace + core/syntax/Pulse extraction | Integrated as `76f1a0a`; 267 baseline tests passed |
-| SemVer | `parallel/semver` | `crates/vesper-semver/**` | Running: §9 interface compatibility |
+| SemVer | `parallel/semver` | `crates/vesper-semver/**` | Integrated: §9 interface compatibility; 25 tests |
 | Bridge wire layouts | `parallel/ffi-wire` | `crates/vesper-ffi/**` | Integrated: §13.2 byte layouts/views; 9 tests |
 | Loom calculus | `parallel/loom-calculus` | `crates/vesper-loom-calculus/**` | Integrated: manifest/solution validation; 17 tests + doctest |
 | SimPulse | `parallel/simpulse` | `crates/vesper-simpulse/**` | Integrated: deterministic scheduling/replay; 18 tests + 2 doctests |

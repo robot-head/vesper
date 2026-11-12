@@ -22,7 +22,7 @@ CARGO_TARGET_DIR=/workspace/vesper/target cargo clippy --manifest-path crates/ve
 
 ## Boundaries and integration
 
-The crate temporarily has its own `[workspace]` solely to build independently. Integration should remove that stanza, add the crate to the root workspace, and regenerate the root lockfile. It depends only on serde, with serde_json used in tests. It does not modify existing compiler modules or provide a CLI command.
+The crate is registered in the root workspace and uses its shared lockfile. It depends only on serde, with serde_json used in tests. It does not modify existing compiler modules or provide a CLI command.
 
 The DTO is an initial transport contract, not the canonical `.vhir` format. A compiler adapter must export resolved kinds, qualified stable IDs, binder scopes and already-validated projection trees; closure environments and source validity are not reconstructed here. Nested function signatures have explicit closed binder contexts; higher-ranked/captured generic binders and nominal effect-row arguments need a richer schema. Nominal modal analysis conservatively joins published kind bounds with argument modes, so phantom/conditional variance may cause false breaking reports. Public field and effect operation changes are deliberately invariant until their full bidirectional variance rules are implemented. The checker does not reason about trait obligations, ABI/layout compatibility, region reachability, SIMD profiles, FFI contracts, proof certificates, or behavior/termination.
 

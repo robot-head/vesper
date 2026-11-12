@@ -3,9 +3,6 @@ name = "vesper-semver"
 version = "0.1.0"
 edition = "2024"
 
-# Temporary standalone workspace until the integration branch registers this crate.
-[workspace]
-
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 
