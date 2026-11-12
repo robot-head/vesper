@@ -153,7 +153,7 @@ fn original_parse_and_pre_candidate_failures_report_truthful_diagnostic_spaces()
     assert_eq!(parse["diagnostic_source"], "original");
     assert!(parse["expanded_source"].is_null());
     let unsupported =
-        rendered("macro keep($x: expr)->expr { quote { $x } } fn main(in x:i64)->i64{keep!(x)}");
+        rendered("macro keep($x: expr)->expr { quote { $x } } fn main[T](in x:i64)->i64{keep!(x)}");
     assert_eq!(unsupported["status"], "rejected");
     assert_eq!(unsupported["stage"], "unsupported");
     assert_eq!(unsupported["diagnostic_source"], "none");

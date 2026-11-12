@@ -1134,8 +1134,15 @@ fn validate_parameter_renames(
     if *blake3::hash(syntax.source().as_bytes()).as_bytes() != bindings.source_hash {
         return Err(AuthorityFailure::ForeignSource);
     }
-    let mut seen = BTreeSet::new();
-    for body in bodies {
+    // Prepay the bounded duplicate-ID scan without allocating a temporary set
+    // outside the remaining authority metadata allowance.
+    b.charge(
+        bodies
+            .len()
+            .checked_mul(bodies.len())
+            .ok_or_else(|| resource("parameter_inventory_overflow"))?,
+    )?;
+    for (index, body) in bodies.iter().enumerate() {
         b.charge(syntax.source().len())?;
         let function = syntax
             .function(body.function)
@@ -1146,7 +1153,9 @@ fn validate_parameter_renames(
         let renames = body.lowered.parameter_renames();
         if body.name != function.header.name
             || !bindings.functions.contains_key(&body.name)
-            || !seen.insert(body.function.index())
+            || bodies[..index]
+                .iter()
+                .any(|previous| previous.function == body.function)
             || body.resolved.original_source() != syntax.source()
             || body.resolved.function_id() != Some(body.function)
             || body.lowered.function_id() != Some(body.function)
