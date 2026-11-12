@@ -2844,6 +2844,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rtrb"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5974e397833d890f2f74963408e0d4a6cd8eda2f6a445ae06750291b5d7a997e"
+
+[[package]]
 name = "rustc-demangle"
 version = "0.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3979,6 +3985,15 @@ dependencies = [
 [[package]]
 name = "vesper-quarry"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-resonance"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "rtrb",
+]
 
 [[package]]
 name = "vesper-semver"
