@@ -247,7 +247,7 @@ impl TcpOptions {
                     if (len - 2) % 8 != 0 || n == 0 || n > MAX_SACK_BLOCKS || opts.sack_len != 0 {
                         return Err(WireError::MalformedOption { kind });
                     }
-                    for (k, chunk) in body.chunks_exact(8).enumerate() {
+                    for (k, chunk) in body.as_chunks::<8>().0.iter().enumerate() {
                         opts.sack_blocks[k] = SackBlock {
                             left: Seq(u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]])),
                             right: Seq(u32::from_be_bytes([
@@ -478,11 +478,11 @@ impl IpPair {
 /// accumulated into `acc`. Carries are folded at the end by [`fold`].
 #[must_use]
 pub fn sum_bytes(mut acc: u64, bytes: &[u8]) -> u64 {
-    let mut chunks = bytes.chunks_exact(2);
-    for c in &mut chunks {
-        acc += u64::from(u16::from_be_bytes([c[0], c[1]]));
+    let (pairs, rest) = bytes.as_chunks::<2>();
+    for c in pairs {
+        acc += u64::from(u16::from_be_bytes(*c));
     }
-    if let [last] = chunks.remainder() {
+    if let [last] = rest {
         acc += u64::from(*last) << 8;
     }
     acc
