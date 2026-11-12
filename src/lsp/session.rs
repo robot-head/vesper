@@ -1070,6 +1070,44 @@ mod tests {
             "effect_ceiling":{"instances":[],"tail":null}})
     }
     #[test]
+    fn macro_preview_rejects_client_authority_and_stale_versions_before_compilation() {
+        let mut session = running(false);
+        open(&mut session, "untitled:preview", "fn main() -> i64 { 42 }");
+        for params in [
+            json!({"textDocument":{"uri":"untitled:preview"},"policy":{}}),
+            json!({"textDocument":{"uri":"untitled:preview","approved":true}}),
+            json!({"textDocument":{"uri":"untitled:preview","source":"forged"}}),
+            json!({"textDocument":{"uri":"untitled:preview","version":null}}),
+            json!({"textDocument":{"uri":"untitled:preview","version":2147483648_i64}}),
+        ] {
+            assert_eq!(
+                session.request("vesper/macroPreview", Some(params)).unwrap_err().code,
+                -32602
+            );
+        }
+        let stale = session
+            .request("vesper/macroPreview", Some(json!({
+                "textDocument":{"uri":"untitled:preview","version":0}
+            })))
+            .unwrap_err();
+        assert_eq!(stale.code, -32801);
+    }
+
+    #[test]
+    fn macro_preview_never_uses_a_stale_source_mirror() {
+        let mut session = running(false);
+        let uri = "untitled:preview";
+        open(&mut session, uri, "fn main() -> i64 { 42 }");
+        let file = session.files[uri];
+        file.set_text(&mut session.db).to("fn main() -> i64 { 7 }".into());
+        let error = session
+            .request("vesper/macroPreview", Some(json!({"textDocument":{"uri":uri}})))
+            .unwrap_err();
+        assert_eq!(error.code, ANALYSIS_UNAVAILABLE);
+        assert_eq!(error.data.unwrap()["status"], "preview_unavailable");
+        assert_eq!(session.document(uri).unwrap().text(), "fn main() -> i64 { 42 }");
+    }
+    #[test]
     fn code_actions_require_negotiated_literal_and_versioned_edit_support() {
         for capabilities in [
             json!({}),
