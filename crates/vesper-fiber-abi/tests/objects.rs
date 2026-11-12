@@ -2,7 +2,8 @@
 use object::{Architecture, Object, ObjectSection, ObjectSymbol, RelocationTarget};
 use vesper_fiber_abi::clif::PARK_SYMBOL;
 use vesper_fiber_abi::prototype::{
-    NESTED_SYMBOL, OptLevel, PULSE_READ_SYMBOL, STALE_BASE_SYMBOL, emit_object,
+    CANCEL_REPARK_SYMBOL, NESTED_SYMBOL, OptLevel, PULSE_READ_SYMBOL, STALE_BASE_SYMBOL,
+    emit_object,
 };
 
 fn check(triple: &str, arch: Architecture, call_reloc: u32) {
@@ -12,7 +13,12 @@ fn check(triple: &str, arch: Architecture, call_reloc: u32) {
         let file = object::File::parse(&*bytes).unwrap();
         assert_eq!(file.architecture(), arch);
         assert_eq!(file.format(), object::BinaryFormat::Elf);
-        for name in [PULSE_READ_SYMBOL, NESTED_SYMBOL, STALE_BASE_SYMBOL] {
+        for name in [
+            PULSE_READ_SYMBOL,
+            NESTED_SYMBOL,
+            STALE_BASE_SYMBOL,
+            CANCEL_REPARK_SYMBOL,
+        ] {
             let sym = file
                 .symbols()
                 .find(|s| s.name() == Ok(name))
@@ -35,8 +41,8 @@ fn check(triple: &str, arch: Architecture, call_reloc: u32) {
                     && matches!(r.flags(), object::RelocationFlags::Elf { r_type } if r_type == call_reloc)
             })
             .count();
-        // pulse_read: 2 parks, nested: 2, stale_base: 1.
-        assert_eq!(calls, 5, "{triple} {opt:?}");
+        // pulse_read: 2 parks, nested: 2, stale_base: 1, cancel_repark: 2.
+        assert_eq!(calls, 7, "{triple} {opt:?}");
     }
 }
 

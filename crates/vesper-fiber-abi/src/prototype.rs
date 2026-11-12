@@ -1,6 +1,6 @@
 //! Hand-built CLIF for the park/resume prototype.
 //!
-//! This is not source lowering: the two entries below are written directly
+//! This is not source lowering: the entries below are written directly
 //! against the [`crate::clif`] helpers to exercise the ABI. The RFC describes
 //! the adapter that would emit the same shapes from Place IR.
 //!
@@ -35,6 +35,8 @@ pub const PULSE_READ_SYMBOL: &str = "vesper_proto_pulse_read";
 pub const NESTED_SYMBOL: &str = "vesper_proto_nested";
 /// Deliberately invalid fixture: keeps the entry data base live across a park.
 pub const STALE_BASE_SYMBOL: &str = "vesper_proto_stale_base";
+/// Lifecycle fixture whose cancellation edge parks again (awaits cleanup).
+pub const CANCEL_REPARK_SYMBOL: &str = "vesper_proto_cancel_repark";
 
 pub const COUNTER: usize = 0;
 pub const EXIT_NOTE: usize = 8;
@@ -46,6 +48,11 @@ pub const NESTED_OUTER: usize = 40;
 pub const DATA_BYTES: usize = 48;
 /// Written to `exit_note` by the cancellation edge.
 pub const CANCEL_NOTE: u64 = 0xCA9CE1;
+/// Written to `exit_note` by `cancel_repark` when its cleanup park is itself
+/// cancelled (abortive cleanup).
+pub const CANCEL_TWICE_NOTE: u64 = 0xCA9CE2;
+/// Added to `counter` by `cancel_repark` when its cleanup park completes.
+pub const CLEANUP_DONE: u64 = 1000;
 
 /// Evidence depth requirements of each entry (outermost first).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -165,6 +172,7 @@ pub struct Ids {
     pub pulse_read: FuncId,
     pub nested: FuncId,
     pub stale_base: FuncId,
+    pub cancel_repark: FuncId,
 }
 
 /// Define both prototype entries in `module`. Returns their ids and the CLIF
@@ -182,6 +190,9 @@ pub fn define<M: Module>(module: &mut M, linkage: Linkage) -> Result<(Ids, Strin
         .map_err(|e| e.to_string())?;
     let stale_base = module
         .declare_function(STALE_BASE_SYMBOL, linkage, &sig)
+        .map_err(|e| e.to_string())?;
+    let cancel_repark = module
+        .declare_function(CANCEL_REPARK_SYMBOL, linkage, &sig)
         .map_err(|e| e.to_string())?;
     let mut text = String::new();
     let mut fctx = FunctionBuilderContext::new();
@@ -499,11 +510,123 @@ pub fn define<M: Module>(module: &mut M, linkage: Linkage) -> Result<(Ids, Strin
         .define_function(stale_base, &mut ctx)
         .map_err(|e| format!("{e:?}"))?;
     module.clear_context(&mut ctx);
+
+    // ---- cancel_repark (lifecycle fixture) --------------------------------
+    // counter += 1; park Async::yield_now.
+    //   Value:     counter += 10, exit COMPLETE(counter).
+    //   Error:     exit FAILED(code).
+    //   Cancelled: exit_note = CANCEL_NOTE, then park Async::yield_now again
+    //              (cleanup awaits something before discharging obligations).
+    //     Value:     counter += CLEANUP_DONE, exit CANCELLED(counter).
+    //     Error:     exit FAILED(code).
+    //     Cancelled: exit_note = CANCEL_TWICE_NOTE, exit CANCELLED(counter).
+    ctx.func.signature = clif::entry_signature(call_conv, ptr);
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+        let park_ref = module.declare_func_in_func(park, b.func);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let fiber = b.block_params(entry)[0];
+        let mem = MemFlags::trusted();
+        let violation = b.create_block();
+        let failed = b.create_block();
+        b.append_block_param(failed, types::I64);
+        b.append_block_param(failed, ptr);
+        let cleanup = b.create_block();
+        b.append_block_param(cleanup, ptr);
+
+        let base0 = clif::entry_data_base(&mut b, ptr, fiber);
+        let c = b.ins().load(types::I64, mem, base0, COUNTER as i32);
+        let c = b.ins().iadd_imm(c, 1);
+        b.ins().store(mem, c, base0, COUNTER as i32);
+        let ev = load_evidence(&mut b, ptr, fiber, 1);
+        let zero = b.ins().iconst(types::I64, 0);
+        let r1 = emit_park(
+            &mut b,
+            ptr,
+            park_ref,
+            fiber,
+            ev.identity,
+            OP_YIELD,
+            zero,
+            zero,
+            violation,
+        );
+        let resumed = b.create_block();
+        let error1 = b.create_block();
+        let cancel1 = b.create_block();
+        branch_on_kind(&mut b, r1.kind, resumed, error1, cancel1, violation);
+        b.switch_to_block(error1);
+        b.ins()
+            .jump(failed, &[r1.value.into(), r1.data_base.into()]);
+        b.switch_to_block(cancel1);
+        b.ins().jump(cleanup, &[r1.data_base.into()]);
+
+        b.switch_to_block(resumed);
+        let c = b.ins().load(types::I64, mem, r1.data_base, COUNTER as i32);
+        let c = b.ins().iadd_imm(c, 10);
+        b.ins().store(mem, c, r1.data_base, COUNTER as i32);
+        emit_exit(&mut b, fiber, exit::COMPLETE, c);
+
+        b.switch_to_block(cleanup);
+        let base = b.block_params(cleanup)[0];
+        let note = b.ins().iconst(types::I64, CANCEL_NOTE as i64);
+        b.ins().store(mem, note, base, EXIT_NOTE as i32);
+        let ev = load_evidence(&mut b, ptr, fiber, 1);
+        let zero = b.ins().iconst(types::I64, 0);
+        let r2 = emit_park(
+            &mut b,
+            ptr,
+            park_ref,
+            fiber,
+            ev.identity,
+            OP_YIELD,
+            zero,
+            zero,
+            violation,
+        );
+        let cleaned = b.create_block();
+        let error2 = b.create_block();
+        let cancel2 = b.create_block();
+        branch_on_kind(&mut b, r2.kind, cleaned, error2, cancel2, violation);
+        b.switch_to_block(error2);
+        b.ins()
+            .jump(failed, &[r2.value.into(), r2.data_base.into()]);
+
+        b.switch_to_block(cleaned);
+        let c = b.ins().load(types::I64, mem, r2.data_base, COUNTER as i32);
+        let c = b.ins().iadd_imm(c, CLEANUP_DONE as i64);
+        b.ins().store(mem, c, r2.data_base, COUNTER as i32);
+        emit_exit(&mut b, fiber, exit::CANCELLED, c);
+
+        b.switch_to_block(cancel2);
+        let note = b.ins().iconst(types::I64, CANCEL_TWICE_NOTE as i64);
+        b.ins().store(mem, note, r2.data_base, EXIT_NOTE as i32);
+        let c = b.ins().load(types::I64, mem, r2.data_base, COUNTER as i32);
+        emit_exit(&mut b, fiber, exit::CANCELLED, c);
+
+        b.switch_to_block(failed);
+        let code = b.block_params(failed)[0];
+        let base = b.block_params(failed)[1];
+        b.ins().store(mem, code, base, EXIT_NOTE as i32);
+        emit_exit(&mut b, fiber, exit::FAILED, code);
+
+        emit_violation(&mut b, violation);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    text.push_str(&ctx.func.display().to_string());
+    module
+        .define_function(cancel_repark, &mut ctx)
+        .map_err(|e| format!("{e:?}"))?;
+    module.clear_context(&mut ctx);
     Ok((
         Ids {
             pulse_read,
             nested,
             stale_base,
+            cancel_repark,
         },
         text,
     ))
@@ -546,7 +669,7 @@ pub fn emit_object(triple: &str, opt: OptLevel) -> Result<(Vec<u8>, String), Str
         triple.architecture,
         target_lexicon::Architecture::X86_64 | target_lexicon::Architecture::Aarch64(_)
     ) {
-        return Err("ABI v1 targets x86_64 and AArch64 only".into());
+        return Err("ABI v2 targets x86_64 and AArch64 only".into());
     }
     let isa = cranelift_codegen::isa::lookup(triple)
         .map_err(|e| e.to_string())?
@@ -575,6 +698,7 @@ pub struct JitPrototype {
     pulse_read: crate::fiber::EntryFn,
     nested: crate::fiber::EntryFn,
     stale_base: crate::fiber::EntryFn,
+    cancel_repark: crate::fiber::EntryFn,
     clif: String,
 }
 
@@ -625,10 +749,11 @@ impl JitPrototype {
                 module.get_finalized_function(id),
             )
         };
-        let (pulse_read, nested, stale_base) = (
+        let (pulse_read, nested, stale_base, cancel_repark) = (
             entry(ids.pulse_read),
             entry(ids.nested),
             entry(ids.stale_base),
+            entry(ids.cancel_repark),
         );
         Ok(Self {
             code: Rc::new(JitCode {
@@ -637,6 +762,7 @@ impl JitPrototype {
             pulse_read,
             nested,
             stale_base,
+            cancel_repark,
             clif,
         })
     }
@@ -668,7 +794,7 @@ impl JitPrototype {
         if config.data_bytes < DATA_BYTES {
             return Err(std::io::Error::other("prototype data frame is 48 bytes"));
         }
-        // SAFETY: entry is code owned by `self.code`, defined with the ABI v1
+        // SAFETY: entry is code owned by `self.code`, defined with the ABI
         // entry signature; evidence depths were checked above.
         unsafe { crate::fiber::Fiber::new(entry, arg, evidence, self.code.clone(), config) }
     }
@@ -695,6 +821,23 @@ impl JitPrototype {
     ) -> std::io::Result<crate::fiber::Fiber> {
         self.spawn(
             self.stale_base,
+            PULSE_READ_EVIDENCE,
+            0,
+            evidence,
+            crate::fiber::FiberConfig {
+                data_bytes: DATA_BYTES,
+                ..Default::default()
+            },
+        )
+    }
+    /// Spawn the lifecycle fixture whose cancellation edge parks again
+    /// (Async at depth 1; uses the `pulse_read` evidence shape).
+    pub fn spawn_cancel_repark(
+        &self,
+        evidence: Rc<EvidenceVector>,
+    ) -> std::io::Result<crate::fiber::Fiber> {
+        self.spawn(
+            self.cancel_repark,
             PULSE_READ_EVIDENCE,
             0,
             evidence,

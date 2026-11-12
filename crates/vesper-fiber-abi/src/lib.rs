@@ -7,7 +7,9 @@
 //!   host and object emission for x86_64/AArch64.
 //! * `fiber`, `stack`, `switch` (Linux x86_64/AArch64): pinned stacks,
 //!   context switching and one-shot continuations.
-//! * `pulse` (Linux): `vesper_pulse::scheduler::Resume` adapter.
+//! * `fpenv` (Linux): the floating-point control state each switch preserves.
+//! * `pulse` (Linux): `vesper_pulse::scheduler::Resume` adapter and the
+//!   owned cancellation/shutdown/drain runtime.
 //!
 //! See `docs/rfcs/native-pulse-abi.md` for the ownership, lifetime and
 //! relocation contracts and for what this prototype does not establish.
@@ -22,6 +24,11 @@ pub mod prototype;
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
 pub mod fiber;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub mod fpenv;
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
@@ -44,5 +51,5 @@ pub mod switch;
 ))]
 pub use fiber::{
     ContinuationTable, Exit, Fiber, FiberConfig, Outcome, Parked, RawContinuation, Rejected,
-    ResumeError, Resumption,
+    ResumeError, Resumption, TableCancel,
 };
