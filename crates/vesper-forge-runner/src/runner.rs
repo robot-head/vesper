@@ -322,6 +322,9 @@ impl MacroRunner {
         if prepared.identity != self.identity {
             return Err(RunnerError::IdentityMismatch);
         }
+        // The executing runner's caps bound allocation, whichever runner
+        // (or earlier cap setting) prepared the request.
+        prepared.request.validate(&self.caps)?;
         if options.cache != CachePolicy::Uncached && !self.identity.is_complete() {
             return Err(RunnerError::IncompleteIdentity {
                 missing: self.identity.missing(),

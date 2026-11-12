@@ -195,7 +195,7 @@ All runs used Rust 1.97.0 on x86_64 Linux, from `crates/vesper-forge-runner`, wi
 ```text
 cargo fmt --check                                   ok
 cargo clippy --all-targets --locked -- -D warnings  ok
-cargo test --locked                                 31 passed: 5 unit (record), 10 approval, 11 cache, 5 hostile
+cargo test --locked                                 32 passed: 5 unit (record), 10 approval, 11 cache, 6 hostile
 cargo run --example cached_macro                    miss accepted, hit rejected after same-label policy change
 fixtures/build.sh (twice)                           identical 74b3fe4d… component
 ```

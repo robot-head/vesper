@@ -280,3 +280,26 @@ fn input_token_stream_limits_apply_before_execution() {
     ));
     assert_eq!(w.executions(), before);
 }
+
+#[test]
+fn execute_revalidates_against_the_executing_runners_caps() {
+    let w = World::new();
+    let dir = w.template("t", "hash_into(1)");
+    let req = w.template_request(&dir);
+    let prepared = w.runner.prepare(&req, vec![]).unwrap();
+    let caps = RunnerLimits {
+        max_memory_bytes: req.limits.max_memory_bytes - 1,
+        ..RunnerLimits::default()
+    };
+    let strict = w.reopen(engine()).with_caps(caps);
+    assert!(matches!(
+        strict
+            .execute(&prepared, ExecOptions::default())
+            .unwrap_err(),
+        RunnerError::Request(RequestError::LimitAboveCap {
+            field: "max_memory_bytes",
+            ..
+        })
+    ));
+    assert_eq!(w.records(), 0);
+}
