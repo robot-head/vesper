@@ -15,8 +15,8 @@ cranelift-object = "0.125"
 cranelift-native = "0.125"
 target-lexicon = "0.13"
 
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
 [dev-dependencies]
-object = { version = "0.37", default-features = false, features = ["read", "std", "elf"] }
+object = { version = "0.37", default-features = false, features = ["read", "std", "elf", "macho"] }
