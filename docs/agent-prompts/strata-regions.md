@@ -21,7 +21,7 @@ Your assignment:
 Own crates/vesper-alloc/**, docs/parallel-results/strata-regions.md.
 Design §15. Implement a bounded region allocator core with aligned allocations, checked size arithmetic, owned region identity/generation, reset/reclamation, stale and cross-region handle rejection, and a usable byte-buffer/region-box representation.
 Keep physical ownership explicit and avoid GC/ARC. Rust drop behavior is not a proof that Vesper's linear handles cannot be forgotten; explain the compiler obligations separately.
-Test alignment, overlap, growth, allocation failure, reuse, stale handles, and cleanup on error. Use Miri where available; document any unavailable validation.
+Test alignment, overlap, growth, allocation failure, reuse, stale handles, and cleanup on error. Copied RegionRef handles may alias the same cell despite distinct source roots; state the required region/object-origin or exclusive-region evidence. Rewind must invalidate handles allocated after its watermark, not merely wait for whole-region reset. Use Miri where available; document any unavailable validation.
 Do not claim ShardSlab performance, @fip inference, cyclic-region typing, or AoSoA vector lowering unless implemented and measured.
 No source syntax/checker/codegen edits yet. Provide a small Alloc/Region lowering contract that the compiler owner can review.
 ```

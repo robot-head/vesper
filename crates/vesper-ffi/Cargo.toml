@@ -3,5 +3,3 @@ name = "vesper-ffi"
 version = "0.1.0"
 edition = "2024"
 description = "Checked byte-oriented wire layouts and views for Vesper Bridge"
-
-[workspace]

@@ -22,7 +22,7 @@ Supported scalars are signed/unsigned 8-, 16-, 32- and 64-bit integers, plus fix
 
 This milestone does not implement source parsing, HIR/PCG borrowing, CLIF generation, `.vsys` bindings, foreign-value validation, foreign-handle finalizers, MPK/PKRU or Arm isolation. Rust slice lifetimes protect this library's views; they are not evidence that the language's corresponding typing rules have been implemented.
 
-Before integration into the main workspace, this library has a temporary `[workspace]` stanza. The integration owner should remove that stanza and register the crate in the root manifest.
+The crate is registered in the main workspace; root workspace checks include its tests.
 
 ```sh
 cargo test --manifest-path crates/vesper-ffi/Cargo.toml

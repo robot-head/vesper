@@ -9,7 +9,7 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 | --- | --- | --- | --- |
 | Workspace extraction | `parallel/workspace` | Root workspace + core/syntax/Pulse extraction | Integrated as `76f1a0a`; 267 baseline tests passed |
 | SemVer | `parallel/semver` | `crates/vesper-semver/**` | Running: §9 interface compatibility |
-| Bridge wire layouts | `parallel/ffi-wire` | `crates/vesper-ffi/**` | Running: §13.2 byte layouts/views |
+| Bridge wire layouts | `parallel/ffi-wire` | `crates/vesper-ffi/**` | Integrated: §13.2 byte layouts/views; 9 tests |
 | Loom calculus | `parallel/loom-calculus` | `crates/vesper-loom-calculus/**` | Running: manifest/solution validation |
 | SimPulse | `parallel/simpulse` | `crates/vesper-simpulse/**` | Running: deterministic scheduling/replay |
 | Contract audit | `parallel/contracts` | `docs/rfcs/parallel-contracts.md` | Running: cross-section contracts and migration gates |
