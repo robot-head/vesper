@@ -3174,6 +3174,7 @@ dependencies = [
  "cranelift-object",
  "egg",
  "egglog",
+ "libc",
  "petgraph",
  "salsa",
  "serde",
@@ -3181,6 +3182,8 @@ dependencies = [
  "target-lexicon",
  "vesper-core",
  "vesper-lean-syntax",
+ "vesper-loom-admission",
+ "vesper-loom-audit",
  "vesper-loom-calculus",
  "vesper-loom-cas",
  "vesper-loom-solver",
@@ -3196,6 +3199,10 @@ name = "vesper-alloc"
 version = "0.1.0"
 
 [[package]]
+name = "vesper-aura"
+version = "0.1.0"
+
+[[package]]
 name = "vesper-core"
 version = "0.1.0"
 dependencies = [
@@ -3205,6 +3212,9 @@ dependencies = [
 [[package]]
 name = "vesper-ffi"
 version = "0.1.0"
+dependencies = [
+ "blake3",
+]
 
 [[package]]
 name = "vesper-fiber-abi"
@@ -3239,6 +3249,32 @@ version = "0.1.0"
 [[package]]
 name = "vesper-lean-syntax"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-loom-admission"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vesper-loom-calculus",
+ "vesper-loom-cas",
+ "vesper-loom-trust",
+]
+
+[[package]]
+name = "vesper-loom-audit"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "semver",
+ "serde",
+ "serde_json",
+ "vesper-loom-calculus",
+]
 
 [[package]]
 name = "vesper-loom-build"

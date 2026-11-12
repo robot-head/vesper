@@ -72,6 +72,19 @@ impl Env {
     }
 }
 
+/// A host target that is guaranteed to differ from the one this test binary
+/// was built for, so "another host" never collides with the real host.
+fn foreign_host_target() -> String {
+    let current = ExecutionIdentity::current().host_target;
+    let foreign = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
+        .into_iter()
+        .find(|t| current.as_deref() != Some(*t))
+        .unwrap()
+        .to_owned();
+    assert_ne!(current.as_deref(), Some(foreign.as_str()));
+    foreign
+}
+
 fn read(path: &Path) -> String {
     fs::read_to_string(path).unwrap()
 }
@@ -391,7 +404,7 @@ fn incompatible_engine_builder_or_host_identities_never_share_results() {
         ),
         (
             "host",
-            Box::new(|i| i.host_target = Some("aarch64-apple-darwin".into())),
+            Box::new(|i| i.host_target = Some(foreign_host_target())),
         ),
         (
             "builder",
@@ -520,7 +533,7 @@ fn a_prepared_build_runs_only_under_the_identity_that_keyed_it() {
     let env = Env::new();
     let prepared = env.runner().prepare(&env.codegen()).unwrap();
     for mutate in [
-        (|i: &mut ExecutionIdentity| i.host_target = Some("aarch64-apple-darwin".into()))
+        (|i: &mut ExecutionIdentity| i.host_target = Some(foreign_host_target()))
             as fn(&mut ExecutionIdentity),
         |i| i.engine_dependencies = None,
     ] {
