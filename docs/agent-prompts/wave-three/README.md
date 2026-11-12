@@ -1,6 +1,7 @@
 # Third parallel implementation wave
 
-Status: **ready to launch**. Each linked file contains a complete standalone prompt
+Status: **assigned externally by the user**. Do not launch duplicate writers.
+Each linked file contains a complete standalone prompt
 to copy into a new agent session. All seven can run concurrently under the frozen
 [contracts](../../rfcs/wave-three-contracts.md); there is no source/backend schema
 writer overlap. Start from fresh `origin/main` containing **`02b3a1d175efb5d2561b7fa5b0aaf80121ae1bc6`** or later.

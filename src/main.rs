@@ -1,4 +1,5 @@
 mod attestation_commands;
+mod audit_commands;
 mod cas_commands;
 mod package_commands;
 mod package_graph;
@@ -13,7 +14,7 @@ use std::{
 };
 use vesper::{ast::Diagnostic, check, ir, lean, lsp, native, optimize, parser, runtime::Runtime};
 
-const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> <file.ves> [options]\n\nCommands:\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify configured-key builder attestations (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --no-opt       Disable equality saturation\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
+const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> <file.ves> [options]\n\nCommands:\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --no-opt       Disable equality saturation\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
 fn main() {
     if let Err(e) = cli() {
         eprintln!("vesper: {e}");
@@ -36,6 +37,9 @@ fn cli() -> Result<(), String> {
     }
     if command == "resolve" {
         return package_commands::resolve(args.collect());
+    }
+    if command == "audit" {
+        return audit_commands::run(args.collect());
     }
     if command == "attest" {
         return attestation_commands::run(args.collect());
