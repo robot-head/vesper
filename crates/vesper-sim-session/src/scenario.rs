@@ -4,7 +4,14 @@
 //! action. It is validated against the checked program before any task starts:
 //! unknown effects/operations, mismatched signatures, unsupported value types,
 //! malformed scripted values and missing bindings are all load errors.
-use crate::value::{self, type_name};
+//!
+//! Version 1 has no model. Version 2 adds a required `model` section
+//! (processes, virtual WAL logs, networks, timed faults and injected
+//! failures), per-task `process` membership and the model actions.
+use crate::{
+    model::{self, ModelPlan, ModelSpec},
+    value::{self, type_name},
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as Json;
 use std::collections::{BTreeMap, BTreeSet};
@@ -17,6 +24,8 @@ use vesper_simpulse::IoResult;
 
 pub const SCENARIO_FORMAT: &str = "vesper-sim-scenario";
 pub const SCENARIO_VERSION: u32 = 1;
+/// Scenario version with a crash/storage/network model section.
+pub const MODEL_SCENARIO_VERSION: u32 = 2;
 /// Hard upper bounds applied regardless of scenario limits.
 pub const MAX_SCENARIO_BYTES: usize = 1 << 20;
 pub const MAX_TASKS: usize = 64;
@@ -36,6 +45,9 @@ pub struct Scenario {
     pub runtime: RuntimeOptions,
     pub bindings: Vec<Binding>,
     pub tasks: Vec<TaskSpec>,
+    /// Required by version 2 and rejected by version 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<ModelSpec>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,6 +96,33 @@ pub enum Action {
     Script,
     /// Park until the embedding host supplies a checked completion.
     External,
+    /// `fn op() -> u64`: open the log for this epoch; returns valid records.
+    WalRecover { log: String },
+    /// `fn op(record: T) -> Result[u64, u32]`: volatile append; `Ok(lsn)`.
+    WalAppend { log: String },
+    /// `fn op() -> Result[u64, u32]`: park until the flush delay elapses;
+    /// `Ok(durable_lsn)` once the batch is durable.
+    WalFlush { log: String },
+    /// `fn op(index: u64) -> Option[T]`: the index-th durable record.
+    WalRead { log: String },
+    /// `fn op(to: u64, message: T) -> Result[u64, u32]`: `Ok(message_id)`.
+    NetSend { network: String },
+    /// `fn op(timeout_ns: u64) -> Result[T, u32]`: oldest message, or
+    /// `Err(timeout_code)` once the timeout elapses.
+    NetRecv { network: String },
+}
+impl Action {
+    pub fn is_model(&self) -> bool {
+        matches!(
+            self,
+            Self::WalRecover { .. }
+                | Self::WalAppend { .. }
+                | Self::WalFlush { .. }
+                | Self::WalRead { .. }
+                | Self::NetSend { .. }
+                | Self::NetRecv { .. }
+        )
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -96,6 +135,9 @@ pub struct TaskSpec {
     pub script: Vec<ScriptEntry>,
     #[serde(default)]
     pub cancel: Option<CancelSpec>,
+    /// Version 2: the model process this task belongs to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -196,6 +238,9 @@ pub(crate) struct ScriptStep {
 
 pub(crate) struct TaskPlan {
     pub name: String,
+    pub process: Option<usize>,
+    /// Restart tasks are spawned by restarts, never at session start.
+    pub restart: bool,
     pub entry: String,
     pub arguments: Vec<Value>,
     pub result: Type,
@@ -207,7 +252,12 @@ pub(crate) struct TaskPlan {
 pub struct Plan {
     pub(crate) scenario: Scenario,
     pub(crate) bindings: BTreeMap<(String, String), BoundOperation>,
+    /// Initial tasks first (scenario order), then every process's restart
+    /// tasks.
     pub(crate) tasks: Vec<TaskPlan>,
+    pub(crate) model: Option<ModelPlan>,
+    /// Plan indices of each process's restart tasks.
+    pub(crate) restarts: Vec<Vec<usize>>,
 }
 impl Plan {
     pub fn scenario(&self) -> &Scenario {
@@ -230,8 +280,15 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
     if scenario.format != SCENARIO_FORMAT {
         return fail(format!("unknown format {:?}", scenario.format));
     }
-    if scenario.version != SCENARIO_VERSION {
-        return fail(format!("unsupported scenario version {}", scenario.version));
+    match (scenario.version, scenario.model.is_some()) {
+        (SCENARIO_VERSION, false) | (MODEL_SCENARIO_VERSION, true) => {}
+        (SCENARIO_VERSION, true) => {
+            return fail("scenario version 1 has no model section; use version 2");
+        }
+        (MODEL_SCENARIO_VERSION, false) => {
+            return fail("scenario version 2 requires a model section");
+        }
+        (version, _) => return fail(format!("unsupported scenario version {version}")),
     }
     let limits = &scenario.limits;
     if scenario.runtime.fuel == 0 || scenario.runtime.fuel > MAX_FUEL {
@@ -251,14 +308,42 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
     if scenario.bindings.len() > MAX_BINDINGS {
         return fail(format!("at most {MAX_BINDINGS} bindings are allowed"));
     }
-    let entries: usize = scenario.tasks.iter().map(|t| t.script.len()).sum();
+    let restart_specs: Vec<&TaskSpec> = scenario
+        .model
+        .iter()
+        .flat_map(|m| m.processes.iter().flat_map(|p| &p.restart))
+        .collect();
+    let entries: usize = scenario
+        .tasks
+        .iter()
+        .chain(restart_specs.iter().copied())
+        .map(|t| t.script.len())
+        .sum();
     if entries > MAX_SCRIPT_ENTRIES {
         return fail(format!(
             "at most {MAX_SCRIPT_ENTRIES} script entries are allowed"
         ));
     }
+    if scenario.tasks.len() + restart_specs.len() > MAX_TASKS {
+        return fail(format!(
+            "at most {MAX_TASKS} task specifications (initial plus restart) are allowed"
+        ));
+    }
+    let model = match &scenario.model {
+        Some(spec) => Some(
+            model::validate(
+                spec.clone(),
+                scenario.tasks.len() as u64,
+                scenario.limits.max_virtual_ns,
+            )
+            .map_err(ScenarioError)?,
+        ),
+        None => None,
+    };
 
     let mut bindings = BTreeMap::new();
+    // Payload type of each log and network, fixed by the first binding.
+    let mut payloads: BTreeMap<(bool, String), String> = BTreeMap::new();
     for binding in &scenario.bindings {
         let key = (binding.effect.clone(), binding.operation.clone());
         let effect = world
@@ -322,6 +407,37 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
                         .is_some_and(|(p, t)| *p != Pass::Inout && type_name(t) == "u64")
             }
             Action::Script | Action::External => true,
+            action => {
+                let payload = model_payload(action, &params, &result).ok_or_else(|| {
+                    ScenarioError(format!(
+                        "action {action:?} is incompatible with {signature}"
+                    ))
+                })?;
+                let Some(model) = &model else {
+                    return fail(format!(
+                        "{signature}: model actions need scenario version 2"
+                    ));
+                };
+                let target = model_target(action);
+                let known = if target.0 {
+                    model.spec.networks.iter().any(|n| n.name == target.1)
+                } else {
+                    model.spec.logs.iter().any(|l| l.name == target.1)
+                };
+                if !known {
+                    return fail(format!("{signature}: unknown model target {}", target.1));
+                }
+                if let Some(payload) = payload {
+                    let fixed = payloads.entry(target.clone()).or_insert(payload.clone());
+                    if *fixed != payload {
+                        return fail(format!(
+                            "{signature}: {} carries {fixed}, not {payload}",
+                            target.1
+                        ));
+                    }
+                }
+                true
+            }
         };
         if !action_ok {
             return fail(format!(
@@ -346,132 +462,265 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
     let mut names = BTreeSet::new();
     let mut tasks = vec![];
     for task in &scenario.tasks {
-        if task.name.is_empty() || !names.insert(task.name.clone()) {
-            return fail(format!(
-                "task names must be unique and non-empty: {:?}",
-                task.name
-            ));
-        }
-        let context = |e: String| ScenarioError(format!("task {}: {e}", task.name));
-        let function = world
-            .functions
-            .get(&task.entry)
-            .filter(|f| f.body.is_some())
-            .ok_or_else(|| context(format!("unknown entry function {}", task.entry)))?;
-        if !function.generics.is_empty() {
-            return Err(context("generic entry functions are unsupported".into()));
-        }
-        if function.effects.tail.is_some() {
-            return Err(context("entry needs a concrete effect row".into()));
-        }
-        for effect in &function.effects.instances {
-            let declaration = &world.effects[&effect.name];
-            for op in &declaration.ops {
-                if !bindings.contains_key(&(effect.name.clone(), op.name.clone())) {
-                    return Err(context(format!(
-                        "no binding for {}::{} installed by {}",
-                        effect.name, op.name, task.entry
-                    )));
-                }
+        let process = match (&task.process, &model) {
+            (None, _) => None,
+            (Some(name), Some(model)) => Some(*model.process_index.get(name).ok_or_else(|| {
+                ScenarioError(format!("task {} names unknown process {name}", task.name))
+            })?),
+            (Some(_), None) => {
+                return fail(format!(
+                    "task {}: processes need scenario version 2",
+                    task.name
+                ));
             }
-        }
-        if function.params.len() != task.arguments.len() {
-            return Err(context(format!(
-                "{} takes {} arguments",
-                task.entry,
-                function.params.len()
-            )));
-        }
-        let mut arguments = vec![];
-        for (param, json) in function.params.iter().zip(&task.arguments) {
-            if param.pass == Pass::Inout {
-                return Err(context("entry parameters cannot be inout".into()));
-            }
-            arguments.push(value::decode(world, &param.ty, json).map_err(context)?);
-        }
-        let result = world
-            .function_results
-            .get(&task.entry)
-            .cloned()
-            .unwrap_or_else(|| function.result.clone());
-        supported(world, &result).map_err(context)?;
-        let installed: BTreeSet<&str> = function
-            .effects
-            .instances
-            .iter()
-            .map(|e| e.name.as_str())
-            .collect();
-        let mut script = vec![];
-        for (index, entry) in task.script.iter().enumerate() {
-            let context =
-                |e: String| ScenarioError(format!("task {} script entry {index}: {e}", task.name));
-            let bound = bindings
-                .get(&(entry.effect.clone(), entry.operation.clone()))
-                .filter(|b| b.action == Action::Script && installed.contains(entry.effect.as_str()))
-                .ok_or_else(|| {
-                    context(format!(
-                        "{}::{} is not a scripted operation of this task",
-                        entry.effect, entry.operation
-                    ))
-                })?;
-            if entry.arguments.len() != bound.params.len() {
-                return Err(context("argument count differs from the signature".into()));
-            }
-            let mut arguments = vec![];
-            for ((_, ty), json) in bound.params.iter().zip(&entry.arguments) {
-                let v = value::decode(world, ty, json).map_err(context)?;
-                arguments.push(value::encode(world, ty, &v).map_err(context)?);
-            }
-            let response = value::decode(world, &bound.result, &entry.response).map_err(context)?;
-            let response_json = value::encode(world, &bound.result, &response).map_err(context)?;
-            let mut writes = vec![];
-            let mut written = BTreeSet::new();
-            for write in &entry.writes {
-                let (pass, ty) = bound
-                    .params
-                    .get(write.argument)
-                    .ok_or_else(|| context(format!("no argument {}", write.argument)))?;
-                if *pass != Pass::Inout || !written.insert(write.argument) {
-                    return Err(context(format!(
-                        "argument {} is not a distinct inout parameter",
-                        write.argument
-                    )));
-                }
-                let v = value::decode(world, ty, &write.value).map_err(context)?;
-                let json = value::encode(world, ty, &v).map_err(context)?;
-                writes.push((write.argument, v, json));
-            }
-            script.push(ScriptStep {
-                effect: entry.effect.clone(),
-                operation: entry.operation.clone(),
-                arguments: Json::Array(arguments),
-                delay_ns: entry.delay_ns,
-                outcome: entry.outcome,
-                response,
-                response_json,
-                writes,
-            });
-        }
-        let cancel_after = match &task.cancel {
-            Some(CancelSpec {
-                after_submissions: 0,
-            }) => return Err(context("after_submissions must be at least 1".into())),
-            Some(spec) => Some(spec.after_submissions),
-            None => None,
         };
-        tasks.push(TaskPlan {
-            name: task.name.clone(),
-            entry: task.entry.clone(),
-            arguments,
-            result,
-            script,
-            cancel_after,
-        });
+        tasks.push(task_plan(
+            world, &bindings, &model, task, process, false, &mut names,
+        )?);
+    }
+    let mut restarts = vec![];
+    if let Some(model) = &model {
+        for (index, process) in model.spec.processes.iter().enumerate() {
+            let mut indices = vec![];
+            for task in &process.restart {
+                indices.push(tasks.len());
+                tasks.push(task_plan(
+                    world,
+                    &bindings,
+                    &Some(model.clone()),
+                    task,
+                    Some(index),
+                    true,
+                    &mut names,
+                )?);
+            }
+            restarts.push(indices);
+        }
     }
     Ok(Plan {
         scenario,
         bindings,
         tasks,
+        model,
+        restarts,
+    })
+}
+
+/// `(is_network, name)` of a model action.
+pub(crate) fn model_target(action: &Action) -> (bool, String) {
+    match action {
+        Action::WalRecover { log }
+        | Action::WalAppend { log }
+        | Action::WalFlush { log }
+        | Action::WalRead { log } => (false, log.clone()),
+        Action::NetSend { network } | Action::NetRecv { network } => (true, network.clone()),
+        _ => unreachable!("not a model action"),
+    }
+}
+
+/// Check a model action's signature. `Some(Some(t))` fixes payload type `t`;
+/// `Some(None)` carries no payload; `None` is incompatible.
+fn model_payload(
+    action: &Action,
+    params: &[(Pass, Type)],
+    result: &Type,
+) -> Option<Option<String>> {
+    let by_value = |p: &(Pass, Type)| p.0 != Pass::Inout;
+    let u64_arg = |p: &(Pass, Type)| by_value(p) && type_name(&p.1) == "u64";
+    let status = type_name(result) == "Result[u64, u32]";
+    let generic_arg = |name: &str, index: usize| match result {
+        Type::Named(n, args) if n == name && args.len() == index + 1 => Some(&args[0]),
+        _ => None,
+    };
+    match action {
+        Action::WalRecover { .. } => {
+            (params.is_empty() && type_name(result) == "u64").then_some(None)
+        }
+        Action::WalFlush { .. } => (params.is_empty() && status).then_some(None),
+        Action::WalAppend { .. } => match params {
+            [record] if by_value(record) && status => Some(Some(type_name(&record.1))),
+            _ => None,
+        },
+        Action::WalRead { .. } => match params {
+            [index] if u64_arg(index) => generic_arg("Option", 0).map(|t| Some(type_name(t))),
+            _ => None,
+        },
+        Action::NetSend { .. } => match params {
+            [to, message] if u64_arg(to) && by_value(message) && status => {
+                Some(Some(type_name(&message.1)))
+            }
+            _ => None,
+        },
+        Action::NetRecv { .. } => match (params, result) {
+            ([timeout], Type::Named(n, args))
+                if u64_arg(timeout)
+                    && n == "Result"
+                    && args.len() == 2
+                    && type_name(&args[1]) == "u32" =>
+            {
+                Some(Some(type_name(&args[0])))
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn task_plan(
+    world: &World,
+    bindings: &BTreeMap<(String, String), BoundOperation>,
+    model: &Option<ModelPlan>,
+    task: &TaskSpec,
+    process: Option<usize>,
+    restart: bool,
+    names: &mut BTreeSet<String>,
+) -> Result<TaskPlan, ScenarioError> {
+    if task.name.is_empty() || task.name.contains('@') || !names.insert(task.name.clone()) {
+        return fail(format!(
+            "task names must be unique, non-empty and free of '@': {:?}",
+            task.name
+        ));
+    }
+    let context = |e: String| ScenarioError(format!("task {}: {e}", task.name));
+    let function = world
+        .functions
+        .get(&task.entry)
+        .filter(|f| f.body.is_some())
+        .ok_or_else(|| context(format!("unknown entry function {}", task.entry)))?;
+    if !function.generics.is_empty() {
+        return Err(context("generic entry functions are unsupported".into()));
+    }
+    if function.effects.tail.is_some() {
+        return Err(context("entry needs a concrete effect row".into()));
+    }
+    for effect in &function.effects.instances {
+        let declaration = &world.effects[&effect.name];
+        for op in &declaration.ops {
+            let Some(bound) = bindings.get(&(effect.name.clone(), op.name.clone())) else {
+                return Err(context(format!(
+                    "no binding for {}::{} installed by {}",
+                    effect.name, op.name, task.entry
+                )));
+            };
+            if bound.action.is_model() {
+                let model = model.as_ref().expect("model actions imply a model");
+                let Some(process) = process else {
+                    return Err(context(format!(
+                        "{} uses a model action but the task has no process",
+                        bound.signature
+                    )));
+                };
+                let (network, target) = model_target(&bound.action);
+                let spec = &model.spec;
+                let owned = if network {
+                    spec.processes[process].endpoints.contains_key(&target)
+                } else {
+                    spec.logs
+                        .iter()
+                        .any(|l| l.name == target && model.process_index[&l.process] == process)
+                };
+                if !owned {
+                    return Err(context(format!(
+                        "{} uses {target}, which process {} does not own",
+                        bound.signature, spec.processes[process].name
+                    )));
+                }
+            }
+        }
+    }
+    if function.params.len() != task.arguments.len() {
+        return Err(context(format!(
+            "{} takes {} arguments",
+            task.entry,
+            function.params.len()
+        )));
+    }
+    let mut arguments = vec![];
+    for (param, json) in function.params.iter().zip(&task.arguments) {
+        if param.pass == Pass::Inout {
+            return Err(context("entry parameters cannot be inout".into()));
+        }
+        arguments.push(value::decode(world, &param.ty, json).map_err(context)?);
+    }
+    let result = world
+        .function_results
+        .get(&task.entry)
+        .cloned()
+        .unwrap_or_else(|| function.result.clone());
+    supported(world, &result).map_err(context)?;
+    let installed: BTreeSet<&str> = function
+        .effects
+        .instances
+        .iter()
+        .map(|e| e.name.as_str())
+        .collect();
+    let mut script = vec![];
+    for (index, entry) in task.script.iter().enumerate() {
+        let context =
+            |e: String| ScenarioError(format!("task {} script entry {index}: {e}", task.name));
+        let bound = bindings
+            .get(&(entry.effect.clone(), entry.operation.clone()))
+            .filter(|b| b.action == Action::Script && installed.contains(entry.effect.as_str()))
+            .ok_or_else(|| {
+                context(format!(
+                    "{}::{} is not a scripted operation of this task",
+                    entry.effect, entry.operation
+                ))
+            })?;
+        if entry.arguments.len() != bound.params.len() {
+            return Err(context("argument count differs from the signature".into()));
+        }
+        let mut arguments = vec![];
+        for ((_, ty), json) in bound.params.iter().zip(&entry.arguments) {
+            let v = value::decode(world, ty, json).map_err(context)?;
+            arguments.push(value::encode(world, ty, &v).map_err(context)?);
+        }
+        let response = value::decode(world, &bound.result, &entry.response).map_err(context)?;
+        let response_json = value::encode(world, &bound.result, &response).map_err(context)?;
+        let mut writes = vec![];
+        let mut written = BTreeSet::new();
+        for write in &entry.writes {
+            let (pass, ty) = bound
+                .params
+                .get(write.argument)
+                .ok_or_else(|| context(format!("no argument {}", write.argument)))?;
+            if *pass != Pass::Inout || !written.insert(write.argument) {
+                return Err(context(format!(
+                    "argument {} is not a distinct inout parameter",
+                    write.argument
+                )));
+            }
+            let v = value::decode(world, ty, &write.value).map_err(context)?;
+            let json = value::encode(world, ty, &v).map_err(context)?;
+            writes.push((write.argument, v, json));
+        }
+        script.push(ScriptStep {
+            effect: entry.effect.clone(),
+            operation: entry.operation.clone(),
+            arguments: Json::Array(arguments),
+            delay_ns: entry.delay_ns,
+            outcome: entry.outcome,
+            response,
+            response_json,
+            writes,
+        });
+    }
+    let cancel_after = match &task.cancel {
+        Some(CancelSpec {
+            after_submissions: 0,
+        }) => return Err(context("after_submissions must be at least 1".into())),
+        Some(spec) => Some(spec.after_submissions),
+        None => None,
+    };
+    Ok(TaskPlan {
+        name: task.name.clone(),
+        process,
+        restart,
+        entry: task.entry.clone(),
+        arguments,
+        result,
+        script,
+        cancel_after,
     })
 }
 
