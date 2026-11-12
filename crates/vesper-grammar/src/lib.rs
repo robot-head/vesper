@@ -1,11 +1,14 @@
 //! Executable scalar host subset of design §38. No source macros, general PEG,
-//! Protobuf/DER, IPC envelopes, SIMD, constant-time parsing or proof claims.
+//! SIMD, constant-time parsing or source/extraction proof claims.
 #![forbid(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
 pub mod arrow;
+pub mod der;
 pub mod framing;
 pub mod grammar;
+pub mod ipc;
+pub mod protobuf;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ErrorKind {

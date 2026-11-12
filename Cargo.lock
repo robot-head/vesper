@@ -3467,10 +3467,12 @@ dependencies = [
  "target-lexicon",
  "vesper-beacon",
  "vesper-bench",
+ "vesper-bench-pmu",
  "vesper-core",
  "vesper-doc",
  "vesper-fiber-abi",
  "vesper-fmt",
+ "vesper-grammar",
  "vesper-lean-syntax",
  "vesper-lint",
  "vesper-loom-admission",
@@ -3523,6 +3525,14 @@ dependencies = [
 [[package]]
 name = "vesper-bench"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-bench-pmu"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "vesper-bench",
+]
 
 [[package]]
 name = "vesper-core"

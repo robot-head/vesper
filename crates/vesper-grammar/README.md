@@ -2,9 +2,33 @@
 
 Dependency-free, safe scalar host implementations of an explicit §38 subset:
 canonical unsigned LEB128, dependent-length frames, validated primitive Arrow
-signed-i64 buffers, and executable deterministic byte-FIRST grammars. This is
-not a source macro compiler, general LL/PEG/Protobuf/DER parser, Arrow IPC envelope
-reader, SIMD implementation, secret constant-time parser or formal proof.
+signed-i64 buffers, executable deterministic byte-FIRST grammars, explicit
+canonical Protobuf/DER profiles, and actual primitive Arrow IPC stream reading.
+This is not a source macro compiler, general LL/PEG/ASN.1 compiler, SIMD
+implementation, secret constant-time parser or formal proof.
+
+## Protocol profiles
+
+- `protobuf` implements `vesper.protobuf.explicit-presence/1`: borrowed strings
+  and bytes, acyclic typed schemas, explicit singular presence/defaults, ordered
+  fields and one nonempty packed segment per repeated numeric field. Unknowns
+  and alternate representations are rejected. Standard protobuf itself has no
+  universal canonical encoding; maps, oneofs, extensions and float types remain
+  unsupported.
+- `der` validates minimal supported universal primitive encodings and sequences.
+  Tag 17 requires an explicit SET OF schema; ASN.1 SET is unsupported. Typed
+  encoding sorts complete child TLVs and all encoder errors preserve output.
+  This is not X.509, PKCS#8 or secret-material semantic validation.
+- `ipc` reads actual Arrow IPC Schema/RecordBatch FlatBuffer metadata and
+  borrowed signed-i64 column bodies. Independent PyArrow fixtures cover V4/V5,
+  nullable values and framing. Default relative alignment is eight bytes;
+  optional 64-byte suitability is separate. Dictionaries, compression, nested
+  fields and custom metadata are explicit unsupported profiles. IPC structural
+  validity is not canonical serialization or a byte-uniqueness claim.
+
+Each module documents its byte/depth/work/count/metadata/output budgets. Payload
+borrows do not imply allocation-free metadata. See `protobuf`, `der` and `ipc`
+examples and the matching `docs/parallel-results/protocol41-*.md` reports.
 
 ## Canonical framing and remainder ownership
 
