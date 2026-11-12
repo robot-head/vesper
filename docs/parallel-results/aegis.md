@@ -56,8 +56,9 @@ after all of these hold:
   be zero); report data equals the Vesper binding. VLEK-signed reports are
   rejected with a typed error.
 - **CCA:** IAK certificate chain to the root; platform COSE_Sign1 signed by
-  the IAK; realm COSE_Sign1 (ES384) signed by the RAK in the realm claims;
-  platform challenge equals the hash of the RAK; realm challenge equals the
+  the IAK; realm COSE_Sign1 (ES384) signed by the RAK in the realm claims
+  (a CBOR `COSE_Key`, EC2/P-384, or a legacy raw SEC1 point);
+  platform challenge equals the hash of the RAK claim bytes; realm challenge equals the
   Vesper binding; REM[2]/REM[3] equal one extend of the claimed digests
   (extend data zero-padded to 64 bytes).
 
