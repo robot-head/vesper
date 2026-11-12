@@ -53,8 +53,8 @@ source-bound FunctionId. Public record clones do not alter this inventory:
 
 `MacroSource::parameter_name_spans(function:FunctionId)->Result<&[Span],Error>`.
 
-Span order matches header.params. Locate actual lexer identifiers within each
-real Param.span, after an optional in/inout/sink token, and verify exact name,
+Span order matches header.params. Locate actual Lower or SelfKw lexer identifiers
+within each real Param.span, after an optional in/inout/sink token, and verify exact name,
 UTF8 boundaries and header association. Return actual spans for ordinary support
 functions too, without promoting them to the macro-function profile. Bound
 scans, retained vectors/copies and metadata before allocation. No header padding,
@@ -119,6 +119,9 @@ name tokens change in headers; comments/whitespace/pass/types/effects remain
 actual original bytes. Each rename has a Source provenance anchor like existing
 alpha-renamed locals, without claiming lexeme equality. Reparse and compare the
 actual lowered body AST as before, then derive actual authority and validate IR.
+Actual parameter identifiers may include SelfKw, matching the ordinary header
+parser. Validate those source-bound parameter tokens without broadening the
+existing body-local binder keyword rules; all emitted fresh names remain Lower.
 
 Parameter names are part of the current authority header fingerprint. Keep
 public authority::derive strict with its existing API. A narrow private expanded
