@@ -34,7 +34,9 @@ fn rejects(source: &str, code: &str) {
 #[test]
 fn precedence_and_functions() {
     assert_eq!(
-        run("fn add(a: i64, b: i64) -> i64 { a + b } fn main() -> i64 { add(2, 3 * 4) }"),
+        run(
+            "fn add(a: i64, b: i64) -> i64 { wrapping_add(a, b) } fn main() -> i64 { add(2, 3 * 4) }"
+        ),
         "14"
     );
 }
@@ -42,7 +44,7 @@ fn precedence_and_functions() {
 fn recursive_stack_machine() {
     assert_eq!(
         run(
-            "fn fib(n: i64) -> i64 { if n < 2 { n } else { fib(n - 1) + fib(n - 2) } } fn main() -> i64 { fib(10) }"
+            "fn fib(n: i64) -> i64 { if n < 2 { n } else { wrapping_add(fib(wrapping_sub(n, 1)), fib(wrapping_sub(n, 2))) } } fn main() -> i64 { fib(10) }"
         ),
         "55"
     );
@@ -142,7 +144,7 @@ fn modal_bound() {
 fn projection_disjoint() {
     assert_eq!(
         run(
-            "copy struct Pair { left: i64, right: i64 } fn update(inout p.{left}: Pair, in q: i64) { p.left += q; } fn main() -> i64 { let p = Pair { left: 1, right: 2 }; update(inout p, in p.right); p.left }"
+            "copy struct Pair { left: i64, right: i64 } fn update(inout p.{left}: Pair, in q: i64) { p.left = wrapping_add(p.left, q); } fn main() -> i64 { let p = Pair { left: 1, right: 2 }; update(inout p, in p.right); p.left }"
         ),
         "3"
     );
@@ -176,7 +178,7 @@ fn unhandled_effect() {
 fn linear_handler() {
     assert_eq!(
         run(
-            "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { Ask::ask() + Ask::ask() } with { return x => x, ask(k) => k(21), } }"
+            "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { wrapping_add(Ask::ask(), Ask::ask()) } with { return x => x, ask(k) => k(21), } }"
         ),
         "42"
     );
@@ -185,7 +187,7 @@ fn linear_handler() {
 fn stateful_handler() {
     assert_eq!(
         run(
-            "linear effect Counter { fn next() -> i64; } fn main() -> i64 { handle Counter state s = 0 in { Counter::next() + Counter::next() } with { return (x, s) => x + s, next(s, k) => k(s, s + 1), } }"
+            "linear effect Counter { fn next() -> i64; } fn main() -> i64 { handle Counter state s = 0 in { wrapping_add(Counter::next(), Counter::next()) } with { return (x, s) => wrapping_add(x, s), next(s, k) => k(s, wrapping_add(s, 1)), } }"
         ),
         "3"
     );
@@ -217,7 +219,7 @@ fn continuation_twice() {
 fn lexical_labels() {
     assert_eq!(
         run(
-            "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { outer.ask() + inner.ask() } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(40), } }"
+            "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { wrapping_add(outer.ask(), inner.ask()) } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(40), } }"
         ),
         "42"
     );
@@ -225,7 +227,7 @@ fn lexical_labels() {
 #[test]
 fn closure_capture() {
     assert_eq!(
-        run("fn main() -> i64 { let x = 40; let f = |y: i64| x + y; f(2) }"),
+        run("fn main() -> i64 { let x = 40; let f = |y: i64| wrapping_add(x, y); f(2) }"),
         "42"
     );
 }
@@ -251,7 +253,7 @@ fn enum_coverage() {
 fn try_handler() {
     assert_eq!(
         run(
-            "fn divide(a: i64, b: i64) -> Result[i64, i64] { if b == 0 { Err(7) } else { Ok(a / b) } } fn main() -> i64 { handle Fail[i64] in { divide(10, 0)? } with { return x => x, raise(err, k) => err, } }"
+            "fn divide(a: i64, b: i64) -> Result[i64, i64] eff [Fail[ArithOverflow]] { if b == 0 { Err(7) } else { Ok(a / b) } } fn main() -> i64 { handle Fail[ArithOverflow] in { handle Fail[i64] in { divide(10, 0)? } with { return x => x, raise(err, k) => err, } } with { return x => x, raise(overflow, k) => 0, } }"
         ),
         "7"
     );
@@ -259,7 +261,7 @@ fn try_handler() {
 #[test]
 fn inout_call() {
     let w = checked(
-        "fn increment(inout x: i64) { x += 1; } fn main() -> i64 { let x = 41; increment(inout x); x }",
+        "fn increment(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let x = 41; increment(inout x); x }",
     );
     assert!(matches!(
         Runtime::new(&w).run("main", vec![]).unwrap(),
@@ -380,7 +382,7 @@ fn named_capability_parameter() {
 #[test]
 fn contextual_closure() {
     assert_eq!(
-        run("fn main() -> i64 { let f: fn(i64) -> i64 = |x| x + 1; f(41) }"),
+        run("fn main() -> i64 { let f: fn(i64) -> i64 = |x| wrapping_add(x, 1); f(41) }"),
         "42"
     );
 }
@@ -564,7 +566,7 @@ fn borrowed_effect_argument_is_not_a_linear_obligation() {
 fn mutable_effect_argument_updates_caller() {
     assert_eq!(
         run(
-            "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n += 2; k(()) }, } }"
+            "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }"
         ),
         "42"
     );
@@ -573,7 +575,7 @@ fn mutable_effect_argument_updates_caller() {
 fn mutable_effect_pattern_aliases_nested_field() {
     assert_eq!(
         run(
-            "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: Pair); } fn main() -> i64 { let p = Pair { x: 40, y: 0 }; handle Inc in { Inc::inc(inout p); p.x } with { return n => n, inc(Pair { x, y }, k) => { x += 2; k(()) }, } }"
+            "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: Pair); } fn main() -> i64 { let p = Pair { x: 40, y: 0 }; handle Inc in { Inc::inc(inout p); p.x } with { return n => n, inc(Pair { x, y }, k) => { x = wrapping_add(x, 2); k(()) }, } }"
         ),
         "42"
     );
@@ -631,14 +633,16 @@ fn explicit_generic_argument_cannot_hide_capability() {
 #[test]
 fn copy_closure_invocation_snapshots_captures() {
     assert_eq!(
-        run("fn main() -> i64 { let x = 0; let f = || { x += 1; x }; f() + f() }"),
+        run("fn main() -> i64 { let x = 0; let f = || { x += 1; x }; wrapping_add(f(), f()) }"),
         "2"
     );
 }
 #[test]
 fn copy_closure_copies_do_not_share_mutable_captures() {
     assert_eq!(
-        run("fn main() -> i64 { let x = 0; let f = || { x += 1; x }; let g = f; f() + g() }"),
+        run(
+            "fn main() -> i64 { let x = 0; let f = || { x += 1; x }; let g = f; wrapping_add(f(), g()) }"
+        ),
         "2"
     );
 }
@@ -922,7 +926,7 @@ fn resumption_invalidates_borrowed_nonzero_facts() {
 fn external_linear_effects_own_and_resume_the_entire_machine() {
     use vesper::runtime::Execution;
     let world = checked(
-        "linear struct Ticket { id: i64 } linear effect IO { fn read() -> i64; } fn main() -> i64 eff [IO] { let ticket = Ticket { id: 1 }; let first = IO::read(); let second = IO::read(); let Ticket { id } = ticket; first + second + id }",
+        "linear struct Ticket { id: i64 } linear effect IO { fn read() -> i64; } fn main() -> i64 eff [IO] { let ticket = Ticket { id: 1 }; let first = IO::read(); let second = IO::read(); let Ticket { id } = ticket; wrapping_add(wrapping_add(first, second), id) }",
     );
     let execution = Runtime::new(&world).begin_external("main", vec![]).unwrap();
     let Execution::Suspended(first) = execution else {
@@ -943,7 +947,7 @@ fn external_linear_effects_own_and_resume_the_entire_machine() {
 fn external_mutable_places_and_lexical_capabilities_survive_parking() {
     use vesper::runtime::Execution;
     let world = checked(
-        "linear effect IO { fn read(inout count: i64) -> i64; } fn helper(inout x: i64) -> i64 eff [IO] { IO::read(inout x) } fn main() -> i64 eff [IO] { let x = 0; let value = helper(inout x); x + value }",
+        "linear effect IO { fn read(inout count: i64) -> i64; } fn helper(inout x: i64) -> i64 eff [IO] { IO::read(inout x) } fn main() -> i64 eff [IO] { let x = 0; let value = helper(inout x); wrapping_add(x, value) }",
     );
     let Execution::Suspended(mut pending) =
         Runtime::new(&world).begin_external("main", vec![]).unwrap()

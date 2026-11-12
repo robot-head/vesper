@@ -22,15 +22,19 @@ fn assert_unknown(interface: &api::Interface) {
 
 #[test]
 fn bodies_locations_and_parameter_names_do_not_enter_contracts() {
-    let before = export("fn inc(x: i64) -> i64 { let temp = x + 1; temp }");
-    let after =
-        export("// shifted source\nfn inc(input: i64) -> i64 { let other = input + 2; other }");
+    let before = export("fn inc(x: i64) -> i64 { let temp = wrapping_add(x, 1); temp }");
+    let after = export(
+        "// shifted source\nfn inc(input: i64) -> i64 { let other = wrapping_add(input, 2); other }",
+    );
     assert_eq!(before, after);
     assert!(api::compare(&before, &after).is_compatible());
     let json = serde_json::to_string(&before).unwrap();
     assert!(!json.contains("$cap"));
     assert!(!json.contains("span"));
-    assert_ne!(before, export("fn inc(x: u32) -> u32 { x + 1 }"));
+    assert_ne!(
+        before,
+        export("fn inc(x: u32) -> u32 { wrapping_add(x, 1) }")
+    );
 }
 
 #[test]
@@ -70,7 +74,7 @@ fn source_effects_are_stable_sorted_and_include_operation_contracts() {
 #[test]
 fn projections_and_passing_modes_are_preserved() {
     let interface = export(
-        "copy struct Pair { left: i64, right: i64 } fn update(inout p.{left}: Pair) { p.left += 1; }",
+        "copy struct Pair { left: i64, right: i64 } fn update(inout p.{left}: Pair) { p.left = wrapping_add(p.left, 1); }",
     );
     let p = &function(&interface, "update").parameters[0];
     assert_eq!(p.pass, api::Pass::Inout);
@@ -81,7 +85,7 @@ fn projections_and_passing_modes_are_preserved() {
         }
     );
     let changed = export(
-        "copy struct Pair { left: i64, right: i64 } fn update(inout p.{right}: Pair) { p.right += 1; }",
+        "copy struct Pair { left: i64, right: i64 } fn update(inout p.{right}: Pair) { p.right = wrapping_add(p.right, 1); }",
     );
     assert!(!api::compare(&interface, &changed).is_compatible());
 }

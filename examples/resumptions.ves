@@ -1,13 +1,18 @@
 linear effect Ask { fn ask() -> i64; }
 
 fn main() -> i64 {
-    handle Ask in {
-        Ask::ask() + 1
+    handle Fail[ArithOverflow] in {
+        handle Ask in {
+            Ask::ask() + 1
+        } with {
+            return value => value,
+            ask(resume) => {
+                let value = resume(20);
+                value * 2
+            },
+        }
     } with {
         return value => value,
-        ask(resume) => {
-            let value = resume(20);
-            value * 2
-        },
+        raise(overflow, resume) => -1,
     }
 }

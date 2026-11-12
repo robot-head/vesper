@@ -63,17 +63,7 @@ pub fn evidence(program: &ir::Program) -> Vec<Diagnostic> {
         for (source, b) in f.blocks.iter().enumerate() {
             let mut current = b.entry_token;
             for i in &b.instructions {
-                let action = matches!(
-                    i.op,
-                    Op::Bind { .. }
-                        | Op::Write { .. }
-                        | Op::Call { .. }
-                        | Op::Indirect { .. }
-                        | Op::Try(_)
-                        | Op::Handle { .. }
-                        | Op::Closure { .. }
-                ) || matches!(i.op, Op::Index(..))
-                    || matches!(&i.op, Op::Binary(op, ..) if matches!(op.as_str(), "/" | "%"));
+                let action = crate::ir::state_action(i);
                 let read = matches!(i.op, Op::Read { .. });
                 if action || read {
                     if let Some((input, output)) = i.token {
@@ -507,7 +497,14 @@ impl Flow<'_> {
             }
             Op::Constant(_) | Op::Unit => {}
         }
-        if self.world.partial_ops.contains(&(i.span.start, i.span.end)) {
+        // Primitive failures (RuntimeError and ArithOverflow) abort like Fail.
+        if i.fallible
+            || self.world.partial_ops.contains(&(i.span.start, i.span.end))
+            || self
+                .world
+                .overflow_ops
+                .contains(&(i.span.start, i.span.end))
+        {
             self.frame(s, &i.span);
         }
         if let Op::Handle {
