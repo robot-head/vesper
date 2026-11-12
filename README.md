@@ -101,3 +101,5 @@ The test suite includes positive/negative ownership cases, nested pattern covera
 The Linux embedding API connects `Runtime::begin_external` and `io_session::Session` to owned io_uring requests, a completion scheduler, and nursery joins/cancellation. Segmented data frames use checked relative addresses so their storage can move. Native parked execution still needs to be connected to these runtime components.
 
 Parallel implementation ownership and ready-to-send external agent prompts are listed in [docs/parallel-work.md](docs/parallel-work.md).
+
+`vesper emit --emit interface --package @org/name` and `vesper semver` now compare experimental checked source contracts. `vesper resolve --catalog ...` resolves local Loom metadata into an exact solution snapshot. See [package workflows and runnable examples](docs/package-workflows.md).

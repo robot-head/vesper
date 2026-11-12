@@ -11,6 +11,7 @@ The first extraction preserves the existing `vesper` API and executable behavior
 | `vesper-semver` | Versioned interface DTOs and conservative compatibility checks | None |
 | `vesper-ffi` | Validated wire layouts and safe byte views | None |
 | `vesper-loom-calculus` | Declarative manifests and proposed-solution validation | None |
+| `vesper-loom-solver` | Offline local-catalog version selection | Loom calculus |
 | `vesper-simpulse` | Owned deterministic scheduling, timers, journal/replay | None |
 
 ```mermaid
@@ -37,4 +38,4 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 
 New parallel-work packages must be registered explicitly in the root workspace members and default-members by the integration owner. Explicit default-members preserve default `cargo test` coverage for the moved Pulse unit tests. The root members list deliberately does not glob unfinished crates.
 
-The SemVer, wire-layout, Loom-calculus, and simulator libraries are tested workspace members. They are not yet wired into the source compiler or CLI. Their DTOs and model contracts are intentionally independent of private checker state; see their reports under `docs/parallel-results/` and the [integration contract audit](../docs/rfcs/parallel-contracts.md).
+The wire-layout and simulator libraries remain standalone tested workspace members. The root now exports experimental source interfaces for SemVer comparison and exposes offline Loom resolution; see [package workflows](../docs/package-workflows.md). Their DTOs and model contracts are intentionally independent of private checker state; see their reports under `docs/parallel-results/` and the [integration contract audit](../docs/rfcs/parallel-contracts.md).

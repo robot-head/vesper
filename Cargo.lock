@@ -1719,6 +1719,7 @@ dependencies = [
  "target-lexicon",
  "vesper-core",
  "vesper-loom-calculus",
+ "vesper-loom-solver",
  "vesper-pulse",
  "vesper-semver",
  "vesper-syntax",
@@ -1743,6 +1744,16 @@ dependencies = [
  "serde",
  "serde_json",
  "toml",
+]
+
+[[package]]
+name = "vesper-loom-solver"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde",
+ "serde_json",
+ "vesper-loom-calculus",
 ]
 
 [[package]]

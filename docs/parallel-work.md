@@ -59,3 +59,15 @@ scripts/test-aarch64.sh
 
 The current host denies `io_uring_setup` with `EPERM`; actual kernel integration must also run on a suitable host.
 
+
+## Coordinator second wave
+
+The coordinator owns source-interface export, CLI adapters, and offline local-catalog resolution. These do not overlap the seven external assignments above.
+
+| Lane | Branch | Ownership |
+| --- | --- | --- |
+| Checked interface export | `parallel/interface-export` | Integrated: `src/interface.rs`, 13 focused tests |
+| Offline solver | `parallel/loom-solver` | Integrated: `crates/vesper-loom-solver/**`, 19 focused tests |
+| CLI/integration | `work` | Integrated: source-interface/SemVer/offline resolve commands, 7 end-to-end tests |
+
+Usage and guarantees are in [package-workflows.md](package-workflows.md).

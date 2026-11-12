@@ -11,6 +11,7 @@ members = [
     "crates/vesper-loom-calculus",
     "crates/vesper-simpulse",
     "crates/vesper-semver",
+    "crates/vesper-loom-solver",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
 default-members = [
@@ -22,6 +23,7 @@ default-members = [
     "crates/vesper-loom-calculus",
     "crates/vesper-simpulse",
     "crates/vesper-semver",
+    "crates/vesper-loom-solver",
 ]
 
 [workspace.dependencies]
@@ -42,6 +44,7 @@ vesper-syntax = { path = "crates/vesper-syntax" }
 vesper-pulse = { path = "crates/vesper-pulse" }
 vesper-semver = { path = "crates/vesper-semver" }
 vesper-loom-calculus = { path = "crates/vesper-loom-calculus" }
+vesper-loom-solver = { path = "crates/vesper-loom-solver" }
 ariadne = "0.5"
 petgraph = "0.8"
 egg = "0.10"

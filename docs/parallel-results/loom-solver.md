@@ -81,6 +81,6 @@ failure versus budget exhaustion, and a 256-package chain on a 128 KiB thread
 stack. There is no registry, download, code execution, trust, or external-lane
 integration in this crate.
 
-Integration owner should remove the temporary `[workspace]` from the crate
-manifest and register the crate in the root workspace. No root manifest,
-lockfile, or CLI changes are included in this branch.
+The integration branch registers this crate in the root workspace and provides
+`vesper resolve` with atomic solution-file output. The isolated agent contribution
+contained no root manifest, lockfile, or CLI edits.

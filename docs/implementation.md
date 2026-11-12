@@ -1,6 +1,6 @@
 # Implementation coverage
 
-This checkpoint implements the core compiler and runtime baseline from sections 1–7 of the design. The current [expanded specification](specification.txt) also contains sections 8–19: Loom, SemVer checking, workspace architecture, a larger Lean extractor, Pulse, Bridge, Vector, Strata, Pact/Forge, Prism, Aura, and Ignis. Selected additions now have bounded standalone library implementations listed below; their source-language and CLI integrations remain future work. The [original core baseline](core-specification-baseline.txt) is retained for comparison.
+This checkpoint implements the core compiler and runtime baseline from sections 1–7 of the design. The current [expanded specification](specification.txt) also contains sections 8–19: Loom, SemVer checking, workspace architecture, a larger Lean extractor, Pulse, Bridge, Vector, Strata, Pact/Forge, Prism, Aura, and Ignis. Selected additions now have bounded standalone library implementations listed below; source-interface comparison and offline-resolution CLI adapters are now implemented, while other source integrations remain future work. The [original core baseline](core-specification-baseline.txt) is retained for comparison.
 
 The first workspace extraction now separates `vesper-core`, `vesper-syntax`, and `vesper-pulse` while preserving the root facade. See [parallel lanes](parallel-work.md) for active assignments and handoff prompts.
 
@@ -28,9 +28,10 @@ The executable pipeline checks HIR, runs CFG ownership analysis on typed Place I
 
 | Workspace library | Implemented and validated | Remaining connection |
 | --- | --- | --- |
-| `vesper-semver` | Versioned interface DTOs, conservative compatibility rules and structured diagnostics | Compiler `.vhir` export, CLI, canonical MIF, executable witnesses |
+| `vesper-semver` | Versioned interface DTOs, conservative compatibility rules, checked source export and `vesper semver` | Final `.vhir` schema, richer scoped contracts, canonical MIF, executable witnesses |
 | `vesper-ffi` | Validated wire layouts, endian access, safe zero-copy byte views | Source syntax, HIR/PCG, CLIF, `.vsys`, hardware isolation |
-| `vesper-loom-calculus` | Manifests, monotonic feature closure, exact-version solution and declared ceiling validation | Resolver, compiler authority audit, registry/trust/build execution |
+| `vesper-loom-calculus` | Manifests, monotonic feature closure, exact-version solution and declared ceiling validation | Compiler authority audit, registry/trust/build execution |
+| `vesper-loom-solver` | Bounded iterative offline resolution, transitive features/native requirements, `vesper resolve` and atomic solution snapshots | CDCL/Max-SMT, authenticated lockfiles, optimization/trust policies |
 | `vesper-simpulse` | Seeded scheduling, virtual timers, actual completion ownership, strict journal replay | Production adapters, source/CLI simulation, DPOR, network/WAL models |
 
 The [contract audit](rfcs/parallel-contracts.md) records checked-arithmetic migration, scoped child loans, native relocation/DMA rules, region aliasing/rewind, and distinct interface/artifact/proof cache keys. These are integration gates, not new proof claims.
@@ -78,3 +79,5 @@ The Rust evaluator uses managed host values and reference-counted frame/slot obj
 ## Host validation constraints
 
 A direct `io_uring_setup(2)` probe on this managed host returns `EPERM` (operation not permitted). Native kernel-driver integration cannot be exercised on this host. The request ledger and cancellation/error ownership tests pass, but the actual kernel round-trip test is skipped on this host. The driver, scheduler, nursery, frame storage, and reference-evaluator I/O bridge are implemented. Mock completion tests exercise source suspension with live linear resources; actual kernel integration tests are skipped here. Native suspension integration remains pending.
+
+Checked source-interface and offline-resolution usage, exit behavior, and format limits are documented in [package-workflows.md](package-workflows.md).

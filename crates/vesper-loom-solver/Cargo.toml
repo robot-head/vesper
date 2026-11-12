@@ -3,8 +3,6 @@ name = "vesper-loom-solver"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-
 [dependencies]
 vesper-loom-calculus = { path = "../vesper-loom-calculus" }
 semver = { version = "1", features = ["serde"] }

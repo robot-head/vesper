@@ -1,3 +1,4 @@
+mod package_commands;
 use ariadne::{Label, Report, ReportKind, Source};
 use std::{
     env, fs, io,
@@ -6,7 +7,7 @@ use std::{
 };
 use vesper::{ast::Diagnostic, check, ir, lean, lsp, native, optimize, parser, runtime::Runtime};
 
-const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> <file.ves> [options]\n\nCommands:\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>)\n  emit    Emit cst, hir, ir, clif, object, or lean (--emit <kind>)\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --no-opt       Disable equality saturation\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
+const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> <file.ves> [options]\n\nCommands:\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve a local Loom catalog (see resolve --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --no-opt       Disable equality saturation\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
 fn main() {
     if let Err(e) = cli() {
         eprintln!("vesper: {e}");
@@ -27,6 +28,12 @@ fn cli() -> Result<(), String> {
         println!("vesper {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
+    if command == "resolve" {
+        return package_commands::resolve(args.collect());
+    }
+    if command == "semver" {
+        return package_commands::semver(args.collect());
+    }
     if command == "lsp" {
         return lsp::serve(io::stdin().lock(), io::stdout().lock());
     }
@@ -42,6 +49,7 @@ fn cli() -> Result<(), String> {
     let mut opt = true;
     let mut target = None;
     let mut linker = String::from("cc");
+    let mut package = None;
     while let Some(a) = args.next() {
         match a.as_str() {
             "-o" => output = Some(PathBuf::from(args.next().ok_or("-o requires a path")?)),
@@ -58,6 +66,12 @@ fn cli() -> Result<(), String> {
             "--no-opt" => opt = false,
             "--target" => target = Some(args.next().ok_or("--target requires a target triple")?),
             "--linker" => linker = args.next().ok_or("--linker requires a path")?,
+            "--package" => {
+                package = Some(
+                    args.next()
+                        .ok_or("--package requires a package namespace")?,
+                )
+            }
             "--help" | "-h" => {
                 print!("{HELP}");
                 return Ok(());
@@ -75,6 +89,9 @@ fn cli() -> Result<(), String> {
             || command == "emit" && matches!(format.as_str(), "object" | "clif"))
     {
         return Err("--target requires build or emit --emit object/clif".into());
+    }
+    if package.is_some() && !(command == "emit" && format == "interface") {
+        return Err("--package requires emit --emit interface".into());
     }
     let input = input.ok_or("missing source file; see --help")?;
     let source = fs::read_to_string(&input).map_err(|e| format!("{input}: {e}"))?;
@@ -101,6 +118,16 @@ fn cli() -> Result<(), String> {
             println!("checked {input}");
         }
         return Ok(());
+    }
+    if command == "emit" && format == "interface" {
+        let package = package.ok_or("interface export requires --package @org/name or std/name")?;
+        let interface = vesper::interface::export(&checked.world, &package)?;
+        let bytes = serde_json::to_vec_pretty(&interface).map_err(|e| e.to_string())?;
+        return if let Some(path) = output {
+            package_commands::atomic_write(&path, &bytes)
+        } else {
+            write(None, &bytes)
+        };
     }
     if opt {
         optimize::optimize(&mut parsed.module, &checked.expression_types);
