@@ -130,6 +130,8 @@ pub struct TransportLimits {
     pub max_tokens: usize,
     pub max_text_bytes: usize,
     pub max_scopes_per_token: usize,
+    /// Sum of scope marks over all tokens.
+    pub max_total_scopes: usize,
     pub max_diagnostics: usize,
 }
 
@@ -139,6 +141,7 @@ impl Default for TransportLimits {
             max_tokens: 1 << 20,
             max_text_bytes: 64 << 20,
             max_scopes_per_token: 256,
+            max_total_scopes: 1 << 22,
             max_diagnostics: 4096,
         }
     }
@@ -170,9 +173,35 @@ pub enum TransportViolation {
         count: usize,
         limit: usize,
     },
+    TooManyScopesTotal {
+        count: usize,
+        limit: usize,
+    },
     UnbalancedDelimiters {
         token: usize,
     },
+    /// A packed slice points outside its table.
+    SliceOutOfBounds {
+        table: PackedTable,
+        index: usize,
+    },
+    /// A packed text slice is not UTF-8.
+    InvalidUtf8 {
+        table: PackedTable,
+        index: usize,
+    },
+    /// An error result carried tokens.
+    TokensInFailure {
+        count: usize,
+    },
+}
+
+/// Which packed table a slice violation refers to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PackedTable {
+    TokenText,
+    TokenScopes,
+    DiagnosticText,
 }
 
 impl TransportLimits {
@@ -185,9 +214,11 @@ impl TransportLimits {
             });
         }
         let mut text = 0usize;
+        let mut scopes = 0usize;
         let mut stack = Vec::new();
         for (i, t) in tokens.iter().enumerate() {
             text = text.saturating_add(t.text.len());
+            scopes = scopes.saturating_add(t.scopes.len());
             if t.scopes.len() > self.max_scopes_per_token {
                 return Err(TransportViolation::TooManyScopes {
                     token: i,
@@ -202,6 +233,12 @@ impl TransportLimits {
                 }
                 _ => {}
             }
+        }
+        if scopes > self.max_total_scopes {
+            return Err(TransportViolation::TooManyScopesTotal {
+                count: scopes,
+                limit: self.max_total_scopes,
+            });
         }
         if !stack.is_empty() {
             return Err(TransportViolation::UnbalancedDelimiters {
@@ -313,6 +350,7 @@ mod tests {
             max_tokens: 2,
             max_text_bytes: 4,
             max_scopes_per_token: 1,
+            max_total_scopes: 1,
             max_diagnostics: 1,
         };
         let three = vec![tok(TokenKind::Ident); 3];

@@ -7,6 +7,12 @@
 ///
 /// Hygiene is *transported*, not decided, here: `scopes` and `pre-resolved`
 /// are opaque values that the Forge expander assigns and checks.
+///
+/// Results are *packed*: every string and scope list in a result is a
+/// `slice` into one `text` byte table or one `scopes` table. A guest
+/// therefore cannot make the host allocate more than it returned in flat
+/// lists (whose size is bounded by guest linear memory); the host bounds
+/// the sum of referenced slices before it copies any of them.
 package vesper:sandbox@0.1.0;
 
 interface types {
@@ -70,25 +76,46 @@ interface types {
         note,
     }
 
-    record diagnostic {
+    /// `offset..offset+len` in a packed table.
+    record slice {
+        offset: u32,
+        len: u32,
+    }
+
+    record packed-token {
+        kind: token-kind,
+        /// Into `packed-result.text`; must be UTF-8.
+        text: slice,
+        span: span,
+        /// Into `packed-result.scopes`.
+        scopes: slice,
+        pre-resolved: option<def-id>,
+    }
+
+    record packed-diagnostic {
         severity: severity,
-        message: string,
+        /// Into `packed-result.text`; must be UTF-8.
+        message: slice,
         span: option<span>,
     }
 
-    record outcome {
-        tokens: list<token>,
-        diagnostics: list<diagnostic>,
+    record packed-result {
+        tokens: list<packed-token>,
+        diagnostics: list<packed-diagnostic>,
+        text: list<u8>,
+        scopes: list<u32>,
     }
 }
 
 interface step {
-    use types.{invocation, outcome, diagnostic};
+    use types.{invocation, packed-result};
 
     /// Payload protocol version this component implements.
     protocol-version: func() -> u32;
 
-    run: func(invocation: invocation) -> result<outcome, list<diagnostic>>;
+    /// `ok`: output tokens plus notes/warnings. `error`: diagnostics only
+    /// (`tokens` must be empty).
+    run: func(invocation: invocation) -> result<packed-result, packed-result>;
 }
 
 world sandboxed-step {

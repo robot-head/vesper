@@ -7,10 +7,12 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use sha2::{Digest, Sha256};
-use vesper_loom_sandbox::transport::{DefId, Delimiter, Span};
+use vesper_loom_sandbox::transport::{
+    DefId, Delimiter, Direction, PackedTable, Span, TransportViolation,
+};
 use vesper_loom_sandbox::{
     ArtifactKind, Invocation, OutputFile, SandboxError, SandboxHost, Severity, StepComponent,
-    StepConfig, StepKind, StepReport, Token, TokenKind, classify,
+    StepConfig, StepKind, StepReport, Token, TokenKind, TransportLimits, classify,
 };
 
 const COMPONENT: &[u8] = include_bytes!("../fixtures/bin/step.component.wasm");
@@ -610,4 +612,147 @@ fn payload_protocol_version_is_checked_by_guest() {
     inv.protocol_version = 99;
     let r = host.run(step, &fx.config(), &inv).unwrap();
     assert!(guest_error(&r).contains("protocol 99 unsupported"));
+}
+
+// ---- hostile packed results -----------------------------------------------
+
+fn output_violation(entry: &str, cfg: Option<StepConfig>) -> TransportViolation {
+    let fx = Fixture::new();
+    let cfg = cfg.unwrap_or_else(|| fx.config());
+    match fx.run_with(&cfg, entry, &[]) {
+        Err(SandboxError::Transport {
+            direction: Direction::Output,
+            violation,
+        }) => violation,
+        other => panic!("{entry}: {other:?}"),
+    }
+}
+
+#[test]
+fn aliased_text_slices_cannot_amplify_host_allocation() {
+    // 100k tokens x 1 MiB each would be ~100 GiB if copied before checking.
+    assert_eq!(
+        output_violation("alias-bomb", None),
+        TransportViolation::TooMuchText {
+            bytes: 100_000 << 20,
+            limit: TransportLimits::default().max_text_bytes
+        }
+    );
+    assert!(matches!(
+        output_violation("alias-bomb-diagnostics", None),
+        TransportViolation::TooManyDiagnostics { count: 100_000, .. }
+    ));
+    let fx = Fixture::new();
+    let mut cfg = fx.config();
+    cfg.limits.transport.max_diagnostics = usize::MAX;
+    assert!(matches!(
+        output_violation("alias-bomb-diagnostics", Some(cfg)),
+        TransportViolation::TooMuchText { .. }
+    ));
+}
+
+#[test]
+fn aliased_scope_slices_are_bounded() {
+    assert_eq!(
+        output_violation("scope-bomb", None),
+        TransportViolation::TooManyScopes {
+            token: 0,
+            count: 1 << 16,
+            limit: 256
+        }
+    );
+    let fx = Fixture::new();
+    let mut cfg = fx.config();
+    cfg.limits.transport.max_scopes_per_token = 1 << 16;
+    assert!(matches!(
+        output_violation("scope-bomb", Some(cfg)),
+        TransportViolation::TooManyScopesTotal { .. }
+    ));
+}
+
+#[test]
+fn malformed_packed_results_are_rejected() {
+    assert_eq!(
+        output_violation("bad-slice", None),
+        TransportViolation::SliceOutOfBounds {
+            table: PackedTable::TokenText,
+            index: 0
+        }
+    );
+    assert_eq!(
+        output_violation("bad-utf8", None),
+        TransportViolation::InvalidUtf8 {
+            table: PackedTable::TokenText,
+            index: 0
+        }
+    );
+    assert_eq!(
+        output_violation("error-with-tokens", None),
+        TransportViolation::TokensInFailure { count: 1 }
+    );
+}
+
+// ---- filesystem metadata determinism ---------------------------------------
+
+fn metadata_run(fx: &Fixture, cfg: &StepConfig) -> Vec<String> {
+    ok_strings(&fx.run_with(cfg, "fs-metadata", &[]).unwrap())
+}
+
+#[test]
+fn filesystem_metadata_is_normalized() {
+    use std::time::{Duration, SystemTime};
+    // Two layouts with the same contents but different host timestamps and
+    // creation order.
+    let a = Fixture::new();
+    let b = Fixture::new();
+    for name in ["c.txt", "a.txt", "b.txt"] {
+        std::fs::write(a.path("proto").join(name), name).unwrap();
+    }
+    for name in ["b.txt", "c.txt", "a.txt"] {
+        std::fs::write(b.path("proto").join(name), name).unwrap();
+    }
+    let old = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000_000);
+    std::fs::File::options()
+        .write(true)
+        .open(b.path("proto/schema.txt"))
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+
+    let ra = metadata_run(&a, &a.config());
+    let rb = metadata_run(&b, &b.config());
+    assert_eq!(ra, rb);
+    let schema = &ra[0];
+    assert!(
+        schema.contains("mtime=0.000000000 atime=0.000000000"),
+        "{schema}"
+    );
+    assert!(
+        ra[1].starts_with("/out/probe.txt len=5 mtime=0.000000000"),
+        "{}",
+        ra[1]
+    );
+    // Identities are renumbered, stable within a run, and distinct per object.
+    let hash = |key: &str| {
+        ra.iter()
+            .find_map(|l| l.strip_prefix(key))
+            .unwrap()
+            .to_string()
+    };
+    assert_eq!(hash("hash:schema="), "0:1");
+    assert_eq!(hash("hash:schema-again="), "0:1");
+    assert_eq!(hash("hash:probe="), "0:2");
+    let mut order = "order=a.txt,b.txt,c.txt,schema.txt".to_string();
+    if cfg!(unix) {
+        order = "order=a.txt,b.txt,c.txt,escape,schema.txt".into();
+    }
+    assert_eq!(ra.last().unwrap(), &order);
+
+    // The normalized timestamp follows the configured wall clock.
+    let c = Fixture::new();
+    let mut cfg = c.config();
+    cfg.determinism.wall_clock_ns = 5_000_000_007;
+    let rc = metadata_run(&c, &cfg);
+    assert!(rc[0].contains("mtime=5.000000007"), "{}", rc[0]);
 }

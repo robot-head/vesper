@@ -12,8 +12,9 @@ use wasmtime_wasi::p2::pipe::{ClosedInputStream, MemoryOutputPipe};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use crate::artifact::{ArtifactKind, classify};
+use crate::fs_determinism::{FsNormalizer, HasFsNormalizer};
 use crate::policy::{ConfigError, Determinism, OUTPUT_GUEST_PATH, ResourceLimits, StepConfig};
-use crate::transport::{self, Direction, PROTOCOL_VERSION, TransportViolation};
+use crate::transport::{self, Direction, PROTOCOL_VERSION, TransportLimits, TransportViolation};
 
 mod bindings {
     wasmtime::component::bindgen!({
@@ -161,6 +162,7 @@ impl SandboxHost {
         // authority is withheld by the per-run `WasiCtx`, not by missing
         // imports. Every denial is therefore observable by the guest.
         wasmtime_wasi::p2::add_to_linker_async(&mut linker).map_err(host_err)?;
+        crate::fs_determinism::add_to_linker(&mut linker).map_err(host_err)?;
         Ok(Self { engine, linker })
     }
 
@@ -231,6 +233,7 @@ impl SandboxHost {
             ctx: b.build(),
             table: ResourceTable::new(),
             limiter: Limiter::new(limits),
+            fs: FsNormalizer::new(config.determinism.wall_clock_ns),
         };
         let mut store = Store::new(&self.engine, state);
         store.limiter(|s| &mut s.limiter);
@@ -285,28 +288,24 @@ impl SandboxHost {
             Ok(Ok(r)) => r,
         };
 
-        let result = match result {
-            Ok(o) => {
-                let o = from_wit_outcome(o);
-                limits.transport.check_outcome(&o).map_err(|violation| {
-                    SandboxError::Transport {
-                        direction: Direction::Output,
-                        violation,
-                    }
-                })?;
-                Ok(o)
-            }
-            Err(d) => {
-                let d: Vec<_> = d.into_iter().map(from_wit_diag).collect();
-                limits
-                    .transport
-                    .check_diagnostics(&d)
-                    .map_err(|violation| SandboxError::Transport {
-                        direction: Direction::Output,
-                        violation,
-                    })?;
-                Err(d)
-            }
+        let (failed, packed) = match result {
+            Ok(p) => (false, p),
+            Err(p) => (true, p),
+        };
+        let (tokens, diagnostics) =
+            unpack(packed, &limits.transport, failed).map_err(|violation| {
+                SandboxError::Transport {
+                    direction: Direction::Output,
+                    violation,
+                }
+            })?;
+        let result = if failed {
+            Err(diagnostics)
+        } else {
+            Ok(transport::Outcome {
+                tokens,
+                diagnostics,
+            })
         };
         let peak_memory_bytes = limiter.peak_memory;
         drop(store);
@@ -352,6 +351,13 @@ struct StepState {
     ctx: WasiCtx,
     table: ResourceTable,
     limiter: Limiter,
+    fs: FsNormalizer,
+}
+
+impl HasFsNormalizer for StepState {
+    fn normalizer(&mut self) -> &mut FsNormalizer {
+        &mut self.fs
+    }
 }
 
 impl WasiView for StepState {
@@ -376,6 +382,10 @@ struct Limiter {
     peak_memory: usize,
     memory_denied: Option<usize>,
     table_denied: Option<usize>,
+    /// Aggregate before the most recent approved grow, restored if Wasmtime
+    /// then fails to perform it.
+    memory_before_grow: Option<(usize, usize)>,
+    table_before_grow: Option<usize>,
 }
 
 impl Limiter {
@@ -391,6 +401,8 @@ impl Limiter {
             peak_memory: 0,
             memory_denied: None,
             table_denied: None,
+            memory_before_grow: None,
+            table_before_grow: None,
         }
     }
 
@@ -414,29 +426,54 @@ impl ResourceLimiter for Limiter {
         &mut self,
         current: usize,
         desired: usize,
-        _maximum: Option<usize>,
+        maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
+        // Beyond the memory's own declared maximum: Wasmtime fails the grow
+        // anyway. Neither charge it nor attribute it to the sandbox limit.
+        if maximum.is_some_and(|m| desired > m) {
+            return Ok(false);
+        }
         let total = self.memory - current.min(self.memory) + desired;
         if total > self.max_memory {
             self.memory_denied = Some(total);
             return Ok(false);
         }
+        self.memory_before_grow = Some((self.memory, self.peak_memory));
         self.memory = total;
         self.peak_memory = self.peak_memory.max(total);
         Ok(true)
+    }
+
+    fn memory_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
+        if let Some((memory, peak)) = self.memory_before_grow.take() {
+            self.memory = memory;
+            self.peak_memory = peak;
+        }
+        Ok(())
+    }
+
+    fn table_grow_failed(&mut self, _error: wasmtime::Error) -> wasmtime::Result<()> {
+        if let Some(before) = self.table_before_grow.take() {
+            self.table = before;
+        }
+        Ok(())
     }
 
     fn table_growing(
         &mut self,
         current: usize,
         desired: usize,
-        _maximum: Option<usize>,
+        maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
+        if maximum.is_some_and(|m| desired > m) {
+            return Ok(false);
+        }
         let total = self.table - current.min(self.table) + desired;
         if total > self.max_table {
             self.table_denied = Some(total);
             return Ok(false);
         }
+        self.table_before_grow = Some(self.table);
         self.table = total;
         Ok(true)
     }
@@ -633,27 +670,6 @@ fn to_wit_token(t: &transport::Token) -> wit::Token {
     }
 }
 
-fn from_wit_token(t: wit::Token) -> transport::Token {
-    use transport::TokenKind as K;
-    transport::Token {
-        kind: match t.kind {
-            wit::TokenKind::Ident => K::Ident,
-            wit::TokenKind::Punct => K::Punct,
-            wit::TokenKind::IntLiteral => K::IntLiteral,
-            wit::TokenKind::StringLiteral => K::StringLiteral,
-            wit::TokenKind::Open(d) => K::Open(from_wit_delim(d)),
-            wit::TokenKind::Close(d) => K::Close(from_wit_delim(d)),
-        },
-        text: t.text,
-        span: from_wit_span(t.span),
-        scopes: t.scopes,
-        pre_resolved: t.pre_resolved.map(|d| transport::DefId {
-            package: d.package,
-            item: d.item,
-        }),
-    }
-}
-
 fn to_wit_invocation(i: &transport::Invocation) -> wit::Invocation {
     wit::Invocation {
         protocol_version: i.protocol_version,
@@ -668,23 +684,134 @@ fn to_wit_invocation(i: &transport::Invocation) -> wit::Invocation {
     }
 }
 
-fn from_wit_diag(d: wit::Diagnostic) -> transport::Diagnostic {
-    transport::Diagnostic {
-        severity: match d.severity {
-            wit::Severity::Error => transport::Severity::Error,
-            wit::Severity::Warning => transport::Severity::Warning,
-            wit::Severity::Note => transport::Severity::Note,
-        },
-        message: d.message,
-        span: d.span.map(from_wit_span),
+fn from_wit_kind(k: wit::TokenKind) -> transport::TokenKind {
+    use transport::TokenKind as K;
+    match k {
+        wit::TokenKind::Ident => K::Ident,
+        wit::TokenKind::Punct => K::Punct,
+        wit::TokenKind::IntLiteral => K::IntLiteral,
+        wit::TokenKind::StringLiteral => K::StringLiteral,
+        wit::TokenKind::Open(d) => K::Open(from_wit_delim(d)),
+        wit::TokenKind::Close(d) => K::Close(from_wit_delim(d)),
     }
 }
 
-fn from_wit_outcome(o: wit::Outcome) -> transport::Outcome {
-    transport::Outcome {
-        tokens: o.tokens.into_iter().map(from_wit_token).collect(),
-        diagnostics: o.diagnostics.into_iter().map(from_wit_diag).collect(),
+fn from_wit_severity(s: wit::Severity) -> transport::Severity {
+    match s {
+        wit::Severity::Error => transport::Severity::Error,
+        wit::Severity::Warning => transport::Severity::Warning,
+        wit::Severity::Note => transport::Severity::Note,
     }
+}
+
+fn slice_range(s: wit::Slice, table_len: usize) -> Option<std::ops::Range<usize>> {
+    let start = s.offset as usize;
+    let end = start.checked_add(s.len as usize)?;
+    (end <= table_len).then_some(start..end)
+}
+
+/// Decodes a packed guest result. All slice bounds and size budgets are
+/// checked before any per-token string or scope vector is allocated, so
+/// aliasing slices cannot amplify host allocation beyond the limits.
+fn unpack(
+    p: wit::PackedResult,
+    limits: &TransportLimits,
+    failed: bool,
+) -> Result<(Vec<transport::Token>, Vec<transport::Diagnostic>), TransportViolation> {
+    use transport::PackedTable as Tbl;
+    if failed && !p.tokens.is_empty() {
+        return Err(TransportViolation::TokensInFailure {
+            count: p.tokens.len(),
+        });
+    }
+    if p.tokens.len() > limits.max_tokens {
+        return Err(TransportViolation::TooManyTokens {
+            count: p.tokens.len(),
+            limit: limits.max_tokens,
+        });
+    }
+    if p.diagnostics.len() > limits.max_diagnostics {
+        return Err(TransportViolation::TooManyDiagnostics {
+            count: p.diagnostics.len(),
+            limit: limits.max_diagnostics,
+        });
+    }
+
+    let mut text_bytes = 0usize;
+    let mut scope_count = 0usize;
+    for (index, t) in p.tokens.iter().enumerate() {
+        let text =
+            slice_range(t.text, p.text.len()).ok_or(TransportViolation::SliceOutOfBounds {
+                table: Tbl::TokenText,
+                index,
+            })?;
+        let scopes =
+            slice_range(t.scopes, p.scopes.len()).ok_or(TransportViolation::SliceOutOfBounds {
+                table: Tbl::TokenScopes,
+                index,
+            })?;
+        if scopes.len() > limits.max_scopes_per_token {
+            return Err(TransportViolation::TooManyScopes {
+                token: index,
+                count: scopes.len(),
+                limit: limits.max_scopes_per_token,
+            });
+        }
+        text_bytes = text_bytes.saturating_add(text.len());
+        scope_count = scope_count.saturating_add(scopes.len());
+    }
+    for (index, d) in p.diagnostics.iter().enumerate() {
+        let msg =
+            slice_range(d.message, p.text.len()).ok_or(TransportViolation::SliceOutOfBounds {
+                table: Tbl::DiagnosticText,
+                index,
+            })?;
+        text_bytes = text_bytes.saturating_add(msg.len());
+    }
+    if text_bytes > limits.max_text_bytes {
+        return Err(TransportViolation::TooMuchText {
+            bytes: text_bytes,
+            limit: limits.max_text_bytes,
+        });
+    }
+    if scope_count > limits.max_total_scopes {
+        return Err(TransportViolation::TooManyScopesTotal {
+            count: scope_count,
+            limit: limits.max_total_scopes,
+        });
+    }
+
+    let text_at = |s: wit::Slice, table: Tbl, index: usize| {
+        let range = slice_range(s, p.text.len()).expect("checked above");
+        std::str::from_utf8(&p.text[range])
+            .map(str::to_owned)
+            .map_err(|_| TransportViolation::InvalidUtf8 { table, index })
+    };
+    let mut tokens = Vec::with_capacity(p.tokens.len());
+    for (index, t) in p.tokens.iter().enumerate() {
+        let scopes = slice_range(t.scopes, p.scopes.len()).expect("checked above");
+        tokens.push(transport::Token {
+            kind: from_wit_kind(t.kind),
+            text: text_at(t.text, Tbl::TokenText, index)?,
+            span: from_wit_span(t.span),
+            scopes: p.scopes[scopes].to_vec(),
+            pre_resolved: t.pre_resolved.map(|d| transport::DefId {
+                package: d.package,
+                item: d.item,
+            }),
+        });
+    }
+    let mut diagnostics = Vec::with_capacity(p.diagnostics.len());
+    for (index, d) in p.diagnostics.iter().enumerate() {
+        diagnostics.push(transport::Diagnostic {
+            severity: from_wit_severity(d.severity),
+            message: text_at(d.message, Tbl::DiagnosticText, index)?,
+            span: d.span.map(from_wit_span),
+        });
+    }
+    // Structural checks (delimiter balance) on the decoded stream.
+    limits.check_tokens(&tokens)?;
+    Ok((tokens, diagnostics))
 }
 
 #[cfg(test)]
@@ -711,5 +838,34 @@ mod tests {
         assert!(!l.memory_growing(0, 50, None).unwrap());
         assert_eq!(l.memory_denied, Some(110));
         assert_eq!(l.peak_memory, 60);
+    }
+
+    #[test]
+    fn limiter_ignores_grows_past_declared_maximum_and_rolls_back_failures() {
+        let limits = ResourceLimits {
+            max_memory_bytes: 100,
+            max_table_elements: 10,
+            ..ResourceLimits::default()
+        };
+        let mut l = Limiter::new(&limits);
+        assert!(l.memory_growing(0, 40, Some(50)).unwrap());
+        // Past the memory's own maximum: refused, uncharged, not our denial.
+        for _ in 0..10 {
+            assert!(!l.memory_growing(40, 60, Some(50)).unwrap());
+        }
+        assert_eq!((l.memory, l.memory_denied), (40, None));
+        // Approved, then failed inside Wasmtime: the charge is restored.
+        assert!(l.memory_growing(40, 90, None).unwrap());
+        l.memory_grow_failed(wasmtime::format_err!("mmap failed"))
+            .unwrap();
+        assert_eq!((l.memory, l.peak_memory), (40, 40));
+        assert!(l.memory_growing(40, 100, None).unwrap());
+        assert_eq!(l.peak_memory, 100);
+
+        assert!(l.table_growing(0, 5, None).unwrap());
+        assert!(!l.table_growing(5, 8, Some(6)).unwrap());
+        assert!(l.table_growing(5, 9, None).unwrap());
+        l.table_grow_failed(wasmtime::format_err!("oom")).unwrap();
+        assert_eq!((l.table, l.table_denied), (5, None));
     }
 }

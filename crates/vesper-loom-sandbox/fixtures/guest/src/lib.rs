@@ -12,8 +12,183 @@ wit_bindgen::generate!({
 
 use exports::vesper::sandbox::step::Guest;
 use vesper::sandbox::types::{
-    Diagnostic, Invocation, Outcome, Severity, Span, StepKind, Token, TokenKind,
+    Invocation, PackedDiagnostic, PackedResult, PackedToken, Severity, Slice, Span, StepKind,
+    Token, TokenKind,
 };
+
+/// Unpacked guest-side diagnostic; packed into the string table on return.
+struct Diagnostic {
+    severity: Severity,
+    message: String,
+    span: Option<Span>,
+}
+
+struct Outcome {
+    tokens: Vec<Token>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Default)]
+struct Packer {
+    out: Option<PackedResult>,
+}
+
+impl Packer {
+    fn result(&mut self) -> &mut PackedResult {
+        self.out.get_or_insert_with(|| PackedResult {
+            tokens: Vec::new(),
+            diagnostics: Vec::new(),
+            text: Vec::new(),
+            scopes: Vec::new(),
+        })
+    }
+
+    fn text(&mut self, s: &str) -> Slice {
+        let r = self.result();
+        let offset = r.text.len() as u32;
+        r.text.extend_from_slice(s.as_bytes());
+        Slice {
+            offset,
+            len: s.len() as u32,
+        }
+    }
+
+    fn token(&mut self, t: Token) {
+        let text = self.text(&t.text);
+        let r = self.result();
+        let scopes = Slice {
+            offset: r.scopes.len() as u32,
+            len: t.scopes.len() as u32,
+        };
+        r.scopes.extend_from_slice(&t.scopes);
+        r.tokens.push(PackedToken {
+            kind: t.kind,
+            text,
+            span: t.span,
+            scopes,
+            pre_resolved: t.pre_resolved,
+        });
+    }
+
+    fn diag(&mut self, d: Diagnostic) {
+        let message = self.text(&d.message);
+        self.result().diagnostics.push(PackedDiagnostic {
+            severity: d.severity,
+            message,
+            span: d.span,
+        });
+    }
+
+    fn finish(mut self) -> PackedResult {
+        self.result();
+        self.out.take().unwrap()
+    }
+}
+
+fn pack(r: Result<Outcome, Vec<Diagnostic>>) -> Result<PackedResult, PackedResult> {
+    let mut p = Packer::default();
+    match r {
+        Ok(o) => {
+            for t in o.tokens {
+                p.token(t);
+            }
+            for d in o.diagnostics {
+                p.diag(d);
+            }
+            Ok(p.finish())
+        }
+        Err(ds) => {
+            for d in ds {
+                p.diag(d);
+            }
+            Err(p.finish())
+        }
+    }
+}
+
+fn empty_result() -> PackedResult {
+    PackedResult {
+        tokens: Vec::new(),
+        diagnostics: Vec::new(),
+        text: Vec::new(),
+        scopes: Vec::new(),
+    }
+}
+
+fn raw_token(text: Slice, scopes: Slice) -> PackedToken {
+    PackedToken {
+        kind: TokenKind::Ident,
+        text,
+        span: Span {
+            file: 0,
+            start: 0,
+            end: 0,
+        },
+        scopes,
+        pre_resolved: None,
+    }
+}
+
+/// Hostile results that a correct host must reject without amplifying.
+fn hostile(entry: &str) -> Option<Result<PackedResult, PackedResult>> {
+    let empty = Slice { offset: 0, len: 0 };
+    let mut r = empty_result();
+    match entry {
+        // 1 MiB of text referenced by 100k tokens: 100 GiB if copied naively.
+        "alias-bomb" => {
+            r.text = vec![b'a'; 1 << 20];
+            let all = Slice {
+                offset: 0,
+                len: 1 << 20,
+            };
+            r.tokens = (0..100_000).map(|_| raw_token(all, empty)).collect();
+        }
+        "alias-bomb-diagnostics" => {
+            r.text = vec![b'a'; 1 << 20];
+            let all = Slice {
+                offset: 0,
+                len: 1 << 20,
+            };
+            r.diagnostics = (0..100_000)
+                .map(|_| PackedDiagnostic {
+                    severity: Severity::Error,
+                    message: all,
+                    span: None,
+                })
+                .collect();
+            return Some(Err(r));
+        }
+        "scope-bomb" => {
+            r.scopes = vec![1; 1 << 16];
+            let all = Slice {
+                offset: 0,
+                len: 1 << 16,
+            };
+            r.tokens = (0..100_000).map(|_| raw_token(empty, all)).collect();
+        }
+        "bad-slice" => {
+            r.text = b"abc".to_vec();
+            r.tokens = vec![raw_token(
+                Slice {
+                    offset: 2,
+                    len: u32::MAX,
+                },
+                empty,
+            )];
+        }
+        "bad-utf8" => {
+            r.text = vec![0xff, 0xfe];
+            r.tokens = vec![raw_token(Slice { offset: 0, len: 2 }, empty)];
+        }
+        "error-with-tokens" => {
+            r.text = b"x".to_vec();
+            r.tokens = vec![raw_token(Slice { offset: 0, len: 1 }, empty)];
+            return Some(Err(r));
+        }
+        _ => return None,
+    }
+    Some(Ok(r))
+}
 
 const PROTOCOL_VERSION: u32 = 1;
 
@@ -67,7 +242,16 @@ impl Guest for Fixture {
         PROTOCOL_VERSION
     }
 
-    fn run(inv: Invocation) -> Result<Outcome, Vec<Diagnostic>> {
+    fn run(inv: Invocation) -> Result<PackedResult, PackedResult> {
+        if let Some(r) = hostile(&inv.entry) {
+            return r;
+        }
+        pack(run(inv))
+    }
+}
+
+fn run(inv: Invocation) -> Result<Outcome, Vec<Diagnostic>> {
+    {
         if inv.protocol_version != PROTOCOL_VERSION {
             return Err(vec![diag(format!(
                 "protocol {} unsupported",
@@ -113,6 +297,7 @@ impl Guest for Fixture {
                 Ok(strings(["woke".to_string()]))
             }
             "panic" => panic!("fixture panic requested"),
+            "fs-metadata" => fs_metadata(),
             "stdout-flood" => {
                 let line = "x".repeat(1023);
                 for _ in 0..4096 {
@@ -324,3 +509,61 @@ fn alloc() -> Result<Outcome, Vec<Diagnostic>> {
 }
 
 export!(Fixture);
+
+/// Reports metadata a host filesystem would leak: timestamps, inode-like
+/// identities, and raw (unsorted) directory order.
+#[cfg(target_env = "p2")]
+fn metadata_hash(dir: &str, name: &str) -> String {
+    use wasip2::filesystem::{preopens, types::PathFlags};
+    for (d, path) in preopens::get_directories() {
+        if path == dir {
+            return match d.metadata_hash_at(PathFlags::empty(), name) {
+                Ok(h) => format!("{:x}:{:x}", h.upper, h.lower),
+                Err(e) => format!("err:{e:?}"),
+            };
+        }
+    }
+    "no-preopen".into()
+}
+
+#[cfg(not(target_env = "p2"))]
+fn metadata_hash(_: &str, _: &str) -> String {
+    "unsupported".into()
+}
+
+fn fs_metadata() -> Result<Outcome, Vec<Diagnostic>> {
+    let secs = |t: std::io::Result<std::time::SystemTime>| match t {
+        Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
+            Ok(d) => format!("{}.{:09}", d.as_secs(), d.subsec_nanos()),
+            Err(_) => "before-epoch".into(),
+        },
+        Err(e) => format!("err:{:?}", e.kind()),
+    };
+    std::fs::write("/out/probe.txt", "probe").map_err(|e| io_err("write", "/out/probe.txt", e))?;
+    let mut out = Vec::new();
+    for path in ["/in/proto/schema.txt", "/out/probe.txt", "/in/proto"] {
+        let m = std::fs::metadata(path).map_err(|e| io_err("stat", path, e))?;
+        out.push(format!(
+            "{path} len={} mtime={} atime={}",
+            if m.is_dir() { 0 } else { m.len() },
+            secs(m.modified()),
+            secs(m.accessed()),
+        ));
+    }
+    out.push(format!(
+        "hash:schema={}",
+        metadata_hash("/in/proto", "schema.txt")
+    ));
+    out.push(format!("hash:probe={}", metadata_hash("/out", "probe.txt")));
+    out.push(format!(
+        "hash:schema-again={}",
+        metadata_hash("/in/proto", "schema.txt")
+    ));
+    let order: Vec<String> = std::fs::read_dir("/in/proto")
+        .map_err(|e| io_err("read_dir", "/in/proto", e))?
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<_, _>>()
+        .map_err(|e| io_err("read_dir", "/in/proto", e))?;
+    out.push(format!("order={}", order.join(",")));
+    Ok(strings(out))
+}

@@ -33,6 +33,7 @@
 //! ```
 
 mod artifact;
+mod fs_determinism;
 mod host;
 mod policy;
 pub mod transport;
