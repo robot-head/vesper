@@ -31,6 +31,8 @@ Local Lean artifact auditing is coordinator-owned in the new `src/proof_commands
 
 Declared-permission upgrade checks in `crates/vesper-loom-calculus/src/upgrade.rs`, the package-command adapter and `tests/upgrade_cli.rs` are coordinator-owned. Offline builder-attestation verification is being implemented separately in the new `crates/vesper-loom-trust/**`; neither task edits the active cached-build, Forge or compiler lanes.
 
+CycloneDX export in `src/sbom_commands.rs`/`tests/sbom_cli.rs` and the independent native scanner milestone in new `crates/vesper-simd/**` are also coordinator-owned. The scanner does not edit source ISA capability typing or the reserved native compiler backend.
+
 ## First-wave results
 
 | Lane | Branch | Exclusive ownership | Status |
