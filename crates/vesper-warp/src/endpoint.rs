@@ -1667,8 +1667,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let mut at = base;
         let mut has_ack = false;
         let mut crypto = None;
-        let ack_eliciting;
-        match kind {
+        let ack_eliciting = match kind {
             LongKind::Close { code, frame_type } => {
                 at += Frame::ConnectionClose(crate::frame::ConnectionClose {
                     error_code: code,
@@ -1676,7 +1675,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     reason: b"",
                 })
                 .encode(&mut scratch[at..limit])?;
-                ack_eliciting = false;
+                false
             }
             LongKind::Normal | LongKind::Probe => {
                 if let Some(ack) = ls
@@ -1700,9 +1699,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 if kind == LongKind::Probe && crypto.is_none() {
                     at += Frame::Ping.encode(&mut scratch[at..limit])?;
                 }
-                ack_eliciting = crypto.is_some() || kind == LongKind::Probe;
+                crypto.is_some() || kind == LongKind::Probe
             }
-        }
+        };
         let frames_len = at - base;
         if frames_len == 0 {
             return Err(WarpError::Config("empty packet"));
