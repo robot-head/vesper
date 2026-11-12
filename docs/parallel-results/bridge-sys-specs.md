@@ -48,7 +48,7 @@ All commands ran from the dedicated worktree with isolated
 
 ```text
 cargo test -p vesper-ffi -- --nocapture
-  PASS: 23 tests (13 sys-spec/ABI/ownership, 1 actual C ABI fixture, 9 existing wire).
+  PASS: 25 tests (15 sys-spec/ABI/ownership, 1 actual C ABI fixture, 9 existing wire).
 cargo clippy -p vesper-ffi --all-targets -- -D warnings
   PASS.
 cargo fmt --all -- --check
@@ -105,3 +105,26 @@ platform's complete C ABI, including narrow-integer extension rules. Source
 parser/checker integration, compiler calls, C header verification, dynamic
 loading/linking, opaque linear handles, variadics, aggregates, callbacks,
 floating-point signatures and MPK/PKRU/POE isolation remain separate work.
+
+
+## Independent-review follow-up
+
+Two integration blockers were fixed in a separate follow-up commit:
+
+- `Target::is_host` now rejects any host without the descriptor's 64-bit
+  little-endian data model before considering OS/architecture/environment. GNU
+  x32 and AArch64 ILP32 therefore cannot be mistaken for LP64 hosts. Current-host
+  tests assert that every positive match has the complete data model; the test
+  also contains an incompatible-layout cfg assertion for such builds. No x32,
+  ILP32 or big-endian runtime execution is claimed.
+- `EnumDescriptor` now owns shared immutable `Arc`-backed enum data, preserving
+  its public accessors/variant shape. Parser resolution, captured return contracts
+  and descriptor clones retain shared references instead of repeatedly cloning
+  variant/name tables. An adversarial valid manifest with a 256-variant enum,
+  192 functions and 6144 parameter occurrences checks that all occurrences and
+  a complete descriptor clone reference exactly the same variant table. All
+  existing canonical-identity and return-validation tests still pass.
+
+The 25-test crate suite, actual C ABI fixture, strict all-target Clippy, workspace
+format check and diff check were rerun after these fixes. The coordinator-owned
+root lock remains outside this lane's commits.

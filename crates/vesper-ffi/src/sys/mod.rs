@@ -10,7 +10,7 @@ pub use foreign::{
     CallFailure, CheckedAddress, ForeignValue, InvalidForeignValue, PreparedCall, RawArgument,
     ValidatedReturn, ValidatedValue, ValidationError,
 };
-use std::{collections::BTreeSet, fmt, ops::Range};
+use std::{collections::BTreeSet, fmt, ops::Range, sync::Arc};
 
 pub const SCHEMA: &str = "vesper.vsys/1";
 
@@ -127,6 +127,11 @@ impl Target {
         true
     }
     pub fn is_host(self) -> bool {
+        // Architecture and OS alone also match GNU x32/AArch64 ILP32 builds.
+        // Every accepted descriptor has a 64-bit little-endian data model.
+        if !cfg!(all(target_pointer_width = "64", target_endian = "little")) {
+            return false;
+        }
         match self {
             Self::LinuxX86_64 => cfg!(all(
                 target_os = "linux",
@@ -260,21 +265,36 @@ impl Scalar {
         }
     }
 }
+/// Immutable enum data is shared across all parameter/return occurrences.
+/// Cloning a descriptor never expands its variant table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumDescriptor {
+    shared: Arc<EnumData>,
+}
+#[derive(Debug, PartialEq, Eq)]
+struct EnumData {
     name: String,
     scalar: Scalar,
     variants: Vec<(String, u64)>,
 }
 impl EnumDescriptor {
+    fn new(name: String, scalar: Scalar, variants: Vec<(String, u64)>) -> Self {
+        Self {
+            shared: Arc::new(EnumData {
+                name,
+                scalar,
+                variants,
+            }),
+        }
+    }
     pub fn name(&self) -> &str {
-        &self.name
+        &self.shared.name
     }
     pub fn scalar(&self) -> Scalar {
-        self.scalar
+        self.shared.scalar
     }
     pub fn variants(&self) -> &[(String, u64)] {
-        &self.variants
+        &self.shared.variants
     }
 }
 /// Logical validity refinements over explicitly specified total-bit C carriers.
@@ -368,7 +388,7 @@ fn carrier(t: &ValueType) -> Option<AbiType> {
         ValueType::Unit => return None,
         ValueType::Scalar(s) => AbiType::Integer(*s),
         ValueType::Bool => AbiType::Integer(Scalar::U8),
-        ValueType::Enum(e) => AbiType::Integer(e.scalar),
+        ValueType::Enum(e) => AbiType::Integer(e.scalar()),
         ValueType::Address { .. } => AbiType::Pointer,
     })
 }
@@ -481,7 +501,7 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                 ValueType::Bool => self.text("bool-u8"),
                 ValueType::Enum(e) => {
                     self.text("enum")?;
-                    self.text(&e.name)
+                    self.text(e.name())
                 }
                 ValueType::Address { pointee, nullable } => {
                     self.text(if *nullable {
@@ -513,10 +533,10 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
     e.optional(library.link.pkg_config.as_deref())?;
     e.count(library.enums.len())?;
     for enumeration in &library.enums {
-        e.text(&enumeration.name)?;
-        e.text(enumeration.scalar.name())?;
-        e.count(enumeration.variants.len())?;
-        for (name, value) in &enumeration.variants {
+        e.text(enumeration.name())?;
+        e.text(enumeration.scalar().name())?;
+        e.count(enumeration.variants().len())?;
+        for (name, value) in enumeration.variants() {
             e.text(name)?;
             e.bytes(&value.to_le_bytes())?;
         }

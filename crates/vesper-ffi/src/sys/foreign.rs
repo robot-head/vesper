@@ -170,14 +170,14 @@ fn validate(contract: &ValueType, bits: u64) -> Result<ValidatedValue, Validatio
             _ => return Err(ValidationError::InvalidBool),
         },
         ValueType::Enum(e) => {
-            scalar(e.scalar, bits)?;
-            if !e.variants.iter().any(|(_, value)| *value == bits) {
+            scalar(e.scalar(), bits)?;
+            if !e.variants().iter().any(|(_, value)| *value == bits) {
                 return Err(ValidationError::InvalidEnum {
-                    name: e.name.clone(),
+                    name: e.name().to_owned(),
                 });
             }
             ValidatedValue::Enum {
-                name: e.name.clone(),
+                name: e.name().to_owned(),
                 discriminant: bits,
             }
         }

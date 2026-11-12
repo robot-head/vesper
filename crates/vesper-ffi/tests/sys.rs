@@ -597,3 +597,74 @@ fn every_truncated_manifest_is_rejected_without_panics_or_invalid_spans() {
         assert!(parse(&invalid, Limits::default()).is_err());
     }
 }
+
+#[test]
+fn repeated_maximum_enums_share_one_variant_table_even_after_capture_and_clone() {
+    let mut body = String::from("enum Big: u32 {");
+    for variant in 0..256 {
+        body.push_str(&format!(" V{variant} = {variant},"));
+    }
+    body.push_str(" }");
+    // Over six thousand occurrences previously cloned the complete 256-variant
+    // table before the canonical-output budget could reject the expansion.
+    for function in 0..192 {
+        body.push_str(&format!(" fn f{function}("));
+        for parameter in 0..32 {
+            body.push_str(&format!("p{parameter}: Big,"));
+        }
+        body.push_str(") -> ForeignVal[Big];");
+    }
+    let library = library(&body);
+    let backing = library.enums()[0].variants().as_ptr();
+    let mut occurrences = 0;
+    for function in library.functions() {
+        for parameter in function.parameters() {
+            let ParameterType::Value(ValueType::Enum(enumeration)) = parameter.ty() else {
+                panic!("enum parameter expected")
+            };
+            assert_eq!(enumeration.variants().as_ptr(), backing);
+            occurrences += 1;
+        }
+        let ValueType::Enum(enumeration) = function.result() else {
+            panic!("enum return expected")
+        };
+        assert_eq!(enumeration.variants().as_ptr(), backing);
+        let captured = function.capture_return(255, ());
+        assert!(captured.validate().is_ok());
+    }
+    assert_eq!(occurrences, 6144);
+    let cloned = library.clone();
+    assert_eq!(cloned.enums()[0].variants().as_ptr(), backing);
+    let ParameterType::Value(ValueType::Enum(enumeration)) =
+        cloned.functions()[0].parameters()[0].ty()
+    else {
+        panic!("enum parameter expected")
+    };
+    assert_eq!(enumeration.variants().as_ptr(), backing);
+}
+
+#[test]
+fn host_detection_implies_the_complete_descriptor_data_model() {
+    for target in [
+        Target::LinuxX86_64,
+        Target::LinuxAarch64,
+        Target::DarwinAarch64,
+        Target::WindowsX86_64,
+    ] {
+        if target.is_host() {
+            assert_eq!(u32::from(target.pointer_bits()), usize::BITS);
+            assert_eq!(target.little_endian(), cfg!(target_endian = "little"));
+        }
+    }
+    #[cfg(any(not(target_pointer_width = "64"), not(target_endian = "little")))]
+    assert!(
+        ![
+            Target::LinuxX86_64,
+            Target::LinuxAarch64,
+            Target::DarwinAarch64,
+            Target::WindowsX86_64
+        ]
+        .into_iter()
+        .any(Target::is_host)
+    );
+}

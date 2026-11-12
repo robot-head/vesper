@@ -268,11 +268,7 @@ impl Parser {
             "duplicate enum variant",
         )?;
         variants.sort();
-        Ok(EnumDescriptor {
-            name,
-            scalar,
-            variants,
-        })
+        Ok(EnumDescriptor::new(name, scalar, variants))
     }
     fn value_type(&mut self) -> Result<RawType, Error> {
         let name = self.word()?;
@@ -428,7 +424,7 @@ fn resolve(t: RawType, enums: &[EnumDescriptor]) -> Result<ValueType, Error> {
                 Ok(ValueType::Unit)
             } else if n == "bool" {
                 Ok(ValueType::Bool)
-            } else if let Some(e) = enums.iter().find(|e| e.name == n) {
+            } else if let Some(e) = enums.iter().find(|e| e.name() == n) {
                 Ok(ValueType::Enum(e.clone()))
             } else {
                 Err(Error::new(
@@ -604,14 +600,14 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         ));
     }
     unique(
-        enums.iter().map(|e| e.name.as_str()),
+        enums.iter().map(EnumDescriptor::name),
         "duplicate enum declaration",
     )?;
     unique(
         raw_functions.iter().map(|f| f.symbol.as_str()),
         "duplicate foreign symbol",
     )?;
-    enums.sort_by(|a, b| a.name.cmp(&b.name));
+    enums.sort_by(|a, b| a.name().cmp(b.name()));
     let mut functions = vec![];
     for f in raw_functions {
         let mut parameters = vec![];

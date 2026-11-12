@@ -59,7 +59,9 @@ The explicit target/convention pairs are:
 | `x86_64-pc-windows-msvc` | `win64` | 64 | little |
 
 A mismatch or an unlisted target fails. Cross-target descriptors do not depend
-on host endianness or `usize`. `Target::is_host` is only an inspection helper.
+on host endianness or `usize`. `Target::is_host` is only an inspection helper and additionally requires a
+64-bit little-endian host data model; x86_64 GNU x32 and AArch64 ILP32 are not
+compatible hosts.
 `static` and `dynamic` are the only link modes. This milestone records C calling
 conventions and signed scalar carriers; it does not assign registers/stack
 slots or produce a trampoline. A later code generator must implement the
@@ -127,7 +129,10 @@ Limits can be lowered but not raised above the hard defaults: source 256 KiB,
 4096 bytes/string, and 1 MiB canonical descriptor output. Zero/oversized limits
 are errors. Identifier/string/count budgets are checked before retaining the
 next element; canonical writes check arithmetic and capacity before extension.
-The source-byte limit bounds lexing work even for whitespace/comments.
+The source-byte limit bounds lexing work even for whitespace/comments. Enum
+variant tables use shared immutable storage, so each parameter/return occurrence
+and captured return retains a reference to one table rather than expanding the
+whole enum. Descriptor clones preserve that sharing.
 
 `identity()` is `vesper.vsys/1:blake3:<digest>`. Its digest hashes canonical bytes
 with schema, library alias, complete explicit target/convention/pointer contract,
