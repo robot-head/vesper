@@ -18,8 +18,11 @@ members = [
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
     "crates/vesper-loom-trust",
+    "crates/vesper-loom-admission",
+    "crates/vesper-loom-audit",
     "crates/vesper-loom-tuf",
     "crates/vesper-alloc",
+    "crates/vesper-aura",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
     "crates/vesper-pact-bridge",
@@ -46,8 +49,11 @@ default-members = [
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
     "crates/vesper-loom-trust",
+    "crates/vesper-loom-admission",
+    "crates/vesper-loom-audit",
     "crates/vesper-loom-tuf",
     "crates/vesper-alloc",
+    "crates/vesper-aura",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
     "crates/vesper-pact-bridge",
@@ -84,6 +90,8 @@ vesper-semver = { path = "crates/vesper-semver" }
 vesper-loom-calculus = { path = "crates/vesper-loom-calculus" }
 vesper-loom-solver = { path = "crates/vesper-loom-solver" }
 vesper-loom-trust = { path = "crates/vesper-loom-trust" }
+vesper-loom-admission = { path = "crates/vesper-loom-admission" }
+vesper-loom-audit = { path = "crates/vesper-loom-audit" }
 vesper-loom-cas = { path = "crates/vesper-loom-cas" }
 ariadne = "0.5"
 petgraph = "0.8"
@@ -99,6 +107,9 @@ target-lexicon = "0.13"
 serde = { workspace = true }
 serde_json = { workspace = true }
 salsa = "0.24"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

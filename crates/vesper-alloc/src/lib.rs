@@ -1,5 +1,10 @@
-//! Vesper Strata region allocator core (design §15.2 and the VirtualArena half
-//! of §15.3), as a host runtime library.
+//! Vesper Strata host-runtime allocators (design §15.2/§15.3).
+//!
+//! [`ShardSlab`] supplies bounded local byte allocations in 64 KiB slabs,
+//! with 48 size classes and unique initialized [`SlabBlock`] owners. Blocks
+//! retain backing storage after the pool handle is dropped; local bookkeeping
+//! uses non-atomic `Rc`, and cross-thread use is deliberately unsupported.
+//! This is separate from the existing region APIs described below.
 //!
 //! A [`Region`] is a bounded, uniquely owned bump allocator over a list of
 //! stable chunks. It provides aligned byte and typed allocations, checked size
@@ -73,6 +78,7 @@
 mod backing;
 mod error;
 mod region;
+mod slab;
 
 pub use backing::{ChunkBacking, SystemBacking};
 pub use error::{
@@ -95,3 +101,8 @@ pub const REGION_LOWERING_CONTRACT_VERSION: u32 = 0;
 /// `docs/parallel-results/strata-collections.md`. Experimental; not yet
 /// consumed by the compiler.
 pub const REGION_ACCESS_CONTRACT_VERSION: u32 = 1;
+
+pub use slab::{
+    SLAB_BYTES, SLAB_SIZE_CLASSES, ShardSlab, SlabBlock, SlabCloseError, SlabConfig, SlabError,
+    SlabId, SlabKey, SlabOwnerError, SlabStats,
+};

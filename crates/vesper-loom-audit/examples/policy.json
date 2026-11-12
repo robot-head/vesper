@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "minimum_severity": "high",
+  "allowed_licenses": ["MIT", "Apache-2.0", "GPL-2.0-only WITH Classpath-exception-2.0"]
+}
