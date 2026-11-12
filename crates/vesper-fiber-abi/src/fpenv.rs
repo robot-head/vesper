@@ -4,7 +4,8 @@
 //! * x86_64 System V: the MXCSR control bits (rounding, exception masks,
 //!   FTZ/DAZ) and the x87 control word. The switch saves the whole MXCSR, so
 //!   the sticky status flags (bits 0–5) are context-local too.
-//! * AArch64 AAPCS64: FPCR (rounding, FZ, DN, AHP and trap enables). The
+//! * AArch64 AAPCS64 (Linux) and the Apple arm64 ABI (macOS, which keeps the
+//!   AAPCS64 rule here): FPCR (rounding, FZ, DN, AHP and trap enables). The
 //!   switch also saves FPSR (cumulative exception flags).
 //!
 //! Changing the floating-point environment from Rust is outside the language's
@@ -169,6 +170,72 @@ pub unsafe fn set_rounding(r: Rounding) {
     unsafe { install(current().with_rounding(r)) }
 }
 
+/// Cumulative IEEE exception flags of the current context, in a portable
+/// encoding: bit 0 invalid, 1 divide-by-zero, 2 overflow, 3 underflow,
+/// 4 inexact, 5 denormal input (x86 DE, AArch64 IDC). ABI v2 switches these
+/// with the context (x86 MXCSR status bits, AArch64 FPSR), so one context's
+/// flags are never observed by another.
+pub fn exception_flags() -> u32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut mxcsr = 0u32;
+        // SAFETY: stores only to the local.
+        unsafe {
+            std::arch::asm!(
+                "stmxcsr [{m}]",
+                m = in(reg) &mut mxcsr,
+                options(nostack, preserves_flags),
+            );
+        }
+        // MXCSR: IE ZE OE UE PE in bits 0,2,3,4,5 and DE in bit 1.
+        let bit = |b: u32| (mxcsr >> b) & 1;
+        bit(0) | (bit(2) << 1) | (bit(3) << 2) | (bit(4) << 3) | (bit(5) << 4) | (bit(1) << 5)
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        let fpsr: u64;
+        // SAFETY: reading FPSR has no side effects.
+        unsafe { std::arch::asm!("mrs {}, fpsr", out(reg) fpsr, options(nomem, nostack)) };
+        // FPSR: IOC DZC OFC UFC IXC in bits 0..=4 and IDC in bit 7.
+        ((fpsr & 0x1F) | (((fpsr >> 7) & 1) << 5)) as u32
+    }
+}
+
+/// Clear the current context's cumulative exception flags.
+pub fn clear_exception_flags() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut mxcsr = 0u32;
+        // SAFETY: only the sticky status bits change; the control bits are
+        // written back unchanged.
+        unsafe {
+            std::arch::asm!(
+                "stmxcsr [{m}]",
+                m = in(reg) &mut mxcsr,
+                options(nostack, preserves_flags),
+            );
+            mxcsr &= !0x3F;
+            std::arch::asm!(
+                "ldmxcsr [{m}]",
+                m = in(reg) &mxcsr,
+                options(nostack, preserves_flags, readonly),
+            );
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: FPSR holds only status bits in AArch64 state (the cumulative
+    // IEEE flags, QC saturation and AArch32-only NZCV), so zeroing it clears
+    // status and changes no control state.
+    unsafe {
+        std::arch::asm!("msr fpsr, xzr", options(nomem, nostack));
+    }
+}
+
+/// Inexact flag in the [`exception_flags`] encoding.
+pub const FLAG_INEXACT: u32 = 1 << 4;
+/// Divide-by-zero flag in the [`exception_flags`] encoding.
+pub const FLAG_DIVIDE_BY_ZERO: u32 = 1 << 1;
+
 /// `a / b` computed by the hardware under the current rounding mode, as raw
 /// bits. The division is done in non-`pure` `asm` so the optimizer can neither
 /// constant-fold it under its default-environment assumption nor reuse a
@@ -230,5 +297,18 @@ mod tests {
             assert_eq!(observed.1, expected, "{r:?}");
         }
         assert_eq!(current().control(), saved.control());
+    }
+
+    #[test]
+    fn exception_flags_are_raised_and_cleared() {
+        clear_exception_flags();
+        assert_eq!(exception_flags(), 0);
+        std::hint::black_box(div_bits(1.0, 3.0));
+        assert_eq!(exception_flags() & FLAG_INEXACT, FLAG_INEXACT);
+        std::hint::black_box(div_bits(1.0, 0.0));
+        assert_ne!(exception_flags() & FLAG_DIVIDE_BY_ZERO, 0);
+        clear_exception_flags();
+        assert_eq!(exception_flags(), 0);
+        assert_eq!(current().control(), FpEnv::DEFAULT.control());
     }
 }

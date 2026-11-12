@@ -1,8 +1,8 @@
 //! Direct park/resume round trips of Cranelift-generated code on the host.
-#![cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+//!
+//! Runs wherever direct fibers are implemented (Linux x86_64/AArch64, macOS
+//! AArch64); it needs no Pulse scheduler.
+#![cfg(vesper_direct_fibers)]
 
 use vesper_fiber_abi::abi::{
     ABI_VERSION, CONTEXT_MAGIC, FiberContext, FiberState, ParkRequest, ResumeSignal, exit,
