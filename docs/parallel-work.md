@@ -5,42 +5,21 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 
 ## Next implementation batch
 
-The user has launched all seven assignments in the [next-wave prompt index](agent-prompts/next-wave/README.md). Forge landed through remote PR #14 and checked arithmetic through PR #17; the other paths remain reserved for their active sessions. Do not launch duplicate implementations. Only the checked-arithmetic lane edits compiler semantics. Source-native suspension and source trait/model syntax follow that migration.
+The previous seven sessions are complete and integrated. The [third-wave prompt index](agent-prompts/wave-three/README.md) is ready for new sessions; its [frozen contracts](rfcs/wave-three-contracts.md) separate frontend, native and platform ownership. Do not assign duplicate writers to those lanes.
 
-| Active lane | Requested branch | Reserved paths |
+| Next lane | Requested branch | Exclusive boundary |
 | --- | --- | --- |
-| Checked arithmetic (landed) | Actual branch `claude/project-thread-vmzghp`, PR #17 | Core semantics integrated; coordinator SemVer/CI/Lean AST follow-up |
-| Native lifecycle | `next/native-lifecycle` | Fiber ABI, native experiment, compatible scheduler changes if needed |
-| Cached sandbox builds | `next/loom-cached-builds` | New `crates/vesper-loom-build/**` |
-| Pact compiler bridge | `next/pact-compiler-bridge` | New `crates/vesper-pact-bridge/**` |
-| Strata collections | `next/strata-collections` | `crates/vesper-alloc/**` |
-| Source simulation | `next/source-simulation` | New `crates/vesper-sim-session/**` |
-| Forge hygiene/authority (landed) | Actual branch `claude/project-thread-1z4nx8`, PR #14 | `crates/vesper-forge/**`; coordinator registration/testing |
+| Source traits/models | `wave3/source-traits-models` | Additive frontend AST/syntax, checker/interface and Pact bridge refactor |
+| Source-native suspension | `wave3/source-native-suspension` | `src/native.rs`, new source-session helpers; fixed IR/ABI |
+| Cached Forge macros | `wave3/cached-forge-runner` | New `crates/vesper-forge-runner/**` |
+| Crash/WAL/network models | `wave3/crash-wal-network-simulation` | Source simulation and new model crate |
+| SIMD kernel model | `wave3/simd-kernel-model` | New Lean/model proof files; scanner codegen read-only |
+| macOS AArch64 fibers | `wave3/macos-arm-fibers` | Fiber platform implementation; preserve Linux APIs/ABI v2 |
+| Prism connections/routing | `wave3/prism-connection-routing` | `crates/vesper-prism/**` |
 
-The names above are the requested branch names, not confirmed remote refs. Record actual branches/PRs, base SHAs, commits and validation evidence when handoffs arrive. The individual prompts define exact ownership, including report files and fixture-only exceptions.
+Root manifests/lock, CLI/module wiring, existing CI/global docs and shared schema decisions remain coordinator-owned. So do `src/lean.rs`, `src/lean_ir.rs`, `src/lean_nodes.rs`, `crates/vesper-lean-syntax/**` and `crates/vesper-loom-tuf/**`. The complete Lean emitter now builds an AST and renders once; new lanes must not restore raw-source construction.
 
-The coordinator retains root workspace/dependency registration, lockfile, CLI/module wiring, CI and global documentation. Do not pre-register unfinished crates or connect macros to caching before the provenance/authority gate is reviewed. Recheck compiler consumers against the arithmetic migration before integration; do not merge a partial arithmetic backend update.
-
-While these sessions run, the coordinator owns read-only locked-resolution validation in `crates/vesper-loom-solver`, `src/package_commands.rs`, CLI routing/help and the new `tests/locked_resolution_cli.rs`. This work uses manifest/catalog DTOs and does not edit the active compiler, fiber, allocator or new integration-crate lanes.
-
-The coordinator also owns offline package-graph inspection in the new `src/package_graph.rs` and `tests/package_graph_cli.rs`, with CLI routing and documentation. It consumes the existing calculus graph without changing compiler or active library APIs.
-
-Release-version checking in `crates/vesper-semver`, the package-command adapter and the new `tests/release_cli.rs` is also coordinator-owned. It does not change the active source-interface exporter or arithmetic semantics.
-
-Local Lean artifact auditing is coordinator-owned in the new `src/proof_commands.rs`, `tools/proof-audit/**` and `tests/proof_audit_cli.rs`. This uses an independent trusted Lean helper and does not edit the reserved extractor, shared IR or `lean/CheckedArithmetic.lean`. It does not authorize package publication or proof-cache reuse.
-
-Declared-permission upgrade checks in `crates/vesper-loom-calculus/src/upgrade.rs`, the package-command adapter and `tests/upgrade_cli.rs` are coordinator-owned. Offline builder-attestation verification is being implemented separately in the new `crates/vesper-loom-trust/**`; neither task edits the active cached-build, Forge or compiler lanes.
-
-CycloneDX export in `src/sbom_commands.rs`/`tests/sbom_cli.rs` and the independent native scanner milestone in new `crates/vesper-simd/**` are also coordinator-owned. The scanner does not edit source ISA capability typing or the reserved native compiler backend.
-
-The independent offline TUF verifier in new `crates/vesper-loom-tuf/**` and bounded
-HTTP/1.1 framing in new `crates/vesper-prism/**` are coordinator subagent lanes.
-Neither is a source compiler or runtime integration. Root registration remains
-with the coordinator after review and validation.
-
-Structured Lean syntax is being implemented independently in new
-`crates/vesper-lean-syntax/**`. It preserves the pinned Lean toolchain. After the arithmetic handoff landed,
-scalar literals began using its nodes; full emitter migration is coordinator-owned.
+The [second-wave integration report](parallel-results/wave-two-integration.md) records all handoffs, actual branches, validation and limitations. Historical [second-wave prompts](agent-prompts/next-wave/README.md) are complete, not active reservations.
 
 ## First-wave results
 
