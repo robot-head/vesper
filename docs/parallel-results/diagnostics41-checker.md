@@ -22,7 +22,7 @@ Supported actual causes:
 - E0305 borrowed non-copy moves, E0306 linear aggregate field moves and E0307
   shared-parameter mutation identify the actual parameter/binding declaration.
 - E0309 branch-dependent consumption identifies the declaration and actual
-  ownership-taking events from the relevant branch states.
+  ownership-taking events from the relevant branch states, excluding common incoming history from branch-specific labels.
 - E0402 abortable checkpoints identify actual live linear declarations, active
   inout parameter declarations, originating inout argument expressions, or linear
   handler-state initializer expressions, according to the existing producer.
@@ -43,7 +43,11 @@ successful-transfer witnesses. Oversized/full histories stay absent. New/shadowi
 with empty histories. Branch propagation requires the same binding declaration
 span and does not participate in moved-state comparisons. Loans retain their
 actual source argument span, and state guards retain their actual initializer
-span. Nested blocks preserve matching binding evidence through the existing Env.
+span. Loan captions describe the argument's requested access, so rejected
+shared/inout or explicit-pass requests do not falsely certify a successful loan.
+State captions say `linear handler state initializer`, identifying the actual
+expression even when ownership checking rejected its initialization.
+Nested blocks preserve matching binding evidence through the existing Env.
 The existing checker does not reinitialize an already moved place by assignment:
 such a write stays rejected and retains the original cause, without inventing a
 new initialized state. New bindings/shadowing reset the evidence. No new public AST/type/World/IR/interface/native ABI schema is introduced.
@@ -67,7 +71,7 @@ Validation used private `/tmp/vesper-target-tooling41-doctest`, one build job,
 dev/test debug disabled and incremental compilation disabled:
 
 - `cargo check -p vesper --lib --offline`: passed.
-- `cargo test -p vesper --test diagnostic_causes --offline`: 14 passed.
+- `cargo test -p vesper --test diagnostic_causes --offline`: 17 passed.
 - `cargo test -p vesper --test language --test syntax_and_ir --offline`:
   107 existing language tests and four syntax/IR tests passed.
 - `cargo clippy -p vesper --lib --test diagnostic_causes --offline -- -D warnings`:
@@ -82,7 +86,12 @@ shadowing regression excludes outer declarations/consumptions from an inner
 binding's causes. Caps and unchanged primary deduplication are checked. Invalid borrowed/loan/
 linear-field/repeated attempts do not become transfer witnesses; separate valid
 field transfers exercise the actual history cap. Nested-block and rejected
-reinitialization cases preserve real origins without changing recovery. Existing
+reinitialization cases preserve real origins without changing recovery. Rejected
+borrowed/moved state initializers and invalid shared/inout/explicit-pass argument
+requests retain neutral source-fact captions, not successful-initialization or
+successful-loan claims. A prebranch consumption followed by a rejected branch
+re-use retains the unchanged primary E0309 but does not mislabel common incoming
+history as a new branch-specific transfer. Existing
 language tests also exercise control flow, capability inference and source/PCG
 acceptance. Tests use parser/checker and the existing interpreter; no JIT, native
 source execution, WASM, macro, proof or ambient URI read is performed.

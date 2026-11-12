@@ -198,10 +198,7 @@ fn abortable_checkpoint_labels_actual_linear_handler_state_initializer() {
     );
     assert_eq!(d.span, span(source, "1/b"));
     assert_eq!(texts(source, d), ["Ticket{}"]);
-    assert_eq!(
-        d.related[0].message,
-        "linear handler state initialized here"
-    );
+    assert_eq!(d.related[0].message, "linear handler state initializer");
 }
 #[test]
 fn evidence_caps_and_primary_deduplication_do_not_claim_complete_history() {
@@ -316,4 +313,71 @@ fn nested_block_moves_preserve_origin_and_writes_do_not_reinitialize_recovery_st
         assert_eq!(d.related.len(), 2);
         assert_eq!(d.related[1].span, start..start + 1);
     }
+}
+
+#[test]
+fn rejected_linear_state_initializers_have_neutral_expression_labels() {
+    for (pass, prefix, code) in [
+        ("in", "", "E0305"),
+        ("sink", "let Ticket{}=ticket;", "E0303"),
+    ] {
+        let source = format!(
+            "linear struct Ticket{{}} linear effect E{{fn op()->i64;}} fn bad({pass} ticket:Ticket,b:i64)->i64 eff[Fail[RuntimeError]]{{{prefix}handle E state resource=ticket in {{1/b}} with {{return (x,resource)=>{{let Ticket{{}}=resource;x}},op(resource,k)=>k(1,resource),}}}}"
+        );
+        let diagnostics = errors(&source);
+        validate(&source, &diagnostics);
+        let origin = source.find("state resource=ticket").unwrap() + "state resource=".len();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|d| d.code == code && d.span == (origin..origin + 6))
+        );
+        let d = one(
+            &diagnostics,
+            "E0402",
+            "abortable effect 'Fail' may discard linear handler state Ticket",
+        );
+        assert_eq!(d.span, span(&source, "1/b"));
+        assert_eq!(d.related[0].span, origin..origin + 6);
+        assert_eq!(d.related[0].message, "linear handler state initializer");
+    }
+}
+#[test]
+fn rejected_argument_accesses_do_not_claim_a_successful_loan() {
+    for (pass, explicit, code) in [("in", "inout", "E0307"), ("sink", "in", "E0308")] {
+        let source = format!(
+            "effect Ask{{fn ask()->i64;}} fn both(inout x:i64,in y:i64){{}} fn bad({pass} x:i64) eff[Ask]{{both({explicit} x,Ask::ask());}}"
+        );
+        let diagnostics = errors(&source);
+        validate(&source, &diagnostics);
+        assert!(diagnostics.iter().any(|d| d.code == code));
+        let d = one(
+            &diagnostics,
+            "E0402",
+            "abortable effect crosses an active inout argument loan",
+        );
+        let origin = source.find(&format!("both({explicit} x,")).unwrap()
+            + "both(".len()
+            + explicit.len()
+            + 1;
+        assert_eq!(d.related[0].span, origin..origin + 1);
+        assert_eq!(d.related[0].message, "inout argument access requested here");
+    }
+}
+
+#[test]
+fn common_prebranch_history_is_not_labeled_as_a_branch_specific_transfer() {
+    let source = "linear struct Tx{} fn bad(sink tx:Tx,in yes:bool){let Tx{}=tx;if yes{let Tx{}=tx;}else{};}";
+    let diagnostics = errors(source);
+    validate(source, &diagnostics);
+    let d = one(
+        &diagnostics,
+        "E0309",
+        "linear value 'tx' is consumed on only some control-flow paths",
+    );
+    assert_eq!(d.related.len(), 1);
+    assert_eq!(d.related[0].message, "linear binding introduced here");
+    let d = one(&diagnostics, "E0303", "use of moved place 'tx'");
+    let moved = source.find("let Tx{}=tx;").unwrap() + "let Tx{}=".len();
+    assert_eq!(d.related[1].span, moved..moved + 2);
 }

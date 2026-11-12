@@ -889,7 +889,7 @@ impl Checker<'_> {
                     ),
                     span.clone(),
                 );
-                self.related(origin, "conflicting argument loan begins here");
+                self.related(origin, "conflicting argument access requested here");
                 self.related(b.span.clone(), "accessed binding introduced here");
                 self.help("An exclusive argument loan cannot overlap another access while the call's arguments are evaluated.");
             }
@@ -2570,7 +2570,7 @@ impl Checker<'_> {
                     format!("abortable effect '{effect}' may discard linear handler state {state}"),
                     span.clone(),
                 );
-                self.related(origin, "linear handler state initialized here");
+                self.related(origin, "linear handler state initializer");
                 self.help("An abortable checkpoint may discard the suspended continuation and its owned linear state.");
             }
         }
@@ -2588,7 +2588,7 @@ impl Checker<'_> {
                 .map(|(_, _, origin)| origin.clone())
                 .collect::<Vec<_>>();
             for origin in origins {
-                self.related(origin, "active inout argument loan begins here");
+                self.related(origin, "inout argument access requested here");
             }
             self.help("An abortable checkpoint cannot cross an active exclusive argument loan.");
         }
@@ -2623,10 +2623,16 @@ impl Checker<'_> {
                     for branch in [x, y] {
                         if branch.span == binding.span {
                             for cause in &branch.move_causes {
-                                self.related(
-                                    cause.span.clone(),
-                                    "ownership-taking use on one control-flow path",
-                                );
+                                // Incoming history is shared by both branches;
+                                // it is not a branch-specific transfer witness.
+                                if !binding.move_causes.iter().any(|before| {
+                                    before.path == cause.path && before.span == cause.span
+                                }) {
+                                    self.related(
+                                        cause.span.clone(),
+                                        "ownership-taking use on one control-flow path",
+                                    );
+                                }
                             }
                         }
                     }
