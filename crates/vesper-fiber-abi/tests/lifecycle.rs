@@ -200,6 +200,8 @@ struct DelayedDriver {
     delay: usize,
     cancelled: bool,
     acks: usize,
+    cancel_calls: usize,
+    fail_cancel: usize,
     released: usize,
     payload: Vec<u8>,
     fail_submit: usize,
@@ -264,6 +266,11 @@ impl Driver<NativeTask> for DelayedDriver {
         self.pending.len()
     }
     fn cancel_all(&mut self) -> io::Result<()> {
+        self.cancel_calls += 1;
+        if self.fail_cancel > 0 {
+            self.fail_cancel -= 1;
+            return Err(io::Error::other("cancel failed"));
+        }
         // Acknowledge the cancellation command for every in-flight request;
         // release nothing.
         self.acks += self.pending.len();
@@ -369,8 +376,10 @@ fn drain_budget_returns_reparked_owners_that_later_complete() {
     let mut rt = incomplete.runtime;
     assert!(rt.records().is_empty(), "nothing reported complete early");
     assert!(code.upgrade().is_some());
-    // A repeated shutdown request does not cancel the cleanup parks.
+    // A repeated shutdown request does not cancel the cleanup parks, and
+    // sends no second driver cancel that could hit cleanup I/O.
     rt.cancel().unwrap();
+    assert_eq!(rt.driver().cancel_calls, 1);
     let drained = rt.drain(8, false).unwrap();
     assert_eq!(drained.records.len(), 2);
     for r in &drained.records {
@@ -383,6 +392,38 @@ fn drain_budget_returns_reparked_owners_that_later_complete() {
     }
     drop(drained);
     assert!(code.upgrade().is_none());
+}
+
+#[test]
+fn a_failed_driver_cancel_is_retried_then_never_repeated() {
+    let (jit, evidence, _) = setup();
+    let mut rt = NativeRuntime::new(DelayedDriver {
+        delay: 2,
+        fail_cancel: 1,
+        ..Default::default()
+    });
+    let id = rt.spawn(
+        jit.spawn_pulse_read(1, evidence.clone()).unwrap(),
+        Some(dev_null()),
+    );
+    for _ in 0..2 {
+        rt.tick(false).unwrap();
+    }
+    assert_eq!(rt.driver().pending(), 1);
+    let incomplete = rt.shutdown(16, false).unwrap_err();
+    assert!(matches!(incomplete.reason, Incomplete::Driver(_)));
+    let mut rt = incomplete.runtime;
+    assert_eq!(rt.live(), vec![id]);
+    rt.cancel().unwrap();
+    rt.cancel().unwrap();
+    assert_eq!(
+        rt.driver().cancel_calls,
+        2,
+        "one failure, one success, no repeat"
+    );
+    assert_eq!(rt.driver().acks, 1);
+    let drained = rt.drain(16, false).unwrap();
+    assert_eq!(drained.records[0].cancelled, Some(CancelPoint::DuringIo));
 }
 
 #[test]

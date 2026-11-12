@@ -80,12 +80,12 @@ carry seven park sites.
 * `cargo clippy --workspace --locked --all-targets -- -D warnings`: pass.
 * `cargo test --workspace --locked`: 672 passed, 0 failed. Lean was not
   re-run, since no Lean or extraction code changed.
-* `cargo test -p vesper-fiber-abi` and `--release`: 49 passed each (8 unit,
-  1 FP, 12 lifecycle, 3 object, 14 round-trip, 8 scheduler, 3 doctests).
+* `cargo test -p vesper-fiber-abi` and `--release`: 50 passed each (8 unit,
+  1 FP, 13 lifecycle, 3 object, 14 round-trip, 8 scheduler, 3 doctests).
 * Kernel: `io_uring kernel round trip validated` and `io_uring kernel
   cancellation during I/O validated` on this host.
 * AArch64 under QEMU user-mode (`qemu-aarch64 -L /usr/aarch64-linux-gnu`):
-  49 passed in debug and release; strict Clippy for the target passes; the
+  50 passed in debug and release; strict Clippy for the target passes; the
   experiment passes in debug and release. Both kernel tests report
   `io_uring unavailable (os error 38) ... NOT validated`. This is
   emulation, not AArch64 hardware.

@@ -539,6 +539,10 @@ impl<D> std::fmt::Debug for Drained<D> {
 pub struct NativeRuntime<D> {
     scheduler: Scheduler<NativeTask, D>,
     scope: Scope,
+    /// `Scheduler::cancel_all` (and so the driver's cancel command) has
+    /// succeeded once. Later `cancel` calls must not repeat it: tasks that
+    /// already took their cancellation edge may have cleanup I/O in flight.
+    driver_cancelled: bool,
     completed: Vec<Completed>,
     failures: Vec<String>,
 }
@@ -559,6 +563,7 @@ impl<D: Driver<NativeTask>> NativeRuntime<D> {
         Self {
             scheduler: Scheduler::new(driver),
             scope: Rc::default(),
+            driver_cancelled: false,
             completed: vec![],
             failures: vec![],
         }
@@ -609,10 +614,19 @@ impl<D: Driver<NativeTask>> NativeRuntime<D> {
         std::mem::take(&mut self.scope.borrow_mut().retained)
     }
     /// Cancel every task (idempotent per task: each receives at most one
-    /// cancellation). A driver error is returned with the runtime intact.
+    /// cancellation). A driver error is returned with the runtime intact and
+    /// a later call retries it. Once the scheduler/driver cancellation has
+    /// succeeded, later calls only keep the scope cancelled: they never send
+    /// another driver cancel, so cleanup I/O submitted by a cancellation
+    /// edge is not cancelled by a retried shutdown. Tasks not yet cancelled
+    /// still receive their one cancellation through the scope.
     pub fn cancel(&mut self) -> io::Result<()> {
         self.scope.borrow_mut().cancelled = true;
-        self.scheduler.cancel_all()
+        if !self.driver_cancelled {
+            self.scheduler.cancel_all()?;
+            self.driver_cancelled = true;
+        }
+        Ok(())
     }
     /// Run at most `budget` ticks until every task has exited.
     pub fn drain(

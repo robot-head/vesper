@@ -241,7 +241,11 @@ or I/O) and driven to its real exit; it is never reported complete early.
 shared by its tasks:
 
 * `cancel(&mut self) -> io::Result<()>` marks the scope and calls
-  `Scheduler::cancel_all` (a driver error leaves everything owned).
+  `Scheduler::cancel_all` (a driver error leaves everything owned and a
+  later call retries it). Once that succeeds, later calls (including a
+  retried `shutdown`) send no further driver cancel, so cleanup I/O issued
+  by a cancellation edge is not cancelled; not-yet-cancelled tasks still get
+  their one cancellation through the scope.
 * `drain(self, budget, wait)` runs at most `budget` ticks. `Ok(Drained)`
   means every task exited: it returns the driver, the decoded completions,
   failure strings and one `TaskRecord { fiber_id, status, result, cancelled,
@@ -489,7 +493,7 @@ Run from the repository root:
 ```sh
 cargo fmt --all -- --check
 cargo clippy -p vesper-fiber-abi -p native-pulse-experiment --all-targets -- -D warnings
-cargo test -p vesper-fiber-abi            # 49 tests incl. three compile-fail doctests
+cargo test -p vesper-fiber-abi            # 50 tests incl. three compile-fail doctests
 cargo test -p vesper-fiber-abi --release
 cargo run -p native-pulse-experiment --release -- --out target/np
 # AArch64 execution under QEMU user-mode (needs gcc-aarch64-linux-gnu, qemu-user,
@@ -511,5 +515,5 @@ Results on the development host (x86_64 Linux cloud container, 2026-11-12):
 all commands pass. The kernel io_uring round trip and the kernel
 cancellation-during-I/O test both ran (`io_uring kernel round trip
 validated`, `io_uring kernel cancellation during I/O validated`). Under QEMU
-AArch64 all 49 tests pass in debug and release, and both kernel tests report
+AArch64 all 50 tests pass in debug and release, and both kernel tests report
 `io_uring unavailable ... (os error 38) ... NOT validated`.
