@@ -318,6 +318,8 @@ struct Planner<'g> {
     qpos: Vec<u32>,
     /// Position of each pass in the global order.
     gpos: Vec<u32>,
+    /// Latest writer of each buffer, anywhere in the buffer.
+    buffer_writer: Vec<Option<Rec>>,
     /// Last pass on each queue that touched each resource.
     last_touch: Vec<BTreeMap<u16, u32>>,
     tex: BTreeMap<TexKey, BTreeSet<u32>>,
@@ -345,6 +347,7 @@ impl RenderGraph {
             qpos: vec![0; self.passes.len()],
             gpos: vec![0; self.passes.len()],
             last_touch: vec![BTreeMap::new(); self.resources.len()],
+            buffer_writer: vec![None; self.resources.len()],
             tex: BTreeMap::new(),
             buf: BTreeMap::new(),
             cross: BTreeMap::new(),
@@ -436,7 +439,16 @@ impl RenderGraph {
             for (i, pi) in self.passes[..j].iter().enumerate() {
                 for a in &pi.uses {
                     for b in &pj.uses {
-                        if a.resource != b.resource || !overlaps(a.range, b.range) {
+                        if a.resource != b.resource {
+                            continue;
+                        }
+                        // Writers of one buffer are serialized even on
+                        // disjoint ranges: the spec allows at most one
+                        // concurrent writer to a buffer.
+                        let buffer_writers = matches!(a.range, UseRange::Bytes { .. })
+                            && a.is_write()
+                            && b.is_write();
+                        if !buffer_writers && !overlaps(a.range, b.range) {
                             continue;
                         }
                         let kind = match (a.is_write(), b.is_write()) {
@@ -562,7 +574,7 @@ impl Planner<'_> {
                     }
                     for (s, req) in reqs {
                         let mut st = std::mem::replace(&mut subs[s as usize], SubState::new(None));
-                        let result = self.process(p, queue, resource, Some(s), &mut st, req);
+                        let result = self.process(p, queue, resource, Some(s), &mut st, req, None);
                         subs[s as usize] = st;
                         result?;
                     }
@@ -575,6 +587,8 @@ impl Planner<'_> {
                         split_segments(segments, start);
                         split_segments(segments, end);
                     }
+                    let prior_writer =
+                        self.buffer_writer[resource as usize].filter(|w| w.pass != p);
                     let mut segs = std::mem::take(segments);
                     let mut result = Ok(());
                     for (start, end, st) in &mut segs {
@@ -594,11 +608,24 @@ impl Planner<'_> {
                             }
                         }
                         if let Some(req) = req {
-                            result = result.and(self.process(p, queue, resource, None, st, req));
+                            let extra = prior_writer.filter(|_| req.access.is_write());
+                            result =
+                                result.and(self.process(p, queue, resource, None, st, req, extra));
                         }
                     }
                     *segments = segs;
                     result?;
+                    let writes: Vec<_> = uses.iter().filter(|u| u.is_write()).collect();
+                    if !writes.is_empty() {
+                        self.buffer_writer[resource as usize] = Some(Rec {
+                            pass: p,
+                            queue,
+                            sync: writes.iter().fold(Sync::NONE, |a, u| sync_union(a, u.sync)),
+                            access: writes
+                                .iter()
+                                .fold(Access::NO_ACCESS, |a, u| a.union_nonempty(u.access)),
+                        });
+                    }
                 }
             }
             self.last_touch[resource as usize].insert(queue, p);
@@ -615,6 +642,7 @@ impl Planner<'_> {
         sub: Option<u32>,
         st: &mut SubState,
         req: Req,
+        other_buffer_writer: Option<Rec>,
     ) -> Result<(), PlanError> {
         let kind = self.queue_kind(queue);
         let target = match st.layout {
@@ -654,6 +682,8 @@ impl Planner<'_> {
 
         let mut same: Vec<Rec> = Vec::new();
         let mut cross: Vec<u32> = Vec::new();
+        // After-scope of an earlier barrier that this one must chain on.
+        let mut chain: Option<(Sync, Access)> = None;
         if let Some(w) = st.last_write {
             if w.queue == queue {
                 let covered = match st.covered_on(queue) {
@@ -663,8 +693,18 @@ impl Planner<'_> {
                 };
                 if is_write || !covered {
                     same.push(w);
+                    if let Some(Covered::Scope(s, a)) = st.covered_on(queue) {
+                        chain = Some((s, a));
+                    }
                 }
             } else if is_write || !matches!(st.covered_on(queue), Some(Covered::Full)) {
+                cross.push(w.pass);
+            }
+        }
+        if let Some(w) = other_buffer_writer {
+            if w.queue == queue {
+                same.push(w);
+            } else {
                 cross.push(w.pass);
             }
         }
@@ -680,13 +720,22 @@ impl Planner<'_> {
 
         let barrier = !same.is_empty() || needs_transition;
         if barrier {
-            let sync_before = same
+            let mut sync_before = same
                 .iter()
                 .fold(Sync::NONE, |acc, r| sync_union(acc, r.sync));
-            let access_before = same
+            let mut access_before = same
                 .iter()
                 .fold(Access::NO_ACCESS, |acc, r| acc.union_nonempty(r.access));
-            let placement = self.placement(p, queue, resource, !same.is_empty());
+            // Sequential barriers in one ExecuteCommandLists scope must
+            // include the preceding barrier's after-scope in SyncBefore.
+            if let Some((s, a)) = chain {
+                sync_before = sync_union(sync_before, s);
+                access_before = access_before.union_nonempty(a);
+            }
+            // A split begin must not run before waits on other queues, which
+            // are placed only before the consumer.
+            let placement =
+                self.placement(p, queue, resource, !same.is_empty() && cross.is_empty());
             self.push_pending(
                 resource,
                 sub,

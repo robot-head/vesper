@@ -10,15 +10,15 @@ Owned paths: `crates/vesper-ignis/**` and this file. No root workspace, lockfile
 | Requirement | Implementation |
 | --- | --- |
 | Resource identity | `BufferHandle` and `TextureHandle` are distinct types tagged with a process-unique graph id; using another graph's handle is `GraphError::ForeignHandle`. |
-| Subresource/range overlap | Buffers are tracked as byte-range segments (split on use boundaries). Textures are tracked per subresource (mip, array slice, plane) using D3D12 subresource numbering. Disjoint ranges never create edges or barriers. |
+| Subresource/range overlap | Buffers are tracked as byte-range segments (split on use boundaries). Textures are tracked per subresource (mip, array slice, plane) using D3D12 subresource numbering. Disjoint ranges never create edges or barriers, with one exception: writers of the same buffer are serialized even on disjoint ranges, because the spec allows at most one concurrent writer per buffer. |
 | Read/write access | `Access`/`Sync` are bit sets with the `D3D12_BARRIER_ACCESS`/`D3D12_BARRIER_SYNC` values. Write accesses: RT, UAV, DSV write, stream-out, copy/resolve dest, AS write (`UNORDERED_ACCESS` is always treated as a write). |
 | Layouts | `Layout` mirrors `D3D12_BARRIER_LAYOUT` (common, read, write, and direct/compute queue-specific variants). A use may give an explicit layout or let the planner keep the current one when compatible, otherwise pick one from a fixed preference list. |
 | Queue ownership | Queues are `Direct`, `Compute`, or `Copy`; any number of each. Per-queue access, sync, and layout support is validated at `add_pass`. |
 | Hazards | RAW, WAR, WAW, and layout transitions (treated as writes) on overlapping ranges. Same-queue hazards produce barriers; cross-queue hazards produce fence waits. |
-| Read reuse | Reads in a compatible layout whose sync/access scope is already covered by an earlier barrier emit nothing. A read in a scope the earlier barrier did not cover gets its own barrier chained on that barrier's after-scope. |
+| Read reuse | Reads in a compatible layout whose sync/access scope is already covered by an earlier barrier emit nothing. A read in a scope the earlier barrier did not cover gets its own barrier. Its `SyncBefore`/`AccessBefore` include the earlier barrier's after-scope, as sequential barriers in one ECL scope require. |
 | Cross-queue sync | One timeline fence per queue, values 1, 2, … in stream order. Waits are elided using vector clocks when a queue already knows directly or transitively that the producer finished. Concurrent reads on several queues in a shared layout are allowed. |
 | Queue handoff | When the consumer queue cannot leave the current layout (for example, compute after `RENDER_TARGET`, or any copy-queue texture transition), the single queue that last used the subresource transitions it (to the target, or to `COMMON`) after its last use, with `SyncAfter = NONE`, before signaling. |
-| Long-distance sync | Optional split barriers (`SyncAfter = SPLIT` after the last touch, `SyncBefore = SPLIT` before the consumer) when other passes run on that queue in between. Begin/end halves carry identical access/layout/subresources. |
+| Long-distance sync | Optional split barriers (`SyncAfter = SPLIT` after the last touch, `SyncBefore = SPLIT` before the consumer) when other passes run on that queue in between. Splits are not used when the barrier also depends on accesses on another queue, because those fence waits sit before the end half only. Begin/end halves carry identical access/layout/subresources. |
 | Final layouts | `TextureDesc::final_layout` (for example `PRESENT`) ends the plan with a transition on the most recent user's queue, joining other queues with fence waits first. |
 | Ordering and cycles | Declaration order is the sequential meaning. `add_dependency` adds explicit edges; Kahn's algorithm (lowest index first) gives a deterministic global order. Cycles return `PlanError::Cycle` with the cycle's passes in edge order. |
 | Determinism | All maps are ordered (`BTreeMap`/`BTreeSet`), barrier batches are sorted, and `Plan::render` produces a stable text form used by golden tests. |
@@ -105,14 +105,14 @@ cargo test --locked
 cargo clippy --all-targets --locked -- -D warnings
 ```
 
-Results on this host (Linux, cargo 1.97.0): formatting is clean; 35 integration tests and 1 doctest pass; Clippy reports no warnings.
+Results on this host (Linux, cargo 1.97.0): formatting is clean; 38 integration tests and 1 doctest pass; Clippy reports no warnings.
 
 The tests cover:
 - Hazards on one queue: RAW (exact texture barrier fields), WAR on a buffer, WAW as a UAV barrier, and no barrier for a first read.
-- Disjoint and adjacent buffer ranges, a mip-chain downsample that syncs only adjacent mips, and box grouping of subresources (whole texture, one cube face).
+- Disjoint and adjacent buffer ranges, serialized buffer writers on disjoint ranges (same queue and cross-queue), a mip-chain downsample that syncs only adjacent mips, and box grouping of subresources (whole texture, one cube face).
 - Read reuse: shared readers, and `GENERIC_READ` serving shader and copy reads. A new sync scope needs a chained barrier. Aggregate sync covers later reads.
 - Layout transitions: RT↔SRV round trips, automatic `DIRECT_QUEUE_GENERIC_READ` for depth+shader reads, and final `PRESENT`.
-- Split barriers, shown with a golden plan. No split across an intervening access to the same buffer.
+- Split barriers, shown with a golden plan. No split across an intervening access to the same buffer, and none before a wait for a remote reader. Sequential barriers chain on the previous after-scope.
 - Ordering: two-pass and three-pass cycles, reordering by explicit edges, and self-dependency rejection.
 - Cross-queue: RAW and WAR fences, redundant and transitive wait elision, ping-pong fences, and a fence simulator that checks increasing values and no deadlock.
 - Queue rules: concurrent reads on two queues, RT handoff to compute (golden), copy-queue transition errors and the COMMON path, a final-layout join across queues, and rejection of queue-specific layouts.
@@ -137,6 +137,7 @@ The tests cover:
 | `ALL` vs acceleration-structure sync scopes | `ALL` is not treated as covering them (conservative). |
 | UAV reads | Always treated as writes; the API has no UAV-read-only access bit. |
 | Auto layout choice | Keep the current layout if it admits the access on this queue; otherwise take the first compatible entry of a fixed list (`SHADER_RESOURCE`, `COPY_SOURCE`, `COPY_DEST`, `UNORDERED_ACCESS`, `RENDER_TARGET`, `DEPTH_STENCIL_READ`, `DEPTH_STENCIL_WRITE`, resolve, shading rate, `GENERIC_READ`, `DIRECT_QUEUE_GENERIC_READ`, `COMMON`). Queue-specific layouts are only used when requested, except `DIRECT_QUEUE_GENERIC_READ` for read combinations no common layout admits. |
+| Overlapping reads in one pass with one explicit layout | The explicit layout must admit the other use's access, or `add_pass` returns `AccessLayoutMismatch`. |
 | Overlapping auto-layout reads | Kept in declaration order (`ReadOrder`) since a transition may occur between them; this only constrains explicit-edge reordering. |
 | Explicit edges on one queue | Order only; no memory barrier is implied. |
 | Fence barriers (design's "Agility SDK 1.620 D3D12_FENCE_BARRIER") | Not emitted; replaced with split barriers within a queue and queue fences across queues until the API shape and version are verified. |

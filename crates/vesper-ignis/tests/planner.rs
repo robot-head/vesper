@@ -192,7 +192,7 @@ fn write_after_write_emits_uav_barrier_without_layout_change() {
 }
 
 #[test]
-fn disjoint_buffer_ranges_do_not_synchronize() {
+fn disjoint_buffer_reads_do_not_synchronize_with_writes() {
     let mut g = RenderGraph::new();
     let q = g.add_queue(QueueKind::Compute);
     let b = buffer(&mut g, "scratch", 1024);
@@ -203,10 +203,10 @@ fn disjoint_buffer_ranges_do_not_synchronize() {
         Sync::COMPUTE_SHADING,
     ))
     .unwrap();
-    g.add_pass(PassDesc::new("hi", q).buffer(
+    g.add_pass(PassDesc::new("read_hi", q).buffer(
         b,
         ByteRange::new(512, 512),
-        Access::UNORDERED_ACCESS,
+        Access::SHADER_RESOURCE,
         Sync::COMPUTE_SHADING,
     ))
     .unwrap();
@@ -214,18 +214,60 @@ fn disjoint_buffer_ranges_do_not_synchronize() {
     assert!(plan.dependencies.is_empty());
     assert_eq!(plan.barrier_count(), 0);
 
-    // A read that overlaps only the upper half depends only on `hi`.
-    g.add_pass(PassDesc::new("read", q).buffer(
+    // A read that overlaps the written half depends only on `lo`.
+    g.add_pass(PassDesc::new("read_lo", q).buffer(
         b,
-        ByteRange::new(600, 8),
+        ByteRange::new(100, 8),
         Access::SHADER_RESOURCE,
         Sync::COMPUTE_SHADING,
     ))
     .unwrap();
     let plan = g.plan().unwrap();
     assert_eq!(plan.dependencies.len(), 1);
-    assert_eq!(plan.dependencies[0].before.index(), 1);
+    assert_eq!(plan.dependencies[0].before.index(), 0);
     assert_eq!(buffer_barriers(&plan, q).len(), 1);
+}
+
+#[test]
+fn buffer_writers_are_serialized_even_on_disjoint_ranges() {
+    // The spec allows at most one concurrent writer to a buffer, even when
+    // ranges do not intersect.
+    let mut g = RenderGraph::new();
+    let q = g.add_queue(QueueKind::Compute);
+    let other = g.add_queue(QueueKind::Compute);
+    let b = buffer(&mut g, "scratch", 1024);
+    let w = |name: &str, q, r| {
+        PassDesc::new(name, q).buffer(b, r, Access::UNORDERED_ACCESS, Sync::COMPUTE_SHADING)
+    };
+    g.add_pass(w("lo", q, ByteRange::new(0, 512))).unwrap();
+    g.add_pass(w("hi", q, ByteRange::new(512, 512))).unwrap();
+    g.add_pass(w("remote", other, ByteRange::new(256, 8)))
+        .unwrap();
+    let plan = g.plan().unwrap();
+    let kinds: Vec<_> = plan
+        .dependencies
+        .iter()
+        .map(|d| (d.before.index(), d.after.index(), d.kind))
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            (0, 1, DependencyKind::WriteAfterWrite),
+            (0, 2, DependencyKind::WriteAfterWrite),
+            (1, 2, DependencyKind::WriteAfterWrite),
+        ]
+    );
+    let bb = buffer_barriers(&plan, q);
+    assert_eq!(bb.len(), 1);
+    assert_eq!(
+        (bb[0].access_before, bb[0].access_after),
+        (Access::UNORDERED_ACCESS, Access::UNORDERED_ACCESS)
+    );
+    assert_eq!(
+        fences(&plan, other),
+        vec![Command::Wait { queue: q, value: 1 }]
+    );
+    assert_valid_fences(&plan);
 }
 
 #[test]
@@ -233,6 +275,7 @@ fn adjacent_but_not_overlapping_ranges_are_disjoint() {
     let mut g = RenderGraph::new();
     let q = g.add_queue(QueueKind::Copy);
     let b = buffer(&mut g, "staging", 100);
+    let src = buffer(&mut g, "src", 100);
     g.add_pass(PassDesc::new("a", q).buffer(
         b,
         ByteRange::new(0, 50),
@@ -240,28 +283,34 @@ fn adjacent_but_not_overlapping_ranges_are_disjoint() {
         Sync::COPY,
     ))
     .unwrap();
-    g.add_pass(PassDesc::new("b", q).buffer(
+    g.add_pass(PassDesc::new("read_hi", q).buffer(
         b,
         ByteRange::new(50, ByteRange::WHOLE.size),
-        Access::COPY_DEST,
-        Sync::COPY,
-    ))
-    .unwrap();
-    g.add_pass(PassDesc::new("c", q).buffer(
-        b,
-        ByteRange::new(49, 2),
         Access::COPY_SOURCE,
         Sync::COPY,
     ))
     .unwrap();
+    g.add_pass(
+        PassDesc::new("read_lo", q)
+            .buffer(b, ByteRange::new(49, 1), Access::COPY_SOURCE, Sync::COPY)
+            .buffer(src, ByteRange::WHOLE, Access::COPY_SOURCE, Sync::COPY),
+    )
+    .unwrap();
     let plan = g.plan().unwrap();
-    let befores: Vec<usize> = plan.dependencies.iter().map(|d| d.before.index()).collect();
-    assert_eq!(befores, vec![0, 1]);
-    // Both writers are merged into one whole-buffer barrier.
-    let b = buffer_barriers(&plan, q);
-    assert_eq!(b.len(), 1);
-    assert_eq!(b[0].access_before, Access::COPY_DEST);
-    assert_eq!(b[0].access_after, Access::COPY_SOURCE);
+    // `read_hi` starts exactly where `a` ends: no edge. `read_lo` touches the
+    // last byte `a` wrote.
+    let edges: Vec<(usize, usize)> = plan
+        .dependencies
+        .iter()
+        .map(|d| (d.before.index(), d.after.index()))
+        .collect();
+    assert_eq!(edges, vec![(0, 2)]);
+    let bb = buffer_barriers(&plan, q);
+    assert_eq!(bb.len(), 1);
+    assert_eq!(
+        (bb[0].access_before, bb[0].access_after),
+        (Access::COPY_DEST, Access::COPY_SOURCE)
+    );
 }
 
 #[test]
@@ -714,7 +763,7 @@ queue 0 (direct):
 
 #[test]
 fn split_is_not_used_across_an_intervening_access_to_the_resource() {
-    // `mid` touches a different range of the same buffer; buffer barriers are
+    // `mid` reads a different range of the same buffer; buffer barriers are
     // whole-buffer, so the split must not straddle it.
     let mut g = RenderGraph::new();
     let q = g.add_queue(QueueKind::Compute);
@@ -723,12 +772,111 @@ fn split_is_not_used_across_an_intervening_access_to_the_resource() {
         PassDesc::new(name, q).buffer(b, r, Access::UNORDERED_ACCESS, Sync::COMPUTE_SHADING)
     };
     g.add_pass(u("first", ByteRange::new(0, 32))).unwrap();
-    g.add_pass(u("mid", ByteRange::new(32, 32))).unwrap();
+    g.add_pass(PassDesc::new("mid", q).buffer(
+        b,
+        ByteRange::new(32, 32),
+        Access::SHADER_RESOURCE,
+        Sync::COMPUTE_SHADING,
+    ))
+    .unwrap();
     g.add_pass(u("last", ByteRange::new(0, 32))).unwrap();
     let plan = g.plan().unwrap();
     let bb = buffer_barriers(&plan, q);
     assert_eq!(bb.len(), 1);
     assert_eq!(bb[0].sync_before, Sync::COMPUTE_SHADING);
+    assert_eq!(bb[0].sync_after, Sync::COMPUTE_SHADING);
+}
+
+#[test]
+fn split_does_not_begin_before_waiting_for_remote_readers() {
+    let mut g = RenderGraph::new();
+    let d = g.add_queue(QueueKind::Direct);
+    let c = g.add_queue(QueueKind::Compute);
+    let t = texture(&mut g, "t", Layout::ShaderResource);
+    let other = texture(&mut g, "other", Layout::RenderTarget);
+    let srv = |name: &str, q, sync| {
+        PassDesc::new(name, q).texture(
+            t,
+            ALL,
+            Access::SHADER_RESOURCE,
+            sync,
+            Layout::ShaderResource,
+        )
+    };
+    g.add_pass(srv("direct_read", d, Sync::PIXEL_SHADING))
+        .unwrap();
+    g.add_pass(srv("compute_read", c, Sync::COMPUTE_SHADING))
+        .unwrap();
+    g.add_pass(PassDesc::new("unrelated", d).texture(
+        other,
+        ALL,
+        Access::RENDER_TARGET,
+        Sync::RENDER_TARGET,
+        None,
+    ))
+    .unwrap();
+    g.add_pass(PassDesc::new("overwrite", d).texture(
+        t,
+        ALL,
+        Access::RENDER_TARGET,
+        Sync::RENDER_TARGET,
+        None,
+    ))
+    .unwrap();
+    let plan = g.plan().unwrap();
+    assert_valid_fences(&plan);
+    let db = texture_barriers(&plan, d);
+    assert!(
+        db.iter()
+            .all(|b| b.sync_after != Sync::SPLIT && b.sync_before != Sync::SPLIT),
+        "{db:?}"
+    );
+    // The transition comes after the wait for the compute reader.
+    let cmds = &plan.queues[d.index()].commands;
+    let wait = cmds
+        .iter()
+        .position(|c| matches!(c, Command::Wait { .. }))
+        .unwrap();
+    let last_barrier = cmds
+        .iter()
+        .rposition(|c| matches!(c, Command::Barriers(_)))
+        .unwrap();
+    assert!(wait < last_barrier);
+}
+
+#[test]
+fn sequential_barriers_chain_on_the_previous_after_scope() {
+    let mut g = RenderGraph::new();
+    let q = g.add_queue(QueueKind::Direct);
+    let b = buffer(&mut g, "b", 64);
+    g.add_pass(PassDesc::new("write", q).buffer(
+        b,
+        ByteRange::WHOLE,
+        Access::UNORDERED_ACCESS,
+        Sync::COMPUTE_SHADING,
+    ))
+    .unwrap();
+    g.add_pass(PassDesc::new("ps", q).buffer(
+        b,
+        ByteRange::WHOLE,
+        Access::SHADER_RESOURCE,
+        Sync::PIXEL_SHADING,
+    ))
+    .unwrap();
+    g.add_pass(PassDesc::new("cs", q).buffer(
+        b,
+        ByteRange::WHOLE,
+        Access::SHADER_RESOURCE,
+        Sync::COMPUTE_SHADING,
+    ))
+    .unwrap();
+    let bb = buffer_barriers(&g.plan().unwrap(), q);
+    assert_eq!(bb.len(), 2);
+    assert_eq!(
+        bb[1].sync_before,
+        Sync::COMPUTE_SHADING | Sync::PIXEL_SHADING
+    );
+    assert_eq!(bb[1].sync_after, Sync::COMPUTE_SHADING);
 }
 
 // ---------------------------------------------------------------------------
@@ -1604,6 +1752,42 @@ fn declaration_errors_are_structured() {
             .texture(t, ALL, Access::COPY_SOURCE, Sync::COPY, Layout::CopySource),
     );
     assert!(matches!(e, Err(GraphError::ConflictingUses { .. })));
+
+    // An explicit layout must admit an overlapping automatic read.
+    let e = g.add_pass(
+        PassDesc::new("p", d)
+            .texture(
+                t,
+                ALL,
+                Access::SHADER_RESOURCE,
+                Sync::PIXEL_SHADING,
+                Layout::ShaderResource,
+            )
+            .texture(t, ALL, Access::COPY_SOURCE, Sync::COPY, None),
+    );
+    assert!(matches!(
+        e,
+        Err(GraphError::AccessLayoutMismatch {
+            use_index: 1,
+            layout: Layout::ShaderResource,
+            ..
+        })
+    ));
+    g.add_pass(
+        PassDesc::new("ok", d)
+            .texture(
+                t,
+                ALL,
+                Access::SHADER_RESOURCE,
+                Sync::PIXEL_SHADING,
+                Layout::GenericRead,
+            )
+            .texture(t, ALL, Access::COPY_SOURCE, Sync::COPY, None),
+    )
+    .unwrap();
+    assert_eq!(g.pass_count(), 1);
+    let mut g = RenderGraph::new();
+    let d = g.add_queue(QueueKind::Direct);
 
     // Nothing was added by the failed calls.
     assert_eq!(g.pass_count(), 0);

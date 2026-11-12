@@ -713,6 +713,22 @@ impl RenderGraph {
                         second_use: j,
                     });
                 }
+                // Overlapping reads are merged per subresource; an explicit
+                // layout must also admit the other use's access.
+                if a.resource == b.resource && overlaps(a.range, b.range) {
+                    for (explicit, other, other_index) in [(a, b, j), (b, a, i)] {
+                        if let Some(layout) = explicit.layout
+                            && !layout.allows(other.access)
+                        {
+                            return Err(GraphError::AccessLayoutMismatch {
+                                pass: desc.name,
+                                use_index: other_index,
+                                access: other.access,
+                                layout,
+                            });
+                        }
+                    }
+                }
             }
         }
         let index = u32::try_from(self.passes.len()).expect("more than u32::MAX passes");
