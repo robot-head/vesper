@@ -1,0 +1,11 @@
+// Checked arithmetic and division failures escape the session entry as
+// typed Fail instances; I/O errors are ordinary source values.
+copy struct Word { v: u64 }
+copy enum Io { Got(u64), IoFailed(u64), IoCancelled }
+linear effect Source { fn read(inout buf: Word) -> Io; }
+fn main() -> u64 eff [Source, Fail[ArithOverflow], Fail[RuntimeError]] {
+    let buf = Word { v: 0 };
+    let n: u64 = match Source::read(inout buf) { Got(n) => n, IoFailed(c) => c, IoCancelled => 0, };
+    let doubled = buf.v + buf.v;
+    doubled / n
+}

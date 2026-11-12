@@ -93,6 +93,7 @@ vesper-simd = { path = "crates/vesper-simd" }
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }
 vesper-pulse = { path = "crates/vesper-pulse" }
+vesper-fiber-abi = { path = "crates/vesper-fiber-abi" }
 vesper-semver = { path = "crates/vesper-semver" }
 vesper-loom-calculus = { path = "crates/vesper-loom-calculus" }
 vesper-loom-solver = { path = "crates/vesper-loom-solver" }

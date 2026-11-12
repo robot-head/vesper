@@ -20,6 +20,11 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
 
+/// Checked source entries with declared linear external effects compiled to
+/// ABI v2 fiber entries that park through `vesper-fiber-abi`.
+#[path = "native_session.rs"]
+pub mod session;
+
 fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
     match t {
         Type::IntLiteral(_) => Ok(types::I64),
@@ -326,6 +331,18 @@ fn compile<M: Module>(
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
     }
+    let ids = declare_instances(m, world, entry, &instances)?;
+    let clif = define_instances(m, world, &instances, &ids, &program)?;
+    Ok((ids, clif))
+}
+/// Declare every monomorphized ordinary function. `entry` is exported under
+/// its source name when it is itself an ordinary instance.
+fn declare_instances<M: Module>(
+    m: &mut M,
+    world: &World,
+    entry: &str,
+    instances: &InstanceMap,
+) -> Result<BTreeMap<String, FuncId>, String> {
     let mut ids = BTreeMap::new();
     for (i, (key, (name, vars))) in instances.iter().enumerate() {
         let f = concrete(world, name, vars)?;
@@ -347,8 +364,18 @@ fn compile<M: Module>(
             .map_err(|e| e.to_string())?;
         ids.insert(key.clone(), id);
     }
+    Ok(ids)
+}
+/// Define the bodies of the instances declared by [`declare_instances`].
+fn define_instances<M: Module>(
+    m: &mut M,
+    world: &World,
+    instances: &InstanceMap,
+    ids: &BTreeMap<String, FuncId>,
+    program: &crate::ir::Program,
+) -> Result<String, String> {
     let mut clif = String::new();
-    for (key, (name, generic_vars)) in &instances {
+    for (key, (name, generic_vars)) in instances {
         let f = concrete(world, name, generic_vars)?;
         let mut ctx = m.make_context();
         ctx.func.signature = signature(m, world, &f)?;
@@ -396,8 +423,8 @@ fn compile<M: Module>(
                 b,
                 m,
                 world,
-                ids: &ids,
-                program: &program,
+                ids,
+                program,
                 capabilities: BTreeMap::new(),
                 next_capability: 0,
                 closures: vec![],
@@ -420,6 +447,7 @@ fn compile<M: Module>(
                             .collect(),
                     )
                 }),
+                session: None,
             };
             if fail_record.is_some() {
                 for (index, effect) in f.effects.instances.iter().enumerate() {
@@ -448,7 +476,7 @@ fn compile<M: Module>(
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
     }
-    Ok((ids, clif))
+    Ok(clif)
 }
 pub fn jit(world: &World, entry: &str) -> Result<crate::runtime::Value, String> {
     jit_with_options(world, entry, true)
@@ -632,6 +660,9 @@ struct Codegen<'a, 'b, M: Module> {
     /// The failure-record pointer of a `fail_only` function being compiled,
     /// with the error type of each of its `Fail` instances.
     fail_record: Option<(ir::Value, Vec<Type>)>,
+    /// Present only while compiling a suspending session entry: external
+    /// operations park instead of resolving to a lexical handler.
+    session: Option<session::SessionCodegen>,
 }
 impl<M: Module> Codegen<'_, '_, M> {
     fn info(&self, value: ir::Value) -> NativeInfo {
@@ -3142,7 +3173,11 @@ impl<M: Module> Codegen<'_, '_, M> {
         let identity = self
             .capabilities
             .get(&key)
-            .ok_or("native effect lacks scoped evidence")?;
+            .ok_or("native effect lacks scoped evidence")?
+            .clone();
+        if let Some(result) = self.session_operation(&identity, effect, op, &values, &refs)? {
+            return Ok(result);
+        }
         if let Some(index) = identity.strip_prefix("native-fail-exit:") {
             let index = index.parse::<i64>().map_err(|e| e.to_string())?;
             return self.fail_exit(index, effect, instance, values);
@@ -3150,7 +3185,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         let index = self
             .handlers
             .iter()
-            .rposition(|h| h.effect.name == effect && &h.identity == identity)
+            .rposition(|h| h.effect.name == effect && h.identity == identity)
             .ok_or("native effect lacks lexical evidence")?;
         let h = self.handlers[index].clone();
         let clause = h
