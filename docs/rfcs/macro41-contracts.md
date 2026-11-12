@@ -45,7 +45,7 @@ The first source syntax is:
 
 ```vesper
 macro keep($value: expr) -> expr { quote { $value } }
-fn main() -> u64 { let n = 42; keep!(n) }
+fn main() -> i64 { let n = 42; keep!(n) }
 ```
 
 Fixed positional expression parameters, one quotation per definition, no recursive
@@ -131,6 +131,28 @@ and `vesper forge expand SOURCE` (actual fully checked expanded source). Optiona
 package/policy flags are validated before copies; no implicit native/WASI execution.
 Acceptance runs emitted normal source explicitly to verify expected result 42.
 Root and acceptance owner freeze exact wire/CLI shape before fixture assertions.
+The unannotated integer let retains the existing i64 default; expansion does not
+insert casts to satisfy a different return annotation.
+
+Frozen CLI: `forge check SOURCE [--package @local/source] [--policy FILE] [--json]`
+returns one JSON object on stdout (success exit0, rejection exit1). `forge expand`
+returns the EXACT fully checked expanded bytes, without an added newline; any
+failure leaves stdout empty and exits1. Check JSON schema is
+`vesper.forge.source/1`, status `expanded_checked`, scope `tier1_source`, with
+package, original `source_blake3`, `expanded_blake3`, source_bytes, expanded_bytes,
+macro_definitions, invocations, expanded_source, source_map and audits. Maps expose
+expanded/original byte objects `{start,end}`, kind source/generated and macro name
+or null. Audits name macro and original invocation span plus conditional evidence.
+Rejection JSON uses status rejected, bounded stage/message/diagnostics and optional
+expanded_source/source_map/source_blake3; no World or partial accepted artifact.
+Stages are parse/expand/resolve/lower/check/authority/ir/resource/unsupported/config/io.
+
+Policy files are at most64KiB, deny unknown/duplicate fields and use
+`{"schema":"vesper.forge.policy/1","macro_emits":[{"name":"m","effects":["Storage"]}],"caller_ceiling":["Storage","builtin::Fail"]}`.
+Lists default empty; unlisted macros remain pure. Effect names grant any arguments
+for that exact known source effect or builtin::Fail; unknown/duplicate entries
+reject. Package labels are at most256 bytes. These are explicit user configuration,
+not authority derivation. Generic effect operations emitted directly remain denied.
 
 ## Compiler-derived authority
 
