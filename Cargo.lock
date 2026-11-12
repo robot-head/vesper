@@ -3180,6 +3180,7 @@ dependencies = [
  "serde",
  "serde_json",
  "target-lexicon",
+ "vesper-beacon",
  "vesper-core",
  "vesper-fiber-abi",
  "vesper-lean-syntax",
@@ -3193,8 +3194,18 @@ dependencies = [
  "vesper-pact-binding",
  "vesper-pulse",
  "vesper-semver",
+ "vesper-serde",
  "vesper-simd",
  "vesper-syntax",
+]
+
+[[package]]
+name = "vesper-aether"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "tempfile",
+ "vesper-loom-cas",
 ]
 
 [[package]]
@@ -3203,6 +3214,10 @@ version = "0.1.0"
 
 [[package]]
 name = "vesper-aura"
+version = "0.1.0"
+
+[[package]]
+name = "vesper-beacon"
 version = "0.1.0"
 
 [[package]]
@@ -3234,6 +3249,10 @@ dependencies = [
  "target-lexicon",
  "vesper-pulse",
 ]
+
+[[package]]
+name = "vesper-flux"
+version = "0.1.0"
 
 [[package]]
 name = "vesper-forge"
@@ -3427,6 +3446,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-quarry"
+version = "0.1.0"
+
+[[package]]
 name = "vesper-semver"
 version = "0.1.0"
 dependencies = [
@@ -3434,6 +3457,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "vesper-serde"
+version = "0.1.0"
 
 [[package]]
 name = "vesper-sim-session"
@@ -3477,6 +3504,10 @@ dependencies = [
  "serde_json",
  "vesper-core",
 ]
+
+[[package]]
+name = "vesper-tensor"
+version = "0.1.0"
 
 [[package]]
 name = "walkdir"
