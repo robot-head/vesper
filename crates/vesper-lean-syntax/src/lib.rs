@@ -295,6 +295,7 @@ pub enum Term {
     Arrow(Box<Term>, Box<Term>),
     ProductType(Vec<Term>),
     Tuple(Vec<Term>),
+    List(Vec<Term>),
     Let {
         binding: Box<LetBinding>,
         body: Box<Term>,
@@ -685,6 +686,14 @@ impl Printer {
                         .join(" × ")
                 )
             }
+            Term::List(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(Self::term)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            ),
             Term::Tuple(values) => {
                 Self::tuple_length(values.len())?;
                 format!(

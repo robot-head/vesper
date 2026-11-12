@@ -3760,6 +3760,8 @@ dependencies = [
 name = "vesper-fmt"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "vesper-lean-syntax",
  "vesper-syntax",
 ]
 
