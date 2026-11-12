@@ -12,7 +12,7 @@ mod support;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use support::*;
-use vesper_warp::endpoint::{Discard, Echo, EndpointConfig};
+use vesper_warp::endpoint::{Discard, Echo, EndpointConfig, StreamMode};
 
 struct Counting;
 
@@ -46,6 +46,8 @@ static GLOBAL: Counting = Counting;
 fn steady_state_round_trips_allocate_nothing() {
     let config = EndpointConfig {
         initial_rtt_ns: 20 * MS,
+        // The wave-four raw path: the Responder sees STREAM frames.
+        stream_mode: StreamMode::Raw,
         ..EndpointConfig::default()
     };
     let mut p = Pair::new(config, Discard::default(), Echo::default());
