@@ -110,3 +110,8 @@ Baseline128 delimiter/XOR scanner. See [SIMD support and limits](docs/simd-scann
 See [CAS workflows](docs/cas-workflows.md).
 
 `vesper emit --emit interface --package @org/name` and `vesper semver` now compare experimental checked source contracts. `vesper resolve --catalog ...` resolves local Loom metadata into an exact solution snapshot. See [package workflows and runnable examples](docs/package-workflows.md).
+
+`vesper audit` checks declared dependencies against local advisory/license policy
+with explicit findings and unknown results; see [offline audits](docs/package-audits.md).
+`vesper attest import` verifies the current configured builder quorum and exact
+blob bytes before CAS ingestion; see [signed artifact admission](docs/builder-attestations.md#importing-verified-blob-bytes).

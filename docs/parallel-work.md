@@ -7,7 +7,9 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 
 The previous seven sessions are complete and integrated. The [third-wave prompt index](agent-prompts/wave-three/README.md) is **assigned to the user's external agent**; its [frozen contracts](rfcs/wave-three-contracts.md) separate frontend, native and platform ownership. Do not assign duplicate writers to those lanes. Locally started duplicates were stopped and preserved as [unmerged spikes](parallel-results/paused-wave-three-spikes.md).
 
-Six additional implementation lanes now run alongside that external wave:
+Six additional implementation lanes are implemented alongside that external wave;
+their [integration report](parallel-results/parallel-next-integration.md) records
+validation, review fixes and remaining boundaries:
 
 | Independent lane | Branch | Exclusive boundary |
 | --- | --- | --- |
