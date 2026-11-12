@@ -309,6 +309,9 @@ struct Req {
     access: Access,
     sync: Sync,
     layout: Option<Layout>,
+    /// For a buffer write: the latest writer of any other range of the
+    /// buffer, which must also be ordered before this write.
+    other_writer: Option<Rec>,
 }
 
 struct Planner<'g> {
@@ -566,6 +569,7 @@ impl Planner<'_> {
                                 access: u.access,
                                 sync: u.sync,
                                 layout: u.layout,
+                                other_writer: None,
                             });
                             r.access |= u.access;
                             r.sync |= u.sync;
@@ -574,7 +578,7 @@ impl Planner<'_> {
                     }
                     for (s, req) in reqs {
                         let mut st = std::mem::replace(&mut subs[s as usize], SubState::new(None));
-                        let result = self.process(p, queue, resource, Some(s), &mut st, req, None);
+                        let result = self.process(p, queue, resource, Some(s), &mut st, req);
                         subs[s as usize] = st;
                         result?;
                     }
@@ -602,15 +606,18 @@ impl Planner<'_> {
                                     access: u.access,
                                     sync: u.sync,
                                     layout: None,
+                                    other_writer: None,
                                 });
                                 r.access |= u.access;
                                 r.sync |= u.sync;
                             }
                         }
                         if let Some(req) = req {
-                            let extra = prior_writer.filter(|_| req.access.is_write());
-                            result =
-                                result.and(self.process(p, queue, resource, None, st, req, extra));
+                            let req = Req {
+                                other_writer: prior_writer.filter(|_| req.access.is_write()),
+                                ..req
+                            };
+                            result = result.and(self.process(p, queue, resource, None, st, req));
                         }
                     }
                     *segments = segs;
@@ -642,7 +649,6 @@ impl Planner<'_> {
         sub: Option<u32>,
         st: &mut SubState,
         req: Req,
-        other_buffer_writer: Option<Rec>,
     ) -> Result<(), PlanError> {
         let kind = self.queue_kind(queue);
         let target = match st.layout {
@@ -701,7 +707,7 @@ impl Planner<'_> {
                 cross.push(w.pass);
             }
         }
-        if let Some(w) = other_buffer_writer {
+        if let Some(w) = req.other_writer {
             if w.queue == queue {
                 same.push(w);
             } else {
