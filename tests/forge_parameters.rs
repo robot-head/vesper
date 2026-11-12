@@ -55,7 +55,7 @@ fn a_parameter_cannot_hijack_a_definition_site_global_after_serialization() {
         .find(|entry| {
             entry.original.start == span.start
                 && entry.original.end == span.end
-                && &artifact.expanded_source()[entry.expanded.start..entry.expanded.end]
+                && artifact.expanded_source()[entry.expanded.start..entry.expanded.end]
                     == renamed.name
         })
         .unwrap();
