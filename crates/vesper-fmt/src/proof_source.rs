@@ -109,8 +109,19 @@ pub fn format_for_verification(
                 .checked_mul(std::mem::size_of::<lexer::Token>())
                 .and_then(|tokens| n.checked_add(tokens))
         })
-        .and_then(|n| result.output.len().checked_mul(2).and_then(|v| n.checked_add(v)))
-        .and_then(|n| model.text_bytes().checked_mul(2).and_then(|v| n.checked_add(v)))
+        .and_then(|n| {
+            result
+                .output
+                .len()
+                .checked_mul(2)
+                .and_then(|v| n.checked_add(v))
+        })
+        .and_then(|n| {
+            model
+                .text_bytes()
+                .checked_mul(2)
+                .and_then(|v| n.checked_add(v))
+        })
         .ok_or(ProofError::Resource("source association work"))?;
     work.charge(charge).map_err(ProofError::Formatter)?;
     let lexed = lexer::lex_with_limits(
