@@ -576,10 +576,10 @@ mod tests {
             ..TcpOptions::default()
         };
         o.sack_len = 3;
-        for k in 0..3 {
-            o.sack_blocks[k] = SackBlock {
-                left: Seq(k as u32 * 10),
-                right: Seq(k as u32 * 10 + 5),
+        for (k, block) in (0u32..).zip(o.sack_blocks.iter_mut().take(3)) {
+            *block = SackBlock {
+                left: Seq(k * 10),
+                right: Seq(k * 10 + 5),
             };
         }
         let n = o.write(&mut buf).unwrap();
