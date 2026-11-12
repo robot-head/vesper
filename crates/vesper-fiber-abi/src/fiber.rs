@@ -8,9 +8,25 @@
 //! * [`ContinuationTable`] maps raw `(fiber_id, generation)` tokens (the value
 //!   a completion queue carries) back to their owned continuation and rejects
 //!   unknown, repeated and stale tokens without consuming anything.
+//!
+//! Lifecycle (explicit owners, see RFC §5):
+//! * [`Fiber::cancel`] cancels a fiber before it starts: no generated code
+//!   runs and the result is an [`Exit`] with status `CANCELLED`.
+//! * [`Parked::cancel`] delivers exactly one `Cancelled` resume. A fiber whose
+//!   cancellation edge parks again comes back as [`Outcome::Parked`]: the live
+//!   continuation stays owned by the caller, never reported as completion.
+//! * [`ContinuationTable::cancel_all`] cancels every owned continuation once
+//!   and keeps those that re-park (at their new generation).
+//! * `Drop` is the unrecoverable fallback, not a protocol: dropping a
+//!   [`Parked`] delivers at most one best-effort `Cancelled` resume; if the
+//!   fiber parks again it is abandoned (stack, context and data freed while
+//!   nothing can run on or point into them) and counted by
+//!   [`abandoned_fibers`]. Source-level linear exhaustion is never derived
+//!   from Rust RAII, the counter or `mem::forget`; `mem::forget` of a
+//!   continuation simply leaks its stack, code share and evidence share.
 use crate::abi::{
-    ABI_VERSION, CONTEXT_MAGIC, EvidenceId, FLAG_STACK_PINNED, FiberContext, FiberState,
-    ParkRequest, ResumeKind, ResumeSignal, exit,
+    ABI_VERSION, CONTEXT_MAGIC, EvidenceId, FLAG_FP_ENV_SAVED, FLAG_STACK_PINNED, FiberContext,
+    FiberState, ParkRequest, ResumeKind, ResumeSignal, exit,
 };
 use crate::data::DataFrame;
 use crate::evidence::EvidenceVector;
@@ -18,7 +34,7 @@ use crate::stack::FiberStack;
 use crate::switch::{initial_stack, vesper_fiber_switch};
 use std::any::Any;
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io;
 use std::ptr::NonNull;
@@ -53,6 +69,8 @@ thread_local! {
 
 /// Number of fibers on this thread that were dropped while still parked after
 /// their cancellation resume (their linear obligations were not discharged).
+/// Diagnostic only: it is not an obligation audit and does not see leaked
+/// (`mem::forget`) continuations.
 pub fn abandoned_fibers() -> u64 {
     ABANDONED.with(Cell::get)
 }
@@ -60,7 +78,7 @@ pub fn abandoned_fibers() -> u64 {
 /// Park entry called by generated code after it filled `ctx.park`.
 ///
 /// Returns a pointer to `ctx.resume` once resumed, or null if `ctx` is not a
-/// running ABI v1 context (generated code must then exit with
+/// running current-ABI context (generated code must then exit with
 /// [`exit::ABI_VIOLATION`]).
 ///
 /// # Safety
@@ -144,7 +162,7 @@ impl Fiber {
     /// Prepare a fiber that will call `entry(ctx, arg)` on its own stack.
     ///
     /// # Safety
-    /// `entry` must follow the ABI v1 entry contract and must be machine code
+    /// `entry` must follow the ABI entry contract and must be machine code
     /// owned (directly or transitively) by `code`.
     pub unsafe fn new(
         entry: EntryFn,
@@ -160,7 +178,7 @@ impl Fiber {
             magic: CONTEXT_MAGIC,
             abi_version: ABI_VERSION,
             state: FiberState::Created as u32,
-            flags: FLAG_STACK_PINNED,
+            flags: FLAG_STACK_PINNED | FLAG_FP_ENV_SAVED,
             generation: 0,
             fiber_id,
             saved_sp: 0,
@@ -213,6 +231,21 @@ impl Fiber {
     }
     pub fn evidence(&self) -> &EvidenceVector {
         &self.evidence
+    }
+    /// Cancel a fiber that never started. No generated code runs: there is no
+    /// obligation to discharge yet. Returns an [`Exit`] with status
+    /// [`exit::CANCELLED`], result 0, zero parks and the initial data image.
+    /// The stack, context and code share are released when this returns.
+    pub fn cancel(self) -> Exit {
+        debug_assert_eq!(self.state(), FiberState::Created);
+        Exit {
+            fiber_id: self.id(),
+            status: exit::CANCELLED,
+            result: 0,
+            data: self.data.bytes().to_vec(),
+            parks: 0,
+            data_relocations: self.data.relocations(),
+        }
     }
     /// Start the fiber. Consumes the created fiber; returns the continuation
     /// if it parks.
@@ -267,10 +300,16 @@ impl Fiber {
 
 impl Drop for Fiber {
     fn drop(&mut self) {
-        // A dropped continuation still resumes exactly once, along its
-        // cancellation edge. If it parks again it is abandoned; freeing the
-        // stack is memory safe (no frame on it is executing and nothing points
-        // into it) but its remaining obligations are lost and counted.
+        // Unrecoverable fallback (explicit owners use `Parked::cancel`): a
+        // dropped continuation is resumed at most once more, along its
+        // cancellation edge. If it parks again it is abandoned. Freeing the
+        // stack is then memory safe: no frame on it is executing, nothing can
+        // resume it, and neither the data frame nor the runtime holds a
+        // pointer into it (direct handlers must not retain stack addresses
+        // past their call; see `Installation::direct`). Its remaining
+        // obligations are lost and counted. Field order then frees the stack
+        // before the data frame, evidence share and code share, so code
+        // outlives every frame that could return into it.
         if self.state() == FiberState::Parked && self.cancel_on_drop {
             self.cancel_on_drop = false;
             let evidence = self.ctx().park.evidence;
@@ -407,6 +446,16 @@ pub struct RawContinuation {
 ///     let _ = k.resume(r); // error[E0382]: use of moved value
 /// }
 /// ```
+///
+/// Continuations stay on their originating thread (pinned stack, `Rc` code
+/// and evidence shares); they are `!Send`:
+///
+/// ```compile_fail
+/// fn send<T: Send>(_: T) {}
+/// fn move_to_thread(k: vesper_fiber_abi::Parked) {
+///     send(k); // error[E0277]: cannot be sent between threads safely
+/// }
+/// ```
 #[derive(Debug)]
 pub struct Parked {
     fiber: Box<Fiber>,
@@ -424,6 +473,20 @@ impl Parked {
     }
     pub fn fiber_id(&self) -> u64 {
         self.fiber.id()
+    }
+    /// Deliver exactly one `Cancelled` resume for the current park.
+    ///
+    /// The fiber takes its cancellation edge. If that edge parks again (for
+    /// example to await cleanup I/O), the live continuation is returned as
+    /// [`Outcome::Parked`] at its new generation; it is not completed,
+    /// dropped or reported as an error. Answer that park like any other.
+    /// Never rejected: the signal names the parked evidence identity.
+    pub fn cancel(self) -> Outcome {
+        let evidence = self.request().evidence;
+        match self.resume(Resumption::cancelled(evidence)) {
+            Ok(outcome) => outcome,
+            Err(_) => unreachable!("a cancellation for the parked evidence is never rejected"),
+        }
     }
     pub fn fiber(&self) -> &Fiber {
         &self.fiber
@@ -491,6 +554,18 @@ impl Parked {
 #[derive(Default, Debug)]
 pub struct ContinuationTable {
     parked: BTreeMap<u64, Parked>,
+    /// Fibers that already received their cancellation resume.
+    cancelled: BTreeSet<u64>,
+}
+
+/// Result of [`ContinuationTable::cancel_all`].
+#[derive(Debug, Default)]
+pub struct TableCancel {
+    /// Fibers whose cancellation edge ran to exit, in fiber-id order.
+    pub exited: Vec<Exit>,
+    /// Fibers whose cancellation edge parked again. They remain owned by the
+    /// table under these new tokens and are not cancelled a second time.
+    pub reparked: Vec<RawContinuation>,
 }
 
 impl ContinuationTable {
@@ -507,6 +582,43 @@ impl ContinuationTable {
         let token = k.token();
         self.parked.insert(token.fiber_id, k);
         token
+    }
+    /// Tokens of every owned continuation, in fiber-id order.
+    pub fn tokens(&self) -> Vec<RawContinuation> {
+        self.parked.values().map(Parked::token).collect()
+    }
+    /// Whether this fiber already received a cancellation resume through
+    /// [`Self::cancel_all`].
+    pub fn cancel_delivered(&self, fiber_id: u64) -> bool {
+        self.cancelled.contains(&fiber_id)
+    }
+    /// Deliver one `Cancelled` resume to every owned continuation that has
+    /// not had one yet. Exits are returned; continuations that park again
+    /// stay in the table at their new generation (old tokens become stale).
+    /// Calling it again only reaches continuations inserted since.
+    pub fn cancel_all(&mut self) -> TableCancel {
+        let mut report = TableCancel::default();
+        let ids: Vec<u64> = self
+            .parked
+            .keys()
+            .copied()
+            .filter(|id| !self.cancelled.contains(id))
+            .collect();
+        for id in ids {
+            let k = self.parked.remove(&id).expect("id taken from the table");
+            match k.cancel() {
+                Outcome::Exited(e) => report.exited.push(e),
+                Outcome::Parked(k) => {
+                    self.cancelled.insert(id);
+                    report.reparked.push(self.insert(k));
+                }
+            }
+        }
+        report
+    }
+    /// Give every owned continuation back to the caller (fiber-id order).
+    pub fn into_parked(mut self) -> Vec<Parked> {
+        std::mem::take(&mut self.parked).into_values().collect()
     }
     fn check(&self, token: RawContinuation) -> Result<(), ResumeError> {
         let k = self
@@ -529,6 +641,7 @@ impl ContinuationTable {
     /// Remove a continuation without resuming it.
     pub fn take(&mut self, token: RawContinuation) -> Result<Parked, ResumeError> {
         self.check(token)?;
+        self.cancelled.remove(&token.fiber_id);
         Ok(self.parked.remove(&token.fiber_id).unwrap())
     }
     /// Resume the continuation named by `token`. Any rejection leaves the
@@ -538,9 +651,18 @@ impl ContinuationTable {
         token: RawContinuation,
         resumption: Resumption,
     ) -> Result<Outcome, ResumeError> {
-        let k = self.take(token)?;
+        self.check(token)?;
+        let k = self.parked.remove(&token.fiber_id).unwrap();
         match k.resume(resumption) {
-            Ok(outcome) => Ok(outcome),
+            Ok(Outcome::Parked(k)) if self.cancelled.contains(&token.fiber_id) => {
+                // Still in its cancellation cleanup: keep the record so a
+                // later cancel_all does not cancel the cleanup park.
+                Ok(Outcome::Parked(k))
+            }
+            Ok(outcome) => {
+                self.cancelled.remove(&token.fiber_id);
+                Ok(outcome)
+            }
             Err(rejected) => {
                 self.parked.insert(token.fiber_id, rejected.continuation);
                 Err(rejected.error)

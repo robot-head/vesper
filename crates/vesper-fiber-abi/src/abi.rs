@@ -5,8 +5,17 @@
 //! layout below requires bumping [`ABI_VERSION`].
 use std::mem::{align_of, offset_of, size_of};
 
-/// Version 1 of the native Pulse continuation ABI.
-pub const ABI_VERSION: u32 = 1;
+/// Version 2 of the native Pulse continuation ABI.
+///
+/// * v1: initial context/evidence layouts; switch frame saved only the
+///   general-purpose and vector callee-saved registers.
+/// * v2: the switch frame also saves the floating-point control state
+///   ([`crate::fpenv`], Linux hosts) and new contexts carry
+///   [`FLAG_FP_ENV_SAVED`]. The `repr(C)` layouts and offsets below are
+///   unchanged from v1, so generated code and objects are unchanged; the
+///   version still changes because the runtime-side switch frame and the
+///   lifecycle contract changed.
+pub const ABI_VERSION: u32 = 2;
 /// `b"VFIB"` little endian. A context with another magic is not a fiber.
 pub const CONTEXT_MAGIC: u32 = u32::from_le_bytes(*b"VFIB");
 
@@ -176,8 +185,12 @@ pub struct FiberContext {
 }
 
 /// `flags` bit: the physical stack must not move while this context lives.
-/// Always set in ABI v1.
+/// Always set since ABI v1.
 pub const FLAG_STACK_PINNED: u32 = 1;
+/// `flags` bit: the switch frame saves and restores the target ABI's
+/// floating-point control state, so each context owns its environment.
+/// Always set since ABI v2.
+pub const FLAG_FP_ENV_SAVED: u32 = 2;
 
 /// Byte offsets used by generated code. Checked against the Rust layout below.
 pub mod offsets {
@@ -272,5 +285,5 @@ const _: () = assert!(size_of::<ParkRequest>() == 32);
 const _: () = assert!(size_of::<ResumeSignal>() == 32);
 const _: () = assert!(size_of::<EvidenceSlot>() == offsets::SLOT_SIZE as usize);
 const _: () = assert!(size_of::<EvidenceVectorHeader>() == 16);
-// ABI v1 is defined for 64-bit targets only; pointers are stored as u64.
+// ABI v1/v2 are defined for 64-bit targets only; pointers are stored as u64.
 const _: () = assert!(size_of::<usize>() == 8);

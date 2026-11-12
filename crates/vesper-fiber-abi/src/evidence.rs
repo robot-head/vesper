@@ -93,7 +93,11 @@ impl Installation {
     /// makes, and no other code may access it while a fiber runs `handler`.
     /// Ownership is usually given to the vector with
     /// [`EvidenceVector::keep_alive`]. `handler` must accept every `op` and
-    /// `arg` the generated code passes, and must not unwind.
+    /// `arg` the generated code passes, and must not unwind. It must not
+    /// retain an address on the performing fiber's stack (such as a
+    /// stack-slot `arg`) past the call: a parked fiber's stack is freed if
+    /// its continuation is abandoned. It must not park, resume or drop the
+    /// fiber that called it.
     pub unsafe fn direct(effect: u32, handler: HandlerFn, state: *mut u8) -> Self {
         Self {
             effect,

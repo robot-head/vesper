@@ -6,6 +6,14 @@
 //!    real io_uring driver is used when the kernel allows it; otherwise the
 //!    run says so and uses an in-process fixture driver.
 //! 3. Writes x86_64 and AArch64 relocatable objects (and their CLIF) to DIR.
+//! 4. Shuts native fibers down explicitly through `NativeRuntime`:
+//!    * a clean shutdown that cancels one fiber before start, one after a
+//!      yield and one during I/O;
+//!    * a recoverable incomplete shutdown: fibers whose cancellation edge
+//!      parks again exhaust a small drain budget, the runtime comes back with
+//!      every owner, and a second drain finishes them;
+//!    * when io_uring is available, a kernel read on an idle pipe cancelled
+//!      during I/O.
 #[cfg(not(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64")
@@ -34,9 +42,12 @@ mod linux {
     use std::fs::File;
     use std::io::{self, Write};
     use std::path::PathBuf;
+    use std::rc::Rc;
+    use vesper_fiber_abi::abi::exit;
     use vesper_fiber_abi::evidence::EvidenceRegistry;
+    use vesper_fiber_abi::evidence::EvidenceVector;
     use vesper_fiber_abi::prototype::{self, JitPrototype, OptLevel};
-    use vesper_fiber_abi::pulse::{Completed, NativeTask};
+    use vesper_fiber_abi::pulse::{Completed, Incomplete, NativeRuntime, NativeTask, TaskRecord};
     use vesper_pulse::io_driver::{IoDriver, Request};
     use vesper_pulse::scheduler::{Driver, Finished, PollError, Scheduler};
 
@@ -112,6 +123,118 @@ mod linux {
         Ok(done)
     }
 
+    fn status(s: u64) -> &'static str {
+        match s {
+            exit::COMPLETE => "complete",
+            exit::FAILED => "failed",
+            exit::CANCELLED => "cancelled",
+            _ => "abi-violation",
+        }
+    }
+
+    fn print_records(records: &[TaskRecord]) {
+        for r in records {
+            println!(
+                "  fiber {}: {} result={} parks={} cancelled={:?}",
+                r.fiber_id,
+                status(r.status),
+                r.result,
+                r.parks,
+                r.cancelled
+            );
+        }
+    }
+
+    fn shutdown_demo(jit: &JitPrototype, path: &PathBuf) -> Result<bool, String> {
+        let mut registry = EvidenceRegistry::new();
+        let (evidence, _) =
+            prototype::pulse_read_evidence(&mut registry).map_err(|e| e.to_string())?;
+        let open = || File::open(path).map_err(|e| e.to_string());
+        let spawn_read = |rt: &mut NativeRuntime<FixtureDriver>, arg, ev: &Rc<EvidenceVector>| {
+            let fiber = jit
+                .spawn_pulse_read(arg, ev.clone())
+                .map_err(|e| e.to_string())?;
+            Ok::<u64, String>(rt.spawn(fiber, Some(open()?)))
+        };
+        let mut ok = true;
+
+        // Clean shutdown.
+        let mut rt = NativeRuntime::new(FixtureDriver::default());
+        spawn_read(&mut rt, 1, &evidence)?;
+        spawn_read(&mut rt, 2, &evidence)?;
+        for _ in 0..3 {
+            rt.tick(false).map_err(|e| e.to_string())?;
+        }
+        spawn_read(&mut rt, 3, &evidence)?;
+        let drained = rt
+            .shutdown(64, false)
+            .map_err(|e| format!("clean shutdown incomplete: {}", e.reason))?;
+        println!("clean shutdown: {} fibers resolved", drained.records.len());
+        print_records(&drained.records);
+        ok &= drained.records.len() == 3
+            && drained.records.iter().all(|r| r.status == exit::CANCELLED);
+
+        // Recoverable incomplete shutdown.
+        let mut rt = NativeRuntime::new(FixtureDriver::default());
+        for _ in 0..2 {
+            let fiber = jit
+                .spawn_cancel_repark(evidence.clone())
+                .map_err(|e| e.to_string())?;
+            rt.spawn(fiber, None);
+        }
+        rt.tick(false).map_err(|e| e.to_string())?;
+        rt.tick(false).map_err(|e| e.to_string())?;
+        let incomplete = match rt.shutdown(2, false) {
+            Ok(_) => return Err("budget of 2 ticks unexpectedly sufficed".into()),
+            Err(incomplete) => incomplete,
+        };
+        let pending = match &incomplete.reason {
+            Incomplete::BudgetExhausted { pending } => pending.clone(),
+            other => return Err(format!("unexpected incomplete shutdown: {other}")),
+        };
+        println!(
+            "incomplete shutdown: {} (pending owners returned: {pending:?})",
+            incomplete.reason
+        );
+        let drained = incomplete
+            .runtime
+            .drain(64, false)
+            .map_err(|e| format!("second drain incomplete: {}", e.reason))?;
+        println!("second drain: {} fibers resolved", drained.records.len());
+        print_records(&drained.records);
+        ok &= pending.len() == 2
+            && drained
+                .records
+                .iter()
+                .all(|r| r.status == exit::CANCELLED && r.result == 1 + prototype::CLEANUP_DONE);
+
+        // Kernel cancellation during I/O.
+        match IoDriver::<NativeTask>::new(8) {
+            Ok(driver) => {
+                let (reader, _writer) = std::io::pipe().map_err(|e| e.to_string())?;
+                let mut rt = NativeRuntime::new(driver);
+                let fiber = jit
+                    .spawn_pulse_read(4, evidence.clone())
+                    .map_err(|e| e.to_string())?;
+                rt.spawn(fiber, Some(File::from(std::os::fd::OwnedFd::from(reader))));
+                for _ in 0..4 {
+                    rt.tick(false).map_err(|e| e.to_string())?;
+                }
+                let in_flight = rt.driver().pending();
+                let drained = rt
+                    .shutdown(64, true)
+                    .map_err(|e| format!("kernel shutdown incomplete: {}", e.reason))?;
+                println!("kernel cancellation during I/O (in flight: {in_flight}):");
+                print_records(&drained.records);
+                ok &= in_flight == 1 && drained.records[0].status == exit::CANCELLED;
+            }
+            Err(e) => {
+                println!("kernel cancellation: io_uring unavailable ({e}); NOT exercised");
+            }
+        }
+        Ok(ok)
+    }
+
     pub fn run() -> Result<(), String> {
         let mut out = PathBuf::from("target/native-pulse");
         let mut fibers = 4u64;
@@ -173,11 +296,15 @@ mod linux {
             std::fs::write(out.join(format!("{name}.clif")), clif).map_err(|e| e.to_string())?;
             println!("wrote {} ({} bytes)", out.join(name).display(), bytes.len());
         }
-        if ok {
-            println!("round trip: OK");
+        if !ok {
+            return Err("round trip results did not match".into());
+        }
+        println!("round trip: OK");
+        if shutdown_demo(&jit, &path)? {
+            println!("shutdown: OK");
             Ok(())
         } else {
-            Err("round trip results did not match".into())
+            Err("shutdown results did not match".into())
         }
     }
 }
