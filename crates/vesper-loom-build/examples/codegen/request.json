@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "component": "../../../vesper-loom-sandbox/fixtures/bin/step.component.wasm",
+  "step": "build-script",
+  "entry": "codegen",
+  "args": ["/in/proto/schema.txt", "/out/generated.vsp"],
+  "inputs": [{ "guest_path": "/in/proto", "host_path": "proto" }],
+  "target": "x86_64-unknown-linux-gnu",
+  "options": { "profile": "dev" },
+  "determinism": { "wall_clock_ns": 0, "monotonic_ns": 0, "random_seed": 0 },
+  "limits": { "fuel": 50000000, "max_output_bytes": 1048576, "wall_clock_backstop_ms": 30000 },
+  "network": "denied"
+}
