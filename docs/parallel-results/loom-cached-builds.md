@@ -11,14 +11,14 @@ Owned paths: `crates/vesper-loom-build/**` and this file. No root manifest, lock
 | --- | --- |
 | Versioned request/outcome | `BuildRequest` (`BUILD_REQUEST_VERSION = 1`): component bytes, `Invocation`, input mounts, target, options, `Determinism`, `ResourceLimits`, `NetworkPolicy`. `BuildOutcome` (`BUILD_OUTCOME_VERSION = 1`) is serde-serializable. A JSON `RequestFile` (strict, `deny_unknown_fields`, version checked before the rest is parsed) resolves relative paths against the request file. |
 | Validation before execution | Unknown request/protocol versions; `ProcMacro`/`DeriveMacro`; `network: allowed`; non-component binaries (preview1 module, garbage); empty/control-character labels; zero limits; non-absolute, unnormalized or root guest paths; mounts at or under `/out`; duplicate or nested guest mounts; identical or nested host inputs; missing or non-directory inputs; a store, scratch area or destination inside an input (or the reverse). All are rejected before any snapshot. |
-| Snapshot, then execute snapshots | `Runner::prepare` stores the component (`Artifact` blob), the canonical invocation (`Source` blob) and every input (`Source` tree via `ingest_dir`). `Runner::execute` materializes each snapshot into a fresh private scratch run with `Store::materialize` and mounts *those* copies read-only. The original host directory is never mounted. |
+| Snapshot, then execute snapshots | `Runner::prepare` resolves the canonical input paths once and stores the component (`Artifact` blob), the canonical invocation (`Source` blob) and every input (`Source` tree via `ingest_dir`). `Runner::execute` needs only the store (the originals may be moved or deleted after `prepare`) and materializes each snapshot into a fresh private scratch run with `Store::materialize` and mounts *those* copies read-only. The original host directory is never mounted. |
 | Inputs changing during ingestion | Each input is ingested twice; differing tree ids give `InputChangedDuringSnapshot` and nothing runs. After the run, every materialized input is re-ingested and must still equal its snapshot (`InputMutatedDuringRun`). Symlinks, special files and non-portable names in inputs are refused by CAS ingestion (`Snapshot` error). |
 | Canonical derivation key | A CAS `DerivationInputs` V1 (see "Key encoding"). It binds component bytes, input tree digests, guest mount points, the exact invocation (entry, args, tokens, step, protocol), target, user options, every `ResourceLimits`/`TransportLimits`/`Determinism` field, network policy, and the `ExecutionIdentity`. The host location of an input is deliberately *not* in the key. |
-| Unknown fingerprints | `ExecutionIdentity` is computed at compile time by `build.rs`. If any field is unknown, `ReadWrite` and `Verify` fail with `UnknownFingerprint` before execution. Only `CachePolicy::Uncached` runs, and it records nothing. |
+| Unknown fingerprints | `ExecutionIdentity` is computed at compile time by `build.rs`. A `PreparedBuild` carries the identity that keyed it, and `execute` on a runner with any other identity fails with `IdentityMismatch`. If any field is unknown, `ReadWrite` and `Verify` fail with `UnknownFingerprint` before execution. Only `CachePolicy::Uncached` runs, and it records nothing. |
 | Hit verification | On a record: the manifest blob is rehashed and strictly decoded (canonical bytes, known schema, no unknown fields). Its embedded key must equal the lookup key. Every object under the output tree is rehashed and sizes are checked. The file list must match the manifest, and stdout/stderr blobs are rehashed. Outputs are then materialized from the store as independent copies, never hard links. |
 | Miss execution | The real `SandboxHost` runs in a fresh scratch run with an empty dedicated `out/`. A result is accepted only if the guest returned `Ok` with no error-severity diagnostic and the sandbox's own output checks passed. The output must also ingest as a valid portable `Artifact` tree whose file listing equals the sandbox's scan. Output tree, stdout, stderr and a `ResultManifest` are stored; only then is the derivation record published (CAS no-replace publish). |
 | Failures publish nothing | Guest errors, traps, fuel, memory, wall-clock timeout, stdio overflow, output-size violations and rejected outputs return errors. No record is published, and an existing destination stays byte-for-byte unchanged. The scratch run is removed by a drop guard. |
-| Destination | `DestinationPolicy::CreateNew` (default) refuses an existing destination before execution. `Replace` builds the new tree in a sibling staging directory and swaps it in only after acceptance. On Linux the swap is one `renameat2(RENAME_EXCHANGE)`; elsewhere it is rename-aside, rename-in, with rollback on failure. Non-directory destinations are refused. |
+| Destination | A destination inside, or containing, an input, the store or the scratch area is refused, so `Replace` can never delete the cache. `DestinationPolicy::CreateNew` (default) refuses an existing destination before execution. `Replace` builds the new tree in a sibling staging directory and swaps it in only after acceptance. On Linux the swap is one `renameat2(RENAME_EXCHANGE)`; elsewhere it is rename-aside, rename-in, with rollback on failure. Non-directory destinations are refused. |
 | Corrupt and dangling entries | Corrupt objects, missing manifests (dangling records), corrupt records and a manifest for another key all report `CorruptCache` (`CorruptionPolicy::Fail`, default). With `Rebuild`, the step re-executes; re-ingesting the true bytes lets CAS quarantine and repair the objects/records, and the status is `Repaired`. |
 | Concurrent same-key writers | Any number of runners or processes may share a store. Duplicate objects deduplicate. Exactly one writer creates the record; identical results are idempotent. A different result for an existing key is `DivergentOutput` (from CAS `DerivationConflict`) and is never overwritten. `CachePolicy::Verify` re-executes even on a hit and reports `DivergentOutput` if the recorded result differs. |
 | Stale state | `Runner::sweep_stale(min_age)` removes `run-*` scratch directories left by killed processes and calls `Store::sweep_temporaries`. Destination staging uses `.vlb-stage-*`/`.vlb-old-*` siblings, which are removed on every error path that returns. |
@@ -38,7 +38,8 @@ options
   builder.source       BLAKE3 of this crate's Cargo.toml, build.rs, src/
   sandbox.source       BLAKE3 of vesper-loom-sandbox Cargo.toml, src/, wit/
   cas.source           BLAKE3 of vesper-loom-cas Cargo.toml, src/
-  engine.dependencies  BLAKE3 of locked name/version/source/checksum of every
+  engine.dependencies  BLAKE3, over the lockfile of the workspace being built, of the
+                       locked name/version/source/checksum of every
                        wasmtime*, cranelift*, pulley*, regalloc2, winch*, wasmparser,
                        wasm-encoder, wasm-metadata, wasi*, wit-*, cap-*, io-extras,
                        fs-set-times, rustix, system-interface package
@@ -63,6 +64,8 @@ inputs
 Result manifest (`vesper-loom-build/result/v1`): canonical `serde_json` of `ResultManifest { schema, key, output_tree, outputs, outcome, stdout, stderr, fuel_consumed, peak_memory_bytes }`. The derivation record points to this one `Artifact` blob.
 
 ## Compatibility domain
+
+`build.rs` finds that lockfile by walking up from the target directory (`OUT_DIR`), because a path dependency is resolved by the consuming workspace's lockfile, not by one next to this crate. The lockfile must list `vesper-loom-build`. With a `CARGO_TARGET_DIR` outside the workspace, no lockfile is found, `engine_dependencies` is `null` and caching is refused (checked).
 
 A key can be reused only by a runner with the same builder, sandbox and CAS sources, the same locked engine packages, the same `rustc`, the same host target triple, the same WIT and protocol, and identical limits and determinism. This is deliberately conservative. Two runners with the same engine but different lockfiles elsewhere in the engine set, or different `rustc`, never share results. After integration the root lockfile also contains Cranelift 0.125 / `wasmtime-internal-*` 38 (used by the compiler). Those match the prefixes, so the integrated runner's `engine.dependencies` digest will differ from the standalone one. That is a different identity, not a soundness issue. The build profile (debug/release) is not in the key: it does not change Wasmtime semantics or the deterministic fuel count.
 
@@ -135,7 +138,7 @@ Rust 1.97.0, x86_64 Linux (ext4, so CAS used its copy fallback). Run from `crate
 cargo fmt -- --check                         # clean
 cargo clippy --all-targets -- -D warnings    # clean
 RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps  # clean
-cargo test                                   # 2 unit + 17 integration + 2 CLI + 1 doctest passed
+cargo test                                   # 3 unit + 19 integration + 2 CLI + 1 doctest passed
 ```
 
 The integration suite ran three consecutive times with no failures (about 7 s each). Root `cargo metadata --locked` is unaffected. No network or WASI target is needed. No Lean, kernel or platform-specific validation applies to this lane.
@@ -151,13 +154,15 @@ The integration suite ran three consecutive times with no failures (about 7 s ea
 | `mutating_the_original_after_snapshot_does_not_affect_execution` | Original edited between `prepare` and `execute`; output reflects the snapshot |
 | `inputs_are_read_only_and_ambient_authority_is_denied` | Writes to a mount fail; the original host path is unreachable; only `/in/proto` and `/out` are preopened; no env/args; DNS denied; failures publish nothing |
 | `failures_publish_nothing_and_preserve_the_destination` | Panic, fuel, memory, wall-clock timeout, stdio overflow, output bytes, guest error, bad input: no record, destination unchanged, scratch empty; a later success replaces atomically without leftovers |
-| `create_new_refuses_an_existing_destination_before_executing` | Existing directory or file destination; destinations in an input, the store or scratch |
+| `create_new_refuses_an_existing_destination_before_executing` | Existing directory or file destination; destinations in an input, the store or scratch; `Replace` of an ancestor of the store/scratch is refused and the store stays intact |
 | `concurrent_writers_of_one_key_agree` | 6 threads with separate runners: exactly one `newly_recorded`, same manifest, one clean record |
 | `divergent_results_for_one_key_are_detected_not_overwritten` | Forged well-formed record: `Verify` reports `DivergentOutput`, leaves the record and creates no destination; an honest record verifies |
 | `corrupt_and_dangling_cache_entries_are_explicit` | Corrupt output object, deleted manifest, garbage record, manifest for another key: `CorruptCache`; `Rebuild` repairs to `Repaired`, then a clean hit |
 | `invalid_requests_are_rejected_before_any_execution` | Every validation rule above, plus a symlink inside an input (snapshot refusal) |
+| `execution_needs_only_the_snapshots_not_the_original_inputs` | Input renamed, then deleted after `prepare`: miss and later hit still succeed |
+| `a_prepared_build_runs_only_under_the_identity_that_keyed_it` | Different or incomplete preparing identity → `IdentityMismatch` under every cache policy; nothing recorded |
 | `request_files_are_versioned_and_strict`, CLI tests | JSON round trip, future version, unknown fields, macro step in a file; executable miss/hit/key/replace/verify/sweep/identity and exit codes |
-| unit `snapshot_refuses_inputs_that_change_between_passes`, `manifest_decoding_is_strict` | Mid-ingestion change detection; non-canonical, unknown-field and unknown-schema manifests rejected |
+| unit `snapshot_refuses_inputs_that_change_between_passes`, `tree_listing_uses_full_path_order`, `manifest_decoding_is_strict` | Mid-ingestion change detection; `a.txt`/`a/x` listed in the sandbox's full-path order; non-canonical, unknown-field and unknown-schema manifests rejected |
 
 Mutation checks (each reverted): mounting the original host directory instead of the snapshot fails the mutation-after-snapshot test. Skipping output-tree verification on a hit fails the corruption test. Dropping `limits.fuel` from the key fails the key test. Dropping the execution identity from the key fails the identity test.
 
@@ -165,7 +170,7 @@ Mutation checks (each reverted): mounting the original host directory instead of
 
 1. Register `crates/vesper-loom-build` in root `members` and `default-members`. Delete its `[workspace]` table and nested `Cargo.lock`, and regenerate the root lockfile. Keep `default-run = "vesper"` for the root package; this crate's binary is `vesper-loom-build`.
 2. Dependencies are `vesper-loom-cas`, `vesper-loom-sandbox` (path), `blake3 1.8` (1.8.7), `serde 1`, `serde_json 1`, unix `libc 0.2` (0.2.191), build-dependency `blake3`, dev `sha2 0.10`, `tempfile 3`. All of these are already in the root lock at the same versions.
-3. `build.rs` reads `../vesper-loom-sandbox` and `../vesper-loom-cas` and the nearest `Cargo.lock` above the crate. Keep the three crates as siblings under `crates/`; otherwise the fingerprint becomes `unknown` and caching is refused (fail-closed).
+3. `build.rs` reads `../vesper-loom-sandbox`, `../vesper-loom-cas` and the lockfile above the target directory. Keep the three crates as siblings under `crates/`; otherwise the fingerprint becomes `unknown` and caching is refused (fail-closed).
 4. CI can run `cargo test -p vesper-loom-build`. It needs no wasm target. The sandbox fixture-freshness job also covers this crate's fixture.
 5. Wiring into the root `vesper` CLI, `Loom.lock` and the Loom build graph is coordinator work and was not done here.
 
