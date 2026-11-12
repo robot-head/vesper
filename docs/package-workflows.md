@@ -38,7 +38,7 @@ The catalog supplies local manifest/version metadata; the command selects concre
 
 Successful JSON output is `{"status":"resolved","solution":...}`. Solver errors use `{"status":"error","error":...}` and exit nonzero. Search-budget exhaustion is distinct from an unsatisfiable graph. File/argument parsing errors are reported on stderr. The output lockfile is a schema-versioned exact `Solution` snapshot containing manifests, selected features and system versions. It is not a signed registry lockfile or a trusted artifact derivation.
 
-Lockfiles are written via a temporary file and atomic replacement after successful resolution and serialization. A resolution or temporary-write failure leaves an existing lockfile intact. As with the standalone calculus, capability checks validate declared metadata, not actual compiler-body authority. Package-qualified authority analysis and provenance verification remain separate integration gates. Unsupported optimization/attestation/vetting policies fail closed rather than being reported as enforced.
+Lockfiles are written via a temporary file and atomic replacement after successful resolution and serialization. Staging names have a fixed short prefix independent of the destination filename, so a valid maximum-length output name remains usable. A resolution or temporary-write failure leaves an existing lockfile intact. As with the standalone calculus, capability checks validate declared metadata, not actual compiler-body authority. Package-qualified authority analysis and provenance verification remain separate integration gates. Unsupported optimization/attestation/vetting policies fail closed rather than being reported as enforced.
 
 The first resolver uses bounded deterministic backtracking, not the design's planned CDCL/Max-SMT engines or its performance targets. The source ceiling, feature and version constraints are useful now while those engines and external trust services remain future work.
 
@@ -57,6 +57,21 @@ Validation checks the current root manifest and requested features, every select
 Successful JSON output is `{"status":"locked","solution":...}`. Invalid or stale snapshots return an error with kind `locked_mismatch`, distinct from a failed search's `unsatisfiable`. Invalid catalog/manifest inputs and unsupported policy remain `invalid_input` and `unsupported_policy`. Structured validation errors use the existing `{"status":"error","error":...}` envelope with zero search decisions. Argument, file and JSON parsing errors go to stderr. Failed validation leaves all files untouched.
 
 Locked validation checks consistency with supplied local metadata. It does not authenticate that metadata, verify package source bytes, audit compiler authority, execute builds or establish provenance. The snapshot format remains the experimental exact `Solution` DTO described above.
+
+## Guarding declared permissions during resolution
+
+```sh
+cargo run -- resolve examples/loom/Loom.toml --catalog examples/loom/catalog.json \
+  --baseline /tmp/Loom.lock -o /tmp/Loom.lock --json
+```
+
+`--baseline` is an opt-in guard on a fresh resolution. The existing snapshot is read and validated first; the candidate is resolved normally, then compared before any output is written. Both graphs must have the same nonempty root identities. Successful guarded JSON includes `upgrade` alongside `status: "resolved"` and `solution`; ordinary resolution without the flag is unchanged. `--baseline` cannot be combined with `--locked`.
+
+The guard rejects added required capabilities, widened package/dependency ceilings and relaxing `forbid_unsafe_ffi`, including grants on edges whose current target is pure. It compares each reachable package, so moving `Net` from one dependency to another is detected even if the root's total remains unchanged. Typed capability identities are compared exactly. Reductions and new pure dependencies are allowed; native-version changes alone do not count as authority changes. Unreachable selections do not grant authority, but both entire snapshots must still pass structural validation.
+
+A rejected comparison exits nonzero, returns `capability_escalation` or `upgrade_mismatch` plus the structured upgrade report in JSON mode, and preserves existing output bytes. Invalid baseline graphs produce `invalid_baseline`; file/JSON parsing errors use stderr. The guard checks the proposed result rather than searching for an older alternative. It has no override flag in this milestone.
+
+This checks declared local metadata, not compiler-body authority, interface SemVer, source provenance, version progression or binary ABI. A caller-supplied baseline is not authenticated. The command performs no builds, package code or tests; full automatic update/publish policy remains separate integration work.
 
 ## Inspecting the package graph
 
