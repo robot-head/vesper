@@ -10,13 +10,38 @@ use std::{
 };
 
 static SERIAL: Mutex<()> = Mutex::new(());
+
+/// Resolve `lean` to the binary of the toolchain this checkout pins.
+///
+/// The fixtures run Lean from a temporary directory. Through the elan proxy,
+/// `lean` there finds no `lean-toolchain` file and fails unless a default
+/// toolchain is configured, which CI deliberately does not do. Asking the
+/// proxy for its prefix from the repository root pins the binary instead.
+fn resolve_lean(lean: String) -> String {
+    let Ok(output) = Command::new(&lean)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .arg("--print-prefix")
+        .output()
+    else {
+        return lean;
+    };
+    let prefix = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let binary = PathBuf::from(prefix)
+        .join("bin")
+        .join(format!("lean{}", std::env::consts::EXE_SUFFIX));
+    if output.status.success() && binary.is_file() {
+        binary.to_string_lossy().into_owned()
+    } else {
+        lean
+    }
+}
 struct Fixture {
     root: PathBuf,
     lean: String,
 }
 impl Fixture {
     fn new() -> Option<Self> {
-        let lean = std::env::var("VESPER_LEAN").unwrap_or_else(|_| "lean".into());
+        let lean = resolve_lean(std::env::var("VESPER_LEAN").unwrap_or_else(|_| "lean".into()));
         let version = match Command::new(&lean).arg("--version").output() {
             Ok(output) => output,
             Err(e) => {
