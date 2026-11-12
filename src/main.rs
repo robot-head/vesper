@@ -14,7 +14,6 @@ mod proof_commands;
 mod sbom_commands;
 mod simd_commands;
 mod trace_commands;
-use ariadne::{Label, Report, ReportKind, Source};
 use std::{
     env, fs, io,
     path::PathBuf,
@@ -305,13 +304,40 @@ fn diagnostics(file: &str, source: &str, ds: &[Diagnostic], json: bool) {
         println!("{}", serde_json::to_string(ds).unwrap());
         return;
     }
-    for d in ds {
-        let span = d.span.start.min(source.len())..d.span.end.min(source.len());
-        let _ = Report::build(ReportKind::Error, (file, span.clone()))
-            .with_code(&d.code)
-            .with_message(&d.message)
-            .with_label(Label::new((file, span)).with_message(&d.message))
-            .finish()
-            .eprint((file, Source::from(source)));
+    let rendered = (|| {
+        if source.len() > vesper_span::Limits::HARD.max_source_bytes {
+            return Err("source exceeds the 1 MiB diagnostic display profile".into());
+        }
+        let index =
+            vesper_span::LineIndex::new(std::sync::Arc::from(source), vesper_span::Limits::HARD)
+                .map_err(|error| error.to_string())?;
+        vesper_diagnostics::prepare(&index, ds, vesper_diagnostics::Limits::HARD)
+            .and_then(|prepared| prepared.terminal(file))
+            .map_err(|error| error.to_string())
+    })();
+    match rendered {
+        Ok(bytes) => {
+            use io::Write;
+            let _ = io::stderr().lock().write_all(&bytes);
+        }
+        Err(reason) => {
+            // Compiler errors remain errors when source presentation is outside
+            // its profile. These are raw byte offsets, never clamped squiggles.
+            eprintln!("diagnostic source rendering unavailable: {reason}");
+            for diagnostic in ds.iter().take(128) {
+                let code: String = diagnostic.code.chars().take(128).collect();
+                let message: String = diagnostic.message.chars().take(4096).collect();
+                eprintln!(
+                    "{code}: {message} (UTF-8 bytes {}..{})",
+                    diagnostic.span.start, diagnostic.span.end
+                );
+            }
+            if ds.len() > 128 {
+                eprintln!(
+                    "{} additional compiler errors exceed the display profile",
+                    ds.len() - 128
+                );
+            }
+        }
     }
 }

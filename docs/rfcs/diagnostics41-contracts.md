@@ -15,7 +15,7 @@ remains 2026-11-12T09:18:30.204Z (41 sections/Appendix A). This batch addresses
 | [#90](https://github.com/robot-head/vesper/issues/90) | diagnostics41/render | New crates/vesper-diagnostics/** |
 | [#91](https://github.com/robot-head/vesper/issues/91) | diagnostics41/bounds | src/tooling/frontend.rs and matching diagnostic-bound tests |
 | [#92](https://github.com/robot-head/vesper/issues/92) | diagnostics41/acceptance | New tests/diagnostics_cli.rs, scripts/test-diagnostics.sh, scripts/check-diagnostics.py, .github/workflows/diagnostics.yml |
-| [#93](https://github.com/robot-head/vesper/issues/93) | diagnostics41/integration | src/main.rs diagnostic dispatcher/imports; src/lsp/session.rs diagnostic conversion; global Cargo/lock; this contract and integration report |
+| [#93](https://github.com/robot-head/vesper/issues/93) | diagnostics41/integration | src/main.rs diagnostic dispatcher/imports; src/lsp/session.rs diagnostic conversion/publication capability recording; global Cargo/lock; this contract and integration report |
 
 Every lane additionally owns its `docs/parallel-results/diagnostics41-<lane>.md`.
 Unlisted production files are read-only. No source work is assigned outside these
@@ -93,7 +93,9 @@ optional metadata. If source/render metadata is outside the renderer profile,
 print a truthful bounded raw coded message/byte location and unavailable reason,
 never guessed/clamped squiggles or a suppressed compiler error. Editor conversion
 failures publish explicit current-version/hash analysis_unavailable warnings,
-not partial or stale errors. Existing code actions still recompute and verify
+not partial or stale errors. Initialization records publishDiagnostics relatedInformation/dataSupport;
+optional relatedInformation and data.help are omitted unless negotiated. Existing
+unavailable-warning status metadata remains intact. Existing code actions still recompute and verify
 actual lint candidates; client labels/fix/proof flags are never authority.
 
 ## Delivery and validation

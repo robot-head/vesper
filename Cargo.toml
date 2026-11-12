@@ -8,6 +8,7 @@ members = [
     "crates/vesper-syntax",
     "crates/vesper-span",
     "crates/vesper-lsp",
+    "crates/vesper-diagnostics",
     "crates/vesper-grammar",
     "crates/vesper-fmt",
     "crates/vesper-lint",
@@ -56,6 +57,7 @@ default-members = [
     "crates/vesper-syntax",
     "crates/vesper-span",
     "crates/vesper-lsp",
+    "crates/vesper-diagnostics",
     "crates/vesper-grammar",
     "crates/vesper-fmt",
     "crates/vesper-lint",
@@ -124,6 +126,7 @@ vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }
 vesper-span = { path = "crates/vesper-span" }
 vesper-lsp = { path = "crates/vesper-lsp" }
+vesper-diagnostics = { path = "crates/vesper-diagnostics" }
 vesper-fmt = { path = "crates/vesper-fmt" }
 vesper-lint = { path = "crates/vesper-lint" }
 vesper-bench = { path = "crates/vesper-bench" }

@@ -3469,6 +3469,7 @@ dependencies = [
  "vesper-bench",
  "vesper-bench-pmu",
  "vesper-core",
+ "vesper-diagnostics",
  "vesper-doc",
  "vesper-fiber-abi",
  "vesper-fmt",
@@ -3541,6 +3542,17 @@ name = "vesper-core"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "vesper-diagnostics"
+version = "0.1.0"
+dependencies = [
+ "ariadne",
+ "serde_json",
+ "vesper-core",
+ "vesper-span",
 ]
 
 [[package]]

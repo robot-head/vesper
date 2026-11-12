@@ -59,6 +59,8 @@ pub(crate) struct Session {
     policy: Policy,
     hierarchical_symbols: bool,
     code_actions_supported: bool,
+    diagnostic_related: bool,
+    diagnostic_help_data: bool,
 }
 impl Session {
     pub(crate) fn new() -> Result<Self, String> {
@@ -71,6 +73,8 @@ impl Session {
             policy: Policy::default(),
             hierarchical_symbols: false,
             code_actions_supported: false,
+            diagnostic_related: false,
+            diagnostic_help_data: false,
         })
     }
     fn running(&self) -> Result<(), ServerError> {
@@ -96,6 +100,17 @@ impl Session {
                 ));
             }
             let initialize = object(params.as_ref())?;
+            let publishes = initialize
+                .get("capabilities")
+                .and_then(|value| value.pointer("/textDocument/publishDiagnostics"));
+            self.diagnostic_related = publishes
+                .and_then(|value| value.get("relatedInformation"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            self.diagnostic_help_data = publishes
+                .and_then(|value| value.get("dataSupport"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             self.hierarchical_symbols = initialize
                 .get("capabilities")
                 .and_then(|value| {
@@ -405,10 +420,26 @@ impl Session {
             .get(uri)
             .ok_or_else(|| ServerError::internal("source mirror missing"))?;
         let analysis = database::guarded_analysis(&self.db, file);
-        let (diagnostics, status, kind) = match analysis.checked() {
+        let (mut diagnostics, status, kind) = match analysis.checked() {
             Ok(_) => (Vec::new(), "checked", None),
-            Err(failure) => diagnostic_payload(document.index(), failure)?,
+            Err(failure) => diagnostic_payload(uri, document.index(), failure)?,
         };
+        // Validation covers every supplied span before optional presentation
+        // fields are filtered for the client's publication capabilities.
+        for diagnostic in &mut diagnostics {
+            if let Some(object) = diagnostic.as_object_mut() {
+                if !self.diagnostic_related {
+                    object.remove("relatedInformation");
+                }
+                if !self.diagnostic_help_data
+                    && object
+                        .get("data")
+                        .is_some_and(|data| data.get("help").is_some())
+                {
+                    object.remove("data");
+                }
+            }
+        }
         Ok(notification(
             "textDocument/publishDiagnostics",
             json!({"uri":uri,"version":document.version(),
@@ -566,6 +597,7 @@ fn kind_matches(offered: &str, requested: &str) -> bool {
 }
 type DiagnosticPayload = (Vec<Value>, &'static str, Option<&'static str>);
 fn diagnostic_payload(
+    uri: &str,
     index: &vesper_span::LineIndex,
     failure: &AnalysisFailure,
 ) -> Result<DiagnosticPayload, ServerError> {
@@ -576,27 +608,39 @@ fn diagnostic_payload(
             Some(failure_kind(failure)),
         )),
         AnalysisFailure::Parse { .. } | AnalysisFailure::Semantic { .. } => {
-            let mut diagnostics = Vec::new();
-            for diagnostic in failure.diagnostics() {
-                let Ok(span) = index.range(vesper_span::ByteSpan {
-                    start: diagnostic.span.start,
-                    end: diagnostic.span.end,
-                }) else {
+            let rendered = vesper_diagnostics::prepare(
+                index,
+                failure.diagnostics(),
+                vesper_diagnostics::Limits::default(),
+            )
+            .and_then(|prepared| prepared.to_lsp(uri));
+            let diagnostics = match rendered {
+                Ok(diagnostics) => diagnostics,
+                Err(error) => {
+                    let kind = if matches!(
+                        &error,
+                        vesper_diagnostics::Error::Span(
+                            vesper_span::Error::ByteOutOfBounds
+                                | vesper_span::Error::Utf8Boundary
+                                | vesper_span::Error::LineEndingInterior
+                                | vesper_span::Error::ReversedRange
+                        )
+                    ) {
+                        "invalid_compiler_span"
+                    } else {
+                        "diagnostic_metadata"
+                    };
                     return Ok((
                         vec![unavailable_warning(
                             index,
-                            "invalid_compiler_span",
-                            "Analysis unavailable: a compiler diagnostic span cannot be mapped to current UTF-16 source",
+                            kind,
+                            &format!("Analysis unavailable: compiler diagnostic metadata: {error}"),
                         )?],
                         "analysis_unavailable",
-                        Some("invalid_compiler_span"),
+                        Some(kind),
                     ));
-                };
-                diagnostics.push(
-                    json!({"range":range_json(span),"severity":1,"source":"vesper",
-                    "code":diagnostic.code,"message":diagnostic.message}),
-                );
-            }
+                }
+            };
             Ok((
                 diagnostics,
                 if matches!(failure, AnalysisFailure::Parse { .. }) {
@@ -945,17 +989,26 @@ mod tests {
             vesper_span::LineIndex::new(Arc::from("😀\r\n"), vesper_span::Limits::default())
                 .unwrap();
         for span in [1..2, 5..6, 99..100] {
-            let failure = AnalysisFailure::Semantic {
-                diagnostics: vec![
-                    crate::ast::Diagnostic::new("test", "valid prefix", 0..0),
-                    crate::ast::Diagnostic::new("test", "invalid location", span),
-                ],
-            };
-            let (diagnostics, status, kind) = diagnostic_payload(&index, &failure).unwrap();
-            assert_eq!(status, "analysis_unavailable");
-            assert_eq!(kind, Some("invalid_compiler_span"));
-            assert_eq!(diagnostics.len(), 1);
-            assert_eq!(diagnostics[0]["severity"], 2);
+            for related in [false, true] {
+                let invalid = if related {
+                    crate::ast::Diagnostic::new("test", "valid primary", 0..0)
+                        .with_related(span.clone(), "invalid secondary location")
+                } else {
+                    crate::ast::Diagnostic::new("test", "invalid location", span.clone())
+                };
+                let failure = AnalysisFailure::Semantic {
+                    diagnostics: vec![
+                        crate::ast::Diagnostic::new("test", "valid prefix", 0..0),
+                        invalid,
+                    ],
+                };
+                let (diagnostics, status, kind) =
+                    diagnostic_payload("opaque:test", &index, &failure).unwrap();
+                assert_eq!(status, "analysis_unavailable");
+                assert_eq!(kind, Some("invalid_compiler_span"));
+                assert_eq!(diagnostics.len(), 1);
+                assert_eq!(diagnostics[0]["severity"], 2);
+            }
         }
     }
     #[test]
