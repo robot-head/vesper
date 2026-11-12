@@ -67,6 +67,22 @@ step.
 * The shared lease table is keyed by `(space, slot << 40 | pn)`, so a
   connection sends at most 2^40 packets and an endpoint holds at most 2^22
   connections.
+* A packet the launch queue refuses is abandoned (and recovery declares it
+  lost), never submitted ahead of its EDT. `send_stream` returns
+  `LaunchBackpressure` and replies drop their data frames first. An ACK-only
+  reply that would need a full queue is deferred: the ACK stays owed and
+  `poll` sends it once there is room.
+* Recovery events are fed to BBR as each ACK frame is processed, so a
+  packet with several ACK frames cannot overflow the event buffer.
+* The `Responder` writes into the space left after the short header and
+  tag. A reply whose application frames still do not fit beside its ACK is
+  sent ACK-only.
+* Send keys are updated (RFC 9001 §6) every `key_update_interval` packets
+  (2^22 by default, under the AES-GCM confidentiality limit), or on
+  `initiate_key_update`.
+* Each connection's RFC 9002 loss/PTO deadline is kept in a per-endpoint
+  timer wheel and re-armed after every step, so time-threshold loss fires
+  on time and not only when a lease's PTO comes due.
 * The §35.3 `[T-Let]` rule is kept in host-Rust form: an error is returned
   only after the received frame was recycled or turned around.
 
@@ -84,6 +100,10 @@ step.
 * `tests/endpoint_zero_alloc.rs`: a counting global allocator sees 0
   allocations over 300 warmed-up rounds (1200 data packets, echoes and
   ACKs, both endpoints, every step above).
+* `tests/review_fixes.rs`: key updates on the interval and on demand,
+  launch backpressure with deferred ACKs and no early sends, the ACK-only
+  fallback for an oversize echo, and time-threshold loss from the recovery
+  timer before any PTO.
 * `tests/tcp_bbr.rs`: TCP bulk and lossy, reordering transfers with
   BBRv3 and no adapter errors; partial and late acknowledgements.
 

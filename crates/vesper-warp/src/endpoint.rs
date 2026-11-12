@@ -44,7 +44,9 @@ use vesper_warp_umem::{
     DescError, InFlightQuicPkt, RxHarvested, TxStaged, UmemError, UmemFrame, XdpNic, Xsk,
     XskBackend,
 };
-use vesper_warp_wheel::{EdtLaunchQueue, PacketNumberSpace, RetransmitLeases, WheelConfig};
+use vesper_warp_wheel::{
+    EdtLaunchQueue, PacketNumberSpace, RetransmitLeases, TimerHandle, Wheel, WheelConfig,
+};
 
 use crate::ack::{AckError, Ecn, ReceivedPackets};
 use crate::cc::{CcError, QuicBbr};
@@ -110,6 +112,10 @@ pub struct EndpointConfig {
     pub initial_rtt_ns: u64,
     /// Fill-ring entries replenished per [`WarpEndpoint::poll`].
     pub fill_batch: u32,
+    /// Packets sealed under one send key before the endpoint initiates a
+    /// key update (RFC 9001 §6), kept well below the cipher's §6.6
+    /// confidentiality limit (2^23 for AES-GCM).
+    pub key_update_interval: u64,
     /// Frames kept off the fill ring for fresh transmissions (sends that
     /// do not turn a received frame around: stream data, probes).
     pub tx_reserve: u32,
@@ -135,6 +141,7 @@ impl Default for EndpointConfig {
             initial_rtt_ns: recovery::K_INITIAL_RTT_NS,
             fill_batch: 64,
             tx_reserve: 64,
+            key_update_interval: 1 << 22,
             completion_batch: 64,
         }
     }
@@ -195,6 +202,9 @@ pub enum WarpError {
     StaleConnection,
     /// The congestion window is full.
     CwndLimited,
+    /// The launch queue is full, or the connection's pacing schedule runs
+    /// past the launch horizon: try again after [`WarpEndpoint::poll`].
+    LaunchBackpressure,
     /// The packet does not fit in one datagram or frame.
     PacketTooLarge {
         len: usize,
@@ -312,6 +322,20 @@ pub struct EndpointStats {
     pub leases_retired_acked: u64,
     pub leases_retired_lost: u64,
     pub pto_fired: u64,
+    /// Connection recovery timers (loss or PTO) that fired.
+    pub recovery_timers_fired: u64,
+    /// Key updates this endpoint initiated.
+    pub key_updates: u64,
+    /// Replies whose application frames did not fit one datagram; the ACK
+    /// was sent alone.
+    pub oversize_replies: u64,
+    /// Reply data dropped because the launch queue had no room.
+    pub backpressured_replies: u64,
+    /// ACK-only replies deferred because the launch queue was full.
+    pub deferred_acks: u64,
+    /// Packets the launch queue refused after sealing (abandoned, never
+    /// sent early).
+    pub launch_refused: u64,
     /// Expired leases that recovery no longer tracked (expected 0).
     pub leases_orphaned: u64,
     pub recovery_timeouts: u64,
@@ -340,6 +364,13 @@ struct Conn {
     last_sent_ns: u64,
     /// Latest departure time scheduled on this connection.
     last_edt_ns: u64,
+    /// The recovery timer as armed in the endpoint's timer wheel.
+    timer: Option<(TimerHandle, u64)>,
+    /// Packets sealed under the current send key, and its generation.
+    sent_under_key: u64,
+    send_generation: u64,
+    /// Listed in `deferred_acks`.
+    ack_deferred: bool,
 }
 
 /// A packet waiting for its earliest departure time.
@@ -387,7 +418,12 @@ pub struct WarpEndpoint<B: XskBackend, R: Responder, T: TxTap = ()> {
     conns: Vec<Option<Conn>>,
     leases: RetransmitLeases<Lease>,
     launch: EdtLaunchQueue<Staged>,
-    /// Recovery events of the packet being processed.
+    /// Each connection's RFC 9002 loss-detection timer.
+    timers: Wheel<SlotHandle>,
+    /// Connections whose ACK-only reply found the launch queue full; the
+    /// ACK stays owed and [`WarpEndpoint::poll`] sends it once there is room.
+    deferred_acks: Vec<SlotHandle>,
+    /// Acknowledgements and losses of the packet being processed.
     events: Vec<CongestionEvent>,
     /// Plaintext of the packet being built.
     scratch: Box<[u8]>,
@@ -433,6 +469,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             .map_err(|_| WarpError::Config("invalid lease wheel"))?;
         let launch = EdtLaunchQueue::new(wheel(config.launch_capacity), config.launch_horizon_ns)
             .map_err(|_| WarpError::Config("invalid launch wheel"))?;
+        let timers = Wheel::new(wheel(config.max_connections))
+            .map_err(|_| WarpError::Config("invalid timer wheel"))?;
         let mut conns = Vec::with_capacity(config.max_connections as usize);
         conns.resize_with(config.max_connections as usize, || None);
         let buf = usize::from(config.max_datagram) + TAG_LEN;
@@ -444,6 +482,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             conns,
             leases,
             launch,
+            timers,
+            deferred_acks: Vec::with_capacity(config.max_connections as usize),
             events: Vec::with_capacity(config.max_tracked_per_conn + 8),
             scratch: vec![0u8; buf].into_boxed_slice(),
             app_out: vec![0u8; buf].into_boxed_slice(),
@@ -546,6 +586,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             cc,
             last_sent_ns: now_ns,
             last_edt_ns: now_ns,
+            timer: None,
+            sent_under_key: 0,
+            send_generation: 0,
+            ack_deferred: false,
         });
         self.write_tile(handle);
         Ok(handle)
@@ -617,6 +661,28 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         st.next_edt_ns = bbr.next_edt_ns();
         // Every field came from a valid state and the handle is live.
         let _ = self.table.set(h, &st);
+        self.sync_timer(h);
+    }
+
+    /// Re-arms the connection's loss-detection timer in the timer wheel
+    /// whenever recovery moved it (an ACK, a send or a timeout).
+    fn sync_timer(&mut self, h: SlotHandle) {
+        let Some(Some(c)) = self.conns.get_mut(h.index() as usize) else {
+            return;
+        };
+        let want = c.recovery.timer().map(|t| t.deadline_ns);
+        if c.timer.as_ref().map(|(_, d)| *d) == want {
+            return;
+        }
+        if let Some((handle, _)) = c.timer.take() {
+            let _ = self.timers.cancel(handle);
+        }
+        if let Some(deadline) = want {
+            // Capacity is one entry per connection slot.
+            if let Ok(handle) = self.timers.insert(deadline, h) {
+                c.timer = Some((handle, deadline));
+            }
+        }
     }
 
     fn lookup(&self, dcid: &[u8]) -> Option<SlotHandle> {
@@ -760,6 +826,24 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.stats.cwnd_limited_replies += 1;
             data_len = 0;
         }
+        if data_len > 0 && !self.launch_has_room(slot, now_ns) {
+            self.stats.backpressured_replies += 1;
+            data_len = 0;
+        }
+        // An ACK-only reply waits behind the connection's queued paced
+        // packets (see `stage`). With the launch queue full it cannot, and
+        // sending it now would overtake them, so the ACK is deferred.
+        if data_len == 0 && self.ack_must_wait(slot, now_ns) {
+            self.defer_ack(slot);
+            return match self.xsk.recycle_to_fill_ring(frame) {
+                Ok(()) => Ok(RxOutcome::Processed {
+                    conn: slot,
+                    pn,
+                    replied: false,
+                }),
+                Err(refused) => Err(WarpError::Umem(refused.error)),
+            };
+        }
         self.stats.replies += 1;
         self.send(
             slot,
@@ -789,6 +873,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     ) -> Result<u64, WarpError> {
         if !self.conn(conn)?.cc.can_send() {
             return Err(WarpError::CwndLimited);
+        }
+        if !self.launch_has_room(conn, now_ns) {
+            return Err(WarpError::LaunchBackpressure);
         }
         let frame = Frame::Stream(StreamFrame {
             stream_id,
@@ -828,7 +915,73 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.stats.pto_fired += 1;
             self.on_lease_expired(fired.lease, now_ns)?;
         }
+        loop {
+            let fired = match self.timers.poll(now_ns) {
+                Ok(Some(fired)) => fired,
+                Ok(None) => break,
+                Err(_) => return Err(WarpError::Config("clock went backwards")),
+            };
+            let slot = fired.payload;
+            match self.conns.get_mut(slot.index() as usize) {
+                Some(Some(c)) if c.handle == slot => c.timer = None,
+                _ => continue,
+            }
+            self.stats.recovery_timers_fired += 1;
+            self.run_recovery_timeout(slot, now_ns, None)?;
+            // Not due after all (the deadline moved): re-arm.
+            self.sync_timer(slot);
+        }
+        self.flush_deferred_acks(now_ns)?;
         Ok(report)
+    }
+
+    /// Whether an ACK-only packet on `conn` would need the launch queue
+    /// and find it full.
+    fn ack_must_wait(&self, conn: SlotHandle, now_ns: u64) -> bool {
+        let Ok(c) = self.conn(conn) else {
+            return false;
+        };
+        c.last_edt_ns > now_ns && self.launch.len() >= self.config.launch_capacity as usize
+    }
+
+    fn defer_ack(&mut self, slot: SlotHandle) {
+        self.stats.deferred_acks += 1;
+        let room = self.deferred_acks.len() < self.deferred_acks.capacity();
+        if let Some(Some(c)) = self.conns.get_mut(slot.index() as usize)
+            && !c.ack_deferred
+            && room
+        {
+            c.ack_deferred = true;
+            self.deferred_acks.push(slot);
+        }
+    }
+
+    /// Sends the ACKs deferred by a full launch queue, oldest first, while
+    /// there is room.
+    fn flush_deferred_acks(&mut self, now_ns: u64) -> Result<(), WarpError> {
+        while let Some(&slot) = self.deferred_acks.first() {
+            if self.ack_must_wait(slot, now_ns) {
+                break;
+            }
+            self.deferred_acks.remove(0);
+            let owed = match self.conns.get_mut(slot.index() as usize) {
+                Some(Some(c)) if c.handle == slot => {
+                    c.ack_deferred = false;
+                    c.received.ack_deadline().is_some()
+                }
+                _ => continue,
+            };
+            // Out of tx frames: keep it owed and try on a later poll.
+            if owed
+                && self
+                    .send(slot, Source::Fresh, true, 0, false, now_ns)
+                    .is_err()
+            {
+                self.defer_ack(slot);
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Posts up to `max` free frames to the fill ring, keeping
@@ -841,13 +994,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
 
     /// A lower bound on when [`WarpEndpoint::poll`] next has timer work.
     pub fn next_wake_ns(&self) -> Option<u64> {
-        match (
+        [
             self.leases.next_wake_hint_ns(),
             self.launch.next_wake_hint_ns(),
-        ) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        }
+            self.timers.next_wake_hint_ns(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     /// A parked packet's PTO deadline passed without an ACK. Runs the
@@ -866,28 +1020,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             .is_some_and(|t| t.deadline_ns <= now_ns);
         let mut lease = Some(lease);
         if due {
-            self.stats.recovery_timeouts += 1;
-            self.events.clear();
-            let conn = self.conns[slot.index() as usize].as_mut().expect("checked");
-            let events = &mut self.events;
-            let room = events.capacity();
-            let action = conn.recovery.on_timeout(now_ns, &mut |ev| {
-                if events.len() < room {
-                    events.push(ev);
-                }
-            });
-            for ev in events.iter() {
-                if let Err(e) = conn.cc.on_event(now_ns, *ev) {
-                    debug_assert!(false, "BBR rejected a loss: {e:?}");
-                }
-            }
-            self.resolve_events(slot, Some(&mut lease));
-            if let TimeoutAction::SendProbe { packets, .. } = action {
-                for _ in 0..packets {
-                    self.send_probe(slot, now_ns)?;
-                }
-            }
-            self.write_tile(slot);
+            self.run_recovery_timeout(slot, now_ns, Some(&mut lease))?;
         }
         if let Some(lease) = lease {
             match self.conn(slot)?.recovery.timer() {
@@ -906,6 +1039,40 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 }
             }
         }
+        Ok(())
+    }
+
+    /// RFC 9002 `OnLossDetectionTimeout` for one connection if its timer is
+    /// due: losses go to BBR, leases and the application; PTO sends probes.
+    /// `fired` holds a lease already taken out of the lease wheel.
+    fn run_recovery_timeout(
+        &mut self,
+        slot: SlotHandle,
+        now_ns: u64,
+        fired: Option<&mut Option<Lease>>,
+    ) -> Result<(), WarpError> {
+        let Some(Some(conn)) = self.conns.get_mut(slot.index() as usize) else {
+            return Ok(());
+        };
+        let due = conn
+            .recovery
+            .timer()
+            .is_some_and(|t| t.deadline_ns <= now_ns);
+        if conn.handle != slot || !due {
+            return Ok(());
+        }
+        self.stats.recovery_timeouts += 1;
+        self.events.clear();
+        let Conn { recovery, cc, .. } = conn;
+        let events = &mut self.events;
+        let action = recovery.on_timeout(now_ns, &mut |ev| record_event(cc, events, ev, now_ns));
+        self.resolve_events(slot, fired);
+        if let TimeoutAction::SendProbe { packets, .. } = action {
+            for _ in 0..packets {
+                self.send_probe(slot, now_ns)?;
+            }
+        }
+        self.write_tile(slot);
         Ok(())
     }
 
@@ -981,6 +1148,38 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             },
             Err((None, error)) => Err(error),
         }
+    }
+
+    /// Starts a key update once `key_update_interval` packets were sealed
+    /// under the current send key and RFC 9001 §6 permits one. A
+    /// peer-initiated update also resets the count.
+    fn maybe_update_keys(&mut self, slot: SlotHandle) {
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            return;
+        };
+        if c.keys.send_generation() != c.send_generation {
+            c.send_generation = c.keys.send_generation();
+            c.sent_under_key = 0;
+        }
+        if c.sent_under_key >= self.config.key_update_interval
+            && c.keys.key_update_permitted()
+            && c.keys.initiate_key_update().is_ok()
+        {
+            self.stats.key_updates += 1;
+            c.send_generation = c.keys.send_generation();
+            c.sent_under_key = 0;
+        }
+    }
+
+    /// Starts a key update now (RFC 9001 §6.1), e.g. on local policy.
+    pub fn initiate_key_update(&mut self, conn: SlotHandle) -> Result<(), WarpError> {
+        self.conn(conn)?;
+        let c = self.conns[conn.index() as usize].as_mut().expect("checked");
+        c.keys.initiate_key_update()?;
+        self.stats.key_updates += 1;
+        c.send_generation = c.keys.send_generation();
+        c.sent_under_key = 0;
+        Ok(())
     }
 
     /// Writes the plaintext packet into `scratch`; returns its length and
@@ -1069,9 +1268,19 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if pn >= MAX_SEND_PN {
             return Err((rx, WarpError::PacketNumbersExhausted));
         }
-        let (plain_len, header_len, has_ack) =
+        self.maybe_update_keys(slot);
+        let (plain_len, header_len, has_ack, data_len) =
             match self.write_plaintext(slot, &tile, with_ack, data_len, now_ns) {
-                Ok(v) => v,
+                Ok((p, h, a)) => (p, h, a, data_len),
+                // A reply whose application frames do not fit still carries
+                // its ACK.
+                Err(WarpError::PacketTooLarge { .. }) if data_len > 0 && rx.is_some() => {
+                    self.stats.oversize_replies += 1;
+                    match self.write_plaintext(slot, &tile, with_ack, 0, now_ns) {
+                        Ok((p, h, a)) => (p, h, a, 0),
+                        Err(e) => return Err((rx, e)),
+                    }
+                }
                 Err(e) => return Err((rx, e)),
             };
         let total = plain_len + TAG_LEN;
@@ -1113,6 +1322,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     {
                         Ok(n) => {
                             debug_assert_eq!(n, total);
+                            conn.sent_under_key += 1;
                             Ok(())
                         }
                         Err(err) => {
@@ -1196,11 +1406,26 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
         match self.launch.submit(now_ns, staged.edt_ns, staged) {
             Ok(()) => self.stats.launch_queued += 1,
-            // Beyond the horizon or full: hand it to the NIC with its EDT.
+            // Full or beyond the horizon. The NIC does not enforce launch
+            // times, so submitting now would send early; the packet is
+            // dropped instead and recovery later declares it lost.
+            // `send_stream` and replies check for room first.
             Err(refused) => {
-                self.submit(refused.into_packet(), now_ns);
+                self.stats.launch_refused += 1;
+                self.stats.tx_abandoned += 1;
+                let _ = self.xsk.abandon_tx(refused.into_packet().frame);
             }
         }
+    }
+
+    /// Whether a paced packet on `conn` would find room in the launch queue.
+    fn launch_has_room(&self, conn: SlotHandle, now_ns: u64) -> bool {
+        let Ok(c) = self.conn(conn) else {
+            return false;
+        };
+        self.launch.len() < self.config.launch_capacity as usize
+            && c.cc.controller().next_edt_ns()
+                <= now_ns.saturating_add(self.config.launch_horizon_ns)
     }
 
     fn release_launches(&mut self, now_ns: u64) -> u32 {
@@ -1300,8 +1525,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> Drop for WarpEndpoint<B, R, T> {
             xsk,
             leases,
             launch,
+            timers,
             ..
         } = self;
+        timers.drain(|_, _| {});
         launch.drain(|_, staged| {
             let _ = xsk.abandon_tx(staged.frame);
         });
@@ -1383,7 +1610,13 @@ fn scan_in_place<B: XskBackend, R: Responder>(
                 }
             }
             Frame::Stream(s) => {
-                app_len += app.on_stream(slot, s, &mut app_out[app_len..]);
+                // At most what one datagram can carry after a header and
+                // the tag; a reply that still does not fit with its ACK
+                // falls back to the ACK alone.
+                let budget = app_out.len().saturating_sub(TAG_LEN + MAX_SHORT_HEADER);
+                if app_len < budget {
+                    app_len += app.on_stream(slot, s, &mut app_out[app_len..budget]);
+                }
             }
             _ => {}
         }
@@ -1408,27 +1641,42 @@ fn on_ack_frame(
     exponent: u8,
 ) -> Result<(), DropReason> {
     let delay = recovery::ack_delay_ns(ack.ack_delay, exponent).map_err(DropReason::Recovery)?;
-    let start = events.len();
-    let room = events.capacity();
-    let outcome = conn
-        .recovery
+    let Conn { recovery, cc, .. } = conn;
+    cc.begin_ack();
+    let outcome = recovery
         .on_ack_received(PnSpace::ApplicationData, ack, delay, now_ns, &mut |ev| {
-            // Sized to max_tracked_per_conn + 8, the most one ACK can resolve.
-            if events.len() < room {
-                events.push(ev);
-            }
+            record_event(cc, events, ev, now_ns);
         })
         .map_err(DropReason::Recovery)?;
-    conn.cc.begin_ack();
-    for ev in &events[start..] {
-        if let Err(e) = conn.cc.on_event(now_ns, *ev) {
-            debug_assert!(false, "BBR rejected an event: {e:?}");
-        }
-    }
-    if let Err(e) = conn.cc.end_ack(now_ns, outcome.rtt_sample) {
+    if let Err(e) = cc.end_ack(now_ns, outcome.rtt_sample) {
         debug_assert!(false, "BBR rejected an ACK: {e:?}");
     }
     Ok(())
+}
+
+/// A recovery event goes straight to the BBR adapter (which batches
+/// `Acked` until the ACK ends); acknowledgements and losses are also kept
+/// for lease retirement. Each sent packet is resolved at most once, so
+/// those fit in `max_tracked_per_conn` however many ACK frames a packet
+/// carries.
+fn record_event(
+    cc: &mut QuicBbr,
+    events: &mut Vec<CongestionEvent>,
+    ev: CongestionEvent,
+    now_ns: u64,
+) {
+    if let Err(e) = cc.on_event(now_ns, ev) {
+        debug_assert!(false, "BBR rejected an event: {e:?}");
+    }
+    if matches!(
+        ev,
+        CongestionEvent::Acked { .. } | CongestionEvent::Lost { .. }
+    ) {
+        debug_assert!(events.len() < events.capacity(), "sized to max_tracked");
+        if events.len() < events.capacity() {
+            events.push(ev);
+        }
+    }
 }
 
 /// Packet-number reconstruction for lane 5's opener: lane 1's RFC 9000 A.3
