@@ -1718,7 +1718,9 @@ dependencies = [
  "serde_json",
  "target-lexicon",
  "vesper-core",
+ "vesper-loom-calculus",
  "vesper-pulse",
+ "vesper-semver",
  "vesper-syntax",
 ]
 

@@ -40,6 +40,8 @@ edition = "2024"
 vesper-core = { path = "crates/vesper-core" }
 vesper-syntax = { path = "crates/vesper-syntax" }
 vesper-pulse = { path = "crates/vesper-pulse" }
+vesper-semver = { path = "crates/vesper-semver" }
+vesper-loom-calculus = { path = "crates/vesper-loom-calculus" }
 ariadne = "0.5"
 petgraph = "0.8"
 egg = "0.10"
