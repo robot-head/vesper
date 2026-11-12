@@ -34,7 +34,7 @@ mod source;
 mod tape;
 
 pub use exec::{PANIC_KIND, Verdict};
-pub use fuzz::{Counterexample, FuzzConfig, FuzzReport, Strategy, fuzz};
+pub use fuzz::{Counterexample, FuzzConfig, FuzzReport, NONDETERMINISTIC_KIND, Strategy, fuzz};
 pub use refute::{REFUTED_KIND, Refutation, refute};
 pub use rng::SplitMix64;
 pub use shrink::{DoesNotFail, ShrinkConfig, ShrinkStats, Shrunk, replay, shrink};

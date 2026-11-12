@@ -3,10 +3,11 @@
 //! The `vesper verify --refute` CLI over extracted Lean predicates is
 //! integration work; this is the library entry point it calls.
 
-use crate::fuzz::{Counterexample, FuzzConfig, fuzz};
+use crate::fuzz::{Counterexample, FuzzConfig, NONDETERMINISTIC_KIND, fuzz};
 use crate::source::{Invalid, Probe, PropError, Source};
 use crate::tape::ChoiceTape;
 use std::fmt::Debug;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 /// Failure kind used for refutations.
 pub const REFUTED_KIND: &str = "refuted";
@@ -26,11 +27,16 @@ pub enum Refutation<T> {
         execs: u64,
         witnesses: Vec<ChoiceTape>,
     },
-    /// A failure was found but the generator does not replay its own shrunk
-    /// tape: the generator or predicate is nondeterministic.
+    /// The generator or predicate failed some other way (for example it
+    /// panicked: kind [`crate::PANIC_KIND`]). Not a refutation.
+    Crashed { counterexample: Counterexample },
+    /// A refutation was found but does not reproduce: replaying the shrunk
+    /// tape does not regenerate an input (`error` is why), or the predicate
+    /// is true on the regenerated input. The generator or predicate is
+    /// nondeterministic. Not a refutation.
     Unreproducible {
         counterexample: Counterexample,
-        error: Invalid,
+        error: Option<Invalid>,
     },
 }
 
@@ -59,20 +65,43 @@ where
             Err(PropError::fail(REFUTED_KIND, shown))
         }
     });
-    match report.counterexample {
-        Some(counterexample) => match generate(&mut Source::replay(&counterexample.tape)) {
-            Ok(input) => Refutation::Refuted {
-                input,
-                counterexample,
-            },
-            Err(error) => Refutation::Unreproducible {
-                counterexample,
-                error,
-            },
-        },
-        None => Refutation::Survived {
+    let Some(counterexample) = report.counterexample else {
+        return Refutation::Survived {
             execs: report.execs,
             witnesses: report.corpus,
+        };
+    };
+    if counterexample.failure.kind == NONDETERMINISTIC_KIND {
+        return Refutation::Unreproducible {
+            counterexample,
+            error: None,
+        };
+    }
+    if counterexample.failure.kind != REFUTED_KIND {
+        return Refutation::Crashed { counterexample };
+    }
+    // Re-establish the refutation from the saved tape alone: regenerate the
+    // input and check that the predicate is false on it.
+    let mut src = Source::replay(&counterexample.tape);
+    match generate(&mut src) {
+        Err(error) => Refutation::Unreproducible {
+            counterexample,
+            error: Some(error),
         },
+        Ok(input) => {
+            let mut probe = Probe::default();
+            let holds = catch_unwind(AssertUnwindSafe(|| predicate(&input, &mut probe)));
+            match holds {
+                Ok(false) => Refutation::Refuted {
+                    input,
+                    counterexample,
+                },
+                Ok(true) => Refutation::Unreproducible {
+                    counterexample,
+                    error: None,
+                },
+                Err(_) => Refutation::Crashed { counterexample },
+            }
+        }
     }
 }

@@ -328,9 +328,12 @@ pub struct Source {
 pub const DEFAULT_MAX_DRAWS: usize = 1 << 16;
 
 impl Source {
-    /// Strictly replay `tape`.
+    /// Strictly replay `tape`. Strict replay can never draw past the tape,
+    /// so its budget is the tape-length cap ([`MAX_TAPE_LEN`]), not the
+    /// default per-run budget: a counterexample found with a raised
+    /// `max_draws` still replays.
     pub fn replay(tape: &ChoiceTape) -> Self {
-        Self::build(tape.values.clone(), Extend::Strict, DEFAULT_MAX_DRAWS)
+        Self::build(tape.values.clone(), Extend::Strict, MAX_TAPE_LEN)
     }
 
     /// Replay `prefix`, then continue with pseudo-random choices from `seed`.

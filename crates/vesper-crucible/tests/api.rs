@@ -161,3 +161,80 @@ fn refute_survives_true_predicates_with_witnesses() {
         other => panic!("{other:?}"),
     }
 }
+
+#[test]
+fn refute_reports_a_panicking_predicate_as_crashed_not_refuted() {
+    let outcome = refute(
+        &FuzzConfig {
+            max_execs: 100,
+            ..FuzzConfig::default()
+        },
+        |_src| Ok(42u8),
+        |_x, _probe| panic!("predicate crashed"),
+    );
+    match outcome {
+        Refutation::Crashed { counterexample } => {
+            assert_eq!(counterexample.failure.kind, vesper_crucible::PANIC_KIND)
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn refute_rechecks_the_predicate_on_the_regenerated_input() {
+    // A predicate that is false only on its first call: the search sees a
+    // refutation, but the independent re-check does not reproduce it.
+    let calls = std::cell::Cell::new(0u32);
+    let outcome = refute(
+        &FuzzConfig {
+            max_execs: 100,
+            ..FuzzConfig::default()
+        },
+        |src| src.draw_u8(),
+        |_x, _probe| {
+            calls.set(calls.get() + 1);
+            calls.get() > 1
+        },
+    );
+    assert!(
+        matches!(outcome, Refutation::Unreproducible { .. }),
+        "{outcome:?}"
+    );
+}
+
+#[test]
+fn strict_replay_is_not_limited_by_the_default_draw_budget() {
+    let n = vesper_crucible::DEFAULT_MAX_DRAWS + 1;
+    let mut prop = |src: &mut Source| {
+        for _ in 0..n {
+            src.draw_bool()?;
+        }
+        Err(vesper_crucible::PropError::fail("bug", "after many draws"))
+    };
+    let verdict = vesper_crucible::replay(&mut prop, &ChoiceTape::new(vec![0; n]));
+    assert!(
+        matches!(verdict, vesper_crucible::Verdict::Fail(ref f) if f.kind == "bug"),
+        "{verdict:?}"
+    );
+}
+
+#[test]
+fn solver_respects_its_candidate_limit_on_long_tapes() {
+    let report = vesper_crucible::fuzz(
+        &FuzzConfig {
+            max_execs: 200,
+            initial_random: 1,
+            max_solver_candidates: 4,
+            ..FuzzConfig::default()
+        },
+        |src: &mut Source| {
+            let mut ones = 0u64;
+            for _ in 0..16_384 {
+                ones += u64::from(src.draw_bool()?);
+            }
+            src.probe().eq(1, 1, ones);
+            Ok(())
+        },
+    );
+    assert!(report.solver_runs <= 4 * report.corpus.len() as u64);
+}

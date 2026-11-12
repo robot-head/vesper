@@ -25,6 +25,10 @@ use crate::source::{
 use crate::tape::ChoiceTape;
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Failure kind of a counterexample whose failure did not reproduce under
+/// strict replay of its own tape.
+pub const NONDETERMINISTIC_KIND: &str = "nondeterministic";
+
 /// Search strategy.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Strategy {
@@ -265,12 +269,19 @@ fn solver_candidates(entry: &Entry, limit: usize) -> Vec<Vec<u64>> {
         .map(|(i, _)| i)
         .collect();
     let mut out = BTreeSet::new();
-    let push = |candidate: Vec<u64>, out: &mut BTreeSet<Vec<u64>>| {
-        if candidate != entry.values && out.len() < limit {
+    // Builds a candidate only while under the limit, so a long tape with
+    // many matching positions never copies more than `limit` tapes.
+    let push = |build: &dyn Fn() -> Vec<u64>, out: &mut BTreeSet<Vec<u64>>| -> bool {
+        if out.len() >= limit {
+            return false;
+        }
+        let candidate = build();
+        if candidate != entry.values {
             out.insert(candidate);
         }
+        out.len() < limit
     };
-    for record in &entry.cmps {
+    'records: for record in &entry.cmps {
         if out.len() >= limit {
             break;
         }
@@ -289,9 +300,14 @@ fn solver_candidates(entry: &Entry, limit: usize) -> Vec<Vec<u64>> {
                                 && matches!(kind, DrawKind::Value { .. })
                                 && repl <= kind.max()
                             {
-                                let mut c = entry.values.clone();
-                                c[i] = repl;
-                                push(c, &mut out);
+                                let build = || {
+                                    let mut c = entry.values.clone();
+                                    c[i] = repl;
+                                    c
+                                };
+                                if !push(&build, &mut out) {
+                                    break 'records;
+                                }
                             }
                         }
                         // Byte-lane encodings.
@@ -304,7 +320,10 @@ fn solver_candidates(entry: &Entry, limit: usize) -> Vec<Vec<u64>> {
                             };
                             for (n_bytes, r_bytes) in [(&n.0, &r.0), (&n.1, &r.1)] {
                                 for start in find_in_lane(entry, &lane, n_bytes) {
-                                    push(replace_in_lane(entry, &lane, start, r_bytes), &mut out);
+                                    let build = || replace_in_lane(entry, &lane, start, r_bytes);
+                                    if !push(&build, &mut out) {
+                                        break 'records;
+                                    }
                                 }
                             }
                         }
@@ -321,10 +340,10 @@ fn solver_candidates(entry: &Entry, limit: usize) -> Vec<Vec<u64>> {
                         continue;
                     }
                     for start in find_in_lane(entry, &lane, needle) {
-                        push(
-                            replace_in_lane(entry, &lane, start, &target[..width]),
-                            &mut out,
-                        );
+                        let build = || replace_in_lane(entry, &lane, start, &target[..width]);
+                        if !push(&build, &mut out) {
+                            break 'records;
+                        }
                     }
                 }
             }
@@ -420,7 +439,7 @@ where
             Err(not) => Counterexample {
                 tape: original.clone(),
                 failure: Failure::new(
-                    "nondeterministic",
+                    NONDETERMINISTIC_KIND,
                     format!("{failure}; strict replay gave {:?}", not.0),
                 ),
                 shrink: ShrinkStats {

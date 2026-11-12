@@ -46,8 +46,11 @@ one internal dependency is `vesper-simpulse`, read-only), the Lean model
   `replay_fibers(src, world, fibers, journal, cfg)`, trait `Fiber<W>`,
   `FiberStep`, `SimRun { seed, journal, dispatches, deferrals, steps }`.
 - `refute(&FuzzConfig, generate, predicate) -> Refutation<T>` with
-  `Refuted { input, counterexample }`, `Survived { execs, witnesses }` and
-  `Unreproducible { counterexample, error }`; `REFUTED_KIND`.
+  `Refuted { input, counterexample }` (only after regenerating the input
+  from the shrunk tape and re-checking that the predicate is false on it),
+  `Survived { execs, witnesses }`, `Crashed { counterexample }` (the
+  generator or predicate panicked) and `Unreproducible { counterexample,
+  error }`; `REFUTED_KIND`, `NONDETERMINISTIC_KIND`.
 
 ### Design decisions
 
@@ -182,13 +185,24 @@ Run on the cloud container, Rust 1.100, with an isolated target directory
 and `VESPER_LEAN` pointing at Lean 4.24.0:
 
 - `cargo fmt --all -- --check`: clean.
-- `cargo test -p vesper-crucible --locked`: 23 tests pass (9 api, 6
+- `cargo test -p vesper-crucible --locked`: 27 tests pass (13 api, 6
   fuzzing, 2 lean_model, 6 shrinking); the Lean model compiles and the
   2000-pair differential agrees.
 - `lean CrucibleShrink.lean` from `lean/`: 8 axiom-report lines, standard
   axioms only.
 - `cargo clippy --workspace --locked --all-targets -- -D warnings`: clean.
 - `cargo test --workspace --locked`: 2275 passed, 0 failed.
+
+## Review fixes (Codex review on 764e5f8)
+
+- The solver now stops building candidates once `max_solver_candidates` is
+  reached, instead of cloning the tape for every match and discarding the
+  extras (quadratic copying on long tapes).
+- `refute` returns `Refuted` only for a reproduced `"refuted"` failure whose
+  predicate is false on the regenerated input; panics are `Crashed`,
+  nondeterministic results `Unreproducible`.
+- `Source::replay` (strict) is budgeted by `MAX_TAPE_LEN`, so tapes found
+  with a raised `max_draws` replay.
 
 ## Root patch
 
