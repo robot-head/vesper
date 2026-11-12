@@ -132,6 +132,7 @@ struct ModuleItems {
 struct Crate {
     name: String,
     modules: Vec<ModuleItems>,
+    notes: Vec<Refusal>,
 }
 
 fn file_error(path: &Path, e: syn::Error) -> MigrateError {
@@ -163,6 +164,41 @@ fn has_attr(attrs: &[Attribute], name: &str) -> bool {
     attrs.iter().any(|a| a.path().is_ident(name))
 }
 
+/// `#[cfg]` / `#[cfg_attr]` items depend on a build configuration that this
+/// front end does not evaluate, so they are refused rather than treated as
+/// unconditional exports.
+fn conditional(attrs: &[Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|a| a.path().is_ident("cfg") || a.path().is_ident("cfg_attr"))
+}
+
+fn cfg_refusal(item: String) -> Refusal {
+    Refusal::new(
+        item,
+        RefusalReason::UnsupportedItem,
+        "conditional (#[cfg]/#[cfg_attr]) item: target and feature configuration is not evaluated",
+    )
+}
+
+fn item_attrs(item: &Item) -> Option<(&[Attribute], String)> {
+    Some(match item {
+        Item::Struct(s) => (&s.attrs, format!("struct {}", s.ident)),
+        Item::Enum(e) => (&e.attrs, format!("enum {}", e.ident)),
+        Item::Type(x) => (&x.attrs, format!("type {}", x.ident)),
+        Item::Fn(f) => (&f.attrs, format!("fn {}", f.sig.ident)),
+        Item::Impl(i) => (
+            &i.attrs,
+            format!("impl {}", quote::ToTokens::to_token_stream(&i.self_ty)),
+        ),
+        Item::Trait(x) => (&x.attrs, format!("trait {}", x.ident)),
+        Item::Const(x) => (&x.attrs, format!("const {}", x.ident)),
+        Item::Static(x) => (&x.attrs, format!("static {}", x.ident)),
+        Item::Union(x) => (&x.attrs, format!("union {}", x.ident)),
+        _ => return None,
+    })
+}
+
 fn no_mangle(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| {
         a.path().is_ident("no_mangle")
@@ -176,12 +212,23 @@ fn no_mangle(attrs: &[Attribute]) -> bool {
 fn repr(attrs: &[Attribute]) -> Vec<String> {
     let mut out = vec![];
     for a in attrs.iter().filter(|a| a.path().is_ident("repr")) {
-        let _ = a.parse_nested_meta(|m| {
-            if let Some(i) = m.path.get_ident() {
-                out.push(i.to_string());
+        let parsed = a.parse_nested_meta(|m| {
+            out.push(
+                m.path
+                    .get_ident()
+                    .map_or_else(|| "<path>".to_string(), |i| i.to_string()),
+            );
+            if m.input.peek(syn::token::Paren) {
+                let content;
+                syn::parenthesized!(content in m.input);
+                let _: TokenStream = content.parse()?;
             }
             Ok(())
         });
+        if parsed.is_err() {
+            // Unknown syntax is never mistaken for a plain `repr(C)`.
+            out.push("<unparsed>".into());
+        }
     }
     out
 }
@@ -217,6 +264,7 @@ fn load_dir(dir: &Path, limits: Limits) -> Result<Crate, MigrateError> {
         Err(e) => return Err(io(&manifest, e)),
     };
     let mut modules = vec![];
+    let mut notes = vec![];
     let mut total = 0usize;
     let mut files = 0usize;
     // (file, directory for child modules)
@@ -260,10 +308,15 @@ fn load_dir(dir: &Path, limits: Limits) -> Result<Crate, MigrateError> {
             &mut queue,
             &mut modules,
             true,
+            &mut notes,
         )?;
         modules.push(ModuleItems { items });
     }
-    Ok(Crate { name, modules })
+    Ok(Crate {
+        name,
+        modules,
+        notes,
+    })
 }
 
 fn collect_items(
@@ -273,13 +326,22 @@ fn collect_items(
     queue: &mut Vec<(PathBuf, PathBuf, String)>,
     modules: &mut Vec<ModuleItems>,
     resolve: bool,
+    notes: &mut Vec<Refusal>,
 ) -> Result<(), MigrateError> {
     for item in items {
         match item {
             Item::Mod(m) if is_pub(&m.vis) => {
                 let name = m.ident.to_string();
                 if has_attr(&m.attrs, "path") {
-                    out.push(Item::Verbatim(quote::quote!(compile_error!("path"))));
+                    notes.push(Refusal::new(
+                        format!("mod {name}"),
+                        RefusalReason::UnsupportedItem,
+                        "`#[path]` modules are not followed",
+                    ));
+                    continue;
+                }
+                if conditional(&m.attrs) {
+                    notes.push(cfg_refusal(format!("mod {name}")));
                     continue;
                 }
                 match m.content {
@@ -292,6 +354,7 @@ fn collect_items(
                             queue,
                             modules,
                             resolve,
+                            notes,
                         )?;
                         modules.push(ModuleItems { items: sub });
                     }
@@ -359,6 +422,7 @@ pub fn analyze_source(
     let mut items = vec![];
     let mut modules = vec![];
     let mut queue = vec![];
+    let mut notes = vec![];
     collect_items(
         parsed.items,
         Path::new(""),
@@ -366,10 +430,12 @@ pub fn analyze_source(
         &mut queue,
         &mut modules,
         false,
+        &mut notes,
     )?;
     let mut krate = Crate {
         name: crate_name.to_owned(),
         modules,
+        notes,
     };
     krate.modules.push(ModuleItems { items });
     let mut m = analyze(krate, limits)?;
@@ -681,16 +747,15 @@ impl<'ast> Visit<'ast> for Scan<'_> {
             Expr::Assign(a) => {
                 if let Some(p) = field_path(&a.left, self.name) {
                     self.writes.insert(p);
+                    self.visit_place_indices(&a.left);
                     self.visit_expr(&a.right);
-                    if let Expr::Index(i) = &*a.left {
-                        self.visit_expr(&i.index);
-                    }
                     return;
                 }
             }
             Expr::Binary(b) if compound(&b.op) => {
                 if let Some(p) = field_path(&b.left, self.name) {
                     self.writes.insert(p);
+                    self.visit_place_indices(&b.left);
                     self.visit_expr(&b.right);
                     return;
                 }
@@ -702,6 +767,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
                     } else {
                         self.reads.insert(p);
                     }
+                    self.visit_place_indices(&r.expr);
                     return;
                 }
             }
@@ -713,6 +779,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
                     } else {
                         self.reads.insert(p);
                     }
+                    self.visit_place_indices(&m.receiver);
                     for a in &m.args {
                         self.visit_expr(a);
                     }
@@ -722,6 +789,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
             Expr::Field(_) => {
                 if let Some(p) = field_path(e, self.name) {
                     self.reads.insert(p);
+                    self.visit_place_indices(e);
                     return;
                 }
             }
@@ -745,6 +813,23 @@ impl<'ast> Visit<'ast> for Scan<'_> {
         syn::visit::visit_pat_ident(self, p);
     }
     fn visit_item(&mut self, _: &'ast Item) {}
+}
+
+impl Scan<'_> {
+    /// Visit the index expressions inside a projected place
+    /// (`s.items[s.cursor].x`): they are evaluated, so their accesses count.
+    fn visit_place_indices(&mut self, e: &Expr) {
+        match e {
+            Expr::Paren(p) => self.visit_place_indices(&p.expr),
+            Expr::Unary(u) => self.visit_place_indices(&u.expr),
+            Expr::Field(f) => self.visit_place_indices(&f.base),
+            Expr::Index(i) => {
+                self.visit_place_indices(&i.expr);
+                self.visit_expr(&i.index);
+            }
+            _ => {}
+        }
+    }
 }
 
 struct PtrAnnotation {
@@ -934,6 +1019,7 @@ impl Analyzer {
         };
         let mut assumptions = vec![];
         let mut skip_len: Option<String> = None;
+        let safe = crate::synth::safe_idents(raw.iter().map(|p| p.name.as_str()));
         for (index, p) in raw.iter().enumerate() {
             if skip_len.as_deref() == Some(p.name.as_str()) {
                 skip_len = None;
@@ -942,7 +1028,7 @@ impl Analyzer {
             let pname = if p.receiver {
                 p.name.clone()
             } else {
-                crate::synth::safe_ident(&p.name)
+                safe[index].clone()
             };
             match &p.ty {
                 RTy::Raw { mutable, inner } => {
@@ -1200,7 +1286,7 @@ fn analyze(krate: Crate, limits: Limits) -> Result<Migration, MigrateError> {
         refused: BTreeMap::new(),
         enum_carriers: BTreeMap::new(),
     };
-    let mut refusals = vec![];
+    let mut refusals = krate.notes.clone();
     let mut fns: Vec<(&syn::ItemFn, Option<String>)> = vec![];
     let mut impls: Vec<&syn::ItemImpl> = vec![];
     let mut count = 0usize;
@@ -1221,6 +1307,26 @@ fn analyze(krate: Crate, limits: Limits) -> Result<Migration, MigrateError> {
                     "item budget exceeded",
                 ));
             }
+            if let Some((attrs, label)) = item_attrs(item)
+                && conditional(attrs)
+            {
+                let public = match item {
+                    Item::Struct(x) => is_pub(&x.vis),
+                    Item::Enum(x) => is_pub(&x.vis),
+                    Item::Type(x) => is_pub(&x.vis),
+                    Item::Fn(x) => is_pub(&x.vis),
+                    Item::Trait(x) => is_pub(&x.vis),
+                    Item::Const(x) => is_pub(&x.vis),
+                    Item::Static(x) => is_pub(&x.vis),
+                    Item::Union(x) => is_pub(&x.vis),
+                    Item::Impl(_) => true,
+                    _ => false,
+                };
+                if public {
+                    refusals.push(cfg_refusal(label));
+                }
+                continue;
+            }
             match item {
                 Item::Struct(s) if is_pub(&s.vis) => {
                     if a.structs.insert(s.ident.to_string(), s.clone()).is_some() {
@@ -1233,7 +1339,17 @@ fn analyze(krate: Crate, limits: Limits) -> Result<Migration, MigrateError> {
                     }
                 }
                 Item::Type(t) if is_pub(&t.vis) => {
-                    if !t.generics.params.is_empty() {
+                    if a.aliases.contains_key(&t.ident.to_string()) {
+                        // Aliases are resolved by name without module scope,
+                        // so an alias defined twice is refused, never merged.
+                        a.refused.insert(
+                            t.ident.to_string(),
+                            (
+                                RefusalReason::UnsupportedType,
+                                "type alias defined in more than one module; resolution is not module-scoped".into(),
+                            ),
+                        );
+                    } else if !t.generics.params.is_empty() {
                         a.refused.insert(
                             t.ident.to_string(),
                             (RefusalReason::Generic, "generic type alias".into()),
@@ -1262,11 +1378,6 @@ fn analyze(krate: Crate, limits: Limits) -> Result<Migration, MigrateError> {
                     format!("union {}", u.ident),
                     RefusalReason::Union,
                     "unions have no FieldTree",
-                )),
-                Item::Verbatim(_) => refusals.push(Refusal::new(
-                    "mod #[path]",
-                    RefusalReason::UnsupportedItem,
-                    "`#[path]` modules are not followed",
                 )),
                 _ => {}
             }
@@ -1326,10 +1437,23 @@ fn analyze(krate: Crate, limits: Limits) -> Result<Migration, MigrateError> {
                 continue;
             }
             for f in s.fields.iter() {
-                if let Err((r, d)) = a.rty(&f.ty, Some(name), 0) {
-                    let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
-                    newly.push((name.clone(), (r, format!("field `{fname}`: {d}"))));
-                    break;
+                let fname = f.ident.as_ref().map(|i| i.to_string()).unwrap_or_default();
+                match a.rty(&f.ty, Some(name), 0) {
+                    Err((r, d)) => {
+                        newly.push((name.clone(), (r, format!("field `{fname}`: {d}"))));
+                        break;
+                    }
+                    Ok(ty) if ty.contains_borrow() => {
+                        newly.push((
+                            name.clone(),
+                            (
+                                RefusalReason::BorrowingType,
+                                format!("field `{fname}` stores a reference or raw pointer"),
+                            ),
+                        ));
+                        break;
+                    }
+                    Ok(_) => {}
                 }
             }
         }
@@ -1421,8 +1545,18 @@ fn analyze(krate: Crate, limits: Limits) -> Result<Migration, MigrateError> {
         let item = format!("struct {name}");
         let mut fields = vec![];
         let mut wire_fields = vec![];
-        let mut wire_err: Option<Refusal> = if repr(&s.attrs).iter().any(|r| r == "C") {
+        let reprs = repr(&s.attrs);
+        let mut wire_err: Option<Refusal> = if reprs.iter().all(|r| r == "C") && !reprs.is_empty() {
             None
+        } else if reprs.iter().any(|r| r == "C") {
+            Some(Refusal::new(
+                &item,
+                RefusalReason::WireLayout,
+                format!(
+                    "#[repr({})] modifiers change size or alignment, which the wire declaration does not model",
+                    reprs.join(", ")
+                ),
+            ))
         } else {
             Some(Refusal::new(
                 &item,
@@ -1545,6 +1679,10 @@ fn analyze(krate: Crate, limits: Limits) -> Result<Migration, MigrateError> {
         }
         for m in methods {
             let display = format!("{ty_name}::{}", m.sig.ident);
+            if conditional(&m.attrs) {
+                refusals.push(cfg_refusal(format!("fn {display}")));
+                continue;
+            }
             if let Some((r, d)) = a.refused.get(&ty_name) {
                 refusals.push(Refusal::new(
                     format!("fn {display}"),

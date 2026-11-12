@@ -24,9 +24,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lang_c::ast::{
     ArraySize, BinaryOperator, Constant, DeclarationSpecifier, Declarator, DeclaratorKind,
-    DerivedDeclarator, Ellipsis, Expression, ExternalDeclaration, IntegerBase, PointerQualifier,
-    SpecifierQualifier, StorageClassSpecifier, StructDeclaration, StructKind, StructType,
-    TypeQualifier, TypeSpecifier, UnaryOperator,
+    DerivedDeclarator, Ellipsis, Expression, ExternalDeclaration, IntegerBase, IntegerSize,
+    PointerQualifier, SpecifierQualifier, StorageClassSpecifier, StructDeclaration, StructKind,
+    StructType, TypeQualifier, TypeSpecifier, UnaryOperator,
 };
 use lang_c::driver::{Config, Flavor, parse_preprocessed};
 use vesper_ffi::{Declaration, Endian, Field, Integer, WireType};
@@ -343,10 +343,24 @@ fn int_specifiers(spec: &[&TypeSpecifier]) -> CType {
 }
 
 /// Evaluate an enumerator or array-size constant expression.
+///
+/// C evaluates these in `int` (C11 6.7.2.2 requires enumerator values to be
+/// representable as `int`). The evaluator models signed `int` arithmetic only:
+/// unsigned or long literals, and any intermediate value outside the `int`
+/// range (overflow is undefined, an out-of-range literal changes type), make
+/// the expression unsupported rather than silently computed in wider math.
 fn eval(e: &Expression, consts: &BTreeMap<String, i128>) -> Option<i128> {
+    let int = |v: i128| {
+        (i128::from(i32::MIN)..=i128::from(i32::MAX))
+            .contains(&v)
+            .then_some(v)
+    };
     match e {
         Expression::Constant(c) => match &c.node {
             Constant::Integer(i) => {
+                if i.suffix.unsigned || i.suffix.size != IntegerSize::Int || i.suffix.imaginary {
+                    return None;
+                }
                 let radix = match i.base {
                     IntegerBase::Decimal => 10,
                     IntegerBase::Octal => 8,
@@ -354,19 +368,20 @@ fn eval(e: &Expression, consts: &BTreeMap<String, i128>) -> Option<i128> {
                     IntegerBase::Binary => 2,
                 };
                 let digits: &str = &i.number;
-                if digits.is_empty() {
-                    Some(0)
+                let v = if digits.is_empty() {
+                    0
                 } else {
-                    u64::from_str_radix(digits, radix).ok().map(i128::from)
-                }
+                    i128::from(u64::from_str_radix(digits, radix).ok()?)
+                };
+                int(v)
             }
             _ => None,
         },
-        Expression::Identifier(id) => consts.get(&id.node.name).copied(),
+        Expression::Identifier(id) => consts.get(&id.node.name).copied().and_then(int),
         Expression::UnaryOperator(u) => {
             let v = eval(&u.node.operand.node, consts)?;
             match u.node.operator.node {
-                UnaryOperator::Minus => v.checked_neg(),
+                UnaryOperator::Minus => int(-v),
                 UnaryOperator::Plus => Some(v),
                 _ => None,
             }
@@ -374,15 +389,15 @@ fn eval(e: &Expression, consts: &BTreeMap<String, i128>) -> Option<i128> {
         Expression::BinaryOperator(b) => {
             let l = eval(&b.node.lhs.node, consts)?;
             let r = eval(&b.node.rhs.node, consts)?;
-            match b.node.operator.node {
-                BinaryOperator::Plus => l.checked_add(r),
-                BinaryOperator::Minus => l.checked_sub(r),
-                BinaryOperator::Multiply => l.checked_mul(r),
-                BinaryOperator::ShiftLeft if (0..64).contains(&r) => l.checked_mul(1i128 << r),
-                BinaryOperator::BitwiseOr => Some(l | r),
-                _ => None,
-            }
-            .filter(|v| (-(1i128 << 64)..(1i128 << 64)).contains(v))
+            let v = match b.node.operator.node {
+                BinaryOperator::Plus => l + r,
+                BinaryOperator::Minus => l - r,
+                BinaryOperator::Multiply => l * r,
+                BinaryOperator::ShiftLeft if l >= 0 && (0..31).contains(&r) => l << r,
+                BinaryOperator::BitwiseOr => l | r,
+                _ => return None,
+            };
+            int(v)
         }
         _ => None,
     }
@@ -775,10 +790,11 @@ fn lift_function(
     let mut sys = vec![];
     let mut lifted = vec![];
     let mut assumptions = vec![];
+    let safe = crate::synth::safe_idents(params.iter().map(|(n, _)| n.as_str()));
     let mut i = 0;
     while i < params.len() {
-        let (pname, ty) = &params[i];
-        let pname = crate::synth::safe_ident(pname);
+        let (_, ty) = &params[i];
+        let pname = safe[i].clone();
         match ty {
             CType::Scalar(s) => {
                 sys.push((pname.clone(), SysParam::Value(SysValue::Scalar(*s))));

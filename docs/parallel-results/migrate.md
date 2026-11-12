@@ -37,8 +37,9 @@ anonymous ones named by their typedef), `typedef` chains, pointers with
 pointee and pointer `const`-ness, arrays (array parameters decay), and the
 fixed-width integers. `int`, `unsigned`, `short` and `long long` are accepted
 because they have one width on all four supported targets. Enumerator values
-are evaluated (literals in any base, `-`, `+`, `|`, `<<`, earlier
-enumerators).
+are evaluated under signed `int` semantics only (unsuffixed literals in any
+base, `-`, `+`, `*`, `|`, `<<`, earlier enumerators); unsigned or long
+literals and any value outside `int` refuse the enum instead of guessing.
 
 Mapping to `.vsys`: a scalar pointer followed by a `size_t` becomes
 `nocapture in|inout CSlice[T]` (`in` for `const T *`). The capture claim is an
@@ -161,6 +162,7 @@ that reads a checked big-endian `vesper_ffi` wire view (the design's
 | `tests/golden.rs` (6) | All six golden outputs. C spec round-trips on all four targets with the expected ABI expansion (slice to pointer + `usize`) and a stable content identity. Typedef, array-decay, const-ness and layout sizes (`batch_header` 24/8, `decoder_stats` 32/8). Exact Rust modes and footprints. Only the three annotated C-ABI functions reach the Rust spec. Expected refusal for every refused fixture item. |
 | `tests/refusals.rs` (12) | Preprocessor subset and line numbers. Every C and Rust refusal reason. Enum constant evaluation. Reserved parameter names renamed (`in` becomes `in_`). Bad link name or header path is a `Synthesis` error. The body-scan cases (compound assignment, indexing, method on field, `&mut` field, pass-on, shadowing, macro, closure, deref, unused). Typed syntax, duplicate and I/O errors. Byte, item, parameter and nesting budgets (5000-deep parens and generics are `Limit`, 1000 shifts are not). Every 7th/11th prefix and 200 random corruptions of the fixtures produce results or typed errors, never panics. |
 | `tests/shadow.rs` (4) | Legacy and migrated parsers agree on 5 boundary + 20 000 generated inputs. Three planted bugs (off-by-one length, loose magic check, wrong endianness) are each caught, the reported input reproduces the divergence, and shrinking keeps it diverging (the off-by-one shrinks to one 25-byte header). Boundary inputs catch the off-by-one at case 2. Panics are reported as outcomes. Runs are reproducible from the seed. |
+| `tests/review.rs` (7) | Fixes for the Codex review of PR #140: `#[cfg]`/`#[cfg_attr]` items, modules and methods are refused rather than exported or reported as duplicates. Index expressions inside projected places count toward footprints (`s.items[s.cursor] += 1` gives `inout s.{cursor, items}`). Structs that store references or raw pointers are refused. `repr(C)` with `align`/`packed` (or `transparent`) gets no wire layout. A type alias defined in two modules is refused. C constants are evaluated only under signed `int` semantics (unsigned/long literals and any overflow are refused, nothing is guessed). Renamed parameters never collide. An empty spec is a typed `Synthesis` error. |
 | unit tests in `src/lift.rs` (3) | The design's rendering rules, whole-value unique borrows, antichain footprints. |
 
 ## Commands and results (Linux x86_64, Rust 1.97.0)
@@ -168,7 +170,7 @@ that reads a checked big-endian `vesper_ffi` wire view (the design's
 ```text
 cargo fmt --all -- --check                                              ok
 cargo clippy -p vesper-migrate --all-targets --locked -- -D warnings    ok
-cargo test -p vesper-migrate --locked                                   25 passed
+cargo test -p vesper-migrate --locked                                   32 passed
 cargo clippy --workspace --locked --all-targets -- -D warnings          see PR
 cargo test --workspace --locked                                         see PR
 ```
@@ -218,7 +220,9 @@ CI edits.
   must be reduced to the subset first.
 - The Rust front end does not follow `pub use` re-exports or `#[path]`
   modules, does not resolve items in private modules, and does not lift trait
-  methods.
+  methods. It does not evaluate `#[cfg]`; conditional items are refused.
+  Type aliases are resolved by name, so an alias defined in two modules is
+  refused instead of being resolved with module scope.
 - `vesper migrate --source ...` CLI wiring and `vesper fuzz --differential`
   belong to integration B (#136). The Vesper-side `@differential_shadow`
   attribute and `Crucible::assert_differential_equiv` are not source-language

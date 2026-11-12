@@ -45,14 +45,31 @@ const RESERVED: &[&str] = &[
     "false",
 ];
 
-/// A parameter name that is safe in Vesper and `.vsys` text: reserved words
-/// get a trailing underscore. Parameter names do not affect the C ABI.
-pub fn safe_ident(name: &str) -> String {
-    if RESERVED.contains(&name) {
-        format!("{name}_")
-    } else {
-        name.to_owned()
-    }
+/// Parameter names that are safe in Vesper and `.vsys` text and distinct
+/// within one signature: a reserved word, or a name already taken by another
+/// parameter, gets trailing underscores until it is free. Parameter names do
+/// not affect the C ABI.
+pub fn safe_idents<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let names: Vec<&str> = names.into_iter().collect();
+    let mut taken: std::collections::BTreeSet<String> = names
+        .iter()
+        .filter(|n| !RESERVED.contains(n))
+        .map(|n| (*n).to_owned())
+        .collect();
+    names
+        .iter()
+        .map(|n| {
+            if !RESERVED.contains(n) {
+                return (*n).to_owned();
+            }
+            let mut candidate = format!("{n}_");
+            while taken.contains(&candidate) || RESERVED.contains(&candidate.as_str()) {
+                candidate.push('_');
+            }
+            taken.insert(candidate.clone());
+            candidate
+        })
+        .collect()
 }
 
 /// Compile every struct's wire declaration through `vesper_ffi::Registry`,
@@ -199,6 +216,12 @@ fn value_matches(rendered: &SysValue, parsed: &ValueType) -> bool {
 /// against the migration.
 pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, MigrateError> {
     let fail = |msg: String| MigrateError::new(ErrorKind::Synthesis, None, msg);
+    if !m.functions.iter().any(|f| f.sys.is_ok()) {
+        return Err(fail(
+            "no function has a C-ABI signature, and a .vsys library must declare at least one"
+                .into(),
+        ));
+    }
     let mut out = String::new();
     let _ = writeln!(
         out,
