@@ -1,4 +1,6 @@
 //! Minimal stdio Language Server: full/incremental text sync and UTF-16 diagnostics.
+pub mod navigation;
+pub mod actions;
 use crate::database::{self, Database, SourceFile};
 use salsa::Setter;
 use serde_json::{Value, json};

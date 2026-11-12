@@ -3487,6 +3487,7 @@ dependencies = [
  "vesper-semver",
  "vesper-serde",
  "vesper-simd",
+ "vesper-span",
  "vesper-syntax",
 ]
 
@@ -3841,6 +3842,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "vesper-span"
+version = "0.1.0"
 
 [[package]]
 name = "vesper-syntax"
