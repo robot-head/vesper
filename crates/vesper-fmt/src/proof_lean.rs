@@ -127,7 +127,9 @@ impl Preflight {
         // Includes owned AST nodes/argument slots, fixed-name components,
         // payload clones and printer temporary collections. Conservative and
         // finite: maxima need not all fit under one metadata/work allowance.
-        let metadata = add(add(8192, mul(measured.nodes, 768)?)?, measured.text)?;
+        let owned_ast = add(add(8192, mul(measured.nodes, 768)?)?, measured.text)?;
+        let printer_temporaries = mul(rendered, add(ast_depth, 8)?)?;
+        let metadata = add(owned_ast, printer_temporaries)?;
         bound(metadata, limits.max_metadata_bytes, "emitter metadata")?;
         bound(ast_depth, 512, "emitter AST depth")?;
         let print_work = mul(rendered, add(mul(ast_depth, 2)?, 16)?)?;
