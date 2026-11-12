@@ -10,7 +10,9 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/source-tooling}"
 
 cargo build --locked -p vesper --bin vesper
 binary="$CARGO_TARGET_DIR/debug/vesper"
-if [[ ! -f "$binary" && -f "$binary.exe" ]]; then
+# MSYS can report an extensionless executable path as existing via its .exe
+# fallback, while native Python needs the actual filename. Prefer that file.
+if [[ -f "$binary.exe" ]]; then
   binary="$binary.exe"
 fi
 scratch="$(mktemp -d "${TMPDIR:-/tmp}/vesper-source-tooling.XXXXXX")"
