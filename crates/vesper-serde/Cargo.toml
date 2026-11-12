@@ -1,0 +1,6 @@
+[package]
+name = "vesper-serde"
+version = "0.1.0"
+edition = "2024"
+description = "Bounded scalar host JSON indexing, cursors, and transactional slice encoding"
+publish = false

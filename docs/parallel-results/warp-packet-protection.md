@@ -214,6 +214,9 @@ Run with `CARGO_TARGET_DIR` private to this checkout, `CARGO_BUILD_JOBS=4`,
   as it was here. Re-running `cargo test -p vesper-loom-build --locked` with
   the in-tree `target/` passes all 26 of its tests, so this is a property of
   the local setup, not of this change; CI uses the in-tree target.
+- After merging `origin/main` at `7ed4775` (PR #35) and regenerating
+  `Cargo.lock`, with the in-tree `target/`: fmt and clippy clean,
+  `cargo test --workspace --locked --no-fail-fast` 1,449 passed, 0 failed.
 
 ## Unsafe code
 
