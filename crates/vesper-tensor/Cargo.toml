@@ -1,0 +1,7 @@
+[package]
+name = "vesper-tensor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "Bounded host tensor shape planning and scalar FP32/Q4_0 execution"

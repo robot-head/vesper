@@ -373,6 +373,12 @@ The complete formal grammar, typing rules, operational semantics, domain framewo
 
 ---
 
+Strict host-data tools are available as `vesper json check FILE --json` and
+`vesper traceparent HEADER --json`. The recorded [design snapshot](docs/specification.txt)
+has [revision metadata](docs/specification-source.json) and a
+[review of the expanded sections](docs/rfcs/expansion-37-review.md). The independent
+foundation libraries have self-checking examples under `scripts/test-expansion-foundations.sh`.
+
 ## Contributing
 
 Contributions across compiler passes, Cranelift/WasmFX backends, Lean 4 tactics, and domain substrates are welcome! Every pull request is gated by `vesper fmt --check`, `vesper lint`, `vesper semver`, `vesper test --sim --doc`, and the zero-`sorryAx` Lean 4 certificate check.
