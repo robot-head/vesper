@@ -9,11 +9,11 @@ The upstream document was not edited.
 
 Six implementation subagents used separate branches/worktrees and isolated
 build targets. Their new production paths do not overlap externally owned wave
-three. The coordinator merged the five wave-three deliveries already present
-at upstream `33bf21b` without modifying their production code, then reran
-combined checks. That merge is `7d18e1b`; earlier local duplicate spikes remain
-unmerged. The external wave-three source/native work and standalone macro runner
-remain under their owner's integration process.
+three. The coordinator merged upstream deliveries through `2d6050e` without
+modifying their production code, including the source-trait integration and
+Forge runner workspace registration. The reconciliation commits are `7d18e1b`
+and `1d5c2ab`; earlier local duplicate spikes remain unmerged. Remaining external
+wave-three work stays under its owner's integration process.
 
 | Milestone | Integrated commits | Working slice |
 | --- | --- | --- |
@@ -25,7 +25,7 @@ remain under their owner's integration process.
 | §37 Aether | `e954f15` | Checked immutable snapshot maps, explicit sharing identities and actual bounded CAS-page verification; [report](expansion-37-aether.md) |
 
 All six new crates are registered in workspace members and default-members;
-the registered workspace now contains 34 packages. Temporary standalone tables,
+the registered workspace now contains 36 packages. Temporary standalone tables,
 profiles and leaf lockfiles from these new lanes were removed. Existing
 sandbox/guest workspaces and external ownership boundaries were preserved.
 No registry dependency version migration was needed.
@@ -83,8 +83,9 @@ Independent peer/coordinator reviews produced concrete changes before release:
 
 ## Local validation
 
-- **1,338 workspace tests/doctests across 157 suites passed**, zero failures or
-  ignores, after merging upstream wave-three deliveries through `33bf21b`.
+- **1,408 workspace tests/doctests across 167 suites passed**, zero failures or
+  ignores, after merging upstream wave-three deliveries through `2d6050e`.
+  The earlier `33bf21b` integration passed 1,338 tests across 157 suites.
 - **99 focused new-library tests/doctests**, five new CLI tests and seven Python
   snapshot regressions passed. Corpus iterations are included within those
   tests, not counted as separate test cases.
@@ -101,20 +102,26 @@ Independent peer/coordinator reviews produced concrete changes before release:
   archive against the publisher's checksum list; shell syntax and YAML parsing
   were checked too.
 
-The registered workspace total does not imply that the externally owned
-standalone Forge runner was registered or tested by this batch. Existing kernel
-tests can explicitly skip unavailable APIs; Cargo totals alone do not establish
-kernel/device execution.
+The final combined workspace includes the externally delivered Forge runner
+and Pact binding crates; their implementation credit remains with wave three.
+Existing kernel tests can explicitly skip unavailable APIs; Cargo totals alone
+do not establish kernel/device execution.
 
 Logs are local under `/tmp/vesper-expansion37-{workspace,focused,cli,clippy,windows,examples}.log`
-and the model-specific Lean logs. Root source builds use the root's private
+and the model-specific Lean logs. The final combined workspace and Clippy runs
+are `/tmp/vesper-expansion37-workspace-final.log` and
+`/tmp/vesper-expansion37-clippy-final.log`. Root source builds use the root's private
 `target/parallel-next`; examples use `target/expansion37`; Windows checks use
 `target/parallel-next-windows`. No source-divergent compiler worktrees share a target.
 
 ## Hosted workflow evidence
 
-Pending the first published workflow run. Local validation above is complete;
-native Windows/macOS results will be recorded separately when observed.
+The first [published foundation workflow run](https://github.com/robot-head/vesper/actions/runs/43186895528)
+at `1d5c2ab` passed native Ubuntu and Windows focused tests, strict Clippy,
+all six executing examples, formatting and snapshot checks. Its pinned Lean
+model job also passed. The macOS job was still queued when this evidence was
+recorded; no native macOS result is claimed here. Required whole-workspace
+checks run separately in [CI](https://github.com/robot-head/vesper/actions/runs/43186895192).
 
 ## Remaining boundaries
 
