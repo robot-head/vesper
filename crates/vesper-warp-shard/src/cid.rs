@@ -75,8 +75,9 @@ impl ConnectionId {
     /// The CID as little-endian 32-bit words, zero padded to 20 bytes.
     pub(crate) fn words(&self) -> [u32; CID_WORDS] {
         let mut w = [0u32; CID_WORDS];
-        for (i, chunk) in self.bytes.chunks_exact(4).enumerate() {
-            w[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+        let (chunks, _) = self.bytes.as_chunks::<4>();
+        for (word, chunk) in w.iter_mut().zip(chunks) {
+            *word = u32::from_le_bytes(*chunk);
         }
         w
     }
