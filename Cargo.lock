@@ -3726,6 +3726,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-ebpf"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "object 0.37.3",
+]
+
+[[package]]
 name = "vesper-ffi"
 version = "0.1.0"
 dependencies = [
