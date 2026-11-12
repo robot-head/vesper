@@ -14,7 +14,7 @@ const P: u64 = PAGE_4K;
 fn announce_accept_split_merge_and_errors() {
     let mut t = GpaAcceptanceTracker::new();
     let mut mem = SimulatedGuestMemory::default();
-    mem.host_write(0x10_000, 0xAB);
+    mem.host_write(0x10_000, 0xAB).unwrap();
     // Unaligned, empty, overflowing ranges.
     assert!(matches!(
         t.announce(0x10_001, 1),
@@ -66,6 +66,14 @@ fn announce_accept_split_merge_and_errors() {
     let slab = slab_a.merge(slab_b).unwrap();
     assert_eq!((slab.gpa_base, slab.page_count_4k), (0x10_000, 8));
     // Accepted pages are zeroed (stale host byte gone) and readable.
+    assert_eq!(mem.guest_read(&t, 0x10_000), Ok(0));
+    // The host cannot write accepted private pages afterwards.
+    assert_eq!(
+        mem.host_write(0x10_000, 0xCD),
+        Err(TeeError::HostWriteToPrivatePage {
+            gpa_page_4k: 0x10_000
+        })
+    );
     assert_eq!(mem.guest_read(&t, 0x10_000), Ok(0));
     t.check_access(0x10_000, 8 * P).unwrap();
     assert_eq!(

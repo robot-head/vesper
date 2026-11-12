@@ -42,7 +42,9 @@ pub struct CcaRealmClaims {
     pub challenge: [u8; 64],
     pub personalization: [u8; 64],
     pub hash_algo: RegisterHash,
-    /// Realm Attestation Key, uncompressed SEC1 P-384.
+    /// Realm Attestation Key exactly as encoded in claim 44237: a CBOR
+    /// `COSE_Key` (EC2, P-384), or, as in early RMM releases, a raw
+    /// uncompressed SEC1 point. The platform challenge hashes these bytes.
     pub public_key: Vec<u8>,
     pub public_key_hash_algo: RegisterHash,
     pub initial_measurement: Vec<u8>,
@@ -375,6 +377,62 @@ fn bytes_of<'v>(v: &'v Value, field: &'static str) -> Result<&'v [u8], ParseErro
     bytes(v, field)
 }
 
+/// Decode the RAK claim: a `COSE_Key` (kty EC2, crv P-384, uncompressed
+/// x/y) or a raw 97-byte SEC1 point.
+pub fn realm_public_key(encoded: &[u8]) -> Result<EcPublicKey, AttestError> {
+    use coset::{CborSerializable, CoseKey, KeyType, Label};
+    if encoded.len() == 97 && encoded[0] == 4 {
+        return EcPublicKey::from_sec1(Curve::P384, encoded);
+    }
+    let bad = |what| AttestError::UnexpectedKeyType { what };
+    let key = CoseKey::from_slice(encoded).map_err(|_| bad("RAK is neither COSE_Key nor SEC1"))?;
+    if key.kty != KeyType::Assigned(iana::KeyType::EC2) {
+        return Err(bad("RAK COSE_Key kty is not EC2"));
+    }
+    let param = |label: iana::Ec2KeyParameter| {
+        let mut found = key
+            .params
+            .iter()
+            .filter(|(l, _)| *l == Label::Int(label as i64));
+        match (found.next(), found.next()) {
+            (Some((_, v)), None) => Some(v),
+            _ => None,
+        }
+    };
+    let crv = param(iana::Ec2KeyParameter::Crv)
+        .and_then(Value::as_integer)
+        .and_then(|i| i64::try_from(i).ok());
+    if crv != Some(iana::EllipticCurve::P_384 as i64) {
+        return Err(bad("RAK COSE_Key curve is not P-384"));
+    }
+    let coord = |label| {
+        param(label)
+            .and_then(Value::as_bytes)
+            .filter(|b| b.len() == 48)
+            .ok_or(bad("RAK COSE_Key coordinate"))
+    };
+    let mut sec1 = Vec::with_capacity(97);
+    sec1.push(4);
+    sec1.extend_from_slice(coord(iana::Ec2KeyParameter::X)?);
+    sec1.extend_from_slice(coord(iana::Ec2KeyParameter::Y)?);
+    EcPublicKey::from_sec1(Curve::P384, &sec1)
+}
+
+/// Encode an uncompressed P-384 SEC1 point as a `COSE_Key` (for simulators
+/// and tests).
+pub fn encode_realm_cose_key(sec1: &[u8]) -> Vec<u8> {
+    use coset::CborSerializable;
+    assert!(sec1.len() == 97 && sec1[0] == 4, "uncompressed P-384 point");
+    coset::CoseKeyBuilder::new_ec2_pub_key(
+        iana::EllipticCurve::P_384,
+        sec1[1..49].to_vec(),
+        sec1[49..].to_vec(),
+    )
+    .build()
+    .to_vec()
+    .expect("COSE_Key encoding into Vec cannot fail")
+}
+
 /// Normalized 48-byte measurement for a CCA RIM:
 /// `SHA-384("vesper-aegis/cca-rim/v1\0" || algo || 0 || rim)`.
 pub fn cca_rim_measurement(hash_algo: RegisterHash, rim: &[u8]) -> [u8; 48] {
@@ -418,7 +476,7 @@ pub fn verify_cca_token(
     verify_sign1(&token.platform, &iak, "CCA platform token (IAK)")?;
 
     let rc = &token.realm_claims;
-    let rak = EcPublicKey::from_sec1(Curve::P384, &rc.public_key)?;
+    let rak = realm_public_key(&rc.public_key)?;
     verify_sign1(&token.realm, &rak, "CCA realm token (RAK)")?;
     if !ct_eq(
         &token.platform_claims.challenge,

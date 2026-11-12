@@ -130,6 +130,8 @@ pub enum TeeError {
     OverlappingGpaRange { gpa_page_4k: u64 },
     /// A read or write touched a page that is not accepted private memory.
     UnacceptedPageAccess { gpa_page_4k: u64 },
+    /// The (simulated) host tried to write an accepted private page.
+    HostWriteToPrivatePage { gpa_page_4k: u64 },
     /// Split point outside `1..page_count`.
     BadSplit { at: u32, page_count_4k: u32 },
     /// Merge of ranges that are not adjacent, or not from the same tracker.

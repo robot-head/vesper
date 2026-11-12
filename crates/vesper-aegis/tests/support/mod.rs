@@ -310,7 +310,7 @@ pub fn cca_realm_claims(rak: &Signer, p: &CcaParams) -> CcaRealmClaims {
         challenge: p.runtime.report_data(),
         personalization: [0; 64],
         hash_algo: p.realm_hash,
-        public_key: rak.sec1(),
+        public_key: cca::encode_realm_cose_key(&rak.sec1()),
         public_key_hash_algo: RegisterHash::Sha256,
         initial_measurement: vec![0xCA; n],
         extensible_measurements: [

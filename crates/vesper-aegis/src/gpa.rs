@@ -419,13 +419,22 @@ pub struct SimulatedGuestMemory {
 pub const SIM_PAGE_ALREADY_ACCEPTED: u64 = 0xC000_0B0A;
 
 impl SimulatedGuestMemory {
-    /// Host writes stale bytes into an unaccepted page.
-    pub fn host_write(&mut self, gpa: u64, byte: u8) {
+    /// Host writes into a page that is not yet accepted. Accepted pages
+    /// are private: the write is refused (on hardware it would fault or
+    /// corrupt only ciphertext).
+    pub fn host_write(&mut self, gpa: u64, byte: u8) -> Result<(), TeeError> {
+        let p = gpa / PAGE_4K;
+        if self.accepted.covers(p, p + 1) {
+            return Err(TeeError::HostWriteToPrivatePage {
+                gpa_page_4k: p * PAGE_4K,
+            });
+        }
         let page = self
             .pages
-            .entry(gpa / PAGE_4K)
+            .entry(p)
             .or_insert_with(|| Box::new([0; PAGE_4K as usize]));
         page[(gpa % PAGE_4K) as usize] = byte;
+        Ok(())
     }
 
     /// Guest read, gated by the tracker.

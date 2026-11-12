@@ -280,6 +280,43 @@ fn cca_token_verifies_and_tampering_is_rejected() {
     );
     verify_cca_token(&t512, &iak_chain.der_chain(), &iak_chain.root, NOW_NS, &rt).unwrap();
 
+    // A legacy raw-SEC1 RAK claim also verifies.
+    let legacy = {
+        let mut realm = support::cca_realm_claims(&rak, &CcaParams::default());
+        realm.public_key = rak.sec1();
+        let platform = vesper_aegis::cca::CcaPlatformClaims {
+            challenge: cca::rak_hash(realm.public_key_hash_algo, &realm.public_key),
+            ..CcaToken::parse(&token).unwrap().platform_claims
+        };
+        cca::encode_collection(
+            &cca::build_sign1(Curve::P256, platform.to_cbor(), |d| iak_chain.leaf.sign(d)),
+            &cca::build_sign1(Curve::P384, realm.to_cbor(), |d| rak.sign(d)),
+        )
+    };
+    verify_cca_token(
+        &legacy,
+        &iak_chain.der_chain(),
+        &iak_chain.root,
+        NOW_NS,
+        &rt,
+    )
+    .unwrap();
+    // COSE_Key on the wrong curve is rejected.
+    assert!(matches!(
+        cca::realm_public_key(&{
+            use coset::CborSerializable;
+            coset::CoseKeyBuilder::new_ec2_pub_key(
+                coset::iana::EllipticCurve::P_256,
+                vec![1; 32],
+                vec![2; 32],
+            )
+            .build()
+            .to_vec()
+            .unwrap()
+        }),
+        Err(AttestError::UnexpectedKeyType { .. })
+    ));
+
     // Byte flips anywhere in the collection never verify.
     for at in 0..token.len() {
         let mut t = token.clone();
