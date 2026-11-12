@@ -1,0 +1,9 @@
+[package]
+name = "vesper-fmt"
+version = "0.1.0"
+edition = "2024"
+description = "Bounded lossless-CST canonical source formatting"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+vesper-syntax = { path = "../vesper-syntax" }

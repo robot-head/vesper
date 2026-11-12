@@ -179,13 +179,141 @@ pub struct Token {
     pub kind: TokenKind,
     pub span: Span,
 }
-pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
-    let mut tokens = Vec::new();
-    let mut errors = Vec::new();
+/// Logical resource ceilings, excluding allocator bookkeeping/RSS. All tokens,
+/// including trivia/error tokens, count; the EOF sentinel is one extra slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LexLimits {
+    pub max_source_bytes: usize,
+    pub max_tokens: usize,
+    pub max_diagnostics: usize,
+}
+pub const HARD_SOURCE_BYTES: usize = 8 * 1024 * 1024;
+pub const HARD_TOKENS: usize = 262_144;
+pub const HARD_DIAGNOSTICS: usize = 1024;
+impl Default for LexLimits {
+    fn default() -> Self {
+        Self {
+            max_source_bytes: 1024 * 1024,
+            max_tokens: 65_536,
+            max_diagnostics: 128,
+        }
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LexLimitKind {
+    SourceBytes,
+    Tokens,
+    Diagnostics,
+    Depth,
+    Configuration,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LexLimit {
+    pub kind: LexLimitKind,
+    pub limit: usize,
+    pub observed: usize,
+    pub retained_bytes: usize,
+}
+impl core::fmt::Display for LexLimit {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(
+            f,
+            "{:?} limit {}; observed {}; retained {} bytes",
+            self.kind, self.limit, self.observed, self.retained_bytes
+        )
+    }
+}
+impl std::error::Error for LexLimit {}
+impl LexLimit {
+    pub(crate) fn diagnostic(self, at: usize) -> Diagnostic {
+        Diagnostic::new("E0003", self.to_string(), at..at)
+    }
+}
+impl LexLimits {
+    pub(crate) fn validate(self) -> Result<(), LexLimit> {
+        for (value, hard, min) in [
+            (self.max_source_bytes, HARD_SOURCE_BYTES, 0),
+            (self.max_tokens, HARD_TOKENS, 1),
+            (self.max_diagnostics, HARD_DIAGNOSTICS, 1),
+        ] {
+            if value > hard || value < min {
+                return Err(LexLimit {
+                    kind: LexLimitKind::Configuration,
+                    limit: hard,
+                    observed: value,
+                    retained_bytes: 0,
+                });
+            }
+        }
+        Ok(())
+    }
+}
+#[derive(Debug)]
+pub struct Lexed {
+    pub tokens: Vec<Token>,
+    pub diagnostics: Vec<Diagnostic>,
+    /// Some means the lexical stream is lossless but must not be accepted as AST.
+    pub limit: Option<LexLimit>,
+}
+/// Source/configuration preflight fails before lexing/allocating. Token or
+/// diagnostic exhaustion returns a capped stream with one opaque Error tail;
+/// concatenating all non-EOF token spans still yields the complete input.
+pub fn lex_with_limits(source: &str, limits: LexLimits) -> Result<Lexed, LexLimit> {
+    limits.validate()?;
+    if source.len() > limits.max_source_bytes {
+        return Err(LexLimit {
+            kind: LexLimitKind::SourceBytes,
+            limit: limits.max_source_bytes,
+            observed: source.len(),
+            retained_bytes: 0,
+        });
+    }
+    let mut tokens: Vec<Token> = Vec::with_capacity(source.len().min(limits.max_tokens) + 1);
+    let mut diagnostics = Vec::with_capacity(limits.max_diagnostics);
+    let mut limit = None;
     for (kind, span) in TokenKind::lexer(source).spanned() {
         let kind = kind.unwrap_or(TokenKind::Error);
+        if tokens.len() >= limits.max_tokens {
+            let last = tokens.pop().expect("positive token limit");
+            let exhausted = LexLimit {
+                kind: LexLimitKind::Tokens,
+                limit: limits.max_tokens,
+                observed: limits.max_tokens + 1,
+                retained_bytes: source.len(),
+            };
+            tokens.push(Token {
+                kind: TokenKind::Error,
+                span: last.span.start..source.len(),
+            });
+            push_limit(
+                &mut diagnostics,
+                exhausted.diagnostic(span.start),
+                limits.max_diagnostics,
+            );
+            limit = Some(exhausted);
+            break;
+        }
         if kind == TokenKind::Error {
-            errors.push(Diagnostic::new(
+            if diagnostics.len() >= limits.max_diagnostics {
+                let exhausted = LexLimit {
+                    kind: LexLimitKind::Diagnostics,
+                    limit: limits.max_diagnostics,
+                    observed: limits.max_diagnostics + 1,
+                    retained_bytes: source.len(),
+                };
+                push_limit(
+                    &mut diagnostics,
+                    exhausted.diagnostic(span.start),
+                    limits.max_diagnostics,
+                );
+                tokens.push(Token {
+                    kind: TokenKind::Error,
+                    span: span.start..source.len(),
+                });
+                limit = Some(exhausted);
+                break;
+            }
+            diagnostics.push(Diagnostic::new(
                 "E0001",
                 "invalid token or unterminated comment",
                 span.clone(),
@@ -197,5 +325,47 @@ pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
         kind: TokenKind::Eof,
         span: source.len()..source.len(),
     });
-    (tokens, errors)
+    Ok(Lexed {
+        tokens,
+        diagnostics,
+        limit,
+    })
+}
+pub(crate) fn push_limit(diagnostics: &mut Vec<Diagnostic>, diagnostic: Diagnostic, max: usize) {
+    if diagnostics.len() >= max {
+        diagnostics.pop();
+    }
+    diagnostics.push(diagnostic);
+}
+pub(crate) fn prefix_boundary(source: &str, max: usize) -> usize {
+    let mut retained = source.len().min(max);
+    while !source.is_char_boundary(retained) {
+        retained -= 1;
+    }
+    retained
+}
+/// Compatibility API with conservative defaults. Oversized source returns only
+/// a bounded UTF-8 prefix token and E0003; it never silently accepts truncation.
+/// Use lex_with_limits to receive an explicit allocation-free preflight error.
+pub fn lex(source: &str) -> (Vec<Token>, Vec<Diagnostic>) {
+    let limits = LexLimits::default();
+    match lex_with_limits(source, limits) {
+        Ok(lexed) => (lexed.tokens, lexed.diagnostics),
+        Err(mut limit) => {
+            let retained = prefix_boundary(source, limits.max_source_bytes);
+            limit.retained_bytes = retained;
+            let mut tokens = Vec::new();
+            if retained != 0 {
+                tokens.push(Token {
+                    kind: TokenKind::Error,
+                    span: 0..retained,
+                });
+            }
+            tokens.push(Token {
+                kind: TokenKind::Eof,
+                span: retained..retained,
+            });
+            (tokens, vec![limit.diagnostic(retained)])
+        }
+    }
 }
