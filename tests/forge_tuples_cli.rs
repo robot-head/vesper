@@ -293,7 +293,8 @@ fn tuple_repetition_preserves_distinct_actual_argument_and_header_anchors() {
     let report = Fixture::new(REPEATED).check(&[]);
     let expanded = report["expanded_source"].as_str().unwrap();
     assert!(expanded.contains("/* tuple , ) λ 🦀 */"));
-    let parameter = REPEATED.find("value:").unwrap();
+    let function = REPEATED.find("fn forward").unwrap();
+    let parameter = function + REPEATED[function..].find("value:").unwrap();
     let argument = REPEATED.find("twice!(value)").unwrap() + "twice!(".len();
     let maps = report["source_map"].as_array().unwrap();
     let header = maps

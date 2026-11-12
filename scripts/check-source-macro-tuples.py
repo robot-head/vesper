@@ -228,7 +228,7 @@ def check_repeated_maps(value, source):
     expanded = value["expanded_source"]
     assert "/* tuple , ) λ 🦀 */" in expanded
     original = source.encode("utf-8")
-    header_start = original.index(b"value:")
+    header_start = original.index(b"value:", original.index(b"fn forward"))
     header = [m for m in value["source_map"] if m["original"] == {"start": header_start, "end": header_start + 5}]
     assert len(header) == 1 and header[0]["kind"] == "source"
     name = source_range(header[0]["expanded"], expanded)
