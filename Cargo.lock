@@ -3698,6 +3698,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-chorus"
+version = "0.1.0"
+dependencies = [
+ "vesper-simpulse",
+]
+
+[[package]]
 name = "vesper-core"
 version = "0.1.0"
 dependencies = [
