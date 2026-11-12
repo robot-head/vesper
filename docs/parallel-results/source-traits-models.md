@@ -139,7 +139,7 @@ cargo test -p vesper-pact-bridge                              6 modes + 24 sessi
 cargo run -p vesper-pact-bridge --example bridge              ok, unchanged output
 cargo test -p vesper --locked (before the new tests)          all existing root suites passed
 cargo test --workspace --locked --no-fail-fast --exclude vesper-loom-build
-                                                              1064 passed, 0 failed, 0 ignored, 114 suites
+                                                              1184 passed, 0 failed, 0 ignored, 131 suites (after merging main at aa400dc)
 vesper run|jit examples/traits/shapes.ves                     4304070304 on both
 vesper emit … --emit object --target aarch64-unknown-linux-gnu  ELF 64-bit, ARM aarch64
 vesper check examples/traits/overlap_rejected.ves             E0605 (PACT0102)
