@@ -14,7 +14,7 @@ frontend collision. Shared Cargo registrations remain coordinated, not exclusive
 | #104 | macro41/typed / Flux | New Forge typed_quote.rs/children, host.rs/syntax.rs/token.rs narrow adapters, private resolve.rs preparsed adapter, typed tests |
 | #105 | macro41/authority / Tensor | New src/forge_frontend/authority.rs and authority tests |
 | #106 | macro41/lower / Aether | New src/forge_frontend/lower.rs/children and lowering tests |
-| #107 | macro41/structured / Serde | New sandbox quote_transport/quote_host + wit/forge-quote + new real fixture/tests; host.rs shared-runtime adapters; new runner quote_* modules/tests/fixture; Forge quote_transport adapter |
+| #107 | macro41/structured / Serde | New sandbox quote_transport/quote_host + wit/forge-quote + new real fixture/tests; host.rs shared-runtime adapters; new runner quote_* modules/tests/fixture and minimal runner.rs crate-private engine accessors; Forge quote_transport adapter |
 | #108 | macro41/acceptance / Quarry | New forge_cli.rs, source macro fixtures, check/test-source-macros scripts and source-macros.yml |
 | #109 | macro41/integration / root | forge_frontend/mod.rs, CLI adapter/main routing, lib/module/Cargo/lock registration, workflow consumed-path filters, contract/integration report |
 
@@ -202,6 +202,11 @@ Key exact component/entry/kind/args/WIT/record schema, ordered slot categories/
 boundaries/visible contents, observable limits/determinism, declared snapshots and
 measured host identity. Cap canonical encoded invocation size before publication.
 Use a bounded codec that checks counts before Vec allocations on decode.
+New quote preparation may reuse the flat runner's verified component/input
+snapshots and host identity through narrow crate-private engine accessors. It must
+replace the invocation artifact and bind its own domain/version/WIT/profile; a
+flat invocation/key cannot authorize quotation execution. Shared compiled-component
+bytes still require exact quotation export validation at new-world instantiation.
 
 Cache RAW generated claims/slot indexes/diagnostics/metering only, never HostToken,
 scope/slot nonce/resolution/approval/audit. Every use imports into the current typed
