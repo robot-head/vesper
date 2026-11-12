@@ -1,0 +1,13 @@
+# Run: vesper lint SOURCE --config Loom.lint.toml --fix --semver-safe
+# This is an explicit policy snapshot; adjacent Loom.toml is never auto-loaded.
+[package]
+name = "lint-policy-example"
+
+[lints.vesper]
+overbroad_inout_projection = "warn"
+unused_effect_capability = "deny"
+demote_alloc_to_region = "warn"
+overly_restrictive_mode = "warn"
+missed_fip_opportunity = "allow"
+
+# Plugin packs are unsupported. A nonempty [lints.plugins] request is an error.
