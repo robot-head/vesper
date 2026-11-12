@@ -42,4 +42,26 @@ Coverage includes target ownership/corruption/truncation/oversize/exact-length m
 
 No Windows/macOS runtime tests, hosted CI success, production registry integration, or full updater/provenance guarantee is claimed. AWS-LC/rustls dependencies remain unconditional even without HTTP and require native crypto build support. Temporary nested workspace/profile exist only to permit isolated validation; coordinator should remove them when registering the crate, then resolve its own root lockfile. The scratch-generated nested lockfile is intentionally not part of the commit.
 
+## Coordinator integration
+
+Registered the crate in the shared workspace and removed its standalone workspace
+and profile. Independent review found a numeric delegated-role preflight bypass;
+the integrated fix preserves both raw role names and possible versioned aliases.
+No target authentication bypass was found in that review. A separate failure-progress
+API is still being implemented; the successful-operation API retains its stated limitation.
+
+The Unix `state::CheckpointStore` now provides explicit initialization, bounded
+checkpoint reads, OS locking across live processes, same-directory atomic replacement
+with file/directory sync, failed-write poisoning and bounded dead-writer staging cleanup.
+State paths bind to an absolute location before locking; a subprocess regression
+changes working directory while two stores are locked and verifies correct isolation.
+This does not make the verifier's internal steps durable or protect against rewriting
+by the directory owner. Store serialization size limits are wire limits, not strict
+transient memory limits.
+
+Integrated validation with Prism: **801 workspace tests/doctests across 81 suites**,
+zero failures or ignores, with the pinned Lean toolchain available. Formatting,
+strict workspace Clippy and focused post-review Clippy passed. Prism separately
+passed Windows GNU compilation; TUF's native crypto has not been cross-validated here.
+
 Review follow-up: preflight graph edges now retain both raw decoded role names and possible version-stripped aliases. This closes a resource-bound bypass for non-consistent delegated role names such as `1.a`. Added regression for `targets -> 1.a -> 2.b -> 3.c` under depth 1 and a numeric-role self cycle; both reject in preflight.
