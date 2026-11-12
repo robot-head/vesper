@@ -236,14 +236,16 @@ pub(crate) fn extract_function(world: &World, f: &FunctionIr) -> Option<Result<S
     {
         return None;
     }
-    Some(extract_closures(world, f))
+    // A closure whose body needs effect lowering moves its whole enclosing
+    // function to the effectful generator instead of failing extraction.
+    extract_closures(world, f).transpose()
 }
 struct Lifted {
     name: String,
     captures: Vec<String>,
     params: Vec<(Pass, Type)>,
 }
-fn extract_closures(world: &World, f: &FunctionIr) -> Result<String, String> {
+fn extract_closures(world: &World, f: &FunctionIr) -> Result<Option<String>, String> {
     let mut definitions = String::new();
     let mut closures = BTreeMap::new();
     for i in f.blocks.iter().flat_map(|b| &b.instructions) {
@@ -297,10 +299,10 @@ fn extract_closures(world: &World, f: &FunctionIr) -> Result<String, String> {
             let mut extended = world.clone();
             extended.functions.insert(name.clone(), function);
             let program = crate::ir::lower_world(&extended);
-            definitions.push_str(
-                &extract_function(&extended, &program.functions[&name])
-                    .ok_or("Lean closure body requires effect specialization")??,
-            );
+            let Some(body) = extract_function(&extended, &program.functions[&name]) else {
+                return Ok(None);
+            };
+            definitions.push_str(&body?);
             closures.insert(
                 i.dest,
                 Lifted {
@@ -320,7 +322,7 @@ fn extract_closures(world: &World, f: &FunctionIr) -> Result<String, String> {
         }
         .emit()?,
     );
-    Ok(definitions)
+    Ok(Some(definitions))
 }
 struct Emitter<'a> {
     world: &'a World,

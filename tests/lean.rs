@@ -281,3 +281,305 @@ fn literal_types_join_across_control_flow() {
     );
     validates("fn main() -> u64 { let n: u64 = 42; let x = if false { 1 } else { n }; x }");
 }
+
+/// Pin the reference evaluator's value, then require Lean to compile the
+/// extraction and print the same value.
+fn agrees(source: &str, expected: &str) {
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    assert_eq!(
+        vesper::runtime::Runtime::new(&c.world)
+            .run("main", vec![])
+            .unwrap()
+            .to_string(),
+        expected,
+        "reference evaluator changed"
+    );
+    validates(source);
+}
+/// Accepted programs whose observable aliasing the extractor cannot yet
+/// express must be rejected explicitly instead of extracted with snapshots.
+fn rejects(source: &str, reason: &str) {
+    let p = parser::parse(source);
+    assert!(p.diagnostics.is_empty(), "{:?}", p.diagnostics);
+    let c = check::check(&p.module);
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    vesper::runtime::Runtime::new(&c.world)
+        .run("main", vec![])
+        .unwrap();
+    let error = lean::extract(&c.world).unwrap_err();
+    assert!(error.contains(reason), "{error}");
+}
+
+#[test]
+fn mutable_operation_arguments() {
+    agrees(
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n += 2; k(()) }, } }",
+        "42",
+    );
+    agrees(
+        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: Pair); } fn main() -> i64 { let p = Pair { x: 40, y: 0 }; handle Inc in { Inc::inc(inout p); p.x } with { return n => n, inc(Pair { x, y }, k) => { x += 2; k(()) }, } }",
+        "42",
+    );
+    agrees(
+        "linear effect St[T] { fn modify(inout x: T) -> T; } fn main() -> i64 { let x: i64 = 5; let r = handle St[i64] in { let old = St::modify(inout x); old + x * 10 } with { return v => v, modify(x, k) => { let old = x; x += 1; let r = k(old); x *= 2; r }, }; r * 100 + x }",
+        "6512",
+    );
+}
+
+#[test]
+fn mutations_before_and_after_non_tail_resumption() {
+    agrees(
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let result = handle Mut in { let y = Mut::change(inout x); x + y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x += 1; result }, }; result + x }",
+        "25",
+    );
+    // After resuming, the clause observes the body's later write to the
+    // same place, and its own later write survives the handler.
+    agrees(
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let result = handle Mut in { let y = Mut::change(inout x); x += 100; y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x * 1000 + result }, }; result * 10 + x }",
+        "1020302",
+    );
+    agrees(
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let r = handle m: Mut in { let y = m.change(inout x); x += 100; y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x * 1000 + result }, }; r * 10 + x }",
+        "1020302",
+    );
+    // Default and `in` parameters alias the performer's place as well.
+    for pass in ["", "in "] {
+        agrees(
+            &format!(
+                "linear effect Tell {{ fn tell({pass}x: i64) -> i64; }} fn main() -> i64 {{ let y = 1; let r = handle Tell in {{ let a = Tell::tell({pass}y); y += 10; a }} with {{ return v => v, tell(x, k) => {{ let r = k(5); x * 100 + r }}, }}; r }}"
+            ),
+            "1105",
+        );
+    }
+}
+
+#[test]
+fn stateful_handlers_thread_mutable_arguments() {
+    agrees(
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; handle Mut state n = 10 in { let y = Mut::change(inout x); x + y } with { return (v, n) => v + n, change(x, n, k) => { x += n; k(20, n + 1) }, } }",
+        "42",
+    );
+    agrees(
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let r = handle Mut state n = 10 in { let a = Mut::change(inout x); x += 1; let b = Mut::change(inout x); a + b } with { return (v, n) => v * 100 + n, change(y, n, k) => { y += n; let r = k(y, n + 1); y += 1000; r }, }; r * 100000 + x }",
+        "341202023",
+    );
+}
+
+#[test]
+fn handler_bodies_mutate_outer_bindings() {
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { x += Ask::ask(); x * 10 } with { return v => v, ask(k) => k(4), }; r + x }",
+        "55",
+    );
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { if Ask::ask() > 2 { x += Ask::ask(); } else { x = 0; }; match x { 1 => { x += 1; }, _ => { x *= 2; }, }; x } with { return v => v + 1, ask(k) => k(4), }; r * 100 + x }",
+        "1110",
+    );
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { let b = false && { x += 100; Ask::ask() > 0 }; let c = true && { x += 1; Ask::ask() > 0 }; if b || c { x } else { 0 } } with { return v => v, ask(k) => k(3), }; r * 100 + x }",
+        "202",
+    );
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn bump(inout x: i64) -> i64 { handle Ask in { x += Ask::ask(); x } with { return v => v, ask(k) => k(7), } } fn main() -> i64 { let x = 1; let r = bump(inout x); r * 100 + x }",
+        "808",
+    );
+    // Clauses capture install-time snapshots; their writes stay local.
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { x = 50; 2 } with { return v => { x += 1000; v + x }, ask(k) => k(x), }; r * 10000 + x }",
+        "10030050",
+    );
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; handle Ask in { x = 50; Ask::ask() } with { return v => v, ask(k) => k(x), } }",
+        "1",
+    );
+}
+
+#[test]
+fn aborts_observe_writes_before_the_operation() {
+    agrees(
+        "effect Stop { fn stop() -> i64; } fn main() -> i64 { let x = 0; let r = handle Stop in { x += 5; Stop::stop(); x += 100; 1 } with { return v => v, stop(k) => 7, }; r * 1000 + x }",
+        "7005",
+    );
+    agrees(
+        "effect Stop { fn stop(inout x: i64) -> i64; } fn main() -> i64 { let x = 0; let r = handle Stop in { x += 5; Stop::stop(inout x); x += 100; 1 } with { return v => v, stop(x, k) => { x += 30; 7 }, }; r * 1000 + x }",
+        "7035",
+    );
+    for (start, expected) in [("1", "114"), ("-1", "99")] {
+        agrees(
+            &format!(
+                "effect Choose {{ fn pick(inout x: i64) -> bool; }} fn main() -> i64 {{ let x = {start}; let r = handle Choose in {{ if Choose::pick(inout x) {{ x += 10; 1 }} else {{ 2 }} }} with {{ return v => v, pick(x, k) => if x > 0 {{ x += 3; k(true) }} else {{ x = 99; 0 }}, }}; r * 100 + x }}"
+            ),
+            expected,
+        );
+    }
+    agrees(
+        "fn divide(b: i64) -> i64 eff [Fail[RuntimeError]] { 84 / b } fn main() -> i64 { let x = 0; let r = handle Fail[RuntimeError] in { x += 5; let q = divide(0); x += 100; q } with { return v => v, raise(e, k) => 42, }; r * 1000 + x }",
+        "42005",
+    );
+    agrees(
+        "effect Stop { fn stop() -> Never; } fn main() -> i64 { handle Stop in { Stop::stop(); 99 } with { return x => x, stop(k) => 7, } }",
+        "7",
+    );
+}
+
+#[test]
+fn disjoint_projected_operation_arguments() {
+    agrees(
+        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p.{x}: Pair); } fn main() -> i64 { let p = Pair { x: 1, y: 2 }; handle Inc in { Inc::inc(inout p); p.x * 10 + p.y } with { return n => n, inc(q, k) => { q.x += 2; k(()) }, } }",
+        "32",
+    );
+    agrees(
+        "copy struct Pair { x: i64, y: i64 } linear effect Two { fn two(inout a.{x}: Pair, inout b.{y}: Pair) -> i64; } fn main() -> i64 { let p = Pair { x: 1, y: 2 }; let r = handle Two in { let v = Two::two(inout p, inout p); p.x * 100 + p.y * 10 + v } with { return v => v, two(a, b, k) => { a.x += 4; b.y += 5; let r = k(3); a.x += 1; r }, }; r * 1000 + p.x }",
+        "573006",
+    );
+    agrees(
+        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: i64) -> i64; } fn main() -> i64 { let p = Pair { x: 1, y: 2 }; let r = handle Inc in { let a = Inc::inc(inout p.x); p.y += 10; let b = Inc::inc(inout p.y); a + b } with { return v => v, inc(n, k) => { n += 1; let r = k(n); n += 100; r }, }; r * 10000 + p.x * 100 + p.y }",
+        "160313",
+    );
+}
+
+#[test]
+fn nested_mutable_handlers() {
+    agrees(
+        "effect Stop { fn stop() -> i64; } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Stop in { handle Ask in { x += Ask::ask(); Stop::stop(); x += 1000; 0 } with { return v => v, ask(k) => k(10), } } with { return v => v, stop(k) => 7, }; r * 100 + x }",
+        "711",
+    );
+    agrees(
+        "linear effect Mut { fn change(inout x: i64) -> i64; } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle outer: Mut in { handle Ask in { let a = Ask::ask(); let b = outer.change(inout x); x += a; b } with { return v => v, ask(k) => k(3), } } with { return v => v, change(y, k) => { y *= 10; let r = k(5); y += 1; r }, }; r * 1000 + x }",
+        "5014",
+    );
+    agrees(
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; let r = handle Inc in { handle Inc in { Inc::inc(inout x); x } with { return n => n * 10, inc(n, k) => { n += 2; let r = k(()); n += 1; r }, } } with { return n => n, inc(n, k) => { n += 100; k(()) }, }; r * 100 + x }",
+        "3004",
+    );
+}
+
+#[test]
+fn continuation_effects_with_mutable_arguments() {
+    // A clause performs an outer effect before and after writing the
+    // borrowed argument, then resumes.
+    agrees(
+        "linear effect Outer { fn ask() -> i64; } linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; let r = handle Outer in { handle Inc in { Inc::inc(inout x); x * 2 } with { return v => v, inc(y, k) => { let v = Outer::ask(); y += v; k(()) }, } } with { return v => v, ask(k) => k(20) + 1, }; r * 1000 + x }",
+        "43021",
+    );
+    agrees(
+        "linear effect Outer { fn ask() -> i64; } linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; let r = handle Outer in { handle Inc in { Inc::inc(inout x); x * 2 } with { return v => v, inc(y, k) => { y += 5; let v = Outer::ask(); y += v; k(()) }, } } with { return v => v, ask(k) => k(20) + 1, }; r * 1000 + x }",
+        "53026",
+    );
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn resume[T](sink k: fn@linear(sink i64) -> T) -> T { k(20) } fn main() -> i64 { handle Ask in { Ask::ask() + 1 } with { return x => x, ask(k) => resume(k) * 2, } }",
+        "42",
+    );
+}
+
+#[test]
+fn helpers_and_closures_with_mutable_operations() {
+    // Helpers forward the updated argument through their own state return.
+    agrees(
+        "linear effect Inc { fn inc(inout x: i64); } fn helper(inout x: i64) eff [Inc] { Inc::inc(inout x); x += 1; } fn main() -> i64 { let x = 1; handle Inc in { helper(inout x); x } with { return n => n, inc(n, k) => { n += 2; k(()) }, } }",
+        "4",
+    );
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn helper(inout x: i64) -> i64 eff [Ask] { x += Ask::ask(); x } fn main() -> i64 { let x = 1; let r = handle Ask in { helper(inout x) + helper(inout x) * 100 } with { return v => v, ask(k) => k(3), }; r * 1000 + x }",
+        "704007",
+    );
+    agrees(
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; handle Inc in { let f = || { let z = 10; Inc::inc(inout z); z }; f() + x } with { return n => n, inc(n, k) => { n += 2; k(()) }, } }",
+        "13",
+    );
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let f = || { let x = 1; handle Ask in { x += Ask::ask(); x } with { return v => v, ask(k) => k(2), } }; f() }",
+        "3",
+    );
+}
+
+#[test]
+fn closures_keep_labeled_lexical_evidence() {
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { let get = || eff [outer: Ask] Ask::ask(); get() } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(1), } }",
+        "1",
+    );
+}
+
+#[test]
+fn generated_names_are_hygienic() {
+    agrees(
+        "fn main() -> i64 { let xs = (20, 42, 3); let index = 1; xs[index] }",
+        "42",
+    );
+    agrees(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let value = 1; let get = 2; let set = 3; let w = 4; handle Ask in { value += Ask::ask(); value + get + set + w } with { return v => v, ask(k) => k(10), } }",
+        "20",
+    );
+}
+
+#[test]
+fn unobservable_aliases_are_rejected() {
+    // The evaluator reads the final value of a body-local place after the
+    // body returned; no frame holds it.
+    rejects(
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { handle Mut in { let z = 3; let y = Mut::change(inout z); z += 100; y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x * 1000 + result }, } }",
+        "local to the handled computation",
+    );
+    // A helper's parameter aliases the frame, but helpers cannot pass lenses.
+    rejects(
+        "linear effect Inc { fn inc(inout x: i64); } fn helper(inout x: i64) eff [Inc] { Inc::inc(inout x); x += 1; } fn main() -> i64 { let x = 1; let r = handle Inc in { helper(inout x); x } with { return n => n, inc(n, k) => { let r = k(()); n += 2; r }, }; r * 100 + x }",
+        "through a helper, callback, or closure",
+    );
+    // A first-class continuation would drop the resumed frame.
+    rejects(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { x += 1; Ask::ask() } with { return v => v, ask(k) => { let resume = ||@linear k(20); resume() * 2 }, }; r * 100 + x }",
+        "continuation",
+    );
+}
+
+#[test]
+fn effect_places_lemmas_are_axiom_free() {
+    let compiler = std::env::var("VESPER_LEAN").unwrap_or_else(|_| "lean".into());
+    if Command::new(&compiler).arg("--version").output().is_err() {
+        eprintln!("Lean validation skipped: set VESPER_LEAN or install the pinned toolchain");
+        return;
+    }
+    let source = include_str!("../lean/EffectPlaces.lean");
+    let code = source.split_once("-/").unwrap().1;
+    assert!(!code.contains("sorry") && !code.contains("axiom"));
+    // The lemmas are about the same CPS definitions the extractor emits.
+    let generated =
+        lean::extract(&check::check(&parser::parse("fn main() -> i64 { 0 }").module).world)
+            .unwrap();
+    for line in [
+        "abbrev HandlerCPS (S O : Type) (m : Type → Type) (A : Type) := (A → S → m O) → S → m O",
+        "  bind action next := fun k s => action (fun a s' => next a k s') s",
+    ] {
+        assert!(source.contains(line) && generated.contains(line), "{line}");
+    }
+    let theorems = source
+        .lines()
+        .filter_map(|l| l.strip_prefix("theorem "))
+        .map(|l| l.split_whitespace().next().unwrap().to_string())
+        .collect::<Vec<_>>();
+    assert!(theorems.len() >= 15, "{theorems:?}");
+    let mut checked = source.to_string();
+    for t in &theorems {
+        checked.push_str(&format!("\n#print axioms Vesper.EffectPlaces.{t}"));
+    }
+    let path =
+        std::env::temp_dir().join(format!("vesper-effect-places-{}.lean", std::process::id()));
+    fs::write(&path, checked).unwrap();
+    let result = Command::new(compiler).arg(&path).output().unwrap();
+    fs::remove_file(&path).unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    assert!(
+        result.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        stdout.matches("does not depend on any axioms").count(),
+        theorems.len(),
+        "{stdout}"
+    );
+}
