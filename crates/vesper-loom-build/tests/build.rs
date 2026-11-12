@@ -483,6 +483,25 @@ fn mutating_the_original_after_snapshot_does_not_affect_execution() {
 }
 
 #[test]
+fn mount_order_is_canonical_in_key_and_execution() {
+    let env = Env::new();
+    let runner = env.runner();
+    fs::create_dir(env.path("extra")).unwrap();
+    let ab = env.codegen().with_input("/in/a-extra", env.path("extra"));
+    let mut ba = ab.clone();
+    ba.inputs.reverse();
+    let p1 = runner.prepare(&ab).unwrap();
+    let p2 = runner.prepare(&ba).unwrap();
+    assert_eq!(p1.key(), p2.key());
+    assert_eq!(p1.snapshots(), p2.snapshots());
+    let guests: Vec<&str> = p2.snapshots().iter().map(|(g, _)| g.as_str()).collect();
+    assert_eq!(guests, ["/in/a-extra", "/in/proto"]);
+    runner.execute(&p1, env.path("d1"), rw()).unwrap();
+    let hit = runner.execute(&p2, env.path("d2"), rw()).unwrap();
+    assert_eq!(hit.cache, CacheStatus::Hit);
+}
+
+#[test]
 fn execution_needs_only_the_snapshots_not_the_original_inputs() {
     let env = Env::new();
     let runner = env.runner();

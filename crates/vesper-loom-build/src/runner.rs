@@ -302,6 +302,9 @@ impl Runner {
             let tree = snapshot_stable(&self.store, host, &spec.guest_path, &mut || {})?;
             mounts.push((spec.guest_path.clone(), tree));
         }
+        // The key's input map is sorted, and preopen order is observable to
+        // the guest, so mounts are always exposed in guest-path order too.
+        mounts.sort_by(|a, b| a.0.cmp(&b.0));
         let inputs = derivation_inputs(request, &self.identity, component, invocation, &mounts);
         let key = inputs
             .key()
