@@ -25,6 +25,130 @@ struct State {
     slots: BTreeMap<String, SlotState>,
     values: BTreeMap<ValueId, ValueState>,
 }
+// Diagnostic-only evidence. Never part of State equality, transfer, joins or
+// IR serialization. If indexing cannot be completed within these limits, omit
+// all optional origins rather than trusting a prefix with unseen duplicates.
+const MAX_CAUSE_WORK: usize = 65_536;
+const MAX_CAUSE_TEXT_BYTES: usize = 1024 * 1024;
+const MAX_CAUSE_NAME_BYTES: usize = 1024;
+const MAX_RELATED: usize = 3;
+#[derive(Clone)]
+struct SlotOrigin {
+    span: Span,
+    parameter: bool,
+}
+#[derive(Default)]
+struct Origins {
+    values: BTreeMap<ValueId, Option<Span>>,
+    slots: BTreeMap<String, Option<SlotOrigin>>,
+}
+impl Origins {
+    fn build(f: &FunctionIr) -> Self {
+        Self::try_build(f).unwrap_or_default()
+    }
+    fn try_build(f: &FunctionIr) -> Option<Self> {
+        let mut out = Self::default();
+        let mut work = MAX_CAUSE_WORK;
+        let mut text = MAX_CAUSE_TEXT_BYTES;
+        fn charge(work: &mut usize) -> Option<()> {
+            *work = work.checked_sub(1)?;
+            Some(())
+        }
+        fn slot(
+            out: &mut Origins,
+            name: &str,
+            span: &Span,
+            parameter: bool,
+            text: &mut usize,
+        ) -> Option<()> {
+            if name.len() > MAX_CAUSE_NAME_BYTES {
+                return None;
+            }
+            *text = text.checked_sub(name.len())?;
+            match out.slots.entry(name.to_owned()) {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert((span.start < span.end).then(|| SlotOrigin {
+                        span: span.clone(),
+                        parameter,
+                    }));
+                }
+                std::collections::btree_map::Entry::Occupied(mut e) => {
+                    e.insert(None);
+                }
+            }
+            Some(())
+        }
+        fn value(out: &mut Origins, id: ValueId, span: Option<&Span>) {
+            match out.values.entry(id) {
+                std::collections::btree_map::Entry::Vacant(e) => {
+                    e.insert(span.filter(|s| s.start < s.end).cloned());
+                }
+                std::collections::btree_map::Entry::Occupied(mut e) => {
+                    e.insert(None);
+                }
+            }
+        }
+        for p in &f.params {
+            charge(&mut work)?;
+            slot(&mut out, &p.name, &p.span, true, &mut text)?;
+        }
+        for block in &f.blocks {
+            charge(&mut work)?;
+            // Phi/block parameters have no unique instruction source span.
+            for id in &block.params {
+                charge(&mut work)?;
+                value(&mut out, *id, None);
+            }
+            for i in &block.instructions {
+                charge(&mut work)?;
+                value(&mut out, i.dest, Some(&i.span));
+                if let Op::Bind { pattern, .. } = &i.op {
+                    let mut pending = vec![pattern];
+                    while let Some(p) = pending.pop() {
+                        charge(&mut work)?;
+                        match &p.kind {
+                            PatternKind::Bind(name) => {
+                                slot(&mut out, name, &p.span, false, &mut text)?
+                            }
+                            PatternKind::Tuple(ps) => {
+                                for child in ps {
+                                    charge(&mut work)?;
+                                    pending.push(child);
+                                }
+                            }
+                            PatternKind::Constructor { fields, .. } => {
+                                for (_, child) in fields {
+                                    charge(&mut work)?;
+                                    pending.push(child);
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        Some(out)
+    }
+    fn value(&self, id: ValueId) -> Option<(Span, &'static str)> {
+        self.values
+            .get(&id)?
+            .as_ref()
+            .map(|span| (span.clone(), "this IR temporary is defined here"))
+    }
+    fn slot(&self, name: &str) -> Option<(Span, &'static str)> {
+        self.slots.get(name)?.as_ref().map(|origin| {
+            (
+                origin.span.clone(),
+                if origin.parameter {
+                    "source span for this IR parameter"
+                } else {
+                    "this IR binding is introduced here"
+                },
+            )
+        })
+    }
+}
 pub fn validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
     let mut diagnostics = evidence(program);
     for f in program.functions.values() {
@@ -34,6 +158,8 @@ pub fn validate(world: &World, program: &ir::Program) -> Vec<Diagnostic> {
             external_captures: f.external_captures.clone(),
             graph: PlaceGraph::default(),
             diagnostics: vec![],
+            origins: Origins::build(f),
+            local_consumes: BTreeMap::new(),
         };
         checker.function(f);
         diagnostics.extend(checker.diagnostics);
@@ -146,6 +272,10 @@ struct Flow<'a> {
     external_captures: BTreeSet<String>,
     graph: PlaceGraph,
     diagnostics: Vec<Diagnostic>,
+    origins: Origins,
+    // A witness is local to one straight-line block visit, never propagated
+    // through a join or guessed from the last static assignment/consumption.
+    local_consumes: BTreeMap<ValueId, Span>,
 }
 impl Flow<'_> {
     fn mode(&self, t: &Type) -> Mode {
@@ -154,6 +284,39 @@ impl Flow<'_> {
     fn error(&mut self, message: impl Into<String>, span: Span) {
         self.diagnostics
             .push(Diagnostic::new("E0410", message, span));
+    }
+    fn caused(
+        &mut self,
+        message: impl Into<String>,
+        span: Span,
+        causes: impl IntoIterator<Item = (Span, &'static str)>,
+        help: &'static str,
+    ) {
+        let mut diagnostic = Diagnostic::new("E0410", message, span);
+        for (span, message) in causes {
+            if diagnostic.related.len() == MAX_RELATED {
+                break;
+            }
+            if span.start >= span.end
+                || span == diagnostic.span
+                || diagnostic.related.iter().any(|label| label.span == span)
+            {
+                continue;
+            }
+            diagnostic = diagnostic.with_related(span, message);
+        }
+        if !diagnostic.related.is_empty() {
+            diagnostic = diagnostic.with_help(help);
+        }
+        self.diagnostics.push(diagnostic);
+    }
+    fn note_consume(&mut self, id: ValueId, span: &Span) {
+        if span.start < span.end && self.origins.values.get(&id).is_some_and(Option::is_some) {
+            // Unique origins already cap this map by MAX_CAUSE_WORK entries.
+            self.local_consumes
+                .entry(id)
+                .or_insert_with(|| span.clone());
+        }
     }
     fn consume(&mut self, s: &mut State, id: ValueId, span: &Span) {
         let Some(v) = s.values.get_mut(&id) else {
@@ -164,16 +327,28 @@ impl Flow<'_> {
             return;
         }
         if !v.owned {
-            self.error(
+            self.caused(
                 "a borrowed non-copy temporary cannot be moved into an owned value",
                 span.clone(),
+                self.origins.value(id),
+                "A borrowed non-copy temporary cannot transfer ownership to an owned value.",
             );
         }
         if v.consumed {
-            self.error(
+            let prior = self
+                .local_consumes
+                .get(&id)
+                .cloned()
+                .map(|span| (span, "an earlier consuming use in this block is here"));
+            self.caused(
                 format!("IR temporary %{id} is consumed more than once"),
                 span.clone(),
+                self.origins.value(id).into_iter().chain(prior),
+                "A non-copy IR temporary may be consumed only once on an execution path.",
             );
+        }
+        if v.owned && !v.consumed {
+            self.note_consume(id, span);
         }
         v.consumed = true;
         v.loan = None;
@@ -192,20 +367,22 @@ impl Flow<'_> {
             .iter()
             .any(|q| q.starts_with(&p.path) || p.path.starts_with(q))
         {
-            self.error(
+            self.caused(
                 format!("IR uses moved place '{}'", p.display()),
                 span.clone(),
+                self.origins.slot(&p.root),
+                "A moved place cannot be used again until ownership is re-established.",
             );
         }
         let ty = self.world.field(&slot.ty, &p.path).unwrap_or(Type::Infer);
         let exclusive = pass == Pass::Inout || (pass == Pass::Sink && self.mode(&ty) != Mode::Copy);
-        for value in s.values.values() {
+        for (id, value) in &s.values {
             if let Some((loan, mode)) = &value.loan
                 && !value.consumed
                 && loan.iter().any(|loan| self.graph.overlaps(p, loan))
                 && (exclusive || *mode == Pass::Inout)
             {
-                self.error(
+                self.caused(
                     format!(
                         "IR access to '{}' overlaps active loan '{}'",
                         p.display(),
@@ -215,20 +392,34 @@ impl Flow<'_> {
                             .join(", ")
                     ),
                     span.clone(),
+                    self.origins.value(*id).map(|(span,_)|(span,"this IR read requests the conflicting access")).into_iter().chain(self.origins.slot(&p.root)),
+                    "Overlapping access must respect the shared or exclusive permission of each active loan.",
                 );
             }
         }
         if pass == Pass::Inout && slot.pass == Pass::In {
-            self.error("IR mutates a shared parameter", span.clone());
+            self.caused(
+                "IR mutates a shared parameter",
+                span.clone(),
+                self.origins.slot(&p.root),
+                "Shared parameters do not grant mutation permission.",
+            );
         }
         if pass == Pass::Sink && self.mode(&ty) != Mode::Copy {
             if slot.pass != Pass::Sink {
-                self.error("IR moves from a borrowed parameter", span.clone());
+                self.caused(
+                    "IR moves from a borrowed parameter",
+                    span.clone(),
+                    self.origins.slot(&p.root),
+                    "Borrowed parameters do not transfer ownership to this function.",
+                );
             }
             if !p.path.is_empty() && self.mode(&slot.ty) == Mode::Linear {
-                self.error(
+                self.caused(
                     "IR must destructure a linear aggregate before moving fields",
                     span.clone(),
+                    self.origins.slot(&p.root),
+                    "Consume the full linear aggregate through its supported destructuring rules.",
                 );
             }
             s.slots
@@ -238,7 +429,7 @@ impl Flow<'_> {
                 .insert(p.path.clone());
         }
     }
-    fn bind(&mut self, s: &mut State, p: &Pattern, t: &Type) {
+    fn bind(&mut self, s: &mut State, p: &Pattern, t: &Type, origin: ValueId) {
         match &p.kind {
             PatternKind::Bind(n) => {
                 s.slots.insert(
@@ -252,13 +443,18 @@ impl Flow<'_> {
             }
             PatternKind::Wild => {
                 if self.mode(t) == Mode::Linear {
-                    self.error("IR wildcard discards a linear value", p.span.clone());
+                    self.caused(
+                        "IR wildcard discards a linear value",
+                        p.span.clone(),
+                        self.origins.value(origin),
+                        "Linear components must be consumed rather than discarded by a wildcard.",
+                    );
                 }
             }
             PatternKind::Tuple(ps) => {
                 if let Type::Tuple(ts) = t {
                     for (p, t) in ps.iter().zip(ts) {
-                        self.bind(s, p, t);
+                        self.bind(s, p, t, origin);
                     }
                 }
             }
@@ -277,7 +473,7 @@ impl Flow<'_> {
                         .collect();
                     for (n, p) in fields {
                         if let Some(f) = v.fields.iter().find(|f| &f.name == n) {
-                            self.bind(s, p, &substitute(&f.ty, &vars));
+                            self.bind(s, p, &substitute(&f.ty, &vars), origin);
                         }
                     }
                 }
@@ -291,24 +487,25 @@ impl Flow<'_> {
                 && self.mode(&v.ty) == Mode::Linear
                 && !v.moved.contains(&vec![])
             {
-                self.error(
+                self.caused(
                     format!("abortable effect may abandon linear place '{n}'"),
                     span.clone(),
+                    self.origins.slot(n),
+                    "An abortable operation must not abandon a live owned linear place.",
                 );
             }
         }
         for (id, v) in &s.values {
             if v.owned && !v.consumed && self.mode(&v.ty) == Mode::Linear {
-                self.error(
+                self.caused(
                     format!("abortable effect may abandon linear temporary %{id}"),
                     span.clone(),
+                    self.origins.value(*id),
+                    "An abortable operation must not abandon a live owned linear temporary.",
                 );
             }
             if !v.consumed && v.loan.as_ref().is_some_and(|(_, p)| *p == Pass::Inout) {
-                self.error(
-                    "abortable effect crosses a mutable temporary loan",
-                    span.clone(),
-                );
+                self.caused("abortable effect crosses a mutable temporary loan", span.clone(), self.origins.value(*id), "A mutable temporary loan cannot cross an operation that may abandon its continuation.");
             }
         }
     }
@@ -319,17 +516,21 @@ impl Flow<'_> {
                 && !v.moved.contains(&vec![])
                 && !self.external_captures.contains(n)
             {
-                self.error(
+                self.caused(
                     format!("linear place '{n}' remains live at IR return"),
                     span.clone(),
+                    self.origins.slot(n),
+                    "Each owned linear place must be consumed on every returning path.",
                 );
             }
         }
         for (id, v) in &s.values {
             if v.owned && !v.consumed && self.mode(&v.ty) == Mode::Linear {
-                self.error(
+                self.caused(
                     format!("linear temporary %{id} remains live at IR return"),
                     span.clone(),
+                    self.origins.value(*id),
+                    "Each owned linear temporary must be consumed on every returning path.",
                 );
             }
         }
@@ -377,7 +578,7 @@ impl Flow<'_> {
                     .map(|v| v.ty.clone())
                     .unwrap_or(Type::Infer);
                 self.consume(s, *value, &i.span);
-                self.bind(s, pattern, &t);
+                self.bind(s, pattern, &t, *value);
             }
             Op::Write { place, value, .. } => {
                 self.consume(s, *value, &i.span);
@@ -390,9 +591,11 @@ impl Flow<'_> {
                 if let Some(slot) = s.slots.get(&p.root) {
                     let t = self.world.field(&slot.ty, &p.path).unwrap_or(Type::Infer);
                     if self.mode(&t) == Mode::Linear {
-                        self.error(
+                        self.caused(
                             "IR assignment overwrites a linear obligation",
                             i.span.clone(),
+                            self.origins.slot(&p.root),
+                            "Overwriting an owned linear obligation would discard it.",
                         );
                     }
                 }
@@ -417,10 +620,7 @@ impl Flow<'_> {
                     .get(v)
                     .is_some_and(|v| self.mode(&v.ty) == Mode::Linear)
                 {
-                    self.error(
-                        "projection would abandon a temporary linear aggregate",
-                        i.span.clone(),
-                    );
+                    self.caused("projection would abandon a temporary linear aggregate", i.span.clone(), self.origins.value(*v), "A linear aggregate must retain all of its ownership obligations when destructured.");
                 }
                 self.consume(s, *v, &i.span);
             }
@@ -433,6 +633,7 @@ impl Flow<'_> {
                     if a.pass == Pass::Sink {
                         self.consume(s, a.value, &i.span);
                     } else if let Some(v) = s.values.get_mut(&a.value) {
+                        // Loan release is not an owned-consumption witness.
                         v.consumed = true;
                         v.loan = None;
                     }
@@ -473,6 +674,7 @@ impl Flow<'_> {
                     if a.pass == Pass::Sink {
                         self.consume(s, a.value, &i.span);
                     } else if let Some(v) = s.values.get_mut(&a.value) {
+                        // Loan release is not an owned-consumption witness.
                         v.consumed = true;
                         v.loan = None;
                     }
@@ -556,10 +758,7 @@ impl Flow<'_> {
                     && slot.pass == Pass::Sink
                     && !slot.moved.contains(&vec![]);
                 if x != y {
-                    self.error(
-                        format!("linear place '{n}' has inconsistent ownership at a CFG join"),
-                        span.clone(),
-                    );
+                    self.caused(format!("linear place '{n}' has inconsistent ownership at a CFG join"), span.clone(), self.origins.slot(n), "Ownership of a linear place must agree on the incoming control-flow edges.");
                 }
                 old.moved.extend(slot.moved.clone());
             } else {
@@ -567,10 +766,7 @@ impl Flow<'_> {
                     && slot.pass == Pass::Sink
                     && !slot.moved.contains(&vec![])
                 {
-                    self.error(
-                        format!("linear place '{n}' survives only one CFG edge"),
-                        span.clone(),
-                    );
+                    self.caused(format!("linear place '{n}' survives only one CFG edge"), span.clone(), self.origins.slot(n), "An owned linear place cannot disappear on another incoming control-flow edge.");
                 }
                 out.slots.insert(n.clone(), slot.clone());
             }
@@ -579,10 +775,7 @@ impl Flow<'_> {
             if let Some(old) = out.values.get_mut(id) {
                 if self.mode(&old.ty) == Mode::Linear && old.owned && old.consumed != value.consumed
                 {
-                    self.error(
-                        format!("linear temporary %{id} has inconsistent ownership at a CFG join"),
-                        span.clone(),
-                    );
+                    self.caused(format!("linear temporary %{id} has inconsistent ownership at a CFG join"), span.clone(), self.origins.value(*id), "Ownership of a linear temporary must agree on incoming control-flow edges.");
                 }
                 old.consumed |= value.consumed;
                 if old.consumed {
@@ -619,6 +812,7 @@ impl Flow<'_> {
                 break;
             }
             let mut state = incoming[&block].clone();
+            self.local_consumes.clear();
             let b = &f.blocks[block];
             let mut diverges = false;
             for i in &b.instructions {
