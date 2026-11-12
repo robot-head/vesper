@@ -660,9 +660,11 @@ fn flags(pic: bool, opt: OptLevel) -> Result<settings::Flags, String> {
     Ok(settings::Flags::new(f))
 }
 
-/// Emit a relocatable object containing both entries for `triple`
-/// (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu`). The object
-/// imports `vesper_fiber_park`; the CLIF text is returned for review.
+/// Emit a relocatable object containing the prototype entries for `triple`
+/// (`x86_64-unknown-linux-gnu` or `aarch64-unknown-linux-gnu` as ELF,
+/// `aarch64-apple-darwin` as Mach-O with the Apple arm64 calling convention).
+/// The object imports `vesper_fiber_park`; the CLIF text is returned for
+/// review. Object generation is not execution evidence for that target.
 pub fn emit_object(triple: &str, opt: OptLevel) -> Result<(Vec<u8>, String), String> {
     let triple: target_lexicon::Triple = triple.parse().map_err(|e| format!("{e}"))?;
     if !matches!(
@@ -689,10 +691,7 @@ pub fn emit_object(triple: &str, opt: OptLevel) -> Result<(Vec<u8>, String), Str
 
 /// JIT-compiled prototype for the host. Dropping this handle does not free the
 /// machine code while any fiber created from it is alive.
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(vesper_direct_fibers)]
 pub struct JitPrototype {
     code: Rc<JitCode>,
     pulse_read: crate::fiber::EntryFn,
@@ -702,18 +701,12 @@ pub struct JitPrototype {
     clif: String,
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(vesper_direct_fibers)]
 struct JitCode {
     module: Option<cranelift_jit::JITModule>,
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(vesper_direct_fibers)]
 impl Drop for JitCode {
     fn drop(&mut self) {
         if let Some(module) = self.module.take() {
@@ -724,10 +717,7 @@ impl Drop for JitCode {
     }
 }
 
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+#[cfg(vesper_direct_fibers)]
 impl JitPrototype {
     pub fn new(opt: OptLevel) -> Result<Self, String> {
         let isa = cranelift_native::builder()

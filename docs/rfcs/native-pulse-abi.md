@@ -517,3 +517,46 @@ cancellation-during-I/O test both ran (`io_uring kernel round trip
 validated`, `io_uring kernel cancellation during I/O validated`). Under QEMU
 AArch64 all 50 tests pass in debug and release, and both kernel tests report
 `io_uring unavailable ... (os error 38) ... NOT validated`.
+
+## Appendix A. Platform: macOS AArch64 (wave 3, lane 6)
+
+For `aarch64-apple-darwin`, this appendix supersedes the "Linux only"
+statements in §1, §3 and §10 above. Results and evidence are in
+[macos-arm-fibers.md](../parallel-results/macos-arm-fibers.md).
+
+* **Gate.** `cfg(vesper_direct_fibers)`, set by `crates/vesper-fiber-abi/build.rs`,
+  covers Linux x86_64, Linux AArch64 and macOS AArch64. It enables `fiber`,
+  `stack`, `switch`, `fpenv` and `JitPrototype`. `pulse` (the scheduler adapter
+  and `NativeRuntime`) stays Linux-only. Nothing here makes io_uring or the
+  Pulse scheduler portable.
+* **ABI.** `ABI_VERSION` is still 2. The `repr(C)` layouts and offsets in §2 are
+  identical. The 192-byte AArch64 switch frame (x19–x28, x29, x30, d8–d15,
+  FPCR at +160, FPSR at +168, 16 bytes of padding) comes from one assembly
+  body shared by the ELF and Mach-O wrappers.
+* **Calling convention.** It is the Apple arm64 ABI, which matches AAPCS64 for
+  everything the switch relies on: the same callee-saved set, 16-byte SP
+  alignment, x29 frame records and FPCR as callee-preserved control. x18 is
+  the Darwin platform register. The switch never reads or writes it, and
+  neither does generated prototype code. Cranelift uses `apple_aarch64`
+  (`isa().default_call_conv()`), and `EntryFn` is ordinary `extern "C"`.
+  macOS arm64 user code is not arm64e, so return addresses are unsigned.
+* **Symbols and assembler.** Mach-O C symbols take a leading underscore:
+  `_vesper_fiber_switch` is global, `_vesper_fiber_start` is
+  `.private_extern`, and `_vesper_fiber_park` is a Rust `no_mangle` export.
+  There are no `.type`/`.size` directives and no CFI, so unwinding across a
+  switch is unsupported, as on Linux. Prototype objects for this triple are
+  Mach-O and call the park import through `ARM64_RELOC_GOT_LOAD_PAGE21` and
+  `GOT_LOAD_PAGEOFF12`.
+* **Stacks.** Each stack is an `mmap` with `MAP_PRIVATE | MAP_ANON` and a
+  one-page `PROT_NONE` guard below it (`MAP_NORESERVE` is not passed). Sizes
+  round to the host page, 16 KiB on Apple silicon. Stacks stay pinned, as
+  in §6.
+* **FP environment.** The rules are the same as on Linux AArch64. Each context
+  owns FPCR and FPSR. A fiber starts with FPCR = FPSR = 0, and the host's
+  environment is restored on every switch back. Trap enables are not used or
+  tested.
+* **Supported on macOS.** `Fiber`, `Parked` (one-shot), `ContinuationTable`,
+  cancellation and re-park, `cancel_all` and code-lifetime sharing through
+  `JitPrototype`. Not supported on macOS: the Pulse adapter, I/O, kqueue,
+  source suspension, nested fibers, work stealing, `Send` fibers and
+  latency claims.
