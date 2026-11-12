@@ -1,0 +1,159 @@
+{
+  "schema_version": 1,
+  "document_url": "https://docs.google.com/document/d/1zO7boUVwNTHRA-1ZNL4bDYi68OjQZBCimLWkETH6bso/edit",
+  "title": "Vesper Language Design & Formal Specification",
+  "document_revision": "AHj4eMRNKqpG49ptnYMT2P35Ci3DoTOSu-ksbay32mOfGeUCerr8tak3VMjlpAyeSVTQ9vKPp11rJ-C4vWy1rYx3vhisB6O4o5EO_Y3TT9Y",
+  "modified_time_utc": "2026-11-12T08:13:57.039Z",
+  "snapshot_sha256": "04c1d5975c031a1dd9be11c3fbfb0c70e973d1c36fefa662ce775cd39dca61c3",
+  "snapshot_transform": "Indexed document paragraph text, LF joined, HTML entities decoded once. Document section order preserved.",
+  "sections": {
+    "1": {
+      "title": "1. The 2025–2026 Programming Languages Research Landscape",
+      "sha256": "16ff79babd05c43581bfb89ec5ae953986bce3df501df9de90c57b30a3db4913"
+    },
+    "2": {
+      "title": "2. Core Language Overview & How Vesper Improves on Rust",
+      "sha256": "a80dbf28bcfc557d2ba9b351882ce912328901f31e4a7fe7ad2bd88ee9cd08c4"
+    },
+    "3": {
+      "title": "3. Formal Surface Grammar (LL(2) EBNF)",
+      "sha256": "6277d26f2132b84be6e63373a290e8e774521ba922059cf93cdf6f94d8570782"
+    },
+    "4": {
+      "title": "4. Core Calculus (λ_Vesper) & Modal Kind Lattice",
+      "sha256": "4699e8e6791102ace878b77b243955c36004b2cdeef62fdfd33ad97e2767b892"
+    },
+    "5": {
+      "title": "5. Core Typing Judgments: Modal Linearity & Place Projections",
+      "sha256": "e1ea488104182799346e49205e5e870cb7154752f48ca77feb8a0c5ea60219b4"
+    },
+    "6": {
+      "title": "6. One-Shot Lexical Effects & Metatheoretic Soundness",
+      "sha256": "0dabd65a8a9b7bee1006b0d66375bb26a35c9d1ac62bcda0e0c265e7a49a7100"
+    },
+    "7": {
+      "title": "7. 5-Stage Rust Implementation Architecture",
+      "sha256": "2059a55d4a7a762d021de3b1bb4a4b3fd98d38b8480ceed92eb576bffa41437f"
+    },
+    "8": {
+      "title": "8. Vesper Loom: Batteries-Included Package Management, Supply Chain Security and Distribution",
+      "sha256": "36962bdc8292e59812c9e83209aeea7e540c5d90f62664199947aeb533eea609"
+    },
+    "9": {
+      "title": "9. Formal SemVer Variance and Interface Subtyping Calculus (vesper semver)",
+      "sha256": "df888582170935023f7e3892546c33046e6162093e1fd57f24ce549c3047f92f"
+    },
+    "10": {
+      "title": "10. Rust Cargo Workspace Architecture and Core Crate Scaffolding",
+      "sha256": "ca7467d07b45a7cf4be1dbfcaac6e79f72d3cac615bf2a15b91e01eca8169fde"
+    },
+    "11": {
+      "title": "11. The Lean 4 Functional Proof Extractor (vesper-verify-lean)",
+      "sha256": "15ddc4ec400fce2f672a7cdcb9266b2c2177664e36209c554e63b2accedd4cfd"
+    },
+    "12": {
+      "title": "12. Vesper Pulse: Native Asynchronous Runtime, Stack-Switching ABI, and Deterministic Simulation",
+      "sha256": "8c925e822320e36196f456a2e000a58cf26e063e2eaa3e9f7dc55693b2b26300"
+    },
+    "13": {
+      "title": "13. Vesper Bridge: Zero-Copy FFI, Omniglot Isolation, and Declarative Sys-Specs",
+      "sha256": "b63e1f2dbfb5a9c37203d82631772734e2b9551497f95e47a2a93931bdfd52aa"
+    },
+    "14": {
+      "title": "14. Vesper Vector: Capability-Typed Portable and Scalable SIMD",
+      "sha256": "20ddca88099c78f8a0ee051b70209c2148cc4c42a039f18e29ec04a30d80f916"
+    },
+    "15": {
+      "title": "15. Vesper Strata: Zero-GC Memory Allocator, Lexical Regions, and Cache-Conscious Collections",
+      "sha256": "bab5131cbbde0aad795990d68308b098c86c29337efce5910c18b2950b9ec502"
+    },
+    "16": {
+      "title": "16. Vesper Pact and Forge: Trait Coherence and WASI Hygienic Macro System",
+      "sha256": "aea35b9dfe986a7681675784bdc1db2e583abc21d7edf88de6efc291f68f643a"
+    },
+    "17": {
+      "title": "17. Vesper Prism: Zero-Allocation, Protocol-Verified Web Framework Showcase",
+      "sha256": "02d861d142635c31f497c903a8d32ee685ea0bcc203447023a206603c1d64661"
+    },
+    "18": {
+      "title": "18. Vesper Aura: Cross-Platform Native UI Framework (WinUI 3, GTK 4, and SwiftUI)",
+      "sha256": "cd70cb6254cb8f4a6b7abfced731041cecdd0767e3778ea5c8172b3f6dfe992e"
+    },
+    "19": {
+      "title": "19. Vesper Ignis: Cross-Platform 3D Game Engine (DirectX 12, Vulkan 1.4, and Metal 4)",
+      "sha256": "8cb2b7acaa4c9a98a7d4e5b76204eb8597ea428c1d0bf22670091ca17fa90342"
+    },
+    "20": {
+      "title": "20. Vesper Wire and Json: Zero-Copy Arena Serde, On-Demand SIMD JSON, and Relative-Pointer Archives",
+      "sha256": "6fbec230c1d6922fca9fbee9fb1ded5543d7fa8ff2c6d42743e0953ffe0db0d5"
+    },
+    "21": {
+      "title": "21. Vesper Lens: Sub-Millisecond Incremental LSP, Resilient LL(2) Recovery, and Substructural Diagnostics",
+      "sha256": "13c6cb203fd5fc42f5065864cd8610fd5eb71f73c6bf53c0cbed0a652ccda466"
+    },
+    "22": {
+      "title": "22. Vesper Beacon: Zero-Allocation Distributed Observability, W3C TraceContext, and OTLP-Arrow Telemetry",
+      "sha256": "20e72fce3e4a79b4b5e095c616f9eda889826d655c06def68dae44af40b0bd0a"
+    },
+    "23": {
+      "title": "23. Vesper Vault: Constant-Time Cryptography, Hardware-Fenced Zeroization, and Nonce-Safe AEAD",
+      "sha256": "2391efcbb9564dc7bdd4cf664b9fc4efdfb313c38e049345b9717014d0d6727f"
+    },
+    "24": {
+      "title": "24. Vesper Quarry: Hermetic Compile-Time SQL, Linear Buffer-Pool Pins, and Vectorized AoSoA Execution",
+      "sha256": "fa4ea2eee5224f2b7b83c989d52869e9e2b3b64b2cea90314d996c331da1a777"
+    },
+    "25": {
+      "title": "25. Vesper Chorus: Choreographic Distributed Consensus, Linear Session Types, and Zero-Copy RDMA",
+      "sha256": "ba55544e2ddecac71e800f72a91325371b2e2b345d4d276dfd9a48c8ebf0ae22"
+    },
+    "26": {
+      "title": "26. Vesper Silicon: Bare-Metal OS Kernels, Embedded Firmware, Interrupt-Mask Capabilities, and Typestate MMIO/DMA",
+      "sha256": "38cae36ec6257129752ecfc3f7495563a63a0753bff049ecb7bbcd75b17d53b6"
+    },
+    "27": {
+      "title": "27. Vesper eBPF: Verifier-Guaranteed Linux eBPF Kernel Programs, Zero-Copy XDP Networking, and Linear RingBuf Reservations",
+      "sha256": "0517944dbda7fb60db27d6284714257f1ed5f3edecc26a76a513908a2deabfb9"
+    },
+    "28": {
+      "title": "28. Vesper Tensor: Compile-Time Shape-Checked Tensor Compute, egglog Operator Fusion, and Linear Paged-KV Local LLM Inference",
+      "sha256": "8194cee1eaa941d2a7feaa1d85b29a8a3da313fb12eb804a05a08b68f57c2b4a"
+    },
+    "29": {
+      "title": "29. Vesper Crucible: Coverage-Guided Concolic Fuzzing, Substructural Shrinking, and Incremental Rust/C Migration Toolchain",
+      "sha256": "d8ac9d9ca59c8fed9b01c3eb93bf47fbd50e47c58f96b735709aa76238e33800"
+    },
+    "30": {
+      "title": "30. Vesper Nexus: Component-Model WasmFX Sandboxes, Linear WIT Resources, and Zero-Copy Host/Guest Plugins",
+      "sha256": "c7844ff6e09d62c1e43908c4f842d8ec74d9cbbbd013cdd9da92f5fbe5f8e6ad"
+    },
+    "31": {
+      "title": "31. Vesper Chrono: Time-Travel Reverse Debugging, Hardware IPT/CoreSight Tracing, and Linear Obligation Provenance",
+      "sha256": "aa7875e2c09fb63be409af19d35cba9f9d3dd190b15420ec34e8630101137120"
+    },
+    "32": {
+      "title": "32. Vesper Resonance: Lock-Free Hard-Realtime DSP, Sample-Accurate Audio Graphs, and Deterministic Robotics Control Loops",
+      "sha256": "43a9e2734d2daf555797549a26d03756ad1dc284e8b6104bcc677c85d5986c7b"
+    },
+    "33": {
+      "title": "33. Vesper Aegis: Hardware Confidential Computing (TDX, SEV-SNP, and Arm CCA), Iago-Safe Bounce Buffers, and Supply-Chain-Bound Remote Attestation",
+      "sha256": "d2f27be3672de7db4336bb4b6c516be0620f988fd1e42c1241aa62e411778189"
+    },
+    "34": {
+      "title": "34. Vesper Flux: Incremental Differential Stream Processing, Zero-GC DBSP Z-Set Materialized Views, and Linear Watermark Progress",
+      "sha256": "e0ca099cbb85113d4a810cd647c42610172ef03cef8a64b465302bf2991247d2"
+    },
+    "35": {
+      "title": "35. Vesper Warp: User-Space Kernel-Bypass QUIC/TCP Networking, Linear AF_XDP/DPDK UMEM Descriptor Rings, and Verified BBRv3 Loss Recovery",
+      "sha256": "2b918c2b37a67ad56f2a76791a3e2c65ad275e1d5aeaac82f6caafd8a41d5e06"
+    },
+    "36": {
+      "title": "36. Vesper Kinetic: Cross-Architecture Bit-Deterministic XPBD Physics, Capability-Verified IEEE-754 Determinism, and Tri-Backend GPU Broadphase",
+      "sha256": "a2bf4457eee989db6ac0367a65276493b35f57a38798cc2eb1cc366cc6bc4e58"
+    },
+    "37": {
+      "title": "37. Vesper Aether: Sub-Millisecond Content-Addressed Unikernels, Hermetic Containerless KVM MicroVMs, and Clone-Safe UFFD Snapshot Forking",
+      "sha256": "49dd7726b83cfd6ec54000ef705b5550a2e9aa06a202d80309c1ca83a04d0af8"
+    }
+  }
+}
