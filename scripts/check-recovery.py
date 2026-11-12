@@ -245,14 +245,18 @@ def run(binary, work):
 
     source = "fn damaged(){receiver.}\r\nfn good()->u64{1}"
     messages = harness.lsp([initialize(), open_document(uri, source), status_request(2, uri),
-        request(3, "textDocument/hover", {"textDocument": {"uri": uri}, "position": position(source, span(source, "{1}")["start"] + 1), "verified": True})])
+        request(3, "textDocument/hover", {"textDocument": {"uri": uri}, "position": position(source, span(source, "{1}")["start"] + 1), "verified": True}),
+        request(4, "textDocument/definition", {"textDocument": {"uri": uri}, "position": position(source, span(source, "good")["start"]), "verified": True}),
+        request(5, "textDocument/codeAction", {"textDocument": {"uri": uri}, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0}}, "context": {"only": ["quickfix"], "diagnostics": []}, "verified": True}),
+        request(6, "vesper/signatureSearch", {"uri": uri, "query": query, "verified": True})])
     status = syntax_status(messages, 2, uri, source, 1)
     _, good = declaration(status, "good")
     publication = publications(messages, uri)[0]
     assert publication["vesper"]["status"] == "parse_error"
     assert any(f["span"] == good["span"] for f in publication["vesper"]["recovery"]["analyzed_functions"])
     assert all(d["code"].startswith("E000") for d in publication["diagnostics"])
-    response(messages, 3, -32003)
+    for identifier in range(3, 7):
+        response(messages, identifier, -32003)
 
     uri = "untitled:incremental/🦀"
     source = "//😀\r\nfn value()->u64{1}\r\nfn sibling()->u64{7}\r\n"
@@ -266,6 +270,7 @@ def run(binary, work):
     assert syntax_status(messages, 2, uri, source, 1)["update_kind"] == "opened"
     fast = syntax_status(messages, 3, uri, body, 2)
     assert fast["update_kind"] == "body_reparse"
+    assert raw_span(declaration(fast, "sibling")[1]["span"], body) == "fn sibling()->u64{7}"
     assert fast == response(messages, 4) == response(messages, 5)
     full = syntax_status(messages, 6, uri, header, 3)
     assert full["update_kind"] == "full_reparse"
@@ -274,8 +279,20 @@ def run(binary, work):
     response(messages, 7, -32602)
     assert syntax_status(messages, 8, uri, "fn fresh(){}", 1)["update_kind"] == "opened"
 
+    original = "// 🦀 é\r\nlinear struct Tx{}\r\nfn good()->u64{1}\r\nfn damaged(sink tx:Tx){tx.}\r\nfn leak(sink other:Tx){}\r\n"
+    changed = original.replace("{1}", "{12345}", 1)
+    messages = harness.lsp([initialize(), open_document(uri, original), status_request(2, uri), change(uri, changed, 2), status_request(3, uri)])
+    before = syntax_status(messages, 2, uri, original, 1)
+    after = syntax_status(messages, 3, uri, changed, 2)
+    assert after["update_kind"] == "body_reparse"
+    old_site = next(s for s in before["sites"] if s["kind"] == "missing_member")
+    new_site = next(s for s in after["sites"] if s["kind"] == "missing_member")
+    assert new_site["span"]["start"] == old_site["span"]["start"] + 4
+    assert raw_span(new_site["receiver"]["root"], changed) == "tx"
+    independent_leak(publications(messages, uri)[1], changed, uri, after)
+
     uri = "untitled:recovery-budget"
-    storm = "fn storm(){" + "value.;" * 300 + "}"
+    storm = "fn storm(){" + ";" * 20_000 + "}"
     messages = harness.lsp([initialize(), open_document(uri, "fn old(){}"), status_request(2, uri), change(uri, storm, 2), status_request(3, uri),
         change(uri, "fn fresh(){}", 3), status_request(4, uri)])
     syntax_status(messages, 2, uri, "fn old(){}", 1)

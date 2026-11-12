@@ -432,6 +432,21 @@ fn actual_member_recovery_preserves_real_leak_and_repairs_restore_strict_exhaust
             "textDocument/hover",
             json!({"textDocument":{"uri":uri},"position":position(source,span(source,"{1}").start+1),"verified":true}),
         ),
+        request(
+            4,
+            "textDocument/definition",
+            json!({"textDocument":{"uri":uri},"position":position(source,span(source,"good").start),"verified":true}),
+        ),
+        request(
+            5,
+            "textDocument/codeAction",
+            json!({"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}},"context":{"only":["quickfix"],"diagnostics":[]},"verified":true}),
+        ),
+        request(
+            6,
+            "vesper/signatureSearch",
+            json!({"uri":uri,"query":query,"verified":true}),
+        ),
     ]);
     let status = syntax_status(&messages, 2, uri, source, 1);
     let (_, good) = declaration(status, "good");
@@ -451,7 +466,9 @@ fn actual_member_recovery_preserves_real_leak_and_repairs_restore_strict_exhaust
             .iter()
             .all(|d| d["code"].as_str().unwrap().starts_with("E000"))
     );
-    error(&messages, 3, -32003);
+    for id in 3..=6 {
+        error(&messages, id, -32003);
+    }
 }
 
 #[test]
@@ -650,6 +667,11 @@ fn valid_body_reparse_header_fallback_and_rejected_edits_have_truthful_current_i
     );
     let fast = syntax_status(&messages, 3, uri, &second, 2);
     assert_eq!(fast["update_kind"], "body_reparse");
+    let (_, sibling) = declaration(fast, "sibling");
+    assert_eq!(
+        &second[raw_span(&sibling["span"], &second)],
+        "fn sibling()->u64{7}"
+    );
     assert_eq!(fast, result(&messages, 4));
     assert_eq!(fast, result(&messages, 5));
     let full = syntax_status(&messages, 6, uri, &header, 3);
@@ -661,12 +683,48 @@ fn valid_body_reparse_header_fallback_and_rejected_edits_have_truthful_current_i
     assert_eq!(reopened["update_kind"], "opened");
     assert_eq!(reopened["declarations"].as_array().unwrap().len(), 1);
     declaration(reopened, "fresh");
+    // The fast path also relocates later damaged syntax and real causal spans.
+    let original = "// 🦀 é\r\nlinear struct Tx{}\r\nfn good()->u64{1}\r\nfn damaged(sink tx:Tx){tx.}\r\nfn leak(sink other:Tx){}\r\n";
+    let changed = original.replacen("{1}", "{12345}", 1);
+    let messages = run(vec![
+        initialize(),
+        open(uri, original),
+        status_request(2, uri),
+        change(uri, &changed, 2),
+        status_request(3, uri),
+    ]);
+    let old = syntax_status(&messages, 2, uri, original, 1);
+    let new = syntax_status(&messages, 3, uri, &changed, 2);
+    assert_eq!(new["update_kind"], "body_reparse");
+    let old_site = old["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind"] == "missing_member")
+        .unwrap();
+    let new_site = new["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["kind"] == "missing_member")
+        .unwrap();
+    assert_eq!(
+        new_site["span"]["start"].as_u64().unwrap(),
+        old_site["span"]["start"].as_u64().unwrap() + 4
+    );
+    assert_eq!(
+        &changed[raw_span(&new_site["receiver"]["root"], &changed)],
+        "tx"
+    );
+    let published = publications(&messages, uri);
+    assert_hash(published[1], &changed, 2);
+    assert_independent_leak(published[1], &changed, uri, new);
 }
 
 #[test]
 fn failed_recovery_update_discards_old_snapshot_and_resource_refusal_is_explicit() {
     let uri = "untitled:recovery-budget";
-    let storm = format!("fn storm(){{{}}}", "value.;".repeat(300));
+    let storm = format!("fn storm(){{{}}}", ";".repeat(20_000));
     let messages = run(vec![
         initialize(),
         open(uri, "fn old(){}"),

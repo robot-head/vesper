@@ -27,7 +27,8 @@ source, with `vesper.recovery.scope:"independent_functions"`, original-span
 analyzed coverage, and damaged-function unavailability. Full semantic hover,
 definition, code actions and structural signature search must fail `-32003`
 against that original source. A separate clean independent sibling is actually
-checked without semantic errors, yet still cannot authorize whole-source hover.
+checked without semantic errors, yet still cannot authorize whole-source hover,
+definition, actions or signature search.
 The client negotiates both diagnostic publication flags and literal/versioned
 actions normally; no missing client capability is used to hide semantic failures.
 
@@ -56,12 +57,15 @@ lexical tails remain opaque instead of resurrecting embedded siblings.
 Actual nongeneric body edits must report `body_reparse`; header changes,
 generic/context uncertainty and unterminated lexical edits must report
 `full_reparse`; accepted unchanged text reports `unchanged`. Current metadata is
-checked against current text. Stale versions and surrogate-interior edits retain
+checked against current text, including a real body edit before a damaged
+receiver and independent leak: their syntax/causal byte ranges relocate while
+the actual reused-body path remains observable. Stale versions and surrogate-interior edits retain
 the last accepted source/version/hash/update result exactly. Close/reopen and the
 64-accepted-revision cache boundary must not expose old recovery snapshots,
 including for another still-open document.
 
-A bounded flat 300-site damaged source exercises resource refusal. If its update
+A bounded flat 20,000-semicolon source exceeds the explicit 16,384-token
+recovery profile and exercises resource refusal before semantic checking. If its update
 fails, recoveryStatus must fail explicitly with current source identity/version,
 never return the old successful syntax snapshot. A subsequent real repair must
 produce the new declaration and checked source again. This is not an exponential
@@ -111,12 +115,27 @@ Python source compilation and workflow YAML parsing
 git diff --check
 ```
 
-Seven Rust tests and fourteen Python stdio sessions/three batch checks are
-drafted against the frozen response. Runtime is explicitly pending the
-coordinator's new recovery-capable binary. No old minimal binary was run or
-accepted as recovery evidence; these assertions deliberately require the real
-new response, genuine causes and actual update path. Final runtime evidence and
-any fixture refinements will be recorded in the owned follow-up.
+The first checkpoint (`273ec08`) intentionally recorded runtime pending. Final
+runtime validation then passed against the new coordinator-built read-only
+binary `/workspace/vesper/target/parallel-next/debug/vesper` (reported integrated
+tree `4b1fcfa`, including final model/parser/scoped/incremental implementations
+and combined incoming main). No production copies or root cache writes were used:
+
+```text
+VESPER_RECOVERY_BINARY=ROOT_READONLY_BINARY scripts/test-recovery.sh
+  passed: 15 actual framed stdio sessions and 3 actual batch checks
+VESPER_RECOVERY_BINARY=ROOT_READONLY_BINARY cargo test -p vesper --test recovery_cli
+  all 7 Rust tests passed using the private Cargo target
+cargo clippy -p vesper --test recovery_cli -- -D warnings
+  passed
+```
+
+The final follow-up uses the explicit 16,384-token limit to make resource refusal
+unambiguous and adds actual body-reparse relocation before later damaged syntax/
+causes. All four semantic feature routes are also rejected for a zero-error
+independent subset. No original expectation was weakened to accept missing
+metadata, false checked status, full parsing labeled as a body path, or stale
+snapshots. No old minimal binary was accepted as recovery evidence.
 
 This is syntax-only recovery plus scoped diagnostics and bounded CST reuse. It
 does not certify a recovered whole program or implement semantic PoisonedRecovery,
