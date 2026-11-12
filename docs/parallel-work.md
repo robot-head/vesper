@@ -21,6 +21,8 @@ The names above are the requested branch names, not confirmed remote refs. Recor
 
 The coordinator retains root workspace/dependency registration, lockfile, CLI/module wiring, CI and global documentation. Do not pre-register unfinished crates or connect macros to caching before the provenance/authority gate is reviewed. Recheck compiler consumers against the arithmetic migration before integration; do not merge a partial arithmetic backend update.
 
+While these sessions run, the coordinator owns read-only locked-resolution validation in `crates/vesper-loom-solver`, `src/package_commands.rs`, CLI routing/help and the new `tests/locked_resolution_cli.rs`. This work uses manifest/catalog DTOs and does not edit the active compiler, fiber, allocator or new integration-crate lanes.
+
 ## First-wave results
 
 | Lane | Branch | Exclusive ownership | Status |
