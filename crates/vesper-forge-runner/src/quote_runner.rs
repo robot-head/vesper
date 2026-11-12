@@ -448,8 +448,18 @@ fn writable(path: &Path) -> std::io::Result<()> {
     let meta = fs::symlink_metadata(path)?;
     if meta.is_dir() {
         let mut permissions = meta.permissions();
-        #[allow(clippy::permissions_set_readonly_false)]
-        permissions.set_readonly(false);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Cleanup needs owner traversal/write access, not broader grants.
+            permissions.set_mode(permissions.mode() | 0o700);
+        }
+        #[cfg(not(unix))]
+        {
+            // Windows clears its readonly attribute; no Unix mode is changed.
+            #[allow(clippy::permissions_set_readonly_false)]
+            permissions.set_readonly(false);
+        }
         fs::set_permissions(path, permissions)?;
         for entry in fs::read_dir(path)? {
             writable(&entry?.path())?;
@@ -458,6 +468,8 @@ fn writable(path: &Path) -> std::io::Result<()> {
         #[cfg(windows)]
         {
             let mut permissions = meta.permissions();
+            // Windows clears its readonly attribute; no Unix mode is changed.
+            #[allow(clippy::permissions_set_readonly_false)]
             permissions.set_readonly(false);
             fs::set_permissions(path, permissions)?;
         }
