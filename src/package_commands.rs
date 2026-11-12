@@ -119,15 +119,15 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
-    let name = path.file_name().ok_or("output path must name a file")?;
+    path.file_name().ok_or("output path must name a file")?;
     let mut temp = PathBuf::from(parent);
-    let mut temporary_name = std::ffi::OsString::from(".");
-    temporary_name.push(name);
-    temporary_name.push(format!(
+    // Do not append a suffix to the destination leaf: a valid NAME_MAX-sized
+    // output name must still leave room for the private staging file.
+    let temporary_name = format!(
         ".vesper-tmp-{}-{}",
         std::process::id(),
         NEXT.fetch_add(1, Ordering::Relaxed)
-    ));
+    );
     temp.push(temporary_name);
     let mut file = OpenOptions::new()
         .write(true)
