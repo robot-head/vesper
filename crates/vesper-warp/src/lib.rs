@@ -19,9 +19,16 @@
 //! [`packet_number::decode_quic_packet_number_rfc9000`] reconstructs the full
 //! packet number, which lane 5's AEAD open takes for the RFC 9001 §5.3 nonce.
 //! Frames are parsed only from the opened payload.
+//!
+//! Integration (wave four, issue #45): [`endpoint`] assembles the
+//! end-to-end §35.3 path across every Warp lane crate, and [`cc`] holds the
+//! congestion-control event adapters (recovery → BBRv3 for QUIC, and the
+//! TCP lane's controller trait → BBRv3).
 #![forbid(unsafe_code)]
 
 pub mod ack;
+pub mod cc;
+pub mod endpoint;
 pub mod frame;
 pub mod header;
 pub mod packet_number;
