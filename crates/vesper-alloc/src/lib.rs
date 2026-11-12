@@ -27,6 +27,16 @@
 //! assert_eq!(out, Ok(3));
 //! ```
 //!
+//! `RegionBox<T>` is invariant in `T`, so a handle cannot be reinterpreted at
+//! a shorter lifetime and used to store a dangling borrow:
+//!
+//! ```compile_fail
+//! use vesper_alloc::RegionBox;
+//! fn shorten<'a, 'h>(b: &'h RegionBox<&'static str>) -> &'h RegionBox<&'a str> {
+//!     b
+//! }
+//! ```
+//!
 //! # What the runtime does not establish
 //!
 //! Rust's ownership rules do not prove Vesper's linear discipline: a Rust

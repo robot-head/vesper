@@ -144,7 +144,10 @@ pub struct RegionBox<T> {
     region: RegionId,
     slot: u32,
     serial: u64,
-    _payload: PhantomData<fn() -> T>,
+    /// Invariant in `T`: `get_mut` writes through a shared handle reference,
+    /// so a covariant handle could store a shorter-lived value under a longer
+    /// type (for example a local borrow as `&'static str`).
+    _payload: PhantomData<fn(T) -> T>,
 }
 
 impl<T> RegionBox<T> {
@@ -363,24 +366,33 @@ impl<B: ChunkBacking> Region<B> {
         {
             return Ok(self.commit_placement(self.current, start, size));
         }
-        // Reuse spare chunks retained by an earlier rewind; drop spares that
-        // cannot hold this request so the chunk list stays allocation-ordered.
-        let next = if self.chunks.is_empty() {
+        // Reuse spare chunks retained by an earlier rewind. Spares before the
+        // first one that fits are returned so the chunk list stays
+        // allocation-ordered; that is only done once the request is certain to
+        // succeed, so a failed request leaves every spare in place.
+        let first_spare = if self.chunks.is_empty() {
             0
         } else {
             self.current + 1
         };
-        while next < self.chunks.len() {
-            debug_assert_eq!(self.chunks[next].cursor, 0);
-            if let Some(start) = self.chunks[next].fit(size, align) {
-                self.current = next;
-                return Ok(self.commit_placement(next, start, size));
+        let fitting = (first_spare..self.chunks.len())
+            .find_map(|i| self.chunks[i].fit(size, align).map(|start| (i, start)));
+        if let Some((index, start)) = fitting {
+            for spare in self.chunks.drain(first_spare..index).collect::<Vec<_>>() {
+                self.release_chunk(spare);
             }
-            let spare = self.chunks.remove(next);
+            self.current = first_spare;
+            return Ok(self.commit_placement(first_spare, start, size));
+        }
+        // No spare fits: a new chunk replaces them all, so their capacity
+        // counts as available to it. They are released only after the backing
+        // has supplied the replacement.
+        let spare_bytes = self.chunks[first_spare..].iter().map(Chunk::capacity).sum();
+        let chunk = self.new_chunk(size, align, first_spare, spare_bytes)?;
+        let start = chunk.fit(size, align).ok_or(AllocError::SizeOverflow)?;
+        for spare in self.chunks.split_off(first_spare) {
             self.release_chunk(spare);
         }
-        let chunk = self.new_chunk(size, align)?;
-        let start = chunk.fit(size, align).ok_or(AllocError::SizeOverflow)?;
         self.chunks.push(chunk);
         self.current = self.chunks.len() - 1;
         Ok(self.commit_placement(self.current, start, size))
@@ -397,18 +409,27 @@ impl<B: ChunkBacking> Region<B> {
         }
     }
 
-    fn new_chunk(&mut self, size: usize, align: usize) -> Result<Chunk, AllocError> {
-        let growth = match self.chunks.last() {
+    /// Obtains a chunk to follow `chunks[..in_use]`, treating `releasable`
+    /// bytes of spare capacity as available. Changes nothing on error.
+    fn new_chunk(
+        &mut self,
+        size: usize,
+        align: usize,
+        in_use: usize,
+        releasable: usize,
+    ) -> Result<Chunk, AllocError> {
+        let growth = match self.chunks[..in_use].last() {
             None => self.config.initial_chunk_bytes,
             Some(last) => last
                 .capacity()
                 .saturating_mul(2)
                 .min(self.config.max_chunk_bytes),
         };
-        let remaining = self.config.max_reserved_bytes - self.reserved;
+        let reserved = self.reserved - releasable;
+        let remaining = self.config.max_reserved_bytes - reserved;
         let exceeded = AllocError::CapacityExceeded {
             requested: size,
-            reserved: self.reserved,
+            reserved,
             limit: self.config.max_reserved_bytes,
         };
         if size > remaining {
@@ -500,8 +521,19 @@ impl<B: ChunkBacking> Region<B> {
     }
 
     /// Pops released or moved allocations at the tip so their bytes are reused.
+    /// When the active chunk empties, the previous chunk becomes active again
+    /// (the emptied one stays as a spare), so the cascade continues across
+    /// chunk boundaries. It never steps below the newest watermark's chunk; a
+    /// raw allocation keeps its chunk's cursor nonzero and so also stops it.
     fn reclaim_tail(&mut self) {
-        while let Some(last) = self.slots.len().checked_sub(1) {
+        loop {
+            let pinned = self.marks.last().map_or(0, |m| m.chunk);
+            while self.current > pinned && self.chunks[self.current].cursor == 0 {
+                self.current -= 1;
+            }
+            let Some(last) = self.slots.len().checked_sub(1) else {
+                break;
+            };
             if self.slots[last].state == SlotState::Live || !self.is_tip(last) {
                 break;
             }
