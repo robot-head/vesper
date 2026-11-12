@@ -7,7 +7,7 @@ CI runs one reference lane and two platform lanes on every push and pull request
 | --- | --- | --- |
 | `check` (Linux x86_64) | `ubuntu-latest` | fmt, Clippy, workspace tests, Lean, AArch64 objects under QEMU, host native executables |
 | macOS (AArch64) | `macos-latest` (Apple silicon) | Clippy, workspace tests, Lean, host native executables on real AArch64 hardware |
-| Windows (x86_64 MSVC) | `windows-latest` | Clippy, workspace tests, Lean |
+| Windows (x86_64 MSVC) | `windows-latest` | Clippy, workspace tests, Lean; native executable linking skipped |
 
 Formatting runs only on Linux because it does not depend on the host. The
 platform lanes check out sources with `core.autocrlf=false` so that span and
@@ -31,26 +31,22 @@ A test that cannot run on a platform is gated in source, never dropped from CI:
 | Area | Linux | macOS AArch64 | Windows x86_64 |
 | --- | --- | --- | --- |
 | Pulse io_uring driver | Built and tested (GitHub runners may deny `io_uring_setup`) | Not built: Linux-only | Not built: Linux-only |
-| `vesper build` native executables | `cc` links ELF | `cc` links Mach-O; examples run natively | Not supported: the driver invokes `cc ... -lm`, which MSVC hosts lack. `native_executable` is ignored on Windows |
+| `vesper build` native executables | `cc` links ELF | `cc` links Mach-O; CI runs examples natively | Not supported: the driver invokes `cc ... -lm`, which MSVC hosts lack. `native_executable` is ignored on Windows |
 | AArch64 object validation | Cross ELF objects under QEMU | Native hardware via `vesper build` | n/a |
-| JIT (`vesper jit`) | Tested | Tested | Tested |
-| Lean extraction | Tested | Tested | Tested |
+| JIT (`vesper jit`) | Executed locally | Configured in CI | Configured in CI |
+| Lean extraction | Executed locally | Configured in CI | Configured in CI |
 
-## Pending crates (open milestone PRs)
+## Integrated milestone crates
 
-These crates carry a temporary standalone `[workspace]` and are not yet root
-members, so CI does not see them. When the integration owner registers one
-(rule 3), it joins every lane automatically through `cargo test --workspace`.
-What each lane will then cover, and the gating it needs:
+All handoff libraries and `experiments/native-pulse` are registered in both root member lists. They share the root lockfile and join every lane through workspace checks; there is no separate standalone-crate script. The sandbox fixture guest remains an independent wasm workspace, with committed fixture binaries used by the host tests. CI does not need wasm compilation targets unless rebuilding those fixtures.
 
-| PR | Crate | Expected platform coverage once registered |
-| --- | --- | --- |
-| #2 | `vesper-fiber-abi` | Stacks (`mmap`) and context switch (`global_asm!`) are `cfg(target_os = "linux")` with x86_64/AArch64 only, so macOS and Windows build only the portable ABI/data layer. A macOS AArch64 port (Mach-O symbol naming, `libc::mmap` on Darwin) is the next step to use Apple-silicon runners as real fiber hardware; Windows needs a separate fiber backend. `experiments/native-pulse` stays outside the workspace and needs its own Linux step if it should run in CI. |
-| #4 | `vesper-pact` | Pure Rust; expected to pass on all three lanes. |
-| #5 | Lean effects and places | Lean-only; covered by the Lean steps on all lanes. Add any new `.lean` files to every lane's Lean step list. |
-| #6 | `vesper-loom-cas` | Tested on Linux only so far. macOS takes the `link`+`unlink` publish path; Windows has no `cfg(unix)` permissions and no executable bits. Expect platform failures to surface here first; gate with `cfg_attr(..., ignore = "...")` per the policy above rather than excluding the crate. |
-| #7 | `vesper-loom-sandbox` | Wasmtime host is portable. Its guest fixtures need the `wasm32-wasip2` (and `wasm32-wasip1`) Rust targets: add `targets: wasm32-wasip2, wasm32-wasip1` to the toolchain step of every lane, or commit prebuilt fixtures. Symlink-escape tests are Unix-only. |
-| #8 | `vesper-ignis` | GPU-independent planner, pure Rust; expected to pass everywhere. It is the planned target for later Windows (D3D12) acceptance, which will need a GPU-capable self-hosted runner, not `windows-latest`. |
+| Crate | Platform boundary |
+| --- | --- |
+| `vesper-fiber-abi` | Native stacks and switching run only on Linux x86_64/AArch64. macOS and Windows check the portable ABI/data/codegen surface. The experiment compiles on every lane and reports an unsupported host outside Linux. |
+| `vesper-pact` | Pure Rust solver and coherence checks. |
+| Lean effects and places | The real extraction suite and `lean/EffectPlaces.lean` run on every lane. |
+| `vesper-loom-cas` | Unix permissions/executable bits and atomic publish differ by host; platform tests must validate their actual behavior. |
+| `vesper-loom-sandbox` | Wasmtime component host with prebuilt guest fixtures; Unix symlink tests remain gated to Unix. |
+| `vesper-ignis` | GPU-independent planner only. D3D12 acceptance still needs Windows hardware and a real executor. |
 
-Registering a crate also means adding it to `default-members` so plain
-`cargo test` keeps the same coverage.
+The integration checkpoint was validated on Linux. These platform jobs configure additional acceptance checks; their presence does not establish a passing macOS/Windows run or hardware validation. Wasmtime 50 and the compiler currently use separate Cranelift versions, so clean workspace builds need more memory and disk than the earlier compiler-only workspace.

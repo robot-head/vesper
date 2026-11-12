@@ -5,9 +5,6 @@ edition = "2024"
 publish = false
 description = "Runs the vesper-fiber-abi park/resume prototype under the Pulse scheduler"
 
-# Standalone experiment; not a workspace member.
-[workspace]
-
 [dependencies]
 vesper-fiber-abi = { path = "../../crates/vesper-fiber-abi" }
 vesper-pulse = { path = "../../crates/vesper-pulse" }

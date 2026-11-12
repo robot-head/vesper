@@ -146,7 +146,7 @@ impl Digest {
             }
         }
         let mut out = [0u8; 32];
-        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+        for (i, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
             out[i] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
         }
         Some(Digest(out))

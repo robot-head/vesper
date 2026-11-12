@@ -1,3 +1,1 @@
-# Standalone-test artifacts until the crate is registered in the root workspace.
 /target
-/Cargo.lock

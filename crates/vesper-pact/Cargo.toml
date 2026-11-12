@@ -6,12 +6,6 @@ description = "Canonical trait goals, tabled resolution and stratified coherence
 license = "MIT OR Apache-2.0"
 publish = false
 
-# Temporary standalone workspace so this lane can be tested before the
-# integration owner registers it. Remove this table (and the nested
-# Cargo.lock) when adding the crate to the root workspace members.
-[workspace]
-
 [dependencies]
-# Versions pinned to match the root Cargo.lock (serde 1.0.229, serde_json 1.0.154).
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.154"
+serde = { workspace = true }
+serde_json = { workspace = true }

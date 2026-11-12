@@ -48,6 +48,10 @@ fn diagnostics_exit_nonzero() {
     assert!(d.iter().any(|d| d["code"] == "E0402"));
 }
 #[test]
+#[cfg_attr(
+    target_os = "windows",
+    ignore = "vesper build uses a Unix cc linker; MSVC executable linking is not implemented"
+)]
 fn native_executable() {
     let path = temp("exe");
     let o = cli()

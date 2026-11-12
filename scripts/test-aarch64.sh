@@ -6,7 +6,7 @@ linker=${AARCH64_LD:-aarch64-linux-gnu-ld}
 emulator=${QEMU_AARCH64:-qemu-aarch64}
 artifacts=$(mktemp -d)
 trap 'rm -rf "$artifacts"' EXIT HUP INT TERM
-cargo build --locked
+cargo build -p vesper --locked
 cat > "$artifacts/start.s" <<'ASM'
 .text
 .global _start

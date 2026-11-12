@@ -13,6 +13,12 @@ members = [
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
     "crates/vesper-alloc",
+    "crates/vesper-fiber-abi",
+    "crates/vesper-pact",
+    "crates/vesper-loom-cas",
+    "crates/vesper-loom-sandbox",
+    "crates/vesper-ignis",
+    "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
 default-members = [
@@ -26,7 +32,15 @@ default-members = [
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
     "crates/vesper-alloc",
+    "crates/vesper-fiber-abi",
+    "crates/vesper-pact",
+    "crates/vesper-loom-cas",
+    "crates/vesper-loom-sandbox",
+    "crates/vesper-ignis",
+    "experiments/native-pulse",
 ]
+
+exclude = ["crates/vesper-loom-sandbox/fixtures/guest"]
 
 [workspace.dependencies]
 logos = "0.15"

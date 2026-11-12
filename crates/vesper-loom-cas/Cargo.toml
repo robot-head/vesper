@@ -14,7 +14,3 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
-
-# Temporary standalone workspace so this crate can be tested before the
-# integration owner registers it in the root workspace. Remove on registration.
-[workspace]

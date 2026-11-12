@@ -1,6 +1,13 @@
 name: CI
 on: [push, pull_request]
 
+# Both compiler and sandbox Cranelift versions are intentional. Keep clean
+# hosted-runner builds within their memory/disk budget; assertions stay enabled.
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
@@ -30,15 +37,15 @@ jobs:
       - run: lean lean/Foundations.lean
       - run: lean lean/RuntimeFrames.lean
       - run: lean lean/SpecificationCounterexample.lean
+      - run: lean lean/EffectPlaces.lean
       - name: Validate AArch64 executables
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user binutils-aarch64-linux-gnu
           scripts/test-aarch64.sh
       - name: Validate host native executables
+        if: runner.os != 'Windows'
         run: scripts/test-native-host.sh
-      - name: Test standalone milestone crates
-        run: scripts/test-standalone-crates.sh
 
   # Per-platform lanes build and test every workspace member on the host OS.
   # Platform-specific code is gated with cfg in the crates themselves (for
@@ -88,10 +95,10 @@ jobs:
       - run: lean lean/Foundations.lean
       - run: lean lean/RuntimeFrames.lean
       - run: lean lean/SpecificationCounterexample.lean
+      - run: lean lean/EffectPlaces.lean
       # On Apple silicon the host is real AArch64 hardware, so native code
-      # runs here rather than under QEMU. On Windows, `vesper build` links
-      # with the runner's MinGW `cc`.
+      # runs here rather than under QEMU. The native executable driver does
+      # not yet support linking with MSVC.
       - name: Validate host native executables
+        if: runner.os != 'Windows'
         run: scripts/test-native-host.sh
-      - name: Test standalone milestone crates
-        run: scripts/test-standalone-crates.sh

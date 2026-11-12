@@ -241,7 +241,7 @@ impl Access {
         let mut bad = 0;
         let mut rest = self.0;
         while rest != 0 {
-            let bit = rest & rest.wrapping_neg();
+            let bit = rest.isolate_lowest_one();
             rest &= !bit;
             if sync.0 & compatible_sync(bit) == 0 {
                 bad |= bit;

@@ -18,7 +18,7 @@ Each agent used a distinct worktree under `/workspace/vesper-worktrees/`. Agents
 
 ## External agent prompts
 
-These lanes are reserved for user-launched cloud sessions or other agentic systems. No cloud-session creation API is exposed in the current toolset. Copy the full text prompt from one file per independent agent:
+All seven feature handoff sessions are complete and their contributions are merged into `main`. The additional platform-CI handoff (`claude/project-thread-hlbvro`) is integrated too. The prompts below record their original scope. No lane remains reserved for a running external session.
 
 | Assignment | Prompt |
 | --- | --- |
@@ -30,7 +30,17 @@ These lanes are reserved for user-launched cloud sessions or other agentic syste
 | Hermetic WASI macro/build host | [forge-wasi.md](agent-prompts/forge-wasi.md) |
 | Ignis barrier graph core | [ignis-barrier-graph.md](agent-prompts/ignis-barrier-graph.md) |
 
-Do not assign a prompt to two agents simultaneously. Record the external branch/PR and owner here once launched. Do not give an external agent a currently active internal lane.
+The integration checkpoint registers every delivered library plus the native experiment in the root workspace. Focused review uses separate `integration/review-*` worktrees; shared manifests, lockfile and CI remain coordinator-owned.
+
+| Completed handoff | Result and remaining boundary |
+| --- | --- |
+| Native ABI | [ABI report](rfcs/native-pulse-abi.md); hand-written CLIF on pinned stacks, source lowering pending |
+| Lean mutable effects | [Report](parallel-results/lean-effects-places.md); executable extraction, explicit rejection of unsupported alias cases |
+| Strata | [Report](parallel-results/strata-regions.md); host-region library, source lifetime/alias rules pending |
+| Pact | [Report](parallel-results/pact-goals.md); solver/coherence DTOs, source integration pending |
+| Loom CAS | [Report](parallel-results/loom-cas.md); private immutable store, build integration pending |
+| Forge WASI | [Report](parallel-results/forge-wasi.md); component host, compiler hygiene and confinement pending |
+| Ignis | [Report](parallel-results/ignis-barrier-graph.md); barrier model, Windows execution pending |
 
 ## Integration rules
 
@@ -54,7 +64,9 @@ cargo clippy --workspace --locked --all-targets -- -D warnings
 lean lean/Foundations.lean
 lean lean/RuntimeFrames.lean
 lean lean/SpecificationCounterexample.lean
+lean lean/EffectPlaces.lean
 scripts/test-aarch64.sh
+scripts/test-native-host.sh
 ```
 
 The current host denies `io_uring_setup` with `EPERM`; actual kernel integration must also run on a suitable host.
@@ -73,3 +85,5 @@ The coordinator owns source-interface export, CLI adapters, and offline local-ca
 Usage and guarantees are in [package-workflows.md](package-workflows.md).
 
 External Strata milestone from PR #1 was merged upstream during the second wave and preserved on integration. The coordinator registers its host-runtime crate for workspace checks; source-level Region lowering and the proposed v0 failure semantics remain design proposals pending compiler-contract review.
+
+The [completed handoff integration report](parallel-results/handoff-integration.md) records review fixes, combined validation, and the next source/build integration boundaries.

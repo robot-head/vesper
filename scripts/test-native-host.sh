@@ -5,7 +5,7 @@
 set -eu
 artifacts=$(mktemp -d)
 trap 'rm -rf "$artifacts"' EXIT HUP INT TERM
-cargo build --locked
+cargo build -p vesper --locked
 for case in fibonacci:55 transaction:42 projections:42 counter:3 fail:42 closures:42 resumptions:42 checked_math:42; do
     source=${case%:*}
     expected=${case#*:}
