@@ -46,8 +46,22 @@ AST/bytecode, shell syntax, workflow YAML/symmetric filters and diff checks.
 Private cache only; no fake production module or Lean toolchain was installed.
 The Rust suite has five tests on Unix and four on Windows.
 
-Runtime validation is in progress. No runtime or native CI success is claimed until the
-coordinator's actual integrated binary/model is ready. The evidence scope remains
-the formatter document algebra and runtime conservation checks: no lexer proof,
-Rust renderer refinement, semantic program proof, certified autofix, performance
-or RSS guarantee.
+Final local acceptance used actual integration checkpoint
+`5fb08c39441f5b3b7bce2af0a88aa5230bde3b79`, the bundled total/noncomputable
+model and AST-emitted noncomputable document, with real Lean4.24.0. The unchanged
+strict kernel auditor accepted the generated theorem and projection lemma under
+an empty axiom policy. The independent private Rust harness passed all five
+actual CLI tests in38.07seconds, zero ignored. The shell/Python harness passed
+28 recorded commands, three actual JSON kernel reports, and a separately emitted
+witness with independent model/witness elaboration, qualified theorem check,
+two printed empty-axiom results and a failing injected-declaration probe.
+Source files remained unchanged. The conflicting --json/--emit-lean rejection
+requires bounded rejection JSON; pure failed --emit-lean requires empty stdout.
+
+Only genuine Lean4.24.0 is installed locally. Missing-executable rejection was
+exercised; no alternative real version was available for a wrong-version test,
+and no Lean executable/version response was mocked. Native three-OS CI remains
+pending the integration PR. These runtime results establish local Linux behavior.
+The evidence scope remains the formatter document algebra and runtime
+conservation checks: no lexer proof, Rust renderer refinement, semantic program
+proof, certified autofix, performance or RSS guarantee.

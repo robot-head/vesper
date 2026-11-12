@@ -70,7 +70,7 @@ class Harness:
     def rejected(self, data, flags=("--format", "--json")):
         path = self.source(data)
         result = self.verify(path, *flags, success=False)
-        if "--emit-lean" in flags:
+        if "--emit-lean" in flags and "--json" not in flags:
             assert result.stdout == b"", "failed witness emission wrote output"
         else:
             report = load(result.stdout)
