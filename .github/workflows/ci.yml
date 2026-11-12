@@ -1,10 +1,14 @@
 name: CI
-# Run on pushes to main and on pull requests. A push trigger on every branch
-# would start a second, duplicate run for each commit pushed to a PR branch.
+# Run on pushes to main, on pull requests, and on merge queue groups. A push
+# trigger on every branch would start a second, duplicate run for each commit
+# pushed to a PR branch. The merge queue only advances once the required
+# checks report on its temporary gh-readonly-queue/main/* branch, so
+# `merge_group` must stay here for as long as the queue is enabled on main.
 on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
 
 # Both compiler and sandbox Cranelift versions are intentional. Keep clean
 # hosted-runner builds within their memory/disk budget; assertions stay enabled.
@@ -14,9 +18,11 @@ env:
   CARGO_PROFILE_TEST_DEBUG: 0
 
 # PR runs share one group per PR (refs/pull/N/merge), so a newer push cancels
-# the older run. Every other run (pushes to main) gets its own group keyed by
-# run id: a shared group would replace a pending run with a newer one, so a
-# burst of merges could leave a commit with no CI result.
+# the older run. Every other run (pushes to main and merge queue groups) gets
+# its own group keyed by run id: a shared group would replace a pending run
+# with a newer one, so a burst of merges could leave a commit with no CI
+# result, and a queued group would never report its required checks. The
+# queue cancels runs for groups it drops by itself.
 concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: true
