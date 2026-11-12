@@ -17,7 +17,7 @@ unchanged41sections/AppendixA, modified2026-11-12T09:18:30.204Z; §16.4 was rere
 | #168 | tuple41/host | typed_quote.rs, new typed_tuple tests, host report; obsolete typed-profile tuple-negative fixtures only |
 | #169 | tuple41/lower | forge_frontend/lower.rs, new forge_tuples tests, lower report |
 | #170 | tuple41/acceptance | new forge_tuples_cli.rs, source_macro_tuples fixtures, check-source-macro-tuples.py, acceptance report |
-| #171 | tuple41/admission | frontend.rs narrow bounded-admission integration, new private frontend/tuple_growth.rs, tuple_analysis tests, admission report |
+| #172 | tuple41/admission | frontend.rs narrow bounded-admission integration, new private frontend/tuple_growth.rs, tuple_analysis tests, admission report |
 
 No core AST/IR/native ABI, header/authority-policy, guest WIT/raw record, root CLI
 registration, workflow/build or test-wrapper changes. No new language macro
@@ -129,7 +129,7 @@ case, without inventing runtime grants. All malformed/depth/output/metadata/work
 refusals fail without partial acceptance.
 
 Actual end-to-end tests discovered the existing frontend's blanket nonempty-tuple
-refusal, which protects against exponential inferred type construction. Claim171
+refusal, which protects against exponential inferred type construction. Claim172
 adds a separate bounded pre-checker admission step; never simply remove that
 guard. Track compact size/depth/metadata bounds for actual tuple/let/parameter/
 known-result inference without constructing inferred Type trees. Preserve all
