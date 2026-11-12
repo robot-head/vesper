@@ -5,6 +5,8 @@
 //! Immutable output copies remove writable file aliases after verification; CAS
 //! filesystem permissions are not a defence against a privileged concurrent writer.
 
+pub mod virtio;
+
 use std::fmt;
 use std::io::{self, Read};
 use vesper_loom_cas::{Domain, ObjectId, ObjectKind, Store, blob_id};
