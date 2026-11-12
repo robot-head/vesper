@@ -1,0 +1,52 @@
+{
+  "schema": { "major": 0, "minor": 1 },
+  "package": { "name": "@demo/geometry", "version": "1.0.0" },
+  "branded_types": [
+    { "ty": "Index", "brands": [ { "name": "M", "trait": { "name": "Ord" } } ] }
+  ],
+  "traits": [
+    { "name": "Eq" },
+    { "name": "Ord" },
+    {
+      "name": "Container",
+      "assoc": [ { "name": "Elem", "mode_bound": { "const": "Linear" } } ]
+    }
+  ],
+  "impls": [
+    { "key": "eq.i64", "trait": { "name": "Eq" }, "self_ty": { "def": { "def": { "name": "i64" } } } },
+    { "key": "eq.string", "trait": { "name": "Eq" }, "self_ty": { "def": { "def": { "name": "String" } } } },
+    { "key": "eq.point", "trait": { "name": "Eq" }, "self_ty": { "def": { "def": { "name": "Point" } } } },
+    { "key": "ord.point", "trait": { "name": "Ord" }, "self_ty": { "def": { "def": { "name": "Point" } } } },
+    {
+      "key": "eq.option",
+      "params": [ { "name": "T", "kind": "type" } ],
+      "trait": { "name": "Eq" },
+      "self_ty": { "def": { "def": { "name": "Option" }, "args": [ { "type": { "param": "T" } } ] } },
+      "where_clauses": [ { "implements": { "self_ty": { "param": "T" }, "trait": { "name": "Eq" } } } ]
+    },
+    {
+      "key": "eq.shape",
+      "params": [ { "name": "T", "kind": "type" } ],
+      "trait": { "name": "Eq" },
+      "self_ty": { "def": { "def": { "name": "Shape" }, "args": [ { "type": { "param": "T" } } ] } },
+      "where_clauses": [ { "implements": { "self_ty": { "param": "T" }, "trait": { "name": "Eq" } } } ]
+    },
+    {
+      "key": "eq.layer",
+      "params": [ { "name": "T", "kind": "type" } ],
+      "trait": { "name": "Eq" },
+      "self_ty": { "def": { "def": { "name": "Layer" }, "args": [ { "type": { "param": "T" } } ] } },
+      "where_clauses": [ { "implements": { "self_ty": { "param": "T" }, "trait": { "name": "Eq" } } } ]
+    },
+    {
+      "key": "container.layer",
+      "params": [ { "name": "T", "kind": "type" } ],
+      "trait": { "name": "Container" },
+      "self_ty": { "def": { "def": { "name": "Layer" }, "args": [ { "type": { "param": "T" } } ] } },
+      "assoc": [ [ "Elem", { "def": { "def": { "name": "Shape" }, "args": [ { "type": { "param": "T" } } ] } } ] ]
+    }
+  ],
+  "models": [
+    { "name": "ByY", "trait": { "name": "Ord" }, "self_ty": { "def": { "def": { "name": "Point" } } } }
+  ]
+}
