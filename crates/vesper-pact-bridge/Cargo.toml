@@ -12,7 +12,3 @@ vesper-pact = { path = "../vesper-pact" }
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 sha2 = "0.10"
-
-# Temporary standalone workspace until the coordinator registers this crate in
-# the root workspace (remove this table and the nested Cargo.lock then).
-[workspace]

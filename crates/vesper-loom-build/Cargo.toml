@@ -6,8 +6,7 @@ description = "Offline Loom build-step runner: CAS-snapshotted inputs, hermetic 
 publish = false
 build = "build.rs"
 
-# Temporary standalone workspace until the coordinator registers this crate.
-[workspace]
+
 
 [dependencies]
 vesper-loom-cas = { path = "../vesper-loom-cas" }

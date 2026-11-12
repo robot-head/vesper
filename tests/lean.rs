@@ -548,23 +548,31 @@ fn effect_places_lemmas_are_axiom_free() {
     let source = include_str!("../lean/EffectPlaces.lean");
     let code = source.split_once("-/").unwrap().1;
     assert!(!code.contains("sorry") && !code.contains("axiom"));
-    // The lemmas are about the same CPS definitions the extractor emits.
+    // Check the actual generated prelude's denotation before importing the
+    // reference model's instances, so the latter cannot mask a wrong generated
+    // Monad implementation. This is independent of names being quoted or layout.
     let generated =
         lean::extract(&check::check(&parser::parse("fn main() -> i64 { 0 }").module).world)
             .unwrap();
-    for line in [
-        "abbrev HandlerCPS (S O : Type) (m : Type → Type) (A : Type) := (A → S → m O) → S → m O",
-        "  bind action next := fun k s => action (fun a s' => next a k s') s",
-    ] {
-        assert!(source.contains(line) && generated.contains(line), "{line}");
-    }
     let theorems = source
         .lines()
         .filter_map(|l| l.strip_prefix("theorem "))
         .map(|l| l.split_whitespace().next().unwrap().to_string())
         .collect::<Vec<_>>();
     assert!(theorems.len() >= 15, "{theorems:?}");
-    let mut checked = source.to_string();
+    let mut checked = generated;
+    checked.push_str(
+        r#"
+example (S O A : Type) (m : Type → Type) :
+    Vesper.HandlerCPS S O m A = ((A → S → m O) → S → m O) := rfl
+example {S O A : Type} {m : Type → Type} [Monad m] (a : A) :
+    (pure a : Vesper.HandlerCPS S O m A) = (fun k s => k a s) := rfl
+example {S O A B : Type} {m : Type → Type} [Monad m]
+    (action : Vesper.HandlerCPS S O m A) (next : A → Vesper.HandlerCPS S O m B) :
+    (action >>= next) = (fun k s => action (fun a s' => next a k s') s) := rfl
+"#,
+    );
+    checked.push_str(source.strip_prefix("import Std").unwrap());
     for t in &theorems {
         checked.push_str(&format!("\n#print axioms Vesper.EffectPlaces.{t}"));
     }

@@ -2,6 +2,8 @@
 
 `vesper-loom-tuf` verifies a target from local repository directories using maintained `tough` 0.24.0 cryptography and TUF metadata verification. It has no HTTP transport, publishing, package execution, or source/build integration. This is a bounded verifier core, **not a complete stateful TUF updater**.
 
+The optional Unix `updater` API owns a locked checkpoint store and gates each subsequent Tough fetch on successful synced checkpoint persistence. It also keeps running when its caller drops the worker handle; process termination and panic remain outside that guarantee.
+
 ## Security boundary
 
 The caller supplies an independently trusted bootstrap root and stable configured repository identity. A successful result contains authenticated owned target bytes, their exact signed length and SHA-256, opaque signed custom metadata, verified metadata versions, a verification time, and a checkpoint. Next verification starts from the checkpoint's latest authenticated root. It never silently falls back to bootstrap when previous state is malformed.
@@ -51,9 +53,45 @@ let update = attempt.result?; // Bytes can be used only after successful state p
 
 `Checkpoint::from_json(bytes, limits)` decodes a bounded wire structure; `verify_target` checks checksum, identity, bootstrap binding, root chain, version floors, and time. `root_version()` is an inspection helper and does not certify an unverified decoded checkpoint. `VerifiedUpdate.custom` is signed but application-specific: Loom namespace/package/version policy must validate its meaning separately.
 
+## Optional Unix owned updater
+
+`updater::start_update(store, request)` transfers an exclusively locked `CheckpointStore` into one admitted standard thread with its own current-thread Tokio runtime. `UpdateRequest` contains the local inputs and limits, **not a caller-supplied previous checkpoint**: the worker loads previous state from its owned store under the OS lock. At most two such workers run per process; each runtime's filesystem blocking pool is also capped at two threads. There is no background queue or unbounded worker manager.
+
+Immediately before each Tough filesystem fetch, the gate harvests and reauthenticates any accepted metadata prefix and synchronously commits its checkpoint through the store. Only a successful file-and-directory sync permits the backend open. If harvest advances a valid prefix before a later check fails, that prefix is still committed before the error is latched. A persistence or harvest failure latches for the remainder of the operation: every subsequent fetch is refused, and outer completion fails even though Tough's root loader treats fetch errors as a missing next root. A final harvest/commit also covers success and ordinary errors, including paths with no next fetch. Target bytes are returned only after final persistence succeeds.
+
+The gate and outer verifier share progress. Failed later private-datastore reads cannot reset final progress to an older clone. The sink separately rejects any decrease in the root-chain prefix, identity, timestamp/snapshot/role floors, or observed host time compared with the last actually committed checkpoint; its remembered committed state changes only after successful persistence. An in-memory checkpoint is never treated as a completed commit.
+
+```rust,no_run
+# #[cfg(unix)]
+# fn owned_example() -> Result<(), Box<dyn std::error::Error>> {
+use std::path::PathBuf;
+use vesper_loom_tuf::{Limits, state::CheckpointStore, updater::{UpdateRequest, start_update}};
+
+// Explicit one-time initialization uses CheckpointStore::create; open never resets missing state.
+let store = CheckpointStore::open("protected-registry-state")?;
+let handle = start_update(store, UpdateRequest {
+    repository_id: "configured-example-registry".into(),
+    bootstrap_root: std::fs::read("trusted-bootstrap-root.json")?,
+    metadata_dir: PathBuf::from("repository/metadata"),
+    targets_dir: PathBuf::from("repository/targets"),
+    target_name: "packages/example-1.0.0.tar".into(),
+    limits: Limits::default(),
+})?;
+let update = handle.wait()?; // Blocks; final checkpoint is already synced before these bytes arrive.
+# let _ = update.bytes;
+# Ok(())
+# }
+```
+
+`UpdateHandle::wait(self)` consumes the handle and blocks for completion; `is_finished()` supports polling. Dropping the handle detaches the worker rather than cancelling it. The worker retains its store/OS lock, verification resources, and admission guard until finalization ends. Source directories must remain available under the filesystem assumptions below. A rejected admission or thread start returns `StartError { error, store }`, so a caller can retry with the same still-owned fresh store; dropping the error intentionally drops that ownership. Admission is released on normal exit, rejected start, or unwinding.
+
+This gate covers Tough fetch boundaries and normal finalization, **not every possible process-failure instant after metadata acceptance**. Killing the process, panic, allocation failure, or I/O failure before a checkpoint can be recovered/committed may still lose advancement. A write failure poisons further commits for that operation and returns no bytes; investigate the stored state and persistence failure rather than silently restarting fresh. Invalid input before any trusted checkpoint exists can leave an explicitly created store incomplete; reopening must fail and recovery must be explicit. The worker is protected against handle-drop cancellation, not process termination, and bounded input sizes do not guarantee wall-clock deadlines for a stalled filesystem. Initial snapshot preparation reads bounded local input files independently of metadata before gated Tough fetches begin.
+
+Existing conservative root-recovery/version-floor rules still apply. No full TUF recovery/reset protocol, package/namespace identity, source correspondence, or provenance guarantee is added by the owned updater.
+
 ## Verification and bounds
 
-The implementation snapshots both directories into a private temporary directory before handing them to `tough::FilesystemTransport`. Safe expiry enforcement is unconditional. Tough verifies root threshold continuity, top-level and delegated signatures, snapshot version/hash pins, target authorization through delegation paths/termination, and the target SHA-256. Only a completely consumed successful target stream is returned. A separate exact-length comparison rejects a target shorter than its signed length even when its hash matches. Post-read checks sample real host time again, reject detected clock regression, and check root, timestamp, snapshot, top-level targets, and every loaded delegated expiry. No expiration-disable or injected-clock option exists. Before Tough runs, the core reserves worst-case checkpoint wire space for every prospective root and role floor in the bounded immutable snapshot, so a normal accepted step cannot exceed the configured return budget.
+The implementation snapshots both directories into a private temporary directory before handing them to `tough::FilesystemTransport`. Safe expiry enforcement is unconditional. Tough verifies root threshold continuity, top-level and delegated signatures, snapshot version/hash pins, target authorization through delegation paths/termination, and the target SHA-256. Only a completely consumed successful target stream is returned. Independent exact-length checks cover the timestamp's snapshot pin, snapshot pins for top-level and every loaded delegated targets role, and the target itself. Declaring a larger length with the correct actual hash cannot bypass these checks. Metadata lengths use original immutable source bytes, not Tough's reserialized datastore bytes; both consistent and non-consistent filenames are supported. A failed snapshot length check retains the authenticated timestamp and snapshot-version pin; later top-level/delegated length failures retain the authenticated snapshot-role floors too. Post-read checks sample real host time again, reject detected clock regression, and check root, timestamp, snapshot, top-level targets, and every loaded delegated expiry. No expiration-disable or injected-clock option exists. Before Tough runs, the core reserves worst-case checkpoint wire space for every prospective root and role floor in the bounded immutable snapshot, so a normal accepted step cannot exceed the configured return budget.
 
 Defaults:
 
@@ -80,7 +118,7 @@ Tough's file transport preserves URL escapes in filesystem paths. Private stagin
 
 The caller must prevent concurrent replacement of source directory ancestors during snapshot construction. The implementation checks ancestors, rejects symlinks/reparse points, and opens leaf files without following them, but does not implement directory-handle-relative traversal resistant to an adversary replacing parent directories between checks. Once constructed, Tough reads only the private immutable snapshot, so later input mutations cannot alter accepted target bytes. Mixed source-file versions fail signed hash/version checks; unauthenticated source filenames never become trust anchors.
 
-Target names must be canonical UTF-8 relative paths with no empty, `.` or `..` segments, URI schemes, percent escapes, backslashes, query/fragment syntax, control characters, Windows device names, trailing dots/spaces, or platform-reserved component characters. Copied file components follow the same platform-safe policy (percent-encoded metadata role filenames are allowed). Source directory arguments may be relative but cannot contain parent traversal. Unicode component bytes are limited to 255. Snapshotting can perform bounded blocking filesystem work within the async call; applications needing an interactive executor should isolate the operation on their own worker runtime.
+Requested target names support **ASCII letters/digits plus `._~+@-`, with `/` as the directory separator**. They must have no empty, `.` or `..` components or Windows device names; each component is limited to 255 bytes. Unicode target names, interior spaces, percent escapes, and other URL-escaped leaf characters are rejected explicitly before verification. Tough's file transport preserves their escapes and cannot reliably open ordinary Unicode/space-named target files, so the core does not claim that support. Original source directory arguments may contain Unicode/spaces/percent characters because snapshotting moves them under the supported private staging path; relative arguments are allowed but parent traversal is rejected. Copied repository entries follow a broader platform-safe UTF-8 component policy, allowing encoded metadata role filenames and unrequested files. Snapshotting can perform bounded blocking filesystem work within the async call; applications needing an interactive executor should isolate the operation on their own worker runtime.
 
 The OS wall clock and its integrity remain trust assumptions. Tough's accepted metadata encodings and canonicalization rules also apply; fixtures use whole-second RFC3339 expiries for portable signature round trips. A detected backward clock fails verification, but a falsified host clock is not a trusted time service.
 
@@ -118,4 +156,4 @@ Successful TUF verification authenticates bytes under the configured repository 
 
 ## Validation
 
-Tests generate real Ed25519-signed TUF repositories with fixed public test seeds. They exercise delegated targets, distinct-key root rotation, loading checkpoint root 2 after old root files disappear, successful and failed-attempt version floors across metadata roles, expired metadata, signature and snapshot hash mutations, scope rejection, target corruption/truncation/oversize, exact-length mismatch, state corruption/mismatched identities, resource limits, filesystem links, numeric role graph cycles/depth, temporary-path constraints, and the legacy failed-update limitation above. A Unix integration commits failure progress, drops/reopens the store, rejects older metadata, then persists a valid successful target and reopens again.
+Tests generate real Ed25519-signed TUF repositories with fixed public test seeds. They exercise delegated targets, distinct-key root rotation, loading checkpoint root 2 after old root files disappear, successful and failed-attempt version floors across metadata roles, expired metadata, signature and snapshot hash mutations, scope rejection, target corruption/truncation/oversize, exact-length mismatch, state corruption/mismatched identities, resource limits, filesystem links, numeric role graph cycles/depth, temporary/target-path constraints, and the legacy failed-update limitation above. Independent raw-Tough checks demonstrate its upper-bound metadata-length behavior, while the core rejects larger declared lengths with valid signatures/hashes at all three metadata edges in both snapshot modes and preserves failure progress. Unix integrations exercise manual and owned-worker error-progress persistence, replay rejection, and successful final checkpoint equality. Worker tests inspect actual synced checkpoints before backend opens, force commit/harvest failures through Tough's root-error swallowing, corrupt/remove private state after gate commits, reject stale final root/time state, reject final persistence after target verification, detach a blocked worker deterministically, and recover store ownership from admission/spawn rejection.

@@ -19,7 +19,7 @@ the evaluator, or `vesper-pulse` internals.
 
 | Piece | Where | Notes |
 | --- | --- | --- |
-| Versioned `repr(C)` layouts and offsets | `src/abi.rs` | `ABI_VERSION = 1`, magic `VFIB`. Every offset used by codegen is a const checked against `offset_of!` at compile time. |
+| Versioned `repr(C)` layouts and offsets | `src/abi.rs` | `ABI_VERSION = 2`, magic `VFIB`. Every offset used by codegen is a const checked against `offset_of!` at compile time. |
 | Evidence identities and vectors | `src/evidence.rs` | Monotonic, never-reused `EvidenceId`s; O(1) static-depth slots. |
 | Cranelift emission helpers | `src/clif.rs` | `declare_park`, `load_evidence`, `emit_park`, `branch_on_kind`, `emit_exit`, `emit_violation`. The only code that encodes ABI offsets into CLIF. |
 | Pinned fiber stacks | `src/stack.rs` | `mmap` + `PROT_NONE` guard page, 256 KiB default. |

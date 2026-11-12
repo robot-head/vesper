@@ -65,15 +65,15 @@ fn main() -> i64 {
     handle Counter state count = 0 in {
         Counter::next() + Counter::next()
     } with {
-        return (value, count) => value + count,
-        next(count, resume) => resume(count, count + 1),
+        return (value, count) => wrapping_add(value, count),
+        next(count, resume) => resume(count, wrapping_add(count, 1)),
     }
 }
 ```
 
 Plain `effect` declarations permit aborting a continuation. `linear effect` declarations require consuming it once. Stateful handlers explicitly thread unique state, and ambient clause captures must be owned copy values. Lexical labels distinguish nested handlers of the same effect. Native handlers support non-tail resumptions and linear state through stack-resident return dispatch.
 
-Potentially failing integer division/remainder and dynamic tuple indexing use `Fail[RuntimeError]`. Constant operands and simple nonzero guards keep safe operations pure; primitive failures cannot bypass linear obligations. See `examples/checked_math.ves`.
+Integer `+`, `-`, `*` and negation use checked semantics and require `Fail[ArithOverflow]` unless constant facts prove them safe. Use explicit `wrapping_add`, `wrapping_sub` and `wrapping_mul` for modular arithmetic. Signed `MIN / -1` also raises overflow. Division/remainder by zero and dynamic tuple indexing use the separate `Fail[RuntimeError]`. Primitive failures cannot bypass linear obligations. See [the arithmetic migration](docs/parallel-results/checked-arithmetic.md) and `examples/checked_math.ves`.
 
 ## Validation
 
@@ -89,6 +89,7 @@ Install the Lean version pinned in `lean-toolchain` to check extracted code and 
 lean lean/Foundations.lean
 lean lean/RuntimeFrames.lean
 lean lean/SpecificationCounterexample.lean
+lean lean/CheckedArithmetic.lean
 VESPER_LEAN=lean cargo test --test lean
 ```
 
@@ -104,5 +105,8 @@ Parallel implementation ownership and ready-to-send external agent prompts are l
 
 `vesper simd scan input.bin --delimiter 10 --json` runs the independent native
 Baseline128 delimiter/XOR scanner. See [SIMD support and limits](docs/simd-scanner.md).
+
+`vesper cas` ingests, verifies and materializes local domain-separated content.
+See [CAS workflows](docs/cas-workflows.md).
 
 `vesper emit --emit interface --package @org/name` and `vesper semver` now compare experimental checked source contracts. `vesper resolve --catalog ...` resolves local Loom metadata into an exact solution snapshot. See [package workflows and runnable examples](docs/package-workflows.md).

@@ -5,9 +5,13 @@ use crate::{
     ast::*,
     check::{Place, World},
     ir::{Argument, FunctionIr, Op, Terminator, ValueId},
-    lean::{name, ty},
+    lean_nodes as nodes,
 };
 use std::collections::{BTreeMap, BTreeSet};
+use syntax::{
+    Binder, BinderKind, Declaration, Definition, DefinitionKind, DoStatement, LetBinding, Term,
+};
+use vesper_lean_syntax as syntax;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Local {
@@ -15,11 +19,14 @@ enum Local {
     Value(ValueId),
 }
 impl Local {
-    fn text(&self) -> String {
-        name(&match self {
+    fn raw_name(&self) -> String {
+        match self {
             Self::Slot(n) => n.clone(),
             Self::Value(v) => format!("$value{v}"),
-        })
+        }
+    }
+    fn term(&self) -> Result<Term, String> {
+        nodes::source_ref(&self.raw_name())
     }
     fn ty<'a>(&self, f: &'a FunctionIr) -> &'a Type {
         match self {
@@ -28,8 +35,8 @@ impl Local {
         }
     }
 }
-fn value(v: ValueId) -> String {
-    Local::Value(v).text()
+fn value(v: ValueId) -> Result<Term, String> {
+    Local::Value(v).term()
 }
 fn slots(p: &Pattern, result: &mut BTreeSet<Local>) {
     match &p.kind {
@@ -219,8 +226,12 @@ fn liveness(world: &World, f: &FunctionIr) -> Vec<BTreeSet<Local>> {
         }
     }
 }
-pub(crate) fn extract_function(world: &World, f: &FunctionIr) -> Option<Result<String, String>> {
-    if f.values.values().any(crate::lean::effectful_arrow)
+/// Return structured declarations, leaving rendering to the module boundary.
+pub(crate) fn extract_function_nodes(
+    world: &World,
+    f: &FunctionIr,
+) -> Option<Result<Vec<Declaration>, String>> {
+    if f.values.values().any(nodes::effectful_arrow)
         || !f.effects.instances.is_empty()
         || f.effects.tail.is_some()
         || f.blocks.iter().flat_map(|b| &b.instructions).any(|i| {
@@ -238,17 +249,16 @@ pub(crate) fn extract_function(world: &World, f: &FunctionIr) -> Option<Result<S
     {
         return None;
     }
-    // A closure whose body needs effect lowering moves its whole enclosing
-    // function to the effectful generator instead of failing extraction.
     extract_closures(world, f).transpose()
 }
+
 struct Lifted {
     name: String,
     captures: Vec<String>,
     params: Vec<(Pass, Type)>,
 }
-fn extract_closures(world: &World, f: &FunctionIr) -> Result<Option<String>, String> {
-    let mut definitions = String::new();
+fn extract_closures(world: &World, f: &FunctionIr) -> Result<Option<Vec<Declaration>>, String> {
+    let mut definitions = vec![];
     let mut closures = BTreeMap::new();
     for i in f.blocks.iter().flat_map(|b| &b.instructions) {
         if let Op::Closure { expr, aliases, .. } = &i.op {
@@ -301,10 +311,10 @@ fn extract_closures(world: &World, f: &FunctionIr) -> Result<Option<String>, Str
             let mut extended = world.clone();
             extended.functions.insert(name.clone(), function);
             let program = crate::ir::lower_world(&extended);
-            let Some(body) = extract_function(&extended, &program.functions[&name]) else {
+            let Some(body) = extract_function_nodes(&extended, &program.functions[&name]) else {
                 return Ok(None);
             };
-            definitions.push_str(&body?);
+            definitions.extend(body?);
             closures.insert(
                 i.dest,
                 Lifted {
@@ -315,8 +325,8 @@ fn extract_closures(world: &World, f: &FunctionIr) -> Result<Option<String>, Str
             );
         }
     }
-    definitions.push_str(
-        &Emitter {
+    definitions.extend(
+        Emitter {
             world,
             f,
             live: liveness(world, f),
@@ -326,6 +336,46 @@ fn extract_closures(world: &World, f: &FunctionIr) -> Result<Option<String>, Str
     );
     Ok(Some(definitions))
 }
+fn apply(function: Term, arguments: Vec<syntax::Argument>) -> Term {
+    Term::App {
+        function: Box::new(function),
+        arguments,
+    }
+}
+fn tuple(mut values: Vec<Term>) -> Term {
+    if values.len() == 1 {
+        values.remove(0)
+    } else {
+        Term::Tuple(values)
+    }
+}
+fn tuple_pattern(mut values: Vec<syntax::Pattern>) -> syntax::Pattern {
+    if values.len() == 1 {
+        values.remove(0)
+    } else {
+        syntax::Pattern::Tuple(values)
+    }
+}
+fn let_value(pattern: syntax::Pattern, ty: Option<Term>, value: Term) -> DoStatement {
+    DoStatement::Let {
+        binding: LetBinding {
+            pattern,
+            ty: ty.map(Box::new),
+            value,
+        },
+        mutable: false,
+    }
+}
+fn named_path(parts: &[&str], rooted: bool) -> Result<syntax::Name, String> {
+    let name = syntax::Name::qualified(
+        parts
+            .iter()
+            .map(|s| nodes::ident(s))
+            .collect::<Result<Vec<_>, _>>()?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(if rooted { name.rooted() } else { name })
+}
 struct Emitter<'a> {
     world: &'a World,
     f: &'a FunctionIr,
@@ -333,91 +383,105 @@ struct Emitter<'a> {
     closures: BTreeMap<ValueId, Lifted>,
 }
 impl Emitter<'_> {
-    fn block_name(&self, b: usize) -> String {
-        name(&format!("$block_{}_{}", self.f.name, b))
+    fn block_name(&self, b: usize) -> Result<syntax::Name, String> {
+        nodes::source_name(&format!("$block_{}_{}", self.f.name, b))
     }
-    fn type_params(&self) -> Result<String, String> {
-        Ok(self.world.functions[&self.f.name]
+    fn type_params(&self) -> Result<Vec<Binder>, String> {
+        self.world.functions[&self.f.name]
             .generics
             .iter()
             .filter(|g| !g.row)
-            .map(|g| format!("{{{} : Type}} ", name(&g.name)))
-            .collect())
+            .map(|g| {
+                Ok(Binder {
+                    name: Some(nodes::ident(&g.name)?),
+                    ty: Box::new(Term::Sort(syntax::Sort::Type(0))),
+                    kind: BinderKind::Implicit,
+                })
+            })
+            .collect()
     }
-    fn result_type(&self) -> Result<String, String> {
-        let mut types = vec![ty(&self.f.result)?];
+    fn generic_args(&self) -> Result<Vec<syntax::Argument>, String> {
+        self.world.functions[&self.f.name]
+            .generics
+            .iter()
+            .filter(|g| !g.row)
+            .map(|g| {
+                Ok(syntax::Argument::Named {
+                    name: nodes::ident(&g.name)?,
+                    value: nodes::source_ref(&g.name)?,
+                })
+            })
+            .collect()
+    }
+    fn result_type(&self) -> Result<Term, String> {
+        let mut types = vec![nodes::ty(&self.f.result)?];
         types.extend(
             self.f
                 .params
                 .iter()
                 .filter(|p| p.pass == Pass::Inout)
-                .map(|p| ty(&p.ty))
+                .map(|p| nodes::ty(&p.ty))
                 .collect::<Result<Vec<_>, _>>()?,
         );
         Ok(if types.len() == 1 {
-            types[0].clone()
+            types.remove(0)
         } else {
-            format!("({})", types.join(" × "))
+            Term::ProductType(types)
         })
     }
-    fn call_block(&self, b: usize, replacements: &BTreeMap<ValueId, ValueId>) -> String {
-        let args = self.live[b]
-            .iter()
-            .map(|l| {
-                if let Local::Value(v) = l
-                    && let Some(arg) = replacements.get(v)
-                {
-                    return value(*arg);
-                }
-                l.text()
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let gs = self.world.functions[&self.f.name]
-            .generics
-            .iter()
-            .filter(|g| !g.row)
-            .map(|g| format!(" ({} := {})", name(&g.name), name(&g.name)))
-            .collect::<String>();
-        format!("({}{gs} {args})", self.block_name(b))
+    fn call_block(
+        &self,
+        b: usize,
+        replacements: &BTreeMap<ValueId, ValueId>,
+    ) -> Result<Term, String> {
+        let mut args = self.generic_args()?;
+        for local in &self.live[b] {
+            let term = if let Local::Value(v) = local
+                && let Some(arg) = replacements.get(v)
+            {
+                value(*arg)?
+            } else {
+                local.term()?
+            };
+            args.push(syntax::Argument::Positional(term));
+        }
+        Ok(apply(Term::Ref(self.block_name(b)?), args))
     }
-    fn emit(&self) -> Result<String, String> {
-        let mut out = String::new();
+    fn emit(&self) -> Result<Vec<Declaration>, String> {
+        let mut out = vec![];
+        let arms = arm_bindings(self.f);
         for (b, block) in self.f.blocks.iter().enumerate() {
-            out.push_str(&format!(
-                "  partial def {} {}",
-                self.block_name(b),
-                self.type_params()?
-            ));
-            for l in &self.live[b] {
-                out.push_str(&format!("({} : {}) ", l.text(), ty(l.ty(self.f))?));
+            let mut binders = self.type_params()?;
+            for local in &self.live[b] {
+                binders.push(Binder::explicit(
+                    nodes::ident(&local.raw_name())?,
+                    nodes::ty(local.ty(self.f))?,
+                ));
             }
-            out.push_str(&format!(": {} := Id.run do\n", self.result_type()?));
+            let mut statements = vec![];
             for (index, i) in block.instructions.iter().enumerate() {
-                if index == 0 && arm_bindings(self.f).contains_key(&b) {
-                    out.push_str(&format!("    let {} : Unit := ()\n", value(i.dest)));
+                if index == 0 && arms.contains_key(&b) {
+                    statements.push(let_value(
+                        syntax::Pattern::Bind(nodes::ident(&Local::Value(i.dest).raw_name())?),
+                        Some(nodes::global(&["Unit"])),
+                        Term::Tuple(vec![]),
+                    ));
                 } else {
-                    self.instruction(i, &mut out)?;
+                    self.instruction(i, &mut statements)?;
                 }
             }
-            match &block.terminator {
+            let result = match &block.terminator {
                 Terminator::Return(v) => {
-                    let mut results = vec![value(*v)];
-                    results.extend(
+                    let mut values = vec![value(*v)?];
+                    values.extend(
                         self.f
                             .params
                             .iter()
                             .filter(|p| p.pass == Pass::Inout)
-                            .map(|p| name(&p.name)),
+                            .map(|p| nodes::source_ref(&p.name))
+                            .collect::<Result<Vec<_>, _>>()?,
                     );
-                    out.push_str(&format!(
-                        "    pure {}\n",
-                        if results.len() == 1 {
-                            results[0].clone()
-                        } else {
-                            format!("({})", results.join(", "))
-                        }
-                    ));
+                    Term::app(nodes::global(&["Pure", "pure"]), [tuple(values)])
                 }
                 Terminator::Jump { block, args } => {
                     let replacements = self.f.blocks[*block]
@@ -426,270 +490,302 @@ impl Emitter<'_> {
                         .copied()
                         .zip(args.iter().copied())
                         .collect();
-                    out.push_str(&format!(
-                        "    pure {}\n",
-                        self.call_block(*block, &replacements)
-                    ));
+                    Term::app(
+                        nodes::global(&["Pure", "pure"]),
+                        [self.call_block(*block, &replacements)?],
+                    )
                 }
-                Terminator::Branch { condition, yes, no } => out.push_str(&format!(
-                    "    if {} then\n      pure {}\n    else\n      pure {}\n",
-                    value(*condition),
-                    self.call_block(*yes, &BTreeMap::new()),
-                    self.call_block(*no, &BTreeMap::new())
-                )),
-                Terminator::Match { value: v, arms } => {
-                    out.push_str(&format!("    match {} with\n", value(*v)));
-                    for (p, target) in arms {
-                        out.push_str(&format!(
-                            "    | {} => pure {}\n",
-                            self.pattern(arm_bindings(self.f).get(target).copied().unwrap_or(p))?,
-                            self.call_block(*target, &BTreeMap::new())
-                        ));
-                    }
-                }
+                Terminator::Branch { condition, yes, no } => Term::If {
+                    condition: Box::new(value(*condition)?),
+                    yes: Box::new(Term::app(
+                        nodes::global(&["Pure", "pure"]),
+                        [self.call_block(*yes, &BTreeMap::new())?],
+                    )),
+                    no: Box::new(Term::app(
+                        nodes::global(&["Pure", "pure"]),
+                        [self.call_block(*no, &BTreeMap::new())?],
+                    )),
+                },
+                Terminator::Match {
+                    value: v,
+                    arms: matches,
+                } => Term::Match {
+                    scrutinee: Box::new(value(*v)?),
+                    arms: matches
+                        .iter()
+                        .map(|(pattern, target)| {
+                            Ok(syntax::MatchArm {
+                                pattern: self
+                                    .pattern(arms.get(target).copied().unwrap_or(pattern))?,
+                                body: Term::app(
+                                    nodes::global(&["Pure", "pure"]),
+                                    [self.call_block(*target, &BTreeMap::new())?],
+                                ),
+                            })
+                        })
+                        .collect::<Result<Vec<_>, String>>()?,
+                },
                 Terminator::Unreachable => {
                     return Err("unreachable control flow has no pure Lean value".into());
                 }
-            }
-            out.push('\n');
+            };
+            let body = Term::app(
+                nodes::global(&["Id", "run"]),
+                [Term::Do {
+                    statements,
+                    result: Box::new(result),
+                }],
+            );
+            out.push(Declaration::Definition(Definition {
+                name: self.block_name(b)?,
+                binders,
+                result: self.result_type()?,
+                body,
+                kind: DefinitionKind::PartialDef,
+            }));
         }
-        out.push_str(&format!(
-            "  partial def {} {}",
-            name(&self.f.name),
-            self.type_params()?
-        ));
+        let mut binders = self.type_params()?;
         for p in &self.f.params {
-            out.push_str(&format!("({} : {}) ", name(&p.name), ty(&p.ty)?));
+            binders.push(Binder::explicit(nodes::ident(&p.name)?, nodes::ty(&p.ty)?));
         }
-        out.push_str(&format!(
-            ": {} := {}\n\n",
-            self.result_type()?,
-            self.call_block(0, &BTreeMap::new())
-        ));
+        out.push(Declaration::Definition(Definition {
+            name: nodes::source_name(&self.f.name)?,
+            binders,
+            result: self.result_type()?,
+            body: self.call_block(0, &BTreeMap::new())?,
+            kind: DefinitionKind::PartialDef,
+        }));
         Ok(out)
     }
-    fn constructor(&self, n: &str) -> Result<String, String> {
-        Ok(match n.rsplit("::").next().unwrap_or(n) {
-            "Some"
-                if self
-                    .world
-                    .constructor(n)
-                    .is_some_and(|(a, _)| a.name == "Option") =>
-            {
-                "Option.some".into()
-            }
-            "None"
-                if self
-                    .world
-                    .constructor(n)
-                    .is_some_and(|(a, _)| a.name == "Option") =>
-            {
-                "Option.none".into()
-            }
-            "Ok" if self
-                .world
-                .constructor(n)
-                .is_some_and(|(a, _)| a.name == "Result") =>
-            {
-                "Except.ok".into()
-            }
-            "Err"
-                if self
-                    .world
-                    .constructor(n)
-                    .is_some_and(|(a, _)| a.name == "Result") =>
-            {
-                "Except.error".into()
-            }
-            _ => {
-                let (a, v) = self
-                    .world
-                    .constructor(n)
-                    .ok_or("unknown Lean constructor")?;
-                format!(
-                    "{}.{}",
-                    name(&a.name),
-                    if a.is_enum {
-                        name(&v.name)
-                    } else {
-                        "mk".into()
-                    }
-                )
-            }
-        })
+    fn constructor(&self, n: &str) -> Result<syntax::Name, String> {
+        let (adt, variant) = self
+            .world
+            .constructor(n)
+            .ok_or("unknown Lean constructor")?;
+        match (adt.name.as_str(), variant.name.as_str()) {
+            ("Option", "Some") => named_path(&["Option", "some"], true),
+            ("Option", "None") => named_path(&["Option", "none"], true),
+            ("Result", "Ok") => named_path(&["Except", "ok"], true),
+            ("Result", "Err") => named_path(&["Except", "error"], true),
+            _ => named_path(
+                &[&adt.name, if adt.is_enum { &variant.name } else { "mk" }],
+                false,
+            ),
+        }
     }
-    fn pattern(&self, p: &Pattern) -> Result<String, String> {
+    fn pattern(&self, p: &Pattern) -> Result<syntax::Pattern, String> {
         Ok(match &p.kind {
-            PatternKind::Bind(n) => name(n),
-            PatternKind::Wild => "_".into(),
-            PatternKind::Literal(l) => super::lean::literal(l),
-            PatternKind::Tuple(ps) => format!(
-                "({})",
+            PatternKind::Bind(n) => syntax::Pattern::Bind(nodes::ident(n)?),
+            PatternKind::Wild => syntax::Pattern::Wildcard,
+            PatternKind::Literal(Literal::Int(n)) => syntax::Pattern::Int(*n),
+            PatternKind::Literal(Literal::Bool(b)) => syntax::Pattern::Bool(*b),
+            PatternKind::Literal(Literal::String(s)) => syntax::Pattern::String(s.clone()),
+            PatternKind::Literal(Literal::Float(_)) => {
+                return Err("floating-point patterns are unsupported in Lean extraction".into());
+            }
+            PatternKind::Tuple(ps) => tuple_pattern(
                 ps.iter()
                     .map(|p| self.pattern(p))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(", ")
+                    .collect::<Result<Vec<_>, _>>()?,
             ),
             PatternKind::Constructor {
                 name: n, fields, ..
             } => {
-                let (_, v) = self.world.constructor(n).ok_or("unknown Lean pattern")?;
-                let ps = v
+                let (_, variant) = self.world.constructor(n).ok_or("unknown Lean pattern")?;
+                let arguments = variant
                     .fields
                     .iter()
-                    .map(|f| {
+                    .map(|field| {
                         self.pattern(
                             &fields
                                 .iter()
-                                .find(|(n, _)| n == &f.name)
+                                .find(|(name, _)| name == &field.name)
                                 .ok_or("missing pattern field")?
                                 .1,
                         )
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                format!("({} {})", self.constructor(n)?, ps.join(" "))
+                syntax::Pattern::Constructor {
+                    name: self.constructor(n)?,
+                    arguments,
+                }
             }
         })
     }
-    fn instruction(&self, i: &crate::ir::Instruction, out: &mut String) -> Result<(), String> {
+    fn instruction(
+        &self,
+        i: &crate::ir::Instruction,
+        out: &mut Vec<DoStatement>,
+    ) -> Result<(), String> {
         let rhs = match &i.op {
-            Op::Constant(l) => format!("({} : {})", super::lean::literal(l), ty(&i.ty)?),
-            Op::Unit => "()".into(),
+            Op::Constant(l) => Term::Ascribe {
+                value: Box::new(nodes::literal(l)),
+                ty: Box::new(nodes::ty(&i.ty)?),
+            },
+            Op::Unit => Term::Tuple(vec![]),
             Op::Read { root, path, .. } => {
-                if let Some(f) = self
+                if let Some(function) = self
                     .world
                     .functions
                     .get(root)
                     .filter(|_| !self.f.locals.contains_key(root))
                 {
-                    if f.params.is_empty() {
-                        format!("(fun (_ : Unit) => {})", name(root))
+                    if function.params.is_empty() {
+                        Term::Lambda {
+                            binders: vec![Binder {
+                                name: None,
+                                ty: Box::new(nodes::global(&["Unit"])),
+                                kind: BinderKind::Explicit,
+                            }],
+                            body: Box::new(nodes::source_ref(root)?),
+                        }
                     } else {
-                        name(root)
+                        nodes::source_ref(root)?
                     }
                 } else {
-                    project(name(root), path, self.f.locals.get(root))
+                    project(nodes::source_ref(root)?, path, self.f.locals.get(root))?
                 }
             }
             Op::Closure { .. } => {
                 let closure = &self.closures[&i.dest];
-                let mut args = closure.captures.iter().map(|s| name(s)).collect::<Vec<_>>();
-                let params = if closure.params.is_empty() {
-                    String::from("(_ : Unit)")
+                let mut arguments = self.generic_args()?;
+                arguments.extend(
+                    closure
+                        .captures
+                        .iter()
+                        .map(|capture| nodes::source_ref(capture).map(syntax::Argument::Positional))
+                        .collect::<Result<Vec<_>, _>>()?,
+                );
+                let binders = if closure.params.is_empty() {
+                    vec![Binder {
+                        name: None,
+                        ty: Box::new(nodes::global(&["Unit"])),
+                        kind: BinderKind::Explicit,
+                    }]
                 } else {
                     closure
                         .params
                         .iter()
                         .enumerate()
-                        .map(|(n, (_, t))| {
-                            ty(t).map(|t| format!("({} : {t})", name(&format!("$arg{n}"))))
+                        .map(|(index, (_, ty))| {
+                            Ok(Binder::explicit(
+                                nodes::ident(&format!("$arg{index}"))?,
+                                nodes::ty(ty)?,
+                            ))
                         })
-                        .collect::<Result<Vec<_>, _>>()?
-                        .join(" ")
+                        .collect::<Result<Vec<_>, String>>()?
                 };
-                args.extend(
-                    closure
-                        .params
-                        .iter()
-                        .enumerate()
-                        .map(|(n, _)| name(&format!("$arg{n}"))),
-                );
-                let gs = self.world.functions[&self.f.name]
-                    .generics
-                    .iter()
-                    .filter(|g| !g.row)
-                    .map(|g| format!(" ({} := {})", name(&g.name), name(&g.name)))
-                    .collect::<String>();
-                format!(
-                    "(fun {params} => ({}{gs} {}))",
-                    name(&closure.name),
-                    args.join(" ")
-                )
+                for (index, _) in closure.params.iter().enumerate() {
+                    arguments.push(syntax::Argument::Positional(nodes::source_ref(&format!(
+                        "$arg{index}"
+                    ))?));
+                }
+                Term::Lambda {
+                    binders,
+                    body: Box::new(apply(nodes::source_ref(&closure.name)?, arguments)),
+                }
             }
             Op::Indirect { callee, args } => {
                 let values = if args.is_empty() {
-                    "()".into()
+                    vec![Term::Tuple(vec![])]
                 } else {
                     args.iter()
-                        .map(|a| value(a.value))
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                        .map(|arg| value(arg.value))
+                        .collect::<Result<Vec<_>, _>>()?
                 };
-                let call = format!("({} {values})", value(*callee));
+                let call = Term::app(value(*callee)?, values);
                 let states = args
                     .iter()
-                    .filter(|a| a.pass == Pass::Inout)
+                    .filter(|arg| arg.pass == Pass::Inout)
                     .collect::<Vec<_>>();
                 if states.is_empty() {
                     call
                 } else {
                     let names = (0..states.len())
-                        .map(|n| name(&format!("$state{}_{}", i.dest, n)))
+                        .map(|index| format!("$state{}_{}", i.dest, index))
                         .collect::<Vec<_>>();
-                    out.push_str(&format!(
-                        "    let ({}, {}) := {call}\n",
-                        value(i.dest),
-                        names.join(", ")
-                    ));
+                    let mut ps = vec![syntax::Pattern::Bind(nodes::ident(
+                        &Local::Value(i.dest).raw_name(),
+                    )?)];
+                    ps.extend(
+                        names
+                            .iter()
+                            .map(|name| nodes::ident(name).map(syntax::Pattern::Bind))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
+                    out.push(let_value(tuple_pattern(ps), None, call));
                     for (arg, new) in states.into_iter().zip(names) {
-                        let p = arg
+                        let place = arg
                             .place
                             .as_ref()
                             .ok_or("mutable indirect argument requires place")?;
-                        out.push_str(&format!(
-                            "    let {} := {}\n",
-                            name(&p.root),
-                            super::lean::update_place(p, &new)
+                        out.push(let_value(
+                            syntax::Pattern::Bind(nodes::ident(&place.root)?),
+                            None,
+                            nodes::update_place(place, nodes::source_ref(&new)?)?,
                         ));
                     }
                     return Ok(());
                 }
             }
-            Op::Unary(op, v) => format!("({op}{})", value(*v)),
+            Op::Unary(op, v) => Term::Unary {
+                op: match op.as_str() {
+                    "-" => syntax::UnaryOp::Neg,
+                    "!" => syntax::UnaryOp::BoolNot,
+                    _ => return Err("unsupported Lean unary operator".into()),
+                },
+                value: Box::new(value(*v)?),
+            },
             Op::Binary(op, a, b) => {
-                // Only proved-in-range checked operations reach pure IR
-                // extraction, so they share Lean's modular operators with
-                // the wrapping intrinsics.
                 let op = crate::numeric::wrapping_intrinsic(op).unwrap_or(op);
-                if matches!(op, "<" | "<=" | ">" | ">=") {
-                    format!("(decide ({} {op} {}))", value(*a), value(*b))
+                if let Some(op) = match op {
+                    "<" => Some(syntax::BinaryOp::Lt),
+                    "<=" => Some(syntax::BinaryOp::Le),
+                    ">" => Some(syntax::BinaryOp::Gt),
+                    ">=" => Some(syntax::BinaryOp::Ge),
+                    _ => None,
+                } {
+                    Term::app(
+                        nodes::global(&["Decidable", "decide"]),
+                        [Term::binary(op, value(*a)?, value(*b)?)],
+                    )
                 } else {
                     let kind = self
                         .f
                         .values
                         .get(a)
                         .and_then(crate::numeric::IntegerKind::from_type);
-                    super::lean::arith_term(op, kind, &value(*a), &value(*b))
+                    nodes::arith_term(op, kind, value(*a)?, value(*b)?)?
                 }
             }
-            Op::Tuple(vs) => format!(
-                "({})",
-                vs.iter().map(|v| value(*v)).collect::<Vec<_>>().join(", ")
+            Op::Tuple(vs) => tuple(
+                vs.iter()
+                    .map(|v| value(*v))
+                    .collect::<Result<Vec<_>, _>>()?,
             ),
-            Op::Data(n, fs) => {
-                let (_, variant) = self.world.constructor(n).ok_or("unknown Lean data")?;
+            Op::Data(name, fields) => {
+                let (_, variant) = self.world.constructor(name).ok_or("unknown Lean data")?;
                 let values = variant
                     .fields
                     .iter()
-                    .map(|f| {
-                        fs.iter()
-                            .find(|(n, _)| n == &f.name)
+                    .map(|field| {
+                        fields
+                            .iter()
+                            .find(|(name, _)| name == &field.name)
                             .map(|(_, v)| value(*v))
-                            .ok_or("missing Lean field")
+                            .ok_or("missing Lean field")?
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                format!("({} {})", self.constructor(n)?, values.join(" "))
+                Term::app(Term::Ref(self.constructor(name)?), values)
             }
-            Op::Project(v, field) => {
-                project(value(*v), std::slice::from_ref(field), self.f.values.get(v))
-            }
+            Op::Project(v, field) => project(
+                value(*v)?,
+                std::slice::from_ref(field),
+                self.f.values.get(v),
+            )?,
             Op::Bind { pattern, value: v } => {
-                out.push_str(&format!(
-                    "    let {} := {}\n",
-                    self.pattern(pattern)?,
-                    value(*v)
-                ));
-                "()".into()
+                out.push(let_value(self.pattern(pattern)?, None, value(*v)?));
+                Term::Tuple(vec![])
             }
             Op::Write {
                 place,
@@ -697,66 +793,78 @@ impl Emitter<'_> {
                 value: v,
             } => {
                 let mut parts = place.split('.');
-                let p = Place {
-                    root: parts.next().unwrap().into(),
+                let place = Place {
+                    root: parts.next().ok_or("empty Lean write place")?.into(),
                     path: parts.map(str::to_owned).collect(),
                 };
                 let new = if op == "=" {
-                    value(*v)
+                    value(*v)?
                 } else {
                     let kind = self
                         .f
                         .values
                         .get(v)
                         .and_then(crate::numeric::IntegerKind::from_type);
-                    super::lean::arith_term(
-                        &op[..1],
+                    nodes::arith_term(
+                        op.strip_suffix('=')
+                            .ok_or("invalid Lean compound operator")?,
                         kind,
-                        &project(name(&p.root), &p.path, self.f.locals.get(&p.root)),
-                        &value(*v),
-                    )
+                        project(
+                            nodes::source_ref(&place.root)?,
+                            &place.path,
+                            self.f.locals.get(&place.root),
+                        )?,
+                        value(*v)?,
+                    )?
                 };
-                out.push_str(&format!(
-                    "    let {} := {}\n",
-                    name(&p.root),
-                    super::lean::update_place(&p, &new)
+                out.push(let_value(
+                    syntax::Pattern::Bind(nodes::ident(&place.root)?),
+                    None,
+                    nodes::update_place(&place, new)?,
                 ));
-                "()".into()
+                Term::Tuple(vec![])
             }
             Op::Call { callee, args, .. } => {
                 let function = &self.world.functions[callee];
                 let vars = self.world.calls.get(&(i.span.start, i.span.end));
-                let gs = function
+                let mut arguments = function
                     .generics
                     .iter()
                     .filter(|g| !g.row)
                     .filter_map(|g| {
-                        vars.and_then(|v| v.get(&g.name))
-                            .map(|t| ty(t).map(|t| format!(" ({} := {t})", name(&g.name))))
+                        vars.and_then(|v| v.get(&g.name)).map(|ty| {
+                            Ok(syntax::Argument::Named {
+                                name: nodes::ident(&g.name)?,
+                                value: nodes::ty(ty)?,
+                            })
+                        })
                     })
-                    .collect::<Result<String, _>>()?;
-                let call = format!(
-                    "({}{gs} {})",
-                    name(callee),
+                    .collect::<Result<Vec<_>, String>>()?;
+                arguments.extend(
                     args.iter()
-                        .map(|a| value(a.value))
-                        .collect::<Vec<_>>()
-                        .join(" ")
+                        .map(|arg| value(arg.value).map(syntax::Argument::Positional))
+                        .collect::<Result<Vec<_>, _>>()?,
                 );
+                let call = apply(nodes::source_ref(callee)?, arguments);
                 let states = call_states(self.world, callee, args);
                 if states.is_empty() {
                     call
                 } else {
-                    let state_names = (0..states.len())
-                        .map(|n| name(&format!("$state{}_{}", i.dest, n)))
+                    let names = (0..states.len())
+                        .map(|index| format!("$state{}_{}", i.dest, index))
                         .collect::<Vec<_>>();
-                    out.push_str(&format!(
-                        "    let ({}, {}) := {call}\n",
-                        value(i.dest),
-                        state_names.join(", ")
-                    ));
-                    for ((param, arg), state) in states.iter().zip(state_names) {
-                        let p = arg
+                    let mut ps = vec![syntax::Pattern::Bind(nodes::ident(
+                        &Local::Value(i.dest).raw_name(),
+                    )?)];
+                    ps.extend(
+                        names
+                            .iter()
+                            .map(|name| nodes::ident(name).map(syntax::Pattern::Bind))
+                            .collect::<Result<Vec<_>, _>>()?,
+                    );
+                    out.push(let_value(tuple_pattern(ps), None, call));
+                    for ((param, arg), state) in states.iter().zip(names) {
+                        let place = arg
                             .place
                             .as_ref()
                             .ok_or("mutable Lean argument requires a place")?;
@@ -766,13 +874,13 @@ impl Emitter<'_> {
                             param.projections.clone()
                         };
                         for path in paths {
-                            let new = project(state.clone(), &path, Some(&param.ty));
-                            let mut place = p.clone();
-                            place.path.extend(path);
-                            out.push_str(&format!(
-                                "    let {} := {}\n",
-                                name(&place.root),
-                                super::lean::update_place(&place, &new)
+                            let new = project(nodes::source_ref(&state)?, &path, Some(&param.ty))?;
+                            let mut projected = place.clone();
+                            projected.path.extend(path);
+                            out.push(let_value(
+                                syntax::Pattern::Bind(nodes::ident(&projected.root)?),
+                                None,
+                                nodes::update_place(&projected, new)?,
                             ));
                         }
                     }
@@ -781,30 +889,43 @@ impl Emitter<'_> {
             }
             _ => return Err("unsupported operation in Lean CFG extraction".into()),
         };
-        out.push_str(&format!(
-            "    let {} : {} := {rhs}\n",
-            value(i.dest),
-            ty(&i.ty)?
+        out.push(let_value(
+            syntax::Pattern::Bind(nodes::ident(&Local::Value(i.dest).raw_name())?),
+            Some(nodes::ty(&i.ty)?),
+            rhs,
         ));
         Ok(())
     }
 }
-fn project(mut base: String, path: &[String], ty: Option<&Type>) -> String {
+fn project(mut base: Term, path: &[String], ty: Option<&Type>) -> Result<Term, String> {
     let mut current = ty;
-    for f in path {
-        if let Some(Type::Tuple(ts)) = current
-            && let Ok(index) = f.parse::<usize>()
+    for field in path {
+        if let Some(Type::Tuple(types)) = current
+            && let Ok(index) = field.parse::<usize>()
         {
-            let mut projection = ".2".repeat(index);
-            if index + 1 < ts.len() {
-                projection.push_str(".1");
+            if index >= types.len() {
+                return Err("tuple projection is outside Lean tuple type".into());
             }
-            base = format!("({base}){projection}");
-            current = ts.get(index);
-            continue;
+            for _ in 0..index {
+                base = Term::Project {
+                    base: Box::new(base),
+                    projection: syntax::Projection::Tuple(std::num::NonZeroU32::new(2).unwrap()),
+                };
+            }
+            if index + 1 < types.len() {
+                base = Term::Project {
+                    base: Box::new(base),
+                    projection: syntax::Projection::Tuple(std::num::NonZeroU32::new(1).unwrap()),
+                };
+            }
+            current = types.get(index);
+        } else {
+            base = Term::Project {
+                base: Box::new(base),
+                projection: syntax::Projection::Field(nodes::ident(field)?),
+            };
+            current = None;
         }
-        base = format!("({base}).{}", name(f));
-        current = None;
     }
-    base
+    Ok(base)
 }

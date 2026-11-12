@@ -21,6 +21,7 @@ pub mod ir_opt;
 pub mod layout;
 pub mod lean;
 mod lean_ir;
+pub(crate) mod lean_nodes;
 pub mod lsp;
 pub mod native;
 pub mod optimize;

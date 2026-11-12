@@ -3180,6 +3180,7 @@ dependencies = [
  "serde_json",
  "target-lexicon",
  "vesper-core",
+ "vesper-lean-syntax",
  "vesper-loom-calculus",
  "vesper-loom-cas",
  "vesper-loom-solver",
@@ -3234,6 +3235,24 @@ dependencies = [
 [[package]]
 name = "vesper-ignis"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-lean-syntax"
+version = "0.1.0"
+
+[[package]]
+name = "vesper-loom-build"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "libc",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "vesper-loom-cas",
+ "vesper-loom-sandbox",
+]
 
 [[package]]
 name = "vesper-loom-calculus"
@@ -3323,6 +3342,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-pact-bridge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "vesper",
+ "vesper-pact",
+]
+
+[[package]]
 name = "vesper-prism"
 version = "0.1.0"
 
@@ -3340,6 +3370,17 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "vesper-sim-session"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "vesper",
+ "vesper-simpulse",
 ]
 
 [[package]]

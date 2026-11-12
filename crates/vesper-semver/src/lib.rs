@@ -44,7 +44,9 @@ where
 }
 
 pub const SCHEMA_VERSION: u32 = 1;
-pub const SEMANTICS_VERSION: u32 = 1;
+/// Version 2 uses `vesper.arith.checked/1`. Version 1 assumed wrapping integer
+/// operators and cannot be certified compatible with a checked-arithmetic export.
+pub const SEMANTICS_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

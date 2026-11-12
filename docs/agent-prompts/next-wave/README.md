@@ -1,6 +1,6 @@
 # Next parallel implementation wave
 
-Status: **all seven sessions launched by the user**. Their implementation paths are reserved; do not assign a second agent to the same lane. Actual branch/PR and validation details will be recorded on handoff.
+Status: **completed and integrated**. The user confirmed all seven handoffs are complete. Their code is merged and registered; see `docs/parallel-results/wave-two-integration.md`. These prompts are historical. The next assignments are in `../wave-three/README.md`.
 
 Each lane starts from a fresh `origin/main` in a separate worktree or cloud checkout. Minimum implementation baseline: `0e6caf9`. Each file contains the complete, copyable prompt for its assigned agent. These are assignments for new work, not claims that the remaining features are already implemented.
 

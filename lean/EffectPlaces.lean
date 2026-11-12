@@ -18,8 +18,8 @@ the *frame*: the bindings outside the handler that its body may write.
   completion writes it back with `patch`.
 
 This file states and proves the algebraic facts that encoding relies on. The
-definitions mirror the generated prelude; the extractor emits the same
-`HandlerCPS` text, which `tests/lean.rs` checks. These lemmas concern the
+definitions mirror the generated prelude; `tests/lean.rs` checks its type and
+Monad denotation with Lean before loading this model's instances. These lemmas concern the
 encoding only. They do not prove that extraction preserves the operational
 semantics of Vesper, and `partial def` translations do not establish
 termination. No axioms or `sorry` are used.

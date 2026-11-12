@@ -9,6 +9,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod response;
+
 use std::{
     collections::VecDeque,
     fmt,

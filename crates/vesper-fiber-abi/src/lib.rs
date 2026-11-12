@@ -1,4 +1,4 @@
-//! Native Pulse continuation ABI, version 1 (prototype).
+//! Native Pulse continuation ABI, version 2 (prototype).
 //!
 //! * [`abi`]: versioned `repr(C)` evidence/continuation layouts and offsets.
 //! * [`evidence`]: never-reused handler identities and owned evidence vectors.

@@ -5,11 +5,11 @@ The expanded design lives in [specification.txt](specification.txt); the impleme
 
 ## Next implementation batch
 
-The user has launched all seven assignments in the [next-wave prompt index](agent-prompts/next-wave/README.md). Forge landed through remote PR #14; the other paths remain reserved for their active sessions. Do not launch duplicate implementations. Only the checked-arithmetic lane edits compiler semantics. Source-native suspension and source trait/model syntax follow that migration.
+The user has launched all seven assignments in the [next-wave prompt index](agent-prompts/next-wave/README.md). Forge landed through remote PR #14 and checked arithmetic through PR #17; the other paths remain reserved for their active sessions. Do not launch duplicate implementations. Only the checked-arithmetic lane edits compiler semantics. Source-native suspension and source trait/model syntax follow that migration.
 
 | Active lane | Requested branch | Reserved paths |
 | --- | --- | --- |
-| Checked arithmetic | `next/checked-arithmetic` | Numeric/checker/IR/evaluator/optimizer/native/Lean/interface code and assigned source fixtures |
+| Checked arithmetic (landed) | Actual branch `claude/project-thread-vmzghp`, PR #17 | Core semantics integrated; coordinator SemVer/CI/Lean AST follow-up |
 | Native lifecycle | `next/native-lifecycle` | Fiber ABI, native experiment, compatible scheduler changes if needed |
 | Cached sandbox builds | `next/loom-cached-builds` | New `crates/vesper-loom-build/**` |
 | Pact compiler bridge | `next/pact-compiler-bridge` | New `crates/vesper-pact-bridge/**` |
@@ -39,8 +39,8 @@ Neither is a source compiler or runtime integration. Root registration remains
 with the coordinator after review and validation.
 
 Structured Lean syntax is being implemented independently in new
-`crates/vesper-lean-syntax/**`. It does not edit the arithmetic lane's emitter
-files or change the pinned Lean toolchain. Emitter migration follows handoff.
+`crates/vesper-lean-syntax/**`. It preserves the pinned Lean toolchain. After the arithmetic handoff landed,
+scalar literals began using its nodes; full emitter migration is coordinator-owned.
 
 ## First-wave results
 

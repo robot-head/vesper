@@ -485,6 +485,30 @@ fn model_versions_are_part_of_the_certification_boundary() {
 }
 
 #[test]
+fn wrapping_arithmetic_exports_cannot_be_certified_under_checked_semantics() {
+    let checked = interface(function());
+    assert_eq!(checked.semantics_version, 2);
+    let mut wrapping = checked.clone();
+    wrapping.semantics_version = 1;
+    for (old, new) in [
+        (&wrapping, &checked),
+        (&checked, &wrapping),
+        (&wrapping, &wrapping),
+    ] {
+        let report = compare(old, new);
+        assert_eq!(report.classification, Classification::Unknown);
+        assert!(!report.is_compatible());
+        assert!(
+            report
+                .issues
+                .iter()
+                .any(|issue| issue.message.contains("language-semantics version"))
+        );
+    }
+    assert!(compare(&checked, &checked).is_compatible());
+}
+
+#[test]
 fn an_already_affine_row_does_not_mask_a_changed_capability_contract() {
     let mut old = function();
     old.effects.capabilities = vec![cap("A", Resumption::Affine), cap("B", Resumption::Linear)];

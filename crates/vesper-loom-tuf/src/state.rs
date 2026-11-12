@@ -28,6 +28,15 @@ pub struct CheckpointStore {
     usable: bool,
 }
 
+impl Drop for CheckpointStore {
+    fn drop(&mut self) {
+        // A concurrent process spawn can briefly inherit the open description
+        // before CLOEXEC closes it. End this transaction explicitly rather than
+        // waiting for every such duplicate descriptor to close.
+        let _ = File::unlock(&self._lock);
+    }
+}
+
 fn error(message: impl std::fmt::Display) -> TufError {
     TufError(format!("checkpoint store: {message}"))
 }
@@ -252,6 +261,19 @@ mod tests {
         assert!(store.load_checkpoint(&Limits::default()).is_err());
         assert!(CheckpointStore::create(&path).is_err());
         assert_eq!(fs::read_dir(&path).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn ending_transaction_unlocks_even_with_an_inherited_description() {
+        let parent = tempfile::tempdir().unwrap();
+        let path = parent.path().join("state");
+        let mut store = CheckpointStore::create(&path).unwrap();
+        store.write_bytes(b"durable", 100).unwrap();
+        let inherited = store._lock.try_clone().unwrap();
+        drop(store);
+        let reopened = CheckpointStore::open(&path).unwrap();
+        assert_eq!(reopened.read_bytes(100).unwrap().unwrap(), b"durable");
+        drop(inherited);
     }
 
     #[test]

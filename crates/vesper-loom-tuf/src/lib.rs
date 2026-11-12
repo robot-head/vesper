@@ -11,6 +11,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
 };
 use tough::{
     IntoVec, RepositoryLoader, TargetName,
@@ -20,6 +21,8 @@ use url::Url;
 
 #[cfg(unix)]
 pub mod state;
+#[cfg(unix)]
+pub mod updater;
 
 /// Local verification request. `repository_id` is a stable, caller-configured registry identity.
 pub struct LocalRequest {
@@ -27,6 +30,7 @@ pub struct LocalRequest {
     pub bootstrap_root: Vec<u8>,
     pub metadata_dir: PathBuf,
     pub targets_dir: PathBuf,
+    /// Canonical ASCII relative path using letters, digits, and `/._~+@-` only.
     pub target_name: String,
     pub previous: Option<Checkpoint>,
     pub limits: Limits,
@@ -201,7 +205,9 @@ fn bounded_root(bytes: &[u8], limits: &Limits) -> Result<Signed<Root>, TufError>
 }
 fn valid_name(name: &str) -> bool {
     !name.is_empty()
-        && !name.contains(['\\', ':', '?', '#', '%', '\0'])
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._~+@-".contains(&byte))
         && name.split('/').all(safe_component)
 }
 fn safe_component(part: &str) -> bool {
@@ -238,8 +244,26 @@ pub async fn verify_target(request: LocalRequest) -> Result<VerifiedUpdate, TufE
 /// This returns progress only when the call completes; it is not durable per-step state or a
 /// cancellation/crash-safe complete TUF updater. No failed result contains target bytes.
 pub async fn verify_target_attempt(request: LocalRequest) -> VerificationAttempt {
+    verify_target_attempt_with_sink(request, None).await
+}
+
+pub(crate) trait ProgressSink: Send + Sync {
+    fn commit(&self, checkpoint: &Checkpoint) -> Result<(), TufError>;
+    fn latch(&self, message: String);
+    fn failure(&self) -> Option<String>;
+    #[cfg(test)]
+    fn observe_fetch(&self, _url: &Url) {}
+}
+
+pub(crate) async fn verify_target_attempt_with_sink(
+    request: LocalRequest,
+    sink: Option<Arc<dyn ProgressSink>>,
+) -> VerificationAttempt {
     let mut checkpoint = None;
-    let result = verify_target_inner(request, &mut checkpoint).await;
+    let mut result = verify_target_inner(request, &mut checkpoint, sink.clone()).await;
+    if let Some(message) = sink.as_ref().and_then(|sink| sink.failure()) {
+        result = Err(TufError(format!("durable fetch gate: {message}")));
+    }
     if let Ok(update) = &result {
         checkpoint = Some(update.checkpoint.clone());
     }
@@ -249,6 +273,7 @@ pub async fn verify_target_attempt(request: LocalRequest) -> VerificationAttempt
 async fn verify_target_inner(
     request: LocalRequest,
     progress: &mut Option<Checkpoint>,
+    sink: Option<Arc<dyn ProgressSink>>,
 ) -> Result<VerifiedUpdate, TufError> {
     let LocalRequest {
         repository_id,
@@ -266,7 +291,9 @@ async fn verify_target_inner(
         return fail("invalid repository identity");
     }
     if !valid_name(&target_name) {
-        return fail("target name must be a canonical relative path");
+        return fail(
+            "target name must be a supported ASCII relative path (letters, digits, /._~+@-)",
+        );
     }
     validate_limits(&limits)?;
     if bootstrap_root.len() as u64 > limits.metadata_file_bytes {
@@ -337,31 +364,61 @@ async fn verify_target_inner(
     }
     let datastore = staging.path().join("state");
     fs::create_dir(&datastore)?;
-    let loaded =
-        RepositoryLoader::new(current, directory_url(&metadata)?, directory_url(&targets)?)
-            .transport(tough::FilesystemTransport)
-            .expiration_enforcement(tough::ExpirationEnforcement::Safe)
-            .limits(tough::Limits {
-                max_root_size: limits.metadata_file_bytes,
-                max_targets_size: limits.metadata_file_bytes,
-                max_timestamp_size: limits.metadata_file_bytes,
-                max_snapshot_size: limits.metadata_file_bytes,
-                max_root_updates: limits.root_updates as u64,
-            })
-            .datastore(&datastore)
-            .load()
-            .await;
+    let loader =
+        RepositoryLoader::new(current, directory_url(&metadata)?, directory_url(&targets)?);
+    let shared_progress = Arc::new(Mutex::new(progress.clone()));
+    let loader = if let Some(sink) = &sink {
+        loader.transport(GatedFilesystem {
+            gate: Arc::new(Mutex::new(FetchGate {
+                datastore: datastore.clone(),
+                metadata: metadata.clone(),
+                bootstrap: bootstrap_root.clone(),
+                started,
+                limits: limits.clone(),
+                progress: shared_progress.clone(),
+            })),
+            sink: sink.clone(),
+        })
+    } else {
+        loader.transport(tough::FilesystemTransport)
+    };
+    let loaded = loader
+        .expiration_enforcement(tough::ExpirationEnforcement::Safe)
+        .limits(tough::Limits {
+            max_root_size: limits.metadata_file_bytes,
+            max_targets_size: limits.metadata_file_bytes,
+            max_timestamp_size: limits.metadata_file_bytes,
+            max_snapshot_size: limits.metadata_file_bytes,
+            max_root_updates: limits.root_updates as u64,
+        })
+        .datastore(&datastore)
+        .load()
+        .await;
     // Tough writes each successfully authenticated step before attempting the next one.
     // Inspect that private datastore even when load() failed, and reauthenticate before promotion.
-    harvest_progress(
+    take_shared_progress(&shared_progress, progress)?;
+    let harvested = harvest_progress(
         &datastore,
         &metadata,
         &bootstrap_root,
         started,
         &limits,
         progress,
-    )?;
+    );
+    update_shared_progress(progress, &shared_progress)?;
+    harvested?;
+    if let Some(message) = sink.as_ref().and_then(|sink| sink.failure()) {
+        return fail(format!("durable fetch gate: {message}"));
+    }
     let repo = loaded.map_err(|e| TufError(format!("TUF metadata verification: {e}")))?;
+    MetadataLengthCheck {
+        snapshot: &repo.snapshot().signed,
+        metadata: &metadata,
+        consistent: repo.root().signed.consistent_snapshot,
+        limits: &limits,
+        count: 0,
+    }
+    .check(&repo.targets().signed, "targets", 0)?;
     let role_versions: BTreeMap<_, _> = repo
         .snapshot()
         .signed
@@ -404,13 +461,25 @@ async fn verify_target_inner(
         return fail("signed target length exceeds limit");
     }
     let stream = repo.read_target(&name).await;
-    refresh_progress_clock(&datastore, &limits, progress)?;
+    take_shared_progress(&shared_progress, progress)?;
+    let refreshed = refresh_progress_clock(&datastore, &limits, progress);
+    update_shared_progress(progress, &shared_progress)?;
+    refreshed?;
     let bytes = stream
         .map_err(|e| TufError(e.to_string()))?
         .ok_or_else(|| TufError("target not found".into()))?
         .into_vec()
         .await;
-    refresh_progress_clock(&datastore, &limits, progress)?;
+    let harvested = harvest_progress(
+        &datastore,
+        &metadata,
+        &bootstrap_root,
+        started,
+        &limits,
+        progress,
+    );
+    update_shared_progress(progress, &shared_progress)?;
+    harvested?;
     let bytes = bytes.map_err(|e| TufError(format!("target verification: {e}")))?;
     if bytes.len() as u64 != target.length {
         return fail("target length differs from signed length");
@@ -471,6 +540,114 @@ async fn verify_target_inner(
         checkpoint,
         verified_at,
     })
+}
+
+struct FetchGate {
+    datastore: PathBuf,
+    metadata: PathBuf,
+    bootstrap: Vec<u8>,
+    started: jiff::Timestamp,
+    limits: Limits,
+    progress: SharedProgress,
+}
+
+type SharedProgress = Arc<Mutex<Option<Checkpoint>>>;
+fn take_shared_progress(
+    shared: &SharedProgress,
+    progress: &mut Option<Checkpoint>,
+) -> Result<(), TufError> {
+    *progress = shared
+        .lock()
+        .map_err(|_| TufError("shared progress lock poisoned".into()))?
+        .clone();
+    Ok(())
+}
+fn update_shared_progress(
+    progress: &Option<Checkpoint>,
+    shared: &SharedProgress,
+) -> Result<(), TufError> {
+    *shared
+        .lock()
+        .map_err(|_| TufError("shared progress lock poisoned".into()))? = progress.clone();
+    Ok(())
+}
+
+#[derive(Clone)]
+struct GatedFilesystem {
+    gate: Arc<Mutex<FetchGate>>,
+    sink: Arc<dyn ProgressSink>,
+}
+impl std::fmt::Debug for GatedFilesystem {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatedFilesystem")
+            .finish_non_exhaustive()
+    }
+}
+
+#[tough::async_trait]
+impl tough::Transport for GatedFilesystem {
+    async fn fetch(&self, url: Url) -> Result<tough::TransportStream, tough::TransportError> {
+        let gated = (|| {
+            let sink = &self.sink;
+            if let Some(message) = sink.failure() {
+                return fail(message);
+            }
+            let mut gate = self
+                .gate
+                .lock()
+                .map_err(|_| TufError("fetch gate lock poisoned".into()))?;
+            let FetchGate {
+                datastore,
+                metadata,
+                bootstrap,
+                started,
+                limits,
+                progress,
+            } = &mut *gate;
+            let mut progress = progress
+                .lock()
+                .map_err(|_| TufError("shared progress lock poisoned".into()))?;
+            let harvested = harvest_progress(
+                datastore,
+                metadata,
+                bootstrap,
+                *started,
+                limits,
+                &mut progress,
+            );
+            // Harvest may advance a valid prefix and then fail. Sync that prefix first;
+            // never mistake an in-memory checkpoint for a successful persistence operation.
+            let committed = if let Some(checkpoint) = progress.as_ref() {
+                sink.commit(checkpoint)
+            } else {
+                Ok(())
+            };
+            if let Err(error) = committed {
+                sink.latch(error.to_string());
+            }
+            if let Err(error) = harvested {
+                sink.latch(error.to_string());
+            }
+            if let Some(message) = sink.failure() {
+                return fail(message);
+            }
+            #[cfg(test)]
+            sink.observe_fetch(&url);
+            Ok(())
+        })();
+        if let Err(error) = gated {
+            // Tough's root loader swallows fetch errors as a missing next root. The
+            // shared latch, checked on every fetch and on outer completion, is mandatory.
+            self.sink.latch(error.to_string());
+            return Err(tough::TransportError::new_with_cause(
+                tough::TransportErrorKind::Other,
+                url,
+                error,
+            ));
+        }
+        tough::Transport::fetch(&tough::FilesystemTransport, url).await
+    }
 }
 
 fn validate_limits(l: &Limits) -> Result<(), TufError> {
@@ -684,10 +861,13 @@ fn harvest_progress(
         .ok_or_else(|| TufError("missing pinned snapshot source".into()))?;
     let original_snapshot: Signed<Snapshot> = serde_json::from_slice(&original)
         .map_err(|e| TufError(format!("invalid pinned snapshot source: {e}")))?;
+    if pin
+        .length
+        .is_some_and(|length| original.len() as u64 != length)
+    {
+        return fail("metadata length differs from signed pin: snapshot.json");
+    }
     if original_snapshot != snapshot
-        || pin
-            .length
-            .is_some_and(|length| original.len() as u64 > length)
         || pin
             .hashes
             .as_ref()
@@ -712,6 +892,55 @@ fn harvest_progress(
     state.role_versions = floors;
     *progress = Some(make_checkpoint(state, limits)?);
     clock_result
+}
+
+struct MetadataLengthCheck<'a> {
+    snapshot: &'a Snapshot,
+    metadata: &'a Path,
+    consistent: bool,
+    limits: &'a Limits,
+    count: usize,
+}
+impl MetadataLengthCheck<'_> {
+    fn check(&mut self, targets: &Targets, role_name: &str, depth: usize) -> Result<(), TufError> {
+        self.count += 1;
+        if depth > self.limits.directory_depth || self.count > self.limits.roles {
+            return fail("metadata length traversal exceeds limit");
+        }
+        let key = format!("{role_name}.json");
+        let pin = self
+            .snapshot
+            .meta
+            .get(&key)
+            .ok_or_else(|| TufError(format!("missing snapshot role pin: {key}")))?;
+        if let Some(length) = pin.length {
+            // Match Tough's role-name escaping while retaining escapes in the filesystem filename.
+            const ESCAPE: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+                .remove(b'_')
+                .remove(b'.')
+                .remove(b'-')
+                .remove(b'~');
+            let encoded = percent_encoding::utf8_percent_encode(role_name, ESCAPE);
+            let filename = if self.consistent {
+                format!("{}.{encoded}.json", pin.version)
+            } else {
+                format!("{encoded}.json")
+            };
+            let bytes = private_file(&self.metadata.join(filename), self.limits)?
+                .ok_or_else(|| TufError(format!("missing loaded metadata source: {key}")))?;
+            if bytes.len() as u64 != length {
+                return fail(format!("metadata length differs from signed pin: {key}"));
+            }
+        }
+        if let Some(delegations) = &targets.delegations {
+            for role in &delegations.roles {
+                if let Some(child) = &role.targets {
+                    self.check(&child.signed, &role.name, depth + 1)?;
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn hex_digest(bytes: &[u8]) -> String {

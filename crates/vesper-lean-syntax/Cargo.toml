@@ -1,0 +1,6 @@
+[package]
+name = "vesper-lean-syntax"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Structured Lean 4 syntax and a single injection-resistant source printer"

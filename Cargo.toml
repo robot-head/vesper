@@ -11,7 +11,9 @@ members = [
     "crates/vesper-ffi",
     "crates/vesper-forge",
     "crates/vesper-loom-calculus",
+    "crates/vesper-lean-syntax",
     "crates/vesper-simpulse",
+    "crates/vesper-sim-session",
     "crates/vesper-simd",
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
@@ -20,8 +22,10 @@ members = [
     "crates/vesper-alloc",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
+    "crates/vesper-pact-bridge",
     "crates/vesper-loom-cas",
     "crates/vesper-loom-sandbox",
+    "crates/vesper-loom-build",
     "crates/vesper-ignis",
     "experiments/native-pulse",
 ]
@@ -35,7 +39,9 @@ default-members = [
     "crates/vesper-ffi",
     "crates/vesper-forge",
     "crates/vesper-loom-calculus",
+    "crates/vesper-lean-syntax",
     "crates/vesper-simpulse",
+    "crates/vesper-sim-session",
     "crates/vesper-simd",
     "crates/vesper-semver",
     "crates/vesper-loom-solver",
@@ -44,8 +50,10 @@ default-members = [
     "crates/vesper-alloc",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
+    "crates/vesper-pact-bridge",
     "crates/vesper-loom-cas",
     "crates/vesper-loom-sandbox",
+    "crates/vesper-loom-build",
     "crates/vesper-ignis",
     "experiments/native-pulse",
 ]
@@ -69,6 +77,7 @@ edition = "2024"
 blake3 = "1.8"
 vesper-core = { path = "crates/vesper-core" }
 vesper-simd = { path = "crates/vesper-simd" }
+vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }
 vesper-pulse = { path = "crates/vesper-pulse" }
 vesper-semver = { path = "crates/vesper-semver" }

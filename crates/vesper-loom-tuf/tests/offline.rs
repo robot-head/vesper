@@ -35,11 +35,17 @@ struct Spec {
     expired: Option<&'static str>,
     length_delta: u64,
     wrong_scope: bool,
+    snapshot_length_delta: u64,
+    targets_length_delta: u64,
+    delegated_length_delta: u64,
+    target_name: Option<&'static str>,
+    consistent: bool,
 }
 
 struct Fixture {
     dir: TempDir,
     bootstrap: Vec<u8>,
+    target_name: String,
 }
 fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
@@ -85,17 +91,22 @@ fn root_expiry(spec: &Spec) -> &'static str {
         "2999-01-01T00:00:00Z"
     }
 }
-fn root_value(version: u64, key: &Ed25519KeyPair, expires: &str) -> Value {
+fn root_value(version: u64, key: &Ed25519KeyPair, expires: &str, consistent: bool) -> Value {
     let id = key_id(key);
     let roles: BTreeMap<_, _> = ["root", "timestamp", "snapshot", "targets"]
         .into_iter()
         .map(|role| (role, json!({"keyids":[id],"threshold":1})))
         .collect();
     json!({"_type":"root","spec_version":"1.0.0","version":version,"expires":expires,
-        "consistent_snapshot":false,"keys":{id:key.tuf_key()},"roles":roles})
+        "consistent_snapshot":consistent,"keys":{id:key.tuf_key()},"roles":roles})
 }
 fn meta(bytes: &[u8], version: u64) -> Value {
     json!({"version":version,"length":bytes.len(),"hashes":{"sha256":digest(bytes)}})
+}
+fn metadata_pin(bytes: &[u8], version: u64, extra_length: u64) -> Value {
+    let mut value = meta(bytes, version);
+    value["length"] = json!(bytes.len() as u64 + extra_length);
+    value
 }
 
 impl Fixture {
@@ -104,13 +115,17 @@ impl Fixture {
         let root1 = key(1);
         let root2 = key(2);
         let delegated_key = key(3);
-        let bootstrap = signed(root_value(1, &root1, root_expiry(&spec)), &[&root1]).await;
+        let bootstrap = signed(
+            root_value(1, &root1, root_expiry(&spec), spec.consistent),
+            &[&root1],
+        )
+        .await;
         fs::create_dir(dir.path().join("metadata")).unwrap();
         fs::create_dir_all(dir.path().join("targets/pkg")).unwrap();
         fs::write(dir.path().join("metadata/1.root.json"), &bootstrap).unwrap();
         let active = if spec.rotated {
             let second = signed(
-                root_value(2, &root2, "2999-01-01T00:00:00Z"),
+                root_value(2, &root2, "2999-01-01T00:00:00Z", spec.consistent),
                 &[&root1, &root2],
             )
             .await;
@@ -120,25 +135,42 @@ impl Fixture {
             &root1
         };
         let target = json!({"length":PAYLOAD.len() as u64 + spec.length_delta,"hashes":{"sha256":digest(PAYLOAD)},"custom":{"loom":{"package":"@example/pkg","version":"1.0.0"}}});
+        let target_name = spec.target_name.unwrap_or("pkg/artifact.bin");
         let delegated = signed(json!({"_type":"targets","spec_version":"1.0.0","version":spec.versions.delegated,"expires":expiry(&spec,"delegated"),
-            "targets":{"pkg/artifact.bin":target}}), &[&delegated_key]).await;
+            "targets":{target_name:target}}), &[&delegated_key]).await;
         let id = key_id(&delegated_key);
         let targets = signed(json!({"_type":"targets","spec_version":"1.0.0","version":spec.versions.targets,"expires":expiry(&spec,"targets"),
             "targets":{},"delegations":{"keys":{id.clone():delegated_key.tuf_key()},"roles":[{"name":"packages","keyids":[id],"threshold":1,"terminating":true,"paths":[if spec.wrong_scope { "other/*" } else {"pkg/*"}]}]}}), &[active]).await;
         let snapshot = signed(json!({"_type":"snapshot","spec_version":"1.0.0","version":spec.versions.snapshot,"expires":expiry(&spec,"snapshot"),
-            "meta":{"targets.json":meta(&targets,spec.versions.targets),"packages.json":meta(&delegated,spec.versions.delegated)}}), &[active]).await;
+            "meta":{"targets.json":metadata_pin(&targets,spec.versions.targets,spec.targets_length_delta),"packages.json":metadata_pin(&delegated,spec.versions.delegated,spec.delegated_length_delta)}}), &[active]).await;
         let timestamp = signed(json!({"_type":"timestamp","spec_version":"1.0.0","version":spec.versions.timestamp,"expires":expiry(&spec,"timestamp"),
-            "meta":{"snapshot.json":meta(&snapshot,spec.versions.snapshot)}}), &[active]).await;
-        for (name, bytes) in [
-            ("targets.json", targets),
-            ("packages.json", delegated),
-            ("snapshot.json", snapshot),
-            ("timestamp.json", timestamp),
+            "meta":{"snapshot.json":metadata_pin(&snapshot,spec.versions.snapshot,spec.snapshot_length_delta)}}), &[active]).await;
+        for (name, version, bytes) in [
+            ("targets.json", spec.versions.targets, targets),
+            ("packages.json", spec.versions.delegated, delegated),
+            ("snapshot.json", spec.versions.snapshot, snapshot),
+            ("timestamp.json", spec.versions.timestamp, timestamp),
         ] {
+            let name = if spec.consistent && name != "timestamp.json" {
+                format!("{version}.{name}")
+            } else {
+                name.into()
+            };
             fs::write(dir.path().join("metadata").join(name), bytes).unwrap();
         }
-        fs::write(dir.path().join("targets/pkg/artifact.bin"), PAYLOAD).unwrap();
-        Self { dir, bootstrap }
+        let filename = if spec.consistent {
+            format!("{}.{target_name}", digest(PAYLOAD))
+        } else {
+            target_name.into()
+        };
+        let target_path = dir.path().join("targets").join(filename);
+        fs::create_dir_all(target_path.parent().unwrap()).unwrap();
+        fs::write(target_path, PAYLOAD).unwrap();
+        Self {
+            dir,
+            bootstrap,
+            target_name: target_name.to_owned(),
+        }
     }
     fn request(&self, previous: Option<Checkpoint>) -> LocalRequest {
         LocalRequest {
@@ -146,7 +178,7 @@ impl Fixture {
             bootstrap_root: self.bootstrap.clone(),
             metadata_dir: self.dir.path().join("metadata"),
             targets_dir: self.dir.path().join("targets"),
-            target_name: "pkg/artifact.bin".into(),
+            target_name: self.target_name.clone(),
             previous,
             limits: Limits::default(),
         }
@@ -893,4 +925,201 @@ async fn source_directory_spaces_do_not_require_encoded_temporary_paths() {
     request.metadata_dir = metadata;
     request.targets_dir = targets;
     verify_target_attempt(request).await.result.unwrap();
+}
+
+async fn raw_tough_repository(fixture: &Fixture) -> tough::Repository {
+    tough::RepositoryLoader::new(
+        &fixture.bootstrap,
+        url::Url::from_directory_path(fixture.dir.path().join("metadata")).unwrap(),
+        url::Url::from_directory_path(fixture.dir.path().join("targets")).unwrap(),
+    )
+    .transport(tough::FilesystemTransport)
+    .expiration_enforcement(tough::ExpirationEnforcement::Safe)
+    .load()
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn exact_metadata_lengths_reject_larger_signed_pins_and_retain_error_progress() {
+    use tough::IntoVec;
+    for consistent in [false, true] {
+        for which in 0..3 {
+            let old = Fixture::new(Spec {
+                consistent,
+                ..Spec::default()
+            })
+            .await;
+            let previous = verify_target_attempt(old.request(None))
+                .await
+                .result
+                .unwrap()
+                .checkpoint;
+            let mut spec = version_two();
+            spec.consistent = consistent;
+            match which {
+                0 => spec.snapshot_length_delta = 1,
+                1 => spec.targets_length_delta = 1,
+                _ => spec.delegated_length_delta = 1,
+            }
+            let fixture = Fixture::new(spec).await;
+            // Independent confirmation: Tough 0.24 accepts all three larger length pins,
+            // despite matching signatures/hashes, and returns the valid target bytes.
+            let backend = raw_tough_repository(&fixture).await;
+            let name = tough::TargetName::new("pkg/artifact.bin").unwrap();
+            assert_eq!(
+                backend
+                    .read_target(&name)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .into_vec()
+                    .await
+                    .unwrap(),
+                PAYLOAD
+            );
+            let attempt = verify_target_attempt(fixture.request(Some(previous))).await;
+            let error = attempt.result.unwrap_err().to_string();
+            let role = match which {
+                0 => "snapshot.json",
+                1 => "targets.json",
+                _ => "packages.json",
+            };
+            assert!(
+                error.contains(&format!("metadata length differs from signed pin: {role}")),
+                "{error}"
+            );
+            let checkpoint = attempt.checkpoint.unwrap();
+            let wire: Value = serde_json::from_slice(&checkpoint.to_json().unwrap()).unwrap();
+            assert_eq!(wire["state"]["timestamp_version"], 2);
+            assert_eq!(wire["state"]["snapshot_version"], 2);
+            assert_eq!(
+                wire["state"]["role_versions"]["packages.json"],
+                if which == 0 { 1 } else { 2 }
+            );
+            assert!(
+                verify_target_attempt(old.request(Some(checkpoint.clone())))
+                    .await
+                    .result
+                    .is_err()
+            );
+            let valid = Fixture::new(Spec {
+                consistent,
+                ..version_two()
+            })
+            .await;
+            assert_eq!(
+                verify_target_attempt(valid.request(Some(checkpoint)))
+                    .await
+                    .result
+                    .unwrap()
+                    .bytes,
+                PAYLOAD
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn unicode_target_names_are_rejected_explicitly_and_supported_ascii_names_work() {
+    let fixture = Fixture::new(Spec {
+        target_name: Some("pkg/é.bin"),
+        ..Spec::default()
+    })
+    .await;
+    let backend = raw_tough_repository(&fixture).await;
+    let name = tough::TargetName::new("pkg/é.bin").unwrap();
+    // The metadata is real and valid; Tough preserves the escaped leaf name and cannot open it.
+    backend.targets().signed.find_target(&name, false).unwrap();
+    assert!(backend.read_target(&name).await.is_err());
+    let attempt = verify_target_attempt(fixture.request(None)).await;
+    assert!(
+        attempt
+            .result
+            .unwrap_err()
+            .to_string()
+            .contains("supported ASCII relative path")
+    );
+    assert!(attempt.checkpoint.is_none());
+    let valid = Fixture::new(Spec {
+        target_name: Some("pkg/@example+v1~.bin"),
+        ..Spec::default()
+    })
+    .await;
+    assert_eq!(
+        verify_target_attempt(valid.request(None))
+            .await
+            .result
+            .unwrap()
+            .bytes,
+        PAYLOAD
+    );
+    for name in ["pkg/name space.bin", "pkg/[name].bin", "pkg/naïve.bin"] {
+        let mut request = valid.request(None);
+        request.target_name = name.into();
+        assert!(
+            verify_target_attempt(request)
+                .await
+                .result
+                .unwrap_err()
+                .to_string()
+                .contains("supported ASCII relative path")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn owned_updater_persists_failure_floors_rejects_replay_and_commits_success() {
+    use vesper_loom_tuf::{
+        state::CheckpointStore,
+        updater::{UpdateRequest, start_update},
+    };
+    fn request(fixture: &Fixture) -> UpdateRequest {
+        let local = fixture.request(None);
+        UpdateRequest {
+            repository_id: local.repository_id,
+            bootstrap_root: local.bootstrap_root,
+            metadata_dir: local.metadata_dir,
+            targets_dir: local.targets_dir,
+            target_name: local.target_name,
+            limits: local.limits,
+        }
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("owned-state");
+    let newer = runtime.block_on(Fixture::new(version_two()));
+    corrupt_signature(&newer, "packages.json");
+    let error = start_update(CheckpointStore::create(&path).unwrap(), request(&newer))
+        .unwrap()
+        .wait()
+        .unwrap_err();
+    assert!(error.to_string().contains("verification"));
+    let store = CheckpointStore::open(&path).unwrap();
+    let limits = Limits::default();
+    let checkpoint = store.load_checkpoint(&limits).unwrap().unwrap();
+    let wire: Value = serde_json::from_slice(&checkpoint.to_json().unwrap()).unwrap();
+    assert_eq!(wire["state"]["timestamp_version"], 2);
+    assert_eq!(wire["state"]["role_versions"]["packages.json"], 2);
+    let old = runtime.block_on(Fixture::new(Spec::default()));
+    assert!(start_update(store, request(&old)).unwrap().wait().is_err());
+    let valid = runtime.block_on(Fixture::new(version_two()));
+    let update = start_update(CheckpointStore::open(&path).unwrap(), request(&valid))
+        .unwrap()
+        .wait()
+        .unwrap();
+    assert_eq!(update.bytes, PAYLOAD);
+    let stored = CheckpointStore::open(&path)
+        .unwrap()
+        .load_checkpoint(&limits)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.to_json().unwrap(),
+        update.checkpoint.to_json().unwrap()
+    );
 }
