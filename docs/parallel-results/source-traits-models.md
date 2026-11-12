@@ -139,7 +139,7 @@ cargo test -p vesper-pact-bridge                              6 modes + 24 sessi
 cargo run -p vesper-pact-bridge --example bridge              ok, unchanged output
 cargo test -p vesper --locked (before the new tests)          all existing root suites passed
 cargo test --workspace --locked --no-fail-fast --exclude vesper-loom-build
-                                                              1184 passed, 0 failed, 0 ignored, 131 suites (after merging main at aa400dc)
+                                                              1221 passed, 0 failed, 0 ignored, 135 suites (after merging main at 865baab)
 vesper run|jit examples/traits/shapes.ves                     4304070304 on both
 vesper emit … --emit object --target aarch64-unknown-linux-gnu  ELF 64-bit, ARM aarch64
 vesper check examples/traits/overlap_rejected.ves             E0605 (PACT0102)
@@ -156,11 +156,11 @@ Not run here:
 * **Real Lean compilation.** There is no Lean toolchain on this host, and installing elan was not permitted in this session. `lean::extract` succeeded for every positive program. `lean_accepts_and_evaluates_elaborated_programs` compiles the output and compares `#eval Vesper.«main»` with the evaluator when `VESPER_LEAN` or `lean` is present; it skipped here.
 * **AArch64 execution.** No QEMU, so objects were emitted and inspected, not executed.
 * **`vesper-loom-build` `tests/build.rs`.** 14 of its 20 tests fail here with `UnknownFingerprint { missing: ["engine_dependencies"] }`. That crate's `build.rs` looks for the consuming workspace's `Cargo.lock` by walking up from the target directory, and deliberately fails closed when `CARGO_TARGET_DIR` is outside the workspace, as it is in this isolated setup. Its source is untouched by this lane. Rerun it with an in-workspace target directory.
-* **CI.** Not exercised for this branch, which cannot build without the root patch.
+* **CI.** The root patch is committed on the branch, so CI runs the same configuration validated here.
 
 ## Coordinator patch
 
-Apply on top of this branch (the `Cargo.lock` hunk is what `cargo` generated):
+The user approved committing this patch on the branch itself (2026-11-12), so it is now part of the PR. It is kept here for reference (the `Cargo.lock` hunk is what `cargo` generated):
 
 ```diff
 --- a/Cargo.toml
@@ -217,7 +217,7 @@ Apply on top of this branch (the `Cargo.lock` hunk is what `cargo` generated):
  ]
 ```
 
-The bridge no longer needs `serde` or `sha2` directly; its manifest change is committed. The lockfile hunk above is not committed. Optionally, the `src/lib.rs` facade comment can mention `vesper -> vesper-pact-binding`. Global docs (`docs/implementation.md`, `docs/parallel-work.md`) should move "source trait/model syntax and elaboration" from remaining work to done for the static fragment.
+The bridge no longer needs `serde` or `sha2` directly; its manifest change is committed. The lockfile hunk above is now committed too. Optionally, the `src/lib.rs` facade comment can mention `vesper -> vesper-pact-binding`. Global docs (`docs/implementation.md`, `docs/parallel-work.md`) should move "source trait/model syntax and elaboration" from remaining work to done for the static fragment.
 
 No shared schema change is requested. A richer interface schema for traits and models would need, at least, trait declarations (parameters, associated types with bounds, method signatures over `Self`), public named models with their brands, and a canonical-impl inventory, so that adding a blanket impl can be classified as Major. That stays coordinator-owned; until then these exports remain `Unsupported`.
 
