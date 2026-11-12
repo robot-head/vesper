@@ -9,7 +9,7 @@ remains 2026-11-12T09:18:30.204Z (41 sections/Appendix A). This batch addresses
 
 | Issue | Branch | Exclusive source ownership |
 | --- | --- | --- |
-| [#87](https://github.com/robot-head/vesper/issues/87) | diagnostics41/model | Diagnostic definitions in crates/vesper-core/src/ast.rs; new core diagnostics tests |
+| [#87](https://github.com/robot-head/vesper/issues/87) | diagnostics41/model | Diagnostic definitions in crates/vesper-core/src/ast.rs; new core diagnostics tests; core serde_json dev-dependency only |
 | [#88](https://github.com/robot-head/vesper/issues/88) | diagnostics41/checker | src/check.rs; new tests/diagnostic_causes.rs |
 | [#89](https://github.com/robot-head/vesper/issues/89) | diagnostics41/ir | src/ir_check.rs; new tests/ir_diagnostic_causes.rs |
 | [#90](https://github.com/robot-head/vesper/issues/90) | diagnostics41/render | New crates/vesper-diagnostics/** |
@@ -69,11 +69,15 @@ no errors.
 ## Shared renderer and host routing
 
 The root-free vesper-diagnostics adapter depends only on vesper-core,
-vesper-span, serde_json and already-locked ariadne0.5. Freeze early an immutable
-prepared value from exact LineIndex plus compiler Diagnostic slice and validated
-limits. Its LSP method emits standard relatedInformation URI/range/message plus
-bounded help metadata, preserving the primary code/message. Its terminal method
-renders all actual labels with Ariadne explicitly configured for BYTE indexing.
+vesper-span, serde_json and already-locked ariadne0.5. Frozen adapter API: `prepare<'a>(&'a LineIndex, &[core::Diagnostic], Limits)`
+returns `Result<Prepared<'a>,Error>`. Prepared is immutable, borrows the exact index
+and owns checked span diagnostics. `to_lsp(uri)` returns `Result<Vec<Value>,Error>`;
+`terminal(file)` returns `Result<Vec<u8>,Error>`. Limits contains validated
+`span:vesper_span::Limits` and `max_name_bytes:usize`. Default source128KiB,
+work64MiB/output256KiB/name4096; HARD uses span HARD/name4096. Name labels reject
+controls; terminal is deterministic plain output with explicit BYTE indexing.
+LSP emits standard relatedInformation URI/range/message and optional `data.help`,
+preserving primary code/message, source=vesper and severity1.
 No UTF-8/UTF-16 min-clamping, guessed positions, unbounded output or partial frame.
 
 Default editor source is 128 KiB; a bounded CLI profile can use span HARD1MiB.
