@@ -78,6 +78,9 @@ pub struct ConnectionLimits {
     pub max_in_flight: usize,
     /// Encoded bytes retained for this connection: unsent wire output plus
     /// completed out-of-order responses. Must admit one maximal response.
+    /// Out-of-order completions are admitted only while one maximal response
+    /// (`response.max_total_bytes`) still fits, so the earliest outstanding
+    /// response can always be submitted once unsent output has been written.
     /// A generated parse-error response (under 128 bytes) may exceed it once.
     pub max_outbound_bytes: usize,
 }
@@ -442,7 +445,22 @@ impl Connection {
             Ok(encoded) => encoded,
             Err(error) => return reject(SubmitErrorKind::Encode(error), response),
         };
-        if self.retained.saturating_add(encoded.len()) > self.limits.max_outbound_bytes {
+        // An out-of-order response cannot be written until earlier ones are,
+        // so it must leave room for one maximal response at the front.
+        // Otherwise later completions could exhaust the budget and block the
+        // earliest submission forever. Unsent wire bytes drain by writing, so
+        // retained Ready bytes stay at most max_outbound - max_total.
+        let reserve = if index == 0 {
+            0
+        } else {
+            self.limits.response.max_total_bytes
+        };
+        if self
+            .retained
+            .saturating_add(encoded.len())
+            .saturating_add(reserve)
+            > self.limits.max_outbound_bytes
+        {
             return reject(SubmitErrorKind::OutboundLimit, response);
         }
         self.retained += encoded.len();

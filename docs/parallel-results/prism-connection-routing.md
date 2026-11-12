@@ -66,6 +66,10 @@ Connection:
 - After the connection stops issuing requests, received bytes are counted in
   `discarded_input` and dropped rather than buffered. Tests check that retained
   plus discarded is exactly the post-close suffix at every split.
+- Out-of-order completions are admitted only while one maximal response
+  (`response.max_total_bytes`) still fits in `max_outbound_bytes`, so later
+  completions can never exhaust the budget and block the earliest response.
+  The front response needs only the budget left after writing unsent output.
 - `RequestId` is `Copy`, so runtime rejection of duplicate/stale/foreign ids is
   the actual guard (and is tested), rather than relying on move semantics.
   Connection identity is a process-global counter; the never-issued (`Unknown`)
@@ -120,7 +124,7 @@ Linux x86_64, rustc/cargo 1.97.0:
 
 - `cargo fmt --all -- --check`: clean.
 - `cargo clippy -p vesper-prism --all-targets --locked -- -D warnings`: clean.
-- `cargo test -p vesper-prism --locked`: 1 unit, 14 connection, 15 framing
+- `cargo test -p vesper-prism --locked`: 1 unit, 15 connection, 15 framing
   (existing), 11 response (existing), 13 routing, 3 doctests + 1 compile-fail
   doctest; all pass.
 

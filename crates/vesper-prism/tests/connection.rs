@@ -484,26 +484,25 @@ fn encode_errors_and_outbound_limit_return_the_response_and_keep_the_slot() {
         assert_eq!(error.kind, kind);
         assert_eq!(error.response, response);
     }
-    // Two ~290-byte responses exceed the 512-byte retained budget together.
-    // The rejected one keeps its slot and its owner can retry after writing.
+    // With max_outbound == max_total there is no room to hold an out-of-order
+    // completion: it is rejected so that the front response always fits.
     let big = || Response::new(200, vec![7; 64]).header("X-Pad", &[b'p'; 150]);
-    connection.submit(issued[1].id, big()).unwrap();
-    let error = connection.submit(issued[0].id, big()).unwrap_err();
+    let error = connection.submit(issued[1].id, big()).unwrap_err();
     assert_eq!(error.kind, SubmitErrorKind::OutboundLimit);
     assert_eq!(error.response, big());
-    assert!(connection.pending_output().is_empty());
-    connection
-        .submit(issued[0].id, Response::new(200, Vec::new()))
-        .unwrap();
+    assert_eq!(connection.retained_outbound_bytes(), 0);
+    connection.submit(issued[0].id, big()).unwrap();
+    // The front response is on the wire; the next front waits for a write.
+    let error = connection.submit(issued[1].id, big()).unwrap_err();
+    assert_eq!(error.kind, SubmitErrorKind::OutboundLimit);
     let mut out = writer(usize::MAX);
     drain(&mut connection, &mut out);
     assert_eq!(connection.retained_outbound_bytes(), 0);
+    connection.submit(issued[1].id, big()).unwrap();
+    drain(&mut connection, &mut out);
     connection.submit(issued[2].id, big()).unwrap();
     drain(&mut connection, &mut out);
-    assert!(
-        out.written
-            .starts_with(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n")
-    );
+    assert!(out.written.starts_with(b"HTTP/1.1 200 OK\r\nx-pad: "));
     // HEAD suppressed the third response's body but kept its length.
     assert!(
         out.written
@@ -620,4 +619,32 @@ fn invalid_connection_limits_are_rejected() {
         Connection::new(bad),
         Err(ConnectionError::Decoder(Error::InvalidLimits))
     ));
+}
+
+#[test]
+fn out_of_order_completions_cannot_starve_the_earliest_response() {
+    let mut limits = limits();
+    limits.response.max_total_bytes = 128;
+    limits.max_outbound_bytes = 300;
+    let mut connection = Connection::new(limits).unwrap();
+    let mut issued = Vec::new();
+    feed(&mut connection, &[A, A, A, A].concat(), &mut issued);
+    // Each ~127-byte response; one is admitted out of order, leaving a
+    // 128-byte reserve for the front, and further ones are refused.
+    let late = || Response::new(200, vec![b'z'; 64]);
+    connection.submit(issued[1].id, late()).unwrap();
+    let error = connection.submit(issued[2].id, late()).unwrap_err();
+    assert_eq!(error.kind, SubmitErrorKind::OutboundLimit);
+    assert!(connection.pending_output().is_empty());
+    // The earliest response always fits, even at maximal size.
+    connection.submit(issued[0].id, late()).unwrap();
+    let mut out = writer(13);
+    drain(&mut connection, &mut out);
+    connection.submit(issued[2].id, late()).unwrap();
+    connection.submit(issued[3].id, late()).unwrap();
+    drain(&mut connection, &mut out);
+    let one = b"HTTP/1.1 200 OK\r\nContent-Length: 64\r\nConnection: keep-alive\r\n\r\n";
+    let one = [one.as_slice(), &[b'z'; 64]].concat();
+    assert!(one.len() <= 128);
+    assert_eq!(out.written, one.repeat(4));
 }

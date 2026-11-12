@@ -158,7 +158,9 @@ abandoned owners, unprocessed input and the failure.
 
 Bounds: decoder limits, `max_in_flight` issued-but-unpromoted requests (polling
 returns `Backpressure`), and `max_outbound_bytes` of retained encoded output,
-which must admit one maximal response; a generated parse-error response (under
+which must admit one maximal response. Out-of-order completions are admitted
+only while a maximal response still fits, so the earliest outstanding response
+can always be submitted after unsent output is written. A generated parse-error response (under
 128 bytes) may exceed it once. Rust `Drop` still permits discarding a
 `Connection`, `Response` or `EncodedResponse`; this is not a linear responder.
 
