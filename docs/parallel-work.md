@@ -23,6 +23,8 @@ The coordinator retains root workspace/dependency registration, lockfile, CLI/mo
 
 While these sessions run, the coordinator owns read-only locked-resolution validation in `crates/vesper-loom-solver`, `src/package_commands.rs`, CLI routing/help and the new `tests/locked_resolution_cli.rs`. This work uses manifest/catalog DTOs and does not edit the active compiler, fiber, allocator or new integration-crate lanes.
 
+The coordinator also owns offline package-graph inspection in the new `src/package_graph.rs` and `tests/package_graph_cli.rs`, with CLI routing and documentation. It consumes the existing calculus graph without changing compiler or active library APIs.
+
 ## First-wave results
 
 | Lane | Branch | Exclusive ownership | Status |
