@@ -348,3 +348,36 @@ fn maximum_supported_depth_handles_real_hostile_inputs_and_balanced_unwind() {
         assert!(parsed.diagnostics.iter().any(|d| d.code == "E0003"));
     }
 }
+
+#[test]
+fn ordinary_25_nested_generic_calls_and_lint_guard_input_parse_by_default() {
+    let mut expression = "1".to_owned();
+    for _ in 0..25 {
+        expression = format!("identity[u64]({expression})");
+    }
+    let source =
+        format!("fn identity[T:mod copy](in value:T)->T{{value}} fn main()->u64{{{expression}}}");
+    let parsed = retained(&source, ParseLimits::default());
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert_eq!(parsed.module.items.len(), 2);
+    assert_eq!(parser::parse(&source), parsed);
+    let lower = retained(
+        &source,
+        ParseLimits {
+            max_depth: 64,
+            ..ParseLimits::default()
+        },
+    );
+    assert!(lower.diagnostics.iter().any(|d| d.code == "E0003"));
+    assert!(lower.module.items.is_empty());
+    // This source is intentionally only parsed here. Lint owns its separate
+    // guard against potentially explosive generic tuple expansion before checking.
+    let source = format!(
+        "fn dup[T:mod copy](in x:T)->(T,T){{(x,x)}} fn main(){{{}0{};}}",
+        "dup(".repeat(25),
+        ")".repeat(25)
+    );
+    let parsed = retained(&source, ParseLimits::default());
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert_eq!(parsed.module.items.len(), 2);
+}

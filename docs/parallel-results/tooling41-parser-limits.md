@@ -29,7 +29,7 @@ parser::parse_with_limits(source, ParseLimits) -> Result<Parse, LexLimit>
 | UTF-8 source bytes | 1 MiB | 8 MiB |
 | Non-EOF tokens, including trivia/error/tail | 65,536 | 262,144 |
 | Diagnostics | 128 | 1,024 |
-| Guarded parser descent / expression AST height | 64 | 128 |
+| Guarded parser descent / expression AST height | 128 | 128 |
 
 EOF is one extra sentinel slot. Token and diagnostic limits must be at least
 one; depth at least one. Zero source-byte budget permits empty input. Values
@@ -113,7 +113,7 @@ Using the same Logos token kinds, it agreed with the new default parser on
 plus 1,000 malformed generated sources**. This directly compares old/new behavior,
 in addition to the committed default/explicit API and ordinary-source tests.
 
-Final focused results: **nine integration tests pass**, strict all-target
+Final focused results: **ten integration tests pass**, strict all-target
 Clippy and formatting pass. Root consumer validation also passes:
 
 ```sh
@@ -142,3 +142,23 @@ optimizer, runtime, Forge, benchmark, or JIT execution.
 
 No root registration patch is needed; the syntax crate is already registered.
 Tooling may continue using existing defaults or choose explicit bounded APIs.
+
+
+## Integration compatibility follow-up
+
+Integration found that the initial default 64 helper-descent budget rejected an
+ordinary 25-deep generic identity-call expression with AST height about 26, before
+Lint's supported 32-delimiter profile could analyze it. Raised only the default
+depth to the already-supported/tested hard ceiling 128. The hard ceiling remains
+128; byte, token and diagnostic budgets are unchanged. Explicit lower-depth
+profiles still reject the same source with E0003 and full lossless recovery.
+
+The positive regression checks real 25-deep `identity[u64](...)` calls and the
+separate 25-deep `dup(...)` source used by Lint's guard-only regression. The latter
+is parsed only: no generic-expansion checker is invoked by this test and no
+Lint safety test is weakened. All existing hostile and maximum-depth tests remain.
+
+Follow-up checks: all ten syntax integration tests, strict all-target syntax
+Clippy and formatting pass. The initial 149 named root-consumer checks above
+preceded this default-only change; coordinator integration reruns consumers and
+Lint's positive/guard regressions with the combined tooling changes.

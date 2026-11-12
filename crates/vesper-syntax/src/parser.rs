@@ -51,7 +51,7 @@ impl Default for ParseLimits {
             max_source_bytes: lex.max_source_bytes,
             max_tokens: lex.max_tokens,
             max_diagnostics: lex.max_diagnostics,
-            max_depth: 64,
+            max_depth: HARD_PARSE_DEPTH,
         }
     }
 }
