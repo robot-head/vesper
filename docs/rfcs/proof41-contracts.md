@@ -15,7 +15,7 @@ at41sections/AppendixA, modified2026-11-12T09:18:30.204Z; §39.4 was reread.
 | #117 | proof41/projection | new fmt/src/proof_model.rs, doc.rs narrow actual-arena projection API, tests/proof_model.rs, projection report |
 | #118 | proof41/emitter | new fmt/src/proof_lean.rs, tests/proof_lean.rs, emitter report |
 | #119 | proof41/acceptance | new tests/format_proof_cli.rs, check/test-format-proof scripts, format-proof.yml, fixtures/format_proof, acceptance report |
-| #120 | proof41/integration | new fmt/src/proof_source.rs, fmt/lib.rs capture/export hooks, new src/verify_commands.rs + main routing, proof_commands.rs narrow reusable kernel/execution helpers, Lean syntax Term::List/printer/tests, manifests/lock/path filters, contract/integration report |
+| #120 | proof41/integration | new fmt/src/proof_source.rs, fmt/lib.rs capture/export hooks, new src/verify_commands.rs + main routing, proof_commands.rs narrow reusable kernel/execution helpers, Lean syntax Term::List and DefinitionKind::NoncomputableDef/printer/tests, manifests/lock/path filters, contract/integration report |
 
 Separate worktrees from this contract, lightweight private caches only, one job,
 debug0/incremental0; target/parallel-next is coordinator-only. Initially3.6GiB free:
@@ -142,7 +142,11 @@ width/col, proving commentsOf(render flat document)=commentsOf(render broken doc
 by direct application of `Vesper.StylusSafety.comments_render_invariant`.
 
 Build Module/Term/Declaration only. Root adds `Term::List(Vec<Term>)` to the
-central AST/printer (ordinary list syntax); no dynamic imports or theorem names.
+central AST/printer (ordinary list syntax) and typed
+`DefinitionKind::NoncomputableDef` for the generated total logical document
+definition, which calls the noncomputable concat normalization. Existing ordinary
+definition kinds stay unchanged; no raw modifier text or partial definition.
+There are no dynamic imports or theorem names.
 Preflight AST nodes/depth/payload copying/escaped rendered-size and conservative
 recursive printer work before construction/rendering; cap actual final bytes.
 Do not emit source code via format!/concatenated templates. Tests must elaborate
