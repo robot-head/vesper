@@ -1,13 +1,26 @@
 //! Handler-installation identities and owned evidence vectors.
 use crate::abi::{ABI_VERSION, EvidenceId, EvidenceSlot, EvidenceVectorHeader, HandlerFn};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Allocates evidence identities. Identities are monotonic and never reused,
-/// so a continuation parked under a removed installation cannot be confused
-/// with a later installation of the same effect at the same depth.
+/// Process-wide identity counter shared by every registry, so recreating a
+/// registry can never reissue an identity that a live vector or parked
+/// continuation still carries.
+static NEXT_EVIDENCE: AtomicU64 = AtomicU64::new(1);
+
+fn allocate(counter: &AtomicU64) -> Result<EvidenceId, EvidenceError> {
+    counter
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
+        .map_err(|_| EvidenceError::Exhausted)
+}
+
+/// Allocates evidence identities. Identities come from one process-wide
+/// monotonic counter and are never reused, across all registries, so a
+/// continuation parked under a removed installation cannot be confused with a
+/// later installation of the same effect at the same depth.
 #[derive(Debug)]
 pub struct EvidenceRegistry {
-    next: u64,
+    _private: (),
 }
 
 impl Default for EvidenceRegistry {
@@ -18,12 +31,10 @@ impl Default for EvidenceRegistry {
 
 impl EvidenceRegistry {
     pub fn new() -> Self {
-        Self { next: 1 }
+        Self { _private: () }
     }
     pub fn fresh(&mut self) -> Result<EvidenceId, EvidenceError> {
-        let id = self.next;
-        self.next = id.checked_add(1).ok_or(EvidenceError::Exhausted)?;
-        Ok(id)
+        allocate(&NEXT_EVIDENCE)
     }
 }
 
@@ -31,7 +42,6 @@ impl EvidenceRegistry {
 pub enum EvidenceError {
     Exhausted,
     TooDeep,
-    DuplicateIdentity(EvidenceId),
 }
 
 impl fmt::Display for EvidenceError {
@@ -41,12 +51,23 @@ impl fmt::Display for EvidenceError {
 }
 impl std::error::Error for EvidenceError {}
 
-/// Description of one handler installation, outermost first.
+/// Description of one handler installation, outermost first. Fields are
+/// private: a raw handler/state pair can only be built through the `unsafe`
+/// [`Installation::direct`] constructor, so safe code cannot install a handler
+/// with invalid or dangling state.
+///
+/// ```compile_fail
+/// let _ = vesper_fiber_abi::evidence::Installation {
+///     effect: 1,
+///     handler_fn: Some(vesper_fiber_abi::prototype::clock_handler),
+///     state_ptr: std::ptr::null_mut(), // error[E0451]: private fields
+/// };
+/// ```
 #[derive(Clone, Copy, Debug)]
 pub struct Installation {
-    pub effect: u32,
-    pub handler_fn: Option<HandlerFn>,
-    pub state_ptr: *mut u8,
+    effect: u32,
+    handler_fn: Option<HandlerFn>,
+    state_ptr: *mut u8,
 }
 
 impl Installation {
@@ -57,6 +78,26 @@ impl Installation {
             handler_fn: None,
             state_ptr: std::ptr::null_mut(),
         }
+    }
+    /// A tail-resumptive handler that generated code calls directly as
+    /// `handler(state, op, arg)` on the performing fiber's stack.
+    ///
+    /// # Safety
+    /// For as long as the resulting [`EvidenceVector`] (and so every fiber
+    /// sharing it) lives, `state` must be valid for every access `handler`
+    /// makes, and no other code may access it while a fiber runs `handler`.
+    /// Ownership is usually given to the vector with
+    /// [`EvidenceVector::keep_alive`]. `handler` must accept every `op` and
+    /// `arg` the generated code passes, and must not unwind.
+    pub unsafe fn direct(effect: u32, handler: HandlerFn, state: *mut u8) -> Self {
+        Self {
+            effect,
+            handler_fn: Some(handler),
+            state_ptr: state,
+        }
+    }
+    pub fn effect(&self) -> u32 {
+        self.effect
     }
 }
 
@@ -151,8 +192,20 @@ mod tests {
         assert_eq!(v.identity(2), None);
     }
     #[test]
-    fn exhausted_registry_is_an_error() {
-        let mut registry = EvidenceRegistry { next: u64::MAX };
-        assert_eq!(registry.fresh(), Err(EvidenceError::Exhausted));
+    fn identities_are_unique_across_registries() {
+        let old = {
+            let mut first = EvidenceRegistry::new();
+            EvidenceVector::install(&mut first, &[Installation::parking(7)]).unwrap()
+        };
+        let mut second = EvidenceRegistry::new();
+        let new = EvidenceVector::install(&mut second, &[Installation::parking(7)]).unwrap();
+        assert_ne!(old.identity(0), new.identity(0));
+    }
+    #[test]
+    fn exhausted_counter_is_an_error() {
+        let counter = AtomicU64::new(u64::MAX);
+        assert_eq!(allocate(&counter), Err(EvidenceError::Exhausted));
+        let counter = AtomicU64::new(5);
+        assert_eq!(allocate(&counter), Ok(5));
     }
 }

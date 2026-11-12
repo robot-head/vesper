@@ -223,8 +223,8 @@ Evidence for the implemented representation:
 
 ## 7. Evidence identities
 
-`EvidenceRegistry::fresh` hands out monotonic nonzero ids and never reuses
-them. Each installation of a handler gets a fresh id, including a nested
+`EvidenceRegistry::fresh` hands out monotonic nonzero ids from one
+process-wide counter, so ids are never reused even across registries. Each installation of a handler gets a fresh id, including a nested
 installation of the same effect or a reinstallation at the same depth.
 Generated code addresses slots by static lexical depth. The innermost
 installation answers unqualified operations; an explicit outer depth models
@@ -232,7 +232,9 @@ named forwarding. Tests:
 `nested_handlers_of_one_effect_have_distinct_identities` (inner park names the
 inner identity, outer park names the outer one, a cross-identity resume is
 rejected, and reinstallations get fresh ids), plus the evidence unit tests.
-`prototype::Requirements::check` rejects a vector whose depths or effect tags
+Raw handler/state pairs can only be built with the `unsafe`
+`Installation::direct`, whose contract covers state validity and lifetime;
+safe code can only install parking handlers. `prototype::Requirements::check` rejects a vector whose depths or effect tags
 do not match what an entry will load, before any code runs.
 
 ## 8. Module and code lifetime
@@ -349,7 +351,7 @@ Run from `crates/vesper-fiber-abi`:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo test                      # x86_64 host: 29 tests incl. compile-fail doctest
+cargo test                      # x86_64 host: 31 tests incl. two compile-fail doctests
 cargo test --release
 # AArch64 execution under QEMU user-mode (needs gcc-aarch64-linux-gnu, qemu-user,
 # rustup target aarch64-unknown-linux-gnu):
@@ -368,5 +370,5 @@ appear as `R_AARCH64_ADR_GOT_PAGE`/`LD64_GOT_LO12_NC` against
 
 Results on the development host (x86_64 Linux, 2026-11-12): all commands pass.
 The kernel io_uring round trip ran (`io_uring kernel round trip validated`).
-Under QEMU AArch64, all 29 tests pass, and the kernel test reports
+Under QEMU AArch64, all 31 tests pass, and the kernel test reports
 `io_uring unavailable ... (os error 38); kernel round trip NOT validated`.

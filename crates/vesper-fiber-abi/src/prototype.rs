@@ -131,11 +131,11 @@ pub fn pulse_read_evidence(
     let mut vector = EvidenceVector::install(
         registry,
         &[
-            Installation {
-                effect: EFFECT_CLOCK,
-                handler_fn: Some(clock_handler),
-                state_ptr: state.cast(),
-            },
+            // SAFETY: `state` points to the boxed u64 that `keep_alive`
+            // below hands to the vector, so it lives as long as the vector;
+            // `clock_handler` accepts any op and the generated code passes
+            // the address of its stack-resident i64 place as `arg`.
+            unsafe { Installation::direct(EFFECT_CLOCK, clock_handler, state.cast()) },
             Installation::parking(EFFECT_ASYNC),
             Installation::parking(EFFECT_NET),
         ],
