@@ -71,12 +71,14 @@ impl Guest for Fixture {
                 p.emit(TokenKind::Close(Delimiter::Brace), "}");
             }
             "capture" => {
+                p.emit(TokenKind::Open(Delimiter::Brace), "{");
                 p.emit(TokenKind::Ident, "let");
                 p.emit(TokenKind::Ident, "x");
                 p.emit(TokenKind::Punct, "=");
                 p.emit(TokenKind::IntLiteral, "0");
                 p.emit(TokenKind::Punct, ";");
                 p.slot(0);
+                p.emit(TokenKind::Close(Delimiter::Brace), "}");
             }
             "drift" => {
                 p.slot(0);

@@ -132,6 +132,10 @@ impl TypedBudget {
         self.remaining -= n;
         Ok(())
     }
+    #[cfg(feature = "sandbox-transport")]
+    pub(crate) fn charge_metadata(&mut self, n: usize) -> Result<(), TypedError> {
+        self.metadata(n)
+    }
     fn parse(&mut self, n: usize) -> Result<(), TypedError> {
         self.charge_work(
             n.checked_add(1)
@@ -246,6 +250,15 @@ impl Drop for ExprExpansion {
     }
 }
 impl ExprExpansion {
+    /// Validates this sealed expansion against its current, live host arena.
+    pub fn validate_host(&self, host: &HygieneHost) -> Result<(), TypedError> {
+        owner(&self.owner, host)?;
+        if !self.alive.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(ForgeError::ExpansionClosed(self.id()).into());
+        }
+        host.expansion(self.id())?;
+        Ok(())
+    }
     pub fn slots(&self) -> &[ExprSlot] {
         &self.slots
     }

@@ -57,5 +57,45 @@ independently executed the previously built 4+6 test binaries read-only. The
 current fixture adds call-connect/read-input cases for upcoming raw-cache tests;
 no source Tier2 integration or compiler checked artifact is claimed.
 
-Raw codec and current-context adapter/cache remain in progress after this
-checkpoint. Private heavy cache currently under2GiB; about8GiB disk free.
+## Raw cache and current-context adapter
+
+The additive quote_key/quote_record/quote_runner modules now encode canonical
+VFQI invocation bytes and VFRQ/schema1 raw records, with separate builder/profile,
+WIT digest, protocol, schema, observable limits/determinism, measured executable
+identity, component and declared-input snapshot bindings. Keys are constructed
+from scratch; legacy snapshot preparation supplies verified identities only.
+The codec preflights count/minimum lengths, work, UTF8, kinds, slot ordinals,
+diagnostics, aliased copy limits and canonical option payloads before allocating
+decoded output. Cached bytes contain only raw claims/ordinals/diagnostics/metering
+and stdio, never tokens, scopes, nonces, resolution or approval.
+
+The runner bounds reads of the actual opened file and hashes exactly those bytes.
+It rejects nonregular objects and, on Unix, opens with O_NOFOLLOW|O_NONBLOCK before
+checking the opened descriptor again. Ancestor directory replacement is not a
+capability-confinement guarantee. Fresh prepare snapshots bind actual declared
+input changes; execution rejects guest errors/output files/input mutation and
+publishes only valid raw success records. Verify reruns and compares raw bytes.
+
+The optional quote_session::expand_fragment adapter imports into the current
+sealed typed arena, resolves the entire current body and checks the current
+trusted registry/graph/policies after every hit or miss. This is conditional
+fragment approval, never compiler ExpandedChecked or source Tier2 compilation.
+Private fields bind components to the structured profile. The only typed API
+amendments are the approved crate-private cumulative metadata charger and public
+sealed expansion current-host/liveness validation. Export accounts for staged
+DTO storage before allocation; repeated input expansion has token/text/scope caps.
+
+Actual cache testing caught the capture guest's bare let sequence, which the
+typed Expr checker correctly rejected. The fixture now emits an explicit block;
+locked independent builds again match, with final SHA256
+92c31f0407dd6efc5ca44cc05954c8f3e095c5603b530c3c6c686ad9b3bb00ce.
+No checker/category relaxation was made.
+
+The full actual Forge/runner/sandbox suite passed 153 tests in19 suites with no
+ignores before the final filesystem guard test. It includes unchanged legacy flat
+runtime/cache/session behavior, actual Wasmtime structured execution and typed
+hygiene. Final raw7cache+4codec tests and strict all-target Clippy are checked
+again after the guard addition; results are recorded in the follow-up below.
+All heavy verification uses private /tmp/vesper-editor41-protocol-target, one job,
+debug0/incremental0. A mistaken lock-update command briefly started an independent
+worktree default target and was stopped; no coordinator cache was written.
