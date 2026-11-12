@@ -4093,6 +4093,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-warp-tls"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "vesper-warp-crypto",
+ "zeroize",
+]
+
+[[package]]
 name = "vesper-warp-umem"
 version = "0.1.0"
 dependencies = [
