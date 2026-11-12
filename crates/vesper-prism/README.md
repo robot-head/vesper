@@ -38,7 +38,7 @@ backslashes, raw non-ASCII bytes and network-path forms beginning with `//`.
 Host is required exactly once and supports ASCII DNS labels, canonical dotted
 IPv4 addresses and bracketed IPv6 addresses, with an optional decimal port at
 most 65535. Alternate numeric-host forms such as `127.1`, integer IP addresses
-and leading-zero IPv4 components are rejected. This
+leading-zero IPv4 components and hexadecimal/mixed-base aliases are rejected. This
 is a deliberately restricted subset of HTTP host/target syntax, not a general
 URI parser or hostname canonicalizer. Routing/authentication code must define
 its own consistent URI decoding and authority policy; `%00` and `%2f`, for

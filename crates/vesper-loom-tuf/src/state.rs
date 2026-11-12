@@ -32,6 +32,14 @@ fn error(message: impl std::fmt::Display) -> TufError {
     TufError(format!("checkpoint store: {message}"))
 }
 
+fn absolute(path: &Path) -> Result<PathBuf, TufError> {
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir().map_err(error)?.join(path))
+    }
+}
+
 fn private_owner(info: &Metadata) -> Result<(), TufError> {
     // SAFETY: geteuid has no arguments or memory preconditions.
     let uid = unsafe { libc::geteuid() };
@@ -64,14 +72,14 @@ impl CheckpointStore {
     /// Explicit initialization; fails if the directory already exists, even if empty.
     /// An interrupted initialization never silently becomes fresh state through `open`.
     pub fn create(directory: impl AsRef<Path>) -> Result<Self, TufError> {
-        let directory = directory.as_ref();
+        let directory = absolute(directory.as_ref())?;
         fs::DirBuilder::new()
             .mode(0o700)
-            .create(directory)
+            .create(&directory)
             .map_err(error)?;
-        let store = Self::acquire(directory, true)?;
+        let store = Self::acquire(&directory, true)?;
         store._lock.sync_all().map_err(error)?;
-        File::open(directory)
+        File::open(&directory)
             .and_then(|f| f.sync_all())
             .map_err(error)?;
         let parent = directory
@@ -86,7 +94,7 @@ impl CheckpointStore {
 
     /// Missing lock/checkpoint files are errors, never initialization.
     pub fn open(directory: impl AsRef<Path>) -> Result<Self, TufError> {
-        let store = Self::acquire(directory.as_ref(), false)?;
+        let store = Self::acquire(&absolute(directory.as_ref())?, false)?;
         open_private(&store.directory.join(STATE), false)?;
         Ok(store)
     }
@@ -100,6 +108,38 @@ impl CheckpointStore {
         let lock = open_private(&directory.join(LOCK), create)?;
         lock.try_lock()
             .map_err(|e| error(format!("cannot acquire exclusive lock: {e}")))?;
+        if !create {
+            let mut removed = false;
+            for (index, entry) in fs::read_dir(directory).map_err(error)?.enumerate() {
+                if index >= 4096 {
+                    return Err(error("state directory entry limit exceeded"));
+                }
+                let entry = entry.map_err(error)?;
+                let name = entry.file_name();
+                let temporary = name
+                    .to_str()
+                    .and_then(|n| n.strip_prefix(".checkpoint-tmp-"))
+                    .and_then(|n| n.split_once('-'))
+                    .is_some_and(|(pid, counter)| {
+                        !pid.is_empty()
+                            && !counter.is_empty()
+                            && pid.bytes().all(|b| b.is_ascii_digit())
+                            && counter.bytes().all(|b| b.is_ascii_digit())
+                    });
+                if temporary {
+                    // Only a dead prior writer can leave staging files while we hold the lock.
+                    // Never follow a link or remove a directory through the cleanup path.
+                    open_private(&entry.path(), false)?;
+                    fs::remove_file(entry.path()).map_err(error)?;
+                    removed = true;
+                }
+            }
+            if removed {
+                File::open(directory)
+                    .and_then(|f| f.sync_all())
+                    .map_err(error)?;
+            }
+        }
         Ok(Self {
             directory: directory.to_path_buf(),
             _lock: lock,
@@ -116,7 +156,9 @@ impl CheckpointStore {
     }
 
     /// Atomically replace and sync a verified checkpoint before releasing target bytes.
-    /// On a write error this guard becomes unusable; reopen to inspect recovered state.
+    /// A storage-write failure makes this guard unusable; reopen to inspect recovered state.
+    /// Serialization and size preflight errors do not start a storage write. The byte limit
+    /// bounds wire size, not the transient serialization allocation.
     pub fn commit_checkpoint(
         &mut self,
         checkpoint: &Checkpoint,
@@ -255,6 +297,13 @@ mod tests {
         let path = parent.path().join("state");
         let mut store = CheckpointStore::create(&path).unwrap();
         store.write_bytes(b"durable", 100).unwrap();
+        let blocked = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "state::tests::child_exits_without_dropping_lock"])
+            .env("VESPER_TUF_LOCK_CRASH_FIXTURE", &path)
+            .env("VESPER_TUF_EXPECT_LOCKED", "1")
+            .output()
+            .unwrap();
+        assert_eq!(blocked.status.code(), Some(24), "{blocked:?}");
         drop(store);
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "state::tests::child_exits_without_dropping_lock"])
@@ -264,6 +313,7 @@ mod tests {
         assert_eq!(output.status.code(), Some(23), "{output:?}");
         let store = CheckpointStore::open(&path).unwrap();
         assert_eq!(store.read_bytes(100).unwrap().unwrap(), b"durable");
+        assert_eq!(fs::read_dir(&path).unwrap().count(), 2);
     }
 
     #[test]
@@ -271,7 +321,51 @@ mod tests {
         let Some(path) = std::env::var_os("VESPER_TUF_LOCK_CRASH_FIXTURE") else {
             return;
         };
-        let _store = CheckpointStore::open(path).unwrap();
+        if std::env::var_os("VESPER_TUF_EXPECT_LOCKED").is_some() {
+            assert!(CheckpointStore::open(path).is_err());
+            std::process::exit(24);
+        }
+        let store = CheckpointStore::open(path).unwrap();
+        let mut temporary =
+            open_private(&store.directory.join(".checkpoint-tmp-999-1"), true).unwrap();
+        temporary.write_all(b"unfinished checkpoint").unwrap();
         std::process::exit(23);
+    }
+
+    #[test]
+    fn relative_store_stays_bound_to_locked_directory_after_cwd_change() {
+        let parent = tempfile::tempdir().unwrap();
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "state::tests::child_changes_current_directory"])
+            .env("VESPER_TUF_CWD_FIXTURE", parent.path())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            fs::read(parent.path().join("a/state/checkpoint.json")).unwrap(),
+            b"new original"
+        );
+        assert_eq!(
+            fs::read(parent.path().join("b/state/checkpoint.json")).unwrap(),
+            b"other"
+        );
+    }
+
+    #[test]
+    fn child_changes_current_directory() {
+        let Some(parent) = std::env::var_os("VESPER_TUF_CWD_FIXTURE") else {
+            return;
+        };
+        let parent = PathBuf::from(parent);
+        fs::create_dir(parent.join("a")).unwrap();
+        fs::create_dir(parent.join("b")).unwrap();
+        let mut other = CheckpointStore::create(parent.join("b/state")).unwrap();
+        other.write_bytes(b"other", 100).unwrap();
+        std::env::set_current_dir(parent.join("a")).unwrap();
+        let mut store = CheckpointStore::create("state").unwrap();
+        store.write_bytes(b"original", 100).unwrap();
+        std::env::set_current_dir(parent.join("b")).unwrap();
+        assert_eq!(store.read_bytes(100).unwrap().unwrap(), b"original");
+        store.write_bytes(b"new original", 100).unwrap();
     }
 }

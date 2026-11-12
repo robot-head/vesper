@@ -233,6 +233,11 @@ fn host_must_be_unique_and_unambiguous_with_valid_port_and_address() {
         "2130706433",
         "127.0.0.01",
         "127.0.0.1.",
+        "0x7f000001",
+        "0X7F000001",
+        "0x7f000001.",
+        "0x7f.0.0.1",
+        "0177.0.0.0x1",
     ] {
         assert_eq!(
             parse(format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n").as_bytes()),
@@ -243,6 +248,7 @@ fn host_must_be_unique_and_unambiguous_with_valid_port_and_address() {
     for host in [
         "localhost",
         "EXAMPLE.test",
+        "0xcorp.example",
         "a.test.",
         "127.0.0.1:80",
         "[::1]",
@@ -252,6 +258,27 @@ fn host_must_be_unique_and_unambiguous_with_valid_port_and_address() {
             parse(format!("GET / HTTP/1.1\r\nhOsT: {host}\r\n\r\n").as_bytes()).is_ok(),
             "{host}"
         );
+    }
+}
+
+#[test]
+fn numeric_host_aliases_poison_every_incremental_split() {
+    for host in ["0x7f000001", "0X7F000001", "0x7f.0.0.1", "0177.0.0.0x1"] {
+        let bytes = format!("GET / HTTP/1.1\r\nHost: {host}\r\n\r\n");
+        for split in 0..=bytes.len() {
+            let mut decoder = decoder();
+            decoder.push(&bytes.as_bytes()[..split]).unwrap();
+            let first = decoder.next_request();
+            if split == bytes.len() {
+                assert_eq!(first, Err(Error::InvalidHost));
+            } else {
+                assert_eq!(first, Ok(None));
+                decoder.push(&bytes.as_bytes()[split..]).unwrap();
+                assert_eq!(decoder.next_request(), Err(Error::InvalidHost));
+            }
+            assert_eq!(decoder.push(&request(b"")), Err(Error::Poisoned));
+            assert_eq!(decoder.next_request(), Err(Error::Poisoned));
+        }
     }
 }
 

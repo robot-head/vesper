@@ -84,11 +84,17 @@ in an existing directory, corrupt JSON, symlinks and unsafe permissions fail;
 they never trigger implicit bootstrap initialization.
 
 Commits write a private same-directory temporary file, sync it, rename over the
-checkpoint, then sync the directory. A write failure poisons the guard: reopen
-to inspect recovered state before another attempt. This requires a filesystem
+checkpoint, then sync the directory. A storage-write failure poisons the guard:
+reopen to inspect recovered state before another attempt. Serialization/size
+preflight failures do not start a write. The byte limit bounds checkpoint wire
+size, rather than transient serialization memory. Reopening under the lock
+removes reserved regular staging files left by dead writers; scanning more than
+4096 state-directory entries fails for manual recovery. Store paths are fixed
+to an absolute path before acquiring the lock, so later working-directory
+changes cannot redirect state access. This requires a filesystem
 with working file/directory sync and atomic same-directory rename. Tested on
-Linux, including replacement under an exclusive lock and child-process exit
-without Rust cleanup. It does not protect against a state-directory owner
+Linux, including live cross-process lock contention, replacement under an
+exclusive lock, and child-process exit without Rust cleanup. It does not protect against a state-directory owner
 rewriting or deleting files, and does not make in-flight verification steps
 durable. In particular, storing only `verify_target` successes does not fix
 the failed-verification limitation above. Release target bytes only after all

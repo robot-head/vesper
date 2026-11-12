@@ -345,13 +345,21 @@ fn valid_host(bytes: &[u8]) -> bool {
     {
         return false;
     }
-    // Avoid alternate numeric-host interpretations such as 127.1, integer IP
-    // addresses and octal-looking IPv4 components. No DNS/IP normalization is
-    // performed on accepted bytes.
-    if host
-        .iter()
-        .all(|byte| byte.is_ascii_digit() || *byte == b'.')
-    {
+    // System resolvers also accept hexadecimal/mixed-base IPv4 components.
+    // Classify these before treating a host as DNS; never normalize them into
+    // a different authority. Keep legitimate names such as 0xcorp.example.
+    let classification = host.strip_suffix(b".").unwrap_or(host);
+    let numeric = classification.split(|b| *b == b'.').all(|part| {
+        let hex = part
+            .strip_prefix(b"0x")
+            .or_else(|| part.strip_prefix(b"0X"));
+        if let Some(digits) = hex {
+            !digits.is_empty() && digits.iter().all(u8::is_ascii_hexdigit)
+        } else {
+            !part.is_empty() && part.iter().all(u8::is_ascii_digit)
+        }
+    });
+    if numeric {
         return std::str::from_utf8(host).is_ok_and(|host| host.parse::<Ipv4Addr>().is_ok());
     }
     if host.last() == Some(&b'.') {

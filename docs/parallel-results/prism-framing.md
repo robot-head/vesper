@@ -86,5 +86,9 @@ security proofs. None is implied by this milestone.
 
 Coordinator registered the crate in both root workspace lists, removed its
 standalone workspace/lockfile and reran all 14 integration tests plus the
-executable doctest in the shared workspace. Independent framing/security review
-is in progress before adding any server/runtime consumer.
+executable doctest in the shared workspace. Independent review found that
+hexadecimal/mixed-base IPv4 aliases could pass DNS validation. The coordinator
+now classifies those aliases before strict IPv4 validation, preserves legitimate
+names such as `0xcorp.example`, and added a fifteenth test exercising every
+transport split and fatal error state. No additional definite framing/bounds
+bug was found in that review; no server/runtime consumer is connected yet.
