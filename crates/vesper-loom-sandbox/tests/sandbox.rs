@@ -447,10 +447,12 @@ fn small_fuel_budget_stops_even_a_trivial_step() {
     let full = fx.run("echo", &[]).unwrap();
     let mut cfg = fx.config();
     cfg.limits.fuel = full.fuel_consumed / 2;
-    assert!(matches!(
-        fx.run_with(&cfg, "echo", &[]),
-        Err(SandboxError::FuelExhausted { .. })
-    ));
+    let half = fx.run_with(&cfg, "echo", &[]);
+    assert!(
+        matches!(half, Err(SandboxError::FuelExhausted { .. })),
+        "full run consumed {} fuel; half budget gave {half:?}",
+        full.fuel_consumed
+    );
     cfg.limits.fuel = full.fuel_consumed;
     assert!(fx.run_with(&cfg, "echo", &[]).is_ok());
 }

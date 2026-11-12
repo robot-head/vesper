@@ -571,9 +571,12 @@ fn killed_writer_process_leaves_only_staging_residue() {
     let staging = store.root().join("tmp");
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
+        // Query each file by path: on Windows a directory listing reports the
+        // size recorded when a file was last closed, which stays 0 while the
+        // child is still writing.
         let size: u64 = fs::read_dir(&staging)
             .unwrap()
-            .filter_map(|e| e.ok()?.metadata().ok())
+            .filter_map(|e| fs::metadata(e.ok()?.path()).ok())
             .map(|m| m.len())
             .sum();
         if size > 0 {
