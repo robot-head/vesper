@@ -51,7 +51,7 @@ def notice(method, params):
 
 
 def initialize():
-    return request(1, "initialize", {"capabilities": {"general": {"positionEncodings": ["utf-16"]}, "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}}}})
+    return request(1, "initialize", {"capabilities": {"general": {"positionEncodings": ["utf-16"]}, "workspace": {"workspaceEdit": {"documentChanges": True}}, "textDocument": {"documentSymbol": {"hierarchicalDocumentSymbolSupport": True}, "codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "source.fixAll.vesper"]}}}}}})
 
 
 def open_doc(uri, source, version=1):
@@ -194,6 +194,22 @@ def legacy_document_symbols(h):
         assert "selectionRange" not in symbols[0], "legacy client needs SymbolInformation"
 
 
+def legacy_code_actions(h):
+    literal = {"codeAction": {"codeActionLiteralSupport": {"codeActionKind": {"valueSet": ["quickfix", "source.fixAll.vesper"]}}}}
+    cases = [{}, {"workspace": {"workspaceEdit": {"documentChanges": False}}, "textDocument": literal}, {"workspace": {"workspaceEdit": {"documentChanges": True}}}, {"textDocument": literal}, {"workspace": {"workspaceEdit": {"documentChanges": True}}, "textDocument": {"codeAction": {"codeActionLiteralSupport": False}}}]
+    uri = "opaque:legacy-actions"
+    source = "effect Audit{fn event();} fn main()->u64 eff[Audit]{42}"
+    for caps in cases:
+        init = initialize()
+        init["params"]["capabilities"] = caps
+        params = {**document(uri), "range": selection(source, "Audit]{42}"), "context": {"only": ["quickfix"], "diagnostics": []}}
+        replies = h.run([init, open_doc(uri, source), request(2, "textDocument/codeAction", params)])
+        assert result(replies, 1)["capabilities"]["codeActionProvider"] is False
+        failure = expect_error(replies, 2, -32003)
+        assert failure["data"]["status"] == "analysis_unavailable" and failure["data"]["kind"] == "client_capability"
+        assert "result" not in response(replies, 2), "legacy clients must not receive unversioned edit downgrades"
+
+
 def formatting_and_forgery(h):
     uri = "untitled:format/🦀"
     source = "// Unicode 🦀 é\r\nfn main( )->i64{/* keep */let x=1;// next\n x}"
@@ -289,6 +305,7 @@ def main():
     with tempfile.TemporaryDirectory(prefix="vesper-editor-", dir=args.work) as temp:
         capabilities_and_navigation(harness, pathlib.Path(temp))
         legacy_document_symbols(harness)
+        legacy_code_actions(harness)
         formatting_and_forgery(harness)
         checked_actions(harness)
         search_and_failures(harness)

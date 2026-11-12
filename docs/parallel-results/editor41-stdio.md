@@ -6,7 +6,7 @@ Owned slice on `editor41/stdio`, fresh base `bbd19af`: only
 implementation remain coordinator/Quarry-owned. Read the editor contracts and
 actual span/protocol/navigation/action/query APIs before forming the traffic.
 
-The four Rust integration tests launch the actual `CARGO_BIN_EXE_vesper lsp`
+The five Rust integration tests launch the actual `CARGO_BIN_EXE_vesper lsp`
 child, write real Content-Length frames, concurrently drain bounded stdout and
 stderr, enforce a 45-second child timeout, and parse actual framed replies:
 
@@ -21,6 +21,9 @@ stderr, enforce a 45-second child timeout, and parse actual framed replies:
   and shutdown/exit completion.
 - Hierarchical-capable clients receive DocumentSymbol; legacy absent/false
   capability clients receive flat SymbolInformation locations.
+- Code actions require negotiated versioned documentChanges and literal action
+  support. Absent/false/partial client capabilities advertise false and return
+  -32003 analysis_unavailable/client_capability, never unversioned edits.
 - Fatal duplicate lengths, bad CRLF, truncated body, oversized header and exit
   before shutdown produce process failure.
 
@@ -69,12 +72,32 @@ Checks completed before the coordinated server integration:
   pass. No Cargo/shared-target mutation or duplicate root dependency build.
 - `git diff --check`: pass.
 
-At this commit the coordinated dispatcher/session replacement is not linked;
-the existing 13:21 binary is the older minimal server. Thus **no runtime pass of
-these new server acceptance tests is claimed**. The coordinator must run
-`cargo test --locked -p vesper --test lsp_cli`, strict root Clippy and
-`scripts/test-editor.sh` after integrating the server, and run/observe the
-three-host workflow. The tests intentionally enforce the frozen implemented
-capabilities and explicit status/error schema; they must not be weakened to
-accept the old minimal server. If integration reveals a real payload mismatch,
-report it and update the owned acceptance path with the agreed final contract.
+The initial delivery preceded the coordinated dispatcher/session link; its
+static-only result is superseded by the actual runtime validation below. The
+coordinator still runs Cargo integration/strict Clippy, the full shell acceptance
+and the three-host workflow after integrating this final follow-up. Acceptance
+enforces the final negotiated capability and explicit status/error contracts.
+
+Follow-up capability negotiation: modern Rust/Python initialization supplies
+`workspace.workspaceEdit.documentChanges:true` and a code-action literal support
+object with quickfix/source.fixAll.vesper valueSet. Five actual child cases in
+each harness cover absent, false and partial negotiation.
+
+Actual final runtime validation: read/executed the coordinator's refreshed
+`/workspace/vesper/target/parallel-next/debug/vesper` (timestamp
+2026-11-12 15:08:18 UTC), without modifying its target/cache:
+
+- `python3 scripts/check-editor.py --binary <that binary>`: **PASS**, all 19
+  actual child sessions, including returned edits/candidate rechecking, fresh
+  positions, strict search, malformed-body recovery, fatal framing and both
+  capability negotiation paths.
+- Recompiled the final Rust integration test using `rustc --test -D warnings`
+  against existing read-only dependency artifacts, output only to
+  `/tmp/vesper-editor41-stdio-tests`; executed against that same actual binary:
+  **5/5 tests PASS**. This is a real process test run; the coordinator separately
+  runs the Cargo test target after cherry-picking the owned follow-up.
+- Final rustfmt check, Python compilation, Bash syntax and diff checks: pass.
+
+No production server, Cargo manifests, shared build target or tracked fixture
+was changed by this lane. Native macOS/Windows results and full shell execution
+remain coordinator/CI validation, rather than claimed local results.

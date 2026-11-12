@@ -108,7 +108,7 @@ fn initialize() -> Value {
     request(
         1,
         "initialize",
-        json!({"capabilities":{"general":{"positionEncodings":["utf-16"]},"textDocument":{"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}}}}),
+        json!({"capabilities":{"general":{"positionEncodings":["utf-16"]},"workspace":{"workspaceEdit":{"documentChanges":true}},"textDocument":{"documentSymbol":{"hierarchicalDocumentSymbolSupport":true},"codeAction":{"codeActionLiteralSupport":{"codeActionKind":{"valueSet":["quickfix","source.fixAll.vesper"]}}}}}}),
     )
 }
 fn shutdown() -> [Value; 2] {
@@ -307,5 +307,47 @@ fn actual_stdio_document_symbols_respect_legacy_client_shape() {
         assert_eq!(symbols[0]["location"]["uri"], uri);
         assert!(symbols[0]["location"]["range"]["start"]["line"].is_u64());
         assert!(symbols[0].get("selectionRange").is_none());
+    }
+}
+
+#[test]
+fn actual_stdio_code_actions_require_versioned_literal_client_support() {
+    let literal = json!({"codeAction":{"codeActionLiteralSupport":{"codeActionKind":{"valueSet":["quickfix","source.fixAll.vesper"]}}}});
+    let cases = [
+        json!({}),
+        json!({"workspace":{"workspaceEdit":{"documentChanges":false}},"textDocument":literal}),
+        json!({"workspace":{"workspaceEdit":{"documentChanges":true}}}),
+        json!({"textDocument":literal}),
+        json!({"workspace":{"workspaceEdit":{"documentChanges":true}},"textDocument":{"codeAction":{"codeActionLiteralSupport":false}}}),
+    ];
+    for caps in cases {
+        let uri = "opaque:legacy-actions";
+        let source = "effect Audit{fn event();} fn main()->u64 eff[Audit]{42}";
+        let mut init = initialize();
+        init["params"]["capabilities"] = caps;
+        let mut messages = vec![
+            init,
+            notice(
+                "textDocument/didOpen",
+                json!({"textDocument":{"uri":uri,"version":1,"text":source}}),
+            ),
+            request(
+                2,
+                "textDocument/codeAction",
+                json!({"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":source.len()}},"context":{"only":["quickfix"],"diagnostics":[]}}),
+            ),
+        ];
+        messages.extend(shutdown());
+        let (ok, replies, stderr) = run(stream(&messages));
+        assert!(ok, "{stderr}");
+        assert_eq!(
+            result(&replies, 1)["capabilities"]["codeActionProvider"],
+            false
+        );
+        error(&replies, 2, -32003);
+        let response = replies.iter().find(|m| m["id"] == 2).unwrap();
+        assert_eq!(response["error"]["data"]["status"], "analysis_unavailable");
+        assert_eq!(response["error"]["data"]["kind"], "client_capability");
+        assert!(response.get("result").is_none());
     }
 }
