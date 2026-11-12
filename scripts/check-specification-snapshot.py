@@ -78,8 +78,9 @@ def check(root: Path) -> None:
         part = parts.get(appendix["title"])
         if part is None or hashlib.sha256(part.encode()).hexdigest() != appendix["sha256"]:
             raise ValueError(f"appendix {letter} differs from its recorded inventory")
+    appendix_label = "appendix" if len(appendices) == 1 else "appendices"
     print(f"Verified the recorded specification revision, all {count} section inventories "
-          f"and {len(appendices)} appendices.")
+          f"and {len(appendices)} {appendix_label}.")
 
 
 if __name__ == "__main__":
