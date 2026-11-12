@@ -17,7 +17,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use cranelift_codegen::ir::{Function, InstructionData, Opcode, Value, ValueDef};
+use cranelift_codegen::ir::{Block, BlockArg, Function, InstructionData, Opcode, Value, ValueDef};
 
 use crate::VerifierFinding;
 use crate::svd::{DeviceModel, FieldAccess, RegisterClass, RegisterModel};
@@ -203,8 +203,35 @@ fn const_value(func: &Function, v: Value, depth: u32) -> Option<i64> {
     }
 }
 
-/// Registers whose loaded values flow into `v` (through any arithmetic).
-fn loaded_sources(func: &Function, v: Value, loads: &HashMap<Value, u64>, out: &mut HashSet<u64>) {
+/// Incoming branch arguments of every block parameter.
+fn block_param_sources(func: &Function) -> HashMap<(Block, usize), Vec<Value>> {
+    let mut map: HashMap<(Block, usize), Vec<Value>> = HashMap::new();
+    for block in func.layout.blocks() {
+        for inst in func.layout.block_insts(block) {
+            let dests = func.dfg.insts[inst]
+                .branch_destination(&func.dfg.jump_tables, &func.dfg.exception_tables);
+            for call in dests {
+                let target = call.block(&func.dfg.value_lists);
+                for (i, arg) in call.args(&func.dfg.value_lists).enumerate() {
+                    if let BlockArg::Value(v) = arg {
+                        map.entry((target, i)).or_default().push(v);
+                    }
+                }
+            }
+        }
+    }
+    map
+}
+
+/// Registers whose loaded values flow into `v` (through arithmetic and
+/// block parameters).
+fn loaded_sources(
+    func: &Function,
+    v: Value,
+    loads: &HashMap<Value, u64>,
+    params: &HashMap<(Block, usize), Vec<Value>>,
+    out: &mut HashSet<u64>,
+) {
     let mut stack = vec![v];
     let mut seen = HashSet::new();
     while let Some(v) = stack.pop() {
@@ -216,11 +243,72 @@ fn loaded_sources(func: &Function, v: Value, loads: &HashMap<Value, u64>, out: &
             out.insert(addr);
             continue;
         }
-        if let ValueDef::Result(inst, _) = func.dfg.value_def(v)
-            && !func.dfg.insts[inst].opcode().can_load()
-        {
-            stack.extend(func.dfg.inst_args(inst).iter().copied());
+        match func.dfg.value_def(v) {
+            ValueDef::Result(inst, _) if !func.dfg.insts[inst].opcode().can_load() => {
+                stack.extend(func.dfg.inst_args(inst).iter().copied());
+            }
+            ValueDef::Param(block, i) => {
+                if let Some(vs) = params.get(&(block, i)) {
+                    stack.extend(vs.iter().copied());
+                }
+            }
+            _ => {}
         }
+    }
+}
+
+/// A memory access: every load and store opcode, including extending loads
+/// and truncating stores, with the width actually accessed.
+struct Access {
+    store: Option<Value>,
+    address: Option<u64>,
+    bits: u32,
+}
+
+fn access(func: &Function, inst: cranelift_codegen::ir::Inst) -> Option<Access> {
+    let resolve = |base: Value, offset: i32| {
+        const_value(func, base, 0)
+            .and_then(|a| a.checked_add(i64::from(offset)))
+            .map(|a| a as u64)
+    };
+    match &func.dfg.insts[inst] {
+        InstructionData::Load {
+            opcode,
+            arg,
+            offset,
+            ..
+        } => {
+            let bits = match opcode {
+                Opcode::Uload8 | Opcode::Sload8 => 8,
+                Opcode::Uload16 | Opcode::Sload16 => 16,
+                Opcode::Uload32 | Opcode::Sload32 => 32,
+                _ => func.dfg.value_type(func.dfg.first_result(inst)).bits(),
+            };
+            Some(Access {
+                store: None,
+                address: resolve(*arg, i32::from(*offset)),
+                bits,
+            })
+        }
+        InstructionData::Store {
+            opcode,
+            args,
+            offset,
+            ..
+        } => {
+            let bits = match opcode {
+                Opcode::Istore8 => 8,
+                Opcode::Istore16 => 16,
+                Opcode::Istore32 => 32,
+                _ => func.dfg.value_type(args[0]).bits(),
+            };
+            Some(Access {
+                store: Some(args[0]),
+                address: resolve(args[1], i32::from(*offset)),
+                bits,
+            })
+        }
+        _ => None,
     }
 }
 
@@ -228,75 +316,63 @@ fn loaded_sources(func: &Function, v: Value, loads: &HashMap<Value, u64>, out: &
 pub fn check_function(func: &Function, model: &DeviceModel, policy: &MmioPolicy) -> MmioReport {
     let name = crate::stack::symbol_of_user_func(&func.name);
     let mut report = MmioReport::default();
+    let params = block_param_sources(func);
+    // All constant-address loads first, so dependencies through blocks that
+    // come later in the layout are seen too.
     let mut loads: HashMap<Value, u64> = HashMap::new();
     for block in func.layout.blocks() {
         for inst in func.layout.block_insts(block) {
+            if let Some(Access {
+                store: None,
+                address: Some(a),
+                ..
+            }) = access(func, inst)
+            {
+                loads.insert(func.dfg.first_result(inst), a);
+            }
+        }
+    }
+    for block in func.layout.blocks() {
+        for inst in func.layout.block_insts(block) {
+            let Some(acc) = access(func, inst) else {
+                continue;
+            };
             let idx = Some(inst.as_u32());
             let mut out = Vec::new();
-            match &func.dfg.insts[inst] {
-                InstructionData::Load {
-                    opcode: Opcode::Load,
-                    arg,
-                    offset,
-                    ..
-                } => {
-                    let Some(addr) = const_value(func, *arg, 0)
-                        .and_then(|a| a.checked_add(i64::from(i32::from(*offset))))
-                    else {
-                        report.non_constant_accesses += 1;
-                        continue;
-                    };
-                    let addr = addr as u64;
-                    let Some(r) = model.register_at(addr) else {
-                        out.push((
-                            RULE_UNKNOWN,
-                            format!("load from unmodelled address {addr:#x}"),
-                        ));
-                        push(&mut report, &name, idx, out);
-                        continue;
-                    };
-                    report.mmio_accesses += 1;
+            let Some(addr) = acc.address else {
+                report.non_constant_accesses += 1;
+                continue;
+            };
+            let what = if acc.store.is_some() {
+                "store to"
+            } else {
+                "load from"
+            };
+            let Some(r) = model.register_at(addr) else {
+                out.push((RULE_UNKNOWN, format!("{what} unmodelled address {addr:#x}")));
+                push(&mut report, &name, idx, out);
+                continue;
+            };
+            report.mmio_accesses += 1;
+            match acc.store {
+                None => {
                     let consumer = policy
                         .consumers
                         .get(&r.path)
                         .is_some_and(|fs| fs.contains(&name));
                     read_findings(r, consumer, &mut out);
-                    loads.insert(func.dfg.first_result(inst), addr);
                 }
-                InstructionData::Store {
-                    opcode: Opcode::Store,
-                    args,
-                    offset,
-                    ..
-                } => {
-                    let Some(addr) = const_value(func, args[1], 0)
-                        .and_then(|a| a.checked_add(i64::from(i32::from(*offset))))
-                    else {
-                        report.non_constant_accesses += 1;
-                        continue;
-                    };
-                    let addr = addr as u64;
-                    let Some(r) = model.register_at(addr) else {
-                        out.push((
-                            RULE_UNKNOWN,
-                            format!("store to unmodelled address {addr:#x}"),
-                        ));
-                        push(&mut report, &name, idx, out);
-                        continue;
-                    };
-                    report.mmio_accesses += 1;
+                Some(value) => {
                     let mut sources = HashSet::new();
-                    loaded_sources(func, args[0], &loads, &mut sources);
+                    loaded_sources(func, value, &loads, &params, &mut sources);
                     if sources.contains(&addr) {
                         out.extend(rmw_finding(r));
                     }
-                    if let Some(v) = const_value(func, args[0], 0) {
-                        let ty = func.dfg.value_type(args[0]);
-                        let bits = ty.bits();
-                        let v = if bits >= 64 {
+                    if let Some(v) = const_value(func, value, 0) {
+                        let v = if acc.bits >= 64 {
                             v as u64
                         } else {
-                            (v as u64) & ((1u64 << bits) - 1)
+                            (v as u64) & ((1u64 << acc.bits) - 1)
                         };
                         write_findings(r, v, &mut out);
                     } else if r.class() == RegisterClass::ReadOnly {
@@ -306,7 +382,6 @@ pub fn check_function(func: &Function, model: &DeviceModel, policy: &MmioPolicy)
                         ));
                     }
                 }
-                _ => {}
             }
             push(&mut report, &name, idx, out);
         }

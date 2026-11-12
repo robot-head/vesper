@@ -58,6 +58,7 @@ pub const RULE_SUSPEND_IN_ISR: &str = "silicon.irq.suspend_in_isr";
 pub const RULE_ALLOC_IN_ISR: &str = "silicon.irq.alloc_in_isr";
 pub const RULE_UNRESOLVED_IN_ATOMIC: &str = "silicon.irq.unresolved_call_in_atomic";
 pub const RULE_LOCK_WITHOUT_GUARD: &str = "silicon.irq.lock_without_guard";
+pub const RULE_RESTORE_WITH_LOCK: &str = "silicon.irq.restore_with_isr_lock_held";
 pub const RULE_RECURSIVE_LOCK: &str = "silicon.irq.recursive_lock";
 pub const RULE_UNHELD_RELEASE: &str = "silicon.irq.release_not_held";
 pub const RULE_UNBALANCED_JOIN: &str = "silicon.irq.unbalanced_join";
@@ -259,10 +260,46 @@ pub fn check_atomic(program: &Program, policy: &AtomicPolicy) -> Vec<VerifierFin
         }
     }
 
+    // A function runs only in ISR context when it is an ISR root or every
+    // caller runs only in ISR context. Only those are exempt from the
+    // IrqGuard requirement; a helper shared with thread code is not.
+    let mut isr_only = in_isr.clone();
+    let roots: Vec<usize> = policy
+        .isr_roots
+        .iter()
+        .filter_map(|r| ctx.ids.get(r.as_str()).copied())
+        .collect();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for c in 0..n {
+            if isr_only[c] {
+                continue;
+            }
+            for s in &callees[c] {
+                if let Some(&w) = ctx.ids.get(s.as_str())
+                    && isr_only[w]
+                    && !roots.contains(&w)
+                {
+                    isr_only[w] = false;
+                    changed = true;
+                }
+            }
+        }
+    }
+
     // Per-function guard/lock dataflow.
     let mut order: BTreeSet<(usize, usize)> = BTreeSet::new();
     for (i, f) in funcs.iter().enumerate() {
-        check_function(&ctx, i, f, in_isr[i], &mut order, &mut findings);
+        check_function(
+            &ctx,
+            i,
+            f,
+            in_isr[i],
+            isr_only[i],
+            &mut order,
+            &mut findings,
+        );
     }
 
     // Lock-order cycles.
@@ -293,6 +330,7 @@ fn check_function(
     index: usize,
     func: &Function,
     in_isr: bool,
+    isr_only: bool,
     order: &mut BTreeSet<(usize, usize)>,
     findings: &mut Vec<VerifierFinding>,
 ) {
@@ -365,10 +403,24 @@ fn check_function(
                     );
                 } else {
                     st.guards -= 1;
+                    if st.guards == 0 && !isr_only {
+                        for &h in &st.held {
+                            if p.locks[h].isr_shared {
+                                finding(
+                                    idx,
+                                    RULE_RESTORE_WITH_LOCK,
+                                    format!(
+                                        "interrupts restored while ISR-shared lock `{}` is held",
+                                        p.locks[h].name
+                                    ),
+                                );
+                            }
+                        }
+                    }
                 }
             } else if let Some(l) = p.locks.iter().position(|l| l.acquire == symbol) {
                 let spec = &p.locks[l];
-                if spec.isr_shared && st.guards == 0 && !in_isr {
+                if spec.isr_shared && st.guards == 0 && !isr_only {
                     finding(
                         idx,
                         RULE_LOCK_WITHOUT_GUARD,

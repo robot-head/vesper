@@ -255,3 +255,57 @@ fn indirect_calls_in_atomic_context_need_targets() {
         "{f:?}"
     );
 }
+
+#[test]
+fn helpers_shared_by_isr_and_thread_code_still_need_the_guard() {
+    let fs = vec![
+        func("isr", 0, &["bump_stats"], false),
+        func("thread_entry", 0, &["bump_stats"], false),
+        func(
+            "bump_stats",
+            0,
+            &["spin_lock_stats", "spin_unlock_stats"],
+            false,
+        ),
+        func(
+            "isr_only_helper",
+            0,
+            &["spin_lock_stats", "spin_unlock_stats"],
+            false,
+        ),
+        func("isr2", 0, &["isr_only_helper"], false),
+    ];
+    let p = Program::compile(Arch::X86_64, fs).unwrap();
+    let mut pol = policy();
+    pol.isr_roots = vec!["isr".into(), "isr2".into()];
+    let f = check_atomic(&p, &pol);
+    let unguarded: Vec<_> = f
+        .iter()
+        .filter(|x| x.rule == RULE_LOCK_WITHOUT_GUARD)
+        .map(|x| x.function.as_str())
+        .collect();
+    assert_eq!(unguarded, ["bump_stats"], "{f:?}");
+}
+
+#[test]
+fn restoring_interrupts_while_isr_lock_held_is_rejected() {
+    let fs = vec![
+        func(
+            "early_restore",
+            0,
+            &[G, "spin_lock_stats", R, "spin_unlock_stats"],
+            false,
+        ),
+        func(
+            "nested_ok",
+            0,
+            &[G, G, "spin_lock_stats", R, "spin_unlock_stats", R],
+            false,
+        ),
+    ];
+    let p = Program::compile(Arch::Aarch64, fs).unwrap();
+    let f = check_atomic(&p, &policy());
+    assert_eq!(f.len(), 1, "{f:?}");
+    assert_eq!(f[0].rule, RULE_RESTORE_WITH_LOCK);
+    assert_eq!(f[0].function, "early_restore");
+}

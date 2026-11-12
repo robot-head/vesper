@@ -267,7 +267,8 @@ fn dma_transfer_owns_the_buffer_until_completion() {
     assert_eq!(e, DmaError::ChannelBusy(0));
     assert_eq!(back.dma_region(), (0x3000, 64));
     // Not complete yet: the transfer comes back.
-    let xfer = dma.poll_complete(xfer).unwrap_err();
+    let (xfer, e) = dma.poll_complete(xfer).unwrap_err();
+    assert_eq!(e, DmaError::NotComplete);
     dma.device_complete(0, 600, None).unwrap();
     let (res, buf) = dma.poll_complete(xfer).unwrap();
     assert_eq!(
@@ -289,6 +290,33 @@ fn dma_transfer_owns_the_buffer_until_completion() {
         dma.submit_tx(9, buf),
         Err((_, DmaError::NoSuchChannel(9)))
     ));
+}
+
+#[test]
+fn transfers_are_bound_to_their_engine_and_slot() {
+    let ledger = Ledger::new();
+    let mut a = DmaEngine::new(Arch::Aarch64, 2, 1, 64, &ledger).unwrap();
+    let mut b = DmaEngine::new(Arch::Aarch64, 2, 1, 64, &ledger).unwrap();
+    let xa = a.submit_rx(0, StaticDmaBuf::<64>::new(0x1000)).unwrap();
+    let xb = b.submit_rx(0, StaticDmaBuf::<64>::new(0x2000)).unwrap();
+    // One ring slot: a second in-flight transfer on another channel must
+    // not overwrite the first descriptor.
+    let (buf, e) = a.submit_rx(1, StaticDmaBuf::<64>::new(0x3000)).unwrap_err();
+    assert_eq!(e, DmaError::RingFull);
+    assert_eq!(a.descriptor(xa.desc_slot()).unwrap().phys_addr, 0x1000);
+    b.device_complete(0, 8, None).unwrap();
+    let (xa, e) = b.poll_complete(xa).unwrap_err();
+    assert_eq!(e, DmaError::ForeignTransfer);
+    let (res, _) = b.poll_complete(xb).unwrap();
+    assert_eq!(res, Ok(8));
+    a.device_complete(0, 4, None).unwrap();
+    let (res, _) = a.poll_complete(xa).unwrap();
+    assert_eq!(res, Ok(4));
+    // The slot is free again.
+    let x = a.submit_rx(1, buf).unwrap();
+    a.device_complete(1, 0, None).unwrap();
+    a.poll_complete(x).unwrap();
+    assert_eq!(ledger.total_leaked(), 0);
 }
 
 #[test]
@@ -431,7 +459,10 @@ fn randomized_map_unmap_dma_sequences_conserve_frames() {
                     let x = inflight.swap_remove(rng.below(inflight.len()));
                     match dma.poll_complete(x) {
                         Ok((_, f)) => held.push(f),
-                        Err(x) => inflight.push(x),
+                        Err((x, e)) => {
+                            assert_eq!(e, DmaError::NotComplete);
+                            inflight.push(x)
+                        }
                     }
                 }
                 _ => {}

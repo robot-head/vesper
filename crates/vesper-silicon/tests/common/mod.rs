@@ -140,6 +140,11 @@ pub enum Mmio {
     Load(u64),
     StoreConst(u64, u32),
     Rmw(u64, u32),
+    Uload8(u64),
+    Istore8(u64, u8),
+    /// Load in one block, pass the value as a block argument, OR and store
+    /// in the successor.
+    RmwAcrossBlocks(u64, u32),
 }
 
 pub fn mmio_fn(name: &str, ops: &[Mmio]) -> Function {
@@ -168,6 +173,28 @@ pub fn mmio_fn(name: &str, ops: &[Mmio]) -> Function {
                 let old = b.ins().load(types::I32, fl, addr, 0);
                 let new = b.ins().bor_imm(old, i64::from(set));
                 b.ins().store(fl, new, addr, 0);
+            }
+            Mmio::Uload8(a) => {
+                let addr = b.ins().iconst(types::I64, a as i64);
+                b.ins().uload8(types::I32, fl, addr, 0);
+            }
+            Mmio::Istore8(a, v) => {
+                let addr = b.ins().iconst(types::I64, a as i64);
+                let v = b.ins().iconst(types::I32, i64::from(v));
+                b.ins().istore8(fl, v, addr, 0);
+            }
+            Mmio::RmwAcrossBlocks(a, set) => {
+                let addr = b.ins().iconst(types::I64, a as i64);
+                let old = b.ins().load(types::I32, fl, addr, 0);
+                let next = b.create_block();
+                b.append_block_param(next, types::I32);
+                b.ins().jump(next, &[old.into()]);
+                b.switch_to_block(next);
+                b.seal_block(next);
+                let p = b.block_params(next)[0];
+                let new = b.ins().bor_imm(p, i64::from(set));
+                let addr2 = b.ins().iconst(types::I64, a as i64);
+                b.ins().store(fl, new, addr2, 0);
             }
         }
     }

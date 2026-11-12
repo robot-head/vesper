@@ -239,6 +239,19 @@ fn cranelift_mmio_pass() {
         check("wild", &[Mmio::StoreConst(0x5000_0000, 1)]),
         [RULE_UNKNOWN]
     );
+    // Extending loads and truncating stores are MMIO accesses too.
+    assert_eq!(check("peek8", &[Mmio::Uload8(0x4000_4000)]), [RULE_RC_READ]);
+    assert_eq!(
+        check("ro8", &[Mmio::Istore8(0x4002_8000, 1)]),
+        [RULE_WRITE_RO]
+    );
+    assert!(check("ack8", &[Mmio::Istore8(0x4002_8010, 1)]).is_empty());
+    // An RMW split across blocks through a block parameter is still an RMW.
+    assert_eq!(
+        check("split", &[Mmio::RmwAcrossBlocks(0x4002_8010, 1)]),
+        [RULE_RMW_W1C]
+    );
+    assert!(check("split_ok", &[Mmio::RmwAcrossBlocks(0x4001_3000, 1 << 6)]).is_empty());
     // Load via base + immediate offset resolves the same register.
     let rep = check_function(&mmio_fn("sr", &[Mmio::Load(0x4001_3008)]), &m, &pol);
     assert_eq!(rep.mmio_accesses, 1);

@@ -67,11 +67,14 @@ interprocedural BFS that finds the shortest path from each function to a
 forbidden symbol. Rules: `sleep_in_atomic`, `alloc_in_atomic`,
 `suspend_in_isr`, `alloc_in_isr`, `unresolved_call_in_atomic`,
 `lock_without_guard` (ISR-shared lock outside ISR without a guard),
-`recursive_lock`, `release_not_held`, `unbalanced_join`,
+`restore_with_isr_lock_held` (re-enabling interrupts while an ISR-shared
+lock is still held), `recursive_lock`, `release_not_held`, `unbalanced_join`,
 `guard_or_lock_escapes` (returning with a guard or lock held: the IR-level
 form of "a linear IrqGuard cannot leave its scope"), and `lock_order_cycle`
 (Tarjan over the lock-order graph, including order induced by callees'
-transitive lock sets).
+transitive lock sets). Only functions reachable *solely* from `@isr` roots
+are exempt from the IrqGuard requirement; a helper shared with thread code
+is checked as thread code.
 
 ### SVD model and hazards (`svd`, `hazard`)
 
@@ -93,7 +96,10 @@ load of the same register), a plain read of a read-to-clear register
 (allowed only as `Consume`, or in IR only in functions the policy lists as
 consumers), writes that set read-only bits or any write to a read-only
 register, reads of write-only registers, out-of-range values, unmodelled
-addresses. Non-constant addresses are counted and not analysed.
+addresses. Every load/store opcode is covered, including extending loads
+(`uload8` …) and truncating stores (`istore8` …) at their access width, and
+RMW detection follows values through block parameters. Non-constant
+addresses are counted and not analysed.
 
 ### Typestate MMIO (`mmio`)
 
@@ -118,7 +124,9 @@ lock ends before interrupts can be restored; interrupts raised while masked
 are delivered on the unmasking restore. `dma_barriers` returns `DC CVAC`
 per line + `DSB SY` before the device and `DC IVAC` per line + `DSB SY`
 after a device write on AArch64, `FENCE IORW, IORW` on RISC-V and nothing on
-coherent x86_64. `SgDmaDescWire` is the 16-byte layout of §26.2 (its fields
+coherent x86_64. Each transfer is bound to its engine and owns its
+descriptor slot until polled (`ForeignTransfer`, `RingFull` errors).
+`SgDmaDescWire` is the 16-byte layout of §26.2 (its fields
 sum to 16; no correction needed). `PageTable::unmap_leaf_4k` returns a
 `PendingTlbShootdown` whose `flush_ipi_and_reclaim` records the per-arch
 invalidation (`DSB ISHST; TLBI VAE1IS; DSB ISH; ISB`, `INVLPG`,
@@ -152,7 +160,7 @@ the models in that file only (not about the Rust code):
 
 ```
 cargo fmt --all -- --check
-VESPER_LEAN=…/lean-4.24.0-linux/bin/lean cargo test -p vesper-silicon      # 38 tests + 6 doctests
+VESPER_LEAN=…/lean-4.24.0-linux/bin/lean cargo test -p vesper-silicon      # 41 tests + 6 doctests
 VESPER_LEAN=…/lean cargo test --workspace --locked
 cargo clippy --workspace --locked --all-targets -- -D warnings
 lean lean/SiliconFrames.lean

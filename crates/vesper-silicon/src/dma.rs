@@ -16,6 +16,8 @@
 //!   (Zicbom) is not modelled; this is the ordering the design names.
 //! * x86_64: none; DMA is cache-coherent.
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use crate::Arch;
 use crate::frames::{PAGE_BYTES, PhysFrame4K};
 use crate::ledger::{Ledger, OwnerKind, Token};
@@ -107,7 +109,15 @@ pub enum DmaError {
     },
     DeviceFault(u8),
     NotInFlight(u8),
+    /// Every descriptor slot is owned by an in-flight transfer.
+    RingFull,
+    /// The device has not completed this transfer yet.
+    NotComplete,
+    /// The transfer was submitted to a different engine.
+    ForeignTransfer,
 }
+
+static NEXT_ENGINE: AtomicU64 = AtomicU64::new(1);
 
 /// One barrier / cache-maintenance instruction.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,6 +201,7 @@ pub enum Direction {
 #[must_use = "a DmaTransfer must be completed with DmaEngine::poll_complete"]
 #[derive(Debug)]
 pub struct DmaTransfer<B> {
+    engine: u64,
     channel: u8,
     desc_slot: u16,
     owned_buf: B,
@@ -224,10 +235,13 @@ enum Channel {
 /// Model of a DMA engine with a descriptor ring.
 #[derive(Debug)]
 pub struct DmaEngine {
+    id: u64,
     arch: Arch,
     line: u32,
     channels: Vec<Channel>,
     ring: Vec<[u8; 16]>,
+    /// Slot owned by an in-flight (or completed, unpolled) transfer.
+    slot_busy: Vec<bool>,
     next_slot: u16,
     barriers: Vec<BarrierInst>,
     ledger: Ledger,
@@ -244,11 +258,14 @@ impl DmaEngine {
         if line == 0 || !line.is_power_of_two() {
             return Err(DmaError::BadLineSize(line));
         }
+        let slots = ring_slots.max(1) as usize;
         Ok(Self {
+            id: NEXT_ENGINE.fetch_add(1, Ordering::Relaxed),
             arch,
             line,
             channels: vec![Channel::Idle; channels as usize],
-            ring: vec![[0; 16]; ring_slots.max(1) as usize],
+            ring: vec![[0; 16]; slots],
+            slot_busy: vec![false; slots],
             next_slot: 0,
             barriers: Vec::new(),
             ledger: ledger.clone(),
@@ -305,8 +322,16 @@ impl DmaEngine {
             Ok(s) => s,
             Err(e) => return Err((buf, e)),
         };
-        let slot = self.next_slot;
-        self.next_slot = (self.next_slot + 1) % self.ring.len() as u16;
+        let n = self.ring.len();
+        let Some(slot) = (0..n)
+            .map(|k| (self.next_slot as usize + k) % n)
+            .find(|&i| !self.slot_busy[i])
+        else {
+            return Err((buf, DmaError::RingFull));
+        };
+        self.slot_busy[slot] = true;
+        let slot = slot as u16;
+        self.next_slot = ((slot as usize + 1) % n) as u16;
         let flags = match direction {
             Direction::FromDevice => SgDmaDescWire::FLAG_DEVICE_WRITES,
             Direction::ToDevice => 0,
@@ -325,6 +350,7 @@ impl DmaEngine {
             capacity: len,
         };
         Ok(DmaTransfer {
+            engine: self.id,
             channel,
             desc_slot: slot,
             owned_buf: buf,
@@ -359,16 +385,22 @@ impl DmaEngine {
 
     /// `DmaEngine::await_complete`: if the device finished, returns the
     /// status and the buffer (after the post-DMA invalidation for receives);
-    /// otherwise gives the transfer back (a fiber would suspend here).
+    /// otherwise gives the transfer back with [`DmaError::NotComplete`] (a
+    /// fiber would suspend here), or with [`DmaError::ForeignTransfer`] if it
+    /// belongs to another engine.
     #[allow(clippy::type_complexity)]
     pub fn poll_complete<B: DmaBuffer>(
         &mut self,
         xfer: DmaTransfer<B>,
-    ) -> Result<(Result<u32, DmaError>, B), DmaTransfer<B>> {
+    ) -> Result<(Result<u32, DmaError>, B), (DmaTransfer<B>, DmaError)> {
+        if xfer.engine != self.id {
+            return Err((xfer, DmaError::ForeignTransfer));
+        }
         let result = match self.channels.get(xfer.channel as usize) {
             Some(Channel::Done { slot, result }) if *slot == xfer.desc_slot => result.clone(),
-            _ => return Err(xfer),
+            _ => return Err((xfer, DmaError::NotComplete)),
         };
+        self.slot_busy[xfer.desc_slot as usize] = false;
         if xfer.direction == Direction::FromDevice {
             let (phys, len) = xfer.owned_buf.dma_region();
             // Region was validated at submit; recomputing cannot fail.
