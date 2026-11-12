@@ -663,6 +663,8 @@ impl Node {
             });
             cx.stats.proposals += 1;
             cx.events.push(NodeEvent::LogChanged);
+            // A quorum the leader alone satisfies (one node) commits now.
+            self.advance_commit(cx);
         }
         for p in 0..self.n {
             if p == self.id {

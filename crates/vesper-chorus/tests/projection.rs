@@ -498,3 +498,51 @@ rec Outer {
         ProjectionError::Unmergeable(ref u) if u.left == "continue Inner" && u.right == "continue Outer"
     ));
 }
+
+#[test]
+fn recursion_variables_are_lexically_scoped() {
+    // `continue X` after the loop's closing brace is out of scope, even
+    // though the statement is placed inside the loop as its exit path.
+    let e = parse_choreography("roles A, B; rec X { A -> B: Ping(); } continue X;").unwrap_err();
+    assert_eq!(
+        e.kind,
+        ParseErrorKind::Invalid(WellFormedError::UnboundRecursionVariable { var: "X".into() })
+    );
+    // Two sequential loops may reuse a name.
+    let src = "
+roles A, B;
+rec X { A -> B { More() { continue X; } Done() { } } }
+rec X { B -> A { More() { continue X; } Done() { } } }
+";
+    let c = parse_choreography(src).unwrap();
+    let a = project(&c, "A").unwrap().render(&c);
+    assert_eq!(
+        a,
+        "rec X { select B { Done(): rec X__2 { offer B { Done(): end, More(): continue X__2 } }, More(): continue X } }"
+    );
+    explore(&c, ExploreLimits::default()).unwrap();
+    // Lexical shadowing is still an error.
+    let e =
+        parse_choreography("roles A, B; rec X { A -> B: M(); rec X { continue X; } }").unwrap_err();
+    assert_eq!(
+        e.kind,
+        ParseErrorKind::Invalid(WellFormedError::ShadowedRecursionVariable { var: "X".into() })
+    );
+}
+
+#[test]
+fn loops_merge_up_to_binder_names() {
+    let src = "
+roles A, B, C, D;
+A -> B {
+    L() { rec X { C -> D { Ping() { continue X; } Stop() { } } } }
+    R() { rec Y { C -> D { Ping() { continue Y; } Stop() { } } } }
+}
+";
+    let c = parse_choreography(src).unwrap();
+    assert_eq!(
+        project(&c, "C").unwrap().render(&c),
+        "rec X { select D { Ping(): continue X, Stop(): end } }"
+    );
+    explore(&c, ExploreLimits::default()).unwrap();
+}

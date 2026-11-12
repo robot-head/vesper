@@ -162,3 +162,31 @@ fn leases_are_bound_to_their_fabric() {
     let (_, src) = a.deregister(src).err().unwrap();
     drop(src);
 }
+
+#[test]
+fn handles_from_another_fabric_are_rejected() {
+    let a = RdmaFabric::new(1);
+    let b = RdmaFabric::new(1);
+    let ra = a.register(0, vec![1; 4], RW).unwrap();
+    let rb = b.register(0, vec![2; 4], RW).unwrap();
+    // Same node, slot and generation on both fabrics: identity must decide.
+    assert_eq!(a.write_local(&rb, 0, &[9]), Err(RdmaError::ForeignHandle));
+    assert_eq!(a.read_local(&rb), Err(RdmaError::ForeignHandle));
+    assert_eq!(
+        a.post_write_with_imm(rb.local_key(), 0, 4, ra.grant(), 0, 0)
+            .err(),
+        Some(RdmaError::ForeignHandle)
+    );
+    assert_eq!(
+        a.post_write_with_imm(ra.local_key(), 0, 4, rb.grant(), 0, 0)
+            .err(),
+        Some(RdmaError::ForeignHandle)
+    );
+    assert!(a.read_remote(rb.grant()).is_none());
+    let (err, rb) = a.deregister(rb).err().unwrap();
+    assert_eq!(err, RdmaError::ForeignHandle);
+    assert_eq!(a.read_local(&ra).unwrap(), vec![1; 4], "A untouched");
+    assert_eq!(b.deregister(rb).unwrap(), vec![2; 4], "B still registered");
+    a.deregister(ra).unwrap();
+    assert_eq!((a.leaks(), b.leaks()), ((0, 0), (0, 0)));
+}

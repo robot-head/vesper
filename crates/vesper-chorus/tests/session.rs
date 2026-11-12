@@ -559,3 +559,51 @@ fn simpulse_reports_a_deadlock_when_a_role_waits_forever() {
     // The blocked sessions were dropped with the roles: two counted leaks.
     assert_eq!(auditor.counts().leaked, 2);
 }
+
+#[test]
+fn replay_rejects_a_journal_with_unconsumed_events() {
+    let (r, _) = sim_two_buyer(SimMode::Record(3), 3, 60);
+    let mut j = r.unwrap().journal;
+    let last = j.events.last().unwrap().clone();
+    j.events.push(last);
+    match sim_two_buyer(SimMode::Replay(j), 3, 60).0 {
+        Err(SimRunError::Sim(vesper_simpulse::Error::ReplayUnconsumed { remaining: 1 })) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn an_abandoned_peer_wakes_a_blocked_receiver_under_simpulse() {
+    // B1 makes progress once, then drops its session without sending. The
+    // seller, possibly already parked waiting for Title, must observe
+    // PeerGone rather than the run ending in a deadlock.
+    struct Quitter(Option<Session<B1Proto>>, bool);
+    impl SimRole for Quitter {
+        fn step(&mut self) -> Result<RoleStep, ChorusError> {
+            if !self.1 {
+                self.1 = true;
+                return Ok(RoleStep::Progress);
+            }
+            drop(self.0.take());
+            Ok(RoleStep::Done)
+        }
+    }
+    let chor = parse_choreography(TWO_BUYER).unwrap();
+    for seed in 0..50 {
+        let net = SimNet::new(seed, SimNetConfig::default());
+        let auditor = LeakAuditor::new();
+        let b1 = Session::<B1Proto>::bind(&chor, "B1", 1, net.handle(), &auditor).unwrap();
+        let s = Session::<SProto>::bind(&chor, "S", 1, net.handle(), &auditor).unwrap();
+        let mut roles: Vec<Box<dyn SimRole>> = vec![
+            Box::new(Quitter(Some(b1), false)),
+            Box::new(SRole(Some(SSt::Title(s)), 1)),
+        ];
+        match run_roles(SimMode::Record(seed), &net, &mut roles, 10_000) {
+            Err(SimRunError::Role {
+                role: 1,
+                error: ChorusError::Net(NetFail::PeerGone),
+            }) => {}
+            other => panic!("seed {seed}: {other:?}"),
+        }
+    }
+}

@@ -141,7 +141,7 @@ unsafe code: `#![forbid(unsafe_code)]`) and `lean/ChorusQuorum.lean`.
 Toolchain: cargo 1.97.0 locally; Lean 4.24.0 (`leanprover/lean4:v4.24.0`,
 the pinned toolchain).
 
-- `cargo test -p vesper-chorus` with `VESPER_LEAN` set: 42 tests plus 3
+- `cargo test -p vesper-chorus` with `VESPER_LEAN` set: 49 tests plus 3
   doctests (two `compile_fail`), all pass.
   - `tests/projection.rs` (18): two-buyer projections match the textbook
     local types and run to completion in the explorer; the unmergeable
@@ -191,6 +191,14 @@ the pinned toolchain).
     file compiles, each of the 9 audited theorems depends only on `propext`,
     `Classical.choice` and `Quot.sound`, and the `#eval` majority table for
     0..64 nodes equals `QuorumRule::Majority`.
+- Review fixes (Codex, PR #151): recursion variables resolve lexically
+  (a `continue X` after the loop's brace is rejected; sequential loops may
+  reuse a name and get unique tree names such as `X__2`); loops merge up to
+  binder names; an abandoned channel wakes parked SimPulse roles so they see
+  `PeerGone`; `run_roles` rejects a replay journal with unconsumed events;
+  RDMA regions, keys and grants are bound to their fabric
+  (`RdmaError::ForeignHandle`); a one-node leader commits its own entries.
+  Each has a regression test.
 - `cargo fmt --all -- --check`: clean.
 - `cargo clippy --workspace --locked --all-targets -- -D warnings`: clean.
 - `cargo test --workspace --locked` (with `VESPER_LEAN` set, Linux x86_64):

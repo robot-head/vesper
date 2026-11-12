@@ -253,3 +253,18 @@ fn quorum_sizes() {
         }
     }
 }
+
+#[test]
+fn a_single_node_cluster_commits_its_own_entries() {
+    let mut cfg = RaftConfig::new(1);
+    cfg.crashes = false;
+    cfg.partitions = false;
+    cfg.propose_per_mille = 1000;
+    let r = run_cluster(0, &cfg, None).unwrap();
+    assert_eq!(r.violation, None);
+    assert!(r.stats.proposals > 0);
+    assert_eq!(
+        r.committed as u64,
+        r.stats.proposals.min(cfg.max_log as u64)
+    );
+}

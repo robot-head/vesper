@@ -244,6 +244,10 @@ struct Parser {
     pos: usize,
     end: (u32, u32),
     roles: Vec<String>,
+    /// Lexically enclosing `rec` binders: (source name, unique tree name).
+    scopes: Vec<(String, String)>,
+    /// Every unique binder name handed out so far.
+    binders: std::collections::BTreeSet<String>,
 }
 
 const KEYWORDS: [&str; 4] = ["roles", "rec", "continue", "end"];
@@ -380,15 +384,47 @@ impl Parser {
     fn stmt(&mut self, depth: usize) -> Result<Stmt, ParseError> {
         if self.keyword("rec") {
             self.pos += 1;
+            let at = self.pos;
             let var = self.ident("recursion variable")?;
-            let body = self.braced(depth)?;
-            return Ok(Stmt::Rec { var, body });
+            if self.scopes.iter().any(|(v, _)| *v == var) {
+                self.pos = at;
+                return self.fail(ParseErrorKind::Invalid(
+                    WellFormedError::ShadowedRecursionVariable { var },
+                ));
+            }
+            // Sequential loops may reuse a name. Each binder gets a unique
+            // tree name, because statements after the block are placed inside
+            // its body (as the loop's exit continuation) and must not be
+            // captured by it.
+            let mut unique = var.clone();
+            let mut n = 1u32;
+            while self.binders.contains(&unique) || self.roles.contains(&unique) {
+                n += 1;
+                unique = format!("{var}__{n}");
+            }
+            self.binders.insert(unique.clone());
+            self.scopes.push((var, unique.clone()));
+            let body = self.braced(depth);
+            self.scopes.pop();
+            return Ok(Stmt::Rec {
+                var: unique,
+                body: body?,
+            });
         }
         if self.keyword("continue") {
             self.pos += 1;
+            let at = self.pos;
             let var = self.ident("recursion variable")?;
+            // Resolve against the lexical scope, not the expanded tree.
+            let Some((_, unique)) = self.scopes.iter().rev().find(|(v, _)| *v == var) else {
+                self.pos = at;
+                return self.fail(ParseErrorKind::Invalid(
+                    WellFormedError::UnboundRecursionVariable { var },
+                ));
+            };
+            let unique = unique.clone();
             self.eat(&Tok::Semi, "`;`")?;
-            return Ok(Stmt::Continue(var));
+            return Ok(Stmt::Continue(unique));
         }
         if self.keyword("end") {
             self.pos += 1;
@@ -559,6 +595,8 @@ pub fn parse_choreography(src: &str) -> Result<Choreography, ParseError> {
         pos: 0,
         end: lexed.end,
         roles: Vec::new(),
+        scopes: Vec::new(),
+        binders: std::collections::BTreeSet::new(),
     };
     if !p.keyword("roles") {
         return p.unexpected("`roles`");

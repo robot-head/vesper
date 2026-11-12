@@ -307,7 +307,7 @@ fn as_offer(t: LocalType) -> Result<(RoleId, Vec<LBranch>), LocalType> {
 }
 
 fn merge(chor: &Choreography, a: LocalType, b: LocalType) -> Result<LocalType, MergeFail> {
-    if a == b {
+    if a == b || a.alpha_eq(&b) {
         return Ok(a);
     }
     let summary = |t: &LocalType| t.head_summary(chor);
@@ -405,12 +405,19 @@ fn merge(chor: &Choreography, a: LocalType, b: LocalType) -> Result<LocalType, M
                 next: Box::new(merge(chor, *n1, *n2)?),
             })
         }
+        // Loops merge up to the names of their binders: rename the right
+        // binder to the left one when that captures nothing.
         (LocalType::Rec { var: v1, body: b1 }, LocalType::Rec { var: v2, body: b2 })
-            if v1 == v2 =>
+            if v1 == v2 || !b2.mentions(&v1) =>
         {
+            let b2 = if v1 == v2 {
+                *b2
+            } else {
+                b2.subst(&v2, &LocalType::Var(v1.clone()))
+            };
             Ok(LocalType::Rec {
                 var: v1,
-                body: Box::new(merge(chor, *b1, *b2)?),
+                body: Box::new(merge(chor, *b1, b2)?),
             })
         }
         (a, b) => Err(MergeFail::Conflict(summary(&a), summary(&b))),

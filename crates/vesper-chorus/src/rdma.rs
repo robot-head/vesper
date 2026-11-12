@@ -58,6 +58,8 @@ pub enum RdmaError {
     TooManyRegions,
     /// The lease belongs to another fabric.
     ForeignLease,
+    /// The region, key or grant belongs to another fabric.
+    ForeignHandle,
     /// The work request completed with an error status.
     Completion(WcStatus),
 }
@@ -72,6 +74,7 @@ impl std::error::Error for RdmaError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalKey {
+    fabric: u64,
     node: u32,
     slot: u32,
     generation: u32,
@@ -80,6 +83,8 @@ pub struct LocalKey {
 /// What a remote peer needs to write into a region.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RemoteSlotGrant {
+    /// Fabric the region is registered on.
+    pub fabric: u64,
     pub node: u32,
     pub rkey: u32,
     pub len: u64,
@@ -167,6 +172,7 @@ impl RdmaRegion {
     }
     pub fn grant(&self) -> RemoteSlotGrant {
         RemoteSlotGrant {
+            fabric: self.key.fabric,
             node: self.key.node,
             rkey: rkey(self.key.slot, self.key.generation),
             len: self.len,
@@ -258,6 +264,7 @@ impl RdmaFabric {
         access: Access,
     ) -> Result<RdmaRegion, RdmaError> {
         let mut g = self.lock();
+        let fabric = g.id;
         let nic = g
             .nics
             .get_mut(node as usize)
@@ -284,6 +291,7 @@ impl RdmaFabric {
         );
         Ok(RdmaRegion {
             key: LocalKey {
+                fabric,
                 node,
                 slot,
                 generation,
@@ -298,6 +306,10 @@ impl RdmaFabric {
     pub fn deregister(&self, mut region: RdmaRegion) -> Result<Vec<u8>, (RdmaError, RdmaRegion)> {
         let mut g = self.lock();
         let k = region.key;
+        if k.fabric != g.id {
+            drop(g);
+            return Err((RdmaError::ForeignHandle, region));
+        }
         let Some(nic) = g.nics.get_mut(k.node as usize) else {
             drop(g);
             return Err((RdmaError::UnknownNode(k.node), region));
@@ -320,6 +332,9 @@ impl RdmaFabric {
     }
 
     fn region(g: &mut Fabric, k: LocalKey) -> Result<&mut Region, RdmaError> {
+        if k.fabric != g.id {
+            return Err(RdmaError::ForeignHandle);
+        }
         let nic = g
             .nics
             .get_mut(k.node as usize)
@@ -375,6 +390,9 @@ impl RdmaFabric {
         imm: u32,
     ) -> Result<InFlightRdmaWrite, RdmaError> {
         let mut g = self.lock();
+        if remote.fabric != g.id {
+            return Err(RdmaError::ForeignHandle);
+        }
         if remote.node as usize >= g.nics.len() {
             return Err(RdmaError::UnknownNode(remote.node));
         }
@@ -543,6 +561,9 @@ impl RdmaFabric {
     /// remote host's own view of its memory).
     pub fn read_remote(&self, grant: RemoteSlotGrant) -> Option<Vec<u8>> {
         let g = self.lock();
+        if grant.fabric != g.id {
+            return None;
+        }
         let r = g
             .nics
             .get(grant.node as usize)?

@@ -75,6 +75,9 @@ struct NetState {
     stats: NetStats,
     /// Earliest delivery time added since the network task last ran.
     earliest_new: Option<u64>,
+    /// A channel end was abandoned since the driver last looked: blocked
+    /// peers must be woken to observe `PeerGone`.
+    abandon_event: bool,
 }
 
 #[derive(Clone)]
@@ -95,6 +98,7 @@ impl SimNet {
                 abandoned: Vec::new(),
                 stats: NetStats::default(),
                 earliest_new: None,
+                abandon_event: false,
             })),
         }
     }
@@ -157,7 +161,9 @@ impl Transport for SimNet {
         Ok(None)
     }
     fn abandon(&mut self, channel: u64, me: RoleId) {
-        self.lock().abandoned.push((channel, me));
+        let mut g = self.lock();
+        g.abandoned.push((channel, me));
+        g.abandon_event = true;
     }
 }
 
@@ -233,6 +239,8 @@ pub fn run_roles(
     for _ in 0..max_steps {
         let Some(token) = sim.next_task().map_err(SimRunError::Sim)? else {
             if sim.is_complete() {
+                // A replayed journal must be consumed completely.
+                sim.finish_replay().map_err(SimRunError::Sim)?;
                 let g = net.lock();
                 let undelivered =
                     g.in_flight.len() + g.mailboxes.values().map(VecDeque::len).sum::<usize>();
@@ -300,6 +308,16 @@ pub fn run_roles(
                     RoleStep::Done => {
                         done[i] = true;
                         sim.finish(token).map_err(tr)?;
+                    }
+                }
+                // An abandoned channel end is a readiness event for every
+                // parked role (it may be the peer that now sees `PeerGone`).
+                if std::mem::take(&mut net.lock().abandon_event) {
+                    for w in waits.iter_mut() {
+                        if let Some(c) = w.take() {
+                            sim.complete_io(c, IoResult::Success { bytes: 0 })
+                                .map_err(SimRunError::Sim)?;
+                        }
                     }
                 }
                 // Wake the network early if a new frame is due before its
