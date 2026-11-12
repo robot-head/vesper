@@ -40,6 +40,7 @@ The executable pipeline checks HIR, runs CFG ownership analysis on typed Place I
 | `vesper-loom-cas` | BLAKE3 blob/tree store, atomic ingestion, independent materialization, distinct artifact/proof records | CLI/build graph, compiler-derived keys, registry/proof verification |
 | `vesper-loom-sandbox` | Real Wasmtime component execution, denied ambient access, deterministic inputs, fuel/memory limits | Forge hygiene/provenance, Loom/CAS integration, enforced disk quota |
 | `vesper-ignis` | Deterministic resource hazards, enhanced-barrier plans and queue fence streams | Windows/D3D12 executor and hardware validation, source lowering, full engine |
+| `vesper-loom-trust` | Real offline Ed25519 verification, configured-operator quorum, exact signed build identities and actual-blob CLI checks | Sigstore/OIDC/TUF, authenticated registry/source lineage, real builder execution and cache-trust integration |
 
 The [contract audit](rfcs/parallel-contracts.md) records checked-arithmetic migration, scoped child loans, native relocation/DMA rules, region aliasing/rewind, and distinct interface/artifact/proof cache keys. These are integration gates, not new proof claims.
 

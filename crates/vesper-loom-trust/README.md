@@ -34,4 +34,4 @@ cargo test --manifest-path crates/vesper-loom-trust/Cargo.toml --locked
 cargo clippy --manifest-path crates/vesper-loom-trust/Cargo.toml --locked --all-targets -- -D warnings
 ```
 
-The temporary standalone workspace/lockfile are for handoff only. The coordinator must register this crate in root members/default-members and generate the shared lockfile. Acceptance remains conditional on trusted expected inputs, keys, configured independence groups and clock; it is not source provenance, compiler authority, hermeticity, ABI compatibility, CVE safety, or a proof certificate.
+The crate is registered in root members/default-members and uses the shared lockfile. Acceptance remains conditional on trusted expected inputs, keys, configured independence groups and clock; it is not source provenance, compiler authority, hermeticity, ABI compatibility, CVE safety, or a proof certificate.
