@@ -340,20 +340,35 @@ fn client_context_unknown_fields_and_invalid_versions_are_not_authority() {
 }
 
 #[test]
-fn malformed_source_has_original_diagnostics_and_oversize_is_unavailable() {
+fn malformed_and_resource_refusals_preserve_the_actual_current_store() {
     let uri = "untitled:refusals";
     let oversize = format!("//{}\n{REPEATED}", "x".repeat(128 * 1024));
+    let mut inventory = String::from("macro keep($x:expr)->expr{quote{$x}}\n");
+    for n in 0..129 {
+        inventory.push_str(&format!("fn helper_{n}()->u64{{{n}}}\n"));
+    }
+    inventory.push_str("fn main()->u64{keep!(42)}\n");
+    assert!(inventory.len() < 128 * 1024);
     let replies = run(vec![
         open(uri, 1, MALFORMED),
         preview(2, uri, 1),
         change(uri, 2, &oversize),
-        preview(3, uri, 2),
+        preview(3, uri, 1),
+        preview(4, uri, 2),
+        open("untitled:oversized-open", 1, &oversize),
+        preview(5, "untitled:oversized-open", 1),
+        change(uri, 2, &inventory),
+        preview(6, uri, 2),
         change(uri, 3, REPEATED),
-        preview(4, uri, 3),
+        preview(7, uri, 3),
     ]);
     rejected(result(&replies, 2), uri, 1, MALFORMED);
     assert_eq!(result(&replies, 2)["stage"], "parse");
     assert_eq!(result(&replies, 2)["diagnostic_source"], "original");
-    error(&replies, 3, -32003);
-    accepted(result(&replies, 4), uri, 3, REPEATED);
+    assert_eq!(result(&replies, 2), result(&replies, 3));
+    error(&replies, 4, -32801);
+    error(&replies, 5, -32602);
+    rejected(result(&replies, 6), uri, 2, &inventory);
+    assert_eq!(result(&replies, 6)["stage"], "resource");
+    accepted(result(&replies, 7), uri, 3, REPEATED);
 }

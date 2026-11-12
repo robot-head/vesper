@@ -259,16 +259,23 @@ def run(binary, work):
 
     malformed = fixture("malformed")
     oversized = "//" + "x" * (128 * 1024) + "\n" + repeated
+    inventory = "macro keep($x:expr)->expr{quote{$x}}\n" + "".join(f"fn helper_{n}()->u64{{{n}}}\n" for n in range(129)) + "fn main()->u64{keep!(42)}\n"
+    assert len(inventory.encode("utf-8")) < 128 * 1024
     guest = '#[wasm_macro(component="file:///never-loaded.wasm")] macro x()->expr{quote{42}} fn main()->i64{x!()}'
-    replies = harness.session([open_document(uri, 1, malformed), preview(2, uri, 1), change(uri, 2, oversized), preview(3, uri, 2),
-                               change(uri, 3, guest), preview(4, uri, 3), change(uri, 4, repeated), preview(5, uri, 4)])
+    replies = harness.session([open_document(uri, 1, malformed), preview(2, uri, 1), change(uri, 2, oversized), preview(3, uri, 1),
+                               preview(4, uri, 2), open_document("untitled:oversized-open", 1, oversized), preview(5, "untitled:oversized-open", 1),
+                               change(uri, 2, inventory), preview(6, uri, 2), change(uri, 3, guest), preview(7, uri, 3),
+                               change(uri, 4, repeated), preview(8, uri, 4)])
     rejected(result(replies, 2), uri, 1, "parse")
     assert result(replies, 2)["diagnostic_source"] == "original"
-    error(replies, 3, -32003)
-    guest_result = result(replies, 4)
+    assert result(replies, 2) == result(replies, 3), "oversized change replaced current text/version"
+    error(replies, 4, -32801)
+    error(replies, 5, -32602)
+    rejected(result(replies, 6), uri, 2, "resource")
+    guest_result = result(replies, 7)
     rejected(guest_result, uri, 3, guest_result["stage"])
     assert guest_result["stage"] in ["parse", "unsupported"]
-    accepted(result(replies, 5), uri, 4, repeated)
+    accepted(result(replies, 8), uri, 4, repeated)
     assert existing.read_bytes() == b"fn main()->u64{99}\n"
     print(json.dumps({"status": "passed", "commands": harness.commands, "stdio_sessions": harness.sessions,
                       "jsonrpc_requests": harness.requests, "explicit_normal_source_runs": harness.runs,

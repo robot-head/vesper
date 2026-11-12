@@ -11,7 +11,10 @@ ordinary parse-error publication/hover unavailability, same-header helper body
 authority drift, actual linear rejection, no accepted maps/audits on rejection,
 more than64 accepted revisions, no-op updates, stale expected versions, stale
 changes, close/reopen, foreign URIs, strict client parameter rejection and source
-resource refusal. Response reads and execution waits have finite limits.
+resource refusal. Oversized store changes preserve the previous document;
+oversized opens leave the URI unopened. A separate source below the store byte
+cap exceeds the real compiler's function inventory limit and returns a structured
+resource rejection. Response reads and execution waits have finite limits.
 
 The Python executable harness additionally verifies both hygiene directions,
 distinct expanded provenance spans for repeated input, actual E0303 related
