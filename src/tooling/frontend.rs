@@ -1,6 +1,7 @@
 //! Bounded editor snapshots from the actual parser and checker. No I/O, host
 //! execution, proof execution, caller-supplied World or trusted boolean occurs.
 use crate::{ast::*, check, lexer, parser};
+mod tuple_growth;
 use std::{collections::BTreeSet, fmt::Write as _, io, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -529,6 +530,7 @@ fn ast_items_guard(
             _ => (),
         }
     }
+    let mut has_tuple_growth = false;
     let mut allowed_closures = BTreeSet::new();
     let mut stack: Vec<_> = items
         .iter()
@@ -719,12 +721,7 @@ fn ast_items_guard(
                     }
                 }
                 E::Tuple(es) => {
-                    if !es.is_empty() {
-                        return Err(
-                            "inferred tuple aggregate construction is unsupported before checking"
-                                .into(),
-                        );
-                    }
+                    has_tuple_growth |= !es.is_empty();
                     for e in es {
                         stack.push((Node::Expr(e), next));
                     }
@@ -838,6 +835,9 @@ fn ast_items_guard(
             },
         }
     }
+    if has_tuple_growth {
+        tuple_growth::guard(items, limits)?;
+    }
     Ok(())
 }
 
@@ -929,9 +929,16 @@ mod tests {
             tuple.push_str("let x=(x,x);");
         }
         tuple.push('}');
+        let parsed_tuple = parser::parse(&tuple);
+        assert!(parsed_tuple.diagnostics.is_empty());
+        assert!(
+            editor_ast_guard(&parsed_tuple.module, AnalysisLimits::default())
+                .unwrap_err()
+                .contains("before checking")
+        );
         assert!(matches!(
             check_source(&tuple, AnalysisLimits::default()),
-            Err(AnalysisFailure::Unsupported { .. })
+            Err(AnalysisFailure::Resource { .. })
         ));
         let mut dag = "copy struct D0{x:i64}".to_owned();
         for i in 1..15 {
