@@ -977,3 +977,36 @@ fn system_backing_rejects_zero_sized_layouts() {
     let p = SystemBacking.allocate(layout).unwrap();
     unsafe { SystemBacking.deallocate(p, layout) };
 }
+
+#[test]
+fn zero_sized_allocations_pin_their_chunk() {
+    #[repr(align(4096))]
+    struct Page;
+    let config = RegionConfig {
+        initial_chunk_bytes: 1,
+        max_chunk_bytes: 1 << 12,
+        retained_bytes: 1,
+        ..small(1 << 16)
+    };
+    let (mut r, _) = counting(config);
+    let first = r.alloc_bytes(1, 1).unwrap();
+    let empty = r.alloc_bytes(0, 4096).unwrap(); // opens a chunk, cursor stays 0
+    let page = r.alloc_value(Page).unwrap();
+    let p_empty = r.bytes_ptr(&empty).unwrap();
+    let p_page = r.get(&page).unwrap() as *const Page;
+    r.release_bytes(first).unwrap();
+    r.alloc_bytes(3, 1).unwrap();
+    assert_eq!(r.bytes_ptr(&empty).unwrap(), p_empty);
+    assert_eq!(r.get(&page).unwrap() as *const Page, p_page);
+    assert_eq!(p_empty.as_ptr().addr() % 4096, 0);
+    assert_eq!(p_page.addr() % 4096, 0);
+
+    // Releasing the zero-sized tip first lets the cascade reclaim everything.
+    let (mut r, _) = counting(config);
+    let first = r.alloc_bytes(1, 1).unwrap();
+    let empty = r.alloc_bytes(0, 4096).unwrap();
+    r.release_bytes(empty).unwrap();
+    r.release_bytes(first).unwrap();
+    assert_eq!(r.stats().tracked_allocations, 0);
+    assert_eq!(r.stats().used_bytes, 0);
+}

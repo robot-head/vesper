@@ -84,10 +84,10 @@ All run from `crates/vesper-alloc` on the cloud host (rustc 1.97.0 stable; Miri 
 | --- | --- |
 | `cargo fmt --check` | clean |
 | `cargo clippy --all-targets -- -D warnings` | clean |
-| `cargo test` | 35 integration tests + 2 doctests (one `compile_fail`) pass |
-| `cargo +nightly miri test` (Stacked Borrows, leak check on) | 35 + 2 pass |
-| `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test` | 35 + 2 pass |
-| `MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri test` | 35 + 2 pass |
+| `cargo test` | 36 integration tests + 2 doctests (one `compile_fail`) pass |
+| `cargo +nightly miri test` (Stacked Borrows, leak check on) | 36 + 2 pass |
+| `MIRIFLAGS="-Zmiri-tree-borrows -Zmiri-strict-provenance" cargo +nightly miri test` | 36 + 2 pass |
+| `MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check" cargo +nightly miri test` | 36 + 2 pass |
 | `cargo metadata --no-deps --locked` at the repository root | root workspace unaffected |
 
 Tests (`tests/region.rs`) use a counting backing with failure injection, so chunk reclamation is observed rather than assumed:
@@ -110,7 +110,7 @@ Four findings were verified and fixed, each with a regression test that failed b
 1. **Soundness (P1):** `RegionBox<T>` used `PhantomData<fn() -> T>` and was therefore covariant. Because `get_mut` writes through `&RegionBox<T>`, safe code could view a `RegionBox<&'static str>` as `RegionBox<&'a str>`, store a local borrow, and read it back as `'static`. The marker is now `PhantomData<fn(T) -> T>` (invariant). A `compile_fail` doctest checks that the coercion is rejected; the same snippet was confirmed to compile with the old marker.
 2. **Soundness (P1):** `SystemBacking::allocate` is a safe method that any caller can use, and it guarded the nonzero-size precondition of `std::alloc::alloc` only with `debug_assert!`. It now returns `None` for zero-sized layouts.
 3. **Failure atomicity (P2):** a request that fit no spare chunk released the spares before asking for a replacement, so a failed request could still discard retained capacity. Spares are now released only after the replacement chunk is obtained.
-4. **Reclamation (P2):** tail reclamation stopped at a chunk boundary because the active chunk index stayed on the emptied chunk, so released slots in the earlier chunk stayed tracked and counted against `max_allocations`. The active chunk now steps back over emptied chunks, never below the newest watermark's chunk.
+4. **Reclamation (P2):** tail reclamation stopped at a chunk boundary because the active chunk index stayed on the emptied chunk, so released slots in the earlier chunk stayed tracked and counted against `max_allocations`. The active chunk now steps back over emptied chunks, never below the newest watermark's chunk. A follow-up review found that a zero-sized allocation can open a chunk without advancing its cursor; a chunk that still holds any slot is now never treated as empty (regression test with a 4096-aligned zero-sized byte allocation and `RegionBox`).
 
 ## Proposed Alloc/Region lowering contract (v0, for compiler-owner review)
 

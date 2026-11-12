@@ -523,12 +523,21 @@ impl<B: ChunkBacking> Region<B> {
     /// Pops released or moved allocations at the tip so their bytes are reused.
     /// When the active chunk empties, the previous chunk becomes active again
     /// (the emptied one stays as a spare), so the cascade continues across
-    /// chunk boundaries. It never steps below the newest watermark's chunk; a
-    /// raw allocation keeps its chunk's cursor nonzero and so also stops it.
+    /// chunk boundaries. It never steps below the newest watermark's chunk or
+    /// past a chunk that still holds a slot (including a zero-sized one); a
+    /// nonzero raw allocation keeps its chunk's cursor nonzero and so also
+    /// stops it.
     fn reclaim_tail(&mut self) {
         loop {
             let pinned = self.marks.last().map_or(0, |m| m.chunk);
-            while self.current > pinned && self.chunks[self.current].cursor == 0 {
+            // A zero cursor alone does not mean the chunk is empty: a
+            // zero-sized allocation can open a chunk without advancing it.
+            // Slots are allocation-ordered, so the chunk holds a slot exactly
+            // when the newest slot lives in it.
+            while self.current > pinned
+                && self.chunks[self.current].cursor == 0
+                && self.slots.last().is_none_or(|s| s.chunk < self.current)
+            {
                 self.current -= 1;
             }
             let Some(last) = self.slots.len().checked_sub(1) else {
