@@ -1,0 +1,35 @@
+// A linear ticket is held across three native parks (read, pause, read)
+// and consumed once. The aggregate inout tally and the read buffer are
+// updated through an effectful helper between the parks.
+linear struct Ticket { id: u64 }
+copy struct Block { lo: u64, hi: u64 }
+copy enum Io { Got(u64), IoFailed(u64), IoCancelled }
+copy enum Tick { Ticked, TickFailed(u32), TickCancelled }
+copy struct Tally { reads: u64, bytes: u64, sum: u64, cancelled: u64, failed: u64 }
+copy struct Summary { ticket: u64, paused: u64, tally: Tally, last: Block }
+linear effect Pulse {
+    fn pause() -> Tick;
+    fn read(inout buf: Block) -> Io;
+}
+fn absorb(inout t: Tally, inout buf: Block) eff [Pulse] {
+    match Pulse::read(inout buf) {
+        Got(n) => {
+            t.reads = wrapping_add(t.reads, 1);
+            t.bytes = wrapping_add(t.bytes, n);
+            t.sum = wrapping_add(t.sum, wrapping_add(buf.lo, buf.hi));
+        },
+        IoFailed(code) => { t.failed = wrapping_add(wrapping_mul(t.failed, 1000), code); },
+        IoCancelled => { t.cancelled = wrapping_add(t.cancelled, 1); },
+    }
+}
+fn main() -> Summary eff [Pulse] {
+    let ticket = Ticket { id: 7 };
+    let tally = Tally { reads: 0, bytes: 0, sum: 0, cancelled: 0, failed: 0 };
+    let buf = Block { lo: 1, hi: 2 };
+    let before = wrapping_mul(buf.hi, 100);
+    absorb(inout tally, inout buf);
+    let paused: u64 = match Pulse::pause() { Ticked => 1, TickFailed(c) => 2, TickCancelled => 3, };
+    absorb(inout tally, inout buf);
+    let Ticket { id } = ticket;
+    Summary { ticket: wrapping_add(id, before), paused: paused, tally: tally, last: buf }
+}
