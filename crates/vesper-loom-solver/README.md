@@ -19,6 +19,24 @@ result is `UnsupportedPolicy`, not a claim of unsatisfiability. Serde defaults
 namespace vetting to true when a policy table exists; offline callers must omit
 that table or explicitly disable vetting to request unverified resolution.
 
+`validate_locked(&ResolveRequest, &Solution)` checks a previously resolved
+snapshot without searching or changing its selections. It accepts older
+versions that still satisfy the supplied request, even if newer local candidates
+exist, and ignores `max_decisions`. It requires one exact root requirement with
+the requested root features, full root/catalog manifest equality (including
+metadata and SemVer build metadata), and exactly the reachable package/native
+selection sets. It recomputes transitive features from the request instead of
+trusting the snapshot's selected features, so extra optional features and unused
+selections cannot silently broaden the graph. Every selected native version
+must also be present in the supplied local catalog.
+
+The ordinary input and selected-policy validation still applies. Invalid
+request/catalog data returns `InvalidInput`; unsupported selected policies return
+`UnsupportedPolicy`. A stale, malformed or incompatible snapshot returns
+`LockedMismatch`, not a claim that no solution exists. All locked-validation
+errors report zero candidate decisions. Package/catalog and selection ordering
+does not affect acceptance or diagnostic ordering.
+
 This milestone is not Resolvo CDCL, Max-SMT, a performance guarantee, or an
 authenticated package manager. It does not access registries, execute code,
 download packages, prove namespace ownership, check CVEs, or verify attestations.
