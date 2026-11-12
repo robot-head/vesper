@@ -71,3 +71,5 @@ The coordinator owns source-interface export, CLI adapters, and offline local-ca
 | CLI/integration | `work` | Integrated: source-interface/SemVer/offline resolve commands, 7 end-to-end tests |
 
 Usage and guarantees are in [package-workflows.md](package-workflows.md).
+
+External Strata milestone from PR #1 was merged upstream during the second wave and preserved on integration. The coordinator registers its host-runtime crate for workspace checks; source-level Region lowering and the proposed v0 failure semantics remain design proposals pending compiler-contract review.

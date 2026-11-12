@@ -32,6 +32,7 @@ The executable pipeline checks HIR, runs CFG ownership analysis on typed Place I
 | `vesper-ffi` | Validated wire layouts, endian access, safe zero-copy byte views | Source syntax, HIR/PCG, CLIF, `.vsys`, hardware isolation |
 | `vesper-loom-calculus` | Manifests, monotonic feature closure, exact-version solution and declared ceiling validation | Compiler authority audit, registry/trust/build execution |
 | `vesper-loom-solver` | Bounded iterative offline resolution, transitive features/native requirements, `vesper resolve` and atomic solution snapshots | CDCL/Max-SMT, authenticated lockfiles, optimization/trust policies |
+| `vesper-alloc` | Externally implemented host-region allocator; registered for workspace testing after upstream merge | Source Region/Alloc typing/lowering, exhaustion policy, ShardSlab and collection integration |
 | `vesper-simpulse` | Seeded scheduling, virtual timers, actual completion ownership, strict journal replay | Production adapters, source/CLI simulation, DPOR, network/WAL models |
 
 The [contract audit](rfcs/parallel-contracts.md) records checked-arithmetic migration, scoped child loans, native relocation/DMA rules, region aliasing/rewind, and distinct interface/artifact/proof cache keys. These are integration gates, not new proof claims.

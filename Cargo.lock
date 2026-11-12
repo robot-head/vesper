@@ -1726,6 +1726,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-alloc"
+version = "0.1.0"
+
+[[package]]
 name = "vesper-core"
 version = "0.1.0"
 dependencies = [

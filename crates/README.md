@@ -12,6 +12,7 @@ The first extraction preserves the existing `vesper` API and executable behavior
 | `vesper-ffi` | Validated wire layouts and safe byte views | None |
 | `vesper-loom-calculus` | Declarative manifests and proposed-solution validation | None |
 | `vesper-loom-solver` | Offline local-catalog version selection | Loom calculus |
+| `vesper-alloc` | External Strata host-region core; checked runtime handles | None |
 | `vesper-simpulse` | Owned deterministic scheduling, timers, journal/replay | None |
 
 ```mermaid
