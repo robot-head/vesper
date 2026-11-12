@@ -168,21 +168,28 @@ fn original_parse_and_pre_candidate_failures_report_truthful_diagnostic_spaces()
 
 #[test]
 fn repeated_antiquotation_retains_distinct_actual_expanded_ranges() {
-    let value = rendered(include_str!("fixtures/source_macros/repeated.ves"));
+    let source = include_str!("fixtures/source_macros/repeated.ves");
+    let value = rendered(source);
     assert_eq!(value["status"], "expanded_checked");
     let maps = value["source_map"].as_array().unwrap();
-    let mut found = false;
-    for (i, a) in maps.iter().enumerate() {
-        for b in &maps[i + 1..] {
-            if a["original"] == b["original"] && a["expanded"] != b["expanded"] {
-                found = true;
-            }
-        }
-    }
+    let original = source.find("twice!(n)").unwrap() + "twice!(".len();
+    let spans: std::collections::BTreeSet<_> = maps
+        .iter()
+        .filter(|entry| entry["original"] == serde_json::json!({"start":original,"end":original+1}))
+        .map(|entry| {
+            (
+                entry["expanded"]["start"].as_u64().unwrap(),
+                entry["expanded"]["end"].as_u64().unwrap(),
+            )
+        })
+        .collect();
     assert!(
-        found,
+        spans.len() >= 2,
         "repeated argument must retain distinct expanded anchors"
     );
+    let spans: Vec<_> = spans.into_iter().collect();
+    assert!(spans.iter().all(|(start, end)| start < end));
+    assert!(spans.windows(2).all(|pair| pair[0].1 <= pair[1].0));
 }
 
 #[test]
