@@ -1658,14 +1658,38 @@ dependencies = [
  "cranelift-object",
  "egg",
  "egglog",
- "io-uring",
- "logos",
  "petgraph",
- "rowan",
  "salsa",
  "serde",
  "serde_json",
  "target-lexicon",
+ "vesper-core",
+ "vesper-pulse",
+ "vesper-syntax",
+]
+
+[[package]]
+name = "vesper-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "vesper-pulse"
+version = "0.1.0"
+dependencies = [
+ "io-uring",
+]
+
+[[package]]
+name = "vesper-syntax"
+version = "0.1.0"
+dependencies = [
+ "logos",
+ "rowan",
+ "serde_json",
+ "vesper-core",
 ]
 
 [[package]]
