@@ -25,6 +25,8 @@ While these sessions run, the coordinator owns read-only locked-resolution valid
 
 The coordinator also owns offline package-graph inspection in the new `src/package_graph.rs` and `tests/package_graph_cli.rs`, with CLI routing and documentation. It consumes the existing calculus graph without changing compiler or active library APIs.
 
+Release-version checking in `crates/vesper-semver`, the package-command adapter and the new `tests/release_cli.rs` is also coordinator-owned. It does not change the active source-interface exporter or arithmetic semantics.
+
 ## First-wave results
 
 | Lane | Branch | Exclusive ownership | Status |

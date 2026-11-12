@@ -16,6 +16,18 @@ Export runs after parsing/checking and before optimization. Its deterministic JS
 
 The `.vhir` suffix here denotes an experimental schema/semantics-versioned source-contract DTO, not a binary ABI, MIF hash, artifact-cache key, proof certificate, or finalized interchange format. Named/latent capability scopes, effectful arrows, captured generic arrows and named enum payloads remain explicit Unsupported contracts; even identical unsupported exports cannot certify compatibility. See `parallel-results/interface-export.md` for the full boundary.
 
+### Release-version policy
+
+```sh
+cargo run -- semver /tmp/receipts-v1.vhir /tmp/receipts-v2.vhir --old-version 1.0.0 --new-version 1.1.0 --json
+```
+
+Supplying both version flags checks whether the proposed release bump covers the actual interface classification. Patch requires at least a patch increase, Minor at least a minor increase, and Major a numeric major increase. Larger bumps are allowed. Unknown interface comparisons always fail, including across a major bump. Without these flags, the existing source-compatibility check and JSON report are unchanged.
+
+Release policy version 1 compares SemVer precedence, so changing build metadata alone is not an increase. It applies the same conservative numeric-component rules to `0.x`; there is no automatic exception for breaking pre-1.0 changes. Prerelease comparisons are explicitly unsupported by this policy. Invalid version strings and unpaired/duplicate flags are errors.
+
+The versioned release report contains the comparison, required/actual bump, acceptance and policy issues. An accepted intentional major release may still require downstream migration: breaking witnesses and required reborrow adapters remain in the report. This does not make it source-compatible or publish the package, and it does not establish source identity, provenance or executable ABI compatibility.
+
 ## Offline resolution
 
 ```sh
