@@ -65,16 +65,19 @@ impl SimPulseTap {
             Err(vesper_simpulse::Error::ReplayUnconsumed { remaining }) => events.len() - remaining,
             Err(other) => return Err(SimPulseError::Encode(other.to_string())),
         };
-        let fresh = &events[self.copied.min(committed)..committed];
+        self.copied = self.copied.min(committed);
+        let fresh = &events[self.copied..committed];
+        let mut n = 0;
         for event in fresh {
             let payload =
                 serde_json::to_vec(event).map_err(|e| SimPulseError::Encode(e.to_string()))?;
             recorder
                 .record_effect_internal(task_of(event), sim.now_ns(), EFFECT_SCHEDULER, &payload)
                 .map_err(SimPulseError::Record)?;
+            // Advance per record so a failed drain never re-records on retry.
+            self.copied += 1;
+            n += 1;
         }
-        let n = fresh.len();
-        self.copied = committed;
         Ok(n)
     }
 }

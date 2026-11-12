@@ -88,6 +88,12 @@ pub trait Replayer {
     fn initial(&self) -> Self::State;
     /// Decode a snapshot image.
     fn restore(&self, image: &[u8]) -> Result<Self::State, String>;
+    /// Whether `apply` reads records of this effect. Replay refuses digest
+    /// and redacted records of modelled effects; the default models all.
+    fn models(&self, effect_id: u16) -> bool {
+        let _ = effect_id;
+        true
+    }
     /// Apply one record. Records of effects the replayer does not model must
     /// be ignored, not rejected.
     fn apply(&self, state: &mut Self::State, event: &FlightEvent<'_>) -> Result<(), String>;
@@ -320,7 +326,10 @@ impl ReplaySession {
                             lamport_seq: epoch.start_lamport_seq,
                             message,
                         })?;
-                (state, epoch.start_lamport_seq)
+                // The record at `start_lamport_seq` is the snapshot marker,
+                // whose state the image already holds; replay resumes after it,
+                // so an evicted marker does not make the snapshot unusable.
+                (state, epoch.start_lamport_seq + 1)
             }
             None => (replayer.initial(), 1),
         };
@@ -330,12 +339,18 @@ impl ReplaySession {
                 first_retained: self.bundle.first_seq,
             });
         }
+        if from > lamport_seq {
+            return Ok(state);
+        }
         for seq in from..=lamport_seq {
             let record = self
                 .bundle
                 .record(seq)
                 .ok_or(ReplayError::SeqOutOfRange { lamport_seq: seq })?;
-            if self.bundle.is_redacted(seq) {
+            // A redacted or digest-only outcome cannot be fed to a step
+            // function that models its effect: the original bytes are gone.
+            if replayer.models(record.effect_id) && (record.digest || self.bundle.is_redacted(seq))
+            {
                 return Err(ReplayError::NotReplayable { lamport_seq: seq });
             }
             replayer

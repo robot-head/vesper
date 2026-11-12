@@ -221,6 +221,9 @@ impl Replayer for Delivered {
     fn restore(&self, image: &[u8]) -> Result<Self::State, String> {
         decode_state(image)
     }
+    fn models(&self, effect_id: u16) -> bool {
+        effect_id == NET
+    }
     fn apply(&self, state: &mut Self::State, ev: &FlightEvent<'_>) -> Result<(), String> {
         if ev.effect_id == NET && ev.op_tag == RECV {
             let task = u64::from_le_bytes(
