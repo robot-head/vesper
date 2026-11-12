@@ -30,3 +30,32 @@ all-target Clippy passes. New tests cover actual claims/slot indexes, alias bomb
 failed items, bad slices/UTF8/count/work/occurrence limits, kind/text mismatch,
 integer overflow/hex/underscores, Unicode/surrogate/string truncations, invocation
 caps and delimiter balance. Final full-runtime checks will supersede this harness.
+
+
+## Runtime checkpoint
+
+Actual quotation runtime now shares the legacy start_validated/complete_call
+helpers (WASI determinism, declared readonly mounts, output-only writable mount,
+fuel/memory/table limits, denied sockets/environment, bounded stdout/stderr).
+The old flat host methods preserve behavior. Child host::quote_runtime is
+reexported as quote_host by coordinator wiring; no broad visibility is added.
+New direct methods run_quotation/run_quotation_async accept the separate DTO and
+validated Limits. Count/table headers are checked before moving lifted WIT
+vectors, and alias/UTF8/kind validation precedes per-item string copies.
+Encoded invocation size is now checked even on direct sandbox input validation.
+
+Real new guest built twice from separate private target directories with locked
+dependencies and the official installed wasm32-wasip2 target. Current fixture
+SHA256 a2e6404be232dfbf2d6216f5cb4e50ea422aac5796a541577ee24cf956c59dda
+matched both builds. Binary lives fixtures/quotation/bin/quotation.component.wasm;
+new guest lock/build script are committed, legacy fixtures unchanged.
+Four actual Wasmtime integration tests plus six transport tests pass. They run
+real structured identity/duplicate/claims/hostile variants and check
+fuel/memory/stdio denial, ambient file/env denial, deterministic time/randomness,
+output detection and old flat-world link rejection. Root acceptance owner also
+independently executed the previously built 4+6 test binaries read-only. The
+current fixture adds call-connect/read-input cases for upcoming raw-cache tests;
+no source Tier2 integration or compiler checked artifact is claimed.
+
+Raw codec and current-context adapter/cache remain in progress after this
+checkpoint. Private heavy cache currently under2GiB; about8GiB disk free.

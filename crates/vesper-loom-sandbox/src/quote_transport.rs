@@ -210,7 +210,10 @@ impl Limits {
                 return Err(Error::Delimiters);
             }
         }
-        bound(text, self.max_input_text_bytes, Resource::Text)
+        bound(text, self.max_input_text_bytes, Resource::Text)?;
+        let encoded = invocation_size(inv)?;
+        bound(encoded, self.max_invocation_bytes, Resource::Invocation)?;
+        work.charge(encoded)
     }
     pub fn check_outcome(self, out: &Outcome, slots: usize, failed: bool) -> Result<(), Error> {
         self.validate()?;
@@ -367,6 +370,7 @@ pub enum Resource {
     Slots,
     Arguments,
     Tokens,
+    Scopes,
     Text,
     Items,
     References,
@@ -570,4 +574,28 @@ fn valid_int(text: &str) -> bool {
         digits += 1;
     }
     digits > 0
+}
+
+/// Exact VFQI/schema1 canonical invocation length used by the raw runner.
+/// Structural count/text validation is performed by check_invocation first.
+pub fn invocation_size(inv: &Invocation) -> Result<usize, Error> {
+    let mut n = add(21, inv.entry.len(), Resource::Invocation)?;
+    for arg in &inv.args {
+        n = add(
+            n,
+            add(4, arg.len(), Resource::Invocation)?,
+            Resource::Invocation,
+        )?;
+    }
+    for slot in &inv.slots {
+        n = add(n, 5, Resource::Invocation)?;
+        for token in &slot.tokens {
+            n = add(
+                n,
+                add(19, token.text.len(), Resource::Invocation)?,
+                Resource::Invocation,
+            )?;
+        }
+    }
+    Ok(n)
 }
