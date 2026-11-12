@@ -2789,6 +2789,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2842,6 +2854,12 @@ dependencies = [
  "rustc-hash 1.1.0",
  "text-size",
 ]
+
+[[package]]
+name = "roxmltree"
+version = "0.20.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
 name = "rustc-demangle"
@@ -3193,6 +3211,29 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
+
+[[package]]
+name = "svd-parser"
+version = "0.14.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4075d0263bd3e233a1b875f61ea5994049780146e8fed2221e55d5a84b7574e0"
+dependencies = [
+ "anyhow",
+ "roxmltree",
+ "svd-rs",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "svd-rs"
+version = "0.14.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bdc28d45e4e7ce6e3b65f489048cae2ef8411a4fcd6d5367a9e8dc26acf2260"
+dependencies = [
+ "once_cell",
+ "regex",
+ "thiserror 1.0.69",
+]
 
 [[package]]
 name = "symbol_table"
@@ -3992,6 +4033,15 @@ dependencies = [
 [[package]]
 name = "vesper-serde"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-silicon"
+version = "0.1.0"
+dependencies = [
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "svd-parser",
+]
 
 [[package]]
 name = "vesper-sim-session"
