@@ -243,3 +243,13 @@ Lean/strict Clippy. Root creates a linked protected PR and returns to clean main
 Full six syntax categories, source Tier2/derive/package linking, incremental macro
 queries, semantic completion/proof lenses and latency guarantees remain future work;
 the overall design implementation goal remains active.
+## Structured adapter helper reservation
+
+Before structured adapter implementation, #107 additionally reserves only two
+narrow methods in `vesper-forge/src/typed_quote.rs`: crate-private
+`TypedBudget::charge_metadata`, forwarding to the existing cumulative metadata
+guard, and public read-only `ExprExpansion::validate_host`, checking the private
+per-host Arc identity and current live expansion. No constructor, identity
+mutation, scope weakening or other typed host changes are permitted by this
+reservation. Raw serialized claims acquire no authority from these helpers.
+
