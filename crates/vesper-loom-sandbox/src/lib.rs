@@ -36,9 +36,11 @@ mod artifact;
 mod fs_determinism;
 mod host;
 mod policy;
+pub mod quote_transport;
 pub mod transport;
 
 pub use artifact::{ArtifactKind, classify};
+pub use host::quote_runtime as quote_host;
 pub use host::{OutputFile, OutputViolation, SandboxError, SandboxHost, StepComponent, StepReport};
 pub use policy::{
     ConfigError, Determinism, InputMount, OUTPUT_GUEST_PATH, ResourceLimits, StepConfig,

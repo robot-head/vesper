@@ -107,6 +107,19 @@ impl HygieneHost {
         }
         check_delimiters(&tokens, self.quote_limits.max_depth)?;
         let term = parse(self, &tokens)?;
+        self.resolve_preparsed(tokens, term)
+    }
+
+    // Only the sealed typed host may supply this already validated tree.
+    pub(crate) fn resolve_preparsed(
+        &mut self,
+        tokens: Vec<HostToken>,
+        term: Term,
+    ) -> Result<ResolvedFragment, ForgeError> {
+        for t in &tokens {
+            self.validate_token(t)?;
+        }
+        check_delimiters(&tokens, self.quote_limits.max_depth)?;
         let mut expansions = BTreeMap::new();
         for t in &tokens {
             if let Origin::Expansion(mut x) = t.origin {
