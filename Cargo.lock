@@ -2611,6 +2611,7 @@ name = "vesper"
 version = "0.1.0"
 dependencies = [
  "ariadne",
+ "blake3",
  "cranelift-codegen 0.125.4",
  "cranelift-frontend 0.125.4",
  "cranelift-jit",
@@ -2733,6 +2734,7 @@ dependencies = [
 name = "vesper-semver"
 version = "0.1.0"
 dependencies = [
+ "semver",
  "serde",
  "serde_json",
 ]

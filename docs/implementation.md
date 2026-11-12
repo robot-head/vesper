@@ -21,6 +21,7 @@ The first workspace extraction now separates `vesper-core`, `vesper-syntax`, and
 | Native backend | `src/native.rs`: Cranelift lowering from shared Place IR, concrete inline record/enum layouts, monomorphization, JIT/object emission, mutable place ABI, stack-resident closure specialization, native one-shot return dispatch, and abort/Fail exits. |
 | Verification backend | `src/lean.rs`: Lean data declarations, `src/lean_ir.rs` extracts pure CFGs with live-slot block arguments, closure lifting, and explicit mutable state returns. `src/lean.rs` emits data/effect declarations and the remaining effect-evidence translations. |
 | Formal foundations | `lean/Foundations.lean`: checked mode lattice, submoding, exact-use, and one-shot transition lemmas. |
+| Local artifact audits | `src/proof_commands.rs` and `tools/proof-audit/Audit.lean`: independent Lean kernel replay, explicit transitive axiom policy and input inventories for existing local artifacts; no reusable package proof certificate. |
 
 The executable pipeline checks HIR, runs CFG ownership analysis on typed Place IR, optimizes pure expressions, rechecks, then executes or generates Cranelift from that IR. The evaluator and native backend share hygienic slot identities, value types, control flow, and projected call arguments. Lexical handler and closure installation remain explicit high-level nodes in the IR; their bodies and clauses are independently lowered, checked, optimized, and executed as shared CFGs. Native effect-helper specialization now lowers its shared CFG to a local return join with scoped capability evidence. State tokens have separate block parameters and predecessor phis, checked before and after effectful optimization. Native one-shot continuations use resume blocks and return dispatch within a specialized activation. Source-generated external parking remains pending. The independent fiber ABI prototype parks hand-written CLIF entries on pinned machine stacks; it does not relocate physical stacks.
 
@@ -28,10 +29,10 @@ The executable pipeline checks HIR, runs CFG ownership analysis on typed Place I
 
 | Workspace library | Implemented and validated | Remaining connection |
 | --- | --- | --- |
-| `vesper-semver` | Versioned interface DTOs, conservative compatibility rules, checked source export and `vesper semver` | Final `.vhir` schema, richer scoped contracts, canonical MIF, executable witnesses |
+| `vesper-semver` | Versioned interface DTOs, conservative compatibility rules, checked source export, `vesper semver` and proposed release-version checks | Final `.vhir` schema, richer scoped contracts, canonical MIF, executable witnesses |
 | `vesper-ffi` | Validated wire layouts, endian access, safe zero-copy byte views | Source syntax, HIR/PCG, CLIF, `.vsys`, hardware isolation |
-| `vesper-loom-calculus` | Manifests, monotonic feature closure, exact-version solution and declared ceiling validation | Compiler authority audit, registry/trust/build execution |
-| `vesper-loom-solver` | Bounded iterative offline resolution, transitive features/native requirements, `vesper resolve` and atomic solution snapshots | CDCL/Max-SMT, authenticated lockfiles, optimization/trust policies |
+| `vesper-loom-calculus` | Manifests, monotonic feature closure, exact-version solution/declared ceiling validation, offline `vesper graph`, and opt-in declared-permission upgrade guards | Compiler authority audit, registry/trust/build execution |
+| `vesper-loom-solver` | Bounded iterative offline resolution, transitive features/native requirements, `vesper resolve`, atomic solution snapshots and read-only `--locked` validation against current inputs | CDCL/Max-SMT, authenticated lockfiles, optimization/trust policies |
 | `vesper-alloc` | Externally implemented host-region allocator; registered for workspace testing after upstream merge | Source Region/Alloc typing/lowering, exhaustion policy, ShardSlab and collection integration |
 | `vesper-simpulse` | Seeded scheduling, virtual timers, actual completion ownership, strict journal replay | Production adapters, source/CLI simulation, DPOR, network/WAL models |
 | `vesper-fiber-abi` | Versioned evidence ABI, pinned-stack native CLIF park/resume prototype and Pulse adapter | Compiler source lowering, stack growth, portable scheduling, physical relocation |
