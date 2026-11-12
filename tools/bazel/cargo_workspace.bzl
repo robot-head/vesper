@@ -60,6 +60,8 @@ def _impl(mctx):
         # are added or removed there.
         for sub in ["src", "src/bin", "tests", "examples", "benches"]:
             d = pkg_path.get_child(sub)
+            # Watch absent directories too, so creating one re-runs this.
+            mctx.watch(d)
             if d.exists and d.is_dir:
                 d.readdir(watch = "yes")
 

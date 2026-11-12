@@ -44,6 +44,9 @@ _NEVER = [
     "**/BUILD.bazel",
     "**/*.pyc",
     "**/__pycache__/**",
+    # Personal settings (may hold the BuildBuddy API key) and CI scratch.
+    "user.bazelrc",
+    ".ci-lean-path",
 ]
 
 def _fix_label(label):
