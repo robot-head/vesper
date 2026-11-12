@@ -126,9 +126,9 @@ fn bombard(
                 opts.sack_permitted = true;
             }
             let nsack = rng.below(4) as u8;
-            for k in 0..usize::from(nsack) {
+            for block in opts.sack_blocks.iter_mut().take(usize::from(nsack)) {
                 let l = base_seq.wrapping_add(rng.below(1 << 16) as u32);
-                opts.sack_blocks[k] = SackBlock {
+                *block = SackBlock {
                     left: Seq(l),
                     right: Seq(l.wrapping_add(rng.below(5000) as u32)),
                 };

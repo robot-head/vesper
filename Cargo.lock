@@ -4050,6 +4050,12 @@ name = "vesper-warp"
 version = "0.1.0"
 dependencies = [
  "vesper-ffi",
+ "vesper-warp-bbr",
+ "vesper-warp-crypto",
+ "vesper-warp-shard",
+ "vesper-warp-tcp",
+ "vesper-warp-umem",
+ "vesper-warp-wheel",
 ]
 
 [[package]]
