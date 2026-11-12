@@ -34,8 +34,88 @@ impl Parse {
         SyntaxNode::new_root(self.green.clone())
     }
 }
+/// Combined guarded descent/AST wrapping depth; additional helper frames are
+/// bounded by this count. This is not a checker/runtime termination guarantee.
+pub const HARD_PARSE_DEPTH: usize = 128;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ParseLimits {
+    pub max_source_bytes: usize,
+    pub max_tokens: usize,
+    pub max_diagnostics: usize,
+    pub max_depth: usize,
+}
+impl Default for ParseLimits {
+    fn default() -> Self {
+        let lex = lexer::LexLimits::default();
+        Self {
+            max_source_bytes: lex.max_source_bytes,
+            max_tokens: lex.max_tokens,
+            max_diagnostics: lex.max_diagnostics,
+            max_depth: 64,
+        }
+    }
+}
+/// Compatibility API. Oversized input yields E0003, an empty AST and a lossless
+/// bounded UTF-8 prefix CST. Within the byte budget all failure CSTs retain the
+/// complete source. Explicit callers should use parse_with_limits for preflight.
 pub fn parse(source: &str) -> Parse {
-    let (tokens, diagnostics) = lexer::lex(source);
+    match parse_with_limits(source, ParseLimits::default()) {
+        Ok(parsed) => parsed,
+        Err(mut limit) => {
+            let retained = lexer::prefix_boundary(source, ParseLimits::default().max_source_bytes);
+            limit.retained_bytes = retained;
+            let mut builder = GreenNodeBuilder::new();
+            builder.start_node(MODULE);
+            if retained != 0 {
+                builder.token(SyntaxKind(K::Error as u16), &source[..retained]);
+            }
+            builder.finish_node();
+            Parse {
+                module: Module::default(),
+                green: builder.finish(),
+                diagnostics: vec![limit.diagnostic(retained)],
+            }
+        }
+    }
+}
+/// Configuration/source byte rejection happens before lexer/CST allocation.
+/// Token/diagnostic/depth exhaustion returns an empty AST and E0003 with the
+/// complete byte-bounded source preserved losslessly in balanced CST nodes.
+pub fn parse_with_limits(source: &str, limits: ParseLimits) -> Result<Parse, lexer::LexLimit> {
+    let lex_limits = lexer::LexLimits {
+        max_source_bytes: limits.max_source_bytes,
+        max_tokens: limits.max_tokens,
+        max_diagnostics: limits.max_diagnostics,
+    };
+    lex_limits.validate()?;
+    if limits.max_depth == 0 || limits.max_depth > HARD_PARSE_DEPTH {
+        return Err(lexer::LexLimit {
+            kind: lexer::LexLimitKind::Configuration,
+            limit: HARD_PARSE_DEPTH,
+            observed: limits.max_depth,
+            retained_bytes: 0,
+        });
+    }
+    let lexer::Lexed {
+        tokens,
+        diagnostics,
+        limit,
+    } = lexer::lex_with_limits(source, lex_limits)?;
+    if limit.is_some() {
+        let mut builder = GreenNodeBuilder::new();
+        builder.start_node(MODULE);
+        for token in &tokens {
+            if token.kind != K::Eof {
+                builder.token(SyntaxKind(token.kind as u16), &source[token.span.clone()]);
+            }
+        }
+        builder.finish_node();
+        return Ok(Parse {
+            module: Module::default(),
+            green: builder.finish(),
+            diagnostics,
+        });
+    }
     let mut p = Parser {
         source,
         tokens,
@@ -48,6 +128,10 @@ pub fn parse(source: &str) -> Parse {
         model_uses: vec![],
         trait_bounds: vec![],
         pending_bounds: vec![],
+        limits,
+        depth: 0,
+        halted: false,
+        expr_heights: Default::default(),
     };
     p.builder.start_node(MODULE);
     let mut module = Module::default();
@@ -67,11 +151,14 @@ pub fn parse(source: &str) -> Parse {
     p.builder.finish_node();
     module.model_uses = std::mem::take(&mut p.model_uses);
     module.trait_bounds = std::mem::take(&mut p.trait_bounds);
-    Parse {
+    if p.halted {
+        module = Module::default();
+    }
+    Ok(Parse {
         module,
         green: p.builder.finish(),
         diagnostics: p.diagnostics,
-    }
+    })
 }
 struct Parser<'a> {
     source: &'a str,
@@ -86,6 +173,10 @@ struct Parser<'a> {
     trait_bounds: Vec<TraitBoundSyntax>,
     /// Trait bounds read by the latest `generics` call (`[T: Trait]`).
     pending_bounds: Vec<TraitBoundSyntax>,
+    limits: ParseLimits,
+    depth: usize,
+    halted: bool,
+    expr_heights: std::collections::BTreeMap<(usize, usize), usize>,
 }
 impl Parser<'_> {
     fn index(&self, n: usize) -> usize {
@@ -160,9 +251,157 @@ impl Parser<'_> {
         }
     }
     fn error(&mut self, msg: impl Into<String>) {
-        self.diagnostics
-            .push(Diagnostic::new("E0002", msg, self.span()));
+        if self.halted {
+            return;
+        }
+        if self.diagnostics.len() >= self.limits.max_diagnostics {
+            self.exhaust(
+                lexer::LexLimitKind::Diagnostics,
+                self.limits.max_diagnostics,
+            );
+        } else {
+            self.diagnostics
+                .push(Diagnostic::new("E0002", msg, self.span()));
+        }
     }
+    fn diagnostic(&mut self, diagnostic: Diagnostic) {
+        if self.halted {
+            return;
+        }
+        if self.diagnostics.len() >= self.limits.max_diagnostics {
+            self.exhaust(
+                lexer::LexLimitKind::Diagnostics,
+                self.limits.max_diagnostics,
+            );
+        } else {
+            self.diagnostics.push(diagnostic);
+        }
+    }
+    fn exhaust(&mut self, kind: lexer::LexLimitKind, limit: usize) {
+        if self.halted {
+            return;
+        }
+        let at = self.start();
+        self.halted = true;
+        let exceeded = lexer::LexLimit {
+            kind,
+            limit,
+            observed: limit + 1,
+            retained_bytes: self.source.len(),
+        };
+        lexer::push_limit(
+            &mut self.diagnostics,
+            exceeded.diagnostic(at),
+            self.limits.max_diagnostics,
+        );
+        while self.pos < self.tokens.len() && self.tokens[self.pos].kind != K::Eof {
+            let token = &self.tokens[self.pos];
+            self.builder.token(
+                SyntaxKind(token.kind as u16),
+                &self.source[token.span.clone()],
+            );
+            self.pos += 1;
+        }
+    }
+    fn enter(&mut self) -> bool {
+        if self.halted {
+            return false;
+        }
+        if self.depth >= self.limits.max_depth {
+            self.exhaust(lexer::LexLimitKind::Depth, self.limits.max_depth);
+            return false;
+        }
+        self.depth += 1;
+        true
+    }
+    fn expr_height(&self, expr: &Expr) -> usize {
+        self.expr_heights
+            .get(&(expr.span.start, expr.span.end))
+            .copied()
+            .unwrap_or(1)
+    }
+    // Cache direct-child heights so parenthesized iterative chains cannot hide
+    // deep ASTs that would overflow later recursive visitors or Drop.
+    fn record_expr(&mut self, expr: Expr) -> Expr {
+        if self.halted {
+            return self.placeholder_expr();
+        }
+        let height = |e: &Expr| self.expr_height(e);
+        let children = match &expr.kind {
+            ExprKind::Literal(_) | ExprKind::Name(_) => 0,
+            ExprKind::Tuple(values) => values.iter().map(height).max().unwrap_or(0),
+            ExprKind::Struct { fields, .. } => {
+                fields.iter().map(|(_, e)| height(e)).max().unwrap_or(0)
+            }
+            ExprKind::Block { statements, tail } => statements
+                .iter()
+                .map(|s| match s {
+                    Statement::Let { value, .. } | Statement::Expr(value) => height(value),
+                })
+                .chain(tail.iter().map(|e| height(e)))
+                .max()
+                .unwrap_or(0),
+            ExprKind::Call { callee, args, .. } => args
+                .iter()
+                .map(|a| height(&a.expr))
+                .chain(std::iter::once(height(callee)))
+                .max()
+                .unwrap_or(0),
+            ExprKind::Field(e, _) | ExprKind::Try(e) | ExprKind::Unary(_, e) => height(e),
+            ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
+                height(a).max(height(b))
+            }
+            ExprKind::If {
+                condition,
+                then,
+                otherwise,
+            } => height(condition)
+                .max(height(then))
+                .max(otherwise.as_ref().map_or(0, |e| height(e))),
+            ExprKind::Match { value, arms } => arms
+                .iter()
+                .map(|(_, e)| height(e))
+                .chain(std::iter::once(height(value)))
+                .max()
+                .unwrap_or(0),
+            ExprKind::Closure { body, .. } => height(body),
+            ExprKind::Handle {
+                state,
+                body,
+                ret,
+                ops,
+                ..
+            } => ops
+                .iter()
+                .map(|c| height(&c.body))
+                .chain(std::iter::once(height(body)))
+                .chain(std::iter::once(height(&ret.body)))
+                .chain(state.iter().map(|(_, e)| height(e)))
+                .max()
+                .unwrap_or(0),
+        };
+        let height = children + 1;
+        if height > self.limits.max_depth {
+            self.exhaust(lexer::LexLimitKind::Depth, self.limits.max_depth);
+            return self.placeholder_expr();
+        }
+        self.expr_heights
+            .insert((expr.span.start, expr.span.end), height);
+        expr
+    }
+    fn placeholder_expr(&self) -> Expr {
+        Expr {
+            kind: ExprKind::Tuple(vec![]),
+            span: self.start()..self.start(),
+        }
+    }
+    fn placeholder_pattern(&self) -> Pattern {
+        Pattern {
+            kind: PatternKind::Wild,
+            span: self.start()..self.start(),
+        }
+    }
+
     fn ident(&mut self) -> String {
         if matches!(self.kind(), K::Lower | K::Upper | K::SelfKw) {
             self.bump()
@@ -442,7 +681,7 @@ impl Parser<'_> {
                     return Some(Item::Conformance(c));
                 }
                 for b in bounds {
-                    self.diagnostics.push(Diagnostic::new(
+                    self.diagnostic(Diagnostic::new(
                         "E0002",
                         "trait bounds are only allowed on 'impl Trait for Type' and model generics",
                         b.span,
@@ -543,6 +782,15 @@ impl Parser<'_> {
         out
     }
     fn place_tree(&mut self) -> Vec<Vec<String>> {
+        let previous = self.depth;
+        if !self.enter() {
+            return vec![];
+        }
+        let result = self.place_tree_inner();
+        self.depth = previous;
+        result
+    }
+    fn place_tree_inner(&mut self) -> Vec<Vec<String>> {
         if self.eat(K::LBrace) {
             let mut out = vec![];
             while !self.at(K::RBrace) && !self.at(K::Eof) {
@@ -569,6 +817,15 @@ impl Parser<'_> {
         }
     }
     fn ty(&mut self) -> Type {
+        let previous = self.depth;
+        if !self.enter() {
+            return Type::Infer;
+        }
+        let result = self.ty_inner();
+        self.depth = previous;
+        result
+    }
+    fn ty_inner(&mut self) -> Type {
         self.builder.start_node(TYPE);
         let result = if self.eat(K::Fn) {
             let mode = if self.eat(K::At) {
@@ -700,7 +957,7 @@ impl Parser<'_> {
         let name = self.upper();
         let generics = self.generics();
         for b in std::mem::take(&mut self.pending_bounds) {
-            self.diagnostics.push(Diagnostic::new(
+            self.diagnostic(Diagnostic::new(
                 "E0002",
                 "trait parameters take modal or row bounds, not trait bounds",
                 b.span,
@@ -839,6 +1096,15 @@ impl Parser<'_> {
         }
     }
     fn type_args(&mut self) -> Vec<Type> {
+        let previous = self.depth;
+        if !self.enter() {
+            return vec![];
+        }
+        let result = self.type_args_inner();
+        self.depth = previous;
+        result
+    }
+    fn type_args_inner(&mut self) -> Vec<Type> {
         let mut args = vec![];
         if self.eat(K::LBracket) {
             while !self.at(K::RBracket) && !self.at(K::Eof) {
@@ -934,6 +1200,15 @@ impl Parser<'_> {
         out
     }
     fn block(&mut self) -> Expr {
+        let previous = self.depth;
+        if !self.enter() {
+            return self.placeholder_expr();
+        }
+        let result = self.block_inner();
+        self.depth = previous;
+        self.record_expr(result)
+    }
+    fn block_inner(&mut self) -> Expr {
         let outer_values = self.bound_values.clone();
         let start = self.start();
         self.expect(K::LBrace);
@@ -985,6 +1260,15 @@ impl Parser<'_> {
         }
     }
     fn expr(&mut self) -> Expr {
+        let previous = self.depth;
+        if !self.enter() {
+            return self.placeholder_expr();
+        }
+        let result = self.expr_inner();
+        self.depth = previous;
+        self.record_expr(result)
+    }
+    fn expr_inner(&mut self) -> Expr {
         self.builder.start_node(EXPR);
         let e = match self.kind() {
             K::Handle => self.handle(),
@@ -1004,6 +1288,15 @@ impl Parser<'_> {
         e
     }
     fn if_expr(&mut self) -> Expr {
+        let previous = self.depth;
+        if !self.enter() {
+            return self.placeholder_expr();
+        }
+        let result = self.if_expr_inner();
+        self.depth = previous;
+        self.record_expr(result)
+    }
+    fn if_expr_inner(&mut self) -> Expr {
         let start = self.start();
         self.expect(K::If);
         let condition = Box::new(self.restricted());
@@ -1150,6 +1443,15 @@ impl Parser<'_> {
         }
     }
     fn binary(&mut self, min: u8) -> Expr {
+        let previous = self.depth;
+        if !self.enter() {
+            return self.placeholder_expr();
+        }
+        let result = self.binary_inner(min);
+        self.depth = previous;
+        self.record_expr(result)
+    }
+    fn binary_inner(&mut self, min: u8) -> Expr {
         let mut lhs = if matches!(self.kind(), K::Minus | K::Bang) {
             let start = self.start();
             let op = self.bump();
@@ -1184,6 +1486,13 @@ impl Parser<'_> {
             if prec == 0 || prec < min {
                 break;
             }
+            if self.expr_height(&lhs) >= self.limits.max_depth {
+                self.exhaust(lexer::LexLimitKind::Depth, self.limits.max_depth);
+                break;
+            }
+            if !self.enter() {
+                break;
+            }
             let op = self.bump();
             let rhs = if right {
                 self.expr()
@@ -1196,13 +1505,32 @@ impl Parser<'_> {
             } else {
                 ExprKind::Binary(op, Box::new(lhs), Box::new(rhs))
             };
-            lhs = Expr { kind, span };
+            lhs = self.record_expr(Expr { kind, span });
         }
         lhs
     }
     fn postfix(&mut self) -> Expr {
+        let previous = self.depth;
+        if !self.enter() {
+            return self.placeholder_expr();
+        }
+        let result = self.postfix_inner();
+        self.depth = previous;
+        self.record_expr(result)
+    }
+    fn postfix_inner(&mut self) -> Expr {
         let mut e = self.primary();
         loop {
+            if !matches!(self.kind(), K::LParen | K::LBracket | K::Dot | K::Question) {
+                break;
+            }
+            if self.expr_height(&e) >= self.limits.max_depth {
+                self.exhaust(lexer::LexLimitKind::Depth, self.limits.max_depth);
+                break;
+            }
+            if !self.enter() {
+                break;
+            }
             let start = e.span.start;
             let kind = match self.kind() {
                 K::LParen => {
@@ -1257,10 +1585,10 @@ impl Parser<'_> {
                 }
                 _ => break,
             };
-            e = Expr {
+            e = self.record_expr(Expr {
                 kind,
                 span: start..self.end(),
-            };
+            });
         }
         e
     }
@@ -1322,6 +1650,15 @@ impl Parser<'_> {
         }
     }
     fn primary(&mut self) -> Expr {
+        let previous = self.depth;
+        if !self.enter() {
+            return self.placeholder_expr();
+        }
+        let result = self.primary_inner();
+        self.depth = previous;
+        self.record_expr(result)
+    }
+    fn primary_inner(&mut self) -> Expr {
         let start = self.start();
         let kind = if let Some(l) = self.literal() {
             ExprKind::Literal(l)
@@ -1402,6 +1739,15 @@ impl Parser<'_> {
         pats
     }
     fn pattern(&mut self) -> Pattern {
+        let previous = self.depth;
+        if !self.enter() {
+            return self.placeholder_pattern();
+        }
+        let result = self.pattern_inner();
+        self.depth = previous;
+        result
+    }
+    fn pattern_inner(&mut self) -> Pattern {
         self.builder.start_node(PATTERN);
         let start = self.start();
         let negative = self.eat(K::Minus);
