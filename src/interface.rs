@@ -27,7 +27,36 @@ pub fn export(world: &World, package: &str) -> Result<api::Interface, String> {
             .exports
             .insert(exporter.id("effect", name), declaration);
     }
+    // Source traits, canonical impls and named models have no representation
+    // in the current interface schema: export them as Unsupported so no
+    // SemVer certificate can claim compatibility for them.
+    for name in &world.elaboration.traits {
+        interface.exports.insert(
+            exporter.id("trait", name),
+            unsupported(format!(
+                "trait '{name}': trait contracts are not representable in interface schema {}",
+                api::SCHEMA_VERSION
+            )),
+        );
+    }
+    for c in &world.elaboration.conformances {
+        let (kind, name) = match &c.model {
+            Some(m) => ("model", m.clone()),
+            None => ("impl", format!("{}.{}", c.trait_name, c.self_ty)),
+        };
+        interface.exports.insert(
+            exporter.id(kind, &name),
+            unsupported(format!(
+                "{kind} {} of trait '{}' for {}: conformances are not representable in this interface schema",
+                c.path, c.trait_name, c.self_ty
+            )),
+        );
+    }
     for (name, function) in &world.functions {
+        // Generated trait/model implementation bodies are private.
+        if world.elaboration.generated.contains_key(name) {
+            continue;
+        }
         let declaration = exporter
             .function(function, &function.generics)
             .map(|signature| api::Declaration::Function { signature })

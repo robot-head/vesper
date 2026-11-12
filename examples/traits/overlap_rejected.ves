@@ -1,0 +1,7 @@
+// Rejected: two canonical impls of Show for Box[i64] overlap (PACT0102).
+// Declaring the second one as `model Exact: Show for Box[i64]` is accepted.
+copy struct Box[T: mod copy] { v: T }
+trait Show { fn show(in self) -> i64; }
+impl[T: mod copy] Show for Box[T] { fn show(in self) -> i64 { 1 } }
+impl Show for Box[i64] { fn show(in self) -> i64 { 2 } }
+fn main() -> i64 { let b = Box { v: 3 }; b.show() }

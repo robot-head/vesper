@@ -2,9 +2,10 @@
 
 use crate::error::{BridgeError, ErrorKind};
 use crate::identity::PackageIdentity;
-use std::collections::BTreeMap;
-use vesper::ast::{Item, Module, Span};
+use std::sync::Arc;
+use vesper::ast::Module;
 use vesper::check::World;
+use vesper_pact_binding::{BindingsDto, SourcePackage};
 
 /// A package whose source parsed and checked without any diagnostic.
 ///
@@ -12,16 +13,17 @@ use vesper::check::World;
 /// session never sees a module the compiler rejected.
 #[derive(Clone, Debug)]
 pub struct CheckedPackage {
-    identity: PackageIdentity,
     module: Module,
-    world: World,
-    adt_spans: BTreeMap<String, Span>,
-    effect_spans: BTreeMap<String, Span>,
+    world: Arc<World>,
+    source: SourcePackage,
+    source_bindings: BindingsDto,
 }
 
 impl CheckedPackage {
     /// Parses and checks `source` with the real Vesper front end. Any parse
-    /// or check diagnostic rejects the package.
+    /// or check diagnostic rejects the package. Source `trait`, `impl ... for`
+    /// and `model` declarations are elaborated by the compiler and their
+    /// lowered bindings are available from [`CheckedPackage::source_bindings`].
     pub fn check(identity: PackageIdentity, source: &str) -> Result<Self, BridgeError> {
         if let Err(msg) = identity.validate() {
             return Err(BridgeError::single(ErrorKind::Invalid, None, msg));
@@ -37,34 +39,24 @@ impl CheckedPackage {
         if !parsed.diagnostics.is_empty() {
             return Err(BridgeError::source(identity, parsed.diagnostics));
         }
-        let checked = vesper::check::check(&parsed.module);
-        if !checked.diagnostics.is_empty() {
-            return Err(BridgeError::source(identity, checked.diagnostics));
+        let checked = vesper::pact_frontend::check_package(&parsed.module, &identity);
+        if !checked.checked.diagnostics.is_empty() {
+            return Err(BridgeError::source(identity, checked.checked.diagnostics));
         }
-        let mut adt_spans = BTreeMap::new();
-        let mut effect_spans = BTreeMap::new();
-        for item in &parsed.module.items {
-            match item {
-                Item::Adt(a) => {
-                    adt_spans.insert(a.name.clone(), a.span.clone());
-                }
-                Item::Effect(e) => {
-                    effect_spans.insert(e.name.clone(), e.span.clone());
-                }
-                _ => {}
-            }
-        }
+        let world = Arc::new(checked.checked.world);
+        let source = SourcePackage::new(identity, world.clone(), &parsed.module)?.with_fingerprint(
+            vesper::pact_frontend::declaration_fingerprint(&parsed.module),
+        );
         Ok(CheckedPackage {
-            identity,
             module: parsed.module,
-            world: checked.world,
-            adt_spans,
-            effect_spans,
+            world,
+            source,
+            source_bindings: checked.bindings,
         })
     }
 
     pub fn identity(&self) -> &PackageIdentity {
-        &self.identity
+        self.source.identity()
     }
 
     /// The checked module (read-only).
@@ -77,16 +69,23 @@ impl CheckedPackage {
         &self.world
     }
 
+    /// The root-free view used by the binding core.
+    pub fn source_package(&self) -> &SourcePackage {
+        &self.source
+    }
+
+    /// Bindings lowered from this package's own source trait, canonical impl
+    /// and named model declarations (empty when it declares none).
+    pub fn source_bindings(&self) -> &BindingsDto {
+        &self.source_bindings
+    }
+
     /// Names of the ADTs declared by this package (excluding the prelude).
     pub fn adt_names(&self) -> impl Iterator<Item = &str> {
-        self.adt_spans.keys().map(String::as_str)
+        self.source.adt_names()
     }
 
     pub fn effect_names(&self) -> impl Iterator<Item = &str> {
-        self.effect_spans.keys().map(String::as_str)
-    }
-
-    pub(crate) fn adt_span(&self, name: &str) -> Option<Span> {
-        self.adt_spans.get(name).cloned()
+        self.source.effect_names()
     }
 }
