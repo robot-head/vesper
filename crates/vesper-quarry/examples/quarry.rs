@@ -19,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut data = DataSet::new(&catalog);
     data.set_rows(
         "orders",
-        vec![
+        &[
             vec![
                 Value::I64(1),
                 Value::I64(7),
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     data.set_rows(
         "customers",
-        vec![vec![Value::I64(10), Value::Text("Ada".into())]],
+        &[vec![Value::I64(10), Value::Text("Ada".into())]],
         limits,
     )?;
     let binds = BTreeMap::from([

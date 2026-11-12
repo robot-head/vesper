@@ -9,7 +9,11 @@ optimizes typed relational predicates, and executes actual rows.
 
 Prepared queries and data are bound to exact revision-plus-schema snapshots;
 stale plans and foreign same-revision catalogs are rejected. Schema/data updates
-are atomic. Duplicate tables/columns/aliases/output names, ambiguous references,
+are atomic. `DataSet::set_rows(table, &rows, limits)` borrows supplied rows and
+clones only after complete validation, preserving both stored state and incoming
+rows on every failure. A regression test exercises type/table/name/configuration/
+row/byte failures and retries the same retained input successfully. Duplicate
+tables/columns/aliases/output names, ambiguous references,
 type mismatches, malformed/unsupported syntax, non-finite floats, invalid data,
 and resource exhaustion produce explicit errors. Expression dependencies come
 from checked AST column nodes. There are no raw predicate text placeholders or
@@ -28,7 +32,7 @@ cargo clippy --manifest-path crates/vesper-quarry/Cargo.toml --all-targets -- -D
 cargo run --manifest-path crates/vesper-quarry/Cargo.toml --example quarry
 ```
 
-All passed: one internal overflow/atomicity test plus 15 integration tests.
+All passed: one internal overflow/atomicity test plus 16 integration tests.
 The differential test compares 3,584 query/input configurations across all join
 kinds, NULL-containing relations, nullable predicates, AND, OR, and NOT. Separate
 tests assert actual expected query rows, all nine Boolean/NULL combinations,

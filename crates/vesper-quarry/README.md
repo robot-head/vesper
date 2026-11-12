@@ -24,9 +24,11 @@ and prints logical work counters. These counters are not timing benchmarks.
 2. Call `catalog.prepare(sql, parameter_definitions, limits)` to obtain an opaque
    `PreparedQuery`. Column identities include binding ID, global slot, alias, and
    column name. Repeated use of the same table requires distinct aliases.
-3. Create `DataSet::new(&catalog)` and supply rows with `set_rows(table, rows,
-   limits)`. This validates scalar types, nullability, widths, and input budgets
-   before replacing existing rows. Empty tables must be supplied explicitly.
+3. Create `DataSet::new(&catalog)` and supply borrowed rows with
+   `set_rows(table, &rows, limits)`. This validates scalar types, nullability, widths, and input budgets
+   before cloning and replacing existing rows. Every failure preserves both the
+   stored dataset and the caller's input rows for recovery/retry. Empty tables must
+   be supplied explicitly.
 4. Call `query.execute(&catalog, &data, &binds)`. Bind maps use normalized lowercase
    names without `:` and must exactly match the declared parameters. Null is
    accepted only for nullable declarations; all f64 values must be finite.
@@ -148,8 +150,9 @@ made by its caller before an API call.
 
 Every resource counter and catalog revision increments with checked arithmetic.
 A failure returns a categorized error, produces no partial query result, and
-leaves catalog/data unchanged. Optimization can change logical work and candidate
-materialization totals, so a low-budget execution may fail in one form and
+leaves catalog/data unchanged. `set_rows` borrows its input, so failed
+updates also preserve the caller's supplied rows. Optimization can change logical
+work and candidate materialization totals, so a low-budget execution may fail in one form and
 succeed in another; differential row equivalence is asserted when both complete.
 Default join budgets intentionally reject large Cartesian products.
 

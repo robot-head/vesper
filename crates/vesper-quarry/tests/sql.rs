@@ -12,7 +12,7 @@ fn data(c: &HermeticCatalog) -> DataSet {
     let mut d = DataSet::new(c);
     d.set_rows(
         "people",
-        vec![
+        &[
             vec![
                 Value::I64(1),
                 Value::I64(10),
@@ -37,7 +37,7 @@ fn data(c: &HermeticCatalog) -> DataSet {
     .unwrap();
     d.set_rows(
         "teams",
-        vec![
+        &[
             vec![Value::I64(10), Value::Text("X".into())],
             vec![Value::I64(30), Value::Null],
         ],
@@ -217,7 +217,7 @@ fn sql_null_three_valued_logic_exhaustive() {
         }
     }
     let mut d = DataSet::new(&c);
-    d.set_rows("truth", rows, Limits::default()).unwrap();
+    d.set_rows("truth", &rows, Limits::default()).unwrap();
     let p = c.prepare("SELECT a AND b AS conjunction,a OR b AS disjunction,NOT a AS negation,a=b AS equality,a IS NULL AS absent FROM truth",&[],Limits::default()).unwrap();
     let mut expected = Vec::new();
     for a in vals {
@@ -283,13 +283,13 @@ fn outer_join_pushdown_differential_for_many_predicates_and_null_inputs() {
     for mask in 0..64 {
         let mut d = DataSet::new(&c);
         for (table, shift) in [("l", 0), ("r", 3)] {
-            let rows = candidates
+            let rows: Vec<Vec<Value>> = candidates
                 .iter()
                 .enumerate()
                 .filter(|(i, _)| mask & (1 << (i + shift)) != 0)
                 .map(|(_, v)| vec![v.clone()])
                 .collect();
-            d.set_rows(table, rows, Limits::default()).unwrap();
+            d.set_rows(table, &rows, Limits::default()).unwrap();
         }
         for kind in ["INNER", "LEFT", "RIGHT", "FULL"] {
             for predicate in predicates {
@@ -433,7 +433,7 @@ fn data_rejection_is_atomic_and_empty_inputs_explicit() {
         ]],
     ] {
         assert_eq!(
-            d.set_rows("people", invalid, Limits::default())
+            d.set_rows("people", &invalid, Limits::default())
                 .unwrap_err()
                 .kind,
             ErrorKind::Data
@@ -449,7 +449,7 @@ fn data_rejection_is_atomic_and_empty_inputs_explicit() {
             .kind,
         ErrorKind::Data
     );
-    d.set_rows("people", vec![], Limits::default()).unwrap();
+    d.set_rows("people", &[], Limits::default()).unwrap();
     assert!(p.execute(&c, &d, &BTreeMap::new()).unwrap().rows.is_empty());
 }
 #[test]
@@ -464,7 +464,7 @@ fn all_scalar_types_and_finite_float_policy() {
     assert_eq!(
         d.set_rows(
             "scalars",
-            vec![vec![
+            &[vec![
                 Value::U64(u64::MAX),
                 Value::F64(f64::NAN),
                 Value::Bytes(vec![])
@@ -477,7 +477,7 @@ fn all_scalar_types_and_finite_float_policy() {
     );
     d.set_rows(
         "scalars",
-        vec![vec![
+        &[vec![
             Value::U64(u64::MAX),
             Value::F64(-0.0),
             Value::Bytes(vec![0, 255]),
@@ -653,7 +653,7 @@ fn nested_outer_joins_preserve_prior_nullable_columns() {
     let mut d = data(&c);
     d.set_rows(
         "labels",
-        vec![
+        &[
             vec![Value::I64(30), Value::Text("thirty".into())],
             vec![Value::I64(40), Value::Text("forty".into())],
         ],
@@ -697,13 +697,13 @@ fn joined_duplicates_are_bag_rows_and_null_never_equals_null() {
     let mut d = DataSet::new(&c);
     d.set_rows(
         "a",
-        vec![vec![Value::I64(1)], vec![Value::I64(1)], vec![Value::Null]],
+        &[vec![Value::I64(1)], vec![Value::I64(1)], vec![Value::Null]],
         Limits::default(),
     )
     .unwrap();
     d.set_rows(
         "b",
-        vec![vec![Value::I64(1)], vec![Value::I64(1)], vec![Value::Null]],
+        &[vec![Value::I64(1)], vec![Value::I64(1)], vec![Value::Null]],
         Limits::default(),
     )
     .unwrap();
@@ -736,7 +736,7 @@ fn cartesian_work_is_bounded_even_when_on_matches_nothing() {
     for name in ["a", "b"] {
         d.set_rows(
             name,
-            (0..50).map(|x| vec![Value::I64(x)]).collect(),
+            &(0..50).map(|x| vec![Value::I64(x)]).collect::<Vec<_>>(),
             Limits::default(),
         )
         .unwrap();
@@ -847,7 +847,7 @@ fn malformed_and_excessive_inputs_fail_without_partial_catalog_changes() {
     assert_eq!(
         d.set_rows(
             "people",
-            vec![vec![]; 11],
+            &vec![vec![]; 11],
             Limits {
                 input_rows: 10,
                 ..Limits::default()
@@ -861,7 +861,7 @@ fn malformed_and_excessive_inputs_fail_without_partial_catalog_changes() {
     assert_eq!(
         d.set_rows(
             "people",
-            vec![vec![
+            &[vec![
                 Value::I64(1),
                 Value::Null,
                 Value::Null,
@@ -890,4 +890,64 @@ fn malformed_and_excessive_inputs_fail_without_partial_catalog_changes() {
         c.prepare(&sql, &[], Limits::default()).unwrap_err().kind,
         ErrorKind::Limit
     );
+}
+
+#[test]
+fn rejected_row_updates_preserve_borrowed_inputs_for_recovery() {
+    let c = catalog();
+    let mut d = data(&c);
+    let stored = d.tables().clone();
+    let valid = vec![vec![
+        Value::I64(4),
+        Value::Null,
+        Value::Null,
+        Value::Text("recover me".into()),
+    ]];
+    let invalid = vec![vec![
+        Value::Text("wrong type".into()),
+        Value::Null,
+        Value::Null,
+        Value::Text("keep me".into()),
+    ]];
+    for (table, rows, limits, kind) in [
+        ("people", &invalid, Limits::default(), ErrorKind::Data),
+        ("missing", &valid, Limits::default(), ErrorKind::Unknown),
+        ("bad name", &valid, Limits::default(), ErrorKind::Syntax),
+        (
+            "people",
+            &valid,
+            Limits {
+                work: usize::MAX,
+                ..Limits::default()
+            },
+            ErrorKind::Limit,
+        ),
+        (
+            "people",
+            &valid,
+            Limits {
+                input_rows: 0,
+                ..Limits::default()
+            },
+            ErrorKind::Limit,
+        ),
+        (
+            "people",
+            &valid,
+            Limits {
+                input_bytes: 0,
+                ..Limits::default()
+            },
+            ErrorKind::Limit,
+        ),
+    ] {
+        let before = rows.clone();
+        assert_eq!(d.set_rows(table, rows, limits).unwrap_err().kind, kind);
+        assert_eq!(rows, &before);
+        assert_eq!(d.tables(), &stored);
+    }
+    // The same retained owner can be corrected/retried after a failed update.
+    d.set_rows("people", &valid, Limits::default()).unwrap();
+    assert_eq!(d.tables()["people"], valid);
+    assert_eq!(valid[0][3], Value::Text("recover me".into()));
 }

@@ -24,13 +24,15 @@ impl DataSet {
     pub fn tables(&self) -> &BTreeMap<String, Vec<Vec<Value>>> {
         &self.tables
     }
-    pub fn set_rows(&mut self, table: &str, rows: Vec<Vec<Value>>, limits: Limits) -> Result<()> {
+    /// Borrows incoming rows so every validation failure preserves the caller's data.
+    /// Clones into the dataset only after the complete preflight succeeds.
+    pub fn set_rows(&mut self, table: &str, rows: &[Vec<Value>], limits: Limits) -> Result<()> {
         limits.validate()?;
         let table = identifier(table)?;
         bound(rows.len(), limits.input_rows, "input row limit")?;
-        validate_rows(&self.catalog, &table, &rows)?;
+        validate_rows(&self.catalog, &table, rows)?;
         let mut count = rows.len();
-        let mut bytes = rows_bytes(&rows)?;
+        let mut bytes = rows_bytes(rows)?;
         for (name, existing) in &self.tables {
             if name != &table {
                 count = add(count, existing.len())?;
@@ -39,7 +41,7 @@ impl DataSet {
         }
         bound(count, limits.input_rows, "input row limit")?;
         bound(bytes, limits.input_bytes, "input byte limit")?;
-        self.tables.insert(table, rows);
+        self.tables.insert(table, rows.to_vec());
         Ok(())
     }
 }
