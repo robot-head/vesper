@@ -54,8 +54,12 @@ and successful snapshot/source-hash behavior are unchanged.
 Core metadata dependency: `4ec73e3f030371758f99d7d6030afcd0efa6de25`
 (`DiagnosticLabel`, additive related/help fields and builders). Temporary source
 copies were used without committing another lane's files. Actual checker cause
-metadata uses the #88 producer implementation, exact tested production checker
-blob `1bef68bae77e211039f1a64717885c01ac5dee8d`; the owned tests compare complete
+metadata uses the final #88 producer commits
+`626b27b6ce42954224aedce2d3f51d5b084de12f` and required followup
+`9a2c6be63daad3b8b1c083ad281350f7573beb8f`, exact final production checker blob
+`e02336f6d6d48a78486775094163b0a4e38bf831`. The three real rich integration tests
+were rerun against this final producer after its witness-recovery correction;
+the owned tests compare complete
 actual raw checker diagnostics with the published frontend failures rather than
 reconstructing guessed causes or relying on a fabricated diagnostic flag.
 
