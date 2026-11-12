@@ -39,8 +39,10 @@ a client `approved` property cannot make hover available.
 Run `scripts/test-source-macros.sh`; it builds the actual CLI unless
 `VESPER_SOURCE_MACROS_BINARY` names an existing binary. The Python harness uses
 only the standard library and executes the same real pipeline with disposable
-owned files. Rust and scripts prefer an existing `.exe` unconditionally, bound
-command time/output and clean up only their own temporary directories.
+owned files. Rust and scripts prefer an existing `.exe` unconditionally, impose command
+timeouts and check output-size ceilings. Rust readers cap retained output during
+collection; Python checks size after capture. Both clean up only their own
+temporary directories.
 
 The native workflow runs Linux, Windows and macOS parser/host/compiler/CLI tests,
 strict Clippy, formatting and the executable Python harness. Its symmetric
@@ -61,8 +63,19 @@ not assert source Tier2 integration or implicit component execution.
 - Read-only execution of the structured foundation's built `quotation_execution`
   test binary: all four tests passed, including actual committed component run,
   hostile wire rejection, sandbox determinism/controls and legacy-world refusal.
-- Actual Forge CLI runtime and native three-OS CI are pending the integrated
-  source pipeline. Static test compilation is not runtime acceptance evidence.
+- Read-only execution of its built `quotation_transport` binary: all six tests
+  passed, covering alias-copy accounting, failed outcomes, current input ordinals,
+  hostile slices/UTF-8/work limits, invocation bounds and lexical coherence.
+- Actual integration binary from `d67244e8d632c5e74289fb5747ead15b2b9280f5`
+  executed read-only via `VESPER_SOURCE_MACROS_BINARY`: all eight Rust CLI tests
+  passed, with zero ignored. This independently uses the previously compiled
+  private acceptance harness rather than rebuilding production files.
+- `scripts/test-source-macros.sh` against that same actual binary passed all
+  115 commands, including 11 explicit ordinary runs of checked expanded source.
+  It exercised the real compiler, actual ownership/type failures, current-body
+  authority checks, byte provenance, package/policy limits and framed stdio LSP.
+- Native three-OS CI is pending the final integration PR. Local Linux acceptance
+  does not establish Windows/macOS behavior or source Tier2 execution.
 
 The supported claim is fixed Tier1 Expr quotations in the explicit pipeline.
 No source Tier2, derives, package linker, incremental macro queries, implicit
