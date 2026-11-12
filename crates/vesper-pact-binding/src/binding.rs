@@ -1,17 +1,15 @@
 //! Versioned declaration-binding DTOs.
 //!
-//! Vesper source has no `trait`, `impl Trait for`, `model` or `via` syntax
-//! yet. Until the source traits/models lane adds it, trait, impl and model
-//! declarations (and queries) enter a session through these DTOs. Every type
-//! they mention must resolve to a checked source declaration, a builtin, or a
+//! Trait, impl and model declarations (and queries) enter a session through
+//! these DTOs. The compiler's source frontend (`vesper::pact_frontend`)
+//! lowers surface `trait`/`impl Trait for`/`model` declarations to exactly
+//! these shapes; tools may still supply them directly. Every type they
+//! mention must resolve to a checked source declaration, a builtin, or a
 //! parameter of the enclosing binding; the DTOs cannot declare new types.
-//!
-//! This boundary is temporary: the DTOs describe exactly what lowered surface
-//! declarations will carry, without claiming that surface syntax exists.
 
 use crate::identity::PackageIdentity;
 use serde::{Deserialize, Serialize};
-use vesper::ast::{Mode, Type};
+use vesper_core::ast::{Mode, Type};
 
 /// Version of the binding schema. Accepted when the major version matches and
 /// the minor version is not newer than [`BINDING_SCHEMA`].

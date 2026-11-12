@@ -25,4 +25,5 @@ pub(crate) mod lean_nodes;
 pub mod lsp;
 pub mod native;
 pub mod optimize;
+pub mod pact_frontend;
 pub mod runtime;

@@ -130,7 +130,7 @@ impl MacroRequest {
                 guest_path: i.guest_path.clone(),
                 reason: reason.to_owned(),
             };
-            let parts = guest_components(&i.guest_path).map_err(&bad)?;
+            let parts = guest_components(&i.guest_path).map_err(bad)?;
             if is_prefix(&parts, &out) || is_prefix(&out, &parts) {
                 return Err(bad("overlaps the output mount"));
             }

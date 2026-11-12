@@ -347,3 +347,7 @@ binary is committed. Rebuilding the fixture needs `rustup target add wasm32-wasi
   beyond the CAS's own no-replace guarantees.
 * **Unsupported features.** Caller-local antiquotation and a typed CST arena or splice ABI.
   Macro file outputs are rejected, not supported.
+
+## Registration
+
+After PR #29 merged, a follow-up applied the coordinator patch above. It registers the crate in the root `members` and `default-members` and excludes its guest workspace. It also removes the standalone `[workspace]` table and nested `Cargo.lock` and switches to the workspace Serde dependencies. The root lock gains only the `vesper-forge-runner` entry. In the root workspace, `cargo test -p vesper-forge-runner` passes 32/32, and strict Clippy and `cargo fmt --all -- --check` pass.

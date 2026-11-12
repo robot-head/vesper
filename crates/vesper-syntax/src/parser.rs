@@ -45,6 +45,9 @@ pub fn parse(source: &str) -> Parse {
         no_struct: false,
         row_names: Default::default(),
         bound_values: Default::default(),
+        model_uses: vec![],
+        trait_bounds: vec![],
+        pending_bounds: vec![],
     };
     p.builder.start_node(MODULE);
     let mut module = Module::default();
@@ -62,6 +65,8 @@ pub fn parse(source: &str) -> Parse {
     }
     p.trivia();
     p.builder.finish_node();
+    module.model_uses = std::mem::take(&mut p.model_uses);
+    module.trait_bounds = std::mem::take(&mut p.trait_bounds);
     Parse {
         module,
         green: p.builder.finish(),
@@ -77,6 +82,10 @@ struct Parser<'a> {
     no_struct: bool,
     row_names: std::collections::BTreeSet<String>,
     bound_values: std::collections::BTreeSet<String>,
+    model_uses: Vec<ModelUse>,
+    trait_bounds: Vec<TraitBoundSyntax>,
+    /// Trait bounds read by the latest `generics` call (`[T: Trait]`).
+    pending_bounds: Vec<TraitBoundSyntax>,
 }
 impl Parser<'_> {
     fn index(&self, n: usize) -> usize {
@@ -97,6 +106,14 @@ impl Parser<'_> {
     }
     fn at(&self, k: K) -> bool {
         self.kind() == k
+    }
+    /// Source text of the `n`th upcoming non-trivia token.
+    fn text(&self, n: usize) -> &str {
+        &self.source[self.tokens[self.index(n)].span.clone()]
+    }
+    /// A contextual keyword: a lower-case identifier with this spelling.
+    fn at_word(&self, n: usize, word: &str) -> bool {
+        self.nth(n) == K::Lower && self.text(n) == word
     }
     fn span(&self) -> Span {
         self.tokens[self.index(0)].span.clone()
@@ -217,6 +234,14 @@ impl Parser<'_> {
             if self.eat(K::Colon) {
                 if row {
                     self.expect(K::Eff);
+                } else if self.at(K::Upper) {
+                    let start = self.start();
+                    let trait_ref = self.trait_ref();
+                    self.pending_bounds.push(TraitBoundSyntax {
+                        param: name.clone(),
+                        trait_ref,
+                        span: start..self.end(),
+                    });
                 } else {
                     self.expect(K::Mod);
                     bound = self.mode().unwrap_or_else(|| {
@@ -260,6 +285,21 @@ impl Parser<'_> {
     }
     fn item(&mut self) -> Option<Item> {
         let start = self.start();
+        if self.at_word(0, "use") && self.at_word(1, "model") {
+            self.use_model(0..self.source.len());
+            return None;
+        }
+        let public =
+            self.at_word(0, "pub") && (self.at_word(1, "trait") || self.at_word(1, "model"));
+        if public {
+            self.bump();
+        }
+        if self.at_word(0, "trait") {
+            return Some(Item::Trait(self.trait_decl(start, public)));
+        }
+        if self.at_word(0, "model") {
+            return Some(Item::Conformance(self.model_decl(start, public)));
+        }
         let mode = self.mode().unwrap_or_default();
         match self.kind() {
             K::Struct => {
@@ -349,10 +389,65 @@ impl Parser<'_> {
             K::Impl => {
                 self.bump();
                 let generics = self.generics();
+                let bounds = std::mem::take(&mut self.pending_bounds);
                 let old_rows = self.row_names.clone();
                 self.row_names
                     .extend(generics.iter().filter(|g| g.row).map(|g| g.name.clone()));
+                if self.at(K::At) {
+                    let trait_ref = self.trait_ref();
+                    if self.at_word(0, "for") {
+                        self.bump();
+                    } else {
+                        self.error("expected 'for' after the impl's trait");
+                    }
+                    let c = self.conformance_rest(
+                        start,
+                        ConformanceKind::Canonical,
+                        generics,
+                        bounds,
+                        trait_ref,
+                    );
+                    self.row_names = old_rows;
+                    return Some(Item::Conformance(c));
+                }
+                let trait_start = self.start();
                 let ty = self.ty();
+                if self.at_word(0, "for") {
+                    self.bump();
+                    let trait_ref = match ty {
+                        Type::Named(name, args) => TraitRef {
+                            package: None,
+                            name,
+                            args,
+                            span: trait_start..self.end(),
+                        },
+                        _ => {
+                            self.error("expected a trait name before 'for'");
+                            TraitRef {
+                                package: None,
+                                name: "<error>".into(),
+                                args: vec![],
+                                span: trait_start..self.end(),
+                            }
+                        }
+                    };
+                    let c = self.conformance_rest(
+                        start,
+                        ConformanceKind::Canonical,
+                        generics,
+                        bounds,
+                        trait_ref,
+                    );
+                    self.row_names = old_rows;
+                    return Some(Item::Conformance(c));
+                }
+                for b in bounds {
+                    self.diagnostics.push(Diagnostic::new(
+                        "E0002",
+                        "trait bounds are only allowed on 'impl Trait for Type' and model generics",
+                        b.span,
+                    ));
+                }
                 self.expect(K::LBrace);
                 let mut methods = vec![];
                 while self.at(K::Fn) {
@@ -376,6 +471,7 @@ impl Parser<'_> {
         let old_rows = self.row_names.clone();
         let old_values = self.bound_values.clone();
         let generics = self.generics();
+        self.trait_bounds.append(&mut self.pending_bounds);
         self.row_names
             .extend(generics.iter().filter(|g| g.row).map(|g| g.name.clone()));
         self.expect(K::LParen);
@@ -389,6 +485,16 @@ impl Parser<'_> {
             Type::unit()
         };
         let effects = self.effects();
+        if self.at_word(0, "where") {
+            for w in self.where_clauses() {
+                let param = w.ty.name().to_owned();
+                self.trait_bounds.push(TraitBoundSyntax {
+                    param,
+                    trait_ref: w.trait_ref,
+                    span: w.span,
+                });
+            }
+        }
         let body = if op {
             self.expect(K::Semi);
             None
@@ -502,13 +608,235 @@ impl Parser<'_> {
             }
             self.expect(K::RParen);
             Type::Tuple(args)
+        } else if self.eat(K::Lt) {
+            // `<T as Trait[args]>::Assoc`
+            let self_ty = self.ty();
+            if self.at_word(0, "as") {
+                self.bump();
+            } else {
+                self.error("expected 'as' in a qualified projection");
+            }
+            let trait_name = self.upper();
+            let trait_args = self.type_args();
+            self.expect(K::Gt);
+            self.expect(K::ColonColon);
+            let assoc = self.upper();
+            projection_type(self_ty, Some((trait_name, trait_args)), assoc)
         } else {
             let name = self.ident();
-            let args = self.type_args();
-            Type::Named(name, args)
+            if self.at(K::ColonColon) && self.nth(1) == K::Upper {
+                // Shorthand projection `T::Assoc` (trait inferred).
+                self.bump();
+                let assoc = self.upper();
+                projection_type(Type::Named(name, vec![]), None, assoc)
+            } else {
+                let args = self.type_args();
+                Type::Named(name, args)
+            }
         };
         self.builder.finish_node();
         result
+    }
+    fn trait_ref(&mut self) -> TraitRef {
+        let start = self.start();
+        let package = if self.at(K::At) {
+            // `@scope/name::Trait`: a dependency package's trait.
+            let mut package = self.bump();
+            while matches!(self.kind(), K::Lower | K::Minus | K::Slash | K::Int)
+                && self.tokens[self.index(0)].span.start == self.end()
+            {
+                package.push_str(&self.bump());
+            }
+            self.expect(K::ColonColon);
+            Some(package)
+        } else {
+            None
+        };
+        let name = self.upper();
+        let args = self.type_args();
+        TraitRef {
+            package,
+            name,
+            args,
+            span: start..self.end(),
+        }
+    }
+    /// `where T: Trait[args], U: Other` (the leading `where` is current).
+    fn where_clauses(&mut self) -> Vec<WhereClause> {
+        let mut out = vec![];
+        self.bump();
+        loop {
+            let start = self.start();
+            let ty = self.ty();
+            self.expect(K::Colon);
+            let trait_ref = self.trait_ref();
+            out.push(WhereClause {
+                ty,
+                trait_ref,
+                span: start..self.end(),
+            });
+            if !self.eat(K::Comma) || self.at(K::LBrace) || self.at(K::Semi) {
+                break;
+            }
+        }
+        out
+    }
+    /// `use model Name;` with the given scope.
+    fn use_model(&mut self, scope: Span) {
+        let start = self.start();
+        self.bump();
+        self.bump();
+        let model = self.upper();
+        self.expect(K::Semi);
+        self.model_uses.push(ModelUse {
+            model,
+            span: start..self.end(),
+            scope,
+        });
+    }
+    /// `trait Name[params] { type A: mod m; fn sig; }` (at `trait`).
+    fn trait_decl(&mut self, start: usize, public: bool) -> TraitDecl {
+        self.bump();
+        let name = self.upper();
+        let generics = self.generics();
+        for b in std::mem::take(&mut self.pending_bounds) {
+            self.diagnostics.push(Diagnostic::new(
+                "E0002",
+                "trait parameters take modal or row bounds, not trait bounds",
+                b.span,
+            ));
+        }
+        let old_rows = self.row_names.clone();
+        self.row_names
+            .extend(generics.iter().filter(|g| g.row).map(|g| g.name.clone()));
+        self.expect(K::LBrace);
+        let mut assoc = vec![];
+        let mut methods = vec![];
+        while !self.at(K::RBrace) && !self.at(K::Eof) {
+            let before = self.pos;
+            if self.at_word(0, "type") {
+                let start = self.start();
+                self.bump();
+                let name = self.upper();
+                let bound = if self.eat(K::Colon) {
+                    self.expect(K::Mod);
+                    self.mode().unwrap_or_else(|| {
+                        self.error("expected modal bound");
+                        Mode::Linear
+                    })
+                } else {
+                    Mode::Linear
+                };
+                self.expect(K::Semi);
+                assoc.push(AssocTypeDecl {
+                    name,
+                    bound,
+                    span: start..self.end(),
+                });
+            } else if self.at(K::Fn) {
+                methods.push(self.function(true));
+            } else {
+                self.error("expected 'type' or 'fn' in a trait");
+            }
+            if self.pos == before {
+                self.bump();
+            }
+        }
+        self.expect(K::RBrace);
+        self.row_names = old_rows;
+        TraitDecl {
+            name,
+            public,
+            generics,
+            assoc,
+            methods,
+            span: start..self.end(),
+        }
+    }
+    /// `model Name[params]: Trait[args] for Type where ... { ... }` (at `model`).
+    fn model_decl(&mut self, start: usize, public: bool) -> Conformance {
+        self.bump();
+        let name = self.upper();
+        let generics = self.generics();
+        let bounds = std::mem::take(&mut self.pending_bounds);
+        let old_rows = self.row_names.clone();
+        self.row_names
+            .extend(generics.iter().filter(|g| g.row).map(|g| g.name.clone()));
+        self.expect(K::Colon);
+        let trait_ref = self.trait_ref();
+        if self.at_word(0, "for") {
+            self.bump();
+        } else {
+            self.error("expected 'for' after the model's trait");
+        }
+        let c = self.conformance_rest(
+            start,
+            ConformanceKind::Model { name, public },
+            generics,
+            bounds,
+            trait_ref,
+        );
+        self.row_names = old_rows;
+        c
+    }
+    /// The self type, `where` clauses and body of an impl or model.
+    fn conformance_rest(
+        &mut self,
+        start: usize,
+        kind: ConformanceKind,
+        generics: Vec<Generic>,
+        bounds: Vec<TraitBoundSyntax>,
+        trait_ref: TraitRef,
+    ) -> Conformance {
+        let self_ty = self.ty();
+        let mut where_clauses: Vec<WhereClause> = bounds
+            .into_iter()
+            .map(|b| WhereClause {
+                ty: Type::Named(b.param, vec![]),
+                trait_ref: b.trait_ref,
+                span: b.span,
+            })
+            .collect();
+        if self.at_word(0, "where") {
+            where_clauses.extend(self.where_clauses());
+        }
+        self.expect(K::LBrace);
+        let mut assoc = vec![];
+        let mut methods = vec![];
+        while !self.at(K::RBrace) && !self.at(K::Eof) {
+            let before = self.pos;
+            if self.at_word(0, "type") {
+                let start = self.start();
+                self.bump();
+                let name = self.upper();
+                self.expect(K::Eq);
+                let ty = self.ty();
+                self.expect(K::Semi);
+                assoc.push(AssocTypeBinding {
+                    name,
+                    ty,
+                    span: start..self.end(),
+                });
+            } else if self.at(K::Fn) {
+                methods.push(self.function(false));
+            } else {
+                self.error("expected 'type' or 'fn' in an impl or model");
+            }
+            if self.pos == before {
+                self.bump();
+            }
+        }
+        self.expect(K::RBrace);
+        Conformance {
+            kind,
+            generics,
+            trait_ref,
+            self_ty,
+            where_clauses,
+            assoc,
+            methods,
+            span: start..self.end(),
+        }
     }
     fn type_args(&mut self) -> Vec<Type> {
         let mut args = vec![];
@@ -613,6 +941,11 @@ impl Parser<'_> {
         let mut tail = None;
         while !self.at(K::RBrace) && !self.at(K::Eof) {
             let before = self.pos;
+            if self.at_word(0, "use") && self.at_word(1, "model") {
+                // The scope is completed when the block closes.
+                self.use_model(start..start);
+                continue;
+            }
             if self.eat(K::Let) {
                 let pat = self.pattern();
                 let ty = if self.eat(K::Colon) {
@@ -640,9 +973,15 @@ impl Parser<'_> {
         }
         self.expect(K::RBrace);
         self.bound_values = outer_values;
+        let span = start..self.end();
+        for u in &mut self.model_uses {
+            if u.scope == (start..start) {
+                u.scope = span.clone();
+            }
+        }
         Expr {
             kind: ExprKind::Block { statements, tail },
-            span: start..self.end(),
+            span,
         }
     }
     fn expr(&mut self) -> Expr {

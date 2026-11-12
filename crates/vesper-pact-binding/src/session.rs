@@ -7,12 +7,13 @@ use crate::lower::{
     Cx, Input, Position, R, fail_error, lower, pact_kind, resolve_model, well_formed_goal,
 };
 use crate::modes::{from_pact, to_pact};
-use crate::source::CheckedPackage;
+use crate::source::{SourcePackage, SourceWorld};
 use crate::tables::IdTables;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
-use vesper::ast::Mode;
+use std::sync::Arc;
+use vesper_core::ast::Mode;
 use vesper_pact::{
     Ambiguity, ConformanceSource, Derivation, Env, Failure, GenericArg, Goal, OverflowKind,
     ParamKind, PlaceholderDecl, Program, ProgramDto, ProofKind, QueryDto, Solution, Solver,
@@ -34,9 +35,10 @@ impl fmt::Display for Revision {
 }
 
 /// Collects checked packages and their declaration bindings.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct SessionBuilder {
-    packages: Vec<(CheckedPackage, BindingsDto)>,
+    prelude: Arc<dyn SourceWorld>,
+    packages: Vec<(SourcePackage, BindingsDto)>,
     config: Option<SolverConfig>,
 }
 
@@ -50,11 +52,17 @@ pub struct LoweredProgram {
 }
 
 impl SessionBuilder {
-    pub fn new() -> Self {
-        Self::default()
+    /// `prelude` supplies the checker's builtin ADTs and effects, which
+    /// belong to the builtin package.
+    pub fn new(prelude: Arc<dyn SourceWorld>) -> Self {
+        SessionBuilder {
+            prelude,
+            packages: vec![],
+            config: None,
+        }
     }
 
-    pub fn package(mut self, package: CheckedPackage, bindings: BindingsDto) -> Self {
+    pub fn package(mut self, package: SourcePackage, bindings: BindingsDto) -> Self {
         self.packages.push((package, bindings));
         self
     }
@@ -73,7 +81,7 @@ impl SessionBuilder {
             .iter()
             .map(|(package, bindings)| Input { package, bindings })
             .collect();
-        let l = lower(&inputs)?;
+        let l = lower(self.prelude.as_ref(), &inputs)?;
         Ok(LoweredProgram {
             dto: l.dto,
             tables: l.tables,
@@ -85,7 +93,13 @@ impl SessionBuilder {
     /// a session, even where the solver would report `Proven`.
     pub fn build(&self) -> Result<CoherentSession, BridgeError> {
         let LoweredProgram { dto, tables } = self.lower()?;
-        let revision = revision_of(&dto, &tables);
+        let mut fingerprints: Vec<(&PackageIdentity, &str)> = self
+            .packages
+            .iter()
+            .filter_map(|(p, _)| p.fingerprint().map(|f| (p.identity(), f)))
+            .collect();
+        fingerprints.sort();
+        let revision = revision_of(&dto, &tables, &fingerprints);
         let program =
             Program::new(dto).map_err(|d| pact_error(&tables, ErrorKind::Incoherent, d))?;
         let coherence = check_coherence(&program);
@@ -103,7 +117,11 @@ impl SessionBuilder {
 
 type TypeMeta<'a> = (Vec<(&'a str, ParamKind, Mode)>, Vec<(&'a str, u32)>);
 
-fn revision_of(dto: &ProgramDto, tables: &IdTables) -> Revision {
+fn revision_of(
+    dto: &ProgramDto,
+    tables: &IdTables,
+    fingerprints: &[(&PackageIdentity, &str)],
+) -> Revision {
     let mut paths: Vec<&DefPath> = vec![];
     paths.extend(tables.types.iter().map(|t| &t.path));
     paths.extend(tables.effects.iter().map(|t| &t.path));
@@ -133,6 +151,12 @@ fn revision_of(dto: &ProgramDto, tables: &IdTables) -> Revision {
         serde_json::to_vec(&(dto, &tables.packages, paths, type_meta, effect_meta))
             .expect("DTOs serialize"),
     );
+    // Source declaration fingerprints (when supplied) bind evidence to the
+    // declarations it was derived from, beyond their Pact shapes.
+    if !fingerprints.is_empty() {
+        h.update(b"\0fingerprints\0");
+        h.update(serde_json::to_vec(fingerprints).expect("fingerprints serialize"));
+    }
     Revision(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
 }
 

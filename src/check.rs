@@ -18,6 +18,8 @@ pub struct World {
     pub overflow_ops: BTreeSet<(usize, usize)>,
     pub string_capacity: usize,
     pub calls: BTreeMap<(usize, usize), BTreeMap<String, Type>>,
+    /// Source trait/model elaboration metadata (empty without traits).
+    pub elaboration: Elaboration,
 }
 impl World {
     pub fn collect(module: &Module) -> (Self, Vec<Diagnostic>) {
@@ -67,6 +69,8 @@ impl World {
                         ));
                     }
                 }
+                // Elaborated by `pact_frontend` into generated functions.
+                Item::Trait(_) | Item::Conformance(_) => {}
                 Item::Impl {
                     ty,
                     generics,
@@ -252,8 +256,44 @@ pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
     pub expression_types: TypeMap,
 }
+/// Checks a module. Source `trait`/`impl ... for`/`model` declarations,
+/// projections and `use model` scopes are elaborated by
+/// [`crate::pact_frontend`] into ordinary core functions and calls first;
+/// the returned World then contains only the existing core schema.
 pub fn check(module: &Module) -> Checked {
+    crate::pact_frontend::check_module(module)
+}
+
+/// Static resolution of trait method calls during the frontend's first
+/// checking pass. Implemented by `pact_frontend`.
+pub(crate) trait TraitCalls {
+    /// `None` when `call` is not a trait call; otherwise the generated
+    /// function the coherent Pact session selected, or a diagnostic.
+    fn resolve(&self, call: &TraitCall<'_>) -> Option<Result<String, Diagnostic>>;
+}
+/// A receiver (`x.m(...)`) or path (`Trait::m(...)`, `Model::m(...)`) call.
+pub(crate) struct TraitCall<'a> {
+    /// Method name of a receiver call, or the full path of a path call.
+    pub callee: &'a str,
+    pub path: bool,
+    /// Type of the receiver or first argument (`Infer` when unknown).
+    pub receiver: Type,
+    /// Generic parameters in scope at the call.
+    pub generics: &'a [Generic],
+    /// Name of the function containing the call.
+    pub function: &'a str,
+    pub span: Span,
+}
+
+/// The core checker. With `traits`, unresolved trait calls are resolved
+/// through it and recorded by call span; the Place-IR validation is then
+/// skipped because the module still contains surface trait calls.
+pub(crate) fn check_core(
+    module: &Module,
+    traits: Option<&dyn TraitCalls>,
+) -> (Checked, BTreeMap<(usize, usize), String>) {
     let (mut world, collection_errors) = World::collect(module);
+    let mut resolved;
     let mut diagnostics = vec![];
     let mut iteration = 0;
     loop {
@@ -279,6 +319,9 @@ pub fn check(module: &Module) -> Checked {
             cap_aliases: BTreeMap::new(),
             loans: vec![],
             effect_inference: vec![],
+            traits,
+            current: String::new(),
+            resolved: BTreeMap::new(),
         };
         c.declarations();
         for f in world.functions.values() {
@@ -294,8 +337,10 @@ pub fn check(module: &Module) -> Checked {
             partial_ops,
             overflow_ops,
             string_capacity,
+            resolved: trait_calls,
             ..
         } = c;
+        resolved = trait_calls;
         let changed = world.function_results != results || world.handler_effects != handler_effects;
         world.types = types;
         world.calls = calls;
@@ -314,7 +359,7 @@ pub fn check(module: &Module) -> Checked {
             break;
         }
     }
-    if diagnostics.is_empty() {
+    if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::ir_check::validate(
             &world,
             &crate::ir::lower_world(&world),
@@ -323,11 +368,14 @@ pub fn check(module: &Module) -> Checked {
     let mut seen = BTreeSet::new();
     diagnostics
         .retain(|d| seen.insert((d.code.clone(), d.span.start, d.span.end, d.message.clone())));
-    Checked {
-        expression_types: world.types.clone(),
-        world,
-        diagnostics,
-    }
+    (
+        Checked {
+            expression_types: world.types.clone(),
+            world,
+            diagnostics,
+        },
+        resolved,
+    )
 }
 struct Checker<'a> {
     world: &'a World,
@@ -350,6 +398,9 @@ struct Checker<'a> {
     cap_aliases: BTreeMap<String, String>,
     loans: Vec<(Place, Pass)>,
     effect_inference: Vec<(bool, usize, Effects, String)>,
+    traits: Option<&'a dyn TraitCalls>,
+    current: String,
+    resolved: BTreeMap<(usize, usize), String>,
 }
 impl Checker<'_> {
     fn error(&mut self, code: &str, msg: impl Into<String>, span: Span) {
@@ -541,6 +592,7 @@ impl Checker<'_> {
         }
     }
     fn function(&mut self, f: &Function) {
+        self.current = f.name.clone();
         self.bounds = f
             .generics
             .iter()
@@ -1594,6 +1646,15 @@ impl Checker<'_> {
                 self.require_effect(&effect, env, span);
                 return result;
             }
+            if name.contains("::")
+                && let Some(f) =
+                    self.trait_call(name, true, args.first().map(|a| &a.expr), env, &span)
+            {
+                return match f {
+                    Some(f) => self.apply(&f, types, args, None, env, span, expected),
+                    None => Type::Infer,
+                };
+            }
         }
         if let ExprKind::Field(base, method) = &callee.kind {
             if let ExprKind::Name(label) = &base.kind
@@ -1622,6 +1683,12 @@ impl Checker<'_> {
             let name = format!("{}::{method}", t.name());
             if let Some(f) = self.world.functions.get(&name) {
                 return self.apply(f, types, args, Some(base), env, span, expected);
+            }
+            if let Some(f) = self.trait_call(method, false, Some(base), env, &span) {
+                return match f {
+                    Some(f) => self.apply(&f, types, args, Some(base), env, span, expected),
+                    None => Type::Infer,
+                };
             }
         }
         let t = self.expr(callee, env, Usage::Own);
@@ -1659,6 +1726,132 @@ impl Checker<'_> {
         } else {
             self.error("E0206", format!("{t} is not callable"), span);
             Type::Infer
+        }
+    }
+    /// Resolves a trait call through the frontend. `None`: not a trait call.
+    /// `Some(None)`: a trait call that failed (diagnosed). `Some(Some(f))`:
+    /// the selected generated function, recorded for elaboration.
+    /// The static type of a trait-call receiver, determined without
+    /// checking the expression (its ownership and effects are checked once,
+    /// when the call is applied). Chained method calls are typed through
+    /// the inherent method or the trait conformance their own receiver
+    /// selects.
+    fn receiver_type(&mut self, e: &Expr, env: &Env) -> Type {
+        if let ExprKind::Literal(l) = &e.kind {
+            return crate::numeric::default_type(&literal_type(l));
+        }
+        let t = self.peek_type(e, env);
+        if t != Type::Infer {
+            return t;
+        }
+        if let Some(t) = self.world.types.get(&(e.span.start, e.span.end))
+            && *t != Type::Infer
+        {
+            return t.clone();
+        }
+        // Receivers that are not places: calls and struct literals have a
+        // declared type.
+        match &e.kind {
+            ExprKind::Call { callee, .. } => match &callee.kind {
+                ExprKind::Name(n) if !env.bindings.contains_key(n) => self
+                    .world
+                    .functions
+                    .get(n)
+                    .filter(|f| f.generics.is_empty())
+                    .map(|f| f.result.clone())
+                    .unwrap_or(Type::Infer),
+                ExprKind::Field(base, method) => {
+                    let base_ty = self.receiver_type(base, env);
+                    if base_ty == Type::Infer {
+                        return Type::Infer;
+                    }
+                    let inherent = format!("{}::{method}", base_ty.name());
+                    let f = match self.world.functions.get(&inherent) {
+                        Some(f) => Some(f.clone()),
+                        None => self.traits.and_then(|traits| {
+                            let generics = self.generics.clone();
+                            let current = self.current.clone();
+                            let call = TraitCall {
+                                callee: method,
+                                path: false,
+                                receiver: base_ty.clone(),
+                                generics: &generics,
+                                function: &current,
+                                span: e.span.clone(),
+                            };
+                            match traits.resolve(&call)? {
+                                Ok(name) => self.world.functions.get(&name).cloned(),
+                                Err(_) => None,
+                            }
+                        }),
+                    };
+                    let Some(f) = f else {
+                        return Type::Infer;
+                    };
+                    let Some(first) = f.params.first() else {
+                        return Type::Infer;
+                    };
+                    let mut vars = BTreeMap::new();
+                    infer(&first.ty, &base_ty, &f.generics, &mut vars);
+                    if f.generics.iter().any(|g| !vars.contains_key(&g.name)) {
+                        return Type::Infer;
+                    }
+                    substitute(&f.result, &vars)
+                }
+                _ => Type::Infer,
+            },
+            ExprKind::Struct { name, .. } => self
+                .world
+                .adts
+                .get(name)
+                .filter(|a| a.generics.is_empty() && !a.is_enum)
+                .map(|a| Type::named(&a.name))
+                .unwrap_or(Type::Infer),
+            _ => Type::Infer,
+        }
+    }
+    fn trait_call(
+        &mut self,
+        callee: &str,
+        path: bool,
+        receiver: Option<&Expr>,
+        env: &Env,
+        span: &Span,
+    ) -> Option<Option<Function>> {
+        let traits = self.traits?;
+        let receiver = match receiver {
+            Some(e) => self.receiver_type(e, env),
+            None => Type::Infer,
+        };
+        let generics = self.generics.clone();
+        let current = self.current.clone();
+        let call = TraitCall {
+            callee,
+            path,
+            receiver,
+            generics: &generics,
+            function: &current,
+            span: span.clone(),
+        };
+        match traits.resolve(&call)? {
+            Ok(name) => match self.world.functions.get(&name) {
+                Some(f) => {
+                    self.resolved.insert((span.start, span.end), name);
+                    Some(Some(f.clone()))
+                }
+                None => {
+                    self.error(
+                        "E0610",
+                        format!("trait call resolved to missing function '{name}'"),
+                        span.clone(),
+                    );
+                    Some(None)
+                }
+            },
+            Err(d) => {
+                self.diagnostics.push(d);
+                Some(None)
+            }
         }
     }
     #[expect(

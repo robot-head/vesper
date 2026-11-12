@@ -3189,6 +3189,8 @@ dependencies = [
  "vesper-loom-cas",
  "vesper-loom-solver",
  "vesper-loom-trust",
+ "vesper-pact",
+ "vesper-pact-binding",
  "vesper-pulse",
  "vesper-semver",
  "vesper-serde",
@@ -3258,6 +3260,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "vesper-loom-sandbox",
+]
+
+[[package]]
+name = "vesper-forge-runner"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "vesper-forge",
+ "vesper-loom-cas",
  "vesper-loom-sandbox",
 ]
 
@@ -3397,14 +3413,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "vesper-pact-bridge"
+name = "vesper-pact-binding"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "vesper-core",
+ "vesper-pact",
+]
+
+[[package]]
+name = "vesper-pact-bridge"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
  "vesper",
  "vesper-pact",
+ "vesper-pact-binding",
 ]
 
 [[package]]

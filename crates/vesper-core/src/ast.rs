@@ -189,10 +189,193 @@ pub enum Item {
         generics: Vec<Generic>,
         methods: Vec<Function>,
     },
+    /// Frontend-only `trait` declaration (§16.2). Elaborated away before a
+    /// checked `World` reaches any backend.
+    Trait(TraitDecl),
+    /// Frontend-only canonical `impl Trait for Type` or named `model`
+    /// declaration (§16.3). Its methods become private generated functions.
+    Conformance(Conformance),
 }
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct Module {
     pub items: Vec<Item>,
+    /// Frontend-only lexical `use model M;` declarations.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_uses: Vec<ModelUse>,
+    /// Frontend-only trait bounds written on function generics or
+    /// `where` clauses outside conformances (generic dictionary dispatch,
+    /// which the static elaboration rejects).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trait_bounds: Vec<TraitBoundSyntax>,
+}
+
+// ---------------------------------------------------------------------------
+// Frontend trait/model declaration metadata (design §16.2-16.3).
+//
+// These shapes are produced by the parser and consumed only by the source
+// frontend (`vesper::pact_frontend`). They never appear in the core
+// `ExprKind`/`Type` schema of an accepted `World`: trait method calls are
+// elaborated into ordinary calls of generated functions, and associated
+// type projections are normalized to ordinary types, or the module is
+// rejected.
+
+/// `trait Name[params] { type A: mod m; fn method(in self, ...) -> T eff [r]; }`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraitDecl {
+    pub name: String,
+    pub public: bool,
+    /// Parameters after `Self`: type parameters (with modal bounds) and
+    /// effect-row parameters.
+    pub generics: Vec<Generic>,
+    pub assoc: Vec<AssocTypeDecl>,
+    /// Method signatures (bodies are `None`).
+    pub methods: Vec<Function>,
+    pub span: Span,
+}
+/// `type Name: mod m;` inside a trait.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssocTypeDecl {
+    pub name: String,
+    pub bound: Mode,
+    pub span: Span,
+}
+/// `Trait[args]`, optionally package-qualified (`@scope/name::Trait`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraitRef {
+    pub package: Option<String>,
+    pub name: String,
+    pub args: Vec<Type>,
+    pub span: Span,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ConformanceKind {
+    /// Anonymous canonical `impl` (global model uniqueness).
+    Canonical,
+    /// Type-branded named `model Name: Trait for Type`.
+    Model { name: String, public: bool },
+}
+/// `type Name = T;` inside an impl or model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AssocTypeBinding {
+    pub name: String,
+    pub ty: Type,
+    pub span: Span,
+}
+/// `where T: Trait[args]` on an impl or model (or `[T: Trait]`).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct WhereClause {
+    pub ty: Type,
+    pub trait_ref: TraitRef,
+    pub span: Span,
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Conformance {
+    pub kind: ConformanceKind,
+    pub generics: Vec<Generic>,
+    pub trait_ref: TraitRef,
+    pub self_ty: Type,
+    pub where_clauses: Vec<WhereClause>,
+    pub assoc: Vec<AssocTypeBinding>,
+    pub methods: Vec<Function>,
+    pub span: Span,
+}
+/// `use model M;`. It applies to code after `span` inside `scope` (the
+/// enclosing block, or the whole module for an item-level use).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelUse {
+    pub model: String,
+    pub span: Span,
+    pub scope: Span,
+}
+/// A trait bound outside a conformance head, e.g. `fn f[T: Show]`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct TraitBoundSyntax {
+    pub param: String,
+    pub trait_ref: TraitRef,
+    pub span: Span,
+}
+
+/// Reserved frontend-only encoding of an associated-type projection
+/// `<T as Trait[args]>::Assoc` (or the shorthand `T::Assoc`). No source
+/// identifier can spell it, and the frontend normalizes every occurrence to
+/// an ordinary type or rejects the module; it never reaches a checked World.
+pub const PROJECTION_TYPE: &str = "$projection";
+/// Placeholder trait of a shorthand projection whose trait is inferred.
+pub const PROJECTION_ANY_TRAIT: &str = "$any";
+
+/// A projection decoded from its reserved [`PROJECTION_TYPE`] encoding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProjectionSyntax<'a> {
+    pub self_ty: &'a Type,
+    /// `None` for shorthand `T::Assoc`.
+    pub trait_name: Option<&'a str>,
+    pub trait_args: &'a [Type],
+    pub assoc: &'a str,
+}
+pub fn projection_type(
+    self_ty: Type,
+    trait_ref: Option<(String, Vec<Type>)>,
+    assoc: impl Into<String>,
+) -> Type {
+    let (name, args) = trait_ref.unwrap_or_else(|| (PROJECTION_ANY_TRAIT.into(), vec![]));
+    Type::Named(
+        PROJECTION_TYPE.into(),
+        vec![
+            self_ty,
+            Type::Named(name, args),
+            Type::Named(assoc.into(), vec![]),
+        ],
+    )
+}
+pub fn as_projection(t: &Type) -> Option<ProjectionSyntax<'_>> {
+    match t {
+        Type::Named(n, args) if n == PROJECTION_TYPE => match args.as_slice() {
+            [self_ty, Type::Named(tr, targs), Type::Named(assoc, a)] if a.is_empty() => {
+                Some(ProjectionSyntax {
+                    self_ty,
+                    trait_name: (tr != PROJECTION_ANY_TRAIT).then_some(tr.as_str()),
+                    trait_args: targs,
+                    assoc,
+                })
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Elaboration metadata a checked World carries about source trait
+/// declarations. Generated implementation functions are private: interface
+/// export omits them and reports the trait/model contracts as unsupported.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Elaboration {
+    /// Package identity the declarations were lowered under.
+    pub package: Option<String>,
+    /// Pact declaration revision the elaborated calls were resolved under.
+    pub revision: Option<String>,
+    /// Declared trait names.
+    pub traits: Vec<String>,
+    /// Declared conformances, by their package-qualified declaration path.
+    pub conformances: Vec<ConformanceInfo>,
+    /// Generated function name to its origin.
+    pub generated: std::collections::BTreeMap<String, GeneratedFunction>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConformanceInfo {
+    pub path: String,
+    pub trait_name: String,
+    pub self_ty: String,
+    pub model: Option<String>,
+    pub public: bool,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GeneratedFunction {
+    /// Package-qualified declaration path of the impl or model.
+    pub conformance: String,
+    pub trait_name: String,
+    pub method: String,
+    /// Always false: generated bodies are never public source exports.
+    pub public: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Expr {
