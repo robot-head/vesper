@@ -151,6 +151,7 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
     let mut output = None;
     let mut locked = false;
     let mut lockfile = None;
+    let mut baseline = None;
     let mut features = BTreeSet::new();
     let mut max_decisions = 100_000usize;
     let mut explicit_budget = false;
@@ -169,6 +170,12 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
                 ))
             }
             "--locked" => locked = true,
+            "--baseline" => {
+                if baseline.is_some() {
+                    return Err("--baseline may only be specified once".into());
+                }
+                baseline = Some(args.next().ok_or("--baseline requires a snapshot path")?);
+            }
             "--lockfile" => {
                 if lockfile.is_some() {
                     return Err("--lockfile may only be specified once".into());
@@ -202,7 +209,7 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
             "--json" => json = true,
             "--help" | "-h" => {
                 println!(
-                    "Usage: vesper resolve [Loom.toml] --catalog <catalog.json> [--features a,b] [--json]\n  Fresh resolution: [--max-decisions N] [-o Loom.lock]\n  Read-only validation: --locked [--lockfile Loom.lock]"
+                    "Usage: vesper resolve [Loom.toml] --catalog <catalog.json> [--features a,b] [--json]\n  Fresh resolution: [--max-decisions N] [--baseline old.lock] [-o Loom.lock]\n  Read-only validation: --locked [--lockfile Loom.lock]"
                 );
                 return Ok(());
             }
@@ -227,6 +234,11 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
             "--max-decisions applies only to fresh resolution; --locked performs no search".into(),
         );
     }
+    if locked && baseline.is_some() {
+        return Err(
+            "--baseline compares a fresh resolution and cannot be combined with --locked".into(),
+        );
+    }
     let manifest_path = manifest_path.unwrap_or_else(|| "Loom.toml".into());
     let catalog_path =
         catalog_path.ok_or("offline resolution requires --catalog <catalog.json>")?;
@@ -246,6 +258,27 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
         catalog,
         max_decisions,
     };
+    let baseline = if let Some(path) = baseline {
+        let bytes = fs::read(&path).map_err(|e| format!("{path}: {e}"))?;
+        let snapshot: vesper_loom_calculus::Solution = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("{path}: invalid baseline snapshot: {e}"))?;
+        let validation = vesper_loom_calculus::validate_solution(&snapshot);
+        if !validation.diagnostics.is_empty()
+            || validation.graph.as_ref().is_none_or(|g| g.roots.is_empty())
+        {
+            if json {
+                println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                    "status":"error","error":{"kind":"invalid_baseline","diagnostics":validation.diagnostics}
+                })).map_err(|e| e.to_string())?);
+            }
+            return Err(format!(
+                "{path}: baseline must have a valid nonempty package graph"
+            ));
+        }
+        Some(snapshot)
+    } else {
+        None
+    };
     if locked {
         let path = lockfile.unwrap_or_else(|| PathBuf::from("Loom.lock"));
         let bytes = fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -260,9 +293,67 @@ pub fn resolve(args: Vec<String>) -> Result<(), String> {
         Ok(solution) => solution,
         Err(error) => return resolution_error(error, json, "resolution"),
     };
+    let upgrade = baseline
+        .as_ref()
+        .map(|old| vesper_loom_calculus::check_upgrade(old, &solution));
+    if let Some(report) = &upgrade
+        && !report.allowed
+    {
+        let kind = if report.diagnostics.iter().any(|d| {
+            matches!(
+                d.code.as_str(),
+                "capability_escalation" | "unsafe_ffi_policy_relaxed"
+            )
+        }) {
+            "capability_escalation"
+        } else {
+            "upgrade_mismatch"
+        };
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status":"error","error":{"kind":kind},"upgrade":report
+                }))
+                .map_err(|e| e.to_string())?
+            );
+        }
+        let messages = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| {
+                let package = diagnostic
+                    .package
+                    .as_ref()
+                    .map(|p| p.as_str())
+                    .unwrap_or("snapshot");
+                format!("{package}: {}", diagnostic.message)
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(format!(
+            "declared-authority upgrade guard rejected candidate: {messages}"
+        ));
+    }
     let bytes = serde_json::to_vec_pretty(&solution).map_err(|e| e.to_string())?;
     if let Some(path) = output {
         atomic_write(&path, &bytes)?;
+    }
+    if let Some(upgrade) = upgrade {
+        if json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "status":"resolved","solution":solution,"upgrade":upgrade
+                }))
+                .map_err(|e| e.to_string())?
+            );
+            return Ok(());
+        }
+        println!(
+            "declared-authority guard passed ({} change(s))",
+            upgrade.changes.len()
+        );
     }
     print_solution(&solution, json, "resolved")
 }

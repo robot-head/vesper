@@ -31,7 +31,7 @@ The executable pipeline checks HIR, runs CFG ownership analysis on typed Place I
 | --- | --- | --- |
 | `vesper-semver` | Versioned interface DTOs, conservative compatibility rules, checked source export, `vesper semver` and proposed release-version checks | Final `.vhir` schema, richer scoped contracts, canonical MIF, executable witnesses |
 | `vesper-ffi` | Validated wire layouts, endian access, safe zero-copy byte views | Source syntax, HIR/PCG, CLIF, `.vsys`, hardware isolation |
-| `vesper-loom-calculus` | Manifests, monotonic feature closure, exact-version solution/declared ceiling validation and offline `vesper graph` inspection | Compiler authority audit, registry/trust/build execution |
+| `vesper-loom-calculus` | Manifests, monotonic feature closure, exact-version solution/declared ceiling validation, offline `vesper graph`, and opt-in declared-permission upgrade guards | Compiler authority audit, registry/trust/build execution |
 | `vesper-loom-solver` | Bounded iterative offline resolution, transitive features/native requirements, `vesper resolve`, atomic solution snapshots and read-only `--locked` validation against current inputs | CDCL/Max-SMT, authenticated lockfiles, optimization/trust policies |
 | `vesper-alloc` | Externally implemented host-region allocator; registered for workspace testing after upstream merge | Source Region/Alloc typing/lowering, exhaustion policy, ShardSlab and collection integration |
 | `vesper-simpulse` | Seeded scheduling, virtual timers, actual completion ownership, strict journal replay | Production adapters, source/CLI simulation, DPOR, network/WAL models |

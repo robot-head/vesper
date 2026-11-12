@@ -58,6 +58,21 @@ Successful JSON output is `{"status":"locked","solution":...}`. Invalid or stale
 
 Locked validation checks consistency with supplied local metadata. It does not authenticate that metadata, verify package source bytes, audit compiler authority, execute builds or establish provenance. The snapshot format remains the experimental exact `Solution` DTO described above.
 
+## Guarding declared permissions during resolution
+
+```sh
+cargo run -- resolve examples/loom/Loom.toml --catalog examples/loom/catalog.json \
+  --baseline /tmp/Loom.lock -o /tmp/Loom.lock --json
+```
+
+`--baseline` is an opt-in guard on a fresh resolution. The existing snapshot is read and validated first; the candidate is resolved normally, then compared before any output is written. Both graphs must have the same nonempty root identities. Successful guarded JSON includes `upgrade` alongside `status: "resolved"` and `solution`; ordinary resolution without the flag is unchanged. `--baseline` cannot be combined with `--locked`.
+
+The guard rejects added required capabilities, widened package/dependency ceilings and relaxing `forbid_unsafe_ffi`, including grants on edges whose current target is pure. It compares each reachable package, so moving `Net` from one dependency to another is detected even if the root's total remains unchanged. Typed capability identities are compared exactly. Reductions and new pure dependencies are allowed; native-version changes alone do not count as authority changes. Unreachable selections do not grant authority, but both entire snapshots must still pass structural validation.
+
+A rejected comparison exits nonzero, returns `capability_escalation` or `upgrade_mismatch` plus the structured upgrade report in JSON mode, and preserves existing output bytes. Invalid baseline graphs produce `invalid_baseline`; file/JSON parsing errors use stderr. The guard checks the proposed result rather than searching for an older alternative. It has no override flag in this milestone.
+
+This checks declared local metadata, not compiler-body authority, interface SemVer, source provenance, version progression or binary ABI. A caller-supplied baseline is not authenticated. The command performs no builds, package code or tests; full automatic update/publish policy remains separate integration work.
+
 ## Inspecting the package graph
 
 ```sh

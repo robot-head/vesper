@@ -29,6 +29,8 @@ Release-version checking in `crates/vesper-semver`, the package-command adapter 
 
 Local Lean artifact auditing is coordinator-owned in the new `src/proof_commands.rs`, `tools/proof-audit/**` and `tests/proof_audit_cli.rs`. This uses an independent trusted Lean helper and does not edit the reserved extractor, shared IR or `lean/CheckedArithmetic.lean`. It does not authorize package publication or proof-cache reuse.
 
+Declared-permission upgrade checks in `crates/vesper-loom-calculus/src/upgrade.rs`, the package-command adapter and `tests/upgrade_cli.rs` are coordinator-owned. Offline builder-attestation verification is being implemented separately in the new `crates/vesper-loom-trust/**`; neither task edits the active cached-build, Forge or compiler lanes.
+
 ## First-wave results
 
 | Lane | Branch | Exclusive ownership | Status |
