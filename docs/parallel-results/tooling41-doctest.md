@@ -90,8 +90,8 @@ both independently and after merging; a base-package main cannot substitute for
 an example. Private body wrapper names avoid all base functions and authored
 snippet identifiers. These constraints are explicit supported syntax, not skips.
 
-Before processing examples, the base file undergoes independent full parsing and
-checking. Base diagnostics prevent the suite from passing. Each example then
+Before processing examples, supported base source undergoes independent full parsing and
+checking. Unsupported pre-check profiles fail explicitly before inference. Base diagnostics prevent the suite from passing. Each example then
 gets a separate full base-plus-snippet parse/check, including actual type,
 effect, modal and Place-IR PCG validation. compile_fail succeeds only if at least
 one diagnostic exists, **all** actual codes equal the requested code, and none
@@ -112,7 +112,8 @@ UTF-8 byte offsets and one-based source line/character-column positions.
 
 Source guards run **before recursive parsing**: file/snippet/merged/cumulative
 check bytes, lexical token/declaration counts, delimiter nesting and an
-unfinished outer-segment token weight. The last guard also rejects long unary,
+unfinished outer-segment token weight, including completed inner subtrees and
+completed-statement peaks. The last guard also rejects long unary,
 assignment and operator spines hidden inside nested groups. After parsing but
 **before checking**, a bounded nominal-type expansion walk unfolds every
 referenced field independently, so compact doubling ADT DAGs cannot trigger
@@ -179,10 +180,43 @@ entry rejection, IR/call-expansion budgets, malformed/cyclic CFGs, exact linear
 leak negatives, wrong/mixed diagnostic codes, unrelated base errors, actual
 comment extraction, CLI JSON/source positions, selected-entry provenance, contextual declaration
 classification, synthetic-name/error exclusion and nominal-DAG/source guards.
-The final focused suite passes **14 integration tests plus one new CFG unit**;
+The final focused suite passes **17 integration tests plus one new CFG unit**;
 all **68 existing backends tests** also pass. Strict focused Clippy and exclusive
 file formatting checks pass. Only Linux native execution was run locally.
 
 No general SimPulse I/O, deterministic virtual clock, 64KiB source arena,
 all-language execution isolation, PMU/timing result, sub-100ms claim, generated
 Lean certificate or cross-platform/native-device evidence is provided here.
+
+
+## Follow-up: inference growth before the checker
+
+A read-only review found that lexical group pop could discard completed inner
+subtree depth, and source inference could build exponentially large tuple types
+from only 25 repeated `let x = (x,x)` bindings. A generic `dup` or repeated
+inferred `Ok`/`Err` branch joins has the same risk without nominal declarations.
+The earlier nominal-only bound did not cover these cases.
+
+The lexical guard now retains each group's maximum completed-statement weight
+and propagates `outer + max(current, peak) + 1` when closing it. Completed
+root declarations reset their own independent weight. Both nested-block/binary
+spines and semicolon-hidden subtree spines reject before recursive parsing.
+
+New public `doctest::source_check_guard(&Module, DocTestLimits)` performs an
+iterative expression/type/pattern audit after parsing and **before** any checker
+call. It never invokes the checker itself. Fixed bounds are 16,384 queued/visited
+nodes and depth 64. It rejects nonempty tuples/types/patterns, generic declarations
+and type/call applications, inferred function/field signatures, builtin generic
+Option/Result constructors, closures/handlers, and trait/model inference. Implicit
+concrete `self` in nongeneric impl methods remains allowed. This is an explicit
+restricted source-checking profile, not a replacement inference algorithm.
+Closed nongeneric nominal structs/enums still use the expansion guard, and flat
+linear Tx construction/destructuring still reaches and passes the actual checker.
+Unsupported profiles return a guard error; they cannot satisfy compile_fail.
+
+The growth regressions parse the 25-binding input and call source_check_guard
+**without invoking check::check**, and check generic duplication and inferred
+constructor producers the same way. A small source-path regression verifies the
+runner invokes the guard; a separate flat-linear cleanup test invokes the actual
+checker only after the guard succeeds. No exponential 25-level checker run was
+used as a test. No core/parser/checker or NativeBatch API changes were made.

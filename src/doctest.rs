@@ -162,8 +162,10 @@ pub fn preflight(source: &str, limits: DocTestLimits) -> Result<(), String> {
     let (tokens, _) = lexer::lex(source);
     let mut count = 0usize;
     let mut declarations = 0usize;
-    let mut stack = Vec::new();
+    // (unfinished outer segment, maximum completed statement, opener).
+    let mut stack: Vec<(usize, usize, K)> = Vec::new();
     let mut segment = 0usize;
+    let mut top_item = false;
     for token in tokens {
         if matches!(
             token.kind,
@@ -181,26 +183,50 @@ pub fn preflight(source: &str, limits: DocTestLimits) -> Result<(), String> {
         if count > limits.max_tokens || declarations > limits.max_declarations {
             return Err("doctest token/declaration limit".into());
         }
+        if stack.is_empty()
+            && (matches!(
+                token.kind,
+                K::Fn | K::Struct | K::Enum | K::Effect | K::Impl | K::Copy | K::Affine | K::Linear
+            ) || token.kind == K::Lower
+                && matches!(&source[token.span.clone()], "trait" | "model" | "pub"))
+        {
+            top_item = true;
+        }
+        let mut completed_item = false;
         match token.kind {
             K::LParen | K::LBrace | K::LBracket => {
-                stack.push(segment);
+                stack.push((segment, 0, token.kind));
                 segment = 0;
             }
             K::RParen | K::RBrace | K::RBracket => {
-                segment = stack
-                    .pop()
-                    .unwrap_or(0)
-                    .checked_add(1)
+                let (outer, peak, opener) = stack.pop().unwrap_or((0, 0, token.kind));
+                segment = outer
+                    .checked_add(segment.max(peak))
+                    .and_then(|n| n.checked_add(1))
                     .ok_or("segment overflow")?;
+                completed_item =
+                    stack.is_empty() && top_item && opener == K::LBrace && token.kind == K::RBrace;
             }
-            K::Semi => segment = 0,
+            K::Semi => {
+                if let Some((_, peak, _)) = stack.last_mut() {
+                    *peak = (*peak).max(segment);
+                }
+                segment = 0;
+                if stack.is_empty() {
+                    top_item = false;
+                }
+            }
             _ => segment = segment.checked_add(1).ok_or("segment overflow")?,
         }
-        let weighted = stack
-            .iter()
-            .try_fold(segment, |n, x| n.checked_add(*x).ok_or("segment overflow"))?;
+        let weighted = stack.iter().try_fold(segment, |n, (outer, _, _)| {
+            n.checked_add(*outer).ok_or("segment overflow")
+        })?;
         if stack.len() > limits.max_nesting || weighted > limits.max_segment_tokens {
             return Err("doctest nesting/expression-segment limit".into());
+        }
+        if completed_item {
+            segment = 0;
+            top_item = false;
         }
     }
     Ok(())
@@ -502,6 +528,176 @@ fn nominal_expansion(module: &crate::ast::Module, limit: usize) -> Result<(), St
     }
     Ok(())
 }
+/// Fail-closed source profile, called after parsing and BEFORE checker inference.
+/// This guard never invokes the checker. Inferred composite growth is not modeled:
+/// nonempty tuples, generic producers/applications, closures and handlers are
+/// unsupported. Closed nongeneric nominal data (including flat linear cleanup)
+/// remains available under the separate nominal expansion bound.
+pub fn source_check_guard(
+    module: &crate::ast::Module,
+    limits: DocTestLimits,
+) -> Result<(), String> {
+    use crate::ast::*;
+    limits.validate()?;
+    enum Node<'a> {
+        Expr(&'a Expr, usize),
+        Ty(&'a Type, usize, bool),
+        Pat(&'a Pattern, usize),
+    }
+    fn function<'a>(
+        f: &'a Function,
+        implicit_self: bool,
+        todo: &mut Vec<Node<'a>>,
+    ) -> Result<(), String> {
+        if !f.generics.is_empty() {
+            return Err(
+                "doctest inferred composite growth: generic functions unsupported before checking"
+                    .into(),
+            );
+        }
+        todo.push(Node::Ty(&f.result, 1, false));
+        for p in &f.params {
+            if implicit_self && p.name == "self" && p.ty == Type::Infer {
+                continue;
+            }
+            todo.push(Node::Ty(&p.ty, 1, false));
+        }
+        for effect in &f.effects.instances {
+            for ty in &effect.args {
+                todo.push(Node::Ty(ty, 1, false));
+            }
+        }
+        if let Some(body) = &f.body {
+            todo.push(Node::Expr(body, 1));
+        }
+        Ok(())
+    }
+    fn builtin_constructor(name: &str) -> bool {
+        matches!(
+            name.rsplit("::").next(),
+            Some("Some" | "None" | "Ok" | "Err" | "Option" | "Result")
+        )
+    }
+    if module.items.len() > limits.max_declarations {
+        return Err("doctest parsed module item limit".into());
+    }
+    let mut todo = Vec::new();
+    for item in &module.items {
+        match item {
+            Item::Function(f) => function(f, false, &mut todo)?,
+            Item::Adt(a) => {
+                if !a.generics.is_empty() {
+                    return Err("doctest inferred composite growth: generic nominal types unsupported before checking".into());
+                }
+                for field in a.variants.iter().flat_map(|v| &v.fields) {
+                    todo.push(Node::Ty(&field.ty, 1, false));
+                }
+            }
+            Item::Effect(e) => {
+                if !e.generics.is_empty() {
+                    return Err(
+                        "doctest generic effect declarations unsupported before checking".into(),
+                    );
+                }
+                for f in &e.ops {
+                    function(f, false, &mut todo)?;
+                }
+            }
+            Item::Impl {
+                ty,
+                generics,
+                methods,
+            } => {
+                if !generics.is_empty() {
+                    return Err(
+                        "doctest generic implementations unsupported before checking".into(),
+                    );
+                }
+                todo.push(Node::Ty(ty, 1, false));
+                for f in methods {
+                    function(f, true, &mut todo)?;
+                }
+            }
+            Item::Trait(_) | Item::Conformance(_) => {
+                return Err("doctest trait/model inference unsupported before checking".into());
+            }
+        }
+        if todo.len() > 16384 {
+            return Err("doctest parsed AST volume limit".into());
+        }
+    }
+    let mut count = 0usize;
+    while let Some(node) = todo.pop() {
+        count = count.checked_add(1).ok_or("parsed AST count overflow")?;
+        if count > 16384 {
+            return Err("doctest parsed AST volume limit".into());
+        }
+        let depth = match &node {
+            Node::Expr(_, d) | Node::Ty(_, d, _) | Node::Pat(_, d) => *d,
+        };
+        if depth > 64 {
+            return Err("doctest parsed AST depth limit".into());
+        }
+        let next = depth.checked_add(1).ok_or("parsed AST depth overflow")?;
+        match node {
+            Node::Ty(ty,_,allow_infer) => match ty {
+                Type::Tuple(ts) if !ts.is_empty() => return Err("doctest inferred composite growth: nonempty tuple types unsupported before checking".into()),
+                Type::Named(name,args) if !args.is_empty() || matches!(name.as_str(), "Option" | "Result") => return Err("doctest inferred composite growth: generic type applications unsupported before checking".into()),
+                Type::Infer if !allow_infer => return Err("doctest inferred function/field signatures unsupported before checking".into()),
+                Type::Function { params, result, effects, .. } => {
+                    for (_,t) in params { todo.push(Node::Ty(t,next,false)); }
+                    todo.push(Node::Ty(result,next,false));
+                    for e in &effects.instances { for ty in &e.args { todo.push(Node::Ty(ty,next,false)); } }
+                }
+                Type::Row(effects) => for e in &effects.instances { for ty in &e.args { todo.push(Node::Ty(ty,next,false)); } },
+                _ => {}
+            },
+            Node::Pat(p,_) => match &p.kind {
+                PatternKind::Tuple(ps) if !ps.is_empty() => return Err("doctest inferred composite growth: tuple patterns unsupported before checking".into()),
+                PatternKind::Constructor { name,fields,.. } => {
+                    if builtin_constructor(name) { return Err("doctest inferred composite growth: builtin generic constructors unsupported before checking".into()); }
+                    for (_,p) in fields { todo.push(Node::Pat(p,next)); }
+                }
+                _ => {}
+            },
+            Node::Expr(expr,_) => match &expr.kind {
+                ExprKind::Tuple(es) if !es.is_empty() => return Err("doctest inferred composite growth: nonempty tuples unsupported before checking".into()),
+                ExprKind::Closure { .. } | ExprKind::Handle { .. } => return Err("doctest inferred composite growth: closures/handlers unsupported before checking".into()),
+                ExprKind::Name(name) if builtin_constructor(name) => return Err("doctest inferred composite growth: builtin generic constructors unsupported before checking".into()),
+                ExprKind::Struct { name, fields } => {
+                    if builtin_constructor(name) { return Err("doctest builtin generic constructors unsupported before checking".into()); }
+                    for (_,e) in fields { todo.push(Node::Expr(e,next)); }
+                }
+                ExprKind::Block { statements,tail } => {
+                    for statement in statements { match statement {
+                        Statement::Let {pat,ty,value} => { todo.push(Node::Pat(pat,next)); todo.push(Node::Ty(ty,next,true)); todo.push(Node::Expr(value,next)); }
+                        Statement::Expr(e) => todo.push(Node::Expr(e,next)),
+                    } }
+                    if let Some(e) = tail { todo.push(Node::Expr(e,next)); }
+                }
+                ExprKind::Call { callee,args,types } => {
+                    if !types.is_empty() { return Err("doctest inferred composite growth: generic calls unsupported before checking".into()); }
+                    todo.push(Node::Expr(callee,next));
+                    for a in args { todo.push(Node::Expr(&a.expr,next)); }
+                }
+                ExprKind::Field(_,name) if builtin_constructor(name) => return Err("doctest inferred composite growth: builtin generic constructors unsupported before checking".into()),
+                ExprKind::Unary(_,e) | ExprKind::Field(e,_) | ExprKind::Try(e) => todo.push(Node::Expr(e,next)),
+                ExprKind::Binary(_,a,b) | ExprKind::Assign(_,a,b) | ExprKind::Index(a,b) => { todo.push(Node::Expr(a,next)); todo.push(Node::Expr(b,next)); }
+                ExprKind::If { condition,then,otherwise } => { todo.push(Node::Expr(condition,next)); todo.push(Node::Expr(then,next)); if let Some(e) = otherwise { todo.push(Node::Expr(e,next)); } }
+                ExprKind::Match { value,arms } => { todo.push(Node::Expr(value,next)); for (p,e) in arms { todo.push(Node::Pat(p,next)); todo.push(Node::Expr(e,next)); } }
+                _ => {}
+            },
+        }
+        if count
+            .checked_add(todo.len())
+            .ok_or("parsed AST count overflow")?
+            > 16384
+        {
+            return Err("doctest parsed AST volume limit".into());
+        }
+    }
+    nominal_expansion(module, limits.max_nominal_expansion)
+}
 fn checked(
     source: &str,
     limits: DocTestLimits,
@@ -519,7 +715,7 @@ fn checked(
         // A default checked empty world is not used for execution on this path.
         return Ok((check::check(&parser::parse("").module), parsed.diagnostics));
     }
-    nominal_expansion(&parsed.module, limits.max_nominal_expansion)?;
+    source_check_guard(&parsed.module, limits)?;
     let checked = check::check(&parsed.module);
     let diagnostics = checked.diagnostics.clone();
     Ok((checked, diagnostics))

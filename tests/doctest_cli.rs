@@ -195,9 +195,9 @@ fn wrapper_names_and_contextual_declarations_cannot_create_expected_errors() {
     for declaration in ["trait T {}", "pub trait T {}"] {
         let source = format!("/// ```vesper,compile_fail(E0002)\n/// {declaration}\n/// ```");
         assert!(
-            !doctest::run(&source, DocTestLimits::default())
-                .unwrap()
-                .passed
+            doctest::run(&source, DocTestLimits::default())
+                .map(|r| !r.passed)
+                .unwrap_or(true)
         );
     }
     let source = "/// ```vesper,compile_fail(E0100)\n/// ()\n/// ```\nfn __vesper_doctest_0() {}";
@@ -206,4 +206,61 @@ fn wrapper_names_and_contextual_declarations_cannot_create_expected_errors() {
             .unwrap()
             .passed
     );
+}
+
+#[test]
+fn parsed_guard_rejects_inferred_composite_growth_without_invoking_checker() {
+    let limits = DocTestLimits::default();
+    let mut tuple = "fn main() { let x = 0;".to_string();
+    for _ in 0..25 {
+        tuple.push_str("let x = (x, x);");
+    }
+    tuple.push('}');
+    let generic =
+        "fn dup[T](x: T) -> (T,T) { (x,x) } fn main() { let x = 0; let x = dup(dup(dup(x))); }";
+    let constructors = "fn main() { let x = 0; let x = if true { Ok(x) } else { Err(x) }; }";
+    for source in [&tuple, generic, constructors] {
+        doctest::preflight(source, limits).unwrap();
+        let parsed = vesper::parser::parse(source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        // source_check_guard never calls check::check: the 25-level inferred
+        // tuple therefore cannot enter the exponential checker in this test.
+        let error = doctest::source_check_guard(&parsed.module, limits).unwrap_err();
+        assert!(error.contains("inferred composite growth"), "{error}");
+    }
+    let integrated = "/// ```vesper\n/// let x = (0,0);\n/// ```\nfn main() {}";
+    assert!(
+        doctest::run(integrated, limits)
+            .err()
+            .unwrap()
+            .contains("inferred composite growth")
+    );
+}
+
+#[test]
+fn completed_subtree_and_completed_statement_spines_fail_before_parsing() {
+    for semicolon in [false, true] {
+        let mut expr = "0".to_string();
+        for _ in 0..28 {
+            expr = if semicolon {
+                format!("{{{expr};0}}{}", "+1".repeat(60))
+            } else {
+                format!("{{{expr}}}{}", "+1".repeat(60))
+            };
+        }
+        let source = format!("fn main() -> i64 {{ {expr} }}");
+        assert!(doctest::preflight(&source, DocTestLimits::default()).is_err());
+    }
+}
+
+#[test]
+fn flat_nongeneric_linear_cleanup_still_reaches_actual_checker() {
+    let source = "linear struct Tx {} fn main() { let tx = Tx {}; let Tx {} = tx; }";
+    let limits = DocTestLimits::default();
+    doctest::preflight(source, limits).unwrap();
+    let parsed = vesper::parser::parse(source);
+    assert!(parsed.diagnostics.is_empty());
+    doctest::source_check_guard(&parsed.module, limits).unwrap();
+    let checked = vesper::check::check(&parsed.module);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
 }
