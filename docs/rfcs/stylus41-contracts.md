@@ -57,10 +57,14 @@ Root also reexports the function/result/edit types at crate root.
 
 RecoveryFormatResult has private fields and getters `output()->&str`,
 `changed()->bool`, `edits()->&[RecoveryEdit]`, `source_hash()->[u8;32]`,
+`formatted_declarations()->usize`,
 `into_output()->String`. RecoveryEdit has private fields, `span()->Range<usize>`
 and `replacement()->&str`. Do not implement caller constructors or Deserialize.
 Span/hash identify original source. Edits are sorted, disjoint original-byte
 ranges, on UTF8 boundaries, confined to actual complete top-level functions.
+The declaration count includes safely formatted/validated functions whose bytes
+are already canonical. LSP returns FormatterUnavailable when this count is zero,
+and can return empty edits for idempotent safe siblings in a damaged buffer.
 No edit can include a gap, comment outside that declaration, damaged body, or
 opaque payload. Zero safe changes is successful unchanged with empty edits.
 
@@ -95,6 +99,9 @@ LSP textDocument/formatting first uses normal format_source. Only Syntax or
 OpaqueMacro errors can try recovery formatting; resource/config/conservation
 errors do not trigger a fresh-budget escape. The fallback reserves from a single
 bounded formatting-operation allowance before both attempts, rather than reset.
+Root reserves two fixed halves of the existing128Mi work allowance:64Mi for
+ordinary/macro formatting and64Mi for recovery fallback, never recycling unused
+units from a rejected stage. Resource/conservation errors cannot enter fallback.
 Use actual current ActionDocument text/index/version/hash. Convert only validated
 recovery edit byte spans through the current UTF16 LineIndex. Return proposed
 edits; no applyEdit, file/URI I/O, diagnostics clearing or semantic acceptance.
