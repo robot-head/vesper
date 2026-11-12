@@ -231,6 +231,14 @@ impl InferCtxt {
                 self.unify_args(x, y)?;
             }
         }
+        // Unifying label arguments may have bound a tail variable (e.g.
+        // `[E[r] | r]`): re-resolve and start over so tails are never bound
+        // twice. Each round binds at least one variable, so this terminates.
+        let a2 = Resolver::run(self, |r| fold_row(&a, r))?;
+        let b2 = Resolver::run(self, |r| fold_row(&b, r))?;
+        if a2 != a || b2 != b {
+            return self.unify_row(&a2, &b2);
+        }
         let infer = |t: Option<Var>| matches!(t, Some(Var::Infer(_)));
         match (a.tail, b.tail) {
             (None, None) => {
@@ -452,6 +460,28 @@ mod tests {
                 &EffectRow::closed(vec![l(0)])
             ),
             Err(UnifyError::Mismatch)
+        );
+    }
+
+    #[test]
+    fn tail_bound_by_label_arguments_is_not_rebound() {
+        // [E[r] | r] = [E[[F]]]: the argument binds r = [F], so the left row
+        // is [E[[F]], F], which differs from the closed right row.
+        let mut cx = InferCtxt::new();
+        let r = cx.new_var(ParamKind::Row);
+        let e = |arg: EffectRow| EffectLabel::Effect {
+            effect: EffectId(9),
+            args: vec![GenericArg::Row(arg)],
+        };
+        let lhs = EffectRow::open(vec![e(EffectRow::open(vec![], r))], r);
+        let rhs = EffectRow::closed(vec![e(EffectRow::closed(vec![l(1)]))]);
+        assert_eq!(cx.clone().unify_row(&lhs, &rhs), Err(UnifyError::Mismatch));
+        // With F present on the right as well, the rows agree and r = [F].
+        let rhs = EffectRow::closed(vec![l(1), e(EffectRow::closed(vec![l(1)]))]);
+        cx.unify_row(&lhs, &rhs).unwrap();
+        assert_eq!(
+            cx.resolve_arg(&GenericArg::var(ParamKind::Row, r)).unwrap(),
+            GenericArg::Row(EffectRow::closed(vec![l(1)]))
         );
     }
 

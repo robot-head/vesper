@@ -380,6 +380,16 @@ impl Validator<'_> {
 
     fn conformance(&mut self, c: &ConformanceDecl, subj: Subject) {
         self.package(c.package, subj);
+        if c.params.contains(&ParamKind::Capability) {
+            // Instantiating such a parameter would need capability inference
+            // variables, which row unification does not support.
+            self.err(
+                DiagCode::Unsupported,
+                subj,
+                "capability parameters on impls/models are outside this fragment".into(),
+            );
+            return;
+        }
         let scope = Scope::Template(&c.params);
         if !self.trait_ref(&c.trait_ref, scope, subj) {
             return;

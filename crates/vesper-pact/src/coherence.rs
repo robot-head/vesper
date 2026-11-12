@@ -165,7 +165,15 @@ fn well_formed(
         Var::Bound(i) => GenericArg::var(k, Var::Placeholder(i)),
         other => GenericArg::var(k, other),
     };
+    let unsupported = |diags: &mut Vec<Diagnostic>, what: String| {
+        diags.push(Diagnostic::new(
+            DiagCode::Unsupported,
+            subject,
+            format!("cannot check well-formedness: {what}; rejected rather than skipped"),
+        ))
+    };
     let Ok(tr) = fold_trait_ref(&decl.trait_ref, &mut { to_ph }) else {
+        unsupported(diags, "head repeats an effect label".into());
         return;
     };
     let t = program.trait_decl(tr.trait_id);
@@ -174,14 +182,25 @@ fn well_formed(
     let mut solver = Solver::new(program);
     for (ai, (assoc, value)) in t.assoc.iter().zip(&decl.assoc_values).enumerate() {
         let Ok(value) = fold_ty(value, &mut { to_ph }) else {
+            unsupported(
+                diags,
+                format!("value of {} repeats an effect label", AssocIdx(ai as u32)),
+            );
             continue;
         };
         let mut goals = vec![Goal::ModeBound {
             ty: value.clone(),
             bound: instantiate_mode(&assoc.mode_bound, &binder),
         }];
-        for b in &assoc.bounds {
+        for (bi, b) in assoc.bounds.iter().enumerate() {
             let Ok(args) = instantiate_args(&b.args, &binder) else {
+                unsupported(
+                    diags,
+                    format!(
+                        "bound {bi} of {} repeats an effect label after substitution",
+                        AssocIdx(ai as u32)
+                    ),
+                );
                 continue;
             };
             goals.push(Goal::Implements {

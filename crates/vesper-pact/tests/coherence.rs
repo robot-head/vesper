@@ -266,3 +266,49 @@ fn orphan_rule_examples() {
         .is_err()
     );
 }
+
+#[test]
+fn bound_instantiation_that_repeats_labels_fails_closed() {
+    let mut dto = world_dto();
+    let needs = TraitId(dto.traits.len() as u32);
+    let has = TraitId(needs.0 + 1);
+    // trait Needs[r: eff]; trait Has[r: eff] { type Item: Needs[eff [Net | r]]; }
+    dto.traits.push(TraitDecl {
+        id: needs,
+        package: STD,
+        params: vec![ParamKind::Row],
+        assoc: vec![],
+        coinductive: false,
+    });
+    dto.traits.push(TraitDecl {
+        id: has,
+        package: STD,
+        params: vec![ParamKind::Row],
+        assoc: vec![AssocDecl {
+            mode_bound: ModeTerm::Const(Mode::Linear),
+            bounds: vec![AssocBound {
+                trait_id: needs,
+                args: vec![open_row(vec![eff(NET)], Var::Bound(1))],
+                brand: Brand::Canonical,
+            }],
+        }],
+        coinductive: false,
+    });
+    // impl Has[eff [Net]] for u64 { type Item = u64 }: the bound becomes Needs[eff [Net, Net]].
+    let id = ImplId(dto.impls.len() as u32);
+    dto.impls.push(ImplDecl {
+        id,
+        decl: conf(
+            STD,
+            vec![],
+            tr(has, c(U64), vec![row(vec![eff(NET)])]),
+            vec![],
+            vec![c(U64)],
+        ),
+    });
+    let p = Program::new(dto).unwrap();
+    assert_eq!(
+        vesper_pact::diag::render(&check_coherence(&p)),
+        "PACT0009 [impl#22] cannot check well-formedness: bound 0 of assoc#0 repeats an effect label after substitution; rejected rather than skipped\n"
+    );
+}

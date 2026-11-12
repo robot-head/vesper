@@ -39,7 +39,7 @@ Effect rows are sets keyed by effect identity, plus an optional tail variable. L
 1. **Normalization.** The obligation driver normalizes each registered goal: every projection (innermost first) becomes a fresh variable `?v` with an obligation `ProjectionEq(p, ?v)`. Unification only sees rigid projections afterwards. Rigid projections are compared syntactically and are not treated as injective: two different ones that still contain inference variables are `Ambiguous`.
 2. **Canonicalization and tabling.** Every nested goal is canonicalized and looked up in a table keyed by `(interned environment, CanonicalGoal)`. Answers are canonical responses: values for the query's binders, plus a derivation over fresh response binders.
 3. **Candidate assembly.** The goal's brand decides which candidates are considered.
-   * `Named(m)`: only model `m`. A model of another trait gives `NoSolution(ModelTraitMismatch)`.
+   * `Named(m)`: matching environment assumptions (`T: Trait via m` in generic code) first, otherwise model `m`. A model of another trait gives `NoSolution(ModelTraitMismatch)`.
    * Brand placeholder `M`: only environment assumptions with that brand.
    * `Canonical`: environment assumptions, plus alias bounds when the self type is a rigid projection. If none applies, canonical impls are tried.
    * Unresolved inference brand (implicit resolution): the innermost `use model` scope containing a model whose head unifies wins and binds the brand to `Named(m)`. Two such models in one scope give `Ambiguous(ConflictingScopedModels)`. With no matching model, the brand binds to `Canonical`. Named models are never found by canonical search.
@@ -63,7 +63,7 @@ A goal found on the active stack is a cycle.
 * **Orphan rule.** A canonical impl is legal when its trait is local, or when scanning `(Self, T_1, …, T_n)` (type arguments only) reaches a local constructor before any uncovered impl parameter. Parameters nested inside foreign constructors are covered.
 * **Overlap.** For each pair of canonical impls of a trait, the heads are unified with renamed parameters. Unifiable heads overlap. This includes modal and effect arguments: `Container[mod copy]` and `Container[mod affine]` for `Bits` are disjoint, and `Source[eff [Net, Cancel]]` and `Source[eff [Net]]` are disjoint, but an open-row `Source[r]` overlaps both.
 * **Named models** are exempt from both checks.
-* **Well-formedness.** Each impl and model is checked under its own where-clauses (parameters become placeholders, where-clauses become assumptions). Each associated value must satisfy its modal bound and its trait bounds.
+* **Well-formedness.** A bound that cannot be instantiated (for example because substitution repeats an effect label) is reported as `PACT0009` rather than skipped. Each impl and model is checked under its own where-clauses (parameters become placeholders, where-clauses become assumptions). Each associated value must satisfy its modal bound and its trait bounds.
 
 ### Derivations
 
@@ -118,15 +118,15 @@ Run from `crates/vesper-pact` on this branch:
 
 ```sh
 cargo fmt -- --check                                  # clean
-cargo test --locked                                   # 47 passed, 0 failed
-cargo test --locked --release                         # 47 passed, 0 failed
+cargo test --locked                                   # 51 passed, 0 failed
+cargo test --locked --release                         # 51 passed, 0 failed
 cargo clippy --locked --all-targets -- -D warnings    # clean
 cargo doc --no-deps                                   # no warnings
 ```
 
 Toolchain: cargo 1.97.0. Dependencies are `serde 1.0.229` (derive) and `serde_json 1.0.154`, the same versions as the root `Cargo.lock`.
 
-Test coverage (`tests/solver.rs` 33, `tests/coherence.rs` 6, `tests/dto.rs` 5, unit 3):
+Test coverage (`tests/solver.rs` 34, `tests/coherence.rs` 7, `tests/dto.rs` 6, unit 4):
 
 * **Recursive goals.**
   * Coinductive `Send` for nested `List`: proven, marked coinductive.
@@ -238,7 +238,7 @@ Lower these to resolved HIR items with `DefId`s. Pact never sees the text.
   * well-formedness goals for types (for example `CacheBTree[K, V, M]` implying `K: Ord via M`);
   * `dyn` object safety and vtables (§16.2 second-class dynamic dispatch);
   * const generics;
-  * capability inference variables;
+  * capability inference variables, and therefore capability parameters on impls/models (rejected at validation);
   * projections in impl heads.
 * Ambiguous answers carry no partial substitutions. The caller has to re-query after more inference.
 * Environment assumptions are not normalized. A non-rigid projection inside an assumption only matches syntactically, which can lose a proof but cannot invent one.

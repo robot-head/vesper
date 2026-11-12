@@ -1046,3 +1046,39 @@ fn every_world_proof_rechecks_with_a_shared_table() {
         assert!(o.is_proven(), "{g}: {o:?}");
     }
 }
+
+#[test]
+fn named_model_bounds_of_generic_code_are_assumptions() {
+    let p = world();
+    // fn f[T] where T: Ord via ReverseUuidOrd
+    let env = Env {
+        placeholders: vec![PlaceholderDecl::ty(None)],
+        assumptions: vec![via(ORD, ph(0), vec![], Brand::Named(REVERSE_UUID_ORD))],
+        model_scopes: vec![],
+    };
+    let o = solve(
+        &p,
+        &query(
+            env.clone(),
+            vec![],
+            via(ORD, ph(0), vec![], Brand::Named(REVERSE_UUID_ORD)),
+        ),
+    );
+    assert_eq!(proven(&o).derivation.step, Step::Assumption { index: 0 });
+    // It proves neither the canonical model nor another named one.
+    assert!(matches!(
+        solve(
+            &p,
+            &query(env.clone(), vec![], implements(ORD, ph(0), vec![]))
+        ),
+        Outcome::NoSolution(_)
+    ));
+    let tree = btree(ph(0), c(U64), Brand::Named(REVERSE_UUID_ORD));
+    assert!(
+        solve(
+            &p,
+            &query(env, vec![], implements(MERGE, tree.clone(), vec![a(tree)]))
+        )
+        .is_proven()
+    );
+}

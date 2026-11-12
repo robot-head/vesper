@@ -760,6 +760,12 @@ impl<'p> Solver<'p> {
                 if decl.trait_ref.trait_id != trait_ref.trait_id {
                     return Ok(Phase::mismatch(m));
                 }
+                // `T: Trait via M` assumed by generic code takes precedence.
+                let env_results =
+                    self.env_implements(env_id, env, &cx, trait_ref, &resolved_brand, &goal_of);
+                if env_results.iter().any(|(_, r)| applies(r)) {
+                    return Ok(Phase::of(env_results));
+                }
                 let r = self.try_conformance(
                     env_id,
                     &cx,
@@ -920,16 +926,15 @@ impl<'p> Solver<'p> {
             |s: &mut Self, cx: &InferCtxt, decl: &ConformanceDecl, source: ConformanceSource| {
                 s.try_projection_conformance(env_id, cx, decl, source, projection, ty, &goal_of)
             };
-        match mode {
-            BrandMode::Named(m) => {
-                let decl = &self.program.model(m).decl;
-                if decl.trait_ref.trait_id != tr.trait_id {
-                    return Ok(Phase::mismatch(m));
-                }
-                let r = conformance(self, &cx, decl, ConformanceSource::Model(m));
-                Ok(Phase::of(vec![(CandidateSource::Model(m), r)]))
-            }
-            BrandMode::Placeholder(_) | BrandMode::Canonical => {
+        if let BrandMode::Named(m) = mode
+            && self.program.model(m).decl.trait_ref.trait_id != tr.trait_id
+        {
+            return Ok(Phase::mismatch(m));
+        }
+        // Phases 1 and 2 apply to every brand: equality assumptions and
+        // where-clauses of generic code (including `via M` bounds) win.
+        {
+            {
                 let brand = cx.resolve_brand(&projection.brand);
                 // 1. Explicit equality assumptions.
                 let mut results = vec![];
@@ -993,7 +998,13 @@ impl<'p> Solver<'p> {
                     };
                     return Ok(Phase::of(vec![(CandidateSource::Rigid, r)]));
                 }
-                // 3. Canonical impls.
+                // 3. The selected model's value, or canonical impls.
+                if let BrandMode::Named(m) = mode {
+                    let decl = &self.program.model(m).decl;
+                    let r = conformance(self, &cx, decl, ConformanceSource::Model(m));
+                    results.push((CandidateSource::Model(m), r));
+                    return Ok(Phase::of(results));
+                }
                 for &i in self.program.impls_of(tr.trait_id) {
                     let decl = &self.program.impl_decl(i).decl;
                     let r = conformance(self, &cx, decl, ConformanceSource::Impl(i));

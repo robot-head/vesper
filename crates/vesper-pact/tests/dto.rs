@@ -187,3 +187,28 @@ fn malformed_queries_are_rejected() {
         .is_proven()
     );
 }
+
+#[test]
+fn capability_parameters_on_impls_are_rejected() {
+    let mut dto = world_dto();
+    // impl[c: cap] Source[eff [cap c]] for PulseTcp
+    let id = ImplId(dto.impls.len() as u32);
+    dto.impls.push(ImplDecl {
+        id,
+        decl: conf(
+            APP,
+            vec![ParamKind::Capability],
+            tr(
+                SOURCE,
+                c(PULSE_TCP),
+                vec![row(vec![EffectLabel::Capability(Var::Bound(0))])],
+            ),
+            vec![],
+            vec![c(RECORD_BATCH)],
+        ),
+    });
+    assert_eq!(
+        rejected(dto),
+        "PACT0009 [impl#22] capability parameters on impls/models are outside this fragment\n"
+    );
+}
