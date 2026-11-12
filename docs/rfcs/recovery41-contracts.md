@@ -150,6 +150,27 @@ A bounded experimental vesper/recoveryStatus request may expose open-buffer synt
 source/version/hash/inventory/actual update path; no World/types/liveness/proof. URI
 labels never load files or execute macros/builds/proofs.
 
+The experimental request is `vesper/recoveryStatus` with
+`{"textDocument":{"uri":"<open URI>"}}`. Its result uses `scope:"syntax_only"`,
+`uri`, `version`, `source_blake3`, `byte_length`, `update_kind`, `declarations` and
+`sites`. Update kinds are `opened`, `unchanged`, `body_reparse`, `full_reparse`;
+opening or rebuilding mirrors is honestly `opened`. Declaration records expose
+`kind`, `name` (or null), `span`, `header_span`, `body_span` (or null), and
+`status:"complete"|"recovered"|"opaque"`. All these inventory spans are original
+UTF-8 byte objects `{start,end}`, not LSP UTF-16 positions. Site records expose
+`kind`, `span`, `declaration_index` (or null), and `receiver` (or null); a receiver
+has `root` and `projections` byte spans. No source text is echoed. Availability
+failures return `-32003` and current version/hash with `kind:"recovery"`.
+
+Parse-failure publication retains the original `vesper.status:"parse_error"`
+when diagnostic metadata is representable. Optional `vesper.recovery` carries
+`scope:"independent_functions"`, `analyzed_functions:[{name,span}]`, and
+`unavailable:[{span,reason}]` with stable reason codes. A refused recovery query
+instead carries `scope:"unavailable"` and a reason; the existing parse diagnostics
+remain visible. Invalid compiler diagnostic metadata still takes the existing
+explicit `analysis_unavailable` publication path. Recovery metadata never changes
+the full-source semantic request gate.
+
 Acceptance covers tx./calls/braces/sibling resilience, context/comment/string/macro
 spoofing, genuine complete-sibling leaks versus damaged-function unavailability,
 repair restoring strict exhaustion, current Unicode/CRLF positions/hash/version,
