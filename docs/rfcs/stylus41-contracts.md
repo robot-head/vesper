@@ -75,6 +75,11 @@ functions remain unchanged; lexical uncertainty or resource errors reject the
 entire operation. Whitespace outside complete declarations and every damaged/
 opaque gap remain byte-for-byte identical. Whole non-whitespace token/comment
 stream and actual declaration kind/name/status inventory must be conserved.
+Diagnostic recovery can resynchronize on a function inside a damaged body, so
+Complete status alone grants no edit permission: selection additionally requires
+the actual original lexer delimiter stack to be empty at the declaration start.
+Unclosed outer delimiters leave subsequent apparent siblings untouched;
+mismatched closing delimiters reject the proposal.
 Reparse the actual candidate and run the complete recovery formatting pass again
 for byte idempotence; no recursion through the public API or budget reset.
 

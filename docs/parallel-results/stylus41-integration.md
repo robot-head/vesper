@@ -47,10 +47,18 @@ edited here. The live document remains at41sections/AppendixA, modified
 2026-11-12T09:18:30.204Z, and §39.1 was reread. This branch initially depends on
 published PR110 head6faa7ec because it consumes the new actual macro parser.
 
-After the final boundary guard, the combined formatter suite passed31tests,
+After the final boundary guard, the combined formatter suite passed 31 tests,
 including the private-construction compile-fail case, with no ignores. Integrated
-root suites passed87tests across formatting, actions, actual CLI/stdio, recovery
-and source macro checking. The independent review caught the diagnostic parser's nested
+root suites passed 87 tests across formatting, actions, actual CLI/stdio, recovery
+and source macro checking. Independent actual acceptance passed 36 commands and
+three stdio sessions, including an explicitly expanded source run returning 42;
+all seven Rust CLI tests also passed against the final guarded binary. Strict
+workspace all-target Clippy and formatting pass on Rust 1.99.1. Existing source
+tooling (192 callbacks), editor (19 sessions), diagnostics (17 CLI/16 stdio),
+recovery (15 stdio/3 batch), and macro (115 commands/11 explicit runs) acceptance
+all still pass.
+
+The independent review caught the diagnostic parser's nested
 function resynchronization before publication; the formatter adds its own
 top-level qualifier and regression coverage rather than treating every Complete
 recovery descriptor as edit permission. Native3OS workflow tests real formatting,
