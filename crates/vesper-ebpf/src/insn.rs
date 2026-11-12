@@ -98,14 +98,8 @@ pub fn slots_from_bytes(bytes: &[u8]) -> Result<Vec<RawInsn>, DecodeError> {
     if !bytes.len().is_multiple_of(8) {
         return Err(DecodeError::TruncatedProgram { len: bytes.len() });
     }
-    Ok(bytes
-        .chunks_exact(8)
-        .map(|c| {
-            let mut b = [0u8; 8];
-            b.copy_from_slice(c);
-            RawInsn::from_bytes(b)
-        })
-        .collect())
+    let (chunks, _) = bytes.as_chunks::<8>();
+    Ok(chunks.iter().map(|c| RawInsn::from_bytes(*c)).collect())
 }
 
 /// A register number known to be in `0..=10`.

@@ -965,9 +965,7 @@ impl<'a> Verifier<'a> {
                 }
                 let frame_no = st.frames.len() as u8;
                 let mut f = new_frame(sp, Some(next), frame_no);
-                for i in 1..=5 {
-                    f.regs[i] = st.cur().regs[i];
-                }
+                f.regs[1..=5].copy_from_slice(&st.cur().regs[1..=5]);
                 st.frames.push(f);
                 Ok(Step::Jump(t))
             }
@@ -1959,9 +1957,7 @@ impl<'a> Verifier<'a> {
                 ));
             }
         };
-        for i in 1..=5 {
-            st.cur_mut().regs[i] = RegType::NotInit;
-        }
+        st.cur_mut().regs[1..=5].fill(RegType::NotInit);
         let ret = if matches!(ret, RegType::NotInit) {
             // void helpers still clobber r0
             RegType::Scalar(Scalar::UNKNOWN)
@@ -2033,9 +2029,7 @@ impl<'a> Verifier<'a> {
         let ret_pc = callee.return_pc.expect("callee has a return pc");
         let caller = st.cur_mut();
         caller.regs[0] = r0;
-        for i in 1..=5 {
-            caller.regs[i] = RegType::NotInit;
-        }
+        caller.regs[1..=5].fill(RegType::NotInit);
         Ok(Step::Jump(ret_pc))
     }
 
