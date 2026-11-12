@@ -3,7 +3,7 @@
 
 use crate::identity::{DefPath, PackageIdentity};
 use std::fmt;
-use vesper::ast::Span;
+use vesper_core::ast::Span;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ErrorKind {
@@ -85,13 +85,13 @@ pub struct BridgeError {
 }
 
 impl BridgeError {
-    pub(crate) fn new(kind: ErrorKind, mut diagnostics: Vec<BridgeDiagnostic>) -> Self {
+    pub fn new(kind: ErrorKind, mut diagnostics: Vec<BridgeDiagnostic>) -> Self {
         diagnostics.sort();
         diagnostics.dedup();
         BridgeError { kind, diagnostics }
     }
 
-    pub(crate) fn single(kind: ErrorKind, subject: Option<DefPath>, message: String) -> Self {
+    pub fn single(kind: ErrorKind, subject: Option<DefPath>, message: String) -> Self {
         BridgeError::new(
             kind,
             vec![BridgeDiagnostic {
@@ -103,7 +103,8 @@ impl BridgeError {
         )
     }
 
-    pub(crate) fn source(package: PackageIdentity, diags: Vec<vesper::ast::Diagnostic>) -> Self {
+    /// Maps checker diagnostics of `package` to a `Source` error.
+    pub fn source(package: PackageIdentity, diags: Vec<vesper_core::ast::Diagnostic>) -> Self {
         BridgeError::new(
             ErrorKind::Source,
             diags

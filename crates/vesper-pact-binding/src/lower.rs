@@ -4,11 +4,11 @@ use crate::binding::*;
 use crate::error::{BridgeError, ErrorKind, Sink, SourceSpan};
 use crate::identity::{DefKind, DefPath, PackageIdentity, valid_ident, valid_key};
 use crate::modes::{derive_scheme, to_pact};
-use crate::source::CheckedPackage;
+use crate::source::SourcePackage;
+use crate::source::SourceWorld;
 use crate::tables::*;
 use std::collections::{BTreeMap, BTreeSet};
-use vesper::ast::{Adt, Mode, Module};
-use vesper::check::World;
+use vesper_core::ast::{Adt, Mode};
 use vesper_pact::{
     AssocBound, AssocDecl, AssocIdx, Brand, ConformanceDecl, EffectDecl, EffectId, EffectLabel,
     EffectRow, GenericArg, Goal, ImplDecl, ImplId, ModeScheme, ModeTerm, ModelDecl, ModelId,
@@ -29,11 +29,6 @@ const PRIMITIVES: [(&str, Mode); 8] = [
     ("Never", Mode::Copy),
     ("String", Mode::Affine),
 ];
-
-/// The checker prelude, as collected by `World::collect` for every module.
-pub(crate) fn prelude_world() -> World {
-    World::collect(&Module::default()).0
-}
 
 /// Translation failure of one term.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,7 +58,7 @@ pub(crate) fn pact_kind(k: ParamKindDto) -> ParamKind {
 
 /// One package's input.
 pub(crate) struct Input<'a> {
-    pub package: &'a CheckedPackage,
+    pub package: &'a SourcePackage,
     pub bindings: &'a BindingsDto,
 }
 
@@ -80,13 +75,15 @@ type PendingEffect = (DefPath, Vec<(String, ParamKind)>, Vec<Mode>);
 struct PendingType<'a> {
     path: DefPath,
     origin: TypeOrigin,
-    adt: Option<(&'a World, &'a Adt, Option<SourceSpan>)>,
+    adt: Option<(&'a dyn SourceWorld, &'a Adt, Option<SourceSpan>)>,
     brands: Option<&'a BrandedTypeDto>,
 }
 
-pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
+pub(crate) fn lower(
+    prelude: &dyn SourceWorld,
+    inputs: &[Input<'_>],
+) -> Result<Lowered, BridgeError> {
     let mut sink = Sink::default();
-    let prelude = prelude_world();
 
     // Packages.
     let mut packages: Vec<PackageIdentity> = vec![PackageIdentity::builtin()];
@@ -159,12 +156,12 @@ pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
             brands: None,
         });
     }
-    let prelude_names: BTreeSet<String> = prelude.adts.keys().cloned().collect();
-    for adt in prelude.adts.values() {
+    let prelude_names: BTreeSet<String> = prelude.adts().keys().cloned().collect();
+    for adt in prelude.adts().values() {
         pending.push(PendingType {
             path: DefPath::new(builtin.clone(), DefKind::Type, adt.name.clone()),
             origin: TypeOrigin::Adt,
-            adt: Some((&prelude, adt, None)),
+            adt: Some((prelude, adt, None)),
             brands: None,
         });
     }
@@ -182,7 +179,7 @@ pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
             }
         }
         for name in i.package.adt_names() {
-            let Some(adt) = world.adts.get(name) else {
+            let Some(adt) = world.adts().get(name) else {
                 continue;
             };
             let span = i
@@ -203,7 +200,7 @@ pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
                 format!("brand parameters name `{name}`, which is not a source ADT of {pkg}"),
             );
         }
-        // Prelude ADTs are reserved; World::collect already rejects
+        // Prelude ADTs are reserved; the checker's World::collect rejects
         // redefinitions, so a successfully checked package cannot shadow them.
         debug_assert!(i.package.adt_names().all(|n| !prelude_names.contains(n)));
     }
@@ -211,7 +208,7 @@ pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
 
     // Effects.
     let mut pending_effects: Vec<PendingEffect> = vec![];
-    for e in prelude.effects.values() {
+    for e in prelude.effects().values() {
         pending_effects.push((
             DefPath::new(builtin.clone(), DefKind::Effect, e.name.clone()),
             generic_kinds(&e.generics),
@@ -221,7 +218,7 @@ pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
     for i in inputs {
         let world = i.package.world();
         for name in i.package.effect_names() {
-            if let Some(e) = world.effects.get(name) {
+            if let Some(e) = world.effects().get(name) {
                 pending_effects.push((
                     DefPath::new(i.package.identity().clone(), DefKind::Effect, name),
                     generic_kinds(&e.generics),
@@ -360,7 +357,7 @@ pub(crate) fn lower(inputs: &[Input<'_>]) -> Result<Lowered, BridgeError> {
                 scheme(Mode::Copy, (0..*k as u32).collect()),
             ),
             (TypeOrigin::Adt, Some((world, adt, span))) => {
-                let (world, adt): (&World, &Adt) = (world, adt);
+                let (world, adt): (&dyn SourceWorld, &Adt) = (*world, adt);
                 let params = adt
                     .generics
                     .iter()
@@ -494,13 +491,13 @@ fn scheme(base: Mode, joins: Vec<u32>) -> ModeScheme {
     }
 }
 
-fn generic_bounds(g: &[vesper::ast::Generic]) -> Vec<Mode> {
+fn generic_bounds(g: &[vesper_core::ast::Generic]) -> Vec<Mode> {
     g.iter()
         .map(|g| if g.row { Mode::Linear } else { g.bound })
         .collect()
 }
 
-fn generic_kinds(g: &[vesper::ast::Generic]) -> Vec<(String, ParamKind)> {
+fn generic_kinds(g: &[vesper_core::ast::Generic]) -> Vec<(String, ParamKind)> {
     g.iter()
         .map(|g| {
             (

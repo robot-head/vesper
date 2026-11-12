@@ -7,7 +7,7 @@
 
 use crate::identity::{DefPath, PackageIdentity};
 use std::collections::BTreeMap;
-use vesper::ast::Mode;
+use vesper_core::ast::Mode;
 use vesper_pact::{
     EffectId, ImplId, ModeScheme, ModelId, PackageId, ParamKind, TraitId, TypeCtorId,
 };

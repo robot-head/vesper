@@ -10,9 +10,9 @@
 //! computed before the constructor's fields are visited), so agreement on
 //! argument modes implies agreement on every ground well-formed instantiation.
 
+use crate::source::SourceWorld;
 use std::collections::BTreeMap;
-use vesper::ast::{Adt, Effects, Mode, Type};
-use vesper::check::World;
+use vesper_core::ast::{Adt, Effects, Mode, Type};
 use vesper_pact::ModeScheme;
 
 /// At most `3^8` argument-mode combinations are verified per constructor.
@@ -41,7 +41,7 @@ fn probe_name(i: usize) -> String {
     format!("$probe{i}")
 }
 
-fn evaluate(world: &World, adt: &Adt, modes: &[Option<Mode>]) -> Mode {
+fn evaluate(world: &dyn SourceWorld, adt: &Adt, modes: &[Option<Mode>]) -> Mode {
     let mut bounds = BTreeMap::new();
     let args = adt
         .generics
@@ -60,7 +60,7 @@ fn evaluate(world: &World, adt: &Adt, modes: &[Option<Mode>]) -> Mode {
 }
 
 /// Derives and verifies the scheme of `adt` against `world`.
-pub(crate) fn derive_scheme(world: &World, adt: &Adt) -> Result<ModeScheme, String> {
+pub(crate) fn derive_scheme(world: &dyn SourceWorld, adt: &Adt) -> Result<ModeScheme, String> {
     let type_params: Vec<usize> = adt
         .generics
         .iter()
@@ -112,7 +112,7 @@ pub(crate) fn derive_scheme(world: &World, adt: &Adt) -> Result<ModeScheme, Stri
 }
 
 fn verify(
-    world: &World,
+    world: &dyn SourceWorld,
     adt: &Adt,
     params: &[usize],
     k: usize,
