@@ -223,15 +223,47 @@ impl Place {
             .join(".")
     }
 }
+// Diagnostic-only evidence. This is deliberately excluded from ownership state
+// comparisons and all published World/IR schemas. Missing/capped evidence stays
+// absent rather than inventing a last use. Each binding retains at most four
+// source events and only bounded place paths.
+const MAX_MOVE_CAUSES: usize = 4;
+#[derive(Debug, Clone)]
+struct MoveCause {
+    path: Vec<String>,
+    span: Span,
+}
 #[derive(Debug, Clone)]
 struct Binding {
     ty: Type,
     pass: Pass,
     projections: Vec<Vec<String>>,
     moved: Vec<Vec<String>>,
+    move_causes: Vec<MoveCause>,
     span: Span,
     integer: Option<i128>,
     nonzero: bool,
+}
+impl Binding {
+    fn remember_move(&mut self, path: &[String], span: Span) {
+        if self.move_causes.len() >= MAX_MOVE_CAUSES
+            || path.len() > 64
+            || path
+                .iter()
+                .try_fold(0usize, |n, p| n.checked_add(p.len()))
+                .is_none_or(|n| n > 1024)
+            || self
+                .move_causes
+                .iter()
+                .any(|c| c.path == path && c.span == span)
+        {
+            return;
+        }
+        self.move_causes.push(MoveCause {
+            path: path.to_vec(),
+            span,
+        });
+    }
 }
 #[derive(Debug, Clone, Default)]
 struct Env {
@@ -386,7 +418,7 @@ struct Checker<'a> {
     results: BTreeMap<String, Type>,
     handler_effects: BTreeMap<(usize, usize), Effects>,
     observations: Vec<(usize, Effects)>,
-    state_guards: Vec<(usize, usize, Type)>,
+    state_guards: Vec<(usize, usize, Type, Span)>,
     partial_ops: BTreeSet<(usize, usize)>,
     overflow_ops: BTreeSet<(usize, usize)>,
     dead: usize,
@@ -396,7 +428,7 @@ struct Checker<'a> {
     allowed: Effects,
     caps: Vec<Effect>,
     cap_aliases: BTreeMap<String, String>,
-    loans: Vec<(Place, Pass)>,
+    loans: Vec<(Place, Pass, Span)>,
     effect_inference: Vec<(bool, usize, Effects, String)>,
     traits: Option<&'a dyn TraitCalls>,
     current: String,
@@ -405,6 +437,23 @@ struct Checker<'a> {
 impl Checker<'_> {
     fn error(&mut self, code: &str, msg: impl Into<String>, span: Span) {
         self.diagnostics.push(Diagnostic::new(code, msg, span));
+    }
+    // Called immediately after the unchanged primary producer. Fixed messages
+    // and at most eight labels bound new metadata independently of source names.
+    fn related(&mut self, span: Span, message: &'static str) {
+        if let Some(d) = self.diagnostics.last_mut()
+            && d.related.len() < 8
+        {
+            d.related.push(DiagnosticLabel {
+                span,
+                message: message.into(),
+            });
+        }
+    }
+    fn help(&mut self, message: &'static str) {
+        if let Some(d) = self.diagnostics.last_mut() {
+            d.help = Some(message.into());
+        }
     }
     fn mode(&self, t: &Type) -> Mode {
         self.world.mode(t, &self.bounds)
@@ -661,6 +710,7 @@ impl Checker<'_> {
                         pass: p.pass,
                         projections: p.projections.clone(),
                         moved: vec![],
+                        move_causes: vec![],
                         span: p.span.clone(),
                         integer: None,
                         nonzero: false,
@@ -772,6 +822,8 @@ impl Checker<'_> {
                 && !b.moved.iter().any(Vec::is_empty)
             {
                 self.error("E0302",format!("linear value '{n}' must be consumed exactly once; destructure it or pass it to a sink parameter"),span.clone());
+                self.related(b.span.clone(), "linear binding introduced here");
+                self.help("Every owned linear binding must be consumed exactly once on every returning path.");
             }
         }
     }
@@ -780,17 +832,30 @@ impl Checker<'_> {
             self.error("E0201", format!("unknown binding '{}'", p.root), span);
             return Type::Infer;
         };
+        let mut transfer_allowed = true;
         if b.moved
             .iter()
             .any(|path| path.starts_with(&p.path) || p.path.starts_with(path))
         {
+            transfer_allowed = false;
             self.error(
                 "E0303",
                 format!("use of moved place '{}'", p.display()),
                 span.clone(),
             );
+            self.related(b.span.clone(), "binding introduced here");
+            for cause in &b.move_causes {
+                if cause.path.starts_with(&p.path) || p.path.starts_with(&cause.path) {
+                    self.related(
+                        cause.span.clone(),
+                        "earlier ownership-taking use of this place",
+                    );
+                }
+            }
+            self.help("A moved non-copy place cannot be used again, including through an overlapping projection.");
         }
         if !b.projections.is_empty() && !b.projections.iter().any(|path| p.path.starts_with(path)) {
+            transfer_allowed = false;
             self.error(
                 "E0304",
                 format!(
@@ -801,6 +866,7 @@ impl Checker<'_> {
             );
         }
         let ty = self.world.field(&b.ty, &p.path).unwrap_or_else(|| {
+            transfer_allowed = false;
             self.error(
                 "E0202",
                 format!("unknown field in '{}'", p.display()),
@@ -808,11 +874,12 @@ impl Checker<'_> {
             );
             Type::Infer
         });
-        for (loan, mode) in self.loans.clone() {
+        for (loan, mode, origin) in self.loans.clone() {
             let exclusive = mode != Pass::In
                 || matches!(usage, Usage::Borrow(Pass::Inout))
                 || (matches!(usage, Usage::Own) && self.mode(&ty) != Mode::Copy);
             if exclusive && loan.overlaps(p) {
+                transfer_allowed = false;
                 self.error(
                     "E0301",
                     format!(
@@ -822,26 +889,39 @@ impl Checker<'_> {
                     ),
                     span.clone(),
                 );
+                self.related(origin, "conflicting argument access requested here");
+                self.related(b.span.clone(), "accessed binding introduced here");
+                self.help("An exclusive argument loan cannot overlap another access while the call's arguments are evaluated.");
             }
         }
         match usage {
             Usage::Own if self.mode(&ty) != Mode::Copy => {
                 if b.pass != Pass::Sink {
+                    transfer_allowed = false;
                     self.error(
                         "E0305",
                         format!("cannot move '{}' through a borrowed parameter", p.display()),
                         span.clone(),
                     );
+                    self.related(b.span.clone(), "borrowed parameter declared here");
+                    self.help("Borrowed parameters do not transfer ownership of non-copy values.");
                 }
                 if !p.path.is_empty() && self.mode(&b.ty) == Mode::Linear {
+                    transfer_allowed = false;
                     self.error(
                         "E0306",
                         "destructure a linear aggregate before moving its fields",
                         span.clone(),
                     );
+                    self.related(b.span.clone(), "linear aggregate binding introduced here");
                 }
                 if let Some(b) = env.bindings.get_mut(&p.root) {
                     b.moved.push(p.path.clone());
+                    // Keep error recovery unchanged, but failed move attempts
+                    // are not witnesses of a preceding ownership transfer.
+                    if transfer_allowed {
+                        b.remember_move(&p.path, span.clone());
+                    }
                 }
             }
             Usage::Borrow(Pass::Inout) if b.pass == Pass::In => {
@@ -850,6 +930,7 @@ impl Checker<'_> {
                     format!("cannot mutate shared parameter '{}'", p.root),
                     span,
                 );
+                self.related(b.span.clone(), "shared parameter declared here");
             }
             _ => {}
         }
@@ -2036,7 +2117,7 @@ impl Checker<'_> {
                 span.clone(),
             );
         }
-        let mut loans: Vec<(Place, Pass)> = vec![];
+        let mut loans: Vec<(Place, Pass, Span)> = vec![];
         let mut constraints = vec![];
         for ((expr, explicit), param) in actuals.into_iter().zip(&f.params) {
             if let Some(pass) = explicit
@@ -2074,12 +2155,21 @@ impl Checker<'_> {
                         .collect()
                 };
                 for p in paths {
-                    for (old, mode) in &loans {
+                    for (old, mode, origin) in &loans {
                         if p.overlaps(old) && !(param.pass == Pass::In && *mode == Pass::In) {
                             self.error("E0301",format!("overlapping arguments '{}' and '{}' violate alias XOR mutability",old.display(),p.display()),expr.span.clone());
+                            self.related(
+                                origin.clone(),
+                                if origin == &expr.span {
+                                    "overlapping projection of this argument introduced here"
+                                } else {
+                                    "earlier overlapping argument evaluated here"
+                                },
+                            );
+                            self.help("Overlapping argument places are allowed only when both arguments use shared in passing.");
                         }
                     }
-                    loans.push((p, param.pass));
+                    loans.push((p, param.pass, expr.span.clone()));
                 }
             }
             let usage = if param.pass == Pass::Sink {
@@ -2137,7 +2227,7 @@ impl Checker<'_> {
             self.loans.extend(
                 loans
                     .iter()
-                    .filter(|(_, mode)| *mode != Pass::Sink)
+                    .filter(|(_, mode, _)| *mode != Pass::Sink)
                     .cloned(),
             );
             if param.pass == Pass::Inout {
@@ -2473,21 +2563,34 @@ impl Checker<'_> {
         span: Span,
         target: Option<usize>,
     ) {
-        for (index, depth, state) in self.state_guards.clone() {
+        for (index, depth, state, origin) in self.state_guards.clone() {
             if depth == self.effect_inference.len() && target.is_none_or(|target| index > target) {
                 self.error(
                     "E0402",
                     format!("abortable effect '{effect}' may discard linear handler state {state}"),
                     span.clone(),
                 );
+                self.related(origin, "linear handler state initializer");
+                self.help("An abortable checkpoint may discard the suspended continuation and its owned linear state.");
             }
         }
-        if self.loans.iter().any(|(_, mode)| *mode == Pass::Inout) {
+        if self.loans.iter().any(|(_, mode, _)| *mode == Pass::Inout) {
             self.error(
                 "E0402",
                 "abortable effect crosses an active inout argument loan",
                 span.clone(),
             );
+            let origins = self
+                .loans
+                .iter()
+                .filter(|(_, mode, _)| *mode == Pass::Inout)
+                .take(8)
+                .map(|(_, _, origin)| origin.clone())
+                .collect::<Vec<_>>();
+            for origin in origins {
+                self.related(origin, "inout argument access requested here");
+            }
+            self.help("An abortable checkpoint cannot cross an active exclusive argument loan.");
         }
         for (n, b) in &env.bindings {
             if b.pass == Pass::Sink
@@ -2495,9 +2598,15 @@ impl Checker<'_> {
                 && !b.moved.iter().any(Vec::is_empty)
             {
                 self.error("E0402",format!("potentially abortable effect '{effect}' may discard live linear value '{n}'"),span.clone());
+                self.related(b.span.clone(), "live linear binding introduced here");
+                self.help("An abortable checkpoint may discard a continuation that still owns this linear binding.");
             }
             if b.pass == Pass::Inout {
                 self.error("E0402",format!("potentially abortable effect '{effect}' crosses active inout parameter '{n}'"),span.clone());
+                self.related(b.span.clone(), "active inout parameter declared here");
+                self.help(
+                    "An abortable checkpoint cannot cross an active exclusive parameter borrow.",
+                );
             }
         }
     }
@@ -2510,10 +2619,38 @@ impl Checker<'_> {
                         format!("linear value '{n}' is consumed on only some control-flow paths"),
                         span.clone(),
                     );
+                    self.related(binding.span.clone(), "linear binding introduced here");
+                    for branch in [x, y] {
+                        if branch.span == binding.span {
+                            for cause in &branch.move_causes {
+                                // Incoming history is shared by both branches;
+                                // it is not a branch-specific transfer witness.
+                                if !binding.move_causes.iter().any(|before| {
+                                    before.path == cause.path && before.span == cause.span
+                                }) {
+                                    self.related(
+                                        cause.span.clone(),
+                                        "ownership-taking use on one control-flow path",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    self.help(
+                        "Returning control-flow paths must agree on linear ownership state; borrowed parameters do not transfer ownership.",
+                    );
                 }
                 binding.moved = x.moved.iter().chain(&y.moved).cloned().collect();
                 binding.moved.sort();
                 binding.moved.dedup();
+                binding.move_causes.clear();
+                for branch in [x, y] {
+                    if branch.span == binding.span {
+                        for cause in &branch.move_causes {
+                            binding.remember_move(&cause.path, cause.span.clone());
+                        }
+                    }
+                }
                 binding.integer = x.integer.filter(|n| Some(*n) == y.integer);
                 binding.nonzero = x.nonzero && y.nonzero;
             }
@@ -2733,6 +2870,10 @@ impl Checker<'_> {
                         format!("shadowing would discard linear value '{n}'"),
                         p.span.clone(),
                     );
+                    self.related(old.span.clone(), "unconsumed linear binding being shadowed");
+                    self.help(
+                        "A new binding does not consume the linear value with the same name.",
+                    );
                 }
                 env.bindings.insert(
                     n.clone(),
@@ -2741,6 +2882,7 @@ impl Checker<'_> {
                         pass,
                         projections: vec![],
                         moved: vec![],
+                        move_causes: vec![],
                         span: p.span.clone(),
                         integer: None,
                         nonzero: false,
@@ -2899,6 +3041,7 @@ impl Checker<'_> {
                     pass: p.pass,
                     projections: p.projections.clone(),
                     moved: vec![],
+                    move_causes: vec![],
                     span: p.span.clone(),
                     integer: None,
                     nonzero: false,
@@ -3001,6 +3144,9 @@ impl Checker<'_> {
                 self.caps.len() - 1,
                 self.effect_inference.len(),
                 state_type.clone(),
+                state
+                    .as_ref()
+                    .map_or_else(|| span.clone(), |(_, e)| e.span.clone()),
             ));
         }
         self.start_observing();

@@ -1,0 +1,86 @@
+name: Causal compiler diagnostics
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/vesper-core/**'
+      - 'crates/vesper-syntax/**'
+      - 'crates/vesper-span/**'
+      - 'crates/vesper-diagnostics/**'
+      - 'src/**'
+      - 'tests/diagnostic_causes.rs'
+      - 'tests/ir_diagnostic_causes.rs'
+      - 'tests/diagnostic_bounds.rs'
+      - 'tests/diagnostics_cli.rs'
+      - 'scripts/test-diagnostics.sh'
+      - 'scripts/check-diagnostics.py'
+      - '.github/workflows/diagnostics.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/vesper-core/**'
+      - 'crates/vesper-syntax/**'
+      - 'crates/vesper-span/**'
+      - 'crates/vesper-diagnostics/**'
+      - 'src/**'
+      - 'tests/diagnostic_causes.rs'
+      - 'tests/ir_diagnostic_causes.rs'
+      - 'tests/diagnostic_bounds.rs'
+      - 'tests/diagnostics_cli.rs'
+      - 'scripts/test-diagnostics.sh'
+      - 'scripts/check-diagnostics.py'
+      - '.github/workflows/diagnostics.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diagnostics-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  native-diagnostics:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test diagnostic model, spans and actual renderer
+        run: cargo test --locked -p vesper-core -p vesper-span -p vesper-diagnostics --all-targets
+      - name: Test genuine causes, frontend bounds and CLI/stdio payloads
+        run: >-
+          cargo test --locked -p vesper --test diagnostic_causes
+          --test ir_diagnostic_causes --test diagnostic_bounds --test diagnostics_cli
+      - name: Check strict diagnostic and root Clippy
+        run: >-
+          cargo clippy --locked --all-targets -p vesper -p vesper-core
+          -p vesper-span -p vesper-diagnostics -- -D warnings
+      - name: Execute disposable CLI/stdio acceptance and renderer example
+        run: scripts/test-diagnostics.sh

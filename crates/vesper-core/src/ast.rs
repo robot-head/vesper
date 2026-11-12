@@ -4,11 +4,23 @@ use std::{collections::BTreeSet, ops::Range};
 
 pub type Span = Range<usize>;
 pub type TypeMap = std::collections::BTreeMap<(usize, usize), Type>;
+/// A supplied secondary source label. Its range and causal meaning are
+/// validated by producers and source-aware adapters, not by this metadata DTO.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticLabel {
+    pub span: Span,
+    pub message: String,
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Diagnostic {
     pub code: String,
     pub message: String,
     pub span: Span,
+    /// Ordered secondary evidence; labels do not authorize edits or prove facts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<DiagnosticLabel>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub help: Option<String>,
 }
 impl Diagnostic {
     pub fn new(code: &str, message: impl Into<String>, span: Span) -> Self {
@@ -16,7 +28,20 @@ impl Diagnostic {
             code: code.into(),
             message: message.into(),
             span,
+            related: Vec::new(),
+            help: None,
         }
+    }
+    pub fn with_related(mut self, span: Span, message: impl Into<String>) -> Self {
+        self.related.push(DiagnosticLabel {
+            span,
+            message: message.into(),
+        });
+        self
+    }
+    pub fn with_help(mut self, message: impl Into<String>) -> Self {
+        self.help = Some(message.into());
+        self
     }
 }
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

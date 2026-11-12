@@ -7,6 +7,7 @@ on:
     paths:
       - 'crates/vesper-span/**'
       - 'crates/vesper-lsp/**'
+      - 'crates/vesper-diagnostics/**'
       - 'crates/vesper-serde/**'
       - 'crates/vesper-syntax/**'
       - 'crates/vesper-core/**'
@@ -27,6 +28,7 @@ on:
     paths:
       - 'crates/vesper-span/**'
       - 'crates/vesper-lsp/**'
+      - 'crates/vesper-diagnostics/**'
       - 'crates/vesper-serde/**'
       - 'crates/vesper-syntax/**'
       - 'crates/vesper-core/**'
