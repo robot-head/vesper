@@ -140,9 +140,9 @@ Host: Linux 6.18.44 x86_64 (Intel Xeon @ 2.30GHz), rustc 1.97.0, Cranelift
 | `cargo fmt --all -- --check` | clean |
 | `cargo clippy -p vesper --all-targets -- -D warnings` | clean |
 | `cargo test --test source_native_suspension` | 10 passed |
-| `cargo test --test native_suspend_abi` | 9 passed |
-| `cargo test -p vesper` (whole root package, incl. existing backend tests) | 393 passed, 0 failed |
-| `cargo test --target aarch64-unknown-linux-gnu --test source_native_suspension --test native_suspend_abi` with `RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu"` | 10 + 9 passed under QEMU (JIT on emulated AArch64) |
+| `cargo test --test native_suspend_abi` | 10 passed |
+| `cargo test -p vesper` (whole root package, incl. existing backend tests) | 394 passed, 0 failed |
+| `cargo test --target aarch64-unknown-linux-gnu --test source_native_suspension --test native_suspend_abi` with `RUNNER="qemu-aarch64 -L /usr/aarch64-linux-gnu"` | 10 + 9 passed under QEMU (JIT on emulated AArch64), at the first commit; the review-fix commit adds one planning-only test not rerun under QEMU |
 | `cargo run --example native-pulse -- <dir>` | kernel io_uring run completed; x86_64 (5208 B) and AArch64 (4048 B) objects written |
 
 Acceptance coverage (`tests/source_native_suspension.rs`):
@@ -185,7 +185,9 @@ Acceptance coverage (`tests/source_native_suspension.rs`):
 Negative coverage (`tests/native_suspend_abi.rs`): wrong, missing, duplicate,
 extra and unknown bindings; Yield/Read kind mismatches; bad constructors.
 Unsupported shapes: non-linear or generic effects, by-value and `sink` buffers,
-non-word buffers, scalar results, entry parameters, suspending recursion.
+non-word buffers, scalar results, entry parameters, suspending recursion, and
+failure types containing function values (no decodable byte image). Locals
+that shadow a world function name are not counted as recursive calls.
 The same errors come back from `object`. Also covered:
 
 * Duplicate (`UnknownToken`) and stale (`StaleToken`) resumes through

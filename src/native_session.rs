@@ -342,14 +342,44 @@ fn align8(n: u32) -> Result<u32, String> {
         .ok_or_else(|| "session data frame is too large".into())
 }
 
+/// Spans of names that the lowered IR resolves to world functions rather
+/// than to local bindings (the same resolution ordinary instance discovery
+/// uses), so shadowing locals and local closures add no call edges.
+type References = BTreeSet<(usize, usize, String)>;
+fn function_references(world: &World) -> References {
+    crate::ir::lower_world(world)
+        .functions
+        .values()
+        .flat_map(|f| {
+            f.blocks
+                .iter()
+                .flat_map(|b| &b.instructions)
+                .filter_map(|i| match &i.op {
+                    crate::ir::Op::Read { root, .. }
+                        if world.functions.contains_key(root) && !f.locals.contains_key(root) =>
+                    {
+                        Some((i.span.start, i.span.end, root.clone()))
+                    }
+                    _ => None,
+                })
+        })
+        .collect()
+}
+
 /// Direct callees of a function body that name world functions.
-fn callees(world: &World, f: &Function) -> BTreeSet<String> {
+fn callees(world: &World, references: &References, f: &Function) -> BTreeSet<String> {
     let mut out = BTreeSet::new();
     if let Some(body) = &f.body {
         visit(body, &mut |e| {
             if let ExprKind::Call { callee, .. } = &e.kind {
                 match &callee.kind {
-                    ExprKind::Name(n) if world.functions.contains_key(n) => {
+                    // A callee typed at its own span is a local value.
+                    ExprKind::Name(n)
+                        if world.functions.contains_key(n)
+                            && !world
+                                .types
+                                .contains_key(&(callee.span.start, callee.span.end)) =>
+                    {
                         out.insert(n.clone());
                     }
                     ExprKind::Field(base, method) => {
@@ -364,7 +394,7 @@ fn callees(world: &World, f: &Function) -> BTreeSet<String> {
                 }
             }
             if let ExprKind::Name(n) = &e.kind
-                && world.functions.contains_key(n)
+                && references.contains(&(e.span.start, e.span.end, n.clone()))
             {
                 out.insert(n.clone());
             }
@@ -379,6 +409,7 @@ fn callees(world: &World, f: &Function) -> BTreeSet<String> {
 fn reject_suspending_recursion(world: &World, entry: &str) -> Result<(), String> {
     fn dfs(
         world: &World,
+        references: &References,
         name: &str,
         path: &mut Vec<String>,
         done: &mut BTreeSet<String>,
@@ -396,20 +427,21 @@ fn reject_suspending_recursion(world: &World, entry: &str) -> Result<(), String>
             return Ok(());
         };
         path.push(name.into());
-        for callee in callees(world, f) {
+        for callee in callees(world, references, f) {
             if world
                 .functions
                 .get(&callee)
                 .is_some_and(|g| specialized_function(world, g))
             {
-                dfs(world, &callee, path, done)?;
+                dfs(world, references, &callee, path, done)?;
             }
         }
         path.pop();
         done.insert(name.into());
         Ok(())
     }
-    dfs(world, entry, &mut vec![], &mut BTreeSet::new())
+    let references = function_references(world);
+    dfs(world, &references, entry, &mut vec![], &mut BTreeSet::new())
 }
 
 /// Validate explicit bindings against the checked entry signature and the
@@ -525,6 +557,13 @@ pub fn plan(world: &World, entry: &str, bindings: &[EffectBinding]) -> Result<Pl
     };
     let mut failure_size = 0;
     for ty in &fails {
+        // Function values are backend-local closure tags with no decodable
+        // byte image, so a raised callable could not be reported faithfully.
+        if contains_function(world, ty) {
+            return Err(format!(
+                "entry failure type {ty} contains a function value, which a session exit cannot report"
+            ));
+        }
         failure_size = failure_size.max(Layout::of(world, ty)?.size);
     }
     let staging_size = effects

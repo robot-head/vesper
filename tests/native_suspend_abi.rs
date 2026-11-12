@@ -237,6 +237,13 @@ fn unsupported_source_shapes_are_rejected_before_code_exists() {
     );
     shape(
         &format!(
+            "{TYPES} linear effect Pulse {{ fn pause() -> Tick; }} fn main() -> u64 eff [Pulse, Fail[fn() -> u64]] {{ 1 }}"
+        ),
+        &pulse(vec![pause()]),
+        "contains a function value",
+    );
+    shape(
+        &format!(
             "{TYPES} linear effect Pulse {{ fn pause() -> Tick; }} fn main(x: u64) -> u64 eff [Pulse] {{ x }}"
         ),
         &pulse(vec![pause()]),
@@ -252,6 +259,16 @@ fn unsupported_source_shapes_are_rejected_before_code_exists() {
         }],
         "generic external effect Chan is unsupported",
     );
+}
+
+#[test]
+fn locals_shadowing_functions_are_not_recursive_calls() {
+    // `main` and `tick` are locals here, not calls of the world functions.
+    let source = format!(
+        "{TYPES} linear effect Pulse {{ fn pause() -> Tick; }} fn tick() -> u64 eff [Pulse] {{ match Pulse::pause() {{ Ticked => 1, TickFailed(c) => 2, TickCancelled => 3, }} }} fn main() -> u64 eff [Pulse] {{ let main: u64 = 40; let tick = |x: u64| wrapping_add(x, 1); wrapping_add(tick(main), 1) }}"
+    );
+    let w = world(&source);
+    plan(&w, "main", &pulse(vec![pause()])).unwrap();
 }
 
 #[test]
