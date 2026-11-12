@@ -74,7 +74,7 @@ fn place_graph_ancestry() {
 #[test]
 fn cfg_and_tokens() {
     let p = parser::parse(
-        "fn inc(inout x: i64) { x += 1; } fn main() -> i64 { let x = 0; if true { inc(inout x); } else { x = 2; }; x }",
+        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let x = 0; if true { inc(inout x); } else { x = 2; }; x }",
     );
     let c = check::check(&p.module);
     assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);

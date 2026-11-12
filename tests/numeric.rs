@@ -38,15 +38,24 @@ fn rejects(source: &str) {
 }
 #[test]
 fn byte_wrap() {
-    eval("fn main() -> u8 { let x: u8 = 255; x + 2 }", "1");
+    eval(
+        "fn main() -> u8 { let x: u8 = 255; wrapping_add(x, 2) }",
+        "1",
+    );
 }
 #[test]
 fn byte_compound_wrap() {
-    eval("fn main() -> u8 { let x: u8 = 255; x += 2; x }", "1");
+    eval(
+        "fn main() -> u8 { let x: u8 = 255; x = wrapping_add(x, 2); x }",
+        "1",
+    );
 }
 #[test]
 fn word_wrap() {
-    eval("fn main() -> u32 { let x: u32 = 4294967295; x + 2 }", "1");
+    eval(
+        "fn main() -> u32 { let x: u32 = 4294967295; wrapping_add(x, 2) }",
+        "1",
+    );
 }
 #[test]
 fn unsigned_max() {
@@ -57,7 +66,10 @@ fn unsigned_max() {
 }
 #[test]
 fn unsigned_wrap() {
-    eval("fn main() -> u64 { 18446744073709551615 + 2 }", "1");
+    eval(
+        "fn main() -> u64 { wrapping_add(18446744073709551615, 2) }",
+        "1",
+    );
 }
 #[test]
 fn unsigned_compare() {
@@ -90,14 +102,14 @@ fn signed_min() {
 #[test]
 fn signed_wrap() {
     eval(
-        "fn main() -> i64 { 9223372036854775807 + 1 }",
+        "fn main() -> i64 { wrapping_add(9223372036854775807, 1) }",
         "-9223372036854775808",
     );
 }
 #[test]
 fn byte_argument() {
     eval(
-        "fn inc(x: u8) -> u8 { x + 1 } fn main() -> u8 { inc(255) }",
+        "fn inc(x: u8) -> u8 { wrapping_add(x, 1) } fn main() -> u8 { inc(255) }",
         "0",
     );
 }
@@ -155,10 +167,10 @@ fn generic_nested_literal_infers_later_argument() {
 }
 
 #[test]
-fn signed_division_overflow_wraps() {
+fn signed_division_overflow_raises() {
     eval(
-        "fn main() -> i64 { let x: i64 = -9223372036854775808; x / -1 }",
-        "-9223372036854775808",
+        "fn main() -> i64 { let x: i64 = -9223372036854775808; handle Fail[ArithOverflow] in { x / -1 } with { return v => v, raise(e, k) => 7, } }",
+        "7",
     );
 }
 

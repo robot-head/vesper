@@ -1,8 +1,10 @@
 copy struct Broker { index: u64, metrics: u64, config: u64 }
 
+// A checked failure may not abort across an inout parameter, so these
+// counters are explicitly modular.
 fn append(inout broker.{index, metrics}: Broker, in config: u64) {
-    broker.index += config;
-    broker.metrics += 1;
+    broker.index = wrapping_add(broker.index, config);
+    broker.metrics = wrapping_add(broker.metrics, 1);
 }
 
 fn main() -> u64 {

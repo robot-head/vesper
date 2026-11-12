@@ -13,6 +13,9 @@ pub struct World {
     pub handler_effects: BTreeMap<(usize, usize), Effects>,
     /// Primitive operations which can raise Fail[RuntimeError].
     pub partial_ops: BTreeSet<(usize, usize)>,
+    /// Checked integer operations which can raise Fail[ArithOverflow]. Spans
+    /// absent here were proved in range (see `vesper.arith.checked/1`).
+    pub overflow_ops: BTreeSet<(usize, usize)>,
     pub string_capacity: usize,
     pub calls: BTreeMap<(usize, usize), BTreeMap<String, Type>>,
 }
@@ -20,7 +23,7 @@ impl World {
     pub fn collect(module: &Module) -> (Self, Vec<Diagnostic>) {
         let mut w = Self::default();
         let mut errors = vec![];
-        let builtins=crate::parser::parse("copy enum Option[T] { None, Some(T) } copy enum Result[T, E] { Ok(T), Err(E) } copy enum RuntimeError { DivisionByZero, IndexOutOfBounds } effect Fail[E] { fn raise(sink error: E) -> Never; }").module;
+        let builtins = crate::parser::parse(&format!("copy enum Option[T] {{ None, Some(T) }} copy enum Result[T, E] {{ Ok(T), Err(E) }} copy enum RuntimeError {{ DivisionByZero, IndexOutOfBounds }} {} effect Fail[E] {{ fn raise(sink error: E) -> Never; }}", crate::numeric::OVERFLOW_DECLARATION)).module;
         for item in builtins.items.iter().chain(module.items.iter()) {
             match item {
                 Item::Adt(a) => {
@@ -49,6 +52,13 @@ impl World {
                     }
                 }
                 Item::Function(f) => {
+                    if crate::numeric::wrapping_intrinsic(&f.name).is_some() {
+                        errors.push(Diagnostic::new(
+                            "E0100",
+                            format!("'{}' is a reserved arithmetic intrinsic", f.name),
+                            f.span.clone(),
+                        ));
+                    }
                     if w.functions.insert(f.name.clone(), (**f).clone()).is_some() {
                         errors.push(Diagnostic::new(
                             "E0100",
@@ -259,6 +269,7 @@ pub fn check(module: &Module) -> Checked {
             observations: vec![],
             state_guards: vec![],
             partial_ops: BTreeSet::new(),
+            overflow_ops: BTreeSet::new(),
             dead: 0,
             string_capacity: 0,
             bounds: BTreeMap::new(),
@@ -281,6 +292,7 @@ pub fn check(module: &Module) -> Checked {
             results,
             handler_effects,
             partial_ops,
+            overflow_ops,
             string_capacity,
             ..
         } = c;
@@ -291,6 +303,7 @@ pub fn check(module: &Module) -> Checked {
         world.function_results = results;
         world.handler_effects = handler_effects;
         world.partial_ops = partial_ops;
+        world.overflow_ops = overflow_ops;
         world.string_capacity = string_capacity;
         diagnostics = errors;
         if !changed {
@@ -327,6 +340,7 @@ struct Checker<'a> {
     observations: Vec<(usize, Effects)>,
     state_guards: Vec<(usize, usize, Type)>,
     partial_ops: BTreeSet<(usize, usize)>,
+    overflow_ops: BTreeSet<(usize, usize)>,
     dead: usize,
     string_capacity: usize,
     bounds: BTreeMap<String, Mode>,
@@ -1035,6 +1049,14 @@ impl Checker<'_> {
                     if !numeric(&t) {
                         self.error("E0200", "negation requires a number", e.span.clone());
                     }
+                    if let Some(kind) = crate::numeric::IntegerKind::from_type(&t)
+                        && self
+                            .integer_fact(v, env)
+                            .and_then(|n| kind.checked_neg(n))
+                            .is_none()
+                    {
+                        self.overflow_failure(env, e.span.clone());
+                    }
                     t
                 }
             }
@@ -1048,6 +1070,9 @@ impl Checker<'_> {
                     Type::Infer
                 };
                 let a = self.expr_expected(l, env, Usage::Own, &goal);
+                // The dividend's fact is the value already evaluated: the right
+                // operand may reassign a binding the left one read.
+                let left_fact = self.integer_fact(l, env);
                 let right_goal = if goal != Type::Infer {
                     goal
                 } else if !matches!(a, Type::IntLiteral(_)) {
@@ -1107,6 +1132,12 @@ impl Checker<'_> {
                 if matches!(op.as_str(), "/" | "%") && integer(&common) && !self.nonzero(r, env) {
                     self.primitive_failure(env, e.span.clone());
                 }
+                if let Some(kind) = crate::numeric::IntegerKind::from_type(&common)
+                    && crate::numeric::may_overflow(op, kind)
+                    && !self.in_range(op, kind, left_fact, self.integer_fact(r, env))
+                {
+                    self.overflow_failure(env, e.span.clone());
+                }
                 if matches!(
                     op.as_str(),
                     "&&" | "||" | "==" | "!=" | "<" | "<=" | ">" | ">="
@@ -1124,6 +1155,13 @@ impl Checker<'_> {
                 let expected = self.place(&p, env, Usage::Borrow(Pass::Inout), l.span.clone());
                 self.types
                     .insert((l.span.start, l.span.end), expected.clone());
+                let target_fact = |env: &Env| {
+                    env.bindings
+                        .get(&p.root)
+                        .filter(|_| p.path.is_empty())
+                        .and_then(|b| b.integer)
+                };
+                let before = target_fact(env);
                 let actual = self.expr_expected(r, env, Usage::Own, &expected);
                 self.expect_type(&expected, &actual, r.span.clone());
                 if bound_capabilities(&expected) != bound_capabilities(&actual) {
@@ -1151,15 +1189,30 @@ impl Checker<'_> {
                 {
                     self.primitive_failure(env, e.span.clone());
                 }
+                // If the right side reassigns the target, either value may be
+                // the one combined, so only an unchanged fact is trusted.
+                let old = target_fact(env).filter(|_| target_fact(env) == before);
+                let value = self.integer_fact(r, env);
+                let kind = crate::numeric::IntegerKind::from_type(&expected);
+                if let Some(kind) = kind
+                    && op != "="
+                    && crate::numeric::may_overflow(op, kind)
+                    && !self.in_range(&op[..1], kind, old, value)
+                {
+                    self.overflow_failure(env, e.span.clone());
+                }
                 let fact = if op == "=" {
-                    self.integer_fact(r, env)
+                    value
                 } else {
-                    None
+                    kind.zip(old)
+                        .zip(value)
+                        .and_then(|((k, a), b)| k.checked(&op[..1], a, b).ok())
                 };
-                let nonzero = op == "=" && self.nonzero(r, env);
+                let nonzero = fact.is_some_and(|n| n != 0) || (op == "=" && self.nonzero(r, env));
+                // A write to a field never establishes a fact about its root.
                 if let Some(binding) = env.bindings.get_mut(&p.root) {
-                    binding.integer = fact;
-                    binding.nonzero = nonzero;
+                    binding.integer = fact.filter(|_| p.path.is_empty());
+                    binding.nonzero = nonzero && p.path.is_empty();
                 }
                 Type::unit()
             }
@@ -1486,6 +1539,9 @@ impl Checker<'_> {
                     return expected;
                 }
                 return t;
+            }
+            if crate::numeric::wrapping_intrinsic(name).is_some() {
+                return self.wrapping_call(name, types, args, env, span, expected);
             }
             if let Some(f) = self.world.functions.get(name) {
                 return self.apply(f, types, args, None, env, span, expected);
@@ -2095,11 +2151,22 @@ impl Checker<'_> {
         let label = request
             .as_ref()
             .map(|l| self.cap_aliases.get(l).unwrap_or(l));
-        self.caps
-            .iter()
-            .rev()
-            .find(|e| e.name == effect.name && (label.is_none() || e.label.as_ref() == label))
-            .cloned()
+        let mut candidates =
+            self.caps.iter().rev().filter(|e| {
+                e.name == effect.name && (label.is_none() || e.label.as_ref() == label)
+            });
+        // Typed instance selection: an unlabeled request with concrete
+        // arguments prefers the innermost capability with exactly those
+        // arguments. Every backend mirrors this with the same instance key.
+        if label.is_none()
+            && let Some(key) = crate::numeric::instance_key(&effect.name, &effect.args)
+            && let Some(cap) = candidates
+                .clone()
+                .find(|c| crate::numeric::instance_key(&c.name, &c.args).as_ref() == Some(&key))
+        {
+            return Some(cap.clone());
+        }
+        candidates.next().cloned()
     }
     fn resolve_effect(&self, effect: &Effect) -> Option<Effect> {
         if let Some(cap) = self.active_effect(effect) {
@@ -2274,34 +2341,160 @@ impl Checker<'_> {
             span,
         );
     }
+    /// Record a checked operation that may raise Fail[ArithOverflow].
+    fn overflow_failure(&mut self, env: &Env, span: Span) {
+        if self.dead != 0 {
+            return;
+        }
+        self.overflow_ops.insert((span.start, span.end));
+        self.require_effect(
+            &Effect {
+                label: None,
+                name: "Fail".into(),
+                args: vec![Type::named(crate::numeric::OVERFLOW_TYPE)],
+            },
+            env,
+            span,
+        );
+    }
+    /// Constant facts which prove a checked operation cannot overflow. A
+    /// known divisor other than -1 (or dividend other than MIN) also proves
+    /// signed division in range; zero divisors are RuntimeError's concern.
+    fn in_range(
+        &self,
+        op: &str,
+        kind: crate::numeric::IntegerKind,
+        a: Option<i128>,
+        b: Option<i128>,
+    ) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => {
+                kind.checked(op, a, b) != Err(crate::numeric::ArithFailure::Overflow)
+            }
+            _ if op == "/" => b.is_some_and(|b| b != -1) || a.is_some_and(|a| a != kind.min()),
+            _ => false,
+        }
+    }
+    /// Typecheck `wrapping_add`, `wrapping_sub` or `wrapping_mul`: two
+    /// by-value operands of one integer kind, with contextual literal typing.
+    fn wrapping_call(
+        &mut self,
+        name: &str,
+        types: &[Type],
+        args: &[Arg],
+        env: &mut Env,
+        span: Span,
+        expected: &Type,
+    ) -> Type {
+        if !types.is_empty() {
+            self.error(
+                "E0207",
+                format!("'{name}' does not take type arguments"),
+                span.clone(),
+            );
+        }
+        if args.len() != 2 {
+            self.error(
+                "E0207",
+                format!("'{name}' expects 2 arguments, found {}", args.len()),
+                span.clone(),
+            );
+        }
+        for a in args {
+            if a.pass != Pass::In || a.explicit {
+                self.error(
+                    "E0308",
+                    format!("'{name}' takes its operands by value"),
+                    a.expr.span.clone(),
+                );
+            }
+        }
+        let goal = if crate::numeric::IntegerKind::from_type(expected).is_some()
+            && !matches!(expected, Type::IntLiteral(_))
+        {
+            expected.clone()
+        } else {
+            Type::Infer
+        };
+        let mut common = goal.clone();
+        let mut actual = vec![];
+        for a in args {
+            let goal = if matches!(common, Type::IntLiteral(_)) {
+                Type::Infer
+            } else {
+                common.clone()
+            };
+            let t = self.expr_expected(&a.expr, env, Usage::Own, &goal);
+            if matches!(common, Type::Infer | Type::IntLiteral(_)) {
+                common = match (&common, &t) {
+                    (Type::IntLiteral(x), Type::IntLiteral(y)) => Type::IntLiteral((*x).max(*y)),
+                    _ => t.clone(),
+                };
+            }
+            actual.push(t);
+        }
+        let common = crate::numeric::default_type(&common);
+        if crate::numeric::IntegerKind::from_type(&common).is_none() {
+            self.error(
+                "E0200",
+                format!("'{name}' requires integer operands of one kind, found {common}"),
+                span.clone(),
+            );
+            return Type::Infer;
+        }
+        for (a, t) in args.iter().zip(&actual) {
+            self.expect_type(&common, t, a.expr.span.clone());
+            if matches!(t, Type::IntLiteral(_)) {
+                self.types
+                    .insert((a.expr.span.start, a.expr.span.end), common.clone());
+            }
+        }
+        common
+    }
     fn nonzero(&self, e: &Expr, env: &Env) -> bool {
         self.integer_fact(e, env).is_some_and(|n| n != 0)
             || matches!(&e.kind, ExprKind::Name(n) if env.bindings.get(n).is_some_and(|b| b.nonzero))
     }
+    /// The exact value of a pure integer expression, under checked semantics:
+    /// an operation that would overflow or fail has no fact.
     fn integer_fact(&self, e: &Expr, env: &Env) -> Option<i128> {
-        let n = match &e.kind {
-            ExprKind::Literal(Literal::Int(n)) => *n,
-            ExprKind::Name(n) => env.bindings.get(n)?.integer?,
-            ExprKind::Binary(op, a, b) => {
-                let a = self.integer_fact(a, env)?;
-                let b = self.integer_fact(b, env)?;
-                match op.as_str() {
-                    "+" => a.wrapping_add(b),
-                    "-" => a.wrapping_sub(b),
-                    "*" => a.wrapping_mul(b),
-                    "/" if b != 0 => a.checked_div(b)?,
-                    "%" if b != 0 => a.checked_rem(b)?,
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        Some(
+        let kind = |e: &Expr| {
             self.types
                 .get(&(e.span.start, e.span.end))
                 .and_then(crate::numeric::IntegerKind::from_type)
-                .map_or(n, |k| k.wrap(n)),
-        )
+        };
+        let n = match &e.kind {
+            ExprKind::Literal(Literal::Int(n)) => *n,
+            ExprKind::Name(n) => env.bindings.get(n)?.integer?,
+            ExprKind::Unary(op, v) if op == "-" => {
+                let k = kind(v).or_else(|| kind(e))?;
+                k.checked_neg(self.integer_fact(v, env)?)?
+            }
+            ExprKind::Binary(op, a, b) => {
+                let k = kind(a).or_else(|| kind(e))?;
+                let (a, b) = (self.integer_fact(a, env)?, self.integer_fact(b, env)?);
+                k.checked(op, a, b).ok()?
+            }
+            ExprKind::Call { callee, args, .. } => {
+                let ExprKind::Name(name) = &callee.kind else {
+                    return None;
+                };
+                let op = crate::numeric::wrapping_intrinsic(name)?;
+                if env.bindings.contains_key(name) || args.len() != 2 {
+                    return None;
+                }
+                let (a, b) = (
+                    self.integer_fact(&args[0].expr, env)?,
+                    self.integer_fact(&args[1].expr, env)?,
+                );
+                kind(e)?.wrapping(op, a, b)
+            }
+            _ => return None,
+        };
+        match kind(e) {
+            Some(k) if !k.fits(n) => None,
+            _ => Some(n),
+        }
     }
     fn refine_condition(e: &Expr, env: &mut Env, truth: bool) {
         if let ExprKind::Binary(op, a, b) = &e.kind {

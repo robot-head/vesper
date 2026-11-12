@@ -98,17 +98,19 @@ fn struct_destructure() {
 #[test]
 fn effect_evidence() {
     validates(
-        "linear effect Ask { fn ask() -> i64; } fn ask_twice() -> i64 eff [Ask] { Ask::ask() + Ask::ask() }",
+        "linear effect Ask { fn ask() -> i64; } fn ask_twice() -> i64 eff [Ask] { wrapping_add(Ask::ask(), Ask::ask()) }",
     );
 }
 #[test]
 fn explicit_state() {
-    validates("fn inc(inout x: i64) { x += 1; }");
+    validates("fn inc(inout x: i64) { x = wrapping_add(x, 1); }");
 }
 
 #[test]
 fn state_call() {
-    validates("fn inc(inout x: i64) { x += 1; } fn main() -> i64 { let x = 41; inc(inout x); x }");
+    validates(
+        "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let x = 41; inc(inout x); x }",
+    );
 }
 #[test]
 fn method() {
@@ -122,25 +124,25 @@ fn projections() {
 #[test]
 fn nested_branch_mutation() {
     validates(
-        "fn main() -> i64 { let x = 40; let y = if true { x += 1; x } else { x = 0; x }; x + y - 40 }",
+        "fn main() -> i64 { let x = 40; let y = if true { x += 1; x } else { x = 0; x }; wrapping_sub(wrapping_add(x, y), 40) }",
     );
 }
 #[test]
 fn state_call_used_as_value() {
     validates(
-        "fn inc(inout x: i64) -> i64 { x += 1; x } fn main() -> i64 { let x = 40; let y = inc(inout x); x + y - 40 }",
+        "fn inc(inout x: i64) -> i64 { x = wrapping_add(x, 1); x } fn main() -> i64 { let x = 40; let y = inc(inout x); wrapping_sub(wrapping_add(x, y), 40) }",
     );
 }
 #[test]
 fn nested_state_calls() {
     validates(
-        "fn inc(inout x: i64) -> i64 { x += 1; x } fn main() -> i64 { let x = 40; inc(inout x) + inc(inout x) - 41 }",
+        "fn inc(inout x: i64) -> i64 { x = wrapping_add(x, 1); x } fn main() -> i64 { let x = 40; wrapping_sub(wrapping_add(inc(inout x), inc(inout x)), 41) }",
     );
 }
 #[test]
 fn disjoint_mutable_arguments_same_root() {
     validates(
-        "copy struct Pair { x: i64, y: i64 } fn update(inout p.{x}: Pair, inout q.{y}: Pair) { p.x += 1; q.y += 2; } fn main() -> i64 { let p = Pair { x: 20, y: 19 }; update(inout p, inout p); p.x + p.y }",
+        "copy struct Pair { x: i64, y: i64 } fn update(inout p.{x}: Pair, inout q.{y}: Pair) { p.x = wrapping_add(p.x, 1); q.y = wrapping_add(q.y, 2); } fn main() -> i64 { let p = Pair { x: 20, y: 19 }; update(inout p, inout p); wrapping_add(p.x, p.y) }",
     );
 }
 #[test]
@@ -156,24 +158,24 @@ fn closure_captures_and_nullary_call() {
 }
 #[test]
 fn closure_mutable_captures_are_values() {
-    validates("fn main() -> i64 { let x = 0; let f = || { x += 1; x }; f() + f() }");
+    validates("fn main() -> i64 { let x = 0; let f = || { x += 1; x }; wrapping_add(f(), f()) }");
 }
 #[test]
 fn returned_closure() {
     validates(
-        "fn make(sink x: i64) -> fn(i64) -> i64 { |y| x + y } fn main() -> i64 { let f = make(40); f(2) }",
+        "fn make(sink x: i64) -> fn(i64) -> i64 { |y| wrapping_add(x, y) } fn main() -> i64 { let f = make(40); f(2) }",
     );
 }
 #[test]
 fn higher_order_pure_function() {
     validates(
-        "fn apply(sink f: fn(i64) -> i64, x: i64) -> i64 { f(x) } fn main() -> i64 { apply(|x| x + 2, 40) }",
+        "fn apply(sink f: fn(i64) -> i64, x: i64) -> i64 { f(x) } fn main() -> i64 { apply(|x| wrapping_add(x, 2), 40) }",
     );
 }
 #[test]
 fn mutable_closure_parameter() {
     validates(
-        "fn main() -> i64 { let inc = |inout x: i64| { x += 1; x }; let x = 40; let y = inc(inout x); x + y - 40 }",
+        "fn main() -> i64 { let inc = |inout x: i64| { x = wrapping_add(x, 1); x }; let x = 40; let y = inc(inout x); wrapping_sub(wrapping_add(x, y), 40) }",
     );
 }
 #[test]
@@ -211,19 +213,19 @@ fn fail_handler_and_try() {
 #[test]
 fn non_tail_one_shot_handler() {
     validates(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { Ask::ask() + 1 } with { return x => x * 2, ask(k) => k(20) + 0, } }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { wrapping_add(Ask::ask(), 1) } with { return x => wrapping_mul(x, 2), ask(k) => wrapping_add(k(20), 0), } }",
     );
 }
 #[test]
 fn handler_forwards_named_outer_capability() {
     validates(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { inner.ask() } with { return x => x, ask(k) => k(outer.ask() + 2), } } with { return x => x, ask(k) => k(40), } }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { inner.ask() } with { return x => x, ask(k) => k(wrapping_add(outer.ask(), 2)), } } with { return x => x, ask(k) => k(40), } }",
     );
 }
 #[test]
 fn handler_calls_effectful_helper() {
     validates(
-        "linear effect Ask { fn ask() -> i64; } fn ask_twice() -> i64 eff [Ask] { Ask::ask() + Ask::ask() } fn main() -> i64 { handle Ask in { ask_twice() } with { return x => x, ask(k) => k(21), } }",
+        "linear effect Ask { fn ask() -> i64; } fn ask_twice() -> i64 eff [Ask] { wrapping_add(Ask::ask(), Ask::ask()) } fn main() -> i64 { handle Ask in { ask_twice() } with { return x => x, ask(k) => k(21), } }",
     );
 }
 
@@ -250,7 +252,7 @@ fn effectful_callbacks_and_open_rows() {
         "linear effect Ask { fn ask() -> i64; } fn ask() -> i64 eff [Ask] { Ask::ask() } fn main() -> i64 { handle Ask in { let f = ask; f() } with { return x => x, ask(k) => k(42), } }",
     );
     validates(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 0; handle Ask in { let f = || { x += 1; x + Ask::ask() }; f() + f() } with { return x => x, ask(k) => k(20), } }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 0; handle Ask in { let f = || { x += 1; wrapping_add(x, Ask::ask()) }; wrapping_add(f(), f()) } with { return x => x, ask(k) => k(20), } }",
     );
 }
 
@@ -316,15 +318,15 @@ fn rejects(source: &str, reason: &str) {
 #[test]
 fn mutable_operation_arguments() {
     agrees(
-        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n += 2; k(()) }, } }",
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
         "42",
     );
     agrees(
-        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: Pair); } fn main() -> i64 { let p = Pair { x: 40, y: 0 }; handle Inc in { Inc::inc(inout p); p.x } with { return n => n, inc(Pair { x, y }, k) => { x += 2; k(()) }, } }",
+        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: Pair); } fn main() -> i64 { let p = Pair { x: 40, y: 0 }; handle Inc in { Inc::inc(inout p); p.x } with { return n => n, inc(Pair { x, y }, k) => { x = wrapping_add(x, 2); k(()) }, } }",
         "42",
     );
     agrees(
-        "linear effect St[T] { fn modify(inout x: T) -> T; } fn main() -> i64 { let x: i64 = 5; let r = handle St[i64] in { let old = St::modify(inout x); old + x * 10 } with { return v => v, modify(x, k) => { let old = x; x += 1; let r = k(old); x *= 2; r }, }; r * 100 + x }",
+        "linear effect St[T] { fn modify(inout x: T) -> T; } fn main() -> i64 { let x: i64 = 5; let r = handle St[i64] in { let old = St::modify(inout x); wrapping_add(old, wrapping_mul(x, 10)) } with { return v => v, modify(x, k) => { let old = x; x = wrapping_add(x, 1); let r = k(old); x = wrapping_mul(x, 2); r }, }; wrapping_add(wrapping_mul(r, 100), x) }",
         "6512",
     );
 }
@@ -332,24 +334,24 @@ fn mutable_operation_arguments() {
 #[test]
 fn mutations_before_and_after_non_tail_resumption() {
     agrees(
-        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let result = handle Mut in { let y = Mut::change(inout x); x + y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x += 1; result }, }; result + x }",
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let result = handle Mut in { let y = Mut::change(inout x); wrapping_add(x, y) } with { return v => v, change(x, k) => { x = wrapping_add(x, 1); let result = k(20); x = wrapping_add(x, 1); result }, }; wrapping_add(result, x) }",
         "25",
     );
     // After resuming, the clause observes the body's later write to the
     // same place, and its own later write survives the handler.
     agrees(
-        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let result = handle Mut in { let y = Mut::change(inout x); x += 100; y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x * 1000 + result }, }; result * 10 + x }",
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let result = handle Mut in { let y = Mut::change(inout x); x = wrapping_add(x, 100); y } with { return v => v, change(x, k) => { x = wrapping_add(x, 1); let result = k(20); wrapping_add(wrapping_mul(x, 1000), result) }, }; wrapping_add(wrapping_mul(result, 10), x) }",
         "1020302",
     );
     agrees(
-        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let r = handle m: Mut in { let y = m.change(inout x); x += 100; y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x * 1000 + result }, }; r * 10 + x }",
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let r = handle m: Mut in { let y = m.change(inout x); x = wrapping_add(x, 100); y } with { return v => v, change(x, k) => { x = wrapping_add(x, 1); let result = k(20); wrapping_add(wrapping_mul(x, 1000), result) }, }; wrapping_add(wrapping_mul(r, 10), x) }",
         "1020302",
     );
     // Default and `in` parameters alias the performer's place as well.
     for pass in ["", "in "] {
         agrees(
             &format!(
-                "linear effect Tell {{ fn tell({pass}x: i64) -> i64; }} fn main() -> i64 {{ let y = 1; let r = handle Tell in {{ let a = Tell::tell({pass}y); y += 10; a }} with {{ return v => v, tell(x, k) => {{ let r = k(5); x * 100 + r }}, }}; r }}"
+                "linear effect Tell {{ fn tell({pass}x: i64) -> i64; }} fn main() -> i64 {{ let y = 1; let r = handle Tell in {{ let a = Tell::tell({pass}y); y += 10; a }} with {{ return v => v, tell(x, k) => {{ let r = k(5); wrapping_add(wrapping_mul(x, 100), r) }}, }}; r }}"
             ),
             "1105",
         );
@@ -359,11 +361,11 @@ fn mutations_before_and_after_non_tail_resumption() {
 #[test]
 fn stateful_handlers_thread_mutable_arguments() {
     agrees(
-        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; handle Mut state n = 10 in { let y = Mut::change(inout x); x + y } with { return (v, n) => v + n, change(x, n, k) => { x += n; k(20, n + 1) }, } }",
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; handle Mut state n = 10 in { let y = Mut::change(inout x); wrapping_add(x, y) } with { return (v, n) => wrapping_add(v, n), change(x, n, k) => { x = wrapping_add(x, n); k(20, wrapping_add(n, 1)) }, } }",
         "42",
     );
     agrees(
-        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let r = handle Mut state n = 10 in { let a = Mut::change(inout x); x += 1; let b = Mut::change(inout x); a + b } with { return (v, n) => v * 100 + n, change(y, n, k) => { y += n; let r = k(y, n + 1); y += 1000; r }, }; r * 100000 + x }",
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let x = 1; let r = handle Mut state n = 10 in { let a = Mut::change(inout x); x = wrapping_add(x, 1); let b = Mut::change(inout x); wrapping_add(a, b) } with { return (v, n) => wrapping_add(wrapping_mul(v, 100), n), change(y, n, k) => { y = wrapping_add(y, n); let r = k(y, wrapping_add(n, 1)); y = wrapping_add(y, 1000); r }, }; wrapping_add(wrapping_mul(r, 100000), x) }",
         "341202023",
     );
 }
@@ -371,24 +373,24 @@ fn stateful_handlers_thread_mutable_arguments() {
 #[test]
 fn handler_bodies_mutate_outer_bindings() {
     agrees(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { x += Ask::ask(); x * 10 } with { return v => v, ask(k) => k(4), }; r + x }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { x = wrapping_add(x, Ask::ask()); wrapping_mul(x, 10) } with { return v => v, ask(k) => k(4), }; wrapping_add(r, x) }",
         "55",
     );
     agrees(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { if Ask::ask() > 2 { x += Ask::ask(); } else { x = 0; }; match x { 1 => { x += 1; }, _ => { x *= 2; }, }; x } with { return v => v + 1, ask(k) => k(4), }; r * 100 + x }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { if Ask::ask() > 2 { x = wrapping_add(x, Ask::ask()); } else { x = 0; }; match x { 1 => { x = wrapping_add(x, 1); }, _ => { x = wrapping_mul(x, 2); }, }; x } with { return v => wrapping_add(v, 1), ask(k) => k(4), }; wrapping_add(wrapping_mul(r, 100), x) }",
         "1110",
     );
     agrees(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { let b = false && { x += 100; Ask::ask() > 0 }; let c = true && { x += 1; Ask::ask() > 0 }; if b || c { x } else { 0 } } with { return v => v, ask(k) => k(3), }; r * 100 + x }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { let b = false && { x += 100; Ask::ask() > 0 }; let c = true && { x += 1; Ask::ask() > 0 }; if b || c { x } else { 0 } } with { return v => v, ask(k) => k(3), }; wrapping_add(wrapping_mul(r, 100), x) }",
         "202",
     );
     agrees(
-        "linear effect Ask { fn ask() -> i64; } fn bump(inout x: i64) -> i64 { handle Ask in { x += Ask::ask(); x } with { return v => v, ask(k) => k(7), } } fn main() -> i64 { let x = 1; let r = bump(inout x); r * 100 + x }",
+        "linear effect Ask { fn ask() -> i64; } fn bump(inout x: i64) -> i64 { handle Ask in { x = wrapping_add(x, Ask::ask()); x } with { return v => v, ask(k) => k(7), } } fn main() -> i64 { let x = 1; let r = bump(inout x); wrapping_add(wrapping_mul(r, 100), x) }",
         "808",
     );
     // Clauses capture install-time snapshots; their writes stay local.
     agrees(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { x = 50; 2 } with { return v => { x += 1000; v + x }, ask(k) => k(x), }; r * 10000 + x }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { x = 50; 2 } with { return v => { x += 1000; wrapping_add(v, x) }, ask(k) => k(x), }; wrapping_add(wrapping_mul(r, 10000), x) }",
         "10030050",
     );
     agrees(
@@ -400,23 +402,23 @@ fn handler_bodies_mutate_outer_bindings() {
 #[test]
 fn aborts_observe_writes_before_the_operation() {
     agrees(
-        "effect Stop { fn stop() -> i64; } fn main() -> i64 { let x = 0; let r = handle Stop in { x += 5; Stop::stop(); x += 100; 1 } with { return v => v, stop(k) => 7, }; r * 1000 + x }",
+        "effect Stop { fn stop() -> i64; } fn main() -> i64 { let x = 0; let r = handle Stop in { x += 5; Stop::stop(); x += 100; 1 } with { return v => v, stop(k) => 7, }; wrapping_add(wrapping_mul(r, 1000), x) }",
         "7005",
     );
     agrees(
-        "effect Stop { fn stop(inout x: i64) -> i64; } fn main() -> i64 { let x = 0; let r = handle Stop in { x += 5; Stop::stop(inout x); x += 100; 1 } with { return v => v, stop(x, k) => { x += 30; 7 }, }; r * 1000 + x }",
+        "effect Stop { fn stop(inout x: i64) -> i64; } fn main() -> i64 { let x = 0; let r = handle Stop in { x += 5; Stop::stop(inout x); x = wrapping_add(x, 100); 1 } with { return v => v, stop(x, k) => { x = wrapping_add(x, 30); 7 }, }; wrapping_add(wrapping_mul(r, 1000), x) }",
         "7035",
     );
     for (start, expected) in [("1", "114"), ("-1", "99")] {
         agrees(
             &format!(
-                "effect Choose {{ fn pick(inout x: i64) -> bool; }} fn main() -> i64 {{ let x = {start}; let r = handle Choose in {{ if Choose::pick(inout x) {{ x += 10; 1 }} else {{ 2 }} }} with {{ return v => v, pick(x, k) => if x > 0 {{ x += 3; k(true) }} else {{ x = 99; 0 }}, }}; r * 100 + x }}"
+                "effect Choose {{ fn pick(inout x: i64) -> bool; }} fn main() -> i64 {{ let x = {start}; let r = handle Choose in {{ if Choose::pick(inout x) {{ x = wrapping_add(x, 10); 1 }} else {{ 2 }} }} with {{ return v => v, pick(x, k) => if x > 0 {{ x = wrapping_add(x, 3); k(true) }} else {{ x = 99; 0 }}, }}; wrapping_add(wrapping_mul(r, 100), x) }}"
             ),
             expected,
         );
     }
     agrees(
-        "fn divide(b: i64) -> i64 eff [Fail[RuntimeError]] { 84 / b } fn main() -> i64 { let x = 0; let r = handle Fail[RuntimeError] in { x += 5; let q = divide(0); x += 100; q } with { return v => v, raise(e, k) => 42, }; r * 1000 + x }",
+        "fn divide(b: i64) -> i64 eff [Fail[RuntimeError]] { 84 / b } fn main() -> i64 { let x = 0; let r = handle Fail[RuntimeError] in { x += 5; let q = divide(0); x += 100; q } with { return v => v, raise(e, k) => 42, }; wrapping_add(wrapping_mul(r, 1000), x) }",
         "42005",
     );
     agrees(
@@ -428,15 +430,15 @@ fn aborts_observe_writes_before_the_operation() {
 #[test]
 fn disjoint_projected_operation_arguments() {
     agrees(
-        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p.{x}: Pair); } fn main() -> i64 { let p = Pair { x: 1, y: 2 }; handle Inc in { Inc::inc(inout p); p.x * 10 + p.y } with { return n => n, inc(q, k) => { q.x += 2; k(()) }, } }",
+        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p.{x}: Pair); } fn main() -> i64 { let p = Pair { x: 1, y: 2 }; handle Inc in { Inc::inc(inout p); wrapping_add(wrapping_mul(p.x, 10), p.y) } with { return n => n, inc(q, k) => { q.x = wrapping_add(q.x, 2); k(()) }, } }",
         "32",
     );
     agrees(
-        "copy struct Pair { x: i64, y: i64 } linear effect Two { fn two(inout a.{x}: Pair, inout b.{y}: Pair) -> i64; } fn main() -> i64 { let p = Pair { x: 1, y: 2 }; let r = handle Two in { let v = Two::two(inout p, inout p); p.x * 100 + p.y * 10 + v } with { return v => v, two(a, b, k) => { a.x += 4; b.y += 5; let r = k(3); a.x += 1; r }, }; r * 1000 + p.x }",
+        "copy struct Pair { x: i64, y: i64 } linear effect Two { fn two(inout a.{x}: Pair, inout b.{y}: Pair) -> i64; } fn main() -> i64 { let p = Pair { x: 1, y: 2 }; let r = handle Two in { let v = Two::two(inout p, inout p); wrapping_add(wrapping_add(wrapping_mul(p.x, 100), wrapping_mul(p.y, 10)), v) } with { return v => v, two(a, b, k) => { a.x = wrapping_add(a.x, 4); b.y = wrapping_add(b.y, 5); let r = k(3); a.x = wrapping_add(a.x, 1); r }, }; wrapping_add(wrapping_mul(r, 1000), p.x) }",
         "573006",
     );
     agrees(
-        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: i64) -> i64; } fn main() -> i64 { let p = Pair { x: 1, y: 2 }; let r = handle Inc in { let a = Inc::inc(inout p.x); p.y += 10; let b = Inc::inc(inout p.y); a + b } with { return v => v, inc(n, k) => { n += 1; let r = k(n); n += 100; r }, }; r * 10000 + p.x * 100 + p.y }",
+        "copy struct Pair { x: i64, y: i64 } linear effect Inc { fn inc(inout p: i64) -> i64; } fn main() -> i64 { let p = Pair { x: 1, y: 2 }; let r = handle Inc in { let a = Inc::inc(inout p.x); p.y = wrapping_add(p.y, 10); let b = Inc::inc(inout p.y); wrapping_add(a, b) } with { return v => v, inc(n, k) => { n = wrapping_add(n, 1); let r = k(n); n = wrapping_add(n, 100); r }, }; wrapping_add(wrapping_add(wrapping_mul(r, 10000), wrapping_mul(p.x, 100)), p.y) }",
         "160313",
     );
 }
@@ -444,15 +446,15 @@ fn disjoint_projected_operation_arguments() {
 #[test]
 fn nested_mutable_handlers() {
     agrees(
-        "effect Stop { fn stop() -> i64; } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Stop in { handle Ask in { x += Ask::ask(); Stop::stop(); x += 1000; 0 } with { return v => v, ask(k) => k(10), } } with { return v => v, stop(k) => 7, }; r * 100 + x }",
+        "effect Stop { fn stop() -> i64; } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Stop in { handle Ask in { x = wrapping_add(x, Ask::ask()); Stop::stop(); x = wrapping_add(x, 1000); 0 } with { return v => v, ask(k) => k(10), } } with { return v => v, stop(k) => 7, }; wrapping_add(wrapping_mul(r, 100), x) }",
         "711",
     );
     agrees(
-        "linear effect Mut { fn change(inout x: i64) -> i64; } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle outer: Mut in { handle Ask in { let a = Ask::ask(); let b = outer.change(inout x); x += a; b } with { return v => v, ask(k) => k(3), } } with { return v => v, change(y, k) => { y *= 10; let r = k(5); y += 1; r }, }; r * 1000 + x }",
+        "linear effect Mut { fn change(inout x: i64) -> i64; } linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle outer: Mut in { handle Ask in { let a = Ask::ask(); let b = outer.change(inout x); x = wrapping_add(x, a); b } with { return v => v, ask(k) => k(3), } } with { return v => v, change(y, k) => { y = wrapping_mul(y, 10); let r = k(5); y = wrapping_add(y, 1); r }, }; wrapping_add(wrapping_mul(r, 1000), x) }",
         "5014",
     );
     agrees(
-        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; let r = handle Inc in { handle Inc in { Inc::inc(inout x); x } with { return n => n * 10, inc(n, k) => { n += 2; let r = k(()); n += 1; r }, } } with { return n => n, inc(n, k) => { n += 100; k(()) }, }; r * 100 + x }",
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; let r = handle Inc in { handle Inc in { Inc::inc(inout x); x } with { return n => wrapping_mul(n, 10), inc(n, k) => { n = wrapping_add(n, 2); let r = k(()); n = wrapping_add(n, 1); r }, } } with { return n => n, inc(n, k) => { n = wrapping_add(n, 100); k(()) }, }; wrapping_add(wrapping_mul(r, 100), x) }",
         "3004",
     );
 }
@@ -462,15 +464,15 @@ fn continuation_effects_with_mutable_arguments() {
     // A clause performs an outer effect before and after writing the
     // borrowed argument, then resumes.
     agrees(
-        "linear effect Outer { fn ask() -> i64; } linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; let r = handle Outer in { handle Inc in { Inc::inc(inout x); x * 2 } with { return v => v, inc(y, k) => { let v = Outer::ask(); y += v; k(()) }, } } with { return v => v, ask(k) => k(20) + 1, }; r * 1000 + x }",
+        "linear effect Outer { fn ask() -> i64; } linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; let r = handle Outer in { handle Inc in { Inc::inc(inout x); wrapping_mul(x, 2) } with { return v => v, inc(y, k) => { let v = Outer::ask(); y = wrapping_add(y, v); k(()) }, } } with { return v => v, ask(k) => wrapping_add(k(20), 1), }; wrapping_add(wrapping_mul(r, 1000), x) }",
         "43021",
     );
     agrees(
-        "linear effect Outer { fn ask() -> i64; } linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; let r = handle Outer in { handle Inc in { Inc::inc(inout x); x * 2 } with { return v => v, inc(y, k) => { y += 5; let v = Outer::ask(); y += v; k(()) }, } } with { return v => v, ask(k) => k(20) + 1, }; r * 1000 + x }",
+        "linear effect Outer { fn ask() -> i64; } linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; let r = handle Outer in { handle Inc in { Inc::inc(inout x); wrapping_mul(x, 2) } with { return v => v, inc(y, k) => { y = wrapping_add(y, 5); let v = Outer::ask(); y = wrapping_add(y, v); k(()) }, } } with { return v => v, ask(k) => wrapping_add(k(20), 1), }; wrapping_add(wrapping_mul(r, 1000), x) }",
         "53026",
     );
     agrees(
-        "linear effect Ask { fn ask() -> i64; } fn resume[T](sink k: fn@linear(sink i64) -> T) -> T { k(20) } fn main() -> i64 { handle Ask in { Ask::ask() + 1 } with { return x => x, ask(k) => resume(k) * 2, } }",
+        "linear effect Ask { fn ask() -> i64; } fn resume[T](sink k: fn@linear(sink i64) -> T) -> T { k(20) } fn main() -> i64 { handle Ask in { wrapping_add(Ask::ask(), 1) } with { return x => x, ask(k) => wrapping_mul(resume(k), 2), } }",
         "42",
     );
 }
@@ -479,19 +481,19 @@ fn continuation_effects_with_mutable_arguments() {
 fn helpers_and_closures_with_mutable_operations() {
     // Helpers forward the updated argument through their own state return.
     agrees(
-        "linear effect Inc { fn inc(inout x: i64); } fn helper(inout x: i64) eff [Inc] { Inc::inc(inout x); x += 1; } fn main() -> i64 { let x = 1; handle Inc in { helper(inout x); x } with { return n => n, inc(n, k) => { n += 2; k(()) }, } }",
+        "linear effect Inc { fn inc(inout x: i64); } fn helper(inout x: i64) eff [Inc] { Inc::inc(inout x); x = wrapping_add(x, 1); } fn main() -> i64 { let x = 1; handle Inc in { helper(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
         "4",
     );
     agrees(
-        "linear effect Ask { fn ask() -> i64; } fn helper(inout x: i64) -> i64 eff [Ask] { x += Ask::ask(); x } fn main() -> i64 { let x = 1; let r = handle Ask in { helper(inout x) + helper(inout x) * 100 } with { return v => v, ask(k) => k(3), }; r * 1000 + x }",
+        "linear effect Ask { fn ask() -> i64; } fn helper(inout x: i64) -> i64 eff [Ask] { x = wrapping_add(x, Ask::ask()); x } fn main() -> i64 { let x = 1; let r = handle Ask in { wrapping_add(helper(inout x), wrapping_mul(helper(inout x), 100)) } with { return v => v, ask(k) => k(3), }; wrapping_add(wrapping_mul(r, 1000), x) }",
         "704007",
     );
     agrees(
-        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; handle Inc in { let f = || { let z = 10; Inc::inc(inout z); z }; f() + x } with { return n => n, inc(n, k) => { n += 2; k(()) }, } }",
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 1; handle Inc in { let f = || { let z = 10; Inc::inc(inout z); z }; wrapping_add(f(), x) } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
         "13",
     );
     agrees(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let f = || { let x = 1; handle Ask in { x += Ask::ask(); x } with { return v => v, ask(k) => k(2), } }; f() }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let f = || { let x = 1; handle Ask in { x = wrapping_add(x, Ask::ask()); x } with { return v => v, ask(k) => k(2), } }; f() }",
         "3",
     );
 }
@@ -511,7 +513,7 @@ fn generated_names_are_hygienic() {
         "42",
     );
     agrees(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let value = 1; let get = 2; let set = 3; let w = 4; handle Ask in { value += Ask::ask(); value + get + set + w } with { return v => v, ask(k) => k(10), } }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let value = 1; let get = 2; let set = 3; let w = 4; handle Ask in { value = wrapping_add(value, Ask::ask()); wrapping_add(wrapping_add(wrapping_add(value, get), set), w) } with { return v => v, ask(k) => k(10), } }",
         "20",
     );
 }
@@ -521,17 +523,17 @@ fn unobservable_aliases_are_rejected() {
     // The evaluator reads the final value of a body-local place after the
     // body returned; no frame holds it.
     rejects(
-        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { handle Mut in { let z = 3; let y = Mut::change(inout z); z += 100; y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x * 1000 + result }, } }",
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { handle Mut in { let z = 3; let y = Mut::change(inout z); z = wrapping_add(z, 100); y } with { return v => v, change(x, k) => { x = wrapping_add(x, 1); let result = k(20); wrapping_add(wrapping_mul(x, 1000), result) }, } }",
         "local to the handled computation",
     );
     // A helper's parameter aliases the frame, but helpers cannot pass lenses.
     rejects(
-        "linear effect Inc { fn inc(inout x: i64); } fn helper(inout x: i64) eff [Inc] { Inc::inc(inout x); x += 1; } fn main() -> i64 { let x = 1; let r = handle Inc in { helper(inout x); x } with { return n => n, inc(n, k) => { let r = k(()); n += 2; r }, }; r * 100 + x }",
+        "linear effect Inc { fn inc(inout x: i64); } fn helper(inout x: i64) eff [Inc] { Inc::inc(inout x); x = wrapping_add(x, 1); } fn main() -> i64 { let x = 1; let r = handle Inc in { helper(inout x); x } with { return n => n, inc(n, k) => { let r = k(()); n = wrapping_add(n, 2); r }, }; wrapping_add(wrapping_mul(r, 100), x) }",
         "through a helper, callback, or closure",
     );
     // A first-class continuation would drop the resumed frame.
     rejects(
-        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { x += 1; Ask::ask() } with { return v => v, ask(k) => { let resume = ||@linear k(20); resume() * 2 }, }; r * 100 + x }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { let x = 1; let r = handle Ask in { x += 1; Ask::ask() } with { return v => v, ask(k) => { let resume = ||@linear k(20); wrapping_mul(resume(), 2) }, }; wrapping_add(wrapping_mul(r, 100), x) }",
         "continuation",
     );
 }
@@ -588,16 +590,16 @@ fn effect_places_lemmas_are_axiom_free() {
 fn implicit_mutable_modes_and_handlers_inside_closures() {
     // Omitted argument modes still resolve to the operation's `inout`.
     agrees(
-        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(x); } with { return v => v, inc(n, k) => { n += 2; k(()) }, }; x }",
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(x); } with { return v => v, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, }; x }",
         "42",
     );
     agrees(
-        "fn inc(inout x: i64) { x += 2; } fn main() -> i64 { let x = 40; let f = |inout y: i64| { y += 1; }; handle Fail[RuntimeError] in { inc(x); f(x); } with { return v => v, raise(e, k) => (), }; x }",
+        "fn inc(inout x: i64) { x = wrapping_add(x, 2); } fn main() -> i64 { let x = 40; let f = |inout y: i64| { y = wrapping_add(y, 1); }; handle Fail[RuntimeError] in { inc(x); f(x); } with { return v => v, raise(e, k) => (), }; x }",
         "43",
     );
     // A handler installed inside a closure still passes frame lenses.
     agrees(
-        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let f = || { let x = 1; handle Mut in { let y = Mut::change(inout x); x += 100; y } with { return v => v, change(x, k) => { x += 1; let result = k(20); x * 1000 + result }, } }; f() }",
+        "linear effect Mut { fn change(inout x: i64) -> i64; } fn main() -> i64 { let f = || { let x = 1; handle Mut in { let y = Mut::change(inout x); x = wrapping_add(x, 100); y } with { return v => v, change(x, k) => { x = wrapping_add(x, 1); let result = k(20); wrapping_add(wrapping_mul(x, 1000), result) }, } }; f() }",
         "102020",
     );
 }
@@ -605,7 +607,7 @@ fn implicit_mutable_modes_and_handlers_inside_closures() {
 #[test]
 fn handlers_preserve_implicit_method_argument_mutations() {
     agrees(
-        "copy struct Actor { value: i64 } impl Actor { fn bump(in self, inout x: i64) { x += 2; } } fn main() -> i64 { let a = Actor { value: 0 }; let x = 40; handle Fail[RuntimeError] in { a.bump(x); } with { return v => v, raise(e, k) => (), }; x }",
+        "copy struct Actor { value: i64 } impl Actor { fn bump(in self, inout x: i64) { x = wrapping_add(x, 2); } } fn main() -> i64 { let a = Actor { value: 0 }; let x = 40; handle Fail[RuntimeError] in { a.bump(x); } with { return v => v, raise(e, k) => (), }; x }",
         "42",
     );
 }
@@ -613,7 +615,7 @@ fn handlers_preserve_implicit_method_argument_mutations() {
 #[test]
 fn handler_frames_merge_selectors_with_different_arities() {
     agrees(
-        "linear effect A { fn change(in n: i64); } linear effect B { fn change(in n: i64, inout x: i64); } fn main() -> i64 { let x = 40; handle a: A in { handle b: B in { b.change(0, x); } with { return v => v, change(n, x, k) => { x += 2; k(()) }, }; } with { return v => v, change(n, k) => k(()), }; x }",
+        "linear effect A { fn change(in n: i64); } linear effect B { fn change(in n: i64, inout x: i64); } fn main() -> i64 { let x = 40; handle a: A in { handle b: B in { b.change(0, x); } with { return v => v, change(n, x, k) => { x = wrapping_add(x, 2); k(()) }, }; } with { return v => v, change(n, k) => k(()), }; x }",
         "42",
     );
 }

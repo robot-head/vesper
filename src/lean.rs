@@ -61,6 +61,10 @@ pub fn extract(world: &World) -> Result<String, String> {
     );
     out.push_str("abbrev HandlerCPS (S O : Type) (m : Type → Type) (A : Type) := (A → S → m O) → S → m O\ninstance [Monad m] : Monad (HandlerCPS S O m) where\n  pure a := fun k s => k a s\n  bind action next := fun k s => action (fun a s' => next a k s') s\n\n");
     out.push_str("def liftAction [Monad m] (action : m A) : HandlerCPS S O m A := fun k s => do\n  let value ← action\n  k value s\n\n");
+    out.push_str(&format!(
+        "/- {}: checked +, -, * and negation raise Fail[ArithOverflow]; wrapping intrinsics are UIntN/Int64 modular operations. -/\ndef inI64 (x : Int) : Bool := decide (-9223372036854775808 ≤ x ∧ x ≤ 9223372036854775807)\n\n",
+        crate::numeric::ARITHMETIC_SEMANTICS
+    ));
     for group in adt_groups(world) {
         out.push_str("mutual\n");
         for a in group {
@@ -1333,7 +1337,31 @@ impl Generator<'_> {
                     None => format!("({b}).{}", name(n)),
                 }
             }
-            ExprKind::Unary(op, v) => format!("({op}{})", self.expr(v, out, indent)?),
+            ExprKind::Unary(op, v) => {
+                let value = self.expr(v, out, indent)?;
+                if op == "-"
+                    && self
+                        .world
+                        .overflow_ops
+                        .contains(&(e.span.start, e.span.end))
+                    && let Some(kind) = self
+                        .type_of(v)
+                        .as_ref()
+                        .and_then(crate::numeric::IntegerKind::from_type)
+                {
+                    self.sync(out, &pad);
+                    self.guard_abort(true)?;
+                    let t = self.temp();
+                    let operand = self.fresh("$operand");
+                    let ok = in_range("neg", kind, &operand, "").unwrap();
+                    out.push_str(&format!(
+                        "{pad}let {t} ← do\n{pad}  let {operand} := {value}\n{pad}  if {ok} then pure (-{operand})\n{pad}  else\n{pad}    {RAISE_OVERFLOW}\n{pad}    nomatch «$impossible»\n"
+                    ));
+                    t
+                } else {
+                    format!("({op}{value})")
+                }
+            }
             ExprKind::Binary(op, a, b) if op == "&&" || op == "||" => {
                 let left = self.expr(a, out, indent)?;
                 let mut rhs = String::new();
@@ -1362,21 +1390,28 @@ impl Generator<'_> {
                 }
             }
             ExprKind::Binary(op, a, b) => {
+                let kind = self
+                    .type_of(a)
+                    .as_ref()
+                    .and_then(crate::numeric::IntegerKind::from_type);
                 let vs = self.operands(&[a, b], out, indent)?;
                 let (a, b) = (&vs[0], &vs[1]);
-                if self.world.partial_ops.contains(&(e.span.start, e.span.end)) {
+                let key = (e.span.start, e.span.end);
+                if self.world.partial_ops.contains(&key) || self.world.overflow_ops.contains(&key) {
                     self.sync(out, &pad);
                     self.guard_abort(true)?;
                     let t = self.temp();
                     let (left, right) = (self.fresh("$left"), self.fresh("$right"));
+                    let checks = self.failure_checks(op, kind, key, &left, &right, &pad);
                     out.push_str(&format!(
-                        "{pad}let {t} ← do\n{pad}  let {left} := {a}\n{pad}  let {right} := {b}\n{pad}  if {right} == 0 then\n{pad}    let «$impossible» ← Effect_Fail.«raise» «RuntimeError».«DivisionByZero»\n{pad}    nomatch «$impossible»\n{pad}  else pure ({left} {op} {right})\n"
+                        "{pad}let {t} ← do\n{pad}  let {left} := {a}\n{pad}  let {right} := {b}\n{checks}{pad}  pure {}\n",
+                        arith_term(op, kind, &left, &right)
                     ));
                     t
                 } else if matches!(op.as_str(), "<" | "<=" | ">" | ">=") {
                     format!("(decide ({a} {op} {b}))")
                 } else {
-                    format!("({a} {op} {b})")
+                    arith_term(op, kind, a, b)
                 }
             }
             ExprKind::Assign(..) => {
@@ -1518,6 +1553,30 @@ impl Generator<'_> {
             }
         })
     }
+    /// Guards for a primitive integer operation, in contract order: the
+    /// divisor check (`Fail[RuntimeError]`) precedes the overflow check.
+    fn failure_checks(
+        &self,
+        op: &str,
+        kind: Option<crate::numeric::IntegerKind>,
+        key: (usize, usize),
+        left: &str,
+        right: &str,
+        pad: &str,
+    ) -> String {
+        let mut checks = String::new();
+        if matches!(op, "/" | "%") && self.world.partial_ops.contains(&key) {
+            checks.push_str(&format!("{pad}  if {right} == 0 then\n{pad}    let «$impossible» ← Effect_Fail.«raise» «RuntimeError».«DivisionByZero»\n{pad}    nomatch «$impossible»\n"));
+        }
+        if self.world.overflow_ops.contains(&key)
+            && let Some(ok) = kind.and_then(|k| in_range(op, k, left, right))
+        {
+            checks.push_str(&format!(
+                "{pad}  if !({ok}) then\n{pad}    {RAISE_OVERFLOW}\n{pad}    nomatch «$impossible»\n"
+            ));
+        }
+        checks
+    }
     fn statement(&mut self, st: &Statement, out: &mut String, indent: usize) -> Result<(), String> {
         let pad = " ".repeat(indent);
         match st {
@@ -1552,18 +1611,32 @@ impl Generator<'_> {
                         value
                     } else {
                         let old = self.place_term(&place).ok_or("unknown assigned place")?;
-                        if self.world.partial_ops.contains(&(e.span.start, e.span.end)) {
+                        let key = (e.span.start, e.span.end);
+                        if self.world.partial_ops.contains(&key)
+                            || self.world.overflow_ops.contains(&key)
+                        {
                             self.sync(out, &pad);
                             self.guard_abort(true)?;
                             let t = self.temp();
-                            let right = self.fresh("$right");
+                            let (left, right) = (self.fresh("$left"), self.fresh("$right"));
+                            let kind = self
+                                .type_of(p)
+                                .as_ref()
+                                .and_then(crate::numeric::IntegerKind::from_type);
+                            // The failure is raised before the place is updated.
+                            let checks =
+                                self.failure_checks(&op[..1], kind, key, &left, &right, &pad);
                             out.push_str(&format!(
-                                "{pad}let {t} ← do\n{pad}  let {right} := {value}\n{pad}  if {right} == 0 then\n{pad}    let «$impossible» ← Effect_Fail.«raise» «RuntimeError».«DivisionByZero»\n{pad}    nomatch «$impossible»\n{pad}  else pure ({old} {} {right})\n",
-                                &op[..1]
+                                "{pad}let {t} ← do\n{pad}  let {left} := {old}\n{pad}  let {right} := {value}\n{checks}{pad}  pure {}\n",
+                                arith_term(&op[..1], kind, &left, &right)
                             ));
                             t
                         } else {
-                            format!("({old} {} {value})", &op[..1])
+                            let kind = self
+                                .type_of(p)
+                                .as_ref()
+                                .and_then(crate::numeric::IntegerKind::from_type);
+                            arith_term(&op[..1], kind, &old, &value)
                         }
                     };
                     self.assign(&place, new, out, &pad)?;
@@ -1629,6 +1702,16 @@ impl Generator<'_> {
                 "Lean extraction of method and indirect calls requires named functions".into(),
             );
         };
+        // Wrapping intrinsics are Lean's modular UIntN/Int64 operations.
+        if let Some(op) = crate::numeric::wrapping_intrinsic(n)
+            && !self.scope.contains_key(n)
+            && !self.world.functions.contains_key(n)
+            && args.len() == 2
+        {
+            let es = args.iter().map(|a| &a.expr).collect::<Vec<_>>();
+            let values = self.operands(&es, out, indent)?;
+            return Ok(format!("({} {op} {})", values[0], values[1]));
+        }
         if let Some(k) = self.continuations.get(n).cloned()
             && k.context == self.context
         {
@@ -1655,7 +1738,19 @@ impl Generator<'_> {
                 let evidence = self.evidence(&cap);
                 return self.perform(eff, op, layer, Some(evidence), args, out, indent);
             }
-            let layer = self.layers.iter().rposition(|l| l.effect.name == eff);
+            // Typed instance selection mirrors the checker when the
+            // operation names its effect arguments explicitly.
+            let explicit = match &e.kind {
+                ExprKind::Call { types, .. } => crate::numeric::instance_key(eff, types),
+                _ => None,
+            };
+            let typed = explicit.and_then(|key| {
+                self.layers.iter().rposition(|l| {
+                    crate::numeric::instance_key(&l.effect.name, &l.effect.args).as_ref()
+                        == Some(&key)
+                })
+            });
+            let layer = typed.or_else(|| self.layers.iter().rposition(|l| l.effect.name == eff));
             return self.perform(eff, op, layer, None, args, out, indent);
         }
         if self.world.constructor(n).is_some() && !self.scope.contains_key(n) {
@@ -2499,6 +2594,50 @@ impl Generator<'_> {
         }
     }
 }
+/// A Lean `Bool` that holds when a checked operation is in range under
+/// `vesper.arith.checked/1`. Signed bounds use exact `Int` arithmetic;
+/// unsigned bounds use exact `Nat` arithmetic.
+pub(crate) fn in_range(
+    op: &str,
+    kind: crate::numeric::IntegerKind,
+    a: &str,
+    b: &str,
+) -> Option<String> {
+    let max = kind.max();
+    Some(if kind.unsigned() {
+        match op {
+            "+" => format!("decide ({a}.toNat + {b}.toNat ≤ {max})"),
+            "-" => format!("decide ({b} ≤ {a})"),
+            "*" => format!("decide ({a}.toNat * {b}.toNat ≤ {max})"),
+            "neg" => format!("({a} == 0)"),
+            _ => return None,
+        }
+    } else {
+        match op {
+            "+" | "-" | "*" => format!("inI64 ({a}.toInt {op} {b}.toInt)"),
+            "/" => format!("!({a} == -9223372036854775808 && {b} == -1)"),
+            "neg" => format!("({a} != -9223372036854775808)"),
+            _ => return None,
+        }
+    })
+}
+/// A total integer operation term. Lean's native `Int64` remainder traps on
+/// `MIN % -1`, which the contract defines as zero.
+pub(crate) fn arith_term(
+    op: &str,
+    kind: Option<crate::numeric::IntegerKind>,
+    a: &str,
+    b: &str,
+) -> String {
+    if op == "%" && kind == Some(crate::numeric::IntegerKind::I64) {
+        format!("(if {b} == -1 then 0 else {a} % {b})")
+    } else {
+        format!("({a} {op} {b})")
+    }
+}
+/// Lean source that raises the builtin overflow value.
+pub(crate) const RAISE_OVERFLOW: &str =
+    "let «$impossible» ← Effect_Fail.«raise» «ArithOverflow».mk";
 pub(crate) fn literal(l: &Literal) -> String {
     match l {
         Literal::Int(n) => n.to_string(),
