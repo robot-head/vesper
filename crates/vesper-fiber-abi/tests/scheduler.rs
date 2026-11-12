@@ -20,6 +20,7 @@ struct FixtureDriver {
     cancelled: bool,
     relocate_while_pending: bool,
     submitted: usize,
+    completion_bytes: Option<usize>,
 }
 
 impl FixtureDriver {
@@ -31,6 +32,7 @@ impl FixtureDriver {
             cancelled: false,
             relocate_while_pending: false,
             submitted: 0,
+            completion_bytes: None,
         }
     }
 }
@@ -61,7 +63,7 @@ impl Driver<NativeTask> for FixtureDriver {
                 } else {
                     let n = self.payload.len().min(request.buffer.len());
                     request.buffer[..n].copy_from_slice(&self.payload[..n]);
-                    Ok(n)
+                    Ok(self.completion_bytes.unwrap_or(n))
                 };
                 Finished { request, result }
             })
@@ -143,6 +145,24 @@ fn io_errors_resume_the_error_edge() {
     let (evidence, _) = prototype::pulse_read_evidence(&mut registry).unwrap();
     let mut driver = FixtureDriver::new(&[]);
     driver.error = Some(5);
+    let mut s = Scheduler::new(driver);
+    s.spawn(NativeTask::new(
+        jit.spawn_pulse_read(1, evidence).unwrap(),
+        Some(dev_null()),
+    ));
+    let (done, failed) = drain(&mut s);
+    assert!(done.is_empty());
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0].contains("failed with code 5"), "{failed:?}");
+}
+
+#[test]
+fn oversized_completion_is_an_io_error_instead_of_a_partial_success() {
+    let jit = JitPrototype::new(OptLevel::Speed).unwrap();
+    let mut registry = EvidenceRegistry::new();
+    let (evidence, _) = prototype::pulse_read_evidence(&mut registry).unwrap();
+    let mut driver = FixtureDriver::new(&[1; 8]);
+    driver.completion_bytes = Some(9);
     let mut s = Scheduler::new(driver);
     s.spawn(NativeTask::new(
         jit.spawn_pulse_read(1, evidence).unwrap(),

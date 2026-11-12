@@ -9,9 +9,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT_EVIDENCE: AtomicU64 = AtomicU64::new(1);
 
 fn allocate(counter: &AtomicU64) -> Result<EvidenceId, EvidenceError> {
-    counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |id| id.checked_add(1))
-        .map_err(|_| EvidenceError::Exhausted)
+    let mut id = counter.load(Ordering::Relaxed);
+    loop {
+        let next = id.checked_add(1).ok_or(EvidenceError::Exhausted)?;
+        match counter.compare_exchange_weak(id, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(id),
+            Err(current) => id = current,
+        }
+    }
 }
 
 /// Allocates evidence identities. Identities come from one process-wide

@@ -204,10 +204,21 @@ impl Resume for NativeTask {
                 let evidence = k.request().evidence;
                 let r = match io.result {
                     Ok(n) => {
-                        self.read_offset += n as u64;
-                        match deliver(&mut k, &io.buffer[..n.min(io.buffer.len())]) {
-                            Ok(()) => Resumption::value(evidence, n as u64),
-                            Err(code) => Resumption::error(evidence, code),
+                        // A Driver is an ordinary safe trait implementation.
+                        // Do not turn a malformed completion into a successful
+                        // read with more bytes than were requested/delivered.
+                        if n > io.buffer.len() || n as u64 > k.request().arg0 {
+                            Resumption::error(evidence, EIO)
+                        } else if let Some(offset) = self.read_offset.checked_add(n as u64) {
+                            match deliver(&mut k, &io.buffer[..n]) {
+                                Ok(()) => {
+                                    self.read_offset = offset;
+                                    Resumption::value(evidence, n as u64)
+                                }
+                                Err(code) => Resumption::error(evidence, code),
+                            }
+                        } else {
+                            Resumption::error(evidence, EIO)
                         }
                     }
                     Err(e) => {

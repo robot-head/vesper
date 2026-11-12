@@ -79,8 +79,10 @@ impl DataFrame {
             frames.relocate()?;
             let image = frames.read(at, self.len())?;
             let fresh: Box<[u64]> = image
-                .chunks_exact(8)
-                .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .map(|c| u64::from_le_bytes(*c))
                 .collect();
             Ok(fresh)
         })();

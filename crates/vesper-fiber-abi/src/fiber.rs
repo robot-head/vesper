@@ -30,6 +30,23 @@ use vesper_pulse::frames::{FrameError, FrameStack};
 pub type EntryFn = unsafe extern "C" fn(*mut FiberContext, u64) -> u64;
 
 static NEXT_FIBER: AtomicU64 = AtomicU64::new(1);
+
+fn allocate_fiber_id(counter: &AtomicU64) -> io::Result<u64> {
+    let mut id = counter.load(Ordering::Relaxed);
+    loop {
+        let next = id
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("fiber identities exhausted"))?;
+        match counter.compare_exchange_weak(id, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(id),
+            Err(current) => id = current,
+        }
+    }
+}
+
+fn next_generation(generation: u64) -> Option<u64> {
+    generation.checked_add(1)
+}
 thread_local! {
     static ABANDONED: Cell<u64> = const { Cell::new(0) };
 }
@@ -62,8 +79,11 @@ pub unsafe extern "C" fn vesper_fiber_park(ctx: *mut FiberContext) -> *const Res
         {
             return std::ptr::null();
         }
+        let Some(generation) = next_generation((*ctx).generation) else {
+            return std::ptr::null();
+        };
         (*ctx).state = FiberState::Parked as u32;
-        (*ctx).generation = (*ctx).generation.wrapping_add(1);
+        (*ctx).generation = generation;
         vesper_fiber_switch(&raw mut (*ctx).saved_sp, (*ctx).scheduler_sp, 0);
         &raw const (*ctx).resume
     }
@@ -133,6 +153,7 @@ impl Fiber {
         code: Rc<dyn Any>,
         config: FiberConfig,
     ) -> io::Result<Self> {
+        let fiber_id = allocate_fiber_id(&NEXT_FIBER)?;
         let stack = FiberStack::new(config.stack_size)?;
         let data = DataFrame::new(config.data_bytes);
         let ctx = Box::new(FiberContext {
@@ -141,7 +162,7 @@ impl Fiber {
             state: FiberState::Created as u32,
             flags: FLAG_STACK_PINNED,
             generation: 0,
-            fiber_id: NEXT_FIBER.fetch_add(1, Ordering::Relaxed),
+            fiber_id,
             saved_sp: 0,
             scheduler_sp: 0,
             evidence: evidence.header(),
@@ -212,7 +233,11 @@ impl Fiber {
             (*c).data_base = self.data.base();
             (*c).data_len = self.data.len() as u64;
             (*c).state = FiberState::Running as u32;
-            (*c).generation = (*c).generation.wrapping_add(1);
+            // Created generations are zero; parked generations are even.
+            // A running generation may reach u64::MAX, but its next park is
+            // rejected above rather than wrapping and revalidating old tokens.
+            (*c).generation = next_generation((*c).generation)
+                .expect("created or parked generation must have a successor");
             vesper_fiber_switch(&raw mut (*c).scheduler_sp, (*c).saved_sp, 0);
         }
         // The fiber has run past every reload point that could observe a
@@ -521,5 +546,25 @@ impl ContinuationTable {
                 Err(rejected.error)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn exhausted_identities_are_never_reused() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(allocate_fiber_id(&counter).unwrap(), u64::MAX - 1);
+        assert!(allocate_fiber_id(&counter).is_err());
+        assert!(allocate_fiber_id(&counter).is_err());
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+    }
+
+    #[test]
+    fn generations_cannot_wrap_to_an_old_token() {
+        assert_eq!(next_generation(u64::MAX - 1), Some(u64::MAX));
+        assert_eq!(next_generation(u64::MAX), None);
     }
 }

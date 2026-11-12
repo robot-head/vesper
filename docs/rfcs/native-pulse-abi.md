@@ -140,7 +140,9 @@ Caller/callee rules:
   queue would carry in `user_data`. `ContinuationTable::resume` rejects
   `UnknownToken` (already resumed or never inserted), `StaleToken` (the fiber
   re-parked at a newer generation), and `WrongEvidence`, and leaves the table
-  unchanged on every rejection.
+  unchanged on every rejection. Fiber identity exhaustion returns an error
+  during creation; generation exhaustion rejects the next park as an ABI
+  violation. Neither counter wraps to a previously valid token.
 * `NativeTask` implements `vesper_pulse::scheduler::Resume` without changing
   the scheduler. Every queue transition moves the task. `Step::Io` moves the
   task's `File` and a fresh buffer into the driver; the completion moves them
@@ -152,7 +154,9 @@ Caller/callee rules:
 
 * `Value(v)`: the operation produced `v`.
 * `Error(code)`: the operation failed (errno for I/O). Generated code takes its
-  error edge. The adapter maps `FAILED` to `Step::Failed`.
+  error edge. The adapter maps `FAILED` to `Step::Failed`. A driver completion
+  claiming more bytes than its buffer or the requested length is rejected as
+  `EIO`, rather than reported as a successful partial copy.
 * `Cancelled`: the scheduler is cancelling (`Event::Cancelled`). The fiber is
   still resumed exactly once and takes its cancellation edge. Linear
   obligations are discharged there; per §12.2 the source type system only

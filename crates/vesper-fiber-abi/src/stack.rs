@@ -29,7 +29,9 @@ impl FiberStack {
         if usable < 4 * page {
             return Err(io::Error::other("fiber stack must be at least four pages"));
         }
-        let mapping_len = usable + page;
+        let mapping_len = usable
+            .checked_add(page)
+            .ok_or_else(|| io::Error::other("stack mapping size overflow"))?;
         // SAFETY: a fresh anonymous mapping with no address hint.
         let mapping = unsafe {
             libc::mmap(
@@ -107,5 +109,8 @@ mod tests {
         assert!(!s.contains(s.top() as u64));
         assert!(!s.contains((s.base() - 1) as u64));
         assert!(FiberStack::new(16).is_err());
+        assert!(FiberStack::new(usize::MAX).is_err());
+        // Rounding fits, but adding the guard page must also be checked.
+        assert!(FiberStack::new(usize::MAX - page_size() + 1).is_err());
     }
 }
