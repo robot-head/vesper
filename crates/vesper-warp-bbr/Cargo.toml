@@ -1,0 +1,10 @@
+[package]
+name = "vesper-warp-bbr"
+version = "0.1.0"
+edition = "2024"
+description = "Sans-IO BBRv3 congestion control and earliest-departure-time pacing for Vesper Warp (design §35)"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
