@@ -132,7 +132,7 @@ struct StagedFile {
 impl Drop for StagedFile {
     fn drop(&mut self) {
         if self.armed {
-            let _ = fs::remove_file(&self.path);
+            let _ = fsutil::remove_staged_file(&self.path);
         }
     }
 }
@@ -981,7 +981,7 @@ impl Store {
                 .and_then(|m| now.duration_since(m).ok())
                 .unwrap_or(Duration::ZERO);
             if age >= min_age {
-                match fs::remove_file(&path) {
+                match fsutil::remove_staged_file(&path) {
                     Ok(()) => removed += 1,
                     Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                     Err(e) => return Err(CasError::io("remove staging file", path, e)),

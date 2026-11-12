@@ -853,13 +853,16 @@ fn materialize_refuses_existing_destinations() {
     fs::create_dir(&existing_dir).unwrap();
     let existing_file = dir.path().join("file");
     fs::write(&existing_file, b"keep me").unwrap();
-    let mut targets = vec![existing_dir.clone(), existing_file.clone()];
-    #[cfg(unix)]
-    {
-        let dangling = dir.path().join("dangling");
-        std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
-        targets.push(dangling);
-    }
+    let targets = [
+        existing_dir.clone(),
+        existing_file.clone(),
+        #[cfg(unix)]
+        {
+            let dangling = dir.path().join("dangling");
+            std::os::unix::fs::symlink(dir.path().join("nowhere"), &dangling).unwrap();
+            dangling
+        },
+    ];
     for target in targets {
         assert!(matches!(
             store.materialize(&root.id, &target, MaterializeOptions::default()),
