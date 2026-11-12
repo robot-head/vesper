@@ -661,3 +661,24 @@ fn retained_report_paths_and_license_token_work_are_bounded() {
         Err(Error::Limit(_))
     ));
 }
+
+#[test]
+fn empty_root_scope_cannot_certify_an_empty_or_unreachable_graph_clean() {
+    let limits = Limits::default();
+    let mut no_roots = solution();
+    no_roots.roots.clear();
+    // A selected vulnerable package is not reachable without a root. It must
+    // not disappear into an empty graph and produce a misleading clean audit.
+    let mut c = catalog();
+    c.advisories.push(advisory("A", id("@org/root")));
+    assert!(matches!(
+        audit(&no_roots, &c, &policy(), &limits),
+        Err(Error::InvalidInput(reason)) if reason.contains("at least one declared root")
+    ));
+    no_roots.packages.clear();
+    let parsed = parse_solution(&serde_json::to_vec(&no_roots).unwrap(), &limits).unwrap();
+    assert!(matches!(
+        audit(&parsed, &catalog(), &policy(), &limits),
+        Err(Error::InvalidInput(reason)) if reason.contains("at least one declared root")
+    ));
+}

@@ -7,7 +7,9 @@ schema, calculus, compiler, Lean, SIMD, existing CLI or workflow edits.
 ## Delivered behavior
 
 A standalone, runnable crate audits an exact public calculus `Solution`, always
-validating that solution before obtaining its `PackageGraph`. It does not accept
+validating that solution before obtaining its `PackageGraph`. At least one root
+is required in both parsed and programmatic inputs; an empty root scope returns
+an input error rather than a clean empty-graph report. It does not accept
 caller-created graph DTOs that claim prior validation. Both reachable Vesper
 packages and reachable declarative native selections are checked; identity
 domains remain explicitly tagged. Inactive optional dependencies, inactive native
@@ -104,12 +106,12 @@ cargo clippy --manifest-path crates/vesper-loom-audit/Cargo.toml --all-targets -
 cargo fmt --manifest-path crates/vesper-loom-audit/Cargo.toml -- --check
 ```
 
-15 focused integration tests passed, no ignored tests; strict Clippy and format
+16 focused integration tests passed, no ignored tests; strict Clippy and format
 passed. Tests cover transitive/native paths, cycles/diamonds/multiple roots,
 shared native paths, feature activation/inactive selections, real SemVer
 prerelease/build/fixed boundaries through audit, malformed/duplicate catalogs and
 JSON keys, SPDX precedence/exception decisions/unknowns, invalid solutions,
-byte/node/depth/edge/path/token/work bounds, complete context binding and report
+byte/node/depth/edge/path/token/work bounds, empty-root scope rejection, complete context binding and report
 serialization. No external service or network feed was used.
 
 The actual runnable example was invoked with the checked-in solution/policy and

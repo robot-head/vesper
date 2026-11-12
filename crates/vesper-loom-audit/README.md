@@ -7,7 +7,8 @@ these supplied inputs; an empty or stale catalog cannot establish CVE absence.
 
 `parse_solution`, `parse_catalog`, `parse_policy` accept bounded JSON and reject
 duplicate keys at every nesting level and unknown schema/DTO fields. `audit`
-revalidates programmatic DTOs and the exact solution. Inactive optional/feature
+revalidates programmatic DTOs and the exact solution. At least one declared root
+is required: an empty audit scope cannot produce a clean report. Inactive optional/feature
 edges and unused selections do not generate findings. Cycles terminate. Findings
 include one shortest deterministic path from each reaching root, with explicit
 Vesper/native identity domains. Invalid inputs and exhausted budgets return

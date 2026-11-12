@@ -337,6 +337,11 @@ fn validate_policy(policy: &Policy, limits: &Limits) -> Result<BTreeSet<String>,
 /// returned for an invalid solution. The complexity estimate is conservative
 /// logical work, not wall-clock or instruction metering.
 fn preflight(solution: &Solution, limits: &Limits, work: &mut Work) -> Result<(), Error> {
+    if solution.roots.is_empty() {
+        return Err(Error::InvalidInput(
+            "audit requires at least one declared root package".into(),
+        ));
+    }
     input::check_size(solution, limits)?;
     if solution
         .packages
