@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "minimum_operators": 2,
+  "max_statement_ttl": 500,
+  "builders": [
+    {
+      "key_id": "key-a",
+      "operator_id": "operator-a",
+      "public_key": "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+      "valid_from": 10,
+      "valid_until": 1000,
+      "revoked": false
+    },
+    {
+      "key_id": "key-b",
+      "operator_id": "operator-b",
+      "public_key": "8139770ea87d175f56a35466c34c7ecccb8d8a91b4ee37a25df60f5b8fc9b394",
+      "valid_from": 10,
+      "valid_until": 1000,
+      "revoked": false
+    }
+  ]
+}

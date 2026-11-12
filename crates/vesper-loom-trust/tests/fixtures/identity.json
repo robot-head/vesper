@@ -1,0 +1,10 @@
+{
+  "package": "@test/package",
+  "version": "1.2.3+source",
+  "source_tree": "b3v1:source:tree:6830b0c5e0481e76f6e2db81cec956649bc2b7cf29b8da00917df1353d287844",
+  "derivation": "drv:b3v1:76a4a6bf926a02128ec5b8bdf8430a76126a633323a5ff19071d5c4f6af2b0f4",
+  "target": "x86_64-unknown-linux-gnu",
+  "builder_blake3": "c4c9c208c14c9cc29905a385c1cf7c93be57b8d2b98b8983bc9b1cde61ab2a48",
+  "sandbox_contract": "vesper:sandbox/step@0.1.0",
+  "output": "b3v1:artifact:blob:8dcf0460049a0a16a51cafcf33facd9d53d4ac90744a780f641937b55f8036f3"
+}
