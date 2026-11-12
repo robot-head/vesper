@@ -3,9 +3,9 @@
 Wave-four lane 3 of design §35 (Vesper Warp): §35.1 item 1, §35.2
 `XdpNic`/`UmemFrame`, §35.4 theorem 1, §35.5 `XdpUmemAccounting`. Issue #39.
 Branch `claude/project-thread-05gni5` (the prompt suggested
-`wave4/warp-umem-rings`; this session may push only to the former). Base
-`a5fa024b8d6f62eaa336337d825a2be2ec8972b4` (origin/main at start, exactly the
-required baseline).
+`wave4/warp-umem-rings`; this session may push only to the former). Started from
+`a5fa024b8d6f62eaa336337d825a2be2ec8972b4` (the required baseline) and rebased
+onto `7ed4775` (origin/main after PR #35), with the lockfile regenerated.
 
 ## Files
 
@@ -191,7 +191,7 @@ DPDK is not implemented.
 
 | Requirement | Evidence |
 | --- | --- |
-| Long randomized runs keep exact conservation | `soft_nic.rs`: 12 scripted and 12 loopback seeds of 400 steps, plus a 3,000-step coverage run, with random geometry, ring sizes, batch sizes, malformed packets, all fault kinds, tx/completion stalls and early/late retires. The auditor runs after every NIC step and every app operation. The coverage run asserts every rejection kind, backpressure, early and late retire, and rx drops all occurred. |
+| Long randomized runs keep exact conservation | `soft_nic.rs` (13 tests): 12 scripted and 12 loopback seeds of 400 steps, plus a 3,000-step coverage run, with random geometry, ring sizes, batch sizes, malformed packets, all fault kinds, tx/completion stalls and early/late retires. The auditor runs after every NIC step and every app operation. The coverage run asserts every rejection kind, backpressure, early and late retire, and rx drops all occurred. |
 | Dropping an owner is detected | `dropped_owners_are_detected_and_quarantined`: rx frame, tx frame, lease before completion; `Leaked { first_chunk }`, chunk never recycled. The Lean differential runs also include drops. |
 | Descriptor validation without losing the frame | `malformed_rx_descriptors_are_rejected_without_losing_frames`, `zero_headroom_overlap_fault_crosses_the_chunk_end`, `turn_around_rejects_bad_windows_and_returns_the_frame`, `spurious_completions_are_skipped_and_counted`. |
 | 0 Alloc steady state | `zero_alloc.rs`: counting global allocator (with a positive control). After 200 warm-up iterations, 5,000 iterations of step → harvest → turn-around → submit → retire → completions → replenish **plus the full auditor** performed 0 allocations. This covers the driver and the software NIC only, not a kernel backend. |
@@ -202,8 +202,10 @@ DPDK is not implemented.
 ```sh
 cargo fmt --all -- --check                                              # ok
 cargo clippy --workspace --locked --all-targets -- -D warnings          # ok
+# (vesper-loom-build's tests need the target dir inside the workspace: its
+#  build script finds Cargo.lock from the target path.)
 VESPER_LEAN=lean cargo test --workspace --locked                        # ok
-VESPER_LEAN=lean cargo test -p vesper-warp-umem                         # 25 tests, ok
+VESPER_LEAN=lean cargo test -p vesper-warp-umem                         # 26 tests, ok
 lean lean/WarpUmem.lean                                                 # ok, standard axioms only
 ```
 
