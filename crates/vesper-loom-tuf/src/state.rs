@@ -231,10 +231,22 @@ impl Drop for Temporary {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{os::unix::fs::symlink, process::Command};
+    use std::{os::unix::fs::symlink, process::Command, sync::Mutex};
+
+    /// Serializes tests that spawn child processes with tests that expect a dropped store's
+    /// lock to be free immediately. While a child is being spawned it briefly shares the
+    /// parent's open file descriptions (until exec closes the close-on-exec ones), so a lock
+    /// dropped in another thread during that window stays held until the child execs.
+    static SPAWN: Mutex<()> = Mutex::new(());
+    fn spawn_guard() -> std::sync::MutexGuard<'static, ()> {
+        SPAWN
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn exclusive_lock_survives_replacement_and_releases_on_drop() {
+        let _spawn = spawn_guard();
         let parent = tempfile::tempdir().unwrap();
         let path = parent.path().join("state");
         let mut store = CheckpointStore::create(&path).unwrap();
@@ -293,6 +305,7 @@ mod tests {
 
     #[test]
     fn process_exit_releases_lock_and_retains_last_checkpoint() {
+        let _spawn = spawn_guard();
         let parent = tempfile::tempdir().unwrap();
         let path = parent.path().join("state");
         let mut store = CheckpointStore::create(&path).unwrap();
@@ -334,6 +347,7 @@ mod tests {
 
     #[test]
     fn relative_store_stays_bound_to_locked_directory_after_cwd_change() {
+        let _spawn = spawn_guard();
         let parent = tempfile::tempdir().unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args(["--exact", "state::tests::child_changes_current_directory"])
