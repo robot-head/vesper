@@ -451,6 +451,28 @@ fn facts_are_invalidated_by_assignment_inout_calls_and_resumptions() {
         "linear effect Ask { fn ask(in x: u8) -> u8; } fn f() -> u8 { let x: u8 = 1; handle Ask in { Ask::ask(x) } with { return v => v, ask(x, k) => { let r = k(0); x + r + 255 }, } }",
         "E0401",
     );
+    // A right operand that reassigns the left operand's binding cannot
+    // discharge the check with the new value.
+    rejects(
+        "fn f() -> i64 eff [Fail[RuntimeError]] { let x: i64 = -9223372036854775808; x / { x = 0; -1 } }",
+        "E0400",
+    );
+    rejects(
+        "fn f() -> u8 { let x: u8 = 255; x + { x = 0; 1 } }",
+        "E0401",
+    );
+    rejects(
+        "fn f() -> u8 { let x: u8 = 255; x += { x = 0; 1 }; x }",
+        "E0401",
+    );
+    agree(
+        &guarded(
+            "i64",
+            "handle Fail[RuntimeError] in { let x: i64 = -9223372036854775808; x / { x = 5; -1 } } with { return v => v, raise(e, k) => 3, }",
+            "4",
+        ),
+        "4",
+    );
     // The handled program observes the modified value.
     agree(
         "linear effect Mut { fn change(inout x: u8); } fn main() -> u8 { let x: u8 = 1; handle Mut in { Mut::change(inout x); handle Fail[ArithOverflow] in { x + 1 } with { return v => v, raise(e, k) => 9, } } with { return v => v, change(x, k) => { x = 255; k(()) }, } }",

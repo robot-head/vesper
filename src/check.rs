@@ -1070,6 +1070,9 @@ impl Checker<'_> {
                     Type::Infer
                 };
                 let a = self.expr_expected(l, env, Usage::Own, &goal);
+                // The dividend's fact is the value already evaluated: the right
+                // operand may reassign a binding the left one read.
+                let left_fact = self.integer_fact(l, env);
                 let right_goal = if goal != Type::Infer {
                     goal
                 } else if !matches!(a, Type::IntLiteral(_)) {
@@ -1131,12 +1134,7 @@ impl Checker<'_> {
                 }
                 if let Some(kind) = crate::numeric::IntegerKind::from_type(&common)
                     && crate::numeric::may_overflow(op, kind)
-                    && !self.in_range(
-                        op,
-                        kind,
-                        self.integer_fact(l, env),
-                        self.integer_fact(r, env),
-                    )
+                    && !self.in_range(op, kind, left_fact, self.integer_fact(r, env))
                 {
                     self.overflow_failure(env, e.span.clone());
                 }
@@ -1157,6 +1155,13 @@ impl Checker<'_> {
                 let expected = self.place(&p, env, Usage::Borrow(Pass::Inout), l.span.clone());
                 self.types
                     .insert((l.span.start, l.span.end), expected.clone());
+                let target_fact = |env: &Env| {
+                    env.bindings
+                        .get(&p.root)
+                        .filter(|_| p.path.is_empty())
+                        .and_then(|b| b.integer)
+                };
+                let before = target_fact(env);
                 let actual = self.expr_expected(r, env, Usage::Own, &expected);
                 self.expect_type(&expected, &actual, r.span.clone());
                 if bound_capabilities(&expected) != bound_capabilities(&actual) {
@@ -1184,11 +1189,9 @@ impl Checker<'_> {
                 {
                     self.primitive_failure(env, e.span.clone());
                 }
-                let old = env
-                    .bindings
-                    .get(&p.root)
-                    .filter(|_| p.path.is_empty())
-                    .and_then(|b| b.integer);
+                // If the right side reassigns the target, either value may be
+                // the one combined, so only an unchanged fact is trusted.
+                let old = target_fact(env).filter(|_| target_fact(env) == before);
                 let value = self.integer_fact(r, env);
                 let kind = crate::numeric::IntegerKind::from_type(&expected);
                 if let Some(kind) = kind
