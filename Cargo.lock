@@ -3481,6 +3481,7 @@ dependencies = [
  "vesper-loom-cas",
  "vesper-loom-solver",
  "vesper-loom-trust",
+ "vesper-lsp",
  "vesper-pact",
  "vesper-pact-binding",
  "vesper-pulse",
@@ -3751,6 +3752,16 @@ dependencies = [
  "tokio",
  "tough",
  "url",
+]
+
+[[package]]
+name = "vesper-lsp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "vesper-serde",
+ "vesper-span",
 ]
 
 [[package]]
