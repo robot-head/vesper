@@ -8,6 +8,7 @@ members = [
     "crates/vesper-syntax",
     "crates/vesper-pulse",
     "crates/vesper-ffi",
+    "crates/vesper-loom-calculus",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
 default-members = [
@@ -16,6 +17,7 @@ default-members = [
     "crates/vesper-syntax",
     "crates/vesper-pulse",
     "crates/vesper-ffi",
+    "crates/vesper-loom-calculus",
 ]
 
 [workspace.dependencies]
