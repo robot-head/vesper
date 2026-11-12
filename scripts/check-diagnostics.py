@@ -96,7 +96,7 @@ def notice(method, params):
 def initialize():
     return request(1, "initialize", {"capabilities": {"general": {"positionEncodings": ["utf-16"]},
                    "workspace": {"workspaceEdit": {"documentChanges": True}},
-                   "textDocument": {"codeAction": {"codeActionLiteralSupport": {}}}}})
+                   "textDocument": {"publishDiagnostics": {"relatedInformation": True, "dataSupport": True}, "codeAction": {"codeActionLiteralSupport": {}}}}})
 
 
 def open_document(uri, source):
@@ -276,6 +276,40 @@ def run(binary, work):
     assert diagnostics[0]["code"] == "VESPER_ANALYSIS_UNAVAILABLE"
     assert diagnostics[0]["range"] == source_range(source, {"start": 0, "end": 0})
     assert "relatedInformation" not in diagnostics[0]
+    case = fixtures()[0]
+    core = select(harness.check("capability-move", MOVE), case["code"], case["message"])
+    assert_core(core, case)
+    for related, data in [(None, None), (False, False), (True, False), (False, True), (True, True)]:
+        init = initialize()
+        text_document = init["params"]["capabilities"]["textDocument"]
+        text_document.pop("publishDiagnostics")
+        flags = {}
+        if related is not None:
+            flags["relatedInformation"] = related
+        if data is not None:
+            flags["dataSupport"] = data
+        if flags:
+            text_document["publishDiagnostics"] = flags
+        uri = "untitled:publication-capabilities/🦀"
+        publication = publications(harness.lsp([init, open_document(uri, MOVE)]), uri)[0]
+        assert publication["version"] == 1
+        diagnostic = select(publication["diagnostics"], core["code"], core["message"])
+        assert diagnostic["severity"] == 1 and diagnostic["range"] == source_range(MOVE, core["span"])
+        assert ("relatedInformation" in diagnostic) == (related is True)
+        assert ("help" in diagnostic.get("data", {})) == (data is True)
+        if related is True:
+            assert diagnostic["relatedInformation"] == [
+                {"location": {"uri": uri, "range": source_range(MOVE, label["span"])}, "message": label["message"]}
+                for label in core["related"]]
+        if data is True:
+            assert diagnostic["data"]["help"] == core["help"]
+    legacy = initialize()
+    legacy["params"]["capabilities"]["textDocument"].pop("publishDiagnostics")
+    uri = "untitled:legacy-unavailable"
+    publication = publications(harness.lsp([legacy, open_document(uri, source)]), uri)[0]
+    assert publication["vesper"]["status"] == "analysis_unavailable"
+    assert publication["diagnostics"][0]["data"]["status"] == "analysis_unavailable"
+    assert publication["diagnostics"][0]["data"]["kind"] == "resource"
     print(json.dumps({"status": "passed", "cli_checks": harness.cli_checks, "stdio_sessions": harness.sessions,
                       "scope": "real ownership, alias, resumption and IR origins; no applied fixes"}))
 

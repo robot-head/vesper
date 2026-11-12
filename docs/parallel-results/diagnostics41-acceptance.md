@@ -63,6 +63,22 @@ The client negotiates literal actions and versioned documentChanges normally.
 The suite neither applies returned actions nor invokes `--fix`, JIT, run,
 native/WASM builds or proof commands.
 
+## Diagnostic publication capability compatibility
+
+Modern initialization helpers explicitly request both
+`textDocument.publishDiagnostics.relatedInformation:true` and
+`textDocument.publishDiagnostics.dataSupport:true`. An additional actual E0303
+test exercises absent flags, explicit false flags, related-only support,
+data-only support, and both flags. RelatedInformation and data.help must follow
+their respective flags independently; code/message/severity/primary range and
+current source identity remain unchanged. CLI JSON remains fully rich regardless
+of editor client capabilities. A legacy-client diagnostic-batch refusal still
+publishes existing unavailable-warning `data.status`/`data.kind` metadata.
+
+Capability filtering is a presentation choice after complete diagnostic metadata
+validation, not authority to skip checks or promote unavailable analysis.
+The scripts still request no automatic application of edits or fixes.
+
 ## Scripts and native workflow
 
 `scripts/check-diagnostics.py --binary PATH [--work DIR]` uses only Python's
@@ -110,14 +126,14 @@ git diff --check
 
 Runtime validation passed against the coordinator's final read-only binary
 `/workspace/vesper/target/parallel-next/debug/vesper`, incorporating final source
-causal captions (`30dcf4b...`), IR producers (`4d6059a...`) and the actual shared
-renderer. No root target writes or production copies were used:
+causal captions (`30dcf4b...`), IR producers (`4d6059a...`), the actual shared
+renderer and the final publication-capability presentation filter. No root target writes or production copies were used:
 
 ```text
 python3 scripts/check-diagnostics.py --binary ROOT_READONLY_BINARY
-  passed: 16 actual CLI checks, 10 actual framed stdio sessions
+  passed: 17 actual CLI checks, 16 actual framed stdio sessions
 VESPER_DIAGNOSTICS_BINARY=ROOT_READONLY_BINARY cargo test -p vesper --test diagnostics_cli
-  all 7 tests passed
+  all 8 tests passed
 cargo clippy -p vesper --test diagnostics_cli -- -D warnings
   passed
 ```

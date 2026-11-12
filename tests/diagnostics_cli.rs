@@ -297,7 +297,7 @@ fn initialize() -> Value {
         1,
         "initialize",
         json!({"capabilities":{"general":{"positionEncodings":["utf-16"]},
-        "workspace":{"workspaceEdit":{"documentChanges":true}},"textDocument":{"codeAction":{"codeActionLiteralSupport":{}}}}}),
+        "workspace":{"workspaceEdit":{"documentChanges":true}},"textDocument":{"publishDiagnostics":{"relatedInformation":true,"dataSupport":true},"codeAction":{"codeActionLiteralSupport":{}}}}}),
     )
 }
 fn open(uri: &str, source: &str) -> Value {
@@ -552,4 +552,96 @@ fn oversized_causal_batch_is_explicit_unavailable_without_partial_or_clamped_cau
     assert_eq!(diagnostics[0]["code"], "VESPER_ANALYSIS_UNAVAILABLE");
     assert_eq!(diagnostics[0]["range"], range(&source, &(0..0)));
     assert!(diagnostics[0].get("relatedInformation").is_none());
+}
+
+#[test]
+fn publication_capabilities_filter_only_optional_fields_independently() {
+    let case = cases().remove(0);
+    let file = File::new(case.source);
+    let core = file.diagnostics();
+    let core = select(&core, case.code, case.message);
+    assert_core(core, &case); // CLI rich evidence is independent of client flags.
+    for (related, data) in [
+        (None, None),
+        (Some(false), Some(false)),
+        (Some(true), Some(false)),
+        (Some(false), Some(true)),
+        (Some(true), Some(true)),
+    ] {
+        let mut init = initialize();
+        let text_document = init["params"]["capabilities"]["textDocument"]
+            .as_object_mut()
+            .unwrap();
+        text_document.remove("publishDiagnostics");
+        let mut flags = serde_json::Map::new();
+        if let Some(flag) = related {
+            flags.insert("relatedInformation".into(), json!(flag));
+        }
+        if let Some(flag) = data {
+            flags.insert("dataSupport".into(), json!(flag));
+        }
+        if !flags.is_empty() {
+            text_document.insert("publishDiagnostics".into(), Value::Object(flags));
+        }
+        let uri = "untitled:publication-capabilities/🦀";
+        let messages = lsp(vec![init, open(uri, case.source)]);
+        let publication = publications(&messages, uri)[0];
+        assert_eq!(publication["version"], 1);
+        assert_eq!(
+            publication["vesper"]["source_blake3"],
+            blake3::hash(case.source.as_bytes()).to_hex().as_str()
+        );
+        let diagnostic = select(
+            publication["diagnostics"].as_array().unwrap(),
+            case.code,
+            case.message,
+        );
+        assert_eq!(diagnostic["range"], range(case.source, &case.primary));
+        assert_eq!(diagnostic["severity"], 1);
+        assert_eq!(
+            diagnostic.get("relatedInformation").is_some(),
+            related == Some(true)
+        );
+        let help = diagnostic.get("data").and_then(|value| value.get("help"));
+        assert_eq!(help.is_some(), data == Some(true));
+        if let Some(help) = help {
+            assert_eq!(help, case.help);
+        }
+        if related == Some(true) {
+            assert_eq!(
+                diagnostic["relatedInformation"].as_array().unwrap().len(),
+                case.related.len()
+            );
+            for ((label, span), message) in diagnostic["relatedInformation"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(&case.related)
+                .zip(&case.labels)
+            {
+                assert_eq!(label["location"]["uri"], uri);
+                assert_eq!(label["location"]["range"], range(case.source, span));
+                assert_eq!(label["message"], *message);
+            }
+        }
+    }
+    // Legacy warning status/kind data remains visible even without dataSupport.
+    let mut legacy = initialize();
+    legacy["params"]["capabilities"]["textDocument"]
+        .as_object_mut()
+        .unwrap()
+        .remove("publishDiagnostics");
+    let source = format!(
+        "linear struct Tx{{}} fn bad(sink tx:Tx){{{}}}",
+        "let Tx{}=tx;".repeat(70)
+    );
+    let uri = "untitled:legacy-unavailable";
+    let messages = lsp(vec![legacy, open(uri, &source)]);
+    let publication = publications(&messages, uri)[0];
+    assert_eq!(publication["vesper"]["status"], "analysis_unavailable");
+    assert_eq!(
+        publication["diagnostics"][0]["data"]["status"],
+        "analysis_unavailable"
+    );
+    assert_eq!(publication["diagnostics"][0]["data"]["kind"], "resource");
 }
