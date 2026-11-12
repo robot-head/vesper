@@ -183,6 +183,38 @@ fn af_xdp_on_loopback_rx_turn_around_tx_completion() {
     assert_eq!(payload(&xsk, &looped), b"fresh");
     xsk.recycle_to_fill_ring(looped).expect("own frame");
 
+    // 4. Layouts the filter must pass to the stack untouched: IPv4 with
+    //    options (whose UDP *source* port sits where an option-free header
+    //    keeps the destination port) and a non-initial fragment.
+    let mut with_options = udp_frame(port, 40001, b"options");
+    with_options[14] = 0x46;
+    with_options.splice(34..34, [1u8, 1, 1, 1]); // four NOP options
+    let total = (with_options.len() - 14) as u16;
+    with_options[16..18].copy_from_slice(&total.to_be_bytes());
+    with_options[24..26].copy_from_slice(&[0, 0]);
+    let csum = checksum(&with_options[14..38]);
+    with_options[24..26].copy_from_slice(&csum.to_be_bytes());
+    let mut fragment = udp_frame(40002, port, b"fragment");
+    fragment[20..22].copy_from_slice(&0x2001u16.to_be_bytes()); // MF, offset 8
+    fragment[24..26].copy_from_slice(&[0, 0]);
+    let csum = checksum(&fragment[14..34]);
+    fragment[24..26].copy_from_slice(&csum.to_be_bytes());
+    for (pn, packet) in [(3, with_options), (4, fragment)] {
+        let mut frame = xsk.alloc_tx(packet.len() as u16).expect("free frame");
+        xsk.tx_bytes_mut(&mut frame)
+            .unwrap()
+            .copy_from_slice(&packet);
+        let lease = xsk.submit_paced_tx(frame, pn, 0).expect("tx ring space");
+        assert!(wait_completion(&mut xsk), "no completion");
+        let _ = xsk.retire(lease).expect("own lease");
+    }
+    std::thread::sleep(Duration::from_millis(200));
+    xsk.backend_mut().wake_rx();
+    assert!(
+        xsk.harvest_rx().expect("no malformed descriptor").is_none(),
+        "the filter redirected an IP-options packet or a fragment"
+    );
+
     drop(redirect);
     audit_driver(&mut xsk).expect("driver accounting conserved");
     let stats = xsk.stats();

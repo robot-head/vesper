@@ -487,4 +487,37 @@ fn driver_refuses_a_backend_with_different_geometry() {
         vesper_warp_umem::Xsk::new(config(16), nic),
         Err(UmemError::InvalidConfig(_))
     ));
+    // Same UMEM length and rings, different headroom or chunk size.
+    let mut zero_headroom = config(8);
+    zero_headroom.headroom = 0;
+    let nic = SoftNic::new(zero_headroom, SoftNicMode::Scripted).unwrap();
+    assert!(matches!(
+        vesper_warp_umem::Xsk::new(config(8), nic),
+        Err(UmemError::InvalidConfig(_))
+    ));
+    let mut big_chunks = config(4);
+    big_chunks.frame_size = 4096;
+    big_chunks.fill_size = 8;
+    let nic = SoftNic::new(big_chunks, SoftNicMode::Scripted).unwrap();
+    assert!(matches!(
+        vesper_warp_umem::Xsk::new(config(8), nic),
+        Err(UmemError::InvalidConfig(_))
+    ));
+}
+
+#[test]
+fn coarse_audit_reports_a_dropped_lease_before_its_completion() {
+    let mut xsk = xsk(8, SoftNicMode::Scripted);
+    vesper_warp_umem::audit_driver(&mut xsk).unwrap();
+    let tx = xsk.alloc_tx(16).unwrap();
+    let lease = xsk.submit_paced_tx(tx, 0, 0).unwrap();
+    let chunk = lease.chunk_idx();
+    drop(lease);
+    assert_eq!(
+        vesper_warp_umem::audit_driver(&mut xsk),
+        Err(ConservationError::Leaked {
+            count: 1,
+            first_chunk: Some(chunk)
+        })
+    );
 }

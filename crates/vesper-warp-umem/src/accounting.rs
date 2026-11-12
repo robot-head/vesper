@@ -122,8 +122,12 @@ pub fn audit_driver<B: XskBackend>(xsk: &mut Xsk<B>) -> Result<(), ConservationE
             device: xsk.free_list().len() as u32,
         });
     }
-    if c.leaked > 0 {
-        return Err(leaked(xsk, c.leaked));
+    // A dropped lease whose transmit has not completed is a leak too.
+    let pending = (0..total)
+        .filter(|&chunk| xsk.location(chunk) == Some(DriverLoc::TxPosted(LeaseMark::Leaked)))
+        .count() as u32;
+    if c.leaked + pending > 0 {
+        return Err(leaked(xsk, c.leaked + pending));
     }
     Ok(())
 }

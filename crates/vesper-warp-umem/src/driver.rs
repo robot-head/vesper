@@ -12,28 +12,50 @@ use crate::wire::XdpDesc;
 /// Packet numbers are below 2^62 (shared wave-four vocabulary, RFC 9000 §17.1).
 pub const MAX_PACKET_NUMBER_EXCLUSIVE: u64 = 1 << 62;
 
-/// Where the device behind a driver keeps its rings and UMEM bytes: the
-/// software NIC or a real kernel socket.
-pub trait XskBackend {
-    type Fill: ProducerRing<u64>;
-    type Rx: ConsumerRing<XdpDesc>;
-    type Tx: ProducerRing<XdpDesc>;
-    type Completion: ConsumerRing<u64>;
-    fn fill(&mut self) -> &mut Self::Fill;
-    fn rx(&mut self) -> &mut Self::Rx;
-    fn tx(&mut self) -> &mut Self::Tx;
-    fn completion(&mut self) -> &mut Self::Completion;
-    /// Size of the UMEM the device registered, in bytes.
-    fn umem_len(&self) -> usize;
-    /// `len` bytes of UMEM at byte offset `addr`, or `None` if out of range.
-    fn frame(&self, addr: u64, len: usize) -> Option<&[u8]>;
-    fn frame_mut(&mut self, addr: u64, len: usize) -> Option<&mut [u8]>;
+/// Device-side access the driver needs. Sealed: the trait is not nameable
+/// outside this crate, so its methods (raw UMEM bytes and the rings) cannot
+/// be called on a backend from safe external code. With the AF_XDP backend
+/// that matters for soundness: a slice of a kernel-owned chunk would alias
+/// memory the kernel writes. Only the driver calls these, and only for
+/// ranges it has checked belong to application-owned chunks.
+pub(crate) mod sealed {
+    use crate::error::UmemError;
+    use crate::ring::{ConsumerRing, ProducerRing};
+    use crate::trace::Transition;
+    use crate::wire::XdpDesc;
+
+    pub trait BackendAccess {
+        type Fill: ProducerRing<u64>;
+        type Rx: ConsumerRing<XdpDesc>;
+        type Tx: ProducerRing<XdpDesc>;
+        type Completion: ConsumerRing<u64>;
+        fn fill(&mut self) -> &mut Self::Fill;
+        fn rx(&mut self) -> &mut Self::Rx;
+        fn tx(&mut self) -> &mut Self::Tx;
+        fn completion(&mut self) -> &mut Self::Completion;
+        /// Size of the UMEM the device registered, in bytes.
+        fn umem_len(&self) -> usize;
+        /// `(frame_size, headroom)` the device was set up with.
+        fn frame_geometry(&self) -> (u32, u32);
+        /// `len` bytes of UMEM at byte offset `addr`, or `None` if out of range.
+        fn frame(&self, addr: u64, len: usize) -> Option<&[u8]>;
+        fn frame_mut(&mut self, addr: u64, len: usize) -> Option<&mut [u8]>;
+        /// Tells the device there is transmit work (`sendto` on a real socket).
+        fn kick_tx(&mut self) -> Result<(), UmemError> {
+            Ok(())
+        }
+        /// Observes a driver-side transition (the software NIC traces them).
+        fn record(&mut self, _transition: Transition) {}
+    }
+}
+
+/// A device behind a driver: the software NIC or a real kernel socket.
+/// Implemented only inside this crate (see `sealed::BackendAccess`).
+pub trait XskBackend: sealed::BackendAccess {
     /// Tells the device there is transmit work (`sendto` on a real socket).
     fn wake_tx(&mut self) -> Result<(), UmemError> {
-        Ok(())
+        self.kick_tx()
     }
-    /// Observes a driver-side transition (the software NIC traces them).
-    fn record(&mut self, _transition: Transition) {}
 }
 
 /// What happened to a lease's lease mark while its chunk is on the kernel tx side.
@@ -163,6 +185,7 @@ impl<B: XskBackend> Xsk<B> {
     pub fn new(config: UmemConfig, mut backend: B) -> Result<Self, UmemError> {
         config.validate()?;
         let same_geometry = backend.umem_len() == config.umem_len()?
+            && backend.frame_geometry() == (config.frame_size, config.headroom)
             && backend.fill().size() == config.fill_size
             && backend.rx().size() == config.rx_size
             && backend.tx().size() == config.tx_size

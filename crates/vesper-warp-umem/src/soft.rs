@@ -22,6 +22,7 @@
 use std::collections::VecDeque;
 
 use crate::config::UmemConfig;
+use crate::driver::sealed::BackendAccess;
 use crate::driver::{Xsk, XskBackend};
 use crate::error::UmemError;
 use crate::ring::{ProducerRing, Ring, pop_one, push_one};
@@ -475,7 +476,9 @@ impl SoftNic {
     }
 }
 
-impl XskBackend for SoftNic {
+impl XskBackend for SoftNic {}
+
+impl BackendAccess for SoftNic {
     type Fill = Ring<u64>;
     type Rx = Ring<XdpDesc>;
     type Tx = Ring<XdpDesc>;
@@ -494,6 +497,9 @@ impl XskBackend for SoftNic {
     }
     fn umem_len(&self) -> usize {
         self.mem.len()
+    }
+    fn frame_geometry(&self) -> (u32, u32) {
+        (self.config.frame_size, self.config.headroom)
     }
     fn frame(&self, addr: u64, len: usize) -> Option<&[u8]> {
         let start = usize::try_from(addr).ok()?;

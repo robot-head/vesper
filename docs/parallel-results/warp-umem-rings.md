@@ -66,6 +66,11 @@ Nothing else was edited.
   `edt_departure_ns`. The EDT is carried but not enforced here: AF_XDP has no
   per-descriptor launch time in this backend, and pacing is lane 2's and lane
   4's job.
+* **Sealed backend access.** Raw UMEM bytes and the rings are reachable
+  only through a crate-private supertrait of `XskBackend`, so safe external
+  code cannot slice a kernel-owned AF_XDP chunk or post to a ring behind the
+  driver's back. `Xsk::new` checks the backend's UMEM length, frame size,
+  headroom and ring sizes against its config.
 * **Fill ring sizing.** `fill_size >= frame_count` is required, so returning a
   frame to the fill ring cannot fail for lack of space. The driver still has
   a free-list fallback (`RejectToFree`/`RecycleToFree`), which this makes
@@ -160,9 +165,10 @@ four ring-size options, `XDP_MMAP_OFFSETS` (requires the post-5.4 layout
 with ring flags), four ring `mmap`s, and bind with `XDP_ZEROCOPY`, falling
 back to `XDP_COPY` and recording why. Rings use acquire loads of the peer
 index and release stores of our own. The unsafe invariants are written at
-the top of `af_xdp.rs`. `XdpRedirect` loads a 19-instruction XDP program
-through `bpf(2)`: an XSKMAP redirect for one IPv4/UDP destination port,
-everything else `XDP_PASS`. It attaches through a BPF link in generic (skb)
+the top of `af_xdp.rs`. `XdpRedirect` loads a 24-instruction XDP program
+through `bpf(2)`: an XSKMAP redirect for one destination port of
+unfragmented, option-free IPv4/UDP, everything else (including IP options
+and fragments) `XDP_PASS`. It attaches through a BPF link in generic (skb)
 mode and detaches on drop.
 
 The crate's dev-dependency on itself with `af-xdp` means every Linux

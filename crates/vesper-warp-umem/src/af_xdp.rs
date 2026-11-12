@@ -38,6 +38,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::config::UmemConfig;
 use crate::driver::XskBackend;
+use crate::driver::sealed::BackendAccess;
 use crate::error::{RingError, UmemError};
 use crate::ring::{ConsumerRing, ProducerRing};
 use crate::wire::XdpDesc;
@@ -457,6 +458,8 @@ pub struct AfXdpBackend {
     tx: ProdRing<XdpDesc>,
     umem: Mmap,
     umem_len: usize,
+    frame_size: u32,
+    headroom: u32,
     bind_mode: BindMode,
     zero_copy_error: Option<AfXdpError>,
     ifindex: u32,
@@ -615,6 +618,8 @@ impl AfXdpBackend {
             tx,
             umem,
             umem_len,
+            frame_size: config.frame_size,
+            headroom: config.headroom,
             bind_mode,
             zero_copy_error,
             ifindex,
@@ -662,7 +667,9 @@ impl AfXdpBackend {
     }
 }
 
-impl XskBackend for AfXdpBackend {
+impl XskBackend for AfXdpBackend {}
+
+impl BackendAccess for AfXdpBackend {
     type Fill = ProdRing<u64>;
     type Rx = ConsRing<XdpDesc>;
     type Tx = ProdRing<XdpDesc>;
@@ -682,6 +689,9 @@ impl XskBackend for AfXdpBackend {
     fn umem_len(&self) -> usize {
         self.umem_len
     }
+    fn frame_geometry(&self) -> (u32, u32) {
+        (self.frame_size, self.headroom)
+    }
     fn frame(&self, addr: u64, len: usize) -> Option<&[u8]> {
         let start = self.range(addr, len)?;
         // SAFETY: in bounds of the live UMEM mapping; see invariant 3.
@@ -692,7 +702,7 @@ impl XskBackend for AfXdpBackend {
         // SAFETY: as above, and `&mut self` excludes other Rust borrows.
         Some(unsafe { std::slice::from_raw_parts_mut(self.umem.ptr.as_ptr().add(start), len) })
     }
-    fn wake_tx(&mut self) -> Result<(), UmemError> {
+    fn kick_tx(&mut self) -> Result<(), UmemError> {
         // Without XDP_USE_NEED_WAKEUP the flag is never set, so always kick.
         let _ = self.tx.0.needs_wakeup();
         // SAFETY: a zero-length, non-blocking sendto with null buffers.
@@ -825,8 +835,9 @@ fn bpf_fd<T>(cmd: i64, attr: &mut T, step: &'static str) -> Result<OwnedFd, AfXd
     Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
-/// An attached XDP program redirecting IPv4/UDP packets with one destination
-/// port to an AF_XDP socket; every other packet passes to the stack.
+/// An attached XDP program redirecting unfragmented, option-free IPv4/UDP
+/// packets with one destination port to an AF_XDP socket; every other packet
+/// (including IPv4 with options and any fragment) passes to the stack.
 pub struct XdpRedirect {
     _link: OwnedFd,
     _prog: OwnedFd,
@@ -863,14 +874,21 @@ impl XdpRedirect {
         bpf_raw(BPF_MAP_UPDATE_ELEM, &mut update, "bpf(BPF_MAP_UPDATE_ELEM)")?;
         let port_le = i32::from(udp_dst_port.swap_bytes());
         let map_fd = map.as_raw_fd();
+        // Unsupported layouts (IP options, fragments) pass to the stack
+        // unchanged rather than being matched at a wrong offset.
         let program = [
             insn(0x61, 2, 1, 0, 0),        // r2 = ctx->data
             insn(0x61, 3, 1, 4, 0),        // r3 = ctx->data_end
             insn(0xbf, 4, 2, 0, 0),        // r4 = r2
-            insn(0x07, 4, 0, 0, 38),       // r4 += 38 (eth + ipv4 + udp dst port)
-            insn(0x2d, 4, 3, 12, 0),       // if r4 > r3 goto pass
+            insn(0x07, 4, 0, 0, 38),       // r4 += 38 (eth + 20-byte ipv4 + udp dst port)
+            insn(0x2d, 4, 3, 17, 0),       // if r4 > r3 goto pass
             insn(0x69, 5, 2, 12, 0),       // r5 = ethertype
-            insn(0x55, 5, 0, 10, 0x0008),  // if r5 != htons(0x0800) goto pass
+            insn(0x55, 5, 0, 15, 0x0008),  // if r5 != htons(0x0800) goto pass
+            insn(0x71, 5, 2, 14, 0),       // r5 = version/IHL
+            insn(0x55, 5, 0, 13, 0x45),    // if r5 != (v4, IHL 5) goto pass
+            insn(0x69, 5, 2, 20, 0),       // r5 = flags/fragment offset
+            insn(0x57, 5, 0, 0, 0xff3f),   // r5 &= htons(MF | offset)
+            insn(0x55, 5, 0, 10, 0),       // if fragmented goto pass
             insn(0x71, 5, 2, 23, 0),       // r5 = ip protocol
             insn(0x55, 5, 0, 8, 17),       // if r5 != UDP goto pass
             insn(0x69, 5, 2, 36, 0),       // r5 = udp dst port
