@@ -39,8 +39,9 @@ pub enum Term {
     },
     Call {
         callee: Box<Term>,
-        /// Token index of the opening parenthesis.
+        /// Token indices of the parentheses.
         open: usize,
+        close: usize,
         args: Vec<Term>,
     },
     Handle {
@@ -181,7 +182,15 @@ impl Parser<'_> {
             });
         }
         let mut t = self.primary()?;
+        // Each postfix call nests the AST one level deeper; bound it like
+        // any other nesting so untrusted `f()()()...` cannot build an
+        // arbitrarily deep tree.
+        let base_depth = self.depth;
         while self.peek_kind() == Some(TokenKind::Open(Delim::Paren)) {
+            if let Err(e) = self.enter() {
+                self.depth = base_depth;
+                return Err(e);
+            }
             let open = self.pos;
             self.pos += 1;
             let mut args = Vec::new();
@@ -195,13 +204,15 @@ impl Parser<'_> {
                     }
                 }
             }
-            self.expect_kind(TokenKind::Close(Delim::Paren), ")")?;
+            let close = self.expect_kind(TokenKind::Close(Delim::Paren), ")")?;
             t = Term::Call {
                 callee: Box::new(t),
                 open,
+                close,
                 args,
             };
         }
+        self.depth = base_depth;
         Ok(t)
     }
 

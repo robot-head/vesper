@@ -244,6 +244,8 @@ fn check_schema(what: &'static str, found: u32) -> Result<(), ForgeError> {
 /// Why a requirement could not be computed.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum GraphFault {
+    /// A call whose target is not statically known.
+    UnknownCallee,
     MissingNode {
         def: DefId,
         path: Vec<DefId>,
@@ -272,6 +274,7 @@ impl fmt::Display for GraphFault {
             Self::Unresolved { at, note, path } => {
                 write!(f, "unresolved edge in {at}: {note} (via {})", Path(path))
             }
+            Self::UnknownCallee => f.write_str("callee is not a statically resolved global"),
             Self::MissingHandlerRule { effect, path } => write!(
                 f,
                 "no handler-construction rule for effect {effect} (via {})",
@@ -361,6 +364,7 @@ impl AuthorityGraph {
                 parent.insert(handler, None);
                 queue.push_back(handler);
             }
+            OperationKind::IndirectCall => return Err(GraphFault::UnknownCallee),
         }
         while let Some(d) = queue.pop_front() {
             let path = root_path(&parent, d);
@@ -615,6 +619,7 @@ impl fmt::Display for OpDisplay<'_> {
             OperationKind::Handler { effect, handler } => {
                 write!(f, "handler {handler} for {effect}")
             }
+            OperationKind::IndirectCall => f.write_str("indirect call"),
         }
     }
 }

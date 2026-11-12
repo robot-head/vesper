@@ -68,7 +68,10 @@ pub(crate) struct GlobalBinding {
 }
 
 /// Owner of all hygiene identities for one compilation session.
-#[derive(Clone, Debug)]
+///
+/// Deliberately not `Clone`: two copies would share a session and counter
+/// positions and could mint the same identity with different meanings.
+#[derive(Debug)]
 pub struct HygieneHost {
     session: SessionId,
     pub(crate) registry: DefinitionRegistry,

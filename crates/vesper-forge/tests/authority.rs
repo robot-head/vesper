@@ -397,3 +397,35 @@ fn handler_construction_without_rule_fails_closed() {
         })
     );
 }
+
+#[test]
+fn generated_call_of_spliced_caller_global_is_attributed_to_the_macro() {
+    let gate = |build: fn(&Expansion) -> Quotation| {
+        let mut h = host();
+        let toks = expand_in_app(&mut h, "", &["connect"], build).unwrap();
+        let f = h.resolve(toks).unwrap();
+        check_authority(h.session(), f, &graph(), &policies(vec![]))
+    };
+    // `$f()`: caller supplies only the name, the macro adds the call.
+    let err = gate(|x| Quotation::new().splice(x.splices[0]).text("()")).unwrap_err();
+    assert_eq!(exceeded(&err)[0].0, net());
+    // `let g = $f; g()`: the call through a local alias is attributed too.
+    let err = gate(|x| {
+        Quotation::new()
+            .text("let g =")
+            .splice(x.splices[0])
+            .text("; g()")
+    })
+    .unwrap_err();
+    assert_eq!(exceeded(&err)[0].0, net());
+    // A generated call whose callee is not a static global fails closed.
+    let err = gate(|_| Quotation::new().text("{ hash_into }(1)")).unwrap_err();
+    assert!(matches!(
+        &err.violations[..],
+        [Violation::Graph {
+            operation: OperationKind::IndirectCall,
+            fault: GraphFault::UnknownCallee,
+            ..
+        }]
+    ));
+}
