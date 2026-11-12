@@ -1,0 +1,11 @@
+[package]
+name = "vesper-warp-tls"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Warp QUIC TLS 1.3 handshake over rustls (design section 35, RFC 9001 section 4, RFC 9000 sections 7 and 18)"
+publish = false
+
+[dependencies]
+rustls = { workspace = true }
+vesper-warp-crypto = { path = "../vesper-warp-crypto" }
+zeroize = { workspace = true }
