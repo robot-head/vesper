@@ -1,10 +1,13 @@
-//! A bounded host SQL reference implementation. See the crate README for its grammar,
-//! resource accounting, NULL semantics, and integration boundaries.
+//! Bounded host SQL execution, checked slotted pages, and recoverable page pins.
+//! See the crate README for grammar, resource accounting, and integration boundaries.
 #![forbid(unsafe_code)]
 
 mod execute;
 mod parse;
 mod plan;
+
+pub mod page;
+pub mod pool;
 
 use std::collections::BTreeMap;
 use std::fmt;

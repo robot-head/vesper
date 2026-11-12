@@ -269,6 +269,42 @@ impl<const QUEUE: usize> TelemetryRing<QUEUE> {
         self.len -= 1;
         record
     }
+    /// Borrows completed records in FIFO order without removing them.
+    pub fn records(&self) -> SpanRecords<'_, QUEUE> {
+        SpanRecords {
+            ring: self,
+            offset: 0,
+            end: self.len,
+        }
+    }
+    /// Removes a prefix only after a consumer succeeds. A failed consumer leaves
+    /// every queued record available in its original FIFO order for retry.
+    /// The ring cannot be mutated while the prefix is being consumed:
+    ///
+    /// ```compile_fail
+    /// use vesper_beacon::TelemetryRing;
+    /// let mut ring = TelemetryRing::<1>::default();
+    /// ring.try_consume_prefix(0, |_| {
+    ///     ring.drain::<1>();
+    ///     Ok::<_, ()>(())
+    /// }).unwrap();
+    /// ```
+    pub fn try_consume_prefix<R, E>(
+        &mut self,
+        max_rows: usize,
+        consumer: impl FnOnce(SpanRecords<'_, QUEUE>) -> Result<R, E>,
+    ) -> Result<R, E> {
+        let count = self.len.min(max_rows);
+        let result = consumer(SpanRecords {
+            ring: self,
+            offset: 0,
+            end: count,
+        })?;
+        for _ in 0..count {
+            self.pop();
+        }
+        Ok(result)
+    }
     /// Transfers up to BATCH records into independent, fixed-width owned columns.
     /// No Arrow/OTLP schema, serialization compatibility, or zero-copy network claim.
     pub fn drain<const BATCH: usize>(&mut self) -> ColumnBatch<BATCH> {
@@ -356,3 +392,32 @@ impl<const BATCH: usize> ColumnBatch<BATCH> {
         &self.attributes[..self.len]
     }
 }
+
+/// Nonmutating, exact-length view of a ring prefix; records are fixed typed values.
+#[derive(Clone)]
+pub struct SpanRecords<'a, const QUEUE: usize> {
+    ring: &'a TelemetryRing<QUEUE>,
+    offset: usize,
+    end: usize,
+}
+impl<const QUEUE: usize> Iterator for SpanRecords<'_, QUEUE> {
+    type Item = SpanRecord;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset == self.end {
+            return None;
+        }
+        let index = if self.offset >= QUEUE - self.ring.head {
+            self.offset - (QUEUE - self.ring.head)
+        } else {
+            self.ring.head + self.offset
+        };
+        self.offset += 1;
+        self.ring.records[index]
+    }
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.end - self.offset;
+        (remaining, Some(remaining))
+    }
+}
+impl<const QUEUE: usize> ExactSizeIterator for SpanRecords<'_, QUEUE> {}
+impl<const QUEUE: usize> core::iter::FusedIterator for SpanRecords<'_, QUEUE> {}

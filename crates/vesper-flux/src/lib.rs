@@ -9,7 +9,10 @@ mod circuit;
 mod frontier;
 mod zset;
 
-pub use circuit::{Circuit, CircuitBuilder, Executor, Field, NodeId, Predicate, TickInput};
+pub use circuit::{
+    CdcHeader, CdcPolicy, CheckpointLimits, Circuit, CircuitBuilder, Executor, Field, Ingested,
+    NodeId, Predicate, SourceBinding, TickInput, WeightPolicy,
+};
 pub use frontier::{Frontier, FrontierTicket, TicketError};
 pub use zset::{Row, ZSet};
 
@@ -50,6 +53,9 @@ pub enum Error {
     StaleTicket,
     WatermarkRegression,
     IdentityExhausted,
+    Cdc(&'static str),
+    SourceMode,
+    Checkpoint(&'static str),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

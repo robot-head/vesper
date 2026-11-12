@@ -1,9 +1,11 @@
 # vesper-serde
 
-A bounded scalar Rust host implementation of the JSON core in design §20.
+Bounded scalar Rust host JSON and binary codec slices from design §20.
 It has no dependencies and forbids unsafe code. It does not provide source
 macros, source Region typing, linear-resource deserialization, SIMD kernels,
-float conversion, archives, NDJSON/AoSoA ingestion, or throughput guarantees.
+float conversion, arbitrary object-graph archives, NDJSON/AoSoA ingestion, or
+throughput guarantees. The versioned tree archive below is an explicit host
+format, not a generic source-derive archive ABI.
 
 ```rust
 use vesper_serde::{IndexedJson, Limits};
@@ -63,4 +65,110 @@ Run the self-checking example with:
 
 ```sh
 cargo run -p vesper-serde --example bounded_json
+```
+
+
+## Binary codecs (§20.4)
+
+`streamvbyte` implements the original raw, non-delta **1/2/3/4-byte** StreamVByte
+u32 layout. The caller supplies the count out-of-band. All `ceil(count/4)`
+control bytes come first, followed by the concatenated little-endian data.
+Each control byte holds four two-bit `(width - 1)` tags, least significant lane
+first. This is not LEB128, delta coding, or the distinct StreamVByte 0/1/2/4
+variant. For example `[1,256,65536,16777216]` encodes as:
+
+```text
+e4 01 00 01 00 00 01 00 00 00 01
+```
+
+`streamvbyte::{encoded_size, max_encoded_size, encode_into, decode_into}` use
+checked counts and sizes. Encode writes the minimal widths and zeroes unused
+tail control bits. Decode ignores unused tail tags and accepts non-minimal widths
+for interoperability, while requiring the exact input frame length. It never
+reads padded bytes. Every Result failure preserves all output bytes/elements;
+a successful write changes only the returned prefix. The operations allocate
+no dynamic storage. `Limits` bound values, encoded bytes and logical work.
+
+```rust
+use vesper_serde::streamvbyte::{self, Limits};
+let mut bytes = [0; 32];
+let len = streamvbyte::encode_into(&[1,256,65536], &mut bytes, Limits::default())?;
+let mut output = [0; 3];
+streamvbyte::decode_into(&bytes[..len], 3, &mut output, Limits::default())?;
+assert_eq!(output, [1,256,65536]);
+# Ok::<(), vesper_serde::binary::Error>(())
+```
+
+`archive` implements the **VSPA host format**, version 1, tree schema 1. Each
+node contains one u32, a UTF-8 label and ordered children. It is not an existing
+external archive format, arbitrary object graph, mmap API or source ABI. Empty
+archives, cycles, shared children and orphans are rejected. Nodes have a
+canonical topological order: root index zero and child index greater than its
+parent. Every non-root node has exactly one parent.
+
+The little-endian 32-byte header is:
+
+| Offset | Field |
+| --- | --- |
+| 0 | Magic `VSPA` (four bytes) |
+| 4 | u16 version = 1 |
+| 6 | u16 schema = 1 |
+| 8 | u32 exact archive byte length |
+| 12 | u32 node count, at least one |
+| 16 | signed RelPtr32 root, target byte 32 |
+| 20 | RelSlice32 nodes: i32 displacement, u32 count |
+| 28 | u32 reserved zero |
+
+Exactly `count` 32-byte records start at byte 32:
+
+| Record offset | Field |
+| --- | --- |
+| 0 | u32 value |
+| 4 | RelSlice32 UTF-8 label bytes |
+| 12 | RelSlice32 child RelPtr32 entries |
+| 20, 24, 28 | reserved u32 zeros |
+
+After the complete node table, each node's payload appears in node-index order:
+label bytes, zero padding to four bytes, then its child RelPtr32 entries. Empty
+slices have zero displacement/count and no payload. Every nonempty slice must
+point to precisely the next canonical payload position; overlaps, aliases,
+nonzero padding, unreachable trailing bytes and pointers into metadata fail.
+All signed offsets originate at their own displacement field. A child entry
+usually has a negative offset because its node precedes the payload. The entire
+V1 archive fits within `i32::MAX` bytes, and each range calculation is checked.
+
+`RelPtr32` and `RelSlice32` are explicitly unvalidated wire descriptors. Their
+`resolve` methods check field and target ranges, signed arithmetic and logical
+alignment; they cannot construct validated node views. Alignment refers to
+archive-relative offsets, not host pointer addresses. Safe byte-copy reads allow
+the archive itself to reside in an unaligned host subslice.
+
+`archive::Archive::validate` validates actual bytes, exact version/schema,
+all node/payload/reference ranges, label UTF-8, reserved/padding bytes and the
+complete rooted-tree/depth invariant before publishing an immutable borrowed
+`Archive`/`NodeView`. Metadata counts must fit actual node bytes before allocation.
+No unsafe typed casts are used. `label_bytes` borrows directly in constant-size
+work; `label` safely rechecks UTF-8 in O(label bytes) to produce a str. Child
+iteration has constant work per edge. No global O(1) or performance claim is made.
+
+`archive::{encoded_size, encode_into}` borrow `TreeNode` inputs and perform full
+schema, checked-size, budget and capacity preflight before writing caller bytes.
+Failure preserves the entire output and all caller input owners. Both preflight
+and validation use one bounded fallible temporary metadata vector, dropped before
+return; no heap metadata is retained by archive views. `validation_bytes(count)`
+reports requested vector payload bytes, excluding allocator bookkeeping/capacity
+rounding. Validation is iterative, including deep tree checks. Limits cover
+archive bytes, nodes, children per node, total edges, depth (root = 1), per-label
+and total UTF-8 bytes, temporary metadata and deterministic work. Work units
+charge metadata, records, edges, labels and data passes; they are not instruction
+or timing counters. Source-region/linear typing, derivation, SIMD, mmap/device
+execution and cryptographic authenticity are not implemented.
+
+Both binary modules report `binary::{Error, ErrorKind}` independently of the
+unchanged JSON errors. Fixed byte vectors, independent differential reference
+encoding, malformed/truncation/mutation tests and owner/buffer-preservation
+checks run with `cargo test -p vesper-serde`. The self-checking binary example is:
+
+```sh
+cargo run -p vesper-serde --example binary_codecs
 ```
