@@ -211,3 +211,192 @@ fn unsupported_source_and_invalid_arguments_never_enter_measurement() {
     }
     assert!(run(&["--help"]).status.success());
 }
+
+#[test]
+fn metric_flags_validate_and_help_names_real_provider_scope() {
+    let help = run(&["--help"]);
+    assert!(help.status.success());
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(text.contains("--pmu"));
+    assert!(text.contains("--metric time|cycles|instructions"));
+    assert!(text.contains("no clock fallback"));
+    for args in [
+        vec!["missing.ves", "--metric", "bytes", "--json"],
+        vec!["missing.ves", "--metric", "--json"],
+        vec!["missing.ves", "--pmu=true", "--json"],
+    ] {
+        let output = run(&args);
+        assert!(!output.status.success());
+        assert_eq!(report(&output)["status"], "error");
+    }
+}
+
+#[test]
+fn requested_hardware_metrics_are_real_or_structured_unavailable_without_fallback() {
+    let fixture = Fixture::new();
+    let source_text = "fn main()->u64{42}";
+    let source = fixture.source("pmu.ves", source_text);
+    let availability = match vesper_bench_pmu::PerfGroup::open() {
+        Ok(group) => {
+            drop(group);
+            None
+        }
+        Err(error) => Some(error.reason),
+    };
+    for metric in ["time", "cycles", "instructions"] {
+        let output = run(&[
+            path(&source),
+            "--metric",
+            metric,
+            "--pmu",
+            "--samples",
+            "6",
+            "--warmup",
+            "1",
+            "--iterations",
+            "8",
+            "--json",
+        ]);
+        let data = report(&output);
+        assert_eq!(data["metric"], metric);
+        if output.status.success() {
+            assert!(
+                availability.is_none(),
+                "child produced counters despite parent provider unavailable"
+            );
+            assert_eq!(data["status"], "measured");
+            assert_eq!(data["pmu"]["status"], "measured");
+            assert_eq!(data["pmu"]["provider"], "linux.perf_event_open.group_read");
+            assert_eq!(data["clock"]["provider"], "std::time::Instant");
+            assert_eq!(data["clock"]["unit"], "nanoseconds");
+            assert_eq!(data["body_calls"], 224);
+            assert_eq!(data["baseline"]["jit"]["runs"], 112);
+            assert_eq!(data["candidate"]["jit"]["runs"], 112);
+            let windows = data["pmu"]["windows"].as_array().unwrap();
+            assert_eq!(windows.len(), 28);
+            for (index, window) in windows.iter().enumerate() {
+                assert!(window["cycles"].as_str().unwrap().parse::<u64>().unwrap() > 0);
+                assert!(
+                    window["instructions"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                        > 0
+                );
+                assert!(
+                    window["enabled_ns"]
+                        .as_str()
+                        .unwrap()
+                        .parse::<u64>()
+                        .unwrap()
+                        > 0
+                );
+                assert_eq!(window["enabled_ns"], window["running_ns"]);
+                assert_eq!(window["invocation"]["warmup"], index < 4);
+                assert_eq!(window["completion"]["attempted_operations"], 8);
+            }
+            if metric == "time" {
+                assert_eq!(data["provider"], "std::time::Instant");
+                assert_eq!(data["unit"], "nanoseconds");
+                assert_eq!(data["pairs"], data["clock"]["pairs"]);
+            } else {
+                assert_eq!(data["provider"], "linux.perf_event_open.group_read");
+                assert_eq!(data["unit"], metric);
+                assert_eq!(data["pairs"], data["pmu"][format!("{metric}_pairs")]);
+                assert!(data["pairs"][0].get("baseline_total_ns").is_none());
+                assert!(data["pairs"][0][format!("baseline_total_{metric}")].is_string());
+            }
+            assert_eq!(data["pairs"].as_array().unwrap().len(), 6);
+            eprintln!("LIVE_PMU_CLI_ACTUAL_COUNTERS: metric={metric},28 actual observed windows");
+        } else {
+            assert_eq!(data["status"], "inconclusive", "{data}");
+            assert_eq!(data["pmu"]["status"], "unavailable");
+            let unavailable = data["pmu"]
+                .get("unavailable")
+                .unwrap_or(&data["observer_error"]["unavailable"]);
+            let reason = unavailable["reason"].as_str().unwrap();
+            assert!(
+                unavailable["operation"]
+                    .as_str()
+                    .is_some_and(|s| !s.is_empty())
+            );
+            assert!(
+                unavailable
+                    .get("errno")
+                    .is_some_and(|v| v.is_null() || v.is_i64())
+            );
+            assert!(
+                [
+                    "UnsupportedPlatform",
+                    "PermissionDenied",
+                    "OsError",
+                    "InvalidRead",
+                    "InvalidMetadata",
+                    "WrongProcessOrThread",
+                    "InvalidState",
+                    "ForeignOrStaleToken",
+                    "Exhausted",
+                    "CounterRegression",
+                    "NotFullyScheduled",
+                    "NoEvents"
+                ]
+                .contains(&reason)
+            );
+            if let Some(vesper_bench_pmu::UnavailableReason::PermissionDenied) = availability {
+                assert_eq!(reason, "PermissionDenied");
+            }
+            assert!(data.get("pairs").is_none());
+            assert!(data.get("analysis").is_none());
+            assert!(data.get("clock").is_none());
+            assert!(data["pmu"].get("windows").is_none());
+            assert!(data["pmu"].get("cycles_pairs").is_none());
+            assert!(data["pmu"].get("instructions_pairs").is_none());
+            eprintln!(
+                "LIVE_PMU_CLI_UNAVAILABLE: metric={metric},reason={reason}; no positive hardware coverage"
+            );
+        }
+        assert_eq!(fs::read(&source).unwrap(), source_text.as_bytes());
+    }
+}
+
+#[test]
+fn hardware_metric_implies_pmu_and_unavailable_or_insufficient_evidence_cannot_pass_gate() {
+    let fixture = Fixture::new();
+    let source_text = "fn main()->i64{7}";
+    let source = fixture.source("gate.ves", source_text);
+    for metric in ["cycles", "instructions"] {
+        let output = run(&[
+            path(&source),
+            "--metric",
+            metric,
+            "--samples",
+            "1",
+            "--warmup",
+            "0",
+            "--iterations",
+            "8",
+            "--max-regression-bp",
+            "1000000",
+            "--json",
+        ]);
+        assert!(!output.status.success());
+        let data = report(&output);
+        assert_eq!(data["status"], "inconclusive");
+        if data["pmu"]["status"] == "measured" {
+            assert_eq!(data["analysis"]["gate_decision"], "Inconclusive");
+            assert_eq!(
+                data["analysis"]["inconclusive_reason"],
+                "InsufficientEpochs"
+            );
+        } else {
+            assert_eq!(
+                data["provider_requested"],
+                "linux.perf_event_open.group_read"
+            );
+            assert!(data.get("pairs").is_none());
+            assert!(data.get("analysis").is_none());
+        }
+        assert_eq!(fs::read(&source).unwrap(), source_text.as_bytes());
+    }
+}
