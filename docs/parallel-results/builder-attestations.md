@@ -1,0 +1,13 @@
+# Configured-key builder attestation quorum
+
+Coordinator-owned independent milestone: new `crates/vesper-loom-trust`. No compiler, CAS, build-runner, Forge, source-interface, root manifest/lockfile or CLI path was edited.
+
+Implemented real Ed25519 strict verification, domain-separated versioned canonical signing bytes, strict bounded serde DTOs, exact build identity matching and a minimum two-configured-operator quorum. Rotated keys for the same operator count once; duplicate keys/attestations, weak/malformed keys and signatures, mismatching extra envelopes, invalid schema, expiry/future issuance/revocation, excessive TTL and invalid policy fail closed. Complete source-tree/derivation/target/builder/sandbox/output identities are signed; interface hashes cannot replace derivation IDs.
+
+Public API: `verify_attestations`, `canonical_signing_bytes`, bounded `parse_identity`/`parse_policy`/`parse_bundle`, and the exported DTO/report types documented in the crate README. Reports contain configured verified key/operator sets and deterministic diagnostics. There is no network, signing service, implicit clock, artifact I/O, cache trust mutation or publication path.
+
+Validation on Linux Rust 1.99.1: 12 tests passed, formatting clean, strict all-target Clippy clean. Tests use actual deterministic Ed25519 signatures and cover identity/payload/key/protocol tampering, noncanonical signatures, configured-group quorum/rotation, time endpoints and `u64::MAX`, schema/object-domain confusion, malformed/duplicate/unknown JSON fields, bounds, and reproducible committed fixture bytes. The fixture's artifact/source/derivation identities are computed using existing CAS APIs and its sandbox contract is the real versioned WIT interface.
+
+Integration: remove the new crate's temporary `[workspace]`, register it in root `members` and `default-members`, add its path dependency for any CLI adapter and regenerate root Cargo.lock. New dependency `ed25519-dalek 2.2.0` uses actual strict Ed25519 verification; existing serde/semver/BLAKE3/CAS/calculus versions are retained. Do not carry the temporary nested lockfile into the root workspace.
+
+The library accepts artifact-domain blob or tree IDs but does not check their bytes. A CLI consumer must hash a real supplied artifact and compare its typed output identity; a blob-only first CLI should explicitly reject tree artifacts. Expected build identity, trusted keys/operator groups and clock are caller trust inputs. This milestone does not implement Sigstore/OIDC/TUF, discover independent builders, establish namespace/source provenance or actual hermetic execution, inspect ABI/CVEs/compiler authority, or certify reusable proofs. Do not wire its conditional result automatically into cache trust/publication.
