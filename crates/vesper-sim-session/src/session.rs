@@ -17,7 +17,10 @@ mod model_ops;
 
 use crate::{
     identity::{ExecutionIdentity, IdentityMismatch},
-    model::{DurableState, LostState, ModelEvent, ModelSnapshot, ModelState},
+    model::{
+        DurableState, LostState, ModelEvent, ModelSnapshot, ModelState, umem::HostBug,
+        warp::WarpState,
+    },
     program::CheckedProgram,
     scenario::{Action, ArgumentWrite, Outcome, Plan, Scenario, ScenarioError, validate},
     value::{self, unit},
@@ -223,6 +226,13 @@ pub enum SessionError {
         log: String,
     },
     LostMismatch,
+    /// UMEM conservation failed: a frame is missing, duplicated or still
+    /// held by a finished task. This is an explicit model error, never a
+    /// silent recycle.
+    Conservation {
+        task: String,
+        message: String,
+    },
 }
 impl std::fmt::Display for SessionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -481,7 +491,8 @@ impl<'w> Session<'w> {
         sim: Simulator<TaskSlot<'w>>,
         expected: Option<Expected>,
     ) -> Result<Self, SessionError> {
-        let model = plan.model.as_ref().map(ModelState::new);
+        let seed = plan.scenario().seed;
+        let model = plan.model.as_ref().map(|m| ModelState::new(m, seed));
         let mut session = Self {
             program,
             plan,
@@ -518,6 +529,16 @@ impl<'w> Session<'w> {
             .collect();
         for (index, at_ns) in faults.into_iter().enumerate() {
             session.spawn_internal(Internal::Fault(index), at_ns)?;
+        }
+        let warp_timers = session
+            .plan
+            .model
+            .as_ref()
+            .and_then(|m| m.spec.warp.as_ref())
+            .map(WarpState::initial_timers)
+            .unwrap_or_default();
+        for (timer, at_ns) in warp_timers {
+            session.spawn_internal(Internal::Warp(timer), at_ns)?;
         }
         Ok(session)
     }
@@ -580,6 +601,14 @@ impl<'w> Session<'w> {
     /// The current process, log and network state (version 2 scenarios).
     pub fn model_snapshot(&self) -> Option<ModelSnapshot> {
         self.model.as_ref().map(|m| m.snapshot(self.sim.now_ns()))
+    }
+    /// Install a deliberately broken host binding (tests of the UMEM
+    /// conservation check only).
+    #[doc(hidden)]
+    pub fn inject_host_bug(&mut self, bug: HostBug) {
+        if let Some(warp) = self.model.as_mut().and_then(|m| m.warp.as_mut()) {
+            warp.set_bug(Some(bug));
+        }
     }
     /// Tasks lost to process crashes so far.
     pub fn lost(&self) -> &[LostTask] {
@@ -1130,6 +1159,23 @@ impl<'w> Session<'w> {
                     }));
                 }
                 Ok(Execution::Complete(value)) => {
+                    let held = self
+                        .model
+                        .as_ref()
+                        .and_then(|m| m.warp.as_ref())
+                        .map(|w| w.held_by(&name))
+                        .unwrap_or_default();
+                    if !held.is_empty() {
+                        return Err(Fault::stall(
+                            token,
+                            SessionError::Conservation {
+                                task: name,
+                                message: format!(
+                                    "the task finished while still holding UMEM frames {held:?}"
+                                ),
+                            },
+                        ));
+                    }
                     let value = match value::encode(world, &self.plan.tasks[spec].result, &value) {
                         Ok(value) => value,
                         Err(message) => {
@@ -1229,7 +1275,7 @@ impl<'w> Session<'w> {
                 return Err(Fault::stall(token, error));
             }
             let action = bound.action.clone();
-            let mut spawn = None;
+            let mut spawn = vec![];
             let immediate = match &action {
                 Action::Clock => Some(Value::UInt(at_ns, 64)),
                 Action::CancelRequested => {
@@ -1288,11 +1334,11 @@ impl<'w> Session<'w> {
             if let Some(response) = immediate {
                 let response_json = value::encode(world, &bound.result, &response)
                     .expect("immediate responses match their validated signatures");
-                if let Some((internal, fires_at)) = spawn
-                    && let Err(error) = self.spawn_internal(internal, fires_at)
-                {
-                    token.payload_mut().owner = Owner::Routing(continuation);
-                    return Err(Fault::stall(token, error));
+                for (internal, fires_at) in spawn {
+                    if let Err(error) = self.spawn_internal(internal, fires_at) {
+                        token.payload_mut().owner = Owner::Routing(continuation);
+                        return Err(Fault::stall(token, error));
+                    }
                 }
                 if let Err(error) = self.event(SourceEvent::Resume {
                     task: name.clone(),

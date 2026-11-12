@@ -4,7 +4,8 @@
 //! Runs checked source on the reference evaluator under SimPulse. Recordings
 //! are bound to this executable's SHA-256 digest; replay with a different
 //! build, source, scenario, model semantics or options is rejected. Version 2
-//! scenarios also print lost tasks and the final durable log bytes.
+//! scenarios also print lost tasks and the final durable log bytes; version 3
+//! scenarios print each NIC's final UMEM frame accounting.
 use std::process::ExitCode;
 use vesper_sim_session::{CheckedProgram, Recording, RunResult, Scenario, Session};
 
@@ -65,6 +66,15 @@ fn run(args: &[String]) -> Result<(), String> {
                     durable.bytes_hex.len() / 2,
                     durable.sha256
                 );
+            }
+            if let Some(warp) = report.model.as_ref().and_then(|m| m.warp.as_ref()) {
+                for (nic, state) in &warp.nics {
+                    let a = state.accounting;
+                    println!(
+                        "umem {nic}: {} frames conserved (fill {}, rx {}, harvested {}, staged {}, leased {}, parked {})",
+                        a.total, a.fill, a.rx, a.harvested, a.staged, a.leased, a.parked
+                    );
+                }
             }
             println!("virtual time: {} ns", report.virtual_ns);
             println!("source events: {}", report.recording.trace.len());

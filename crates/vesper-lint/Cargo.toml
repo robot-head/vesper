@@ -1,0 +1,10 @@
+[package]
+name = "vesper-lint"
+version = "0.1.0"
+edition = "2024"
+description = "Conservative lint analysis over checked typed compiler facts"
+
+[dependencies]
+vesper-core = { path = "../vesper-core" }
+serde = { workspace = true }
+toml = "=0.8.23"

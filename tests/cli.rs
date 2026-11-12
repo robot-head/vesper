@@ -114,8 +114,8 @@ fn lsp_diagnostics_and_updates() {
         json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}),
         json!({"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///test.ves","version":1,"text":"fn main() { unknown }"}}}),
         json!({"jsonrpc":"2.0","method":"textDocument/didChange","params":{"textDocument":{"uri":"file:///test.ves","version":2},"contentChanges":[{"range":{"start":{"line":0,"character":12},"end":{"line":0,"character":19}},"text":"()"}]}}),
-        json!({"jsonrpc":"2.0","id":2,"method":"shutdown","params":null}),
-        json!({"jsonrpc":"2.0","method":"exit","params":null}),
+        json!({"jsonrpc":"2.0","id":2,"method":"shutdown"}),
+        json!({"jsonrpc":"2.0","method":"exit"}),
     ] {
         input.write_all(&frame(v)).unwrap();
     }
@@ -126,6 +126,8 @@ fn lsp_diagnostics_and_updates() {
     assert!(s.contains("E0201"));
     assert!(s.contains("\"diagnostics\":[]"));
     assert!(s.contains("\"version\":2"));
+    assert!(s.contains("\"id\":2,\"result\":null"));
+    assert!(!s.contains("\"error\":"));
 }
 
 #[test]

@@ -12,6 +12,7 @@ pub use vesper_pulse::{io_driver, scheduler};
 pub use vesper_syntax::{lexer, parser};
 pub mod check;
 pub mod database;
+pub mod doctest;
 pub mod interface;
 #[cfg(target_os = "linux")]
 pub mod io_session;
@@ -27,3 +28,4 @@ pub mod native;
 pub mod optimize;
 pub mod pact_frontend;
 pub mod runtime;
+pub mod tooling;

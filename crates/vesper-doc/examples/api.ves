@@ -1,0 +1,15 @@
+//! Local module & documentation
+/// Pair <b>native</b> layout
+copy struct Pair {
+    /// Native byte field; not a one-byte wire slot.
+    left: u8, right: u64
+}
+/// Updates only left
+fn update(inout p.{left}: Pair) { p.left = 1; }
+/// Resolved latent effect result
+linear effect Ask { fn ask() -> i64; }
+fn inferred() -> fn() -> i64 eff [Ask] { || eff [Ask] Ask::ask() }
+linear struct Unused {}
+linear struct Tx { id: u64 }
+/// Consumes the transaction and returns its number.
+fn close(sink x: Tx) -> u64 { let Tx { id } = x; id }

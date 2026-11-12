@@ -1,182 +1,181 @@
-//! Minimal stdio Language Server: full/incremental text sync and UTF-16 diagnostics.
-use crate::database::{self, Database, SourceFile};
-use salsa::Setter;
-use serde_json::{Value, json};
-use std::{
-    collections::BTreeMap,
-    io::{BufRead, Write},
+//! Bounded synchronous stdio language server over open in-memory buffers.
+pub mod actions;
+pub mod navigation;
+mod search;
+mod session;
+
+use serde_json::json;
+use std::io::{BufRead, Write};
+use vesper_lsp::{
+    Envelope, ProtocolErrorKind, ProtocolLimits, ResponsePayload, encode_frame, parse_envelope,
+    read_frame,
 };
-pub fn serve(reader: impl BufRead, mut writer: impl Write) -> Result<(), String> {
-    let mut reader = reader;
-    let mut db = Database::default();
-    let mut files: BTreeMap<String, SourceFile> = BTreeMap::new();
-    let mut shutdown = false;
-    loop {
-        let mut length = None;
-        loop {
-            let mut line = String::new();
-            if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
-                return Ok(());
-            }
-            if line.trim().is_empty() {
-                break;
-            }
-            if let Some((k, v)) = line.split_once(':')
-                && k.eq_ignore_ascii_case("content-length")
-            {
-                length = Some(
-                    v.trim()
-                        .parse::<usize>()
-                        .map_err(|_| "invalid Content-Length")?,
-                );
-            }
-        }
-        let length = length.ok_or("missing Content-Length")?;
-        if length > 16 * 1024 * 1024 {
-            return Err("LSP message exceeds 16 MiB".into());
-        }
-        let mut bytes = vec![0; length];
-        reader.read_exact(&mut bytes).map_err(|e| e.to_string())?;
-        let msg: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        let method = msg["method"].as_str().unwrap_or("");
-        let id = msg.get("id").cloned();
-        let response = match method {
-            "initialize" => Some(
-                json!({"capabilities":{"textDocumentSync":{"openClose":true,"change":2}},"serverInfo":{"name":"vesper","version":env!("CARGO_PKG_VERSION")}}),
-            ),
-            "shutdown" => {
-                shutdown = true;
-                Some(Value::Null)
-            }
-            "exit" => {
-                return if shutdown {
-                    Ok(())
-                } else {
-                    Err("LSP exit before shutdown".into())
+
+/// Serve framed JSON-RPC without treating document URIs as filesystem access.
+/// Framing errors terminate the stream; a rejected body has a known boundary
+/// and receives a bounded error before the next frame is read.
+pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), String> {
+    let limits = ProtocolLimits::default();
+    let mut session = session::Session::new()?;
+    while let Some(body) = read_frame(&mut reader, limits).map_err(|e| e.to_string())? {
+        let message = match parse_envelope(&body, limits) {
+            Ok(message) => message,
+            Err(error) => {
+                let code = match error.kind {
+                    ProtocolErrorKind::Utf8 | ProtocolErrorKind::Json => -32700,
+                    _ => -32600,
                 };
-            }
-            "textDocument/didOpen" | "textDocument/didChange" => {
-                let doc = &msg["params"]["textDocument"];
-                let uri = doc["uri"]
-                    .as_str()
-                    .ok_or("missing document URI")?
-                    .to_owned();
-                let file = if let Some(f) = files.get(&uri) {
-                    *f
-                } else {
-                    let f = SourceFile::new(&db, String::new());
-                    files.insert(uri.clone(), f);
-                    f
-                };
-                let text = if method.ends_with("didOpen") {
-                    doc["text"]
-                        .as_str()
-                        .ok_or("missing document text")?
-                        .to_owned()
-                } else {
-                    let mut text = file.text(&db).clone();
-                    for change in msg["params"]["contentChanges"]
-                        .as_array()
-                        .ok_or("missing content changes")?
-                    {
-                        let replacement = change["text"].as_str().ok_or("missing change text")?;
-                        if let Some(range) = change.get("range") {
-                            let start = offset(&text, &range["start"])?;
-                            let end = offset(&text, &range["end"])?;
-                            if start > end {
-                                return Err("reversed edit range".into());
-                            }
-                            text.replace_range(start..end, replacement);
-                        } else {
-                            text = replacement.to_owned();
-                        }
-                    }
-                    text
-                };
-                file.set_text(&mut db).to(text.clone());
-                let diagnostics=database::diagnostics(&db,file).iter().map(|d|json!({"range":{"start":position(&text,d.span.start),"end":position(&text,d.span.end)},"severity":1,"code":d.code,"source":"vesper","message":d.message})).collect::<Vec<_>>();
                 send(
                     &mut writer,
-                    &json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":uri,"version":doc["version"],"diagnostics":diagnostics}}),
+                    Envelope::Response {
+                        id: None,
+                        payload: ResponsePayload::Error {
+                            code,
+                            message: error.to_string(),
+                            data: None,
+                        },
+                    },
+                    limits,
                 )?;
-                None
-            }
-            "textDocument/didClose" => {
-                if let Some(uri) = msg["params"]["textDocument"]["uri"].as_str() {
-                    files.remove(uri);
-                    send(
-                        &mut writer,
-                        &json!({"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{"uri":uri,"diagnostics":[]}}),
-                    )?;
-                }
-                None
-            }
-            "initialized" | "$/cancelRequest" | "$/setTrace" => None,
-            _ => {
-                if let Some(id) = id {
-                    send(
-                        &mut writer,
-                        &json!({"jsonrpc":"2.0","id":id,"error":{"code":-32601,"message":"Method not found"}}),
-                    )?;
-                }
                 continue;
             }
         };
-        if let (Some(id), Some(result)) = (id, response) {
-            send(
-                &mut writer,
-                &json!({"jsonrpc":"2.0","id":id,"result":result}),
-            )?;
+        match message {
+            Envelope::Request { id, method, params } => {
+                let payload = match session.request(&method, params) {
+                    Ok(value) => ResponsePayload::Result(value),
+                    Err(error) => ResponsePayload::Error {
+                        code: error.code,
+                        message: error.message,
+                        data: error.data,
+                    },
+                };
+                send(
+                    &mut writer,
+                    Envelope::Response {
+                        id: Some(id),
+                        payload,
+                    },
+                    limits,
+                )?;
+            }
+            Envelope::Notification { method, params } => {
+                match session.notification(&method, params) {
+                    Ok(session::NotificationOutcome::Continue(messages)) => {
+                        for message in messages {
+                            send(&mut writer, message, limits)?;
+                        }
+                    }
+                    Ok(session::NotificationOutcome::Exit { clean }) => {
+                        return if clean {
+                            Ok(())
+                        } else {
+                            Err("LSP exit before shutdown".into())
+                        };
+                    }
+                    Err(error) => {
+                        // A notification never receives a JSON-RPC response.
+                        let message: String = error.message.chars().take(4096).collect();
+                        send(
+                            &mut writer,
+                            Envelope::Notification {
+                                method: "window/logMessage".into(),
+                                params: Some(json!({"type": 2, "message": message})),
+                            },
+                            limits,
+                        )?;
+                    }
+                }
+            }
+            // This server issues no client requests, so responses carry no authority.
+            Envelope::Response { .. } => (),
         }
     }
+    Ok(())
 }
-fn send(w: &mut impl Write, v: &Value) -> Result<(), String> {
-    let bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
-    write!(w, "Content-Length: {}\r\n\r\n", bytes.len()).map_err(|e| e.to_string())?;
-    w.write_all(&bytes).map_err(|e| e.to_string())?;
-    w.flush().map_err(|e| e.to_string())
-}
-fn offset(text: &str, p: &Value) -> Result<usize, String> {
-    let line = p["line"].as_u64().ok_or("invalid line")? as usize;
-    let character = p["character"].as_u64().ok_or("invalid character")? as usize;
-    let mut start = 0;
-    for _ in 0..line {
-        start += text[start..].find('\n').ok_or("line out of bounds")? + 1;
-    }
-    let mut units = 0;
-    for (i, c) in text[start..].char_indices() {
-        if units == character {
-            return Ok(start + i);
+
+fn send(writer: &mut impl Write, message: Envelope, limits: ProtocolLimits) -> Result<(), String> {
+    let bytes = match encode_frame(&message, limits) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            // Encoding completes before writing. A refused feature result must
+            // not leave a partial frame or silently lose its request ID.
+            let Envelope::Response { id, .. } = message else {
+                return Err(error.to_string());
+            };
+            encode_frame(
+                &Envelope::Response {
+                    id,
+                    payload: ResponsePayload::Error {
+                        code: -32004,
+                        message: "Editor response exceeds protocol output limits".into(),
+                        data: Some(json!({"status": "resource_unavailable"})),
+                    },
+                },
+                limits,
+            )
+            .map_err(|e| e.to_string())?
         }
-        if c == '\n' {
-            break;
-        }
-        units += c.len_utf16();
-    }
-    if units == character {
-        let end = text[start..]
-            .find('\n')
-            .map(|i| start + i)
-            .unwrap_or(text.len());
-        Ok(end)
-    } else {
-        Err("UTF-16 character offset out of bounds".into())
-    }
+    };
+    writer.write_all(&bytes).map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())
 }
-fn position(text: &str, offset: usize) -> Value {
-    let offset = offset.min(text.len());
-    let line = text[..offset].bytes().filter(|b| *b == b'\n').count();
-    let start = text[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    json!({"line":line,"character":text[start..offset].encode_utf16().count()})
-}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use vesper_lsp::{Id, read_message};
+
     #[test]
-    fn utf16() {
-        let t = "a😀b\nc";
-        assert_eq!(offset(t, &json!({"line":0,"character":3})).unwrap(), 5);
-        assert!(offset(t, &json!({"line":0,"character":2})).is_err());
-        assert_eq!(position(t, 5), json!({"line":0,"character":3}));
+    fn oversized_result_returns_one_bounded_error_with_original_id() {
+        let limits = ProtocolLimits {
+            max_reply_bytes: 256,
+            ..Default::default()
+        };
+        let mut wire = Vec::new();
+        send(
+            &mut wire,
+            Envelope::Response {
+                id: Some(Id::String("request".into())),
+                payload: ResponsePayload::Result(json!("x".repeat(2048))),
+            },
+            limits,
+        )
+        .unwrap();
+        let mut wire = Cursor::new(wire);
+        let response = read_message(&mut wire, ProtocolLimits::default())
+            .unwrap()
+            .unwrap();
+        assert!(matches!(response, Envelope::Response {
+            id: Some(Id::String(id)),
+            payload: ResponsePayload::Error { code: -32004, .. }
+        } if id == "request"));
+        assert!(
+            read_message(&mut wire, ProtocolLimits::default())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn refused_notification_writes_nothing() {
+        let limits = ProtocolLimits {
+            max_reply_bytes: 256,
+            ..Default::default()
+        };
+        let mut wire = Vec::new();
+        assert!(
+            send(
+                &mut wire,
+                Envelope::Notification {
+                    method: "window/logMessage".into(),
+                    params: Some(json!({"message": "x".repeat(2048)}))
+                },
+                limits
+            )
+            .is_err()
+        );
+        assert!(wire.is_empty());
     }
 }

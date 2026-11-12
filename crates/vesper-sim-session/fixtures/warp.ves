@@ -1,0 +1,165 @@
+// Design §35.2/§35.3 slice: a QUIC-shaped receive step over the linear
+// XdpNic effect. Every harvested frame is either recycled to the fill ring
+// (malformed header, unknown connection ID) or turned around in place,
+// submitted with an EDT launch time and parked until its ACK or PTO.
+// No implicit arithmetic: wrapping_add/wrapping_sub, comparisons and division
+// by non-zero literals only.
+copy struct RxHarvested {}
+copy struct TxStaged {}
+linear struct UmemFrame[State] { chunk_idx: u32, data_offset: u32, pkt_len: u32 }
+linear struct InFlightQuicPkt { pkt_num_full: u64, edt_departure_ns: u64, held_frame: UmemFrame[TxStaged] }
+// A copy view of a harvested frame; the simulator rejects it once the frame
+// changes state (Vesper has no borrowed return types to express that).
+copy struct ByteSlice { chunk_idx: u32, generation: u64, offset: u32, len: u32 }
+copy struct QuicShortHdr { first_byte: u8, dcid: u64, pkt_num_trunc: u64, payload_len: u32, peer_addr: u32, peer_port: u32 }
+
+linear effect XdpNic {
+    fn harvest_rx_single() -> Option[UmemFrame[RxHarvested]];
+    fn view_frame_bytes(in frame: UmemFrame[RxHarvested]) -> ByteSlice;
+    fn recycle_to_fill_ring(sink frame: UmemFrame[RxHarvested]) -> Unit;
+    fn turn_around_tx_in_place(sink rx_frame: UmemFrame[RxHarvested], tx_len: u32) -> UmemFrame[TxStaged];
+    fn submit_paced_tx(sink tx_frame: UmemFrame[TxStaged], pkt_num_full: u64, edt_launch_ns: u64) -> InFlightQuicPkt;
+    fn park_for_ack_or_pto(sink inflight: InFlightQuicPkt) -> Unit;
+}
+// Header splitting is a helper operation, not new syntax.
+linear effect Wire { fn split_short_header(bytes: ByteSlice) -> Result[QuicShortHdr, u32]; }
+linear effect RxWait { fn wait_rx(timeout_ns: u64) -> u64; }
+linear effect Clock { fn now() -> u64; }
+
+// One connection "tile" (no tiled(N) syntax yet: two named tiles).
+copy struct Conn { cid: u64, largest_rx_pn: u64, next_tx_pn: u64, next_edt_ns: u64, pacing_ns: u64, peer_addr: u32, peer_port: u32 }
+copy struct Conns { a: Conn, b: Conn }
+copy enum QuicError { PnExhausted(u64) }
+copy enum StepKind { Idle, Replied, Malformed, UnknownCid }
+copy struct Stepped { conns: Conns, kind: StepKind, rebound: bool }
+copy struct Stats { replied: u64, malformed: u64, unknown_cid: u64, rebinds: u64, waits: u64, largest_a: u64, largest_b: u64, next_tx_a: u64, next_tx_b: u64, error: bool }
+
+// RFC 9000 §A.3 with a 32-bit truncated packet number.
+fn decode_packet_number_rfc9000(largest: u64, trunc: u64) -> u64 {
+    let win: u64 = 4294967296;
+    let hwin: u64 = 2147483648;
+    let expected = wrapping_add(largest, 1);
+    let candidate = wrapping_add(wrapping_sub(expected, expected % win), trunc);
+    if wrapping_add(candidate, hwin) <= expected && candidate < 4611686014132420608 {
+        wrapping_add(candidate, win)
+    } else if candidate > wrapping_add(expected, hwin) && candidate >= win {
+        wrapping_sub(candidate, win)
+    } else {
+        candidate
+    }
+}
+
+// EDT: launch no earlier than now or the previous launch, plus pacing.
+fn advance_edt(prev_ns: u64, now_ns: u64, pacing_ns: u64) -> u64 {
+    let base = if now_ns > prev_ns { now_ns } else { prev_ns };
+    wrapping_add(base, pacing_ns)
+}
+
+fn max_u64(a: u64, b: u64) -> u64 { if a > b { a } else { b } }
+
+fn lookup_cid(conns: Conns, dcid: u64) -> Option[Conn] {
+    if conns.a.cid == dcid { Some(conns.a) } else if conns.b.cid == dcid { Some(conns.b) } else { None }
+}
+fn store(conns: Conns, c: Conn) -> Conns {
+    if conns.a.cid == c.cid { Conns { a: c, b: conns.b } } else { Conns { a: conns.a, b: c } }
+}
+
+// Packet numbers stay below 2^62 (RFC 9000 §12.3).
+fn pn_space_left(conns: Conns) -> Result[u64, QuicError] {
+    let limit: u64 = 4611686018427387903;
+    if conns.a.next_tx_pn >= limit { Err(PnExhausted(conns.a.cid)) }
+    else if conns.b.next_tx_pn >= limit { Err(PnExhausted(conns.b.cid)) }
+    else { Ok(limit) }
+}
+
+// §35.3 `poll_and_step_quic_rx_one`. `?` is used only before a frame is
+// live; every later failure recycles the frame explicitly ([T-Let]).
+// Connections are passed by value and returned: the §35.3 `inout conns`
+// form is rejected by today's checker together with Fail (E0402).
+fn poll_and_step(conns: Conns, now_ns: u64) -> Result[Stepped, QuicError] eff [XdpNic, Wire, Fail[QuicError]] {
+    let headroom = pn_space_left(conns)?;
+    match XdpNic::harvest_rx_single() {
+        None => Ok(Stepped { conns: conns, kind: Idle, rebound: false }),
+        Some(rx_frame) => {
+            let view = XdpNic::view_frame_bytes(rx_frame);
+            match Wire::split_short_header(view) {
+                Err(code) => {
+                    XdpNic::recycle_to_fill_ring(rx_frame);
+                    Ok(Stepped { conns: conns, kind: Malformed, rebound: false })
+                },
+                Ok(hdr) => match lookup_cid(conns, hdr.dcid) {
+                    None => {
+                        XdpNic::recycle_to_fill_ring(rx_frame);
+                        Ok(Stepped { conns: conns, kind: UnknownCid, rebound: false })
+                    },
+                    Some(conn) => {
+                        let full_pn = decode_packet_number_rfc9000(conn.largest_rx_pn, hdr.pkt_num_trunc);
+                        let edt = advance_edt(conn.next_edt_ns, now_ns, conn.pacing_ns);
+                        let tx_frame = XdpNic::turn_around_tx_in_place(rx_frame, 64);
+                        let inflight = XdpNic::submit_paced_tx(tx_frame, conn.next_tx_pn, edt);
+                        XdpNic::park_for_ack_or_pto(inflight);
+                        let rebound = conn.peer_port != 0 && (conn.peer_addr != hdr.peer_addr || conn.peer_port != hdr.peer_port);
+                        let updated = Conn {
+                            cid: conn.cid,
+                            largest_rx_pn: max_u64(conn.largest_rx_pn, full_pn),
+                            next_tx_pn: wrapping_add(conn.next_tx_pn, 1),
+                            next_edt_ns: edt,
+                            pacing_ns: conn.pacing_ns,
+                            peer_addr: hdr.peer_addr,
+                            peer_port: hdr.peer_port,
+                        };
+                        Ok(Stepped { conns: store(conns, updated), kind: Replied, rebound: rebound })
+                    },
+                },
+            }
+        },
+    }
+}
+
+fn count(s: Stats, kind: StepKind, rebound: bool) -> Stats {
+    let rebinds = if rebound { wrapping_add(s.rebinds, 1) } else { s.rebinds };
+    match kind {
+        Idle => s,
+        Replied => Stats { replied: wrapping_add(s.replied, 1), malformed: s.malformed, unknown_cid: s.unknown_cid, rebinds: rebinds, waits: s.waits, largest_a: s.largest_a, largest_b: s.largest_b, next_tx_a: s.next_tx_a, next_tx_b: s.next_tx_b, error: s.error },
+        Malformed => Stats { replied: s.replied, malformed: wrapping_add(s.malformed, 1), unknown_cid: s.unknown_cid, rebinds: rebinds, waits: s.waits, largest_a: s.largest_a, largest_b: s.largest_b, next_tx_a: s.next_tx_a, next_tx_b: s.next_tx_b, error: s.error },
+        UnknownCid => Stats { replied: s.replied, malformed: s.malformed, unknown_cid: wrapping_add(s.unknown_cid, 1), rebinds: rebinds, waits: s.waits, largest_a: s.largest_a, largest_b: s.largest_b, next_tx_a: s.next_tx_a, next_tx_b: s.next_tx_b, error: s.error },
+    }
+}
+fn finish(s: Stats, conns: Conns, error: bool) -> Stats {
+    Stats { replied: s.replied, malformed: s.malformed, unknown_cid: s.unknown_cid, rebinds: s.rebinds, waits: s.waits, largest_a: conns.a.largest_rx_pn, largest_b: conns.b.largest_rx_pn, next_tx_a: conns.a.next_tx_pn, next_tx_b: conns.b.next_tx_pn, error: error }
+}
+fn waited(s: Stats) -> Stats {
+    Stats { replied: s.replied, malformed: s.malformed, unknown_cid: s.unknown_cid, rebinds: s.rebinds, waits: wrapping_add(s.waits, 1), largest_a: s.largest_a, largest_b: s.largest_b, next_tx_a: s.next_tx_a, next_tx_b: s.next_tx_b, error: s.error }
+}
+
+copy struct Drained { conns: Conns, stats: Stats, failed: bool }
+
+// Drain the RX ring at one virtual instant (bounded by `budget` steps).
+fn drain(budget: u64, conns: Conns, stats: Stats) -> Drained eff [XdpNic, Wire, Clock] {
+    if budget == 0 { Drained { conns: conns, stats: stats, failed: false } } else {
+        let now = Clock::now();
+        let stepped = handle Fail[QuicError] in { poll_and_step(conns, now) } with {
+            return value => value,
+            raise(error, resume) => Err(error),
+        };
+        match stepped {
+            Err(e) => Drained { conns: conns, stats: stats, failed: true },
+            Ok(s) => match s.kind {
+                Idle => Drained { conns: s.conns, stats: stats, failed: false },
+                Replied => drain(wrapping_sub(budget, 1), s.conns, count(stats, s.kind, s.rebound)),
+                Malformed => drain(wrapping_sub(budget, 1), s.conns, count(stats, s.kind, s.rebound)),
+                UnknownCid => drain(wrapping_sub(budget, 1), s.conns, count(stats, s.kind, s.rebound)),
+            },
+        }
+    }
+}
+
+// Busy-poll loop: drain, then wait for the next arrival; stop after an idle
+// timeout (the traffic is over) or after `rounds` waits.
+fn serve(rounds: u64, idle_timeout_ns: u64, conns: Conns, stats: Stats) -> Stats eff [XdpNic, Wire, RxWait, Clock] {
+    let d = drain(64, conns, stats);
+    if d.failed { finish(d.stats, d.conns, true) }
+    else if rounds == 0 { finish(d.stats, d.conns, false) }
+    else if RxWait::wait_rx(idle_timeout_ns) == 0 { finish(d.stats, d.conns, false) }
+    else { serve(wrapping_sub(rounds, 1), idle_timeout_ns, d.conns, waited(d.stats)) }
+}

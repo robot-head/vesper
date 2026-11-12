@@ -11,6 +11,7 @@ use crate::{
         FailOp, Fault, LostState, ModelEvent, ModelPlan, ModelState, StaleSource,
         net::{Arrival, NetError, Sent},
         wal::WalError,
+        warp::{WarpEffect, WarpError, WarpTimer},
     },
     scenario::{Action, BoundOperation, Outcome, canonical},
     value,
@@ -40,6 +41,7 @@ pub(crate) enum Internal {
         epoch: u32,
         fails: Option<u32>,
     },
+    Warp(WarpTimer),
 }
 impl Internal {
     pub fn describe(&self) -> String {
@@ -50,6 +52,7 @@ impl Internal {
                 network, request, ..
             } => format!("model:{network}:timeout#{request}"),
             Self::Flush { log, request, .. } => format!("model:{log}:flush#{request}"),
+            Self::Warp(timer) => format!("model:{}", timer.describe()),
         }
     }
 }
@@ -58,7 +61,7 @@ pub(crate) enum ModelStep {
     /// Resume at once with this response, optionally starting a timer task.
     Immediate {
         response: Json,
-        internal: Option<(Internal, u64)>,
+        internal: Vec<(Internal, u64)>,
     },
     /// Park on `request` until the timer task fires.
     Park {
@@ -70,6 +73,7 @@ pub(crate) enum ModelStep {
 
 enum SimAction {
     Complete(CompletionId, IoResult),
+    SpawnInternal(Internal, u64),
     SpawnTask {
         spec: usize,
         name: String,
@@ -98,6 +102,23 @@ fn injected(
         occurrence,
         plan.failures.get(&(target.into(), op, occurrence)).copied(),
     )
+}
+
+fn warp_error(task: &str, error: WarpError) -> SessionError {
+    match error {
+        WarpError::Misuse(message) => SessionError::Model {
+            task: task.into(),
+            message,
+        },
+        WarpError::Budget(message) => SessionError::ModelBudget {
+            task: task.into(),
+            message,
+        },
+        WarpError::Conservation(message) => SessionError::Conservation {
+            task: task.into(),
+            message,
+        },
+    }
 }
 
 impl<'w> Session<'w> {
@@ -146,7 +167,7 @@ impl<'w> Session<'w> {
                 });
                 ModelStep::Immediate {
                     response: json!(recovery.records.len()),
-                    internal: None,
+                    internal: vec![],
                 }
             }
             Action::WalAppend { log } => {
@@ -187,7 +208,7 @@ impl<'w> Session<'w> {
                 };
                 ModelStep::Immediate {
                     response,
-                    internal: None,
+                    internal: vec![],
                 }
             }
             Action::WalFlush { log } => {
@@ -258,7 +279,7 @@ impl<'w> Session<'w> {
                         Some(r) => json!({ "Some": parse(&r.payload) }),
                         None => json!("None"),
                     },
-                    internal: None,
+                    internal: vec![],
                 }
             }
             Action::NetSend { network } => {
@@ -327,7 +348,10 @@ impl<'w> Session<'w> {
                     }
                     json!({ "Ok": m.id })
                 };
-                ModelStep::Immediate { response, internal }
+                ModelStep::Immediate {
+                    response,
+                    internal: internal.into_iter().collect(),
+                }
             }
             Action::NetRecv { network } => {
                 let timeout = args[0].as_u64().expect("u64 timeout");
@@ -342,7 +366,7 @@ impl<'w> Session<'w> {
                     });
                     ModelStep::Immediate {
                         response: json!({ "Ok": parse(&m.payload) }),
-                        internal: None,
+                        internal: vec![],
                     }
                 } else if timeout == 0 {
                     uses_request = true;
@@ -353,7 +377,7 @@ impl<'w> Session<'w> {
                     });
                     ModelStep::Immediate {
                         response: json!({ "Err": state.timeout_code }),
-                        internal: None,
+                        internal: vec![],
                     }
                 } else {
                     let timeout_at_ns = now.checked_add(timeout).ok_or_else(|| {
@@ -381,6 +405,37 @@ impl<'w> Session<'w> {
                         },
                         at_ns: timeout_at_ns,
                     }
+                }
+            }
+            action if action.warp().is_some() => {
+                let (op, nic) = action.warp().expect("warp action");
+                let warp = model.warp.as_mut().expect("xdp actions imply a warp model");
+                let result = warp
+                    .op(nic, op, &task, args, now, request)
+                    .map_err(|e| warp_error(&task, e))?;
+                events.extend(result.events.into_iter().map(ModelEvent::Warp));
+                let spawns = result
+                    .effects
+                    .into_iter()
+                    .map(|effect| match effect {
+                        WarpEffect::Spawn(timer, at) => (Internal::Warp(timer), at),
+                        WarpEffect::Wake { .. } => unreachable!("operations never wake waiters"),
+                    })
+                    .collect();
+                match (result.response, result.park) {
+                    (Some(response), _) => ModelStep::Immediate {
+                        response,
+                        internal: spawns,
+                    },
+                    (None, Some((timer, at_ns))) => {
+                        uses_request = true;
+                        ModelStep::Park {
+                            request,
+                            internal: Internal::Warp(timer),
+                            at_ns,
+                        }
+                    }
+                    (None, None) => unreachable!("an operation resumes or parks"),
                 }
             }
             _ => unreachable!("not a model action"),
@@ -565,6 +620,33 @@ impl<'w> Session<'w> {
                                 Outcome::Success { bytes },
                                 json!({ "Ok": wal.durable_lsn() }),
                             ));
+                            actions
+                                .push(SimAction::Complete(completion, IoResult::Success { bytes }));
+                        }
+                    }
+                }
+            }
+            Internal::Warp(timer) => {
+                let spec = plan
+                    .spec
+                    .warp
+                    .as_ref()
+                    .expect("warp timers imply a warp model");
+                let warp = model.warp.as_mut().expect("warp timers imply a warp model");
+                let (warp_events, effects) = warp
+                    .fire(spec, timer, now)
+                    .map_err(|e| warp_error(&internal.describe(), e))?;
+                events.extend(warp_events.into_iter().map(ModelEvent::Warp));
+                for effect in effects {
+                    match effect {
+                        WarpEffect::Spawn(timer, at) => {
+                            actions.push(SimAction::SpawnInternal(Internal::Warp(timer), at))
+                        }
+                        WarpEffect::Wake { request, rx_len } => {
+                            let completion =
+                                completion_of(request).expect("RX waiters are live requests");
+                            let bytes = u64::from(rx_len);
+                            deliveries.push((request, Outcome::Success { bytes }, json!(rx_len)));
                             actions
                                 .push(SimAction::Complete(completion, IoResult::Success { bytes }));
                         }
@@ -756,6 +838,9 @@ impl<'w> Session<'w> {
                     .map_err(SessionError::Simulator)?,
                 SimAction::SpawnTask { spec, name, epoch } => {
                     self.spawn_instance(spec, name, epoch)?
+                }
+                SimAction::SpawnInternal(internal, at_ns) => {
+                    self.spawn_internal(internal, at_ns)?
                 }
             }
         }

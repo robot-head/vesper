@@ -18,7 +18,28 @@ The [fourth-wave prompt index](agent-prompts/wave-four/README.md) splits design 
 | RFC 9293 TCP | `wave4/warp-tcp` | New `crates/vesper-warp-tcp/**` |
 | Source XdpNic and WAN simulation | `wave4/warp-source-simulation` | `crates/vesper-sim-session/**` |
 
-## Earlier implementation batch
+## Current independent batch: sections 20–37
+
+The [design snapshot](specification.txt) has been refreshed through section 37;
+[revision metadata](specification-source.json) and a [full-section review](rfcs/expansion-37-review.md)
+record its identity, changes and scaffold limitations. Six new isolated lanes
+implement JSON codecs, Beacon, Quarry, Tensor, Flux and Aether under the
+[expanded ownership contracts](rfcs/expansion-37-contracts.md). Their source paths
+are independent of externally merging wave three. The coordinator supplies CLI
+wiring, root registration and the new `Expanded foundation contracts` workflow.
+[Integrated results and validation](parallel-results/expansion-37-integration.md)
+record the completed slices and remaining boundaries.
+
+| Lane | Branch | Exclusive implementation |
+| --- | --- | --- |
+| JSON/codecs (§20) | `expansion37/serde` | New `crates/vesper-serde/**` |
+| Beacon (§22) | `expansion37/beacon` | New `crates/vesper-beacon/**` |
+| Quarry (§24) | `expansion37/quarry` | New `crates/vesper-quarry/**` |
+| Tensor (§28) | `expansion37/tensor` | New `crates/vesper-tensor/**` |
+| Flux (§34) | `expansion37/flux` | New crate and `lean/FluxDbsp.lean` |
+| Aether (§37) | `expansion37/aether` | New crate and `lean/AetherMemory.lean` |
+
+## Earlier independent batch and external wave three
 
 The previous seven sessions are complete and integrated. The [third-wave prompt index](agent-prompts/wave-three/README.md) is **assigned to the user's external agent**; its [frozen contracts](rfcs/wave-three-contracts.md) separate frontend, native and platform ownership. Do not assign duplicate writers to those lanes. Locally started duplicates were stopped and preserved as [unmerged spikes](parallel-results/paused-wave-three-spikes.md).
 

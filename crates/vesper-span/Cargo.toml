@@ -1,0 +1,6 @@
+[package]
+name = "vesper-span"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Strict bounded source positions, diagnostic data and transactional edits"

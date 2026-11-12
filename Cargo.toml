@@ -6,6 +6,14 @@ members = [
     ".",
     "crates/vesper-core",
     "crates/vesper-syntax",
+    "crates/vesper-span",
+    "crates/vesper-lsp",
+    "crates/vesper-grammar",
+    "crates/vesper-fmt",
+    "crates/vesper-lint",
+    "crates/vesper-bench",
+    "crates/vesper-bench-pmu",
+    "crates/vesper-doc",
     "crates/vesper-pulse",
     "crates/vesper-prism",
     "crates/vesper-ffi",
@@ -23,6 +31,13 @@ members = [
     "crates/vesper-loom-tuf",
     "crates/vesper-alloc",
     "crates/vesper-aura",
+    "crates/vesper-beacon",
+    "crates/vesper-beacon-arrow",
+    "crates/vesper-serde",
+    "crates/vesper-quarry",
+    "crates/vesper-tensor",
+    "crates/vesper-flux",
+    "crates/vesper-aether",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
     "crates/vesper-pact-bridge",
@@ -32,6 +47,7 @@ members = [
     "crates/vesper-loom-build",
     "crates/vesper-forge-runner",
     "crates/vesper-ignis",
+    "crates/vesper-warp-shard",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -39,6 +55,14 @@ default-members = [
     ".",
     "crates/vesper-core",
     "crates/vesper-syntax",
+    "crates/vesper-span",
+    "crates/vesper-lsp",
+    "crates/vesper-grammar",
+    "crates/vesper-fmt",
+    "crates/vesper-lint",
+    "crates/vesper-bench",
+    "crates/vesper-bench-pmu",
+    "crates/vesper-doc",
     "crates/vesper-pulse",
     "crates/vesper-prism",
     "crates/vesper-ffi",
@@ -56,6 +80,13 @@ default-members = [
     "crates/vesper-loom-tuf",
     "crates/vesper-alloc",
     "crates/vesper-aura",
+    "crates/vesper-beacon",
+    "crates/vesper-beacon-arrow",
+    "crates/vesper-serde",
+    "crates/vesper-quarry",
+    "crates/vesper-tensor",
+    "crates/vesper-flux",
+    "crates/vesper-aether",
     "crates/vesper-fiber-abi",
     "crates/vesper-pact",
     "crates/vesper-pact-bridge",
@@ -65,6 +96,7 @@ default-members = [
     "crates/vesper-loom-build",
     "crates/vesper-forge-runner",
     "crates/vesper-ignis",
+    "crates/vesper-warp-shard",
     "experiments/native-pulse",
 ]
 
@@ -92,6 +124,16 @@ vesper-core = { path = "crates/vesper-core" }
 vesper-simd = { path = "crates/vesper-simd" }
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }
+vesper-span = { path = "crates/vesper-span" }
+vesper-lsp = { path = "crates/vesper-lsp" }
+vesper-fmt = { path = "crates/vesper-fmt" }
+vesper-lint = { path = "crates/vesper-lint" }
+vesper-bench = { path = "crates/vesper-bench" }
+vesper-bench-pmu = { path = "crates/vesper-bench-pmu" }
+vesper-grammar = { path = "crates/vesper-grammar" }
+vesper-doc = { path = "crates/vesper-doc" }
+vesper-beacon = { path = "crates/vesper-beacon" }
+vesper-serde = { path = "crates/vesper-serde" }
 vesper-pulse = { path = "crates/vesper-pulse" }
 vesper-fiber-abi = { path = "crates/vesper-fiber-abi" }
 vesper-semver = { path = "crates/vesper-semver" }

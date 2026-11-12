@@ -1,0 +1,13 @@
+{
+  "parameters": [
+    {
+      "pass": "Sink",
+      "mode": "Linear",
+      "ty": { "Named": ["Tx", []] },
+      "selector": { "kind": "All" }
+    }
+  ],
+  "result": { "Named": ["u64", []] },
+  "result_max_mode": "Copy",
+  "effect_ceiling": { "instances": [], "tail": null }
+}
