@@ -1406,24 +1406,24 @@ impl<C: CongestionController> Connection<C> {
         while !self.sent.is_empty() {
             let front = *self.sent.get(0);
             if front.end <= ack_abs {
-                if !front.sacked {
-                    self.report_acked(now, &front, front.bytes());
-                }
                 if self.timed == Some(front.pn) {
                     if front.retransmits == 0 {
                         sample = Some(now.saturating_sub(front.sent_ns));
                     }
                     self.timed = None;
                 }
+                // Remove first so the event reports post-ACK bytes in flight.
                 self.sent.pop_front();
+                if !front.sacked {
+                    self.report_acked(now, &front, front.bytes());
+                }
             } else if front.start < ack_abs {
                 // Partial acknowledgment of a segment.
                 let part = (ack_abs - front.start) as u32;
+                self.sent.get_mut(0).start = ack_abs;
                 if !front.sacked {
                     self.report_acked(now, &front, part);
                 }
-                let f = self.sent.get_mut(0);
-                f.start = ack_abs;
                 break;
             } else {
                 break;
@@ -1973,14 +1973,27 @@ impl<C: CongestionController> Connection<C> {
         }
         let data_end = 1 + self.write_end;
         let unsent = data_end.saturating_sub(self.snd_nxt);
+        let wnd_right = self.snd_una + u64::from(self.snd_wnd);
+        let usable = wnd_right.saturating_sub(self.snd_nxt);
         if unsent == 0 {
-            if self.fin_requested {
+            if !self.fin_requested {
+                return Ok(None);
+            }
+            // FIN occupies sequence space, so it needs one octet of window;
+            // against a zero window it goes out as the persist probe.
+            if usable > 0 {
                 return self.emit_new(now, 0, true, send, out).map(Some);
+            }
+            if self.snd_wnd == 0 && self.sent.is_empty() {
+                if self.probe_due {
+                    self.probe_due = false;
+                    self.stats.window_probes += 1;
+                    return self.emit_new(now, 0, true, send, out).map(Some);
+                }
+                self.arm_persist(now);
             }
             return Ok(None);
         }
-        let wnd_right = self.snd_una + u64::from(self.snd_wnd);
-        let usable = wnd_right.saturating_sub(self.snd_nxt);
         let pipe = self.pipe();
         let cwnd_room = u64::from(self.cc.cwnd_bytes().saturating_sub(pipe));
         let smss = u64::from(self.smss);
@@ -2019,7 +2032,9 @@ impl<C: CongestionController> Connection<C> {
                 return Ok(None);
             }
         }
-        let with_fin = self.fin_requested && self.snd_nxt + len == data_end;
+        // Attach FIN only when its sequence number also fits the window.
+        let with_fin =
+            self.fin_requested && self.snd_nxt + len == data_end && self.snd_nxt + len < wnd_right;
         self.emit_new(now, len as u32, with_fin, send, out)
             .map(Some)
     }
@@ -2247,9 +2262,12 @@ impl<C: CongestionController> Connection<C> {
 
         let pn = self.next_pn;
         self.next_pn += 1;
+        let bytes = s.bytes();
+        // Departure time first: pacing delay must not count as RTT or loss.
+        let edt_ns = self.cc.schedule_edt_ns(bytes, now).max(now);
         let e = self.sent.get_mut(i);
         e.pn = pn;
-        e.sent_ns = now;
+        e.sent_ns = edt_ns;
         e.lost = false;
         if retransmit {
             e.retransmits = e.retransmits.saturating_add(1);
@@ -2264,22 +2282,20 @@ impl<C: CongestionController> Connection<C> {
         if s.syn && !retransmit && self.timed.is_none() {
             self.timed = Some(pn);
         }
-        let bytes = s.bytes();
         self.cc.on_sent(SentPacket {
             pn,
-            sent_ns: now,
+            sent_ns: edt_ns,
             bytes,
             ack_eliciting: true,
             in_flight: true,
         });
         if self.rto_deadline.is_none() {
-            self.rto_deadline = Some(now.saturating_add(self.rtt.rto_ns()));
+            self.rto_deadline = Some(edt_ns.saturating_add(self.rtt.rto_ns()));
         }
         if with_ack {
             self.after_ack_sent();
         }
         self.stats.segments_sent += 1;
-        let edt_ns = self.cc.schedule_edt_ns(bytes, now);
         Ok(Transmit {
             len: n,
             edt_ns,

@@ -1174,3 +1174,47 @@ fn karn_rule_skips_retransmitted_samples() {
         .unwrap();
     assert_eq!(t.c.rtt().srtt_ns(), before, "ambiguous sample discarded");
 }
+
+#[test]
+fn fin_respects_a_zero_send_window() {
+    let mut t = T::est();
+    // Peer closes its window.
+    t.rx_opts(t.pseq, t.pack, Flags::ACK, 0, &TcpOptions::default(), &[])
+        .unwrap();
+    assert_eq!(t.c.send_window(), 0);
+    t.c.close().unwrap();
+    t.none();
+    // The persist timer sends the FIN as the probe.
+    let d = t.c.poll_timeout().expect("persist timer armed");
+    t.now = d;
+    t.c.on_timeout(d);
+    let f = t.one();
+    assert!(f.has(Flags::FIN));
+    assert_eq!(t.c.stats().window_probes, 1);
+}
+
+#[test]
+fn fin_is_not_attached_beyond_the_window() {
+    let mut t = T::est();
+    t.rx_opts(t.pseq, t.pack, Flags::ACK, 10, &TcpOptions::default(), &[])
+        .unwrap();
+    t.send = b"0123456789".to_vec();
+    t.c.write(10).unwrap();
+    t.c.close().unwrap();
+    let d = t.one();
+    assert_eq!(d.payload.len(), 10);
+    assert!(!d.has(Flags::FIN), "FIN would be one past the window");
+    t.none();
+    t.rx_opts(
+        t.pseq,
+        t.pack.wrapping_add(10),
+        Flags::ACK,
+        10,
+        &TcpOptions::default(),
+        &[],
+    )
+    .unwrap();
+    let f = t.one();
+    assert!(f.has(Flags::FIN));
+    assert_eq!(f.seq, t.pack.wrapping_add(10));
+}
