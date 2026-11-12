@@ -200,8 +200,15 @@ Run with `CARGO_TARGET_DIR` private to this checkout, `CARGO_BUILD_JOBS=4`,
 `CARGO_INCREMENTAL=0`:
 
 - `cargo fmt --all -- --check`: clean.
-- `cargo clippy --workspace --locked --all-targets -- -D warnings`: CLIPPY_RESULT
-- `cargo test --workspace --locked`: TEST_RESULT
+- `cargo clippy --workspace --locked --all-targets -- -D warnings`: clean.
+- `cargo test --workspace --locked --no-fail-fast`: 1,328 passed, 16 failed,
+  all 16 in `vesper-loom-build` (`tests/build.rs`, `tests/cli.rs`) with
+  `UnknownFingerprint { missing: ["engine_dependencies"] }`. That crate's
+  build script locates `Cargo.lock` by walking up from `OUT_DIR`, so it
+  reports "unknown" whenever the target directory is outside the workspace,
+  as it was here. Re-running `cargo test -p vesper-loom-build --locked` with
+  the in-tree `target/` passes all 26 of its tests, so this is a property of
+  the local setup, not of this change; CI uses the in-tree target.
 
 ## Unsafe code
 
