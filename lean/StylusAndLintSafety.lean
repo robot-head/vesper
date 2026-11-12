@@ -180,6 +180,14 @@ theorem comments_renderWith (choose : GroupChoice) (doc : Doc)
     commentsOf (renderWith choose width col mode doc) = docComments doc :=
   layoutWith_comments choose width 0 col 0 mode doc
 
+-- Even two different schedules or inherited modes preserve the same payloads.
+theorem comments_renderWith_invariant (left right : GroupChoice) (doc : Doc)
+    (width col : Nat) (leftMode rightMode : Mode) :
+    commentsOf (renderWith left width col leftMode doc) =
+    commentsOf (renderWith right width col rightMode doc) :=
+  (comments_renderWith left doc width col leftMode).trans
+    (comments_renderWith right doc width col rightMode).symm
+
 -- Local-width representative of the Doc algebra. The generic theorem above
 -- is stronger: comment order/payloads are independent of this group policy.
 def widthChoice : GroupChoice := fun _ width col doc =>
@@ -206,9 +214,65 @@ theorem projection_narrowing_preserves_disjointness
   intro f h
   exact h_disj f ⟨h_subset f h.1, h.2⟩
 
+-- Closed checks expose the layout distinction, not merely a length/count.
+example : render 100 0 .flat (.concat [.comment "/* first */", .softLineOrSpace,
+    .text "42", .comment "/* last */"]) =
+    [.comment "/* first */", .text " ", .text "42", .comment "/* last */"] := rfl
+example : render 100 0 .broken (.concat [.comment "/* first */", .softLineOrSpace,
+    .text "42", .comment "/* last */"]) =
+    [.comment "/* first */", .line 0, .text "42", .comment "/* last */"] := rfl
+
+-- Indentation, Unicode scalar columns, embedded LF and CR are represented.
+example : render 0 9 .flat (.nest 4 (.concat [.text "é🦀", .hardLine,
+    .comment "/* nested */"])) =
+    [.text "é🦀", .line 4, .comment "/* nested */"] := rfl
+example : advanceColumn 17 "é\n🦀" = 1 := rfl
+example : advanceColumn 17 "é🦀" = 19 := rfl
+example : flatWidth (.text "é🦀") = some 2 := rfl
+example : flatWidth (.text "a\rb") = none := rfl
+example : flatWidth (.comment "// line") = none := rfl
+
+-- Group policy changes concrete whitespace; the theorem preserves exact ordered
+-- payloads regardless. A line comment forces the default group to broken mode.
+example : render 8 0 .broken (.group (.concat [.text "ab", .softLineOrSpace,
+    .comment "/*c*/"])) = [.text "ab", .text " ", .comment "/*c*/"] := rfl
+example : render 7 0 .flat (.group (.concat [.text "ab", .softLineOrSpace,
+    .comment "/*c*/"])) = [.text "ab", .line 0, .comment "/*c*/"] := rfl
+example : render 100 0 .flat (.group (.concat [.comment "// é🦀", .softLineOrSpace,
+    .text "42"])) = [.comment "// é🦀", .line 0, .text "42"] := rfl
+
+-- These tags do not assert that text payloads have been lexed. The source bridge
+-- separately checks actual source comment tokens against projected comment tags.
+example : commentsOf (render 1 0 .flat (.concat [.text "// comment-looking text",
+    .comment "/* actual tag */"])) = ["/* actual tag */"] := rfl
+example : commentsOf (render 0 0 .broken (.concat [.comment "/* repeated */",
+    .comment "/* repeated */"])) = ["/* repeated */", "/* repeated */"] := rfl
+
+theorem payload_order_matters :
+    commentsOf (render 0 0 .flat (.concat [.comment "a", .comment "b"])) ≠
+    commentsOf (render 0 0 .flat (.concat [.comment "b", .comment "a"])) := by
+  decide
+
+-- Without h_subset the disjointness conclusion is false, even though the old
+-- leaves are disjoint from the caller's leaves. This is not an autofix witness.
+theorem narrowing_requires_subset :
+    ¬(forall (leavesNew leavesOld callerOther : Nat -> Bool),
+      (forall f, ¬(leavesOld f = true /\ callerOther f = true)) ->
+      forall f, ¬(leavesNew f = true /\ callerOther f = true)) := by
+  intro claimed
+  have old_disjoint : forall (_ : Nat), ¬(false = true /\ true = true) := by
+    intro _ h
+    exact Bool.false_ne_true h.1
+  exact claimed (fun _ => true) (fun _ => false) (fun _ => true)
+    old_disjoint 0 ⟨rfl, rfl⟩
+
+#print axioms payload_order_matters
+#print axioms narrowing_requires_subset
+
 #print axioms commentsOf_append
 #print axioms layoutWith_comments
 #print axioms comments_render_invariant
 #print axioms comments_renderWith
+#print axioms comments_renderWith_invariant
 #print axioms projection_narrowing_preserves_disjointness
 end Vesper.StylusSafety
