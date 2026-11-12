@@ -403,8 +403,27 @@ fn editor_ast_guard(module: &crate::ast::Module, limits: AnalysisLimits) -> Resu
                     generic_constructors.insert(format!("{}::{}", a.name, v.name));
                 }
             }
-            Item::Conformance(c) if !c.generics.is_empty() => {
-                return Err("generic conformance inference is unsupported before checking".into());
+            Item::Trait(t) => {
+                for f in &t.methods {
+                    if !t.generics.is_empty() || !f.generics.is_empty() {
+                        generic_values.insert(f.name.clone());
+                        generic_values.insert(format!("{}::{}", t.name, f.name));
+                    }
+                }
+            }
+            Item::Conformance(c) => {
+                if !c.generics.is_empty() {
+                    return Err(
+                        "generic conformance inference is unsupported before checking".into(),
+                    );
+                }
+                for f in &c.methods {
+                    if !f.generics.is_empty() {
+                        generic_values.insert(f.name.clone());
+                        generic_values.insert(format!("{}::{}", c.self_ty.name(), f.name));
+                        generic_values.insert(format!("{}::{}", c.trait_ref.name, f.name));
+                    }
+                }
             }
             _ => (),
         }
@@ -420,7 +439,14 @@ fn editor_ast_guard(module: &crate::ast::Module, limits: AnalysisLimits) -> Resu
             stack.push((Node::Type(arg), 0));
         }
     }
-    let mut count = 0;
+    let mut count = module
+        .model_uses
+        .len()
+        .checked_add(module.trait_bounds.len())
+        .ok_or("analysis AST metadata overflow")?;
+    if count > limits.max_ast_nodes {
+        return Err("analysis AST metadata budget exceeded".into());
+    }
     while let Some((node, depth)) = stack.pop() {
         count += 1;
         if count > limits.max_ast_nodes || depth > limits.max_depth {
@@ -448,6 +474,12 @@ fn editor_ast_guard(module: &crate::ast::Module, limits: AnalysisLimits) -> Resu
                 }
                 Item::Function(f) => stack.push((Node::Function(f), next)),
                 Item::Effect(e) => {
+                    if e.generics.len() > 64 {
+                        return Err("analysis effect generic count limit exceeded".into());
+                    }
+                    count = count
+                        .checked_add(e.generics.len())
+                        .ok_or("analysis AST metadata overflow")?;
                     for f in &e.ops {
                         stack.push((Node::Function(f), next));
                     }
@@ -505,6 +537,14 @@ fn editor_ast_guard(module: &crate::ast::Module, limits: AnalysisLimits) -> Resu
                     allowed_closures.insert((tail.span.start, tail.span.end));
                 }
                 for p in &f.params {
+                    for path in &p.projections {
+                        count = count
+                            .checked_add(path.len() + 1)
+                            .ok_or("analysis AST metadata overflow")?;
+                        if count > limits.max_ast_nodes {
+                            return Err("analysis selector metadata budget exceeded".into());
+                        }
+                    }
                     stack.push((Node::Type(&p.ty), next));
                 }
                 stack.push((Node::Type(&f.result), next));
@@ -803,6 +843,24 @@ mod tests {
             check_source(&dag, AnalysisLimits::default()),
             Err(AnalysisFailure::Resource { .. })
         ));
+        // Zero-argument metadata still consumes the editor AST/count profile;
+        // exercise guards directly without invoking a checker on hostile input.
+        let row = format!(
+            "effect E{{fn e();}} fn f() eff[{}]{{}}",
+            vec!["E"; 65].join(",")
+        );
+        let parsed = parser::parse(&row);
+        assert!(parsed.diagnostics.is_empty());
+        assert!(editor_ast_guard(&parsed.module, AnalysisLimits::default()).is_err());
+        let generic_method =
+            "trait Dup{fn dup[T:mod copy](in self,in x:T)->(T,T);} fn f(){Dup::dup(0);}";
+        let parsed = parser::parse(generic_method);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        assert!(editor_ast_guard(&parsed.module, AnalysisLimits::default()).is_err());
+        let uses = "use model M;".repeat(2049);
+        let parsed = parser::parse(&uses);
+        assert!(parsed.diagnostics.is_empty());
+        assert!(editor_ast_guard(&parsed.module, AnalysisLimits::default()).is_err());
         let recursive = "copy struct Node{x:Node} fn main(){}";
         assert!(matches!(
             check_source(recursive, AnalysisLimits::default()),

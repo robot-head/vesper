@@ -718,12 +718,14 @@ fn row_tokens<'a>(f: &ast::Function, tokens: &'a [Token]) -> Result<Vec<&'a Toke
     }
     Err("unterminated source effect row".into())
 }
-fn edits_for(
-    source: &str,
-    function: &ast::Function,
-    tokens: &[Token],
-    unused: &BTreeSet<usize>,
-) -> Result<(Vec<SourceEdit>, BTreeMap<usize, ast::Span>), String> {
+struct EffectRow<'a> {
+    entries: Vec<Vec<&'a Token>>,
+    commas: Vec<&'a Token>,
+    spans: BTreeMap<usize, ast::Span>,
+}
+// Map checked effects to source tokens first. Edit normalization only runs after
+// policy and selected-range filtering; mapping never builds unselected edits.
+fn effect_row<'a>(function: &ast::Function, tokens: &'a [Token]) -> Result<EffectRow<'a>, String> {
     if function.effects.tail.is_some() {
         return Err("open source effect row".into());
     }
@@ -750,8 +752,34 @@ fn edits_for(
     if entries.len() != function.effects.instances.len() || entries.iter().any(Vec::is_empty) {
         return Err("effect row/source mapping differs from checked declaration".into());
     }
+    let spans = entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            (
+                index,
+                entry[0].span.start..entry.last().expect("nonempty").span.end,
+            )
+        })
+        .collect();
+    Ok(EffectRow {
+        entries,
+        commas,
+        spans,
+    })
+}
+fn edits_for(
+    source: &str,
+    function: &ast::Function,
+    tokens: &[Token],
+    unused: &BTreeSet<usize>,
+) -> Result<(Vec<SourceEdit>, BTreeMap<usize, ast::Span>), String> {
+    let EffectRow {
+        entries,
+        commas,
+        spans,
+    } = effect_row(function, tokens)?;
     let mut edits = vec![];
-    let mut spans = BTreeMap::new();
     let mut remove = |token: &Token| {
         edits.push(SourceEdit {
             span: token.span.clone(),
@@ -760,10 +788,6 @@ fn edits_for(
         });
     };
     for (index, entry) in entries.iter().enumerate() {
-        spans.insert(
-            index,
-            entry[0].span.start..entry.last().expect("nonempty").span.end,
-        );
         if unused.contains(&index) {
             for token in entry {
                 remove(token);
@@ -861,10 +885,10 @@ fn prepare(
     }
     let mut edits = vec![];
     let mut fixable = BTreeSet::new();
-    for (name, indices) in &groups {
+    for name in groups.keys() {
         let f = &before.checked.world.functions[name];
-        match edits_for(source, f, &before.tokens, indices) {
-            Ok((_, spans)) => {
+        match effect_row(f, &before.tokens) {
+            Ok(EffectRow { spans, .. }) => {
                 let mut chosen = BTreeSet::new();
                 for finding in &mut analysis.findings {
                     if finding.function == *name
@@ -1203,7 +1227,7 @@ mod selected_tests {
         assert!(
             prepare_source_selected_with_policy(
                 SOURCE,
-                9..2,
+                ast::Span { start: 9, end: 2 },
                 true,
                 &Policy::default(),
                 ConfigProvenance::Default
