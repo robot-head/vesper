@@ -1,4 +1,4 @@
-# Vesper Bridge wire layouts
+# Vesper Bridge wire layouts and sys-specs
 
 This crate implements the byte-oriented layout/view milestone from design §13.2. It is independent of the compiler frontend so layout and memory-access contracts can be reviewed before adding `wire struct` syntax or CLIF lowering.
 
@@ -20,7 +20,9 @@ The design simultaneously asks for natural-alignment gap rejection and a packed,
 
 Supported scalars are signed/unsigned 8-, 16-, 32- and 64-bit integers, plus fixed byte arrays, explicit padding and nested nominal wire structs. Bool, sparse enums, pointers and unknown field kinds fail closed. Native-endian representation depends on the target; portable protocols should use explicit endian types. Native-endian accesses currently use host endianness and width-byte alignment; this is not a general C ABI layout engine. A cross-target frontend must supply/extend a target-layout contract before accepting host-independent native fields.
 
-This milestone does not implement source parsing, HIR/PCG borrowing, CLIF generation, `.vsys` bindings, foreign-value validation, foreign-handle finalizers, MPK/PKRU or Arm isolation. Rust slice lifetimes protect this library's views; they are not evidence that the language's corresponding typing rules have been implemented.
+The separate [`sys` module](SYS-SPECS.md) now parses bounded `.vsys` contracts, records explicit C target/convention/link descriptors, checks canonical artifact identity and raw foreign-return refinements, and prepares owner-preserving numerical call arguments. It does not use wire layouts as C struct layouts.
+
+This milestone does not implement compiler source integration, HIR/PCG borrowing, CLIF generation, native foreign-call trampolines, foreign-handle finalizers, MPK/PKRU or Arm isolation. Rust slice lifetimes protect this library's views; they are not evidence that the language's corresponding typing rules have been implemented.
 
 The crate is registered in the main workspace; root workspace checks include its tests.
 

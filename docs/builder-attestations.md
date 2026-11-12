@@ -30,3 +30,36 @@ Acceptance is conditional on the supplied expected identity, trusted key registr
 This is not Sigstore/OIDC/TUF verification, source-namespace authentication, a compiler authority audit, ABI/CVE analysis or a complete Lila deployment. It does not authenticate how the local policy was obtained. All CLI reports retain `cache_eligible: false`; future registry/build integration must supply the missing provenance and policy gates before changing cache trust. Use immutable CAS objects for subsequent consumption rather than assuming a local path cannot change after verification.
 
 JSON mode emits a schema-versioned `verified` or `rejected` report, the actual/expected blob IDs, the full signature/quorum diagnostics, explicit trust basis and evaluation time. Unsupported output kinds and resource-limit failures produce structured errors. Argument, file and JSON parsing failures use stderr. No input files or cache records are rewritten.
+
+## Importing verified blob bytes
+
+`vesper attest import` repeats the complete current policy, signature, clock and
+content checks, then imports the exact owned artifact bytes into the CAS:
+
+```sh
+cargo run -- attest import \
+  --expected crates/vesper-loom-trust/tests/fixtures/identity.json \
+  --policy crates/vesper-loom-trust/tests/fixtures/policy.json \
+  --bundle crates/vesper-loom-trust/tests/fixtures/bundle.json \
+  --artifact crates/vesper-loom-trust/tests/fixtures/artifact.bin \
+  --store /tmp/vesper-admitted-artifacts --at 150 --json
+```
+
+Import supports regular artifact files up to 64 MiB, rejects final-component
+symlinks/special files, and detects files growing beyond the limit. The Unix
+open also uses nonblocking/no-follow flags so a raced FIFO cannot block the
+artifact read. It creates no store directory until the library has accepted
+both the fresh configured quorum and actual content hash. Expired, revoked,
+malformed, mismatching or unsupported inputs leave the store untouched.
+
+This writes immutable CAS bytes; it creates no derivation index, permanent trust
+flag, executable permission or installation/publication record. An I/O failure
+after validation may leave valid CAS/staging changes. Repeating import always
+rechecks current policy, even when the blob is already present. Successful
+reports bind full evaluated context and operation/outcome metadata; reports
+are diagnostic values, never reusable authorization handles.
+
+The [admission library](../crates/vesper-loom-admission/README.md) additionally
+supports freshly validated bounded retrieval and no-clobber materialization.
+The supplied expected identity, key policy, operator grouping and clock retain
+the same explicit trust boundary as `attest verify`.

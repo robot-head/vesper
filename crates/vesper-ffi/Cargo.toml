@@ -2,4 +2,7 @@
 name = "vesper-ffi"
 version = "0.1.0"
 edition = "2024"
-description = "Checked byte-oriented wire layouts and views for Vesper Bridge"
+description = "Checked wire layouts, views and declarative C ABI contracts for Vesper Bridge"
+
+[dependencies]
+blake3 = "1.8"

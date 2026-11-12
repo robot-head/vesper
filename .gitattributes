@@ -1,0 +1,2 @@
+# GitHub fallback until Vesper has an upstream Linguist language and grammar.
+*.ves linguist-language=Rust
