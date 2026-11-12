@@ -229,8 +229,9 @@ impl HybridClientSecret {
         let contributory = self.slot().with(|s| {
             out.with_mut(|o| {
                 let dk = mlkem_key(s);
-                let k = dk.decapsulate(&ct);
+                let mut k = dk.decapsulate(&ct);
                 o[..32].copy_from_slice(k.as_slice());
+                k.zeroize();
                 let ss = x25519_key(s).diffie_hellman(&PublicKey::from(peer));
                 o[32..].copy_from_slice(ss.as_bytes());
                 ss.was_contributory()
@@ -292,9 +293,14 @@ fn server_core(
     let mut out = SecretSlot::<SHARED_SECRET_LEN>::new(policy)?;
     let mut share = [0u8; SERVER_SHARE_LEN];
     let contributory = out.with_mut(|o| {
-        let (ct, k) = ek.encapsulate_deterministic(&Array::from(*m));
+        let m: &Array<u8, _> = match m.as_slice().try_into() {
+            Ok(m) => m,
+            Err(_) => unreachable!("32 bytes"),
+        };
+        let (ct, mut k) = ek.encapsulate_deterministic(m);
         share[..MLKEM768_CT_LEN].copy_from_slice(ct.as_slice());
         o[..32].copy_from_slice(k.as_slice());
+        k.zeroize();
         let sk = StaticSecret::from(*x25519_eph);
         share[MLKEM768_CT_LEN..].copy_from_slice(PublicKey::from(&sk).as_bytes());
         let ss = sk.diffie_hellman(&PublicKey::from(peer));
@@ -318,15 +324,16 @@ pub fn server_encapsulate<R: TryCryptoRng + ?Sized>(
     let mut eph = SecretSlot::<64>::new(policy)?;
     let r = match eph.with_mut(|e| fill(rng, e)) {
         Ok(()) => eph.with(|e| {
-            let m: [u8; 32] = match e[..32].try_into() {
+            // Borrow both halves in place: no unwiped stack copies.
+            let m: &[u8; 32] = match e[..32].try_into() {
                 Ok(m) => m,
                 Err(_) => unreachable!("32 bytes"),
             };
-            let x: [u8; 32] = match e[32..].try_into() {
+            let x: &[u8; 32] = match e[32..].try_into() {
                 Ok(x) => x,
                 Err(_) => unreachable!("32 bytes"),
             };
-            server_core(client_share, &m, &x, policy)
+            server_core(client_share, m, x, policy)
         }),
         Err(e) => Err(e),
     };

@@ -9,7 +9,7 @@ dependency on the root `vesper` package, `vesper-warp-crypto` untouched.
 
 | §23 item | Where | Evidence |
 | --- | --- | --- |
-| 23.5 constant-time SSA taint verifier over real Cranelift IR | `src/verifier.rs` | `tests/verifier.rs`, 17 tests over `cranelift-frontend` functions that also pass `cranelift_codegen::verify_function` |
+| 23.5 constant-time SSA taint verifier over real Cranelift IR | `src/verifier.rs` | `tests/verifier.rs`, 19 tests over `cranelift-frontend` functions that also pass `cranelift_codegen::verify_function` |
 | 23.2 secret scalars `SecU8/SecU32/SecU64`, `SecMask64`, `SecVec`, `verify_tag_16_ct` | `src/secret.rs` | `tests/secret.rs`; compile-fail doctests for `==` and `/` |
 | 23.1.2 `SecretSlot[K]` (page-aligned, `mlock`, `MADV_DONTDUMP`, closure projections, `shred`) | `src/slot.rs`, gated `src/sys.rs` | `tests/slot.rs`, including an `RLIMIT_MEMLOCK=0` child process |
 | 23.3 linear `AeadSealer`/`NonceTicket`, burn, exhaustion, rotation, Doom-principle `open_in_place` | `src/aead.rs` | `tests/aead.rs`, `tests/alloc.rs`, compile-fail doctests |
@@ -71,7 +71,11 @@ Accepted: bitwise ops, add/sub/mul, shifts and rotates, `select` and
 branches on the result of the declassify marker. Memory is tracked per value
 as "points into a secret buffer / a stack slot / untracked memory", and
 flow-insensitively per region: a secret stored to a stack slot or to
-untracked memory makes later loads from it secret.
+untracked memory makes later loads from it secret, and any pointer that may
+reach such memory counts as exposing a secret when passed to a callee. Any
+callee (trusted or not) that receives a secret is assumed to write secrets
+through every pointer argument, because callees have no memory-effect
+summaries (review findings on PR #150).
 
 ## Measurements and environment
 

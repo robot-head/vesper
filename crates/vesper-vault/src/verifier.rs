@@ -38,7 +38,9 @@
 //! Memory facts are flow-insensitive (once secret, always secret), which is
 //! sound for the function body. Pointers reloaded from memory lose their
 //! provenance and are treated as untracked, so secret buffers must be passed
-//! as policy-named parameters.
+//! as policy-named parameters. A callee that receives a secret (or access to
+//! one) is assumed to write secrets through every pointer argument it gets,
+//! since callees carry no memory-effect summaries.
 //!
 //! # What this does and does not establish
 //!
@@ -250,13 +252,40 @@ impl Analysis<'_> {
     /// Does this argument hand a callee secret data or access to it?
     fn exposes_secret(&self, v: Value) -> bool {
         let a = self.get(v);
-        a.secret || a.points_to_secret_memory(&self.mem)
+        a.secret
+            || a.points_to_secret_memory(&self.mem)
+            || (self.mem.untracked_secret && Self::untracked(a))
+    }
+
+    /// May this value address untracked memory? Plain integers count: once a
+    /// secret is stored to untracked memory, any untracked pointer may reach it.
+    fn untracked(a: Abs) -> bool {
+        a.pts & PTS_UNTRACKED != 0 || (a.pts == 0 && a.slots == 0)
+    }
+
+    /// A callee that receives secrets may write them through any pointer it
+    /// is given. Callees carry no memory-effect summaries, so every pointer
+    /// argument's memory becomes secret.
+    fn record_callee_writes(&mut self, cargs: &[Value]) -> bool {
+        if !cargs.iter().any(|&a| self.exposes_secret(a)) {
+            return false;
+        }
+        let secret = Abs {
+            secret: true,
+            pts: 0,
+            slots: 0,
+        };
+        let mut changed = false;
+        for &a in cargs {
+            let addr = self.get(a);
+            changed |= self.record_store(addr, secret);
+        }
+        changed
     }
 
     fn load_result(&self, data: &InstructionData, addr: Abs) -> Abs {
         let mut secret = addr.points_to_secret_memory(&self.mem);
-        let untracked = addr.pts & PTS_UNTRACKED != 0 || (addr.pts == 0 && addr.slots == 0);
-        if untracked && self.mem.untracked_secret {
+        if Self::untracked(addr) && self.mem.untracked_secret {
             secret = true;
         }
         if let Some(flags) = data.memflags()
@@ -277,8 +306,7 @@ impl Analysis<'_> {
             return false;
         }
         let before = self.mem;
-        let untracked = addr.pts & PTS_UNTRACKED != 0 || (addr.pts == 0 && addr.slots == 0);
-        if untracked {
+        if Self::untracked(addr) {
             self.mem.untracked_secret = true;
         }
         self.mem.secret_slots |= addr.slots;
@@ -363,19 +391,25 @@ impl Analysis<'_> {
                     if self.policy.declassify.contains(&name) {
                         Abs::PUBLIC
                     } else {
+                        let secret = cargs.iter().any(|&a| self.exposes_secret(a));
+                        mem_changed = self.record_callee_writes(cargs);
                         Abs {
-                            secret: cargs.iter().any(|&a| self.exposes_secret(a)),
+                            secret,
                             pts: 0,
                             slots: 0,
                         }
                     }
                 }
-                CallInfo::Indirect(_, cargs) => Abs {
-                    secret: cargs.iter().any(|&a| self.exposes_secret(a))
-                        || self.any_secret(&args[..1]),
-                    pts: 0,
-                    slots: 0,
-                },
+                CallInfo::Indirect(_, cargs) => {
+                    let secret = cargs.iter().any(|&a| self.exposes_secret(a))
+                        || self.any_secret(&args[..1]);
+                    mem_changed = self.record_callee_writes(cargs);
+                    Abs {
+                        secret,
+                        pts: 0,
+                        slots: 0,
+                    }
+                }
                 CallInfo::NotACall => {
                     let mut r = Abs::PUBLIC;
                     for &a in args {

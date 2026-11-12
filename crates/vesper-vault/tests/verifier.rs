@@ -495,3 +495,57 @@ fn multiple_violations_are_all_reported_once() {
         "{findings:#?}"
     );
 }
+
+#[test]
+fn buffer_holding_a_spilled_secret_cannot_reach_an_unknown_callee() {
+    // store secret -> public buffer, then hand that buffer to a helper.
+    let mut call = None;
+    let f = build("spill_then_call", 2, |b, p| {
+        b.ins().store(MemFlags::trusted(), p[0], p[1], 0);
+        let helper = import(b, "inspect", 1);
+        let c = b.ins().call(helper, &[p[1]]);
+        call = Some(c);
+        let r = b.inst_results(c)[0];
+        b.ins().return_(&[r]);
+    });
+    let findings = verify_constant_time(&f, &CtPolicy::secret_params([0]));
+    assert_eq!(
+        rules(&findings),
+        vec!["secret-call-unknown"],
+        "{findings:#?}"
+    );
+    assert_eq!(findings[0].inst, Some(call.unwrap().as_u32()));
+    assert!(verify_constant_time(&f, &CtPolicy::default()).is_empty());
+}
+
+#[test]
+fn trusted_callee_writes_taint_its_output_buffer() {
+    // write_secret(secret, out) is trusted constant time, but what it wrote
+    // to `out` is secret: branching on a load from `out` is rejected.
+    let mut brif = None;
+    let f = build("trusted_writes", 2, |b, p| {
+        let helper = import(b, "write_secret", 2);
+        b.ins().call(helper, &[p[0], p[1]]);
+        let v = b.ins().load(I64, MemFlags::trusted(), p[1], 0);
+        let t = b.create_block();
+        let e = b.create_block();
+        brif = Some(b.ins().brif(v, t, &[], e, &[]));
+        b.switch_to_block(t);
+        b.ins().return_(&[v]);
+        b.switch_to_block(e);
+        b.ins().return_(&[v]);
+    });
+    let policy = CtPolicy {
+        constant_time_callees: vec!["%write_secret".into()],
+        ..CtPolicy::secret_params([0])
+    };
+    let findings = verify_constant_time(&f, &policy);
+    assert_eq!(rules(&findings), vec!["secret-branch"], "{findings:#?}");
+    assert_eq!(findings[0].inst, Some(brif.unwrap().as_u32()));
+    // With a public first argument the helper writes nothing secret.
+    let public = CtPolicy {
+        constant_time_callees: vec!["%write_secret".into()],
+        ..CtPolicy::default()
+    };
+    assert!(verify_constant_time(&f, &public).is_empty());
+}
