@@ -50,3 +50,15 @@ All handoff libraries and `experiments/native-pulse` are registered in both root
 | `vesper-ignis` | GPU-independent planner only. D3D12 acceptance still needs Windows hardware and a real executor. |
 
 The integration checkpoint was validated on Linux. These platform jobs configure additional acceptance checks; their presence does not establish a passing macOS/Windows run or hardware validation. Wasmtime 50 and the compiler currently use separate Cranelift versions, so clean workspace builds need more memory and disk than the earlier compiler-only workspace.
+
+## Merge queue
+
+`main` is protected by a GitHub merge queue. The CI workflow listens for `merge_group` as well as `pull_request` and pushes to `main`, so every queued group runs the same three jobs on the exact commit that will land. The repository ruleset for `main` requires these status checks, named as the jobs report them:
+
+| Required check | Job |
+| --- | --- |
+| `check` | Linux reference lane |
+| `macOS (AArch64)` | `platform` matrix entry |
+| `Windows (x86_64 MSVC)` | `platform` matrix entry |
+
+Renaming a job or matrix entry renames its check, so update the ruleset in the same change, or the queue waits forever on a check that never reports. A lane that is known to be red on `main` cannot be required until it is fixed, because every group would fail.

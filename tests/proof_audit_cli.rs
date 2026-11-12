@@ -79,14 +79,24 @@ impl Fixture {
             String::from_utf8_lossy(&output.stderr)
         );
     }
+    /// Run `vesper proof-audit` on this fixture.
+    ///
+    /// Kernel replay re-checks every imported module, including `Std` or
+    /// `Lean` when a fixture imports them. On shared macOS runners that
+    /// regularly outlasts the 30 s default, so these tests, which check audit
+    /// verdicts and not the timeout itself, pass the maximum unless a test
+    /// sets its own `--timeout`.
     fn audit(&self, module: &str, theorem: &str, extra: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_vesper"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_vesper"));
+        command
             .args(["proof-audit", module, "--root"])
             .arg(&self.root)
             .args(["--theorem", theorem, "--lean", &self.lean, "--json"])
-            .args(extra)
-            .output()
-            .unwrap()
+            .args(extra);
+        if !extra.contains(&"--timeout") {
+            command.args(["--timeout", "300"]);
+        }
+        command.output().unwrap()
     }
 }
 impl Drop for Fixture {
@@ -235,10 +245,9 @@ run_cmd do
         .unwrap();
     assert!(probe.status.success());
     assert!(String::from_utf8_lossy(&probe.stdout).contains("does not depend on any axioms"));
-    // `import Lean` makes the replay re-check the whole Lean package, which
-    // can outlast the 30 s default on slower hosts (macOS runners). Allow the
-    // maximum so the audit is rejected by the kernel and not by the timeout.
-    let output = f.audit("Bad", "Example.forged", &["--timeout", "300"]);
+    // `import Lean` makes the replay re-check the whole Lean package; the
+    // fixture's maximum timeout lets the kernel, not the clock, reject it.
+    let output = f.audit("Bad", "Example.forged", &[]);
     assert!(!output.status.success());
     let error = report(&output);
     assert_eq!(error["status"], "error");

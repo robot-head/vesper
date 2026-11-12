@@ -3182,6 +3182,7 @@ dependencies = [
  "target-lexicon",
  "vesper-beacon",
  "vesper-core",
+ "vesper-fiber-abi",
  "vesper-lean-syntax",
  "vesper-loom-admission",
  "vesper-loom-audit",
