@@ -12,7 +12,8 @@ object = { version = "=0.37.3", default-features = false, features = ["write_cor
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.177"
 
-[dev-dependencies]
 # An independent loader-side parser (the aya project's object reader) checks
-# that emitted objects are what aya-style loaders accept.
+# that emitted objects are what aya-style loaders accept. aya-obj uses
+# `std::os::fd` and does not build on Windows.
+[target.'cfg(unix)'.dev-dependencies]
 aya-obj = "=0.3.0"

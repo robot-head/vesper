@@ -20,6 +20,7 @@ fn round_trips_every_accepted_corpus_program() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn aya_parses_the_mitigator_object() {
     let p = build(&MitigatorConfig::default()).unwrap();
