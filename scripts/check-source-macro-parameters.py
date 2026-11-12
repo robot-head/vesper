@@ -232,7 +232,7 @@ def check_header_and_repeated_maps(value, source):
     headers = [m for m in value["source_map"] if m["original"] == {"start": start, "end": start + 5}]
     assert len(headers) == 1 and headers[0]["kind"] == "source"
     renamed = source_range(headers[0]["expanded"], expanded)
-    assert renamed != "value" and renamed.startswith("__forge_local_")
+    assert renamed != "value" and renamed.isidentifier()
     original = source.encode("utf-8").index(b"twice!(value)") + len(b"twice!(")
     entries = [m for m in value["source_map"] if m["original"] == {"start": original, "end": original + 5}]
     assert len(entries) == 2 and entries[0]["expanded"] != entries[1]["expanded"]

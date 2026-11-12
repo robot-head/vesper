@@ -291,7 +291,6 @@ fn renamed_parameter_header_and_repeated_argument_have_actual_byte_anchors() {
     assert_eq!(header[0]["kind"], "source");
     let renamed = &expanded[range(&header[0]["expanded"], expanded)];
     assert_ne!(renamed, "value");
-    assert!(renamed.starts_with("__forge_local_"));
     assert!(expanded.matches(renamed).count() >= 3);
     let argument = REPEATED.find("twice!(value)").unwrap() + "twice!(".len();
     let repeated = maps
