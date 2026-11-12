@@ -186,3 +186,73 @@ fn a5_chacha20_poly1305_short_header() {
     assert_eq!(&buf[opened.header_len..][..opened.payload_len], &[0x01]);
     assert_eq!(&buf[..4], &hex("4200bff4")[..]);
 }
+
+#[test]
+fn chacha_header_protection_handles_max_counter() {
+    let keys = TrafficSecret::new(Cipher::ChaCha20Poly1305, &hex(CHACHA_SECRET))
+        .unwrap()
+        .keys();
+    let mut sample = [0u8; 16];
+    sample[..4].copy_from_slice(&[0xff; 4]);
+    // Regression: an attacker-chosen sample with counter 2^32 - 1 used to
+    // panic inside the buffered ChaCha20 wrapper. The mask must match an
+    // independent RFC 8439 §2.3 block function (validated on the A.5 sample
+    // first), since the wrapper itself cannot produce that block.
+    let hp = TrafficSecret::new(Cipher::ChaCha20Poly1305, &hex(CHACHA_SECRET))
+        .unwrap()
+        .key_material();
+    let hp: [u8; 32] = hp.hp().try_into().unwrap();
+    let a5: [u8; 16] = hex("5e5cd55c41f69080575d7999c25a5bfb").try_into().unwrap();
+    assert_eq!(reference_mask(&hp, &a5).to_vec(), hex("aefefe7d03"));
+    assert_eq!(keys.header.mask(&sample), reference_mask(&hp, &sample));
+
+    // And a packet carrying that sample is rejected cleanly, not by panic.
+    let mut opener = vesper_warp_crypto::Opener::new(keys);
+    let mut pkt = vec![0x40u8; 40];
+    pkt[5..9].copy_from_slice(&[0xff; 4]);
+    let before = pkt.clone();
+    assert!(
+        opener
+            .open_packet(&mut pkt, 1, |h| Some(h.truncated_pn))
+            .is_err()
+    );
+    assert_eq!(pkt, before);
+}
+
+/// Test-only RFC 8439 §2.3 ChaCha20 block function, first 5 bytes, with the
+/// RFC 9001 §5.4.4 counter/nonce split of the sample.
+fn reference_mask(key: &[u8; 32], sample: &[u8; 16]) -> [u8; 5] {
+    let word = |b: &[u8]| u32::from_le_bytes(b.try_into().unwrap());
+    let mut st = [0u32; 16];
+    st[..4].copy_from_slice(&[0x6170_7865, 0x3320_646e, 0x7962_2d32, 0x6b20_6574]);
+    for i in 0..8 {
+        st[4 + i] = word(&key[4 * i..4 * i + 4]);
+    }
+    for i in 0..4 {
+        st[12 + i] = word(&sample[4 * i..4 * i + 4]);
+    }
+    let mut x = st;
+    fn qr(x: &mut [u32; 16], a: usize, b: usize, c: usize, d: usize) {
+        x[a] = x[a].wrapping_add(x[b]);
+        x[d] = (x[d] ^ x[a]).rotate_left(16);
+        x[c] = x[c].wrapping_add(x[d]);
+        x[b] = (x[b] ^ x[c]).rotate_left(12);
+        x[a] = x[a].wrapping_add(x[b]);
+        x[d] = (x[d] ^ x[a]).rotate_left(8);
+        x[c] = x[c].wrapping_add(x[d]);
+        x[b] = (x[b] ^ x[c]).rotate_left(7);
+    }
+    for _ in 0..10 {
+        qr(&mut x, 0, 4, 8, 12);
+        qr(&mut x, 1, 5, 9, 13);
+        qr(&mut x, 2, 6, 10, 14);
+        qr(&mut x, 3, 7, 11, 15);
+        qr(&mut x, 0, 5, 10, 15);
+        qr(&mut x, 1, 6, 11, 12);
+        qr(&mut x, 2, 7, 8, 13);
+        qr(&mut x, 3, 4, 9, 14);
+    }
+    let w0 = x[0].wrapping_add(st[0]).to_le_bytes();
+    let w1 = x[1].wrapping_add(st[1]).to_le_bytes();
+    [w0[0], w0[1], w0[2], w0[3], w1[0]]
+}

@@ -163,7 +163,7 @@ against the same software implementation.
 
 ## Acceptance tests
 
-`cargo test -p vesper-warp-crypto` (20 tests):
+`cargo test -p vesper-warp-crypto` (21 tests):
 
 - `tests/rfc9001_vectors.rs`: RFC 9001 Appendix A.1 Initial secret, both
   Initial secrets and their key/iv/hp; A.2 the protected 1200-byte client
@@ -172,7 +172,12 @@ against the same software implementation.
   Retry integrity tag (plus rejection of a flipped tag, wrong ODCID and
   short packet); A.5 the ChaCha20-Poly1305 key, iv, hp, "quic ku" secret,
   nonce, mask and the 21-byte protected short-header packet, sealed through
-  `OneRttKeys` and opened back. The vector bytes were copied from the RFC
+  `OneRttKeys` and opened back. A regression test covers a ChaCha20
+  header-protection sample whose counter is `2^32 - 1` (attacker-chosen,
+  since header protection is removed before authentication): the buffered
+  `chacha20::ChaCha20` wrapper panics on that block, so the mask is computed
+  with the `ChaChaCore` block function directly and checked against a
+  test-only RFC 8439 reference. The vector bytes were copied from the RFC
   source (quicwg/base-drafts `rfc9001.md`).
 - `tests/protection.rs`: round trip for all three ciphers; flips in the
   first byte, header, both pn bytes, payload and tag all fail with the

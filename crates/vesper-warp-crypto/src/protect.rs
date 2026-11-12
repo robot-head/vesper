@@ -4,11 +4,12 @@
 //! against the buffer before any byte is touched. Every arithmetic step on
 //! them is checked.
 
-use aes::cipher::{BlockEncrypt, KeyIvInit, StreamCipher, StreamCipherSeek};
+use aes::cipher::{BlockEncrypt, KeyIvInit, StreamCipherCore, StreamCipherSeekCore};
 use aes::{Aes128, Aes256};
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes128Gcm, Aes256Gcm};
-use chacha20::ChaCha20;
+use chacha20::ChaChaCore;
+use chacha20::cipher::consts::U10;
 use chacha20poly1305::ChaCha20Poly1305;
 use zeroize::Zeroize;
 
@@ -276,9 +277,16 @@ impl HeaderKey {
                 // nonce = sample[4..16]; mask = ChaCha20 keystream bytes 0..5.
                 let counter = u32::from_le_bytes(sample[..4].try_into().expect("4 bytes"));
                 let nonce: [u8; 12] = sample[4..].try_into().expect("12 bytes");
-                let mut c = ChaCha20::new(k.into(), (&nonce).into());
-                c.seek(u64::from(counter) * 64);
-                c.apply_keystream(&mut out);
+                // The block core is used directly because the buffered
+                // `ChaCha20` wrapper refuses any output at counter 2^32 - 1
+                // (it panics), and that sample is attacker-chosen. One block
+                // at any 32-bit counter is well defined (RFC 8439 §2.3).
+                let mut core = ChaChaCore::<U10>::new(k.into(), (&nonce).into());
+                core.set_block_pos(counter);
+                let mut block = Default::default();
+                core.write_keystream_block(&mut block);
+                out.copy_from_slice(&block[..5]);
+                block.as_mut_slice().zeroize();
             }
         }
         out
