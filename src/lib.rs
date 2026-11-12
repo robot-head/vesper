@@ -28,3 +28,4 @@ pub mod native;
 pub mod optimize;
 pub mod pact_frontend;
 pub mod runtime;
+pub mod tooling;
