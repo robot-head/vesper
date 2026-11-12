@@ -10,11 +10,11 @@ use vesper_kinetic::hash_world;
 
 const TICKS: u64 = 600;
 const GOLDEN_SHA256_TICK_1: &str =
-    "36325a53fa4b30863c752ad6f88ce5e6a90ba536640c1c8aa90f5ce7988f5191";
+    "43dd82d12e548012b88b979008cf1919eea1eb96737b61da4bdfdb8b04d80509";
 const GOLDEN_SHA256_FINAL: &str =
-    "f8d98c3b51da4d885a0460f7059fb1850cb028caa8865a21dded2100709acc10";
+    "d0005b688c2677b1e6bbfcf2df8e209fe20b4ba2240ccb761afd5e727adbf2dd";
 const GOLDEN_BLAKE3_FINAL: &str =
-    "f4c91c0d2e95d3e342d92b50e50e06a9cd9dfd3a70c2ba09f62cc8e08b25cbb0";
+    "462d71d065183ffa84a6848d9c0d7c13c6cda9c8abbf3219cc5facdda9606ace";
 
 #[test]
 fn fixed_scene_matches_committed_golden_hash() {
@@ -24,6 +24,12 @@ fn fixed_scene_matches_committed_golden_hash() {
     for tick in 1..=TICKS {
         let header = world.step().expect("step");
         max_contacts = max_contacts.max(header.manifold_count);
+        // The scene must stay physically sane, not merely reproducible.
+        for i in 0..world.bodies().len() {
+            let b = world.bodies().get(i).unwrap();
+            let speed = b.vel.iter().map(|v| v.abs()).sum::<f32>();
+            assert!(speed < 30.0, "tick {tick}: body {i} speed {speed}");
+        }
         if tick == 1 {
             after_first = common::hex(&hash_world(world.tick(), world.bodies()).sha256);
         }

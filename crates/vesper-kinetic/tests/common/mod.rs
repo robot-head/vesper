@@ -48,7 +48,9 @@ pub fn scene_parts() -> (Vec<Body>, Vec<DistanceConstraint>) {
     }
     let mut joints = Vec::new();
     for chain in 0..4i32 {
-        let base = [chain as f32 * 1.25 - 0.5, 6.0, -1.5];
+        // Chains hang in separate z planes so their links never start
+        // overlapping each other.
+        let base = [chain as f32 * 1.25 - 0.5, 6.0, -1.5 - chain as f32 * 0.75];
         let first = bodies.len() as u32;
         bodies.push(anchor(base));
         for link in 1..=8i32 {

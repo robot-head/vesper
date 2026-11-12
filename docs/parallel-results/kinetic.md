@@ -13,10 +13,10 @@ New crate `crates/vesper-kinetic` (depends on `cranelift-codegen` 0.125,
 
 | Item | Where | Evidence |
 | --- | --- | --- |
-| 1. DetFloat auditor over real Cranelift 0.125 functions | `src/detfloat.rs` | `tests/detfloat.rs` (13 tests) |
+| 1. DetFloat auditor over real Cranelift 0.125 functions | `src/detfloat.rs` | `tests/detfloat.rs` (14 tests) |
 | 2. Branchless 30-bit 3D Morton codes, optional BMI2 path | `src/morton.rs` | `tests/morton.rs` (5 tests) |
 | 3. Deterministic greedy constraint colouring | `src/coloring.rs` | `tests/coloring.rs` (4 tests) |
-| 4. AoSoA tiles and XPBD substep solver, 0 alloc per step | `src/tile.rs`, `src/world.rs` | `tests/world.rs` (8), `tests/alloc.rs` (1) |
+| 4. AoSoA tiles and XPBD substep solver, 0 alloc per step | `src/tile.rs`, `src/world.rs` | `tests/world.rs` (10), `tests/alloc.rs` (1) |
 | 5. Rollback ring with linear `RollbackTicket`s | `src/rollback.rs` | `tests/rollback.rs` (4 tests) |
 | 6. Cross-architecture golden hash | `tests/golden.rs` | CI on Linux x86_64, macOS AArch64, Windows x86_64 MSVC |
 | 7. Lean colouring disjointness and Morton inverse | `lean/KineticColoring.lean` | `tests/lean_model.rs` (2 tests) |
@@ -49,7 +49,9 @@ pairwise tree or left fold) and `detfloat.nan-escape` (a result of
 NaN-producing arithmetic, the same opcode set Cranelift's own NaN
 canonicalisation pass rewrites, reaching a store, return, call argument or
 integer bitcast without the canonicalisation pattern; tracked through block
-parameters to a fixpoint). The IR is first run through Cranelift's verifier;
+parameters to a fixpoint). Results of the NaN-producing libcalls (`Fma*`,
+`Ceil*`, `Floor*`, `Trunc*`, `Nearest*`) are taint sources even when the call
+itself is permitted. The IR is first run through Cranelift's verifier;
 invalid IR is `AuditError::InvalidIr`. A test runs Cranelift's real
 `canonicalize_nans` pass for the host ISA on scalar f32, f64 and f32x4
 functions and checks the auditor accepts its output (the pass emits the
@@ -62,12 +64,16 @@ what an ISA backend emits from it.
 ### Solver
 
 Each tick: Morton-sorted cell broadphase (cell index = floor of position over
-`cell_size`, clamped to the 1024³ grid, 27-neighbour search by binary
-search over the sorted codes), sphere-sphere and ground-plane contacts with a
-speculative margin, colouring of joints plus contacts, then `substeps` XPBD
+`cell_size`, clamped to the 1024³ grid, neighbour search by binary search
+over the sorted codes), sphere-sphere and ground-plane contacts kept when they
+are within reach during the tick (radii + margin + each body's conservative
+per-tick sweep `|v|₁·dt + |g|₁·dt²`; the cell search radius grows with the
+largest sweep up to `MAX_SEARCH_RADIUS`, beyond which the step fails with
+`StepError::SweepTooLarge` rather than missing contacts), colouring of joints plus contacts, then `substeps` XPBD
 substeps (integrate, project colours in colour order, derive velocities).
 Distance joints and contacts use compliance `alpha / h²`,
-`dλ = -C / max(w + α̃, 1e-9)`. All float arithmetic goes through `world::det`
+`dλ = -C / max(w + α̃, 1e-9)`. Coincident centres (zero-length
+constraint) separate along +y, a fixed choice, instead of being skipped. All float arithmetic goes through `world::det`
 helpers: single binary32 operations, `sqrt` (correctly rounded by IEEE-754),
 and a `max` with a fixed answer for every input. No transcendental is called.
 Rust never contracts `a * b + c`; `f32::mul_add` is never called. Measured:
@@ -89,7 +95,9 @@ not implemented.
 `capture` copies the tiles into a slot reserved at construction (no
 allocation). `RollbackTicket` is non-`Clone`, non-`Copy`, `#[must_use]`; its
 only exits are `confirm`, `rewind` and `rewind_and_resimulate`. Refused calls
-(foreign ticket, world shape mismatch) return the ticket. A dropped ticket is
+(foreign ticket, a world other than the one the ring was built for, world
+shape mismatch) return the ticket. Binding a ring to one world keeps restored
+collider ids and joint indices meaningful. A dropped ticket is
 counted by `SnapshotRing::leaked_tickets` and keeps its slot pinned, so a ring
 full of leaked tickets refuses new captures rather than overwriting history.
 This is host-library discipline enforced by Rust ownership, **not** an
@@ -104,14 +112,15 @@ under 80 µs" was not measured.
 ## Cross-ISA bit determinism
 
 `tests/golden.rs` runs the fixed scene (180 bodies: 144 stacked spheres with
-sideways velocities, four 8-link pendulum chains, ground plane; up to 461
-contacts and 9 colours per tick) for 600 ticks and compares the SHA-256 of
+sideways velocities, four 8-link pendulum chains in separate planes, ground
+plane; up to 536 contacts per tick, 5 colours on the last tick; every body's
+speed stays below 30 units/s throughout, which the test asserts) for 600 ticks and compares the SHA-256 of
 the canonical little-endian state (and the BLAKE3 the header carries) with
 committed values, plus the SHA-256 after tick 1:
 
-- tick 1 SHA-256: `36325a53fa4b30863c752ad6f88ce5e6a90ba536640c1c8aa90f5ce7988f5191`
-- tick 600 SHA-256: `f8d98c3b51da4d885a0460f7059fb1850cb028caa8865a21dded2100709acc10`
-- tick 600 BLAKE3: `f4c91c0d2e95d3e342d92b50e50e06a9cd9dfd3a70c2ba09f62cc8e08b25cbb0`
+- tick 1 SHA-256: `43dd82d12e548012b88b979008cf1919eea1eb96737b61da4bdfdb8b04d80509`
+- tick 600 SHA-256: `d0005b688c2677b1e6bbfcf2df8e209fe20b4ba2240ccb761afd5e727adbf2dd`
+- tick 600 BLAKE3: `462d71d065183ffa84a6848d9c0d7c13c6cda9c8abbf3219cc5facdda9606ace`
 
 Locally (x86_64 Linux) the hashes are identical in debug, release and
 release with `-C target-cpu=native`. The CI jobs `check` (Linux x86_64),
@@ -158,8 +167,8 @@ Own commit: `crates/vesper-kinetic` added to root `members` and
 Run locally with Rust 1.97.0 and Lean 4.24.0:
 
 - `cargo fmt --all -- --check`: clean.
-- `cargo clippy --workspace --locked --all-targets -- -D warnings`: see PR.
-- `VESPER_LEAN=lean cargo test -p vesper-kinetic`: 38 tests pass.
+- `cargo clippy --workspace --locked --all-targets -- -D warnings`: clean.
+- `VESPER_LEAN=lean cargo test -p vesper-kinetic`: 42 tests pass.
 - `VESPER_LEAN=lean cargo test --workspace --locked`: see PR.
 
 ## Decisions and corrections
@@ -179,6 +188,18 @@ Run locally with Rust 1.97.0 and Lean 4.24.0:
   claims bit identity only for this crate's Rust solver on the three CI
   targets, backed by the golden test. The auditor checks Cranelift IR, not
   backend output, and nothing here is a compiler `eff [DetFloat]` claim.
+
+## Review fixes
+
+Codex review of the first push found four issues, all fixed with tests:
+contacts were only detected within a fixed margin, so fast bodies could
+tunnel within one tick (now swept); a ring could restore a snapshot into a
+different world of the same size (now refused as `ForeignWorld`); a permitted
+FMA libcall's result bypassed the NaN check (now a taint source); and
+coincident centres were silently skipped (now separated along +y). The first
+golden scene also started with overlapping pendulum chains and blew up to
+380 units/s; the chains now hang in separate planes and the golden test
+bounds body speeds, so the golden values changed.
 
 ## Remaining gaps
 

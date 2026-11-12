@@ -499,6 +499,31 @@ fn generates_nan(op: Opcode) -> bool {
     )
 }
 
+/// Direct calls to libcalls that compute NaN-producing float operations (the
+/// libcall forms of `fma`, `ceil`, `floor`, `trunc` and `nearest`), whether or
+/// not the call itself is permitted.
+fn nan_generating_libcall(func: &Function, data: &InstructionData) -> bool {
+    let func_ref = match data.analyze_call(&func.dfg.value_lists, &func.dfg.exception_tables) {
+        CallInfo::Direct(f, _) | CallInfo::DirectWithSig(f, _, _) => f,
+        _ => return false,
+    };
+    matches!(
+        func.dfg.ext_funcs[func_ref].name,
+        ExternalName::LibCall(
+            LibCall::FmaF32
+                | LibCall::FmaF64
+                | LibCall::CeilF32
+                | LibCall::CeilF64
+                | LibCall::FloorF32
+                | LibCall::FloorF64
+                | LibCall::TruncF32
+                | LibCall::TruncF64
+                | LibCall::NearestF32
+                | LibCall::NearestF64
+        )
+    )
+}
+
 fn canonical_nan_bits(ty: Type, bits: &[u8]) -> bool {
     match ty.lane_type().bits() {
         32 => bits
@@ -604,7 +629,7 @@ fn check_nan_escape(cx: &mut Ctx<'_>, order: &[Inst]) {
             let results = dfg.inst_results(inst);
             let args = dfg.inst_args(inst);
             let any_arg = args.iter().any(|a| tainted[a.as_u32() as usize]);
-            let taint_results = if generates_nan(op) {
+            let taint_results = if generates_nan(op) || nan_generating_libcall(func, data) {
                 true
             } else if cx.is_canonicalizer(inst) {
                 false

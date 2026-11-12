@@ -66,6 +66,9 @@ pub enum RollbackError {
     ForeignTicket,
     /// The world's body count differs from the ring's.
     WorldShape { expected: usize, found: usize },
+    /// The world is not the one the ring was built for (its collider table
+    /// and joints, which give the snapshot meaning, may differ).
+    ForeignWorld,
     /// The ring was built with zero slots or more than `u16::MAX + 1`.
     InvalidCapacity(usize),
 }
@@ -79,6 +82,7 @@ impl std::fmt::Display for RollbackError {
                 write!(f, "world has {found} bodies, ring expects {expected}")
             }
             Self::InvalidCapacity(n) => write!(f, "invalid ring capacity {n}"),
+            Self::ForeignWorld => write!(f, "world is not the one this ring snapshots"),
         }
     }
 }
@@ -105,6 +109,7 @@ struct Slot {
 #[derive(Debug)]
 pub struct SnapshotRing {
     id: u64,
+    world_id: u64,
     body_count: usize,
     slots: Vec<Slot>,
     next: usize,
@@ -112,7 +117,9 @@ pub struct SnapshotRing {
 }
 
 impl SnapshotRing {
-    /// A ring of `capacity` snapshots shaped like `world`.
+    /// A ring of `capacity` snapshots of `world`. It only captures and
+    /// restores that world, so restored collider ids and joint indices always
+    /// refer to the tables they were captured with.
     pub fn new(world: &World, capacity: usize) -> Result<Self, RollbackError> {
         if capacity == 0 || capacity > usize::from(u16::MAX) + 1 {
             return Err(RollbackError::InvalidCapacity(capacity));
@@ -120,6 +127,7 @@ impl SnapshotRing {
         let tiles = world.bodies.tiles.len();
         Ok(Self {
             id: NEXT_RING_ID.fetch_add(1, Ordering::Relaxed),
+            world_id: world.id,
             body_count: world.bodies.len(),
             slots: (0..capacity)
                 .map(|_| Slot {
@@ -134,6 +142,9 @@ impl SnapshotRing {
     }
 
     fn check_world(&self, world: &World) -> Result<(), RollbackError> {
+        if world.id != self.world_id {
+            return Err(RollbackError::ForeignWorld);
+        }
         if world.bodies.len() != self.body_count {
             return Err(RollbackError::WorldShape {
                 expected: self.body_count,

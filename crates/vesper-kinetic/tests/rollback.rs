@@ -112,7 +112,16 @@ fn tickets_are_linear_and_refusals_return_them() {
     )
     .unwrap();
     let (a, err) = ring.rewind(a, &mut small).unwrap_err();
-    assert!(matches!(err, RollbackError::WorldShape { .. }));
+    assert_eq!(err, RollbackError::ForeignWorld);
+    // A different world with the same shape is refused too: its collider
+    // table and joints need not match the snapshot.
+    let mut twin = common::scene();
+    let (a, err) = ring.rewind(a, &mut twin).unwrap_err();
+    assert_eq!(err, RollbackError::ForeignWorld);
+    assert_eq!(
+        ring.capture(&twin).unwrap_err(),
+        RollbackError::ForeignWorld
+    );
     assert_eq!(ring.confirm(a).unwrap(), 0);
 
     // Dropping a ticket is a counted leak and keeps its slot pinned.

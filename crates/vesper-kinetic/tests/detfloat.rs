@@ -180,7 +180,12 @@ fn integer_calls_exact_libcalls_and_fma_libcalls() {
         );
         vec![r[0]]
     });
-    assert_eq!(rules(&f, &DetFloatPolicy::default()), vec!["detfloat.fma"]);
+    // The ceil libcall result (a NaN-producing operation) also escapes into
+    // the fma call's arguments uncanonicalised.
+    assert_eq!(
+        rules(&f, &DetFloatPolicy::default()),
+        vec!["detfloat.fma", "detfloat.nan-escape"]
+    );
 }
 
 #[test]
@@ -458,4 +463,27 @@ fn invalid_ir_is_a_typed_error() {
         audit(&func, &DetFloatPolicy::default()),
         Err(vesper_kinetic::AuditError::InvalidIr(_))
     ));
+}
+
+#[test]
+fn permitted_fma_libcall_results_are_still_nan_tracked() {
+    let f = build("fma_lib", &[types::F32; 3], &[types::F32], |b, a| {
+        let r = call_fn(
+            ExternalName::LibCall(LibCall::FmaF32),
+            &[types::F32; 3],
+            &[types::F32],
+            b,
+            &[a[0], a[1], a[2]],
+        );
+        vec![r[0]]
+    });
+    let allowed = DetFloatPolicy {
+        allow_fma: true,
+        ..DetFloatPolicy::default()
+    };
+    assert_eq!(rules(&f, &allowed), vec!["detfloat.nan-escape"]);
+    assert_eq!(
+        rules(&f, &DetFloatPolicy::default()),
+        vec!["detfloat.fma", "detfloat.nan-escape"]
+    );
 }

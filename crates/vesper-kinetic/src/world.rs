@@ -123,6 +123,9 @@ pub enum StepError {
     Coloring(ColoringError),
     /// The tick counter would overflow.
     TickOverflow,
+    /// Bodies move so fast that the swept contact search would need more
+    /// than [`MAX_SEARCH_RADIUS`] cells in each direction.
+    SweepTooLarge { body: usize },
 }
 
 impl std::fmt::Display for StepError {
@@ -139,6 +142,10 @@ impl std::fmt::Display for StepError {
             }
             Self::Coloring(e) => write!(f, "constraint colouring: {e}"),
             Self::TickOverflow => write!(f, "tick counter overflow"),
+            Self::SweepTooLarge { body } => write!(
+                f,
+                "body {body} moves too far in one tick for the swept contact search"
+            ),
         }
     }
 }
@@ -150,6 +157,13 @@ impl From<ColoringError> for StepError {
         Self::Coloring(e)
     }
 }
+
+/// Most broadphase cells searched in each direction around a body. The
+/// search radius grows with the largest per-tick sweep so that fast bodies
+/// still meet every body they can reach during the tick's substeps.
+pub const MAX_SEARCH_RADIUS: i32 = 4;
+
+static NEXT_WORLD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Debug, Clone, Copy)]
 enum Contact {
@@ -163,10 +177,12 @@ pub struct World {
     config: WorldConfig,
     pub(crate) bodies: TiledBodies,
     pub(crate) tick: u64,
+    pub(crate) id: u64,
     colliders: Vec<SphereCollider>,
     joints: Vec<DistanceConstraint>,
     // Per-step scratch, reserved at construction.
     prev: Vec<[f32; 3]>,
+    sweep: Vec<f32>,
     cells: Vec<(u32, u32)>,
     contacts: Vec<Contact>,
     constraint_bodies: Vec<ConstraintBodies>,
@@ -278,9 +294,11 @@ impl World {
             config,
             bodies: TiledBodies::from_bodies(bodies),
             tick: 0,
+            id: NEXT_WORLD_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             colliders: colliders.to_vec(),
             joints: joints.to_vec(),
             prev: vec![[0.0; 3]; bodies.len()],
+            sweep: vec![0.0; bodies.len()],
             cells: Vec::with_capacity(bodies.len()),
             contacts: Vec::with_capacity(config.max_contacts),
             constraint_bodies: Vec::with_capacity(constraint_capacity),
@@ -358,31 +376,67 @@ impl World {
         out
     }
 
-    /// Broadphase and narrowphase: fills `self.contacts`.
+    /// Conservative bound on how far body `i` can travel this tick:
+    /// `(|vx| + |vy| + |vz|)·dt + (|gx| + |gy| + |gz|)·dt²` (an L1 bound on the
+    /// L2 distance covered by the substeps' ballistic motion; constraint
+    /// corrections are not included).
+    fn sweep_of(&self, i: usize) -> f32 {
+        if self.bodies.inv_mass(i) == 0.0 {
+            return 0.0;
+        }
+        let v = self.bodies.vel(i);
+        let g = self.config.gravity;
+        let dt = self.config.dt;
+        let speed = det::add(det::add(v[0].abs(), v[1].abs()), v[2].abs());
+        let accel = det::add(det::add(g[0].abs(), g[1].abs()), g[2].abs());
+        det::add(det::mul(speed, dt), det::mul(det::mul(accel, dt), dt))
+    }
+
+    /// Broadphase and narrowphase: fills `self.contacts` with every pair (and
+    /// ground contact) that is within reach during the tick: radii plus
+    /// margin plus both bodies' sweeps. Contacts are kept for all substeps
+    /// and only push when they actually penetrate.
     fn detect_contacts(&mut self) -> Result<(), StepError> {
         self.contacts.clear();
         self.cells.clear();
         let n = self.bodies.len();
+        let mut max_sweep = 0.0f32;
         for i in 0..n {
+            let s = self.sweep_of(i);
+            if !s.is_finite() {
+                return Err(StepError::SweepTooLarge { body: i });
+            }
+            self.sweep[i] = s;
+            max_sweep = det::max(s, max_sweep);
             let [x, y, z] = self.cell_of(self.bodies.pos(i));
             self.cells.push((morton::encode_masked(x, y, z), i as u32));
         }
         self.cells.sort_unstable();
         let margin = self.config.contact_margin;
+        let cell_size = self.config.cell_size;
         for i in 0..n {
             let wi = self.bodies.inv_mass(i);
             let pi = self.bodies.pos(i);
             let ri = self.radius(i);
+            let si = self.sweep[i];
             if let Some(ground) = self.config.ground_y
                 && wi > 0.0
-                && det::sub(det::sub(pi[1], ri), ground) < margin
+                && det::sub(det::sub(pi[1], ri), ground) < det::add(margin, si)
             {
                 self.push_contact(Contact::Ground(i as u32))?;
             }
+            // Cells are at least one largest diameter plus margin wide, so a
+            // partner within reach lies within `1 + ceil((si + max_sweep) /
+            // cell_size)` cells.
+            let extra = det::div(det::add(si, max_sweep), cell_size).ceil();
+            if extra >= MAX_SEARCH_RADIUS as f32 {
+                return Err(StepError::SweepTooLarge { body: i });
+            }
+            let r = 1 + extra as i32;
             let cell = self.cell_of(pi);
-            for dz in -1i32..=1 {
-                for dy in -1i32..=1 {
-                    for dx in -1i32..=1 {
+            for dz in -r..=r {
+                for dy in -r..=r {
+                    for dx in -r..=r {
                         let neighbour = [
                             i32::from(cell[0]) + dx,
                             i32::from(cell[1]) + dy,
@@ -420,7 +474,10 @@ impl World {
                                 det::sub(pi[1], pj[1]),
                                 det::sub(pi[2], pj[2]),
                             ];
-                            let reach = det::add(det::add(ri, self.radius(j)), margin);
+                            let reach = det::add(
+                                det::add(det::add(ri, self.radius(j)), margin),
+                                det::add(si, self.sweep[j]),
+                            );
                             if det::dot(d, d) < det::mul(reach, reach) {
                                 self.push_contact(Contact::Pair(i as u32, j as u32))?;
                             }
@@ -573,9 +630,13 @@ impl World {
                     det::sub(pa[2], pb[2]),
                 ];
                 let len = det::sqrt(det::dot(d, d));
-                if len <= EPS {
-                    return;
-                }
+                // Coincident centres have no direction; separate along +y
+                // (a deterministic choice) so the correction is never dropped.
+                let (len, d) = if len <= EPS {
+                    (0.0, [0.0, 1.0, 0.0])
+                } else {
+                    (len, d)
+                };
                 let c = det::sub(len, target);
                 if inequality && c >= 0.0 {
                     return;
@@ -586,7 +647,7 @@ impl World {
                 }
                 let denom = det::max(det::add(w, alpha_tilde), EPS);
                 let d_lambda = det::div(det::neg(c), denom);
-                let inv_len = det::div(1.0, len);
+                let inv_len = if len == 0.0 { 1.0 } else { det::div(1.0, len) };
                 let n = [
                     det::mul(d[0], inv_len),
                     det::mul(d[1], inv_len),

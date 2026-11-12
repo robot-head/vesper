@@ -252,3 +252,78 @@ fn contact_overflow_fails_the_step_and_leaves_the_world_unchanged() {
     assert_eq!(w.tick(), 0);
     assert_eq!(hash_world(w.tick(), w.bodies()), before);
 }
+
+#[test]
+fn fast_bodies_do_not_tunnel_through_each_other_within_a_tick() {
+    // 72 units/s toward each other: without swept candidates one tick swaps
+    // them with no contact.
+    let cfg = WorldConfig {
+        gravity: [0.0; 3],
+        ground_y: None,
+        ..common::config()
+    };
+    let bodies = [
+        dynamic([-0.3, 0.0, 0.0], [36.0, 0.0, 0.0]),
+        dynamic([0.3, 0.0, 0.0], [-36.0, 0.0, 0.0]),
+    ];
+    let mut w = World::new(cfg, &bodies, &BALL, &[]).unwrap();
+    let h = w.step().unwrap();
+    assert!(h.manifold_count >= 1, "contact found");
+    let (a, b) = (w.bodies().get(0).unwrap(), w.bodies().get(1).unwrap());
+    assert!(a.pos[0] < b.pos[0], "no swap: {:?} {:?}", a.pos, b.pos);
+    assert!(
+        w.max_penetration() < 0.05,
+        "penetration {}",
+        w.max_penetration()
+    );
+
+    // Too fast for the bounded search: a typed error, world unchanged.
+    let rocket = [dynamic([0.0; 3], [1.0e4, 0.0, 0.0])];
+    let mut w = World::new(cfg, &rocket, &BALL, &[]).unwrap();
+    assert_eq!(w.step(), Err(StepError::SweepTooLarge { body: 0 }));
+    assert_eq!(w.tick(), 0);
+}
+
+#[test]
+fn coincident_centres_are_separated_deterministically() {
+    let cfg = WorldConfig {
+        gravity: [0.0; 3],
+        ground_y: None,
+        ..common::config()
+    };
+    let same = [
+        dynamic([1.0, 2.0, 3.0], [0.0; 3]),
+        dynamic([1.0, 2.0, 3.0], [0.0; 3]),
+    ];
+    let mut w = World::new(cfg, &same, &BALL, &[]).unwrap();
+    for _ in 0..10 {
+        w.step().unwrap();
+    }
+    assert!(
+        w.max_penetration() < 0.01,
+        "penetration {}",
+        w.max_penetration()
+    );
+    let (a, b) = (w.bodies().get(0).unwrap(), w.bodies().get(1).unwrap());
+    assert!(a.pos[1] > b.pos[1], "separated along +y");
+
+    let mut joined = same;
+    for body in &mut joined {
+        body.collision_layer_mask = 0;
+    }
+    let joint = DistanceConstraint {
+        a: 0,
+        b: 1,
+        rest_length: 0.5,
+        compliance: 0.0,
+    };
+    let mut w = World::new(cfg, &joined, &BALL, &[joint]).unwrap();
+    for _ in 0..10 {
+        w.step().unwrap();
+    }
+    assert!(
+        w.max_joint_error() < 1e-3,
+        "joint error {}",
+        w.max_joint_error()
+    );
+}
