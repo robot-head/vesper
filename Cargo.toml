@@ -52,6 +52,7 @@ members = [
     "crates/vesper-warp-bbr",
     "crates/vesper-warp-umem",
     "crates/vesper-warp-wheel",
+    "crates/vesper-warp-crypto",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -105,6 +106,7 @@ default-members = [
     "crates/vesper-warp-bbr",
     "crates/vesper-warp-umem",
     "crates/vesper-warp-wheel",
+    "crates/vesper-warp-crypto",
     "experiments/native-pulse",
 ]
 
@@ -119,6 +121,16 @@ rowan = "0.16"
 serde = { version = "1", features = ["derive", "rc"] }
 serde_json = "1"
 io-uring = "0.7"
+aes = { version = "=0.8.4", features = ["zeroize"] }
+aes-gcm = { version = "=0.10.3", default-features = false, features = ["aes", "zeroize"] }
+chacha20 = { version = "=0.9.1", features = ["zeroize"] }
+chacha20poly1305 = { version = "=0.10.1", default-features = false }
+hkdf = "=0.12.4"
+poly1305 = { version = "=0.8.0", features = ["zeroize"] }
+polyval = { version = "=0.6.2", features = ["zeroize"] }
+sha2 = "0.10.9"
+subtle = "2.6.1"
+zeroize = { version = "1.9.1", features = ["zeroize_derive"] }
 
 [package]
 default-run = "vesper"
