@@ -27,6 +27,8 @@ The coordinator also owns offline package-graph inspection in the new `src/packa
 
 Release-version checking in `crates/vesper-semver`, the package-command adapter and the new `tests/release_cli.rs` is also coordinator-owned. It does not change the active source-interface exporter or arithmetic semantics.
 
+Local Lean artifact auditing is coordinator-owned in the new `src/proof_commands.rs`, `tools/proof-audit/**` and `tests/proof_audit_cli.rs`. This uses an independent trusted Lean helper and does not edit the reserved extractor, shared IR or `lean/CheckedArithmetic.lean`. It does not authorize package publication or proof-cache reuse.
+
 ## First-wave results
 
 | Lane | Branch | Exclusive ownership | Status |
