@@ -4,12 +4,19 @@
 //! `Content-Length` are supported. Transfer codings, upgrades, CONNECT,
 //! expectations, HTTP/1.0 and absolute-form targets fail closed. This is not a
 //! server, source-language linearity implementation, TLS stack or SIMD parser.
+//! [`connection`] adds a socket-independent connection state machine,
+//! [`target`] the single URI decoding policy, and [`router`]/[`service`]
+//! bounded routing and middleware over that decoded target.
 //! All parse errors poison the decoder: the caller must close the connection,
 //! not search the remaining bytes for another request boundary.
 
 #![forbid(unsafe_code)]
 
+pub mod connection;
 pub mod response;
+pub mod router;
+pub mod service;
+pub mod target;
 
 use std::{
     collections::VecDeque,

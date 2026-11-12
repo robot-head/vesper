@@ -59,9 +59,10 @@ explicitly unsupported. Connection options cannot nominate Host, Content-Length
 or Transfer-Encoding for removal. A consumer must still honor `Connection:
 close`; this decoder does not manage socket lifetime.
 
-There is no chunked decoder, trailers, middleware, routing,
-HTTP/2, HTTP/3, WebSocket, TLS, I/O, cancellation, allocator integration, SIMD
-acceleration, source ownership typing or proof/performance claim.
+There is no chunked decoder, trailers, HTTP/2, HTTP/3, WebSocket, TLS, I/O,
+cancellation, allocator integration, SIMD acceleration, source ownership typing
+or proof/performance claim. The connection, target and routing layers below are
+built on this decoder without changing its behavior.
 
 
 ## Fixed-length responses
@@ -113,3 +114,71 @@ sending, and bytes can be deliberately copied after extraction. These ownership
 choices prevent accidental builder reuse; they do not establish Vesper's linear
 response-exhaustion theorem. ConnectionPolicy is explicit metadata plus a wire
 header; the transport owner must enact it. No socket is sent to or closed here.
+
+
+## Connection state machine
+
+`connection::Connection` composes the decoder and response encoder without a
+socket. The transport owner calls `receive` (which accepts only the prefix that
+fits the bounded input queue and returns its length), `poll_request`, `submit`
+and `pending_output`/`advance_output` (or `write_to` for one `io::Write` call).
+
+```rust
+use vesper_prism::connection::{Connection, ConnectionLimits, RequestEvent, Response};
+let mut connection = Connection::new(ConnectionLimits::default())?;
+connection.receive(b"HEAD /a HTTP/1.1\r\nHost: x\r\n\r\n")?;
+let RequestEvent::Request(inbound) = connection.poll_request() else { unreachable!() };
+connection.submit(inbound.id, Response::new(200, b"body".to_vec())).unwrap();
+assert_eq!(connection.pending_output(),
+    b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nConnection: keep-alive\r\n\r\n");
+# Ok::<(), vesper_prism::connection::ConnectionError>(())
+```
+
+Each issued request gets an opaque `RequestId`. Responses may be submitted in
+any order; they enter the wire queue strictly in request order. Foreign,
+never-issued, duplicate, already-written and abandoned ids are rejected, as are
+encode errors and submissions that would exceed `max_outbound_bytes`; every
+rejection returns the `Response` and leaves the wire unchanged. HEAD context and
+the Connection header come from the associated request, so applications never
+choose HEAD framing themselves. Short writes advance only by the reported count;
+overruns are rejected.
+
+Close policy: `Connection: close` on a request makes it the last one issued and
+forces `Connection: close` on its response. `Response::close` ends the
+connection after that response; already-issued later requests are abandoned and
+any already-submitted later responses are returned by `take_abandoned`. After
+`end_input`, complete pipelined requests still drain and the final response is
+marked close if not yet submitted. A parse error poisons the decoder and is
+never resynchronized: earlier responses are written in order, then a minimal
+400/413/417/431/501/505 `Connection: close` response (none for EOF inside a
+frame). Bytes received after the connection stops issuing requests are counted
+and discarded. `shutdown` consumes the connection and returns unsent wire bytes
+with their written offsets, blocked out-of-order responses, awaiting ids,
+abandoned owners, unprocessed input and the failure.
+
+Bounds: decoder limits, `max_in_flight` issued-but-unpromoted requests (polling
+returns `Backpressure`), and `max_outbound_bytes` of retained encoded output,
+which must admit one maximal response; a generated parse-error response (under
+128 bytes) may exceed it once. Rust `Drop` still permits discarding a
+`Connection`, `Response` or `EncodedResponse`; this is not a linear responder.
+
+## Targets and routing
+
+`target::Target::parse` is the only percent decoder. It splits the path on
+literal `/` before decoding and rejects encoded `/`, `\` and NUL, `.`/`..`
+segments (also when encoded), empty interior segments and invalid UTF-8 (unless
+`Utf8Policy::AllowBytes`). A trailing slash is recorded and significant. `+` is
+literal in paths and a space in queries. Queries split on literal `&`/first `=`
+before decoding; empty entries and empty keys are rejected, a key with no `=` has
+no value, duplicates are kept in order, and `Query::unique` reports duplicates
+as an error. Decoding happens once: `%252e` is the data `%2e`.
+
+`router::Router` matches decoded segments against static and `:param` patterns.
+A static segment beats a parameter at the first differing position regardless of
+insertion order, with bounded backtracking (`max_match_work`). The highest
+precedence matching path is selected before its methods are consulted (405 lists
+methods sorted, with HEAD implied by GET; HEAD falls back to GET). Duplicate
+routes, conflicting parameter names at one position, escapes in literal
+patterns and malformed patterns are rejected without changing the router.
+`service::Service` runs a bounded middleware chain and the router over the same
+`ParsedRequest`, so guards and routes cannot disagree about what a path meant.
