@@ -40,8 +40,7 @@ group width boundaries, line comments, comment-looking Text and duplicate
 payloads. Printed axiom dependencies are empty for both required theorems,
 the stronger schedule theorems, helper conservation lemmas and both
 counterexamples. No sorry, custom axioms, partial definitions or native_decide
-are used. Explicit structural termination keeps mutual Doc/List definitions
-and proofs total.
+are used. Explicit structural termination keeps the model definitions and proofs total.
 
 Lean's optimized String.contains/startsWith/splitOn carry propext in this pinned
 toolchain. Equivalent primitive scalar-list helpers avoid importing that axiom
@@ -53,3 +52,29 @@ lean/StylusAndLintSafety.lean`, plus `git diff --check`. No toolchain install,
 Cargo build, coordinator-cache write or existing proof edit was needed.
 The emitter/root owners perform independent actual witness elaboration and
 kernel artifact replay under the empty axiom policy.
+
+
+## Strict artifact replay follow-up
+
+Actual root CLI replay initially rejected compiler-generated unsafe recursion
+auxiliaries. A noncomputable section alone did not suppress them; every logical
+model definition is now explicitly noncomputable, and unnecessary derived
+runtime instances are removed. This changes executable code generation only,
+not logical reduction or the thirteen closed examples.
+
+The next actual replay exposed the pinned replay facility's unsupported nested
+`Doc.rec_1` recursor. Per the published #116 amendment and contract d3884e4, the
+internal algebra uses binary `Doc.append`. Public `Doc.concat : List Doc -> Doc`
+is the same callable interface, normalizing ordered lists with foldr append nil.
+The new axiom-free `docComments_concat` theorem proves exact ordered-payload
+agreement with list concatenation. Emitter and projection APIs remain unchanged.
+No auditor policy or artifact validation was weakened.
+
+Fresh private artifacts were compiled with actual Lean 4.24.0 and then audited
+through the unchanged root `vesper proof-audit StylusAndLintSafety` command,
+requesting both required theorems. The real result is accepted=true,
+kernel_replayed=true, 186 checked constants, allowed_axioms=[], forbidden_axioms=[];
+both theorem axiom lists are empty. All nine printed model theorem dependency
+lists are also empty. The audit result is retained at
+/tmp/proof41-model-safe-audit3-result.json; its large toolchain inventory should be
+summarized, not dumped into review logs. No coordinator cache was written.

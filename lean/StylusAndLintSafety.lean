@@ -3,8 +3,14 @@
 -- renderer below uses a local width chooser; Rust's bounded suffix lookahead
 -- is intentionally not claimed to refine this model. This is not a lexer,
 -- source semantics, parser, compiler or certified-autofix correctness proof.
+-- Explicit noncomputable definitions omit compiler-only unsafe auxiliaries;
+-- the strict kernel auditor replays this logical model without executable code.
+noncomputable section
 namespace Vesper.StylusSafety
 
+-- Binary append avoids Lean's nested-inductive auxiliary recursor, unsupported
+-- by the pinned strict replay facility. Public concat normalizes ordered lists
+-- to this ordinary algebra; consumers retain Doc.concat : List Doc -> Doc.
 inductive Doc where
   | nil
   | text (value : String)
@@ -13,14 +19,15 @@ inductive Doc where
   | softLineOrSpace
   | softLineOrEmpty
   | nest (indent : Nat) (inner : Doc)
-  | concat (children : List Doc)
+  | append (left right : Doc)
   | group (inner : Doc)
-  deriving Repr
+
+noncomputable def Doc.concat (children : List Doc) : Doc :=
+  children.foldr Doc.append Doc.nil
 
 inductive Mode where
   | flat
   | broken
-  deriving DecidableEq, Repr
 
 -- Text and comment payloads stay distinct, including comment-looking text.
 -- A line piece records the indentation appended after its newline.
@@ -28,9 +35,8 @@ inductive Piece where
   | text (value : String)
   | comment (value : String)
   | line (indent : Nat)
-  deriving DecidableEq, Repr
 
-@[simp] def commentsOf : List Piece -> List String
+@[simp] noncomputable def commentsOf : List Piece -> List String
   | [] => []
   | .comment value :: rest => value :: commentsOf rest
   | _ :: rest => commentsOf rest
@@ -45,52 +51,51 @@ inductive Piece where
       | line indent => exact ih
       | comment value => exact congrArg (List.cons value) ih
 
-mutual
-  @[simp] def docComments : Doc -> List String
-    | .nil | .text _ | .hardLine | .softLineOrSpace | .softLineOrEmpty => []
-    | .comment value => [value]
-    | .nest _ inner | .group inner => docComments inner
-    | .concat children => docCommentsList children
-  @[simp] def docCommentsList : List Doc -> List String
-    | [] => []
-    | head :: tail => docComments head ++ docCommentsList tail
-end
+@[simp] noncomputable def docComments : Doc -> List String
+  | .nil | .text _ | .hardLine | .softLineOrSpace | .softLineOrEmpty => []
+  | .comment value => [value]
+  | .nest _ inner | .group inner => docComments inner
+  | .append left right => docComments left ++ docComments right
+
+@[simp] noncomputable def docCommentsList : List Doc -> List String
+  | [] => []
+  | head :: tail => docComments head ++ docCommentsList tail
+
+theorem docComments_concat (children : List Doc) :
+    docComments (Doc.concat children) = docCommentsList children := by
+  induction children with
+  | nil => rfl
+  | cons head tail ih =>
+      exact congrArg (fun xs : List String => docComments head ++ xs) ih
 
 -- Use primitive scalar-list operations: Lean's optimized String.contains,
 -- startsWith and splitOn use propext internally in this toolchain. These
 -- equivalent model helpers keep the theorem's dependency set empty.
-def containsScalar (value : String) (wanted : Char) : Bool :=
+noncomputable def containsScalar (value : String) (wanted : Char) : Bool :=
   value.toList.any (fun ch => ch == wanted)
 
-def isLineComment (value : String) : Bool :=
+noncomputable def isLineComment (value : String) : Bool :=
   match value.toList with
   | '/' :: '/' :: _ => true
   | _ => false
 
-mutual
-  -- Mirrors the cached flat-width algebra. Newlines/CR and line comments
-  -- cannot be assigned a finite flat width. Nat models successful checked
-  -- arithmetic, without representing the Rust machine's finite overflow guard.
-  def flatWidth : Doc -> Option Nat
-    | .nil | .softLineOrEmpty => some 0
-    | .softLineOrSpace => some 1
-    | .hardLine => none
-    | .text value =>
-        if containsScalar value '\n' || containsScalar value '\r' then none else some value.length
-    | .comment value =>
-        if containsScalar value '\n' || containsScalar value '\r' || isLineComment value
-        then none else some value.length
-    | .nest _ inner | .group inner => flatWidth inner
-    | .concat children => flatWidths children
-  termination_by structural doc => doc
-  def flatWidths : List Doc -> Option Nat
-    | [] => some 0
-    | head :: tail => do
-        let left <- flatWidth head
-        let right <- flatWidths tail
-        pure (left + right)
-  termination_by structural docs => docs
-end
+-- Mirrors the cached flat-width algebra. Newlines/CR and line comments cannot
+-- have finite flat width. Nat abstracts successful checked machine arithmetic.
+noncomputable def flatWidth : Doc -> Option Nat
+  | .nil | .softLineOrEmpty => some 0
+  | .softLineOrSpace => some 1
+  | .hardLine => none
+  | .text value =>
+      if containsScalar value '\n' || containsScalar value '\r' then none else some value.length
+  | .comment value =>
+      if containsScalar value '\n' || containsScalar value '\r' || isLineComment value
+      then none else some value.length
+  | .nest _ inner | .group inner => flatWidth inner
+  | .append left right => do
+      let l <- flatWidth left
+      let r <- flatWidth right
+      pure (l + r)
+termination_by structural doc => doc
 
 -- Group ordinal permits an arbitrary mode schedule even when repeated shared
 -- nodes have identical text/width/column but a different continuation. Thus the
@@ -101,78 +106,60 @@ structure Layout where
   pieces : List Piece
   column : Nat
   nextGroup : Nat
-  deriving Repr
 
-def advanceColumn (column : Nat) (value : String) : Nat :=
+noncomputable def advanceColumn (column : Nat) (value : String) : Nat :=
   value.toList.foldl (fun col ch => if ch == '\n' then 0 else col + 1) column
 
-mutual
-  def layoutWith (choose : GroupChoice) (width indent column next : Nat)
-      (mode : Mode) : Doc -> Layout
-    | .nil => ⟨[], column, next⟩
-    | .text value => ⟨[.text value], advanceColumn column value, next⟩
-    | .comment value => ⟨[.comment value], advanceColumn column value, next⟩
-    | .hardLine => ⟨[.line indent], indent, next⟩
-    | .softLineOrSpace => match mode with
-        | .flat => ⟨[.text " "], column + 1, next⟩
-        | .broken => ⟨[.line indent], indent, next⟩
-    | .softLineOrEmpty => match mode with
-        | .flat => ⟨[], column, next⟩
-        | .broken => ⟨[.line indent], indent, next⟩
-    | .nest spaces inner => layoutWith choose width (indent + spaces) column next mode inner
-    | .concat children => layoutsWith choose width indent column next mode children
-    | .group inner =>
-        layoutWith choose width indent column (next + 1) (choose next width column inner) inner
-  termination_by structural doc => doc
-  def layoutsWith (choose : GroupChoice) (width indent column next : Nat)
-      (mode : Mode) : List Doc -> Layout
-    | [] => ⟨[], column, next⟩
-    | head :: tail =>
-        let first := layoutWith choose width indent column next mode head
-        let rest := layoutsWith choose width indent first.column first.nextGroup mode tail
-        ⟨first.pieces ++ rest.pieces, rest.column, rest.nextGroup⟩
-  termination_by structural docs => docs
-end
+noncomputable def layoutWith (choose : GroupChoice) (width indent column next : Nat)
+    (mode : Mode) : Doc -> Layout
+  | .nil => ⟨[], column, next⟩
+  | .text value => ⟨[.text value], advanceColumn column value, next⟩
+  | .comment value => ⟨[.comment value], advanceColumn column value, next⟩
+  | .hardLine => ⟨[.line indent], indent, next⟩
+  | .softLineOrSpace => match mode with
+      | .flat => ⟨[.text " "], column + 1, next⟩
+      | .broken => ⟨[.line indent], indent, next⟩
+  | .softLineOrEmpty => match mode with
+      | .flat => ⟨[], column, next⟩
+      | .broken => ⟨[.line indent], indent, next⟩
+  | .nest spaces inner => layoutWith choose width (indent + spaces) column next mode inner
+  | .append left right =>
+      let first := layoutWith choose width indent column next mode left
+      let rest := layoutWith choose width indent first.column first.nextGroup mode right
+      ⟨first.pieces ++ rest.pieces, rest.column, rest.nextGroup⟩
+  | .group inner =>
+      layoutWith choose width indent column (next + 1) (choose next width column inner) inner
+termination_by structural doc => doc
 
-mutual
-  theorem layoutWith_comments (choose : GroupChoice) (width indent column next : Nat)
-      (mode : Mode) (doc : Doc) :
-      commentsOf (layoutWith choose width indent column next mode doc).pieces = docComments doc := by
-    cases doc with
-    | nil => rfl
-    | text value => rfl
-    | comment value => rfl
-    | hardLine => rfl
-    | softLineOrSpace => cases mode <;> rfl
-    | softLineOrEmpty => cases mode <;> rfl
-    | nest spaces inner =>
-        exact layoutWith_comments choose width (indent + spaces) column next mode inner
-    | concat children =>
-        exact layoutsWith_comments choose width indent column next mode children
-    | group inner =>
-        exact layoutWith_comments choose width indent column (next + 1)
-          (choose next width column inner) inner
-  termination_by structural doc
-  theorem layoutsWith_comments (choose : GroupChoice) (width indent column next : Nat)
-      (mode : Mode) (docs : List Doc) :
-      commentsOf (layoutsWith choose width indent column next mode docs).pieces = docCommentsList docs := by
-    cases docs with
-    | nil => rfl
-    | cons head tail =>
-        exact (commentsOf_append _ _).trans
-          ((congrArg
-            (fun xs : List String => xs ++ commentsOf (layoutsWith choose width indent
-              (layoutWith choose width indent column next mode head).column
-              (layoutWith choose width indent column next mode head).nextGroup mode tail).pieces)
-            (layoutWith_comments choose width indent column next mode head)).trans
-            (congrArg (fun ys : List String => docComments head ++ ys)
-              (layoutsWith_comments choose width indent
-                (layoutWith choose width indent column next mode head).column
-                (layoutWith choose width indent column next mode head).nextGroup mode tail)))
-  termination_by structural docs
-end
+theorem layoutWith_comments (choose : GroupChoice) (width indent column next : Nat)
+    (mode : Mode) (doc : Doc) :
+    commentsOf (layoutWith choose width indent column next mode doc).pieces = docComments doc := by
+  cases doc with
+  | nil => rfl
+  | text value => rfl
+  | comment value => rfl
+  | hardLine => rfl
+  | softLineOrSpace => cases mode <;> rfl
+  | softLineOrEmpty => cases mode <;> rfl
+  | nest spaces inner =>
+      exact layoutWith_comments choose width (indent + spaces) column next mode inner
+  | append left right =>
+      exact (commentsOf_append _ _).trans
+        ((congrArg
+          (fun xs : List String => xs ++ commentsOf (layoutWith choose width indent
+            (layoutWith choose width indent column next mode left).column
+            (layoutWith choose width indent column next mode left).nextGroup mode right).pieces)
+          (layoutWith_comments choose width indent column next mode left)).trans
+          (congrArg (fun ys : List String => docComments left ++ ys)
+            (layoutWith_comments choose width indent
+              (layoutWith choose width indent column next mode left).column
+              (layoutWith choose width indent column next mode left).nextGroup mode right)))
+  | group inner =>
+      exact layoutWith_comments choose width indent column (next + 1)
+        (choose next width column inner) inner
+termination_by structural doc
 
-def renderWith (choose : GroupChoice) (width col : Nat) (mode : Mode) (doc : Doc) : List Piece :=
+noncomputable def renderWith (choose : GroupChoice) (width col : Nat) (mode : Mode) (doc : Doc) : List Piece :=
   (layoutWith choose width 0 col 0 mode doc).pieces
 
 theorem comments_renderWith (choose : GroupChoice) (doc : Doc)
@@ -190,12 +177,12 @@ theorem comments_renderWith_invariant (left right : GroupChoice) (doc : Doc)
 
 -- Local-width representative of the Doc algebra. The generic theorem above
 -- is stronger: comment order/payloads are independent of this group policy.
-def widthChoice : GroupChoice := fun _ width col doc =>
+noncomputable def widthChoice : GroupChoice := fun _ width col doc =>
   match flatWidth doc with
   | none => .broken
   | some needed => if needed <= width - col then .flat else .broken
 
-def render (width col : Nat) (mode : Mode) (doc : Doc) : List Piece :=
+noncomputable def render (width col : Nat) (mode : Mode) (doc : Doc) : List Piece :=
   renderWith widthChoice width col mode doc
 
 theorem comments_render_invariant (doc : Doc) (width col : Nat) :
@@ -269,6 +256,7 @@ theorem narrowing_requires_subset :
 #print axioms payload_order_matters
 #print axioms narrowing_requires_subset
 
+#print axioms docComments_concat
 #print axioms commentsOf_append
 #print axioms layoutWith_comments
 #print axioms comments_render_invariant
@@ -276,3 +264,4 @@ theorem narrowing_requires_subset :
 #print axioms comments_renderWith_invariant
 #print axioms projection_narrowing_preserves_disjointness
 end Vesper.StylusSafety
+end
