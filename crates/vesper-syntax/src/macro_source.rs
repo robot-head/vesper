@@ -794,7 +794,20 @@ impl SourceParser<'_> {
             }
             K::LParen => {
                 self.bump()?;
-                self.expr(mode, depth + 1)?;
+                // Stream the actual values without constructing a second AST
+                // or element vector. Tuple arity is bounded by the existing
+                // source/token/work limits, independently of macro slot count.
+                // An empty list is unit; one value without a comma is grouping.
+                if self.kind() != K::RParen {
+                    self.expr(mode, depth + 1)?;
+                    while self.kind() == K::Comma {
+                        self.bump()?;
+                        if self.kind() == K::RParen {
+                            break;
+                        }
+                        self.expr(mode, depth + 1)?;
+                    }
+                }
                 self.expect(K::RParen)?;
             }
             K::LBrace => {
