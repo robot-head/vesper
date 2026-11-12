@@ -13,12 +13,13 @@ env:
   CARGO_PROFILE_DEV_DEBUG: 0
   CARGO_PROFILE_TEST_DEBUG: 0
 
-# One run per PR (refs/pull/N/merge) or branch; a newer push to a PR cancels
-# its older run. Runs on main are queued rather than cancelled so every merge
-# gets a result.
+# PR runs share one group per PR (refs/pull/N/merge), so a newer push cancels
+# the older run. Every other run (pushes to main) gets its own group keyed by
+# run id: a shared group would replace a pending run with a newer one, so a
+# burst of merges could leave a commit with no CI result.
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
 
 jobs:
   # Linux is the reference lane: formatting, Clippy, the full workspace tests,
