@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "roots": [{"name": "@org/app", "version": "^1", "features": ["native"]}],
+  "packages": [
+    {
+      "manifest": {
+        "package": {"name": "@org/app", "version": "1.0.0", "edition": "2026", "license": "MIT"},
+        "features": {"native": {"sys_deps": ["libdemo ^1"]}},
+        "dependencies": {},
+        "build-sandbox": null,
+        "resolver": null,
+        "verification": null
+      },
+      "features": []
+    }
+  ],
+  "system_packages": [{"name": "libdemo", "version": "1.0.0"}]
+}
