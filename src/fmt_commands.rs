@@ -66,6 +66,19 @@ struct Staging {
 impl Drop for Staging {
     fn drop(&mut self) {
         if self.cleanup {
+            // The guard exists only after exclusive creation. Windows rejects
+            // unlinking readonly files, including stages that inherited the
+            // input's readonly bit before a later drift/rename error. Clear
+            // that bit only on this invocation-owned staging path. Unix mode
+            // bits are never broadened. Cleanup remains best effort on OS error.
+            #[cfg(windows)]
+            if let Ok(metadata) = fs::metadata(&self.path) {
+                let mut permissions = metadata.permissions();
+                if permissions.readonly() {
+                    permissions.set_readonly(false);
+                    let _ = fs::set_permissions(&self.path, permissions);
+                }
+            }
             let _ = fs::remove_file(&self.path);
         }
     }
@@ -265,6 +278,54 @@ mod tests {
         assert!(!needs);
         assert_eq!(check["status"], "unchanged");
         assert_eq!(check["changed"], false);
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn readonly_owned_stage_is_cleaned_on_actual_precommit_drift_error() {
+        let directory = fixture();
+        let path = directory.join("input.ves");
+        let stage = directory.join("readonly-owned-stage");
+        fs::write(&path, "fn main(){1}").unwrap();
+        let writable = fs::metadata(&path).unwrap().permissions();
+        let mut readonly = writable.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&path, readonly).unwrap();
+        let input = open_input(&path).unwrap();
+        assert!(input.metadata.permissions().readonly());
+        // Keep an original readonly permission snapshot, then simulate a new
+        // source edit. The actual helper inherits readonly onto its own stage
+        // before rejecting this observed drift, so Windows must clear it.
+        fs::set_permissions(&path, writable.clone()).unwrap();
+        fs::write(&path, "fn main(){2}").unwrap();
+        let error = replace_at_stage(&path, &input, "candidate", stage.clone()).unwrap_err();
+        assert!(error.contains("input changed"), "{error}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "fn main(){2}");
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().readonly(),
+            writable.readonly()
+        );
+        assert!(!stage.exists());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn readonly_collision_is_not_unlinked_or_made_writable() {
+        let directory = fixture();
+        let path = directory.join("input.ves");
+        let stage = directory.join("readonly-foreign-stage");
+        fs::write(&path, "fn main(){1}").unwrap();
+        let input = open_input(&path).unwrap();
+        fs::write(&stage, "foreign owner").unwrap();
+        let original = fs::metadata(&stage).unwrap().permissions();
+        let mut readonly = original.clone();
+        readonly.set_readonly(true);
+        fs::set_permissions(&stage, readonly).unwrap();
+        assert!(replace_at_stage(&path, &input, "candidate", stage.clone()).is_err());
+        assert_eq!(fs::read_to_string(&stage).unwrap(), "foreign owner");
+        assert!(fs::metadata(&stage).unwrap().permissions().readonly());
+        assert_eq!(fs::read_to_string(&path).unwrap(), input.text);
+        // Test cleanup restores exactly the prior permission snapshot.
+        fs::set_permissions(&stage, original).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 }

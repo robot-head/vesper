@@ -125,3 +125,25 @@ No root lib module or new production dependency besides the leaf is needed.
 Leaf standalone tests use dev-only serde_json/libc to compile the source adapter;
 root already has those dependencies. Run actual root CLI tests with
 `cargo test -p vesper --test fmt_cli`, then the normal combined checks.
+
+
+## Follow-up: readonly staging cleanup
+
+Peer review found that a stage inheriting readonly permissions could remain after
+a later precommit error on Windows, whose unlink rejects readonly files. The
+invocation-owned staging guard now clears readonly on Windows before attempting
+unlink; it leaves Unix mode bits unchanged. The guard is still constructed only
+after successful exclusive creation and disabled after commit, so preexisting
+collisions are never made writable or deleted. Cleanup is best effort when OS
+permission/sharing/device operations fail; no unconditional cleanup on process
+abort or arbitrary OS errors is claimed.
+
+Two focused cross-platform regressions use the actual replacement helper. One
+captures readonly input permissions, changes the source, then exercises the
+precommit drift failure after the stage inherited readonly and verifies its
+removal/source preservation. The other verifies that a readonly colliding stage
+keeps both bytes and readonly permission. Linux executes the Unix behavior;
+Windows-specific clearing still requires the coordinator's Windows CI execution.
+
+Follow-up validation: all 21 standalone tests pass (11 formatter plus 10 adapter),
+strict all-target Clippy, formatting and whitespace checks pass on Linux.

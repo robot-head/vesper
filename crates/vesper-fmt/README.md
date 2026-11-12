@@ -58,8 +58,12 @@ source with nonzero exit. Regular UTF-8 input is bounded to 256 KiB; final
 symlinks/nonregular files are rejected. Success stages output with exclusive
 creation beside the destination, preserves file permissions, syncs the staging
 file, checks for observed source changes, then renames as the single commit.
-All returned precommit errors preserve the input and remove only staging files
-owned by this invocation. A colliding existing staging name is never deleted.
+All returned precommit errors preserve the input. Cleanup attempts to remove
+only staging files owned by this invocation. On Windows it first clears an
+inherited readonly bit on that owned stage; Unix permission bits are not changed.
+A colliding existing staging name is neither made writable nor deleted. Cleanup
+is best effort: an OS permission/sharing/device error can still prevent removal;
+there is no process-crash or arbitrary OS-failure cleanup guarantee.
 This is not crash-durable directory fsync, metadata/xattr/ownership preservation,
 or a filesystem compare-and-swap against an uncoordinated concurrent writer
 between the final check and rename. Callers must coordinate concurrent edits.
