@@ -87,7 +87,7 @@ Internal stale completions are also recorded as `StaleRejected`:
 - A flush timer that fires after a crash (a generation mismatch).
 - A receive timeout for a request that was already delivered or that crashed.
 
-Budget, misuse and replay errors are checked on a copy of the model before anything changes. The session is then interrupted, and the requesting `Suspension` (or the internal timer token, `RecoveredOwner::Internal`) stays recoverable through `take_stalled`. The baseline limitation still applies: evaluator faults or fuel exhaustion inside `begin_external`/`resume` are `Terminal`. `TerminalFailure` now also carries the model trace.
+Budget, misuse and replay errors are checked on a copy of the model before anything changes. For an immediate model operation, the source `Resume` that follows it is checked against the event budget and the recorded trace in the same step, before the model commits. The session is then interrupted, and the requesting `Suspension` (or the internal timer token, `RecoveredOwner::Internal`) stays recoverable through `take_stalled`. The baseline limitation still applies: evaluator faults or fuel exhaustion inside `begin_external`/`resume` are `Terminal`. `TerminalFailure` now also carries the model trace.
 
 ### Trace and replay
 
@@ -133,7 +133,7 @@ Servers hold a linear `Lease` across every suspension. `fixtures/kv_ack_first.js
 
 ## Acceptance evidence
 
-All of this runs in `tests/models.rs` (11 tests) on real checked source.
+All of this runs in `tests/models.rs` (12 tests) on real checked source.
 
 1. **Counterexample.** With `serve_ack_first`, the client receives `Ack(1)` at 10 ns, and the crash at 12 ns finds that record in the in-flight flush. `audit@1` recovers 0 records. The run is identical under re-recording and replay, and the flush completion at 15 ns is recorded as a stale rejection.
    - A bounded crash-point search re-executes from scratch for every crash time from 0 to 30 ns, with no owner cloned. With the fixture seed, the unsafe server loses an acknowledged write exactly for crashes at 5–14 ns. The corrected `serve_flush_first` never does.
@@ -170,7 +170,7 @@ These were run on the x86_64 Linux cloud host (kernel 6.18, rustc 1.97.0) with `
 cargo fmt --all -- --check                                          # clean
 cargo clippy -p vesper-sim-session --locked --all-targets -- -D warnings  # clean
 cargo test -p vesper-sim-session --locked
-#   8 unit (WAL, network, value) + 2 CLI + 11 model + 15 simulation, all pass
+#   8 unit (WAL, network, value) + 2 CLI + 12 model + 15 simulation, all pass
 cargo run --locked -p vesper-sim-session --example two_tasks        # "replay reproduced the run"
 cargo run --locked -p vesper-sim-session --bin vesper-sim -- record fixtures/kv.ves fixtures/kv_ack_first.json rec.json
 cargo run --locked -p vesper-sim-session --bin vesper-sim -- replay fixtures/kv.ves fixtures/kv_ack_first.json rec.json

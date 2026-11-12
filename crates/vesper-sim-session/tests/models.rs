@@ -835,3 +835,65 @@ fn model_scenarios_are_validated_at_load() {
     }
     assert!(reject(json).contains("version 2"));
 }
+
+#[test]
+fn immediate_model_steps_check_their_resume_before_committing() {
+    let program = program();
+    // Every event budget that stops a task on its append must leave the log
+    // exactly as it was before that append.
+    let mut stopped_on_append = 0;
+    for max_events in 1..=40 {
+        let mut json = base();
+        json["model"]["limits"]["max_events"] = json!(max_events);
+        let RunResult::Interrupted { mut session, error } =
+            Session::record(&program, scenario(&json))
+                .unwrap()
+                .run(u64::MAX)
+        else {
+            continue;
+        };
+        assert_eq!(error, SessionError::EventLimit);
+        let volatile = session.model_snapshot().unwrap().logs["kv"]
+            .volatile_lsns
+            .clone();
+        let appended = session
+            .model_trace()
+            .iter()
+            .any(|e| matches!(e, ModelEvent::WalAppended { .. }));
+        if let Some(RecoveredOwner::Suspended(c)) = session.take_stalled().map(|s| s.owner)
+            && c.request().operation == "append"
+        {
+            stopped_on_append += 1;
+            assert!(volatile.is_empty(), "max_events {max_events}");
+            assert!(!appended, "max_events {max_events}");
+        }
+    }
+    assert!(stopped_on_append > 0);
+
+    // A replay whose recorded resume of the append differs stops before the
+    // append is committed.
+    let report = record(&program, &base());
+    let mut forged = report.recording.clone();
+    for event in &mut forged.trace {
+        if let SourceEvent::Resume { task, response, .. } = event
+            && task == "server"
+            && *response == json!({"Ok": 1})
+        {
+            *response = json!({"Ok": 2});
+        }
+    }
+    let (mut session, error) = interrupted(replay(&program, &base(), forged));
+    assert!(
+        matches!(error, SessionError::TraceMismatch { .. }),
+        "{error:?}"
+    );
+    assert!(
+        session.model_snapshot().unwrap().logs["kv"]
+            .volatile_lsns
+            .is_empty()
+    );
+    let RecoveredOwner::Suspended(c) = session.take_stalled().unwrap().owner else {
+        panic!("the appending owner is retained")
+    };
+    assert_eq!(c.request().operation, "append");
+}

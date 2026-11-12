@@ -881,19 +881,28 @@ impl<'w> Session<'w> {
     /// Record (or, when replaying, check) one source event before the
     /// transition it describes.
     fn event(&mut self, event: SourceEvent) -> Result<(), SessionError> {
-        self.event_budget(1)?;
+        self.check_source(&event, 0)?;
         if let Some(expected) = &mut self.expected {
-            let recorded = expected.recording.trace.get(expected.source);
-            if recorded != Some(&event) {
-                return Err(SessionError::TraceMismatch {
-                    index: expected.source,
-                    expected: recorded.cloned().map(Box::new),
-                    actual: Box::new(event),
-                });
-            }
             expected.source += 1;
         }
         self.trace.push(event);
+        Ok(())
+    }
+
+    /// Check the next source event against the event budget (with
+    /// `alongside` further events reserved) and the recorded trace.
+    fn check_source(&self, event: &SourceEvent, alongside: usize) -> Result<(), SessionError> {
+        self.event_budget(1 + alongside)?;
+        if let Some(expected) = &self.expected {
+            let recorded = expected.recording.trace.get(expected.source);
+            if recorded != Some(event) {
+                return Err(SessionError::TraceMismatch {
+                    index: expected.source,
+                    expected: recorded.cloned().map(Box::new),
+                    actual: Box::new(event.clone()),
+                });
+            }
+        }
         Ok(())
     }
 

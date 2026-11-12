@@ -5,7 +5,7 @@
 //! before the copy is committed; only then does the step touch SimPulse
 //! (completing parked waits or spawning timer tasks). A budget, misuse or
 //! replay error therefore leaves the model and every owner unchanged.
-use super::{LostTask, Session, SessionError};
+use super::{LostTask, Session, SessionError, SourceEvent};
 use crate::{
     model::{
         FailOp, Fault, LostState, ModelEvent, ModelPlan, ModelState, StaleSource,
@@ -13,6 +13,7 @@ use crate::{
         wal::WalError,
     },
     scenario::{Action, BoundOperation, Outcome, canonical},
+    value,
 };
 use serde_json::{Value as Json, json};
 use vesper_simpulse::{CompletionId, IoResult, TaskState};
@@ -384,6 +385,28 @@ impl<'w> Session<'w> {
             }
             _ => unreachable!("not a model action"),
         };
+        // An immediate step resumes the source right after committing, so its
+        // Resume event is checked against the budget and the recorded trace
+        // now, together with the model events, before anything is committed.
+        if let ModelStep::Immediate { response, .. } = &step {
+            let world = self.program.world();
+            let invalid = |message| SessionError::InvalidResponse {
+                task: task.clone(),
+                message,
+            };
+            let value = value::decode(world, &bound.result, response).map_err(invalid)?;
+            let response = value::encode(world, &bound.result, &value).map_err(invalid)?;
+            self.check_source(
+                &SourceEvent::Resume {
+                    task: task.clone(),
+                    at_ns: now,
+                    response,
+                    writes: vec![],
+                    outcome: None,
+                },
+                events.len(),
+            )?;
+        }
         self.check_model(&events)?;
         self.model = Some(model);
         self.commit_model(events);
