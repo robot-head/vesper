@@ -76,7 +76,9 @@ code termination, or hardware isolation.
 Private temporary registration uses pure Forge (`default-features=false`), actual
 syntax and authority implementations; none of that shared wiring is committed by
 this lane. Consumed syntax commits: `3b14cdb6` + `338c45ae`; typed Forge:
-`58f8051` + `4575337`. Authority binding APIs are the owner's actual implementation.
+`58f8051` + `4575337`. Authority binding APIs are the owner's actual implementation (tested production
+file blob `bd0c1b7542171a61d413ca4fc01d43848e95711e`; its final dependency commit
+is coordinated separately).
 
 `tests/forge_lower.rs` exercises the real syntax parser, typed quotation host,
 whole-body resolver, lowerer, normal parser and frontend checker. Positive value
@@ -88,9 +90,16 @@ repeated source argument provenance with actual linear E0303 rejection, distinct
 expanded expression positions, foreign host/source/package refusal, limit failures,
 shape mutation refusal, retry after failure and exact/shared work boundaries.
 
-Checkpoint verification: all 10 focused tests pass; `rustfmt --check` passes.
-Strict library/owned-test Clippy currently reaches an existing
-`clippy::if_same_then_else` in the temporary authority dependency, reported to
-that owner; the final follow-up will record its resolution. No native execution, structured-WASI integration,
+Final verification against the actual dependencies above:
+
+- `cargo test -p vesper --test forge_lower --offline`: all 10 tests pass.
+- `cargo clippy -p vesper --lib --test forge_lower --offline -- -D warnings`: passes,
+  with no suppressions after resyncing the authority owner's lint fix.
+- `rustfmt --edition 2024 --check src/forge_frontend/lower.rs tests/forge_lower.rs`:
+  passes.
+
+All checks used the private cache, one Cargo job, debug information disabled and
+incremental compilation disabled. Shared temporary wiring was restored before
+both owned-only commits. No native execution, structured-WASI integration,
 residual-row purity proof, authority certification, or live ownership proof is
 claimed by this lowering stage.
