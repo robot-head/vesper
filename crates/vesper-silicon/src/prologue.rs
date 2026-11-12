@@ -134,8 +134,9 @@ pub fn measure_aarch64(code: &[u8]) -> MeasuredPrologue {
     };
     // Value tracked for the scratch register Cranelift uses for large frames.
     let mut x16: Option<u64> = None;
-    for word in code.chunks_exact(4) {
-        let w = u32::from_le_bytes([word[0], word[1], word[2], word[3]]);
+    let (words, _tail) = code.as_chunks::<4>();
+    for word in words {
+        let w = u32::from_le_bytes(*word);
         let rn = (w >> 5) & 31;
         if w == 0xd503_233f || w == 0xd503_237f || (w & 0xffff_ff3f) == 0xd503_241f {
             // paciasp, pacibsp, bti {c,j,jc}
