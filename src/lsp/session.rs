@@ -1121,6 +1121,30 @@ mod tests {
         );
     }
     #[test]
+    fn macro_preview_noop_reuses_actual_artifact_with_current_document_version() {
+        let mut session = running(false);
+        let uri = "untitled:macro";
+        let source = include_str!("../../tests/fixtures/source_macros/keep.ves");
+        open(&mut session, uri, source);
+        let before = database::macro_preview::preview(&session.db, session.files[uri])
+            .outcome()
+            .unwrap();
+        change(&mut session, uri, 2, source);
+        let after = database::macro_preview::preview(&session.db, session.files[uri])
+            .outcome()
+            .unwrap();
+        assert!(Arc::ptr_eq(&before, &after));
+        let result = session
+            .request(
+                "vesper/macroPreview",
+                Some(json!({"textDocument":{"uri":uri,"version":2}})),
+            )
+            .unwrap();
+        assert_eq!(result["version"], 2);
+        assert_eq!(result["status"], "expanded_checked");
+        assert_eq!(result["expanded_source"], after.expanded_source());
+    }
+    #[test]
     fn code_actions_require_negotiated_literal_and_versioned_edit_support() {
         for capabilities in [
             json!({}),
