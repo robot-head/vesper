@@ -74,8 +74,24 @@ initializer scope, repeated spans, real E0303 linear duplication rejection,
 trailing-unit E0200, current helper-body authority changes and implicit failures,
 malformed/unsupported input and bounded CLI reads. Strict root/pure-host Clippy
 passes. An independent read-only review found no actionable correctness or
-authority bypass. Full integrated workspace and native CI evidence is recorded
-after final structured integration, rather than inferred from leaf results.
+authority bypass.
+
+The integrated local workspace passed 2,305 tests in 295 suites, no ignores, on
+Rust1.99.1 with actual Lean4.24.0. Strict workspace all-target Clippy and formatting
+passed; the five standalone Lean files also checked. The existing source-tooling
+acceptance passed its 192 measured callbacks, editor acceptance passed19sessions,
+causal diagnostics passed17CLI/16stdio checks, and recovery passed15stdio/3batch
+checks against the integrated binary. The final platform cleanup adjustment was
+then covered by the actual seven cache tests and strict runner Clippy.
+
+Native CI uses newly released Rust1.100. Its Linux/macOS workspace jobs exposed
+the pre-existing Warp TCP malformed.rs129 needless_range_loop, already fixed by
+the external owner's reserved PR101. Coordination was posted there; no Warp
+files were edited or merged by this batch. Windows additionally caught a new
+structured-cache cleanup lint; the helper now restores owner access with Unix
+PermissionsExt and uses narrowly documented Windows readonly-attribute resets.
+Native checks are rerun on that final fix. Final PR validation records the
+observed status; local1.99 results are not represented as passing1.100 CI.
 
 ## Remaining design scope
 
