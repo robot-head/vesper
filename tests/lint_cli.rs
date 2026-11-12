@@ -431,3 +431,295 @@ fn result_construction_is_supported_only_with_explicit_closed_types() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("explicit closed type arguments"));
     assert_eq!(f.text(), unsupported);
 }
+
+fn configured(fixture: &Fixture, policy: &str, args: &[&str]) -> Output {
+    let config = fixture.dir.join("Loom.toml");
+    fs::write(&config, policy).unwrap();
+    Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .arg("lint")
+        .arg(&fixture.path)
+        .arg("--config")
+        .arg(&config)
+        .args(args)
+        .output()
+        .unwrap()
+}
+fn policy_report(output: &Output) -> Value {
+    // from_slice rejects a second JSON object or any trailing non-whitespace.
+    serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "{e}: {} / {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    })
+}
+const POLICY_SOURCE: &str = "effect Audit {fn event();} fn main()->u64 eff[Audit]{42}";
+const PROJECTION_POLICY_SOURCE: &str = "copy struct Pair{left:u64,right:u64} effect Audit{fn event();} fn update(inout p:Pair) eff[Audit]{p.left=p.right;}";
+#[test]
+fn explicit_warn_and_deny_report_severity_provenance_and_exactly_one_outcome() {
+    let f = Fixture::new(POLICY_SOURCE);
+    let config = "[package]\nname='example'\n[lints.vesper]\nunused_effect_capability='warn'\n";
+    let out = configured(&f, config, &["--json"]);
+    assert!(out.status.success());
+    let r = policy_report(&out);
+    assert_eq!(r["status"], "checked");
+    assert_eq!(r["diagnostics"][0]["severity"], "warn");
+    assert_eq!(r["policy"]["provenance"]["kind"], "explicit");
+    assert_eq!(r["policy"]["provenance"]["bytes"], config.len());
+    assert_eq!(
+        r["policy"]["provenance"]["blake3"],
+        blake3::hash(config.as_bytes()).to_hex().to_string()
+    );
+    assert!(
+        r["policy"]["provenance"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("Loom.toml")
+    );
+    let out = configured(
+        &f,
+        "[lints.vesper]\nunused_effect_capability='deny'",
+        &["--json"],
+    );
+    assert!(!out.status.success());
+    let r = policy_report(&out);
+    assert_eq!(r["status"], "denied");
+    assert_eq!(r["outcome"]["remaining_denied"], 1);
+    assert_eq!(r["diagnostics"][0]["severity"], "deny");
+    assert_eq!(r["changed"], false);
+    assert_eq!(f.text(), POLICY_SOURCE);
+}
+#[test]
+fn allowed_findings_are_suppressed_before_fix_selection() {
+    let f = Fixture::new(POLICY_SOURCE);
+    let out = configured(
+        &f,
+        "[lints.vesper]\nunused_effect_capability='allow'",
+        &["--fix", "--json"],
+    );
+    assert!(out.status.success());
+    let r = policy_report(&out);
+    assert!(r["diagnostics"].as_array().unwrap().is_empty());
+    assert_eq!(r["outcome"]["suppressed"], 1);
+    assert_eq!(r["applied_edits"], 0);
+    assert_eq!(r["changed"], false);
+    assert_eq!(f.text(), POLICY_SOURCE);
+    let f = Fixture::new(PROJECTION_POLICY_SOURCE);
+    let out = configured(
+        &f,
+        "[lints.vesper]\nunused_effect_capability='deny'\noverbroad_inout_projection='allow'",
+        &["--fix", "--semver-safe", "--json"],
+    );
+    assert!(out.status.success());
+    let r = policy_report(&out);
+    assert!(findings(&r, "L0101").is_empty());
+    assert_eq!(r["outcome"]["suppressed"], 1);
+    assert_eq!(r["changed"], true);
+    assert!(f.text().contains("inout p:Pair"));
+    check(&f.path);
+}
+#[test]
+fn configured_fix_clears_unused_deny_but_truthfully_reports_changed_when_other_deny_remains() {
+    let f = Fixture::new(POLICY_SOURCE);
+    let out = configured(
+        &f,
+        "[lints.vesper]\nunused_effect_capability='deny'",
+        &["--fix", "--semver-safe", "--json"],
+    );
+    assert!(out.status.success());
+    let r = policy_report(&out);
+    assert_eq!(r["status"], "checked");
+    assert_eq!(r["changed"], true);
+    assert_eq!(r["outcome"]["remaining_denied"], 0);
+    check(&f.path);
+    let run = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .arg("run")
+        .arg(&f.path)
+        .output()
+        .unwrap();
+    assert!(run.status.success());
+    assert_eq!(String::from_utf8_lossy(&run.stdout).trim(), "42");
+    let f = Fixture::new(PROJECTION_POLICY_SOURCE);
+    let out = configured(
+        &f,
+        "[lints.vesper]\nunused_effect_capability='warn'\noverbroad_inout_projection='deny'",
+        &["--fix", "--semver-safe", "--json"],
+    );
+    assert!(!out.status.success());
+    let r = policy_report(&out);
+    assert_eq!(r["status"], "denied");
+    assert_eq!(r["changed"], true);
+    assert!(r["applied_edits"].as_u64().unwrap() > 0);
+    assert_eq!(r["outcome"]["remaining_denied"], 1);
+    assert_ne!(f.text(), PROJECTION_POLICY_SOURCE);
+    check(&f.path);
+}
+#[test]
+fn future_rules_are_explicitly_unavailable_and_unsupported_guarantees_preserve_source() {
+    let f = Fixture::new(POLICY_SOURCE);
+    let config = "[lints.vesper]\ndemote_alloc_to_region='warn'\noverly_restrictive_mode='warn'\nmissed_fip_opportunity='allow'";
+    let out = configured(&f, config, &["--json"]);
+    assert!(out.status.success());
+    let r = policy_report(&out);
+    let unavailable = r["policy"]["unavailable"].as_array().unwrap();
+    assert_eq!(unavailable.len(), 3);
+    assert!(
+        unavailable
+            .iter()
+            .all(|r| r["available"] == false && r["configured"] == true)
+    );
+    assert_eq!(r["policy"]["plugin_packs_supported"], false);
+    assert_eq!(r["diagnostics"].as_array().unwrap().len(), 1);
+    for config in [
+        "[lints.vesper]\ndemote_alloc_to_region='deny'",
+        "[lints.plugins]\n'@vesper-game/ignis-lints'={version='1',fuel_limit=100}",
+    ] {
+        let out = configured(&f, config, &["--fix", "--json"]);
+        assert!(!out.status.success());
+        let r = policy_report(&out);
+        assert_eq!(r["status"], "invalid");
+        assert_eq!(f.text(), POLICY_SOURCE);
+    }
+}
+#[test]
+fn invalid_and_deep_hostile_policy_never_changes_source() {
+    let f = Fixture::new(POLICY_SOURCE);
+    for config in [
+        "[lints.vesper]\nnot_a_lint='warn'",
+        "[lints.vesper]\nunused_effect_capability=true",
+        "[lints.vesper]\nunused_effect_capability='warn'\nunused_effect_capability='deny'",
+        "[lints]\nunknown={}",
+        "[lints.vesper]\nunused_effect_capability='WARN'",
+    ] {
+        let out = configured(&f, config, &["--fix", "--json"]);
+        assert!(!out.status.success(), "{config}");
+        assert_eq!(policy_report(&out)["status"], "invalid");
+        assert_eq!(f.text(), POLICY_SOURCE);
+    }
+    for config in [
+        format!("x={}1{}", "[".repeat(80), "]".repeat(80)),
+        format!("[{}x]\ny=1", "a.".repeat(80)),
+        format!("[[{}x]]\ny=1", "a.".repeat(80)),
+        format!("{}x=1", "a.".repeat(80)),
+        " ".repeat(65537),
+    ] {
+        let out = configured(&f, &config, &["--fix", "--json"]);
+        assert!(!out.status.success());
+        assert_eq!(policy_report(&out)["status"], "invalid");
+        assert_eq!(f.text(), POLICY_SOURCE);
+    }
+}
+#[test]
+fn quoted_multiline_policy_contents_and_unrelated_sections_are_supported() {
+    let f = Fixture::new(POLICY_SOURCE);
+    let config = r#####"# [ { . fake syntax
+[package]
+name = "policy-case"
+notes = """fake [lints.plugins]
+[[a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.q.r.s]]
+{ [ \" quoted \" ] }
+"""
+literal = '''# [ { . text } ]'''
+["lints"."vesper"]
+"unused_effect_capability" = 'allow'
+"#####;
+    let out = configured(&f, config, &["--fix", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let r = policy_report(&out);
+    assert_eq!(r["changed"], false);
+    assert!(r["diagnostics"].as_array().unwrap().is_empty());
+    assert_eq!(f.text(), POLICY_SOURCE);
+}
+#[test]
+fn absent_explicit_config_keeps_builtin_warn_defaults_and_never_discovers_adjacent_loom() {
+    let f = Fixture::new(POLICY_SOURCE);
+    fs::write(
+        f.dir.join("Loom.toml"),
+        "[lints.vesper]\nunused_effect_capability='deny'",
+    )
+    .unwrap();
+    let r = f.json(&["--json"]);
+    assert_eq!(r["status"], "checked");
+    assert_eq!(r["diagnostics"][0]["severity"], "warn");
+    assert_eq!(r["policy"]["provenance"]["kind"], "default");
+    fs::write(f.dir.join("Loom.toml"), "invalid {{{}").unwrap();
+    assert_eq!(f.json(&["--json"])["status"], "checked");
+    let out = f.run(&["--config", "--json"]);
+    assert!(!out.status.success());
+    let out = f.run(&["--config", "missing.toml", "--json"]);
+    assert!(!out.status.success());
+    assert_eq!(policy_report(&out)["status"], "invalid");
+    assert_eq!(f.text(), POLICY_SOURCE);
+}
+#[test]
+fn denied_rule_cannot_pass_on_conservatively_skipped_source_analysis() {
+    let source = "effect E{fn ask()->u64;} fn main()->u64{handle E in{E::ask()}with{return x=>x,ask(k)=>42,}}";
+    let f = Fixture::new(source);
+    let out = configured(
+        &f,
+        "[lints.vesper]\nunused_effect_capability='deny'",
+        &["--json"],
+    );
+    assert!(!out.status.success());
+    let r = policy_report(&out);
+    assert_eq!(r["status"], "denied");
+    assert_eq!(r["outcome"]["remaining_denied"], 0);
+    assert_eq!(
+        r["outcome"]["unavailable_denied_rules"],
+        serde_json::json!(["unused_effect_capability"])
+    );
+    assert_eq!(f.text(), source);
+}
+#[test]
+fn denied_rule_reports_unanalyzed_generated_trait_implementation_bodies() {
+    let source = "effect Audit{fn event();} copy struct Item{} trait Score{fn score(in self)->u64 eff[Audit];} impl Score for Item{fn score(in self)->u64 eff[Audit]{1}} fn main()->u64{0}";
+    let f = Fixture::new(source);
+    // Existing default warning behavior remains unchanged.
+    let default = f.json(&["--json"]);
+    assert_eq!(default["status"], "checked");
+    assert_eq!(default["outcome"]["excluded_generated_bodies"], 1);
+    for rule in ["unused_effect_capability", "overbroad_inout_projection"] {
+        let out = configured(
+            &f,
+            &format!("[lints.vesper]\n{rule}='deny'"),
+            &["--json", "--fix"],
+        );
+        assert!(!out.status.success());
+        let r = policy_report(&out);
+        assert_eq!(r["status"], "denied");
+        assert_eq!(r["outcome"]["excluded_generated_bodies"], 1);
+        assert_eq!(
+            r["outcome"]["unavailable_denied_rules"],
+            serde_json::json!([rule])
+        );
+        assert_eq!(r["changed"], false);
+        assert_eq!(f.text(), source);
+    }
+}
+#[test]
+#[cfg(unix)]
+fn explicit_policy_rejects_symlink_and_directory_without_source_changes() {
+    let f = Fixture::new(POLICY_SOURCE);
+    let config = f.dir.join("policy.toml");
+    fs::write(&config, "[lints.vesper]\nunused_effect_capability='allow'").unwrap();
+    let link = f.dir.join("link.toml");
+    std::os::unix::fs::symlink(&config, &link).unwrap();
+    for path in [&link, &f.dir] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+            .arg("lint")
+            .arg(&f.path)
+            .arg("--config")
+            .arg(path)
+            .args(["--fix", "--json"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        assert_eq!(policy_report(&out)["status"], "invalid");
+        assert_eq!(f.text(), POLICY_SOURCE);
+    }
+}

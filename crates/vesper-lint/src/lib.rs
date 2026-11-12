@@ -4,6 +4,8 @@
 //! DTOs. They are inspection data, not certificates accepted from plugins or
 //! untrusted JSON. This leaf has no dependency on the compiler facade.
 #![forbid(unsafe_code)]
+pub mod policy;
+
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use vesper_core::ast::{Effect, Effects, Function, Param, Pass, Span, Type, substitute};

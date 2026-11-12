@@ -13,18 +13,20 @@ use vesper::{
     lexer::{self, Token, TokenKind as K},
     parser,
 };
+use vesper_lint::policy::{Policy, PolicyLimits, PolicyUsage, RuleStatus, Severity};
 use vesper_lint::{
     Action, CheckedProgram, Finding, FindingKind, FunctionFacts, LintReport, ParameterFacts,
     SourceEdit,
 };
 
-pub const HELP: &str = "Usage: vesper lint FILE [--json] [--fix] [--semver-safe]\n\nCheck actual resolved effects and supported inout field accesses.\nUnused effects (L0102) may be removed only after complete candidate reparse/recheck.\nProjection narrowing (L0101) is diagnostic-only: caller/signature changes need review.\n--semver-safe requires --fix and validates exported supported interface compatibility.\nHandlers, closures, indirect/open-row/recursive calls remain conservative.\nInputs: regular UTF-8 files <=256 KiB; token/nesting/work budgets also apply.\nNo arena escape, mode-relaxation, FIP, secret/Cancel or plugin-pack analysis.\n";
+pub const HELP: &str = "Usage: vesper lint FILE [--json] [--fix] [--semver-safe] [--config PATH]\n\nCheck actual resolved effects and supported inout field accesses.\nUnused effects (L0102) may be removed only after complete candidate reparse/recheck.\nProjection narrowing (L0101) is diagnostic-only: caller/signature changes need review.\n--semver-safe requires --fix and validates exported supported interface compatibility.\nHandlers, closures, indirect/open-row/recursive calls remain conservative.\nInputs: regular UTF-8 files <=256 KiB; token/nesting/work budgets also apply.\n--config loads one explicit bounded Loom.toml policy; no adjacent/default discovery.\nAllow suppresses diagnostics and fixes; warn succeeds; remaining deny exits nonzero.\nFuture warn/allow lints are reported unavailable; future deny/plugins fail closed.\nNo arena escape, mode-relaxation, FIP, secret/Cancel or plugin-pack analysis.\n";
 const MAX_BYTES: usize = 262144;
 #[derive(Debug, Serialize)]
 pub struct ReportedFinding {
     #[serde(flatten)]
     pub finding: Finding,
     pub fixable: bool,
+    pub severity: Severity,
 }
 #[derive(Debug, Serialize)]
 pub struct SourceReport {
@@ -36,6 +38,34 @@ pub struct SourceReport {
     pub applied_edits: usize,
     pub semver: Option<vesper_semver::Report>,
     pub work: usize,
+    pub policy: PolicyReport,
+    pub outcome: PolicyOutcome,
+}
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigProvenance {
+    Default,
+    Explicit {
+        path: String,
+        bytes: usize,
+        blake3: String,
+    },
+}
+#[derive(Debug, Serialize)]
+pub struct PolicyReport {
+    pub provenance: ConfigProvenance,
+    pub rules: Vec<RuleStatus>,
+    pub unavailable: Vec<RuleStatus>,
+    pub plugin_packs_supported: bool,
+    pub usage: PolicyUsage,
+}
+#[derive(Debug, Serialize, Default)]
+pub struct PolicyOutcome {
+    pub remaining_denied: usize,
+    pub remaining_warnings: usize,
+    pub suppressed: usize,
+    pub excluded_generated_bodies: usize,
+    pub unavailable_denied_rules: Vec<vesper_lint::policy::LintName>,
 }
 pub struct PreparedLint {
     pub report: SourceReport,
@@ -757,12 +787,30 @@ fn edits_for(
 }
 /// Builds a fully checked candidate but never performs filesystem writes.
 pub fn prepare_source(source: &str, fix: bool, semver_safe: bool) -> Result<PreparedLint, String> {
+    prepare_source_with_policy(
+        source,
+        fix,
+        semver_safe,
+        &Policy::default(),
+        ConfigProvenance::Default,
+    )
+}
+/// Apply a validated policy before selecting edits. The candidate is fully
+/// rechecked by the same unchanged compiler and interface gates as the default.
+pub fn prepare_source_with_policy(
+    source: &str,
+    fix: bool,
+    semver_safe: bool,
+    policy: &Policy,
+    provenance: ConfigProvenance,
+) -> Result<PreparedLint, String> {
     if semver_safe && !fix {
         return Err("--semver-safe requires --fix".into());
     }
     let before = checked_source(source)?;
     let mut analysis = vesper_lint::analyze(&before.facts, vesper_lint::Limits::default())
         .map_err(|e| e.to_string())?;
+    let suppressed = apply_policy(&mut analysis, policy);
     let mut groups: BTreeMap<String, BTreeSet<usize>> = BTreeMap::new();
     for finding in &analysis.findings {
         if let FindingKind::UnusedEffectCapability { effect_index, .. } = &finding.detail {
@@ -795,7 +843,11 @@ pub fn prepare_source(source: &str, fix: bool, semver_safe: bool) -> Result<Prep
             }),
         }
     }
-    let diagnostics=analysis.findings.iter().cloned().map(|finding|{let can_fix=matches!(&finding.detail,FindingKind::UnusedEffectCapability{effect_index,..} if fixable.contains(&(finding.function.clone(),*effect_index)));ReportedFinding{finding,fixable:can_fix}}).collect();
+    let diagnostics = analysis.findings.iter().cloned().map(|finding| {
+        let can_fix=matches!(&finding.detail,FindingKind::UnusedEffectCapability{effect_index,..} if fixable.contains(&(finding.function.clone(),*effect_index)));
+        let severity=policy.severity_for(&finding.detail);
+        ReportedFinding{finding,fixable:can_fix,severity}
+    }).collect();
     let mut report = SourceReport {
         schema_version: 1,
         status: "checked",
@@ -805,7 +857,16 @@ pub fn prepare_source(source: &str, fix: bool, semver_safe: bool) -> Result<Prep
         applied_edits: 0,
         semver: None,
         work: analysis.work,
+        policy: PolicyReport {
+            provenance,
+            rules: policy.rules(),
+            unavailable: policy.unavailable(),
+            plugin_packs_supported: false,
+            usage: policy.usage(),
+        },
+        outcome: policy_outcome(&analysis, &before.facts, policy, suppressed),
     };
+    set_policy_status(&mut report);
     if !fix {
         return Ok(PreparedLint {
             report,
@@ -821,8 +882,9 @@ pub fn prepare_source(source: &str, fix: bool, semver_safe: bool) -> Result<Prep
     let candidate =
         vesper_lint::apply_edits(source, &edits, MAX_BYTES).map_err(|e| e.to_string())?;
     let after = checked_source(&candidate)?;
-    let after_report = vesper_lint::analyze(&after.facts, vesper_lint::Limits::default())
+    let mut after_report = vesper_lint::analyze(&after.facts, vesper_lint::Limits::default())
         .map_err(|e| e.to_string())?;
+    let after_suppressed = apply_policy(&mut after_report, policy);
     validate_lint_delta(&analysis, &after_report)?;
     if semver_safe {
         let compatibility = compatible_interfaces(&before.checked.world, &after.checked.world)?;
@@ -839,10 +901,67 @@ pub fn prepare_source(source: &str, fix: bool, semver_safe: bool) -> Result<Prep
         report.changed = candidate != source;
         report.applied_edits = edits.len();
     }
+    report.outcome = policy_outcome(&after_report, &after.facts, policy, after_suppressed);
+    set_policy_status(&mut report);
     Ok(PreparedLint {
         candidate: report.changed.then_some(candidate),
         report,
     })
+}
+fn apply_policy(report: &mut LintReport, policy: &Policy) -> usize {
+    let before = report.findings.len();
+    report
+        .findings
+        .retain(|finding| policy.severity_for(&finding.detail) != Severity::Allow);
+    before - report.findings.len()
+}
+fn policy_outcome(
+    report: &LintReport,
+    program: &CheckedProgram,
+    policy: &Policy,
+    suppressed: usize,
+) -> PolicyOutcome {
+    // Trait-implementation bodies are checked but elaborated into generated
+    // functions. The unchanged analyzer excludes them from source diagnostics.
+    // An explicit deny cannot claim complete coverage of those bodies.
+    let excluded_generated_bodies = program
+        .functions
+        .values()
+        .filter(|facts| !facts.source_owned && facts.declaration.body.is_some())
+        .count();
+    PolicyOutcome {
+        remaining_denied: report
+            .findings
+            .iter()
+            .filter(|finding| policy.severity_for(&finding.detail) == Severity::Deny)
+            .count(),
+        remaining_warnings: report
+            .findings
+            .iter()
+            .filter(|finding| policy.severity_for(&finding.detail) == Severity::Warn)
+            .count(),
+        suppressed,
+        excluded_generated_bodies,
+        unavailable_denied_rules: if report.skipped.is_empty() && excluded_generated_bodies == 0 {
+            vec![]
+        } else {
+            policy
+                .rules()
+                .into_iter()
+                .filter(|rule| rule.severity == Severity::Deny)
+                .map(|rule| rule.lint)
+                .collect()
+        },
+    }
+}
+fn set_policy_status(report: &mut SourceReport) {
+    report.status = if report.outcome.remaining_denied > 0
+        || !report.outcome.unavailable_denied_rules.is_empty()
+    {
+        "denied"
+    } else {
+        "checked"
+    };
 }
 fn compatible_interfaces(
     before: &check::World,
@@ -907,6 +1026,57 @@ fn read_source(path: &Path) -> Result<(String, fs::Permissions), String> {
         String::from_utf8(bytes).map_err(|_| "lint input must be UTF-8")?,
         metadata.permissions(),
     ))
+}
+fn load_policy(path: &Path) -> Result<(Policy, ConfigProvenance), String> {
+    const MAX_CONFIG_BYTES: u64 = 65536;
+    if path.as_os_str().len() > 4096 {
+        return Err("lint config path exceeds 4096 bytes".into());
+    }
+    if !fs::symlink_metadata(path)
+        .map_err(|e| e.to_string())?
+        .is_file()
+    {
+        return Err("lint config must be a regular file without final symlinks".into());
+    }
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        options.custom_flags(0x0020_0000);
+    }
+    let file = options.open(path).map_err(|e| e.to_string())?;
+    let metadata = file.metadata().map_err(|e| e.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_CONFIG_BYTES {
+        return Err("lint config must be a bounded regular file (64 KiB)".into());
+    }
+    let mut bytes = vec![];
+    file.take(MAX_CONFIG_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err("lint config exceeds 64 KiB".into());
+    }
+    let source = std::str::from_utf8(&bytes).map_err(|_| "lint config must be UTF-8")?;
+    let policy = Policy::parse(source, PolicyLimits::default()).map_err(|e| e.to_string())?;
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(path)
+    };
+    let provenance = ConfigProvenance::Explicit {
+        path: absolute.display().to_string(),
+        bytes: bytes.len(),
+        blake3: blake3::hash(&bytes).to_hex().to_string(),
+    };
+    Ok((policy, provenance))
 }
 struct Staging(Option<PathBuf>);
 impl Staging {
@@ -982,11 +1152,14 @@ fn replace_at(
 }
 pub fn run(args: Vec<String>) -> Result<(), String> {
     let json = args.iter().any(|a| a == "--json");
+    let mut config_label: Option<String> = None;
     let result = (|| {
         let mut path = None;
+        let mut config = None;
         let mut fix = false;
         let mut semver_safe = false;
-        for arg in args {
+        let mut args = args.into_iter();
+        while let Some(arg) = args.next() {
             match arg.as_str() {
                 "--help" | "-h" => {
                     print!("{HELP}");
@@ -995,6 +1168,20 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 "--json" => (),
                 "--fix" => fix = true,
                 "--semver-safe" => semver_safe = true,
+                "--config" => {
+                    if config.is_some() {
+                        return Err("--config may be specified only once".into());
+                    }
+                    let value = args.next().ok_or("--config requires a path")?;
+                    if value.len() > 4096 {
+                        return Err("lint config path exceeds 4096 bytes".into());
+                    }
+                    if value.starts_with('-') {
+                        return Err("--config requires a path".into());
+                    }
+                    config_label = Some(value.clone());
+                    config = Some(PathBuf::from(value));
+                }
                 _ if arg.starts_with('-') => return Err(format!("unknown lint option '{arg}'")),
                 _ => {
                     if path.replace(PathBuf::from(arg)).is_some() {
@@ -1004,8 +1191,17 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             }
         }
         let path = path.ok_or("lint requires a source file")?;
+        let (policy, provenance) = if let Some(config) = config {
+            load_policy(&config)?
+        } else {
+            (Policy::default(), ConfigProvenance::Default)
+        };
         let (source, permissions) = read_source(&path)?;
-        let prepared = prepare_source(&source, fix, semver_safe)?;
+        let prepared = if config_label.is_none() {
+            prepare_source(&source, fix, semver_safe)?
+        } else {
+            prepare_source_with_policy(&source, fix, semver_safe, &policy, provenance)?
+        };
         let output = serde_json::to_string_pretty(&prepared.report).map_err(|e| e.to_string())?;
         if let Some(candidate) = prepared.candidate {
             replace_source(&path, &source, &candidate, permissions)?;
@@ -1020,7 +1216,8 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             } else {
                 for finding in &report.diagnostics {
                     println!(
-                        "{} {}:{}..{}: {}",
+                        "{:?} {} {}:{}..{}: {}",
+                        finding.severity,
                         finding.finding.code,
                         finding.finding.function,
                         finding.finding.span.start,
@@ -1028,20 +1225,32 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                         finding.finding.message
                     );
                 }
+                for rule in &report.policy.unavailable {
+                    println!(
+                        "Unavailable lint {} ({:?}); not analyzed",
+                        rule.lint.as_str(),
+                        rule.severity
+                    );
+                }
                 println!(
-                    "lint: {} diagnostic(s), {} conservative skip(s), changed={}",
+                    "lint: {} diagnostic(s), {} conservative skip(s), changed={}, remaining deny={}",
                     report.diagnostics.len(),
                     report.skipped.len(),
-                    report.changed
+                    report.changed,
+                    report.outcome.remaining_denied
                 );
             }
-            Ok(())
+            if report.status == "denied" {
+                Err("lint policy denied remaining findings or unavailable analysis".into())
+            } else {
+                Ok(())
+            }
         }
         Err(error) => {
             if json {
                 println!(
                     "{}",
-                    serde_json::json!({"schema_version":1,"status":"invalid","error":error})
+                    serde_json::json!({"schema_version":1,"status":"invalid","error":error,"config":config_label})
                 );
             }
             Err(error)
