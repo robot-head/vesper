@@ -2,4 +2,4 @@ macro keep($x: expr) -> expr { quote { $x } }
 fn shared(in value: i64) -> i64 { keep!(value) }
 fn mutable(inout value: i64) -> i64 { keep!(value) }
 fn owned(sink value: i64) -> i64 { keep!(value) }
-fn main() -> i64 { let mut value = 14; wrapping_add(shared(value), wrapping_add(mutable(value), owned(value))) }
+fn main() -> i64 { let value = 14; wrapping_add(shared(value), wrapping_add(mutable(value), owned(value))) }

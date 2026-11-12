@@ -32,10 +32,27 @@ comment/token payloads and be byte-idempotent on the next check; expansion and
 execution remain separate operations. The independent lexical inventory is
 restricted to this closed fixture corpus, which has no nested comments.
 
-Static validation passed: standalone Rust test compilation and strict Clippy
-against existing read-only serde_json/blake3 artifacts, rustfmt, Python
-compilation and whitespace checks. No compiler dependencies, Wasmtime or
-additional toolchain were built. Actual runtime validation is pending the
-integrated parameter-aware executable; these static checks are not represented
-as runtime results. Native Linux/macOS/Windows workflow coverage is coordinated
-with #158 and remains separate pending evidence.
+Validation against the actual integrated executable
+`/workspace/vesper/target/parallel-next/debug/vesper` at root checkpoint b77cce7
+passed:
+
+- Five independent Rust tests, zero failures and zero ignored tests. Eight
+  positive expanded programs were checked and separately executed to42.
+- Sixty-five Python commands, nine stdio sessions,47 JSON-RPC requests and nine
+  explicit normal expanded-source runs to42. All accepted previews matched the
+  actual separately compiled Forge artifact, maps and audits.
+- The existing source-macro harness passed115commands and11explicit expanded
+  runs after replacing only its obsolete unsupported-parameter fixture.
+- Standalone Rust compilation and strict Clippy against existing read-only
+  serde_json/blake3 artifacts, rustfmt, Python compilation and whitespace checks.
+
+Initial executable validation caught a test fixture using unsupported Rust
+`let mut` syntax. The fixture now uses actual Vesper `let` syntax and retains its
+real inout argument passing. No production grammar was changed. All parameter
+capture, header provenance, SelfKw, linearity, authority and formatter assertions
+remain enabled.
+
+No compiler dependencies, Wasmtime or additional toolchain were built by this
+acceptance lane. Native Linux/macOS/Windows workflow coverage is coordinated
+with #158 and remains separate pending evidence; these local actual Linux
+results do not claim hosted execution on other platforms.
