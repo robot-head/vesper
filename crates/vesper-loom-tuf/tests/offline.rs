@@ -111,7 +111,9 @@ fn metadata_pin(bytes: &[u8], version: u64, extra_length: u64) -> Value {
 
 impl Fixture {
     async fn new(spec: Spec) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        Self::new_in(spec, tempfile::tempdir().unwrap()).await
+    }
+    async fn new_in(spec: Spec, dir: TempDir) -> Self {
         let root1 = key(1);
         let root2 = key(2);
         let delegated_key = key(3);
@@ -582,16 +584,16 @@ async fn symlink_ancestor_in_writable_directory_is_rejected() {
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn system_symlink_ancestor_is_accepted() {
-    let fixture = Fixture::new(Spec::default()).await;
-    let request = fixture.request(None);
+    // Build the fixture explicitly below `/var` so the test does not depend on `TMPDIR`.
     assert!(
-        request
-            .metadata_dir
-            .ancestors()
-            .any(|a| fs::symlink_metadata(a).unwrap().file_type().is_symlink()),
-        "expected the temporary directory to sit below a system symlink"
+        fs::symlink_metadata("/var")
+            .unwrap()
+            .file_type()
+            .is_symlink()
     );
-    verify_target(request).await.unwrap();
+    let dir = tempfile::tempdir_in("/var/tmp").unwrap();
+    let fixture = Fixture::new_in(Spec::default(), dir).await;
+    verify_target(fixture.request(None)).await.unwrap();
 }
 
 #[tokio::test]
