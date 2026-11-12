@@ -36,7 +36,16 @@ Rustfmt, Python AST/bytecode, shell syntax, YAML parsing, symmetric workflow
 filters, existing integration target names and `git diff --check` passed. The
 Rust suite contains seven tests on Unix, six on Windows.
 
-Runtime validation is in progress. The baseline binary does not implement this feature;
-no acceptance/runtime success is claimed until the coordinator publishes its
-actual integrated binary. Native CI is pending the integration PR. No semantic
-repair, full macro grammar, source Tier2, performance, RSS or proof claim is made.
+Final local runtime acceptance used the actual integrated binary from root
+checkpoint `a91659a`, including the `e8c22c2` lexical top-level recovery guard.
+`VESPER_STYLUS_BINARY` selected that existing binary without writing the
+coordinator build cache. The independently precompiled private Rust harness
+passed all seven actual CLI/stdio tests with zero ignored. The shell/Python
+harness passed 36 real commands, three stdio sessions and one explicit ordinary
+run of successfully checked macro-expanded source yielding42. Current revisions,
+UTF16 CRLF edit application, zero-edit repeated recovery formatting, actual
+E0302/E0303 failures, file preservation and unavailable damaged-buffer hover all
+passed. These results establish local Linux behavior only.
+
+Native three-OS CI is pending the integration PR. No semantic repair, full macro
+grammar, source Tier2, performance, RSS or proof claim is made.
