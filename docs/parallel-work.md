@@ -3,6 +3,21 @@
 Base checkpoint: `c5328d0`. Integration branch: `main` (the `work` branch was merged in PR #9). Remote: https://github.com/robot-head/vesper.
 The expanded design lives in [specification.txt](specification.txt); the implemented core baseline is [core-specification-baseline.txt](core-specification-baseline.txt).
 
+## Fourth wave: Vesper Warp (§35)
+
+The [fourth-wave prompt index](agent-prompts/wave-four/README.md) splits design §35 (user-space QUIC/TCP networking, linear UMEM rings, BBRv3) into eight concurrent lanes under the [wave-four contracts](rfcs/wave-four-contracts.md). Each lane owns one new `crates/vesper-warp*` crate (lane 8 owns `crates/vesper-sim-session/**`), depends only on crates already on `main`, and commits its own root registration patch on its PR branch. An integration step in `crates/vesper-warp` follows once lanes 1–6 merge.
+
+| Lane | Suggested branch | Exclusive boundary |
+| --- | --- | --- |
+| QUIC packet core and loss recovery | `wave4/warp-quic-packet-core` | New `crates/vesper-warp/**`, `lean/WarpPacketNumber.lean` |
+| BBRv3 and EDT pacing | `wave4/warp-bbrv3` | New `crates/vesper-warp-bbr/**`, `lean/WarpBbr.lean` |
+| Linear UMEM frames and AF_XDP rings | `wave4/warp-umem-rings` | New `crates/vesper-warp-umem/**`, `lean/WarpUmem.lean` |
+| Timing wheel and EDT launch queue | `wave4/warp-timing-wheel` | New `crates/vesper-warp-wheel/**` |
+| Packet protection and nonce tickets | `wave4/warp-packet-protection` | New `crates/vesper-warp-crypto/**` |
+| Connection tiles, CID lookup, RSS | `wave4/warp-connection-shards` | New `crates/vesper-warp-shard/**` |
+| RFC 9293 TCP | `wave4/warp-tcp` | New `crates/vesper-warp-tcp/**` |
+| Source XdpNic and WAN simulation | `wave4/warp-source-simulation` | `crates/vesper-sim-session/**` |
+
 ## Current independent batch: sections 20–37
 
 The [design snapshot](specification.txt) has been refreshed through section 37;
