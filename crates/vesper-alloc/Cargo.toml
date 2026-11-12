@@ -1,0 +1,12 @@
+[package]
+name = "vesper-alloc"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Strata region allocator core (design section 15)"
+publish = false
+
+[dependencies]
+
+# Temporary standalone workspace so this crate can be tested before the
+# integration owner registers it in the root workspace. Remove on registration.
+[workspace]
