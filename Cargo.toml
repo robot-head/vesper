@@ -47,6 +47,7 @@ members = [
     "crates/vesper-loom-build",
     "crates/vesper-forge-runner",
     "crates/vesper-ignis",
+    "crates/vesper-warp-shard",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -95,6 +96,7 @@ default-members = [
     "crates/vesper-loom-build",
     "crates/vesper-forge-runner",
     "crates/vesper-ignis",
+    "crates/vesper-warp-shard",
     "experiments/native-pulse",
 ]
 

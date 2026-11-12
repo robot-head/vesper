@@ -1,0 +1,8 @@
+[package]
+name = "vesper-warp-shard"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Warp AoSoA connection tiles, SIMD CID lookup and Toeplitz RSS shard steering (design section 35)"
+publish = false
+
+[dependencies]
