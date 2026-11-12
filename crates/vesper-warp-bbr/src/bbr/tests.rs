@@ -79,6 +79,7 @@ impl Pipe {
                 bytes: packet.bytes,
             },
             state,
+            previously_lost: false,
         }];
         self.bbr.on_ack(self.now, &d, Some(rtt)).unwrap();
     }
@@ -660,6 +661,7 @@ fn rejected_inputs_leave_state_unchanged() {
             bytes,
         },
         state,
+        previously_lost: false,
     };
     let now = p.now + RTT;
     let b = &mut p.bbr;
@@ -752,6 +754,7 @@ fn pure_ack_packets_never_count() {
             bytes: 50,
         },
         state: st,
+        previously_lost: false,
     }];
     b.on_ack(20, &d, None).unwrap();
     assert_eq!(b.delivered_bytes(), 0);
@@ -780,6 +783,7 @@ fn contract_event_dispatch() {
             bytes: pkt.bytes,
         },
         state: st,
+        previously_lost: false,
     }];
     p.bbr
         .on_event(at, CongestionEvent::EcnCe { count: 1 })
@@ -799,4 +803,88 @@ fn contract_event_dispatch() {
         .unwrap();
     assert_eq!(p.bbr.delivered_bytes(), MSS as u64);
     assert!(p.bbr.in_recovery());
+}
+
+#[test]
+fn ce_only_congestion_can_exit_startup() {
+    // Codex review case: the initial ten packets, six CE marks, then the
+    // flight is ACKed. No packet is lost, so there is no fast recovery.
+    let mut p = Pipe::new(RATE, RTT);
+    for _ in 0..10 {
+        p.send(true);
+    }
+    p.bbr.on_ecn_ce(p.now, 6).unwrap();
+    while !p.queue.is_empty() && p.bbr.state() == BbrState::Startup {
+        p.ack_next();
+    }
+    assert!(!p.bbr.in_recovery());
+    assert_eq!(p.bbr.undo_state, Some(BbrState::Startup));
+    assert!(p.bbr.full_bw_reached());
+    assert_ne!(p.bbr.state(), BbrState::Startup);
+    assert!(p.bbr.inflight_hi().is_some());
+}
+
+#[test]
+fn ack_after_declared_loss_counts_delivery_without_double_release() {
+    let mut b = Bbrv3::new(BbrConfig::quic(MSS), 0).unwrap();
+    let pkt = |pn| SentPacket {
+        pn,
+        sent_ns: 10,
+        bytes: MSS,
+        ack_eliciting: true,
+        in_flight: true,
+    };
+    let first = b.on_packet_sent(10, pkt(1)).unwrap();
+    let second = b.on_packet_sent(10, pkt(2)).unwrap();
+    let lost = LostPacket {
+        pn: 1,
+        sent_ns: 10,
+        bytes: MSS,
+    };
+    b.on_packet_lost(20, lost, first).unwrap();
+    assert_eq!(b.bytes_in_flight(), MSS as u64);
+    b.on_spurious_loss_detected(25).unwrap();
+    // The late ACK for packet 1 delivers its bytes but releases nothing:
+    // packet 2 is still in flight.
+    let late = [Delivered {
+        packet: AckedPacket {
+            pn: 1,
+            sent_ns: 10,
+            bytes: MSS,
+        },
+        state: first,
+        previously_lost: true,
+    }];
+    b.on_ack(30, &late, None).unwrap();
+    assert_eq!(b.bytes_in_flight(), MSS as u64);
+    assert_eq!(b.delivered_bytes(), MSS as u64);
+    let on_time = [Delivered {
+        packet: AckedPacket {
+            pn: 2,
+            sent_ns: 10,
+            bytes: MSS,
+        },
+        state: second,
+        previously_lost: false,
+    }];
+    b.on_ack(31, &on_time, None).unwrap();
+    assert_eq!(b.bytes_in_flight(), 0);
+    assert_eq!(b.delivered_bytes(), 2 * MSS as u64);
+    // A single packet lost and then ACKed as if still in flight is caught.
+    let mut c = Bbrv3::new(BbrConfig::quic(MSS), 0).unwrap();
+    let st = c.on_packet_sent(10, pkt(1)).unwrap();
+    c.on_packet_lost(20, lost, st).unwrap();
+    let wrong = [Delivered {
+        packet: AckedPacket {
+            pn: 1,
+            sent_ns: 10,
+            bytes: MSS,
+        },
+        state: st,
+        previously_lost: false,
+    }];
+    assert!(matches!(
+        c.on_ack(30, &wrong, None),
+        Err(BbrError::InflightUnderflow { .. })
+    ));
 }

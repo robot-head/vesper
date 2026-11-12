@@ -98,6 +98,13 @@ full pipe" rule; send quantum; `SetCwnd`, `BoundCwndForProbeRTT`,
   `Acked` event.
 - **Reno-coexistence rounds** are the draft's `TargetInflight()` in packets
   (bytes divided by SMSS), capped at 63.
+- **Late ACKs after a declared loss.** `Delivered::previously_lost` marks a
+  packet the transport already reported lost (spurious loss). Its bytes are
+  counted as delivered but not released from the flight a second time
+  (Codex review on PR #58).
+- **CE in Startup.** CE marks in a loss round stand in for fast recovery in
+  `CheckStartupHighLoss`, so an ECN path that never drops can take the
+  congestion-based Startup exit (Codex review on PR #58).
 - **Pure-ACK packets** (`in_flight: false`) are never counted in flight,
   delivered or lost.
 - **Send guard.** `on_packet_sent` refuses an in-flight send when
@@ -151,7 +158,7 @@ proof), validates the axiom report, and runs the fixture on 1,642 cases
 
 ## Tests
 
-- 34 unit tests (`src/**`): every state transition (Startup→Drain on
+- 36 unit tests (`src/**`): every state transition (Startup→Drain on
   plateau; Drain→ProbeBW on inflight and on the 3-round limit;
   DOWN→CRUISE→REFILL→UP→DOWN; one-round REFILL; `cycle_count` advance;
   ProbeRTT entry after the 10 s window, cwnd bound, exit after 200 ms plus a
@@ -162,7 +169,8 @@ proof), validates the axiom report, and runs the fixture on 1,642 cases
   of `inflight_hi`; precautionary probing; ECN-CE in UP and in CRUISE;
   persistent congestion; spurious-loss undo to Startup and to REFILL;
   app-limited samples and idle restart pacing at `bw·0.99`; `InflightAtLoss`;
-  error cases; pure-ACK packets; contract dispatch.
+  error cases; pure-ACK packets; contract dispatch; CE-only Startup exit;
+  late ACK of a packet declared lost.
 - `tests/simulator.rs` (7 tests) on a deterministic packet-level link
   simulator (`tests/sim/mod.rs`: rate, propagation delay, finite tail-drop
   buffer, seeded random and Gilbert–Elliott burst loss, optional CE marking,
@@ -196,7 +204,7 @@ Run in this cloud session (Lean 4.24.0 release binary, as pinned by
 ```text
 cargo fmt --all -- --check                                         ok
 cargo clippy -p vesper-warp-bbr --locked --all-targets -- -D warnings  ok
-VESPER_LEAN=lean cargo test -p vesper-warp-bbr                      ok (48 tests)
+VESPER_LEAN=lean cargo test -p vesper-warp-bbr                      ok (50 tests)
 lean lean/WarpBbr.lean   (from lean/)                               ok, 10 axiom lines, standard axioms only
 cargo clippy --workspace --locked --all-targets -- -D warnings      see PR
 VESPER_LEAN=lean cargo test --workspace --locked                    see PR

@@ -155,6 +155,7 @@ fn arbitrary_event_sequences_are_total_and_rejections_are_side_effect_free() {
                                 bytes: p.bytes,
                             },
                             state: *s,
+                            previously_lost: false,
                         })
                         .collect();
                     let rtt = RttSample {
@@ -218,6 +219,7 @@ fn arbitrary_event_sequences_are_total_and_rejections_are_side_effect_free() {
                                 bytes: 1,
                             },
                             state: forged,
+                            previously_lost: false,
                         }];
                         bbr.on_ack(now, &d, None)
                     }

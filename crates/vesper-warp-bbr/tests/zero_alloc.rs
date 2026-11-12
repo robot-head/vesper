@@ -90,6 +90,7 @@ fn step(bbr: &mut Bbrv3, ring: &mut Ring, now: &mut u64, pn: &mut u64, loss_ever
                 bytes: packet.bytes,
             },
             state,
+            previously_lost: false,
         }];
         let rtt = *now - packet.sent_ns;
         bbr.on_ack(

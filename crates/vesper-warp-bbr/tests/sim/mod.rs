@@ -323,6 +323,7 @@ impl Sim {
                 bytes: o.packet.bytes,
             },
             state: o.state,
+            previously_lost: false,
         }];
         self.bbr
             .on_ack(self.now, &delivered, Some(rtt))

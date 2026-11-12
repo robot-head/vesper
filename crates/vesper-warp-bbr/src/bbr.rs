@@ -245,6 +245,7 @@ pub struct Bbrv3 {
     recovery_start_ns: u64,
     last_now_ns: u64,
     ce_pending: bool,
+    ce_in_loss_round: bool,
     rs: RateSample,
     // BBR state.
     state: BbrState,
@@ -335,6 +336,7 @@ impl Bbrv3 {
             recovery_start_ns: 0,
             last_now_ns: now_ns,
             ce_pending: false,
+            ce_in_loss_round: false,
             rs: RateSample::default(),
             state: BbrState::Startup,
             pacing_gain: STARTUP_PACING_GAIN,
@@ -660,7 +662,10 @@ impl Bbrv3 {
         rtt: Option<RttSample>,
     ) -> Result<(), BbrError> {
         self.check_time(now_ns)?;
+        // `released` leaves the flight; `newly_delivered` (which also covers
+        // packets already declared lost) is added to C.delivered.
         let mut released: u64 = 0;
+        let mut newly_delivered: u64 = 0;
         for d in packets {
             check_pn(d.packet.pn)?;
             if d.packet.sent_ns > now_ns {
@@ -670,9 +675,12 @@ impl Bbrv3 {
                 continue;
             }
             self.check_snapshot(d.packet.pn, &d.state)?;
-            released = released
+            newly_delivered = newly_delivered
                 .checked_add(d.packet.bytes as u64)
                 .ok_or(BbrError::CounterOverflow)?;
+            if !d.previously_lost {
+                released += d.packet.bytes as u64;
+            }
         }
         if released > self.inflight {
             return Err(BbrError::InflightUnderflow {
@@ -680,7 +688,7 @@ impl Bbrv3 {
                 released,
             });
         }
-        if self.delivered.checked_add(released).is_none() {
+        if self.delivered.checked_add(newly_delivered).is_none() {
             return Err(BbrError::CounterOverflow);
         }
 
@@ -712,7 +720,7 @@ impl Bbrv3 {
                 newest = Some(d);
             }
         }
-        rs.newly_acked = released;
+        rs.newly_acked = newly_delivered;
         // GenerateRateSample()
         if self.app_limited != 0 && self.delivered > self.app_limited {
             self.app_limited = 0;
@@ -806,6 +814,7 @@ impl Bbrv3 {
         self.note_loss();
         self.loss_events_in_round = self.loss_events_in_round.saturating_add(count - 1);
         self.ce_pending = true;
+        self.ce_in_loss_round = true;
         Ok(())
     }
 
@@ -982,12 +991,14 @@ impl Bbrv3 {
             self.bw_latest = self.rs.delivery_rate;
             self.inflight_latest = self.rs.delivered;
             self.loss_events_in_round = 0;
+            self.ce_in_loss_round = false;
         }
     }
 
     fn reset_congestion_signals(&mut self) {
         self.is_loss_in_round = false;
         self.loss_events_in_round = 0;
+        self.ce_in_loss_round = false;
         self.bw_latest = 0;
         self.inflight_latest = 0;
     }
@@ -1120,7 +1131,12 @@ impl Bbrv3 {
     }
 
     fn check_startup_high_loss(&mut self) {
-        if self.full_bw_reached || !self.loss_round_start || !self.in_recovery {
+        // CE marks stand in for fast recovery: without them an ECN path
+        // that never drops could not take the loss-based Startup exit.
+        if self.full_bw_reached
+            || !self.loss_round_start
+            || !(self.in_recovery || self.ce_in_loss_round)
+        {
             return;
         }
         if self.loss_events_in_round < STARTUP_FULL_LOSS_CNT && self.has_selective_acks {

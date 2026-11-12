@@ -92,6 +92,11 @@ pub struct Delivered {
     pub packet: AckedPacket,
     /// Its snapshot from [`crate::Bbrv3::on_packet_sent`].
     pub state: PacketDeliveryState,
+    /// The packet was already reported lost (a late or spurious-loss ACK).
+    /// Its bytes left the flight at the loss, so they are not released
+    /// again; they still count as delivered (draft: `C.delivered` SHOULD
+    /// include spuriously retransmitted data that is acknowledged).
+    pub previously_lost: bool,
 }
 
 /// A CC-agnostic congestion event (contract vocabulary).
