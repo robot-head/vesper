@@ -1,4 +1,5 @@
-//! Context-switch trampolines (System V x86_64 and AAPCS64 Linux).
+//! Context-switch trampolines (System V x86_64 Linux, AAPCS64 Linux and the
+//! Apple arm64 ABI on macOS).
 //!
 //! `vesper_fiber_switch(save_sp, load_sp, arg) -> arg` spills the callee-saved
 //! registers of the current context onto its own stack, stores the resulting
@@ -23,8 +24,9 @@
 //! control bits, so exception flags are also context-local. Not supported:
 //! x87 data registers or status word in use across a switch (the ABI requires
 //! an empty x87 stack at calls), AVX upper halves (caller-saved), SVE/SME
-//! state, and x18 as a reserved platform register (it is caller-saved on
-//! Linux). The trampolines carry no CFI: unwinding across a switch is not
+//! state, and any use of x18 (caller-saved on Linux, reserved by Darwin; the
+//! switch never touches it, so a Darwin context keeps whatever the kernel
+//! maintains there). The trampolines carry no CFI: unwinding across a switch is not
 //! supported, and panics abort at the `extern "C"` boundaries.
 use crate::abi::FiberContext;
 
@@ -81,46 +83,67 @@ std::arch::global_asm!(
     ".size vesper_fiber_start, .-vesper_fiber_start",
 );
 
+// The AArch64 switch body is shared by ELF (Linux) and Mach-O (Darwin) so the
+// v2 frame layout cannot diverge between them; only symbol spelling and
+// assembler directives are platform-specific. x18 is neither read nor written:
+// Darwin reserves it as the platform register, Linux treats it as temporary.
 #[cfg(target_arch = "aarch64")]
+macro_rules! aarch64_switch_body {
+    () => {
+        concat!(
+            "sub sp, sp, #192\n",
+            "stp x19, x20, [sp, #0]\n",
+            "stp x21, x22, [sp, #16]\n",
+            "stp x23, x24, [sp, #32]\n",
+            "stp x25, x26, [sp, #48]\n",
+            "stp x27, x28, [sp, #64]\n",
+            "stp x29, x30, [sp, #80]\n",
+            "stp d8, d9, [sp, #96]\n",
+            "stp d10, d11, [sp, #112]\n",
+            "stp d12, d13, [sp, #128]\n",
+            "stp d14, d15, [sp, #144]\n",
+            "mrs x9, fpcr\n",
+            "mrs x10, fpsr\n",
+            "stp x9, x10, [sp, #160]\n",
+            "mov x9, sp\n",
+            "str x9, [x0]\n",
+            "mov sp, x1\n",
+            "ldp x19, x20, [sp, #0]\n",
+            "ldp x21, x22, [sp, #16]\n",
+            "ldp x23, x24, [sp, #32]\n",
+            "ldp x25, x26, [sp, #48]\n",
+            "ldp x27, x28, [sp, #64]\n",
+            "ldp x29, x30, [sp, #80]\n",
+            "ldp d8, d9, [sp, #96]\n",
+            "ldp d10, d11, [sp, #112]\n",
+            "ldp d12, d13, [sp, #128]\n",
+            "ldp d14, d15, [sp, #144]\n",
+            "ldp x9, x10, [sp, #160]\n",
+            "msr fpcr, x9\n",
+            "msr fpsr, x10\n",
+            "add sp, sp, #192\n",
+            "mov x0, x2\n",
+            "ret\n",
+        )
+    };
+}
+
+// x20 = context, x19 = fiber_main, x0 = first resume argument.
+#[cfg(target_arch = "aarch64")]
+macro_rules! aarch64_start_body {
+    () => {
+        concat!("mov x1, x0\n", "mov x0, x20\n", "blr x19\n", "brk #0\n",)
+    };
+}
+
+#[cfg(all(target_arch = "aarch64", target_os = "linux"))]
 std::arch::global_asm!(
     ".text",
     ".p2align 4",
     ".globl vesper_fiber_switch",
     ".type vesper_fiber_switch,%function",
     "vesper_fiber_switch:",
-    "sub sp, sp, #192",
-    "stp x19, x20, [sp, #0]",
-    "stp x21, x22, [sp, #16]",
-    "stp x23, x24, [sp, #32]",
-    "stp x25, x26, [sp, #48]",
-    "stp x27, x28, [sp, #64]",
-    "stp x29, x30, [sp, #80]",
-    "stp d8, d9, [sp, #96]",
-    "stp d10, d11, [sp, #112]",
-    "stp d12, d13, [sp, #128]",
-    "stp d14, d15, [sp, #144]",
-    "mrs x9, fpcr",
-    "mrs x10, fpsr",
-    "stp x9, x10, [sp, #160]",
-    "mov x9, sp",
-    "str x9, [x0]",
-    "mov sp, x1",
-    "ldp x19, x20, [sp, #0]",
-    "ldp x21, x22, [sp, #16]",
-    "ldp x23, x24, [sp, #32]",
-    "ldp x25, x26, [sp, #48]",
-    "ldp x27, x28, [sp, #64]",
-    "ldp x29, x30, [sp, #80]",
-    "ldp d8, d9, [sp, #96]",
-    "ldp d10, d11, [sp, #112]",
-    "ldp d12, d13, [sp, #128]",
-    "ldp d14, d15, [sp, #144]",
-    "ldp x9, x10, [sp, #160]",
-    "msr fpcr, x9",
-    "msr fpsr, x10",
-    "add sp, sp, #192",
-    "mov x0, x2",
-    "ret",
+    aarch64_switch_body!(),
     ".size vesper_fiber_switch, .-vesper_fiber_switch",
     "",
     ".p2align 4",
@@ -128,12 +151,28 @@ std::arch::global_asm!(
     ".hidden vesper_fiber_start",
     ".type vesper_fiber_start,%function",
     "vesper_fiber_start:",
-    // x20 = context, x19 = fiber_main, x0 = first resume argument.
-    "mov x1, x0",
-    "mov x0, x20",
-    "blr x19",
-    "brk #0",
+    aarch64_start_body!(),
     ".size vesper_fiber_start, .-vesper_fiber_start",
+);
+
+// Mach-O: C symbols carry a leading underscore, `.private_extern` is the
+// hidden-visibility spelling, and there are no `.type`/`.size` directives.
+// Darwin arm64 keeps the AAPCS64 callee-saved set (x19-x28, x29 frame record,
+// d8-d15 low halves) and 16-byte SP alignment; macOS arm64 user code is not
+// arm64e, so the saved x30 carries no pointer-authentication signature.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+std::arch::global_asm!(
+    ".text",
+    ".p2align 4",
+    ".globl _vesper_fiber_switch",
+    "_vesper_fiber_switch:",
+    aarch64_switch_body!(),
+    "",
+    ".p2align 4",
+    ".globl _vesper_fiber_start",
+    ".private_extern _vesper_fiber_start",
+    "_vesper_fiber_start:",
+    aarch64_start_body!(),
 );
 
 /// Size of the saved switch frame in bytes (ABI v2).
