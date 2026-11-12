@@ -1,0 +1,14 @@
+[package]
+name = "vesper-bench-pmu"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Owned Linux perf-event group observations for safe benchmark windows"
+
+[dependencies]
+vesper-bench = { path = "../vesper-bench" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
+[workspace]
