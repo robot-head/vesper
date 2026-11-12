@@ -4,6 +4,10 @@ A Rust implementation of the Vesper language described in [the supplied specific
 
 This repository now contains an executable language implementation rather than the original Hello World program. It is a research compiler, **not yet a complete implementation of every backend, runtime, and proof obligation in the document**. See [implementation coverage](docs/implementation.md) for the exact boundaries.
 
+GitHub highlights `.ves` files with its Rust grammar through [.gitattributes](.gitattributes).
+This is approximate highlighting and classifies those files as Rust until
+[GitHub Linguist](https://github.com/github-linguist/linguist) adds native Vesper support.
+
 ## Run
 
 Install stable Rust and a C linker, then:
