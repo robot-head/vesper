@@ -3222,6 +3222,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-forge"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tempfile",
+ "vesper-loom-sandbox",
+]
+
+[[package]]
 name = "vesper-ignis"
 version = "0.1.0"
 

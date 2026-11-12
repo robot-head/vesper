@@ -47,8 +47,9 @@ No Windows/macOS runtime tests, hosted CI success, production registry integrati
 Registered the crate in the shared workspace and removed its standalone workspace
 and profile. Independent review found a numeric delegated-role preflight bypass;
 the integrated fix preserves both raw role names and possible versioned aliases.
-No target authentication bypass was found in that review. A separate failure-progress
-API is still being implemented; the successful-operation API retains its stated limitation.
+No target authentication bypass was found in that review. The integrated phase-two
+failure-progress API is described below; the legacy successful-operation wrapper
+retains its stated limitation.
 
 The Unix `state::CheckpointStore` now provides explicit initialization, bounded
 checkpoint reads, OS locking across live processes, same-directory atomic replacement
@@ -83,3 +84,8 @@ The reviewed temporary-path issue is now an explicit supported-environment check
 Validation with coordinator `src/state.rs` copied locally from main `ecfb8d2` (not committed by this lane) and its existing Unix module declaration temporarily enabled: **30 tests** passed (23 core/integration tests owned here plus 7 coordinator store tests), plus **1 compiled README example**; formatting and strict all-target Clippy passed. New signed-fixture tests cover root-before-invalid-timestamp, timestamp/pinned-snapshot-before-invalid-snapshot, snapshot-role floors before invalid delegation/target, invalid-state nonpromotion, legacy schema migration, preauthentication checkpoint-budget reservation, original source paths with unusual characters, and OS-backed store commit-on-error/reopen/rollback followed by successful target persistence and reopen.
 
 Only `src/lib.rs`, `tests/offline.rs`, `README.md`, and this report belong to the phase-2 commit. `src/state.rs`, root manifests/lockfiles, and the coordinator's Unix module declaration remain coordinator-owned. Integration tests require that already-merged coordinator module.
+
+Coordinator reran phase two against the hardened store: 30 unit/integration tests
+and the README example passed, including commit-on-error/reopen/rollback.
+Strict workspace Clippy also passed with Forge registered. Exact metadata pin
+lengths and file-transport target-name compatibility are being reviewed separately.

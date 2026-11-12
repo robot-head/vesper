@@ -1,7 +1,7 @@
 # Forge hygiene and emitted-code authority — lane report
 
 Lane 7 of the [next wave](../agent-prompts/next-wave/07-forge-hygiene-authority.md) (design §16.4; contract audit rows "Macro capability provenance" and "Authority versus discharged rows").
-Owned paths: `crates/vesper-forge/**` and this file. Branch `claude/project-thread-1z4nx8`, base `origin/main` at `c2ba0b1` (contains the required `0e6caf9` baseline). Not merged.
+Owned paths: `crates/vesper-forge/**` and this file. Branch `claude/project-thread-1z4nx8`, base `origin/main` at `c2ba0b1` (contains the required `0e6caf9` baseline). Landed through PR #14; coordinator integration follows below.
 
 No root manifest, lockfile, CLI, CI, shared AST/parser/checker, sandbox, CAS, build runner or Pact file was touched.
 
@@ -168,3 +168,20 @@ This is a hygiene/provenance core and an authority gate. It is not a source macr
 * **Policies are inputs.** `MacroPolicy` and `CallerCeiling` are assumed to come from trusted manifests (`Loom.toml`). Loom does not parse or sign them yet. A bounded scratch-region exception and the full set of privileged handler-construction rules are still contract decisions for HIR and Loom.
 * **Deterministic, not portable.** Scope and binder indices depend on call order within a session. Persisted identities are valid only for the session that minted them.
 * **Not exercised.** No real WASI guest is run in these tests; transport input is constructed directly. Sandbox execution is covered by `vesper-loom-sandbox`'s own suite. No kernel, hardware or Lean claims are made.
+
+## Coordinator integration and executable boundary tests
+
+Registered Forge in root workspace members/default-members, removed the child
+workspace/lockfile and reused workspace Serde dependencies. The original 35
+tests passed in the integrated workspace, as did the 31 tests with sandbox
+transport disabled and the `forge_gate` example. Strict workspace Clippy passed.
+
+Added two `sandbox_execution` tests using the committed real WASI component
+fixture from `vesper-loom-sandbox`. The component executes under Wasmtime,
+consumes fuel, and echoes wire tokens carrying adversarial caller scopes/spans.
+Returned tokens are attributed to the macro, cannot capture a caller local,
+and cannot bypass the transitive authority gate. Pure output is accepted;
+privileged output requires the macro's explicit `emits` grant even when its
+caller already holds that authority. Both tests passed. This supersedes the
+handoff's constructed-transport-only test boundary, while the trusted graph
+and source/compiler limitations above still apply.

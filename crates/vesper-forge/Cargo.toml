@@ -5,19 +5,18 @@ edition = "2024"
 description = "Forge quotation hygiene, emission provenance and emitted-code authority gate"
 publish = false
 
-# Temporary standalone workspace for independent testing; integration removes
-# this table and the nested lockfile and registers the crate at the root.
-[workspace]
-
 [features]
 default = ["sandbox-transport"]
 # Import untrusted flat `vesper-loom-sandbox` transport outcomes.
 sandbox-transport = ["dep:vesper-loom-sandbox"]
 
 [dependencies]
-serde = { version = "1", features = ["derive", "rc"] }
-serde_json = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
 vesper-loom-sandbox = { path = "../vesper-loom-sandbox", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
 
 [[example]]
 name = "forge_gate"
