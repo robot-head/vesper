@@ -442,6 +442,14 @@ Read-only limit accessors/private utility additions that do not change policy
 may be agreed between writers and reported; public/API or policy changes require
 coordinator amendment publication before dependent edits.
 
+Coordinator retains the existing private parent `Math` variants Num(i64),
+Add/Sub/Mul/WAdd/WSub/WMul([egg::Id;2]), and replaces the old arbitrary Symbol
+leaf with Input(u32). Parent Graph remains egg::EGraph<Math,()>; parent rules()
+returns the existing 18 forward Rewrite values in catalog order. Producer may
+use these private parent items; checker imports none of them. Static pattern
+names/variables may use egg symbols, but source names never enter its global
+symbol interner.
+
 The producer directly encodes Math RecExpr nodes and opaque InputVar symbols;
 it does not round-trip source names/operators through formatted s-expressions.
 Actual egg explanations stay disabled. Instrument bounded scheduling/appliers
@@ -459,7 +467,8 @@ Each path/closure round reserves and charges before work; quadratic candidate
 pair scans must be prepaid/refused, not performed outside the budget. No
 unbounded recursive explanation conversion, proof matrix or hidden host
 collection growth is allowed. The final emitted proof must connect the actual
-source root to the actual Extractor-selected candidate root.
+source root to the actual Extractor-selected candidate root, except for the
+explicit literal-range fold-only profile below.
 
 Do not invoke egg Explanation::check_proof as the trust gate: egg0.10 accepts
 unknown rule reasons and does not revalidate our conditional totality semantics.
