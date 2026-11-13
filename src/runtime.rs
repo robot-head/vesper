@@ -341,7 +341,7 @@ pub struct Runtime<'a> {
     /// The checked call site of the function being invoked, used to
     /// instantiate generic effect arguments for typed instance selection.
     call_site: Option<(usize, usize)>,
-    resource_trace: Option<ResourceTraceEngine>,
+    resource_trace: Option<Box<ResourceTraceEngine>>,
     resource_fuel_exhausted: bool,
 }
 impl<'a> Runtime<'a> {
@@ -375,7 +375,7 @@ impl<'a> Runtime<'a> {
         config.validate_world(self.world)?;
         let engine = ResourceTraceEngine::new(config)?;
         let observer = engine.observer();
-        self.resource_trace = Some(engine);
+        self.resource_trace = Some(Box::new(engine));
         Ok(observer)
     }
     fn construct_data(
