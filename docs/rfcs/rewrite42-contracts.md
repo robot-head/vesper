@@ -16,7 +16,9 @@ interface amendments likewise precede dependent edits.
 | Independent adversarial/runtime | new dedicated optimizer witness tests and fixtures, acceptance report |
 
 Reports are `docs/rfcs/rewrite42-{checker,producer,acceptance,integration}-report.md`.
-Specific child claims/worktrees are assigned before their writers start. No
+The coordinator exposes `pub mod witness` and keeps `mod certificate` private
+under optimize; external tests use `vesper::optimize::witness`. Specific child
+claims/worktrees are assigned before their writers start. No
 Cargo/dependency, core AST/numeric, main/lib, native, IR/ir_opt, formatter,
 allocator, BUILD/workflow, external-agent or unrelated test edits. Each writer
 uses a private small target, one job, debug0 and incremental0. No push/PR/merge
@@ -370,7 +372,7 @@ The following names/signatures are frozen to let writers work independently:
 
 ```rust
 // In witness.rs; all fields stay private to that module.
-pub(super) struct WitnessBudget { /* limits and cumulative counters */ }
+pub(super) struct WitnessBudget { /* private limits/counters; not Clone/Copy */ }
 pub(super) struct BoundSource<'s> { /* borrowed names/callees, owned terms */ }
 
 impl WitnessBudget {
@@ -462,8 +464,8 @@ is outside i64, a distinct literal-range-ineligible outcome permits a fold-only
 proposal with the complete prefix witness; if nothing changed, return None.
 This is not a fallback after search failure. If admission passes and any later
 Runner/capture/search/proof/resource operation refuses, discard the entire
-prefix/proposal and retain the original island. In-range constants that were
-eliminated by the prefix need not block graph admission. No temporary folded
+prefix/proposal and retain the original island. Constants eliminated by the
+prefix need not block graph admission. No temporary folded
 AST is installed. Every fold-only proposal still passes the full exact gate.
 
 ## Failure behavior and required actual evidence
@@ -504,3 +506,14 @@ actual execution and limitations. Do not ignore tests, relax limits, fabricate
 stubs, emit raw Lean strings, or claim hosted/Lean/proof/linear-time/performance
 success without corresponding evidence. This draft grants no implementation
 authorization until coordinator publication.
+
+## Explicit coordinator-review decisions
+
+The proposed values/seams still require publication, not writer inference:
+4MiB/16MiB default/HARD logical metadata accounting; a move-only private budget
+carried in RewriteProposal into the same full gate; public checker module path
+`optimize::witness`; exact original same-op callee inventories; and the explicit
+literal-range-only fold profile. The contextual-literal exception and maximal
+island ordering incorporate the coordinator's review instructions. There is no
+remaining known semantic feasibility blocker, and no source authorization is
+implied by this draft commit.
