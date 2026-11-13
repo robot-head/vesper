@@ -54,7 +54,7 @@ explicit stacks and prepays boxes/vectors/strings and origin scans before
 materializing payloads. Existing caller AST storage/allocator/RSS and physical
 OOM retain the explicitly limited contract scope.
 
-## Authored evidence and review
+## Evidence and review
 
 Twelve public tests cover 96 rule/kind combinations, equality composition,
 prior totality, cyclic/irrelevant guards, signed/unsigned overflow and wide
@@ -73,10 +73,39 @@ candidate fixtures already use canonical spans.
 
 Executed in this authoring lane: `rustfmt --edition 2024` on owned Rust files
 and `git diff --check`, both passed. Per the frozen build lease, **no compilation,
-tests, Clippy or Miri were executed by this lane**. The coordinator alone runs
-the combined implementation and relays actual results; authored cases above
-must not be mistaken for an execution claim. Any resulting fixes/evidence will
-be recorded in a follow-up.
+tests, Clippy or Miri were executed by this lane**. The following actual results
+were executed and reported by the coordinator in the combined integration
+worktree, rather than inferred from source review.
+
+At integration head `2260c6a`, the corrected critical run passed **129 tests
+across six targets**, with zero failures or ignored tests:
+
+| Actual target | Passed |
+|---|---:|
+| Library, including three checker-local tests and genuine producer/adversarial tests | 71 |
+| Existing checked arithmetic integration | 18 |
+| Rewrite CLI | 5 |
+| Public checker core, including 96 rule/kind combinations | 12 |
+| Rewrite runtime/evaluator/native behavior | 8 |
+| Independent public adversarial checker tests | 15 |
+
+The actual log `/tmp/rewrite42-critical-fixed.log` explicitly records all three
+checker-local cases and all twelve public core cases as passing. Both independent
+review findings were fixed and executed: conflicting/noncanonical candidate
+typing spans and caller-retained String/Vec capacities are rejected, including
+the source-preserving actual gate tests. Checker source `4af398d` remained
+unchanged during the subsequent producer accounting corrections.
+
+Coordinator strict package all-target Clippy passed; actual output is retained
+in `/tmp/rewrite42-clippy-fixed.log`. The independently authored Python driver
+also passed **340 commands across 49 programs**, recorded in
+`/tmp/rewrite42-python-fixed.log`; its stated scope is the actual default
+witness-gated AST optimizer, evaluator and JIT. This is execution evidence,
+not a formal certificate or performance claim.
+
+The final full-root-package rerun was underway on the same code when this
+report was updated; its result is left to the coordinator's integration report.
+No unreported platform, Miri or broader-package success is inferred here.
 
 ## Limits
 
