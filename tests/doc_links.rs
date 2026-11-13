@@ -241,11 +241,12 @@ fn actual_checker_and_parser_failures_take_precedence_over_broken_links() {
 
 #[test]
 fn private_generated_trait_helpers_and_builtin_only_declarations_are_not_targets() {
-    let source = "/// [Point] [Score] [result]\ncopy struct Point { x: i64 } trait Score { type Out: mod copy; fn score(in self) -> Self::Out; } impl Score for Point { type Out = i64; fn score(in self) -> i64 { self.x } } model ByX: Score for Point { type Out = i64; fn score(in self) -> Self::Out { self.x } } fn result(in p: Point) -> i64 { p.score() }";
+    let source = "/// [Point], [Score], [result]\ncopy struct Point { x: i64 } trait Score { type Out: mod copy; fn score(in self) -> Self::Out; } impl Score for Point { type Out = i64; fn score(in self) -> i64 { self.x } } model ByX: Score for Point { type Out = i64; fn score(in self) -> Self::Out { self.x } } fn result(in p: Point) -> i64 { p.score() }";
     let checked = check::check(&parser::parse(source).module);
     assert!(checked.diagnostics.is_empty());
     assert!(!checked.world.elaboration.generated.is_empty());
     let document = actual(source);
+    assert_eq!(document.intra_doc_links.references.len(), 3);
     let inventory = targets(&document);
     for name in checked.world.elaboration.generated.keys() {
         assert!(!inventory.iter().any(|(p, _)| p == name));
@@ -263,7 +264,7 @@ fn private_generated_trait_helpers_and_builtin_only_declarations_are_not_targets
     );
     for path in ["Option", "Fail", "Point::score"] {
         error(
-            &format!("/// [{path}]\n{source}"),
+            &format!("/// [{path}].\n{source}"),
             "unknown",
             &format!("[{path}]"),
         );
