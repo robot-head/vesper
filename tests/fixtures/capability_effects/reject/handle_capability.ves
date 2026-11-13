@@ -1,0 +1,8 @@
+// expect: E0701
+fn main() -> u64 {
+    handle Realtime in {
+        1
+    } with {
+        return value => value,
+    }
+}

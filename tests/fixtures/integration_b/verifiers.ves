@@ -1,0 +1,56 @@
+// Integration B verifier fixtures: each verifier has a planted violation and
+// a clean function, selected by the policy files next to this module.
+
+// const-time: a branch on a secret parameter (planted) and a secret that only
+// flows to the result (clean).
+fn select(secret: u64, a: u64, b: u64) -> u64 {
+    if secret == 0 {
+        a
+    } else {
+        b
+    }
+}
+
+fn forward(secret: u64, a: u64) -> u64 {
+    secret
+}
+
+// stack and realtime: unbounded recursion (planted).
+fn count(n: u64) -> u64 eff [Fail[ArithOverflow]] {
+    if n == 0 {
+        0
+    } else {
+        count(n - 1)
+    }
+}
+
+// detfloat and realtime: a remainder lowers to an imported `fmod` call.
+fn wrap(x: f64, m: f64) -> f64 eff [Fail[RuntimeError]] {
+    x % m
+}
+
+fn ct_main() -> u64 {
+    forward(select(1, 2, 3), 4)
+}
+
+fn clean_main() -> u64 {
+    forward(7, 4)
+}
+
+fn rec_main() -> u64 {
+    handle Fail[ArithOverflow] in {
+        count(3)
+    } with {
+        return value => value,
+        raise(error, resume) => 0,
+    }
+}
+
+fn float_main() -> f64 {
+    handle Fail[RuntimeError] in {
+        wrap(7.5, 2.0)
+    } with {
+        return value => value,
+        raise(error, resume) => 0.0,
+    }
+}

@@ -1,0 +1,38 @@
+// A realtime control step: only realtime callees, bounded call depth, and an
+// abortive Fail handler (no resumable continuation).
+copy struct Gains {
+    kp: f64,
+    kd: f64,
+}
+
+fn clamp(x: f64, limit: f64) -> f64 eff [Realtime] {
+    if x > limit {
+        limit
+    } else if x < -limit {
+        -limit
+    } else {
+        x
+    }
+}
+
+fn torque(in g: Gains, error: f64, rate: f64) -> f64 eff [Realtime] {
+    clamp(g.kp * error + g.kd * rate, 12.5)
+}
+
+fn step(in g: Gains, error: f64, rate: f64, tick: u64) -> u64 eff [Realtime] {
+    let _t = torque(in g, error, rate);
+    handle Fail[ArithOverflow] in {
+        tick + 1
+    } with {
+        return value => value,
+        raise(overflow, resume) => 0,
+    }
+}
+
+fn main() -> u64 {
+    let g = Gains {
+        kp: 2.0,
+        kd: 0.5
+    };
+    step(in g, 1.0, 0.25, 41)
+}

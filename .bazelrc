@@ -21,6 +21,7 @@ common --@rules_rust//rust/settings:extra_rustc_flag=-Alinker-messages
 
 # Tests that check generated Lean pass it through when it is set.
 test --test_env=VESPER_LEAN
+test --test_env=VESPER_LEAN4LEAN42_ROOT
 test --test_output=errors
 test --test_summary=terse
 
