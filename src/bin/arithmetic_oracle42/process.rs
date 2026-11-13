@@ -361,6 +361,9 @@ impl Session {
         self.tx.take();
     }
     fn cleanup(&mut self, timeout: u64, force: bool) -> Result<Cleanup, HarnessError> {
+        self.cleanup_until(deadline(timeout), force)
+    }
+    fn cleanup_until(&mut self, until: Instant, force: bool) -> Result<Cleanup, HarnessError> {
         if self.closed {
             return Err(err(FailureKind::Io, "duplicate cleanup"));
         }
@@ -369,7 +372,6 @@ impl Session {
         if force {
             let _ = self.child.kill();
         }
-        let until = deadline(timeout);
         let status = loop {
             if let Some(status) = self.child.try_wait()? {
                 break Some(status);
@@ -396,7 +398,10 @@ impl Session {
         })
     }
     fn finish(&mut self, timeout: u64) -> Result<(), HarnessError> {
-        let result = self.cleanup(timeout, false)?;
+        self.finish_until(deadline(timeout))
+    }
+    fn finish_until(&mut self, until: Instant) -> Result<(), HarnessError> {
+        let result = self.cleanup_until(until, false)?;
         self.stderr_fault()?;
         if result.killed {
             return Err(err(FailureKind::Timeout, "child shutdown deadline"));
@@ -741,17 +746,16 @@ impl Engine {
         worker.handled += 1;
         report.max_worker_cases = report.max_worker_cases.max(worker.handled);
         if worker.handled == config.limits.worker_cases {
+            let until = deadline(config.limits.shutdown_timeout_ms);
             worker.session.close_input();
-            let eof = worker
-                .session
-                .receive(deadline(config.limits.shutdown_timeout_ms))?;
+            let eof = worker.session.receive(until)?;
             if eof.is_some() {
                 return Err(err(
                     FailureKind::Protocol,
                     "extra worker response on retirement",
                 ));
             }
-            worker.session.finish(config.limits.shutdown_timeout_ms)?;
+            worker.session.finish_until(until)?;
             self.workers[index] = None;
         }
         report.phase_times.workers_ms += ms(start);
@@ -767,16 +771,13 @@ impl Engine {
         let mut failure = None;
         for worker in &mut self.workers {
             if let Some(mut slot) = worker.take() {
+                let until = deadline(config.limits.shutdown_timeout_ms);
                 slot.session.close_input();
                 let result = (|| {
-                    if slot
-                        .session
-                        .receive(deadline(config.limits.shutdown_timeout_ms))?
-                        .is_some()
-                    {
+                    if slot.session.receive(until)?.is_some() {
                         return Err(err(FailureKind::Protocol, "extra worker terminal frame"));
                     }
-                    slot.session.finish(config.limits.shutdown_timeout_ms)
+                    slot.session.finish_until(until)
                 })();
                 if let Err(e) = result {
                     failure.get_or_insert(e);
@@ -792,22 +793,20 @@ impl Engine {
         let start = Instant::now();
         let mut failure = self.retire_workers(config).err();
         if self.healthy {
+            let until = deadline(config.limits.shutdown_timeout_ms);
             self.lean.close_input();
             let result = (|| {
                 let bytes = self
                     .lean
-                    .receive(deadline(config.limits.shutdown_timeout_ms))?
+                    .receive(until)?
                     .ok_or_else(|| err(FailureKind::Protocol, "missing BYE"))?;
                 protocol::hash_frame(&mut self.responses, &bytes);
                 protocol::bye(&bytes, self.counters)?;
-                if let Some(extra) = self
-                    .lean
-                    .receive(deadline(config.limits.shutdown_timeout_ms))?
-                {
+                if let Some(extra) = self.lean.receive(until)? {
                     protocol::hash_frame(&mut self.responses, &extra);
                     return Err(err(FailureKind::Protocol, "extra Lean terminal frame"));
                 }
-                self.lean.finish(config.limits.shutdown_timeout_ms)
+                self.lean.finish_until(until)
             })();
             if let Err(e) = result {
                 failure.get_or_insert(e);
@@ -1168,14 +1167,12 @@ fn shrink(
             record_rust(&rust, report, true);
             confirmed = true;
             report.max_worker_cases = report.max_worker_cases.max(1);
+            let until = deadline(config.limits.shutdown_timeout_ms);
             child.close_input();
-            if child
-                .receive(deadline(config.limits.shutdown_timeout_ms))?
-                .is_some()
-            {
+            if child.receive(until)?.is_some() {
                 return Err(err(FailureKind::Protocol, "shrink extra response"));
             }
-            child.finish(config.limits.shutdown_timeout_ms)?;
+            child.finish_until(until)?;
             let mismatch = compare(&case, &oracle, &rust).err();
             evidence.shrink_log[index]["status"] = serde_json::json!("completed");
             evidence.shrink_log[index]["mismatch"] =
