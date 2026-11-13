@@ -349,3 +349,106 @@ fn fixtures_are_canonically_formatted() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+fn codes(source: &str) -> Vec<String> {
+    checked(source)
+        .diagnostics
+        .into_iter()
+        .map(|d| d.code)
+        .collect()
+}
+
+#[test]
+fn secret_negation_that_may_overflow_is_rejected() {
+    let leak = "copy struct Secret[T] { value: T } fn f(s: Secret[i64]) -> Secret[i64] eff [ConstTime, Fail[ArithOverflow]] { Secret { value: -s.value } }";
+    assert!(
+        codes(leak).contains(&"E0703".to_string()),
+        "{:?}",
+        codes(leak)
+    );
+}
+
+#[test]
+fn realtime_recursion_through_function_values_is_rejected() {
+    let cycle = "fn apply(sink f: fn() -> u64 eff [Realtime]) -> u64 eff [Realtime] { f() } \
+                 fn recur() -> u64 eff [Realtime] { apply(recur) } fn main() -> u64 { recur() }";
+    assert!(
+        codes(cycle).contains(&"E0722".to_string()),
+        "{:?}",
+        codes(cycle)
+    );
+    let closure = "fn apply(sink f: fn() -> u64 eff [Realtime]) -> u64 eff [Realtime] { f() } \
+                   fn main() -> u64 { apply(|| -> u64 eff [Realtime] { apply(|| -> u64 eff [Realtime] { 1 }) }) }";
+    assert!(
+        codes(closure).contains(&"E0722".to_string()),
+        "{:?}",
+        codes(closure)
+    );
+    // A callback that never calls back is fine.
+    let ok = "fn apply(sink f: fn() -> u64 eff [Realtime]) -> u64 eff [Realtime] { f() } \
+              fn leaf() -> u64 eff [Realtime] { 1 } fn main() -> u64 { apply(leaf) }";
+    assert!(codes(ok).is_empty(), "{:?}", codes(ok));
+}
+
+#[test]
+fn const_time_closures_keep_the_result_boundary() {
+    let leak = "copy struct Secret[T] { value: T } fn main() -> bool { let leak = |s: Secret[bool]| -> bool eff [ConstTime] { s.value }; leak(Secret { value: true }) }";
+    assert!(
+        codes(leak).contains(&"E0706".to_string()),
+        "{:?}",
+        codes(leak)
+    );
+}
+
+#[test]
+fn generic_effect_arguments_use_their_instantiation() {
+    let leak = "copy struct Secret[T] { value: T } linear effect Log[T] { fn write(x: T) -> Unit; } \
+                fn f(s: Secret[u64]) -> Unit eff [ConstTime, Log[u64]] { Log::write(s.value) }";
+    assert!(
+        codes(leak).contains(&"E0705".to_string()),
+        "{:?}",
+        codes(leak)
+    );
+    let ok = "copy struct Secret[T] { value: T } linear effect Log[T] { fn write(x: T) -> Unit; } \
+              fn f(s: Secret[u64]) -> Unit eff [ConstTime, Log[Secret[u64]]] { Log::write(s) }";
+    assert!(codes(ok).is_empty(), "{:?}", codes(ok));
+}
+
+#[test]
+fn function_value_arguments_are_coerced_too() {
+    let bypass = "fn apply(sink f: fn(f64) -> f64 eff [DetFloat], x: f64) -> f64 eff [DetFloat] { f(x) } \
+                  fn main() -> f64 { let invoke = apply; invoke(|x: f64| -> f64 { x % 2.0 }, 1.0) }";
+    assert!(
+        codes(bypass).contains(&"E0708".to_string()),
+        "{:?}",
+        codes(bypass)
+    );
+}
+
+#[test]
+fn nested_patterns_cannot_open_secrets_outside_const_time() {
+    let leak = "copy struct Secret[T] { value: T } fn f(s: Secret[u64]) -> u64 { let (Secret { value },) = (s,); value }";
+    assert!(
+        codes(leak).contains(&"E0707".to_string()),
+        "{:?}",
+        codes(leak)
+    );
+    let wrapped = "copy struct Secret[T] { value: T } copy struct Key { k: Secret[u64] } fn f(key: Key) -> u64 { let Key { k: Secret { value } } = key; value }";
+    assert!(
+        codes(wrapped).contains(&"E0707".to_string()),
+        "{:?}",
+        codes(wrapped)
+    );
+}
+
+#[test]
+fn function_typed_fields_are_callable_values() {
+    let ok = "copy struct Holder { f: fn(f64) -> f64 eff [DetFloat] } fn run(sink h: Holder, x: f64) -> f64 eff [DetFloat] { h.f(x) }";
+    assert!(codes(ok).is_empty(), "{:?}", codes(ok));
+    let plain = "copy struct Holder { f: fn(f64) -> f64 } fn run(sink h: Holder, x: f64) -> f64 eff [DetFloat] { h.f(x) }";
+    assert!(
+        codes(plain).contains(&"E0700".to_string()),
+        "{:?}",
+        codes(plain)
+    );
+}

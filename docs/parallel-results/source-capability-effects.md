@@ -57,7 +57,9 @@ row for it. The discipline binds callees instead:
 - E0722: no recursion, direct or mutual, among realtime functions. The core
   language has no loop construct, so recursion is its only iteration and no
   static bound can be written: every realtime call cycle is rejected at each
-  call site that closes it.
+  call site that closes it. Calls through function values count: each one is
+  an edge to every realtime function whose value is taken anywhere and to
+  every realtime closure, so `apply(recur)` inside `recur` is a cycle.
 - E0723: no handler of a resumable (`linear`) effect inside a realtime body;
   its captured continuation may need a suspended fiber stack. Abortive
   handlers such as `Fail[ArithOverflow]` are allowed.
@@ -92,13 +94,17 @@ row for it. The discipline binds callees instead:
   E0705 rejects passing a secret to a parameter whose type is not secret, to
   an effect operation's public argument, or writing it into a public `inout`
   parameter; E0706 rejects returning a secret-derived value from a non-secret
-  result type (Unit results excepted).
+  result type (Unit results excepted), for named functions and for closures
+  checked under ConstTime alike. Checked unary negation of a secret that may
+  overflow is rejected like the binary operators. Generic effect parameters
+  are judged by their instantiation in the active row.
 - Declassification is an explicit, auditable gate: a `ConstTime` function
   whose name is `declassify` or starts with `declassify_` (the design's
   `declassify_bool`). Only a gate may return a secret's payload as public, and
   a call to a gate yields a public value.
 - Everywhere, E0707: a secret's payload can only be read (field access or
-  destructuring) inside `eff [ConstTime]`, and secret values are never compared
+  destructuring, including nested tuple and struct patterns) inside
+  `eff [ConstTime]`, and secret values are never compared
   with `==`, `!=`, `<`, `<=`, `>` or `>=` (secret types omit Eq and Ord).
 
 These are source typing rules. They do not show that the machine code is
@@ -133,15 +139,17 @@ evidence for any of them.
 
 ## Checks
 
-- `cargo test --locked --test capability_effects`: 12 passed. Accepted
+- `cargo test --locked --test capability_effects`: 19 passed (seven
+  regression tests for the first review round). Accepted
   fixtures check and produce the same value under `vesper run` and `vesper
   jit`; every rejected fixture reports its expected code through the library
   and through `vesper check`, with a span inside the code; every rule has a
   fixture; examples/ still check; `vesper fmt --check` is clean on the fixture
   directory.
-- `cargo fmt --all -- --check`, `cargo clippy --workspace --locked
-  --all-targets -- -D warnings` and `cargo test --workspace --locked`: see
-  the PR for the recorded results.
+- `cargo fmt --all -- --check` and `cargo clippy --workspace --locked
+  --all-targets -- -D warnings`: clean.
+- `cargo test --workspace --locked` on the first head (`00497a3`): 3,339
+  passed, 0 failed, across 379 test binaries.
 
 ## Decisions
 

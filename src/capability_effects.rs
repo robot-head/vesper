@@ -161,6 +161,7 @@ pub(crate) fn handler_rejected(effect: &Effect, span: Span) -> Diagnostic {
 pub(crate) fn check_world(world: &World) -> Vec<Diagnostic> {
     let mut diagnostics = vec![];
     let mut graph: BTreeMap<String, Vec<(String, Span)>> = BTreeMap::new();
+    let mut indirect = BTreeSet::new();
     for f in world.functions.values() {
         let caps = capabilities(&f.effects);
         let mut w = Walker::new(world, f, caps.clone());
@@ -185,11 +186,16 @@ pub(crate) fn check_world(world: &World) -> Vec<Diagnostic> {
                 );
             }
         }
-        if caps.contains(&Capability::Realtime) {
-            graph.insert(f.name.clone(), w.direct_calls.clone());
+        for (node, edges) in std::mem::take(&mut w.edges) {
+            graph.entry(node).or_default().extend(edges);
         }
+        indirect.extend(std::mem::take(&mut w.indirect_targets));
         diagnostics.extend(w.diagnostics);
     }
+    graph.insert(
+        INDIRECT.to_string(),
+        indirect.into_iter().map(|n| (n, 0..0)).collect(),
+    );
     diagnostics.extend(realtime_recursion(&graph));
     diagnostics.sort_by(|a, b| {
         (a.span.start, a.span.end, &a.code).cmp(&(b.span.start, b.span.end, &b.code))
@@ -214,12 +220,27 @@ fn tail_span(e: &Expr) -> Span {
     }
 }
 
+/// Synthetic call-graph node standing for every call through a function
+/// value: it has an edge to each realtime function whose value is taken and
+/// to each realtime closure.
+const INDIRECT: &str = "$indirect";
+/// Prefix of the call-graph node of a realtime closure in plain code.
+const CLOSURE_NODE: &str = "$closure@";
+
 /// Rejects call cycles among realtime functions: recursion has no static
 /// bound in the core language.
 fn realtime_recursion(graph: &BTreeMap<String, Vec<(String, Span)>>) -> Vec<Diagnostic> {
     let mut out = vec![];
     let mut reported = BTreeSet::new();
     for (root, edges) in graph {
+        if root == INDIRECT {
+            continue;
+        }
+        let shown = if root.starts_with(CLOSURE_NODE) {
+            "a realtime closure"
+        } else {
+            root.as_str()
+        };
         for (callee, span) in edges {
             if !graph.contains_key(callee) || reported.contains(&(span.start, span.end)) {
                 continue;
@@ -242,12 +263,19 @@ fn realtime_recursion(graph: &BTreeMap<String, Vec<(String, Span)>>) -> Vec<Diag
             }
             if cycle {
                 reported.insert((span.start, span.end));
+                let message = if callee == INDIRECT {
+                    format!(
+                        "eff [Realtime] call through a function value in '{shown}' may reach it again; recursion has no static bound"
+                    )
+                } else {
+                    format!(
+                        "eff [Realtime] call from '{shown}' to '{callee}' is recursive; recursion has no static bound"
+                    )
+                };
                 out.push(
                     Diagnostic::new(
                         "E0722",
-                        format!(
-                            "eff [Realtime] call from '{root}' to '{callee}' is recursive; recursion has no static bound"
-                        ),
+                        message,
                         span.clone(),
                     )
                     .with_help("realtime code must have a statically bounded call depth; unroll or bound the iteration"),
@@ -277,6 +305,12 @@ struct Walker<'w> {
     scopes: Vec<BTreeMap<String, Local>>,
     diagnostics: Vec<Diagnostic>,
     direct_calls: Vec<(String, Span)>,
+    /// Realtime call-graph node the walk is in (`None` outside realtime
+    /// code), its outgoing edges, and the nodes reachable through function
+    /// values (address-taken realtime functions and realtime closures).
+    node: Option<String>,
+    edges: BTreeMap<String, Vec<(String, Span)>>,
+    indirect_targets: BTreeSet<String>,
 }
 
 enum Callee<'w> {
@@ -297,7 +331,14 @@ impl<'w> Walker<'w> {
             scopes: vec![BTreeMap::new()],
             diagnostics: vec![],
             direct_calls: vec![],
+            node: None,
+            edges: BTreeMap::new(),
+            indirect_targets: BTreeSet::new(),
         };
+        if w.has(Capability::Realtime) {
+            w.node = Some(function.name.clone());
+            w.edges.insert(function.name.clone(), vec![]);
+        }
         for p in &function.params {
             let secret = w.secret_type(&p.ty);
             w.bind(
@@ -440,11 +481,40 @@ impl<'w> Walker<'w> {
 
     /// Outside ConstTime, destructuring a secret exposes its payload.
     fn secret_access_pattern(&mut self, p: &Pattern, t: &Type) {
-        if self.has(Capability::ConstTime) {
+        if self.has(Capability::ConstTime) || !self.secret_type(t) {
             return;
         }
+        // Recurse into the subpatterns with their component types.
+        match (&p.kind, t) {
+            (PatternKind::Tuple(ps), Type::Tuple(ts)) => {
+                for (p, t) in ps.iter().zip(ts) {
+                    self.secret_access_pattern(p, t);
+                }
+            }
+            (PatternKind::Constructor { name, fields, .. }, Type::Named(_, args)) => {
+                if let Some((a, v)) = self.world.constructor(name) {
+                    let vars: BTreeMap<String, Type> = a
+                        .generics
+                        .iter()
+                        .zip(args)
+                        .map(|(g, t)| (g.name.clone(), t.clone()))
+                        .collect();
+                    for (i, (field, sub)) in fields.iter().enumerate() {
+                        let fty = v
+                            .fields
+                            .iter()
+                            .find(|f| &f.name == field)
+                            .or_else(|| v.fields.get(i).filter(|_| field.parse::<usize>().is_ok()))
+                            .map(|f| substitute(&f.ty, &vars));
+                        if let Some(fty) = fty {
+                            self.secret_access_pattern(sub, &fty);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
         if let PatternKind::Constructor { name, .. } = &p.kind
-            && self.secret_type(t)
             && self
                 .world
                 .constructor(name)
@@ -500,7 +570,15 @@ impl<'w> Walker<'w> {
         let typed_secret = self.ty(e).is_some_and(|t| self.secret_type(&t));
         let tainted = match &e.kind {
             ExprKind::Literal(_) => false,
-            ExprKind::Name(n) => self.local(n).is_some_and(|l| l.tainted),
+            ExprKind::Name(n) => {
+                if self.local(n).is_none()
+                    && let Some(f) = self.world.functions.get(n)
+                    && capabilities(&f.effects).contains(&Capability::Realtime)
+                {
+                    self.indirect_targets.insert(n.clone());
+                }
+                self.local(n).is_some_and(|l| l.tainted)
+            }
             ExprKind::Tuple(es) => es.iter().fold(false, |t, e| self.expr(e) | t),
             ExprKind::Struct { name, fields } => {
                 let adt = self.world.constructor(name);
@@ -597,7 +675,27 @@ impl<'w> Walker<'w> {
                 }
                 t
             }
-            ExprKind::Unary(_, v) => self.expr(v),
+            ExprKind::Unary(op, v) => {
+                let t = self.expr(v);
+                if self.has(Capability::ConstTime)
+                    && t
+                    && self
+                        .world
+                        .overflow_ops
+                        .contains(&(e.span.start, e.span.end))
+                {
+                    self.error(
+                        "E0703",
+                        format!(
+                            "eff [ConstTime] checked '{op}' on a secret value may abort depending on the secret (in '{}')",
+                            self.function.name
+                        ),
+                        e.span.clone(),
+                        "use wrapping_sub(0, x) on secrets",
+                    );
+                }
+                t
+            }
             ExprKind::Binary(op, l, r) => {
                 let a = self.expr(l);
                 let b = self.expr(r);
@@ -668,6 +766,7 @@ impl<'w> Walker<'w> {
                 params,
                 effects,
                 body,
+                result,
                 ..
             } => {
                 let outer = self.caps.clone();
@@ -701,6 +800,15 @@ impl<'w> Walker<'w> {
                         }
                     }
                 }
+                let outer_node = self.node.clone();
+                if self.caps.contains(&Capability::Realtime) {
+                    let node = outer_node
+                        .clone()
+                        .unwrap_or_else(|| format!("{CLOSURE_NODE}{}", e.span.start));
+                    self.edges.entry(node.clone()).or_default();
+                    self.indirect_targets.insert(node.clone());
+                    self.node = Some(node);
+                }
                 let t = self.with_scope(|w| {
                     for p in params {
                         let secret = w.secret_type(&p.ty);
@@ -710,14 +818,35 @@ impl<'w> Walker<'w> {
                                 tainted: secret,
                                 lexical_callable: false,
                                 public_param: false,
-                                ty: None,
+                                ty: Some(p.ty.clone()),
                             },
                         );
                     }
                     w.expr(body)
                 });
+                if self.caps.contains(&Capability::ConstTime) && t {
+                    let declared = match self.ty(e) {
+                        Some(Type::Function { result, .. }) => Some(*result),
+                        _ => (*result != Type::Infer).then(|| result.clone()),
+                    };
+                    if declared
+                        .as_ref()
+                        .is_none_or(|r| !self.secret_type(r) && !carries_no_information(r))
+                    {
+                        self.error(
+                            "E0706",
+                            "eff [ConstTime] closure returns a secret-derived value as non-secret"
+                                .to_string(),
+                            tail_span(body),
+                            "wrap the result in a secret type or pass it through an explicit declassify gate",
+                        );
+                    }
+                }
+                self.node = outer_node;
                 self.caps = outer;
-                t
+                // A closure's value is secret only through its captures,
+                // which its own result boundary has already checked.
+                false
             }
             ExprKind::Handle {
                 effect,
@@ -919,7 +1048,10 @@ impl<'w> Walker<'w> {
                 {
                     return Callee::Function(f);
                 }
-                Callee::Unknown
+                match self.ty(callee) {
+                    Some(t @ Type::Function { .. }) => Callee::Value(Some(t), false),
+                    _ => Callee::Unknown,
+                }
             }
             _ => Callee::Value(self.ty(callee), false),
         }
@@ -928,7 +1060,7 @@ impl<'w> Walker<'w> {
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg]) -> bool {
         let callee_taint = match &callee.kind {
             ExprKind::Field(base, _) => self.expr(base),
-            ExprKind::Name(_) => self.expr(callee),
+            ExprKind::Name(n) => self.local(n).is_some_and(|l| l.tainted),
             _ => self.expr(callee),
         };
         let resolved = self.resolve(callee);
@@ -949,6 +1081,7 @@ impl<'w> Walker<'w> {
             Callee::Constructor | Callee::Intrinsic => any,
             Callee::Function(f) => {
                 self.direct_calls.push((f.name.clone(), span.clone()));
+                self.edge(&f.name, span.clone());
                 self.require_carried(&f.name, &f.effects, span.clone());
                 let mut params: Vec<Type> =
                     f.params.iter().map(|p| substitute(&p.ty, &vars)).collect();
@@ -984,6 +1117,9 @@ impl<'w> Walker<'w> {
                 any
             }
             Callee::Value(ty, lexical) => {
+                if !lexical {
+                    self.edge(INDIRECT, span.clone());
+                }
                 let effects = match &ty {
                     Some(Type::Function { effects, .. }) => Some(effects.clone()),
                     _ => None,
@@ -1018,6 +1154,7 @@ impl<'w> Walker<'w> {
                 }
                 if let Some(Type::Function { params, .. }) = &ty {
                     for ((t, a), (_, p)) in taints.iter().zip(args).zip(params) {
+                        self.coerce(&a.expr, p);
                         if *t && self.has(Capability::ConstTime) && !lexical && !self.secret_type(p)
                         {
                             self.error(
@@ -1082,12 +1219,26 @@ impl<'w> Walker<'w> {
             );
         }
         if self.has(Capability::ConstTime) {
-            let vars = generic_vars_from_call(self.world, e);
+            // Instantiate the effect's generics from the active row, then
+            // from the call: a generic parameter is secret only when its
+            // instantiation is.
+            let mut vars: BTreeMap<String, Type> = self
+                .function
+                .effects
+                .instances
+                .iter()
+                .find(|i| i.name == d.name && i.args.len() == d.generics.len())
+                .map(|i| {
+                    d.generics
+                        .iter()
+                        .zip(&i.args)
+                        .map(|(g, t)| (g.name.clone(), t.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            vars.extend(generic_vars_from_call(self.world, e));
             for ((t, a), p) in taints.iter().zip(args).zip(&op.params) {
-                if *t
-                    && !self.secret_type(&substitute(&p.ty, &vars))
-                    && !is_generic(&p.ty, &d.generics)
-                {
+                if *t && !self.secret_type(&substitute(&p.ty, &vars)) {
                     self.error(
                         "E0705",
                         format!(
@@ -1099,6 +1250,15 @@ impl<'w> Walker<'w> {
                     );
                 }
             }
+        }
+    }
+
+    fn edge(&mut self, callee: &str, span: Span) {
+        if let Some(node) = &self.node {
+            self.edges
+                .entry(node.clone())
+                .or_default()
+                .push((callee.to_string(), span));
         }
     }
 
@@ -1231,10 +1391,6 @@ fn generic_vars_from_call(world: &World, e: &Expr) -> BTreeMap<String, Type> {
         .get(&(e.span.start, e.span.end))
         .cloned()
         .unwrap_or_default()
-}
-
-fn is_generic(t: &Type, generics: &[Generic]) -> bool {
-    matches!(t, Type::Named(n, a) if a.is_empty() && generics.iter().any(|g| &g.name == n))
 }
 
 fn mentions_float(t: &Type) -> bool {
