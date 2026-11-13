@@ -41,13 +41,21 @@ macro preview cannot authorize definitions on original macro source: navigation
 remains unavailable with the real parse classification. Actual type errors and
 damaged source retain semantic/parse unavailable errors.
 
-Validation so far: standalone Rust compilation/strict Clippy, rustfmt, Python
-syntax and whitespace checks pass. All three ordinary fixture programs pass the
-actual compiler; a baseline framed stdio request confirms the local fixture is
-admitted by existing guarded analysis and resolves its shadowed local variable.
-Those baseline checks do not claim the new doc-navigation fallback executes.
+Actual validation against the provider-integrated executable at
+`/workspace/vesper/target/parallel-next/debug/vesper`, built from coordinator
+source `bd392e1` (integration head `6793b3c`), passes:
 
-**Feature runtime results are pending the provider-integrated executable.**
-The coordinator will supply that actual binary before both harnesses run. No
-URI filesystem reads, program/guest/Lean execution, proof certificate, timing,
-RSS, BuildBuddy or other-platform execution is claimed.
+- All five independent Rust executable tests, zero failures and zero ignores.
+- Nine Python stdio sessions with 86 JSON-RPC requests, including exact current
+  original-source Locations and every rejection/null/resource distinction above.
+- Standalone Rust compilation/strict Clippy, rustfmt, Python syntax and whitespace
+  checks. No source, test expectation or production limit needed adjustment after
+  these actual feature runs.
+
+All three ordinary fixture programs additionally pass the actual compiler; the
+pre-integration framed baseline confirmed existing guarded analysis and lexical
+shadowing before the fallback existed. Those were fixture baselines, separate
+from the new feature results above. Root performs integrated Cargo verification
+and independent provider review separately. These are local Linux results;
+hosted native and BuildBuddy evidence remain separate. No program/guest/Lean
+execution, proof certificate, timing or RSS guarantee is claimed.
