@@ -58,7 +58,12 @@ pub fn cases() -> Vec<Case> {
             a.stx(Size::W, Reg::R6, off, Reg::R0);
         }
         ret(&mut a, 0);
-        add("accept/tc_skb_fields", None, Kernel::Accepts, fin(a, SchedCls));
+        add(
+            "accept/tc_skb_fields",
+            None,
+            Kernel::Accepts,
+            fin(a, SchedCls),
+        );
     }
     {
         // direct packet read and write in a tc classifier
@@ -69,7 +74,12 @@ pub fn cases() -> Vec<Case> {
         a.stx(Size::H, Reg::R2, 0, Reg::R5);
         a.bind(out).unwrap();
         ret(&mut a, 0);
-        add("accept/tc_packet_rw", None, Kernel::Accepts, fin(a, SchedCls));
+        add(
+            "accept/tc_packet_rw",
+            None,
+            Kernel::Accepts,
+            fin(a, SchedCls),
+        );
     }
     {
         let mut a = Asm::new();
@@ -177,7 +187,12 @@ pub fn cases() -> Vec<Case> {
         }
         a.call(h::GET_CURRENT_UID_GID);
         ret(&mut a, 0);
-        add("accept/kprobe_pt_regs", None, Kernel::Accepts, fin(a, Kprobe));
+        add(
+            "accept/kprobe_pt_regs",
+            None,
+            Kernel::Accepts,
+            fin(a, Kprobe),
+        );
 
         let mut a = Asm::new();
         a.ldx(Size::DW, Reg::R2, Reg::R1, 168);
@@ -486,7 +501,12 @@ pub fn cases() -> Vec<Case> {
         ret(&mut a, 2);
         let mut p = fin(a, Xdp);
         p.license = "Proprietary".into();
-        add("reject/kfunc_license", Some("kfunc.license"), Kernel::Rejects, p);
+        add(
+            "reject/kfunc_license",
+            Some("kfunc.license"),
+            Kernel::Rejects,
+            p,
+        );
     }
     {
         let mut a = Asm::new();

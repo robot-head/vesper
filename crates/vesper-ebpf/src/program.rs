@@ -45,7 +45,10 @@ impl MapKind {
     }
 
     pub fn is_array(self) -> bool {
-        matches!(self, MapKind::Array | MapKind::PerCpuArray | MapKind::ProgArray)
+        matches!(
+            self,
+            MapKind::Array | MapKind::PerCpuArray | MapKind::ProgArray
+        )
     }
 }
 
@@ -162,9 +165,7 @@ impl ProgramType {
     }
 
     pub fn from_kernel_type(t: u32) -> Option<ProgramType> {
-        ProgramType::ALL
-            .into_iter()
-            .find(|p| p.kernel_type() == t)
+        ProgramType::ALL.into_iter().find(|p| p.kernel_type() == t)
     }
 
     /// Whether the program reads and writes packet bytes directly

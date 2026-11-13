@@ -231,7 +231,8 @@ fn load_inner(prog: &Program, kernel_ext: bool) -> Result<Loaded, LoadError> {
         let mut p = prog.clone();
         // kfunc ids are already in the instructions: no extern types
         p.kfuncs.clear();
-        let ob = crate::btf_ext::build(&p, "prog").map_err(|e| LoadError::Invalid(e.to_string()))?;
+        let ob =
+            crate::btf_ext::build(&p, "prog").map_err(|e| LoadError::Invalid(e.to_string()))?;
         func_info = crate::btf::FuncInfo::bytes(&ob.func_info);
         for r in &ob.line_records {
             for w in [r[0] / 8, r[1], r[2], r[3]] {

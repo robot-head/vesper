@@ -114,10 +114,16 @@ fn relocated(p: &Program) -> Vec<(i16, i32)> {
 fn core_relocates_against_a_synthetic_target() {
     let p = core_probe();
     assert_eq!(p.core_relos.len(), 5);
-    assert_eq!(relocated(&p), vec![(0, 0), (8, 0), (0, 16), (0, 98), (0, 1)]);
+    assert_eq!(
+        relocated(&p),
+        vec![(0, 0), (8, 0), (0, 16), (0, 98), (0, 1)]
+    );
     let r = apply(&p, &synthetic_target()).unwrap();
     assert!(r.core_relos.is_empty());
-    assert_eq!(relocated(&r), vec![(32, 0), (24, 0), (0, 40), (0, 3), (0, 1)]);
+    assert_eq!(
+        relocated(&r),
+        vec![(32, 0), (24, 0), (0, 40), (0, 3), (0, 1)]
+    );
     // field-exists of a member the target lacks is 0, not an error
     let mut a = Asm::new();
     let local = LocalType::structure("pt_regs", 8, vec![("orig_ax", ulong(), 0)]);
@@ -231,10 +237,7 @@ fn aya_reads_and_relocates_our_btf_ext() {
     let mut obj = aya_obj::Object::parse(&bytes).expect("aya-obj parses the object");
     assert!(obj.btf_ext.is_some(), "aya-obj found .BTF.ext");
     let prog = &obj.programs["core_probe"];
-    assert!(matches!(
-        prog.section,
-        aya_obj::ProgramSection::KProbe { .. }
-    ));
+    assert!(matches!(prog.section, aya_obj::ProgramSection::KProbe));
     {
         let f = obj.functions.values().next().expect("function");
         assert_eq!(f.line_info.line_info.len(), p.lines.len());

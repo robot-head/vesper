@@ -462,9 +462,9 @@ impl Btf {
             | BtfType::Float { size, .. }
             | BtfType::Datasec { size, .. } => Some(*size as u64),
             BtfType::Ptr { .. } => Some(8),
-            BtfType::Array { elem, len, .. } => {
-                self.size_of_depth(*elem, depth + 1)?.checked_mul(*len as u64)
-            }
+            BtfType::Array { elem, len, .. } => self
+                .size_of_depth(*elem, depth + 1)?
+                .checked_mul(*len as u64),
             _ => None,
         }
     }
@@ -515,7 +515,14 @@ impl BtfBuilder {
     }
 
     /// Append a type header; returns the new type id.
-    pub fn header(&mut self, name: u32, kind: u32, vlen: u32, kflag: bool, size_or_type: u32) -> u32 {
+    pub fn header(
+        &mut self,
+        name: u32,
+        kind: u32,
+        vlen: u32,
+        kflag: bool,
+        size_or_type: u32,
+    ) -> u32 {
         self.word(name);
         self.word((kind << 24) | (vlen & 0xffff) | if kflag { 1 << 31 } else { 0 });
         self.word(size_or_type);
@@ -543,7 +550,13 @@ impl BtfBuilder {
     }
 
     /// `members`: (name, type, bit offset).
-    pub fn structure(&mut self, name: &str, union: bool, size: u32, members: &[(&str, u32, u32)]) -> u32 {
+    pub fn structure(
+        &mut self,
+        name: &str,
+        union: bool,
+        size: u32,
+        members: &[(&str, u32, u32)],
+    ) -> u32 {
         let names: Vec<u32> = members.iter().map(|m| self.str(m.0)).collect();
         let n = self.str(name);
         let kind = if union { KIND_UNION } else { KIND_STRUCT };
@@ -560,7 +573,9 @@ impl BtfBuilder {
         let signed = values.iter().any(|v| v.1 < 0);
         let names: Vec<u32> = values.iter().map(|v| self.str(v.0)).collect();
         let n = self.str(name);
-        let wide = values.iter().any(|v| v.1 > u32::MAX as i64 || v.1 < i32::MIN as i64);
+        let wide = values
+            .iter()
+            .any(|v| v.1 > u32::MAX as i64 || v.1 < i32::MIN as i64);
         if wide {
             let t = self.header(n, KIND_ENUM64, values.len() as u32, signed, size);
             for (v, nm) in values.iter().zip(names) {
@@ -707,7 +722,13 @@ pub fn subprog_starts(prog: &crate::Program) -> Vec<usize> {
 fn c_identifier(s: &str) -> String {
     let mut out: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
         out.insert(0, '_');
@@ -735,7 +756,11 @@ pub fn add_func_types(b: &mut BtfBuilder, prog: &crate::Program) -> Vec<FuncInfo
             .find(|(_, e)| *e == start)
             .map(|(n, _)| n.clone());
         let (name, proto, linkage) = if start == 0 {
-            (named.unwrap_or_else(|| prog.name.clone()), main_proto, FUNC_GLOBAL)
+            (
+                named.unwrap_or_else(|| prog.name.clone()),
+                main_proto,
+                FUNC_GLOBAL,
+            )
         } else {
             (
                 named.unwrap_or_else(|| format!("sub_{start}")),
@@ -759,4 +784,3 @@ pub fn program_btf(prog: &crate::Program) -> (Vec<u8>, Vec<FuncInfo>) {
     let infos = add_func_types(&mut b, prog);
     (b.finish(), infos)
 }
-

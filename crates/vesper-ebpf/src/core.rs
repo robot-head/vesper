@@ -188,7 +188,11 @@ pub enum CoreError {
     /// The instruction cannot carry the value.
     BadInstruction { slot: usize, detail: String },
     /// The instruction's value is not the local value.
-    LocalMismatch { slot: usize, found: u64, expected: u64 },
+    LocalMismatch {
+        slot: usize,
+        found: u64,
+        expected: u64,
+    },
 }
 
 impl fmt::Display for CoreError {
@@ -241,7 +245,9 @@ impl CoreSpec {
     /// a decimal component indexes an array).
     pub fn field(kind: CoreKind, root: LocalType, path: &[&str]) -> Result<CoreSpec, CoreError> {
         if !kind.is_field() {
-            return Err(CoreError::BadAccess(format!("{kind:?} is not a field kind")));
+            return Err(CoreError::BadAccess(format!(
+                "{kind:?} is not a field kind"
+            )));
         }
         let mut access = vec![0];
         let mut cur = &root;
@@ -287,10 +293,14 @@ impl CoreSpec {
 
     pub fn enumval(kind: CoreKind, root: LocalType, name: &str) -> Result<CoreSpec, CoreError> {
         if !kind.is_enumval() {
-            return Err(CoreError::BadAccess(format!("{kind:?} is not an enumval kind")));
+            return Err(CoreError::BadAccess(format!(
+                "{kind:?} is not an enumval kind"
+            )));
         }
         let LocalType::Enum { values, .. } = &root else {
-            return Err(CoreError::BadAccess("enumval relocation on a non-enum".into()));
+            return Err(CoreError::BadAccess(
+                "enumval relocation on a non-enum".into(),
+            ));
         };
         let i = values
             .iter()
@@ -313,7 +323,12 @@ impl CoreSpec {
     }
 
     fn describe(&self) -> String {
-        format!("{:?} {}:{}", self.kind, self.root.name(), self.access_string())
+        format!(
+            "{:?} {}:{}",
+            self.kind,
+            self.root.name(),
+            self.access_string()
+        )
     }
 
     /// The local field reached by the access path: (byte offset, type).
@@ -470,7 +485,7 @@ impl CoreSpec {
                 _ => return Err(CoreError::BadAccess(self.access_string())),
             }
         }
-        if bits % 8 != 0 {
+        if !bits.is_multiple_of(8) {
             return Err(CoreError::Bitfield(self.access_string()));
         }
         Ok(Some(match self.kind {
@@ -481,7 +496,9 @@ impl CoreSpec {
             },
             CoreKind::FieldExists => 1,
             CoreKind::FieldSigned => match target.get(target.skip_mods(cur)) {
-                Some(BtfType::Int { encoding, .. }) => (encoding & crate::btf::INT_SIGNED != 0) as u64,
+                Some(BtfType::Int { encoding, .. }) => {
+                    (encoding & crate::btf::INT_SIGNED != 0) as u64
+                }
                 Some(BtfType::Enum { signed, .. }) => *signed as u64,
                 _ => 0,
             },
@@ -537,7 +554,12 @@ fn find_member(btf: &Btf, id: u32, name: &str, depth: u32) -> Option<(u32, u32, 
 /// Write `value` into the instruction at `slot` (the forms the kernel's
 /// `bpf_core_patch_insn` supports: ALU with an immediate, a load/store
 /// offset, `LD_IMM64`), after checking it holds `expected`.
-pub fn patch(insns: &mut [RawInsn], slot: usize, expected: u64, value: u64) -> Result<(), CoreError> {
+pub fn patch(
+    insns: &mut [RawInsn],
+    slot: usize,
+    expected: u64,
+    value: u64,
+) -> Result<(), CoreError> {
     let bad = |d: &str| CoreError::BadInstruction {
         slot,
         detail: d.to_owned(),
@@ -569,7 +591,8 @@ pub fn patch(insns: &mut [RawInsn], slot: usize, expected: u64, value: u64) -> R
             i.off = i16::try_from(value).map_err(|_| bad("offset does not fit 16 bits"))?;
         }
         class::LD if code == 0x18 && slot + 1 < insns.len() => {
-            let found = (insns[slot].imm as u32 as u64) | ((insns[slot + 1].imm as u32 as u64) << 32);
+            let found =
+                (insns[slot].imm as u32 as u64) | ((insns[slot + 1].imm as u32 as u64) << 32);
             if found != expected {
                 return Err(CoreError::LocalMismatch {
                     slot,

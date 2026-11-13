@@ -13,8 +13,13 @@
 //!   as clang does, as pointers to arrays whose length is the value);
 //! * `.BTF` with the minimal type information describing `.maps`
 //!   (`int`, the array and pointer types, one struct and `VAR` per map and
-//!   the `.maps` `DATASEC`). No `.BTF.ext` (line info, CO-RE) is emitted:
-//!   `@btf_core` relocations are out of scope.
+//!   the `.maps` `DATASEC`);
+//! * for programs with subprograms, kfunc calls, CO-RE relocations or line
+//!   info, a richer `.BTF` and a `.BTF.ext` instead ([`crate::btf_ext`]):
+//!   one `FUNC` per subprogram (func info), line info, CO-RE relocation
+//!   records with their local types, and extern `FUNC`s in `.ksyms` for
+//!   kfuncs, whose call sites carry an `R_BPF_64_32` relocation against an
+//!   undefined symbol of the kfunc's name (as clang emits for `__ksym`).
 //!
 //! Map definitions are read back from the BTF by [`read_object`], so the
 //! round trip exercises the same information an external loader uses.
@@ -534,9 +539,7 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
         let n = s.name().map_err(|e| ElfError::Read(e.to_string()))?;
         if let Some(t) = parse_section(n) {
             if found.is_some() {
-                return Err(ElfError::Malformed(
-                    "more than one program section".into(),
-                ));
+                return Err(ElfError::Malformed("more than one program section".into()));
             }
             found = Some((s, t));
         }

@@ -1,8 +1,8 @@
 //! The §27.5 pre-flight abstract verifier.
 //!
 //! It models the parts of Linux `kernel/bpf/verifier.c` that decide whether
-//! the programs this crate emits are safe, for privileged (`CAP_BPF`) XDP
-//! programs:
+//! the programs this crate emits are safe, for privileged (`CAP_BPF`) XDP,
+//! tc (`sched_cls`), tracepoint and kprobe programs:
 //!
 //! * a CFG pass: decodable instructions, in-range jumps that stay inside
 //!   their subprogram and never land in the second slot of `LD_IMM64`, no
@@ -18,6 +18,11 @@
 //!   must be released on every path before the program exits;
 //! * path exploration with state pruning against fully explored states
 //!   and rejection of loops that revisit an in-progress state unchanged.
+//! * per-type context layouts and helper sets; tail calls through program
+//!   arrays; `bpf_loop` callbacks, explored once per iteration until their
+//!   entry state repeats; the `bpf_preempt_disable`/`enable` kfuncs;
+//! * scalar ids: a 64-bit `mov` links two scalar registers, and a bound
+//!   learnt for one by a comparison applies to both.
 //!
 //! The direction that matters is soundness: a program this verifier accepts
 //! must be one the kernel accepts and one that cannot fault. Where the
@@ -2102,7 +2107,10 @@ impl<'a> Verifier<'a> {
             other => Err(err(
                 pc,
                 "call.arg_type",
-                format!("{what}: expected pointer to writable memory, got {}", other.name()),
+                format!(
+                    "{what}: expected pointer to writable memory, got {}",
+                    other.name()
+                ),
             )),
         }
     }
@@ -2119,7 +2127,10 @@ impl<'a> Verifier<'a> {
                 return Err(err(
                     pc,
                     "call.arg_type",
-                    format!("r2: expected a callback (BPF_PSEUDO_FUNC), got {}", other.name()),
+                    format!(
+                        "r2: expected a callback (BPF_PSEUDO_FUNC), got {}",
+                        other.name()
+                    ),
                 ));
             }
         };
@@ -2203,7 +2214,11 @@ impl<'a> Verifier<'a> {
         match k.name.as_str() {
             "bpf_preempt_disable" => {
                 st.preempt = st.preempt.checked_add(1).ok_or_else(|| {
-                    err(pc, "kfunc.unbalanced", "bpf_preempt_disable nesting overflow")
+                    err(
+                        pc,
+                        "kfunc.unbalanced",
+                        "bpf_preempt_disable nesting overflow",
+                    )
                 })?;
             }
             "bpf_preempt_enable" => {

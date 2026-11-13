@@ -273,7 +273,9 @@ fn records<'a>(
         let len = n
             .checked_mul(rec as usize)
             .ok_or_else(|| bad(".BTF.ext count overflow"))?;
-        let end = at.checked_add(len).ok_or_else(|| bad(".BTF.ext overflow"))?;
+        let end = at
+            .checked_add(len)
+            .ok_or_else(|| bad(".BTF.ext overflow"))?;
         let body = sub
             .get(at..end)
             .ok_or_else(|| bad(".BTF.ext records past the end"))?;
@@ -286,7 +288,7 @@ fn records<'a>(
 }
 
 fn slot_of(byte_off: u32) -> Result<usize, BtfError> {
-    if byte_off % 8 != 0 {
+    if !byte_off.is_multiple_of(8) {
         return Err(bad(format!("instruction offset {byte_off} is not a slot")));
     }
     Ok((byte_off / 8) as usize)
@@ -337,7 +339,10 @@ pub fn parse_ext(btf: &Btf, ext: &[u8], section: &str) -> Result<ObjectExt, BtfE
         let access: Vec<u32> = btf
             .name(rd(r, 8)?)
             .split(':')
-            .map(|p| p.parse().map_err(|_| bad(format!("CO-RE access string {p:?}"))))
+            .map(|p| {
+                p.parse()
+                    .map_err(|_| bad(format!("CO-RE access string {p:?}")))
+            })
             .collect::<Result<_, _>>()?;
         if access.is_empty() {
             return Err(bad("empty CO-RE access string"));

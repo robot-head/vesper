@@ -794,7 +794,12 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                         saved: [regs[6], regs[7], regs[8], regs[9]],
                         fp: regs[10],
                         ret_pc: next,
-                        lp: Some(LoopFrame { entry, i: 0, n, arg }),
+                        lp: Some(LoopFrame {
+                            entry,
+                            i: 0,
+                            n,
+                            arg,
+                        }),
                     });
                     regs[10] = new_stack(env);
                     init.fill(false);
@@ -806,9 +811,10 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                 }
             }
             Insn::Call(CallTarget::Kfunc(_))
-                if prog.kfuncs.iter().any(|k| {
-                    k.slot == pc && crate::helpers::KFUNCS.contains(&k.name.as_str())
-                }) =>
+                if prog
+                    .kfuncs
+                    .iter()
+                    .any(|k| k.slot == pc && crate::helpers::KFUNCS.contains(&k.name.as_str())) =>
             {
                 // bpf_preempt_disable/enable: no observable effect here
                 init[0..=5].fill(false);
