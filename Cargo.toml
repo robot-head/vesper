@@ -56,6 +56,7 @@ members = [
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
     "crates/vesper-warp-tls",
+    "crates/vesper-nexus",
     "crates/vesper-kinetic",
     "experiments/native-pulse",
 ]
@@ -114,6 +115,7 @@ default-members = [
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
     "crates/vesper-warp-tls",
+    "crates/vesper-nexus",
     "crates/vesper-kinetic",
     "experiments/native-pulse",
 ]

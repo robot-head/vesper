@@ -2,6 +2,7 @@
 # Host-library acceptance examples; no device/server/platform performance claim.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+. scripts/bazel-lib.sh
 for pair in \
   'vesper-serde bounded_json' \
   'vesper-serde binary_codecs' \
@@ -16,5 +17,5 @@ for pair in \
   'vesper-aether snapshot_pages' \
   'vesper-aether packed_queue'; do
   read -r package example <<< "$pair"
-  cargo run --locked -p "$package" --example "$example"
+  bazel_exec "//crates/$package:example/$example"
 done
