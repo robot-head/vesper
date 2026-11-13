@@ -30,6 +30,12 @@ fn deadline(timeout: u64) -> Instant {
 
 /// PATH-aware lookup also works with Bazel's bare CARGO_BIN_EXE names.
 pub fn resolve_executable(path: &Path) -> Result<PathBuf, HarnessError> {
+    fs::canonicalize(resolve_invocation(path)?).map_err(Into::into)
+}
+
+// Multicall launchers dispatch using argv[0]. In particular, canonicalizing
+// rustc -> rustup or lean -> elan before invocation changes the selected tool.
+fn resolve_invocation(path: &Path) -> Result<PathBuf, HarnessError> {
     let candidates = |p: PathBuf| -> Vec<PathBuf> {
         #[cfg(windows)]
         {
@@ -60,7 +66,11 @@ pub fn resolve_executable(path: &Path) -> Result<PathBuf, HarnessError> {
                 continue;
             }
         }
-        return fs::canonicalize(candidate).map_err(Into::into);
+        return if candidate.is_absolute() {
+            Ok(candidate)
+        } else {
+            Ok(std::env::current_dir()?.join(candidate))
+        };
     }
     Err(err(FailureKind::Io, "executable not found"))
 }
@@ -453,6 +463,11 @@ fn version(bytes: &[u8]) -> Result<String, HarnessError> {
     }
     Ok(s.to_owned())
 }
+
+fn rustc_version(bytes: &[u8]) -> Option<String> {
+    let value = std::str::from_utf8(bytes).ok()?.trim();
+    (value.starts_with("rustc ") && value.len() <= 1024).then(|| value.to_owned())
+}
 fn lean_command(program: &Path, root: &Path, search: &std::ffi::OsStr) -> Command {
     let mut cmd = command(program, Some(root));
     cmd.env("LEAN_PATH", search);
@@ -504,7 +519,7 @@ impl Engine {
         }
         let worker_path = resolve_executable(&config.worker_exe)?;
         report.worker_blake3 = file_hash(&worker_path)?;
-        let configured = resolve_executable(&config.lean)?;
+        let configured = resolve_invocation(&config.lean)?;
         let mut cmd = command(&configured, None);
         cmd.arg("--version");
         report.tools.lean_version = version(&tool(cmd, &config.limits)?)?;
@@ -521,15 +536,14 @@ impl Engine {
         let mut cmd = command(&lean, None);
         cmd.arg("--version");
         report.tools.lean_version = version(&tool(cmd, &config.limits)?)?;
-        report.tools.rustc_version = resolve_executable(Path::new("rustc"))
+        report.tools.rustc_version = resolve_invocation(Path::new("rustc"))
             .ok()
             .and_then(|p| {
                 let mut cmd = command(&p, None);
                 cmd.arg("--version");
                 tool(cmd, &config.limits).ok()
             })
-            .and_then(|b| String::from_utf8(b).ok())
-            .map(|s| s.trim().chars().take(1024).collect())
+            .and_then(|bytes| rustc_version(&bytes))
             .unwrap_or_else(|| "unavailable".into());
         let root = TempRoot::new(&std::env::temp_dir(), "vesper-oracle42")?;
         for (name, source) in [
@@ -1487,6 +1501,28 @@ pub mod testing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn launcher_lookup_preserves_symlink_basename_but_worker_lookup_canonicalizes() {
+        let root = TempRoot::new(&std::env::temp_dir(), "oracle42-launcher-test").unwrap();
+        let target = fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        let alias = root.0.join("rustc");
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+        assert_eq!(resolve_invocation(&alias).unwrap(), alias);
+        assert_eq!(resolve_executable(&alias).unwrap(), target);
+    }
+
+    #[test]
+    fn optional_rustc_metadata_never_reports_a_multicall_launcher_version() {
+        assert_eq!(rustc_version(b"rustup 1.28.2 (1234)\n"), None);
+        assert_eq!(rustc_version(b"elan 4.1.0\n"), None);
+        assert_eq!(
+            rustc_version(b"rustc 1.99.0 (example)\n"),
+            Some("rustc 1.99.0 (example)".into())
+        );
+        assert_eq!(rustc_version(&[0xff]), None);
+    }
 
     #[test]
     fn complete_artifact_quota_is_checked_before_destination_initialization() {
