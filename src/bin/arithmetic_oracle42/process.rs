@@ -135,6 +135,7 @@ struct Session {
     writer: Option<JoinHandle<()>>,
     stderr: Option<JoinHandle<()>>,
     stderr_state: Arc<Mutex<StderrState>>,
+    #[cfg(test)]
     peak: Arc<AtomicUsize>,
     closed: bool,
 }
@@ -242,6 +243,7 @@ impl Session {
             writer: Some(writer),
             stderr: Some(stderr),
             stderr_state,
+            #[cfg(test)]
             peak,
             closed: false,
         })
@@ -826,13 +828,12 @@ impl Engine {
 }
 
 fn validate_rust_answer(answer: &RustAnswer) -> Result<(), HarnessError> {
-    if let RustAnswer::Diagnostic { codes, .. } = answer {
-        if codes.is_empty()
+    if let RustAnswer::Diagnostic { codes, .. } = answer
+        && (codes.is_empty()
             || codes.len() > 16
-            || codes.iter().any(|s| s.len() > 16 || !s.is_ascii())
-        {
-            return Err(err(FailureKind::Protocol, "worker diagnostic envelope"));
-        }
+            || codes.iter().any(|s| s.len() > 16 || !s.is_ascii()))
+    {
+        return Err(err(FailureKind::Protocol, "worker diagnostic envelope"));
     }
     Ok(())
 }
@@ -880,10 +881,10 @@ fn compare(case: &Case, oracle: &OracleAnswer, rust: &RustAnswer) -> Result<(), 
             OracleAnswer::Outcome { outcome, .. },
             RustAnswer::Outcomes { evaluator, jit },
         ) => {
-            if let Outcome::Value(n) = outcome {
-                if !case.program.kind.fits(*n) {
-                    return Err(err(FailureKind::Protocol, "Lean value kind range"));
-                }
+            if let Outcome::Value(n) = outcome
+                && !case.program.kind.fits(*n)
+            {
+                return Err(err(FailureKind::Protocol, "Lean value kind range"));
             }
             if evaluator.iter().chain(jit.iter()).any(|a| a != outcome) {
                 return Err(err(
@@ -1281,7 +1282,7 @@ fn artifact_bytes(
             serde_json::to_vec(&RunFailure {
                 error: error.clone(),
                 case_id: snapshot.first_failed_case,
-                partial: snapshot,
+                partial: Box::new(snapshot),
             }),
         )
     } else {
@@ -1324,22 +1325,21 @@ pub fn run(config: &RunConfig) -> Result<RunReport, RunFailure> {
             return Err(RunFailure {
                 error,
                 case_id: report.first_failed_case,
-                partial: report,
+                partial: Box::new(report),
             });
         }
     };
     let mut failure = drive(config, &mut engine, &mut report, &mut evidence).err();
-    if let Some(item) = &mut evidence {
-        if let Err(error) = shrink(config, &mut engine, &mut report, item) {
-            if failure.is_none() {
-                failure = Some(error);
-            }
-        }
+    if let Some(item) = &mut evidence
+        && let Err(error) = shrink(config, &mut engine, &mut report, item)
+        && failure.is_none()
+    {
+        failure = Some(error);
     }
-    if let Err(error) = engine.finish(config, &mut report) {
-        if failure.is_none() {
-            failure = Some(error);
-        }
+    if let Err(error) = engine.finish(config, &mut report)
+        && failure.is_none()
+    {
+        failure = Some(error);
     }
     engine.hashes(&mut report);
     report.elapsed_ms = ms(start);
@@ -1369,7 +1369,7 @@ pub fn run(config: &RunConfig) -> Result<RunReport, RunFailure> {
         Some(error) => Err(RunFailure {
             error,
             case_id: report.first_failed_case,
-            partial: report,
+            partial: Box::new(report),
         }),
         None => Ok(report),
     }

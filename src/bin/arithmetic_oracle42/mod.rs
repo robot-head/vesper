@@ -281,8 +281,8 @@ pub struct Mode {
 #[serde(rename_all = "snake_case")]
 pub enum RustAnswer {
     Outcomes {
-        evaluator: [Outcome; 4],
-        jit: [Outcome; 4],
+        evaluator: Box<[Outcome; 4]>,
+        jit: Box<[Outcome; 4]>,
     },
     Diagnostic {
         phase: DiagnosticPhase,
@@ -428,7 +428,7 @@ impl From<std::io::Error> for HarnessError {
 pub struct RunFailure {
     pub error: HarnessError,
     pub case_id: Option<u64>,
-    pub partial: RunReport,
+    pub partial: Box<RunReport>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
