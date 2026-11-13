@@ -564,9 +564,11 @@ impl Engine {
         let ready = server
             .receive(deadline(config.limits.startup_timeout_ms))?
             .ok_or_else(|| err(FailureKind::ToolVersion, "Lean READY absent"))?;
-        protocol::ready(&ready)?;
         let mut responses = blake3::Hasher::new();
         protocol::hash_frame(&mut responses, &ready);
+        // A rejected but fully observed READY is still transcript evidence.
+        report.responses_blake3 = *responses.finalize().as_bytes();
+        protocol::ready(&ready)?;
         let mut corpus = blake3::Hasher::new();
         corpus.update(b"vesper.oracle42.corpus\0");
         corpus.update(&1u16.to_le_bytes());
@@ -798,11 +800,11 @@ impl Engine {
                     .ok_or_else(|| err(FailureKind::Protocol, "missing BYE"))?;
                 protocol::hash_frame(&mut self.responses, &bytes);
                 protocol::bye(&bytes, self.counters)?;
-                if self
+                if let Some(extra) = self
                     .lean
                     .receive(deadline(config.limits.shutdown_timeout_ms))?
-                    .is_some()
                 {
+                    protocol::hash_frame(&mut self.responses, &extra);
                     return Err(err(FailureKind::Protocol, "extra Lean terminal frame"));
                 }
                 self.lean.finish(config.limits.shutdown_timeout_ms)
