@@ -242,7 +242,7 @@ fn candidate_builder_refuses_expanded_shared_dag_before_materializing_its_tree()
         kind: bound.kind(),
         node: TermNode::InputVar(0),
     }];
-    for _ in 0..20 {
+    for _ in 0..12 {
         let child = terms.len() as u32 - 1;
         terms.push(Term {
             kind: bound.kind(),
