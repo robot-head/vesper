@@ -4641,6 +4641,9 @@ dependencies = [
 [[package]]
 name = "vesper-quarry"
 version = "0.1.0"
+dependencies = [
+ "vesper-simd",
+]
 
 [[package]]
 name = "vesper-resonance"
