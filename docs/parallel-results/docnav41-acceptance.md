@@ -59,3 +59,11 @@ from the new feature results above. Root performs integrated Cargo verification
 and independent provider review separately. These are local Linux results;
 hosted native and BuildBuddy evidence remain separate. No program/guest/Lean
 execution, proof certificate, timing or RSS guarantee is claimed.
+
+Final provider hardening rerun: the actual executable rebuilt by the integrated
+Cargo checks at coordinator head `4a691dc` (provider code `bd392e1` plus
+`94e084e`) again passes all five Rust executable tests with zero failures/ignores
+and all nine Python sessions/86 requests. The unsupported-owner inventory change
+requires no acceptance expectation changes. This supplement changes only the
+report; no builds, cache writes, production edits or limit changes occurred in
+this lane.
