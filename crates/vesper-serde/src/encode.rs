@@ -1,7 +1,9 @@
 use crate::{Error, ErrorKind, Kind, Node, add};
 
-/// Supported host encoding slice. Numbers are exact integer values; floating
-/// point conversion, schema derives, streams and binary archives are deferred.
+/// Supported host encoding slice: exact integers and finite IEEE binary64
+/// values. Finite float serialization roundtrips through scalar binary64
+/// conversion, including signed zero; it does not preserve arbitrary decimal
+/// mathematical values or define a canonical JSON byte representation.
 /// Raw nodes can only come from a fully validated IndexedJson.
 #[derive(Clone, Copy, Debug)]
 pub enum Value<'a> {
@@ -9,6 +11,7 @@ pub enum Value<'a> {
     Bool(bool),
     U64(u64),
     I64(i64),
+    F64(f64),
     String(&'a str),
     Array(&'a [Value<'a>]),
     Object(&'a [(&'a str, Value<'a>)]),
@@ -76,6 +79,40 @@ pub fn encode_into(
 }
 fn err(kind: ErrorKind) -> Error {
     Error::new(kind, 0)
+}
+const FLOAT_TEXT_BYTES: usize = 512;
+// Declared conservative logical allowance per bounded binary64 formatting pass.
+// This is admission accounting, not a CPU instruction or time guarantee. Both
+// passes are paid before formatting; the existing size charge pays output writes.
+const FLOAT_FORMAT_PASS_WORK: usize = FLOAT_TEXT_BYTES * FLOAT_TEXT_BYTES + FLOAT_TEXT_BYTES;
+struct FloatText {
+    bytes: [u8; FLOAT_TEXT_BYTES],
+    len: usize,
+}
+impl core::fmt::Write for FloatText {
+    fn write_str(&mut self, text: &str) -> core::fmt::Result {
+        let end = self
+            .len
+            .checked_add(text.len())
+            .filter(|&n| n <= FLOAT_TEXT_BYTES)
+            .ok_or(core::fmt::Error)?;
+        self.bytes[self.len..end].copy_from_slice(text.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
+impl FloatText {
+    fn format(value: f64) -> Result<Self, core::fmt::Error> {
+        let mut text = Self {
+            bytes: [0; FLOAT_TEXT_BYTES],
+            len: 0,
+        };
+        core::fmt::write(&mut text, format_args!("{value}"))?;
+        Ok(text)
+    }
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
 }
 struct Check {
     limits: EncodeLimits,
@@ -157,6 +194,15 @@ impl Check {
             }
             Value::U64(n) => digits(*n),
             Value::I64(n) => add(usize::from(*n < 0), digits(n.unsigned_abs()))?,
+            Value::F64(n) => {
+                if !n.is_finite() {
+                    return Err(err(ErrorKind::Number));
+                }
+                self.charge(FLOAT_FORMAT_PASS_WORK * 2)?;
+                FloatText::format(*n)
+                    .map_err(|_| err(ErrorKind::Number))?
+                    .len
+            }
             Value::String(text) => self.string(text)?,
             Value::Array(values) => {
                 self.depth(depth)?;
@@ -253,6 +299,14 @@ impl Writer<'_> {
                     self.byte(b'-');
                 }
                 self.integer(n.unsigned_abs());
+            }
+            Value::F64(n) => {
+                // Complete preflight already formatted these same immutable
+                // finite bits into an identical stack buffer and paid both
+                // passes. No fallible result escapes after output begins.
+                let text = FloatText::format(*n)
+                    .expect("preflight checked deterministic bounded finite float formatting");
+                self.bytes(text.as_bytes());
             }
             Value::String(s) => self.string(s),
             Value::Raw(node) => self.bytes(node.raw().as_bytes()),
