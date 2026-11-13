@@ -4107,9 +4107,13 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "rustls-webpki",
+ "serde",
+ "serde_json",
  "spki",
  "subtle",
  "vesper-loom-cas",
+ "vesper-vault",
+ "x509-parser",
  "zeroize",
 ]
 
