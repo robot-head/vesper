@@ -1837,3 +1837,129 @@ pub fn execute(
     *artifact_directory = publish_evidence(config, &models.path, report)?;
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(limits: Limits) -> (Workspace, Workspace, Config, Report) {
+        let models = Workspace::new(None).unwrap();
+        let retained = Workspace::new(None).unwrap();
+        let config = Config {
+            tool_root: models.path.clone(),
+            lean: PathBuf::from("unused-tool"),
+            artifacts: Some(retained.path.clone()),
+            limits: limits.clone(),
+        };
+        let mut report = Report::new(limits);
+        let path = models.path.join("RewriteWitness.lean");
+        create_file(&path, b"bounded evidence").unwrap();
+        report.targets[0].source =
+            Some(file_digest(&models.path, &path, 1024, until(5000)).unwrap());
+        (models, retained, config, report)
+    }
+
+    #[test]
+    fn retained_quota_failure_creates_no_publication_or_unlisted_payload() {
+        let limits = Limits {
+            artifact_bytes: 1,
+            ..Limits::default()
+        };
+        let (models, parent, config, mut report) = fixture(limits);
+        assert!(publish_evidence(&config, &models.path, &mut report).is_err());
+        assert_eq!(fs::read_dir(&parent.path).unwrap().count(), 0);
+        assert!(report.artifacts.is_empty());
+        assert_eq!(
+            fs::read(models.path.join("RewriteWitness.lean")).unwrap(),
+            b"bounded evidence"
+        );
+    }
+
+    #[test]
+    fn bounded_publication_copies_exact_bytes_and_accounts_the_report() {
+        let limits = Limits {
+            artifact_bytes: 1024 * 1024,
+            ..Limits::default()
+        };
+        let (models, parent, config, mut report) = fixture(limits);
+        let dir = publish_evidence(&config, &models.path, &mut report)
+            .unwrap()
+            .unwrap();
+        assert_eq!(report.artifacts.len(), 1);
+        assert_eq!(report.artifacts[0].blake3, digest(b"bounded evidence"));
+        assert_eq!(
+            fs::read(dir.join("RewriteWitness.lean")).unwrap(),
+            b"bounded evidence"
+        );
+        save_report(&config, Some(&dir), &report).unwrap();
+        let mut files = Vec::new();
+        let mut bytes = 0;
+        let mut entries = 0;
+        walk_files(
+            &parent.path,
+            &dir,
+            &mut files,
+            16,
+            config.limits.artifact_bytes,
+            &mut bytes,
+            &mut entries,
+            until(5000),
+            false,
+            0,
+        )
+        .unwrap();
+        assert_eq!(files.len(), 2);
+        assert!(bytes <= config.limits.artifact_bytes);
+        assert_eq!(report.status, Status::Failed); // This storage unit never supplies replay evidence.
+    }
+
+    #[test]
+    fn raw_relative_paths_cannot_hide_empty_dot_or_drive_components() {
+        for path in ["a//b", "a/./b", "a/../b", "a/", "/a", "C:/a", "a\\b"] {
+            assert_eq!(relative(path).unwrap_err().kind, ErrorKind::ToolIdentity);
+        }
+        assert!(relative(".lake/packages/batteries/README.md").is_ok());
+    }
+
+    #[test]
+    fn empty_directories_are_charged_before_unbounded_scan() {
+        let space = Workspace::new(None).unwrap();
+        for n in 0..5 {
+            fs::create_dir(space.path.join(format!("empty{n}"))).unwrap();
+        }
+        let mut files = Vec::new();
+        let mut bytes = 0;
+        let mut entries = 0;
+        let error = walk_files(
+            &space.path,
+            &space.path,
+            &mut files,
+            1,
+            1024,
+            &mut bytes,
+            &mut entries,
+            until(5000),
+            false,
+            0,
+        )
+        .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::OutputLimit);
+        assert!(files.is_empty());
+        assert_eq!(entries, 5);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn dangling_optional_artifact_is_present_and_refused_as_nonregular() {
+        let space = Workspace::new(None).unwrap();
+        let path = space.path.join("Model.olean.server");
+        std::os::unix::fs::symlink("missing", &path).unwrap();
+        assert!(present(&path).unwrap());
+        assert_eq!(
+            file_digest(&space.path, &path, 1024, until(5000))
+                .unwrap_err()
+                .kind,
+            ErrorKind::ToolIdentity
+        );
+    }
+}
