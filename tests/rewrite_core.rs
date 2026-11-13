@@ -688,3 +688,102 @@ fn certificate_reservation_capacity_counts_even_when_unused() {
         Err(WitnessError::Limit)
     );
 }
+
+#[test]
+fn candidate_value_spans_cannot_borrow_conflicting_or_arbitrary_typing() {
+    let certificate = fixture(IntegerKind::U64, 12);
+    let (source, mut candidate, mut types) = ast_pair(&certificate);
+    assert_eq!(
+        verify_rewrite(
+            &source,
+            &candidate,
+            &types,
+            &certificate,
+            WitnessLimits::default()
+        ),
+        Ok(())
+    );
+    // This is a real other typing location. A backend coercion of a 256-valued
+    // operand through u8 would change the mathematically certified U64 term.
+    types.insert((1000, 1001), IntegerKind::U8.ty());
+    let ExprKind::Call { args, .. } = &mut candidate.kind else {
+        unreachable!()
+    };
+    args[0].expr.span = 1000..1001;
+    assert_eq!(
+        verify_rewrite(
+            &source,
+            &candidate,
+            &types,
+            &certificate,
+            WitnessLimits::default()
+        ),
+        Err(WitnessError::OutputMismatch)
+    );
+    types.insert((1000, 1001), IntegerKind::U64.ty());
+    assert_eq!(
+        verify_rewrite(
+            &source,
+            &candidate,
+            &types,
+            &certificate,
+            WitnessLimits::default()
+        ),
+        Err(WitnessError::OutputMismatch)
+    );
+}
+
+#[test]
+fn candidate_retained_strings_and_empty_or_live_vectors_are_metered() {
+    let limits = WitnessLimits {
+        max_metadata_bytes: 64 * 1024,
+        ..WitnessLimits::default()
+    };
+    for field in 0..5 {
+        let mut certificate = fixture(IntegerKind::U64, if field < 2 { 1 } else { 12 });
+        if field == 1 {
+            let old_input = certificate.input;
+            let old_output = certificate.output;
+            certificate.input = old_output;
+            certificate.output = old_input;
+            certificate.proofs.push(Equality {
+                from: old_output,
+                to: old_input,
+                reason: Reason::Symmetry { proof: 0 },
+            });
+            certificate.conclusion = 1;
+        }
+        let (source, mut candidate, types) = ast_pair(&certificate);
+        assert_eq!(
+            verify_rewrite(&source, &candidate, &types, &certificate, limits),
+            Ok(()),
+            "baseline field {field}"
+        );
+        let extra = limits.max_metadata_bytes + 1;
+        match (&mut candidate.kind, field) {
+            (ExprKind::Name(name), 0) => name.try_reserve_exact(extra).unwrap(),
+            (ExprKind::Binary(op, _, _), 1) => op.try_reserve_exact(extra).unwrap(),
+            (ExprKind::Call { callee, .. }, 2) => {
+                let ExprKind::Name(name) = &mut callee.kind else {
+                    unreachable!()
+                };
+                name.try_reserve_exact(extra).unwrap();
+            }
+            (ExprKind::Call { args, .. }, 3) => args
+                .try_reserve_exact(extra / std::mem::size_of::<Arg>() + 1)
+                .unwrap(),
+            (ExprKind::Call { types, .. }, 4) => {
+                assert!(types.is_empty());
+                types
+                    .try_reserve_exact(extra / std::mem::size_of::<Type>() + 1)
+                    .unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            verify_rewrite(&source, &candidate, &types, &certificate, limits),
+            Err(WitnessError::Limit),
+            "retained field {field}"
+        );
+    }
+}

@@ -658,11 +658,19 @@ fn compare_output(
         budget.work(1)?;
         nodes = add(nodes, 1)?;
         limit(depth, budget.limits.max_depth)?;
+        // Backends use value spans to recover coercion types. Only the checked
+        // common-kind root span is permitted for generated value occurrences.
+        // The separately inspected intrinsic callee retains its real origin.
+        if e.span != source.span {
+            return Err(WitnessError::OutputMismatch);
+        }
+        budget.metadata(size_of::<Expr>())?;
         let current = term(terms, id)?;
         match (&e.kind, current.node) {
             (ExprKind::Literal(Literal::Int(actual)), TermNode::Const(expected))
                 if *actual == expected => {}
             (ExprKind::Name(actual), TermNode::InputVar(variable)) => {
+                budget.metadata(actual.capacity())?;
                 let expected = source.name(variable).ok_or(WitnessError::UnknownVariable)?;
                 budget.names(actual.len())?;
                 budget.work(expected.len())?;
@@ -671,6 +679,7 @@ fn compare_output(
                 }
             }
             (ExprKind::Binary(actual, left, right), TermNode::Checked { op, children }) => {
+                budget.metadata(actual.capacity())?;
                 if checked_op(actual) != Some(op) {
                     return Err(WitnessError::OutputMismatch);
                 }
@@ -679,6 +688,20 @@ fn compare_output(
                 stack.push((left, children[0], add(depth, 1)?));
             }
             (ExprKind::Call { .. }, TermNode::Wrapping { op, children }) => {
+                let ExprKind::Call {
+                    callee,
+                    types,
+                    args,
+                } = &e.kind
+                else {
+                    return Err(WitnessError::OutputMismatch);
+                };
+                budget.metadata(size_of::<Expr>())?;
+                budget.metadata(mul(types.capacity(), size_of::<Type>())?)?;
+                budget.metadata(mul(args.capacity(), size_of::<Arg>())?)?;
+                if let ExprKind::Name(name) = &callee.kind {
+                    budget.metadata(name.capacity())?;
+                }
                 let (actual, callee, args) =
                     call_parts(e).map_err(|_| WitnessError::OutputMismatch)?;
                 if actual != op {
