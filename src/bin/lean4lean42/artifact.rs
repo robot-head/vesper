@@ -1381,6 +1381,12 @@ fn create_file(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 fn copy_evidence(from: &Path, to: &Path, expected: &FileDigest, end: Instant) -> Result<(), Error> {
+    if !regular_meta(from)?.is_file() || fs::metadata(from)?.len() != expected.bytes {
+        return Err(Error::new(
+            ErrorKind::Artifact,
+            "evidence source changed after preflight",
+        ));
+    }
     let mut input = File::open(from)?;
     let mut output = OpenOptions::new().create_new(true).write(true).open(to)?;
     let mut hash = blake3::Hasher::new();
@@ -1406,6 +1412,12 @@ fn copy_evidence(from: &Path, to: &Path, expected: &FileDigest, end: Instant) ->
         return Err(Error::new(
             ErrorKind::Artifact,
             "evidence source changed after preflight",
+        ));
+    }
+    if !regular_meta(from)?.is_file() || fs::metadata(from)?.len() != expected.bytes {
+        return Err(Error::new(
+            ErrorKind::Artifact,
+            "evidence source changed while copying",
         ));
     }
     output.sync_all()?;
