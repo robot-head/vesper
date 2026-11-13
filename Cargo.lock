@@ -4490,6 +4490,16 @@ name = "vesper-prism"
 version = "0.1.0"
 
 [[package]]
+name = "vesper-prism-h3"
+version = "0.1.0"
+dependencies = [
+ "vesper-prism",
+ "vesper-warp",
+ "vesper-warp-shard",
+ "vesper-warp-umem",
+]
+
+[[package]]
 name = "vesper-pulse"
 version = "0.1.0"
 dependencies = [
