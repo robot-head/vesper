@@ -173,7 +173,11 @@ fn request_tags_and_decimal_literals_bind_exact_data() {
             [[1, 0], [2, 0], [4, 0, 2, 2]]
         ])
     );
-    assert!(protocol::encode_request(0, &p, 128, bytes.len() - 1).is_err());
+    assert_eq!(
+        protocol::encode_request(73, &p, 128, bytes.len()).unwrap(),
+        bytes
+    );
+    assert!(protocol::encode_request(73, &p, 128, bytes.len() - 1).is_err());
     assert!(protocol::encode_request(SEQUENCE_CAP + 1, &p, 128, 16384).is_err());
 }
 
