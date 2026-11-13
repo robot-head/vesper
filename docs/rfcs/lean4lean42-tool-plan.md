@@ -2,8 +2,10 @@
 
 This is a source-reviewed feasibility plan, not a working installation or an
 external-checking result. The public #297 claim precedes this document. The only
-owned repository change is this new file. No Lean4Lean build, dependency install,
-port, model execution, Cargo command or source modification was performed.
+owned repository change is this new file. This planning lane performed no
+Lean4Lean build, dependency install, port, model execution, Cargo command or
+source modification. Later coordinator experiments are attributed separately
+below; they do not establish a working candidate.
 
 ## Decision and exact candidate
 
@@ -78,9 +80,13 @@ an exhaustive claim about every upstream branch or unpublished port.
    check makes those later counterexamples irrelevant.
 4. **Keep 4.24 import and primitive APIs.** Installed Lean 4.24 source still has
    `ImportedModule.mainModule?`, two-argument `subsumesInfo`, `readModuleData`,
-   and `String.mk`, matching the selected base's API generation. The 4.26 bump
-   changes these and string-primitive handling; copying that bump wholesale
-   would introduce later-version APIs. Port against actual 4.24 declarations.
+   and `String.mk`, resembling the selected base's API generation. Presence of
+   those names does not establish source-level compatibility: private visibility,
+   aliases and field notation must be checked by actual compilation. The first
+   coordinator feasibility build failed on precisely this boundary, described
+   below. The 4.26 bump changes these and string-primitive handling; copying that
+   bump wholesale would introduce later-version APIs. Port against actual 4.24
+   declarations and record each required adaptation.
 5. **Preserve proof/opaque-body dependency traversal for this version.** In
    4.24, `ConstantInfo.value?` includes theorem bodies by default and hides only
    opaque bodies. Base `Main.lean:35`–39 already handles the opaque fallback.
@@ -206,6 +212,34 @@ or full §42. Do not label the CLI self-verified merely because its project also
 contains verification files. The independent proof-scope plan records the
 remaining proof gaps and assumptions.
 
+## Coordinator feasibility update: private API access
+
+After the initial planning commit, the coordinator publicly authorized a
+coordinator-only temporary experiment under
+[#297 comment6851501308](https://github.com/robot-head/vesper/issues/297#issuecomment-6851501308).
+The reference checkout remains clean at the selected 4faf commit. The separate
+experiment is `/tmp/vesper-lean4lean42-port`, with Lean 4.24, the proposed
+Batteries commit, the three declaration-value guards and fresh target import.
+This planning lane did not modify or build that experiment.
+
+The coordinator's actual first build failed in
+`Lean4Lean/Environment/Basic.lean:85:21`: field access `mod.mainModule?` could
+not resolve `Lean.ImportedModule.mainModule?`. The declaration exists but is
+private in 4.24. Adding `mainModule?` to the existing `open private` list alone
+still produced the same field-notation failure in the second build. This lane
+read the retained logs `/tmp/lean4lean42-feasibility-build.log` and
+`/tmp/lean4lean42-feasibility-build2.log`; both record Lean exit1 and a failed
+`Lean4Lean.Environment.Basic` target. These are actual compatibility failures,
+not merely predicted risks.
+
+The coordinator reported a third experiment using the opened private alias
+through explicit `mainModule? mod` application instead of field notation. Its
+outcome is not established by this update. Do not infer build success, a complete
+compatibility patch or external model acceptance from the proposed correction.
+Further private-API, proof or runtime adaptations may remain. Identical kernel
+files and familiar declaration signatures cannot replace compilation and the
+required rejection/coverage checks.
+
 ## Evidence and limits
 
 Read-only source evidence was gathered through GitHub repository/file/commit
@@ -220,7 +254,10 @@ Immutable references:
 - [4.26 bump](https://github.com/digama0/lean4lean/commit/6bca7f6fd61bcea09266303e75c437ba9745a32b), [fresh/import fix](https://github.com/digama0/lean4lean/commit/c55ae0d09832b5ac7d6567372ee324bf2ff9dd70), [value-FVar fixes](https://github.com/digama0/lean4lean/commit/779c51fdea49c57c60f8039703605faae126b17f), and [later replay source](https://github.com/digama0/lean4lean/blob/5518bf83860bab48e8d53f1f447cdd6c50c30c3f/Lean4Lean/Replay.lean).
 - [Proposed Batteries](https://github.com/leanprover-community/batteries/tree/8da40b72fece29b7d3fe3d768bac4c8910ce9bee) and [Lean 4.24 kernel](https://github.com/leanprover/lean4/tree/797c613eb9b6d4ec95db23e3e00af9ac6657f24b/src/kernel).
 
-Compatibility/port compilation, tool installation, actual external model
-checks, rejection tests, elapsed time and platform behavior remain unexecuted.
-This document recommends the contract and experiment inputs; it does not claim
-that those experiments have passed or authorize writing their implementation.
+At the initial source review, compatibility/port compilation and external
+checks were unexecuted. The separately attributed coordinator update now records
+only the observed failed builds; this lane still performed no builds or source
+changes. A successful candidate build, external model checks, rejection tests,
+elapsed-time measurements and platform behavior have not been established by
+this document. It does not claim those gates passed or authorize repository
+implementation outside the separately published scope.
