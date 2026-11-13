@@ -415,9 +415,7 @@ impl Iterator for DecodedChars<'_> {
 fn hex4(text: &[u8], pos: &mut usize) -> Result<u32, Error> {
     let mut n = 0;
     for _ in 0..4 {
-        let b = *text
-            .get(*pos)
-            .ok_or(Error::new(ErrorKind::Escape, *pos))?;
+        let b = *text.get(*pos).ok_or(Error::new(ErrorKind::Escape, *pos))?;
         *pos += 1;
         let d = match b {
             b'0'..=b'9' => b - b'0',
@@ -430,9 +428,7 @@ fn hex4(text: &[u8], pos: &mut usize) -> Result<u32, Error> {
     Ok(n)
 }
 pub(crate) fn escape(text: &[u8], pos: &mut usize) -> Result<char, Error> {
-    let b = *text
-        .get(*pos)
-        .ok_or(Error::new(ErrorKind::Escape, *pos))?;
+    let b = *text.get(*pos).ok_or(Error::new(ErrorKind::Escape, *pos))?;
     *pos += 1;
     Ok(match b {
         b'"' => '"',
@@ -697,6 +693,22 @@ fn key_string<'a>(input: &'a [u8], t: &Token, at: usize) -> Result<JsonString<'a
     })
 }
 
+/// Steps of the decoded comparison loop on two unescaped UTF-8 keys: one per
+/// equal Unicode scalar, plus the step that finds a difference or the end.
+fn raw_compare_steps(a: &[u8], b: &[u8]) -> usize {
+    let k = a.iter().zip(b).take_while(|(p, q)| p == q).count();
+    // Back up to the start of the scalar containing the first difference.
+    let mut boundary = k;
+    while boundary > 0 && boundary < a.len().min(b.len()) && (a[boundary] & 0xc0) == 0x80 {
+        boundary -= 1;
+    }
+    a[..boundary]
+        .iter()
+        .filter(|c| (**c & 0xc0) != 0x80)
+        .count()
+        + 1
+}
+
 /// Reject `current` if it equals an earlier key of the object whose first key
 /// token is `start`. Both parsers share this, so their work totals agree.
 pub(crate) fn check_duplicate(
@@ -719,6 +731,26 @@ pub(crate) fn check_duplicate(
     let mut previous = start;
     while previous < current {
         tick(work, 1)?;
+        let (x, y) = (&tokens[previous], &tokens[current]);
+        if !x.escaped && !y.escaped {
+            // Same accounting as the decoded loop below without decoding.
+            let (a, b) = (
+                &input[x.start + 1..x.end - 1],
+                &input[y.start + 1..y.end - 1],
+            );
+            let units = raw_compare_steps(a, b)
+                .checked_mul(24)
+                .ok_or(err(ErrorKind::WorkLimit))?;
+            if units > max_work - *work {
+                return Err(err(ErrorKind::WorkLimit));
+            }
+            tick(work, units)?;
+            if a == b {
+                return Err(err(ErrorKind::DuplicateKey));
+            }
+            previous = tokens[previous + 1].next;
+            continue;
+        }
         let mut a = key_string(input, &tokens[previous], at)?.chars();
         let mut b = key_string(input, &tokens[current], at)?.chars();
         let mut units = 0usize;
@@ -741,4 +773,51 @@ pub(crate) fn check_duplicate(
         previous = tokens[previous + 1].next;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::raw_compare_steps;
+
+    fn decoded_steps(a: &str, b: &str) -> usize {
+        let (mut x, mut y) = (a.chars(), b.chars());
+        let mut steps = 0;
+        loop {
+            steps += 1;
+            match (x.next(), y.next()) {
+                (Some(p), Some(q)) if p == q => {}
+                _ => return steps,
+            }
+        }
+    }
+
+    #[test]
+    fn raw_steps_equal_decoded_steps() {
+        let alphabet = ["a", "b", "é", "è", "€", "₭", "😀", "😁", "\u{7f}", "z"];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut word = |n: usize| -> String {
+            (0..n)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    alphabet[(seed % alphabet.len() as u64) as usize]
+                })
+                .collect()
+        };
+        for _ in 0..20_000 {
+            let a = word(6);
+            let mut b = a.clone();
+            let cut = a.char_indices().map(|(i, _)| i).nth(3).unwrap_or(a.len());
+            b.truncate(cut);
+            b.push_str(&word(2));
+            for (a, b) in [(&a, &b), (&b, &a), (&a, &a)] {
+                assert_eq!(
+                    raw_compare_steps(a.as_bytes(), b.as_bytes()),
+                    decoded_steps(a, b),
+                    "{a:?} {b:?}"
+                );
+            }
+        }
+    }
 }

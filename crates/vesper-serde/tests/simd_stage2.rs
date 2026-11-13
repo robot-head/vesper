@@ -15,14 +15,18 @@ fn compare(input: &[u8], limits: Limits) -> bool {
         let simd = IndexedJson::parse_with_isa(input, limits, isa);
         match (&scalar, &simd) {
             (Ok(a), Ok(b)) => {
-                assert!(a.same_tape(b), "{isa:?} tape differs on {:?}", String::from_utf8_lossy(input));
+                assert!(
+                    a.same_tape(b),
+                    "{isa:?} tape differs on {:?}",
+                    String::from_utf8_lossy(input)
+                );
                 assert_eq!(a.index_capacity_bytes(), b.index_capacity_bytes());
             }
             (Err(a), Err(b)) => {
-                if a.kind != b.kind && std::env::var_os("SHOW_KINDS").is_some() {
-                    eprintln!("{:?} vs {:?} on {:?}", a.kind, b.kind, String::from_utf8_lossy(input));
+                if a != b && std::env::var_os("SHOW_KINDS").is_some() {
+                    eprintln!("{a:?} vs {b:?} on {:?}", String::from_utf8_lossy(input));
                 }
-                kinds_agree &= a.kind == b.kind
+                kinds_agree &= a == b
             }
             _ => panic!(
                 "{isa:?} disagrees on {:?}: scalar {:?}, simd {:?}",
@@ -50,7 +54,11 @@ fn random_valid_documents_build_identical_tapes() {
     for _ in 0..3000 {
         let doc = document(&mut rng);
         let parsed = IndexedJson::parse(&doc, Limits::default());
-        assert!(parsed.is_ok(), "{:?}: {parsed:?}", String::from_utf8_lossy(&doc));
+        assert!(
+            parsed.is_ok(),
+            "{:?}: {parsed:?}",
+            String::from_utf8_lossy(&doc)
+        );
         compare(&doc, Limits::default());
     }
 }
@@ -66,12 +74,16 @@ fn mutated_documents_are_accepted_and_rejected_identically() {
         agree += usize::from(compare(&doc, Limits::default()));
     }
     // With default limits, every mutated input fails for the same reason.
-    assert_eq!(agree, total, "error kinds agreed on {agree}/{total} mutated inputs");
+    assert_eq!(
+        agree, total,
+        "error kinds agreed on {agree}/{total} mutated inputs"
+    );
 }
 
 #[test]
 fn tight_limits_are_enforced_identically() {
     let mut rng = Rng(77);
+    let (mut total, mut agree) = (0, 0);
     for _ in 0..1500 {
         let doc = document(&mut rng);
         let limits = Limits {
@@ -83,9 +95,19 @@ fn tight_limits_are_enforced_identically() {
             max_work: rng.below(doc.len() * 3 + 400),
             max_index_bytes: rng.below(2000),
         };
-        compare(&doc, limits);
-        compare(&doc, Limits { max_input_bytes: 1 << 20, ..limits });
+        total += 2;
+        agree += usize::from(compare(&doc, limits));
+        agree += usize::from(compare(
+            &doc,
+            Limits {
+                max_input_bytes: 1 << 20,
+                ..limits
+            },
+        ));
     }
+    // Several limits can fail at once, and the engines check them in a
+    // different order; acceptance is identical (asserted in `compare`).
+    eprintln!("tight limits: errors identical on {agree}/{total}");
 }
 
 #[test]
@@ -111,7 +133,9 @@ fn deep_and_wide_inputs() {
     compare(wide.as_bytes(), Limits::default());
     let dup = wide.replace("\"k299\"", "\"k\\u0031\"");
     assert_eq!(
-        IndexedJson::parse_simd(dup.as_bytes(), Limits::default()).unwrap_err().kind,
+        IndexedJson::parse_simd(dup.as_bytes(), Limits::default())
+            .unwrap_err()
+            .kind,
         ErrorKind::DuplicateKey
     );
     compare(dup.as_bytes(), Limits::default());
@@ -119,30 +143,62 @@ fn deep_and_wide_inputs() {
 
 #[test]
 fn on_demand_reads_borrow_unescaped_strings_and_skip_subtrees() {
-    let input = br#"{"skip":{"deep":[1,2,{"x":"\u0041"}]},"id":42,"topic":"plain","esc":"a\nb","f":2.5}"#;
+    let input =
+        br#"{"skip":{"deep":[1,2,{"x":"\u0041"}]},"id":42,"topic":"plain","esc":"a\nb","f":2.5}"#;
     for isa in Isa::available() {
         let doc = IndexedJson::parse_with_isa(input, Limits::default(), isa).unwrap();
         let root = doc.root();
-        assert_eq!(root.field("id", 1 << 20).unwrap().unwrap().as_u64().unwrap(), 42);
-        let topic = root.field("topic", 1 << 20).unwrap().unwrap().string().unwrap();
+        assert_eq!(
+            root.field("id", 1 << 20)
+                .unwrap()
+                .unwrap()
+                .as_u64()
+                .unwrap(),
+            42
+        );
+        let topic = root
+            .field("topic", 1 << 20)
+            .unwrap()
+            .unwrap()
+            .string()
+            .unwrap();
         assert!(!topic.is_escaped());
         let mut scratch = [0u8; 8];
-        assert_eq!(topic.decode(&mut scratch).unwrap(), JsonStr::Borrowed("plain"));
-        let esc = root.field("esc", 1 << 20).unwrap().unwrap().string().unwrap();
+        assert_eq!(
+            topic.decode(&mut scratch).unwrap(),
+            JsonStr::Borrowed("plain")
+        );
+        let esc = root
+            .field("esc", 1 << 20)
+            .unwrap()
+            .unwrap()
+            .string()
+            .unwrap();
         assert_eq!(esc.decode(&mut scratch).unwrap(), JsonStr::Scratch("a\nb"));
         assert_eq!(
             root.field("skip", 1 << 20).unwrap().unwrap().raw(),
             r#"{"deep":[1,2,{"x":"\u0041"}]}"#
         );
         let kinds: Vec<Kind> = root.fields().unwrap().map(|(_, v)| v.kind()).collect();
-        assert_eq!(kinds, [Kind::Object, Kind::Number, Kind::String, Kind::String, Kind::Number]);
+        assert_eq!(
+            kinds,
+            [
+                Kind::Object,
+                Kind::Number,
+                Kind::String,
+                Kind::String,
+                Kind::Number
+            ]
+        );
     }
 }
 
 #[test]
 fn reusable_parser_reports_errors_and_recovers() {
     let mut parser = SimdParser::new();
-    let err = parser.parse(b"[1,]", Limits::default(), |_| ()).unwrap_err();
+    let err = parser
+        .parse(b"[1,]", Limits::default(), |_| ())
+        .unwrap_err();
     assert_eq!(err.kind, ErrorKind::Syntax);
     let n = parser
         .parse(b"[1,2,3]", Limits::default(), |doc| doc.token_count())
@@ -162,14 +218,50 @@ fn reusable_parser_reports_errors_and_recovers() {
 #[test]
 fn malformed_classics_are_rejected_by_both() {
     let cases: &[&[u8]] = &[
-        b"", b" ", b"[", b"]", b"{", b"\"", b"\"abc", b"[1 2]", b"[1,]", b"{\"a\"}", b"{\"a\":}",
-        b"{\"a\" 1}", b"{1:1}", b"tru", b"truex", b"nul", b"01", b"1.", b"-", b"1e", b"1e+",
-        b"\"\\x\"", b"\"\\u12\"", b"\"\\ud800\"", b"\"\\udc00\"", b"\"\x01\"", b"\"a\"b",
-        b"1\"a\"", b"[\"a\" \"b\"]", b"{\"a\":1 \"b\":2}", b"\xef\xbb\xbf[]", b"[\x0c]",
-        b"[1]\x1a", b"\"\\\"", b"{\"a\":1}}", b"[[]", b"[]]", b"\"\xed\xa0\x80\"",
+        b"",
+        b" ",
+        b"[",
+        b"]",
+        b"{",
+        b"\"",
+        b"\"abc",
+        b"[1 2]",
+        b"[1,]",
+        b"{\"a\"}",
+        b"{\"a\":}",
+        b"{\"a\" 1}",
+        b"{1:1}",
+        b"tru",
+        b"truex",
+        b"nul",
+        b"01",
+        b"1.",
+        b"-",
+        b"1e",
+        b"1e+",
+        b"\"\\x\"",
+        b"\"\\u12\"",
+        b"\"\\ud800\"",
+        b"\"\\udc00\"",
+        b"\"\x01\"",
+        b"\"a\"b",
+        b"1\"a\"",
+        b"[\"a\" \"b\"]",
+        b"{\"a\":1 \"b\":2}",
+        b"\xef\xbb\xbf[]",
+        b"[\x0c]",
+        b"[1]\x1a",
+        b"\"\\\"",
+        b"{\"a\":1}}",
+        b"[[]",
+        b"[]]",
+        b"\"\xed\xa0\x80\"",
     ];
     for case in cases {
-        assert!(IndexedJson::parse(case, Limits::default()).is_err(), "{case:?}");
+        assert!(
+            IndexedJson::parse(case, Limits::default()).is_err(),
+            "{case:?}"
+        );
         compare(case, Limits::default());
     }
 }

@@ -56,14 +56,24 @@ impl<'a> IndexedJson<'a> {
 
     /// Parse with an explicit stage 1 path; `IsaUnavailable` if it cannot run.
     pub fn parse_with_isa(input: &'a [u8], limits: Limits, isa: Isa) -> Result<Self, Error> {
+        Self::parse_with_index(input, limits, isa, &mut StructuralIndex::new())
+    }
+
+    /// As [`parse_with_isa`](Self::parse_with_isa), reusing `index`'s capacity
+    /// for stage 1. The token tape is still owned by the returned document.
+    pub fn parse_with_index(
+        input: &'a [u8],
+        limits: Limits,
+        isa: Isa,
+        index: &mut StructuralIndex,
+    ) -> Result<Self, Error> {
         let plan = admit(input, &limits)?;
-        let mut index = StructuralIndex::new();
         index.build(input, isa, index_limits(input, &limits))?;
         let mut tokens = Vec::new();
         tokens
             .try_reserve_exact(plan.capacity)
             .map_err(|_| Error::new(ErrorKind::AllocationFailed, 0))?;
-        let work_used = build(input, &index, &limits, plan.capacity, &mut tokens)?;
+        let work_used = build(input, index, &limits, plan.capacity, &mut tokens)?;
         Ok(Self {
             input,
             tokens,
@@ -340,7 +350,11 @@ impl Builder<'_, '_> {
         // An unclosed string runs to the end; its escapes are still checked
         // first, in byte order, as the scalar parser does.
         let closed = self.byte(i + 1) == Some(b'"');
-        let close = if closed { self.pos(i + 1) } else { self.input.len() };
+        let close = if closed {
+            self.pos(i + 1)
+        } else {
+            self.input.len()
+        };
         let token = self.push(Kind::String, depth, open)?;
         let mut decoded = close - open - 1;
         let mut escaped = false;
@@ -375,20 +389,42 @@ impl Builder<'_, '_> {
             return Err(Error::new(ErrorKind::Syntax, self.input.len()));
         }
         if decoded > self.limits.max_string_bytes {
-            return Err(Error::new(ErrorKind::StringLimit, close));
+            let at = self.limit_offset(open, close);
+            return Err(Error::new(ErrorKind::StringLimit, at));
         }
         self.string_bytes = self
             .string_bytes
             .checked_add(decoded)
-            .ok_or(Error::new(ErrorKind::StringLimit, close))?;
+            .ok_or(Error::new(ErrorKind::StringLimit, close + 1))?;
         if self.string_bytes > self.limits.max_total_string_bytes {
-            return Err(Error::new(ErrorKind::StringLimit, close));
+            return Err(Error::new(ErrorKind::StringLimit, close + 1));
         }
         let t = &mut self.tokens[token];
         t.end = close + 1;
         t.decoded_len = decoded;
         t.escaped = escaped;
         Ok(i + 2)
+    }
+
+    /// Error path only: the offset just past the unit (byte or escape) at
+    /// which the decoded length first exceeds `max_string_bytes`.
+    fn limit_offset(&self, open: usize, close: usize) -> usize {
+        let mut pos = open + 1;
+        let mut decoded = 0usize;
+        while pos < close {
+            if self.input[pos] == b'\\' {
+                let mut next = pos + 1;
+                decoded += escape(self.input, &mut next).map_or(1, char::len_utf8);
+                pos = next;
+            } else {
+                decoded += 1;
+                pos += 1;
+            }
+            if decoded > self.limits.max_string_bytes {
+                return pos;
+            }
+        }
+        close
     }
 
     fn scalar(&mut self, i: usize, depth: usize) -> Result<usize, Error> {
@@ -405,12 +441,15 @@ impl Builder<'_, '_> {
                     b't' => (Kind::Bool, b"true"),
                     _ => (Kind::Bool, b"false"),
                 };
-                if !text.starts_with(literal) {
-                    return Err(Error::new(ErrorKind::Syntax, start));
+                if let Some(at) = (0..literal.len()).find(|&k| text.get(k) != Some(&literal[k])) {
+                    return Err(Error::new(ErrorKind::Syntax, start + at));
                 }
                 (kind, literal.len())
             }
-            _ => (Kind::Number, number(text).map_err(|at| Error::new(ErrorKind::Number, start + at))?),
+            _ => (
+                Kind::Number,
+                number(text).map_err(|at| Error::new(ErrorKind::Number, start + at))?,
+            ),
         };
         if len != text.len() {
             return Err(Error::new(ErrorKind::Syntax, start + len));

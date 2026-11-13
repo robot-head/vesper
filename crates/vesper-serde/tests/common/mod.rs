@@ -38,7 +38,11 @@ fn string(rng: &mut Rng, out: &mut Vec<u8>) {
 }
 
 fn value(rng: &mut Rng, out: &mut Vec<u8>, depth: usize) {
-    let pick = if depth > 5 { rng.below(6) } else { rng.below(9) };
+    let pick = if depth > 5 {
+        rng.below(6)
+    } else {
+        rng.below(9)
+    };
     match pick {
         0 => out.extend_from_slice(b"null"),
         1 => out.extend_from_slice(if rng.below(2) == 0 { b"true" } else { b"false" }),
@@ -112,4 +116,3 @@ pub fn mutate(rng: &mut Rng, doc: &mut Vec<u8>) {
         }
     }
 }
-

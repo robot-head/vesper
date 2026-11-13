@@ -20,9 +20,7 @@ fn to_serde(node: Node<'_, '_>) -> Option<Value> {
             } else if let Ok(n) = node.as_i64() {
                 Value::from(n)
             } else {
-                let f = node
-                    .as_f64(FloatLimits::default())
-                    .ok()?;
+                let f = node.as_f64(FloatLimits::default()).ok()?;
                 Value::from(f)
             }
         }
@@ -121,7 +119,10 @@ fn corpus() -> Vec<(String, Vec<u8>)> {
 /// Valid JSON this crate rejects by policy: duplicate keys are ambiguous.
 const POLICY_REJECTS: &[(&str, ErrorKind)] = &[
     ("y_object_duplicated_key.json", ErrorKind::DuplicateKey),
-    ("y_object_duplicated_key_and_value.json", ErrorKind::DuplicateKey),
+    (
+        "y_object_duplicated_key_and_value.json",
+        ErrorKind::DuplicateKey,
+    ),
 ];
 
 #[test]
@@ -150,7 +151,10 @@ fn json_test_suite_corpus() {
                 y += 1;
             }
             "n_" => {
-                assert!(matches!(outcome, Outcome::Rejected(_)), "{name}: must reject");
+                assert!(
+                    matches!(outcome, Outcome::Rejected(_)),
+                    "{name}: must reject"
+                );
                 n += 1;
             }
             "i_" => match (outcome, serde) {
@@ -179,7 +183,10 @@ fn random_documents_equal_serde_json() {
     for _ in 0..3000 {
         let doc = document(&mut rng);
         let Outcome::Accepted(value) = ours(&doc, Limits::default()) else {
-            panic!("generated document rejected: {:?}", String::from_utf8_lossy(&doc));
+            panic!(
+                "generated document rejected: {:?}",
+                String::from_utf8_lossy(&doc)
+            );
         };
         let expected: Value = serde_json::from_slice(&doc).unwrap();
         let value = value.expect("generated numbers are finite");

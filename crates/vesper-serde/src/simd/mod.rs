@@ -352,8 +352,9 @@ pub(crate) fn run<R: Recorder>(
 ) -> Result<RunOutcome, Error> {
     match isa {
         Isa::Scalar => Ok(scalar::run(input, sink, rec)),
-        other => kernels::run(other, input, sink, rec)
-            .ok_or(Error::new(ErrorKind::IsaUnavailable, 0)),
+        other => {
+            kernels::run(other, input, sink, rec).ok_or(Error::new(ErrorKind::IsaUnavailable, 0))
+        }
     }
 }
 

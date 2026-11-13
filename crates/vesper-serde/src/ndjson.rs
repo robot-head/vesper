@@ -1,7 +1,10 @@
 //! Fully validated immutable NDJSON batches with aggregate logical budgets.
 //!
-//! Each record retains a bounded scalar JSON index. This is not incremental or
-//! zero-heap streaming; every record validates before any view is published.
+//! Each record retains a bounded JSON token tape, built by the scalar parser or
+//! from the stage 1 SIMD structural index (see [`Engine`]); both engines build
+//! identical tapes and statistics. This is not incremental or zero-heap
+//! streaming; every record validates before any view is published.
+use crate::simd::{Isa, StructuralIndex};
 use crate::{IndexedJson, Limits, Node};
 use std::{fmt, mem::size_of, ops::Range};
 
@@ -51,6 +54,23 @@ fn initial(kind: ErrorKind) -> Error {
         offset: 0,
         record: 0,
         line: 1,
+    }
+}
+
+/// How each record is indexed. Tapes, statistics and accept/reject decisions
+/// are identical; only error offsets may differ on malformed records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Engine {
+    /// Byte-at-a-time recursive descent.
+    Scalar,
+    /// Stage 1 SIMD structural index on the given path, then the stage 2
+    /// tape builder. The stage 1 buffers are reused across records.
+    Simd(Isa),
+}
+impl Engine {
+    /// SIMD on the fastest path this CPU supports.
+    pub fn detect() -> Self {
+        Engine::Simd(Isa::detect())
     }
 }
 
@@ -175,8 +195,19 @@ fn relocate(error: crate::Error, payload: &Range<usize>, record: usize, line: us
 }
 
 impl<'a> NdjsonBatch<'a> {
+    /// Parse with [`Engine::detect`]: the stage 1 SIMD index when available.
     pub fn parse(input: &'a [u8], limits: BatchLimits) -> Result<Self, Error> {
+        Self::parse_with(input, limits, Engine::detect())
+    }
+
+    pub fn parse_with(input: &'a [u8], limits: BatchLimits, engine: Engine) -> Result<Self, Error> {
         limits.validate()?;
+        if let Engine::Simd(isa) = engine
+            && !isa.is_available()
+        {
+            return Err(initial(ErrorKind::Json(crate::ErrorKind::IsaUnavailable)));
+        }
+        let mut index = StructuralIndex::new();
         if input.len() > limits.max_input_bytes {
             return Err(initial(ErrorKind::InputLimit));
         }
@@ -291,8 +322,13 @@ impl<'a> NdjsonBatch<'a> {
                     ..limits.record
                 };
                 let span = start..payload_end;
-                let json = IndexedJson::parse(payload, record_limits)
-                    .map_err(|error| relocate(error, &span, ordinal, line))?;
+                let json = match engine {
+                    Engine::Scalar => IndexedJson::parse(payload, record_limits),
+                    Engine::Simd(isa) => {
+                        IndexedJson::parse_with_index(payload, record_limits, isa, &mut index)
+                    }
+                }
+                .map_err(|error| relocate(error, &span, ordinal, line))?;
                 let tokens = json.token_count();
                 let index = json.index_capacity_bytes();
                 let parsed_work = json.work_used();

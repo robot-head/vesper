@@ -386,7 +386,8 @@ mod x86 {
             let max = _mm256_set1_epi8(0x1f);
             let ctl = |x| _mm256_cmpeq_epi8(_mm256_max_epu8(x, max), max);
             let curly = _mm256_set1_epi8(0x20);
-            let op = |x| _mm256_cmpeq_epi8(_mm256_shuffle_epi8(self.op, x), _mm256_or_si256(x, curly));
+            let op =
+                |x| _mm256_cmpeq_epi8(_mm256_shuffle_epi8(self.op, x), _mm256_or_si256(x, curly));
             let ws = |x| _mm256_cmpeq_epi8(_mm256_shuffle_epi8(self.ws, x), x);
             let bs = _mm256_set1_epi8(b'\\' as i8);
             let qt = _mm256_set1_epi8(b'"' as i8);
@@ -408,16 +409,22 @@ mod x86 {
             let prev2 = _mm256_alignr_epi8::<14>(input, shifted);
             let prev3 = _mm256_alignr_epi8::<13>(input, shifted);
             let lo4 = _mm256_set1_epi8(0x0f);
-            let b1h =
-                _mm256_shuffle_epi8(self.b1h, _mm256_and_si256(_mm256_srli_epi16::<4>(prev1), lo4));
+            let b1h = _mm256_shuffle_epi8(
+                self.b1h,
+                _mm256_and_si256(_mm256_srli_epi16::<4>(prev1), lo4),
+            );
             let b1l = _mm256_shuffle_epi8(self.b1l, _mm256_and_si256(prev1, lo4));
-            let b2h =
-                _mm256_shuffle_epi8(self.b2h, _mm256_and_si256(_mm256_srli_epi16::<4>(input), lo4));
+            let b2h = _mm256_shuffle_epi8(
+                self.b2h,
+                _mm256_and_si256(_mm256_srli_epi16::<4>(input), lo4),
+            );
             let special = _mm256_and_si256(_mm256_and_si256(b1h, b1l), b2h);
             let third = _mm256_subs_epu8(prev2, _mm256_set1_epi8(0x60));
             let fourth = _mm256_subs_epu8(prev3, _mm256_set1_epi8(0x70));
-            let must23 =
-                _mm256_and_si256(_mm256_or_si256(third, fourth), _mm256_set1_epi8(0x80u8 as i8));
+            let must23 = _mm256_and_si256(
+                _mm256_or_si256(third, fourth),
+                _mm256_set1_epi8(0x80u8 as i8),
+            );
             self.error = _mm256_or_si256(self.error, _mm256_xor_si256(must23, special));
         }
 

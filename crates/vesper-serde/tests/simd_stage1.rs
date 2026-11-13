@@ -37,13 +37,16 @@ fn assert_same(input: &[u8]) {
 }
 
 /// A JSON-flavoured alphabet, weighted toward the bytes stage 1 classifies.
-const ALPHABET: &[u8] = b"\\\\\\\"\"\"{}[]:,  \t\n\r0123456789-+.eEtrufalsn\x00\x01\x0c\x1a\x1f\x7f";
+const ALPHABET: &[u8] =
+    b"\\\\\\\"\"\"{}[]:,  \t\n\r0123456789-+.eEtrufalsn\x00\x01\x0c\x1a\x1f\x7f";
 
 fn random_input(rng: &mut Rng, len: usize) -> Vec<u8> {
     (0..len)
         .map(|_| match rng.below(10) {
             0 => rng.next() as u8,
-            1 => [0xc3, 0xa9, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x98, 0x80, 0xed, 0xa0][rng.below(11)],
+            1 => [
+                0xc3, 0xa9, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x98, 0x80, 0xed, 0xa0,
+            ][rng.below(11)],
             _ => ALPHABET[rng.below(ALPHABET.len())],
         })
         .collect()
@@ -74,11 +77,22 @@ fn simd_paths_are_detected_on_simd_architectures() {
 #[test]
 fn branchless_escape_mask_matches_scalar_reference() {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-    let mut cases: Vec<u64> = vec![0, u64::MAX, 1, 1 << 63, 0x5555_5555_5555_5555, !0x5555_5555_5555_5555];
+    let mut cases: Vec<u64> = vec![
+        0,
+        u64::MAX,
+        1,
+        1 << 63,
+        0x5555_5555_5555_5555,
+        !0x5555_5555_5555_5555,
+    ];
     // Every run of backslashes starting at every position.
     for start in 0..64 {
         for len in 1..=(64 - start) {
-            let run = if len == 64 { u64::MAX } else { ((1u64 << len) - 1) << start };
+            let run = if len == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << len) - 1) << start
+            };
             cases.push(run);
         }
     }
@@ -157,7 +171,11 @@ fn utf8_same(input: &[u8]) {
     let want = core::str::from_utf8(input).is_ok();
     assert_eq!(block_masks(input, Isa::Scalar).unwrap().1, want);
     for isa in simd_paths() {
-        assert_eq!(block_masks(input, isa).unwrap().1, want, "{isa:?} on {input:x?}");
+        assert_eq!(
+            block_masks(input, isa).unwrap().1,
+            want,
+            "{isa:?} on {input:x?}"
+        );
     }
 }
 
@@ -224,8 +242,13 @@ fn utf8_three_and_four_byte_sequences_at_block_edges() {
 fn structural_index_positions_match_across_paths() {
     let doc = br#" {"id": 42, "topic":"a\"b", "x":[true,null,-1.5e3], "s":"\u00e9\\"} "#;
     let mut want = StructuralIndex::new();
-    want.build(doc, Isa::Scalar, IndexLimits::default()).unwrap();
-    let positions: Vec<u8> = want.structurals().iter().map(|&p| doc[p as usize]).collect();
+    want.build(doc, Isa::Scalar, IndexLimits::default())
+        .unwrap();
+    let positions: Vec<u8> = want
+        .structurals()
+        .iter()
+        .map(|&p| doc[p as usize])
+        .collect();
     // Opening and closing quotes, operators and scalar starts, nothing else.
     let text: String = positions.iter().map(|&b| b as char).collect();
     assert_eq!(text, r#"{"":4,"":"","":[t,n,-],"":""}"#);
