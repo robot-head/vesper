@@ -345,6 +345,12 @@ inductive HasType : Ctx → RCtx → Expr → Ty → Mode → Row → Prop where
       IsAtom a → IsAtom b → Split Γ Γ1 Γ2 → SplitR R R1 R2 →
       HasType Γ1 R1 a .nat .copy ε → HasType Γ2 R2 b .nat .copy ε →
       Label.abort ∈ ε → HasType Γ R (.arith op a b) .nat m ε
+  /-- Closed literal arithmetic has a pure row when its actual evaluation
+  succeeds and both operands are in u64 range. No symbolic operand or unchecked
+  range assertion is admitted. -/
+  | arithLiteral {Γ R op a b c m ε} :
+      Discard Γ → DiscardR R → a < u64Bound → b < u64Bound → op.eval a b = some c →
+      HasType Γ R (.arith op (.natV a) (.natV b)) .nat m ε
   | abort {Γ R τ m ε} : Discard Γ → DiscardR R → Label.abort ∈ ε → HasType Γ R .abort τ m ε
   /-- [T-Perform] -/
   | perform {Γ R l a m ε} : IsAtom a → HasType Γ R a (Sig l).arg .linear ε →
@@ -773,6 +779,9 @@ theorem subst_ty {Γ R e τ m ε} (h : HasType Sig Γ R e τ m ε) :
   | natV n hΓ hR =>
     intro k v Rv R' hok hs
     exact .natV n (discard_del hΓ k) (discard_rest hΓ hok hR hs)
+  | arithLiteral hΓ hR ha hb hev =>
+    intro k v Rv R' hok hs
+    exact .arithLiteral (discard_del hΓ k) (discard_rest hΓ hok hR hs) ha hb hev
   | mint hΓ hR hm =>
     intro k v Rv R' hok hs
     exact .mint (discard_del hΓ k) (discard_rest hΓ hok hR hs) hm
@@ -859,6 +868,8 @@ theorem weakenR {Γ R e τ m ε} (h : HasType Sig Γ R e τ m ε) :
   | var hi hj hR hk => intro Rd R' hd hs; exact .var hi hj (discardR_join hs hR hd) hk
   | unitV hΓ hR => intro Rd R' hd hs; exact .unitV hΓ (discardR_join hs hR hd)
   | natV n hΓ hR => intro Rd R' hd hs; exact .natV n hΓ (discardR_join hs hR hd)
+  | arithLiteral hΓ hR ha hb hev =>
+    intro Rd R' hd hs; exact .arithLiteral hΓ (discardR_join hs hR hd) ha hb hev
   | mint hΓ hR hm => intro Rd R' hd hs; exact .mint hΓ (discardR_join hs hR hd) hm
   | abort hΓ hR hab => intro Rd R' hd hs; exact .abort hΓ (discardR_join hs hR hd) hab
   | hdlV r hΓ hsR hd0 hm =>
@@ -915,6 +926,7 @@ theorem weakenRow {Γ R e τ m ε} (h : HasType Sig Γ R e τ m ε) :
   | var hi hj hR hk => intro ε' _; exact .var hi hj hR hk
   | unitV hΓ hR => intro ε' _; exact .unitV hΓ hR
   | natV n hΓ hR => intro ε' _; exact .natV n hΓ hR
+  | arithLiteral hΓ hR ha hb hev => intro ε' _; exact .arithLiteral hΓ hR ha hb hev
   | mint hΓ hR hm => intro ε' _; exact .mint hΓ hR hm
   | abort hΓ hR hab => intro ε' hε; exact .abort hΓ hR (hε _ hab)
   | hdlV r hΓ hsR hd0 hm => intro ε' _; exact .hdlV r hΓ hsR hd0 hm
@@ -1389,13 +1401,15 @@ theorem head_pres {e L n a e' L' n'} (hh : Head Sig e L n a e' L' n') :
       obtain ⟨hΓ1, hΓ2⟩ := split_empty hsΓ
       subst hΓ1; subst hΓ2
       exact ⟨R1, .natV _ discard_empty (discardR_join hsR (nat_discard h1) (nat_discard h2)), hs, hf⟩
-  | arithAbort =>
+    | arithLiteral _ hd _ _ _ => exact ⟨R1, .natV _ discard_empty hd, hs, hf⟩
+  | arithAbort hev =>
     intro R1 R2 τ m ε h hs hf
     cases h with
     | arith _ _ hsΓ hsR h1 h2 hab =>
       obtain ⟨hΓ1, hΓ2⟩ := split_empty hsΓ
       subst hΓ1; subst hΓ2
       exact ⟨R1, .abort discard_empty (discardR_join hsR (nat_discard h1) (nat_discard h2)) hab, hs, hf⟩
+    | arithLiteral _ _ _ _ hsafe => rw [hev] at hsafe; contradiction
   | @handleRet l v ret opc _ _ hv =>
     intro R1 R2 τ m ε h hs hf
     cases h with
@@ -1664,6 +1678,9 @@ theorem progress_gen {Γ R e τ m ε} (h : HasType Sig Γ R e τ m ε) : Γ = Ct
     cases hev : op.eval x y with
     | none => exact Or.inr (Or.inr (Or.inr ⟨.hole, _, _, _, _, _, rfl, .arithAbort hev⟩))
     | some z => exact Or.inr (Or.inr (Or.inr ⟨.hole, _, _, _, _, _, rfl, .arithOk hev⟩))
+  | arithLiteral _ _ _ _ hev =>
+    intro _ L n _
+    exact Or.inr (Or.inr (Or.inr ⟨.hole, _, _, _, _, _, rfl, .arithOk hev⟩))
   | abort => intro _ _ _ _; exact Or.inr (Or.inl rfl)
   | @perform _ _ l _ _ _ ha h1 hl =>
     intro hΓ L n _; subst hΓ
@@ -1947,6 +1964,80 @@ theorem ArithOp.eval_some {op : ArithOp} {a b c : Nat} (h : op.eval a b = some c
 theorem add_overflow_aborts : ArithOp.eval .add (u64Bound - 1) 1 = none := by
   simp [ArithOp.eval, u64Bound]
 
+/-- A closed literal arithmetic expression has a pure typing exactly when
+both operands are in range and its actual primitive evaluation succeeds. -/
+theorem literal_arith_pure_iff (Sig : Nat → EffSig) (op : ArithOp) (a b : Nat) :
+    HasType Sig Ctx.empty RCtx.empty (.arith op (.natV a) (.natV b)) .nat .copy [] ↔
+      a < u64Bound ∧ b < u64Bound ∧ ∃ c, op.eval a b = some c := by
+  constructor
+  · intro h
+    cases h with
+    | arith _ _ _ _ _ _ hab => cases hab
+    | arithLiteral _ _ ha hb hev => exact ⟨ha, hb, _, hev⟩
+  · rintro ⟨ha, hb, c, hev⟩
+    exact .arithLiteral discard_empty discardR_empty ha hb hev
+
+/-- Failure of the primitive cannot be reclassified as pure at any result
+mode or type. -/
+theorem literal_arith_failure_not_pure (Sig : Nat → EffSig) {op : ArithOp} {a b : Nat}
+    (hev : op.eval a b = none) (τ : Ty) (m : Mode) :
+    ¬ HasType Sig Ctx.empty RCtx.empty (.arith op (.natV a) (.natV b)) τ m [] := by
+  intro h
+  cases h with
+  | arith _ _ _ _ _ _ hab => cases hab
+  | arithLiteral _ _ _ _ hsafe => rw [hev] at hsafe; contradiction
+
+theorem literal_add_boundary_pure (Sig : Nat → EffSig) :
+    HasType Sig Ctx.empty RCtx.empty
+      (.arith .add (.natV (u64Bound - 2)) (.natV 1)) .nat .copy [] :=
+  .arithLiteral (c := u64Bound - 1) discard_empty discardR_empty (by decide) (by decide)
+    (by simp [ArithOp.eval, u64Bound])
+
+theorem literal_sub_boundary_pure (Sig : Nat → EffSig) :
+    HasType Sig Ctx.empty RCtx.empty
+      (.arith .sub (.natV (u64Bound - 1)) (.natV (u64Bound - 1))) .nat .copy [] :=
+  .arithLiteral (c := 0) discard_empty discardR_empty (by decide) (by decide)
+    (by simp [ArithOp.eval, u64Bound])
+
+theorem literal_mul_boundary_pure (Sig : Nat → EffSig) :
+    HasType Sig Ctx.empty RCtx.empty
+      (.arith .mul (.natV (u64Bound - 1)) (.natV 1)) .nat .copy [] :=
+  .arithLiteral (c := u64Bound - 1) discard_empty discardR_empty (by decide) (by decide)
+    (by simp [ArithOp.eval, u64Bound])
+
+theorem sub_underflow_aborts : ArithOp.eval .sub 0 1 = none := by
+  simp [ArithOp.eval]
+
+theorem mul_overflow_aborts : ArithOp.eval .mul (u64Bound - 1) 2 = none := by
+  simp [ArithOp.eval, u64Bound]
+
+theorem literal_add_overflow_not_pure (Sig : Nat → EffSig) (τ : Ty) (m : Mode) :
+    ¬ HasType Sig Ctx.empty RCtx.empty
+      (.arith .add (.natV (u64Bound - 1)) (.natV 1)) τ m [] :=
+  literal_arith_failure_not_pure Sig add_overflow_aborts τ m
+
+theorem literal_sub_underflow_not_pure (Sig : Nat → EffSig) (τ : Ty) (m : Mode) :
+    ¬ HasType Sig Ctx.empty RCtx.empty (.arith .sub (.natV 0) (.natV 1)) τ m [] :=
+  literal_arith_failure_not_pure Sig sub_underflow_aborts τ m
+
+theorem literal_mul_overflow_not_pure (Sig : Nat → EffSig) (τ : Ty) (m : Mode) :
+    ¬ HasType Sig Ctx.empty RCtx.empty
+      (.arith .mul (.natV (u64Bound - 1)) (.natV 2)) τ m [] :=
+  literal_arith_failure_not_pure Sig mul_overflow_aborts τ m
+
+/-- Evaluation alone is insufficient: oversized natural literals are outside
+this new u64 literal rule even if subtraction would produce zero. -/
+theorem oversized_literal_sub_eval : ArithOp.eval .sub u64Bound u64Bound = some 0 := by
+  simp [ArithOp.eval, u64Bound]
+
+theorem oversized_literal_sub_not_pure (Sig : Nat → EffSig) (τ : Ty) (m : Mode) :
+    ¬ HasType Sig Ctx.empty RCtx.empty
+      (.arith .sub (.natV u64Bound) (.natV u64Bound)) τ m [] := by
+  intro h
+  cases h with
+  | arith _ _ _ _ _ _ hab => cases hab
+  | arithLiteral _ _ ha _ _ => exact (Nat.lt_irrefl _ ha)
+
 /-! ## Modal kinds: the field-modality premise is necessary -/
 
 /-- [K-Adt] for `copy struct Hidden { t : Ticket @@ copy, u : Unit @@ copy }`
@@ -1976,7 +2067,7 @@ def exSig : Nat → EffSig
 /-- The §6 worked derivation: `let tx = begin_txn(); validate()?; tx.commit()`
 with the abortable step modelled by checked arithmetic. -/
 def txnAcrossAbort : Expr :=
-  .letE .mint (.letE (.arith .add (.natV 1) (.natV 2)) (.consume (.var 1)))
+  .letE .mint (.letE (.arith .add (.natV (u64Bound - 1)) (.natV 1)) (.consume (.var 1)))
 
 /-- Rejected by the Resumption Frame Condition: `linear ⊑ affine` is false. -/
 theorem txn_across_abort_rejected (τ : Ty) (m : Mode) (ε : Row) :
@@ -2005,6 +2096,62 @@ theorem txn_across_abort_rejected (τ : Ty) (m : Mode) (ε : Row) :
               have : Mode.Le Mode.linear Mode.affine :=
                 Mode.le_trans hm1 (Mode.le_trans hfr hres)
               exact absurd this (by decide)
+
+        | arithLiteral _ _ _ _ hsafe =>
+          rw [add_overflow_aborts] at hsafe
+          contradiction
+
+/-- Literal 1+2 is safe while the handle remains live in the let frame. -/
+def txnAcrossSafeArith : Expr :=
+  .letE .mint (.letE (.arith .add (.natV 1) (.natV 2)) (.consume (.var 1)))
+
+theorem txn_across_safe_arith_typed :
+    HasType exSig Ctx.empty RCtx.empty txnAcrossSafeArith .unit .copy [] := by
+  refine .letE (split_left_all _) (splitR_empty_left _) (ε1 := []) (τ1 := .hdl) (m1 := .linear)
+    (.mint discard_empty discardR_empty (Mode.le_refl _)) ?_
+    ⟨fun _ _ _ h => (by cases h), fun _ _ h => (by cases h)⟩
+    (rowSub_refl _) (rowSub_refl _)
+  have hsplit : Split (Ctx.one (.hdl, .linear)) Ctx.empty (Ctx.one (.hdl, .linear)) := by
+    intro i; cases i with
+    | zero => exact .right _
+    | succ i => exact .none
+  refine .letE hsplit (splitR_empty_left _) (ε1 := []) (τ1 := .nat) (m1 := .copy)
+    (.arithLiteral (c := 3) discard_empty discardR_empty (by decide) (by decide)
+    (by simp [ArithOp.eval, u64Bound])) ?_
+    ⟨fun _ _ m _ => Mode.le_linear m, fun _ _ h => (by cases h)⟩
+    (rowSub_refl _) (rowSub_refl _)
+  refine .consume (.var 1) (.var (mx := .linear) rfl ?_ discardR_empty (Mode.le_refl _))
+  intro j t m hne hj
+  cases j with
+  | zero =>
+    simp only [Ctx.ext, Option.some.injEq, Prod.mk.injEq] at hj
+    rcases hj with ⟨rfl, rfl⟩
+    exact Mode.copy_le _
+  | succ j =>
+    cases j with
+    | zero => exact absurd rfl hne
+    | succ j => simp [Ctx.one, Ctx.ext, Ctx.empty] at hj
+
+theorem txn_across_safe_arith_runs : ∃ L n,
+    Steps exSig ⟨txnAcrossSafeArith, RCtx.empty, 0⟩
+      [.mint 0, .silent, .silent, .silent, .consume 0] ⟨.unitV, L, n⟩ := by
+  refine ⟨?L, ?n, ?main⟩
+  case main =>
+    apply Steps.cons (Step.ctx (.letC .hole (.letE (.arith .add (.natV 1) (.natV 2)) (.consume (.var 1))))
+      Head.mint)
+    apply Steps.cons (Step.ctx .hole (Head.letV (.hdlV 0)))
+    apply Steps.cons (Step.ctx (.letC .hole (.consume (.hdlV 0)))
+      (Head.arithOk (c := 3) (by simp [ArithOp.eval, u64Bound])))
+    apply Steps.cons (Step.ctx .hole (Head.letV (.natV 3)))
+    apply Steps.cons (Step.ctx .hole (Head.consume (by simp [RCtx.set])))
+    exact .refl _
+
+theorem txn_across_safe_arith_exhausts :
+    ∀ L n, Steps exSig ⟨txnAcrossSafeArith, RCtx.empty, 0⟩
+      [.mint 0, .silent, .silent, .silent, .consume 0] ⟨.unitV, L, n⟩ →
+      relCount 0 [.mint 0, .silent, .silent, .silent, .consume 0] = 1 :=
+  fun _ _ hs => total_linear_exhaustion txn_across_safe_arith_typed (fun l h => by simp at h) hs
+    (Or.inl .unitV) 0 (Or.inl (by simp))
 
 /-- Consuming the handle before the abortable step is accepted. -/
 def txnThenArith : Expr :=
@@ -2326,3 +2473,20 @@ end Vesper.MetatheoryFull
 #print axioms Vesper.MetatheoryFull.checked_overflow_runs
 #print axioms Vesper.MetatheoryFull.txn_then_arith_exhausts
 #print axioms Vesper.MetatheoryFull.lin_handler_resumes_once
+
+#print axioms Vesper.MetatheoryFull.literal_arith_pure_iff
+#print axioms Vesper.MetatheoryFull.literal_arith_failure_not_pure
+#print axioms Vesper.MetatheoryFull.literal_add_boundary_pure
+#print axioms Vesper.MetatheoryFull.literal_sub_boundary_pure
+#print axioms Vesper.MetatheoryFull.literal_mul_boundary_pure
+#print axioms Vesper.MetatheoryFull.sub_underflow_aborts
+#print axioms Vesper.MetatheoryFull.mul_overflow_aborts
+#print axioms Vesper.MetatheoryFull.literal_add_overflow_not_pure
+#print axioms Vesper.MetatheoryFull.literal_sub_underflow_not_pure
+#print axioms Vesper.MetatheoryFull.literal_mul_overflow_not_pure
+#print axioms Vesper.MetatheoryFull.txn_across_safe_arith_typed
+#print axioms Vesper.MetatheoryFull.txn_across_safe_arith_runs
+#print axioms Vesper.MetatheoryFull.txn_across_safe_arith_exhausts
+
+#print axioms Vesper.MetatheoryFull.oversized_literal_sub_eval
+#print axioms Vesper.MetatheoryFull.oversized_literal_sub_not_pure

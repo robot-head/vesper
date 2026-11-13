@@ -12,7 +12,7 @@ use std::path::PathBuf;
 const NAMESPACE: &str = "Vesper.MetatheoryFull";
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
 /// The headline results; the report lists all of them.
-const KEY_THEOREMS: [&str; 12] = [
+const KEY_THEOREMS: [&str; 17] = [
     "subst_ty",
     "plug_inv",
     "head_pres",
@@ -25,6 +25,11 @@ const KEY_THEOREMS: [&str; 12] = [
     "vt_rleM",
     "vSet_comm_disjoint",
     "txn_across_abort_rejected",
+    "literal_arith_pure_iff",
+    "oversized_literal_sub_not_pure",
+    "txn_across_safe_arith_typed",
+    "txn_across_safe_arith_runs",
+    "txn_across_safe_arith_exhausts",
 ];
 
 /// Resolve an elan proxy to the pinned toolchain's real binary from the
@@ -213,4 +218,51 @@ fn metatheory_compiles_with_only_standard_axioms() {
     }
     let declared: BTreeSet<String> = theorems.into_iter().collect();
     assert_eq!(audited, declared, "every theorem is audited exactly once");
+}
+
+/// These fixtures exercise the real public parser/checker independently of the
+/// Lean proof artifact. They do not establish a general checker refinement.
+#[test]
+fn literal_arithmetic_preserves_live_linear_frames_only_when_safe() {
+    fn codes(source: &str) -> Vec<String> {
+        let parsed = vesper::parser::parse(source);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "{source}\n{:?}",
+            parsed.diagnostics
+        );
+        vesper::check::check(&parsed.module)
+            .diagnostics
+            .into_iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect()
+    }
+
+    for expression in [
+        "1 + 2",
+        "18446744073709551614 + 1",
+        "18446744073709551615 - 18446744073709551615",
+        "18446744073709551615 * 1",
+    ] {
+        let source = format!(
+            "linear struct Ticket {{}} fn safe() -> u64 {{ let t = Ticket {{}}; \
+             let n: u64 = {expression}; let Ticket {{}} = t; n }}"
+        );
+        assert!(codes(&source).is_empty(), "safe literal fixture: {source}");
+    }
+    for expression in [
+        "18446744073709551615 + 1",
+        "0 - 1",
+        "18446744073709551615 * 2",
+    ] {
+        let no_effect = format!("fn missing() -> u64 {{ {expression} }}");
+        assert_eq!(codes(&no_effect), ["E0401"], "{no_effect}");
+        let unsafe_frame = format!(
+            "linear struct Ticket {{}} fn bad() -> u64 eff [Fail[ArithOverflow]] {{ \
+             let t = Ticket {{}}; let n: u64 = {expression}; let Ticket {{}} = t; n }}"
+        );
+        assert_eq!(codes(&unsafe_frame), ["E0402"], "{unsafe_frame}");
+        let allowed = format!("fn allowed() -> u64 eff [Fail[ArithOverflow]] {{ {expression} }}");
+        assert!(codes(&allowed).is_empty(), "{allowed}");
+    }
 }
