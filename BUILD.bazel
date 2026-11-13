@@ -14,10 +14,18 @@ vesper_crate(
         "//crates/vesper-grammar:files",
         "//crates/vesper-loom-trust:files",
     ],
-    # Six tests run serially, each kernel-replaying Lean's Std; on macOS
-    # runners the target needs well over 15 minutes, so it runs on Linux
-    # (BuildBuddy) only.
+    # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
+    # "Linux-only suites" in docs/ci-platforms.md.
     test_target_compatible_with = {
+        # Fresh replay of both complete model import closures through the
+        # external Lean4Lean checker: about 15 minutes on macOS runners, and
+        # the reason that lane needed the 6-minute checker setup at all.
+        "test/lean4lean42_acceptance": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Six tests run serially, each kernel-replaying Lean's Std; on macOS
+        # runners the target needs well over 15 minutes.
         "test/proof_audit_cli": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
