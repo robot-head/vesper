@@ -558,10 +558,15 @@ impl Capture {
         let target = required
             .max(checked_mul(self.node_capacity, 2)?)
             .min(RAW_NODES);
+        let nodes = checked_mul(target, 512)?;
+        // At most N classes can be merged; each cleanup can copy <=N node/
+        // parent entries. Charge that quadratic cumulative request envelope at
+        // every full geometric replacement credit, never only the net delta.
+        let cleanup = checked_mul(checked_mul(target, target)?, 128)?;
         self.budget
             .as_mut()
             .ok_or(WitnessError::Limit)?
-            .metadata(checked_mul(target, 512)?)?;
+            .metadata(checked_add(nodes, cleanup)?)?;
         self.node_capacity = target;
         Ok(())
     }
@@ -1411,11 +1416,31 @@ mod tests {
         }
         assert_eq!(root, Some(Id::from(nodes.len() - 1)));
         let expression = RecExpr::from(nodes);
-        let budget = WitnessBudget::new(WitnessLimits::HARD).unwrap();
-        assert!(matches!(
-            run_graph(&expression, budget),
-            Err(WitnessError::Limit)
-        ));
+        let mut graph = Graph::default();
+        graph.add_expr(&expression);
+        graph.rebuild();
+        let actual = rules();
+        let control = actual[0].search_with_limit(&graph, MATCHES);
+        assert_eq!(
+            control
+                .iter()
+                .map(|found| found.substs.len())
+                .sum::<usize>(),
+            MATCHES
+        );
+        let capture = Arc::new(Mutex::new(Capture {
+            budget: Some(WitnessBudget::new(WitnessLimits::HARD).unwrap()),
+            records: Vec::new(),
+            error: None,
+            node_capacity: graph.nodes().len(),
+        }));
+        let mut scheduler = BoundedScheduler {
+            capture: capture.clone(),
+        };
+        let before = graph.nodes().len();
+        assert!(scheduler.search_rewrite(0, &graph, &actual[0]).is_empty());
+        assert_eq!(capture.lock().unwrap().error, Some(WitnessError::Limit));
+        assert_eq!(graph.nodes().len(), before);
     }
 
     #[test]
