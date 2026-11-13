@@ -235,7 +235,7 @@ fn actual_shadowed_callee_identity_and_span_survive_child_folds() {
 fn actual_depth_refusal_keeps_original_hir_bytes_and_program_behavior() {
     let expression = "x".to_owned() + &" + 0".repeat(70);
     let fixture = Fixture::new(&format!(
-        "fn f(x: i64) -> i64 {{ {expression} }} fn main() -> i64 {{ f(42) }}"
+        "fn f(x: i64) -> i64 eff [Fail[ArithOverflow]] {{ {expression} }} fn main() -> i64 {{ handle Fail[ArithOverflow] in {{ f(42) }} with {{ return v => v, raise(e, k) => 43, }} }}"
     ));
     fixture.agrees("42");
     let before = fixture.success("emit", &["--emit", "hir", "--no-opt"]);

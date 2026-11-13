@@ -91,8 +91,8 @@ class Harness:
         return path
 
 
-def guarded(kind, expression):
-    return f"fn main() -> {kind} {{ handle Fail[ArithOverflow] in {{ {expression} }} with {{ return v => v, raise(e, k) => 42, }} }}"
+def guarded(kind, expression, fallback="42"):
+    return f"fn main() -> {kind} {{ handle Fail[ArithOverflow] in {{ {expression} }} with {{ return v => v, raise(e, k) => {fallback}, }} }}"
 
 
 def run(binary, work):
@@ -109,7 +109,7 @@ def run(binary, work):
             assert h.hir(path) == encoded
 
     for kind, maximum in [("u8", "255"), ("u32", "4294967295"), ("u64", "18446744073709551615"), ("i64", "9223372036854775807")]:
-        source = f"fn f(x: {kind}) -> {kind} {{ (x + 0) * 0 }} fn main() -> {kind} {{ f(42) }}"
+        source = f"fn f(x: {kind}) -> {kind} eff [Fail[ArithOverflow]] {{ (x + 0) * 0 }} " + guarded(kind, "f(42)")
         path = h.agree(source, "0")
         assert tail(body(load(h.hir(path)), "f"))["kind"] == {"Literal": {"Int": 0}}
         source = f"fn f(x: {kind}) -> {kind} eff [Fail[ArithOverflow]] {{ (x + 1) * 0 }} " + guarded(kind, f"f({maximum})")
@@ -151,13 +151,14 @@ def run(binary, work):
         assert original["callee"] == call["callee"]
         assert [argument["expr"]["kind"] for argument in call["args"]] == [{"Literal": {"Int": a}}, {"Literal": {"Int": b}}]
 
-    source = "fn f(x: i64) -> i64 { (x + 0) / 2 } fn main() -> i64 { f(84) }"
+    source = "fn f(x: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { (x + 0) / 2 } fn main() -> i64 { handle Fail[RuntimeError] in { handle Fail[ArithOverflow] in { f(84) } with { return v => v, raise(e, k) => 43, } } with { return v => v, raise(e, k) => 44, } }"
     path = h.agree(source, "42")
     division = tail(body(load(h.hir(path)), "f"))["kind"]["Binary"]
     assert division[0] == "/" and division[1]["kind"] == {"Name": "x"}
-    source = "fn f(x: i64) -> i64 eff [Fail[RuntimeError]] { x / 1 } fn main() -> i64 { handle Fail[RuntimeError] in { f(20 + 22) } with { return v => v + 0, raise(e, k) => 42 + 0, } }"
+    source = "fn f(x: i64) -> i64 eff [Fail[RuntimeError]] { x / 1 } fn main() -> i64 { handle Fail[ArithOverflow] in { handle Fail[RuntimeError] in { f(20 + 22) } with { return v => v + 0, raise(e, k) => 42 + 0, } } with { return v => v, raise(e, k) => 43, } }"
     path = h.agree(source, "42")
-    handler = tail(body(load(h.hir(path)), "main"))["kind"]["Handle"]
+    outer_handler = tail(body(load(h.hir(path)), "main"))["kind"]["Handle"]
+    handler = tail(outer_handler["body"])["kind"]["Handle"]
     assert tail(handler["ret"]["body"])["kind"] == {"Name": "v"}
     assert tail(handler["ops"][0]["body"])["kind"] == {"Literal": {"Int": 42}}
     assert tail(handler["body"])["kind"]["Call"]["args"][0]["expr"]["kind"] == {"Literal": {"Int": 42}}
@@ -166,7 +167,7 @@ def run(binary, work):
         source = "fn overflow() -> i64 eff [Fail[ArithOverflow]] { 9223372036854775807 + 1 } fn division() -> i64 eff [Fail[RuntimeError]] { 1 / 0 } " + f"fn main() -> i64 {{ handle Fail[RuntimeError] in {{ handle Fail[ArithOverflow] in {{ wrapping_mul({arguments}) }} with {{ return v => v, raise(e, k) => 10, }} }} with {{ return v => v, raise(e, k) => 20, }} }}"
         h.agree(source, expected)
 
-    source = "fn f(x: i64) -> i64 { x" + " + 0" * 70 + " } fn main() -> i64 { f(42) }"
+    source = "fn f(x: i64) -> i64 eff [Fail[ArithOverflow]] { x" + " + 0" * 70 + " } " + guarded("i64", "f(42)", "43")
     path = h.agree(source, "42")
     original, rewritten = h.hir(path, True), h.hir(path)
     assert original == rewritten == h.hir(path), "resource refusal must keep the complete island unchanged"

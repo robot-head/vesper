@@ -50,9 +50,16 @@ values, totality, shadowed/original intrinsic provenance, barrier order and
 whole-island refusal. No existing `.ves` fixture is edited. No public serialized
 certificate, proof flag, fabricated World, Lean source or approval is supplied.
 
-**Execution is pending coherent source integration.** The contract reserves all
-compiler builds/tests and script execution to the coordinator's integration
-worktree/cache. This lane has authored and rustfmt-checked its source and checked
-whitespace only; none of the runtime/native/CLI assertions above is reported as
-executed yet. The report will be updated from the coordinator's actual results.
+**Final execution is pending.** The contract reserves compiler builds/tests and
+script execution to the coordinator's integration worktree/cache. The first
+coordinator pass executes four CLI and four runtime tests successfully; remaining
+failures expose ill-typed positive fixtures and a producer-budget refusal on a
+required genuine simplification. The fixture correction adds existing effect
+rows and lexical handlers around checked variable arithmetic, preserving all
+structural expectations and the full depth-70 original-HIR comparison. Successful
+identity/depth cases use a distinct failure fallback. No compiler effect policy,
+optimization expectation or witness limit is relaxed. The producer's structural
+positive expectations remain unchanged while its owner fixes the refusal.
+This lane still performs only authored edits/rustfmt/whitespace checks; the
+coordinator will supply final runtime/script results for the report.
 No hosted, Lean, formal refinement, timing, RSS or performance claim is made.

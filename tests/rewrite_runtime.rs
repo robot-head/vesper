@@ -169,8 +169,12 @@ fn origins(expression: &Expr, types: &TypeMap) -> Vec<(String, std::ops::Range<u
 }
 
 fn guarded(kind: &str, expression: &str) -> String {
+    guarded_with(kind, expression, "42")
+}
+
+fn guarded_with(kind: &str, expression: &str, fallback: &str) -> String {
     format!(
-        "fn main() -> {kind} {{ handle Fail[ArithOverflow] in {{ {expression} }} with {{ return v => v, raise(e, k) => 42, }} }}"
+        "fn main() -> {kind} {{ handle Fail[ArithOverflow] in {{ {expression} }} with {{ return v => v, raise(e, k) => {fallback}, }} }}"
     )
 }
 
@@ -198,12 +202,16 @@ fn actual_six_fold_families_preserve_every_supported_integer_kind() {
 #[test]
 fn actual_identities_and_prior_totality_support_install_simplifications() {
     for kind in ["u8", "u32", "u64", "i64"] {
-        let source =
-            format!("fn f(x: {kind}) -> {kind} {{ x + 0 }} fn main() -> {kind} {{ f(42) }}");
+        let source = format!(
+            "fn f(x: {kind}) -> {kind} eff [Fail[ArithOverflow]] {{ x + 0 }} {}",
+            guarded_with(kind, "f(42)", "43")
+        );
         let after = agree(&source, "42");
         assert!(matches!(&tail(function(&after, "f")).kind, ExprKind::Name(name) if name == "x"));
-        let source =
-            format!("fn f(x: {kind}) -> {kind} {{ (x + 0) * 0 }} fn main() -> {kind} {{ f(42) }}");
+        let source = format!(
+            "fn f(x: {kind}) -> {kind} eff [Fail[ArithOverflow]] {{ (x + 0) * 0 }} {}",
+            guarded(kind, "f(42)")
+        );
         let after = agree(&source, "0");
         assert_eq!(
             tail(function(&after, "f")).kind,
@@ -343,16 +351,22 @@ fn typed_shadowed_intrinsics_stay_calls_while_their_pure_arguments_rewrite() {
 
 #[test]
 fn pure_children_inside_barriers_rewrite_without_moving_effect_or_failure_order() {
-    let source = "fn f(x: i64) -> i64 { (x + 0) / 2 } fn main() -> i64 { f(84) }";
+    let source = "fn f(x: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] { (x + 0) / 2 } fn main() -> i64 { handle Fail[RuntimeError] in { handle Fail[ArithOverflow] in { f(84) } with { return v => v, raise(e, k) => 43, } } with { return v => v, raise(e, k) => 44, } }";
     let after = agree(source, "42");
     let ExprKind::Binary(operation, left, _) = &tail(function(&after, "f")).kind else {
         panic!("division barrier")
     };
     assert_eq!(operation, "/");
     assert!(matches!(&left.kind, ExprKind::Name(name) if name == "x"));
-    let source = "fn f(x: i64) -> i64 eff [Fail[RuntimeError]] { x / 1 } fn main() -> i64 { handle Fail[RuntimeError] in { f(20 + 22) } with { return v => v + 0, raise(e, k) => 42 + 0, } }";
+    let source = "fn f(x: i64) -> i64 eff [Fail[RuntimeError]] { x / 1 } fn main() -> i64 { handle Fail[ArithOverflow] in { handle Fail[RuntimeError] in { f(20 + 22) } with { return v => v + 0, raise(e, k) => 42 + 0, } } with { return v => v, raise(e, k) => 43, } }";
     let after = agree(source, "42");
-    let ExprKind::Handle { body, ret, ops, .. } = &tail(function(&after, "main")).kind else {
+    let ExprKind::Handle {
+        body: outer_body, ..
+    } = &tail(function(&after, "main")).kind
+    else {
+        panic!("outer overflow handler")
+    };
+    let ExprKind::Handle { body, ret, ops, .. } = &tail(outer_body).kind else {
         panic!("handler barrier")
     };
     assert!(matches!(&tail(&ret.body).kind, ExprKind::Name(name) if name == "v"));
@@ -379,7 +393,10 @@ fn pure_children_inside_barriers_rewrite_without_moving_effect_or_failure_order(
 #[test]
 fn depth_refusal_preserves_the_entire_maximal_island_without_child_retry() {
     let expression = "x".to_owned() + &" + 0".repeat(70);
-    let source = format!("fn f(x: i64) -> i64 {{ {expression} }} fn main() -> i64 {{ f(42) }}");
+    let source = format!(
+        "fn f(x: i64) -> i64 eff [Fail[ArithOverflow]] {{ {expression} }} {}",
+        guarded_with("i64", "f(42)", "43")
+    );
     let (before, checked, after, rewritten) = transform(&source);
     assert_eq!(function(&before, "f"), function(&after, "f"));
     worlds_agree(&checked.world, &rewritten.world, "42", &source);
