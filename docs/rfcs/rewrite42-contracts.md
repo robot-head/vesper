@@ -379,6 +379,15 @@ Private producer ceilings are fixed, not caller-increasable in this profile:
 8 iterations, 2048 raw append-only egraph nodes, 128 substitutions per rule per
 iteration, and 4096 successful recorded rule applications. A non-saturated
 Runner stop (iteration/node/time/other resource stop) refuses the whole attempt.
+There is one distinct normal-completion case: the actual root e-class contains
+an in-profile Num/Input leaf, so AstSize1 attains the global lower bound for
+nonempty terms. The producer may explicitly stop further search as
+MinimumRootComplete before any capture/resource failure. Distinguish this
+private marker/state from arbitrary hook errors or resource stops. No recorded
+failure may be cleared or reclassified. Root leaf presence only stops search;
+it never proves equivalence. The recorded rule/congruence chain and full exact
+cumulative checker still authorize the actual extracted leaf before install.
+This avoids continuing cyclic annihilator classes after the objective is met.
 A capped search reporting its full match cap may conservatively refuse rather
 than assume that all matches were seen; never materialize an unbounded match
 list to discover its length. These supplement,
