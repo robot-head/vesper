@@ -85,6 +85,10 @@ object verification resources before opening the store. Existing fixed Store
 buffers are charged cumulatively (up to nine64KiB buffer envelopes per record),
 so many tiny objects can exhaust metadata below the independent object cap.
 Individual maxima do not guarantee that every combination fits all other caps.
+Caller-path resolution, the filesystem-resolved canonical destination-root
+prefix and its legacy Store path copies are outside these logical admission
+caps. Fixed relative paths and a conservative caller-input-path envelope are
+prepaid; this is not a bound on every Store or operating-system allocation.
 
 After validation, children are published before parents. Valid existing objects
 can be reused; corrupt ones can be repaired through the existing quarantine and
