@@ -677,9 +677,12 @@ impl Engine {
                 return Err(e);
             }
         };
-        let response: WorkerResponse = serde_json::from_slice(&bytes)
-            .map_err(|e| err(FailureKind::Protocol, e.to_string()))?;
+        let response: WorkerResponse = serde_json::from_slice(&bytes).map_err(|e| {
+            report.interrupted_worker_cases += 1;
+            err(FailureKind::Protocol, e.to_string())
+        })?;
         if response.worker_seq != worker.sequence || response.case_id != id {
+            report.interrupted_worker_cases += 1;
             return Err(err(FailureKind::Protocol, "worker response identity"));
         }
         let answer = match response.answer {
@@ -689,7 +692,11 @@ impl Engine {
                 return Err(e);
             }
         };
-        validate_rust_answer(&answer)?;
+        validate_rust_answer(&answer).inspect_err(|_| {
+            report.interrupted_worker_cases += 1;
+        })?;
+        // This response already confirms completed work, even if retirement fails.
+        record_rust(&answer, report, false);
         worker.sequence += 1;
         worker.handled += 1;
         report.max_worker_cases = report.max_worker_cases.max(worker.handled);
@@ -716,8 +723,7 @@ impl Engine {
             .update(&[u8::from(case.intent == Intent::StaticNegative)]);
         self.corpus.update(&fingerprint);
     }
-    fn finish(&mut self, config: &RunConfig, report: &mut RunReport) -> Result<(), HarnessError> {
-        let start = Instant::now();
+    fn retire_workers(&mut self, config: &RunConfig) -> Result<(), HarnessError> {
         let mut failure = None;
         for worker in &mut self.workers {
             if let Some(mut slot) = worker.take() {
@@ -737,6 +743,14 @@ impl Engine {
                 }
             }
         }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+    fn finish(&mut self, config: &RunConfig, report: &mut RunReport) -> Result<(), HarnessError> {
+        let start = Instant::now();
+        let mut failure = self.retire_workers(config).err();
         if self.healthy {
             self.lean.close_input();
             let result = (|| {
@@ -933,6 +947,12 @@ fn drive(
                     return Err(err(FailureKind::Invariant, "generator identity"));
                 }
                 case.program.validate()?;
+                if corpus::render_case(&case)?.len() > config.limits.source_bytes {
+                    return Err(err(
+                        FailureKind::UnsupportedProfile,
+                        "configured source byte cap",
+                    ));
+                }
                 let fingerprint = corpus::semantic_fingerprint(&case)?;
                 if id < total {
                     report.generated_valid += 1;
@@ -971,7 +991,6 @@ fn drive(
                 engine.receive_worker(pending.slot, pending.case.id, pending.until, config, report);
             let (rust, error) = match result {
                 Ok(rust) => {
-                    record_rust(&rust, report, false);
                     let error = compare(&pending.case, &pending.oracle, &rust).err();
                     (Some(rust), error)
                 }
@@ -1046,49 +1065,87 @@ fn shrink(
     if candidates.len() > 64 {
         return Err(err(FailureKind::Invariant, "shrink candidate cap"));
     }
+    // No fresh shrink child can exceed the configured live-worker bound.
+    engine.retire_workers(config)?;
     for mut case in candidates
         .into_iter()
         .take(usize::from(config.limits.shrink_attempts))
     {
         case.id = evidence.case.id;
         case.program.validate()?;
+        if corpus::render_case(&case)?.len() > config.limits.source_bytes {
+            return Err(err(
+                FailureKind::UnsupportedProfile,
+                "configured shrink source byte cap",
+            ));
+        }
         report.shrink_attempts += 1;
-        let (oracle, request, response) = engine.oracle(&case, config, report, true)?;
-        // Fresh process for each optional shrink avoids retaining failed-worker state.
-        let mut cmd = command(&engine.worker_path, None);
-        cmd.arg("--worker");
-        let mut child =
-            Session::spawn(cmd, FRAME_CAP, config.limits.stderr_bytes, ReadMode::Framed)?;
-        report.rust_worker_spawns += 1;
-        let payload = serde_json::to_vec(&WorkerRequest {
-            worker_seq: 0,
-            case: case.clone(),
-            evaluator_fuel: config.limits.evaluator_fuel,
-        })
-        .map_err(|e| err(FailureKind::Protocol, e.to_string()))?;
-        let bytes = child.exchange(payload, deadline(config.limits.worker_timeout_ms))?;
-        let result: WorkerResponse = serde_json::from_slice(&bytes)
+        evidence
+            .shrink_log
+            .push(serde_json::json!({"attempt":report.shrink_attempts,
+            "fingerprint":corpus::semantic_fingerprint(&case)?,"status":"started",
+            "worker_spawned":false}));
+        let index = evidence.shrink_log.len() - 1;
+        let mut spawned = false;
+        let mut confirmed = false;
+        let result = (|| {
+            let (oracle, request, response) = engine.oracle(&case, config, report, true)?;
+            evidence.shrink_log[index]["status"] = serde_json::json!("oracle_answered");
+            let mut cmd = command(&engine.worker_path, None);
+            cmd.arg("--worker");
+            let mut child =
+                Session::spawn(cmd, FRAME_CAP, config.limits.stderr_bytes, ReadMode::Framed)?;
+            spawned = true;
+            report.rust_worker_spawns += 1;
+            evidence.shrink_log[index]["worker_spawned"] = serde_json::json!(true);
+            let payload = serde_json::to_vec(&WorkerRequest {
+                worker_seq: 0,
+                case: case.clone(),
+                evaluator_fuel: config.limits.evaluator_fuel,
+            })
             .map_err(|e| err(FailureKind::Protocol, e.to_string()))?;
-        if result.worker_seq != 0 || result.case_id != case.id {
-            return Err(err(FailureKind::Protocol, "shrink worker identity"));
-        }
-        let rust = result.answer?;
-        validate_rust_answer(&rust)?;
-        record_rust(&rust, report, true);
-        report.max_worker_cases = report.max_worker_cases.max(1);
-        child.close_input();
-        if child
-            .receive(deadline(config.limits.shutdown_timeout_ms))?
-            .is_some()
-        {
-            return Err(err(FailureKind::Protocol, "shrink extra response"));
-        }
-        child.finish(config.limits.shutdown_timeout_ms)?;
-        let mismatch = compare(&case, &oracle, &rust).err();
-        evidence.shrink_log.push(serde_json::json!({"attempt":report.shrink_attempts,"fingerprint":corpus::semantic_fingerprint(&case)?,"mismatch":mismatch.as_ref().map(|e|e.kind)}));
-        if mismatch.is_some_and(|e| e.kind == evidence.error.kind) {
-            evidence.shrunken = Some((case, request, response));
-            break;
+            let bytes = child.exchange(payload, deadline(config.limits.worker_timeout_ms))?;
+            let reply: WorkerResponse = serde_json::from_slice(&bytes)
+                .map_err(|e| err(FailureKind::Protocol, e.to_string()))?;
+            if reply.worker_seq != 0 || reply.case_id != case.id {
+                return Err(err(FailureKind::Protocol, "shrink worker identity"));
+            }
+            let rust = reply.answer?;
+            validate_rust_answer(&rust)?;
+            record_rust(&rust, report, true);
+            confirmed = true;
+            report.max_worker_cases = report.max_worker_cases.max(1);
+            child.close_input();
+            if child
+                .receive(deadline(config.limits.shutdown_timeout_ms))?
+                .is_some()
+            {
+                return Err(err(FailureKind::Protocol, "shrink extra response"));
+            }
+            child.finish(config.limits.shutdown_timeout_ms)?;
+            let mismatch = compare(&case, &oracle, &rust).err();
+            evidence.shrink_log[index]["status"] = serde_json::json!("completed");
+            evidence.shrink_log[index]["mismatch"] =
+                serde_json::json!(mismatch.as_ref().map(|e| e.kind));
+            Ok((request, response, mismatch))
+        })();
+        match result {
+            Ok((request, response, mismatch)) => {
+                if mismatch.is_some_and(|e| e.kind == evidence.error.kind) {
+                    evidence.shrunken = Some((case, request, response));
+                    break;
+                }
+            }
+            Err(error) => {
+                if spawned && !confirmed {
+                    report.interrupted_worker_cases += 1;
+                }
+                evidence.shrink_log[index]["status"] = serde_json::json!("failed");
+                evidence.shrink_log[index]["error"] = serde_json::to_value(&error)
+                    .map_err(|e| err(FailureKind::Artifact, e.to_string()))?;
+                report.phase_times.shrink_ms = ms(start);
+                return Err(error);
+            }
         }
     }
     report.phase_times.shrink_ms = ms(start);
@@ -1104,53 +1161,35 @@ fn artifact_bytes(
     let Some(parent) = &config.artifacts else {
         return Ok(());
     };
-    fs::create_dir_all(parent)?;
-    let root = TempRoot::new(parent, "oracle42-run")?;
-    let path = root.0.clone();
-    std::mem::forget(root);
+    // Build the complete bounded publication plan before touching the destination.
+    let mut plan: Vec<(&str, Vec<u8>)> = Vec::with_capacity(12);
     let mut used = 0usize;
-    let mut put = |name: &str,
-                   bytes: Vec<u8>,
-                   report: &mut RunReport,
-                   listed: bool|
-     -> Result<(), HarnessError> {
+    let mut metadata = Vec::with_capacity(12);
+    let mut put = |name: &'static str, bytes: Vec<u8>| -> Result<(), HarnessError> {
         if bytes.len() > config.limits.artifact_bytes.saturating_sub(used)
             || name.len() > 256
-            || report.artifacts.len() >= 16
+            || metadata.len() >= 16
         {
             return Err(err(FailureKind::Artifact, "artifact quota"));
         }
         used += bytes.len();
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(path.join(name))
-            .map_err(|e| err(FailureKind::Artifact, e.to_string()))?;
-        file.write_all(&bytes)
-            .map_err(|e| err(FailureKind::Artifact, e.to_string()))?;
-        if listed {
-            report.artifacts.push(ArtifactInfo {
-                relative_path: name.into(),
-                bytes: bytes.len() as u64,
-                blake3: *blake3::hash(&bytes).as_bytes(),
-            });
-        }
+        metadata.push(ArtifactInfo {
+            relative_path: name.into(),
+            bytes: bytes.len() as u64,
+            blake3: *blake3::hash(&bytes).as_bytes(),
+        });
+        plan.push((name, bytes));
         Ok(())
     };
-    // Content files are independently hashable; summaries deliberately exclude themselves.
     if let Some(evidence) = evidence {
         put(
             "original.vs",
             corpus::render_case(&evidence.case)?.into_bytes(),
-            report,
-            true,
         )?;
         put(
             "case.json",
             serde_json::to_vec(&evidence.case)
                 .map_err(|e| err(FailureKind::Artifact, e.to_string()))?,
-            report,
-            true,
         )?;
         let framed = |bytes: &[u8]| {
             let mut framed = Vec::with_capacity(4 + bytes.len());
@@ -1158,56 +1197,67 @@ fn artifact_bytes(
             framed.extend_from_slice(bytes);
             framed
         };
-        put("request.frame", framed(&evidence.request), report, true)?;
-        put("response.frame", framed(&evidence.response), report, true)?;
+        put("request.frame", framed(&evidence.request))?;
+        put("response.frame", framed(&evidence.response))?;
         put(
             "difference.json",
             serde_json::to_vec(&(&evidence.error, &evidence.rust))
                 .map_err(|e| err(FailureKind::Artifact, e.to_string()))?,
-            report,
-            true,
         )?;
         if let Some((case, request, response)) = &evidence.shrunken {
-            put(
-                "shrunken.vs",
-                corpus::render_case(case)?.into_bytes(),
-                report,
-                true,
-            )?;
-            put("shrunken-request.frame", framed(request), report, true)?;
-            put("shrunken-response.frame", framed(response), report, true)?;
+            put("shrunken.vs", corpus::render_case(case)?.into_bytes())?;
+            put("shrunken-request.frame", framed(request))?;
+            put("shrunken-response.frame", framed(response))?;
         }
         if !evidence.shrink_log.is_empty() {
             put(
                 "shrink-log.json",
                 serde_json::to_vec(&evidence.shrink_log)
                     .map_err(|e| err(FailureKind::Artifact, e.to_string()))?,
-                report,
-                true,
             )?;
         }
     }
-    let config_bytes =
+    put(
+        "config.json",
         serde_json::to_vec(&(config.suite, config.seed, config.jobs, &config.limits))
-            .map_err(|e| err(FailureKind::Artifact, e.to_string()))?;
-    put("config.json", config_bytes, report, true)?;
+            .map_err(|e| err(FailureKind::Artifact, e.to_string()))?,
+    )?;
+    // Snapshot includes content inventory, but excludes the summary's own hash.
+    let mut snapshot = report.clone();
+    snapshot.artifacts = metadata.clone();
     let (name, summary) = if let Some(error) = failure {
         (
             "failure.json",
             serde_json::to_vec(&RunFailure {
                 error: error.clone(),
-                case_id: report.first_failed_case,
-                partial: report.clone(),
+                case_id: snapshot.first_failed_case,
+                partial: snapshot,
             }),
         )
     } else {
-        ("report.json", serde_json::to_vec(&*report))
+        ("report.json", serde_json::to_vec(&snapshot))
     };
-    let bytes = summary.map_err(|e| err(FailureKind::Artifact, e.to_string()))?;
-    if bytes.len() > FRAME_CAP {
-        return Err(err(FailureKind::Artifact, "summary limit"));
+    let summary = summary.map_err(|e| err(FailureKind::Artifact, e.to_string()))?;
+    if summary.len() > FRAME_CAP
+        || summary.len() > config.limits.artifact_bytes.saturating_sub(used)
+    {
+        return Err(err(FailureKind::Artifact, "complete artifact quota"));
     }
-    put(name, bytes, report, false)?;
+    plan.push((name, summary));
+    let root = TempRoot::new(parent, "oracle42-run")?;
+    // The unique output directory is intentionally retained, including on an I/O failure.
+    let path = root.0.clone();
+    std::mem::forget(root);
+    for (name, bytes) in plan {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path.join(name))
+            .map_err(|e| err(FailureKind::Artifact, e.to_string()))?;
+        file.write_all(&bytes)
+            .map_err(|e| err(FailureKind::Artifact, e.to_string()))?;
+    }
+    report.artifacts = metadata;
     Ok(())
 }
 
@@ -1382,5 +1432,32 @@ pub mod testing {
             max_frame_bytes: session.peak.load(Ordering::Relaxed),
             stderr_bytes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn complete_artifact_quota_is_checked_before_destination_initialization() {
+        let root = TempRoot::new(&std::env::temp_dir(), "oracle42-artifact-test").unwrap();
+        let output = root.0.join("must-not-be-created");
+        let mut config = RunConfig {
+            suite: Suite::Ci128,
+            seed: 0,
+            jobs: 1,
+            lean: "unused".into(),
+            worker_exe: "unused".into(),
+            artifacts: Some(output.clone()),
+            limits: HarnessLimits::default(),
+        };
+        // This permits config.json alone, but excludes the complete summary.
+        config.limits.artifact_bytes = 1024;
+        let mut report = RunReport::default();
+        let failure = artifact_bytes(&config, &mut report, None, None).unwrap_err();
+        assert_eq!(failure.kind, FailureKind::Artifact);
+        assert!(!output.exists());
+        assert!(report.artifacts.is_empty());
     }
 }
