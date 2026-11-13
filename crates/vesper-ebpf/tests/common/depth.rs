@@ -315,6 +315,26 @@ pub fn cases() -> Vec<Case> {
         add("accept/bpf_loop", None, Kernel::Accepts, fin(a, Xdp));
     }
     {
+        // bpf_loop's result: the callback stops at index 2, so 3 runs
+        let mut a = Asm::new();
+        let cb = a.label();
+        let end = a.label();
+        a.mov64(Reg::R1, 5);
+        a.ld_func(Reg::R2, cb);
+        a.mov64(Reg::R3, 0);
+        a.mov64(Reg::R4, 0);
+        a.call(h::LOOP);
+        a.alu64(AluOp::And, Reg::R0, 3);
+        a.exit();
+        a.bind(cb).unwrap();
+        a.mov64(Reg::R0, 0);
+        a.jmp(JmpOp::Ne, Reg::R1, 2, end);
+        a.mov64(Reg::R0, 1);
+        a.bind(end).unwrap();
+        a.exit();
+        add("accept/bpf_loop_count", None, Kernel::Accepts, fin(a, Xdp));
+    }
+    {
         let mut a = Asm::new();
         let cb = a.label();
         a.mov64(Reg::R1, 4);
