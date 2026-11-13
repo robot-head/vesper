@@ -1,7 +1,10 @@
-//! Bounded CPU BF16 key/value storage with 16-token pages.
+//! Bounded CPU key/value storage with 16-token pages.
 //!
-//! BF16 is stored as opaque little-endian two-byte elements in `[head, width]`
-//! order. No floating-point conversion or finiteness policy is applied. The
+//! The default format stores BF16 as opaque little-endian two-byte elements in
+//! `[head, width]` order; no floating-point conversion or finiteness policy is
+//! applied to it. [`KvPool::with_format`] can instead store little-endian FP32
+//! elements (bit-exact copies of the caller's values) for inference that must
+//! not round its cache. The
 //! pool owns its backing bytes; a non-clone sequence handle authorizes access.
 //! Explicit release is required: dropping a handle does not reclaim its pages.
 //! This host ownership protocol does not implement source-language linearity.
@@ -26,6 +29,25 @@ pub enum KvError {
     StaleGeneration,
     StaleCheckpoint,
     GenerationExhausted,
+    /// The step's element format does not match the pool's [`KvFormat`].
+    Format,
+}
+
+/// Element encoding of every key/value element in a pool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KvFormat {
+    /// Opaque little-endian BF16 bit patterns (two bytes per element).
+    Bf16,
+    /// Little-endian IEEE binary32 bit patterns (four bytes per element).
+    F32,
+}
+impl KvFormat {
+    pub const fn element_bytes(self) -> usize {
+        match self {
+            Self::Bf16 => 2,
+            Self::F32 => 4,
+        }
+    }
 }
 impl std::fmt::Display for KvError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -54,6 +76,15 @@ pub struct Bf16Step<'a> {
 pub struct KvToken<'a> {
     pub key: &'a [u8],
     pub value: &'a [u8],
+}
+
+/// A borrowed page of filled K/V token slots (see [`KvPool::read_page`]).
+#[derive(Debug)]
+pub struct KvPage<'a> {
+    pub first_position: usize,
+    pub tokens: usize,
+    pub keys: &'a [u8],
+    pub values: &'a [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -120,6 +151,7 @@ pub struct KvStats {
 pub struct KvPool {
     identity: u64,
     config: KvConfig,
+    format: KvFormat,
     token_bytes: usize,
     page_bytes: usize,
     storage: Vec<u8>,
@@ -138,6 +170,11 @@ impl KvPool {
     /// Allocates payload and bounded sequence tables once. Append/read/rollback/
     /// release allocate no additional backing storage.
     pub fn new(config: KvConfig) -> Result<Self, KvError> {
+        Self::with_format(config, KvFormat::Bf16)
+    }
+    /// As [`KvPool::new`], storing elements in `format`. The byte budget counts
+    /// the format's element size.
+    pub fn with_format(config: KvConfig, format: KvFormat) -> Result<Self, KvError> {
         if config.heads == 0
             || config.head_dim == 0
             || config.pages == 0
@@ -155,7 +192,9 @@ impl KvPool {
             .heads
             .checked_mul(config.head_dim)
             .ok_or(KvError::Overflow)?;
-        let token_bytes = elements.checked_mul(2).ok_or(KvError::Overflow)?;
+        let token_bytes = elements
+            .checked_mul(format.element_bytes())
+            .ok_or(KvError::Overflow)?;
         let page_bytes = token_bytes
             .checked_mul(TOKENS_PER_PAGE)
             .and_then(|n| n.checked_mul(2))
@@ -198,6 +237,7 @@ impl KvPool {
         Ok(Self {
             identity,
             config,
+            format,
             token_bytes,
             page_bytes,
             storage,
@@ -207,6 +247,9 @@ impl KvPool {
     }
     pub fn config(&self) -> KvConfig {
         self.config
+    }
+    pub fn format(&self) -> KvFormat {
+        self.format
     }
     pub fn stats(&self) -> KvStats {
         let active_sequences = self.slots.iter().filter(|s| s.active).count();
@@ -286,9 +329,9 @@ impl KvPool {
         key: Bf16Step<'_>,
         value: Bf16Step<'_>,
     ) -> Result<(), KvError> {
-        let state = self.state(sequence)?;
-        if position != state.tokens {
-            return Err(KvError::Position);
+        self.state(sequence)?;
+        if self.format != KvFormat::Bf16 {
+            return Err(KvError::Format);
         }
         for step in [key, value] {
             if step.heads != self.config.heads
@@ -297,6 +340,46 @@ impl KvPool {
             {
                 return Err(KvError::Shape);
             }
+        }
+        self.append_with(sequence, position, |out, plane| {
+            out.copy_from_slice(if plane == 0 { key.bytes } else { value.bytes });
+        })
+    }
+    /// Appends one `[heads, head_dim]` FP32 key/value step to an
+    /// [`KvFormat::F32`] pool. Values are stored bit-exactly (including NaN
+    /// payloads); the same validation and no-allocation rules as
+    /// [`KvPool::append`] apply.
+    pub fn append_f32(
+        &mut self,
+        sequence: &mut Sequence,
+        position: usize,
+        key: &[f32],
+        value: &[f32],
+    ) -> Result<(), KvError> {
+        self.state(sequence)?;
+        if self.format != KvFormat::F32 {
+            return Err(KvError::Format);
+        }
+        let elements = self.config.heads * self.config.head_dim;
+        if key.len() != elements || value.len() != elements {
+            return Err(KvError::Shape);
+        }
+        self.append_with(sequence, position, |out, plane| {
+            let source = if plane == 0 { key } else { value };
+            for (chunk, v) in out.as_chunks_mut::<4>().0.iter_mut().zip(source) {
+                chunk.copy_from_slice(&v.to_le_bytes());
+            }
+        })
+    }
+    fn append_with(
+        &mut self,
+        sequence: &mut Sequence,
+        position: usize,
+        write: impl Fn(&mut [u8], usize),
+    ) -> Result<(), KvError> {
+        let state = self.state(sequence)?;
+        if position != state.tokens {
+            return Err(KvError::Position);
         }
         let new_len = position.checked_add(1).ok_or(KvError::Overflow)?;
         if new_len > self.config.max_tokens_per_sequence {
@@ -337,9 +420,9 @@ impl KvPool {
             self.slots[sequence.key.slot].pages.push(lease);
         }
         let start = lease.page * self.page_bytes + (position % TOKENS_PER_PAGE) * self.token_bytes;
-        self.storage[start..start + self.token_bytes].copy_from_slice(key.bytes);
+        write(&mut self.storage[start..start + self.token_bytes], 0);
         let start = start + TOKENS_PER_PAGE * self.token_bytes;
-        self.storage[start..start + self.token_bytes].copy_from_slice(value.bytes);
+        write(&mut self.storage[start..start + self.token_bytes], 1);
         self.slots[sequence.key.slot].tokens = new_len;
         Ok(())
     }
@@ -367,11 +450,34 @@ impl KvPool {
             return Err(KvError::Shape);
         }
         let token = self.read(sequence, position)?;
-        let bytes = self.config.head_dim * 2;
+        let bytes = self.config.head_dim * self.format.element_bytes();
         let start = head * bytes;
         Ok(KvToken {
             key: &token.key[start..start + bytes],
             value: &token.value[start..start + bytes],
+        })
+    }
+    /// Number of pages currently leased by `sequence`.
+    pub fn page_count(&self, sequence: &Sequence) -> Result<usize, KvError> {
+        Ok(self.state(sequence)?.pages.len())
+    }
+    /// Borrowed view of one leased page: only its filled token slots, keys and
+    /// values each laid out as `[token, head, width]` elements of the pool's
+    /// format. The page's lease is validated against its current owner.
+    pub fn read_page(&self, sequence: &Sequence, index: usize) -> Result<KvPage<'_>, KvError> {
+        let state = self.state(sequence)?;
+        let lease = *state.pages.get(index).ok_or(KvError::Position)?;
+        self.lease(sequence.key, lease)?;
+        let first = index * TOKENS_PER_PAGE;
+        let tokens = (state.tokens - first).min(TOKENS_PER_PAGE);
+        let start = lease.page * self.page_bytes;
+        let plane = TOKENS_PER_PAGE * self.token_bytes;
+        let used = tokens * self.token_bytes;
+        Ok(KvPage {
+            first_position: first,
+            tokens,
+            keys: &self.storage[start..start + used],
+            values: &self.storage[start + plane..start + plane + used],
         })
     }
     pub fn checkpoint(&self, sequence: &Sequence) -> Result<Checkpoint, KvError> {
