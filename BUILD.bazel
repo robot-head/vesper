@@ -14,9 +14,10 @@ vesper_crate(
         "//crates/vesper-grammar:files",
         "//crates/vesper-loom-trust:files",
     ],
-    # Runs Lean serially on many fixtures; macOS runners need more than the
-    # medium size's 300 s.
-    test_timeouts = {"test/proof_audit_cli": "long"},
+    # Six tests run serially, each kernel-replaying Lean's Std (one re-checks
+    # the whole Lean package). On macOS runners they finish one by one but
+    # take more than 900 s in total, so the target gets the 3600 s ceiling.
+    test_timeouts = {"test/proof_audit_cli": "eternal"},
 )
 # Narrow slices of the root package for members that read them.
 filegroup(
