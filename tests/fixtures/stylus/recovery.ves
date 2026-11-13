@@ -1,0 +1,6 @@
+// gap  🦀  preserved
+fn damaged(){let x=;}
+
+// sibling comment stays outside the edit
+fn main( )->i64{42}
+
