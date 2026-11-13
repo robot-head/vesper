@@ -138,7 +138,7 @@ jobs:
           --driver "$PWD/target/debug/lean4lean42.exe"
           --lean "$(elan which lean)"
           --lake "$(elan which lake)"
-          --git "$(command -v git)"
+          --git git
       - run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - run: cargo test --workspace --locked
         env:
