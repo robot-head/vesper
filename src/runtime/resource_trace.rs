@@ -480,6 +480,14 @@ struct Shared {
 pub struct ResourceTraceObserver {
     shared: Rc<Shared>,
 }
+impl fmt::Debug for ResourceTraceObserver {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Formatting a handle must not borrow the running ledger or expand a
+        // potentially large report. Call snapshot explicitly to inspect it.
+        f.debug_struct("ResourceTraceObserver")
+            .finish_non_exhaustive()
+    }
+}
 impl ResourceTraceObserver {
     pub fn snapshot(&self) -> Result<ResourceTraceReport, ResourceTraceError> {
         let state = self
