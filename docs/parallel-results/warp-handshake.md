@@ -47,7 +47,9 @@ per-space CRYPTO buffers and `open_connection_with_params` as hooks.
   largest received number, reserved bits, duplicate check, then frames:
   ACK (RFC 9002 recovery in that space), CRYPTO (lane 13's buffer for the
   space) and CONNECTION_CLOSE. Frame types not allowed in the packet type
-  are rejected by lane 1's `scan_payload`.
+  are rejected by lane 1's `scan_payload`. TLS runs after each packet, so
+  a Handshake packet coalesced behind the Initial that carries the
+  ServerHello opens with the keys it yields.
 * In-order CRYPTO bytes go from lane 13's per-space receive buffer to
   `QuicTls::on_crypto_frame`; TLS output goes into lane 13's per-space send
   buffer (with an overflow queue). Lost CRYPTO ranges are requeued from the
@@ -93,9 +95,15 @@ per-space CRYPTO buffers and `open_connection_with_params` as hooks.
 
 ### Two changes to the existing 1-RTT path
 
-* The short-header packet-number offset and the stream frame budget now
-  use the peer's connection-ID length from the tile instead of assuming it
-  equals ours (a server's peer CID is whatever the client chose).
+* Short headers are written with the peer's connection-ID length (new
+  `HeaderParser::write_short_to_peer`), and the packet-number offset and
+  the stream frame budget use it too, instead of assuming it equals ours
+  (a server's peer CID is whatever the client chose). Parsing keeps the
+  local length.
+* A closing connection (`Local` or `Handshake` error) answers incoming
+  packets in any space with CONNECTION_CLOSE again, at most once per PTO
+  (RFC 9000 §10.2.1); a draining one (`Peer`) stays silent. Before, only
+  1-RTT packets on `Local` closes were answered.
 * An application-data PTO probe leaves at once instead of being paced
   (RFC 9002 §6.2.4 sends probes regardless of the congestion window). A
   seed sweep at 40% loss showed BBRv3's loss response pushing the pacing
@@ -134,6 +142,15 @@ All on this host, rustc 1.97.0, debug build unless stated.
     connection; a 300-byte Initial is `BadInitial`; Initials without a
     listener and Handshake packets for unknown CIDs are `UnknownCid`.
   * Role and configuration checks for `connect` and `listen`.
+  * Mismatched connection-ID lengths (4-byte client and 12-byte server,
+    17 and 4, and a 1-byte client CID, whose short Initial header needs
+    the most padding) at 5% loss and reordering: handshake and 40 kB each
+    way.
+  * A server Initial and Handshake packet coalesced into one datagram are
+    both processed.
+  * A client whose CONNECTION_CLOSE was lost answers the server's
+    retransmitted flight with it again, once per PTO, and the server
+    then sees the close.
   * "0 Alloc" after the handshake: with a counting global allocator on the
     test thread, 300 warm rounds of stream echo over a handshake-opened
     connection allocate nothing (the test wire's own datagram copies are
