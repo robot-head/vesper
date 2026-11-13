@@ -278,12 +278,56 @@ executed fix in this lane. Do not bypass primitive checking or preload unchecked
 constants as a substitute. Review any subsequent prerequisite failures in the
 same way and rerun the real models after each actual correction.
 
-The coordinator also reported a fourth import experiment with
-`importAll := true`; its outcome is not established by this update. No external
-model acceptance or complete port has been established. Further private-API,
-proof, primitive or runtime adaptations may remain. Identical kernel files and
-familiar declaration signatures cannot replace compilation and the required
-rejection/coverage checks.
+### Coordinator primitive fix and the next universe failure
+
+The coordinator's fourth experiment with `importAll := true` built successfully,
+but both actual fresh model checks still failed on `And.left` (retained
+`external-importAll-*` files in the same model-check directory). The coordinator
+then applied the exact upstream d7a52 Primitive patch with `git apply`, without
+bypassing primitive checks. Build5 completed successfully (53 jobs).
+
+Actual fresh checks now progressed further, but both still exited1:
+
+| Model | Observed seconds | Actual error |
+|---|---:|---|
+| RewriteWitness | 15.973 | universe level of type_of(arg #2) of `FloatSpec.mk` is too big for the corresponding inductive datatype |
+| ArithmeticOracle | 15.068 | same |
+
+These are coordinator results in
+`/tmp/lean4lean42-model-check-47qniaf5/results-primitive5.json` and
+`external-primitive5-*`, associated with retained patch
+`/tmp/lean4lean42-port5.diff` (reported SHA256
+`5e584ecdac5f75fd8c0e749d9223a41ac7e8d5688eb8c06cae111164e963b2db`).
+They are external-check failures, not positive acceptance.
+
+Independent read-only source diagnosis identifies a second exact upstream fix:
+[bc9a736be9c318209992e91ef6a218864b817dcf](https://github.com/digama0/lean4lean/commit/bc9a736be9c318209992e91ef6a218864b817dcf),
+“fix: bugs in Level.geq.” Base `Level.geq' u v` evaluates
+`normalize(v).le(normalize(u))`, but `NormLevel.le` reverses its node constant
+inequality: it compares `n₂.const ≤ n₁.const` rather than `n₁.const ≤ n₂.const`.
+The patch also corrects which node constant is compared to variable offsets.
+For pure constant levels, the base therefore rejects2≥1 by testing2≤1.
+
+This matches the observed field index precisely. Installed 4.24
+`Init/Data/Float.lean:15` declares an ordinary safe `structure FloatSpec`, with
+`float : Type` then `val : float`; its result is Type1 (Sort2). The first field
+requires2≥2, while the second requires2≥1. The latter comparison fails in the
+base algorithm. This is source reasoning, not an executed metadata probe by
+this lane.
+
+The hardcoded `false` safety argument in replay is not a supported explanation
+for this error. The source declaration is not unsafe, and the universe guard
+in `Inductive/Add.lean:223`–225 executes regardless of `isUnsafe`; that flag
+controls the following positivity check. Correct the comparison using the
+reviewed upstream fix and retain the inductive guard. Acceptance should include
+both valid and invalid universe controls, including2≥1 and1≥2, instead of
+weakening or bypassing induction checks. The source diagnosis does not establish
+that applying this fix will complete the port; further failures may remain.
+
+No external model acceptance or complete port has been established. Further
+private-API, proof, primitive or runtime adaptations may remain. Identical kernel
+files and familiar declaration signatures cannot replace compilation and the
+required rejection/coverage checks.
 
 ## Evidence and limits
 
