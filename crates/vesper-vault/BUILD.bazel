@@ -1,0 +1,8 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    # Lean resolves symlinked runfiles to the source tree, so the Lean proof
+    # check runs in a copy of regular files, like the other Lean-backed crates.
+    copy_test_cwd = ["test/lean"],
+    extra_test_data = ["//:lean"],
+)
