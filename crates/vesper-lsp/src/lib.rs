@@ -2,7 +2,8 @@
 //!
 //! This crate performs no filesystem access or compiler execution. URI labels
 //! carry no filesystem authority. See the README for the explicit JSON-RPC
-//! profile, resource accounting and stream error policy.
+//! profile, resource accounting and stream error policy. The [`lens`] module
+//! ranks and records caller-supplied facts only.
 //!
 //! ```
 //! use vesper_lsp::{DocumentStore, StoreLimits, ContentChange};
@@ -16,6 +17,7 @@
 //! ```
 #![forbid(unsafe_code)]
 mod document;
+pub mod lens;
 mod transport;
 pub use document::{ContentChange, Document, DocumentStore, StoreError, StoreLimits};
 pub use transport::{

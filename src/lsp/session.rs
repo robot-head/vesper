@@ -1,5 +1,6 @@
 //! In-memory bounded editor lifecycle. URIs are labels, never filesystem paths.
 use super::{actions, macro_preview, navigation, search};
+mod lens_requests;
 use crate::{
     database::{self, Database, RecoveryFile, SourceFile, SyntaxSnapshot},
     tooling::{
@@ -7,9 +8,11 @@ use crate::{
         lint::ConfigProvenance,
     },
 };
+pub(crate) use lens_requests::CommandOutcome;
+pub use lens_requests::LensConfig;
 use salsa::Setter;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 use vesper_lint::policy::Policy;
 use vesper_lsp::{ContentChange, DocumentStore, Envelope, Position, Range, StoreLimits};
 use vesper_syntax::{
@@ -79,7 +82,17 @@ pub(crate) struct Session {
     code_actions_supported: bool,
     diagnostic_related: bool,
     diagnostic_help_data: bool,
+    lens_views: RefCell<LensViews>,
+    proofs: vesper_lsp::lens::ProofLedger,
+    lens_config: LensConfig,
 }
+type LensViews = BTreeMap<
+    String,
+    (
+        [u8; 32],
+        Result<Arc<super::lens::View>, super::lens::Unavailable>,
+    ),
+>;
 impl Session {
     pub(crate) fn new() -> Result<Self, String> {
         Ok(Self {
@@ -94,7 +107,15 @@ impl Session {
             code_actions_supported: false,
             diagnostic_related: false,
             diagnostic_help_data: false,
+            lens_views: RefCell::new(BTreeMap::new()),
+            proofs: vesper_lsp::lens::ProofLedger::new(1024).map_err(|e| e.to_string())?,
+            lens_config: LensConfig::default(),
         })
+    }
+    pub(crate) fn with_config(config: LensConfig) -> Result<Self, String> {
+        let mut session = Self::new()?;
+        session.set_lens_config(config);
+        Ok(session)
     }
     fn running(&self) -> Result<(), ServerError> {
         match self.state {
@@ -160,7 +181,14 @@ impl Session {
                 "documentSymbolProvider":true,"workspaceSymbolProvider":true,
                 "documentFormattingProvider":true,
                 "codeActionProvider":code_actions,
+                "completionProvider":{"triggerCharacters":["."],"resolveProvider":false},
+                "inlayHintProvider":true,
+                "codeLensProvider":{"resolveProvider":false},
+                "executeCommandProvider":{"commands":[lens_requests::PROOF_COMMAND]},
                 "experimental":{
+                    "vesperLens":{"version":1,"poisonedRecovery":"VESPER_POISONED_RECOVERY",
+                        "completion":"obligation_ranked_members",
+                        "proofLenses":"lean_extraction_axiom_free"},
                     "vesperRecoveryStatus":{"scope":"syntax_only","version":1},
                     "vesperMacroPreview":{"version":1,"tier":1,"scope":"expanded_source_only"}
                 }
@@ -187,6 +215,9 @@ impl Session {
                 | "vesper/macroPreview"
                 | "textDocument/formatting"
                 | "textDocument/codeAction"
+                | "textDocument/completion"
+                | "textDocument/inlayHint"
+                | "textDocument/codeLens"
         ) {
             return Err(ServerError::new(-32601, "Method not found"));
         }
@@ -194,18 +225,31 @@ impl Session {
         match method {
             "vesper/macroPreview" => self.macro_preview(params),
             "vesper/recoveryStatus" => self.recovery_status(document_uri(params)?),
-            "textDocument/hover" | "textDocument/definition" => {
+            "textDocument/completion" => self.completion(params),
+            "textDocument/inlayHint" => self.inlay_hints(params),
+            "textDocument/codeLens" => self.code_lenses(params),
+            "textDocument/hover" => {
+                let uri = document_uri(params)?;
+                let at = position(field(params, "position")?)?;
+                let base = self.snapshot(uri).and_then(|snapshot| {
+                    navigation::hover(
+                        &snapshot,
+                        self.document(uri)?.index(),
+                        at,
+                        navigation::Limits::default(),
+                    )
+                    .map(|value| value.unwrap_or(Value::Null))
+                    .map_err(nav_error)
+                });
+                self.hover_with_obligations(uri, at, base)
+            }
+            "textDocument/definition" => {
                 let uri = document_uri(params)?;
                 let at = position(field(params, "position")?)?;
                 let snapshot = self.snapshot(uri)?;
                 let document = self.document(uri)?;
                 let limits = navigation::Limits::default();
-                let result = if method == "textDocument/hover" {
-                    navigation::hover(&snapshot, document.index(), at, limits)
-                } else {
-                    navigation::definition(uri, &snapshot, document.index(), at, limits)
-                };
-                result
+                navigation::definition(uri, &snapshot, document.index(), at, limits)
                     .map(|value| value.unwrap_or(Value::Null))
                     .map_err(nav_error)
             }
@@ -496,6 +540,9 @@ impl Session {
         // survive in the mirror, including IDs of still-open documents.
         self.files.clear();
         self.recovery.clear();
+        // Cached Lens views hold whole checker states; keep only open buffers
+        // reachable, and rebuild them lazily from the new database.
+        self.lens_views.borrow_mut().clear();
         self.db = Database::default();
         for document in self.documents.iter() {
             self.files.insert(
@@ -573,7 +620,12 @@ impl Session {
         let (mut diagnostics, status, kind) = match analysis.checked() {
             Ok(_) => (Vec::new(), "checked", None),
             Err(failure @ AnalysisFailure::Parse { .. }) => match self.recovery_payload(uri) {
-                Ok((payload, metadata)) => {
+                Ok((mut payload, mut metadata)) => {
+                    // PoisonedRecovery: one notice per live linear binding of
+                    // each damaged function, never a cascade of leak errors.
+                    let (poison, lens) = self.poison_payload(uri);
+                    payload.0.extend(poison);
+                    metadata["lens"] = lens;
                     recovery = Some(metadata);
                     payload
                 }
@@ -1175,13 +1227,17 @@ mod tests {
         );
         let result = session.request("initialize", Some(json!({}))).unwrap();
         assert_eq!(result["capabilities"]["positionEncoding"], "utf-16");
-        for unsupported in [
-            "completionProvider",
-            "executeCommandProvider",
-            "codeLensProvider",
-        ] {
-            assert!(result["capabilities"].get(unsupported).is_none());
-        }
+        // Lens providers are advertised; proof commands are server-named only.
+        assert_eq!(
+            result["capabilities"]["executeCommandProvider"]["commands"],
+            json!(["vesper.proofAudit"])
+        );
+        assert_eq!(
+            result["capabilities"]["completionProvider"]["triggerCharacters"],
+            json!(["."])
+        );
+        assert!(result["capabilities"]["codeLensProvider"].is_object());
+        assert!(result["capabilities"].get("renameProvider").is_none());
         assert_eq!(
             session
                 .request("initialize", Some(json!({})))
