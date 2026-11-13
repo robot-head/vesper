@@ -400,6 +400,9 @@ struct Stats {
     bytes: usize,
     metadata: usize,
 }
+// Structural nodes are Module/ModuleName, Declaration, Term, Argument, Name
+// and Ident. Vec/Box indirections and literal/string storage are payloads,
+// metered in bytes rather than additional AST levels.
 impl Stats {
     fn combine(self, b: Self) -> Result<Self, ExportError> {
         Ok(Self {
@@ -419,7 +422,7 @@ fn name_stats(spec: Spec) -> Result<Stats, ExportError> {
     }
     Ok(Stats {
         nodes: parts + 1,
-        depth: 0,
+        depth: 2, // Name -> Ident; components are flat sibling leaves.
         names,
         bytes: add(
             add(names, mul(parts, 4)?)?,
@@ -442,7 +445,7 @@ impl Maker {
     fn reference(&self, spec: Spec) -> Result<Piece, ExportError> {
         let mut stats = name_stats(spec)?;
         stats.nodes = add(stats.nodes, 1)?;
-        stats.depth = 1;
+        stats.depth = add(stats.depth, 1)?; // Term::Ref -> Name -> Ident.
         stats.metadata = add(stats.metadata, size_of::<Term>())?;
         Ok(Piece {
             stats,
@@ -497,13 +500,16 @@ impl Maker {
     ) -> Result<Piece, ExportError> {
         let count = N + usize::from(kind.is_some());
         let mut stats = function.stats;
+        let mut maxdepth = function.stats.depth;
         for arg in &args {
             stats = stats.combine(arg.stats)?;
+            maxdepth = maxdepth.max(add(arg.stats.depth, 1)?); // Argument -> value.
         }
         if let Some(k) = &kind {
             stats = stats.combine(k.stats)?;
+            // A named Argument has both its Ident leaf and value as children.
+            maxdepth = maxdepth.max(add(k.stats.depth.max(1), 1)?);
         }
-        let maxdepth = stats.depth;
         stats.nodes = add(stats.nodes, 1 + count + if kind.is_some() { 1 } else { 0 })?;
         stats.depth = add(maxdepth, 1)?;
         stats.bytes = add(stats.bytes, 2 + count + if kind.is_some() { 11 } else { 0 })?;
@@ -882,8 +888,10 @@ fn lower(
         rooted: false,
     };
     let ns = name_stats(namespace)?;
-    stats.nodes = add(stats.nodes, add(ns.nodes, 2)?)?;
-    stats.depth = add(stats.depth, 1)?;
+    // Module + Namespace declaration + the fixed ModuleName import node.
+    // ModuleName's String components are payload, not AST Ident nodes.
+    stats.nodes = add(stats.nodes, add(ns.nodes, 3)?)?;
+    stats.depth = add(stats.depth.max(ns.depth), 2)?;
     stats.names = add(stats.names, add(ns.names, "RewriteWitness".len())?)?;
     stats.bytes = add(stats.bytes, add(mul(ns.bytes, 2)?, 128)?)?;
     stats.metadata = add(

@@ -10,7 +10,102 @@ use vesper::optimize::witness_lean::{
     ExportError, ExportLimits, ReplayScope, export_rewrite, model_audit_roots, model_source,
     prepare_rewrite,
 };
-use vesper_lean_syntax::{Declaration, DefinitionKind, Term as LeanTerm};
+use vesper_lean_syntax::{Argument, Declaration, DefinitionKind, Module, Name, Term as LeanTerm};
+
+// Independent walk of the public AST, without exporter-private Stats/template
+// helpers. Literal storage and Vec/Box indirections are payload, not nodes.
+fn name_shape(name: &Name) -> (usize, usize) {
+    assert!(!name.components().is_empty());
+    (1 + name.components().len(), 2)
+}
+
+fn term_shape(term: &LeanTerm) -> (usize, usize) {
+    match term {
+        LeanTerm::Ref(name) => {
+            let (nodes, depth) = name_shape(name);
+            (1 + nodes, 1 + depth)
+        }
+        LeanTerm::Nat(_) | LeanTerm::Rfl | LeanTerm::ByDecide => (1, 1),
+        LeanTerm::App {
+            function,
+            arguments,
+        } => {
+            let (mut nodes, mut depth) = term_shape(function);
+            nodes += 1;
+            for argument in arguments {
+                let (value, named) = match argument {
+                    Argument::Positional(value) => (value, false),
+                    Argument::Named { value, .. } => (value, true),
+                };
+                let (child_nodes, child_depth) = term_shape(value);
+                nodes += 1 + child_nodes + usize::from(named);
+                depth = depth.max(1 + child_depth.max(usize::from(named)));
+            }
+            (nodes, depth + 1)
+        }
+        LeanTerm::Ascribe { value, ty } => {
+            let (a, ad) = term_shape(value);
+            let (b, bd) = term_shape(ty);
+            (1 + a + b, 1 + ad.max(bd))
+        }
+        LeanTerm::Binary { left, right, .. } => {
+            let (a, ad) = term_shape(left);
+            let (b, bd) = term_shape(right);
+            (1 + a + b, 1 + ad.max(bd))
+        }
+        LeanTerm::Unary { value, .. } => {
+            let (nodes, depth) = term_shape(value);
+            (1 + nodes, 1 + depth)
+        }
+        _ => panic!("exporter emitted syntax outside its fixed subset"),
+    }
+}
+
+fn declaration_shape(declaration: &Declaration) -> (usize, usize) {
+    match declaration {
+        Declaration::Definition(definition) => {
+            assert!(definition.binders.is_empty());
+            let (n, nd) = name_shape(&definition.name);
+            let (a, ad) = term_shape(&definition.result);
+            let (b, bd) = term_shape(&definition.body);
+            (1 + n + a + b, 1 + nd.max(ad).max(bd))
+        }
+        Declaration::Theorem {
+            name,
+            binders,
+            proposition,
+            proof,
+        } => {
+            assert!(binders.is_empty());
+            let (n, nd) = name_shape(name);
+            let (a, ad) = term_shape(proposition);
+            let (b, bd) = term_shape(proof);
+            (1 + n + a + b, 1 + nd.max(ad).max(bd))
+        }
+        Declaration::Namespace { name, declarations } => {
+            let (n, mut depth) = name_shape(name);
+            let mut nodes = 1 + n;
+            for declaration in declarations {
+                let (child_nodes, child_depth) = declaration_shape(declaration);
+                nodes += child_nodes;
+                depth = depth.max(child_depth);
+            }
+            (nodes, depth + 1)
+        }
+        _ => panic!("exporter emitted declaration outside its fixed subset"),
+    }
+}
+
+fn module_shape(module: &Module) -> (usize, usize) {
+    let mut nodes = 1 + module.imports.len(); // ModuleName is one node per import.
+    let mut depth = usize::from(!module.imports.is_empty());
+    for declaration in &module.declarations {
+        let (child_nodes, child_depth) = declaration_shape(declaration);
+        nodes += child_nodes;
+        depth = depth.max(child_depth);
+    }
+    (nodes, depth + 1)
+}
 
 fn fixture(name: &str) -> (Expr, Expr, TypeMap, RewriteCertificate) {
     let kind = IntegerKind::U8;
@@ -109,6 +204,10 @@ fn structured_definitions_proofs_and_manifest_preserve_topological_sharing() {
     assert!(manifest.ast_node_count > manifest.declaration_count);
     assert!(manifest.ast_depth <= ExportLimits::default().max_ast_depth);
     let module = prepared.module();
+    assert_eq!(
+        module_shape(module),
+        (manifest.ast_node_count, manifest.ast_depth)
+    );
     assert_eq!(module.imports.len(), 1);
     let [Declaration::Namespace { name, declarations }] = module.declarations.as_slice() else {
         panic!("one namespace")
@@ -524,4 +623,63 @@ fn static_model_audit_inventory_is_exact_and_not_kernel_acceptance_status() {
     );
     assert_eq!(roots[32], "Vesper.RewriteWitness.congr_wrapping");
     assert!(!model_source().is_empty());
+}
+
+#[test]
+fn actual_structural_depth_counts_names_arguments_namespace_and_module() {
+    for program in [
+        "fn f(x: u64) -> u64 eff [Fail[ArithOverflow]] { x + 0 }",
+        "fn f() -> i64 { wrapping_add(9223372036854775807, 1) }",
+        "fn f(x: u64) -> u64 eff [Fail[ArithOverflow]] { (x + 0) * 0 }",
+    ] {
+        let (source, types) = checked_tail(program);
+        let prepared = prepare_rewrite(
+            &source,
+            &types,
+            WitnessLimits::default(),
+            ExportLimits::default(),
+        )
+        .unwrap()
+        .expect("actual bounded candidate");
+        let (nodes, depth) = module_shape(prepared.lean.module());
+        assert_eq!(
+            (nodes, depth),
+            (
+                prepared.lean.manifest().ast_node_count,
+                prepared.lean.manifest().ast_depth
+            )
+        );
+        assert!(depth >= 7, "Name/Ident and Argument levels must be counted");
+        let exact = ExportLimits {
+            max_ast_depth: depth,
+            ..ExportLimits::default()
+        };
+        export_rewrite(
+            &source,
+            &prepared.candidate,
+            &types,
+            &prepared.certificate,
+            WitnessLimits::default(),
+            exact,
+        )
+        .unwrap()
+        .render()
+        .unwrap();
+        let below = ExportLimits {
+            max_ast_depth: depth - 1,
+            ..ExportLimits::default()
+        };
+        assert_eq!(
+            export_rewrite(
+                &source,
+                &prepared.candidate,
+                &types,
+                &prepared.certificate,
+                WitnessLimits::default(),
+                below
+            )
+            .unwrap_err(),
+            ExportError::Limit
+        );
+    }
 }
