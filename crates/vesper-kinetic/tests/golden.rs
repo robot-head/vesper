@@ -111,7 +111,11 @@ fn friction_and_restitution_scene_is_bit_identical_across_solvers() {
             hashes.push(run(world, 300, broadphase == BroadphaseMode::Lbvh).1);
         }
     }
-    eprintln!("arch={} friction sha256={}", std::env::consts::ARCH, hashes[0]);
+    eprintln!(
+        "arch={} friction sha256={}",
+        std::env::consts::ARCH,
+        hashes[0]
+    );
     assert!(hashes.iter().all(|h| *h == hashes[0]), "{hashes:?}");
     assert_eq!(hashes[0], GOLDEN_FRICTION_SHA256);
     // Friction changes the outcome (it is not silently ignored).

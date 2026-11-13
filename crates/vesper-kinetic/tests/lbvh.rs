@@ -1,6 +1,8 @@
 //! LBVH broadphase against the brute-force pair set, 64-bit Morton codes and
 //! typed errors.
 
+#![allow(clippy::needless_range_loop)]
+
 use vesper_kinetic::lbvh::{
     Aabb, Child, Lbvh, LbvhError, MORTON64_AXIS_MAX, brute_force_pairs, demorton64, morton64,
 };
@@ -47,11 +49,7 @@ fn random_boxes(rng: &mut Rng, n: usize, world: f32, size: f32) -> Vec<Aabb> {
     (0..n)
         .map(|_| {
             let c = [rng.unit() * world, rng.unit() * world, rng.unit() * world];
-            let h = [
-                rng.unit() * size,
-                rng.unit() * size,
-                rng.unit() * size,
-            ];
+            let h = [rng.unit() * size, rng.unit() * size, rng.unit() * size];
             Aabb {
                 min: [c[0] - h[0], c[1] - h[1], c[2] - h[2]],
                 max: [c[0] + h[0], c[1] + h[1], c[2] + h[2]],
@@ -163,7 +161,10 @@ fn malformed_inputs_are_typed_errors() {
         min: [f32::NAN, 0.0, 0.0],
         max: [1.0; 3],
     };
-    assert_eq!(tree.build(&[good, nan]), Err(LbvhError::InvalidBox { index: 1 }));
+    assert_eq!(
+        tree.build(&[good, nan]),
+        Err(LbvhError::InvalidBox { index: 1 })
+    );
     let inverted = Aabb {
         min: [2.0; 3],
         max: [1.0; 3],

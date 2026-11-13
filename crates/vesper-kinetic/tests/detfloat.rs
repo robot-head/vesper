@@ -156,7 +156,10 @@ fn correctly_rounded_math_symbols_are_allowlisted() {
     });
     let policy = DetFloatPolicy::default().with_correctly_rounded_math();
     assert_eq!(rules(&f, &policy), vec!["detfloat.libm"]);
-    assert_eq!(policy.allowed_float_calls.len(), vesper_kinetic::crmath::SYMBOLS.len());
+    assert_eq!(
+        policy.allowed_float_calls.len(),
+        vesper_kinetic::crmath::SYMBOLS.len()
+    );
 }
 
 #[test]

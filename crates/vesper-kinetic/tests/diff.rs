@@ -1,6 +1,8 @@
 //! Reverse-mode XPBD gradients against central finite differences, and the
 //! forward model against the World solver.
 
+#![allow(clippy::needless_range_loop)]
+
 use vesper_kinetic::diff::{
     DiffConstraint, DiffError, DiffParticle, DiffScene, gradients, simulate,
 };
@@ -239,8 +241,5 @@ fn malformed_scenes_are_typed_errors() {
         })
     );
     let s = chain();
-    assert_eq!(
-        gradients(&s, &[], &[]),
-        Err(DiffError::SeedLength)
-    );
+    assert_eq!(gradients(&s, &[], &[]), Err(DiffError::SeedLength));
 }

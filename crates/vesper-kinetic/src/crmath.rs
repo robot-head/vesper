@@ -198,7 +198,11 @@ impl Exact {
     fn fixed_abs(self, f: u32) -> BigInt {
         let m = BigInt::from(self.mant);
         let s = self.exp + i64::from(f);
-        if s >= 0 { m << (s as u64) } else { m >> ((-s) as u64) }
+        if s >= 0 {
+            m << (s as u64)
+        } else {
+            m >> ((-s) as u64)
+        }
     }
 
     /// `|x|` as an exact rational `num / 2^den_shift`, both integers.
@@ -237,7 +241,7 @@ fn atan_inv(k: u32, f: u32) -> BigInt {
     let mut n: u64 = 0;
     while !term.is_zero() {
         let t = &term / BigInt::from(2 * n + 1);
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             sum += t;
         } else {
             sum -= t;
@@ -754,11 +758,20 @@ mod tests {
         // Half of the smallest subnormal ties to even (zero).
         assert_eq!(round_to(false, &one, -1075, Format::F64), 0);
         assert_eq!(round_to(false, &BigInt::from(3), -1076, Format::F64), 1);
-        assert_eq!(round_to(false, &one, 1024, Format::F64), Format::F64.inf_bits());
-        assert_eq!(f32::from_bits(round_to(false, &one, 0, Format::F32) as u32), 1.0);
+        assert_eq!(
+            round_to(false, &one, 1024, Format::F64),
+            Format::F64.inf_bits()
+        );
+        assert_eq!(
+            f32::from_bits(round_to(false, &one, 0, Format::F32) as u32),
+            1.0
+        );
         // 1 + 2^-24 ties to 1 in binary32; 1 + 3·2^-25 rounds up.
         let m = (BigInt::one() << 24u32) + 1;
-        assert_eq!(f32::from_bits(round_to(false, &m, -24, Format::F32) as u32), 1.0);
+        assert_eq!(
+            f32::from_bits(round_to(false, &m, -24, Format::F32) as u32),
+            1.0
+        );
         let m = (BigInt::one() << 25u32) + 3;
         assert_eq!(
             f32::from_bits(round_to(false, &m, -25, Format::F32) as u32),
@@ -769,7 +782,13 @@ mod tests {
     #[test]
     fn constants_are_accurate() {
         let (pi, ln2) = constants(60);
-        assert_eq!(f64::from_bits(round_to(false, &pi, -60, Format::F64)), std::f64::consts::PI);
-        assert_eq!(f64::from_bits(round_to(false, &ln2, -60, Format::F64)), std::f64::consts::LN_2);
+        assert_eq!(
+            f64::from_bits(round_to(false, &pi, -60, Format::F64)),
+            std::f64::consts::PI
+        );
+        assert_eq!(
+            f64::from_bits(round_to(false, &ln2, -60, Format::F64)),
+            std::f64::consts::LN_2
+        );
     }
 }

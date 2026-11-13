@@ -7,13 +7,14 @@
 //! test, not a proof that the Rust code refines the model.
 
 use std::path::{Path, PathBuf};
+use vesper_kinetic::lbvh::morton64;
 use vesper_kinetic::morton::{decode_masked, encode_masked};
 use vesper_kinetic::{Colorer, ConstraintBodies};
 
-const MODEL_ID: &str = "vesper.kinetic.coloring-morton-model/1";
+const MODEL_ID: &str = "vesper.kinetic.coloring-morton-model/2";
 const MODEL_CLAIM: &str =
     "Lean model of greedy colouring and Morton codes; proofs cover the model, not Rust";
-const AUDITED_THEOREMS: usize = 7;
+const AUDITED_THEOREMS: usize = 15;
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
 
 fn lean_dir() -> PathBuf {
@@ -61,6 +62,14 @@ fn lean_model_source_audit() {
         "theorem morton_10bit_roundtrip",
         "theorem morton_10bit_injective",
         "theorem interleave_lt",
+        "theorem morton_21bit_roundtrip",
+        "theorem morton_21bit_injective",
+        "theorem morton_21bit_lt",
+        "theorem sorted_prefix_between",
+        "theorem monotone_keys_prefix_range",
+        "theorem augKey_lt_iff",
+        "theorem augKey_div",
+        "theorem augKey_injective",
     ] {
         assert!(source.contains(theorem), "missing {theorem}");
     }
@@ -244,6 +253,24 @@ fn lean_model_matches_rust_morton_and_colouring() {
             want.push(colorer.color_of(i as usize).to_string());
         }
         push(line, want.join(" "));
+    }
+    // The LBVH's 63-bit codes against the model's 21-bit interleave.
+    for (x, y, z) in [
+        (0u32, 0u32, 0u32),
+        (0x1f_ffff, 0x1f_ffff, 0x1f_ffff),
+        (1, 0, 0),
+        (0, 0, 1),
+    ]
+    .into_iter()
+    .chain((0..200).map(|_| {
+        let r = rng.next();
+        (
+            (r & 0x1f_ffff) as u32,
+            ((r >> 21) & 0x1f_ffff) as u32,
+            ((r >> 42) & 0x1f_ffff) as u32,
+        )
+    })) {
+        push(format!("3 {x} {y} {z}"), morton64(x, y, z).to_string());
     }
     push("2 1".into(), "error".into());
     push("1 3".into(), "error".into());

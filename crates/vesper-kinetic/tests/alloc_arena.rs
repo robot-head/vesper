@@ -60,7 +60,11 @@ fn region_arena_steps_do_not_allocate_in_steady_state() {
     COUNTING.store(true, Ordering::SeqCst);
     drop(std::hint::black_box(Box::new([0u8; 64])));
     COUNTING.store(false, Ordering::SeqCst);
-    assert_eq!(ALLOCS.swap(0, Ordering::SeqCst), 1, "counting allocator self-check");
+    assert_eq!(
+        ALLOCS.swap(0, Ordering::SeqCst),
+        1,
+        "counting allocator self-check"
+    );
 
     COUNTING.store(true, Ordering::SeqCst);
     let mut checksum = 0u8;

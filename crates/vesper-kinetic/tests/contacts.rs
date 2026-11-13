@@ -1,11 +1,11 @@
 //! Coulomb friction (static and dynamic) and restitution in XPBD contacts,
 //! checked against closed-form particle mechanics.
 
+#![allow(clippy::needless_range_loop)]
+
 mod common;
 
-use vesper_kinetic::{
-    ContactMaterial, SolverMode, SphereCollider, StepError, World, WorldConfig,
-};
+use vesper_kinetic::{ContactMaterial, SolverMode, SphereCollider, StepError, World, WorldConfig};
 
 const R: f32 = 0.25;
 const G: f32 = 9.81;
@@ -39,7 +39,12 @@ fn friction(mu_s: f32, mu_k: f32) -> ContactMaterial {
 fn static_friction_holds_below_the_coulomb_limit() {
     // Tilted gravity models a 16.7° incline: tangential pull 0.3·g < μs·g.
     for solver in [SolverMode::Scalar, SolverMode::Batched16] {
-        let mut w = one_ball([0.3 * G, -G, 0.0], [0.0, R, 0.0], [0.0; 3], friction(0.5, 0.3));
+        let mut w = one_ball(
+            [0.3 * G, -G, 0.0],
+            [0.0, R, 0.0],
+            [0.0; 3],
+            friction(0.5, 0.3),
+        );
         w.set_solver_mode(solver);
         for _ in 0..240 {
             w.step().unwrap();
@@ -49,7 +54,12 @@ fn static_friction_holds_below_the_coulomb_limit() {
         assert!(b.vel[0].abs() < 1e-2, "{solver:?}: v {}", b.vel[0]);
     }
     // Without friction the same ball slides away at 0.3·g.
-    let mut w = one_ball([0.3 * G, -G, 0.0], [0.0, R, 0.0], [0.0; 3], friction(0.0, 0.0));
+    let mut w = one_ball(
+        [0.3 * G, -G, 0.0],
+        [0.0, R, 0.0],
+        [0.0; 3],
+        friction(0.0, 0.0),
+    );
     for _ in 0..120 {
         w.step().unwrap();
     }
@@ -61,20 +71,33 @@ fn static_friction_holds_below_the_coulomb_limit() {
 #[test]
 fn dynamic_friction_slides_with_reduced_acceleration() {
     // Pull 0.8·g exceeds μs·g = 0.5·g: the ball slides with a = (0.8 − 0.3)·g.
-    let mut w = one_ball([0.8 * G, -G, 0.0], [0.0, R, 0.0], [0.0; 3], friction(0.5, 0.3));
+    let mut w = one_ball(
+        [0.8 * G, -G, 0.0],
+        [0.0, R, 0.0],
+        [0.0; 3],
+        friction(0.5, 0.3),
+    );
     for _ in 0..120 {
         w.step().unwrap();
     }
     let x = w.bodies().get(0).unwrap().pos[0];
     let expected = 0.5 * (0.8 - 0.3) * G; // after 1 s
-    assert!((x - expected).abs() < 0.08 * expected, "x {x}, expected {expected}");
+    assert!(
+        (x - expected).abs() < 0.08 * expected,
+        "x {x}, expected {expected}"
+    );
 }
 
 #[test]
 fn sliding_ball_stops_after_the_coulomb_distance() {
     let v0 = 3.0f32;
     let mu = 0.5f32;
-    let mut w = one_ball([0.0, -G, 0.0], [0.0, R, 0.0], [v0, 0.0, 0.0], friction(mu, mu));
+    let mut w = one_ball(
+        [0.0, -G, 0.0],
+        [0.0, R, 0.0],
+        [v0, 0.0, 0.0],
+        friction(mu, mu),
+    );
     for _ in 0..240 {
         w.step().unwrap();
     }
@@ -148,7 +171,10 @@ fn materials_are_validated() {
             "restitution must be in [0, 1]",
         ),
     ] {
-        assert_eq!(w.set_contact_material(m), Err(StepError::InvalidMaterial(what)));
+        assert_eq!(
+            w.set_contact_material(m),
+            Err(StepError::InvalidMaterial(what))
+        );
     }
     assert_eq!(w.contact_material(), ContactMaterial::default());
 }

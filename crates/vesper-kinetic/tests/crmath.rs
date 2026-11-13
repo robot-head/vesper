@@ -46,7 +46,11 @@ fn matches_mpmath_references_bit_for_bit() {
                     "expf" => crmath::expf(x),
                     _ => crmath::logf(x),
                 };
-                (*name, u64::from(got.to_bits()), u64::from(f32_of(r).to_bits()))
+                (
+                    *name,
+                    u64::from(got.to_bits()),
+                    u64::from(f32_of(r).to_bits()),
+                )
             }
             ["atan2", y, x, r] => (
                 "atan2",
@@ -65,7 +69,12 @@ fn matches_mpmath_references_bit_for_bit() {
             failures.push(format!("{line}: got {got:x}"));
         }
     }
-    assert!(failures.is_empty(), "{} mismatches:\n{}", failures.len(), failures.join("\n"));
+    assert!(
+        failures.is_empty(),
+        "{} mismatches:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
     assert_eq!(checked.len(), 10, "{checked:?}");
     assert!(checked.values().all(|n| *n >= 100), "{checked:?}");
     assert_eq!(crmath::precision_cap_hits(), 0);
@@ -159,7 +168,10 @@ fn output_sweep_hash_is_identical_on_every_architecture() {
         }
     }
     let digest: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
-    eprintln!("arch={} crmath sweep sha256={digest}", std::env::consts::ARCH);
+    eprintln!(
+        "arch={} crmath sweep sha256={digest}",
+        std::env::consts::ARCH
+    );
     assert_eq!(digest, GOLDEN_SWEEP);
 }
 

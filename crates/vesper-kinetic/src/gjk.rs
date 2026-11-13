@@ -12,14 +12,26 @@
 //! simple and robust at this size. All arithmetic is plain binary64 with no
 //! fused multiply-add, so results are the same on every IEEE-754 target.
 
+// `!(x > y)` is deliberate: it is also true when `x` is NaN.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
 /// A convex shape.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Shape<'a> {
-    Sphere { center: [f64; 3], radius: f64 },
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+    },
     /// The segment `a`–`b` swept by `radius`.
-    Capsule { a: [f64; 3], b: [f64; 3], radius: f64 },
+    Capsule {
+        a: [f64; 3],
+        b: [f64; 3],
+        radius: f64,
+    },
     /// The convex hull of `vertices` (at least one).
-    Polytope { vertices: &'a [[f64; 3]] },
+    Polytope {
+        vertices: &'a [[f64; 3]],
+    },
 }
 
 /// Typed narrowphase failures.
@@ -101,11 +113,13 @@ impl Shape<'_> {
             Shape::Capsule { a, b, radius } => {
                 finite(a) && finite(b) && radius.is_finite() && *radius >= 0.0
             }
-            Shape::Polytope { vertices } => {
-                !vertices.is_empty() && vertices.iter().all(finite)
-            }
+            Shape::Polytope { vertices } => !vertices.is_empty() && vertices.iter().all(finite),
         };
-        if ok { Ok(()) } else { Err(GjkError::InvalidShape) }
+        if ok {
+            Ok(())
+        } else {
+            Err(GjkError::InvalidShape)
+        }
     }
 
     fn radius(&self) -> f64 {
@@ -214,8 +228,9 @@ fn affine_closest(pts: &[SupportPoint], subset: &[usize]) -> Option<[f64; 4]> {
         for row in 0..m {
             if row != col {
                 let f = g[row][col] / g[col][col];
-                for c in col..4 {
-                    g[row][c] -= f * g[col][c];
+                let pivot_row = g[col];
+                for (c, x) in g[row].iter_mut().enumerate().skip(col) {
+                    *x -= f * pivot_row[c];
                 }
             }
         }

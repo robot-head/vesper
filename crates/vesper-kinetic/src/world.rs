@@ -12,6 +12,9 @@
 //! calls it), and the only non-basic operation used is `sqrt`, which IEEE-754
 //! requires to be correctly rounded. No transcendental function is called.
 
+// `!(x > y)` is deliberate: it is also true when `x` is NaN.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
 use crate::coloring::{Colorer, ColoringError, ConstraintBodies};
 use crate::lbvh::{Aabb, Lbvh, LbvhError};
 use crate::morton;
@@ -439,11 +442,7 @@ impl World {
         self.broadphase = mode;
         if mode == BroadphaseMode::Lbvh && self.lbvh.is_none() {
             let n = self.bodies.len();
-            let max_pairs = self
-                .config
-                .max_contacts
-                .saturating_mul(4)
-                .saturating_add(n);
+            let max_pairs = self.config.max_contacts.saturating_mul(4).saturating_add(n);
             self.lbvh = Some(LbvhScratch {
                 tree: Lbvh::with_capacity(n),
                 boxes: Vec::with_capacity(n),
@@ -756,7 +755,9 @@ impl World {
     ) -> Result<KineticSnapshotWireHdr, StepError> {
         let n = self.bodies.len();
         let c = self.config.max_contacts;
-        let total = scratch_bytes(n, c).expect("checked at construction").max(16);
+        let total = scratch_bytes(n, c)
+            .expect("checked at construction")
+            .max(16);
         let mark = arena.checkpoint().map_err(StepError::Arena)?;
         let result = match arena.alloc_bytes(total, 16) {
             Err(e) => Err(StepError::Arena(e.into())),
@@ -850,7 +851,9 @@ impl World {
                             self.project(index, inv_h2, contacts, state);
                         }
                     }
-                    SolverMode::Batched16 => self.project_color_batched(color, inv_h2, contacts, state),
+                    SolverMode::Batched16 => {
+                        self.project_color_batched(color, inv_h2, contacts, state)
+                    }
                 }
             }
             for i in 0..n {
@@ -1083,7 +1086,8 @@ impl World {
         let joints = self.joints.len();
         for k in 0..layer_len {
             let index = self.colorer.layer(color)[k];
-            let is_ground = index as usize >= joints && contacts[index as usize - joints][1] == GROUND;
+            let is_ground =
+                index as usize >= joints && contacts[index as usize - joints][1] == GROUND;
             if is_ground {
                 grounds[ng] = index;
                 ng += 1;
@@ -1186,7 +1190,11 @@ impl World {
         }
         let mut nrm = [[0.0f32; N]; 3];
         for l in 0..N {
-            let inv_len = if len[l] == 0.0 { 1.0 } else { det::div(1.0, len[l]) };
+            let inv_len = if len[l] == 0.0 {
+                1.0
+            } else {
+                det::div(1.0, len[l])
+            };
             for k in 0..3 {
                 nrm[k][l] = det::mul(d[k][l], inv_len);
             }
@@ -1316,7 +1324,11 @@ impl World {
                     ([0.0; 3], [0.0; 3], 0.0)
                 } else {
                     let b = b as usize;
-                    (self.bodies.vel(b), self.prev_vel[b], self.bodies.inv_mass(b))
+                    (
+                        self.bodies.vel(b),
+                        self.prev_vel[b],
+                        self.bodies.inv_mass(b),
+                    )
                 };
                 let va = self.bodies.vel(a);
                 let wa = self.bodies.inv_mass(a);

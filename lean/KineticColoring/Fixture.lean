@@ -14,7 +14,8 @@ LEAN_PATH="$out" lean --run lean/KineticColoring/Fixture.lean < cases
 Each input line is space-separated decimal naturals: `0 x y z` prints
 `interleave 10 x y z` and the three deinterleaved axes; `1 a1 b1 a2 b2 ...`
 prints the colours `colorAll` assigns to the constraints `(a1, b1), (a2, b2),
-...` in that order. After one header naming the model and its claim boundary,
+...` in that order; `3 x y z` prints `interleave 21 x y z` (the LBVH's
+63-bit code). After one header naming the model and its claim boundary,
 each output line answers one input line. An unparseable line prints `error`.
 -/
 
@@ -30,6 +31,7 @@ def runCase : List Nat → Option String
   | [0, x, y, z] =>
     let m := interleave 10 x y z
     some s!"{m} {deinterleaveX 10 m} {deinterleaveY 10 m} {deinterleaveZ 10 m}"
+  | [3, x, y, z] => some s!"{interleave 21 x y z}"
   | 1 :: rest => (pairs rest).map fun cs =>
     " ".intercalate ((colorAll cs).map (fun x => toString x.2))
   | _ => none

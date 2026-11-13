@@ -353,7 +353,12 @@ fn lbvh_broadphase_has_no_search_radius_limit() {
     let h = w.step().unwrap();
     assert_eq!(h.manifold_count, 1);
     let (a, b) = (w.bodies().get(0).unwrap(), w.bodies().get(1).unwrap());
-    assert!(a.pos[0] < b.pos[0], "no tunnelling: {:?} {:?}", a.pos, b.pos);
+    assert!(
+        a.pos[0] < b.pos[0],
+        "no tunnelling: {:?} {:?}",
+        a.pos,
+        b.pos
+    );
 }
 
 #[test]

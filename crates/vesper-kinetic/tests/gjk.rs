@@ -1,5 +1,7 @@
 //! GJK distance and EPA penetration against closed-form references.
 
+#![allow(clippy::needless_range_loop)]
+
 use vesper_kinetic::gjk::{GjkError, Shape, distance, intersects, separation};
 
 fn boxv(min: [f64; 3], max: [f64; 3]) -> Vec<[f64; 3]> {
@@ -47,7 +49,11 @@ fn sphere_pairs_match_closed_form() {
         center: [0.0; 3],
         radius: 1.0,
     };
-    for (cb, rb) in [([3.0, 0.0, 0.0], 1.0), ([1.0, 2.0, 2.0], 0.5), ([0.0, -2.5, 0.0], 1.0)] {
+    for (cb, rb) in [
+        ([3.0, 0.0, 0.0], 1.0),
+        ([1.0, 2.0, 2.0], 0.5),
+        ([0.0, -2.5, 0.0], 1.0),
+    ] {
         let b = Shape::Sphere {
             center: cb,
             radius: rb,
@@ -80,8 +86,16 @@ fn box_pairs_match_closed_form_distances() {
     let mut rng = Rng(0x1234_5678_9abc_def1);
     for _ in 0..300 {
         let mk = |rng: &mut Rng| {
-            let c = [rng.range(-4.0, 4.0), rng.range(-4.0, 4.0), rng.range(-4.0, 4.0)];
-            let h = [rng.range(0.1, 1.5), rng.range(0.1, 1.5), rng.range(0.1, 1.5)];
+            let c = [
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+                rng.range(-4.0, 4.0),
+            ];
+            let h = [
+                rng.range(0.1, 1.5),
+                rng.range(0.1, 1.5),
+                rng.range(0.1, 1.5),
+            ];
             (
                 [c[0] - h[0], c[1] - h[1], c[2] - h[2]],
                 [c[0] + h[0], c[1] + h[1], c[2] + h[2]],
@@ -112,7 +126,11 @@ fn box_pairs_match_closed_form_distances() {
                 .map(|k| (ba.1[k] - bb.0[k]).min(bb.1[k] - ba.0[k]))
                 .fold(f64::INFINITY, f64::min);
             let s = separation(&sa, &sb).unwrap();
-            assert!(close(-s.distance, depth, 1e-9), "depth {} vs {depth}", -s.distance);
+            assert!(
+                close(-s.distance, depth, 1e-9),
+                "depth {} vs {depth}",
+                -s.distance
+            );
             assert!(intersects(&sa, &sb).unwrap());
         }
     }
@@ -124,9 +142,16 @@ fn sphere_box_inside_and_outside() {
     let v = boxv([-1.0, -0.5, -2.0], [1.0, 0.5, 2.0]);
     let b = Shape::Polytope { vertices: &v };
     for _ in 0..300 {
-        let p = [rng.range(-3.0, 3.0), rng.range(-2.0, 2.0), rng.range(-4.0, 4.0)];
+        let p = [
+            rng.range(-3.0, 3.0),
+            rng.range(-2.0, 2.0),
+            rng.range(-4.0, 4.0),
+        ];
         let r = rng.range(0.05, 0.6);
-        let s = Shape::Sphere { center: p, radius: r };
+        let s = Shape::Sphere {
+            center: p,
+            radius: r,
+        };
         let lo = [-1.0, -0.5, -2.0];
         let hi = [1.0, 0.5, 2.0];
         let inside = (0..3).all(|k| p[k] > lo[k] && p[k] < hi[k]);
@@ -194,7 +219,13 @@ fn segment_distance(p0: [f64; 3], p1: [f64; 3], q0: [f64; 3], q1: [f64; 3]) -> f
 fn capsule_pairs_match_segment_distances() {
     let mut rng = Rng(0xCAFE_F00D_DEAD_BEEF);
     for _ in 0..150 {
-        let mut pt = || [rng.range(-3.0, 3.0), rng.range(-3.0, 3.0), rng.range(-3.0, 3.0)];
+        let mut pt = || {
+            [
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+                rng.range(-3.0, 3.0),
+            ]
+        };
         let (a0, a1, b0, b1) = (pt(), pt(), pt(), pt());
         let (ra, rb) = (0.2, 0.3);
         let ca = Shape::Capsule {
@@ -231,7 +262,11 @@ fn capsule_pairs_match_segment_distances() {
     };
     let s = separation(&ca, &cb).unwrap();
     assert!(close(s.distance, -0.5, 1e-12), "{s:?}");
-    assert!(close(s.normal[2].abs(), 1.0, 1e-12), "normal {:?}", s.normal);
+    assert!(
+        close(s.normal[2].abs(), 1.0, 1e-12),
+        "normal {:?}",
+        s.normal
+    );
     // Parallel capsules 1.0 apart.
     let cb = Shape::Capsule {
         a: [-0.5, 1.0, 0.0],

@@ -13,6 +13,9 @@
 //! floating-point program's real-number semantics, not an approximation);
 //! the tests check it against central finite differences.
 
+// `!(x > y)` is deliberate: it is also true when `x` is NaN.
+#![allow(clippy::neg_cmp_op_on_partial_ord)]
+
 use vesper_tensor::host::{Bindings, Tensor};
 
 /// One particle.
@@ -50,7 +53,10 @@ pub enum DiffError {
     InvalidScene(&'static str),
     /// A constraint's endpoints coincided during the simulation (its
     /// direction, and so its derivative, is undefined).
-    Degenerate { tick: u32, constraint: usize },
+    Degenerate {
+        tick: u32,
+        constraint: usize,
+    },
     /// The tape would exceed [`MAX_TAPE`] operations.
     TapeTooLarge,
     /// A seed slice has the wrong length.
@@ -166,7 +172,9 @@ fn validate(scene: &DiffScene) -> Result<(), DiffError> {
     let n = scene.particles.len();
     for c in &scene.constraints {
         if c.a >= n || c.b >= n || c.a == c.b {
-            return Err(DiffError::InvalidScene("constraint names a bad particle pair"));
+            return Err(DiffError::InvalidScene(
+                "constraint names a bad particle pair",
+            ));
         }
         if !(c.rest_length.is_finite()
             && c.rest_length >= 0.0
@@ -287,8 +295,11 @@ fn record(scene: &DiffScene) -> Result<Recorded, DiffError> {
     })
 }
 
-/// Final positions and velocities.
-pub fn simulate(scene: &DiffScene) -> Result<(Vec<[f64; 3]>, Vec<[f64; 3]>), DiffError> {
+/// Final `(positions, velocities)`.
+pub type FinalState = (Vec<[f64; 3]>, Vec<[f64; 3]>);
+
+/// Run the forward model without recording gradients.
+pub fn simulate(scene: &DiffScene) -> Result<FinalState, DiffError> {
     let r = record(scene)?;
     let get = |v: &[[Var; 3]]| -> Vec<[f64; 3]> {
         v.iter()
@@ -338,7 +349,12 @@ pub fn gradients(
     if seed_pos.len() != n || seed_vel.len() != n {
         return Err(DiffError::SeedLength);
     }
-    if !seed_pos.iter().chain(seed_vel).flatten().all(|x| x.is_finite()) {
+    if !seed_pos
+        .iter()
+        .chain(seed_vel)
+        .flatten()
+        .all(|x| x.is_finite())
+    {
         return Err(DiffError::InvalidScene("seeds must be finite"));
     }
     let r = record(scene)?;
@@ -354,7 +370,13 @@ pub fn gradients(
     let adj = r.tape.backward(&seeds);
     let pick = |v: &[[Var; 3]]| -> Vec<[f64; 3]> {
         v.iter()
-            .map(|p| [adj[p[0].0 as usize], adj[p[1].0 as usize], adj[p[2].0 as usize]])
+            .map(|p| {
+                [
+                    adj[p[0].0 as usize],
+                    adj[p[1].0 as usize],
+                    adj[p[2].0 as usize],
+                ]
+            })
             .collect()
     };
     Ok(Gradients {
