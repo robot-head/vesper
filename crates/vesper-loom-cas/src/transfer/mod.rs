@@ -1,8 +1,11 @@
 //! Bounded portable Merkle-closure packs (design §8.2.6).
 //!
 //! Object identities describe content, not provenance or permission to execute.
-//! The shared wire/resource boundary is present here; export/import are added
-//! by their separately claimed implementation lanes.
+//! [`export_pack`] verifies the complete reachable closure and emits canonical
+//! children-first records. [`import_pack`] requires the caller's expected root
+//! and validates the entire pack and closure before opening the destination.
+//! Logical admission limits precede publication; subsequent store/I/O failures
+//! may leave verified immutable objects. No derivations or trust are transferred.
 
 use std::{fmt, mem::size_of};
 
