@@ -33,8 +33,8 @@ use vesper_ffi::{Declaration, Endian, Field, Integer, WireType};
 
 use crate::{
     Access, ErrorKind, LiftedEnum, LiftedField, LiftedFunction, LiftedParam, LiftedStruct, Limits,
-    MigrateError, Migration, Mode, Origin, Refusal, RefusalReason, Scalar, SysParam, SysSignature,
-    SysValue,
+    MigrateError, Migration, Mode, Origin, PointerAccess, Refusal, RefusalReason, Scalar, SysParam,
+    SysPointee, SysSignature, SysValue,
 };
 
 /// Types of `<stdint.h>`, `<stddef.h>` and `<stdbool.h>` that are built in.
@@ -783,6 +783,7 @@ fn wire_type(t: &CType) -> Result<WireType, (RefusalReason, String)> {
 fn lift_function(
     name: &str,
     params: Vec<(String, CType)>,
+    decayed: &[bool],
     ret: CType,
 ) -> Result<LiftedFunction, Refusal> {
     let item = format!("fn {name}");
@@ -809,25 +810,31 @@ fn lift_function(
                 pointee,
                 pointee_const,
             } => {
-                let CType::Scalar(e) = **pointee else {
-                    let (reason, why) = match &**pointee {
-                        CType::Struct(n) => (
-                            RefusalReason::Aggregate,
-                            format!(
-                                "parameter `{pname}` points to struct `{n}`; .vsys models only scalar pointees"
-                            ),
-                        ),
-                        CType::Refused(r, d) => (*r, format!("parameter `{pname}`: {d}")),
-                        _ => (
-                            RefusalReason::OpaquePointer,
-                            format!("parameter `{pname}` has an opaque, void or nested pointee"),
-                        ),
-                    };
-                    return Err(refuse(reason, why));
-                };
                 let next_is_len =
                     matches!(params.get(i + 1), Some((_, CType::Scalar(Scalar::Usize))));
-                if next_is_len {
+                let single = match &**pointee {
+                    CType::Scalar(e) => SysPointee::Scalar(*e),
+                    CType::Struct(n) if next_is_len => {
+                        return Err(refuse(
+                            RefusalReason::Aggregate,
+                            format!(
+                                "parameter `{pname}` points to struct `{n}` and is followed by a size_t: arrays of structs are not modelled by .vsys"
+                            ),
+                        ));
+                    }
+                    CType::Struct(n) => SysPointee::Struct(n.clone()),
+                    CType::Refused(r, d) => {
+                        return Err(refuse(*r, format!("parameter `{pname}`: {d}")));
+                    }
+                    _ => {
+                        return Err(refuse(
+                            RefusalReason::OpaquePointer,
+                            format!("parameter `{pname}` has an opaque, void or nested pointee"),
+                        ));
+                    }
+                };
+                if let (SysPointee::Scalar(e), true) = (&single, next_is_len) {
+                    let e = *e;
                     let access = if *pointee_const {
                         Access::In
                     } else {
@@ -852,11 +859,49 @@ fn lift_function(
                     i += 2;
                     continue;
                 }
-                return Err(refuse(
-                    RefusalReason::PointerParameter,
-                    format!(
-                        "parameter `{pname}` is a single-element pointer not followed by a size_t length; Bridge .vsys accepts pointer parameters only as nocapture CSlice"
-                    ),
+                if decayed.get(i).copied().unwrap_or(false) {
+                    return Err(refuse(
+                        RefusalReason::ArrayWithoutLength,
+                        format!(
+                            "array parameter `{pname}` is not followed by a size_t length; its extent is unknown"
+                        ),
+                    ));
+                }
+                if matches!(single, SysPointee::Scalar(Scalar::U8 | Scalar::I8)) {
+                    return Err(refuse(
+                        RefusalReason::ArrayWithoutLength,
+                        format!(
+                            "byte pointer `{pname}` has no size_t length: a buffer or string of unknown extent, not one element"
+                        ),
+                    ));
+                }
+                let access = if *pointee_const {
+                    PointerAccess::In
+                } else {
+                    PointerAccess::Inout
+                };
+                assumptions.push(format!(
+                    "`{pname}` lifted to a non-null nocapture {} pointer to one `{}`: a C header cannot show non-null, single-element or non-retention",
+                    access.keyword(),
+                    single.name()
+                ));
+                lifted.push(LiftedParam {
+                    name: pname.clone(),
+                    mode: if *pointee_const {
+                        Mode::In
+                    } else {
+                        Mode::Inout
+                    },
+                    footprint: None,
+                    ty: single.name().to_owned(),
+                });
+                sys.push((
+                    pname,
+                    SysParam::Pointer {
+                        pointee: single,
+                        access,
+                        nullable: false,
+                    },
                 ));
             }
             CType::Array { .. } => unreachable!("arrays decay before lifting"),
@@ -883,6 +928,9 @@ fn lift_function(
             CType::Refused(r, d) => return Err(refuse(*r, format!("parameter `{pname}`: {d}"))),
         }
         i += 1;
+    }
+    if let Some(why) = crate::synth::aliasing_pair(&sys) {
+        return Err(refuse(RefusalReason::AliasingPointers, why));
     }
     let (result, sys_result) = match ret {
         CType::Void => ("ForeignVal[Unit]".to_string(), SysValue::Unit),
@@ -1134,6 +1182,7 @@ pub fn analyze_header(
                 ));
             }
             let mut params = vec![];
+            let mut decayed = vec![];
             let mut void_list = false;
             for (index, p) in fd.node.parameters.iter().enumerate() {
                 let mut pc = false;
@@ -1157,15 +1206,18 @@ pub fn analyze_header(
                     break;
                 }
                 // Array parameters decay to pointers.
+                let mut is_array = false;
                 if let CType::Array {
                     elem, elem_const, ..
                 } = pty
                 {
+                    is_array = true;
                     pty = CType::Pointer {
                         pointee: elem,
                         pointee_const: elem_const,
                     };
                 }
+                decayed.push(is_array);
                 params.push((pname.unwrap_or_else(|| format!("arg{index}")), pty));
             }
             if !void_list && params.is_empty() {
@@ -1184,7 +1236,7 @@ pub fn analyze_header(
                     format!("function `{name}` repeats parameter `{dup}`"),
                 ));
             }
-            match lift_function(&name, params, ret) {
+            match lift_function(&name, params, &decayed, ret) {
                 Ok(f) => ctx.functions.push(f),
                 Err(r) => ctx.refusals.push(r),
             }
@@ -1193,7 +1245,7 @@ pub fn analyze_header(
     // Wire layouts must compile through vesper_ffi; padding and unknown
     // struct references become refusals here.
     crate::synth::check_wire_layouts(&mut ctx.structs);
-    Ok(Migration {
+    let mut m = Migration {
         origin: Origin::CHeader {
             header: header.to_owned(),
         },
@@ -1201,7 +1253,15 @@ pub fn analyze_header(
         structs: ctx.structs,
         enums: ctx.enums,
         refusals: ctx.refusals,
-    })
+    };
+    // A struct pointee needs a checked wire layout; otherwise the whole C
+    // function is refused, as other unliftable C signatures are.
+    crate::synth::check_pointer_pointees(&mut m);
+    let (keep, refused): (Vec<_>, Vec<_>) = m.functions.into_iter().partition(|f| f.sys.is_ok());
+    m.functions = keep;
+    m.refusals
+        .extend(refused.into_iter().filter_map(|f| f.sys.err()));
+    Ok(m)
 }
 
 /// Whether `text` contains a typedef whose declared name is `name`.

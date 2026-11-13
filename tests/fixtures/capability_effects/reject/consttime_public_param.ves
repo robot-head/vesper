@@ -1,0 +1,22 @@
+// expect: E0705
+copy struct Secret[T] {
+    value: T,
+}
+
+fn public_mix(x: u64) -> u64 eff [ConstTime] {
+    wrapping_add(x, 1)
+}
+
+fn mix(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    Secret {
+        value: public_mix(value)
+    }
+}
+
+fn main() -> u64 {
+    0
+}

@@ -1,0 +1,20 @@
+// expect: E0705
+copy struct Secret[T] {
+    value: T,
+}
+
+linear effect Log {
+    fn write(x: u64) -> Unit;
+}
+
+fn trace(s: Secret[u64]) -> Unit eff [ConstTime, Log] {
+    let Secret {
+        value
+    }
+    = s;
+    Log::write(value)
+}
+
+fn main() -> u64 {
+    0
+}

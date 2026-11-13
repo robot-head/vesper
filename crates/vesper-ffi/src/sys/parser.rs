@@ -306,6 +306,117 @@ impl Parser {
         }
         Ok(RawType::Name(name))
     }
+    fn peek_word(&self, offset: usize) -> Option<&str> {
+        match &self.tokens.get(self.at + offset)?.kind {
+            TokenKind::Word(w) => Some(w),
+            _ => None,
+        }
+    }
+    /// `wire struct Name { field: type, ... }`.
+    fn wire_struct(&mut self) -> Result<RawWireStruct, Error> {
+        let start = self.token().span.start;
+        self.keyword("wire")?;
+        self.keyword("struct")?;
+        let name = self.word()?;
+        reject_reserved_type(&name)?;
+        self.expect(b'{')?;
+        let mut fields = vec![];
+        while !self.eat(b'}') {
+            if fields.len() >= self.limits.wire_fields {
+                return Err(self.error(ErrorKind::Limit, "wire struct field budget exceeded"));
+            }
+            let field = self.word()?;
+            self.expect(b':')?;
+            let ty = self.wire_field_type()?;
+            fields.push(crate::Field::new(field, ty));
+            if !self.eat(b',') {
+                self.expect(b'}')?;
+                break;
+            }
+        }
+        if fields.is_empty() {
+            return Err(self.error(ErrorKind::Type, "empty wire struct is unsupported"));
+        }
+        unique(
+            fields.iter().map(|f| f.name.as_str()),
+            "duplicate wire struct field",
+        )?;
+        Ok(RawWireStruct {
+            declaration: crate::Declaration::new(name, fields),
+            span: start..self.tokens[self.at.saturating_sub(1)].span.end,
+        })
+    }
+    fn wire_field_type(&mut self) -> Result<crate::WireType, Error> {
+        use crate::{Endian, Integer, WireType};
+        let name = self.word()?;
+        if name == "ByteArray" || name == "ZeroPad" {
+            self.expect(b'[')?;
+            let n = self.number()?;
+            self.expect(b']')?;
+            let n = usize::try_from(n)
+                .ok()
+                .filter(|n| *n > 0 && *n <= MAX_WIRE_STRUCT_BYTES)
+                .ok_or_else(|| {
+                    self.error(
+                        ErrorKind::Limit,
+                        "byte array length must be 1..=1048576 bytes",
+                    )
+                })?;
+            return Ok(if name == "ByteArray" {
+                WireType::ByteArray(n)
+            } else {
+                WireType::ZeroPad(n)
+            });
+        }
+        let (base, endian) = if let Some(b) = name.strip_suffix("be") {
+            (b, Endian::Big)
+        } else if let Some(b) = name.strip_suffix("le") {
+            (b, Endian::Little)
+        } else {
+            (name.as_str(), Endian::Native)
+        };
+        if let Some(s) = scalar(base) {
+            if s == Scalar::Usize {
+                return Err(self.error(
+                    ErrorKind::Unsupported,
+                    "wire struct fields use fixed-width integers, not usize",
+                ));
+            }
+            if endian != Endian::Native && s.bits() == 8 {
+                return Err(self.error(
+                    ErrorKind::Unsupported,
+                    "8-bit wire integers have no byte order; write u8/i8",
+                ));
+            }
+            let bits = u16::from(s.bits());
+            return Ok(WireType::Integer(if s.signed() {
+                Integer::signed(bits, endian)
+            } else {
+                Integer::unsigned(bits, endian)
+            }));
+        }
+        if matches!(
+            name.as_str(),
+            "bool"
+                | "Unit"
+                | "CSlice"
+                | "ForeignVal"
+                | "Option"
+                | "Ptr"
+                | "NullablePtr"
+                | "f32"
+                | "f64"
+                | "char"
+                | "long"
+                | "c_long"
+        ) {
+            return Err(self.error(
+                ErrorKind::Unsupported,
+                "wire struct fields must admit every bit pattern: fixed-width integers, ByteArray[N], ZeroPad[N] or wire structs",
+            ));
+        }
+        Ok(WireType::Struct(name))
+    }
     fn function(&mut self) -> Result<RawFunction, Error> {
         self.keyword("fn")?;
         let symbol = self.word()?;
@@ -315,37 +426,52 @@ impl Parser {
             if parameters.len() >= self.limits.parameters {
                 return Err(self.error(ErrorKind::Limit, "function parameter budget exceeded"));
             }
-            let borrowed = if self.is_word("nocapture") {
+            let span_start = self.token().span.start;
+            let nocapture = if self.is_word("nocapture") {
                 self.bump();
-                let access = match self.word()?.as_str() {
-                    "in" => Access::In,
-                    "inout" => Access::Inout,
-                    _ => {
-                        return Err(self.error(
-                            ErrorKind::Unsupported,
-                            "nocapture must be followed by in or inout",
-                        ));
-                    }
-                };
-                Some(access)
+                true
             } else {
-                None
+                false
+            };
+            // An access keyword is followed by the parameter name; a parameter
+            // that is itself named `in` is followed by ':'.
+            let access = match self.peek_word(0) {
+                Some(w @ ("in" | "out" | "inout")) if self.peek_word(1).is_some() => {
+                    let a = match w {
+                        "in" => PointerAccess::In,
+                        "out" => PointerAccess::Out,
+                        _ => PointerAccess::Inout,
+                    };
+                    self.bump();
+                    Some(a)
+                }
+                _ => None,
+            };
+            let access = match (nocapture, access) {
+                (true, Some(a)) => Some(a),
+                (true, None) => {
+                    return Err(self.error(
+                        ErrorKind::Unsupported,
+                        "nocapture must be followed by in, out or inout",
+                    ));
+                }
+                (false, Some(a)) => {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        span_start..self.token().span.end,
+                        format!(
+                            "borrowed `{}` pointer parameters must be declared `nocapture`; capturing foreign pointers are unsupported",
+                            a.keyword()
+                        ),
+                    ));
+                }
+                (false, None) => None,
             };
             let name = self.word()?;
             self.expect(b':')?;
-            let ty = if let Some(access) = borrowed {
-                self.keyword("CSlice")?;
-                self.expect(b'[')?;
-                let element = scalar(&self.word()?).ok_or_else(|| {
-                    self.error(
-                        ErrorKind::Unsupported,
-                        "CSlice requires a total-bit integer element",
-                    )
-                })?;
-                self.expect(b']')?;
-                RawParameterType::Slice { element, access }
-            } else {
-                RawParameterType::Value(self.value_type()?)
+            let ty = match access {
+                Some(access) => self.borrowed_type(access)?,
+                None => RawParameterType::Value(self.value_type()?),
             };
             parameters.push((name, ty));
             if !self.eat(b',') {
@@ -374,7 +500,91 @@ impl Parser {
             result,
         })
     }
+    /// The type after `nocapture <access> name:`: a slice, a single pointee
+    /// or an explicitly nullable `Option[pointee]`.
+    fn borrowed_type(&mut self, access: PointerAccess) -> Result<RawParameterType, Error> {
+        if self.is_word("CSlice") {
+            let slice_access = match access {
+                PointerAccess::In => Access::In,
+                PointerAccess::Inout => Access::Inout,
+                PointerAccess::Out => {
+                    return Err(self.error(
+                        ErrorKind::Unsupported,
+                        "CSlice is in or inout; an out slice would expose uninitialized elements",
+                    ));
+                }
+            };
+            self.bump();
+            self.expect(b'[')?;
+            let element = scalar(&self.word()?).ok_or_else(|| {
+                self.error(
+                    ErrorKind::Unsupported,
+                    "CSlice requires a total-bit integer element",
+                )
+            })?;
+            self.expect(b']')?;
+            return Ok(RawParameterType::Slice {
+                element,
+                access: slice_access,
+            });
+        }
+        let nullable = if self.is_word("Option") {
+            self.bump();
+            self.expect(b'[')?;
+            true
+        } else {
+            false
+        };
+        let span = self.token().span.clone();
+        let pointee = self.word()?;
+        match pointee.as_str() {
+            "Ptr" | "NullablePtr" if nullable => {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    span,
+                    "pointer-to-pointer parameters are unsupported",
+                ));
+            }
+            "Ptr" => {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    span,
+                    "pointer-to-pointer parameters are unsupported; a nocapture pointee is one scalar or wire struct",
+                ));
+            }
+            "NullablePtr" => {
+                return Err(Error::new(
+                    ErrorKind::Type,
+                    span,
+                    "a nullable single pointer must be declared explicitly as Option[T]; pointer-to-pointer parameters are unsupported",
+                ));
+            }
+            "CSlice" | "Option" | "ForeignVal" => {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    span,
+                    "nested borrowed layouts are unsupported",
+                ));
+            }
+            _ => {}
+        }
+        if nullable {
+            self.expect(b']')?;
+        }
+        Ok(RawParameterType::Pointer {
+            pointee,
+            span,
+            access,
+            nullable,
+        })
+    }
 }
+struct RawWireStruct {
+    declaration: crate::Declaration,
+    span: Range<usize>,
+}
+/// Largest accepted wire struct pointee, and largest byte array field.
+const MAX_WIRE_STRUCT_BYTES: usize = 1 << 20;
 #[derive(Clone)]
 enum RawType {
     Name(String),
@@ -382,7 +592,16 @@ enum RawType {
 }
 enum RawParameterType {
     Value(RawType),
-    Slice { element: Scalar, access: Access },
+    Slice {
+        element: Scalar,
+        access: Access,
+    },
+    Pointer {
+        pointee: String,
+        span: Range<usize>,
+        access: PointerAccess,
+        nullable: bool,
+    },
 }
 struct RawFunction {
     symbol: String,
@@ -407,7 +626,15 @@ fn reject_reserved_type(n: &str) -> Result<(), Error> {
     if scalar(n).is_some()
         || matches!(
             n,
-            "Unit" | "bool" | "CSlice" | "ForeignVal" | "Ptr" | "NullablePtr"
+            "Unit"
+                | "bool"
+                | "CSlice"
+                | "ForeignVal"
+                | "Ptr"
+                | "NullablePtr"
+                | "Option"
+                | "ByteArray"
+                | "ZeroPad"
         )
     {
         return Err(Error::new(ErrorKind::Type, 0..0, "reserved type name"));
@@ -571,9 +798,15 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
     };
     p.expect(b'{')?;
     let mut enums = vec![];
+    let mut raw_structs = vec![];
     let mut raw_functions = vec![];
     while !p.eat(b'}') {
-        if p.is_word("enum") {
+        if p.is_word("wire") {
+            if raw_structs.len() >= limits.wire_structs {
+                return Err(p.error(ErrorKind::Limit, "wire struct declaration budget exceeded"));
+            }
+            raw_structs.push(p.wire_struct()?);
+        } else if p.is_word("enum") {
             if enums.len() >= limits.enums {
                 return Err(p.error(ErrorKind::Limit, "enum declaration budget exceeded"));
             }
@@ -586,7 +819,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         } else {
             return Err(p.error(
                 ErrorKind::Unsupported,
-                "expected fn/enum; handles, structs, code and variadics are unsupported",
+                "expected fn/enum/wire struct; handles, C structs, code and variadics are unsupported",
             ));
         }
     }
@@ -608,6 +841,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         "duplicate foreign symbol",
     )?;
     enums.sort_by(|a, b| a.name().cmp(b.name()));
+    let wire_structs = compile_wire_structs(raw_structs, &enums)?;
     let mut functions = vec![];
     for f in raw_functions {
         let mut parameters = vec![];
@@ -626,6 +860,16 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                 RawParameterType::Slice { element, access } => {
                     ParameterType::Slice { element, access }
                 }
+                RawParameterType::Pointer {
+                    pointee,
+                    span,
+                    access,
+                    nullable,
+                } => ParameterType::Pointer {
+                    pointee: resolve_pointee(&pointee, span, &enums, &wire_structs)?,
+                    access,
+                    nullable,
+                },
             };
             parameters.push(ParameterDescriptor { name, ty });
         }
@@ -642,6 +886,7 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
         target,
         link,
         enums,
+        wire_structs,
         functions,
         canonical: vec![],
         identity: DescriptorId([0; 32]),
@@ -649,4 +894,84 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
     library.canonical = canonicalize(&library, limits.canonical_bytes)?;
     library.identity = DescriptorId(*blake3::hash(&library.canonical).as_bytes());
     Ok(library)
+}
+
+fn compile_wire_structs(
+    raw: Vec<RawWireStruct>,
+    enums: &[EnumDescriptor],
+) -> Result<Vec<WireStructDescriptor>, Error> {
+    for w in &raw {
+        let name = &w.declaration.name;
+        if enums.iter().any(|e| e.name() == name) {
+            return Err(Error::new(
+                ErrorKind::Duplicate,
+                w.span.clone(),
+                "wire struct name collides with an enum",
+            ));
+        }
+        for f in &w.declaration.fields {
+            if let crate::WireType::Struct(n) = &f.ty
+                && enums.iter().any(|e| e.name() == n)
+            {
+                return Err(Error::new(
+                    ErrorKind::Unsupported,
+                    w.span.clone(),
+                    format!(
+                        "field `{}` uses enum `{n}`; sparse enums do not admit every bit pattern",
+                        f.name
+                    ),
+                ));
+            }
+        }
+    }
+    unique(
+        raw.iter().map(|w| w.declaration.name.as_str()),
+        "duplicate wire struct declaration",
+    )?;
+    let registry = crate::Registry::new(raw.iter().map(|w| w.declaration.clone()))
+        .map_err(|e| Error::new(ErrorKind::Duplicate, 0..0, e.to_string()))?;
+    let mut out = vec![];
+    for w in raw {
+        let layout = registry
+            .compile(&w.declaration.name)
+            .map_err(|e| Error::new(ErrorKind::Type, w.span.clone(), e.to_string()))?;
+        if layout.size() > MAX_WIRE_STRUCT_BYTES {
+            return Err(Error::new(
+                ErrorKind::Limit,
+                w.span,
+                "wire struct pointee exceeds 1048576 bytes",
+            ));
+        }
+        out.push(WireStructDescriptor {
+            shared: Arc::new(WireStructData {
+                declaration: w.declaration,
+                layout,
+            }),
+        });
+    }
+    out.sort_by(|a, b| a.name().cmp(b.name()));
+    Ok(out)
+}
+fn resolve_pointee(
+    name: &str,
+    span: Range<usize>,
+    enums: &[EnumDescriptor],
+    structs: &[WireStructDescriptor],
+) -> Result<Pointee, Error> {
+    if let Some(s) = scalar(name) {
+        return Ok(Pointee::Scalar(s));
+    }
+    if let Some(w) = structs.iter().find(|w| w.name() == name) {
+        return Ok(Pointee::Struct(w.clone()));
+    }
+    let why = if name == "bool" || enums.iter().any(|e| e.name() == name) {
+        format!(
+            "pointee `{name}` does not admit every bit pattern foreign code may write; point to its integer carrier"
+        )
+    } else if name == "Unit" {
+        "void pointees are opaque and unsupported".to_owned()
+    } else {
+        format!("unknown pointee `{name}`; declare it as a wire struct")
+    };
+    Err(Error::new(ErrorKind::Type, span, why))
 }
