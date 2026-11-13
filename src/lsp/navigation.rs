@@ -1,5 +1,7 @@
 //! Pure navigation over a whole, validated checked source and its exact text index.
 //! Type modes describe types, never current ownership, obligations or proof status.
+mod doc_links;
+
 use crate::{
     ast::*,
     check::World,
@@ -869,8 +871,15 @@ pub fn definition(
         .filter(|n| contains(&n.expr.span, offset))
         .min_by_key(|n| n.expr.span.len())
         .and_then(|n| n.target.as_ref());
-    let Some(target) = target else {
-        return Ok(None);
+    let fallback;
+    let target = if let Some(target) = target {
+        target
+    } else {
+        fallback = doc_links::target(snapshot, &data.tokens, offset, limits)?;
+        let Some(target) = fallback.as_ref() else {
+            return Ok(None);
+        };
+        target
     };
     let result = json!({"uri":uri_label,"range":source_range(index,target)?});
     output(&result, limits.max_output_bytes)?;
