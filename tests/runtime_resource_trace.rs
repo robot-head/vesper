@@ -19,6 +19,7 @@ const PROBE: &str = include_str!("fixtures/runtime_resource_trace/match_probe.ve
 const MUTATION: &str = include_str!("fixtures/runtime_resource_trace/mutation.ves");
 const CAPACITY: &str = include_str!("fixtures/runtime_resource_trace/capacity.ves");
 const HANDLERS: &str = include_str!("fixtures/runtime_resource_trace/handlers.ves");
+const NAMESPACE: &str = include_str!("fixtures/runtime_resource_trace/namespace.ves");
 
 fn checked(source: &str) -> World {
     let parsed = parser::parse(source);
@@ -197,6 +198,7 @@ fn repeated_dynamic_site_keeps_distinct_carriers_and_actual_consume_order() {
 #[test]
 fn selected_kinds_are_exact_and_unselected_linear_values_stay_unobserved() {
     let world = checked(LIFE);
+    let namespace_world = checked(NAMESPACE);
     for optimize in [false, true] {
         let (result, report) = execute(
             &world,
@@ -223,6 +225,18 @@ fn selected_kinds_are_exact_and_unselected_linear_values_stay_unobserved() {
         assert_ne!(report.events()[0].identity(), report.events()[1].identity());
 
         let (result, report) = execute(&world, &[], Limits::default(), optimize, "kinds", vec![]);
+        answer(result);
+        assert_closed(&report);
+        assert!(report.events().is_empty());
+
+        let (result, report) = execute(
+            &namespace_world,
+            &["Ticket"],
+            Limits::default(),
+            optimize,
+            "same_basename",
+            vec![],
+        );
         answer(result);
         assert_closed(&report);
         assert!(report.events().is_empty());
@@ -701,6 +715,66 @@ fn entry_rejects_missing_foreign_and_prior_run_carriers_before_execution() {
     assert_eq!(before.events().len(), 1);
     assert_eq!(before.live().len(), 1);
     assert_eq!(before.status(), Status::Completed);
+}
+
+#[test]
+fn actual_entry_and_return_shapes_cannot_bypass_selected_carrier_validation() {
+    let world = checked(LIFE);
+    for optimize in [false, true] {
+        let mut ordinary = Runtime::new(&world);
+        let other = ordinary.run("untracked_return", vec![]).unwrap();
+        assert!(matches!(&other, Value::Data { ty, resource_identity: None, .. } if ty == "Ghost"));
+        let (result, report) = execute(
+            &world,
+            &["Ticket"],
+            Limits::default(),
+            optimize,
+            "relay",
+            vec![other],
+        );
+        assert!(result.is_err());
+        failure(&report, Failure::BoundaryTypeMismatch);
+        assert!(report.events().is_empty());
+        assert!(report.live().is_empty());
+
+        let original = checked(MUTATION);
+        let (result, report) = execute(
+            &original,
+            &["Ticket"],
+            Limits::default(),
+            optimize,
+            "wrong_return",
+            vec![],
+        );
+        assert!(matches!(result.unwrap(), Value::Tuple(values) if values.len() == 2));
+        assert_eq!(report.status(), Status::Completed);
+        assert_eq!(actions(&report), [Action::Mint]);
+        assert_eq!(report.live().len(), 1);
+
+        // Both elements now route to the real untracked Ghost. A carrier-only
+        // walk sees no missing Ticket token; the actual declared return shape
+        // must independently reject it and preserve the genuinely minted Ticket.
+        let changed = mutant(
+            "wrong_return",
+            "(ticket, ghost)",
+            "(".len(),
+            "ticket",
+            "ghost",
+        );
+        let (result, report) = execute(
+            &changed,
+            &["Ticket"],
+            Limits::default(),
+            optimize,
+            "wrong_return",
+            vec![],
+        );
+        assert!(result.is_err());
+        failure(&report, Failure::BoundaryTypeMismatch);
+        assert_eq!(actions(&report), [Action::Mint]);
+        assert_eq!(report.live().len(), 1);
+        assert_eq!(report.live()[0].identity(), report.events()[0].identity());
+    }
 }
 
 #[test]

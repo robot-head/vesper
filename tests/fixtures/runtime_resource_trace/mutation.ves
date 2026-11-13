@@ -1,4 +1,5 @@
 linear struct Ticket {}
+linear struct Ghost {}
 copy struct Pair {
     left: Ticket,
     right: Ticket
@@ -42,6 +43,12 @@ fn dead_return() -> Ticket {
     let second = Ticket {};
     close(first);
     second
+}
+
+fn wrong_return() -> (Ticket, Ghost) {
+    let ticket = Ticket {};
+    let ghost = Ghost {};
+    (ticket, ghost)
 }
 
 fn error_after_mint() -> i64 {

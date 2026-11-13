@@ -111,6 +111,9 @@ fn accept(sink ticket: Ticket) -> i64 {
 fn return_pair() -> (Ticket, Ticket) {
     (Ticket {}, Ticket {})
 }
+fn untracked_return() -> Ghost {
+    Ghost {}
+}
 fn echo(in value: i64) -> i64 {
     value
 }
