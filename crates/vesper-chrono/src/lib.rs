@@ -1,7 +1,13 @@
 #![doc = include_str!("../README.md")]
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 
 pub mod bundle;
+pub mod capture;
+pub mod checkpoint;
+pub mod ete;
+pub mod hwpath;
+pub mod ipt;
+pub mod ipt_flow;
 pub mod lineage;
 pub mod redact;
 pub mod replay;
@@ -11,6 +17,11 @@ pub mod timeline;
 pub mod wire;
 
 pub use bundle::{Bundle, BundleError, BundleKey, BundleLimits, RecordedEvent, RecordedSnapshot};
+pub use checkpoint::{
+    ActivationCheckpoint, AddressPolicy, CheckpointError, CheckpointLimits, JournalEntry,
+    ParkPoint, ResumeTag, StackShape,
+};
+pub use hwpath::{BranchTimeline, EffectAnchor, InstructionPath, PathError, TraceStep};
 pub use lineage::{
     HopKind, LineageError, ObligationHop, ObligationId, ObligationLineage, ObligationStatus,
     Provenance,
@@ -25,13 +36,17 @@ pub use timeline::{
 };
 pub use wire::{ChronoLayouts, EventHeader, TraceCursor};
 
-/// Features of §31 this crate does not implement; each reports unavailable.
+/// Parts of §31 this crate does not implement or has not exercised; each
+/// reports why.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unavailable {
-    /// Intel Processor Trace / Arm CoreSight ETM branch tracing (§31.1 item 3).
+    /// Intel PT / CoreSight capture on real hardware (§31.1 item 3). The
+    /// decoders (`ipt`, `ipt_flow`, `ete`) and the gated `capture` module
+    /// exist; no hardware trace has been captured or decoded.
     HardwareBranchTrace,
-    /// Native fiber activation and VirtualArena copy-on-write checkpoints
-    /// (§31.1 item 2); snapshots here are caller-provided state images.
+    /// Byte-image native activation checkpoints and VirtualArena
+    /// copy-on-write shard checkpoints (§31.1 item 2). `checkpoint` restores
+    /// activations by deterministic re-execution instead.
     NativeActivationCheckpoint,
     /// `vesper replay` CLI and Lens DAP surfaces (integration B, #136).
     ReplayCli,
@@ -49,10 +64,10 @@ impl Unavailable {
     pub fn reason(self) -> &'static str {
         match self {
             Self::HardwareBranchTrace => {
-                "Intel PT / CoreSight ETM tracing is not implemented or exercised; ipt_tsc_anchor holds caller-supplied logical time"
+                "Intel PT / CoreSight decoding is tested only on independently encoded streams; capture needs an intel_pt, cs_etm or arm_spe PMU, which the development and CI hosts lack"
             }
             Self::NativeActivationCheckpoint => {
-                "native activation and VirtualArena CoW checkpoints are not implemented; snapshots are caller-provided images"
+                "vesper-fiber-abi exposes no stack-byte, register-frame or fixed-address stack API, so checkpoints restore by re-executing the resume journal; VirtualArena CoW checkpoints are not implemented"
             }
             Self::ReplayCli => "the vesper replay CLI is integration B (#136)",
             Self::EvidenceVectorInterposition => {

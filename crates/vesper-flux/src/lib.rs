@@ -1,4 +1,7 @@
-//! Bounded host implementation of relational DBSP. Uses allocating BTreeMaps,
+//! Bounded host implementation of relational DBSP, durable content-addressed
+//! checkpoints and a SimPulse-scheduled multi-worker executor with aligned
+//! barrier checkpoints and rollback recovery.
+//! Uses allocating BTreeMaps,
 //! checked i128 accumulators and i64 stored weights, not SIMD/arena or compiler lowering.
 //! Errors are transactional; tick input is borrowed and all prior integrals survive.
 //! Representable accepted computations obey integer arithmetic. Intermediate budget
@@ -10,8 +13,9 @@ mod frontier;
 mod zset;
 
 pub use circuit::{
-    CdcHeader, CdcPolicy, CheckpointLimits, Circuit, CircuitBuilder, Executor, Field, Ingested,
-    NodeId, Predicate, SourceBinding, TickInput, WeightPolicy,
+    CdcHeader, CdcPolicy, CheckpointLimits, Circuit, CircuitBuilder, ClusterConfig, ClusterRun,
+    CommittedCheckpoint, DurableCheckpointer, DurableReport, DurableRestore, Executor, Field,
+    Ingested, NodeId, Predicate, Recovery, SourceBinding, TickInput, WeightPolicy, run_cluster,
 };
 pub use frontier::{Frontier, FrontierTicket, TicketError};
 pub use zset::{Row, ZSet};
@@ -56,6 +60,12 @@ pub enum Error {
     Cdc(&'static str),
     SourceMode,
     Checkpoint(&'static str),
+    /// Content-addressed storage failure: missing, corrupt, wrong-kind or IO.
+    Storage(&'static str),
+    /// The circuit cannot be partitioned by the configured key columns.
+    Partition(&'static str),
+    /// Simulated cluster protocol violation or exhausted step budget.
+    Cluster(&'static str),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

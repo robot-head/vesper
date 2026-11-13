@@ -13,13 +13,17 @@ use vesper_chrono::{HopKind, ObligationHop, ObligationLineage};
 const MODEL_ID: &str = "vesper.chrono.replay-model/1";
 const MODEL_CLAIM: &str = "interaction-tree replay, snapshot fold and lineage log models; not a proof about the Rust implementation";
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
-const THEOREMS: [&str; 6] = [
+const THEOREMS: [&str; 10] = [
     "chrono_replay_reproduces_live_execution",
     "replay_ignores_environment",
     "replay_from_snapshot",
     "lineage_creation_precedes",
     "lineage_complete",
     "reverse_watch_finds_latest_mutation",
+    "checkpoint_restore_replays_to_live",
+    "reexecuted_checkpoint_replays_to_live",
+    "restore_rejects_relocation",
+    "restore_at_captured_base",
 ];
 
 fn root() -> PathBuf {

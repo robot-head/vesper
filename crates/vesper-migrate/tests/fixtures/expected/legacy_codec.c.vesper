@@ -25,6 +25,7 @@ struct padded_record {
 
 enum codec_status { CODEC_OK = 0, CODEC_SHORT = 1, CODEC_BAD_MAGIC = 2, CODEC_LAST = 3 }
 
+extern fn legacy_parse_batch_header(in raw_bytes: CSlice[u8], inout out_crc: u32, inout out_count: i32) -> ForeignVal[i32];
 extern fn legacy_parse_batch_header_into(in raw_bytes: CSlice[u8], inout out: CSlice[u32]) -> ForeignVal[i32];
 extern fn legacy_crc32c(in data: CSlice[u8], seed: u32) -> ForeignVal[u32];
 extern fn legacy_encode(in src: CSlice[u8], inout dst: CSlice[u8]) -> ForeignVal[usize];
@@ -32,3 +33,5 @@ extern fn legacy_status() -> ForeignVal[u32];
 extern fn legacy_version() -> ForeignVal[u32];
 extern fn legacy_reset() -> ForeignVal[Unit];
 extern fn legacy_crc_table() -> ForeignVal[NullablePtr[u32]];
+extern fn legacy_read_header(in raw_bytes: CSlice[u8], inout out_hdr: batch_header) -> ForeignVal[i32];
+extern fn legacy_fill(inout stats: decoder_stats) -> ForeignVal[i32];

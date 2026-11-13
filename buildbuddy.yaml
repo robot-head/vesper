@@ -26,6 +26,8 @@ actions:
       # `clippy` (warnings are errors) and `rustfmt` checks.
       - run: |
           export VESPER_LEAN="$(cat .ci-lean-path)"
+          export VESPER_LEAN4LEAN42_ROOT="$(mktemp -d /tmp/vesper-lean4lean42-ci.XXXXXX)/checker"
+          BAZEL_FLAGS="--config=ci --config=rbe_build" scripts/ci/prepare-lean4lean42.sh "$VESPER_LEAN4LEAN42_ROOT"
           bazel test --config=ci --config=rbe_build //...
       - run: "scripts/ci/check-lean-models.sh"
 
