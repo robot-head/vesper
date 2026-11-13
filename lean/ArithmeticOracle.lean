@@ -427,7 +427,9 @@ private def serve (input output : IO.FS.Stream) : IO (Except String Unit) := do
         jn diagnostics, jn invalid, jn values, jn overflows, jn exhausted])
       return .ok ()
     | .ok (some payload) =>
-      if seen > 9999999999 then
+      -- Reserve the terminal count within the ten-digit control domain. EOF
+      -- above remains legal at the limit; another frame cannot be dispatched.
+      if seen >= 9999999999 then
         send output (fatalResponse "sequence_limit")
         return .error "sequence_limit"
       let answer := processBytes seen payload

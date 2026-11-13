@@ -95,3 +95,18 @@ It adds no modal/place/handler metatheory and does not complete §42 or Lean4Lea
 Source/backend equivalence, process cleanup/fault injection and complete corpus
 counts require the separately owned integration and acceptance runs. The
 existing mathematical model source remains unchanged.
+
+## Terminal sequence-bound follow-up
+
+Independent review identified the terminal counter boundary: dispatching ID
+9999999999 would increment `seen` to an eleven-digit BYE counter. The server
+now rejects a new frame when `seen >= 9999999999`, before dispatch or increment.
+EOF is handled first, so a session already at that terminal count can still
+produce its normal ten-digit BYE and exit zero. The last dispatchable ID is
+9999999998. The pure request API and ordinary suite behavior are unchanged.
+
+After this change, reran the same actual oracle `lean -o` command and both
+`check_protocol.py` / `check_bounds.py` probes above. All passed with the same
+54- and 19-request counters and four fatal-session checks. No ten-billion-frame
+session was executed or claimed; the extreme boundary correction is established
+by the guarded increment and EOF ordering in source review.
