@@ -73,6 +73,9 @@ mint(ty, constructor, field_count, actual_span), consume_batch(actual carriers),
 validate_values(actual entry args), finish(completion) and sticky fail(reason,
 optional span). ResourceConsume borrows actual type/constructor and contains the
 actual carrier identity and pattern site. Its batch is fully prepaid.
+Authoritative operations, including finish, return typed errors; run must
+propagate a finalization failure rather than report a successful value with an
+unfinished observer. Borrow conflicts cannot panic or silently become success.
 
 `Runtime::observe_resources(config)` returns the read-only observer and refuses
 reconfiguration of an already observed Runtime. It revalidates the selected
