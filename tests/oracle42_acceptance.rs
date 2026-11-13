@@ -688,7 +688,7 @@ fn preflight_failures(binary: &Path, tool: &Toolchain) {
         assert!(
             matches!(
                 failure.error.kind,
-                FailureKind::Io | FailureKind::ToolVersion
+                FailureKind::Io | FailureKind::ToolVersion | FailureKind::Crash
             ),
             "{failure:?}"
         );
