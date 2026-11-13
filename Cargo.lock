@@ -2939,6 +2939,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "prost"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3ef0b569d1d907ab3a28596aee62cf1f61dacb0529a4bedcd8e7460e2d5228b4"
+dependencies = [
+ "bytes",
+ "prost-derive",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ad9c5423459fa2f729b8d9235fab810aa29628b171467744fc86d21460ad70d"
+dependencies = [
+ "anyhow",
+ "itertools",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
+]
+
+[[package]]
 name = "pulley-interpreter"
 version = "50.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4178,9 +4201,13 @@ dependencies = [
  "ring",
  "rustls-pki-types",
  "rustls-webpki",
+ "serde",
+ "serde_json",
  "spki",
  "subtle",
  "vesper-loom-cas",
+ "vesper-vault",
+ "x509-parser",
  "zeroize",
 ]
 
@@ -4214,9 +4241,13 @@ name = "vesper-beacon-arrow"
 version = "0.1.0"
 dependencies = [
  "arrow-array",
+ "arrow-buffer",
  "arrow-ipc",
  "arrow-schema",
  "arrow2",
+ "hmac",
+ "prost",
+ "sha2",
  "vesper-beacon",
 ]
 
@@ -4237,6 +4268,10 @@ name = "vesper-chorus"
 version = "0.1.0"
 dependencies = [
  "vesper-simpulse",
+ "vesper-warp",
+ "vesper-warp-crypto",
+ "vesper-warp-shard",
+ "vesper-warp-umem",
 ]
 
 [[package]]

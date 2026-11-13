@@ -15,6 +15,10 @@ chacha20poly1305 = { workspace = true }
 subtle = { workspace = true }
 zeroize = { workspace = true }
 vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-vault = { path = "../vesper-vault" }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+x509-parser = "=0.18.1"
 
 [dev-dependencies]
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

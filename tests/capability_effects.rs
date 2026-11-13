@@ -452,3 +452,49 @@ fn function_typed_fields_are_callable_values() {
         codes(plain)
     );
 }
+
+#[test]
+fn assignments_into_capability_function_types_are_coerced() {
+    let bypass = "fn apply(sink f: fn(f64) -> f64 eff [DetFloat], x: f64) -> f64 eff [DetFloat] { f(x) } \
+                  fn good(x: f64) -> f64 eff [DetFloat] { x } fn bad(x: f64) -> f64 { x % 2.0 } \
+                  fn main() -> f64 { let f: fn(f64) -> f64 eff [DetFloat] = good; f = bad; apply(f, 1.0) }";
+    assert!(
+        codes(bypass).contains(&"E0708".to_string()),
+        "{:?}",
+        codes(bypass)
+    );
+    let ok = "fn apply(sink f: fn(f64) -> f64 eff [DetFloat], x: f64) -> f64 eff [DetFloat] { f(x) } \
+              fn good(x: f64) -> f64 eff [DetFloat] { x } fn also(x: f64) -> f64 eff [DetFloat] { x * 2.0 } \
+              fn main() -> f64 { let f: fn(f64) -> f64 eff [DetFloat] = good; f = also; apply(f, 1.0) }";
+    assert!(codes(ok).is_empty(), "{:?}", codes(ok));
+    // Reassigning a lexically checked closure local drops its exemption.
+    let relexical = "fn plain(x: f64) -> f64 { x } \
+                     fn f(x: f64) -> f64 eff [DetFloat] { let g = |y: f64| -> f64 { y }; g = plain; g(x) }";
+    let c = codes(relexical);
+    assert!(c.iter().any(|c| c == "E0700" || c == "E0708"), "{c:?}");
+}
+
+#[test]
+fn secret_handler_state_reaches_the_return_clause() {
+    let init = "copy struct Secret[T] { value: T } linear effect Ask { fn ask() -> u64; } \
+                fn leak(s: Secret[bool]) -> bool eff [ConstTime] { handle Ask state flag = s.value in { 0 } with { return (v, flag) => flag, ask(flag, k) => k(0, false), } }";
+    assert!(
+        codes(init).contains(&"E0706".to_string()),
+        "{:?}",
+        codes(init)
+    );
+    let resumed = "copy struct Secret[T] { value: T } linear effect Ask { fn ask() -> u64; } \
+                   fn leak(s: Secret[bool]) -> bool eff [ConstTime] { let Secret { value } = s; handle Ask state flag = false in { Ask::ask() } with { return (v, flag) => flag, ask(flag, k) => k(0, value), } }";
+    assert!(
+        codes(resumed).contains(&"E0706".to_string()),
+        "{:?}",
+        codes(resumed)
+    );
+    let public = "copy struct Secret[T] { value: T } linear effect Ask { fn ask() -> u64; } \
+                  fn fine(s: Secret[bool]) -> bool eff [ConstTime] { handle Ask state flag = true in { 0 } with { return (v, flag) => flag, ask(flag, k) => k(0, false), } }";
+    assert!(codes(public).is_empty(), "{:?}", codes(public));
+    // A secret state does not taint an independent public result.
+    let independent = "copy struct Secret[T] { value: T } linear effect Ask { fn ask() -> u64; } \
+                       fn fine(s: Secret[bool]) -> u64 eff [ConstTime] { handle Ask state flag = s.value in { 0 } with { return (v, flag) => v, ask(flag, k) => k(0, false), } }";
+    assert!(codes(independent).is_empty(), "{:?}", codes(independent));
+}
