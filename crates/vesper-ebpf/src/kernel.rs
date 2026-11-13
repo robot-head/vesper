@@ -187,8 +187,30 @@ pub fn prepare(prog: &Program) -> Result<Program, LoadError> {
     crate::btf::resolve_kfuncs(&p, btf).map_err(|e| LoadError::Invalid(e.to_string()))
 }
 
+/// Load `prog` with its program BTF, func info, line info and CO-RE
+/// relocation records (`BPF_PROG_LOAD` `core_relos`): the kernel applies
+/// the CO-RE relocations itself, against its own BTF. kfunc ids are still
+/// resolved here, as a loader does.
+pub fn load_with_ext(prog: &Program) -> Result<Loaded, LoadError> {
+    probe()?;
+    load_inner(prog, true)
+}
+
 fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
-    let prepared = prepare(prog)?;
+    load_inner(prog, false)
+}
+
+fn load_inner(prog: &Program, kernel_ext: bool) -> Result<Loaded, LoadError> {
+    let prepared = if kernel_ext {
+        if prog.kfuncs.is_empty() {
+            prog.clone()
+        } else {
+            crate::btf::resolve_kfuncs(prog, vmlinux()?)
+                .map_err(|e| LoadError::Invalid(e.to_string()))?
+        }
+    } else {
+        prepare(prog)?
+    };
     let prog = &prepared;
     let mut maps = Vec::new();
     for def in &prog.maps {
@@ -204,11 +226,26 @@ fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
     let has_callbacks = insns
         .iter()
         .any(|i| i.code == 0x18 && i.src == pseudo::FUNC);
-    let (btf_fd, func_info) = if has_callbacks {
-        let (btf, infos) = crate::btf::program_btf(prog);
-        (Some(load_btf(&btf)?), crate::btf::FuncInfo::bytes(&infos))
+    let (mut func_info, mut line_info, mut core_relos) = (Vec::new(), Vec::new(), Vec::new());
+    let btf_fd = if has_callbacks || kernel_ext {
+        let mut p = prog.clone();
+        // kfunc ids are already in the instructions: no extern types
+        p.kfuncs.clear();
+        let ob = crate::btf_ext::build(&p, "prog").map_err(|e| LoadError::Invalid(e.to_string()))?;
+        func_info = crate::btf::FuncInfo::bytes(&ob.func_info);
+        for r in &ob.line_records {
+            for w in [r[0] / 8, r[1], r[2], r[3]] {
+                line_info.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        for r in &ob.core_records {
+            for w in r {
+                core_relos.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        Some(load_btf(&ob.btf)?)
     } else {
-        (None, Vec::new())
+        None
     };
     let name: String = prog
         .name
@@ -236,6 +273,16 @@ fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
             put_u32(&mut a, 76, crate::btf::FuncInfo::REC_SIZE);
             put_u64(&mut a, 80, func_info.as_ptr() as u64);
             put_u32(&mut a, 88, (func_info.len() / 8) as u32);
+            if !line_info.is_empty() {
+                put_u32(&mut a, 92, 16);
+                put_u64(&mut a, 96, line_info.as_ptr() as u64);
+                put_u32(&mut a, 104, (line_info.len() / 16) as u32);
+            }
+            if !core_relos.is_empty() {
+                put_u32(&mut a, 116, (core_relos.len() / 16) as u32);
+                put_u64(&mut a, 128, core_relos.as_ptr() as u64);
+                put_u32(&mut a, 136, 16);
+            }
         }
         Ok(bpf(BPF_PROG_LOAD, &mut a))
     };

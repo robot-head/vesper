@@ -15,6 +15,7 @@
 #![deny(unsafe_code)]
 
 pub mod btf;
+pub mod btf_ext;
 pub mod callgraph;
 pub mod core;
 pub mod elf;

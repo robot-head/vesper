@@ -52,7 +52,7 @@ impl std::error::Error for ElfError {}
 pub fn section_name(t: ProgramType) -> &'static str {
     match t {
         ProgramType::Xdp => "xdp",
-        ProgramType::SchedCls => "tc",
+        ProgramType::SchedCls => "classifier",
         ProgramType::Tracepoint => "tracepoint",
         ProgramType::Kprobe => "kprobe",
     }
@@ -358,6 +358,15 @@ pub fn parse_maps_btf(btf: &[u8]) -> Result<Vec<(u64, MapDef)>, ElfError> {
 
 // ---------------------------------------------------------------- ELF ---
 
+/// Whether the object needs function BTF and `.BTF.ext`: subprograms,
+/// kfunc calls, CO-RE relocations or line info.
+fn needs_ext(prog: &Program) -> bool {
+    !prog.kfuncs.is_empty()
+        || !prog.core_relos.is_empty()
+        || !prog.lines.is_empty()
+        || crate::btf::subprog_starts(prog).len() > 1
+}
+
 /// Emit a relocatable BPF ELF object for `prog`.
 pub fn write_object(prog: &Program) -> Result<Vec<u8>, ElfError> {
     let mut obj = Object::new(BinaryFormat::Elf, Architecture::Bpf, Endianness::Little);
@@ -393,8 +402,26 @@ pub fn write_object(prog: &Program) -> Result<Vec<u8>, ElfError> {
     });
 
     let mut map_syms: Vec<SymbolId> = Vec::new();
+    let rich = needs_ext(prog);
+    let ext = if rich {
+        Some(
+            crate::btf_ext::build(prog, &program_section(prog))
+                .map_err(|e| ElfError::Write(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    if let Some(ext) = &ext {
+        let btf_sec = obj.add_section(Vec::new(), b".BTF".to_vec(), SectionKind::Metadata);
+        obj.set_section_data(btf_sec, ext.btf.clone(), 4);
+        let ext_sec = obj.add_section(Vec::new(), b".BTF.ext".to_vec(), SectionKind::Metadata);
+        obj.set_section_data(ext_sec, ext.ext.clone(), 4);
+    }
     if !prog.maps.is_empty() {
-        let (btf, offsets, size) = maps_btf(&prog.maps);
+        let (btf, offsets, size) = match &ext {
+            Some(e) => (Vec::new(), e.map_offsets.clone(), e.maps_size),
+            None => maps_btf(&prog.maps),
+        };
         let maps: SectionId = obj.add_section(Vec::new(), b".maps".to_vec(), SectionKind::Data);
         obj.set_section_data(maps, vec![0u8; size as usize], 8);
         for (m, off) in prog.maps.iter().zip(&offsets) {
@@ -410,8 +437,10 @@ pub fn write_object(prog: &Program) -> Result<Vec<u8>, ElfError> {
                 flags: SymbolFlags::None,
             }));
         }
-        let btf_sec = obj.add_section(Vec::new(), b".BTF".to_vec(), SectionKind::Metadata);
-        obj.set_section_data(btf_sec, btf, 4);
+        if ext.is_none() {
+            let btf_sec = obj.add_section(Vec::new(), b".BTF".to_vec(), SectionKind::Metadata);
+            obj.set_section_data(btf_sec, btf, 4);
+        }
     }
 
     // the entry function and named subprograms
@@ -440,6 +469,34 @@ pub fn write_object(prog: &Program) -> Result<Vec<u8>, ElfError> {
         });
     }
 
+    // kfunc calls: R_BPF_64_32 against an undefined global symbol
+    let mut kfunc_syms: HashMap<&str, SymbolId> = HashMap::new();
+    for k in &prog.kfuncs {
+        let sym = *kfunc_syms.entry(k.name.as_str()).or_insert_with(|| {
+            obj.add_symbol(Symbol {
+                name: k.name.as_bytes().to_vec(),
+                value: 0,
+                size: 0,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Dynamic,
+                weak: false,
+                section: SymbolSection::Undefined,
+                flags: SymbolFlags::None,
+            })
+        });
+        obj.add_relocation(
+            text,
+            Relocation {
+                offset: k.slot as u64 * 8,
+                symbol: sym,
+                addend: 0,
+                flags: RelocationFlags::Elf {
+                    r_type: object::elf::R_BPF_64_32,
+                },
+            },
+        )
+        .map_err(|e| ElfError::Write(e.to_string()))?;
+    }
     for &(at, map) in &prog.map_relocs {
         let sym = *map_syms
             .get(map)
@@ -500,15 +557,71 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
     let mut maps: Vec<MapDef> = Vec::new();
     let mut map_at: Vec<u64> = Vec::new();
     let maps_index = sec(".maps").map(|s| s.index());
-    if let Some(b) = sec(".BTF") {
-        let d = b.data().map_err(|e| ElfError::Read(e.to_string()))?;
-        for (off, def) in parse_maps_btf(d)? {
-            map_at.push(off);
-            maps.push(def);
+    let text_name = text
+        .name()
+        .map_err(|e| ElfError::Read(e.to_string()))?
+        .to_owned();
+    let mut ext = crate::btf_ext::ObjectExt::default();
+    let malformed = |e: crate::btf::BtfError| ElfError::Malformed(e.to_string());
+    match (sec(".BTF"), sec(".BTF.ext")) {
+        (Some(b), Some(x)) => {
+            let d = b.data().map_err(|e| ElfError::Read(e.to_string()))?;
+            let btf = crate::btf::Btf::parse(d).map_err(malformed)?;
+            for (off, def) in crate::btf_ext::maps_from_btf(&btf).map_err(malformed)? {
+                map_at.push(off);
+                maps.push(def);
+            }
+            let xd = x.data().map_err(|e| ElfError::Read(e.to_string()))?;
+            ext = crate::btf_ext::parse_ext(&btf, xd, &text_name).map_err(malformed)?;
         }
+        (Some(b), None) => {
+            let d = b.data().map_err(|e| ElfError::Read(e.to_string()))?;
+            for (off, def) in parse_maps_btf(d)? {
+                map_at.push(off);
+                maps.push(def);
+            }
+        }
+        (None, Some(_)) => return Err(ElfError::Malformed(".BTF.ext without .BTF".into())),
+        (None, None) => {}
     }
+    let mut kfuncs = Vec::new();
     let mut map_relocs = Vec::new();
     for (off, rel) in text.relocations() {
+        if rel.flags()
+            == (RelocationFlags::Elf {
+                r_type: object::elf::R_BPF_64_32,
+            })
+        {
+            // a kfunc call: an undefined symbol named after the function
+            let object::RelocationTarget::Symbol(si) = rel.target() else {
+                return Err(ElfError::Malformed("relocation without symbol".into()));
+            };
+            let sym = file
+                .symbol_by_index(si)
+                .map_err(|e| ElfError::Read(e.to_string()))?;
+            if !sym.is_undefined() || off % 8 != 0 {
+                return Err(ElfError::Malformed(format!(
+                    "unsupported call relocation at {off}"
+                )));
+            }
+            let slot = (off / 8) as usize;
+            let s = insns
+                .get_mut(slot)
+                .ok_or_else(|| ElfError::Malformed("relocation past the code".into()))?;
+            if s.code != 0x85 {
+                return Err(ElfError::Malformed("kfunc relocation on a non-call".into()));
+            }
+            s.src = pseudo::KFUNC_CALL;
+            s.imm = 0;
+            kfuncs.push(crate::program::KfuncRef {
+                slot,
+                name: sym
+                    .name()
+                    .map_err(|e| ElfError::Read(e.to_string()))?
+                    .to_owned(),
+            });
+            continue;
+        }
         if rel.flags()
             != (RelocationFlags::Elf {
                 r_type: object::elf::R_BPF_64_64,
@@ -564,6 +677,7 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
         }
     }
     functions.sort_by_key(|(_, e)| *e);
+    kfuncs.sort_by_key(|k| k.slot);
     Ok(Program {
         name,
         prog_type,
@@ -573,8 +687,8 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
         functions,
         license,
         attach,
-        kfuncs: Vec::new(),
-        core_relos: Vec::new(),
-        lines: Vec::new(),
+        kfuncs,
+        core_relos: ext.core_relos,
+        lines: ext.lines,
     })
 }
