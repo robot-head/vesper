@@ -207,6 +207,17 @@ derivation, host integrity or the unfinished implementation proof closure.
 
 ## Integration and validation
 
+The private acceptance seam exposes production protocol DTOs and a closed
+`process::testing::probe(Command, ProbeKind, timeout_ms, &Limits)`. Its result
+reports the observed error, actual child reap/reader/watcher joins, and retained
+frame/stderr/queue counters. Closed modes are Malformed, Oversize,
+TruncatedHeader, TruncatedPayload, WrongToken, Stall, StderrFlood, Crash,
+ShortWrites, QueuePressure and QueueCancel. Transport completions emit only
+one/64 markers; QueueCancel must time out under queue pressure. stdin is null.
+No probe returns a run report, control verdict or external coverage. This seam
+was agreed by the process/protocol/acceptance writers and published on #302
+before dependent implementation.
+
 Use the proposed default/HARD limits, exact report/sealing fields and aliases,
 plus the additions above. Explicit build setup, ordinary offline run and
 private seal are distinct operations. Missing/wrong tools fail hard. Actual
