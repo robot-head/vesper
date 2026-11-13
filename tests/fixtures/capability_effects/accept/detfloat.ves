@@ -1,0 +1,29 @@
+// Bit-deterministic integration step built only from + - * / on f64.
+copy struct Body {
+    pos: f64,
+    vel: f64,
+}
+
+fn half(x: f64) -> f64 eff [DetFloat] {
+    x * 0.5
+}
+
+fn integrate(in b: Body, dt: f64, accel: f64) -> Body eff [DetFloat] {
+    let vel = b.vel + accel * dt;
+    Body {
+        pos: b.pos + half(b.vel + vel) * dt,
+        vel
+    }
+}
+
+fn main() -> f64 {
+    let b = integrate(
+        in Body {
+            pos: 0.0,
+            vel: 1.0
+        },
+        0.5,
+        2.0
+    );
+    b.pos
+}

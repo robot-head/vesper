@@ -1,0 +1,8 @@
+// expect: E0730
+fn wrap_angle(x: f64) -> f64 eff [DetFloat] {
+    x % 6.25
+}
+
+fn main() -> f64 {
+    wrap_angle(7.0)
+}

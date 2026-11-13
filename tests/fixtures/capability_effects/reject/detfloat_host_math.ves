@@ -1,0 +1,17 @@
+// expect: E0731
+linear effect Libm {
+    fn sin(x: f64) -> f64;
+}
+
+fn rotate(x: f64) -> f64 eff [DetFloat, Libm] {
+    Libm::sin(x)
+}
+
+fn main() -> f64 {
+    handle Libm in {
+        rotate(1.0)
+    } with {
+        return value => value,
+        sin(x, resume) => resume(x),
+    }
+}

@@ -1,0 +1,12 @@
+// expect: E0700
+fn helper(x: u64) -> u64 {
+    x
+}
+
+fn tag(x: u64) -> u64 eff [ConstTime] {
+    helper(x)
+}
+
+fn main() -> u64 {
+    tag(1)
+}

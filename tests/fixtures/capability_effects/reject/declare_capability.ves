@@ -1,0 +1,6 @@
+// expect: E0100
+effect DetFloat {}
+
+fn main() -> u64 {
+    1
+}

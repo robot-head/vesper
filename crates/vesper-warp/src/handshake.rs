@@ -100,6 +100,33 @@ pub enum ConnectionEvent {
     HandshakeComplete(vesper_warp_shard::SlotHandle),
     /// The handshake is confirmed; Handshake keys are discarded.
     HandshakeConfirmed(vesper_warp_shard::SlotHandle),
+    /// Client: the server accepted 0-RTT; data sent in it counts.
+    ZeroRttAccepted(vesper_warp_shard::SlotHandle),
+    /// Client: the server refused 0-RTT. Every stream was reset to a fresh
+    /// state (RFC 9000 §7.4.1); the application sends its data again.
+    ZeroRttRejected(vesper_warp_shard::SlotHandle),
+    /// Client: a Retry was accepted and the handshake restarted with its
+    /// token.
+    Retried(vesper_warp_shard::SlotHandle),
+    /// Client: a NEW_TOKEN token was stored for the next connection to the
+    /// same server name.
+    NewToken(vesper_warp_shard::SlotHandle),
+    /// The peer's new address (server) or our new path (client) passed
+    /// path validation (RFC 9000 §8.2).
+    PathValidated(vesper_warp_shard::SlotHandle),
+    /// Path validation failed; the connection went back to its last
+    /// validated path, or stays where it was.
+    PathFailed(vesper_warp_shard::SlotHandle),
+    /// Server: the peer moved to a new address (RFC 9000 §9.3); its
+    /// validation is in progress.
+    PeerMigrated(vesper_warp_shard::SlotHandle),
+    /// The connection is gone and its slot was freed: after the closing or
+    /// draining period, on idle timeout, on a stateless reset or a
+    /// Version Negotiation failure. The handle is stale from now on.
+    Closed {
+        conn: vesper_warp_shard::SlotHandle,
+        error: crate::endpoint::ConnectionError,
+    },
 }
 
 /// The packet-number space a TLS encryption level maps to.
@@ -143,6 +170,9 @@ pub(crate) struct LongSpace {
     /// CRYPTO data, in packet-number order.
     pub sent: VecDeque<(u64, u64, u32)>,
     pub discarded: bool,
+    /// Next packet number: kept across new keys, since a client must not
+    /// reset packet numbers after Retry (RFC 9000 §17.2.5.3).
+    pub next_pn: u64,
 }
 
 impl LongSpace {
@@ -153,6 +183,7 @@ impl LongSpace {
             received: ReceivedPackets::new(space, max_ack_delay_ns),
             sent: VecDeque::with_capacity(tracked),
             discarded: false,
+            next_pn: 0,
         }
     }
 
@@ -213,6 +244,17 @@ pub(crate) struct Hs {
     /// A HANDSHAKE_DONE frame arrived in the packet being processed.
     pub done_received: bool,
     pub peer_params_applied: bool,
+    /// Client: the server name, for the NEW_TOKEN cache.
+    pub server_name: Option<Box<str>>,
+    /// Client: the Destination Connection ID of its first Initial, for
+    /// the Retry integrity tag (RFC 9001 §5.8).
+    pub original_dcid: vesper_warp_shard::ConnectionId,
+    /// Client: the token every Initial carries (from Retry or NEW_TOKEN).
+    pub token: Option<Box<[u8]>>,
+    /// Client: a Retry was accepted.
+    pub retried: bool,
+    /// Client: stream limits came from remembered 0-RTT parameters.
+    pub zero_rtt_params: bool,
 }
 
 impl Hs {
@@ -245,6 +287,12 @@ impl Hs {
             handshake_acked: false,
             done_received: false,
             peer_params_applied: false,
+            server_name: None,
+            original_dcid: vesper_warp_shard::ConnectionId::from_slice(&[])
+                .expect("an empty connection ID"),
+            token: None,
+            retried: false,
+            zero_rtt_params: false,
         })
     }
 
