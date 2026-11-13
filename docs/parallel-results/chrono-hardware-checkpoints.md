@@ -52,10 +52,14 @@ remains. The crate attribute changed from `forbid(unsafe_code)` to
 - **PT flow.** Return compression is assumed whenever a TNT bit is pending
   or next; otherwise a `ret` takes a TIP. A TIP.PGD without a preceding
   branch only disables tracing when it names the current IP. TSX is rejected
-  as unsupported. The reconstructor stops at the first instruction that
+  as unsupported. A periodic PSB+ whose FUP lies ahead of the current IP is
+  reached by walking packetless code first; only a packet-needing branch on
+  the way is a desynchronisation. Instructions may straddle adjacent code
+  segments. The reconstructor stops at the first instruction that
   needs a packet after the packets end, and leftover TNT bits are an error.
 - **Time.** Each branch carries the interval between the TSC packets around
-  it. A branch is definitely between effect records `a` and `b` only when
+  it. A direct jump or call emits no packet, so its lower bound is the TSC in
+  effect at the previous flow packet, not a TSC read ahead of it. A branch is definitely between effect records `a` and `b` only when
   `tsc_lo > anchor(a)` and `tsc_hi <= anchor(b)`; intervals that straddle an
   anchor are returned separately as uncertain instead of being assigned. The
   recorder's `time_ns` field must hold the same TSC/CNTVCT clock when
@@ -68,7 +72,10 @@ remains. The crate attribute changed from `forbid(unsafe_code)` to
   not implemented; atoms map onto the timeline at their latest address.
 - **Capture.** The child waits on stdin in `sh -c 'read _; exec "$0" "$@"'`,
   the event is opened on its pid with `enable_on_exec`, and a newline
-  releases it, so the traced program runs no untraced instruction.
+  releases it, so the traced program runs no untraced instruction. The AUX
+  ring is drained (advancing `aux_tail`) while the child runs, and a
+  truncated `PERF_RECORD_AUX` or a `PERF_RECORD_LOST` marks the capture
+  lossy.
   `EACCES`/`EPERM` and `ENOENT`/`ENODEV`/`EOPNOTSUPP`/`EINVAL` from
   `perf_event_open` become `Unavailable`. SPE output is returned raw.
 - **Checkpoints by re-execution.** `vesper-fiber-abi` exposes no accessor
@@ -77,7 +84,9 @@ remains. The crate attribute changed from `forbid(unsafe_code)` to
   may neither edit it nor use `unsafe` outside capture. So a checkpoint holds
   the park request (evidence by depth), generation, data frame, the shape of
   the self-pointing stack words (`Parked::stack_self_pointers`, relative to
-  the lowest one) and the journal of resumptions with the data frame each
+  the lowest one), the data frame both as the fiber left it at the park and
+  as the resumer has filled it since (so deliveries made before the
+  checkpoint are restored), and the journal of resumptions with the data frame each
   resumer left. `restore` starts a fresh fiber of the same code, replays the
   journal checking each park, then checks request, generation, data frame
   and stack shape, and hands back a live activation that resumes to the same

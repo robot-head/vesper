@@ -3,7 +3,8 @@
 //! An [`ActivationCheckpoint`] describes a parked `vesper-fiber-abi` fiber at
 //! one park: its identity, generation, pending park request (with the
 //! evidence slot named by depth, since evidence identities are never reused
-//! across vectors), its data frame, the shape of the stack words that point
+//! across vectors), its data frame both as the fiber left it at the park and
+//! as the resumer has since filled it, the shape of the stack words that point
 //! into its own stack, and the journal of every resumption it received so far
 //! together with the data-frame image each resumer left before resuming.
 //!
@@ -19,9 +20,10 @@
 //! fresh fiber of the same code and argument and replays the journal, checking
 //! at every park that the request and park count match. It then checks that
 //! the rebuilt activation equals the checkpoint: request, generation, data
-//! frame and stack shape (every self-pointing stack word at the same offset,
-//! pointing at the same offset). The rebuilt activation then resumes to the
-//! same result as the live one.
+//! frame at the park and stack shape (every self-pointing stack word at the same offset,
+//! pointing at the same offset). It then re-applies the deliveries made at
+//! the captured park, and the rebuilt activation resumes to the same result as
+//! the live one.
 //!
 //! **Relocation.** A fresh stack is a fresh mapping, so the rebuilt
 //! activation normally sits at a different address. Saved raw stack pointers
@@ -123,6 +125,10 @@ pub struct ActivationCheckpoint {
     /// Continuation generation at the park.
     pub generation: u64,
     pub park: ParkPoint,
+    /// The data frame as the fiber left it when it parked.
+    pub data_at_park: Vec<u8>,
+    /// The data frame at capture, including completions the resumer has
+    /// already delivered into it at this park.
     pub data: Vec<u8>,
     /// `None` when no stack word points into the stack.
     pub stack: Option<StackShape>,
@@ -294,8 +300,10 @@ impl ActivationCheckpoint {
         out.extend_from_slice(&self.fiber_id.to_le_bytes());
         out.extend_from_slice(&self.generation.to_le_bytes());
         put_park(&mut out, &self.park);
-        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
-        out.extend_from_slice(&self.data);
+        for frame in [&self.data_at_park, &self.data] {
+            out.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+            out.extend_from_slice(frame);
+        }
         match &self.stack {
             None => out.push(0),
             Some(shape) => {
@@ -350,6 +358,8 @@ impl ActivationCheckpoint {
         let generation = r.u64()?;
         let park = r.park()?;
         let n = r.len("data", limits.max_data_bytes)?;
+        let data_at_park = r.take(n)?.to_vec();
+        let n = r.len("data", limits.max_data_bytes)?;
         let data = r.take(n)?.to_vec();
         let stack = match r.u8()? {
             0 => None,
@@ -387,6 +397,7 @@ impl ActivationCheckpoint {
             fiber_id,
             generation,
             park,
+            data_at_park,
             data,
             stack,
             journal,
@@ -478,6 +489,8 @@ mod native {
     #[derive(Debug)]
     pub struct RecordedActivation {
         parked: Parked,
+        /// The data frame as the fiber left it at this park.
+        data_at_park: Vec<u8>,
         journal: Vec<JournalEntry>,
     }
 
@@ -521,7 +534,11 @@ mod native {
 
         fn wrap(outcome: Outcome, journal: Vec<JournalEntry>) -> Step {
             match outcome {
-                Outcome::Parked(parked) => Step::Parked(Self { parked, journal }),
+                Outcome::Parked(parked) => Step::Parked(Self {
+                    data_at_park: parked.data().to_vec(),
+                    parked,
+                    journal,
+                }),
                 Outcome::Exited(e) => Step::Exited(e),
             }
         }
@@ -547,6 +564,7 @@ mod native {
                 fiber_id: self.parked.fiber_id(),
                 generation: self.parked.token().generation,
                 park: park_point(&self.parked)?,
+                data_at_park: self.data_at_park.clone(),
                 data: self.parked.data().to_vec(),
                 stack: StackShape::from_pairs(&self.parked.stack_self_pointers()),
                 journal: self.journal.clone(),
@@ -589,6 +607,7 @@ mod native {
                     error: rejected.error,
                     activation: Self {
                         parked: rejected.continuation,
+                        data_at_park: std::mem::take(&mut self.data_at_park),
                         journal,
                     },
                 })),
@@ -689,7 +708,8 @@ mod native {
             };
             let verified = check("park", rebuilt.park == self.park)
                 .and_then(|_| check("generation", rebuilt.generation == self.generation))
-                .and_then(|_| check("data frame", rebuilt.data == self.data))
+                .and_then(|_| check("data frame", rebuilt.data_at_park == self.data_at_park))
+                .and_then(|_| check("data frame size", rebuilt.data.len() == self.data.len()))
                 .and_then(|_| {
                     check(
                         "stack shape",
@@ -700,6 +720,9 @@ mod native {
             if let Err(e) = verified {
                 return Err(cancel(a, e));
             }
+            // Re-apply what the resumer had delivered at this park.
+            let mut a = a;
+            a.data_mut().copy_from_slice(&self.data);
             let displacement = match (&self.stack, &rebuilt.stack) {
                 (Some(c), Some(r)) => r.anchor.wrapping_sub(c.anchor) as i64,
                 _ => 0,

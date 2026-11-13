@@ -20,12 +20,16 @@
 //! between packets and code (a TIP where a TNT bit is needed, an IP outside
 //! the image, an undecodable instruction) are typed errors.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fmt;
 
 use iced_x86::{Decoder, DecoderOptions, FlowControl, Mnemonic};
 
 use crate::ipt::{IpPacketKind, PtPacket, PtPacketAt};
+
+/// Longest x86 instruction.
+const MAX_INSN_LEN: usize = 15;
 
 /// A contiguous mapped code region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,12 +69,30 @@ impl<'a> CodeImage<'a> {
         self.segments.sort_by_key(|s| s.base);
         Ok(())
     }
-    /// The bytes from `ip` to the end of its segment.
-    pub fn at(&self, ip: u64) -> Option<&'a [u8]> {
-        self.segments.iter().find_map(|s| {
-            let off = ip.checked_sub(s.base)?;
-            (off < s.bytes.len() as u64).then(|| &s.bytes[off as usize..])
-        })
+    /// The bytes from `ip` to the end of its segment, continued into
+    /// directly adjacent segments far enough to hold one instruction (at
+    /// most 15 bytes on x86).
+    pub fn at(&self, ip: u64) -> Option<Cow<'a, [u8]>> {
+        let i = self.segments.iter().position(|s| {
+            ip.checked_sub(s.base)
+                .is_some_and(|off| off < s.bytes.len() as u64)
+        })?;
+        let s = self.segments[i];
+        let rest = &s.bytes[(ip - s.base) as usize..];
+        if rest.len() >= MAX_INSN_LEN {
+            return Some(Cow::Borrowed(rest));
+        }
+        let mut joined = rest.to_vec();
+        let mut end = s.base + s.bytes.len() as u64;
+        for next in &self.segments[i + 1..] {
+            if next.base != end || joined.len() >= MAX_INSN_LEN {
+                break;
+            }
+            let take = (MAX_INSN_LEN - joined.len()).min(next.bytes.len());
+            joined.extend_from_slice(&next.bytes[..take]);
+            end += next.bytes.len() as u64;
+        }
+        Some(Cow::Owned(joined))
     }
 }
 
@@ -216,7 +238,11 @@ struct Walker<'p, 'i> {
     next: usize,
     image: &'p CodeImage<'i>,
     limits: FlowLimits,
-    tnt: VecDeque<(bool, usize)>,
+    /// Pending TNT bits: (taken, packet index, TSC when the packet was read).
+    tnt: VecDeque<(bool, usize, Option<u64>)>,
+    /// TSC in effect when the most recent flow packet was consumed: the
+    /// conservative lower bound for branches that emit no packet.
+    flow_tsc: Option<u64>,
     calls: Vec<u64>,
     bitness: u32,
     tsc: Option<u64>,
@@ -235,12 +261,30 @@ impl Walker<'_, '_> {
         self.tsc = Some(tsc);
     }
 
+    /// A flow packet was consumed.
+    fn consumed(&mut self) {
+        self.flow_tsc = self.tsc;
+    }
+
+    /// Push a branch resolved by the packet just consumed.
     fn push(&mut self, from: u64, to: Option<u64>, kind: BranchKind, packet_index: usize) {
+        let lo = self.tsc;
+        self.push_at(from, to, kind, packet_index, lo);
+    }
+
+    fn push_at(
+        &mut self,
+        from: u64,
+        to: Option<u64>,
+        kind: BranchKind,
+        packet_index: usize,
+        tsc_lo: Option<u64>,
+    ) {
         self.trace.branches.push(Branch {
             from,
             to,
             kind,
-            tsc_lo: self.tsc,
+            tsc_lo,
             tsc_hi: None,
             packet_index,
         });
@@ -287,7 +331,7 @@ impl Walker<'_, '_> {
     }
 
     /// Next TNT bit, refilling from packets.
-    fn take_tnt(&mut self, ip: u64) -> Result<Option<(bool, usize)>, FlowError> {
+    fn take_tnt(&mut self, ip: u64) -> Result<Option<(bool, usize, Option<u64>)>, FlowError> {
         if let Some(bit) = self.tnt.pop_front() {
             return Ok(Some(bit));
         }
@@ -296,7 +340,9 @@ impl Walker<'_, '_> {
             Some(i) => match self.packets[i].packet {
                 PtPacket::Tnt { tnt, .. } => {
                     self.next += 1;
-                    self.tnt.extend(tnt.iter().map(|t| (t, i)));
+                    self.consumed();
+                    let tsc = self.tsc;
+                    self.tnt.extend(tnt.iter().map(|t| (t, i, tsc)));
                     Ok(self.tnt.pop_front())
                 }
                 _ => Err(FlowError::ExpectedTnt { ip, found: Some(i) }),
@@ -324,6 +370,7 @@ impl Walker<'_, '_> {
                     ..
                 } => {
                     self.next += 1;
+                    self.consumed();
                     Ok(Some((kind, target, i)))
                 }
                 _ => Err(FlowError::ExpectedTip { ip, found: Some(i) }),
@@ -338,6 +385,7 @@ impl Walker<'_, '_> {
                 return Ok(None);
             };
             self.next += 1;
+            self.consumed();
             match self.packets[i].packet {
                 PtPacket::Psb | PtPacket::Ovf | PtPacket::TraceStop => {
                     if self.packets[i].packet == PtPacket::Ovf {
@@ -373,7 +421,7 @@ impl Walker<'_, '_> {
     /// resynchronisation, asynchronous FUP+TIP, OVF and a TIP.PGD naming
     /// the current IP (tracing filtered out at a branch target). Returns the new IP (or `None` when tracing stopped);
     /// `Ok(Some(ip))` unchanged when nothing applies.
-    fn interrupts(&mut self, ip: u64) -> Result<Option<u64>, FlowError> {
+    fn interrupts(&mut self, mut ip: u64) -> Result<Option<u64>, FlowError> {
         if !self.tnt.is_empty() {
             return Ok(Some(ip));
         }
@@ -384,6 +432,7 @@ impl Walker<'_, '_> {
             match self.packets[i].packet {
                 PtPacket::Psb => {
                     self.next += 1;
+                    self.consumed();
                     // PSB+ up to PSBEND: an optional FUP restates the current IP.
                     while let Some(p) = self.packets.get(self.next) {
                         let j = self.next;
@@ -397,14 +446,19 @@ impl Walker<'_, '_> {
                                 ip: found,
                                 ..
                             } => {
+                                // The PSB may be emitted after straight-line
+                                // code that produced no packet: walk it.
                                 if let Some(found) = found
                                     && found != ip
                                 {
-                                    return Err(FlowError::Desynchronized {
-                                        expected: ip,
-                                        found,
-                                        packet_index: j,
-                                    });
+                                    if !self.walk_straight(ip, found)? {
+                                        return Err(FlowError::Desynchronized {
+                                            expected: ip,
+                                            found,
+                                            packet_index: j,
+                                        });
+                                    }
+                                    ip = found;
                                 }
                             }
                             _ => {
@@ -422,6 +476,7 @@ impl Walker<'_, '_> {
                     ..
                 } if at == ip => {
                     self.next += 1;
+                    self.consumed();
                     match self.take_tip(ip)? {
                         Some((IpPacketKind::Tip, Some(to), j)) => {
                             self.push(ip, Some(to), BranchKind::Async, j);
@@ -446,11 +501,13 @@ impl Walker<'_, '_> {
                     ..
                 } if to == Some(ip) => {
                     self.next += 1;
+                    self.consumed();
                     self.push(ip, to, BranchKind::Disable, i);
                     return self.resume_point();
                 }
                 PtPacket::Ovf => {
                     self.next += 1;
+                    self.consumed();
                     self.trace.overflows += 1;
                     self.calls.clear();
                     return self.resume_point();
@@ -458,6 +515,54 @@ impl Walker<'_, '_> {
                 _ => return Ok(Some(ip)),
             }
         }
+    }
+
+    fn decode(&mut self, ip: u64) -> Result<iced_x86::Instruction, FlowError> {
+        let bytes = self.image.at(ip).ok_or(FlowError::IpOutsideImage {
+            ip,
+            packet_index: self.next,
+        })?;
+        let mut decoder = Decoder::with_ip(self.bitness, &bytes, ip, DecoderOptions::NONE);
+        let insn = decoder.decode();
+        if insn.is_invalid() {
+            return Err(FlowError::BadInstruction { ip });
+        }
+        Ok(insn)
+    }
+
+    /// Execute from `from` to `to` through instructions that need no packet
+    /// (straight-line code, direct jumps and calls). False if a branch that
+    /// needs a packet comes first.
+    fn walk_straight(&mut self, mut from: u64, to: u64) -> Result<bool, FlowError> {
+        while from != to {
+            if self.trace.instructions == self.limits.max_instructions {
+                return Err(FlowError::InstructionBudget {
+                    limit: self.limits.max_instructions,
+                });
+            }
+            let insn = self.decode(from)?;
+            self.trace.instructions += 1;
+            let lo = self.flow_tsc;
+            from = match insn.flow_control() {
+                FlowControl::Next => insn.next_ip(),
+                FlowControl::UnconditionalBranch if !insn.is_jmp_far() => {
+                    let t = insn.near_branch_target();
+                    self.push_at(from, Some(t), BranchKind::DirectJump, self.next, lo);
+                    t
+                }
+                FlowControl::Call if !insn.is_call_far() => {
+                    let t = insn.near_branch_target();
+                    self.call_push(insn.next_ip());
+                    self.push_at(from, Some(t), BranchKind::DirectCall, self.next, lo);
+                    t
+                }
+                _ => {
+                    self.trace.instructions -= 1;
+                    return Ok(false);
+                }
+            };
+        }
+        Ok(true)
     }
 
     fn transfer(
@@ -486,6 +591,9 @@ impl Walker<'_, '_> {
     }
 
     fn call_push(&mut self, ret: u64) {
+        if self.limits.max_call_depth == 0 {
+            return;
+        }
         if self.calls.len() == self.limits.max_call_depth {
             self.calls.remove(0);
         }
@@ -509,15 +617,7 @@ impl Walker<'_, '_> {
                     limit: self.limits.max_instructions,
                 });
             }
-            let bytes = self.image.at(cur).ok_or(FlowError::IpOutsideImage {
-                ip: cur,
-                packet_index: self.next,
-            })?;
-            let mut decoder = Decoder::with_ip(self.bitness, bytes, cur, DecoderOptions::NONE);
-            let insn = decoder.decode();
-            if insn.is_invalid() {
-                return Err(FlowError::BadInstruction { ip: cur });
-            }
+            let insn = self.decode(cur)?;
             self.trace.instructions += 1;
             let next_ip = insn.next_ip();
             let far = insn.is_jmp_far()
@@ -545,13 +645,15 @@ impl Walker<'_, '_> {
                     FlowControl::Next => Some(next_ip),
                     FlowControl::UnconditionalBranch => {
                         let to = insn.near_branch_target();
-                        self.push(cur, Some(to), BranchKind::DirectJump, self.next);
+                        let lo = self.flow_tsc;
+                        self.push_at(cur, Some(to), BranchKind::DirectJump, self.next, lo);
                         Some(to)
                     }
                     FlowControl::Call => {
                         let to = insn.near_branch_target();
                         self.call_push(next_ip);
-                        self.push(cur, Some(to), BranchKind::DirectCall, self.next);
+                        let lo = self.flow_tsc;
+                        self.push_at(cur, Some(to), BranchKind::DirectCall, self.next, lo);
                         Some(to)
                     }
                     FlowControl::ConditionalBranch => match self.take_tnt(cur)? {
@@ -559,13 +661,13 @@ impl Walker<'_, '_> {
                             self.trace.stopped_at = Some(cur);
                             None
                         }
-                        Some((taken, i)) => {
+                        Some((taken, i, lo)) => {
                             let to = if taken {
                                 insn.near_branch_target()
                             } else {
                                 next_ip
                             };
-                            self.push(cur, Some(to), BranchKind::Conditional { taken }, i);
+                            self.push_at(cur, Some(to), BranchKind::Conditional { taken }, i, lo);
                             Some(to)
                         }
                     },
@@ -588,17 +690,18 @@ impl Walker<'_, '_> {
                                 Some(PtPacket::Tnt { .. })
                             );
                         if compressed {
-                            let (taken, i) = self
+                            let (taken, i, lo) = self
                                 .take_tnt(cur)?
                                 .ok_or(FlowError::BadCompressedReturn { ip: cur })?;
                             let to = self.calls.pop();
                             match (taken, to) {
                                 (true, Some(to)) => {
-                                    self.push(
+                                    self.push_at(
                                         cur,
                                         Some(to),
                                         BranchKind::Return { compressed: true },
                                         i,
+                                        lo,
                                     );
                                     Some(to)
                                 }
@@ -656,6 +759,7 @@ pub fn reconstruct(
         image,
         limits,
         tnt: VecDeque::new(),
+        flow_tsc: None,
         calls: Vec::new(),
         bitness: 64,
         tsc: None,

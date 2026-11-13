@@ -657,3 +657,109 @@ fn trace_and_image_mismatches_are_typed_errors() {
     assert!(image4.add(0x1010, &code).is_err());
     assert!(image4.add(u64::MAX - 2, &code).is_err());
 }
+
+/// Review regressions (PR #280).
+#[test]
+fn psb_plus_after_straight_line_code_walks_to_the_sync_ip() {
+    let code = program();
+    let image = CodeImage::single(BASE, &code);
+    let mut e = Enc::default();
+    // Enabled at the first nop; a periodic PSB+ names the jmp rax two nops
+    // later, with no packet for the straight-line code between.
+    e.psb()
+        .psbend()
+        .ip(PGE, 6, 0x401022)
+        .psb()
+        .ip(FUP, 6, 0x401024)
+        .psbend()
+        .ip(TIP, 6, BASE);
+    let trace = reconstruct(
+        &decode_packets(&e.0).unwrap(),
+        &image,
+        FlowLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(
+        trace.branches[1].kind,
+        BranchKind::IndirectJump,
+        "{:?}",
+        trace.branches
+    );
+    assert_eq!(trace.branches[1].from, 0x401024);
+}
+
+#[test]
+fn instructions_straddling_adjacent_segments_decode() {
+    // jmp rel32 to 0x3010 split across two adjacent segments.
+    let a = [0x90, 0xe9];
+    let b = [0x0a, 0x00, 0x00, 0x00, 0x90];
+    let mut image = CodeImage::new();
+    image.add(0x3000, &a).unwrap();
+    image.add(0x3002, &b).unwrap();
+    let target = [0xff, 0xe0]; // jmp rax
+    image.add(0x3010, &target).unwrap();
+    let mut e = Enc::default();
+    e.psb().ip(PGE, 6, 0x3000).ip(PGD, 0, 0);
+    let trace = reconstruct(
+        &decode_packets(&e.0).unwrap(),
+        &image,
+        FlowLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(trace.branches[1].kind, BranchKind::DirectJump);
+    assert_eq!(trace.branches[1].to, Some(0x3010));
+}
+
+#[test]
+fn zero_call_depth_disables_return_compression_storage() {
+    let code = program();
+    let image = CodeImage::single(BASE, &code);
+    let limits = FlowLimits {
+        max_call_depth: 0,
+        ..FlowLimits::default()
+    };
+    // A compressed return then has no stack entry: a typed error, no panic.
+    let mut e = Enc::default();
+    e.psb().ip(PGE, 6, BASE).tnt(&[true, true, false, true]);
+    assert_eq!(
+        reconstruct(&decode_packets(&e.0).unwrap(), &image, limits),
+        Err(FlowError::BadCompressedReturn { ip: 0x40101c })
+    );
+    // An uncompressed return works.
+    let mut e = Enc::default();
+    e.psb()
+        .ip(PGE, 6, BASE)
+        .tnt(&[true, true, false])
+        .ip(TIP, 6, 0x40100e)
+        .ip(TIP, 6, 0x401020);
+    assert!(reconstruct(&decode_packets(&e.0).unwrap(), &image, limits).is_ok());
+}
+
+#[test]
+fn packetless_branches_keep_a_conservative_lower_timestamp() {
+    let code = program();
+    let image = CodeImage::single(BASE, &code);
+    let mut e = Enc::default();
+    // The TSC sits between the jne TNT and the compressed-ret TNT; the
+    // direct call between them may have run before it.
+    e.psb()
+        .ip(PGE, 6, BASE)
+        .tsc(100)
+        .tnt(&[true, true, false])
+        .tsc(500)
+        .tnt(&[true])
+        .tsc(900);
+    let trace = reconstruct(
+        &decode_packets(&e.0).unwrap(),
+        &image,
+        FlowLimits::default(),
+    )
+    .unwrap();
+    let call = trace
+        .branches
+        .iter()
+        .find(|b| b.kind == BranchKind::DirectCall)
+        .unwrap();
+    assert_eq!(call.tsc_lo, Some(100));
+    assert!(call.tsc_hi >= Some(500));
+}

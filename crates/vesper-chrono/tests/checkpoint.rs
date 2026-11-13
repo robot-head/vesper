@@ -19,6 +19,7 @@ fn image_round_trips_and_rejects_damage() {
             arg0: 8,
             arg1: 16,
         },
+        data_at_park: vec![1, 2, 3, 0],
         data: vec![1, 2, 3, 4],
         stack: Some(vesper_chrono::StackShape {
             anchor: 0x7000_0000,
@@ -188,7 +189,7 @@ mod native {
         ));
         // A checkpoint that claims a different data frame.
         let mut wrong = c.clone();
-        wrong.data[0] ^= 1;
+        wrong.data_at_park[0] ^= 1;
         assert_eq!(
             wrong
                 .restore(fiber(&jit, ARG), AddressPolicy::Reexecuted)
@@ -232,6 +233,26 @@ mod native {
             finish_read(a),
             prototype::expected_pulse_read(ARG, 1001, &INBOX)
         );
+    }
+
+    /// A completion delivered at the captured park, before the checkpoint,
+    /// is restored too (review regression, PR #280).
+    #[test]
+    fn deliveries_made_at_the_captured_park_are_restored() {
+        let jit = JitPrototype::new(OptLevel::Speed).unwrap();
+        let a = parked(RecordedActivation::start(fiber(&jit, ARG)).unwrap());
+        let mut a = parked(resume_value(a, 0));
+        a.data_mut()[prototype::INBOX..prototype::INBOX + 8].copy_from_slice(&INBOX);
+        let c = a.checkpoint().unwrap();
+        assert_ne!(c.data, c.data_at_park);
+        let r = c
+            .restore(fiber(&jit, ARG), AddressPolicy::Reexecuted)
+            .unwrap();
+        // Resume without delivering again: the restored frame holds the inbox.
+        let restored = resume_value(r.activation, 8).exited().unwrap().result;
+        let live = resume_value(a, 8).exited().unwrap().result;
+        assert_eq!(restored, live);
+        assert_eq!(live, prototype::expected_pulse_read(ARG, 1001, &INBOX));
     }
 
     /// Record the run in a flight log, store the park-2 checkpoint as a

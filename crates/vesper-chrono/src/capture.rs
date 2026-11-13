@@ -12,7 +12,9 @@
 //! The child is started as `sh -c 'read _; exec "$0" "$@"' program args...`:
 //! it waits on its stdin pipe, the event is opened with `enable_on_exec` on
 //! its pid, and a newline releases it, so tracing begins at the `exec` of the
-//! program and no code of it runs untraced.
+//! program and no code of it runs untraced. The AUX ring is drained while the
+//! child runs, and `PERF_RECORD_AUX` truncation or `PERF_RECORD_LOST` marks
+//! the capture as lossy.
 //!
 //! This is the only module of the crate with `unsafe` code (the wave-six
 //! contract allows `perf_event_open` capture here). On the development host
@@ -190,7 +192,8 @@ impl Default for CaptureConfig {
 pub struct CapturedTrace {
     pub pmu: TracePmu,
     pub aux: Vec<u8>,
-    /// True when the AUX ring wrapped and the oldest bytes were lost.
+    /// True when trace data was lost: the kernel reported a truncated AUX
+    /// record or lost records, or the AUX ring was overrun.
     pub wrapped: bool,
     pub exit_code: Option<i32>,
 }
@@ -315,6 +318,97 @@ mod linux {
         })
     }
 
+    // perf_event_mmap_page data ring fields and record types.
+    const DATA_HEAD: usize = 1024;
+    const DATA_TAIL: usize = 1032;
+    const PERF_RECORD_AUX: u32 = 11;
+    const PERF_RECORD_LOST: u32 = 2;
+    const PERF_AUX_FLAG_TRUNCATED: u64 = 1;
+
+    struct Rings<'m> {
+        base: &'m Mapping,
+        aux: &'m Mapping,
+        aux_size: u64,
+        data_offset: usize,
+        data_size: u64,
+        bytes: Vec<u8>,
+        truncated: bool,
+    }
+
+    impl Rings<'_> {
+        fn read_u64(&self, offset: usize) -> u64 {
+            // SAFETY: `offset` is a u64 field of the mapped header page.
+            unsafe { self.base.ptr.add(offset).cast::<u64>().read_volatile() }
+        }
+        fn write_u64(&self, offset: usize, value: u64) {
+            // SAFETY: as above; the tail fields are ours to write.
+            unsafe {
+                self.base
+                    .ptr
+                    .add(offset)
+                    .cast::<u64>()
+                    .write_volatile(value)
+            }
+        }
+        fn data_byte(&self, at: u64) -> u8 {
+            let off = self.data_offset + (at % self.data_size) as usize;
+            // SAFETY: `off` lies inside the mapped data ring.
+            unsafe { self.base.ptr.add(off).read_volatile() }
+        }
+        fn data_u64(&self, at: u64) -> u64 {
+            (0..8).fold(0u64, |v, i| {
+                v | (u64::from(self.data_byte(at + i)) << (8 * i))
+            })
+        }
+
+        /// Copy new AUX bytes and consume data-ring records.
+        fn drain(&mut self) {
+            let head = self.read_u64(AUX_HEAD);
+            fence(Ordering::Acquire);
+            let mut at = self.read_u64(AUX_TAIL);
+            if head.saturating_sub(at) > self.aux_size {
+                self.truncated = true;
+                at = head - self.aux_size;
+            }
+            while at < head {
+                let off = (at % self.aux_size) as usize;
+                let run = (self.aux_size - at % self.aux_size).min(head - at) as usize;
+                // SAFETY: [off, off + run) lies inside the mapped AUX area.
+                self.bytes.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(self.aux.ptr.add(off), run)
+                });
+                at += run as u64;
+            }
+            fence(Ordering::Release);
+            self.write_u64(AUX_TAIL, head);
+
+            let head = self.read_u64(DATA_HEAD);
+            fence(Ordering::Acquire);
+            let mut at = self.read_u64(DATA_TAIL);
+            while at + 8 <= head {
+                let header = self.data_u64(at);
+                let kind = header as u32;
+                let size = u64::from((header >> 48) as u16);
+                if size < 8 {
+                    break;
+                }
+                // PERF_RECORD_AUX: aux_offset, aux_size, flags.
+                if kind == PERF_RECORD_AUX
+                    && size >= 32
+                    && self.data_u64(at + 24) & PERF_AUX_FLAG_TRUNCATED != 0
+                {
+                    self.truncated = true;
+                }
+                if kind == PERF_RECORD_LOST {
+                    self.truncated = true;
+                }
+                at += size;
+            }
+            fence(Ordering::Release);
+            self.write_u64(DATA_TAIL, at.min(head));
+        }
+    }
+
     pub(super) fn capture(
         probe: &PmuProbe,
         program: &str,
@@ -418,30 +512,34 @@ mod linux {
             .map_err(|e| CaptureError::Child {
                 detail: e.to_string(),
             })?;
-        let status = child.wait().map_err(|e| CaptureError::Child {
-            detail: e.to_string(),
-        })?;
+        // The AUX mapping is writable, so the kernel never overwrites unread
+        // data: drain it (advancing aux_tail) while the child runs, and read
+        // PERF_RECORD_AUX records to learn whether the kernel had to stop.
+        let mut ring = Rings {
+            base: &base,
+            aux: &aux,
+            aux_size: aux_len as u64,
+            data_offset: page,
+            data_size: (config.data_pages * page) as u64,
+            bytes: Vec::new(),
+            truncated: false,
+        };
+        let status = loop {
+            ring.drain();
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(1)),
+                Err(e) => {
+                    return Err(CaptureError::Child {
+                        detail: e.to_string(),
+                    });
+                }
+            }
+        };
         // SAFETY: an ioctl without argument on our perf fd.
         unsafe { libc::ioctl(fd.as_raw_fd(), PERF_EVENT_IOC_DISABLE, 0) };
-
-        // SAFETY: aux_head/aux_tail are u64 fields of the mapped header page.
-        let (head, tail) = unsafe {
-            let head = base.ptr.add(AUX_HEAD).cast::<u64>().read_volatile();
-            fence(Ordering::Acquire);
-            (head, base.ptr.add(AUX_TAIL).cast::<u64>().read_volatile())
-        };
-        let size = aux_len as u64;
-        let wrapped = head - tail > size;
-        let start = if wrapped { head - size } else { tail };
-        let mut bytes = Vec::with_capacity((head - start) as usize);
-        let mut at = start;
-        while at < head {
-            let off = (at % size) as usize;
-            let run = ((size - at % size).min(head - at)) as usize;
-            // SAFETY: [off, off + run) lies inside the mapped AUX area.
-            bytes.extend_from_slice(unsafe { std::slice::from_raw_parts(aux.ptr.add(off), run) });
-            at += run as u64;
-        }
+        ring.drain();
+        let (bytes, wrapped) = (std::mem::take(&mut ring.bytes), ring.truncated);
         drop(aux);
         drop(base);
         Ok(CapturedTrace {
