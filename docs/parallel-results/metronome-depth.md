@@ -134,7 +134,7 @@ cargo clippy -p vesper-bench -p vesper-bench-pmu --locked --all-targets \
   --target x86_64-pc-windows-msvc -- -D warnings                       # clean
 cargo test -p vesper-bench -p vesper-bench-pmu --locked                 # pass
 cargo test --locked --bin vesper bench_commands                         # 7 pass
-cargo test --workspace --locked                                         # see PR
+VLB_CARGO_LOCK=$PWD/Cargo.lock cargo test --workspace --locked --no-fail-fast  # pass, exit 0
 ```
 
 New tests: RDPMC formula, sign extension, denied/unscheduled/malformed pages
@@ -146,6 +146,10 @@ randomized run detecting an 8x difference; causal accounting and the
 known-bottleneck experiment; CLI flag parsing and forwarding, the layout driver
 with scripted children (survives, does not survive, mismatched plan,
 unavailable child) and the README check.
+
+`VLB_CARGO_LOCK` is needed only because the target directory sits outside the
+checkout; without it `vesper-loom-build` cannot find the lockfile and its tests
+fail with `UnknownFingerprint`, unrelated to this lane.
 
 ## Decisions
 
