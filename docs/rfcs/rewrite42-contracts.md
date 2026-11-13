@@ -156,12 +156,17 @@ profile adds no serde/parser or persistent certificate compatibility promise.
 
 The caller supplies the actual already-checked AST and its matching TypeMap;
 certificates cannot supply authoritative types, variable names or intrinsic
-resolution. The source root and every source value node must have an exact
-closed `Type::Named` with empty arguments, one of u8/u32/u64/i64. Every admitted
-node has the same IntegerKind. Missing entries, Infer, unresolved IntLiteral,
-rows, generic/noninteger/mixed kinds fail closed. `check::integer` alone is
-insufficient because it accepts Infer. Literal values must fit the admitted
-kind without truncation. Bare unresolved literals need no optimization.
+resolution. The source root and every nonliteral source value node must have an
+exact closed `Type::Named` with empty arguments, one of u8/u32/u64/i64. Every
+admitted node has that same IntegerKind. A literal leaf may inherit this closed
+kind when its actual AST i128 value fits and its TypeMap entry is either that
+same closed kind or `Type::IntLiteral(_)`. The IntLiteral payload is contextual
+metadata, not value authority: it need not equal the actual AST literal value.
+All numerical proof constants bind the actual AST i128 value. Missing entries,
+Infer, rows, generic/noninteger/mismatched closed kinds fail closed even at
+literal leaves. A literal root with only IntLiteral metadata is not admitted;
+no default width is invented. `check::integer` alone is insufficient because it
+accepts Infer. Literal values are never truncated into range.
 
 Admitted source nodes are only integer literals, names, binary +/−/*, and exact
 wrapping_add/sub/mul intrinsic calls. An intrinsic source call has a Name callee,
@@ -342,9 +347,12 @@ an unbounded RecExpr/proof tree or hidden full-DAG flatten is permitted.
 Budgets bound logical represented data and requested allocations, not allocator
 overreservation/bookkeeping, resident-set size, arbitrary physical OOM/process
 abort, external OS work or an existing caller-owned AST's entire allocation.
-Producer and checker are separate bounded phases; verification counts the
-proposal's represented certificate/candidate along with its scratch. There is
-no claim that one phase's work budget also bounds egg's entire process RSS.
+Admission, fold prefix, Runner/capture, proof construction, candidate building
+and actual gate verification share one cumulative WitnessBudget per island;
+there is no phase reset. Verification counts the proposal's represented
+certificate/candidate along with its scratch, even if this conservatively
+charges representation again. The standalone public checker creates its own
+fresh budget for its standalone input. There is no whole-process RSS claim.
 
 Private producer ceilings are fixed, not caller-increasable in this profile:
 8 iterations, 2048 raw append-only egraph nodes, 128 substitutions per rule per
@@ -386,11 +394,16 @@ pub(super) fn build_candidate(
     source: &BoundSource<'_>, terms: &[Term], root: TermId,
     budget: &mut WitnessBudget,
 ) -> Result<Expr, WitnessError>;
+pub(super) fn verify_with_budget(
+    source: &Expr, candidate: &Expr, types: &TypeMap,
+    certificate: &RewriteCertificate, budget: &mut WitnessBudget,
+) -> Result<(), WitnessError>;
 
 // In certificate.rs.
 pub(super) struct RewriteProposal {
     pub(super) candidate: Expr,
     pub(super) certificate: RewriteCertificate,
+    pub(super) budget: WitnessBudget,
 }
 pub(super) fn propose_rewrite(
     source: &Expr, types: &TypeMap, limits: WitnessLimits,
@@ -401,8 +414,11 @@ BoundSource fields cannot be certificate-provided or publicly forged. Admission
 may represent duplicate structural nodes. The output builder independently
 validates the supplied term DAG/root/kinds/variables and allowed intrinsic
 origins plus expansion limits before materialization; invoking it does not
-approve the proof. The mandatory public verifier separately rebinds actual AST
-endpoints and checks all equality reasons before coordinator installation.
+approve the proof. Public verify_rewrite creates a new WitnessBudget and calls
+verify_with_budget. The coordinator's mandatory actual gate instead passes the
+producer-returned budget to that same full verifier, preserving cumulative
+limits. That verifier rebinds actual AST endpoints and checks every equality
+reason from scratch before installation; producer assertions do not bypass it.
 Read-only limit accessors/private utility additions that do not change policy
 may be agreed between writers and reported; public/API or policy changes require
 coordinator amendment publication before dependent edits.
@@ -430,13 +446,31 @@ Do not invoke egg Explanation::check_proof as the trust gate: egg0.10 accepts
 unknown rule reasons and does not revalidate our conditional totality semantics.
 Its explanation construction/debug proof checks can recurse/expand before the
 adapter budget. No TreeTerm flatten/string APIs are used as a workaround.
-The existing direct constant-fold cases instead produce their explicit fold
-certificate, which passes the same mandatory gate.
+The six existing direct folds form a bounded bottom-up prefix over the original
+admitted typed term DAG before the Runner. For each operator, connect rewritten
+children by Congruence first; if both mapped children are Const, append its
+explicit checked/wrapping fold equality, then Transitivity. A checked overflow
+keeps the operator rather than folding it to a wrapped value. This constructs
+an explicit original-root to folded-root proof even when folding exposes more
+constants in an ancestor. All prefix allocations/proofs/work consume the same
+attempt budget, and the final original-root to actual extracted-root proof
+composes the prefix and Runner witnesses.
+
+The current Math::Num(i64) range remains the graph profile. Check every constant
+reachable from the folded root before graph admission. If a reachable constant
+is outside i64, a distinct literal-range-ineligible outcome permits a fold-only
+proposal with the complete prefix witness; if nothing changed, return None.
+This is not a fallback after search failure. If admission passes and any later
+Runner/capture/search/proof/resource operation refuses, discard the entire
+prefix/proposal and retain the original island. In-range constants that were
+eliminated by the prefix need not block graph admission. No temporary folded
+AST is installed. Every fold-only proposal still passes the full exact gate.
 
 ## Failure behavior and required actual evidence
 
 The gate borrows the actual source while proposing and verifying. It performs
-`*expression = proposal.candidate` only after successful public verification.
+`*expression = proposal.candidate` only after successful full verification with
+the proposal's cumulative budget through verify_with_budget.
 None/Err at any producer/admission/checker/resource step retains the complete
 original island, including spans and existing child nodes. There is no silent
 unchecked fallback, post-error partially installed candidate or success flag
