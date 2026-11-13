@@ -50,16 +50,29 @@ values, totality, shadowed/original intrinsic provenance, barrier order and
 whole-island refusal. No existing `.ves` fixture is edited. No public serialized
 certificate, proof flag, fabricated World, Lean source or approval is supplied.
 
-**Final execution is pending.** The contract reserves compiler builds/tests and
-script execution to the coordinator's integration worktree/cache. The first
-coordinator pass executes four CLI and four runtime tests successfully; remaining
-failures expose ill-typed positive fixtures and a producer-budget refusal on a
-required genuine simplification. The fixture correction adds existing effect
-rows and lexical handlers around checked variable arithmetic, preserving all
-structural expectations and the full depth-70 original-HIR comparison. Successful
-identity/depth cases use a distinct failure fallback. No compiler effect policy,
-optimization expectation or witness limit is relaxed. The producer's structural
-positive expectations remain unchanged while its owner fixes the refusal.
-This lane still performs only authored edits/rustfmt/whitespace checks; the
-coordinator will supply final runtime/script results for the report.
-No hosted, Lean, formal refinement, timing, RSS or performance claim is made.
+Actual execution is performed by the coordinator, as required by the published
+contract. Final critical integration head `2260c6a` passes:
+
+- All 129 critical tests across six targets, including all eight runtime tests
+  and five actual CLI tests, with zero failures or ignores. Genuine nested
+  wrapping simplification and original callee provenance assertions pass.
+- The actual executable Python harness's 340 commands across 49 inline programs,
+  covering checked baseline validity, evaluator/JIT agreement, installed HIR,
+  deterministic output and unchanged whole-island refusal.
+- Strict package all-target Clippy with `-D warnings`. Writer formatting and
+  whitespace checks also pass. This writer performs no local compiler build or
+  executable run; these runtime results come from the coordinator's actual
+  integration log and final binary.
+
+The initial coordinator pass exposed ill-typed positive fixtures and a genuine
+producer-budget refusal on a required simplification. The fixture correction
+adds existing effect rows/lexical handlers around checked variable arithmetic,
+preserving every structural expectation and the full depth-70 original-HIR
+comparison. Successful identity/depth cases use a distinct failure fallback.
+The producer owner separately fixes its bounded accounting. No compiler effect
+policy, optimization expectation or witness cap is relaxed.
+
+The full root-package final rerun is separate and was still in progress when
+this acceptance update was written; the 129-test targeted result does not claim
+whole-workspace execution. No hosted, Lean, full Rust/source refinement,
+self-hosting/DDC, timing, RSS or production-performance claim is made.
