@@ -272,7 +272,9 @@ fn private_generated_trait_helpers_and_builtin_only_declarations_are_not_targets
 
 #[test]
 fn finite_reference_refusal_does_not_publish_partially_analyzed_document() {
-    let source = format!("/// {}\nfn main() {{}}", "[main] ".repeat(1025));
+    // Commas keep these independent references rather than Markdown's
+    // deliberately excluded `[label] [reference]` pairs.
+    let source = format!("/// {}\nfn main() {{}}", "[main], ".repeat(1025));
     let checked = check::check(&parser::parse(&source).module);
     assert!(checked.diagnostics.is_empty());
     let result = document_source(&source, Limits::default()).unwrap_err();
