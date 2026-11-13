@@ -1,6 +1,10 @@
 //! Bounded direct-child supervision shared by probes, compilation and replay.
 //! No child reads stdin. The watcher enforces the absolute child deadline even
 //! while the consumer is inspecting an inventory or hashing import artifacts.
+//! Shutdown grace triggers a direct-child kill and measures actual reap/join
+//! completion. Portable std OS wait/read/join calls are not hard-interruptible;
+//! an observed grace overrun fails rather than being advertised as bounded.
+//! This does not claim cancellation of arbitrary independently spawned descendants.
 use super::{Digest, Error, ErrorKind, Limits};
 use std::{
     collections::VecDeque,
@@ -58,8 +62,11 @@ pub fn read_frame<R: Read>(reader: &mut R, cap: usize) -> Result<Option<Vec<u8>>
         }
     }
     let len = u32::from_le_bytes(header) as usize;
-    if len == 0 || len > cap {
+    if len == 0 {
         return Err(error(ErrorKind::Protocol, "frame payload cap"));
+    }
+    if len > cap {
+        return Err(error(ErrorKind::OutputLimit, "frame payload cap"));
     }
     let mut bytes = Vec::new();
     bytes
@@ -107,6 +114,25 @@ pub struct ProcessResult {
 pub struct Captured {
     pub process: ProcessResult,
     pub stdout: Vec<u8>,
+}
+
+/// Actual observations after cleanup, also delivered when a phase failed.
+/// An absent exit code denotes a signal or failed OS wait, never a fake code.
+#[derive(Debug)]
+pub struct ProcessObservation {
+    pub exit: Option<i32>,
+    pub stdout_bytes: u64,
+    pub stderr_bytes: u64,
+    pub stdout_blake3: Digest,
+    pub stderr_blake3: Digest,
+    pub elapsed_ms: u64,
+    pub stderr: Vec<u8>,
+    pub child_reaped: bool,
+    pub stdout_joined: bool,
+    pub stderr_joined: bool,
+    pub watcher_joined: bool,
+    pub cleanup_elapsed_ms: u64,
+    pub cleanup_deadline_exceeded: bool,
 }
 
 struct Stream {
@@ -230,7 +256,12 @@ impl Queue {
         state.entries.push_back(event);
         #[cfg(test)]
         {
-            state.peak = state.peak.max(state.entries.len());
+            let frames = state
+                .entries
+                .iter()
+                .filter(|event| matches!(event, Event::Data(..)))
+                .count();
+            state.peak = state.peak.max(frames);
         }
         self.changed.notify_all();
         true
@@ -288,6 +319,8 @@ struct Cleanup {
     stdout_joined: bool,
     stderr_joined: bool,
     watcher_joined: bool,
+    elapsed_ms: u64,
+    deadline_exceeded: bool,
     #[cfg(test)]
     max_retained_frame: usize,
     #[cfg(test)]
@@ -307,6 +340,8 @@ struct Session {
     drainer: Option<JoinHandle<()>>,
     watcher: Option<JoinHandle<()>>,
     until: Instant,
+    shutdown_until: Arc<Mutex<Option<Instant>>>,
+    shutdown_timeout: Duration,
     start: Instant,
     closed: bool,
 }
@@ -364,6 +399,8 @@ impl Session {
             drainer: None,
             watcher: None,
             until,
+            shutdown_until: Arc::new(Mutex::new(None)),
+            shutdown_timeout: Duration::from_millis(limits.shutdown_timeout_ms),
             start,
             closed: false,
         };
@@ -371,6 +408,7 @@ impl Session {
         let cancel = Arc::clone(&session.cancel);
         let faults = Arc::clone(&session.faults);
         let exit = Arc::clone(&session.exit);
+        let shutdown_until = Arc::clone(&session.shutdown_until);
         session.watcher = Some(
             thread::Builder::new()
                 .name("lean4lean42-watch".into())
@@ -386,6 +424,12 @@ impl Session {
                                         error(ErrorKind::Timeout, "child exit deadline"),
                                     );
                                 }
+                                if lock(&shutdown_until).is_some_and(|limit| at > limit) {
+                                    fault(
+                                        &faults,
+                                        error(ErrorKind::Timeout, "child shutdown deadline"),
+                                    );
+                                }
                                 *lock(&exit) = Some(Exit {
                                     status: Some(status),
                                     at,
@@ -397,6 +441,12 @@ impl Session {
                         }
                         if Instant::now() >= until {
                             fault(&faults, error(ErrorKind::Timeout, "child process deadline"));
+                        }
+                        if lock(&shutdown_until).is_some_and(|limit| Instant::now() >= limit) {
+                            fault(
+                                &faults,
+                                error(ErrorKind::Timeout, "child shutdown deadline"),
+                            );
                         }
                         if cancel.load(Ordering::Acquire) || lock(&faults).is_some() {
                             let _ = child.kill();
@@ -512,6 +562,9 @@ impl Session {
     }
 
     fn cleanup(&mut self, cancel: bool) -> Cleanup {
+        let start = Instant::now();
+        let until = start + self.shutdown_timeout;
+        *lock(&self.shutdown_until) = Some(until);
         if cancel {
             self.cancel.store(true, Ordering::Release);
         }
@@ -542,6 +595,8 @@ impl Session {
             stdout_joined,
             stderr_joined,
             watcher_joined,
+            elapsed_ms: elapsed(start),
+            deadline_exceeded: Instant::now() > until,
             #[cfg(test)]
             max_retained_frame: queue.frame_peak,
             #[cfg(test)]
@@ -560,7 +615,8 @@ impl Drop for Session {
 }
 
 struct RunOutcome {
-    result: Result<ProcessResult, Error>,
+    failure: Option<Error>,
+    observation: ProcessObservation,
     #[cfg(test)]
     cleanup: Cleanup,
 }
@@ -605,6 +661,12 @@ fn run(
     {
         failure = Some(error(ErrorKind::Crash, "child wait or pipe thread failed"));
     }
+    if failure.is_none() && cleanup.deadline_exceeded {
+        failure = Some(error(
+            ErrorKind::Timeout,
+            "child cleanup exceeded shutdown grace",
+        ));
+    }
     let exit = lock(&session.exit);
     if failure.is_none() && exit.as_ref().is_some_and(|e| e.at > session.until) {
         failure = Some(error(ErrorKind::Timeout, "child exit deadline"));
@@ -619,13 +681,11 @@ fn run(
             "child terminated without an exit code",
         ));
     }
-    let result = if let Some(e) = failure {
-        Err(e)
-    } else {
+    let observation = {
         let stdout = lock(&session.stdout);
         let mut stderr = lock(&session.stderr);
-        Ok(ProcessResult {
-            exit: code.unwrap_or(-1),
+        ProcessObservation {
+            exit: code,
             stdout_bytes: stdout.bytes,
             stderr_bytes: stderr.bytes,
             stdout_blake3: *stdout.hash.finalize().as_bytes(),
@@ -636,10 +696,13 @@ fn run(
             stdout_joined: cleanup.stdout_joined,
             stderr_joined: cleanup.stderr_joined,
             watcher_joined: cleanup.watcher_joined,
-        })
+            cleanup_elapsed_ms: cleanup.elapsed_ms,
+            cleanup_deadline_exceeded: cleanup.deadline_exceeded,
+        }
     };
     Ok(RunOutcome {
-        result,
+        failure,
+        observation,
         #[cfg(test)]
         cleanup,
     })
@@ -651,7 +714,47 @@ pub fn framed(
     limits: &Limits,
     receive: impl FnMut(&[u8], Instant) -> Result<(), Error>,
 ) -> Result<ProcessResult, Error> {
-    run(command, timeout_ms, limits, Output::Framed, receive)?.result
+    framed_observed(command, timeout_ms, limits, receive, |_| {})
+}
+
+fn observed_result(
+    outcome: RunOutcome,
+    observe: impl FnOnce(&ProcessObservation),
+) -> Result<ProcessResult, Error> {
+    observe(&outcome.observation);
+    if let Some(failure) = outcome.failure {
+        return Err(failure);
+    }
+    let value = outcome.observation;
+    let exit = value
+        .exit
+        .ok_or_else(|| error(ErrorKind::Crash, "child has no observed exit code"))?;
+    Ok(ProcessResult {
+        exit,
+        stdout_bytes: value.stdout_bytes,
+        stderr_bytes: value.stderr_bytes,
+        stdout_blake3: value.stdout_blake3,
+        stderr_blake3: value.stderr_blake3,
+        elapsed_ms: value.elapsed_ms,
+        stderr: value.stderr,
+        child_reaped: value.child_reaped,
+        stdout_joined: value.stdout_joined,
+        stderr_joined: value.stderr_joined,
+        watcher_joined: value.watcher_joined,
+    })
+}
+
+pub fn framed_observed(
+    command: Command,
+    timeout_ms: u64,
+    limits: &Limits,
+    receive: impl FnMut(&[u8], Instant) -> Result<(), Error>,
+    observe: impl FnOnce(&ProcessObservation),
+) -> Result<ProcessResult, Error> {
+    observed_result(
+        run(command, timeout_ms, limits, Output::Framed, receive)?,
+        observe,
+    )
 }
 
 pub fn capture(
@@ -659,6 +762,16 @@ pub fn capture(
     timeout_ms: u64,
     limits: &Limits,
     cap: usize,
+) -> Result<Captured, Error> {
+    capture_observed(command, timeout_ms, limits, cap, |_| {})
+}
+
+pub fn capture_observed(
+    command: Command,
+    timeout_ms: u64,
+    limits: &Limits,
+    cap: usize,
+    observe: impl FnOnce(&ProcessObservation),
 ) -> Result<Captured, Error> {
     let reserved = transport_bytes(limits)?
         .checked_add(cap)
@@ -670,14 +783,14 @@ pub fn capture(
     stdout
         .try_reserve_exact(cap)
         .map_err(|_| error(ErrorKind::Allocation, "capture allocation"))?;
-    let process = run(command, timeout_ms, limits, Output::Raw, |bytes, _| {
+    let outcome = run(command, timeout_ms, limits, Output::Raw, |bytes, _| {
         if bytes.len() > cap.saturating_sub(stdout.len()) {
             return Err(error(ErrorKind::OutputLimit, "captured stdout cap"));
         }
         stdout.extend_from_slice(bytes);
         Ok(())
-    })?
-    .result?;
+    })?;
+    let process = observed_result(outcome, observe)?;
     Ok(Captured { process, stdout })
 }
 
@@ -742,10 +855,10 @@ pub mod testing {
                 machine.feed(bytes)
             }
         })?;
-        let observed = match outcome.result {
-            Err(e) => Some(e.kind),
-            Ok(process) if process.exit != 0 => Some(ErrorKind::Crash),
-            Ok(_) if marker => {
+        let observed = match outcome.failure {
+            Some(e) => Some(e.kind),
+            None if outcome.observation.exit != Some(0) => Some(ErrorKind::Crash),
+            None if marker => {
                 if (kind == ProbeKind::ShortWrites && frames == 1)
                     || (kind == ProbeKind::QueuePressure && frames == 64)
                 {
@@ -754,7 +867,7 @@ pub mod testing {
                     Some(ErrorKind::Protocol)
                 }
             }
-            Ok(_) => match machine.finish() {
+            None => match machine.finish() {
                 Err(e) => Some(e.kind),
                 Ok(_) => Some(ErrorKind::Protocol),
             },
