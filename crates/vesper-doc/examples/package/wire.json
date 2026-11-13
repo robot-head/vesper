@@ -1,0 +1,27 @@
+{
+  "format": "vesper-wire-layouts",
+  "version": 1,
+  "declarations": [
+    {
+      "name": "Header",
+      "fields": [
+        { "name": "length", "type": "u32be" },
+        { "name": "api_key", "type": "u16be" },
+        { "name": "api_version", "type": "u16be" },
+        { "name": "correlation_id", "type": "i32be" },
+        { "name": "flags", "type": "u8" },
+        { "name": "reserved", "type": "pad[3]" }
+      ]
+    },
+    {
+      "name": "Record",
+      "fields": [
+        { "name": "header", "type": "Header" },
+        { "name": "key", "type": "bytes[16]" },
+        { "name": "offset", "type": "u64le" },
+        { "name": "payload", "type": "bytes[40]" }
+      ]
+    }
+  ],
+  "roots": ["Record"]
+}

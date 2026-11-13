@@ -28,11 +28,11 @@ fn help_and_argument_errors_follow_the_requested_output_contract() {
         .output()
         .unwrap();
     assert!(help.status.success());
-    assert!(String::from_utf8_lossy(&help.stdout).contains("test --doc FILE"));
+    assert!(String::from_utf8_lossy(&help.stdout).contains("test --doc [FILE|DIR]"));
     for args in [
         vec!["test", "--json"],
         vec!["test", "--unknown", "--json"],
-        vec!["test", "--doc", "--json"],
+        vec!["test", "--doc", "a.ves", "b.ves", "--json"],
     ] {
         let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
             .args(args)

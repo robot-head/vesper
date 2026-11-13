@@ -8,5 +8,7 @@ description = "Bounded typed documentation DTOs, static rendering and offline si
 [dependencies]
 vesper-core = { path = "../vesper-core" }
 vesper-syntax = { path = "../vesper-syntax" }
+vesper-simpulse = { path = "../vesper-simpulse" }
+vesper-ffi = { path = "../vesper-ffi" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
