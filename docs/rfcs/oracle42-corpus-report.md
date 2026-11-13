@@ -50,9 +50,22 @@ Ten authored tests cover:
 
 Writer checks executed: rustfmt with `skip_children=true` while sibling module
 files are absent, and `git diff --check`, both pass. No Cargo build or test run
-has been executed by this writer. Coordinator execution of the coherent source,
-strict Clippy and real oracle suites is pending; authored tests are not reported
-as passing runtime evidence.
+has been executed by this writer.
+
+The coordinator executed the actual `oracle42_corpus` Cargo test target at
+integration head `4b9d167`. All 11 tests passed, with zero failures or ignored
+tests, in an observed 0.88 seconds. Ten are the corpus-owned tests above; one is
+the shared process module's private artifact-quota test included by the test
+module import. The execution log is `/tmp/oracle42-root-corpus-runner.log`.
+This run actually generated and checked uniqueness of all 100,000 typed
+argument pairs and fingerprints, parsed/checked/bound all 128 CI sources at
+three seeds, and exercised the 15 isolated diagnostics plus shrink, hash and
+AST-tampering checks. The 100,000-case test is generation coverage, not 100,000
+runtime oracle comparisons. Strict Clippy, the complete eight-setting runtime
+oracle matrix and the full 100,000-program execution remain pending evidence.
+The same log's separate runner test target had an unrelated fixture-size
+assertion failure under repair by its owner; it is not reported as a passing
+combined runner suite.
 
 Earlier authorized feasibility probes used the existing ready `vesper` binary,
 not this new generator: 32 distinct hand-rendered valid programs passed 160 CLI
@@ -62,7 +75,8 @@ tagged tuples, wide unsigned values, signed endpoints and copy locals. A later
 excluded unknown-callee calls, which produce two Rust diagnostics. These probes
 do not establish the new eight-setting oracle matrix or a completed full run.
 
-Owned source/test checkpoints are `31e3892`, `aa093c1`, and `dd49e79`. Compiler,
+Owned source/test checkpoints are `31e3892`, `aa093c1`, `dd49e79`, and style-only
+`4604410`. Lean process,
 Lean process, worker scheduling, execution counts, actual mismatch shrinking,
 and full-run completion remain separate coordinator/runner evidence. There is
 no full-parser oracle, semantic-result uniqueness, whole-compiler refinement,
