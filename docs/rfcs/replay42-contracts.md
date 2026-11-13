@@ -1,10 +1,10 @@
-# Independent Lean replay of AST rewrite witnesses (§42): review draft
+# Independent Lean replay of AST rewrite witnesses (§42): frozen contract
 
-Public parent claim #239 precedes implementation. This is a documentation-only
-draft for coordinator review, not a source authorization or frozen interface.
-The preceding Rust foundation #238 has its own CI/merge status. Implementation
-child issues and exclusive worktrees will be created before source writers;
-the coordinator publishes this contract before those writers begin.
+Public parent claim #239 and child claims #240–#242 precede implementation.
+The coordinator reviewed this contract, with independent model/API and kernel
+acceptance reviews. The preceding Rust foundation #238 has its own CI/merge
+status. Source writers begin only after this frozen contract is pushed and
+linked from the claims; interface amendments likewise precede dependent edits.
 
 ## Ownership and exclusions
 
@@ -453,7 +453,9 @@ Positive cases cover actual checked identities, all six folds, prior-totality
 support, signed/U64 endpoints and real original-callee origins. Kernel-check
 exporter mapping for all 24 rules/four kinds with bounded fixtures as well as
 genuine producer artifacts; hand-built DTO coverage does not replace actual
-producer-to-export evidence. Test all equality reasons and DAG sharing without
+producer-to-export evidence. Four bounded per-kind aggregate certificates may
+cover all catalog rules without starting 96 separate Lean processes; all their
+unused proof records remain validated and exported. Test all equality reasons and DAG sharing without
 flattening. Pure model tests and actual-runtime Rust binding tests have distinct
 claims; no executable Lean/Rust differential oracle is asserted by this chunk.
 
@@ -499,5 +501,5 @@ private fixture backdoor or KernelAccepted state is introduced.
 Coordinator records actual Rust, Lean kernel, axiom audit, strict Clippy,
 formatting/diff and available platform evidence after implementations are
 combined. Read-only /tmp API probes informed this contract but are not a full
-model/exporter/acceptance execution claim. No source/test build begins from this
-draft alone; root publication and child claims precede implementation.
+model/exporter/acceptance execution claim. Root publication and child claims
+precede source/test implementation; actual results are recorded separately.
