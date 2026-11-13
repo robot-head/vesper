@@ -69,9 +69,32 @@ independent replays used the same unchanged checker/model/artifact bytes before
 and after. A second fresh setup of the corrected source passed with all 94
 controls and the complete envelopes.
 
-At this checkpoint complete production Rust acceptance, final package
-regression and hosted platform checks remain pending. No unexecuted result is
-claimed.
+The complete production Rust acceptance matrix passed all 12 tests, with zero
+failures, ignored or filtered tests, in 405.16 seconds. Its genuine CLI run took
+394097ms and spawned 15 observed processes. All 94 controls matched; timeout,
+crash and protocol-error counters were zero. RewriteWitness covered 86647 IDs
+with 84699 additions, 1178 constructor / 767 recursor comparisons and 33 roots;
+ArithmeticOracle covered 88337 IDs with 86267 additions, 1252 constructor / 815
+recursor comparisons and 37 roots. All pending counters were zero. The exact
+parsed CLI report, serialized after the independent positive assertions, is
+retained in `lean4lean42-complete-report.json` (24976 bytes before newline).
+The same serial matrix also passed the configuration/protocol/control/coverage,
+source/build/receipt mutation and actual transport-cleanup refusal cases.
+
+Corrected setup's receipt is 149370 bytes, binds 336 source files/1,990,071 bytes,
+289 generated output files/240,301,410 bytes and the 13 compiler runtime entries
+above. Its checker BLAKE3 is
+`776dbf335b8135322a60d4273561e72ea0b53860852712ecad8788c8bbaab399`;
+source-manifest typed BLAKE3 is
+`8f8481dde10584f4445f60672911dfd752c77ed9c3acb65938f0855aa71deedb`.
+These observations belong to the actual Linux build, not universal binaries.
+Workspace formatting, Python compilation, setup shell parsing and Bazel build
+metadata synchronization pass. The preserved raw feasibility patch intentionally
+has significant single-space context lines; whitespace validation excludes that
+exact immutable data artifact and passes for all other changed paths.
+
+At this checkpoint final package regression and hosted platform checks remain
+pending. No unexecuted result is claimed.
 
 ## Process and receipt limits
 
