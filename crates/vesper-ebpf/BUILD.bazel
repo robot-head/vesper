@@ -1,0 +1,9 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    # tests/lean_model.rs compiles lean/EbpfFirewall.lean; Lean resolves
+    # symlinked runfiles to the source tree and then rejects them as outside
+    # --root, so it runs in a copy of regular files.
+    copy_test_cwd = ["test/lean_model"],
+    extra_test_data = ["//:lean"],
+)
