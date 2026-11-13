@@ -1,19 +1,25 @@
 vesper.migrate/1 report for Rust crate `legacy_codec`
 
-functions lifted: 10
+functions lifted: 13
   DecoderStats::into_parts [vesper only]
   DecoderStats::observe [vesper only]
   DecoderStats::reset [vesper only]
   DecoderStats::summary [vesper only]
+  legacy_bump_crc [vsys]
   legacy_classify [vsys]
   legacy_header_len [vsys]
-  legacy_parse_batch_header [vesper only]
+  legacy_parse_batch_header [vsys]
     assumed: `raw_bytes` + `raw_len` form a nocapture slice (from annotation)
-    assumed: `out_crc` is a non-null nocapture element (from annotation)
-    assumed: `out_count` is a non-null nocapture element (from annotation)
+    assumed: `out_crc` is a non-null nocapture inout element (from annotation)
+    assumed: `out_count` is a non-null nocapture inout element (from annotation)
   legacy_parse_batch_header_into [vsys]
     assumed: `raw_bytes` + `raw_len` form a nocapture slice (from annotation)
     assumed: `out` + `out_len` form a nocapture slice (from annotation)
+  legacy_reset_stats [vsys]
+    assumed: `stats` is a non-null nocapture out element (from annotation)
+  legacy_swap [vesper only]
+    assumed: `a` is a non-null nocapture inout element (from annotation)
+    assumed: `b` is a non-null nocapture inout element (from annotation)
   parse_batch_header [vesper only]
   record_bytes_hint [vesper only]
 
@@ -31,7 +37,7 @@ refusals: 18
   fn checksum (Generic): type and const generics are not lifted
   fn cursor_peek (BorrowingType): parameter `cursor`: `Cursor` carries a lifetime, so it stores borrows
   fn first_byte (ReturnedBorrow): returns a borrow; Vesper signatures are lifetime-free
-  fn legacy_parse_batch_header: vsys (PointerParameter): `out_crc`: Bridge .vsys accepts pointer parameters only as nocapture CSlice
+  fn legacy_swap: vsys (AliasingPointers): `a` and `b` point to the same type and one is written; a signature cannot show they are distinct objects
   fn on_record (FunctionPointer): parameter `callback`: function pointers are unsupported
   fn parse_batch_header: vsys (NotCAbi): not `extern "C"`; a C-ABI shim is needed before a .vsys entry exists
   fn raw_peek (RawPointerWithoutAnnotation): parameter `p` is a raw pointer; add `/// vesper-migrate: p in|inout [len <param>]`

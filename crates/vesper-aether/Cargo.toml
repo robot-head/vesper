@@ -2,14 +2,30 @@
 name = "vesper-aether"
 version = "0.1.0"
 edition = "2024"
-description = "Bounded host memory-layout and verified CAS snapshot-page planning"
+description = "Bounded host memory-layout and verified CAS snapshot-page planning, KVM slot plans, snapshot forks and userfaultfd lazy restore"
 publish = false
 
+[features]
+default = []
+# Real Linux userfaultfd lazy restore (the gated unsafe module, Linux x86_64/AArch64).
+uffd = []
+# Real Linux KVM guest execution (the same gated module, Linux x86_64).
+kvm = ["dep:kvm-ioctls", "dep:kvm-bindings"]
+
 [dependencies]
+blake3 = "1.8"
 vesper-loom-cas = { path = "../vesper-loom-cas" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+kvm-bindings = { version = "=0.14.2", optional = true }
+kvm-ioctls = { version = "=0.25.1", optional = true }
+
+# Builds the gated Linux backends in every test/clippy run (CI passes no
+# features); their tests probe the host and report "unavailable" when the
+# kernel, device or privileges refuse.
 [dev-dependencies]
 tempfile = "3"
+vesper-aether = { path = ".", features = ["uffd", "kvm"] }

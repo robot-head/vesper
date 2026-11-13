@@ -25,6 +25,10 @@ pub struct Limits {
     pub variants: usize,
     pub string_bytes: usize,
     pub canonical_bytes: usize,
+    /// `wire struct` declarations usable as single-pointer pointees.
+    pub wire_structs: usize,
+    /// Fields per `wire struct`.
+    pub wire_fields: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -37,6 +41,8 @@ impl Default for Limits {
             variants: 256,
             string_bytes: 4096,
             canonical_bytes: 1024 * 1024,
+            wire_structs: 64,
+            wire_fields: 256,
         }
     }
 }
@@ -52,6 +58,8 @@ impl Limits {
             (self.variants, hard.variants),
             (self.string_bytes, hard.string_bytes),
             (self.canonical_bytes, hard.canonical_bytes),
+            (self.wire_structs, hard.wire_structs),
+            (self.wire_fields, hard.wire_fields),
         ] {
             if value == 0 || value > cap {
                 return Err(Error::new(ErrorKind::Limit, 0..0, "invalid parser limits"));
@@ -312,6 +320,93 @@ pub enum Access {
     In,
     Inout,
 }
+/// Direction of a single-element `nocapture` pointer parameter.
+///
+/// `In` is a shared (const) pointee the callee only reads. `Out` is a unique
+/// pointee the callee must write before returning and must not read first;
+/// `Inout` is a unique pointee the callee may read and write. The direction is
+/// a declared contract: nothing here observes what foreign code does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointerAccess {
+    In,
+    Out,
+    Inout,
+}
+impl PointerAccess {
+    pub fn keyword(self) -> &'static str {
+        match self {
+            Self::In => "in",
+            Self::Out => "out",
+            Self::Inout => "inout",
+        }
+    }
+    /// Whether the foreign callee may write through the pointer.
+    pub fn writes(self) -> bool {
+        !matches!(self, Self::In)
+    }
+}
+/// A `wire struct` declared in a `.vsys` library and compiled by
+/// [`crate::Registry`]: zero implicit padding, total bit validity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WireStructDescriptor {
+    shared: Arc<WireStructData>,
+}
+#[derive(Debug, PartialEq, Eq)]
+struct WireStructData {
+    declaration: crate::Declaration,
+    layout: crate::WireLayout,
+}
+impl WireStructDescriptor {
+    pub fn name(&self) -> &str {
+        &self.shared.declaration.name
+    }
+    /// The declaration as written (field order significant).
+    pub fn declaration(&self) -> &crate::Declaration {
+        &self.shared.declaration
+    }
+    /// The checked byte layout, including nested structs.
+    pub fn layout(&self) -> &crate::WireLayout {
+        &self.shared.layout
+    }
+}
+/// What a single-element pointer parameter points to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pointee {
+    /// One total-bit integer with its natural C alignment.
+    Scalar(Scalar),
+    /// One `wire struct` with its compiled layout.
+    Struct(WireStructDescriptor),
+}
+impl Pointee {
+    /// Exact byte size of the pointee.
+    pub fn size(&self) -> usize {
+        match self {
+            Self::Scalar(s) => usize::from(s.bits() / 8),
+            Self::Struct(w) => w.layout().size(),
+        }
+    }
+    /// Required address alignment of the pointee.
+    pub fn alignment(&self) -> usize {
+        match self {
+            Self::Scalar(s) => usize::from(s.bits() / 8),
+            Self::Struct(w) => w.layout().alignment(),
+        }
+    }
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Scalar(s) => s.name(),
+            Self::Struct(w) => w.name(),
+        }
+    }
+}
+/// Typed layout of one single-element pointer parameter.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PointerLayout {
+    pub size: usize,
+    pub alignment: usize,
+    pub access: PointerAccess,
+    pub nullable: bool,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParameterType {
     Value(ValueType),
@@ -320,6 +415,31 @@ pub enum ParameterType {
         element: Scalar,
         access: Access,
     },
+    /// A borrowed, noncapturing pointer to exactly one scalar or wire struct,
+    /// passed as one C pointer. `nullable` only when declared `Option[T]`.
+    Pointer {
+        pointee: Pointee,
+        access: PointerAccess,
+        nullable: bool,
+    },
+}
+impl ParameterType {
+    /// Size, alignment and direction of a single-element pointer parameter.
+    pub fn pointer_layout(&self) -> Option<PointerLayout> {
+        match self {
+            Self::Pointer {
+                pointee,
+                access,
+                nullable,
+            } => Some(PointerLayout {
+                size: pointee.size(),
+                alignment: pointee.alignment(),
+                access: *access,
+                nullable: *nullable,
+            }),
+            _ => None,
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParameterDescriptor {
@@ -374,6 +494,7 @@ impl FunctionDescriptor {
                     parameters.push(AbiType::Pointer);
                     parameters.push(AbiType::Integer(Scalar::Usize));
                 }
+                ParameterType::Pointer { .. } => parameters.push(AbiType::Pointer),
             }
         }
         AbiSignature {
@@ -414,6 +535,7 @@ pub struct LibraryDescriptor {
     target: Target,
     link: LinkDescriptor,
     enums: Vec<EnumDescriptor>,
+    wire_structs: Vec<WireStructDescriptor>,
     functions: Vec<FunctionDescriptor>,
     canonical: Vec<u8>,
     identity: DescriptorId,
@@ -433,6 +555,13 @@ impl LibraryDescriptor {
     }
     pub fn functions(&self) -> &[FunctionDescriptor] {
         &self.functions
+    }
+    /// Declared `wire struct` pointees, sorted by name.
+    pub fn wire_structs(&self) -> &[WireStructDescriptor] {
+        &self.wire_structs
+    }
+    pub fn wire_struct(&self, name: &str) -> Option<&WireStructDescriptor> {
+        self.wire_structs.iter().find(|w| w.name() == name)
     }
     pub fn function(&self, symbol: &str) -> Option<&FunctionDescriptor> {
         self.functions
@@ -560,9 +689,75 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                     })?;
                     e.text(element.name())?;
                 }
+                ParameterType::Pointer {
+                    pointee,
+                    access,
+                    nullable,
+                } => {
+                    e.text("nocapture-pointer")?;
+                    e.text(access.keyword())?;
+                    e.text(if *nullable { "option" } else { "nonnull" })?;
+                    match pointee {
+                        Pointee::Scalar(s) => {
+                            e.text("scalar")?;
+                            e.text(s.name())?;
+                        }
+                        Pointee::Struct(w) => {
+                            e.text("wire-struct")?;
+                            e.text(w.name())?;
+                        }
+                    }
+                }
             }
         }
         e.value(&f.result)?;
+    }
+    // Appended only when present, so descriptors without wire structs keep
+    // the exact canonical bytes (and identities) of the earlier schema.
+    if !library.wire_structs.is_empty() {
+        e.text("wire-structs")?;
+        e.count(library.wire_structs.len())?;
+        for w in &library.wire_structs {
+            let d = w.declaration();
+            e.text(&d.name)?;
+            e.bytes(&(w.layout().size() as u64).to_le_bytes())?;
+            e.bytes(&(w.layout().alignment() as u64).to_le_bytes())?;
+            e.count(d.fields.len())?;
+            for field in &d.fields {
+                e.text(&field.name)?;
+                match &field.ty {
+                    crate::WireType::Integer(i) => {
+                        e.text("integer")?;
+                        e.text(if i.signed { "i" } else { "u" })?;
+                        e.bytes(&i.bits.to_le_bytes())?;
+                        e.text(match i.endian {
+                            crate::Endian::Native => "native",
+                            crate::Endian::Little => "le",
+                            crate::Endian::Big => "be",
+                        })?;
+                    }
+                    crate::WireType::ByteArray(n) => {
+                        e.text("bytes")?;
+                        e.bytes(&(*n as u64).to_le_bytes())?;
+                    }
+                    crate::WireType::ZeroPad(n) => {
+                        e.text("zero-pad")?;
+                        e.bytes(&(*n as u64).to_le_bytes())?;
+                    }
+                    crate::WireType::Struct(n) => {
+                        e.text("struct")?;
+                        e.text(n)?;
+                    }
+                    other => {
+                        return Err(Error::new(
+                            ErrorKind::Type,
+                            0..0,
+                            format!("unexpected wire field type {other:?}"),
+                        ));
+                    }
+                }
+            }
+        }
     }
     Ok(e.bytes)
 }
