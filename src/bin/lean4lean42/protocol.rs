@@ -81,7 +81,7 @@ impl Name {
         }
         Some(parts)
     }
-    pub fn hash(&self, hash: &mut blake3::Hasher) {
+    pub fn hash_into(&self, hash: &mut blake3::Hasher) {
         hash.update(&(self.components.len() as u16).to_le_bytes());
         for part in &self.components {
             match part {
@@ -711,11 +711,11 @@ fn inventory_hasher(target: u8, modules: u64, constants: u64) -> blake3::Hasher 
 }
 fn hash_module(hash: &mut blake3::Hasher, m: &ModuleRecord) {
     hash.update(&m.id.to_le_bytes());
-    m.name.hash(hash);
+    m.name.hash_into(hash);
 }
 fn hash_constant(hash: &mut blake3::Hasher, c: &Constant) {
     hash.update(&c.id.to_le_bytes());
-    c.name.hash(hash);
+    c.name.hash_into(hash);
     hash.update(&c.module_id.to_le_bytes());
     hash.update(&[c.form, c.skip]);
     hash.update(&(c.owners.len() as u16).to_le_bytes());
@@ -1567,7 +1567,7 @@ mod tests {
             };
             let name = parse_name(&sample, &mut budget).unwrap();
             let mut hash = blake3::Hasher::new();
-            name.hash(&mut hash);
+            name.hash_into(&mut hash);
             assert!(hashes.insert(*hash.finalize().as_bytes()));
         }
         for invalid_name in [
