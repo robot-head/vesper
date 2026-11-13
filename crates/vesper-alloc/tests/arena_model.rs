@@ -520,6 +520,48 @@ fn failed_checked_reservation_preserves_values_keys_and_region_accounting() {
     assert_eq!(next.generation(), key.generation() + 1);
 }
 
+#[test]
+fn foreign_insert_and_consuming_release_return_exact_owners_and_values() {
+    let mut first = region();
+    let mut second = region();
+    let mut owner = first.arena_new::<Payload>().unwrap();
+    let initial = first.arena_insert(&mut owner, Payload::new(1, 11)).unwrap();
+    let input = Payload::new(2, 22);
+    let address = input.marker_address();
+    let before_first = first.stats();
+    let before_second = second.stats();
+    let failed = second.arena_insert(&mut owner, input).unwrap_err();
+    let cross = RegionError::Handle(HandleError::CrossRegion {
+        expected: second.id(),
+        found: first.id(),
+    });
+    assert_eq!(failed.error, ArenaError::Region(cross));
+    assert_eq!(
+        (
+            failed.value.id,
+            failed.value.value,
+            failed.value.marker_address()
+        ),
+        (2, 22, address)
+    );
+    assert_eq!(first.stats(), before_first);
+    assert_eq!(second.stats(), before_second);
+    let recovered = first.arena_insert(&mut owner, failed.value).unwrap();
+    assert_eq!(recovered.generation(), initial.generation() + 1);
+    let before = first.stats();
+    let failed_release = second.arena_release(owner).unwrap_err();
+    assert_eq!(failed_release.error, cross);
+    let owner = failed_release.owner;
+    assert_eq!(first.stats(), before);
+    assert_eq!(first.arena_get(&owner, initial).unwrap().value, 11);
+    let value = first.arena_get(&owner, recovered).unwrap();
+    assert_eq!(
+        (value.id, value.value, value.marker_address()),
+        (2, 22, address)
+    );
+    first.arena_release(owner).unwrap();
+}
+
 struct Vertex {
     value: i64,
     edges: Vec<ArenaKey<Vertex>>,
