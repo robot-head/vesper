@@ -2,7 +2,8 @@
 
 Dependency-free, safe scalar host implementations of an explicit §38 subset:
 canonical unsigned LEB128, dependent-length frames, validated primitive Arrow
-signed-i64 buffers, executable deterministic byte-FIRST grammars, explicit
+signed-i64 buffers, executable deterministic byte-FIRST grammars and canonical
+logical-value codecs, explicit
 canonical Protobuf/DER profiles, and actual primitive Arrow IPC stream reading.
 This is not a source macro compiler, general LL/PEG/ASN.1 compiler, SIMD
 implementation, secret constant-time parser or formal proof.
@@ -105,6 +106,8 @@ and nullable information from their actual structure. Supported rules are:
 | `Frame(child)` | Canonical length plus exact child parse confined to payload |
 | `Sequence` | Ordered references to child rules |
 | `Choice` | Select a nonnullable child by disjoint derived byte FIRST sets |
+| `Repeat { rule, count }` | Execute exactly a bounded fixed number of child rules |
+| `Counted(child)` | Canonical ULEB128 count followed by that many child values |
 
 Every rule reference and branch identity is validated, including unreachable
 rules. Branch IDs are unique within their choice; a capture identifies both the
@@ -114,7 +117,7 @@ rules are supported. Their height is checked even when metadata is memoized.
 Choice alternatives must be nonnullable and have disjoint FIRST sets. Nullable
 rules and sequences are supported outside alternatives, and sequence FIRST sets
 skip nullable prefixes. Nullable choice alternatives are rejected explicitly:
-there is no FOLLOW-set analysis, ordered backtracking, repetition, recursive
+there is no FOLLOW-set analysis, ordered backtracking, recursive
 production, left-recursion handling, generic PEG semantics or user-asserted FIRST
 metadata. ULEB128/blob/frame FIRST sets conservatively include all 256 byte values.
 
@@ -122,8 +125,9 @@ metadata. ULEB128/blob/frame FIRST sets conservatively include all 256 byte valu
 a `Remainder`. `parse_exact` checks outer EOF; every nested `Frame` checks its own
 EOF before returning. Captures preserve actual rule, chosen branch, input span,
 ULEB number and frame/blob payload span. Failed parses publish no partial event
-vector and never modify rules/input. This subset does not supply a generic
-serializer or assert a bijection for arbitrary grammars.
+vector and never modify rules/input. Captures remain inspection events. The
+logical codec below separately supplies canonical serialization for the supported
+validated rules; it makes no claim about arbitrary or recursive grammars.
 
 Validation allocates one fallible bounded metadata vector. Execution allocates
 one bounded event vector. Edges, definitions, literal bytes, branch-ID comparisons,
@@ -137,6 +141,51 @@ this ceiling and the caller limit. No result depends on CPU-time estimates.
 
 `Error { kind, offset }` is allocation-free; input errors use byte offsets,
 while definition errors use rule indices. Encoder/resource errors can use zero.
+
+## Canonical logical-value codecs
+
+`grammar::codec::{decode_exact, encoded_len, encode_into}` operates on an actual
+validated `Grammar`. `Value` contains semantic numbers, borrowed blob bytes,
+ordered sequences, explicit choice branch IDs, frames and repetition values.
+Empty/byte/literal rules use `Value::Unit`; values do not contain an encoded-input
+transcript. Callers may construct new values independently and serialize them.
+Equality compares semantic byte contents, irrespective of input offsets.
+
+Fixed repetitions emit no count. Counted repetitions emit exactly one canonical
+ULEB128 count derived from the number of semantic children; parsing records that
+count in `Capture.number`. Zero-count fixed repetition is nullable with empty
+FIRST; counted repetition always consumes a prefix and has conservative FIRST
+all256. Nullable children are allowed because each finite iteration still costs
+work and a visit. Every reference/cycle, including zero-count and unreachable
+children, is validated. `max_repetitions` defaults1024, has hard maximum4096, and
+zero permits only zero repetitions. Existing choice restrictions stay enabled.
+
+Exact decoding enforces outer EOF and each frame's own EOF. Encoding derives
+canonical primitive/count/frame lengths from semantic values, checks every shape,
+branch and arity, and produces output through a bounded plan and scratch buffer.
+Every returned error preserves the caller's entire output; success preserves its
+unwritten suffix. `encoded_len` performs the bounded measurement without output.
+
+Codec limits separately cap semantic values4096, metadata512KiB, output1MiB,
+depth32 and work8Mi by default; their hard limits are16384,4MiB,4MiB,64,64Mi.
+Applicable grammar byte/frame/count/depth/work/visit limits still apply. A codec
+that decodes directly to values does not allocate a capture vector: the old
+capture-storage budget governs actual captures, while semantic storage uses the
+codec metadata cap. These are logical payload/work guards, without allocator,
+latency or RSS guarantees. Caller-owned rules/values are outside those allocations.
+
+Canonical round trips and byte uniqueness are scoped to one validated grammar
+and this exact profile. This is not a general PEG/source `@wire_grammar` compiler,
+secret constant-time codec, source linearity proof, cryptographic authenticity
+check or proof that Rust refines a formal model. Actual independent tests cover
+tagged framed batches and exhaustive short numeric/count streams; no formal
+certificate is supplied by this API.
+
+Run the independent logical-value example:
+
+```sh
+cargo run -p vesper-grammar --example codec
+```
 
 Run the self-checking example:
 
