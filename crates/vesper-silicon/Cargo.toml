@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-cranelift-codegen = { version = "0.125", features = ["arm64", "x86"] }
+cranelift-codegen = { version = "0.125", features = ["arm64", "riscv64", "x86"] }
 svd-parser = { version = "=0.14.10", features = ["expand"] }
 
 [dev-dependencies]

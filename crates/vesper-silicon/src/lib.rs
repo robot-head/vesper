@@ -2,7 +2,7 @@
 //! bare-metal code.
 //!
 //! * [`stack`]: worst-case stack depth over real Cranelift 0.125 functions
-//!   compiled for x86_64 and AArch64, with frames read from the emitted
+//!   compiled for x86_64, AArch64 and riscv64, with frames read from the emitted
 //!   machine code, recursion and unresolved-call rejection, and
 //!   `@stack_limit` budgets per root.
 //! * [`atomic`]: IrqGuard / sleep-in-atomic / ISR-suspension / lock-order
@@ -43,9 +43,8 @@ pub mod svd;
 pub enum Arch {
     X86_64,
     Aarch64,
-    /// Barrier and TLB sequences only; the stack analyzer rejects it with
-    /// [`stack::StackError::UnsupportedIsa`] (the RISC-V Cranelift backend is
-    /// not enabled in this workspace).
+    /// riscv64 (RV64GC as Cranelift 0.125 targets it; the compressed
+    /// encodings only when enabled with `has_zca`/`has_zcd`).
     Riscv64,
 }
 
