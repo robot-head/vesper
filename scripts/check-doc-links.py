@@ -185,9 +185,9 @@ def main():
         ]:
             harness.rejected(name, fixture(name), code, raw)
 
-        # An unterminated code span/fence cannot suppress links in another group.
-        for prefix in ["//! ```\n//! [Hidden]\n\n", "//! ` [Hidden]\n// ordinary boundary\n", "//! ~~~\n//! [Hidden]\nfn boundary() {}\n"]:
-            harness.rejected("group-reset-" + str(harness.commands), prefix + "/// [missing]\nfn main() {}\n", "unknown", "[missing]")
+        # Fences and matching-inline searches cannot suppress a later doc group.
+        for prefix in ["//! ```\n//! [Hidden]\n\n", "//! ` [present]\n// ordinary boundary\n", "//! ~~~\n//! [Hidden]\nfn boundary() {}\n"]:
+            harness.rejected("group-reset-" + str(harness.commands), prefix + "/// [missing]\n/// `\nfn main() {} fn present() {}\n", "unknown", "[missing]")
 
         # Rename a real declaration while retaining the original reference.
         edited = local.replace("fn close(sink", "fn finish(sink")
@@ -198,7 +198,7 @@ def main():
         harness.rejected("invalid-syntax", "/// [missing]\nfn {\n", "source parse failed")
         harness.rejected("invalid-type", "/// [missing]\nfn main() -> bool { 42 }\n", "source check failed")
         harness.rejected("linear-leak", "/// [missing]\nlinear struct Ticket {} fn main() { let ticket = Ticket {}; }\n", "source check failed")
-        harness.rejected("reference-limit", "//! " + "[present] " * 1025 + "\nfn present() {}\n", "resource")
+        harness.rejected("reference-limit", "//! " + "[present]; " * 1025 + "\nfn present() {}\n", "resource")
         harness.rejected("path-limit", "//! [" + "a" * 1025 + "]\nfn main() {}\n", "resource")
         harness.rejected("source-limit", "//" + "x" * (128 * 1024) + "\nfn main() {}\n", "limit")
 

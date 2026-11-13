@@ -274,11 +274,13 @@ fn actual_lexical_exclusions_cannot_smuggle_references_or_html() {
     assert!(html.contains("&lt;script&gt;") && html.contains("example.invalid"));
     for prefix in [
         "//! ```\n//! [Hidden]\n\n",
-        "//! ` [Hidden]\n// ordinary boundary\n",
+        "//! ` [present]\n// ordinary boundary\n",
         "//! ~~~\n//! [Hidden]\nfn boundary() {}\n",
     ] {
-        Fixture::new(&format!("{prefix}/// [missing]\nfn main() {{}}\n"))
-            .rejected("unknown", Some("[missing]"));
+        Fixture::new(&format!(
+            "{prefix}/// [missing]\n/// `\nfn main() {{}} fn present() {{}}\n"
+        ))
+        .rejected("unknown", Some("[missing]"));
     }
 }
 
@@ -342,7 +344,7 @@ fn real_source_errors_and_finite_refusals_never_publish_linked_documents() {
     }
     Fixture::new(&format!(
         "//! {}\nfn present() {{}}\n",
-        "[present] ".repeat(1025)
+        "[present]; ".repeat(1025)
     ))
     .rejected("resource", None);
     Fixture::new(&format!("//! [{}]\nfn main() {{}}\n", "a".repeat(1025)))

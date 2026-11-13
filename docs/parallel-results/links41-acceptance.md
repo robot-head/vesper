@@ -21,8 +21,9 @@ target identity. Both JSON and HTML must be byte deterministic.
 Lexical cases cover ordinary comment/string lookalikes, `////`, escaped brackets,
 matching inline-code delimiter runs, backtick and tilde fences, images, explicit
 Markdown URLs, reference-style links/definitions and bracketed non-path prose.
-An unclosed inline span or fence cannot suppress a reference after a blank line,
-ordinary comment or source declaration breaks its doc-comment group. Script-like
+A fence or inline-code matching search cannot suppress a reference after a blank
+line, ordinary comment or declaration breaks its doc-comment group. Unmatched
+backticks remain literal rather than granting an unclosed code span. Script-like
 text remains escaped, with no script/iframe tags or external hrefs.
 
 Unknown references, a genuine type/effect namespace ambiguity, explicit Self,
@@ -34,13 +35,28 @@ successful document or newly created HTML file. Existing output bytes and input
 source bytes remain unchanged; the Rust Unix case also checks final input
 symlink refusal. The proof status stays unverified.
 
-Validation so far: standalone compilation of all five executable Rust tests,
-strict standalone Clippy with `-D warnings`, rustfmt, Python syntax compilation
-and whitespace checks pass. Actual ordinary `vesper check` passes for the local
-inventory, exclusions, ambiguous namespace and generic declaration fixtures.
-Those are fixture baselines, not evidence that the new link feature runs.
+Actual validation against the coordinator's integrated `db99085` executable at
+`/workspace/vesper/target/parallel-next/debug/vesper` passed:
 
-**New-feature executable results are pending the integrated implementation.**
-The coordinator will supply the actual tuple-plus-links executable before this
-lane runs its Rust/Python harnesses. No source execution, guest/component, Lean,
-certificate, other-platform, timing or RSS result is claimed here.
+- All five independent executable Rust tests, zero failures and zero ignored.
+- The Python harness's 49 actual commands, with exact local inventories,
+  UTF8/CRLF reference ranges, complete unique HTML fragment targets, deterministic
+  escaped output, actual failure codes/spans and preserved source/output bytes.
+- Standalone compilation and strict standalone Clippy with `-D warnings`,
+  rustfmt, Python syntax compilation and whitespace checks.
+
+The first executable pass identified two incorrect corpus assumptions. An
+unmatched backtick is literal, so its bracketed content remains eligible for
+resolution; the group-boundary case now uses a known reference before the
+boundary and still requires the exact unknown span afterward. Adjacent
+`[present] [present]` pairs are excluded reference-style Markdown, so the strict
+1025-reference refusal now uses semicolon-separated occurrences. Both tests keep
+their intended actual diagnostic/refusal requirements; production limits and
+behavior were not changed for these corrections.
+
+Before feature integration, actual ordinary `vesper check` also passed the local,
+exclusion, ambiguous namespace and generic declaration fixtures. Those checks
+were fixture baselines, distinct from the feature runs above. No source
+execution, guest/component, Lean, certificate, other-platform, timing or RSS
+result is claimed here. Root runs integrated Cargo and workspace checks
+separately; hosted native evidence remains pending.
