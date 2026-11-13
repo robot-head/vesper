@@ -30,7 +30,7 @@ fn fixture(text: &str) -> (Expr, TypeMap) {
     };
     ((**tail).clone(), checked.expression_types)
 }
-fn proposal(source: &Expr, types: &TypeMap) -> RewriteProposal {
+fn proposal(source: &Expr, types: &TypeMap) -> Box<RewriteProposal> {
     match propose_rewrite(source, types, WitnessLimits::default())
         .expect("coherent producer must produce this simple witness")
     {
