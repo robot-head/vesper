@@ -1,0 +1,2 @@
+macro keep($x: expr) -> expr { quote { $x } }
+fn main() -> i64 { keep!(

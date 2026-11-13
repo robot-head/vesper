@@ -65,3 +65,4 @@ actions:
       - run: "scripts/test-source-macros.sh"
       - run: |
           VESPER_LEAN="$(cat .ci-lean-path)" scripts/test-format-proof.sh
+      - run: "scripts/test-macro-preview.sh"
