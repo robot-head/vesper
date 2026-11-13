@@ -5,7 +5,10 @@ the documentation adapter, its private link attachment module, narrow doc CLI
 help/typed-renderer wiring, nine new adapter tests and this report. No checker,
 AST/IR/native, Forge, LSP session, dependency, build/Bazel, workflow or test-wrapper
 changes. Library commit `3f02e1c` is a dependency only; its local cherry-pick
-`61e2e76` must not be imported as adapter-owned work.
+`61e2e76` must not be imported as adapter-owned work. Review-hardening dependency
+`a0266e5` is the local dependency-only copy `1951e78`; reviewed parser/library
+dependency `c02767e` is the dependency-only copy `005b4b0`.
+Final reviewed dependency `2f94869` is dependency-only copy `0624808`.
 
 Both `document_source` and `document_checked` preserve their actual checking
 boundaries. The former retains its parser/checker diagnostics and preflight
@@ -57,6 +60,24 @@ assertion. The parser-precedence fixture is balanced but syntactically invalid,
 so it exercises real parser diagnostics rather than existing delimiter preflight.
 The positive source binds a linear method receiver before calling it because
 direct temporary linear projection is unsupported by the unchanged core checker.
+
+After library review-hardening `a0266e5`, the same seven actual suites again pass
+all 106 tests with zero failures or ignores. A second fixture refinement
+separates builtin-only negative references from following doc-comment lines with
+punctuation, since full reference-style Markdown can cross those lines. Its three
+positive source references now use commas and an explicit three-reference
+assertion. Actual unknown-code/range and private-helper checks remain unchanged.
+The already-running seven-suite regression also completed successfully against
+reviewed parser/library dependency `c02767e`: the same 106 tests pass with zero
+failures or ignores. Later final parser changes are validated separately rather
+than attributed to this run.
+
+Against final reviewed dependency `2f94869`, all nine targeted adapter tests pass
+with zero failures or ignores. The final strict check also passes:
+`cargo clippy --locked -p vesper --lib --bin vesper --test doc_links -- -D warnings`.
+The earlier hardened iterator-style warning was fixed by the library owner;
+no warning suppression or adapter behavior change was needed. Root runs the
+final combined acceptance suites and whole-workspace Clippy separately.
 
 These are local Linux results, not hosted macOS/Windows evidence, and they do not
 claim general Markdown support, whole-workspace testing, a latency/RSS bound or
