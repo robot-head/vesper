@@ -15,6 +15,18 @@ No checker/native/compiler production code is changed.
    comment byte in its original order relative to both comments and code.
 5. Reparse and a second formatting pass giving byte-identical output.
 
+Layout follows Wadler-Lindig groups with Prettier-style lookahead. Spaces inside
+a line never break. An overlong line breaks, outermost first, at: delimited
+`(...)`, `[...]` and `.{...}` lists (one comma-separated item per line, each item
+its own group so `shard.{metrics}` projections and paths stay together), the
+`->` return type (its own group, so it only moves to an indented line when it
+cannot follow the parameter list), member-chain dots and infix operators (both
+indented one level). `::` paths never split. The formatter never adds or removes
+tokens, so a broken list keeps exactly the commas in the source; a source
+trailing comma selects the vertical layout even when the list would fit, which
+keeps both forms idempotent. A statement with no break point can still exceed
+the ribbon.
+
 Line comments always have a hard newline before the next token, including closing
 delimiters. Nested block comments, CR bytes in line comments, Unicode text and
 string spelling are preserved. Whitespace and blank lines outside tokens are
@@ -71,7 +83,15 @@ and output bytes; they are not measured CPU instructions or an RSS limit.
 Existing lexer/parser internal allocations are not converted into fallible arena
 APIs. There is no OOM/crash-recovery guarantee or zero-allocation claim.
 
-`src/fmt_commands.rs` provides `vesper fmt FILE [--recovery] [--check] [--json]`.
+`src/fmt_commands.rs` provides `vesper fmt [PATH...] [--recovery] [--check] [--json]`.
+With no PATH it formats the current directory. Directory arguments are walked
+for `.ves` files in sorted order without following symlinks, skipping hidden,
+`target/` and `bazel-*` directories (at most 200,000 entries). Each file uses the
+single-file commit below; one failing file is reported in the `files` array and
+does not stop the others. A single non-directory PATH keeps the original
+single-file JSON report; multi-file runs report `file_count`, `formatted`,
+`needs_format`, `errors` and per-file entries, and exit nonzero on any error or,
+with `--check`, any noncanonical file.
 The explicit recovery flag selects the complete-declaration mode. JSON retains
 schema_version1, adds mode source/recovery, and includes the edit count in recovery
 mode. Check mode never writes and reports noncanonical
