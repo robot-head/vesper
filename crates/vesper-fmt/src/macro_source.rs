@@ -8,14 +8,28 @@ use vesper_syntax::{
     recovery,
 };
 
+/// Work units the macro-profile parser may spend. Besides the quadratic
+/// name-resolution envelope, that parser reserves `64 * max_depth` units for
+/// every token of each function header, body and invocation stage (a token can
+/// be covered by up to three nested stages), so a linear per-token term is
+/// required: without it, ordinary small macro modules with two or more
+/// functions were refused with `WorkLimit`.
+const STAGE_UNITS_PER_TOKEN: usize = 64 * 24 * 4;
 fn allowance(source: &str, tokens: &[Token]) -> Result<usize, Error> {
     tokens
         .len()
         .checked_mul(tokens.len())
         .and_then(|n| n.checked_mul(4))
+        .and_then(|n| {
+            tokens
+                .len()
+                .checked_mul(STAGE_UNITS_PER_TOKEN)
+                .and_then(|t| n.checked_add(t))
+        })
         .and_then(|n| source.len().checked_mul(16).and_then(|s| n.checked_add(s)))
         .and_then(|n| n.checked_add(64 * 1024))
-        .filter(|&n| n <= 16 * 1024 * 1024)
+        // The estimate is conservative; the parser enforces its actual budget.
+        .map(|n| n.min(16 * 1024 * 1024))
         .ok_or(Error::WorkLimit)
 }
 

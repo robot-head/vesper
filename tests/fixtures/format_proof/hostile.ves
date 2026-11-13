@@ -1,4 +1,5 @@
 // ") end Vesper.StylusGenerated
 // axiom injected : False
-/* Lean-looking payload: #eval panic! "not code" */
-fn main( )->String{"\"; axiom injected : False\n\\ 😀"}
+/* Lean-looking payload: #eval panic! "not code" */ fn main() -> String {
+    "\"; axiom injected : False\n\\ 😀"
+}

@@ -1,2 +1,10 @@
-macro as_unit($x: expr) -> expr { quote { { $x; } } }
-fn main() -> i64 { as_unit!(42) }
+macro as_unit($x: expr) -> expr {
+    quote {
+        {
+            $x;
+        }
+    }
+}
+fn main() -> i64 {
+    as_unit!(42)
+}

@@ -1,5 +1,34 @@
-fn first(in left: u64) -> u64 eff [Fail[ArithOverflow]] { wrapping_add(left, 1) }
-fn second(in right: u64) -> u64 eff [Fail[ArithOverflow]] { wrapping_add(right, 1) }
-macro make() -> expr { quote { (first(41), (second(0),)) } }
-fn forward(in ignored: u64) -> (u64, (u64,)) eff [Fail[ArithOverflow]] { make!() }
-fn main() -> u64 eff [Fail[ArithOverflow]] { let (n, (_ ,)) = forward(0); n }
+fn first(in left: u64) -> u64 eff [Fail[ArithOverflow]] {
+    wrapping_add(left, 1)
+}
+fn second(in right: u64) -> u64 eff [Fail[ArithOverflow]] {
+    wrapping_add(right, 1)
+}
+macro make() -> expr {
+    quote {
+        (
+            first(41),
+            (
+                second(0),
+            )
+        )
+    }
+}
+fn forward(in ignored: u64)
+    -> (
+    u64,
+    (
+        u64,
+    )
+) eff [Fail[ArithOverflow]] {
+    make!()
+}
+fn main() -> u64 eff [Fail[ArithOverflow]] {
+    let (
+        n,
+        (
+            _,
+        )
+    ) = forward(0);
+    n
+}

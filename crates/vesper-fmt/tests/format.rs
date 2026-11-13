@@ -343,3 +343,55 @@ fn comments_inside_broken_lists_are_conserved() {
         "{output}"
     );
 }
+
+#[test]
+fn one_blank_line_between_items_and_statements_is_kept() {
+    let output = verify(
+        "fn a() -> u64 {\n    let x = 1;\n\n\n    x\n}\n\n\n\nfn b() -> u64 { 2 }\n// next\nfn c() -> u64 { 3 }",
+    );
+    assert_eq!(
+        output,
+        "fn a() -> u64 {\n    let x = 1;\n\n    x\n}\n\nfn b() -> u64 {\n    2\n}\n// next\nfn c() -> u64 {\n    3\n}\n"
+    );
+    // A blank line right inside a block is not kept, and none has trailing spaces.
+    assert_eq!(
+        verify("fn a() -> u64 {\n\n    1\n\n}"),
+        "fn a() -> u64 {\n    1\n}\n"
+    );
+}
+
+#[test]
+fn prefix_operators_and_keyword_parentheses_are_spaced() {
+    assert_eq!(
+        verify("fn f(x: i64) -> i64 { let y = - 1; let z = ! (x == y); g(-x, y - -1) }"),
+        "fn f(x: i64) -> i64 {\n    let y = -1;\n    let z = !(x == y);\n    g(-x, y - -1)\n}\n"
+    );
+    assert_eq!(
+        verify("fn main() -> i64 { handle Counter in { 1 } with { return (value) => value, } }"),
+        "fn main() -> i64 {\n    handle Counter in {\n        1\n    } with {\n        return (value) => value,\n    }\n}\n"
+    );
+    assert_eq!(
+        verify("fn h() -> fn () -> i64 { g }"),
+        "fn h() -> fn() -> i64 {\n    g\n}\n"
+    );
+}
+
+#[test]
+fn small_macro_modules_with_several_functions_fit_the_default_budget() {
+    let source = "fn increment(in x: u64) -> u64 eff [Fail[ArithOverflow]] { wrapping_add(x, 1) }\n\
+        macro bump() -> expr { quote { increment(41) } }\n\
+        fn main() -> u64 eff [Fail[ArithOverflow]] { bump!() }\n";
+    let output = format_source(source, Limits::default()).unwrap().output;
+    assert!(output.contains("macro bump() -> expr {"), "{output}");
+    assert!(!format_source(&output, Limits::default()).unwrap().changed);
+}
+
+#[test]
+fn comment_heavy_macro_modules_are_not_refused_by_the_allowance_estimate() {
+    let source = format!(
+        "{}macro keep($x:expr)->expr{{quote{{$x}}}}fn main()->i64{{keep!(42)}}",
+        "//c\n".repeat(800)
+    );
+    let output = format_source(&source, Limits::default()).unwrap().output;
+    assert!(output.ends_with("keep!(42)\n}\n"), "{output}");
+}

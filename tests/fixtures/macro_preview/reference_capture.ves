@@ -1,2 +1,12 @@
-macro own() -> expr { quote { { let tmp = 42; tmp } } }
-fn main() -> i64 { let tmp = 0; own!() }
+macro own() -> expr {
+    quote {
+        {
+            let tmp = 42;
+            tmp
+        }
+    }
+}
+fn main() -> i64 {
+    let tmp = 0;
+    own!()
+}
