@@ -62,3 +62,15 @@ fn x86_doitm_is_reported_unavailable() {
         matches!(ConstTime::probe(), HardwareCtMode::Unavailable { reason } if reason.contains("DOITM"))
     );
 }
+
+/// Every Apple-silicon core (M1 onward, Armv8.4+) implements FEAT_DIT, so on
+/// the macOS AArch64 runner the scope must really toggle PSTATE.DIT.
+#[cfg(all(target_arch = "aarch64", target_os = "macos"))]
+#[test]
+fn apple_silicon_sets_dit_inside_the_scope() {
+    assert!(ConstTime::probe().is_active(), "{:?}", ConstTime::probe());
+    let before = ConstTime::dit_flag();
+    let (inside, _) = ConstTime::scope(|_| ConstTime::dit_flag());
+    assert_eq!(inside, Some(true));
+    assert_eq!(ConstTime::dit_flag(), before);
+}
