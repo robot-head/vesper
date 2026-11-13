@@ -1,0 +1,327 @@
+{
+  "format": "vesper-sim-scenario",
+  "version": 3,
+  "seed": 3535,
+  "limits": {
+    "max_operations_per_task": 1000000,
+    "max_virtual_ns": 100000000,
+    "max_dispatches": 1000000
+  },
+  "runtime": {
+    "fuel": 1000000000,
+    "optimize": true
+  },
+  "bindings": [
+    {
+      "effect": "XdpNic",
+      "operation": "harvest_rx_single",
+      "params": [],
+      "result": "Option[UmemFrame[RxHarvested]]",
+      "action": {
+        "xdp_harvest": {
+          "nic": "nic0"
+        }
+      }
+    },
+    {
+      "effect": "XdpNic",
+      "operation": "view_frame_bytes",
+      "params": [
+        "UmemFrame[RxHarvested]"
+      ],
+      "result": "ByteSlice",
+      "action": {
+        "xdp_view": {
+          "nic": "nic0"
+        }
+      }
+    },
+    {
+      "effect": "XdpNic",
+      "operation": "recycle_to_fill_ring",
+      "params": [
+        "sink UmemFrame[RxHarvested]"
+      ],
+      "result": "()",
+      "action": {
+        "xdp_recycle": {
+          "nic": "nic0"
+        }
+      }
+    },
+    {
+      "effect": "XdpNic",
+      "operation": "turn_around_tx_in_place",
+      "params": [
+        "sink UmemFrame[RxHarvested]",
+        "u32"
+      ],
+      "result": "UmemFrame[TxStaged]",
+      "action": {
+        "xdp_turn_around": {
+          "nic": "nic0"
+        }
+      }
+    },
+    {
+      "effect": "XdpNic",
+      "operation": "submit_paced_tx",
+      "params": [
+        "sink UmemFrame[TxStaged]",
+        "u64",
+        "u64"
+      ],
+      "result": "InFlightQuicPkt",
+      "action": {
+        "xdp_submit": {
+          "nic": "nic0"
+        }
+      }
+    },
+    {
+      "effect": "XdpNic",
+      "operation": "park_for_ack_or_pto",
+      "params": [
+        "sink InFlightQuicPkt"
+      ],
+      "result": "()",
+      "action": {
+        "xdp_park": {
+          "nic": "nic0"
+        }
+      }
+    },
+    {
+      "effect": "Wire",
+      "operation": "split_short_header",
+      "params": [
+        "ByteSlice"
+      ],
+      "result": "Result[QuicShortHdr, u32]",
+      "action": {
+        "xdp_split_short_header": {
+          "nic": "nic0"
+        }
+      }
+    },
+    {
+      "effect": "RxWait",
+      "operation": "wait_rx",
+      "params": [
+        "u64"
+      ],
+      "result": "u64",
+      "action": {
+        "xdp_wait_rx": {
+          "nic": "nic0"
+        }
+      }
+    },
+    {
+      "effect": "Clock",
+      "operation": "now",
+      "params": [],
+      "result": "u64",
+      "action": "clock"
+    },
+    {
+      "effect": "AckPath",
+      "operation": "on_ack",
+      "params": [
+        "ByteSlice"
+      ],
+      "result": "Result[AckSummary, u32]",
+      "action": {
+        "xdp_on_ack": {
+          "nic": "nic0"
+        }
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "name": "server",
+      "entry": "serve_acked",
+      "process": "server",
+      "arguments": [
+        100000,
+        1000000,
+        {
+          "a": {
+            "cid": 41377,
+            "largest_rx_pn": 0,
+            "next_tx_pn": 0,
+            "next_edt_ns": 0,
+            "pacing_ns": 1000,
+            "peer_addr": 0,
+            "peer_port": 0
+          },
+          "b": {
+            "cid": 45746,
+            "largest_rx_pn": 0,
+            "next_tx_pn": 0,
+            "next_edt_ns": 0,
+            "pacing_ns": 1000,
+            "peer_addr": 0,
+            "peer_port": 0
+          }
+        },
+        {
+          "replied": 0,
+          "acks": 0,
+          "retired": 0,
+          "malformed": 0,
+          "unknown_cid": 0,
+          "waits": 0,
+          "largest_acked_a": 0,
+          "largest_acked_b": 0,
+          "error": false
+        }
+      ]
+    }
+  ],
+  "model": {
+    "limits": {
+      "max_events": 1000000,
+      "max_epochs": 0,
+      "max_instances": 1
+    },
+    "processes": [
+      {
+        "name": "server"
+      }
+    ],
+    "warp": {
+      "limits": {
+        "max_in_flight": 4096,
+        "max_leases": 64
+      },
+      "nics": [
+        {
+          "name": "nic0",
+          "process": "server",
+          "frames": 64,
+          "frame_bytes": 2048,
+          "headroom": 256,
+          "rx_ring": 32,
+          "ingress": "down",
+          "egress": "up",
+          "ack_return_ns": 20000,
+          "pto_ns": 300000,
+          "ack_path": {
+            "link": "ack",
+            "ack_every": 2,
+            "max_ack_delay_ns": 25000,
+            "max_ranges": 8
+          }
+        }
+      ],
+      "links": [
+        {
+          "name": "down",
+          "base_delay_ns": 10000,
+          "gilbert_elliott": {
+            "good_to_bad_ppm": 20000,
+            "bad_to_good_ppm": 250000,
+            "loss_good_ppm": 1000,
+            "loss_bad_ppm": 500000
+          },
+          "loss_ppm": 2000,
+          "duplicate_ppm": 5000,
+          "reorder": {
+            "ppm": 10000,
+            "extra_delay_ns": 30000
+          },
+          "bottleneck": {
+            "buffer_packets": 24,
+            "rate_bytes_per_sec": 125000000
+          }
+        },
+        {
+          "name": "up",
+          "base_delay_ns": 10000,
+          "loss_ppm": 5000,
+          "duplicate_ppm": 2000,
+          "bottleneck": {
+            "buffer_packets": 64,
+            "rate_bytes_per_sec": 125000000
+          }
+        },
+        {
+          "name": "ack",
+          "base_delay_ns": 10000,
+          "gilbert_elliott": {
+            "good_to_bad_ppm": 30000,
+            "bad_to_good_ppm": 300000,
+            "loss_good_ppm": 20000,
+            "loss_bad_ppm": 600000
+          },
+          "loss_ppm": 30000,
+          "duplicate_ppm": 10000,
+          "reorder": {
+            "ppm": 20000,
+            "extra_delay_ns": 15000
+          },
+          "bottleneck": {
+            "buffer_packets": 32,
+            "rate_bytes_per_sec": 125000000
+          }
+        }
+      ],
+      "flows": [
+        {
+          "name": "bulk_a",
+          "nic": "nic0",
+          "cid": 41377,
+          "src_addr": 167772161,
+          "src_port": 4433,
+          "start_ns": 0,
+          "bursts": 40,
+          "burst_packets": 16,
+          "burst_interval_ns": 200000,
+          "payload_bytes": 1187,
+          "first_pn": 4294967200,
+          "malformed_ppm": 10000,
+          "unknown_cid_ppm": 10000
+        },
+        {
+          "name": "burst_b",
+          "nic": "nic0",
+          "cid": 45746,
+          "src_addr": 167772162,
+          "src_port": 4434,
+          "start_ns": 50000,
+          "bursts": 8,
+          "burst_packets": 40,
+          "burst_interval_ns": 1000000,
+          "payload_bytes": 1187,
+          "first_pn": 0,
+          "malformed_ppm": 10000,
+          "unknown_cid_ppm": 10000
+        }
+      ],
+      "events": [
+        {
+          "at_ns": 4000000,
+          "event": {
+            "nat_rebind": {
+              "flow": "bulk_a",
+              "addr": 167772169,
+              "port": 5000
+            }
+          }
+        },
+        {
+          "at_ns": 6000000,
+          "event": {
+            "nat_rebind": {
+              "flow": "burst_b",
+              "addr": 167772170,
+              "port": 6000
+            }
+          }
+        }
+      ]
+    }
+  }
+}
