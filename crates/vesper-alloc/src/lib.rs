@@ -86,8 +86,10 @@ pub use error::{
     StringError, ValueAllocError,
 };
 pub use region::{
-    CHUNK_ALIGN, Region, RegionBox, RegionBytes, RegionConfig, RegionId, RegionSlice, RegionStats,
-    RegionStr, RegionString, RegionVec, Watermark,
+    ArenaError, ArenaId, ArenaInsertError, ArenaKey, CHUNK_ALIGN, FLAT_GROUP_WIDTH, FlatConfig,
+    FlatError, FlatInsertError, FlatIter, HARD_MAX_ARENA_ENTRY_BYTES, HARD_MAX_FLAT_GROUP_BYTES,
+    HARD_MAX_FLAT_GROUPS, Region, RegionBox, RegionBytes, RegionConfig, RegionFlatTable, RegionId,
+    RegionSlice, RegionSlotArena, RegionStats, RegionStr, RegionString, RegionVec, Watermark,
 };
 
 /// Version of the proposed Alloc/Region lowering contract described in

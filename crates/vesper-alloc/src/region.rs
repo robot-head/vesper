@@ -20,9 +20,18 @@ use std::mem;
 use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod arena;
+mod flat;
 mod string;
 mod vec;
 
+pub use arena::{
+    ArenaError, ArenaId, ArenaInsertError, ArenaKey, HARD_MAX_ARENA_ENTRY_BYTES, RegionSlotArena,
+};
+pub use flat::{
+    FLAT_GROUP_WIDTH, FlatConfig, FlatError, FlatInsertError, FlatIter, HARD_MAX_FLAT_GROUP_BYTES,
+    HARD_MAX_FLAT_GROUPS, RegionFlatTable,
+};
 pub use string::{RegionStr, RegionString};
 pub use vec::{RegionSlice, RegionVec};
 
