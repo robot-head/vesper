@@ -1,16 +1,17 @@
 # CI platform lanes
 
-CI runs one reference lane and two platform lanes on every push and pull request
-(`.github/workflows/ci.yml`).
+CI runs one reference lane on BuildBuddy Workflows (`buildbuddy.yaml`) and two
+platform lanes on GitHub Actions (`.github/workflows/platforms.yml`). Every
+lane builds and tests through Bazel; see [bazel.md](bazel.md).
 
 | Lane | Runner | Runs |
 | --- | --- | --- |
-| `check` (Linux x86_64) | `ubuntu-latest` | fmt, Clippy, workspace tests, Lean, AArch64 objects under QEMU, host native executables |
-| macOS (AArch64) | `macos-latest` (Apple silicon) | Clippy, workspace tests, Lean, host native executables on real AArch64 hardware |
-| Windows (x86_64 MSVC) | `windows-latest` | Clippy, workspace tests, Lean; native executable linking skipped |
+| `Test all targets` (Linux x86_64) | BuildBuddy Workflows, remote execution for builds | rustfmt, Clippy, workspace tests, Lean |
+| `Native and acceptance scripts` (Linux x86_64) | BuildBuddy Workflows | AArch64 objects under QEMU, host native executables, acceptance scripts |
+| macOS (AArch64) | `macos-latest` (Apple silicon) | rustfmt, Clippy, workspace tests, Lean, host native executables, acceptance scripts |
+| Windows (x86_64 MSVC) | `windows-latest` | Cargo (Bazel cannot link MSVC on Windows yet): Clippy, workspace tests, Lean models; native executable linking skipped |
 
-Formatting runs only on Linux because it does not depend on the host. The
-platform lanes check out sources with `core.autocrlf=false` so that span and
+The platform lanes check out sources with `core.autocrlf=false` so that span and
 snapshot tests see the same bytes as Linux.
 
 ## Platform gating policy
@@ -51,14 +52,9 @@ All handoff libraries and `experiments/native-pulse` are registered in both root
 
 The integration checkpoint was validated on Linux. These platform jobs configure additional acceptance checks; their presence does not establish a passing macOS/Windows run or hardware validation. Wasmtime 50 and the compiler currently use separate Cranelift versions, so clean workspace builds need more memory and disk than the earlier compiler-only workspace.
 
-## Merge queue
+## Required checks
 
-`main` is protected by a GitHub merge queue. The CI workflow listens for `merge_group` as well as `pull_request` and pushes to `main`, so every queued group runs the same three jobs on the exact commit that will land. The repository ruleset for `main` requires these status checks, named as the jobs report them:
-
-| Required check | Job |
-| --- | --- |
-| `check` | Linux reference lane |
-| `macOS (AArch64)` | `platform` matrix entry |
-| `Windows (x86_64 MSVC)` | `platform` matrix entry |
-
-Renaming a job or matrix entry renames its check, so update the ruleset in the same change, or the queue waits forever on a check that never reports. A lane that is known to be red on `main` cannot be required until it is fixed, because every group would fail.
+The checks are named after the BuildBuddy actions (`Test all targets`,
+`Native and acceptance scripts`) and the GitHub matrix entries
+(`macOS (AArch64)`, `Windows (x86_64 MSVC)`). Renaming one renames its check,
+so update branch protection in the same change.
