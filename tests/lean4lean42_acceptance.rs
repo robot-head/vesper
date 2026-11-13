@@ -628,6 +628,7 @@ struct NegativeInventory {
     inductive: u32,
     constructor: u32,
     recursor: u32,
+    eq: u32,
     quotients: [u32; 4],
     unsafe_id: u32,
 }
@@ -699,9 +700,13 @@ impl NegativeInventory {
             0,
             [inductive]
         ]));
+        let init_module = if target == 0 { 1 } else { 2 };
+        // These source-only data still have to model quotient prerequisites:
+        // eligible inductive Eq, its self-owned group, and an earlier group event.
+        let eq = constants.len() as u32;
+        constants.push(json!([1, 3, eq, name(&["Eq"]), init_module, 4, 0, [eq]]));
         let first = constants.len() as u32;
         let quotients = [first, first + 1, first + 2, first + 3];
-        let init_module = if target == 0 { 1 } else { 2 };
         for parts in [
             vec!["Quot"],
             vec!["Quot", "ind"],
@@ -786,6 +791,7 @@ impl NegativeInventory {
             inductive,
             constructor,
             recursor,
+            eq,
             quotients,
             unsafe_id,
         }
@@ -812,6 +818,7 @@ impl NegativeInventory {
             (1, vec![self.inductive]),
             (3, vec![self.constructor]),
             (4, vec![self.recursor]),
+            (1, vec![self.eq]),
             (2, self.quotients.to_vec()),
         ] {
             feed(machine, &json!([1, 5, sequence, action, ids])).unwrap();
@@ -847,7 +854,10 @@ fn coverage_refusals(limits: &Limits) {
                 3 => feed(&mut machine, &json!([1, 5, 0, 3, [fixture.constructor]])).unwrap_err(),
                 4 => feed(&mut machine, &json!([1, 5, 0, 3, [fixture.recursor]])).unwrap_err(),
                 5 => feed(&mut machine, &json!([1, 5, 0, 1, [fixture.inductive, 0]])).unwrap_err(),
-                6 => feed(&mut machine, &json!([1, 5, 0, 2, &fixture.quotients[..3]])).unwrap_err(),
+                6 => {
+                    feed(&mut machine, &json!([1, 5, 0, 1, [fixture.eq]])).unwrap();
+                    feed(&mut machine, &json!([1, 5, 1, 2, &fixture.quotients[..3]])).unwrap_err()
+                }
                 7 => feed(&mut machine, &json!([1, 6, fixture.unsafe_id, 2])).unwrap_err(),
                 8 => feed(&mut machine, &json!([1, 5, 0, 0, [0]])).unwrap_err(),
                 9 => feed(&mut machine, &json!([1, 5, 1, 0, [0]])).unwrap_err(),
@@ -857,7 +867,7 @@ fn coverage_refusals(limits: &Limits) {
                     // All ID claims are source-only parser data. Deliberately
                     // unresolved work prevents any synthetic completion.
                     let mut counters = [0; 14];
-                    counters[0] = u64::from(fixture.inductive) + 2;
+                    counters[0] = u64::from(fixture.inductive) + 3;
                     counters[1] = fixture.inventory.totals.eligibility[0];
                     counters[2] = 1;
                     counters[3] = 1;

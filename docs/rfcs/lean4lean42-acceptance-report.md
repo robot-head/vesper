@@ -101,6 +101,23 @@ Logs are `/tmp/lean4lean42-acceptance-transport-build.log`,
 Linux transport evidence only, not a genuine two-model replay or a full
 acceptance result. The mandatory prepared-root test was not invoked.
 
+### Coordinator compile and initial matrix attempt
+
+The coordinator compiled the actual acceptance target successfully with
+`cargo test -p vesper --locked --test lean4lean42_acceptance --no-run`
+(11.64s). An initial target execution passed eleven imported unit checks and
+the eleven transport probes, then stopped before any genuine replay because
+the source-only inventory fixture omitted Eq. The strengthened production
+guard correctly requires an eligible form4 Eq and its earlier group coverage
+before quotient initialization. The fixture now includes that prerequisite
+and event, with coherent addition/coverage totals; the wrong-quotient-group
+negative establishes Eq first so it still tests its intended fault. The
+synthetic terminal remains deliberately unresolved, with no replay success
+claim. The actual log is `/tmp/lean4lean42-root-acceptance.log`.
+
+This correction is unexecuted at this report revision. The genuine assembled
+model replay and newly sealed setup remain separate pending coordinator work.
+
 ## Scope
 
 Complete external replay would establish the stated eligible fresh-closure
