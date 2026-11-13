@@ -116,3 +116,38 @@ fn bad_depth_configuration_is_rejected() {
     cfg.max_log = 1000;
     assert!(run_cluster(1, &cfg, None).is_err());
 }
+
+/// A server removed from the configuration must not disrupt the cluster
+/// that remains: on a quiet network (no loss, crashes or partitions) the
+/// only elections are the first one and those after a removed leader steps
+/// down, plus the odd split vote.
+#[test]
+fn removed_servers_do_not_disrupt_the_remaining_cluster() {
+    let mut cfg = RaftConfig::new(7);
+    cfg.initial_members = 5;
+    cfg.membership_per_mille = 200;
+    cfg.crashes = false;
+    cfg.partitions = false;
+    cfg.drop_per_mille = 0;
+    cfg.duplicate_per_mille = 0;
+    let (mut extra, mut changes, mut elected) = (0u64, 0u64, 0u64);
+    let count = runs(200);
+    for seed in 0..count {
+        let r = run_cluster(seed, &cfg, None).unwrap_or_else(|e| panic!("seed {seed}: {e:?}"));
+        assert_eq!(r.violation, None, "seed {seed}");
+        changes += r.stats.config_changes;
+        elected += r.stats.leaders_elected;
+        extra += r
+            .stats
+            .leaders_elected
+            .saturating_sub(1 + r.stats.leader_step_downs);
+    }
+    eprintln!(
+        "{count} seeds: {changes} config changes, {elected} leaders elected, {extra} beyond first and step-downs"
+    );
+    assert!(changes > count);
+    assert!(
+        extra * 20 <= count,
+        "{extra} disruptive elections in {count} seeds"
+    );
+}

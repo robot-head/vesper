@@ -571,6 +571,52 @@ fn unanswered_receive_times_out() {
     assert_eq!(a.counts().faulted, 1);
 }
 
+/// A frame is only accepted from the host that the receiver's placement
+/// assigns to the sending role: a third host that writes a well-formed
+/// stream claiming to be role C is ignored, and the same bytes from C's
+/// real host are accepted.
+#[test]
+fn frames_are_bound_to_the_sending_host() {
+    let chor = parse_choreography(KV).unwrap();
+    let get = [
+        header(5, 0, 1),
+        vec![1],
+        vec![0; 8],
+        vec![3],
+        b"Get".to_vec(),
+        vec![3],
+        b"u64".to_vec(),
+        vec![0, 0, 0, 8],
+        vec![0; 8],
+    ]
+    .concat();
+    for (forger, accepted) in [(2, false), (0, true)] {
+        let net = WarpNet::new(WarpNetConfig {
+            nodes: 3,
+            seed: 9,
+            loss_ppm: 50_000,
+            max_wait_steps: 400,
+            ..WarpNetConfig::default()
+        })
+        .unwrap();
+        let a = LeakAuditor::new();
+        // C lives on host 0, S on host 1; host 2 is a bystander.
+        let s =
+            Session::<Rec<ServerLoop>>::bind(&chor, "S", 5, net.transport(1, &[0, 1]).unwrap(), &a)
+                .unwrap();
+        net.inject_stream(forger, 1, &get).unwrap();
+        let got = s.enter().offer().map(|c| c.split().is_ok());
+        match got {
+            Ok(true) => assert!(accepted, "frame forged by host {forger} was accepted"),
+            Ok(false) => panic!("unexpected branch"),
+            Err(f) => {
+                assert!(!accepted, "genuine frame was rejected");
+                assert_eq!(f.into_error(), ChorusError::Net(NetFail::Timeout));
+            }
+        }
+    }
+}
+
 fn header(channel: u64, from: u16, to: u16) -> Vec<u8> {
     let mut v = STREAM_MAGIC.to_vec();
     v.extend(channel.to_be_bytes());

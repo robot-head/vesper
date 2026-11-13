@@ -563,6 +563,9 @@ struct Node {
     outstanding: BTreeMap<u64, Outstanding>,
     next_channel: u64,
     inbox: Vec<Packet>,
+    /// When this node last accepted a current leader's AppendEntries or
+    /// InstallSnapshot (volatile).
+    last_leader_contact: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -585,6 +588,8 @@ pub struct RaftStats {
     pub snapshots_installed: u64,
     pub config_changes: u64,
     pub leader_step_downs: u64,
+    /// Vote requests ignored under leader stickiness.
+    pub sticky_vote_denials: u64,
 }
 
 struct Protocols {
@@ -655,6 +660,30 @@ impl Node {
         config_of(&self.log, self.initial_members)
     }
 
+    /// Servers a leader replicates to: the newest configuration, plus the
+    /// previous one while the newest is uncommitted, so that a server being
+    /// removed still receives the entry that removes it.
+    fn replication_targets(&self) -> u64 {
+        let at = config_index(&self.log);
+        let mut targets = self.members();
+        if at > self.commit {
+            targets |= config_of(&self.log[..at as usize - 1], self.initial_members);
+        }
+        targets
+    }
+
+    /// Leader stickiness (Raft thesis §4.2.3), used when membership can
+    /// change: a server that heard from a current leader within the minimum
+    /// election timeout ignores a vote request, so that a removed server
+    /// that never learned of its removal cannot depose the leader.
+    fn heard_from_leader(&self, cx: &Ctx<'_>) -> bool {
+        cx.cfg.membership_per_mille > 0
+            && (self.role == Role::Leader
+                || self
+                    .last_leader_contact
+                    .is_some_and(|t| cx.now < t.saturating_add(cx.cfg.election_min_ns)))
+    }
+
     fn quorum(&self, cx: &Ctx<'_>) -> usize {
         cx.cfg.quorum.size(self.members().count_ones()) as usize
     }
@@ -664,6 +693,7 @@ impl Node {
         self.role = Role::Follower;
         // The snapshot is committed state and survives the crash.
         self.commit = self.snap_index;
+        self.last_leader_contact = None;
         self.votes.clear();
         self.inbox.clear();
         for (_, o) in std::mem::take(&mut self.outstanding) {
@@ -762,9 +792,9 @@ impl Node {
         if self.role != Role::Leader {
             return;
         }
-        let members = self.members();
+        let targets = self.replication_targets();
         for p in 0..self.n {
-            if p == self.id || !member(members, p) {
+            if p == self.id || !member(targets, p) {
                 continue;
             }
             let next = self.next_index[p as usize].clamp(1, self.log.len() as u64 + 1);
@@ -967,14 +997,18 @@ impl Node {
                         return;
                     }
                 };
-                if req.term > self.term {
+                let sticky = req.term > self.term && self.heard_from_leader(cx);
+                if sticky {
+                    cx.stats.sticky_vote_denials += 1;
+                } else if req.term > self.term {
                     self.become_follower(req.term);
                 }
                 let up_to_date = (req.last_log_term, req.last_log_index) >= {
                     let (i, t) = self.last();
                     (t, i)
                 };
-                let grant = req.term == self.term
+                let grant = !sticky
+                    && req.term == self.term
                     && self.voted_for.is_none_or(|v| v == req.candidate)
                     && up_to_date;
                 if grant {
@@ -1027,6 +1061,7 @@ impl Node {
                         self.become_follower(h.term);
                     }
                     self.reset_election(cx);
+                    self.last_leader_contact = Some(cx.now);
                     let prev = h.prev_log_index;
                     let prev_ok = prev == 0
                         || (prev <= self.log.len() as u64
@@ -1116,6 +1151,7 @@ impl Node {
                         self.become_follower(h.term);
                     }
                     self.reset_election(cx);
+                    self.last_leader_contact = Some(cx.now);
                     accepted = true;
                     if last > self.commit {
                         let have = last as usize <= self.log.len()
@@ -1496,6 +1532,7 @@ pub fn run_cluster(
             outstanding: BTreeMap::new(),
             next_channel: 0,
             inbox: Vec::new(),
+            last_leader_contact: None,
         })
         .collect();
     // Initial election timers.

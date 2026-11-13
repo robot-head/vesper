@@ -176,6 +176,9 @@ struct RecvDir {
 /// One side (host) of a link: its endpoint and the streams it carries.
 struct Side {
     node: u32,
+    /// The host at the other end of this link: every frame read here was
+    /// sent by it.
+    peer: u32,
     ep: Ep,
     conn: SlotHandle,
     send: BTreeMap<DirKey, SendDir>,
@@ -197,12 +200,15 @@ struct Link {
 
 #[derive(Default)]
 struct Mail {
-    frames: HashMap<(u32, DirKey), VecDeque<Frame>>,
-    /// `(node, channel, role)`: that role abandoned the channel, as seen at
-    /// `node`.
-    abandoned: BTreeSet<(u32, u64, RoleId)>,
-    /// `(node, direction)` whose stream was malformed.
-    malformed: BTreeSet<(u32, DirKey)>,
+    /// `(node, source host, direction)` → frames received at `node` from
+    /// `source host`. The source is the link the frame arrived on, so a
+    /// receiver only accepts frames from the host its placement names.
+    frames: HashMap<(u32, u32, DirKey), VecDeque<Frame>>,
+    /// `(node, source host, channel, role)`: that role abandoned the
+    /// channel, as reported to `node` by `source host`.
+    abandoned: BTreeSet<(u32, u32, u64, RoleId)>,
+    /// `(node, source host, direction)` whose stream was malformed.
+    malformed: BTreeSet<(u32, u32, DirKey)>,
 }
 
 struct Core {
@@ -316,8 +322,9 @@ fn build_core(cfg: WarpNetConfig) -> Result<Core, WarpNetError> {
             let s_conn = server
                 .open_connection(&scid, &ccid, keys(1, 0)?, 0)
                 .map_err(warp)?;
-            let side = |node, ep, conn, peer_uni_base| Side {
+            let side = |node, peer, ep, conn, peer_uni_base| Side {
                 node,
+                peer,
                 ep,
                 conn,
                 send: BTreeMap::new(),
@@ -328,7 +335,7 @@ fn build_core(cfg: WarpNetConfig) -> Result<Core, WarpNetError> {
             };
             // Uni stream IDs: client-initiated 2 + 4i, server 3 + 4i.
             links.push(Link {
-                sides: [side(a, client, c_conn, 3), side(b, server, s_conn, 2)],
+                sides: [side(a, b, client, c_conn, 3), side(b, a, server, s_conn, 2)],
                 held: [Vec::new(), Vec::new()],
                 blocked: [false; 2],
                 failed: None,
@@ -905,7 +912,7 @@ impl Core {
                             if let Some(r) = side.recv.remove(&stream_id)
                                 && let Some(key) = r.header
                             {
-                                mail.abandoned.insert((side.node, key.0, key.1));
+                                mail.abandoned.insert((side.node, side.peer, key.0, key.1));
                             }
                         }
                         _ => {}
@@ -935,13 +942,14 @@ impl Core {
                         }
                     }
                     if !r.stopped
-                        && let Err(()) = Self::parse_stream(side.node, r, mail, stats, max_body)
+                        && let Err(()) =
+                            Self::parse_stream((side.node, side.peer), r, mail, stats, max_body)
                     {
                         r.stopped = true;
                         r.buf.clear();
                         stats.malformed_streams += 1;
                         if let Some(key) = r.header {
-                            mail.malformed.insert((side.node, key));
+                            mail.malformed.insert((side.node, side.peer, key));
                         }
                         let _ = side.ep.stream_stop_sending(side.conn, id, ERR_MALFORMED);
                     }
@@ -957,7 +965,7 @@ impl Core {
                         // Truncated record at FIN.
                         stats.malformed_streams += 1;
                         if let Some(key) = r.header {
-                            mail.malformed.insert((side.node, key));
+                            mail.malformed.insert((side.node, side.peer, key));
                         }
                     }
                 }
@@ -966,7 +974,7 @@ impl Core {
     }
 
     fn parse_stream(
-        node: u32,
+        (node, src): (u32, u32),
         r: &mut RecvDir,
         mail: &mut Mail,
         stats: &mut WarpNetStats,
@@ -989,12 +997,15 @@ impl Core {
                 Some((Record::Frame(f), n)) => {
                     at += n;
                     stats.frames_delivered += 1;
-                    mail.frames.entry((node, key)).or_default().push_back(f);
+                    mail.frames
+                        .entry((node, src, key))
+                        .or_default()
+                        .push_back(f);
                 }
                 Some((Record::Abandon, n)) => {
                     at += n;
                     stats.abandons_received += 1;
-                    mail.abandoned.insert((node, key.0, key.1));
+                    mail.abandoned.insert((node, src, key.0, key.1));
                 }
             }
         }
@@ -1002,19 +1013,21 @@ impl Core {
         Ok(())
     }
 
-    fn try_recv(&mut self, node: u32, key: DirKey) -> Result<Option<Frame>, NetFail> {
+    /// Next frame for `key` at `node` that arrived from host `src` (the
+    /// host the receiver's placement assigns to the sending role).
+    fn try_recv(&mut self, node: u32, src: u32, key: DirKey) -> Result<Option<Frame>, NetFail> {
         if let Some(f) = self
             .mail
             .frames
-            .get_mut(&(node, key))
+            .get_mut(&(node, src, key))
             .and_then(VecDeque::pop_front)
         {
             return Ok(Some(f));
         }
-        if self.mail.malformed.contains(&(node, key)) {
+        if self.mail.malformed.contains(&(node, src, key)) {
             return Err(NetFail::Malformed);
         }
-        if self.mail.abandoned.contains(&(node, key.0, key.1)) {
+        if self.mail.abandoned.contains(&(node, src, key.0, key.1)) {
             return Err(NetFail::PeerGone);
         }
         Ok(None)
@@ -1043,7 +1056,10 @@ impl Transport for WarpTransport {
         let node = self.node;
         self.net
             .call(move |g| {
-                if g.mail.abandoned.contains(&(node, frame.channel, frame.to)) {
+                if g.mail
+                    .abandoned
+                    .contains(&(node, dst, frame.channel, frame.to))
+                {
                     return Err(NetFail::PeerGone);
                 }
                 if frame.label.len() > MAX_NAME_LEN
@@ -1058,7 +1074,7 @@ impl Transport for WarpTransport {
                     g.stats.local_frames += 1;
                     g.mail
                         .frames
-                        .entry((dst, key))
+                        .entry((dst, node, key))
                         .or_default()
                         .push_back(frame);
                     return Ok(());
@@ -1075,8 +1091,9 @@ impl Transport for WarpTransport {
         to: RoleId,
     ) -> Result<Option<Frame>, NetFail> {
         let node = self.node;
+        let src = self.host(from)?;
         self.net
-            .call(move |g| g.try_recv(node, (channel, from, to)))
+            .call(move |g| g.try_recv(node, src, (channel, from, to)))
             .unwrap_or(Err(NetFail::Closed))
     }
 
@@ -1093,7 +1110,7 @@ impl Transport for WarpTransport {
             let r = self
                 .net
                 .call(move |g| {
-                    if let Some(f) = g.try_recv(node, (channel, from, to))? {
+                    if let Some(f) = g.try_recv(node, src, (channel, from, to))? {
                         return Ok(Some(f));
                     }
                     if let Some((li, _)) = g.side_of(node, src)
@@ -1122,7 +1139,7 @@ impl Transport for WarpTransport {
                     continue;
                 }
                 if host == node {
-                    g.mail.abandoned.insert((host, channel, me));
+                    g.mail.abandoned.insert((host, node, channel, me));
                     continue;
                 }
                 let key = (channel, me, peer);

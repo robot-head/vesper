@@ -84,7 +84,11 @@ name or body, invalid UTF-8 or a record truncated at FIN stops the stream
 session direction, receives on it fail with `NetFail::Malformed`. A well
 formed frame that is off the projection is a `ProtocolViolation` from the
 monitor; a bad payload encoding is a `Decode` error. The QUIC connection
-survives all of these (tested).
+survives all of these (tested). Received frames, abandon markers and
+malformed-stream marks are keyed by the host whose connection carried them,
+and a receive only takes them from the host that the receiver's placement
+assigns to the sending role, so a third host cannot forge another role's
+frames by writing a matching stream header (tested).
 
 Warp endpoints are not `Send` (the handshake's `CidSource` is a boxed
 trait object), while session transports must be. The network therefore runs
@@ -133,9 +137,16 @@ committed-prefix agreement after each change.
   leader proposes adding or removing one server only after it has committed
   an entry of its current term and while no configuration entry is
   uncommitted (the single-server rule with the fix from Ongaro's thesis);
-  quorums, vote counting, commit counting and replication targets follow the
-  leader's configuration; a leader removed by a committed configuration
-  steps down; non-members do not campaign. Spare servers (`initial_members
+  quorums, vote counting and commit counting follow the leader's
+  configuration; while the newest configuration is uncommitted the leader
+  also replicates to the servers of the previous one, so a server being
+  removed receives its removal; a leader removed by a committed
+  configuration steps down; non-members do not campaign. When membership
+  can change, voters apply leader stickiness (Raft thesis §4.2.3): a server
+  that accepted a current leader's AppendEntries or InstallSnapshot within
+  `election_min_ns`, or is the leader, ignores a higher-term vote request
+  without adopting its term, so a removed server that missed its removal
+  cannot depose the remaining cluster. Spare servers (`initial_members
   < nodes`) can be added and catch up through AppendEntries or snapshots.
 
 ## Lean
@@ -211,7 +222,7 @@ the generated targets take from `cargo metadata`. CI runs `bazel test //...`.
 
 New and changed tests (debug build, this container):
 
-- `tests/warp_session.rs` (8 tests, about 9 s): the two-buyer protocol with
+- `tests/warp_session.rs` (9 tests, about 9 s): the two-buyer protocol with
   each role on its own thread over a 10 % loss, 5 % reorder, 1 % duplicate
   Warp network, using `SelectN`/`OfferN` for the decision, for three
   seeds; a four-way choice in a loop (60 operations, checked against a
@@ -223,7 +234,9 @@ New and changed tests (debug build, this container):
   reordered branch list); a dropped client observed as `PeerGone`; an
   unanswered receive timing out; seven malformed or off-protocol injected
   streams, each a typed error with the connection intact, and a bad-magic
-  stream counted; configuration validation.
+  stream counted; a well-formed frame injected by a third host is not
+  accepted while the same bytes from the role's own host are; configuration
+  validation.
 - `tests/replog_warp.rs` (3 tests, about 8 s): six seeded scenarios (3, 5
   and 7 hosts, 5 % loss, 5 % reordering, 1 % duplication, 6 partitioned
   terms): no checker violation, every log equal to the leader's and fully
@@ -231,14 +244,17 @@ New and changed tests (debug build, this container):
   seeds partitions caused RPC timeouts, logs were repaired through
   rejections, datagrams were lost and stream bytes retransmitted. A rerun
   of one seed reproduces the digest and every counter.
-- `tests/raft_depth.rs` (5 tests, about 2 s for 400 + 400 seeds;
+- `tests/raft_depth.rs` (6 tests, about 2 s for 400 + 400 seeds;
   `CHORUS_SIM_RUNS` overrides): with `snapshot_threshold = 6` on 5 nodes,
   400 seeds gave 3,300 compactions, 2,369 snapshots sent, 630 installed and
   6,391 committed entries with no violation; with 7 servers, 5 initial
-  members, `membership_per_mille = 200` and snapshots, 400 seeds gave 1,362
-  configuration changes and 162 leader step-downs, with node views that
-  grew to 6 or 7 members and shrank to 3 or 4, and 7,214 committed entries,
-  with no violation. Also the snapshot projection and configuration
+  members, `membership_per_mille = 200` and snapshots, 400 seeds gave 1,477
+  configuration changes and 168 leader step-downs, with node views that
+  grew to 6 or 7 members and shrank to 3 or 4, and 7,077 committed entries,
+  with no violation. On a quiet network with membership changes, 200 seeds
+  elected 338 leaders and only 2 beyond the first election and removed
+  leaders' step-downs (646 before replicating to departing servers and
+  leader stickiness). Also the snapshot projection and configuration
   parsing.
 - `tests/lean.rs`: now checks both Lean files (18 theorems audited) and the
   Rust `are_dual` on the modelled choreographies.
