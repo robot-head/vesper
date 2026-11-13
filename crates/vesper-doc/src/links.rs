@@ -341,9 +341,15 @@ struct Line<'a> {
     text: &'a str,
     start: usize,
 }
-fn run(bytes: &[u8], start: usize, byte: u8) -> usize {
-    bytes[start..].iter().take_while(|&&b| b == byte).count()
+fn run(bytes: &[u8], start: usize, byte: u8, budget: &mut Budget) -> Result<usize, LinkError> {
+    let mut n = 0;
+    while bytes.get(start + n) == Some(&byte) {
+        budget.work(1)?;
+        n += 1;
+    }
+    Ok(n)
 }
+
 fn balanced_end(
     lines: &[Line<'_>],
     line: usize,
@@ -355,63 +361,99 @@ fn balanced_end(
     let mut depth = 1usize;
     let mut quote = None;
     let mut angle = false;
-    for (index, text) in lines.iter().enumerate().skip(line) {
-        let bytes = text.text.as_bytes();
-        let mut at = if index == line { start + 1 } else { 0 };
-        while at < bytes.len() {
-            budget.work(1)?;
-            let byte = bytes[at];
-            if byte == b'\\' {
-                at = (at + 2).min(bytes.len());
+    let mut destination_started = false;
+    let mut destination_separated = false;
+    let mut index = line;
+    let mut at = start + 1;
+    while index < lines.len() {
+        let bytes = lines[index].text.as_bytes();
+        if at >= bytes.len() {
+            if open == b'(' && destination_started && depth == 1 && quote.is_none() && !angle {
+                destination_separated = true;
+            }
+            index += 1;
+            at = 0;
+            continue;
+        }
+        budget.work(1)?;
+        let byte = bytes[at];
+        if byte == b'\\' {
+            at = (at + 2).min(bytes.len());
+            continue;
+        }
+        if open == b'[' && byte == b'`' {
+            let count = run(bytes, at, b'`', budget)?;
+            budget.work(count)?;
+            if let Some((end_line, end_at)) = close_ticks(lines, index, at, count, budget)? {
+                index = end_line;
+                at = end_at;
+            } else {
+                at += count;
+            }
+            continue;
+        }
+        if open == b'(' {
+            if let Some(delimiter) = quote {
+                if byte == delimiter {
+                    quote = None;
+                }
+                at += 1;
                 continue;
             }
-            if open == b'(' {
-                if let Some(delimiter) = quote {
-                    if byte == delimiter {
-                        quote = None;
-                    }
-                    at += 1;
-                    continue;
+            if angle {
+                if byte == b'>' {
+                    angle = false;
                 }
-                if angle {
-                    if byte == b'>' {
-                        angle = false;
-                    }
-                    at += 1;
-                    continue;
-                }
-                if matches!(byte, b'\'' | b'"') {
-                    quote = Some(byte);
-                    at += 1;
-                    continue;
-                }
+                at += 1;
+                continue;
+            }
+            if !destination_started && byte.is_ascii_whitespace() {
+                at += 1;
+                continue;
+            }
+            if !destination_started {
+                destination_started = true;
                 if byte == b'<' {
                     angle = true;
                     at += 1;
                     continue;
                 }
+            } else if depth == 1 && byte.is_ascii_whitespace() {
+                destination_separated = true;
             }
-            if byte == open {
-                depth = add(depth, 1)?;
-            } else if byte == close {
-                depth -= 1;
-                if depth == 0 {
-                    return Ok(Some((index, at + 1)));
-                }
+            // An apostrophe inside a bare URI is a sub-delimiter, not a title.
+            if destination_separated && matches!(byte, b'\'' | b'"') {
+                quote = Some(byte);
+                at += 1;
+                continue;
             }
-            at += 1;
         }
+        if byte == open {
+            depth = add(depth, 1)?;
+        } else if byte == close {
+            depth -= 1;
+            if depth == 0 {
+                return Ok(Some((index, at + 1)));
+            }
+        }
+        at += 1;
     }
     Ok(None)
 }
+
 fn next_markdown(
     lines: &[Line<'_>],
     line: usize,
     start: usize,
     budget: &mut Budget,
 ) -> Result<Option<(usize, usize)>, LinkError> {
-    for index in line..lines.len().min(line + 2) {
-        let bytes = lines[index].text.as_bytes();
+    for (index, value) in lines
+        .iter()
+        .enumerate()
+        .take(lines.len().min(line + 2))
+        .skip(line)
+    {
+        let bytes = value.text.as_bytes();
         let mut at = if index == line { start } else { 0 };
         while matches!(bytes.get(at), Some(b' ' | b'\t' | b'\r')) {
             budget.work(1)?;
@@ -437,7 +479,7 @@ fn close_ticks(
         while pos < bytes.len() {
             budget.work(1)?;
             if bytes[pos] == b'`' {
-                let n = run(bytes, pos, b'`');
+                let n = run(bytes, pos, b'`', budget)?;
                 budget.work(n)?;
                 if n == count {
                     return Ok(Some((index, pos + n)));
@@ -541,7 +583,7 @@ fn group(
             let byte = trimmed.as_bytes().first().copied();
             if let Some((delimiter, count)) = fence {
                 if byte == Some(delimiter) {
-                    let n = run(bytes, indent, delimiter);
+                    let n = run(bytes, indent, delimiter, budget)?;
                     budget.work(add(n, bytes.len() - indent - n)?)?;
                     if n >= count && text[indent + n..].trim().is_empty() {
                         fence = None;
@@ -552,7 +594,7 @@ fn group(
             }
             if matches!(byte, Some(b'`' | b'~')) {
                 let delimiter = byte.unwrap();
-                let n = run(bytes, indent, delimiter);
+                let n = run(bytes, indent, delimiter, budget)?;
                 budget.work(n)?;
                 if n >= 3 {
                     fence = Some((delimiter, n));
@@ -570,7 +612,7 @@ fn group(
         match bytes[at] {
             b'\\' => at = (at + 2).min(bytes.len()),
             b'`' => {
-                let n = run(bytes, at, b'`');
+                let n = run(bytes, at, b'`', budget)?;
                 budget.work(n)?;
                 if let Some((end_line, end_at)) = close_ticks(lines, line, at, n, budget)? {
                     line = end_line;
@@ -607,6 +649,21 @@ fn group(
                     {
                         line = i;
                         at = p;
+                        // A following full inline link may share the second
+                        // label of a reference-style prefix. Its destination
+                        // remains excluded, rather than exposing nested text.
+                        if let Some((url_line, url_at)) = next_markdown(lines, i, p, budget)?
+                            .filter(|&(i, p)| lines[i].text.as_bytes()[p] == b'(')
+                        {
+                            if let Some((i, p)) =
+                                balanced_end(lines, url_line, url_at, b'(', b')', budget)?
+                            {
+                                line = i;
+                                at = p;
+                            } else {
+                                line = lines.len();
+                            }
+                        }
                     } else {
                         line = lines.len();
                     }
