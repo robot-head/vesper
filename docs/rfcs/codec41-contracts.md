@@ -91,6 +91,16 @@ max_events as a visit bound. max_capture_bytes governs actual Capture storage;
 if decoding directly into logical values without Capture allocation, their
 separate metadata envelope governs that storage. Explain the distinction.
 
+Resource-profile clarification before final acceptance: max_output_bytes limits
+encoded_len/encode_into, not decoder input; decode_exact retains the grammar's
+declared input/frame limits. Decode and encode pay different work/storage costs
+(borrowed values versus plan/scratch/final copy). Roundtrip semantics and byte
+uniqueness apply to successful operations with sufficient compatible directional
+budgets; do not promise unconditional same-budget total roundtrips or that every
+accepted enlarged-grammar input fits the codec's HARD output cap. Document and
+test a genuine directional resource refusal without weakening canonical byte or
+transactional-output assertions. This changes no API or existing limit.
+
 ## Actual algorithms and transactional output
 
 Decode actual input through the validated rules, canonical primitive decoder,
