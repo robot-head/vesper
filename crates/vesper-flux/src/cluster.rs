@@ -425,12 +425,8 @@ impl State<'_> {
             return Err(Error::Checkpoint("global manifest epoch"));
         }
         let mut out = Vec::with_capacity(self.n());
-        for chunk in bytes[header + 8..].chunks_exact(32) {
-            out.push(blob_id(
-                chunk
-                    .try_into()
-                    .map_err(|_| Error::Checkpoint("global manifest"))?,
-            ));
+        for chunk in bytes[header + 8..].as_chunks::<32>().0 {
+            out.push(blob_id(*chunk));
         }
         Ok(out)
     }
