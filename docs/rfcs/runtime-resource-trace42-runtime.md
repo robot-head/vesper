@@ -32,8 +32,8 @@ admits scalars/unit, tuples and nongeneric ADTs; unknown/open/callable/generic
 boundary schemas explicitly fail UnsupportedValue. Internal generic helpers are
 unchanged. The visitor borrows real Type/field references rather than cloning or
 substituting types; a schema encountered only at the result can refuse after
-execution while retaining the genuine event prefix. Returned live ownership remains a reported residual, not a
-fabricated leak verdict. Completion distinguishes runtime and actual fuel-guard
+execution while retaining the genuine event prefix. Returned live ownership
+remains a reported residual, not a fabricated leak verdict. Completion distinguishes runtime and actual fuel-guard
 errors; trace failures retain their typed prefix. Traced external execution is
 explicitly refused while the surviving observer retains that refusal.
 
@@ -44,8 +44,25 @@ their identity. No Layout encoder was added. A real parse/check/observe/run
 simulation regression obtains a tracked Ticket inside a wrapper and requires
 the actual JSON encoder to reject it; its unobserved counterpart remains valid.
 
-Authored checks: rustfmt and git diff --check. The first combined runtime/core --lib compilation/test command is currently
-running under the coordinator's exclusive shared-cache lease. Its result, the
-new regression and legacy evaluator/I/O/layout/simulation/source-native
-suspension checks have not yet been recorded at this checkpoint. These are source claims only until
-the coordinator records actual execution evidence.
+Actual checks executed by this runtime lane with the coordinator's exclusive
+shared-cache Cargo lease (jobs1, incremental off, debug information disabled):
+
+- `cargo test --locked -p vesper --lib`: 91 passed, including all eight new
+  tracing-core units and the existing I/O session tests.
+- Focused legacy root targets: backends68, effect_optimization5, numeric21 and
+  source_native_suspension10: 104 passed.
+- `cargo test --locked -p vesper-sim-session`: 65 passed (library18, CLI2,
+  models12, simulation16, Warp12, Warp ACK5), including the real tracked JSON
+  refusal and its ordinary unobserved counterpart.
+
+No failures or ignored tests occurred. Logs are
+`/tmp/runtime-resource42-runtime-{lib,compat,sim}.log`. These executed binaries
+were compiled from the first coherent runtime checkpoint9e97bf9 with core
+5f91722+d60471d+e8231fe. Followup12ff98b prepays the complete scheduled child
+count and next depth before any pattern/typed-boundary traversal stack growth.
+Its final combined --lib and independently owned acceptance rerun is handed to
+the independent acceptance lane after explicit release of this Cargo lease;
+those final-head results are not claimed here yet. Rustfmt and git diff --check
+also passed. The existing native-suspension fixture encoder's rejection is a
+source-level assertion; the production JSON rejection above is actual runtime
+evidence. No native resource observer or complete resource oracle is implied.
