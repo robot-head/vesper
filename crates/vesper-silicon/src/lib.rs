@@ -2,21 +2,28 @@
 //! bare-metal code.
 //!
 //! * [`stack`]: worst-case stack depth over real Cranelift 0.125 functions
-//!   compiled for x86_64 and AArch64, with frames read from the emitted
+//!   compiled for x86_64, AArch64 and riscv64, with frames read from the emitted
 //!   machine code, recursion and unresolved-call rejection, and
 //!   `@stack_limit` budgets per root.
 //! * [`atomic`]: IrqGuard / sleep-in-atomic / ISR-suspension / lock-order
 //!   checks over the same functions and call graph.
 //! * [`svd`] and [`hazard`]: a CMSIS-SVD register model (parsed by
-//!   `svd-parser`) and MMIO hazard checks (W1C read-modify-write, plain reads
-//!   of read-to-clear registers, writes to read-only fields) over operation
+//!   `svd-parser`; exercised on the vendor RP2040 SVD) and MMIO hazard
+//!   checks (W1C read-modify-write, plain reads of read-to-clear or
+//!   read-side-effect registers, writes to read-only fields) over operation
 //!   traces and over Cranelift loads/stores.
+//! * [`pac`]: generation of host-side typestate accessor modules (Rust text)
+//!   from the register model.
+//! * [`dtb`]: flattened-devicetree input for memory banks, reservations,
+//!   interrupt controllers (RISC-V hart intc, PLIC, GIC) and DMA coherence,
+//!   feeding the frame, IrqGuard and DMA models.
 //! * [`mmio`]: access-typed registers and typestate peripheral singletons
 //!   bound at run time from the model, on a software register file.
 //! * [`irq`], [`dma`], [`frames`]: linear `IrqGuard`, `DmaTransfer` and
 //!   `PhysFrame4K`/`PendingTlbShootdown` owners with a leak [`ledger`] and a
 //!   frame-conservation auditor, plus the per-architecture DMA barrier and
-//!   TLB-invalidation instruction sequences.
+//!   TLB-invalidation instruction sequences, including Zicbom `cbo.*`
+//!   maintenance for non-coherent RISC-V DMA and a software cache model.
 //!
 //! Scope and evidence: there is no freestanding target, no real hardware,
 //! interrupt controller, page table or DMA engine here, and no `@svd_pac`
@@ -29,11 +36,13 @@
 
 pub mod atomic;
 pub mod dma;
+pub mod dtb;
 pub mod frames;
 pub mod hazard;
 pub mod irq;
 pub mod ledger;
 pub mod mmio;
+pub mod pac;
 pub mod prologue;
 pub mod stack;
 pub mod svd;
@@ -43,9 +52,8 @@ pub mod svd;
 pub enum Arch {
     X86_64,
     Aarch64,
-    /// Barrier and TLB sequences only; the stack analyzer rejects it with
-    /// [`stack::StackError::UnsupportedIsa`] (the RISC-V Cranelift backend is
-    /// not enabled in this workspace).
+    /// riscv64 (RV64GC as Cranelift 0.125 targets it; the compressed
+    /// encodings only when enabled with `has_zca`/`has_zcd`).
     Riscv64,
 }
 

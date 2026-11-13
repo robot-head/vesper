@@ -1,0 +1,119 @@
+// Hand-written board tree for the Silicon devicetree tests: two memory
+// banks, a /memreserve/ entry, /reserved-memory regions (one no-map), a PLIC
+// with 32 sources, two harts with Zicbom, a coherent and a non-coherent DMA
+// master. It describes no real board. Compile with:
+//   dtc -I dts -O dtb -o vesper-rv-board.dtb vesper-rv-board.dts
+/dts-v1/;
+
+/memreserve/ 0x80000000 0x20000;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	compatible = "vesper,rv-board";
+	model = "Vesper RISC-V test board";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <10000000>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "riscv";
+			riscv,isa = "rv64imafdc_zicbom_zicsr_zifencei";
+			riscv,cbom-block-size = <64>;
+			mmu-type = "riscv,sv39";
+			hart0_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			reg = <1>;
+			compatible = "riscv";
+			riscv,isa = "rv64imafdc_zicbom_zicsr_zifencei";
+			riscv,cbom-block-size = <64>;
+			mmu-type = "riscv,sv39";
+			hart1_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x400000>;
+	};
+
+	memory@100000000 {
+		device_type = "memory";
+		reg = <0x1 0x00000000 0x0 0x200000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		opensbi@80040000 {
+			reg = <0x0 0x80040000 0x0 0x40000>;
+			no-map;
+		};
+
+		framebuffer@80200800 {
+			reg = <0x0 0x80200800 0x0 0x1000>;
+		};
+	};
+
+	soc {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		compatible = "simple-bus";
+		ranges;
+		interrupt-parent = <&plic>;
+
+		plic: interrupt-controller@c000000 {
+			compatible = "sifive,plic-1.0.0", "riscv,plic0";
+			reg = <0x0 0x0c000000 0x0 0x4000000>;
+			#address-cells = <0>;
+			#interrupt-cells = <1>;
+			interrupt-controller;
+			interrupts-extended = <&hart0_intc 11 &hart0_intc 9 &hart1_intc 11 &hart1_intc 9>;
+			riscv,ndev = <32>;
+		};
+
+		serial@10000000 {
+			compatible = "ns16550a";
+			reg = <0x0 0x10000000 0x0 0x100>;
+			interrupts = <10>;
+		};
+
+		dma@10010000 {
+			compatible = "vesper,sim-dma";
+			reg = <0x0 0x10010000 0x0 0x1000>;
+			interrupts = <5 6>;
+			dma-noncoherent;
+		};
+
+		nic@10020000 {
+			compatible = "vesper,sim-nic";
+			reg = <0x0 0x10020000 0x0 0x1000>;
+			interrupts = <7>;
+			dma-coherent;
+		};
+
+		disabled@10030000 {
+			compatible = "vesper,sim-off";
+			reg = <0x0 0x10030000 0x0 0x1000>;
+			interrupts = <40>;
+			status = "disabled";
+		};
+	};
+};
