@@ -140,6 +140,43 @@ fn frame_eof_never_borrows_or_consumes_outer_bytes() {
 }
 
 #[test]
+fn nested_frame_prefix_width_changes_use_measured_payload_lengths() {
+    fn reference_varint(mut n: usize) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        loop {
+            let digit = (n % 128) as u8;
+            n /= 128;
+            bytes.push(digit + if n == 0 { 0 } else { 128 });
+            if n == 0 {
+                return bytes;
+            }
+        }
+    }
+    let rules = [Rule::Frame(1), Rule::Frame(2), Rule::Blob];
+    let grammar = grammar(&rules);
+    for len in [
+        0, 1, 125, 126, 127, 128, 129, 16380, 16381, 16382, 16383, 16384,
+    ] {
+        let payload: Vec<_> = (0..len).map(|i| (i % 251) as u8).collect();
+        let value = Value::Frame(Box::new(Value::Frame(Box::new(Value::Bytes(&payload)))));
+        // This oracle builds complete envelopes bottom-up using division and
+        // remainder, independently of the codec's deferred prefix write plan.
+        let mut expected = reference_varint(payload.len());
+        expected.extend_from_slice(&payload);
+        for _ in 0..2 {
+            let mut framed = reference_varint(expected.len());
+            framed.extend_from_slice(&expected);
+            expected = framed;
+        }
+        assert_eq!(bytes(&grammar, &value), expected, "payload length {len}");
+        assert_eq!(
+            decode_exact(&grammar, &expected, CodecLimits::default()).unwrap(),
+            value
+        );
+    }
+}
+
+#[test]
 fn choice_keeps_branch_identity_and_uses_real_first_dispatch() {
     let rules = [
         Rule::Choice(vec![Branch { id: 17, rule: 1 }, Branch { id: 99, rule: 2 }]),
