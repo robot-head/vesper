@@ -53,11 +53,53 @@ unmatched compiler overrides and unsupported CLI options must also fail.
 
 ## Execution evidence
 
-Writer checks are rustfmt and git diff --check only. No Cargo command, Lean
-build, setup seal, complete replay or acceptance execution has been performed
-by this lane. The actual pins/assembled source are coordinator-owned; the
-prepared root and positive execution lease are pending at this checkpoint.
-Authored tests are not a claim that the matrix passes.
+The writer ran rustfmt and git diff --check. Under a separate explicit
+coordinator lease, the writer also compiled and executed the transport-only
+harness described below. No Cargo command, Lean build, setup seal, complete
+model replay or full acceptance execution has been performed by this lane.
+The prepared root and full positive execution remain pending. Authored
+full-matrix tests are not a claim that the matrix passes.
+
+### Executed independent transport probes
+
+The temporary `/tmp/lean4lean42-acceptance-transport.rs` imported the actual
+integrated driver module and copied the exact owned `transport_faults`
+function. The integration HEAD observed at compilation was
+`1020a85948125e5f24d2ed01d24f59e291e7ac20`. Its peer was the real
+`/workspace/vesper/target/parallel-next/debug/lean4lean42` executable, after
+the coordinator's `/tmp/lean4lean42-root-build2.log` recorded a completed
+2.56-second build. The harness used Rust 1.99.1 and existing cached rlibs;
+it did not invoke Cargo or compile/install dependencies.
+
+Actual commands, with compilation output captured separately:
+
+```sh
+taskset -c 0 rustc --edition=2024 --cfg test -C debuginfo=0 \
+  /tmp/lean4lean42-acceptance-transport.rs \
+  --crate-name lean4lean42_acceptance_transport \
+  -L dependency=/workspace/vesper/target/parallel-next/debug/deps \
+  --extern serde=/workspace/vesper/target/parallel-next/debug/deps/libserde-a1ebe81f48fb296d.rlib \
+  --extern serde_json=/workspace/vesper/target/parallel-next/debug/deps/libserde_json-302f6e6a62713afe.rlib \
+  --extern blake3=/workspace/vesper/target/parallel-next/debug/deps/libblake3-8ece2d105e9c83d1.rlib \
+  -o /tmp/lean4lean42-acceptance-transport
+taskset -c 0 /tmp/lean4lean42-acceptance-transport
+```
+
+Both commands exited0. The standalone cfg(test) compilation emitted two
+unused internal-test-helper warnings; this was not a strict Clippy invocation.
+Execution passed all eleven real child-process probes and invalid-cap
+preflight in 1.756 seconds (wrapper wall time 1.775 seconds), with CPU affinity
+restricted to one CPU. The assertions checked actual child reap and reader/
+watcher joins, retained frame/stderr bounds, zero payload allocation for an
+oversize header, queue peak4 under pressure, all64 pressure markers, and real
+deadline cancellation while the queue was full. No kernel/control/replay
+success was supplied by a peer.
+
+Logs are `/tmp/lean4lean42-acceptance-transport-build.log`,
+`/tmp/lean4lean42-acceptance-transport-run.log`, and
+`/tmp/lean4lean42-acceptance-transport-result.json`. This is executed local
+Linux transport evidence only, not a genuine two-model replay or a full
+acceptance result. The mandatory prepared-root test was not invoked.
 
 ## Scope
 
