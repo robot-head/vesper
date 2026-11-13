@@ -491,14 +491,11 @@ impl DeviceTree {
         let Some(v) = self.prop(id, name) else {
             return Ok(None);
         };
-        if v.len() % 4 != 0 {
+        let (cells, rest) = v.as_chunks::<4>();
+        if !rest.is_empty() {
             return Err(self.bad(id, name, format!("{} bytes is not whole cells", v.len())));
         }
-        Ok(Some(
-            v.chunks_exact(4)
-                .map(|c| u32::from_be_bytes([c[0], c[1], c[2], c[3]]))
-                .collect(),
-        ))
+        Ok(Some(cells.iter().map(|c| u32::from_be_bytes(*c)).collect()))
     }
 
     pub fn prop_u32(&self, id: usize, name: &str) -> Result<Option<u32>, DtbError> {
@@ -579,7 +576,7 @@ impl DeviceTree {
         };
         let (a, s) = self.reg_cells(id)?;
         let per = (a + s) as usize;
-        if cells.is_empty() || cells.len() % per != 0 {
+        if cells.is_empty() || !cells.len().is_multiple_of(per) {
             return Err(self.bad(
                 id,
                 "reg",
@@ -675,7 +672,7 @@ impl DeviceTree {
         };
         let ctl = self.interrupt_parent(id)?;
         let n = self.controller_cells(id, ctl)? as usize;
-        if cells.is_empty() || cells.len() % n != 0 {
+        if cells.is_empty() || !cells.len().is_multiple_of(n) {
             return Err(DtbError::BadInterruptSpecifier {
                 node: self.path(id),
                 detail: format!("{} cells is not a multiple of {n}", cells.len()),
