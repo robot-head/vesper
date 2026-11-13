@@ -148,8 +148,8 @@ pub fn execute_case(case: &Case, evaluator_fuel: u64) -> Result<RustAnswer, Harn
     let (e2, j2) = execute_mode(&optimized.world, kind, evaluator_fuel, false)?;
     let (e3, j3) = execute_mode(&optimized.world, kind, evaluator_fuel, true)?;
     Ok(RustAnswer::Outcomes {
-        evaluator: [e0, e1, e2, e3],
-        jit: [j0, j1, j2, j3],
+        evaluator: Box::new([e0, e1, e2, e3]),
+        jit: Box::new([j0, j1, j2, j3]),
     })
 }
 
