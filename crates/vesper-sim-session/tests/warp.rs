@@ -7,7 +7,8 @@ use serde_json::{Value as Json, json};
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 use vesper_sim_session::{
-    CheckedProgram, ModelEvent, RecoveredOwner, Report, RunResult, Scenario, Session, SessionError,
+    CheckedProgram, ModelEvent, RETIRED_WARP_MODEL_SEMANTICS, RecoveredOwner, Report, RunResult,
+    Scenario, Session, SessionError, WARP_MODEL_SEMANTICS,
     model::{
         link::{Fate, GilbertElliott, LossCause},
         umem::{HostBug, RxDrop},
@@ -140,6 +141,48 @@ fn bulk_ingress_under_burst_loss_and_rebinding_conserves_every_frame() {
     assert_eq!(nic.leases, 0);
     assert_eq!(snapshot.in_flight, 0);
     trace_conserves_frames(report, 64);
+
+    // Every frame transition went through the vesper-warp-umem software NIC:
+    // its device and driver counters equal the model trace.
+    let count = |f: fn(&WarpEvent) -> bool| warp_events(report).filter(|e| f(e)).count() as u64;
+    let nic_counters = nic.softnic;
+    let arrived = count(|e| matches!(e, WarpEvent::RxArrived { .. }));
+    let launched = count(|e| matches!(e, WarpEvent::Launched { .. }));
+    let no_fill = count(|e| {
+        matches!(
+            e,
+            WarpEvent::RxDropped {
+                reason: RxDrop::NoFillFrame,
+                ..
+            }
+        )
+    });
+    let ring_full = count(|e| {
+        matches!(
+            e,
+            WarpEvent::RxDropped {
+                reason: RxDrop::RxRingFull,
+                ..
+            }
+        )
+    });
+    assert!(arrived > 2500 && launched > 2000, "{arrived} {launched}");
+    assert_eq!(nic_counters.rx_delivered, arrived);
+    assert_eq!(
+        nic_counters.harvested,
+        count(|e| matches!(e, WarpEvent::Harvested { .. }))
+    );
+    assert_eq!(nic_counters.rx_dropped_no_buffer, no_fill);
+    assert_eq!(nic_counters.rx_dropped_ring_full, ring_full);
+    assert_eq!(nic_counters.tx_submitted, launched);
+    assert_eq!(nic_counters.tx_consumed, launched);
+    assert_eq!(nic_counters.completions_posted, launched);
+    assert_eq!(nic_counters.completions, launched);
+    assert_eq!(
+        nic_counters.retired,
+        count(|e| matches!(e, WarpEvent::Retired { .. }))
+    );
+    assert_eq!(nic_counters.leaks_detected, 0);
 
     // What the source saw matches what the model delivered to it.
     let mut emitted: BTreeMap<u64, (String, u64, PacketKind)> = BTreeMap::new();
@@ -361,6 +404,26 @@ fn the_full_run_replays_byte_identically() {
     assert_eq!(&replayed, report);
 }
 
+/// Recordings of the wave-four private frame model (`umem-v1`) are rejected
+/// with an explicit version error, not replayed on the software NIC.
+#[test]
+fn recordings_of_the_retired_frame_model_are_rejected() {
+    let program = program_with("");
+    let json = small();
+    let mut recording = record(&program, &json).recording;
+    assert_eq!(recording.identity.model_semantics, WARP_MODEL_SEMANTICS);
+    assert!(WARP_MODEL_SEMANTICS.contains("umem-softnic-v1"));
+    recording.identity.model_semantics = RETIRED_WARP_MODEL_SEMANTICS.into();
+    let err = Session::replay(&program, scenario(&json), recording)
+        .err()
+        .unwrap();
+    assert!(
+        matches!(&err, SessionError::Identity(m) if m.field == "model_semantics"
+            && m.recorded.contains("umem-v1") && m.current.contains("umem-softnic-v1")),
+        "{err:?}"
+    );
+}
+
 type Mutation = Box<dyn Fn(&mut WarpEvent)>;
 
 #[test]
@@ -512,7 +575,18 @@ fn a_host_binding_that_drops_a_recycled_frame_is_caught() {
         panic!("{error:?}")
     };
     assert_eq!(task, "server");
-    assert!(message.contains("Missing"), "{message}");
+    // The broken binding dropped the frame owner: the software NIC's ledger
+    // recorded it and its audit reports the chunk as leaked.
+    assert!(message.contains("Leaked"), "{message}");
+    // The failed step was rolled back on the shared NIC: the frame is still
+    // harvested by the task and the audit passes again.
+    let snapshot = session.model_snapshot().unwrap().warp.unwrap();
+    let a = snapshot.nics["nic0"].accounting;
+    assert_eq!((a.harvested, a.total), (1, 64));
+    assert_eq!(
+        a.free + a.fill + a.rx + a.harvested + a.staged + a.leased + a.parked,
+        64
+    );
     // The recycling task's continuation is retained, not dropped.
     let stalled = session.take_stalled().unwrap();
     assert!(matches!(stalled.owner, RecoveredOwner::Suspended(_)));
@@ -523,6 +597,21 @@ fn a_host_binding_that_drops_a_recycled_frame_is_caught() {
             .iter()
             .any(|e| matches!(e, ModelEvent::Warp(WarpEvent::Recycled { .. })))
     );
+}
+
+fn run_entry_session<'w>(
+    program: &'w CheckedProgram,
+    entry: &str,
+    arguments: Json,
+) -> (Session<'w>, SessionError) {
+    let mut json = small();
+    json["tasks"][0]["entry"] = json!(entry);
+    json["tasks"][0]["arguments"] = arguments;
+    interrupted(
+        Session::record(program, scenario(&json))
+            .unwrap()
+            .run(u64::MAX),
+    )
 }
 
 fn run_entry(program: &CheckedProgram, entry: &str, arguments: Json) -> (String, SessionError) {
@@ -585,9 +674,16 @@ fn bad_len() -> u64 eff [XdpNic, RxWait] {
         matches!(&error, SessionError::Model { message, .. } if message.contains("StaleView")),
         "{error:?}"
     );
-    let (_, error) = run_entry(&program, "leak", json!([]));
+    // A leaking source program: the task returns its frame instead of
+    // consuming it. The owner is dropped and the software NIC's own audit
+    // (vesper-warp-umem's UmemAuditor) reports the leak.
+    let (mut session, error) = run_entry_session(&program, "leak", json!([]));
+    let a = session.model_snapshot().unwrap().warp.unwrap().nics["nic0"].accounting;
+    assert_eq!((a.leaked, a.harvested, a.total), (1, 0, 64));
+    assert!(session.take_stalled().is_some());
     assert!(
-        matches!(&error, SessionError::Conservation { message, .. } if message.contains("holding")),
+        matches!(&error, SessionError::Conservation { message, .. }
+            if message.contains("holding") && message.contains("Leaked { count: 1")),
         "{error:?}"
     );
     let (_, error) = run_entry(&program, "bad_len", json!([]));
