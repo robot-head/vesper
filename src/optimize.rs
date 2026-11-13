@@ -71,7 +71,7 @@ fn rules() -> Vec<Rewrite<Math, ()>> {
 fn install_proposal(
     expression: &mut Expr,
     types: &TypeMap,
-    mut proposal: RewriteProposal,
+    mut proposal: Box<RewriteProposal>,
 ) -> Result<(), WitnessError> {
     witness::verify_with_budget(
         expression,
