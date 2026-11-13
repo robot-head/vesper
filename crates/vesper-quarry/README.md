@@ -284,8 +284,11 @@ cargo run -p vesper-quarry --example quarry_durable
 ### Devices and the crash model
 
 `Device` is positional read/write/set_len/sync over two files. `FsDevice`
-uses `std::fs` (`quarry.data`, `quarry.wal`; `sync` is `File::sync_all`, and
-the directory is synced after creation on Unix). `SimDevice` is a
+uses `std::fs` (`quarry.data`, `quarry.wal`; `sync` is `File::sync_all`; on
+Unix the store directory and the parent of every directory the open created
+are synced). It holds an exclusive `File::try_lock` on `quarry.lock` for its
+lifetime, so a second open of the same directory fails with
+`DeviceError::Locked` instead of two stores writing one log. `SimDevice` is a
 deterministic crash/fsync model: writes are visible at once and durable only
 after `sync` of that file. `crash(choice)` returns the medium after a power
 loss: `LoseUnsynced`, `KeepUnsynced`, or `Subset { seed }` (a seeded subset of
@@ -305,7 +308,10 @@ LSN and payload. LSNs are consecutive record numbers from the base. Scanning
 stops at the first torn header, torn payload, oversize length, bad checksum or
 out-of-sequence LSN (`wal::TailDefect`), and recovery durably cuts the file
 there before writing anything. A frame that checks but does not decode is
-`Corrupt`, not a tail. Binding the generation into each frame's CRC makes
+`Corrupt`, not a tail. Payloads are at most 32 KiB + 64 bytes, enough for an
+update carrying two maximum-size images. A log longer than its two header
+slots with no valid header is `Corrupt` (initialization writes only the
+headers), so logged commits are never reinitialized away. Binding the generation into each frame's CRC makes
 frames left over from before a truncation invalid even if their bytes survive.
 
 Records (`wal::LogRecord`): `PageImage` (full page before its first change
@@ -343,7 +349,9 @@ images), `Compensation` (redo-only, with `undo_next`), `Commit`, `End`.
 - **Concurrency.** Up to 64 transactions; a page changed by an active
   transaction is locked to it until commit/abort (no-wait: `Conflict`).
   Readers of a locked page get `Conflict` (no dirty reads, no MVCC). This
-  page-granular exclusion is what makes undo always fit its page.
+  page-granular exclusion, plus per-page rollback accounting (an insert is
+  placed only where the page, fully rolled back, still has room for the
+  insert's slot and one-byte tombstone), is what makes undo always fit.
 - **Log space.** Each change reserves room for its compensation and each
   transaction for its `Commit`/`End`, so `LogFull` is reported before a
   rollback could run out of log. Recovery may append compensations past the

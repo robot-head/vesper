@@ -169,6 +169,11 @@ struct TxnState {
     undo: Vec<Undo>,
     reserved: u64,
     insert_page: Option<u64>,
+    /// Per page: bytes the page uses now minus the bytes it would use after
+    /// rolling this transaction back. A rollback restores shrunk records
+    /// and leaves a slot plus a one-byte tombstone per insert, so inserts
+    /// must leave room for it (see `insert_inner`).
+    rollback_slack: BTreeMap<u64, i64>,
 }
 #[derive(Debug)]
 struct Undo {
@@ -268,10 +273,12 @@ impl<D: Device> Db<D> {
         let mut report = RecoveryReport::default();
         let scan = wal::scan(&mut dev, limits.max_wal_bytes)?;
         let Some(scan) = scan else {
-            if data_len != 0 {
+            // Initialization writes only the two header slots, so a longer
+            // log without a valid header held frames: never overwrite it.
+            if data_len != 0 || dev.len(FileId::Wal)? > wal::HEADER_BYTES {
                 return Err(DbError::new(
                     DbErrorKind::Corrupt,
-                    "data file present but no valid log header",
+                    "existing store without a valid log header",
                 ));
             }
             let wal = Wal::create(&mut dev, limits.max_wal_bytes)?;
@@ -776,10 +783,17 @@ impl<D: Device> Db<D> {
             }
             self.ensure_resident(page)?;
             let pin = self.pool.fix_shared(page).map_err(pool_error)?;
-            let fits = self
-                .pool
-                .view_shared(&pin)
-                .map(|p| p.free_bytes() >= image.len() + SLOT_SIZE);
+            let slack = self.txns[&txn]
+                .rollback_slack
+                .get(&page)
+                .copied()
+                .unwrap_or(0);
+            let fits = self.pool.view_shared(&pin).map(|p| {
+                // Rolled back, the page would use `used - slack` bytes; this
+                // insert would add a slot and a one-byte tombstone to that.
+                let after_rollback = p.used_bytes() as i64 - slack + (SLOT_SIZE + 1) as i64;
+                p.free_bytes() >= image.len() + SLOT_SIZE && after_rollback <= PAGE_SIZE as i64
+            });
             self.pool
                 .unpin_clean(pin)
                 .map_err(|e| DbError::new(DbErrorKind::Corrupt, format!("pin release: {e}")))?;
@@ -832,6 +846,8 @@ impl<D: Device> Db<D> {
         state.last_lsn = lsn;
         state.reserved += clr;
         state.insert_page = Some(page);
+        // Now: payload + slot. After rollback: tombstone + slot.
+        *state.rollback_slack.entry(page).or_insert(0) += image.len() as i64 - 1;
         state.undo.push(Undo {
             prev,
             page,
@@ -909,6 +925,8 @@ impl<D: Device> Db<D> {
         let state = self.txns.get_mut(&txn).expect("active");
         state.last_lsn = lsn;
         state.reserved += clr;
+        let before_len = before.as_ref().map_or(0, Vec::len) as i64;
+        *state.rollback_slack.entry(page).or_insert(0) += image.len() as i64 - before_len;
         state.undo.push(Undo {
             prev,
             page,

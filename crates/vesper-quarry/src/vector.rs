@@ -204,6 +204,28 @@ enum Side<'a, T> {
     Slice(&'a [T]),
     One(&'a T),
 }
+impl<T> Side<'_, T> {
+    #[inline]
+    fn get(&self, i: usize) -> &T {
+        match self {
+            Side::Slice(s) => &s[i],
+            Side::One(x) => x,
+        }
+    }
+}
+/// Ordered comparison by reference: variable-length scalars are never
+/// copied per row.
+fn ord_compare<T: Ord>(op: Cmp, n: usize, a: Side<T>, b: Side<T>, nulls: &[u8]) -> Vec<u8> {
+    (0..n)
+        .map(|i| {
+            if nulls[i] == 1 {
+                0
+            } else {
+                u8::from(ordered(op, a.get(i).cmp(b.get(i))))
+            }
+        })
+        .collect()
+}
 impl<T: Copy> Side<'_, T> {
     #[inline]
     fn at(&self, i: usize) -> T {
@@ -328,12 +350,6 @@ fn compare(
             vec![1; n],
         ))));
     }
-    let to_col = |o: Operand<'_>| -> Result<Column> {
-        Ok(match o {
-            Operand::Col(c) => c.into_owned(),
-            Operand::Scalar(v) => Column::broadcast(&v, ty, n)?,
-        })
-    };
     let nulls_of = |o: &Operand<'_>| -> Vec<u8> {
         match o {
             Operand::Col(c) => c.nulls.clone(),
@@ -364,23 +380,36 @@ fn compare(
         // Finite values only, so IEEE comparison equals the row executor's
         // partial_cmp (+0 == -0).
         Some(ScalarType::F64) => fixed_compare(op, n, side!(&a, F64), side!(&b, F64)),
-        _ => {
-            let (x, y) = (to_col(a)?, to_col(b)?);
-            (0..n)
-                .map(|i| {
-                    if nulls[i] == 1 {
-                        Ok(0)
-                    } else {
-                        scalar_order(&x.value(i), &y.value(i)).map(|o| u8::from(ordered(op, o)))
-                    }
-                })
-                .collect::<Result<Vec<u8>>>()?
+        Some(ScalarType::Text) => ord_compare(op, n, side!(&a, Text), side!(&b, Text), &nulls),
+        Some(ScalarType::Bytes) => ord_compare(op, n, side!(&a, Bytes), side!(&b, Bytes), &nulls),
+        Some(ScalarType::Bool) => {
+            // Booleans are stored as 0/1 bytes; false < true matches bool's order.
+            let (mut sa, mut sb) = (0u8, 0u8);
+            let x = bool_side(&a, &mut sa)?;
+            let y = bool_side(&b, &mut sb)?;
+            fixed_compare(op, n, x, y)
         }
+        None => return Err(Error::new(ErrorKind::Type, "comparison without a type")),
     };
     for (v, &z) in val.iter_mut().zip(&nulls) {
         *v &= !z & 1;
     }
     Ok(Operand::Col(Cow::Owned(bool_column(val, nulls))))
+}
+fn bool_side<'a>(o: &'a Operand<'_>, store: &'a mut u8) -> Result<Side<'a, u8>> {
+    match o {
+        Operand::Col(c) => match &c.data {
+            Data::Bool(s) => Ok(Side::Slice(s.as_slice())),
+            _ => Err(Error::new(ErrorKind::Type, "comparison mismatch")),
+        },
+        Operand::Scalar(v) => match **v {
+            Value::Bool(b) => {
+                *store = u8::from(b);
+                Ok(Side::One(store))
+            }
+            _ => Err(Error::new(ErrorKind::Type, "comparison mismatch")),
+        },
+    }
 }
 fn scalar_order(a: &Value, b: &Value) -> Result<Ordering> {
     Ok(match (a, b) {

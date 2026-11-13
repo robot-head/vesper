@@ -603,3 +603,93 @@ fn crashes_during_recovery_recover_the_same_prefix() {
     }
     assert!(complete.states.len() > 3);
 }
+
+// ---- review regressions -------------------------------------------------
+
+#[test]
+fn inserts_leave_room_to_roll_back_a_shrinking_update() {
+    let mut dev = SimDevice::new();
+    let (mut db, _) = Db::open(&mut dev, limits(4)).unwrap();
+    let mut t = db.begin().unwrap();
+    let big = db.insert(&mut t, &vec![9; MAX_VALUE]).unwrap();
+    db.commit(t).unwrap();
+    let mut t = db.begin().unwrap();
+    db.update(&mut t, big, b"x").unwrap();
+    let small = db.insert(&mut t, b"y").unwrap();
+    assert_ne!(
+        small.page, big.page,
+        "the freed space is owed to the rollback"
+    );
+    // Another commit makes the loser's records durable before the abort.
+    let mut other = db.begin().unwrap();
+    db.insert(&mut other, b"z").unwrap();
+    db.commit(other).unwrap();
+    db.abort(t).unwrap();
+    assert_eq!(db.get(None, big).unwrap().unwrap(), vec![9; MAX_VALUE]);
+    drop(db);
+    let (mut db, _) = Db::open(&mut dev, limits(4)).unwrap();
+    assert_eq!(db.get(None, big).unwrap().unwrap(), vec![9; MAX_VALUE]);
+
+    // Same shape, rolled back by recovery instead of abort.
+    let mut t = db.begin().unwrap();
+    db.update(&mut t, big, b"x").unwrap();
+    db.insert(&mut t, b"y").unwrap();
+    let mut other = db.begin().unwrap();
+    db.insert(&mut other, b"w").unwrap();
+    db.commit(other).unwrap();
+    std::mem::forget(t);
+    drop(db);
+    let mut crashed = dev.crash(CrashChoice::KeepUnsynced);
+    let (mut db, report) = Db::open(&mut crashed, limits(4)).unwrap();
+    assert_eq!(report.rolled_back.len(), 1);
+    assert_eq!(db.get(None, big).unwrap().unwrap(), vec![9; MAX_VALUE]);
+}
+
+#[test]
+fn large_records_can_be_replaced_by_large_records() {
+    let mut dev = SimDevice::new();
+    let (mut db, _) = Db::open(&mut dev, limits(4)).unwrap();
+    let mut t = db.begin().unwrap();
+    let id = db.insert(&mut t, &vec![1; 10_000]).unwrap();
+    db.commit(t).unwrap();
+    let mut t = db.begin().unwrap();
+    db.update(&mut t, id, &vec![2; 10_000]).unwrap();
+    db.commit(t).unwrap();
+    drop(db);
+    let mut crashed = dev.crash(CrashChoice::LoseUnsynced);
+    let (mut db, _) = Db::open(&mut crashed, limits(4)).unwrap();
+    assert_eq!(db.get(None, id).unwrap().unwrap(), vec![2; 10_000]);
+}
+
+#[test]
+fn a_corrupt_header_over_logged_commits_is_never_reinitialized() {
+    let mut dev = SimDevice::new();
+    let (mut db, _) = Db::open(&mut dev, limits(4)).unwrap();
+    let mut t = db.begin().unwrap();
+    db.insert(&mut t, b"only in the log").unwrap();
+    db.commit(t).unwrap();
+    drop(db);
+    let mut crashed = dev.crash(CrashChoice::LoseUnsynced);
+    assert_eq!(crashed.len(FileId::Data).unwrap(), 0);
+    crashed.corrupt(FileId::Wal, 9, 1);
+    let err = Db::open(&mut crashed, limits(4)).unwrap_err();
+    assert_eq!(err.kind, DbErrorKind::Corrupt);
+    assert!(crashed.len(FileId::Wal).unwrap() > HEADER_BYTES, "log kept");
+}
+
+#[test]
+fn a_store_directory_cannot_be_opened_twice() {
+    let tmp = std::env::var_os("TEST_TMPDIR").map_or_else(std::env::temp_dir, Into::into);
+    let dir = tmp
+        .join(format!("vesper-quarry-lock-{}", std::process::id()))
+        .join("nested");
+    let first = FsDevice::open(&dir).unwrap();
+    assert_eq!(
+        FsDevice::open(&dir).unwrap_err(),
+        vesper_quarry::device::DeviceError::Locked
+    );
+    drop(first);
+    let (db, _) = Db::open(FsDevice::open(&dir).unwrap(), limits(2)).unwrap();
+    drop(db);
+    std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+}

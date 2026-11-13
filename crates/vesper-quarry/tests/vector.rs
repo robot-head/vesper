@@ -387,3 +387,83 @@ fn simd_mask_count_matches_portable_count() {
         assert_eq!(simd.count_ones(&mask), portable.count_ones(&mask));
     }
 }
+
+#[test]
+fn text_and_bytes_parameters_are_compared_without_per_row_copies() {
+    let mut c = HermeticCatalog::default();
+    c.apply_ddl(
+        "CREATE TABLE t (s TEXT, b BYTES, f BOOL)",
+        Limits::default(),
+    )
+    .unwrap();
+    let mut d = DataSet::new(&c);
+    let rows: Vec<Vec<Value>> = (0..1024)
+        .map(|i| {
+            vec![
+                Value::Text(format!("{i}")),
+                Value::Bytes(vec![i as u8]),
+                Value::Bool(i % 2 == 0),
+            ]
+        })
+        .collect();
+    d.set_rows("t", &rows, Limits::default()).unwrap();
+    let defs = [
+        ParamDef {
+            name: "s".into(),
+            ty: ScalarType::Text,
+            nullable: false,
+        },
+        ParamDef {
+            name: "b".into(),
+            ty: ScalarType::Bytes,
+            nullable: false,
+        },
+        ParamDef {
+            name: "f".into(),
+            ty: ScalarType::Bool,
+            nullable: false,
+        },
+    ];
+    let q = c
+        .prepare(
+            "SELECT s FROM t WHERE (s < :s OR b >= :b) AND f = :f",
+            &defs,
+            Limits::default(),
+        )
+        .unwrap();
+    // A 3 MiB parameter: broadcasting it per row would need gigabytes.
+    let binds = BTreeMap::from([
+        ("s".to_string(), Value::Text("5".repeat(3 << 20))),
+        ("b".to_string(), Value::Bytes(vec![200; 16])),
+        ("f".to_string(), Value::Bool(true)),
+    ]);
+    // The row executor's work budget rejects this; compute the answer directly.
+    let big = "5".repeat(3 << 20);
+    let expected: Vec<Vec<Value>> = rows
+        .iter()
+        .filter(|r| {
+            let (Value::Text(s), Value::Bytes(b), Value::Bool(f)) = (&r[0], &r[1], &r[2]) else {
+                unreachable!()
+            };
+            (s.as_str() < big.as_str() || b.as_slice() >= &[200u8; 16][..]) && *f
+        })
+        .map(|r| vec![r[0].clone()])
+        .collect();
+    let got = q
+        .execute_vectorized(&c, &d, &binds, &VectorEngine::detect())
+        .unwrap();
+    assert_eq!(got.rows, expected);
+    assert!(!got.rows.is_empty());
+    // Small parameters: equal to the row executor too.
+    let small = BTreeMap::from([
+        ("s".to_string(), Value::Text("5".into())),
+        ("b".to_string(), Value::Bytes(vec![200])),
+        ("f".to_string(), Value::Bool(false)),
+    ]);
+    assert_eq!(
+        q.execute_vectorized(&c, &d, &small, &VectorEngine::portable())
+            .unwrap()
+            .rows,
+        q.execute(&c, &d, &small).unwrap().rows
+    );
+}

@@ -24,8 +24,9 @@ use crate::page::{crc32c, crc32c_update, PAGE_SIZE};
 pub const HEADER_BYTES: u64 = 64;
 const MAGIC: &[u8; 8] = b"QRYWAL01";
 const FRAME_HEADER: usize = 16;
-/// The largest payload is a full page image plus its tag and page id.
-pub const MAX_PAYLOAD: usize = PAGE_SIZE + 64;
+/// The largest payload: an update carrying before and after images of up
+/// to a page each, plus fixed fields (a full page image is smaller).
+pub const MAX_PAYLOAD: usize = 2 * PAGE_SIZE + 64;
 
 /// One logged action. Slot images include Quarry's one-byte record tag
 /// (`1` live, `0` tombstone).

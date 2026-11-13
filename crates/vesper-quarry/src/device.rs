@@ -32,6 +32,8 @@ pub enum DeviceError {
     Crashed,
     /// A read went past the end of the file.
     ShortRead,
+    /// Another open device holds the store's lock.
+    Locked,
     /// A host I/O error (message from the OS).
     Io(String),
 }
@@ -40,6 +42,7 @@ impl fmt::Display for DeviceError {
         match self {
             Self::Crashed => f.write_str("device crashed"),
             Self::ShortRead => f.write_str("read past end of file"),
+            Self::Locked => f.write_str("store is locked by another open handle"),
             Self::Io(e) => write!(f, "I/O error: {e}"),
         }
     }
@@ -79,16 +82,27 @@ impl<T: Device + ?Sized> Device for &mut T {
 
 /// `quarry.data` and `quarry.wal` in one directory, using `std::fs`.
 ///
-/// `sync` is `File::sync_all`. On Unix the directory is also synced once
-/// after the files are created so that their names are durable. Whether the
-/// OS and disk honour these barriers is outside this crate's control.
+/// `sync` is `File::sync_all`. On Unix the store directory is synced after
+/// the files are created, and so is the parent of every directory this call
+/// created, so that the names are durable. An exclusive advisory lock on
+/// `quarry.lock` (`File::try_lock`) is held for the device's lifetime: a
+/// second open of the same directory fails with `DeviceError::Locked`
+/// instead of letting two stores write one log. Whether the OS and disk
+/// honour these barriers and locks is outside this crate's control.
 #[derive(Debug)]
 pub struct FsDevice {
     files: [std::fs::File; 2],
+    _lock: std::fs::File,
 }
 impl FsDevice {
     pub fn open(dir: &std::path::Path) -> Result<Self, DeviceError> {
         let io = |e: std::io::Error| DeviceError::Io(e.to_string());
+        // Directories that do not exist yet, outermost first.
+        let mut created: Vec<&std::path::Path> = dir
+            .ancestors()
+            .take_while(|a| !a.as_os_str().is_empty() && !a.exists())
+            .collect();
+        created.reverse();
         std::fs::create_dir_all(dir).map_err(io)?;
         let open = |name: &str| {
             std::fs::OpenOptions::new()
@@ -99,12 +113,29 @@ impl FsDevice {
                 .open(dir.join(name))
                 .map_err(io)
         };
+        let lock = open("quarry.lock")?;
+        lock.try_lock().map_err(|e| match e {
+            std::fs::TryLockError::WouldBlock => DeviceError::Locked,
+            std::fs::TryLockError::Error(e) => io(e),
+        })?;
         let files = [open("quarry.data")?, open("quarry.wal")?];
         #[cfg(unix)]
-        std::fs::File::open(dir)
-            .and_then(|d| d.sync_all())
-            .map_err(io)?;
-        Ok(Self { files })
+        {
+            let sync_dir = |d: &std::path::Path| {
+                std::fs::File::open(d)
+                    .and_then(|d| d.sync_all())
+                    .map_err(io)
+            };
+            sync_dir(dir)?;
+            for d in &created {
+                if let Some(parent) = d.parent().filter(|p| !p.as_os_str().is_empty()) {
+                    sync_dir(parent)?;
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = &created;
+        Ok(Self { files, _lock: lock })
     }
 }
 impl Device for FsDevice {

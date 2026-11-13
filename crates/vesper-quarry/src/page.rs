@@ -155,6 +155,15 @@ impl SlottedPage {
         usize::from(read_u16(self.bytes.as_slice(), 22))
             - (HEADER_SIZE + self.slot_count() * SLOT_SIZE)
     }
+    /// Header, directory and live record bytes; `PAGE_SIZE - used_bytes()`
+    /// is what an update (which compacts) can still use.
+    pub fn used_bytes(&self) -> usize {
+        let records: usize = (0..self.slot_count())
+            .filter_map(|i| slot_range(self.bytes.as_slice(), i).ok())
+            .map(|r| r.len())
+            .sum();
+        HEADER_SIZE + self.slot_count() * SLOT_SIZE + records
+    }
     pub fn read(&self, slot: u16) -> Result<&[u8], PageError> {
         if usize::from(slot) >= self.slot_count() {
             return Err(PageError::SlotOutOfBounds);
