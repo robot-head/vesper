@@ -735,10 +735,14 @@ pub(super) fn build_candidate(
     origins.resize(terms.len(), false);
     origins[root as usize] = true;
     for id in (0..terms.len()).rev() {
+        budget.work(1)?;
         if !origins[id] {
             continue;
         }
         if let Some((wrapping, op, children)) = binary(terms[id].node) {
+            if wrapping {
+                budget.work(source.origins.len())?;
+            }
             if wrapping && source.origin(op).is_none() {
                 return Err(WitnessError::InvalidIntrinsicOrigin);
             }
@@ -749,6 +753,9 @@ pub(super) fn build_candidate(
     }
     let mut stack = Vec::new();
     let mut values: Vec<Expr> = Vec::new();
+    // Prepay every possible origin-inventory scan during expanded construction
+    // before the first name/callee/payload allocation is materialized.
+    budget.work(mul(shape.nodes, source.origins.len())?)?;
     budget.reserve(&mut stack, add(mul(shape.nodes, 2)?, 1)?)?;
     budget.reserve(&mut values, shape.nodes)?;
     stack.push(BuildFrame::Enter(root));
@@ -1013,9 +1020,10 @@ pub(super) fn verify_with_budget(
     }
     limit(certificate.terms.len(), budget.limits.max_terms)?;
     limit(certificate.proofs.len(), budget.limits.max_proofs)?;
-    budget.metadata(mul(certificate.proofs.len(), size_of::<Equality>())?)?;
+    budget.metadata(mul(certificate.proofs.capacity(), size_of::<Equality>())?)?;
+    budget.metadata(mul(certificate.terms.capacity(), size_of::<Term>())?)?;
     let bound = bind_source(source, types, budget)?;
-    let _shapes = validate_terms(&bound, &certificate.terms, budget)?;
+    let shapes = validate_terms(&bound, &certificate.terms, budget)?;
     term(&certificate.terms, certificate.input)?;
     term(&certificate.terms, certificate.output)?;
     compare_input(&bound, &certificate.terms, certificate.input, budget)?;
@@ -1079,6 +1087,12 @@ pub(super) fn verify_with_budget(
     if conclusion.from != certificate.input || conclusion.to != certificate.output {
         return Err(WitnessError::InvalidEquality);
     }
+    // Public callers may supply a candidate allocated before entering the
+    // checker. Its logical represented data still counts with checker scratch.
+    let output_shape = shapes[certificate.output as usize];
+    limit(output_shape.nodes, budget.limits.max_output_nodes)?;
+    limit(output_shape.names, budget.limits.max_name_bytes)?;
+    budget.metadata(add(output_shape.bytes, size_of::<Expr>())?)?;
     compare_output(
         &bound,
         candidate,
