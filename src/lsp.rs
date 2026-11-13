@@ -1,24 +1,120 @@
-//! Bounded synchronous stdio language server over open in-memory buffers.
+//! Bounded stdio language server over open in-memory buffers.
+//!
+//! One reader thread frames client input; the session itself stays on the
+//! calling thread, so requests are handled in arrival order. Proof audits run
+//! on worker threads and answer later; `$/cancelRequest` answers a still
+//! pending request with `RequestCancelled` exactly once and stops its job.
 pub mod actions;
+mod lens;
+#[cfg(test)]
+mod lens_tests;
 pub mod macro_preview;
 pub mod navigation;
+mod proof_lens;
 mod search;
 mod session;
 
 use serde_json::json;
-use std::io::{BufRead, Write};
-use vesper_lsp::{
-    Envelope, ProtocolErrorKind, ProtocolLimits, ResponsePayload, encode_frame, parse_envelope,
-    read_frame,
+pub use session::LensConfig;
+use std::{
+    io::{BufRead, Write},
+    sync::mpsc,
+    thread,
 };
+use vesper_lsp::{
+    Envelope, Id, ProtocolErrorKind, ProtocolLimits, ResponsePayload, encode_frame,
+    lens::{CancelToken, PendingRequests, ProofStatus, cancel_params},
+    parse_envelope, read_frame,
+};
+
+const REQUEST_CANCELLED: i32 = -32800;
+/// Frames read ahead of the session. A full queue stops the reader, so a
+/// burst or a stalled client keeps the old read-one-handle-one backpressure.
+const READ_AHEAD: usize = 8;
+
+enum Event {
+    Frame(Vec<u8>),
+    Fatal(String),
+    Eof,
+    Proof {
+        id: Id,
+        token: CancelToken,
+        job: Box<proof_lens::Job>,
+        status: Option<ProofStatus>,
+    },
+}
 
 /// Serve framed JSON-RPC without treating document URIs as filesystem access.
 /// Framing errors terminate the stream; a rejected body has a known boundary
 /// and receives a bounded error before the next frame is read.
-pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), String> {
+pub fn serve<R: BufRead + Send + 'static>(reader: R, writer: impl Write) -> Result<(), String> {
+    serve_with(reader, writer, LensConfig::default())
+}
+
+/// [`serve`] with explicit server-side Lens configuration.
+pub fn serve_with<R: BufRead + Send + 'static>(
+    mut reader: R,
+    mut writer: impl Write,
+    config: LensConfig,
+) -> Result<(), String> {
     let limits = ProtocolLimits::default();
-    let mut session = session::Session::new()?;
-    while let Some(body) = read_frame(&mut reader, limits).map_err(|e| e.to_string())? {
+    let mut session = session::Session::with_config(config)?;
+    let mut pending = PendingRequests::new(64).map_err(|e| e.to_string())?;
+    let (events, inbox) = mpsc::sync_channel(READ_AHEAD);
+    let input = events.clone();
+    // Detached: a blocked read must not keep `exit` from returning.
+    thread::spawn(move || {
+        loop {
+            let event = match read_frame(&mut reader, limits) {
+                Ok(Some(body)) => Event::Frame(body),
+                Ok(None) => Event::Eof,
+                Err(error) => Event::Fatal(error.to_string()),
+            };
+            let last = !matches!(event, Event::Frame(_));
+            if input.send(event).is_err() || last {
+                return;
+            }
+        }
+    });
+    let finish = |pending: &mut PendingRequests| {
+        for id in pending.cancel_all() {
+            drop(id);
+        }
+    };
+    while let Ok(event) = inbox.recv() {
+        let body = match event {
+            Event::Frame(body) => body,
+            Event::Eof => {
+                finish(&mut pending);
+                return Ok(());
+            }
+            Event::Fatal(error) => {
+                finish(&mut pending);
+                return Err(error);
+            }
+            Event::Proof {
+                id,
+                token,
+                job,
+                status,
+            } => {
+                if pending.finish(&id, &token) {
+                    let payload = match status {
+                        Some(status) => ResponsePayload::Result(session.finish_proof(&job, status)),
+                        None => cancelled(),
+                    };
+                    send(
+                        &mut writer,
+                        Envelope::Response {
+                            id: Some(id),
+                            payload,
+                        },
+                        limits,
+                    )?;
+                }
+                continue;
+            }
+        };
         let message = match parse_envelope(&body, limits) {
             Ok(message) => message,
             Err(error) => {
@@ -42,6 +138,44 @@ pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Str
             }
         };
         match message {
+            Envelope::Request { id, method, params } if method == "workspace/executeCommand" => {
+                let payload = match session.execute_command(params) {
+                    Ok(session::CommandOutcome::Done(value)) => ResponsePayload::Result(value),
+                    Ok(session::CommandOutcome::Run(job)) => match pending.begin(id.clone()) {
+                        Ok(token) => {
+                            let events = events.clone();
+                            thread::spawn(move || {
+                                let status = proof_lens::run(&job, &token);
+                                let _ = events.send(Event::Proof {
+                                    id,
+                                    token,
+                                    job: Box::new(job),
+                                    status,
+                                });
+                            });
+                            continue;
+                        }
+                        Err(error) => ResponsePayload::Error {
+                            code: -32600,
+                            message: error.to_string(),
+                            data: None,
+                        },
+                    },
+                    Err(error) => ResponsePayload::Error {
+                        code: error.code,
+                        message: error.message,
+                        data: error.data,
+                    },
+                };
+                send(
+                    &mut writer,
+                    Envelope::Response {
+                        id: Some(id),
+                        payload,
+                    },
+                    limits,
+                )?;
+            }
             Envelope::Request { id, method, params } => {
                 let payload = match session.request(&method, params) {
                     Ok(value) => ResponsePayload::Result(value),
@@ -60,6 +194,21 @@ pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Str
                     limits,
                 )?;
             }
+            Envelope::Notification { method, params } if method == "$/cancelRequest" => {
+                // An answered or unknown ID is ignored, as the protocol allows.
+                if let Ok(id) = cancel_params(params.as_ref())
+                    && pending.cancel(&id)
+                {
+                    send(
+                        &mut writer,
+                        Envelope::Response {
+                            id: Some(id),
+                            payload: cancelled(),
+                        },
+                        limits,
+                    )?;
+                }
+            }
             Envelope::Notification { method, params } => {
                 match session.notification(&method, params) {
                     Ok(session::NotificationOutcome::Continue(messages)) => {
@@ -68,6 +217,7 @@ pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Str
                         }
                     }
                     Ok(session::NotificationOutcome::Exit { clean }) => {
+                        finish(&mut pending);
                         return if clean {
                             Ok(())
                         } else {
@@ -93,6 +243,14 @@ pub fn serve(mut reader: impl BufRead, mut writer: impl Write) -> Result<(), Str
         }
     }
     Ok(())
+}
+
+fn cancelled() -> ResponsePayload {
+    ResponsePayload::Error {
+        code: REQUEST_CANCELLED,
+        message: "Request cancelled".into(),
+        data: None,
+    }
 }
 
 fn send(writer: &mut impl Write, message: Envelope, limits: ProtocolLimits) -> Result<(), String> {
@@ -126,7 +284,7 @@ fn send(writer: &mut impl Write, message: Envelope, limits: ProtocolLimits) -> R
 mod tests {
     use super::*;
     use std::io::Cursor;
-    use vesper_lsp::{Id, read_message};
+    use vesper_lsp::read_message;
 
     #[test]
     fn oversized_result_returns_one_bounded_error_with_original_id() {

@@ -4206,6 +4206,8 @@ dependencies = [
  "serde",
  "serde_json",
  "vesper-core",
+ "vesper-ffi",
+ "vesper-simpulse",
  "vesper-syntax",
 ]
 
