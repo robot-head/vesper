@@ -139,3 +139,60 @@ fn random_programs_differential() {
     assert!(programs * 100 >= seeds * 90);
     assert!(dp_total * 4 < ex_total);
 }
+
+/// Reads a flag and fails if it is unset, or sets it.
+struct Flag {
+    reader: bool,
+}
+impl vesper_crucible::SimFiber<bool> for Flag {
+    fn footprint(&self) -> vesper_crucible::Footprint {
+        if self.reader {
+            vesper_crucible::Footprint::none().read(0)
+        } else {
+            vesper_crucible::Footprint::none().write(0)
+        }
+    }
+    fn step(
+        &mut self,
+        flag: &mut bool,
+        cx: &mut vesper_crucible::StepCx,
+    ) -> Result<vesper_crucible::SimStep, vesper_crucible::PropError> {
+        if self.reader {
+            cx.read(0);
+            if !*flag {
+                return Err(vesper_crucible::PropError::fail("unset", "flag not set"));
+            }
+        } else {
+            cx.write(0);
+            *flag = true;
+        }
+        Ok(vesper_crucible::SimStep::Done)
+    }
+}
+
+#[test]
+fn a_failing_step_still_reverses_its_races() {
+    // Review regression: the failure ended the execution before its race
+    // with the writer was analysed, so DPOR never ran the writer first.
+    let cfg = ExploreConfig::default();
+    let setup = || (false, vec![Flag { reader: true }, Flag { reader: false }]);
+    let ex = explore_exhaustive(&cfg, setup, |f: &bool| Ok(*f)).unwrap();
+    let dp = explore_dpor(&cfg, setup, |f: &bool| Ok(*f)).unwrap();
+    same_outcomes(&ex, &dp);
+    assert_eq!(dp.outcomes.len(), 2);
+    assert!(dp.first_failure().is_some());
+}
+
+#[test]
+fn wake_identities_do_not_depend_on_the_interleaving() {
+    // Review regression: SimPulse's completion IDs come from one shared
+    // counter, so exposing them made disjoint sleepers order-dependent.
+    // Fibers see per-fiber sequence numbers instead.
+    let program = vec![
+        vec![Op::Sleep(10), Op::Write(0)],
+        vec![Op::Sleep(10), Op::Write(1)],
+    ];
+    let (ex, dp) = both(&program);
+    same_outcomes(&ex, &dp);
+    assert_eq!(ex.outcomes.len(), 1);
+}

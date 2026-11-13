@@ -128,3 +128,23 @@ fn a_leaked_linear_payload_fails_the_execution_and_is_counted() {
     });
     assert_eq!(verdict, Verdict::Invalid(Invalid::Overrun));
 }
+
+#[test]
+fn an_execution_that_unwinds_does_not_leak_into_the_next() {
+    // Review regression: a panicking property skipped the reset.
+    let mut arena = VirtualArena::with_bytes(64).unwrap();
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        arena.run_replay(&[], |_, region| {
+            region.alloc_bytes(64, 1).unwrap();
+            panic!("property panicked");
+        })
+    }));
+    assert!(caught.is_err());
+    let verdict = arena.run_replay(&[1, 7, 0], |src, region| {
+        assert_eq!(region.stats().used_bytes, 0);
+        let b = draw_region_bytes(src, region, 4)?;
+        assert_eq!(region.bytes(&b).unwrap(), &[7]);
+        Ok(())
+    });
+    assert_eq!(verdict, Verdict::Pass);
+}

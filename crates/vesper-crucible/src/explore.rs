@@ -33,6 +33,32 @@ use std::collections::BTreeMap;
 use std::fmt;
 use vesper_simpulse::{CompletionId, IoResult, Journal, Simulator, TaskId, TaskState, WakeReason};
 
+/// Why a fiber was woken, with schedule-independent identities.
+///
+/// SimPulse numbers completions from one counter shared by all fibers, so
+/// its `CompletionId`s depend on the interleaving and would make otherwise
+/// independent steps observably order-dependent. Steps see per-fiber
+/// sequence numbers instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wake {
+    Start,
+    Yield,
+    /// The fiber's `seq`-th timer or scheduled I/O fired as a timer.
+    Timer {
+        seq: u32,
+    },
+    /// The fiber's `seq`-th timer-backed (scheduled) I/O completed.
+    ScheduledIo {
+        seq: u32,
+        result: IoResult,
+    },
+    /// The fiber's `seq`-th external I/O was delivered.
+    ExternalIo {
+        seq: u32,
+        result: IoResult,
+    },
+}
+
 /// A shared-state object a fiber step reads or writes (chosen by the test).
 pub type ObjId = u64;
 
@@ -143,7 +169,7 @@ pub enum SimStep {
 #[derive(Debug)]
 pub struct StepCx {
     task: usize,
-    reason: WakeReason,
+    reason: Wake,
     now_ns: u64,
     accesses: Vec<Access>,
 }
@@ -155,8 +181,8 @@ impl StepCx {
     }
 
     /// Why SimPulse woke this fiber: start, yield, its timer, or its I/O
-    /// completion with the result.
-    pub fn reason(&self) -> WakeReason {
+    /// completion with the result, identified per fiber (see [`Wake`]).
+    pub fn reason(&self) -> Wake {
         self.reason
     }
 
@@ -355,6 +381,8 @@ pub(crate) struct Machine<W, F> {
     io_seq: Vec<u32>,
     external: BTreeMap<(usize, u32), (CompletionId, IoResult)>,
     waiting_external: Vec<bool>,
+    /// Per-fiber identity of every completion SimPulse allocated.
+    completions: BTreeMap<CompletionId, (u32, bool)>,
     /// The pending timer or scheduled I/O of each fiber: (seq, deadline).
     timers: Vec<Option<(u32, u64)>>,
     timer_seq: Vec<u32>,
@@ -390,6 +418,7 @@ impl<W, F: SimFiber<W>> Machine<W, F> {
             io_seq: vec![0; n],
             external: BTreeMap::new(),
             waiting_external: vec![false; n],
+            completions: BTreeMap::new(),
             timers: vec![None; n],
             timer_seq: vec![0; n],
             deferrals: 0,
@@ -513,7 +542,7 @@ impl<W, F: SimFiber<W>> Machine<W, F> {
         }
     }
 
-    fn arm(&mut self, i: usize, delay_ns: u64) -> Result<(), ExploreError> {
+    fn arm(&mut self, i: usize, delay_ns: u64) -> Result<u32, ExploreError> {
         let deadline = self
             .sim
             .now_ns()
@@ -524,7 +553,7 @@ impl<W, F: SimFiber<W>> Machine<W, F> {
             .checked_add(1)
             .ok_or_else(|| sim_err("timer sequence exhausted"))?;
         self.timers[i] = Some((seq, deadline));
-        Ok(())
+        Ok(seq)
     }
 
     fn step_task(&mut self, i: usize) -> Result<(), StepError> {
@@ -541,7 +570,22 @@ impl<W, F: SimFiber<W>> Machine<W, F> {
             self.deferrals += 1;
             self.sim.yield_task(token).map_err(|e| sim_err(e.error))?;
         };
-        let reason = self.reasons[i].take().unwrap_or(token.reason());
+        let raw = self.reasons[i].take().unwrap_or(token.reason());
+        let ident = |c: &CompletionId| {
+            self.completions
+                .get(c)
+                .copied()
+                .ok_or_else(|| sim_err("wake for an unknown completion"))
+        };
+        let reason = match raw {
+            WakeReason::Start => Wake::Start,
+            WakeReason::Yield => Wake::Yield,
+            WakeReason::Timer(c) => Wake::Timer { seq: ident(&c)?.0 },
+            WakeReason::Io { completion, result } => match ident(&completion)? {
+                (seq, true) => Wake::ExternalIo { seq, result },
+                (seq, false) => Wake::ScheduledIo { seq, result },
+            },
+        };
         let declared = self.fibers[i].footprint();
         let mut cx = StepCx {
             task: i,
@@ -554,7 +598,14 @@ impl<W, F: SimFiber<W>> Machine<W, F> {
         if let Some(&access) = cx.accesses.iter().find(|&&a| !declared.permits(a)) {
             return Err(ExploreError::Footprint { task: i, access }.into());
         }
-        let next = result.map_err(StepError::Prop)?;
+        let next = match result {
+            Ok(next) => next,
+            Err(e) => {
+                // Retire the failed fiber so the other fibers can go on.
+                self.sim.finish(token).map_err(|e| sim_err(e.error))?;
+                return Err(StepError::Prop(e));
+            }
+        };
         let transition = match next {
             SimStep::Yield => self.sim.yield_task(token),
             SimStep::Done => self.sim.finish(token).map(drop),
@@ -562,12 +613,16 @@ impl<W, F: SimFiber<W>> Machine<W, F> {
                 return Err(ExploreError::ZeroDelay { task: i }.into());
             }
             SimStep::Sleep { ns } => {
-                self.arm(i, ns)?;
-                self.sim.sleep(token, ns).map(drop)
+                let seq = self.arm(i, ns)?;
+                self.sim.sleep(token, ns).map(|c| {
+                    self.completions.insert(c, (seq, false));
+                })
             }
             SimStep::Io(IoRequest::Scheduled { delay_ns, result }) => {
-                self.arm(i, delay_ns)?;
-                self.sim.schedule_io(token, delay_ns, result).map(drop)
+                let seq = self.arm(i, delay_ns)?;
+                self.sim.schedule_io(token, delay_ns, result).map(|c| {
+                    self.completions.insert(c, (seq, false));
+                })
             }
             SimStep::Io(IoRequest::External { result }) => match self.sim.park_io(token) {
                 Ok(completion) => {
@@ -576,6 +631,7 @@ impl<W, F: SimFiber<W>> Machine<W, F> {
                         .checked_add(1)
                         .ok_or_else(|| sim_err("external I/O sequence exhausted"))?;
                     self.external.insert((i, seq), (completion, result));
+                    self.completions.insert(completion, (seq, true));
                     self.waiting_external[i] = true;
                     Ok(())
                 }

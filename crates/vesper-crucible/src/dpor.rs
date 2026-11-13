@@ -31,9 +31,13 @@ use crate::explore::{
 use crate::source::{Failure, PropError};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// The final outcome of one execution: the observer's value for a completed
-/// run, or the failure that stopped it.
-pub type Outcome<O> = Result<O, Failure>;
+/// The final outcome of one execution: the observer's value, or every
+/// failure that happened in it (sorted). A fiber whose step fails is
+/// retired and the other fibers run on, so the set of failures is the same
+/// for every interleaving of one Mazurkiewicz trace; reporting only the
+/// first failure would depend on which of two independent failing steps
+/// happened to run first.
+pub type Outcome<O> = Result<O, Vec<Failure>>;
 
 /// What a systematic exploration found.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,11 +59,14 @@ impl<O: Ord> Exploration<O> {
         self.outcomes.keys().collect()
     }
 
-    /// The first failure found, with its schedule.
+    /// A failure found, with the schedule of its execution.
     pub fn first_failure(&self) -> Option<(&Failure, &[Proc])> {
-        self.outcomes
-            .iter()
-            .find_map(|(o, s)| o.as_ref().err().map(|f| (f, s.as_slice())))
+        self.outcomes.iter().find_map(|(o, s)| {
+            o.as_ref()
+                .err()
+                .and_then(|f| f.first())
+                .map(|f| (f, s.as_slice()))
+        })
     }
 }
 
@@ -214,16 +221,12 @@ where
         // Re-execute the recorded prefix.
         let (world, fibers) = setup();
         let mut m = Machine::new(world, fibers, config.seed)?;
+        let mut failures: Vec<Failure> = Vec::new();
         for e in &events {
             match m.execute(e.proc) {
                 Ok(()) => {}
                 Err(StepError::Explore(err)) => return Err(err),
-                Err(StepError::Prop(p)) => {
-                    return Err(ExploreError::Nondeterministic(format!(
-                        "recorded prefix step {} failed on re-execution: {p:?}",
-                        e.proc
-                    )));
-                }
+                Err(StepError::Prop(p)) => failures.push(failure_of(p)?),
             }
             out.transitions += 1;
         }
@@ -238,9 +241,13 @@ where
         let leaf: Option<Outcome<O>> = loop {
             let d = events.len();
             if m.complete() {
+                if !failures.is_empty() {
+                    failures.sort();
+                    break Some(Err(std::mem::take(&mut failures)));
+                }
                 break Some(match observe(&m.world) {
                     Ok(o) => Ok(o),
-                    Err(e) => Err(failure_of(e)?),
+                    Err(e) => Err(vec![failure_of(e)?]),
                 });
             }
             if d >= config.max_depth {
@@ -312,7 +319,7 @@ where
             match result {
                 Ok(()) => {}
                 Err(StepError::Explore(err)) => return Err(err),
-                Err(StepError::Prop(e)) => break Some(Err(failure_of(e)?)),
+                Err(StepError::Prop(e)) => failures.push(failure_of(e)?),
             }
             // A newly created delivery or timer process starts after the
             // step that submitted or armed it.

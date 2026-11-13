@@ -2,7 +2,7 @@
 #![allow(dead_code)]
 
 use vesper_crucible::{
-    Footprint, IoRequest, IoResult, PropError, SimFiber, SimStep, SplitMix64, StepCx, WakeReason,
+    Footprint, IoRequest, IoResult, PropError, SimFiber, SimStep, SplitMix64, StepCx, Wake,
 };
 
 // ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ impl SimFiber<Rpc> for RpcFiber {
                         result: IoResult::Success { bytes: 8 },
                     }));
                 }
-                assert!(matches!(cx.reason(), WakeReason::Io { .. }));
+                assert!(matches!(cx.reason(), Wake::ExternalIo { seq: 0, .. }));
                 cx.write(PENDING);
                 cx.read(TIMED_OUT);
                 w.pending = false;
@@ -71,7 +71,7 @@ impl SimFiber<Rpc> for RpcFiber {
                     *pc = 1;
                     return Ok(SimStep::Sleep { ns: *timeout_ns });
                 }
-                assert!(matches!(cx.reason(), WakeReason::Timer(_)));
+                assert!(matches!(cx.reason(), Wake::Timer { seq: 0 }));
                 cx.write(PENDING);
                 if w.pending {
                     cx.write(TIMED_OUT);
@@ -127,6 +127,8 @@ pub enum Op {
     Update(u64),
     /// A step with no shared access.
     Local,
+    /// Read a cell and fail the run if its value is odd.
+    Check(u64),
     Sleep(u64),
     Scheduled(u64),
     External(u64),
@@ -162,7 +164,7 @@ impl SimFiber<Cells> for OpFiber {
     fn footprint(&self) -> Footprint {
         let fp = Footprint::none().write(acc_obj(self.id));
         match self.ops.get(self.pc) {
-            Some(Op::Read(c)) => fp.read(*c),
+            Some(Op::Read(c) | Op::Check(c)) => fp.read(*c),
             Some(Op::Write(c) | Op::Update(c)) => fp.write(*c),
             _ => fp,
         }
@@ -172,10 +174,10 @@ impl SimFiber<Cells> for OpFiber {
         let me = self.id;
         cx.write(acc_obj(me));
         let reason = match cx.reason() {
-            WakeReason::Start => 1,
-            WakeReason::Yield => 2,
-            WakeReason::Timer(_) => 3,
-            WakeReason::Io { result, .. } => match result {
+            Wake::Start => 1,
+            Wake::Yield => 2,
+            Wake::Timer { seq } => 3 + 7 * u64::from(seq),
+            Wake::ScheduledIo { result, .. } | Wake::ExternalIo { result, .. } => match result {
                 IoResult::Success { bytes } => 10 + bytes,
                 IoResult::Error { code } => 1000 + code.unsigned_abs() as u64,
                 IoResult::Cancelled => 4,
@@ -203,6 +205,13 @@ impl SimFiber<Cells> for OpFiber {
                 SimStep::Yield
             }
             Op::Local => SimStep::Yield,
+            Op::Check(c) => {
+                cx.read(c);
+                if w.cells[c as usize] % 2 == 1 {
+                    return Err(PropError::fail("odd", format!("cell {c} by fiber {me}")));
+                }
+                SimStep::Yield
+            }
             Op::Sleep(ns) => SimStep::Sleep { ns },
             Op::Scheduled(ns) => SimStep::Io(IoRequest::Scheduled {
                 delay_ns: ns,
@@ -230,7 +239,8 @@ pub fn random_program(seed: u64, fibers: usize, max_ops: usize) -> Vec<Vec<Op>> 
             let mut ops: Vec<Op> = (0..n)
                 .map(|_| {
                     let cell = rng.below_inclusive(CELLS - 1);
-                    match rng.index(10) {
+                    match rng.index(11) {
+                        10 => Op::Check(cell),
                         0 | 1 => Op::Read(cell),
                         2 | 3 => Op::Write(cell),
                         4 | 5 => Op::Update(cell),

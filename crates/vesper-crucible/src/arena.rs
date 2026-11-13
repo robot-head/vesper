@@ -75,6 +75,8 @@ pub struct VirtualArena {
     region: Region,
     src: Source,
     stats: ArenaStats,
+    /// An execution started and has not been cleaned up (it unwound).
+    dirty: bool,
 }
 
 impl fmt::Debug for VirtualArena {
@@ -113,6 +115,7 @@ impl VirtualArena {
             region,
             src: Source::replay(&crate::ChoiceTape::default()),
             stats: ArenaStats::default(),
+            dirty: false,
         })
     }
 
@@ -125,7 +128,8 @@ impl VirtualArena {
         self.stats
     }
 
-    /// Bytes currently allocated in the region (0 between executions).
+    /// Bytes currently allocated in the region (0 between executions, except
+    /// after an execution that unwound; the next execution starts clean).
     pub fn used_bytes(&self) -> usize {
         self.region.stats().used_bytes
     }
@@ -145,6 +149,7 @@ impl VirtualArena {
     where
         P: FnOnce(&mut Source, &mut Region) -> Result<(), PropError>,
     {
+        self.recover();
         self.src.rearm_strict(tape);
         self.execute(prop)
     }
@@ -155,14 +160,31 @@ impl VirtualArena {
     where
         P: FnOnce(&mut Source, &mut Region) -> Result<(), PropError>,
     {
+        self.recover();
         self.src.rearm_random(prefix, seed, max_draws);
         self.execute(prop)
+    }
+
+    /// Rebuild the region if the previous execution unwound (a panicking
+    /// property caught by the caller) before its reset ran, so no execution
+    /// ever inherits another's allocations or live handles.
+    fn recover(&mut self) {
+        if !self.dirty {
+            return;
+        }
+        if self.region.reset().is_err() {
+            self.stats.linear_leaks += 1;
+            let fresh = Region::new(self.config).expect("configuration validated at construction");
+            drop(std::mem::replace(&mut self.region, fresh));
+        }
+        self.dirty = false;
     }
 
     fn execute<P>(&mut self, prop: P) -> Verdict
     where
         P: FnOnce(&mut Source, &mut Region) -> Result<(), PropError>,
     {
+        self.dirty = true;
         let result = prop(&mut self.src, &mut self.region);
         let used = self.region.stats().used_bytes;
         self.stats.executions += 1;
@@ -190,6 +212,7 @@ impl VirtualArena {
                 format!("{count} linear region payload(s) live at the end of the execution"),
             ));
         }
+        self.dirty = false;
         verdict
     }
 }

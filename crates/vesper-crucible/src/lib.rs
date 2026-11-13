@@ -51,7 +51,7 @@ pub use dpor::{Exploration, Outcome, explore_dpor, explore_exhaustive};
 pub use exec::{PANIC_KIND, Verdict};
 pub use explore::{
     Access, EXPLORE_KIND, ExploreConfig, ExploreError, Footprint, IoRequest, ObjId, Proc, SimFiber,
-    SimStep, SimTrace, StepCx, explore_random, format_schedule, replay_schedule,
+    SimStep, SimTrace, StepCx, Wake, explore_random, format_schedule, replay_schedule,
 };
 pub use fuzz::{Counterexample, FuzzConfig, FuzzReport, NONDETERMINISTIC_KIND, Strategy, fuzz};
 pub use refute::{REFUTED_KIND, Refutation, refute};

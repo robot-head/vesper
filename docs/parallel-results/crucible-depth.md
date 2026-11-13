@@ -49,7 +49,8 @@ A step returns `SimStep::{Yield, Done, Sleep { ns }, Io(IoRequest)}`, with
 `IoRequest::Scheduled { delay_ns, result }` (`Simulator::schedule_io`) or
 `IoRequest::External { result }` (`park_io`; the explorer chooses when to
 call `complete_io`). `StepCx` gives the step its wake reason (start, yield,
-timer, or I/O completion with its result) and SimPulse's virtual time, and
+timer, or I/O completion with its result, as a `Wake` with per-fiber
+sequence numbers) and SimPulse's virtual time, and
 records the step's shared accesses.
 
 In every state the machine offers the enabled `Proc`s in canonical order:
@@ -178,23 +179,24 @@ every program:
 | Lost update (2 read/update fibers + 1 independent) | 90 | 4 | 4 |
 | Requester/watchdog, buggy and fixed | 10 | 3 | as exhaustive |
 | Timers + scheduled I/O + external I/O + 3 shared cells | 3,150 | 10 | 10 |
-| 150 random programs, up to 3 ops per fiber (CI sweep) | 56,945 in total | 370 in total | equal on every program; DPOR strictly fewer on 147 |
+| 150 random programs, up to 3 ops per fiber (CI sweep) | 13,445 in total | 319 in total | equal on every program; DPOR strictly fewer on 148 |
 
 Random programs have 2 or 3 fibers. Their steps are reads, writes,
-read-modify-writes, local steps, sleeps, scheduled I/O and external I/O over
-3 cells, with deadlines that often collide. Each step folds its wake reason,
+read-modify-writes, local steps, checks that fail on an odd cell value,
+sleeps, scheduled I/O and external I/O over 3 cells, with deadlines that often collide. Each step folds its wake reason,
 virtual time and read values into a per-fiber accumulator, so outcomes tell
 schedules apart.
 
 Stress runs, in release with `VESPER_CRUCIBLE_DPOR_SEEDS`, up to 4 ops per
 fiber:
 
-- 2,933 of 3,000 programs fit the exhaustive budget (20,000 executions).
-  They took 1,620,853 exhaustive executions against 9,264 for DPOR, with
-  equal outcome sets on all of them; DPOR was strictly fewer on 2,918.
-- 11,732 of 12,000 programs fit the budget. They took 6,887,074 exhaustive
-  executions against 37,134 for DPOR, with equal outcome sets on all of
-  them; DPOR was strictly fewer on 11,680. The run took 151 s.
+- After the review fixes (see below), with failing `Check` steps in the
+  mix: 11,770 of 12,000 programs fit the exhaustive budget (20,000
+  executions). They took 6,273,874 exhaustive executions against 37,815
+  for DPOR, with equal outcome sets on all of them; DPOR was strictly fewer
+  on 11,711. The run took 135 s.
+- Before those fixes, the same sweep without failing steps (11,732
+  programs, 6,887,074 vs 37,134 executions) also agreed.
 
 Every DPOR outcome's schedule also replays to that outcome.
 
@@ -203,11 +205,16 @@ Every DPOR outcome's schedule also replays to that outcome.
 On the cloud container, Rust 1.100, isolated target directory:
 
 - `cargo fmt --all -- --check`: clean.
-- `cargo test -p vesper-crucible --locked`: 43 tests pass (13 api, 4 arena,
-  1 arena_alloc, 5 dpor, 6 explore, 6 fuzzing, 2 lean_model, 6 shrinking).
+- `cargo test -p vesper-crucible --locked`: 46 tests pass (13 api, 5 arena,
+  1 arena_alloc, 7 dpor, 6 explore, 6 fuzzing, 2 lean_model, 6 shrinking).
 - `cargo clippy --workspace --locked --all-targets -- -D warnings`:
   clean.
-- `cargo test --workspace --locked`: running; see the PR for the result.
+- `cargo test --workspace --locked --no-fail-fast` (on the first PR
+  head): 3,343 passed, 0 failed. `vesper-loom-build`'s build script finds
+  `Cargo.lock` by walking up from the target directory, so with a target
+  directory outside the checkout it needs `VLB_CARGO_LOCK=$PWD/Cargo.lock`;
+  without it its 14 cache tests fail with `UnknownFingerprint`, unrelated to
+  this lane.
 - `python3 tools/bazel/sync_build_files.py`: no BUILD changes. Bazel picks
   up the new dependency from `cargo metadata`.
 
@@ -234,6 +241,28 @@ dependencies, and no `src/**`, CI or global doc edits.
   them together anyway. This avoids redundant branching in both explorers.
 - The wave-five `run_fibers` / `Fiber` API (run/defer over SimPulse's own
   dispatch order) is kept as it was.
+
+## Review fixes (Codex review on 2d0944f)
+
+- **A failing step ended the execution before its races were analysed**, so
+  DPOR could miss schedules that avoid the failure (a reader failing on an
+  unset flag never saw the writer go first). A failed fiber is now retired
+  in SimPulse and the other fibers run on. An `Outcome` failure is the
+  sorted list of every failure in the execution, which is the same for
+  every interleaving of a trace; "first failure" was not. Regression test:
+  `a_failing_step_still_reverses_its_races`, and the random sweep now
+  includes failing steps. `explore_random` still stops at the first failure,
+  which is what fuzzing wants.
+- **A panicking property skipped the arena reset**, so a caller that caught
+  the panic and reused the arena inherited the previous execution's
+  allocations. The arena now marks an execution in progress and rebuilds or
+  resets the region before the next one. Regression test:
+  `an_execution_that_unwinds_does_not_leak_into_the_next`.
+- **SimPulse completion IDs made disjoint steps order-dependent.** They come
+  from one counter shared by all fibers, and steps could read them from the
+  wake reason. Steps now see `Wake`, with per-fiber timer and I/O sequence
+  numbers, instead of SimPulse's `WakeReason`. Regression test:
+  `wake_identities_do_not_depend_on_the_interleaving`.
 
 ## Corrections to the design text
 
