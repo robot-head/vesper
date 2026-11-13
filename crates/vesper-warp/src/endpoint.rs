@@ -141,6 +141,12 @@ const CLOSE_FRAME_CRYPTO: u64 = 0x06;
 const APP_CLOSE: u64 = u64::MAX;
 /// NEW_TOKEN tokens a client keeps (one per server name, newest kept).
 const MAX_CACHED_TOKENS: usize = 16;
+/// Bytes a coalesced long-header packet leaves for the packet after it.
+const COALESCE_RESERVE: usize = 128;
+/// RFC 9000 §20.1 APPLICATION_ERROR.
+const APPLICATION_ERROR: u64 = 0x0c;
+// Our own tokens fit wherever a peer's NEW_TOKEN token fits.
+const _: () = assert!(MAX_TOKEN_LEN <= crate::stream::MAX_NEW_TOKEN_LEN);
 
 /// Which §35.3 CID lookup to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -830,7 +836,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         conns.resize_with(config.max_connections as usize, || None);
         let buf = usize::from(config.max_datagram) + TAG_LEN;
         // Long-header frames are built after a maximal header gap.
-        let scratch_len = buf + MAX_LONG_HEADER;
+        let scratch_len = buf + MAX_LONG_HEADER + crate::stream::MAX_NEW_TOKEN_LEN + 8;
         let rx_frame = xsk.config().frame_size as usize;
         let mut endpoint = Self {
             config,
@@ -1313,6 +1319,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 }
                 PacketType::Initial | PacketType::Handshake => {
                     let datagram = if first { total } else { 0 };
+                    if !first {
+                        self.stats.coalesced_received += 1;
+                    }
                     match self.process_long_packet(&mut rest[..end], &header, datagram, now_ns) {
                         Ok(v) => processed = Some(v),
                         Err((slot, reason)) => {
@@ -1477,7 +1486,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let mut peer_close = None;
         let mut handshake_acked = false;
         let Conn {
-            recovery, streams, ..
+            recovery,
+            streams,
+            cc,
+            ..
         } = conn;
         let info = scan_payload(payload, header.packet_type, |f| {
             if failure.is_some() {
@@ -1492,10 +1504,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                             return;
                         }
                     };
+                    cc.begin_ack();
                     match recovery.on_ack_received(space, ack, delay, now_ns, &mut |ev| {
-                        record_long_event(events, ev)
+                        record_long_event(cc, space, events, ev, now_ns)
                     }) {
-                        Ok(_) => handshake_acked |= space == PnSpace::Handshake,
+                        Ok(outcome) => {
+                            handshake_acked |= space == PnSpace::Handshake;
+                            if let Err(e) = cc.end_ack(now_ns, outcome.rtt_sample) {
+                                debug_assert!(false, "BBR rejected an ACK: {e:?}");
+                            }
+                        }
                         Err(e) => failure = Some(DropReason::Recovery(e)),
                     }
                 }
@@ -1720,6 +1738,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     }
                     if pns != PnSpace::ApplicationData {
                         c.recovery.discard_space(pns, now_ns);
+                        // RFC 9002 §6.4: the space's packets leave the flight.
+                        if let Err(e) = c.cc.discard_space(pns, now_ns) {
+                            debug_assert!(false, "BBR rejected a discard: {e:?}");
+                        }
                     }
                     if space == Space::Initial {
                         self.initial_dcids.retain(|(_, h)| *h != slot);
@@ -1788,38 +1810,74 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         code
     }
 
-    /// Sends owed Initial/Handshake ACKs and pending CRYPTO data.
+    /// Whether a long-header space has an owed ACK or CRYPTO data to send.
+    fn long_wants(&self, slot: SlotHandle, space: PnSpace) -> bool {
+        let Ok(c) = self.conn(slot) else {
+            return false;
+        };
+        let Some(hs) = c.hs.as_ref() else {
+            return false;
+        };
+        let ls = &hs.spaces[if space == PnSpace::Initial { 0 } else { 1 }];
+        ls.sealer.is_some()
+            && (ls.received.ack_deadline().is_some() || c.streams.crypto(space).has_data())
+    }
+
+    /// Sends owed Initial/Handshake ACKs and pending CRYPTO data, coalescing
+    /// an Initial and a Handshake packet (and a client's 0-RTT packet) into
+    /// one datagram where they fit (RFC 9000 §12.2).
     fn flush_handshake(&mut self, slot: SlotHandle, now_ns: u64) -> Result<u32, WarpError> {
         let mut sent = 0;
         if self.conn(slot)?.error.is_some() || self.conn(slot)?.hs.is_none() {
             return Ok(sent);
         }
         self.move_pending(slot);
-        for space in [PnSpace::Initial, PnSpace::Handshake] {
-            for _ in 0..self.config.max_tracked_per_conn {
-                let c = self.conns[slot.index() as usize].as_mut().expect("live");
-                if c.error.is_some() {
-                    return Ok(sent);
-                }
-                let has_data = c.streams.crypto(space).has_data();
-                let Some(ls) = c.hs.as_mut().and_then(|h| h.long(space)) else {
-                    break;
-                };
-                if ls.sealer.is_none() {
-                    break;
-                }
-                let ack = ls.received.ack_deadline().is_some();
-                if !ack && !has_data {
-                    break;
-                }
-                match self.send_long(slot, space, LongKind::Normal, now_ns) {
-                    Ok(_) => sent += 1,
-                    Err(WarpError::AmplificationLimited) => return Ok(sent),
-                    Err(WarpError::Umem(_)) => return Ok(sent),
-                    Err(e) => return Err(e),
-                }
-                self.move_pending(slot);
+        for _ in 0..self.config.max_tracked_per_conn {
+            if self.conn(slot)?.error.is_some() {
+                return Ok(sent);
             }
+            let initial = self.long_wants(slot, PnSpace::Initial);
+            let handshake = self.long_wants(slot, PnSpace::Handshake);
+            let zero_rtt = self.zero_rtt_wants(slot, now_ns);
+            if !initial && !handshake && !zero_rtt {
+                break;
+            }
+            self.dgram_begin();
+            let mut stop = false;
+            let mut result = Ok(());
+            if initial {
+                let last = !handshake && !zero_rtt;
+                match self.send_long(slot, PnSpace::Initial, LongKind::Normal, last, now_ns) {
+                    Ok(_) => sent += 1,
+                    Err(WarpError::AmplificationLimited | WarpError::Umem(_)) => stop = true,
+                    Err(WarpError::PacketTooLarge { .. }) => {}
+                    Err(e) => result = Err(e),
+                }
+            }
+            // The client may have discarded Initial keys on this send.
+            if !stop && result.is_ok() && handshake {
+                match self.send_long(slot, PnSpace::Handshake, LongKind::Normal, !zero_rtt, now_ns) {
+                    Ok(_) => sent += 1,
+                    Err(WarpError::AmplificationLimited | WarpError::Umem(_)) => stop = true,
+                    Err(WarpError::PacketTooLarge { .. }) => {}
+                    Err(e) => result = Err(e),
+                }
+            }
+            if !stop && result.is_ok() && zero_rtt {
+                match self.send_zero_rtt(slot, now_ns) {
+                    Ok(true) => sent += 1,
+                    Ok(false) => {}
+                    Err(WarpError::Umem(_)) => stop = true,
+                    Err(_) => {}
+                }
+            }
+            let empty = self.dgram_len == 0;
+            self.dgram_finish(slot, false, now_ns);
+            result?;
+            if stop || empty {
+                break;
+            }
+            self.move_pending(slot);
         }
         Ok(sent)
     }
@@ -1841,24 +1899,29 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         for &(_, off, len) in &ls.sent {
             streams.crypto_mut(space).on_lost(off, len as usize);
         }
-        self.send_long(slot, space, LongKind::Probe, now_ns)?;
+        self.dgram_begin();
+        let out = self.send_long(slot, space, LongKind::Probe, true, now_ns);
+        self.dgram_finish(slot, false, now_ns);
+        out?;
         self.stats.probes_sent += 1;
         Ok(())
     }
 
-    /// Builds, seals and sends one Initial or Handshake packet in its own
-    /// datagram: an owed ACK, then CRYPTO data (lost ranges first), then
-    /// PING for a probe or CONNECTION_CLOSE for a close; ack-eliciting
-    /// Initials (all client Initials) are padded to 1200 bytes. Returns the
-    /// packet number.
+    /// Builds and seals one Initial or Handshake packet at the end of the
+    /// datagram being assembled (`self.dgram`): an owed ACK, then CRYPTO
+    /// data (lost ranges first), then PING for a probe or CONNECTION_CLOSE
+    /// for a close. A packet that is not `last` leaves room for the next
+    /// coalesced packet; the `last` one is padded so that a datagram
+    /// carrying a client Initial or an ack-eliciting server Initial reaches
+    /// 1200 bytes (RFC 9000 §14.1). Returns the packet number.
     fn send_long(
         &mut self,
         slot: SlotHandle,
         space: PnSpace,
         kind: LongKind,
+        last: bool,
         now_ns: u64,
     ) -> Result<u64, WarpError> {
-        let max = usize::from(self.config.max_datagram);
         let exponent = self.config.ack_delay_exponent;
         let tile = self
             .table
@@ -1866,10 +1929,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             .map_err(|_| WarpError::StaleConnection)?;
         let idx = slot.index() as usize;
         let c = self.conns[idx].as_mut().ok_or(WarpError::StaleConnection)?;
+        let max = usize::from(c.max_datagram).min(self.dgram.len());
         let largest_acked = c.recovery.largest_acked(space);
         let Conn { hs, streams, .. } = c;
         let hs = hs.as_mut().ok_or(WarpError::KeysUnavailable)?;
-        if let Some(amp) = hs.amp
+        if self.dgram_len == 0
+            && let Some(amp) = hs.amp
             && !amp.allows(max as u64)
         {
             self.stats.amplification_blocked += 1;
@@ -1879,16 +1944,34 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let mut scid = [0u8; 20];
         let scid_len = hs.local_cid().len();
         scid[..scid_len].copy_from_slice(hs.local_cid());
+        let mut token = [0u8; crate::stream::MAX_NEW_TOKEN_LEN];
+        let mut token_len = 0;
+        if client
+            && space == PnSpace::Initial
+            && let Some(t) = hs.token.as_deref()
+        {
+            token_len = t.len().min(token.len());
+            token[..token_len].copy_from_slice(&t[..token_len]);
+        }
         let ls = hs.long(space).ok_or(WarpError::KeysUnavailable)?;
         let Some(sealer) = ls.sealer.as_ref() else {
             return Err(WarpError::KeysUnavailable);
         };
-        let pn = sealer.next_packet_number();
+        // Packet numbers continue across a Retry's new Initial keys.
+        let pn = sealer.next_packet_number().max(ls.next_pn);
+        // Room left in the datagram; a coalesced successor needs some.
+        let room = max
+            .saturating_sub(self.dgram_len)
+            .saturating_sub(if last { 0 } else { COALESCE_RESERVE });
 
         // Frames after a maximal header, moved once its length is known.
         let scratch = &mut self.scratch;
-        let base = MAX_LONG_HEADER;
-        let limit = max.saturating_sub(TAG_LEN).min(scratch.len());
+        let base = MAX_LONG_HEADER + token_len + 8;
+        let header_max = base;
+        let limit = (base + room.saturating_sub(header_max + TAG_LEN)).min(scratch.len());
+        if limit <= base {
+            return Err(WarpError::PacketTooLarge { len: header_max });
+        }
         let mut at = base;
         let mut has_ack = false;
         let mut crypto = None;
@@ -1907,8 +1990,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     .received
                     .ack_frame(now_ns, exponent)
                     .map_err(|_| WarpError::Config("bad ack_delay_exponent"))?
+                    && let Ok(n) = Frame::Ack(ack).encode(&mut scratch[at..limit])
                 {
-                    at += Frame::Ack(ack).encode(&mut scratch[at..limit])?;
+                    at += n;
                     has_ack = true;
                 }
                 // Room for a PING after the CRYPTO frame.
@@ -1949,7 +2033,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 return Err(WarpError::PacketNumbersExhausted);
             }
         };
-        let pad_initial = space == PnSpace::Initial && (client || ack_eliciting);
+        if space == PnSpace::Initial && (client || ack_eliciting) {
+            self.dgram_pad = true;
+        }
+        let pad_to = if last && self.dgram_pad {
+            MIN_INITIAL_DATAGRAM.saturating_sub(self.dgram_len)
+        } else {
+            0
+        };
         let dcid = tile.peer_cid;
         let header = |payload_len: usize, pn_bytes: usize, out: &mut [u8]| {
             write_long(
@@ -1958,24 +2049,25 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     ty,
                     dcid: dcid.as_bytes(),
                     scid: &scid[..scid_len],
-                    token: &[],
+                    token: &token[..token_len],
                     full_pn: pn,
                     pn_len: PnLen::new(pn_bytes as u8).expect("1..=4 bytes"),
                     payload_len,
                 },
             )
         };
+        let dgram_len = self.dgram_len;
         let layout: Result<_, WarpError> = 'layout: {
             // The header-protection sample needs pn_len + payload >= 4.
             let mut pn_bytes = shortest.max(4usize.saturating_sub(frames_len));
             let mut pad = 0;
-            if pad_initial {
+            if pad_to > 0 {
                 pn_bytes = shortest;
-                let probe = match header(MIN_INITIAL_DATAGRAM, pn_bytes, &mut scratch[..base]) {
+                let probe = match header(pad_to, pn_bytes, &mut scratch[..base]) {
                     Ok(p) => p,
                     Err(e) => break 'layout Err(e.into()),
                 };
-                pad = MIN_INITIAL_DATAGRAM.saturating_sub(probe.header_len + frames_len + TAG_LEN);
+                pad = pad_to.saturating_sub(probe.header_len + frames_len + TAG_LEN);
             }
             if at + pad > scratch.len() {
                 break 'layout Err(WarpError::PacketTooLarge { len: at + pad });
@@ -1989,7 +2081,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             scratch.copy_within(base..base + payload, written.header_len);
             let plain_len = written.header_len + payload;
             let total = plain_len + TAG_LEN;
-            if total > max {
+            if dgram_len + total > max {
                 break 'layout Err(WarpError::PacketTooLarge { len: total });
             }
             Ok((pad, payload, written, plain_len, total))
@@ -2001,38 +2093,24 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 return Err(e);
             }
         };
-        let mut frame = match self.xsk.alloc_tx(total as u16) {
-            Ok(f) => f,
-            Err(e) => {
-                requeue(streams);
-                return Err(WarpError::Umem(e));
-            }
-        };
+        let out = &mut self.dgram[dgram_len..dgram_len + total];
+        out[..plain_len].copy_from_slice(&scratch[..plain_len]);
         let sealer = ls.sealer.as_mut().expect("checked");
         let sealed = match sealer.ticket(pn) {
             Err(e) => Err(WarpError::Crypto(e)),
-            Ok(ticket) => match self.xsk.tx_bytes_mut(&mut frame) {
-                Err(e) => {
-                    let _ = sealer.abandon(ticket);
-                    Err(WarpError::Umem(e))
-                }
-                Ok(bytes) => {
-                    bytes[..plain_len].copy_from_slice(&scratch[..plain_len]);
-                    match sealer.seal(ticket, bytes, written.pn_offset, payload) {
-                        Ok(_) => Ok(()),
-                        Err(err) => {
-                            let _ = sealer.abandon(err.ticket);
-                            Err(WarpError::Crypto(err.error))
-                        }
-                    }
+            Ok(ticket) => match sealer.seal(ticket, out, written.pn_offset, payload) {
+                Ok(_) => Ok(()),
+                Err(err) => {
+                    let _ = sealer.abandon(err.ticket);
+                    Err(WarpError::Crypto(err.error))
                 }
             },
         };
         if let Err(e) = sealed {
             requeue(streams);
-            let _ = self.xsk.abandon_tx(frame);
             return Err(e);
         }
+        ls.next_pn = pn + 1;
         let in_flight = !matches!(kind, LongKind::Close { .. }) && (ack_eliciting || pad > 0);
         let sent = recovery::SentPacket {
             pn,
@@ -2046,10 +2124,22 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             if let Some((off, len)) = crypto {
                 c.streams.crypto_mut(space).on_lost(off, len as usize);
             }
-            let _ = self.xsk.abandon_tx(frame);
             return Err(WarpError::Recovery(e));
         }
+        // Handshake packets are in BBR's flight too; they bypass its
+        // congestion-window guard (the handshake must progress).
+        if let Err(e) = c.cc.on_packet_sent_in(space, now_ns, sent, true) {
+            debug_assert!(false, "BBR rejected a handshake packet: {e:?}");
+        }
         c.last_sent_ns = sent.sent_ns;
+        if self.dgram_len == 0 {
+            self.dgram_first_pn = pn;
+        } else {
+            self.stats.coalesced_sent += 1;
+        }
+        self.dgram_len += total;
+        self.dgram_eliciting |= in_flight;
+        self.dgram_probe |= kind == LongKind::Probe;
         let hs = c.hs.as_mut().expect("checked");
         if let Some(amp) = hs.amp.as_mut() {
             amp.sent += total as u64;
@@ -2070,19 +2160,6 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
         self.stats.packets_sent += 1;
         self.stats.handshake_packets_sent += 1;
-        if let Ok(bytes) = self.xsk.tx_bytes_mut(&mut frame) {
-            self.tap.on_transmit(slot, pn, now_ns, bytes);
-        }
-        // Not leased: lost CRYPTO data is resent from the CRYPTO buffer.
-        match self.xsk.submit_paced_tx(frame, pn, now_ns) {
-            Ok(pkt) => {
-                let _ = self.xsk.retire(pkt);
-            }
-            Err(refused) => {
-                self.stats.tx_abandoned += 1;
-                let _ = self.xsk.abandon_tx(refused.into_owner());
-            }
-        }
         if discard_initial {
             let _ = self.apply_tls_events(slot, now_ns);
         }
@@ -2090,9 +2167,253 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         Ok(pn)
     }
 
+    /// Starts assembling a datagram of coalesced long-header packets.
+    fn dgram_begin(&mut self) {
+        self.dgram_len = 0;
+        self.dgram_pad = false;
+        self.dgram_eliciting = false;
+        self.dgram_probe = false;
+    }
+
+    /// Sends the assembled datagram in one tx frame, paced by BBR unless it
+    /// is a probe or carries nothing in flight (RFC 9002 §7.7).
+    fn dgram_finish(&mut self, slot: SlotHandle, close: bool, now_ns: u64) {
+        if self.dgram_len == 0 {
+            return;
+        }
+        if self.dgram_pad && self.dgram_len < MIN_INITIAL_DATAGRAM {
+            // The coalesced successor of a padded-for Initial could not be
+            // built: pad the datagram itself. The zeros parse as an invalid
+            // short header and are discarded by the receiver (RFC 9000
+            // §12.2), after the packets before them.
+            let n = MIN_INITIAL_DATAGRAM.min(self.dgram.len());
+            self.dgram[self.dgram_len..n].fill(0);
+            if let Some(Some(c)) = self.conns.get_mut(slot.index() as usize)
+                && let Some(amp) = c.hs.as_mut().and_then(|h| h.amp.as_mut())
+            {
+                amp.sent += (n - self.dgram_len) as u64;
+            }
+            self.dgram_len = n;
+        }
+        let total = self.dgram_len;
+        self.dgram_len = 0;
+        let mut frame = match self.xsk.alloc_tx(total as u16) {
+            Ok(f) => f,
+            Err(_) => {
+                // Recovery declares the packets lost and CRYPTO is resent.
+                self.stats.tx_abandoned += 1;
+                return;
+            }
+        };
+        match self.xsk.tx_bytes_mut(&mut frame) {
+            Ok(bytes) => bytes[..total].copy_from_slice(&self.dgram[..total]),
+            Err(_) => {
+                self.stats.tx_abandoned += 1;
+                let _ = self.xsk.abandon_tx(frame);
+                return;
+            }
+        }
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            let _ = self.xsk.abandon_tx(frame);
+            return;
+        };
+        let edt_ns = if self.dgram_eliciting && !self.dgram_probe && !close {
+            c.cc.schedule_edt_ns(total as u32, now_ns)
+        } else {
+            now_ns
+        };
+        c.last_edt_ns = c.last_edt_ns.max(edt_ns);
+        let to = c.path.remote;
+        let staged = Staged {
+            conn: slot,
+            frame,
+            pn: self.dgram_first_pn,
+            edt_ns,
+            // Not leased: lost CRYPTO data is resent from the CRYPTO buffer.
+            park: false,
+            tapped: false,
+            carried: true,
+            close,
+            to,
+        };
+        self.launch_or_queue(staged, now_ns);
+    }
+
+    /// Client: whether a 0-RTT packet should go out now.
+    fn zero_rtt_wants(&mut self, slot: SlotHandle, now_ns: u64) -> bool {
+        let room = self.launch_has_room(slot, now_ns);
+        let Ok(c) = self.conn_mut(slot) else {
+            return false;
+        };
+        c.error.is_none()
+            && c.keys.is_none()
+            && c.zero_rtt_sealer.is_some()
+            && c.cc.can_send()
+            && room
+            && c.streams.has_pending()
+    }
+
+    /// Client: appends a 0-RTT packet of stream frames to the datagram
+    /// being assembled (RFC 9001 §4.6.1), padded when the datagram carries
+    /// an Initial. 0-RTT shares the application packet-number space and
+    /// its recovery, BBR and stream records with 1-RTT. Returns whether a
+    /// packet was added.
+    fn send_zero_rtt(&mut self, slot: SlotHandle, now_ns: u64) -> Result<bool, WarpError> {
+        let tile = self
+            .table
+            .get(slot)
+            .map_err(|_| WarpError::StaleConnection)?;
+        let pn = tile.next_tx_pn;
+        if pn >= MAX_SEND_PN {
+            return Err(WarpError::PacketNumbersExhausted);
+        }
+        let idx = slot.index() as usize;
+        let c = self.conns[idx].as_mut().ok_or(WarpError::StaleConnection)?;
+        let max = usize::from(c.max_datagram).min(self.dgram.len());
+        let room = max.saturating_sub(self.dgram_len);
+        if room <= MAX_LONG_HEADER + TAG_LEN + 8 {
+            return Ok(false);
+        }
+        let mut scid = [0u8; 20];
+        let scid_len = match c.hs.as_ref() {
+            Some(hs) => {
+                let l = hs.local_cid();
+                scid[..l.len()].copy_from_slice(l);
+                l.len()
+            }
+            None => return Ok(false),
+        };
+        let budget = (room - MAX_LONG_HEADER - TAG_LEN).min(self.app_out.len());
+        let len = c
+            .streams
+            .fill(&mut self.app_out[..budget], &mut self.record);
+        if len == 0 {
+            self.record.clear();
+            return Ok(false);
+        }
+        let shortest = match encoded_len(pn, c.recovery.largest_acked(PnSpace::ApplicationData)) {
+            Ok(l) => l.bytes(),
+            Err(_) => {
+                c.streams.requeue(&self.record);
+                self.record.clear();
+                return Err(WarpError::PacketNumbersExhausted);
+            }
+        };
+        let pad_to = if self.dgram_pad {
+            MIN_INITIAL_DATAGRAM.saturating_sub(self.dgram_len)
+        } else {
+            0
+        };
+        let dcid = tile.peer_cid;
+        let header = |payload_len: usize, pn_bytes: usize, out: &mut [u8]| {
+            write_long(
+                out,
+                &LongHeader {
+                    ty: LongPacketType::ZeroRtt,
+                    dcid: dcid.as_bytes(),
+                    scid: &scid[..scid_len],
+                    token: &[],
+                    full_pn: pn,
+                    pn_len: PnLen::new(pn_bytes as u8).expect("1..=4 bytes"),
+                    payload_len,
+                },
+            )
+        };
+        let scratch = &mut self.scratch;
+        let dgram_len = self.dgram_len;
+        let layout: Result<_, WarpError> = 'layout: {
+            let mut pn_bytes = shortest.max(4usize.saturating_sub(len));
+            let mut pad = 0;
+            if pad_to > 0 {
+                pn_bytes = shortest;
+                let probe = match header(pad_to, pn_bytes, &mut scratch[..MAX_LONG_HEADER]) {
+                    Ok(p) => p,
+                    Err(e) => break 'layout Err(e.into()),
+                };
+                pad = pad_to.saturating_sub(probe.header_len + len + TAG_LEN);
+            }
+            let payload = len + pad;
+            let written = match header(payload + TAG_LEN, pn_bytes, &mut scratch[..MAX_LONG_HEADER])
+            {
+                Ok(w) => w,
+                Err(e) => break 'layout Err(e.into()),
+            };
+            let plain_len = written.header_len + payload;
+            let total = plain_len + TAG_LEN;
+            if dgram_len + total > max || plain_len > scratch.len() {
+                break 'layout Err(WarpError::PacketTooLarge { len: total });
+            }
+            scratch[written.header_len..written.header_len + len]
+                .copy_from_slice(&self.app_out[..len]);
+            scratch[written.header_len + len..plain_len].fill(0); // PADDING
+            Ok((payload, written, plain_len, total))
+        };
+        let (payload, written, plain_len, total) = match layout {
+            Ok(l) => l,
+            Err(e) => {
+                c.streams.requeue(&self.record);
+                self.record.clear();
+                return Err(e);
+            }
+        };
+        let out = &mut self.dgram[dgram_len..dgram_len + total];
+        out[..plain_len].copy_from_slice(&scratch[..plain_len]);
+        let sealer = c.zero_rtt_sealer.as_mut().expect("checked by the caller");
+        let sealed = match sealer.ticket(pn) {
+            Err(e) => Err(WarpError::Crypto(e)),
+            Ok(ticket) => match sealer.seal(ticket, out, written.pn_offset, payload) {
+                Ok(_) => Ok(()),
+                Err(err) => {
+                    let _ = sealer.abandon(err.ticket);
+                    Err(WarpError::Crypto(err.error))
+                }
+            },
+        };
+        let sent = recovery::SentPacket {
+            pn,
+            sent_ns: now_ns.max(c.last_sent_ns),
+            bytes: total as u32,
+            ack_eliciting: true,
+            in_flight: true,
+        };
+        let recorded = sealed.and_then(|()| {
+            c.recovery
+                .on_packet_sent(PnSpace::ApplicationData, sent)
+                .map_err(WarpError::Recovery)
+                .and_then(|()| {
+                    c.cc
+                        .on_packet_sent(now_ns, sent, false)
+                        .map_err(WarpError::Cc)
+                })
+        });
+        if let Err(e) = recorded {
+            c.streams.requeue(&self.record);
+            self.record.clear();
+            return Err(e);
+        }
+        c.last_sent_ns = sent.sent_ns;
+        if let Ok(mut st) = self.table.get(slot) {
+            st.next_tx_pn = pn + 1;
+            let _ = self.table.set(slot, &st);
+        }
+        if self.dgram_len == 0 {
+            self.dgram_first_pn = pn;
+        } else {
+            self.stats.coalesced_sent += 1;
+        }
+        self.dgram_len += total;
+        self.dgram_eliciting = true;
+        self.settle_record(slot, &Ok((pn, true)));
+        self.stats.packets_sent += 1;
+        self.stats.zero_rtt_packets_sent += 1;
+        Ok(true)
+    }
+
     /// CONNECTION_CLOSE with `code` in every space we hold send keys for
-    /// (Initial, Handshake, 1-RTT): the peer may not have the later ones
-    /// yet (RFC 9000 §10.2.3).
+    /// (Initial and Handshake coalesced, then 1-RTT): the peer may not have
+    /// the later ones yet (RFC 9000 §10.2.3). `frame_type` [`APP_CLOSE`]
+    /// sends an application close (0x1d) in 1-RTT and APPLICATION_ERROR in
+    /// the long-header spaces, which may not carry one.
     fn send_close_code(
         &mut self,
         slot: SlotHandle,
@@ -2101,26 +2422,35 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         now_ns: u64,
     ) -> Result<(), WarpError> {
         let mut any = false;
-        for space in [PnSpace::Initial, PnSpace::Handshake] {
-            let has = self
-                .conns
+        let long_close = if frame_type == APP_CLOSE {
+            LongKind::Close {
+                code: APPLICATION_ERROR,
+                frame_type: 0,
+            }
+        } else {
+            LongKind::Close { code, frame_type }
+        };
+        let has = |me: &mut Self, space| {
+            me.conns
                 .get_mut(slot.index() as usize)
                 .and_then(Option::as_mut)
                 .and_then(|c| c.hs.as_mut())
                 .and_then(|h| h.long(space))
-                .is_some_and(|ls| ls.sealer.is_some());
-            if has
-                && self
-                    .send_long(slot, space, LongKind::Close { code, frame_type }, now_ns)
-                    .is_ok()
-            {
+                .is_some_and(|ls| ls.sealer.is_some())
+        };
+        let spaces = [has(self, PnSpace::Initial), has(self, PnSpace::Handshake)];
+        self.dgram_begin();
+        for (i, space) in [PnSpace::Initial, PnSpace::Handshake].into_iter().enumerate() {
+            let last = i == 1 || !spaces[1];
+            if spaces[i] && self.send_long(slot, space, long_close, last, now_ns).is_ok() {
                 any = true;
             }
         }
+        self.dgram_finish(slot, true, now_ns);
         if self.conn(slot)?.keys.is_some() {
             let n = Frame::ConnectionClose(crate::frame::ConnectionClose {
                 error_code: code,
-                frame_type: Some(frame_type),
+                frame_type: (frame_type != APP_CLOSE).then_some(frame_type),
                 reason: b"",
             })
             .encode(&mut self.app_out)?;
@@ -2942,9 +3272,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let action = if space == PnSpace::ApplicationData {
             recovery.on_timeout(now_ns, &mut |ev| record_event(cc, events, ev, now_ns))
         } else {
-            // Long-header packets are not in BBR's flight (see the module
-            // docs): their losses only reach the CRYPTO buffers.
-            recovery.on_timeout(now_ns, &mut |ev| record_long_event(events, ev))
+            // Long-header losses reach BBR and the CRYPTO buffers.
+            recovery.on_timeout(now_ns, &mut |ev| {
+                record_long_event(cc, space, events, ev, now_ns)
+            })
         };
         self.resolve_events(slot, space, fired);
         if let TimeoutAction::SendProbe { space, packets, .. } = action
@@ -3759,9 +4090,19 @@ fn record_event(
     }
 }
 
-/// A long-header space's recovery event: acknowledgements and losses are
-/// kept for the CRYPTO buffers; nothing reaches BBR.
-fn record_long_event(events: &mut Vec<CongestionEvent>, ev: CongestionEvent) {
+/// A long-header space's recovery event: it reaches BBR under its own
+/// space's snapshots, and acknowledgements and losses are kept for the
+/// CRYPTO buffers.
+fn record_long_event(
+    cc: &mut QuicBbr,
+    space: PnSpace,
+    events: &mut Vec<CongestionEvent>,
+    ev: CongestionEvent,
+    now_ns: u64,
+) {
+    if let Err(e) = cc.on_event_in(space, now_ns, ev) {
+        debug_assert!(false, "BBR rejected an event: {e:?}");
+    }
     if matches!(
         ev,
         CongestionEvent::Acked { .. } | CongestionEvent::Lost { .. }

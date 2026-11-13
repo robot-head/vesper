@@ -488,7 +488,9 @@ fn every_handshake_datagram_lost_once_is_recovered() {
             net.step();
         }
         assert!(net.confirmed(), "victim {victim}");
-        assert_eq!(net.dropped, 1, "victim {victim}");
+        // Coalesced Initial and Handshake packets (wave six) can make the
+        // whole handshake fewer datagrams than victims.
+        assert_eq!(net.dropped, u64::from(seen > victim), "victim {victim}");
         assert_established(&net);
         transfer(&mut net, victim, 3_000, 3_000, 500);
     }
@@ -587,39 +589,29 @@ fn a_closed_handshake_answers_retransmissions_with_its_close() {
 
 #[test]
 fn a_handshake_packet_coalesced_after_the_initial_is_processed() {
-    // RFC 9000 §12.2: the server's Initial and its first Handshake packet
-    // in one datagram. The Handshake keys come from the Initial's
-    // ServerHello, so TLS must run before the second packet is opened.
+    // RFC 9000 §12.2: the server coalesces its Initial and its first
+    // Handshake packet into one datagram. The Handshake keys come from the
+    // Initial's ServerHello, so TLS must run before the second packet is
+    // opened.
     let mut net = Net::new(6, 0, 0);
     net.blackhole[1] = true;
     net.step();
     net.step();
     let flight = net.sent[1].clone();
-    // The first Handshake datagram, and the Initial before it (the one
-    // with the ServerHello; with a post-quantum key share the ClientHello
-    // spans two Initials and the server may acknowledge the first alone).
-    let hs = flight
-        .iter()
-        .position(|d| d[0] & 0xb0 == 0xa0)
-        .expect("a Handshake datagram");
-    assert!(hs >= 1, "an Initial first");
-    assert!(flight[..hs].iter().all(|d| d[0] & 0xb0 == 0x80));
     let now = net.now;
-    for d in &flight[..hs - 1] {
+    let before = net.client.stats();
+    for d in &flight {
         net.client.xsk_mut().backend_mut().deliver(d);
     }
-    while net.client.poll_and_step_quic_rx_one(now).unwrap() != RxOutcome::Idle {}
-    let mut coalesced = flight[hs - 1].clone();
-    coalesced.extend_from_slice(&flight[hs]);
-    let before = net.client.stats().handshake_packets_received;
-    net.client.xsk_mut().backend_mut().deliver(&coalesced);
     while net.client.poll_and_step_quic_rx_one(now).unwrap() != RxOutcome::Idle {}
     let stats = net.client.stats();
-    assert_eq!(stats.handshake_packets_received - before, 2, "{stats:?}");
-    // The rest of the flight, then the handshake finishes.
-    for d in &flight[hs + 1..] {
-        net.client.xsk_mut().backend_mut().deliver(d);
-    }
+    assert!(net.server.stats().coalesced_sent >= 1);
+    assert!(stats.coalesced_received > before.coalesced_received, "{stats:?}");
+    assert!(
+        stats.handshake_packets_received - before.handshake_packets_received
+            > flight.len() as u64
+    );
+    assert_eq!(stats.rx_dropped, before.rx_dropped, "{stats:?}");
     net.blackhole[1] = false;
     net.handshake(200);
     assert_established(&net);
@@ -705,11 +697,15 @@ fn server_respects_the_anti_amplification_limit() {
         server_tx <= bytes,
         "server sent {server_tx} bytes before validating a {received}-byte client"
     );
-    // With a one-Initial ClientHello the server's flight alone exceeds
-    // the limit; a two-Initial one (post-quantum key share) leaves room
-    // for the whole flight.
+    // With a one-Initial ClientHello the server's flight fills the limit
+    // exactly (coalesced, three 1200-byte datagrams) or exceeds it; a
+    // two-Initial one (post-quantum key share) leaves room for the whole
+    // flight.
     if received == 1200 {
-        assert!(sent.amplification_blocked > 0, "{sent:?}");
+        assert!(
+            sent.amplification_blocked > 0 || server_tx == bytes,
+            "{sent:?}"
+        );
     }
 }
 
