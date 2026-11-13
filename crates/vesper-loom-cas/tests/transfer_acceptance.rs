@@ -671,11 +671,70 @@ fn invalid_settings_never_open_even_an_existing_destination() {
     }
 }
 
+#[test]
+fn invalid_pack_and_limits_take_precedence_over_an_unusable_destination() {
+    let scratch = tempfile::tempdir().unwrap();
+    let destination = scratch.path().join("not-a-store");
+    fs::write(&destination, b"unrelated file must survive").unwrap();
+    let root = identity(Domain::Source, ObjectKind::Blob, b"x");
+    assert!(matches!(
+        import_pack(&destination, root, b"not a pack", TransferLimits::default()),
+        Err(TransferError::InvalidPack(_))
+    ));
+    assert!(matches!(
+        import_pack(
+            &destination,
+            root,
+            b"not a pack",
+            TransferLimits {
+                max_work: 0,
+                ..TransferLimits::default()
+            }
+        ),
+        Err(TransferError::InvalidLimits(_))
+    ));
+    assert_eq!(
+        fs::read(&destination).unwrap(),
+        b"unrelated file must survive"
+    );
+}
+
 fn make_writable(path: &Path) {
     let mut permissions = fs::metadata(path).unwrap().permissions();
     #[allow(clippy::permissions_set_readonly_false)]
     permissions.set_readonly(false);
     fs::set_permissions(path, permissions).unwrap();
+}
+
+#[test]
+fn an_object_directory_is_not_a_verified_regular_object() {
+    let scratch = tempfile::tempdir().unwrap();
+    let source = Store::open(scratch.path().join("source")).unwrap();
+    let root = source
+        .put_blob(Domain::Source, b"expected contents")
+        .unwrap()
+        .id;
+    let path = source.object_path(&root);
+    make_writable(&path);
+    fs::remove_file(&path).unwrap();
+    fs::create_dir(&path).unwrap();
+    assert!(export_pack(&source, root, TransferLimits::default()).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_to_hash_matching_bytes_is_still_an_unsupported_source_object() {
+    let scratch = tempfile::tempdir().unwrap();
+    let source = Store::open(scratch.path().join("source")).unwrap();
+    let payload = b"matching bytes do not authorize symlink traversal";
+    let root = source.put_blob(Domain::Source, payload).unwrap().id;
+    let outside = scratch.path().join("outside");
+    fs::write(&outside, payload).unwrap();
+    let path = source.object_path(&root);
+    fs::remove_file(&path).unwrap();
+    std::os::unix::fs::symlink(&outside, &path).unwrap();
+    assert!(export_pack(&source, root, TransferLimits::default()).is_err());
+    assert_eq!(fs::read(outside).unwrap(), payload);
 }
 
 #[test]
