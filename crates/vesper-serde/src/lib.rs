@@ -1,10 +1,13 @@
-//! Bounded, scalar host codec foundations for design section 20.
+//! Bounded host codec foundations for design section 20.
 //!
 //! An [`IndexedJson`] validates the *entire* immutable input before exposing raw
 //! views or constant-time subtree skips. Duplicate keys are rejected by decoded
 //! Unicode scalar equality, including escaped spellings, in every object.
 //! Unescaped strings borrow input; escaped strings use explicit caller scratch.
-//! There are no source-language, SIMD, arena, linear-resource, or speed claims.
+//! It is built either by scalar recursive descent or by the two-stage §20.3
+//! path: a SIMD structural index ([`simd`]) then a tape builder over it
+//! ([`IndexedJson::parse_simd`], [`SimdParser`]). There are no source-language,
+//! arena, or linear-resource claims.
 // `unsafe` is denied everywhere except the gated `simd::kernels` module.
 #![deny(unsafe_code)]
 #![doc = include_str!("../README.md")]
