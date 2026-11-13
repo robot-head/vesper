@@ -98,9 +98,15 @@ the sender now drains the queued bytes before closing stdin. Boxed-array
 assertions follow the published carrier amendment. None of these changes
 relaxes actual failure, completion, outcome, terminal or cleanup assertions.
 
-Release-build and Full100000 execution were still pending when this report
-was updated. No full-package, Bazel, BuildBuddy, macOS or Windows execution is
-established by these focused logs.
+The coordinator subsequently completed the release build and Full100000 run
+at source `8e2f653e91729e1e893d65432ef15554f628d639`: 100000 distinct valid
+programs, all 15 negatives and all 800000 backend outcomes passed. The full
+root-package regression also passed 946 tests across 78 result records; the
+51 focused tests are included in that total. Final strict Clippy, formatting
+and static-model CI passed. See the [integration report](oracle42-integration-report.md)
+and [unmodified full-run JSON](oracle42-full100000-report.json) for the exact
+configuration, counters, timing and coordinator execution provenance.
+No Bazel, BuildBuddy, macOS or Windows execution is established by these logs.
 
 ## Scope
 
@@ -108,7 +114,7 @@ Passing establishes agreement only on actually completed programs and execution
 settings. It does not prove the AST binding, checker/compiler refinement or
 the executable Lean checker's refinement of source typing. Hashes associate
 observations; they are not proof certificates. Worker recycling and logical
-caps are not whole-process RSS claims. The explicit Full100000 run is not part
-of this routine acceptance target and no 100000-program/800000-outcome
-completion, cross-platform execution, performance or full §42 completion is
-claimed without separate actual evidence.
+caps are not whole-process RSS claims. The separately completed Full100000 run
+is outside this routine acceptance target. Neither that run nor these focused
+checks establishes cross-platform execution, performance guarantees or full
+§42 completion; the integration report states the remaining scope.
