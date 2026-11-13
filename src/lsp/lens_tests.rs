@@ -684,6 +684,105 @@ fn proof_lens_records_proved_failed_and_stale_requests() {
 }
 
 #[cfg(unix)]
+fn process_state(pid: u32) -> io::Result<Option<u8>> {
+    // Both Linux and BSD/macOS ps expose the leading process state through
+    // stat. On Linux, kill -0 also succeeds for zombies, which have already
+    // terminated even when their new parent has not yet reaped them.
+    let output = std::process::Command::new("/bin/ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()?;
+    if !output.status.success() {
+        if output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty() {
+            return Ok(None);
+        }
+        return Err(io::Error::other(format!(
+            "ps failed for {pid}: {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    let text = std::str::from_utf8(&output.stdout)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let mut rows = text.lines().map(str::trim).filter(|row| !row.is_empty());
+    let state = rows.next().and_then(|row| row.as_bytes().first().copied());
+    if rows.next().is_some() {
+        return Err(io::Error::other("ps returned multiple process rows"));
+    }
+    Ok(state)
+}
+
+#[cfg(unix)]
+fn process_alive(pid: u32) -> io::Result<bool> {
+    // Every other reported state remains alive, including sleeping S and
+    // stopped T/t. An unexpected state must not make cancellation pass.
+    Ok(process_state(pid)?.is_some_and(|state| state != b'Z'))
+}
+
+#[cfg(unix)]
+#[test]
+fn proof_lens_process_state_distinguishes_live_stopped_and_zombie() {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = ChildGuard(
+        std::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .unwrap(),
+    );
+    let pid = child.0.id();
+    let wait_for_state = |expected| {
+        let started = std::time::Instant::now();
+        loop {
+            let actual = process_state(pid).unwrap();
+            if actual == Some(expected) {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "process {pid}: expected state {}, observed {actual:?}",
+                char::from(expected)
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    };
+    wait_for_state(b'S');
+    assert!(process_alive(pid).unwrap(), "sleeping child is still alive");
+    assert!(
+        std::process::Command::new("/bin/kill")
+            .args(["-STOP", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    wait_for_state(b'T');
+    assert!(process_alive(pid).unwrap(), "stopped child is still alive");
+    child.0.kill().unwrap();
+    // Do not wait/reap until the zombie observation: this is the distinction
+    // the process-tree cancellation assertion needs to make correctly.
+    wait_for_state(b'Z');
+    #[cfg(target_os = "linux")]
+    assert!(
+        std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .status()
+            .unwrap()
+            .success(),
+        "Linux kill -0 includes a dead zombie"
+    );
+    assert!(
+        !process_alive(pid).unwrap(),
+        "zombie has already terminated"
+    );
+    child.0.wait().unwrap();
+    assert!(!process_alive(pid).unwrap(), "reaped child is absent");
+}
+
+#[cfg(unix)]
 #[test]
 fn proof_lens_cancellation_stops_the_whole_process_tree() {
     // The compile step forks a grandchild, as `vesper proof-audit` forks Lean.
@@ -710,17 +809,14 @@ fn proof_lens_cancellation_stops_the_whole_process_tree() {
         );
         thread::sleep(Duration::from_millis(10));
     };
+    assert!(
+        process_alive(pid).unwrap(),
+        "grandchild {pid} must be live before cancellation"
+    );
     client.notify("$/cancelRequest", json!({"id": id}));
     assert_eq!(client.response(id)["error"]["code"], -32800);
-    let alive = || {
-        std::process::Command::new("/bin/sh")
-            .args(["-c", &format!("kill -0 {pid} 2>/dev/null")])
-            .status()
-            .unwrap()
-            .success()
-    };
     let started = std::time::Instant::now();
-    while alive() {
+    while process_alive(pid).unwrap() {
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "grandchild {pid} survived cancel"

@@ -9,7 +9,13 @@
 //! * [`rollback`]: snapshot ring with linear [`rollback::RollbackTicket`]s.
 //! * [`snapshot`]: the 48-byte §36.2 header and canonical world hashes.
 //!
-//! Not here: the GPU broadphase (Ignis), Tensor gradients and the compiler's
+//! * [`crmath`]: correctly rounded `sin`, `cos`, `atan2`, `exp`, `log`.
+//! * [`lbvh`]: 64-bit Morton LBVH broadphase (Karras construction).
+//! * [`gjk`]: GJK distance and EPA penetration for convex shapes.
+//! * [`diff`]: reverse-mode gradients of an XPBD simulation as Tensor host
+//!   tensors.
+//!
+//! Not here: the GPU broadphase (Ignis; no GPU in CI) and the compiler's
 //! `eff [DetFloat]` source effect. Ownership-based linearity in this crate is
 //! host-library discipline, not an implementation of Vesper's source typing
 //! rules.
@@ -17,7 +23,11 @@
 #![deny(unsafe_code)]
 
 pub mod coloring;
+pub mod crmath;
 pub mod detfloat;
+pub mod diff;
+pub mod gjk;
+pub mod lbvh;
 pub mod morton;
 pub mod rollback;
 pub mod snapshot;
@@ -30,4 +40,7 @@ pub use morton::MortonError;
 pub use rollback::{ResimulateError, RollbackError, RollbackTicket, SnapshotRing};
 pub use snapshot::{KineticSnapshotWireHdr, SNAPSHOT_HEADER_LEN, WorldHashes, hash_world};
 pub use tile::{Body, RigidBodyTile, TILE_WIDTH, TiledBodies};
-pub use world::{DistanceConstraint, SphereCollider, StepError, World, WorldConfig};
+pub use world::{
+    BATCH_WIDTH, BroadphaseMode, ContactMaterial, DistanceConstraint, SolverMode, SphereCollider,
+    StepError, World, WorldConfig,
+};

@@ -4,7 +4,7 @@ This crate implements the byte-oriented layout/view milestone from design §13.2
 
 `Registry::new` accepts nominal `Declaration`/`Field` descriptors. `Registry::compile` rejects unsupported fields, invalid integer widths, duplicate names, missing/recursive struct definitions, implicit internal or tail padding, size overflow, and excessive descriptor depth/expansion. Successful `WireLayout` metadata has private fields and exposes checked offsets, sizes and alignment through read-only accessors.
 
-`view_wire`, `split_wire`, and `split_wire_mut` perform bounds/alignment checks without allocating or copying the header. The mutable split returns disjoint header/payload borrows. Views provide checked nested projections, byte-array borrows and integer reads/writes. `initialize_wire` zeroes the header in place, including every `ZeroPad`, without touching payload bytes. Integer writes reject truncation and signedness changes before modifying memory. The crate forbids unsafe Rust.
+`view_wire`, `split_wire`, and `split_wire_mut` perform bounds/alignment checks without allocating or copying the header. The mutable split returns disjoint header/payload borrows. Views provide checked nested projections, byte-array borrows and integer reads/writes. `initialize_wire` zeroes the header in place, including every `ZeroPad`, without touching payload bytes. Integer writes reject truncation and signedness changes before modifying memory. The crate denies unsafe Rust everywhere except the one gated `isolation::hw` module (below).
 
 ## Alignment contract
 
@@ -20,9 +20,13 @@ The design simultaneously asks for natural-alignment gap rejection and a packed,
 
 Supported scalars are signed/unsigned 8-, 16-, 32- and 64-bit integers, plus fixed byte arrays, explicit padding and nested nominal wire structs. Bool, sparse enums, pointers and unknown field kinds fail closed. Native-endian representation depends on the target; portable protocols should use explicit endian types. Native-endian accesses currently use host endianness and width-byte alignment; this is not a general C ABI layout engine. A cross-target frontend must supply/extend a target-layout contract before accepting host-independent native fields.
 
-The separate [`sys` module](SYS-SPECS.md) now parses bounded `.vsys` contracts, records explicit C target/convention/link descriptors, checks canonical artifact identity and raw foreign-return refinements, and prepares owner-preserving numerical call arguments. It does not use wire layouts as C struct layouts.
+The separate [`sys` module](SYS-SPECS.md) now parses bounded `.vsys` contracts, records explicit C target/convention/link descriptors, checks canonical artifact identity and raw foreign-return refinements, and prepares owner-preserving numerical call arguments. Single-element `nocapture in|out|inout` pointer parameters may point to one integer or to a `wire struct` declared in the `.vsys` file; those declarations compile through `Registry`, so a pointee has zero implicit padding and total bit validity.
 
-This milestone does not implement compiler source integration, HIR/PCG borrowing, CLIF generation, native foreign-call trampolines, foreign-handle finalizers, MPK/PKRU or Arm isolation. Rust slice lifetimes protect this library's views; they are not evidence that the language's corresponding typing rules have been implemented.
+## Isolation domains (§13.4)
+
+`isolation::IsolationDomain` allocates a protection key (`pkey_alloc`), maps page-aligned anonymous regions tagged with it (`pkey_mprotect`), and `with_revoked(Revoke::Write | Revoke::Access, f)` runs `f` with the current thread's rights to those regions removed: `WRPKRU` on x86_64 Linux (Intel/AMD PKU) and `MSR POR_EL0` on AArch64 Linux (Arm POE, `HWCAP2_POE`). The previous register value is restored on every exit, including unwinding panics. Region bytes are only copied through raw pointers (`read`/`write`), never exposed as Rust references. `isolation::contain` runs work in a forked child with a `SIGSEGV`/`SIGBUS` handler so a protection-key fault (`SEGV_PKUERR`) is reported as `ChildExit::Fault` with its address instead of killing the caller. Without PKU/POE (or on other targets) every constructor returns `Unavailable` with the reason. This is a same-address-space tripwire for stray writes, not a security boundary against code that can rewrite PKRU/POR_EL0 itself, and it does not pivot stacks or separate a foreign heap.
+
+This milestone does not implement compiler source integration, HIR/PCG borrowing, CLIF generation, native foreign-call trampolines (and so no `handle Ffi[Lib] isolated(mpk)` lowering), or foreign-handle finalizers. Rust slice lifetimes protect this library's views; they are not evidence that the language's corresponding typing rules have been implemented.
 
 The crate is registered in the main workspace; root workspace checks include its tests.
 

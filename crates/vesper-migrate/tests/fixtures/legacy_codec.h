@@ -52,9 +52,17 @@ codec_status_t legacy_status(void);
 unsigned int legacy_version(void);
 void legacy_reset(void);
 const uint32_t *legacy_crc_table(void);
+/* Single-element out-parameters: lifted to nocapture single pointers. */
+int32_t legacy_read_header(const uint8_t *raw_bytes, size_t raw_len,
+                           batch_header_t *out_hdr);
+int32_t legacy_fill(struct decoder_stats *stats);
 
 /* Refused: each line exercises one typed refusal. */
-int32_t legacy_fill(struct decoder_stats *stats);
+void legacy_swap(uint32_t *a, uint32_t *b);
+uint32_t legacy_sum4(const uint32_t values[4]);
+void legacy_set_name(const uint8_t *name);
+void legacy_attach(void *context);
+int32_t legacy_pack(struct padded_record *record);
 long legacy_offset(void);
 double legacy_ratio(uint32_t a);
 int legacy_log(const char *fmt, ...);

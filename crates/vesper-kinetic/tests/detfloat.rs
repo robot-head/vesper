@@ -123,6 +123,46 @@ fn libm_transcendentals_need_the_allowlist() {
 }
 
 #[test]
+fn correctly_rounded_math_symbols_are_allowlisted() {
+    for (symbol, ty) in [
+        ("vesper_crmath_sin", types::F64),
+        ("vesper_crmath_atan2f", types::F32),
+        ("vesper_crmath_logf", types::F32),
+    ] {
+        let two = symbol.contains("atan2");
+        let params: Vec<types::Type> = if two { vec![ty, ty] } else { vec![ty] };
+        let f = build("crmath", &params, &[ty], |b, a| {
+            let r = call_fn(ExternalName::testcase(symbol), &params, &[ty], b, a);
+            vec![r[0]]
+        });
+        assert_eq!(
+            rules(&f, &DetFloatPolicy::default()),
+            vec!["detfloat.unlisted-float-call"],
+            "{symbol}"
+        );
+        let policy = DetFloatPolicy::default().with_correctly_rounded_math();
+        assert!(rules(&f, &policy).is_empty(), "{symbol}");
+    }
+    // The plain libm names stay flagged even with the crmath allowlist.
+    let f = build("libm", &[types::F64], &[types::F64], |b, a| {
+        let r = call_fn(
+            ExternalName::testcase("sin"),
+            &[types::F64],
+            &[types::F64],
+            b,
+            &[a[0]],
+        );
+        vec![r[0]]
+    });
+    let policy = DetFloatPolicy::default().with_correctly_rounded_math();
+    assert_eq!(rules(&f, &policy), vec!["detfloat.libm"]);
+    assert_eq!(
+        policy.allowed_float_calls.len(),
+        vesper_kinetic::crmath::SYMBOLS.len()
+    );
+}
+
+#[test]
 fn user_named_callees_resolve_through_the_policy_symbol_table() {
     let f = build("user", &[types::F64], &[types::F64], |b, a| {
         let name = b
