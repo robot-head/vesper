@@ -164,8 +164,27 @@ test detects Wine through `ntdll!wine_get_version`.
 The `Windows (x86_64 MSVC)` job runs `cargo clippy --workspace --locked
 --all-targets -- -D warnings` and `cargo test --workspace --locked` on
 `windows-latest`. Those commands now include every direct-fiber test above.
-The workflow did not need to change. The job URL and its per-binary results
-are recorded in the PR.
+The workflow did not need to change.
+
+**Validated on real Windows.** The evidence is
+[run 43508402003, job "Windows (x86_64 MSVC)"](https://github.com/robot-head/vesper/actions/runs/43508402003/job/132171950002)
+on PR head `cfd6a11` (MSVC host, stable rustc 1.100.0). Clippy passed, and
+every `vesper-fiber-abi` binary ran natively and passed:
+
+| Binary | Result on Windows x64 (MSVC) |
+| --- | --- |
+| unit tests (incl. `stack_is_aligned_and_guarded` with `VirtualQuery` protections, `fpenv` with x87 CW 0x027F) | 9 passed |
+| `fiber_lifecycle.rs` | 4 passed |
+| `objects.rs` | 4 passed |
+| `round_trip.rs` (Cranelift JIT, `WindowsFastcall`) | 14 passed |
+| `windows_platform.rs` (all 11, including the exact `STATUS_GUARD_PAGE_VIOLATION` and `STATUS_STACK_OVERFLOW` exit codes that Wine cannot check) | 11 passed |
+| `platform.rs`, `fp_env.rs`, `lifecycle.rs`, `scheduler.rs` | 0 (gated out, as intended) |
+
+The macOS (AArch64) job and the Linux Bazel checks passed on the same head,
+so the Linux and macOS results are unchanged. An earlier run on `eab52d6`
+failed before building because the runner's `curl.exe` could not reach the
+certificate revocation server while downloading the Lean installer
+(`CRYPT_E_REVOCATION_OFFLINE`), which is unrelated to this change.
 
 ## Root patch
 
