@@ -98,14 +98,21 @@ The broader package run reached an existing Lens cancellation test and failed:
 its killed sleep descendant had PPID1/stateZ, while the assertion used kill -0
 as a live-process test. Lens runtime/test source is unchanged by this PR; #305
 tracks separate clean-main reproduction and a narrowly scoped acceptance fix.
-The regression run is not represented as passing. Hosted platform checks and
-completion of the remaining package regression remain pending.
+A subsequent remaining-package regression passed 989 tests across 82 result
+records, zero failures/ignored, with exactly two explicit filters: the genuine
+replay matrix already passed above, and the known clean-main Lens cancellation
+case tracked separately. Its real proof-lens Lean/auditor path was enabled.
+These counts do not add the 11 included helper checks from the focused 12-test
+run a second time. Full current-head hosted checks and the separate Lens fix
+remain pending.
 
 Source inspection also found that pinned Lake verifies a local package revision
 through Git on Windows. Explicit setup now adds only the selected Git directory
 to that build's controlled PATH and restores the prior environment before
 sealing; ordinary offline invocations are unchanged. Python compilation passes;
-actual Windows/macOS evidence remains pending hosted CI.
+the actual Windows hosted checker-build/setup step now passes, including real
+sealing controls. Windows workspace lint/tests and the queued macOS lane remain
+pending; no completed platform verdict is claimed.
 
 ## Process and receipt limits
 
