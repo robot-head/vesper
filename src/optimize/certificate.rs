@@ -12,8 +12,8 @@ use super::{Graph, Math, rules};
 use crate::ast::{Expr, TypeMap};
 use crate::numeric::IntegerKind;
 use egg::{
-    Applier, AstSize, Extractor, Id, Language, PatternAst, RecExpr, Rewrite, RewriteScheduler,
-    Runner, SearchMatches, StopReason, Subst, Symbol, Var,
+    Applier, AstSize, ENodeOrVar, Extractor, Id, Language, PatternAst, RecExpr, Rewrite,
+    RewriteScheduler, Runner, SearchMatches, StopReason, Subst, Symbol, Var,
 };
 use std::sync::{Arc, Mutex};
 
@@ -545,8 +545,26 @@ struct Capture {
     budget: Option<WitnessBudget>,
     records: Vec<Record>,
     error: Option<WitnessError>,
+    node_capacity: usize,
 }
 impl Capture {
+    fn nodes(&mut self, required: usize) -> Result<(), WitnessError> {
+        if required > RAW_NODES {
+            return Err(WitnessError::Limit);
+        }
+        if required <= self.node_capacity {
+            return Ok(());
+        }
+        let target = required
+            .max(checked_mul(self.node_capacity, 2)?)
+            .min(RAW_NODES);
+        self.budget
+            .as_mut()
+            .ok_or(WitnessError::Limit)?
+            .metadata(checked_mul(target, 512)?)?;
+        self.node_capacity = target;
+        Ok(())
+    }
     fn fail(&mut self, error: WitnessError) {
         self.error.get_or_insert(error);
     }
@@ -613,6 +631,10 @@ impl Applier<Math, ()> for RecordingApplier {
             return Vec::new();
         }
         let arity = rule_arity(self.rule);
+        if let Err(error) = state.nodes(graph.nodes().len() + APPLICATION_NODES) {
+            state.fail(error);
+            return Vec::new();
+        }
         let mut bindings = [Id::from(0); 3];
         for index in 0..arity {
             let Some(id) = substitution.get(self.variables[index]) else {
@@ -635,13 +657,13 @@ impl Applier<Math, ()> for RecordingApplier {
             state.fail(error);
             return Vec::new();
         }
-        // Prepay bounded parent-list/map replacement requests before entering
-        // the opaque applier, in addition to its fixed maximum new-node data.
+        // Persistent node data is prepaid by geometric credits. This call's
+        // transient parent-list and small pattern/result vectors are separate.
         let allocation = graph
             .nodes()
             .len()
             .checked_mul(128)
-            .and_then(|n| n.checked_add(APPLICATION_NODES * 512));
+            .and_then(|n| n.checked_add(256));
         if let Err(error) = allocation
             .ok_or(WitnessError::Limit)
             .and_then(|bytes| budget.metadata(bytes))
@@ -679,12 +701,58 @@ impl RewriteScheduler<Math, ()> for BoundedScheduler {
         let Ok(mut state) = self.capture.lock() else {
             return Vec::new();
         };
-        // Catalog patterns have at most two operator nodes. Prepay a
-        // conservative quadratic search envelope before egg allocates matches.
+        let Some(pattern) = rewrite.searcher.get_pattern_ast() else {
+            state.fail(WitnessError::UnknownRule);
+            return Vec::new();
+        };
+        let pattern_nodes = pattern.as_ref();
+        // A frozen LHS has <=2 concrete nodes (including constant leaves).
+        // Choosing those raw nodes fixes every variable binding. Their count
+        // product bounds matches; canonicalization cannot invent a concrete
+        // operator/constant absent from the append-only original nodes.
+        let scan = graph
+            .nodes()
+            .len()
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(pattern_nodes.len()));
+        if !scan.is_some_and(|scan| state.charge(scan)) {
+            state.fail(WitnessError::Limit);
+            return Vec::new();
+        }
+        let mut concrete = 0usize;
+        let mut combinations = 1usize;
+        for node in pattern_nodes {
+            if let ENodeOrVar::ENode(pattern_node) = node {
+                concrete += 1;
+                if concrete > 2 {
+                    state.fail(WitnessError::UnknownRule);
+                    return Vec::new();
+                }
+                let count = graph
+                    .nodes()
+                    .iter()
+                    .filter(|node| node.matches(pattern_node))
+                    .count();
+                combinations = match combinations.checked_mul(count) {
+                    Some(count) => count.min(MATCHES),
+                    None => {
+                        state.fail(WitnessError::Limit);
+                        return Vec::new();
+                    }
+                };
+            }
+        }
+        if combinations == 0 {
+            return Vec::new();
+        }
+        if concrete == 0 {
+            state.fail(WitnessError::UnknownRule);
+            return Vec::new();
+        }
         let work = graph
             .nodes()
             .len()
-            .checked_mul(graph.nodes().len())
+            .checked_mul(combinations)
             .and_then(|n| n.checked_mul(8))
             .and_then(|n| n.checked_add(32));
         if !work.is_some_and(|work| state.charge(work)) {
@@ -695,7 +763,10 @@ impl RewriteScheduler<Math, ()> for BoundedScheduler {
             .budget
             .as_mut()
             .ok_or(WitnessError::Limit)
-            .and_then(|budget| budget.metadata(MATCHES * 128))
+            // Matcher machines allocate bounded register/scratch storage per
+            // visited class, even without a match. Match/outer result vectors
+            // have full geometric capacity requests, not just live lengths.
+            .and_then(|budget| budget.metadata((graph.nodes().len() + combinations) * 512))
         {
             state.fail(error);
             return Vec::new();
@@ -728,19 +799,19 @@ fn run_graph(
     expression: &RecExpr<Math>,
     mut budget: WitnessBudget,
 ) -> Result<SearchResult, WitnessError> {
-    // Opaque egg working storage (nodes/classes/parents, bounded match lists,
-    // rule objects and extractor tables) is conservatively prepaid separately
-    // from our fallibly reserved recording/term/proof structures.
-    budget.metadata(checked_add(
-        checked_mul(RAW_NODES, 512)?,
-        checked_mul(RULE_COUNT * MATCHES, 96)?,
-    )?)?;
+    // Static closed rule/iteration objects are small. Graph/extractor storage
+    // grows through full-capacity credits before graph growth; each search
+    // charges its own possible match data, not every hard-cap slot.
+    budget.metadata((RULE_COUNT + ITERATIONS) * 512)?;
     budget.work(expression.as_ref().len())?;
-    let capture = Arc::new(Mutex::new(Capture {
+    let mut state = Capture {
         budget: Some(budget),
         records: Vec::new(),
         error: None,
-    }));
+        node_capacity: 0,
+    };
+    state.nodes(expression.as_ref().len().max(4))?;
+    let capture = Arc::new(Mutex::new(state));
     let mut actual = rules();
     if actual.len() != RULE_COUNT {
         return Err(WitnessError::UnknownRule);
@@ -1232,6 +1303,18 @@ mod tests {
         let produced = proposal(&source, &types);
         assert!(has_rule(&produced, 1));
         assert!(has_rule(&produced, 6));
+        assert!(matches!(
+            produced.candidate.kind,
+            ExprKind::Literal(Literal::Int(0))
+        ));
+    }
+
+    #[test]
+    fn folded_child_prefix_emits_real_congruence_for_its_live_parent() {
+        let (source, types) =
+            fixture("fn f(x: u8) -> u8 eff [Fail[ArithOverflow]] { (1 + 2) + x }");
+        let produced = proposal(&source, &types);
+        assert!(has_rule(&produced, 19));
         assert!(
             produced
                 .certificate
@@ -1239,10 +1322,7 @@ mod tests {
                 .iter()
                 .any(|proof| matches!(proof.reason, Reason::Congruence { .. }))
         );
-        assert!(matches!(
-            produced.candidate.kind,
-            ExprKind::Literal(Literal::Int(0))
-        ));
+        assert!(matches!(produced.candidate.kind, ExprKind::Binary(_, _, _)));
     }
 
     #[test]
@@ -1368,6 +1448,7 @@ mod tests {
                 budget: Some(WitnessBudget::new(WitnessLimits::default()).unwrap()),
                 records,
                 error: None,
+                node_capacity: 0,
             }));
             let actual = rules();
             let applier = RecordingApplier {
