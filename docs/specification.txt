@@ -202,7 +202,7 @@ impl XdpUmemAccounting {
     }
 }
 Vesper Programming Language: Research Foundations, Language Design & Formal Specification
-Master Specification Map (Sections 1–41 & Appendix A)
+Master Specification Map (Sections 1–42 & Appendix A)
 Architectural Layer
 Sections
 Subsystems, Packages & Host Crates
@@ -210,8 +210,8 @@ Foundations, Core Calculus & Metatheory
 Sections 1–6
 PL research synthesis, LL(2) surface grammar, lambda_Vesper modal lattice (copy, affine, linear), OxCaml mode crossing, [T-Let] Resumption Frame Condition, [T-CallProj] disjoint field trees, one-shot lexical handlers, Zero-Pin Stack Relocation
 Compiler, Supply Chain, SemVer & Verification
-Sections 7–11, Appendix A
-5-stage Cranelift + egglog pipeline (vesper-syntax, vesper-hir, vesper-mir-pcg, vesper-opt-egglog, vesper-codegen-clif), Vesper Loom (vesper-loom-*), SemVer Variance (vesper-semver), Lean 4 Proof Extractor (vesper-verify-lean)
+Sections 7–11, 42, Appendix A
+5-stage Cranelift + egglog pipeline (vesper-syntax, vesper-hir, vesper-mir-pcg, vesper-opt-egglog, vesper-codegen-clif), Vesper Loom (vesper-loom-*), SemVer Variance (vesper-semver), Lean 4 Proof Extractor (vesper-verify-lean), Verified Bootstrap & DDC (vesper-codegen-verified)
 Application, Graphics, Observability & Security Flagships
 Sections 17–19, 22–23
 Prism HTTP/2/3 & WebSockets (@vesper-web/prism, vesper-prism), Aura WinUI 3 / GTK 4 / SwiftUI (@vesper-ui/aura, vesper-aura), Ignis D3D12 / Vulkan 1.4 / Metal 4 (@vesper-game/ignis, vesper-ignis), Beacon OTLP-Arrow (@vesper-obs/beacon, vesper-beacon), Vault constant-time AEAD & PQ KEM (@vesper-crypto/vault, vesper-vault)
@@ -2947,7 +2947,174 @@ impl IgnisBarrierCompiler {
     }
 }
 
-19.8 Single-Source WASI Slang Pipeline and Tri-Backend Bindless Lowering
+42. Verified and Verifying Bootstrap Architecture: In-Logic Self-Hosting, Equational E-Graph Witnesses, Direct Verified Codegen, and Diverse Double-Compiling (Stage 0 to Stage 3)
+Bootstrapping Vesper as both a verifying compiler (statically enforcing modal linearity, disjoint FieldTree projections, and Resumption Frame Conditions while extracting zero-sorryAx Lean 4 models for user code) and a verified compiler (mathematically proving that the compiler's own passes preserve operational semantics and are free of binary-seed backdoors) synthesizes CakeML in-logic bootstrapping, CompCert forward simulation, Translation Validation for equality saturation, and Wheeler's Diverse Double-Compiling (DDC). Implemented across crates/vesper-codegen-verified and the self-hosted @vesper-lang/compiler workspace, this architecture shrinks Vesper's steady-state Trusted Computing Base (TCB) to roughly 6,500 lines of auditable specification and kernel code—removing rustc, Cargo, egglog search heuristics, and cranelift-codegen from the soundness boundary of verified builds.
+42.1 Architectural Pillars of a Verified and Verifying Toolchain
+1. Executable Lean 4 Ground-Truth Oracle (Stage 0b Differential Lockstep): Before trusting any optimization or codegen pass in the initial Rust seed compiler (Stage 0, vesperc-rs), Appendix A's VesperMetatheory.lean extends into a computable multi-local reference typechecker (checkExpr) and fuel-stepped reference evaluator (evalSteps) audited by both Lean 4's kernel and the external self-verified Lean4Lean checker (Section 11.4). Vesper Crucible's ChoiceTape fuzzer (Section 29.2) executes 100,000+ synthesized programs in lockstep across vesperc-rs (cranelift-jit) and the Lean 4 reference evaluator—asserting 1-to-1 static diagnostic agreement and bit-identical dynamic resource mint/consume traces from day one.
+2. Proof-Producing Equality Saturation (egglog Equational Witnesses): Rather than verifying Stage 4's Datalog e-graph saturation engine (vesper-opt-egglog, Section 7) as a monolithic search procedure, Vesper untrusts the e-graph search and verifies rewrite certificates. Every algebraic, VVec SIMD (Section 14), @fip constructor-reuse (Section 15.4), and inline handler-fusion rule carries a pre-proved Lean 4 refinement lemma (bv_decide or EffM equational law). When egglog extracts a minimum-cost optimized PlaceIr term, it emits a compact EgglogRewriteWitness (sequence of rule IDs, e-class substitutions, and congruence steps) validated in linear time by a tiny proof-checker—guaranteeing semantics preservation even if cost heuristics contain bugs.
+3. Dual-Path Backend Soundness: SMT Translation Validation and vesper-codegen-verified: Real-world JIT/AOT backends such as Cranelift optimize aggressively across complex ISA lowering rules where subtle instruction-selection bugs can invalidate source-level proofs. Vesper closes the Stage 5 backend gap via two complementary tiers: (3a) for high-throughput Cranelift builds, lowering rules are restricted to VeriISLE-verified patterns paired with per-block Bitwuzla SMT translation validation (reusing vesper-loom-solver, Section 8.4) and vesper-vault's verify_constant_time_ssa pass (Section 23.5); and (3b) for @verified targets and the compiler itself, crates/vesper-codegen-verified provides a compact (~2,500 LOC), non-speculative direct emitter (PlaceIr to linear-scan register allocation to x86_64 / AArch64 / RV64 machine bytes plus vesper_fiber_yield trampolines and Section 26.5 WCSD stack bounds) proven via forward simulation in Lean 4.
+4. Hermetic Self-Hosting and Self-Verification in Vesper (@vesper-lang/compiler): Once Stage 0 compiles Vesper's core subset, the 5-stage compiler is implemented in Vesper itself (@vesper-lang/compiler). Every compiler pass executes inside a deterministic Region::scoped VirtualArena (Section 15.2) with Alloc, Net, Clock, and Ffi statically absent from capability_ceiling in Loom.toml (Section 8.2). Crucially, Stage 0's vesper-verify-lean extracts @vesper-lang/compiler into pure Lean 4 definitions (Funs.lean) and proves that HirChecker::infer_fn and PcgSolver::check_body refine Vesper.Metatheory.HasType, CallProjValid, FrameSafe, and Theorem 2 (Total Linear Exhaustion).
+5. Defeating Thompson's Trusting Trust via Diverse Double-Compiling (DDC) and Lila Quorum: Even a formally verified compiler source tree can be subverted if compiled by a Trojaned seed binary. Vesper eliminates binary-seed trust by compiling @vesper-lang/compiler along two zero-shared-lineage paths: Path A compiles Stage 0 (rustc + Cranelift) to Stage 1 to Stage 2 to Stage 3, while Path B takes the kernel-checked Lean 4 functional model of @vesper-lang/compiler, compiles it via Lean 4's C emitter + CompCert C into vesperc-lean-ddc (zero Rust, zero Cranelift), and compiles @vesper-lang/compiler to Stage 2' and Stage 3'. Asserting BLAKE3(Stage 2) == BLAKE3(Stage 3) == BLAKE3(Stage 3') across independent Lila clean-room builders (Section 8.2) and Vesper Aegis hardware TEE attestation quotes (Section 33.4) mathematically rules out any self-propagating binary backdoor.
+42.2 Five-Stage Bootstrap Topology and Reproducible Lock Anchor
+Stage 0 (vesperc-rs Seed and vesperc-ref Lean 4 Oracle): Rust 12-crate compiler core (vesper-span through vesper-verify-lean) tested in continuous differential lockstep against the computable Lean 4 semantics (VesperMetatheory.lean).
+Stage 1 (vesperc-vsp-1 First Self-Hosted Generation): @vesper-lang/compiler compiled by Stage 0 (vesperc-rs), while Stage 0's vesper-verify-lean extracts @vesper-lang/compiler into Lean 4 and discharges its zero-sorryAx soundness .olean certificates.
+Stage 2 (vesperc-vsp-2 Self-Verifying Generation): @vesper-lang/compiler compiled and verified by Stage 1 (vesperc-vsp-1) inside vesper-loom-sandbox (epoch-zero clock, zero network/FS authority), closing the self-verifying loop.
+Stage 3 (vesperc-vsp-3 Fixed-Point Release and Stage 3' CompCert DDC Cross-Check): @vesper-lang/compiler recompiled by Stage 2 and independently compiled via Path B (Lean 4 to CompCert C to vesperc-lean-ddc), locking the canonical release only when all three output digests match bit-for-bit:
+# bootstrap/stage3_ddc.lock — Pinned Hermetic Fixed-Point & Diverse Double-Compile Anchor
+[bootstrap]
+compiler_package     = "@vesper-lang/compiler"
+version              = "1.0.0"
+source_merkle_blake3 = "blake3:7a19e4c0f82b31d69a04e581c3b72f109e84d2a16c5b30f9e1d2a4c8b7f60123"
+lean_spec_mif        = "mif:blake3:3c8e91a204f7b5d1e6c28094a7b3d5f18290e4c6b1a3f5d790e2c4a6b8d0f1e2"
+allowed_lean_axioms  = ["propext", "Quot.sound"]
+[fixed_point_quorum]
+path_a_stage2_blake3      = "blake3:e9f01b4c8d2a76543210fedcba9876543210fedcba9876543210fedcba987654"
+path_a_stage3_blake3      = "blake3:e9f01b4c8d2a76543210fedcba9876543210fedcba9876543210fedcba987654"
+path_b_lean_compcert_ddc  = "blake3:e9f01b4c8d2a76543210fedcba9876543210fedcba9876543210fedcba987654"
+lila_builder_signatures   = 3
+aegis_tdx_snp_attested    = true
+42.3 Self-Hosted Hermetic Compiler Driver and Witness Verification in Vesper
+Written in Vesper, @vesper-lang/compiler confines every compilation phase inside a bounded Region::scoped arena—statically proving zero global heap churn, zero ambient I/O, and mandatory validation of Stage 4 rewrite certificates prior to Stage 5 machine-code emission:
+// packages/vesper-compiler/src/driver.vsp (capability_ceiling = ["Fail"] in Loom.toml)
+copy struct RewriteStepWire {
+    rule_id: u16,
+    target_node_idx: u32,
+    subst_arity: u16,
+}
+pub fn compile_unit_verified[P: IsaProfile](
+    in src_bytes: ByteSlice,
+    in ceiling: CapabilityCeiling,
+    inout out_elf: ByteSliceMut,
+) -> Result[UnitArtifactDigests, CompileDiag] eff [Isa[P], Fail[CompileDiag]] {
+    Region::scoped(16.mib(), |cap pass_arena| {
+        let cst = Syntax::parse_lossless_ll2[P](in pass_arena, in src_bytes)?;
+        let typed_hir = HirChecker::infer_and_constrain(in pass_arena, in cst, in ceiling)?;
+        let place_ir = PcgSolver::lower_and_verify_exhaustion(in pass_arena, in typed_hir)?;
+        let (opt_ir, witness_steps) = EgglogOpt::saturate_with_witness(in pass_arena, in place_ir);
+        WitnessChecker::verify_equational_chain(in place_ir, in opt_ir, in witness_steps)?;
+        let code_len = VerifiedCodegen::emit_elf_deterministic(
+            in pass_arena,
+            in opt_ir,
+            inout out_elf,
+        )?;
+        Ok(UnitArtifactDigests::compute_blake3[P](in place_ir, in out_elf.prefix(code_len)))
+    })
+}
+42.4 Lean 4 Compositional Forward Simulation and DDC Fixed-Point Proofs (vesper verify)
+In proofs/BootstrapSimulationAndDdc.lean, vesper-verify-lean (Section 11) composes Stage 4's witness-checked PlaceIr rewrites with Stage 5's direct codegen simulation theorem to establish End-to-End Compiler Semantic Preservation, alongside the DDC Determinism Theorem:
+-- proofs/BootstrapSimulationAndDdc.lean
+theorem end_to_end_verified_codegen_simulation
+    {Ir Mach Outcome : Type}
+    (evalIr   : Ir -> Outcome)
+    (evalMach : Mach -> Outcome)
+    (verifyWitness : Ir -> Ir -> Bool)
+    (emitMach      : Ir -> Option Mach)
+    (h_witness_sound : forall ir1 ir2, verifyWitness ir1 ir2 = true -> evalIr ir2 = evalIr ir1)
+    (h_backend_sim   : forall opt m, emitMach opt = some m -> evalMach m = evalIr opt)
+    (srcIr optIr : Ir) (machBin : Mach)
+    (hw : verifyWitness srcIr optIr = true)
+    (hc : emitMach optIr = some machBin) :
+    evalMach machBin = evalIr srcIr := by
+  rw [h_backend_sim optIr machBin hc, h_witness_sound srcIr optIr hw]
+theorem ddc_eliminates_seed_trojan_on_compiler
+    {Src Bin : Type} [DecidableEq Bin]
+    (specCompile : Src -> Bin)
+    (compileRef  : Src -> Bin)
+    (execStage2  : Bin -> Src -> Bin)
+    (compilerSrc : Src) (stage2Bin : Bin)
+    (h_ref_correct : compileRef compilerSrc = specCompile compilerSrc)
+    (h_fixed_pt    : execStage2 stage2Bin compilerSrc = stage2Bin)
+    (h_ddc_match   : stage2Bin = compileRef compilerSrc) :
+    execStage2 stage2Bin compilerSrc = specCompile compilerSrc := by
+  rw [h_fixed_pt, h_ddc_match, h_ref_correct]
+42.5 Rust E-Graph Proof-Witness Validator and DDC Fixed-Point Auditor (crates/vesper-codegen-verified)
+Adding crates/vesper-codegen-verified brings the unified Rust host workspace to 47 modular crates, implementing the small trusted Stage 4 equational rewrite-certificate checker and the Stage 2 / Stage 3 / DDC cryptographic fixed-point gate:
+// crates/vesper-codegen-verified/src/lib.rs
+use smol_str::SmolStr;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerifiedRewriteRule {
+    AddZeroRight,
+    BitXorSelfZero,
+    TailResumptiveInline,
+    FipReuseSameSizeSlot,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExprTerm {
+    Var(u32),
+    ConstU64(u64),
+    Add(Box<ExprTerm>, Box<ExprTerm>),
+    BitXor(Box<ExprTerm>, Box<ExprTerm>),
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BootstrapVerifyError {
+    InvalidRewriteStep { step_idx: usize, rule: VerifiedRewriteRule },
+    FinalTermMismatch,
+    StageFixedPointDivergence { stage2: blake3::Hash, stage3: blake3::Hash },
+    DdcCrossCompilerMismatch { stage3_path_a: blake3::Hash, stage3_path_b_ddc: blake3::Hash },
+    InsufficientLilaBuilderQuorum { actual: usize, min_required: usize },
+}
+pub fn step_verified_rewrite(
+    term: &ExprTerm,
+    rule: VerifiedRewriteRule,
+) -> Option<ExprTerm> {
+    match (rule, term) {
+        (VerifiedRewriteRule::AddZeroRight, ExprTerm::Add(lhs, rhs))
+            if **rhs == ExprTerm::ConstU64(0) =>
+        {
+            Some((**lhs).clone())
+        }
+        (VerifiedRewriteRule::BitXorSelfZero, ExprTerm::BitXor(lhs, rhs)) if lhs == rhs => {
+            Some(ExprTerm::ConstU64(0))
+        }
+        _ => None,
+    }
+}
+pub fn verify_rewrite_certificate_chain(
+    initial: &ExprTerm,
+    expected_final: &ExprTerm,
+    steps: &[VerifiedRewriteRule],
+) -> Result<(), BootstrapVerifyError> {
+    let mut curr = initial.clone();
+    for (step_idx, &rule) in steps.iter().enumerate() {
+        curr = step_verified_rewrite(&curr, rule)
+            .ok_or(BootstrapVerifyError::InvalidRewriteStep { step_idx, rule })?;
+    }
+    if &curr != expected_final {
+        return Err(BootstrapVerifyError::FinalTermMismatch);
+    }
+    Ok(())
+}
+pub fn audit_ddc_bootstrap_quorum(
+    stage2_bytes: &[u8],
+    stage3_bytes: &[u8],
+    stage3_lean_compcert_ddc_bytes: &[u8],
+    verified_lila_signatures: &[SmolStr],
+    min_quorum: usize,
+) -> Result<blake3::Hash, BootstrapVerifyError> {
+    let h_stage2 = blake3::hash(stage2_bytes);
+    let h_stage3 = blake3::hash(stage3_bytes);
+    if h_stage2 != h_stage3 {
+        return Err(BootstrapVerifyError::StageFixedPointDivergence {
+            stage2: h_stage2,
+            stage3: h_stage3,
+        });
+    }
+    let h_ddc = blake3::hash(stage3_lean_compcert_ddc_bytes);
+    if h_stage3 != h_ddc {
+        return Err(BootstrapVerifyError::DdcCrossCompilerMismatch {
+            stage3_path_a: h_stage3,
+            stage3_path_b_ddc: h_ddc,
+        });
+    }
+    if verified_lila_signatures.len() < min_quorum {
+        return Err(BootstrapVerifyError::InsufficientLilaBuilderQuorum {
+            actual: verified_lila_signatures.len(),
+            min_required: min_quorum,
+        });
+    }
+    Ok(h_stage3)
+}
+19.8 Single-Source WASI Slang Pipeline and Tri-Backend Bindless Lowering
 To target DirectX 12, Vulkan 1.4, and Metal 4 from one shader codebase without losing modern GPU features, Ignis extends Section 19.2's fuel-metered Wasmtime shader sandbox (vesper-loom-sandbox) with Khronos Slang (slang-2026.wasm, macro_emits_effects = [], confined by [T-MacroConfinement]):
 Tri-Target Hermetic Compilation and Binary Harvesting: Shaders annotated with @gpu_module compile once into Slang IR inside Wasmtime and lower deterministically into three cached artifacts in ~/.vesper/store/ indexed by mif:blake3: Shader Model 6.9 DXIL plus Advanced Shader Delivery PSDB archives on Windows; SPIR-V 1.6+ targeting SPV_EXT_descriptor_heap, SPV_EXT_mesh_shader, SPV_EXT_shader_invocation_reorder, and SPV_KHR_cooperative_matrix on Linux; and Metal AIR bitcode compiled through Metal 4's explicit MTL4Compiler and MTL4PipelineDataSetSerializer binary archives on macOS for zero-stutter startup.
 Cross-API Wire Struct Layout Verification: During macro expansion, Ignis verifies that every shared Vesper wire struct (Section 13.2) has identical byte offsets, scalar widths, and total size across DXIL scalar block layout, SPIR-V physical storage buffers, and Metal device const buffers.

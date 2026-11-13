@@ -1,11 +1,11 @@
 {
   "schema_version": 2,
-  "numbered_section_count": 41,
+  "numbered_section_count": 42,
   "document_url": "https://docs.google.com/document/d/1zO7boUVwNTHRA-1ZNL4bDYi68OjQZBCimLWkETH6bso/edit",
   "title": "Vesper Language Design & Formal Specification",
-  "document_revision": "AHj4eMRg35hVwN07Ww4ah8QktN80KS_xgnyZypmazCIeUl-0B2N9N-ucp4P_nKYdwQMnGLpzGw3DjIaQE3liPaE18kxN9vW5Y-9PERTVdhw",
-  "modified_time_utc": "2026-11-12T09:18:30.204Z",
-  "snapshot_sha256": "8e0f05ae32a6c87a8ce25fb339f66c760fe5d5f3fd3cb05e58236d291fa62207",
+  "document_revision": "AHj4eMSb9JoNMOKZJ6wCp3fBbv7MFBZf76WoYONerEUzZ35_RI-G55cPRJqH1EIJVtIveO4t_2eQMcRO78JADiHSJhj25XSuxRM5WN7j24A",
+  "modified_time_utc": "2026-11-13T04:46:25.948Z",
+  "snapshot_sha256": "8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d",
   "snapshot_transform": "Indexed document paragraph text, LF joined, HTML entities decoded once. Document section order preserved.",
   "sections": {
     "1": {
@@ -82,7 +82,7 @@
     },
     "19": {
       "title": "19. Vesper Ignis: Cross-Platform 3D Game Engine (DirectX 12, Vulkan 1.4, and Metal 4)",
-      "sha256": "8cb2b7acaa4c9a98a7d4e5b76204eb8597ea428c1d0bf22670091ca17fa90342"
+      "sha256": "ade8390d4b0b18103dd16d87f3ebd3e514659541aaa86bb616d76be6c0c27228"
     },
     "20": {
       "title": "20. Vesper Wire and Json: Zero-Copy Arena Serde, On-Demand SIMD JSON, and Relative-Pointer Archives",
@@ -146,7 +146,7 @@
     },
     "35": {
       "title": "35. Vesper Warp: User-Space Kernel-Bypass QUIC/TCP Networking, Linear AF_XDP/DPDK UMEM Descriptor Rings, and Verified BBRv3 Loss Recovery",
-      "sha256": "027ab833fc2a9c3e2ea7ba1eb747c09e0f8f1ad187926734841133efbaf61b9d"
+      "sha256": "0d4ec35c9a67d1786bebf2314fc69605ff6f5e34b7f5bb3eee124da86ef71cfb"
     },
     "36": {
       "title": "36. Vesper Kinetic: Cross-Architecture Bit-Deterministic XPBD Physics, Capability-Verified IEEE-754 Determinism, and Tri-Backend GPU Broadphase",
@@ -171,6 +171,10 @@
     "41": {
       "title": "41. Vesper Metronome: User-Space Hardware PMU Microbenchmarking, Paired Interleaved A/B Regression Gates, Stabilizer Layout Randomization, and Fiber Causal Profiling (vesper bench)",
       "sha256": "6b8e81c34925039207ce877e677b38a5575629b8b5c18a6fe014182bda1a5dd2"
+    },
+    "42": {
+      "title": "42. Verified and Verifying Bootstrap Architecture: In-Logic Self-Hosting, Equational E-Graph Witnesses, Direct Verified Codegen, and Diverse Double-Compiling (Stage 0 to Stage 3)",
+      "sha256": "fbd5cd3bd45c29d79b545955fce5b89db67df52ca4842eab04c7779e09ad7e64"
     }
   },
   "document_heading_order": [
@@ -195,6 +199,7 @@
     "17. Vesper Prism: Zero-Allocation, Protocol-Verified Web Framework Showcase",
     "18. Vesper Aura: Cross-Platform Native UI Framework (WinUI 3, GTK 4, and SwiftUI)",
     "19. Vesper Ignis: Cross-Platform 3D Game Engine (DirectX 12, Vulkan 1.4, and Metal 4)",
+    "42. Verified and Verifying Bootstrap Architecture: In-Logic Self-Hosting, Equational E-Graph Witnesses, Direct Verified Codegen, and Diverse Double-Compiling (Stage 0 to Stage 3)",
     "20. Vesper Wire and Json: Zero-Copy Arena Serde, On-Demand SIMD JSON, and Relative-Pointer Archives",
     "29. Vesper Crucible: Coverage-Guided Concolic Fuzzing, Substructural Shrinking, and Incremental Rust/C Migration Toolchain",
     "30. Vesper Nexus: Component-Model WasmFX Sandboxes, Linear WIT Resources, and Zero-Copy Host/Guest Plugins",
