@@ -8,7 +8,7 @@ use super::{
     },
 };
 use crate::{
-    ast::{Expr, ExprKind, Item, Literal, TypeMap},
+    ast::{Arg, Expr, ExprKind, Item, Literal, Type, TypeMap},
     check,
     numeric::IntegerKind,
     parser,
@@ -208,6 +208,99 @@ fn candidate_wrapping_calls_keep_actual_same_operator_callee_origin() {
     callee.span = source.span.start..source.span.start;
     assert!(install_proposal(&mut source, &types, proposed).is_err());
     assert_eq!(source, before);
+}
+
+#[test]
+fn unrelated_checked_width_span_cannot_be_installed_on_a_candidate_child() {
+    let (mut source, types) =
+        fixture("fn f(x:i64,y:i64)->i64{let unrelated:u8=1;wrapping_add(wrapping_mul(x,1),y)}");
+    let foreign_span = types
+        .iter()
+        .find_map(|(&(start, end), ty)| (ty == &Type::named("u8")).then_some(start..end))
+        .expect("real checked unrelated u8 value span");
+    assert_ne!(foreign_span, source.span);
+    let before = source.clone();
+    let mut proposed = proposal(&source, &types);
+    let ExprKind::Call { args, .. } = &mut proposed.candidate.kind else {
+        panic!("simplified wrapping_add candidate")
+    };
+    args[0].expr.span = foreign_span;
+    assert_eq!(
+        install_proposal(&mut source, &types, proposed),
+        Err(WitnessError::OutputMismatch)
+    );
+    assert_eq!(source, before);
+}
+
+fn oversized_candidate(text: &str, mutate: impl FnOnce(&mut Expr, usize)) {
+    let (mut source, types) = fixture(text);
+    let before = source.clone();
+    let mut proposed = proposal(&source, &types);
+    mutate(
+        &mut proposed.candidate,
+        WitnessLimits::default().max_metadata_bytes,
+    );
+    assert_eq!(
+        install_proposal(&mut source, &types, proposed),
+        Err(WitnessError::Limit),
+        "retained candidate capacity must consume the carried metadata budget"
+    );
+    assert_eq!(source, before);
+}
+
+#[test]
+fn retained_candidate_string_capacity_counts_even_with_short_contents() {
+    oversized_candidate("fn f(x:i64)->i64{wrapping_add(x,0)}", |candidate, cap| {
+        let ExprKind::Name(name) = &mut candidate.kind else {
+            panic!("simplified source variable")
+        };
+        name.reserve_exact(cap);
+        assert!(name.capacity() > cap);
+    });
+    oversized_candidate(
+        "fn f(x:i64,y:i64)->i64 eff [Fail[ArithOverflow]]{(x+0)+y}",
+        |candidate, cap| {
+            let ExprKind::Binary(operator, ..) = &mut candidate.kind else {
+                panic!("simplified checked addition")
+            };
+            operator.reserve_exact(cap);
+            assert!(operator.capacity() > cap);
+        },
+    );
+    oversized_candidate(
+        "fn f(x:i64,y:i64)->i64{wrapping_add(wrapping_mul(x,1),y)}",
+        |candidate, cap| {
+            let ExprKind::Call { callee, .. } = &mut candidate.kind else {
+                panic!("simplified wrapping addition")
+            };
+            let ExprKind::Name(name) = &mut callee.kind else {
+                unreachable!()
+            };
+            name.reserve_exact(cap);
+            assert!(name.capacity() > cap);
+        },
+    );
+}
+
+#[test]
+fn retained_candidate_vector_capacity_counts_at_length_two_or_zero() {
+    let text = "fn f(x:i64,y:i64)->i64{wrapping_add(wrapping_mul(x,1),y)}";
+    oversized_candidate(text, |candidate, cap| {
+        let ExprKind::Call { args, .. } = &mut candidate.kind else {
+            panic!("simplified wrapping addition")
+        };
+        args.reserve_exact(cap / std::mem::size_of::<Arg>() + 1);
+        assert_eq!(args.len(), 2);
+        assert!(args.capacity() * std::mem::size_of::<Arg>() > cap);
+    });
+    oversized_candidate(text, |candidate, cap| {
+        let ExprKind::Call { types, .. } = &mut candidate.kind else {
+            panic!("simplified wrapping addition")
+        };
+        types.reserve_exact(cap / std::mem::size_of::<Type>() + 1);
+        assert!(types.is_empty());
+        assert!(types.capacity() * std::mem::size_of::<Type>() > cap);
+    });
 }
 
 #[test]

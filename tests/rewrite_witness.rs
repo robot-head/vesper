@@ -29,6 +29,26 @@ fn checked_island(text: &str) -> (Expr, TypeMap) {
     };
     ((**tail).clone(), checked.expression_types)
 }
+fn canonical_candidate(source: &Expr) -> Expr {
+    fn values(expression: &mut Expr, span: &std::ops::Range<usize>) {
+        expression.span = span.clone();
+        match &mut expression.kind {
+            ExprKind::Binary(_, left, right) => {
+                values(left, span);
+                values(right, span);
+            }
+            ExprKind::Call { args, .. } => {
+                for arg in args {
+                    values(&mut arg.expr, span);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut candidate = source.clone();
+    values(&mut candidate, &source.span);
+    candidate
+}
 fn kind_type(kind: IntegerKind) -> &'static str {
     match kind {
         IntegerKind::U8 => "u8",
@@ -587,9 +607,15 @@ fn wrapping_identity() -> (Expr, TypeMap, RewriteCertificate) {
 #[test]
 fn candidate_variables_endpoints_and_callee_origin_cannot_be_swapped() {
     let (source, types, cert) = wrapping_identity();
-    assert_eq!(verify(&source, &source, &types, &cert), Ok(()));
+    let canonical = canonical_candidate(&source);
+    assert_eq!(verify(&source, &canonical, &types, &cert), Ok(()));
+    assert_eq!(
+        verify(&source, &source, &types, &cert),
+        Err(WitnessError::OutputMismatch),
+        "raw source child spans do not satisfy the candidate profile"
+    );
     for mutation in 0..8 {
-        let mut candidate = source.clone();
+        let mut candidate = canonical.clone();
         let root_start = candidate.span.start;
         let ExprKind::Call {
             callee,
@@ -617,7 +643,7 @@ fn candidate_variables_endpoints_and_callee_origin_cannot_be_swapped() {
             "mutation{mutation}"
         );
     }
-    let mut candidate = source.clone();
+    let mut candidate = canonical.clone();
     let ExprKind::Call { args, .. } = &mut candidate.kind else {
         unreachable!()
     };
@@ -626,7 +652,7 @@ fn candidate_variables_endpoints_and_callee_origin_cannot_be_swapped() {
     assert_eq!(
         verify(&source, &candidate, &types, &cert),
         Ok(()),
-        "generated value spans are not authority"
+        "every candidate value uses the checked root span"
     );
 }
 
@@ -670,7 +696,7 @@ fn congruence_must_preserve_corresponding_child_order_even_for_commutative_wrapp
     ];
     cert.conclusion = 2;
     cert.output = 3;
-    let mut candidate = source.clone();
+    let mut candidate = canonical_candidate(&source);
     let ExprKind::Call { args, .. } = &mut candidate.kind else {
         unreachable!()
     };
@@ -744,10 +770,11 @@ fn invalid_configuration_and_small_resource_limits_never_weaken_endpoint_checkin
         );
     }
     let (source, types, cert) = wrapping_identity();
+    let candidate = canonical_candidate(&source);
     assert_eq!(
         verify_rewrite(
             &source,
-            &source,
+            &candidate,
             &types,
             &cert,
             WitnessLimits {
@@ -760,7 +787,7 @@ fn invalid_configuration_and_small_resource_limits_never_weaken_endpoint_checkin
     assert_eq!(
         verify_rewrite(
             &source,
-            &source,
+            &candidate,
             &types,
             &cert,
             WitnessLimits {
