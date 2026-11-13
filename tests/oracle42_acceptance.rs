@@ -1152,8 +1152,8 @@ fn compare_real_backends(case: &Case, response: &Value) {
         oracle::worker::execute_case(case, 100000).expect("real compiler/evaluator/JIT execution");
     match (answer, rust) {
         (OracleAnswer::Outcome { outcome, .. }, RustAnswer::Outcomes { evaluator, jit }) => {
-            assert_eq!(evaluator, [outcome; 4]);
-            assert_eq!(jit, [outcome; 4]);
+            assert_eq!(*evaluator, [outcome; 4]);
+            assert_eq!(*jit, [outcome; 4]);
         }
         (OracleAnswer::Diagnostic { class, .. }, RustAnswer::Diagnostic { phase, codes }) => {
             assert_eq!(
