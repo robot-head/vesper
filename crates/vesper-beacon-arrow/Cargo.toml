@@ -3,13 +3,17 @@ name = "vesper-beacon-arrow"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Budgeted Apache Arrow IPC adapter for Beacon spans"
+description = "Budgeted Apache Arrow IPC and OTel Arrow (OTAP) adapter for Beacon spans and histograms"
 
 [dependencies]
 vesper-beacon = { path = "../vesper-beacon" }
 arrow-array = "=56.2.0"
+arrow-buffer = "=56.2.1"
 arrow-schema = "=56.2.0"
 arrow-ipc = { version = "=56.2.0", default-features = false }
+prost = { version = "=0.14.6", default-features = false, features = ["derive", "std"] }
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
 
 [dev-dependencies]
 arrow2 = { version = "=0.18.0", default-features = false, features = ["io_ipc"] }

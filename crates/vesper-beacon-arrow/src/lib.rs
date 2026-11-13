@@ -4,7 +4,12 @@
 //! Arrow arrays or writing IPC. These are not allocator-capacity, RSS, or OOM
 //! guarantees. The core remains dependency-free/no_std. No OTAP transport,
 //! zero-allocation, fiber propagation, or performance claim is made.
+//!
+//! The [`otap`] module adds the OpenTelemetry Arrow Protocol encoding,
+//! decoding, framed transport and PII redaction boundary.
 #![forbid(unsafe_code)]
+
+pub mod otap;
 
 use arrow_array::{ArrayRef, RecordBatch, UInt64Array, UInt8Array};
 use arrow_ipc::{

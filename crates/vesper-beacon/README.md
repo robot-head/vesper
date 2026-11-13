@@ -61,8 +61,17 @@ recovers a parent from queue backpressure, attributes explicit cancellation,
 drains owned columns, and records a
 trace-linked latency exemplar. There are no performance claims or benchmarks.
 
+`Pii<T>` tags a value as personally identifiable, like `Secret<T>` without
+Debug/Clone. `Telemetrable` marks the values an exporter may encode without a
+policy (scalars, `&'static str`, `Redacted`); it is not implemented for
+`Secret`, `Pii` or runtime strings, which compile-fail doctests check. The
+sealed `Sensitive` trait lets an exporter fingerprint a `Secret`/`Pii` byte
+payload under an explicit policy. This is library type discipline, not the
+source checker's `Telemetrable` coherence rule.
+
 An optional allocating sibling, `vesper-beacon-arrow`, exports these records as
-standard Apache Arrow IPC with a versioned custom span schema. The core adds
+standard Apache Arrow IPC with a versioned custom span schema, and as OTAP
+batches with PII redaction. The core adds
 only a nonmutating `records()` iterator and transactional `try_consume_prefix`
 callback. The callback borrows the current ring, preventing mutation between
 prefix selection and successful removal; errors leave the FIFO intact. Arrow
