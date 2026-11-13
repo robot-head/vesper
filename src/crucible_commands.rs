@@ -5,7 +5,11 @@
 //! `u32`, `u8` or `bool`. Each Crucible execution draws one value per
 //! parameter from the ChoiceTape and calls the function in the evaluator.
 //! Coverage feedback is coarse: the outcome class and the result value are
-//! reported as probe edges (native Cranelift edge instrumentation is lane 23).
+//! reported as probe edges. With `--native-coverage` the target instead runs
+//! as Cranelift code instrumented with edge counters and comparison-operand
+//! logging ([`vesper::native_coverage`], lane 23), which feed Crucible's
+//! corpus selection and input-to-state solver; the evaluator still runs every
+//! input and must agree on success or failure.
 //!
 //! * `fuzz` fails when the evaluator returns an error (an escaping `Fail`,
 //!   an abort, fuel exhaustion is *not* a failure but an invalid run), when
@@ -34,7 +38,7 @@ use vesper_crucible::{
     ChoiceTape, FuzzConfig, Invalid, PropError, Refutation, Source, Strategy, Verdict,
 };
 
-const FUZZ_HELP: &str = "Usage: vesper fuzz <file.ves> --target <fn> [options]\n\nRun Crucible coverage-guided fuzzing over a source function in the evaluator.\nParameters must be i64, u64, u32, u8 or bool.\n\nOptions:\n  --target <fn>          Function to fuzz (required)\n  --native               Also run each input through the Cranelift JIT and compare\n  --differential <fn>    Compare every outcome with a shadow implementation\n  --corpus <dir>         Replay saved tapes first, then save the campaign corpus\n  --regressions <file>   Write found failures as @test regression cases\n  --execs <n>            Execution budget (default 2000, 200 with --native)\n  --seed <n>             Campaign seed (default 0xc0ffee)\n  --fuel <steps>         Evaluator step limit per run (default 100000)\n  --random               Unguided random search\n";
+const FUZZ_HELP: &str = "Usage: vesper fuzz <file.ves> --target <fn> [options]\n\nRun Crucible coverage-guided fuzzing over a source function in the evaluator.\nParameters must be i64, u64, u32, u8 or bool.\n\nOptions:\n  --target <fn>          Function to fuzz (required)\n  --native               Also run each input through the Cranelift JIT and compare\n  --native-coverage      Run the target as instrumented native code: edge counters\n                         and comparison operands guide the corpus and solver\n  --differential <fn>    Compare every outcome with a shadow implementation\n  --corpus <dir>         Replay saved tapes first, then save the campaign corpus\n  --regressions <file>   Write found failures as @test regression cases\n  --execs <n>            Execution budget (default 2000, 200 with --native)\n  --seed <n>             Campaign seed (default 0xc0ffee)\n  --fuel <steps>         Evaluator step limit per run (default 100000)\n  --random               Unguided random search\n";
 const REFUTE_HELP: &str = "Usage: vesper verify --refute <file.ves> --contract <fn> [options]\n\nSearch for a counterexample to a bool-returning contract with Crucible before Lean proving.\n\nOptions:\n  --contract <fn>        Contract predicate (alias --target, required)\n  --requires <fn>        Precondition predicate over the same parameters\n  --regressions <file>   Write a refutation as an @test regression case\n  --execs <n>            Execution budget (default 5000)\n  --seed <n>             Campaign seed (default 0xc0ffee)\n  --fuel <steps>         Evaluator step limit per run (default 100000)\n";
 
 /// Supported parameter carriers.
@@ -435,6 +439,54 @@ fn native_outcome(
     Ok(batch.run("__vesper_fuzz_case"))
 }
 
+/// Machine value of a drawn argument (`i64` as its two's-complement bits).
+fn machine_value(value: &Value) -> u64 {
+    match value {
+        Value::Int(n) => *n as u64,
+        Value::UInt(n, _) => *n,
+        Value::Bool(b) => u64::from(*b),
+        _ => unreachable!("carriers draw only integers and booleans"),
+    }
+}
+
+/// One `--native-coverage` execution: run the instrumented native code,
+/// feed its edges and comparison operands to Crucible, and cross-check the
+/// outcome class against the evaluator.
+fn native_coverage_run(
+    coverage: &mut vesper::native_coverage::NativeCoverage,
+    evaluator: &Evaluator<'_>,
+    name: &str,
+    args: &[Value],
+    src: &mut Source,
+) -> Result<(), PropError> {
+    use vesper::native_coverage::NativeOutcome;
+    let machine: Vec<u64> = args.iter().map(machine_value).collect();
+    let outcome = coverage
+        .run(&machine)
+        .map_err(|e| PropError::fail("native-run", e))?;
+    coverage.feed(src.probe());
+    let reference = evaluator.call(name, args.to_vec());
+    if let Err(e) = &reference
+        && is_fuel(e)
+    {
+        return Err(PropError::Invalid(Invalid::Rejected));
+    }
+    match (outcome, reference) {
+        (NativeOutcome::Returned, Ok(_)) => Ok(()),
+        (NativeOutcome::Failed { effect }, Err(e)) => {
+            Err(PropError::fail(format!("native {effect}"), e))
+        }
+        (NativeOutcome::Returned, Err(e)) => Err(PropError::fail(
+            "native-divergence",
+            format!("native code returned, evaluator failed: {e}"),
+        )),
+        (NativeOutcome::Failed { effect }, Ok(v)) => Err(PropError::fail(
+            "native-divergence",
+            format!("native code raised {effect}, evaluator returned {v}"),
+        )),
+    }
+}
+
 fn same_outcome(a: &Result<Value, String>, b: &Result<Value, String>) -> bool {
     match (a, b) {
         (Ok(x), Ok(y)) => x.to_string() == y.to_string(),
@@ -526,6 +578,7 @@ impl Drop for QuietPanics {
 pub fn fuzz(args: Vec<String>) -> Result<(), String> {
     let mut common = Common::new();
     let mut native = false;
+    let mut native_coverage = false;
     let mut differential = None;
     let mut corpus = None;
     let mut random = false;
@@ -538,6 +591,7 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
             }
             "--target" => common.target = Some(next(&mut it, arg)?.clone()),
             "--native" => native = true,
+            "--native-coverage" => native_coverage = true,
             "--random" => random = true,
             "--differential" => differential = Some(next(&mut it, arg)?.clone()),
             "--corpus" => corpus = Some(PathBuf::from(next(&mut it, arg)?)),
@@ -549,6 +603,9 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
                 }
             }
         }
+    }
+    if native_coverage && (native || differential.is_some()) {
+        return Err("--native-coverage cannot be combined with --native or --differential".into());
     }
     let input = common
         .input
@@ -594,12 +651,27 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
             .map_err(|e| format!("--native: '{name}' is outside the native batch subset: {e}"))?
             .map_err(|e| format!("--native: '{name}' failed natively on zero arguments: {e}"))?;
     }
+    let mut coverage = if native_coverage {
+        let compiled =
+            vesper::native_coverage::NativeCoverage::compile(&loaded.source, &loaded.world, &name)?;
+        let stats = compiled.stats();
+        println!(
+            "native coverage: {} function(s), {} edge counter(s), {} comparison site(s)",
+            stats.functions, stats.edges, stats.comparisons
+        );
+        Some(compiled)
+    } else {
+        None
+    };
     let execs = common.execs.unwrap_or(if native { 200 } else { 2000 });
     let evaluator = Evaluator::new(&loaded.world, common.fuel);
     let source = &loaded.source;
     let constants = literals(source);
     let mut property = |src: &mut Source| -> Result<(), PropError> {
         let args = draw_args(&target.carriers, src)?;
+        if let Some(coverage) = coverage.as_mut() {
+            return native_coverage_run(coverage, &evaluator, &name, &args, src);
+        }
         let outcome = evaluator.call(&name, args.clone());
         src.probe().edge(edge_of(&outcome));
         report_literals(src.probe(), &target.carriers, &args, &constants);
