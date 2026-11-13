@@ -34,6 +34,7 @@ pub mod hazard;
 pub mod irq;
 pub mod ledger;
 pub mod mmio;
+pub mod pac;
 pub mod prologue;
 pub mod stack;
 pub mod svd;
