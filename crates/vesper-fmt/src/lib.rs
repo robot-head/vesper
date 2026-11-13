@@ -1,10 +1,14 @@
 //! Canonical formatting of the currently supported lossless Vesper source grammar.
 //! Every successful result is reparsed, token/comment conserved and idempotent.
+//! Supported source expression macros are syntax-validated without execution.
 //! Unsupported macro/quotation syntax and invalid/incomplete buffers are errors:
 //! callers keep their original source, including all opaque payload trivia.
 #![forbid(unsafe_code)]
 mod doc;
+mod macro_source;
+pub mod recovery;
 pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
+pub use recovery::{RecoveryEdit, RecoveryFormatResult, format_recovery_source};
 use vesper_syntax::{
     lexer::{self, Token, TokenKind as K},
     parser,
@@ -60,7 +64,7 @@ pub struct FormatResult {
     pub output: String,
     pub changed: bool,
 }
-struct Work {
+pub(crate) struct Work {
     used: usize,
     max: usize,
 }
@@ -92,7 +96,12 @@ fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
         })
         .collect()
 }
-fn guarded_lex(source: &str, limits: Limits, work: &mut Work) -> Result<Vec<Token>, Error> {
+fn guarded_lex(
+    source: &str,
+    limits: Limits,
+    work: &mut Work,
+    allow_macros: bool,
+) -> Result<Vec<Token>, Error> {
     work.charge(source.len())?;
     let (tokens, errors) = lexer::lex(source);
     if let Some(error) = errors.first() {
@@ -110,11 +119,11 @@ fn guarded_lex(source: &str, limits: Limits, work: &mut Work) -> Result<Vec<Toke
         if token.kind.trivia() || token.kind == K::Eof {
             continue;
         }
-        if token.kind == K::Bang && matches!(previous, Some(K::Lower | K::Upper)) {
+        if !allow_macros && token.kind == K::Bang && matches!(previous, Some(K::Lower | K::Upper)) {
             return Err(Error::OpaqueMacro);
         }
         let text = &source[token.span.clone()];
-        if matches!(text, "quote" | "quasiquote" | "syntax_quote") {
+        if !allow_macros && matches!(text, "quote" | "quasiquote" | "syntax_quote") {
             return Err(Error::OpaqueMacro);
         }
         // Count chains at every delimiter level, collapsing a nested group
@@ -176,15 +185,23 @@ fn guarded_lex(source: &str, limits: Limits, work: &mut Work) -> Result<Vec<Toke
     )?;
     Ok(tokens)
 }
-fn once(source: &str, limits: Limits, work: &mut Work) -> Result<String, Error> {
-    let tokens = guarded_lex(source, limits, work)?;
-    let parsed = parser::parse(source);
-    if let Some(error) = parsed.diagnostics.first() {
-        return Err(Error::Syntax {
-            offset: error.span.start,
-        });
-    }
-    let syntax = parsed.syntax();
+fn once(source: &str, limits: Limits, work: &mut Work) -> Result<(String, bool), Error> {
+    let (tokens, macros) = match guarded_lex(source, limits, work, false) {
+        Ok(tokens) => (tokens, false),
+        Err(Error::OpaqueMacro) => (guarded_lex(source, limits, work, true)?, true),
+        Err(error) => return Err(error),
+    };
+    let syntax = if macros {
+        macro_source::syntax(source, &tokens, limits, work)?
+    } else {
+        let parsed = parser::parse(source);
+        if let Some(error) = parsed.diagnostics.first() {
+            return Err(Error::Syntax {
+                offset: error.span.start,
+            });
+        }
+        parsed.syntax()
+    };
     // The CST is the lowering source. Exact source slices are anchored by each
     // lossless token's byte range; compare against lexer evidence before use.
     let mut atoms = Vec::new();
@@ -231,18 +248,25 @@ fn once(source: &str, limits: Limits, work: &mut Work) -> Result<String, Error> 
     let output = document.render(root)?;
     work.charge(document.work_used())?;
     work.charge(output.len())?;
-    Ok(output)
+    Ok((output, macros))
 }
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
 /// token/comment bytes are never wrapped, so those leaves may exceed the ribbon.
 pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error> {
+    let mut work = Work::new(limits.max_work);
+    format_with_work(source, limits, &mut work)
+}
+pub(crate) fn format_with_work(
+    source: &str,
+    limits: Limits,
+    work: &mut Work,
+) -> Result<FormatResult, Error> {
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }
-    let mut work = Work::new(limits.max_work);
-    let output = once(source, limits, &mut work)?;
-    let original = guarded_lex(source, limits, &mut work)?;
-    let rewritten = guarded_lex(&output, limits, &mut work)?;
+    let (output, macros) = once(source, limits, work)?;
+    let original = guarded_lex(source, limits, work, macros)?;
+    let rewritten = guarded_lex(&output, limits, work, macros)?;
     let a = pieces(source, &original);
     let b = pieces(&output, &rewritten);
     if a.len() != b.len()
@@ -252,8 +276,8 @@ pub fn format_source(source: &str, limits: Limits) -> Result<FormatResult, Error
     {
         return Err(Error::Conservation);
     }
-    let second = once(&output, limits, &mut work)?;
-    if second != output {
+    let (second, second_macros) = once(&output, limits, work)?;
+    if second != output || macros != second_macros {
         return Err(Error::NotIdempotent);
     }
     Ok(FormatResult {
@@ -280,6 +304,11 @@ enum Gap {
     Hard,
 }
 fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) -> Gap {
+    if previous.kind == K::Dollar
+        || current.kind == K::Bang && matches!(previous.kind, K::Lower | K::Upper)
+    {
+        return Gap::None;
+    }
     if previous.kind == K::Comment || previous.kind == K::Semi {
         return Gap::Hard;
     }

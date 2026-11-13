@@ -1,0 +1,29 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+])
+
+# The root package also owns docs/, examples/, lean/, scripts/ and tools/
+# (directories without their own BUILD.bazel), which the CLI and its tests read.
+vesper_crate(
+    extra_compile_data = ["//crates/vesper-doc:files"],
+    extra_test_data = [
+        "//crates/vesper-doc:files",
+        "//crates/vesper-grammar:files",
+        "//crates/vesper-loom-trust:files",
+    ],
+)
+# Narrow slices of the root package for members that read them.
+filegroup(
+    name = "examples",
+    srcs = glob(["examples/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "lean",
+    srcs = glob(["lean/**"]),
+    visibility = ["//visibility:public"],
+)

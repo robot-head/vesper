@@ -3,6 +3,10 @@
 Base checkpoint: `c5328d0`. Integration branch: `main` (the `work` branch was merged in PR #9). Remote: https://github.com/robot-head/vesper.
 The expanded design lives in [specification.txt](specification.txt); the implemented core baseline is [core-specification-baseline.txt](core-specification-baseline.txt).
 
+## Fifth wave: every unstarted section and the Warp gaps
+
+The [fifth-wave prompt index](agent-prompts/wave-five/README.md) splits the ten design sections that had no code at `af03122` (§23 Vault, §25 Chorus, §26 Silicon, §27 eBPF, §29 Crucible and migrate, §30 Nexus, §31 Chrono, §32 Resonance, §33 Aegis, §36 Kinetic) and the three gaps left by the Warp integration (TLS handshake, stream retransmission, source simulation on the software NIC) into fourteen concurrent lanes under the [wave-five contracts](rfcs/wave-five-contracts.md). Claim issues are #121–#134; integration steps are #135 (Warp handshake) and #136 (CLI and compiler hooks). The [section status review](rfcs/wave-five-review.md) lists what remains in the sections that already have code. Other agents hold §16.4 macros (#103–#110) and §39 formatting (#111–#120); wave five does not touch those paths.
+
 ## Fourth wave: Vesper Warp (§35)
 
 The [fourth-wave prompt index](agent-prompts/wave-four/README.md) splits design §35 (user-space QUIC/TCP networking, linear UMEM rings, BBRv3) into eight concurrent lanes under the [wave-four contracts](rfcs/wave-four-contracts.md). Each lane owns one new `crates/vesper-warp*` crate (lane 8 owns `crates/vesper-sim-session/**`), depends only on crates already on `main`, and commits its own root registration patch on its PR branch. An integration step in `crates/vesper-warp` follows once lanes 1–6 merge.
@@ -126,10 +130,13 @@ The integration checkpoint registers every delivered library plus the native exp
 
 ## Acceptance commands
 
+CI builds and tests with Bazel ([bazel.md](bazel.md)). A new workspace member
+needs a `BUILD.bazel`: run `python3 tools/bazel/sync_build_files.py` after
+registering it. Files read from outside the crate directory must be declared
+in that file (`extra_compile_data`, `extra_test_data`).
+
 ```sh
-cargo fmt --all -- --check
-VESPER_LEAN=lean cargo test --workspace --locked
-cargo clippy --workspace --locked --all-targets -- -D warnings
+VESPER_LEAN=$(elan which lean) bazel test //...   # tests, Clippy and rustfmt
 lean lean/Foundations.lean
 lean lean/RuntimeFrames.lean
 lean lean/SpecificationCounterexample.lean
