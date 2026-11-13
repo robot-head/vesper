@@ -92,6 +92,67 @@ impl SpaceKeys {
     }
 }
 
+/// The 0-RTT secret (RFC 9001 §4.6.1): the client seals early data with
+/// it, the server opens it. There is no server-to-client 0-RTT direction.
+pub struct ZeroRttKeys {
+    side: Side,
+    secret: TrafficSecret,
+}
+
+impl fmt::Debug for ZeroRttKeys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ZeroRttKeys")
+            .field("side", &self.side)
+            .field("cipher", &self.cipher())
+            .finish_non_exhaustive()
+    }
+}
+
+impl ZeroRttKeys {
+    pub fn cipher(&self) -> Cipher {
+        self.secret.cipher()
+    }
+
+    pub fn side(&self) -> Side {
+        self.side
+    }
+
+    pub fn secret(&self) -> &TrafficSecret {
+        &self.secret
+    }
+
+    /// Client: protection for outgoing 0-RTT packets.
+    pub fn into_sealer(self) -> Result<Sealer, TlsError> {
+        if self.side != Side::Client {
+            return Err(TlsError::ProtocolViolation("only a client seals 0-RTT"));
+        }
+        Ok(Sealer::new(self.secret.keys()))
+    }
+
+    /// Server: protection for incoming 0-RTT packets.
+    pub fn into_opener(self) -> Result<Opener, TlsError> {
+        if self.side != Side::Server {
+            return Err(TlsError::ProtocolViolation("only a server opens 0-RTT"));
+        }
+        Ok(Opener::new(self.secret.keys()))
+    }
+}
+
+/// What became of 0-RTT on this connection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EarlyData {
+    /// Not offered (client) or not accepted (server; a server cannot tell
+    /// a refused offer from no offer).
+    None,
+    /// Client: offered on a resumed session, outcome not known yet.
+    Offered,
+    /// The server accepted the client's 0-RTT data.
+    Accepted,
+    /// Client: the server refused it. Everything sent in 0-RTT is void
+    /// (RFC 9000 §7.4.1): the client starts its streams afresh in 1-RTT.
+    Rejected,
+}
+
 /// Output of the driver, drained with [`QuicTls::poll_event`] in order.
 #[derive(Debug)]
 pub enum Event {
@@ -117,6 +178,18 @@ pub enum Event {
     HandshakeConfirmed,
     /// Drop every key and pending packet for this space (RFC 9001 §4.9).
     DiscardKeys(Space),
+    /// 0-RTT keys: a client offering early data gets them with the
+    /// ClientHello; a server gets them once it accepted early data.
+    ZeroRttKeys(ZeroRttKeys),
+    /// Client offering 0-RTT: the transport parameters the server sent on
+    /// the resumed connection (RFC 9000 §7.4.1), which bound what may be
+    /// sent before the handshake completes. Decoded and value-checked, but
+    /// not authenticated against this connection's connection IDs.
+    RememberedTransportParameters(TransportParameters),
+    /// Client: the server accepted or refused the 0-RTT offer (reported
+    /// before [`Event::HandshakeComplete`]). Server: early data was
+    /// accepted (reported after [`Event::ZeroRttKeys`]).
+    EarlyData(EarlyData),
 }
 
 /// Connection IDs a server has seen before it starts TLS.
@@ -160,6 +233,11 @@ pub struct QuicTls {
     confirmed: bool,
     failed: Option<u64>,
     scratch: Vec<u8>,
+    early: EarlyData,
+    zero_rtt_keys: KeyState,
+    /// Client: Handshake-space data (EncryptedExtensions) reached rustls,
+    /// so its transport parameters are the server's, not remembered ones.
+    hs_read: bool,
 }
 
 fn reassemblers(capacity: usize, max_ranges: usize) -> [CryptoReassembler; 3] {
@@ -216,6 +294,7 @@ impl QuicTls {
         me.captured = captured;
         me.install_initial(original_dcid.as_bytes())?;
         me.flush_writes()?;
+        me.offer_zero_rtt()?;
         Ok(me)
     }
 
@@ -268,6 +347,9 @@ impl QuicTls {
             confirmed: false,
             failed: None,
             scratch: Vec::new(),
+            early: EarlyData::None,
+            zero_rtt_keys: KeyState::Pending,
+            hs_read: false,
         }
     }
 
@@ -456,6 +538,14 @@ impl QuicTls {
         }
     }
 
+    /// The caller dropped its 0-RTT keys (RFC 9001 §4.9.3: a client once it
+    /// has 1-RTT keys, a server some time after the first 1-RTT packet).
+    pub fn discard_zero_rtt(&mut self) {
+        if self.zero_rtt_keys == KeyState::Installed {
+            self.zero_rtt_keys = KeyState::Discarded;
+        }
+    }
+
     /// RFC 9001 §6.1: initiates a 1-RTT key update, which is not permitted
     /// before the handshake is confirmed.
     pub fn initiate_key_update(&self, keys: &mut OneRttKeys) -> Result<(), TlsError> {
@@ -490,6 +580,25 @@ impl QuicTls {
 
     pub fn is_handshake_confirmed(&self) -> bool {
         self.confirmed
+    }
+
+    /// The state of this connection's 0-RTT keys.
+    pub fn zero_rtt_key_state(&self) -> KeyState {
+        self.zero_rtt_keys
+    }
+
+    /// What became of 0-RTT.
+    pub fn early_data(&self) -> EarlyData {
+        self.early
+    }
+
+    /// Whether this handshake resumed an earlier session.
+    pub fn is_resumed(&self) -> bool {
+        self.complete
+            && matches!(
+                self.conn.handshake_kind(),
+                Some(rustls::HandshakeKind::Resumed)
+            )
     }
 
     pub fn key_update_permitted(&self) -> bool {
@@ -580,6 +689,9 @@ impl QuicTls {
             if let Err(e) = r {
                 return Err(tls_error(e, self.conn.alert()));
             }
+            if space >= Space::Handshake {
+                self.hs_read = true;
+            }
             self.after_tls()?;
         }
     }
@@ -587,6 +699,9 @@ impl QuicTls {
     fn after_tls(&mut self) -> Result<(), TlsError> {
         self.check_peer_params()?;
         self.flush_writes()?;
+        if self.side == Side::Server {
+            self.accept_zero_rtt()?;
+        }
         if !self.complete && !self.conn.is_handshaking() {
             if self.conn.alpn_protocol().is_none() {
                 return Err(TlsError::NoApplicationProtocol);
@@ -598,6 +713,18 @@ impl QuicTls {
             }
             if self.key_state[Space::Data.index()] != KeyState::Installed {
                 return Err(TlsError::KeyExportMismatch(Space::Data));
+            }
+            if self.early == EarlyData::Offered {
+                let accepted = match &self.conn {
+                    quic::Connection::Client(c) => c.is_early_data_accepted(),
+                    quic::Connection::Server(_) => false,
+                };
+                self.early = if accepted {
+                    EarlyData::Accepted
+                } else {
+                    EarlyData::Rejected
+                };
+                self.events.push_back(Event::EarlyData(self.early));
             }
             self.complete = true;
             self.read_space = Space::Data;
@@ -614,6 +741,11 @@ impl QuicTls {
 
     fn check_peer_params(&mut self) -> Result<(), TlsError> {
         if self.peer_params.is_some() {
+            return Ok(());
+        }
+        // Before EncryptedExtensions a resuming client's rustls holds the
+        // remembered parameters, not this server's.
+        if self.side == Side::Client && !self.hs_read {
             return Ok(());
         }
         let Some(bytes) = self.conn.quic_transport_parameters() else {
@@ -670,6 +802,67 @@ impl QuicTls {
                 }
             }
         }
+    }
+
+    /// Client: rustls offered early data on a resumed session. Exports the
+    /// 0-RTT secret (checked against rustls's 0-RTT keys) and the
+    /// remembered server transport parameters.
+    fn offer_zero_rtt(&mut self) -> Result<(), TlsError> {
+        let Some(keys) = self.conn.zero_rtt_keys() else {
+            return Ok(());
+        };
+        let Some(remembered) = self.conn.quic_transport_parameters() else {
+            return Ok(());
+        };
+        // A ticket from a server whose parameters no longer decode cannot
+        // bound 0-RTT; send none (the handshake itself still resumes).
+        let Ok(params) = TransportParameters::decode(remembered, Side::Server) else {
+            return Ok(());
+        };
+        let secret = self.early_secret(&keys)?;
+        self.early = EarlyData::Offered;
+        self.zero_rtt_keys = KeyState::Installed;
+        self.events
+            .push_back(Event::RememberedTransportParameters(params));
+        self.events.push_back(Event::ZeroRttKeys(ZeroRttKeys {
+            side: Side::Client,
+            secret,
+        }));
+        Ok(())
+    }
+
+    /// Server: rustls accepted early data while reading the ClientHello.
+    fn accept_zero_rtt(&mut self) -> Result<(), TlsError> {
+        if self.zero_rtt_keys != KeyState::Pending {
+            return Ok(());
+        }
+        let Some(keys) = self.conn.zero_rtt_keys() else {
+            return Ok(());
+        };
+        let secret = self.early_secret(&keys)?;
+        self.early = EarlyData::Accepted;
+        self.zero_rtt_keys = KeyState::Installed;
+        self.events.push_back(Event::ZeroRttKeys(ZeroRttKeys {
+            side: Side::Server,
+            secret,
+        }));
+        self.events.push_back(Event::EarlyData(EarlyData::Accepted));
+        Ok(())
+    }
+
+    fn early_secret(&mut self, keys: &quic::DirectionalKeys) -> Result<TrafficSecret, TlsError> {
+        let cipher = self.cipher()?;
+        let raw = self
+            .captured
+            .client_early
+            .take()
+            .ok_or(TlsError::KeyExportMismatch(Space::Data))?;
+        let secret = TrafficSecret::new(cipher, &raw)
+            .map_err(|_| TlsError::KeyExportMismatch(Space::Data))?;
+        if !probe(&*keys.packet, Some(&*keys.header), &secret) {
+            return Err(TlsError::KeyExportMismatch(Space::Data));
+        }
+        Ok(secret)
     }
 
     /// Turns captured secrets into [`SpaceKeys`] after checking that they

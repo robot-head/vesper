@@ -27,9 +27,15 @@
 //! keys, by sealing a probe packet with rustls and opening it with
 //! `vesper-warp-crypto`.
 //!
-//! Not implemented: 0-RTT (disabled in every configuration built here),
-//! client certificates, QUIC v2, and endpoint wiring (integration A,
-//! issue #135). No heap-allocation claim is made.
+//! * Session resumption and 0-RTT (wave six, issue #247): opt-in with
+//!   [`ClientSetup::with_zero_rtt`] and [`ServerSetup::with_zero_rtt`].
+//!   A resuming client exports the 0-RTT secret ([`ZeroRttKeys`]) and the
+//!   remembered server transport parameters; a server exports the secret
+//!   when rustls accepts early data, which it does only for single-use
+//!   stateful tickets (anti-replay). [`EarlyData`] reports the outcome.
+//!
+//! Not implemented: client certificates and QUIC v2. No heap-allocation
+//! claim is made.
 
 #![forbid(unsafe_code)]
 
@@ -42,7 +48,7 @@ pub mod varint;
 
 pub use config::{ClientSetup, FixedTime, ServerSetup};
 pub use error::TlsError;
-pub use handshake::{Event, KeyState, QuicTls, ServerCids, SpaceKeys};
+pub use handshake::{EarlyData, Event, KeyState, QuicTls, ServerCids, SpaceKeys, ZeroRttKeys};
 pub use params::{
     CidExpectations, ConnectionId, PreferredAddress, TransportParameterError, TransportParameters,
 };

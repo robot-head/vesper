@@ -64,6 +64,8 @@ pub enum StreamError {
     Reset { stream_id: u64, error_code: u64 },
     /// The error code does not fit a varint.
     BadErrorCode,
+    /// An RFC 9218 urgency above 7.
+    BadPriority(u8),
 }
 
 /// Who opened the connection; decides which stream IDs are ours (§2.1).
@@ -858,6 +860,52 @@ const fn crypto_header_max() -> usize {
 // ---------------------------------------------------------------------------
 // Frame records.
 
+/// An RFC 9218 stream priority. Lower urgency is sent first; streams of one
+/// urgency that are not incremental are sent one at a time in stream-ID
+/// order, incremental ones are interleaved round-robin after them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Priority {
+    /// 0 (most urgent) to 7.
+    pub urgency: u8,
+    pub incremental: bool,
+}
+
+impl Priority {
+    /// RFC 9218 §4: `u=3`, not incremental.
+    pub const DEFAULT: Priority = Priority {
+        urgency: 3,
+        incremental: false,
+    };
+}
+
+impl Default for Priority {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Longest NEW_TOKEN token the stream layer carries.
+pub const MAX_NEW_TOKEN_LEN: usize = 128;
+/// NEW_CONNECTION_ID and RETIRE_CONNECTION_ID frames queued at once.
+pub const MAX_CID_FRAMES: usize = 8;
+
+#[derive(Debug, Clone, Copy)]
+struct NewCidFrame {
+    seq: u64,
+    retire_prior_to: u64,
+    cid: [u8; 20],
+    len: u8,
+    token: [u8; frame::RESET_TOKEN_LEN],
+    pending: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TokenFrame {
+    bytes: [u8; MAX_NEW_TOKEN_LEN],
+    len: u8,
+    pending: bool,
+}
+
 /// A retransmittable frame recorded against the packet that carried it
 /// (§13.3). Values that must be sent *current* are not stored.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -900,6 +948,17 @@ pub enum SentFrame {
     /// HANDSHAKE_DONE (server only, RFC 9001 §4.1.2): resent until
     /// acknowledged.
     HandshakeDone,
+    /// NEW_CONNECTION_ID with this sequence number (wave six): resent
+    /// until acknowledged.
+    NewConnectionId {
+        seq: u64,
+    },
+    /// RETIRE_CONNECTION_ID: resent until acknowledged.
+    RetireConnectionId {
+        seq: u64,
+    },
+    /// NEW_TOKEN (server): resent until acknowledged or replaced.
+    NewToken,
 }
 
 /// Most retransmittable frames one packet carries.
@@ -995,6 +1054,7 @@ struct Stream {
     id: u64,
     send: Option<SendStream>,
     recv: Option<RecvStream>,
+    priority: Priority,
 }
 
 const BIDI: usize = 0;
@@ -1037,9 +1097,14 @@ pub struct StreamSet {
     /// (packet number, frame) in packet-number order.
     sent: VecDeque<(u64, SentFrame)>,
     events: VecDeque<StreamEvent>,
-    /// Round-robin cursor over `streams` for data.
+    /// Round-robin cursor over `streams` for incremental data.
     rr: usize,
     stats: StreamStats,
+    /// Connection-level control frames carried by the stream layer's
+    /// retransmission machinery (wave six, issue #247).
+    new_cids: [Option<NewCidFrame>; MAX_CID_FRAMES],
+    retire_cids: [Option<(u64, bool)>; MAX_CID_FRAMES],
+    new_token: Option<TokenFrame>,
 }
 
 impl std::fmt::Debug for StreamSet {
@@ -1091,6 +1156,9 @@ impl StreamSet {
             events: VecDeque::with_capacity(cfg.event_capacity),
             rr: 0,
             stats: StreamStats::default(),
+            new_cids: [None; MAX_CID_FRAMES],
+            retire_cids: [None; MAX_CID_FRAMES],
+            new_token: None,
         })
     }
 
@@ -1196,7 +1264,180 @@ impl StreamSet {
         } else {
             None
         };
-        self.streams.push(Stream { id, send, recv });
+        self.streams.push(Stream {
+            id,
+            send,
+            recv,
+            priority: Priority::DEFAULT,
+        });
+    }
+
+    /// Sets a stream's RFC 9218 priority (any stream with a send half).
+    pub fn set_priority(&mut self, id: u64, priority: Priority) -> Result<(), StreamError> {
+        if priority.urgency > 7 {
+            return Err(StreamError::BadPriority(priority.urgency));
+        }
+        let i = self.lookup_local_api(id)?;
+        if self.streams[i].send.is_none() {
+            return Err(StreamError::NotWritable(id));
+        }
+        self.streams[i].priority = priority;
+        Ok(())
+    }
+
+    /// A stream's priority.
+    pub fn priority(&self, id: u64) -> Option<Priority> {
+        self.find(id).map(|i| self.streams[i].priority)
+    }
+
+    // -- connection-level control frames (wave six) --------------------------
+
+    /// Queues NEW_CONNECTION_ID (RFC 9000 §19.15); false when
+    /// [`MAX_CID_FRAMES`] are already outstanding or the ID is invalid.
+    pub fn queue_new_connection_id(
+        &mut self,
+        seq: u64,
+        retire_prior_to: u64,
+        cid: &[u8],
+        reset_token: [u8; frame::RESET_TOKEN_LEN],
+    ) -> bool {
+        if cid.is_empty() || cid.len() > 20 || retire_prior_to > seq {
+            return false;
+        }
+        let Some(slot) = self.new_cids.iter_mut().find(|f| f.is_none()) else {
+            return false;
+        };
+        let mut bytes = [0u8; 20];
+        bytes[..cid.len()].copy_from_slice(cid);
+        *slot = Some(NewCidFrame {
+            seq,
+            retire_prior_to,
+            cid: bytes,
+            len: cid.len() as u8,
+            token: reset_token,
+            pending: true,
+        });
+        true
+    }
+
+    /// Queues RETIRE_CONNECTION_ID (RFC 9000 §19.16); false when full.
+    pub fn queue_retire_connection_id(&mut self, seq: u64) -> bool {
+        if self.retire_cids.iter().flatten().any(|(s, _)| *s == seq) {
+            return true;
+        }
+        let Some(slot) = self.retire_cids.iter_mut().find(|f| f.is_none()) else {
+            return false;
+        };
+        *slot = Some((seq, true));
+        true
+    }
+
+    /// Queues NEW_TOKEN (RFC 9000 §19.7), replacing an unacknowledged one;
+    /// false for an empty or oversized token.
+    pub fn queue_new_token(&mut self, token: &[u8]) -> bool {
+        if token.is_empty() || token.len() > MAX_NEW_TOKEN_LEN {
+            return false;
+        }
+        let mut bytes = [0u8; MAX_NEW_TOKEN_LEN];
+        bytes[..token.len()].copy_from_slice(token);
+        self.new_token = Some(TokenFrame {
+            bytes,
+            len: token.len() as u8,
+            pending: true,
+        });
+        true
+    }
+
+    /// Whether queued connection-ID or token frames are unacknowledged.
+    pub fn control_outstanding(&self) -> bool {
+        self.new_cids.iter().any(Option::is_some)
+            || self.retire_cids.iter().any(Option::is_some)
+            || self.new_token.is_some()
+    }
+
+    // -- 0-RTT (wave six) ----------------------------------------------------
+
+    /// 0-RTT was rejected (RFC 9000 §7.4.1): every stream is forgotten and
+    /// the connection starts its stream state afresh under the server's
+    /// real transport parameters. CRYPTO buffers and HANDSHAKE_DONE state
+    /// are kept.
+    pub fn reset_streams(&mut self, peer: PeerParams) -> Result<(), &'static str> {
+        if peer.initial_max_streams_bidi > frame::MAX_STREAM_COUNT
+            || peer.initial_max_streams_uni > frame::MAX_STREAM_COUNT
+        {
+            return Err("peer stream limits out of range");
+        }
+        for s in self.streams.drain(..) {
+            if let Some(mut t) = s.send {
+                t.buf.reset_for_reuse();
+                self.send_pool.push(t.buf);
+            }
+            if let Some(mut r) = s.recv {
+                r.buf.reset_for_reuse();
+                self.recv_pool.push(r.buf);
+            }
+        }
+        self.sent
+            .retain(|(_, f)| matches!(f, SentFrame::Crypto { .. } | SentFrame::HandshakeDone));
+        self.events.clear();
+        self.peer = peer;
+        self.local_opened = [0; 2];
+        self.local_open_now = [0; 2];
+        self.peer_max_streams = [peer.initial_max_streams_bidi, peer.initial_max_streams_uni];
+        self.streams_blocked_pending = [false; 2];
+        self.streams_blocked_at = [None; 2];
+        self.remote_opened = [0; 2];
+        self.local_max_streams = [self.cfg.max_streams_bidi, self.cfg.max_streams_uni];
+        self.max_streams_pending = [false; 2];
+        self.tx_max_data = peer.initial_max_data;
+        self.tx_sent = 0;
+        self.data_blocked_at = None;
+        self.data_blocked_pending = false;
+        self.rx_max_data = self.cfg.conn_window;
+        self.rx_highest = 0;
+        self.rx_consumed = 0;
+        self.max_data_pending = false;
+        self.rr = 0;
+        Ok(())
+    }
+
+    /// 0-RTT was accepted: the server's real transport parameters replace
+    /// the remembered ones, which they may not reduce (RFC 9000 §7.4.1).
+    /// Credit only grows, for open streams too.
+    pub fn raise_peer_params(&mut self, peer: PeerParams) -> Result<(), &'static str> {
+        let old = self.peer;
+        if peer.initial_max_data < old.initial_max_data
+            || peer.initial_max_stream_data_bidi_local < old.initial_max_stream_data_bidi_local
+            || peer.initial_max_stream_data_bidi_remote < old.initial_max_stream_data_bidi_remote
+            || peer.initial_max_stream_data_uni < old.initial_max_stream_data_uni
+            || peer.initial_max_streams_bidi < old.initial_max_streams_bidi
+            || peer.initial_max_streams_uni < old.initial_max_streams_uni
+        {
+            return Err("the server reduced a remembered transport parameter");
+        }
+        if peer.initial_max_streams_bidi > frame::MAX_STREAM_COUNT
+            || peer.initial_max_streams_uni > frame::MAX_STREAM_COUNT
+        {
+            return Err("peer stream limits out of range");
+        }
+        self.peer = peer;
+        self.peer_max_streams[BIDI] =
+            self.peer_max_streams[BIDI].max(peer.initial_max_streams_bidi);
+        self.peer_max_streams[UNI] = self.peer_max_streams[UNI].max(peer.initial_max_streams_uni);
+        self.tx_max_data = self.tx_max_data.max(peer.initial_max_data);
+        let role_bit = self.role.initiator_bit();
+        for s in &mut self.streams {
+            let local = s.id & 1 == role_bit;
+            let credit = match (local, is_uni(s.id)) {
+                (true, false) => peer.initial_max_stream_data_bidi_remote,
+                (true, true) => peer.initial_max_stream_data_uni,
+                (false, _) => peer.initial_max_stream_data_bidi_local,
+            };
+            if let Some(t) = s.send.as_mut() {
+                t.max_data = t.max_data.max(credit);
+            }
+        }
+        Ok(())
     }
 
     /// Opens a stream of our own (RFC 9000 §2.1); returns its ID.
@@ -1638,6 +1879,9 @@ impl StreamSet {
         let conn_credit = self.tx_max_data.saturating_sub(self.tx_sent);
         self.max_data_pending
             || self.handshake_done_pending
+            || self.new_cids.iter().flatten().any(|f| f.pending)
+            || self.retire_cids.iter().flatten().any(|(_, p)| *p)
+            || self.new_token.is_some_and(|t| t.pending)
             || self.data_blocked_pending
             || self.max_streams_pending.iter().any(|p| *p)
             || self.streams_blocked_pending.iter().any(|p| *p)
@@ -1683,6 +1927,41 @@ impl StreamSet {
         }
         if self.max_data_pending && control!(Frame::MaxData(self.rx_max_data), SentFrame::MaxData) {
             self.max_data_pending = false;
+        }
+        for i in 0..MAX_CID_FRAMES {
+            if let Some(f) = self.new_cids[i]
+                && f.pending
+                && control!(
+                    Frame::NewConnectionId {
+                        seq: f.seq,
+                        retire_prior_to: f.retire_prior_to,
+                        cid: &f.cid[..usize::from(f.len)],
+                        reset_token: &f.token,
+                    },
+                    SentFrame::NewConnectionId { seq: f.seq }
+                )
+            {
+                self.new_cids[i].as_mut().expect("present").pending = false;
+            }
+            if let Some((seq, true)) = self.retire_cids[i]
+                && control!(
+                    Frame::RetireConnectionId { seq },
+                    SentFrame::RetireConnectionId { seq }
+                )
+            {
+                self.retire_cids[i] = Some((seq, false));
+            }
+        }
+        if let Some(t) = self.new_token
+            && t.pending
+            && control!(
+                Frame::NewToken {
+                    token: &t.bytes[..usize::from(t.len)]
+                },
+                SentFrame::NewToken
+            )
+        {
+            self.new_token.as_mut().expect("present").pending = false;
         }
         for uni in [false, true] {
             let k = kind(uni);
@@ -1801,33 +2080,70 @@ impl StreamSet {
                 len: len as u32,
             });
         }
-        // Stream data, round-robin.
+        // Stream data in RFC 9218 priority order.
         let count = self.streams.len();
         if count == 0 {
             return at;
         }
-        let start = self.rr % count;
-        let mut idle = 0;
-        let mut i = start;
-        while idle < count && !record.is_full() {
-            let wrote = self.stream_chunk(i, &mut out[at..], record);
-            match wrote {
+        // Streams that had data but could not write a frame this packet
+        // (bounded: one bit per stream, at most 64 tracked; beyond that the
+        // loop stops at the first refusal).
+        let mut refused: u64 = 0;
+        while !record.is_full() && out.len() - at >= 8 {
+            let Some(i) = self.next_stream(refused) else {
+                break;
+            };
+            match self.stream_chunk(i, &mut out[at..], record) {
                 Some(n) => {
                     at += n;
-                    idle = 0;
-                    // Next packet starts with the next stream.
-                    self.rr = (i + 1) % count;
+                    if self.streams[i].priority.incremental {
+                        // The next incremental frame goes to the next stream.
+                        self.rr = (i + 1) % count;
+                    }
                 }
-                None => {
-                    idle += 1;
-                    i = (i + 1) % count;
-                }
-            }
-            if out.len() - at < 8 {
-                break;
+                None if i < 64 => refused |= 1 << i,
+                None => break,
             }
         }
         at
+    }
+
+    /// The stream to send from next: the lowest urgency with data; within
+    /// it, the non-incremental stream with the lowest ID, else the next
+    /// incremental one after the round-robin cursor.
+    fn next_stream(&self, refused: u64) -> Option<usize> {
+        let conn_credit = self.tx_max_data.saturating_sub(self.tx_sent);
+        let count = self.streams.len();
+        let mut best: Option<(u8, bool, u64, usize)> = None;
+        for k in 0..count {
+            // Visit from the cursor so ties among incremental streams go
+            // round-robin.
+            let i = (self.rr + k) % count;
+            if i < 64 && refused & (1 << i) != 0 {
+                continue;
+            }
+            let s = &self.streams[i];
+            if !s.send.as_ref().is_some_and(|t| t.has_data(conn_credit)) {
+                continue;
+            }
+            let p = s.priority;
+            // Order: urgency, then non-incremental before incremental, then
+            // (non-incremental only) stream ID; incremental keeps visit order.
+            let key = (
+                p.urgency,
+                p.incremental,
+                if p.incremental { 0 } else { s.id },
+                i,
+            );
+            let better = match best {
+                None => true,
+                Some((u, inc, id, _)) => (key.0, key.1, key.2) < (u, inc, id),
+            };
+            if better {
+                best = Some(key);
+            }
+        }
+        best.map(|(_, _, _, i)| i)
     }
 
     /// One STREAM frame from stream `i` into `out`, or `None`.
@@ -2005,6 +2321,25 @@ impl StreamSet {
                 self.handshake_done_acked = true;
                 self.handshake_done_pending = false;
             }
+            SentFrame::NewConnectionId { seq } => {
+                for f in &mut self.new_cids {
+                    if f.is_some_and(|f| f.seq == seq && !f.pending) {
+                        *f = None;
+                    }
+                }
+            }
+            SentFrame::RetireConnectionId { seq } => {
+                for f in &mut self.retire_cids {
+                    if *f == Some((seq, false)) {
+                        *f = None;
+                    }
+                }
+            }
+            SentFrame::NewToken => {
+                if self.new_token.is_some_and(|t| !t.pending) {
+                    self.new_token = None;
+                }
+            }
             _ => {}
         }
     }
@@ -2089,6 +2424,25 @@ impl StreamSet {
                 let k = kind(uni);
                 if self.peer_max_streams[k] == limit {
                     self.streams_blocked_pending[k] = true;
+                }
+            }
+            SentFrame::NewConnectionId { seq } => {
+                for f in self.new_cids.iter_mut().flatten() {
+                    if f.seq == seq {
+                        f.pending = true;
+                    }
+                }
+            }
+            SentFrame::RetireConnectionId { seq } => {
+                for f in self.retire_cids.iter_mut().flatten() {
+                    if f.0 == seq {
+                        f.1 = true;
+                    }
+                }
+            }
+            SentFrame::NewToken => {
+                if let Some(t) = self.new_token.as_mut() {
+                    t.pending = true;
                 }
             }
             SentFrame::Stream { .. } | SentFrame::Crypto { .. } => {}

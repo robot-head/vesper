@@ -1491,6 +1491,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 TlsEvent::HandshakeConfirmed => {
                     self.push_conn_event(ConnectionEvent::HandshakeConfirmed(slot));
                 }
+                TlsEvent::ZeroRttKeys(_)
+                | TlsEvent::RememberedTransportParameters(_)
+                | TlsEvent::EarlyData(_) => {}
                 TlsEvent::DiscardKeys(space) => {
                     let pns = pn_space(space);
                     if let Some(ls) = hs.long(pns) {
