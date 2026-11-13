@@ -279,3 +279,85 @@ pub fn worker_main() -> Result<(), HarnessError> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tagged(overflow: bool, value: Value) -> Value {
+        Value::Tuple(vec![Value::Bool(overflow), value])
+    }
+
+    fn rejects(value: Value, kind: Kind, backend: Backend) {
+        assert_eq!(
+            decode(value, kind, backend).unwrap_err().kind,
+            FailureKind::Invariant
+        );
+    }
+
+    #[test]
+    fn unsigned_evaluator_never_reinterprets_negative_int() {
+        for kind in [Kind::U8, Kind::U64] {
+            rejects(tagged(false, Value::Int(-1)), kind, Backend::Evaluator);
+            rejects(tagged(true, Value::Int(-1)), kind, Backend::Evaluator);
+        }
+    }
+
+    #[test]
+    fn unsigned_evaluator_int_must_fit_the_checked_kind() {
+        rejects(tagged(false, Value::Int(256)), Kind::U8, Backend::Evaluator);
+    }
+
+    #[test]
+    fn explicit_unsigned_widths_are_strict_for_both_backends() {
+        for backend in [Backend::Evaluator, Backend::Native] {
+            for (kind, wrong_width) in [(Kind::U8, 64), (Kind::U32, 8), (Kind::U64, 32)] {
+                rejects(tagged(false, Value::UInt(1, wrong_width)), kind, backend);
+                rejects(tagged(true, Value::UInt(0, wrong_width)), kind, backend);
+            }
+        }
+    }
+
+    #[test]
+    fn native_unsigned_values_require_an_explicit_unsigned_carrier() {
+        for kind in [Kind::U8, Kind::U32, Kind::U64] {
+            rejects(tagged(false, Value::Int(1)), kind, Backend::Native);
+            rejects(tagged(true, Value::Int(0)), kind, Backend::Native);
+        }
+    }
+
+    #[test]
+    fn overflow_tag_never_hides_a_nonzero_payload() {
+        rejects(tagged(true, Value::Int(1)), Kind::U8, Backend::Evaluator);
+        for backend in [Backend::Evaluator, Backend::Native] {
+            for (kind, width) in [(Kind::U8, 8), (Kind::U32, 32), (Kind::U64, 64)] {
+                rejects(tagged(true, Value::UInt(1, width)), kind, backend);
+            }
+            rejects(tagged(true, Value::Int(1)), Kind::I64, backend);
+        }
+    }
+
+    #[test]
+    fn admitted_evaluator_ints_preserve_the_exact_nonnegative_value() {
+        for n in [0, 255] {
+            assert_eq!(
+                decode(tagged(false, Value::Int(n)), Kind::U8, Backend::Evaluator).unwrap(),
+                Outcome::Value(i128::from(n))
+            );
+        }
+        assert_eq!(
+            decode(tagged(true, Value::Int(0)), Kind::U8, Backend::Evaluator).unwrap(),
+            Outcome::Overflow
+        );
+    }
+
+    #[test]
+    fn full_unsigned_64_bit_carrier_is_preserved_without_signed_conversion() {
+        for backend in [Backend::Evaluator, Backend::Native] {
+            assert_eq!(
+                decode(tagged(false, Value::UInt(u64::MAX, 64)), Kind::U64, backend).unwrap(),
+                Outcome::Value(i128::from(u64::MAX))
+            );
+        }
+    }
+}
