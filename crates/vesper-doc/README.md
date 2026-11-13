@@ -1,7 +1,22 @@
 # Checked API documentation
 
 `vesper-doc` is a root-free typed metadata, rendering and offline search library.
-It depends on `vesper-core` and the lossless `vesper-syntax` lexer, plus serde.
+It depends on `vesper-core` and the lossless `vesper-syntax` lexer, plus serde,
+`vesper-simpulse` (simulated doctest I/O) and `vesper-ffi` (wire layout checking).
+
+Wave-six additions (§40.2, §40.3, proof badges):
+
+- `sim`: the SimPulse doctest host behind `vesper,sim(seed=N,clock,net,disk)`
+  fences. One kernel task per run; latency parks it on scheduled completions,
+  network jitter is seed-derived, and a second run replays the first journal.
+- `visual`: the 16-byte `WireFieldSpan` and `LinearEdge` records of §40.3,
+  compiled `vesper-wire-layouts` JSON (`--wire`), native struct rulers and
+  static SVG for byte layouts and the linear obligation state machine.
+- `badges`: proved / audited / unverified from `vesper proof-audit --json`
+  reports and `@proof(Name)` doc anchors only.
+
+`examples/package` is a Loom package used by the README's Getting Started:
+`vesper lint` and `vesper test --doc` run over it with no file argument.
 The facade's `src/doc_commands.rs` invokes the actual parser/checker, reads the
 checked World, resolves result annotations using `world.function_results`, and
 passes complete types, modes, effects, selectors and documentation to this leaf.

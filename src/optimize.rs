@@ -19,6 +19,7 @@ use egg::{Id, Rewrite, Subst, define_language, rewrite};
 mod adversarial_tests;
 mod certificate;
 pub mod witness;
+pub mod witness_lean;
 
 use certificate::{RewriteOutcome, RewriteProposal};
 use witness::{WitnessError, WitnessLimits};
