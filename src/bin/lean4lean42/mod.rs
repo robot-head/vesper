@@ -143,7 +143,7 @@ impl Default for Limits {
             stderr_bytes: 64 * 1024,
             declarations: 262144,
             name_bytes: 16 * 1024 * 1024,
-            inventory_bytes: 64 * 1024 * 1024,
+            inventory_bytes: 80 * 1024 * 1024,
             artifact_bytes: 2 * 1024 * 1024 * 1024,
             artifact_files: 8192,
             report_bytes: 256 * 1024,
