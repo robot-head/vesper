@@ -1119,3 +1119,122 @@ pub fn verify_rewrite(
         &mut WitnessBudget::new(limits)?,
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn variable_source() -> (Expr, TypeMap) {
+        let source = Expr {
+            kind: ExprKind::Name("x".into()),
+            span: 1..2,
+        };
+        let mut types = TypeMap::new();
+        types.insert((1, 2), IntegerKind::U64.ty());
+        (source, types)
+    }
+
+    #[test]
+    fn shared_dag_expansion_is_refused_before_materialization() {
+        let (source, types) = variable_source();
+        let before = source.clone();
+        let mut budget = WitnessBudget::new(WitnessLimits::default()).unwrap();
+        let bound = bind_source(&source, &types, &mut budget).unwrap();
+        let mut terms = bound.terms().to_vec();
+        let mut root = bound.root();
+        for _ in 0..24 {
+            let next = terms.len() as TermId;
+            terms.push(Term {
+                kind: IntegerKind::U64,
+                node: TermNode::Checked {
+                    op: IntOp::Add,
+                    children: [root, root],
+                },
+            });
+            root = next;
+        }
+        assert_eq!(
+            build_candidate(&bound, &terms, root, &mut budget),
+            Err(WitnessError::Limit)
+        );
+        assert_eq!(source, before);
+    }
+
+    #[test]
+    fn output_builder_copies_real_intrinsic_origin_and_rechecks_cumulatively() {
+        let source = Expr {
+            kind: ExprKind::Call {
+                callee: Box::new(Expr {
+                    kind: ExprKind::Name("wrapping_add".into()),
+                    span: 3..15,
+                }),
+                types: vec![],
+                args: vec![
+                    Arg {
+                        pass: Pass::In,
+                        explicit: false,
+                        expr: Expr {
+                            kind: ExprKind::Name("x".into()),
+                            span: 16..17,
+                        },
+                    },
+                    Arg {
+                        pass: Pass::In,
+                        explicit: false,
+                        expr: Expr {
+                            kind: ExprKind::Literal(Literal::Int(0)),
+                            span: 18..19,
+                        },
+                    },
+                ],
+            },
+            span: 1..20,
+        };
+        let mut types = TypeMap::new();
+        for span in [(1, 20), (16, 17), (18, 19)] {
+            types.insert(span, IntegerKind::U8.ty());
+        }
+        let mut budget = WitnessBudget::new(WitnessLimits::default()).unwrap();
+        let bound = bind_source(&source, &types, &mut budget).unwrap();
+        let candidate = build_candidate(&bound, bound.terms(), bound.root(), &mut budget).unwrap();
+        let ExprKind::Call { callee, args, .. } = &candidate.kind else {
+            panic!("actual call");
+        };
+        assert_eq!(callee.span, 3..15);
+        assert_eq!(args[0].expr.span, source.span);
+        assert_eq!(args[1].expr.span, source.span);
+        let certificate = RewriteCertificate {
+            schema_version: 1,
+            arithmetic_version: 1,
+            terms: bound.terms().to_vec(),
+            proofs: vec![Equality {
+                from: bound.root(),
+                to: bound.root(),
+                reason: Reason::Refl,
+            }],
+            input: bound.root(),
+            output: bound.root(),
+            conclusion: 0,
+        };
+        let used = budget.work;
+        verify_with_budget(&source, &candidate, &types, &certificate, &mut budget).unwrap();
+        assert!(budget.work > used);
+        budget.work = budget.limits.max_work;
+        assert_eq!(
+            verify_with_budget(&source, &candidate, &types, &certificate, &mut budget),
+            Err(WitnessError::Limit)
+        );
+    }
+
+    #[test]
+    fn failed_logical_reservation_does_not_grow_the_vector() {
+        let limits = WitnessLimits {
+            max_metadata_bytes: 1,
+            ..WitnessLimits::default()
+        };
+        let mut budget = WitnessBudget::new(limits).unwrap();
+        let mut values: Vec<u64> = Vec::new();
+        assert_eq!(budget.reserve(&mut values, 1), Err(WitnessError::Limit));
+        assert_eq!(values.capacity(), 0);
+    }
+}
