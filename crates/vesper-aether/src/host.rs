@@ -87,6 +87,8 @@ pub enum UffdError {
     UnexpectedEvent(u8),
     /// More faults than the caller's budget.
     FaultBudget,
+    /// Another `serve` session on this region is still running.
+    Busy,
 }
 impl From<Unavailable> for UffdError {
     fn from(value: Unavailable) -> Self {

@@ -202,6 +202,7 @@ mod uffd {
         pages: usize,
         route: UffdRoute,
         unregistered: AtomicBool,
+        serving: AtomicBool,
     }
 
     impl LazyRegion {
@@ -245,6 +246,7 @@ mod uffd {
                 pages,
                 route,
                 unregistered: AtomicBool::new(false),
+                serving: AtomicBool::new(false),
             };
             let mut reg = UffdioRegister {
                 range: region.range(),
@@ -297,6 +299,17 @@ mod uffd {
             if source.page_count() != self.pages || self.unregistered.load(Ordering::SeqCst) {
                 return Err(UffdError::InvalidRegion);
             }
+            // One session at a time: two servers would share one userfaultfd.
+            if self.serving.swap(true, Ordering::SeqCst) {
+                return Err(UffdError::Busy);
+            }
+            struct EndSession<'r>(&'r AtomicBool);
+            impl Drop for EndSession<'_> {
+                fn drop(&mut self) {
+                    self.0.store(false, Ordering::SeqCst);
+                }
+            }
+            let _session = EndSession(&self.serving);
             // SAFETY: eventfd(2) returns a new descriptor or -1.
             let stop = adopt(libc::c_long::from(unsafe {
                 libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK)
@@ -315,7 +328,20 @@ mod uffd {
                 }
             }
             std::thread::scope(|scope| {
-                let server = scope.spawn(|| self.server_loop(source, fault_budget, stop_fd));
+                let server = scope.spawn(|| {
+                    // A panicking page source must still release the toucher:
+                    // unregister (waking it) before the panic propagates.
+                    let served = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        self.server_loop(source, fault_budget, stop_fd)
+                    }));
+                    match served {
+                        Ok(result) => result,
+                        Err(panic) => {
+                            self.fail(UffdError::InvalidRegion);
+                            std::panic::resume_unwind(panic)
+                        }
+                    }
+                });
                 let result = {
                     let _stop = StopOnDrop(stop_fd);
                     touch(&Toucher {

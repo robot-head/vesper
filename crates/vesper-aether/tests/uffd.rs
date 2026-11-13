@@ -268,3 +268,64 @@ fn forked_clones_restore_with_their_own_generation() {
         s.retire();
     }
 }
+
+struct Panicking;
+impl PageSource for Panicking {
+    fn page_count(&self) -> usize {
+        2
+    }
+    fn fill(&self, _index: usize) -> Result<PageFill<'_>, Error> {
+        panic!("page source exploded");
+    }
+}
+
+#[test]
+fn panicking_source_releases_the_toucher_and_propagates() {
+    if !available("panicking_source_releases_the_toucher_and_propagates") {
+        return;
+    }
+    let region = LazyRegion::new(2).unwrap();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        region.serve(&Panicking, 8, |t| t.read_u8(0))
+    }));
+    let panic = outcome.unwrap_err();
+    assert_eq!(panic.downcast_ref::<&str>(), Some(&"page source exploded"));
+    assert_eq!(
+        region.serve(&Counting { pages: 2 }, 8, |_| ()).unwrap_err(),
+        UffdError::InvalidRegion
+    );
+}
+
+#[test]
+fn concurrent_sessions_on_one_region_are_refused() {
+    if !available("concurrent_sessions_on_one_region_are_refused") {
+        return;
+    }
+    let region = LazyRegion::new(2).unwrap();
+    let source = Counting { pages: 2 };
+    let inside = std::sync::Barrier::new(2);
+    let done = std::sync::Barrier::new(2);
+    std::thread::scope(|s| {
+        let first = s.spawn(|| {
+            region.serve(&source, 8, |t| {
+                inside.wait();
+                done.wait();
+                t.read_u8(0)
+            })
+        });
+        inside.wait();
+        assert_eq!(
+            region.serve(&source, 8, |_| ()).unwrap_err(),
+            UffdError::Busy
+        );
+        done.wait();
+        let (byte, stats) = first.join().unwrap().unwrap();
+        assert_eq!(byte, Some(0));
+        assert_eq!(stats.copied, 1);
+    });
+    // The session ended, so the region can serve again.
+    let (byte, _) = region
+        .serve(&source, 8, |t| t.read_u8(PAGE_BYTES + 1))
+        .unwrap();
+    assert_eq!(byte, Some(2));
+}

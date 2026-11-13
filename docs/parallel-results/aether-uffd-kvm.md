@@ -47,7 +47,9 @@ root `Cargo.lock` (new third-party packages; separate commit).
   unexpected event, out-of-region fault or budget overrun unregisters the
   region (which wakes the blocked thread), and the session returns a typed
   `UffdError`; the region then refuses reuse. A panic in `touch` still stops
-  the server (drop guard), so nothing hangs.
+  the server (drop guard), and a panic in the page source unregisters the
+  region before propagating, so nothing hangs. Only one `serve` session runs
+  per region at a time (a concurrent call gets `UffdError::Busy`).
 - `SnapshotMap::slot_source(store, vm, slot)` is the CAS page source: each
   page re-reads and re-hashes its BLAKE3 blob through the existing
   `SnapshotMap::resolve`, then copies the 4 KiB page.
@@ -96,7 +98,7 @@ within a 16-exit budget. **This has never run**: the cloud host has no
 | --- | --- | --- |
 | `tests/slot_plan.rs` | every `PlanError`, overlap differential, cross-VM sharing, SnapshotMap→plan | everywhere |
 | `tests/fork.rs` | COW sharing, generation block, distinct keys, nonce uniqueness over 4 generations × 32 clones (2,112 nonces), ticket binding, epoch exhaustion, leak counting | everywhere |
-| `tests/uffd.rs` | real userfaultfd: CAS restore out of order with a write fault, 4 concurrent touchers over 64 pages, source error and budget overrun without hangs, two reseeded clones restored with their own generation block, un-reseeded clone refused | **Linux 6.18 cloud host, as root (route `Syscall`) and as uid 65534 with all capabilities dropped (route `SyscallUserModeOnly`, sysctl 0)** |
+| `tests/uffd.rs` | real userfaultfd: CAS restore out of order with a write fault, 4 concurrent touchers over 64 pages, source error, source panic and budget overrun without hangs, concurrent sessions refused, two reseeded clones restored with their own generation block, un-reseeded clone refused | **Linux 6.18 cloud host, as root (route `Syscall`) and as uid 65534 with all capabilities dropped (route `SyscallUserModeOnly`, sysctl 0)** |
 | `tests/kvm.rs` | guest run where `/dev/kvm` opens; otherwise records `Unavailable` | recorded `DeviceAbsent` on the cloud host |
 | `tests/lean_model.rs` | Lean hygiene; with `VESPER_LEAN`, compile and axiom audit | Lean 4.24.0 locally |
 
