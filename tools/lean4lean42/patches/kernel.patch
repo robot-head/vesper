@@ -1,0 +1,687 @@
+diff --git a/Lean4Lean/Environment.lean b/Lean4Lean/Environment.lean
+index e7f4981..2007794 100644
+--- a/Lean4Lean/Environment.lean
++++ b/Lean4Lean/Environment.lean
+@@ -42,10 +42,13 @@ def addDefinition (env : Environment) (v : DefinitionVal) (check := true) :
+   else
+     if check then
+       M.run env (safety := .safe) (lctx := {}) (lparams := v.levelParams) do
+-        checkConstantVal env v.toConstantVal (← checkPrimitiveDef v)
++        checkConstantVal env v.toConstantVal (allowPrimitive := true)
++        checkNoMVarNoFVar env v.name v.value
+         let valType ← TypeChecker.checkType v.value
+         if !(← isDefEq valType v.type) then
+           throw <| .declTypeMismatch env (.defnDecl v) valType
++        -- Recognize only typed, closed bodies; the candidate is not yet inserted.
++        checkName env v.name (← checkPrimitiveDef v)
+     return env.add (.defnInfo v)
+
+ def addTheorem (env : Environment) (v : TheoremVal) (check := true) :
+@@ -56,6 +59,7 @@ def addTheorem (env : Environment) (v : TheoremVal) (check := true) :
+       if !(← isProp v.type) then
+         throw <| .thmTypeIsNotProp env v.name v.type
+       checkConstantVal env v.toConstantVal
++      checkNoMVarNoFVar env v.name v.value
+       let valType ← TypeChecker.checkType v.value
+       if !(← isDefEq valType v.type) then
+         throw <| .declTypeMismatch env (.thmDecl v) valType
+@@ -66,6 +70,7 @@ def addOpaque (env : Environment) (v : OpaqueVal) (check := true) :
+   if check then
+     M.run env (safety := .safe) (lctx := {}) (lparams := v.levelParams) do
+       checkConstantVal env v.toConstantVal
++      checkNoMVarNoFVar env v.name v.value
+       let valType ← TypeChecker.checkType v.value
+       if !(← isDefEq valType v.type) then
+         throw <| .declTypeMismatch env (.opaqueDecl v) valType
+@@ -78,10 +83,16 @@ def addMutual (env : Environment) (vs : List DefinitionVal) (check := true) :
+     throw <| .other "invalid mutual definition, declaration is not tagged as unsafe/partial"
+   if check then
+     M.run env (safety := v₀.safety) (lctx := {}) (lparams := v₀.levelParams) do
++      let mut found : NameSet := {}
+       for v in vs do
+         if v.safety != v₀.safety then
+           throw <| .other
+             "invalid mutual definition, declarations must have the same safety annotation"
++        if v.levelParams != v₀.levelParams then
++          throw <| .other "invalid mutual definition, declarations must have the same universe level parameters"
++        if found.contains v.name then
++          throw <| .other s!"invalid mutual definition, duplicate declaration name '{v.name}'"
++        found := found.insert v.name
+         checkConstantVal env v.toConstantVal
+   let mut env' := env
+   for v in vs do
+diff --git a/Lean4Lean/Environment/Basic.lean b/Lean4Lean/Environment/Basic.lean
+index 9d12e85..5a1c3d0 100644
+--- a/Lean4Lean/Environment/Basic.lean
++++ b/Lean4Lean/Environment/Basic.lean
+@@ -58,7 +58,7 @@ def checkName (env : Environment) (n : Name)
+     if primitives.contains n then
+       throw <| .other s!"unexpected use of primitive name {n}"
+
+-open private subsumesInfo Kernel.Environment.mk moduleNames moduleNameMap parts toEffectiveImport
++open private subsumesInfo Kernel.Environment.mk moduleNames moduleNameMap parts toEffectiveImport mainModule?
+   from Lean.Environment
+
+ def empty (mainModule : Name) (trustLevel : UInt32 := 0) : Environment :=
+@@ -82,7 +82,7 @@ def finalizeImport (s : ImportState) (imports : Array Import) (mainModule : Name
+     (trustLevel : UInt32 := 0) : Except Exception Environment := do
+   let modules := (moduleNames s).filterMap ((moduleNameMap s)[·]?)
+   let moduleData ← modules.mapM fun mod => do
+-    let some data := mod.mainModule? |
++    let some data := mainModule? mod |
+       throw <| .other s!"missing data file for module {mod.module}"
+     return data
+   let numPrivateConsts := moduleData.foldl (init := 0) fun numPrivateConsts data => Id.run do
+diff --git a/Lean4Lean/Inductive/Add.lean b/Lean4Lean/Inductive/Add.lean
+index 9dc49e8..98005c9 100644
+--- a/Lean4Lean/Inductive/Add.lean
++++ b/Lean4Lean/Inductive/Add.lean
+@@ -220,7 +220,7 @@ def checkConstructors (indTypes : Array InductiveType)
+             loop (body.instantiate1 param) (i + 1) fuel
+           else
+             let s ← ensureType dom
+-            unless stats.resultLevel.isZero || stats.resultLevel.geq' s.sortLevel! do
++            unless stats.resultLevel.isAlwaysZero || stats.resultLevel.geq' s.sortLevel! do
+               throw <| .other s!"universe level of type_of(arg #{i + 1}) of '{n}' \
+                 is too big for the corresponding inductive datatype"
+             if !isUnsafe then
+@@ -265,7 +265,7 @@ def isLargeEliminator (stats : InductiveStats) (indTypes : Array InductiveType)
+         withLocalDecl name dom.consumeTypeAnnotations bi fun arg => do
+           let mut toCheck := toCheck
+           if i ≥ stats.params.size then
+-            if !(← ensureType dom).sortLevel!.isZero then
++            if !(← ensureType dom).sortLevel!.isAlwaysZero then
+               toCheck := toCheck.push arg
+           loop (body.instantiate1 arg) (i + 1) toCheck fuel
+       else
+@@ -285,7 +285,7 @@ def getElimLevel (stats : InductiveStats) (indTypes : Array InductiveType) :
+
+ def isKTarget (stats : InductiveStats) (indTypes : Array InductiveType) : M Bool := do
+   let #[indType] := indTypes | return false
+-  unless stats.resultLevel.isZero do return false
++  unless stats.resultLevel.isAlwaysZero do return false
+   let [ctor] := indType.ctors | return false
+   let rec loop i
+     | .forallE _ _ body _ => i < stats.params.size && loop (i + 1) body
+@@ -496,7 +496,9 @@ namespace ElimNestedInductive
+ structure Result where
+   ngen : NameGenerator
+   nparams : Nat
+-  aux2nested : NameMap Expr -- exprs contain `nparams` loose bvars
++  lctx : LocalContext
++  params : Array Expr -- free variables in lctx
++  aux2nested : NameMap Expr -- expressions open over params
+   types : List InductiveType
+
+ instance [MonadStateOf NameGenerator m] : MonadNameGenerator m where
+@@ -538,11 +540,11 @@ def restoreNested (r : Result) (env' : Environment) (e : Expr)
+     if let some nested := r.aux2nested.find? c then
+       let args := t.getAppArgs
+       assert! args.size ≥ r.nparams
+-      return mkAppRange (nested.instantiateRev As) r.nparams args.size args
++      return mkAppRange ((nested.abstract r.params).instantiateRev As) r.nparams args.size args
+     let (nested, auxI_name) ← r.getNestedIfAuxCtor env' c
+     let args := t.getAppArgs
+     assert! args.size ≥ r.nparams
+-    let nested' := nested.instantiateRev As
++    let nested' := (nested.abstract r.params).instantiateRev As
+     nested'.withApp fun I I_args => do
+     let .const I_c I_ls := I | unreachable!
+     let c' := .const (c.replacePrefix auxI_name I_c) I_ls
+@@ -679,7 +681,7 @@ def run (nparams : Nat) (types : List InductiveType) : M Result := do
+   let I :: _ := types
+     | throw <| .other s!"invalid empty (mutual) inductive datatype declaration, {""
+         }it must contain at least one inductive type."
+-  withParams I.type nparams fun _ _ params => do
++  withParams I.type nparams fun lctx _ params => do
+   let rec loop i
+   | 0 => throw <| .other "deep recursion: ElimNestedInductive.run.loop"
+   | fuel+1 => do
+@@ -693,8 +695,8 @@ def run (nparams : Nat) (types : List InductiveType) : M Result := do
+       modify fun s => { s with newTypes := s.newTypes.set! i { indType with ctors } }
+       loop (i+1) fuel
+     else
+-      let aux2nested := s.nestedAux.foldl (fun m (e, n) => m.insert n (e.abstract params)) {}
+-      return { s with nparams := params.size, aux2nested, types := s.newTypes.toList }
++      let aux2nested := s.nestedAux.foldl (fun m (e, n) => m.insert n e) {}
++      return { s with nparams := params.size, lctx, params, aux2nested, types := s.newTypes.toList }
+   loop 0 1000
+ end ElimNestedInductive
+
+@@ -717,14 +719,27 @@ def mkAuxRecNameMap (env' : Environment) (types : List InductiveType) :
+     oldRecNames := oldRecNames.push oldRecName
+   return (oldRecNames.toList, recMap)
+
++def checkNoNestedAux (n : Name) (e : Expr) : Except Exception Unit := do
++  if (e.find? fun
++      | .const c _ => (`_nested).isPrefixOf c
++      | .proj s _ _ => (`_nested).isPrefixOf s
++      | _ => false).isSome then
++    throw <| .other s!"invalid declaration '{n}', it uses the reserved prefix '_nested'"
++
+ def Environment.addInductive (env : Environment) (lparams : List Name) (nparams : Nat)
+     (types : List InductiveType) (isUnsafe allowPrimitive : Bool) :
+     Except Exception Environment := do
++  for indType in types do
++    env.checkNoMVarNoFVar indType.name indType.type
++    for ctor in indType.ctors do
++      env.checkNoMVarNoFVar ctor.name ctor.type
++      checkNoNestedAux ctor.name ctor.type
+   let res ← ElimNestedInductive.run nparams types env
+     |>.run' { lvls := lparams.map .param, newTypes := types.toArray }
+   let numNested := res.aux2nested.size
++  let safety := if isUnsafe then .unsafe else .safe
+   let env' ← AddInductive.run nparams res.types numNested
+-    { env, allowPrimitive, lparams, safety := if isUnsafe then .unsafe else .safe }
++    { env, allowPrimitive, lparams, safety }
+   if numNested = 0 then return env'
+   let allIndNames := types.map (·.name)
+   let (recNames', recNameMap') := mkAuxRecNameMap env' types
+@@ -752,3 +767,6 @@ def Environment.addInductive (env : Environment) (lparams : List Name) (nparams
+       modify (·.add <| .ctorInfo { ctor with type := newType })
+     processRec (mkRecName indType.name)
+   recNames'.forM processRec
++  TypeChecker.M.run (← get) (safety := safety) (lctx := res.lctx)
++      (lparams := lparams) do
++    res.aux2nested.forM fun _ e => do _ ← TypeChecker.checkType e
+diff --git a/Lean4Lean/Inductive/Reduce.lean b/Lean4Lean/Inductive/Reduce.lean
+index 6e3d75d..c1bbd55 100644
+--- a/Lean4Lean/Inductive/Reduce.lean
++++ b/Lean4Lean/Inductive/Reduce.lean
+@@ -48,7 +48,8 @@ def toCtorWhenStruct (inductName : Name) (e : Expr) : m Expr := do
+     return e
+   let eType ← whnf (← inferType e)
+   if !eType.getAppFn.isConstOf inductName then return e
+-  if (← whnf (← inferType eType)) == .prop then return e
++  let .sort u ← whnf (← inferType eType) | unreachable!
++  unless u.isNeverZero do return e
+   return expandEtaStruct env eType e
+
+ def getRecRuleFor (rval : RecursorVal) (major : Expr) : Option RecursorRule := do
+diff --git a/Lean4Lean/Level.lean b/Lean4Lean/Level.lean
+index dd12bc3..4a36717 100644
+--- a/Lean4Lean/Level.lean
++++ b/Lean4Lean/Level.lean
+@@ -10,6 +10,7 @@ def forEach [Monad m] (l : Level) (f : Level → m Bool) : m Unit := do
+   | .max l₁ l₂ | .imax l₁ l₂ => l₁.forEach f; l₂.forEach f
+   | .zero | .param .. | .mvar .. => pure ()
+
++/-- Returns `some n` if level parameter `n` appears in `l` and `n ∉ ps`. -/
+ def getUndefParam (l : Level) (ps : List Name) : Option Name := Id.run do
+   (·.2) <$> StateT.run (s := none) do
+     l.forEach fun l => do
+@@ -31,13 +32,16 @@ namespace Normalize
+
+ local instance : Ord Name := ⟨Name.cmp⟩
+
++/-- represents v+n -/
+ structure VarNode where
+   var : Name
+   offset : Nat
+   deriving BEq, Ord, Repr
+
++/-- A key-value pair `vs => { const, var }` in NormLevel represents
++the max of `C(vs, const)` and `V(vs, v, n)` for each `v+n ∈ var`, using the `C` and `V` sublevel
++functions from <https://lmf.cnrs.fr/downloads/Perso/long.pdf>. -/
+ structure Node where
+-  path : List Name := []
+   const : Nat := 0
+   var : List VarNode := []
+   deriving Repr, Inhabited
+@@ -47,6 +51,8 @@ instance : BEq Node where
+ instance : Ord Node where
+   compare n₁ n₂ := compare n₁.const n₂.const |>.then <| compare n₁.var n₂.var
+
++def Node.isEmpty (n : Node) : Bool := n.const == 0 && n.var.isEmpty
++
+ def subset (cmp : α → α → Ordering) : List α → List α → Bool
+   | [], _ => true
+   | _, [] => false
+@@ -64,7 +70,7 @@ def orderedInsert (cmp : α → α → Ordering) (a : α) : List α → Option (
+     | .eq => none
+     | .gt => (orderedInsert cmp a l).map (b :: ·)
+
+-def NormLevel := Std.TreeMap (List Name) Node compare
++@[reducible] def NormLevel := Std.TreeMap (List Name) Node compare
+   deriving Repr
+
+ instance : BEq NormLevel where
+@@ -83,14 +89,16 @@ def VarNode.addVar (v : Name) (k : Nat) : List VarNode → List VarNode
+ def NormLevel.addVar (v : Name) (k : Nat) (path' : List Name) (s : NormLevel) : NormLevel :=
+   s.modify path' fun n => { n with var := VarNode.addVar v k n.var }
+
+-def NormLevel.addNode (v : Name) (path' : List Name) (s : NormLevel) : NormLevel :=
++def NormLevel.addNode (v : Name) (k : Nat) (path' : List Name) (s : NormLevel) : NormLevel :=
+   s.alter path' fun
+-    | none => some { var := [⟨v, 0⟩] }
+-    | some n => some { n with var := VarNode.addVar v 0 n.var }
++    | none => some { var := [⟨v, k⟩] }
++    | some n => some { n with var := VarNode.addVar v k n.var }
+
+ def NormLevel.addConst (k : Nat) (path : List Name) (acc : NormLevel) : NormLevel :=
+   if k = 0 || k = 1 && !path.isEmpty then acc else
+-  acc.modify path fun n => { n with const := k.max n.const }
++  acc.alter path fun
++    | none => some { const := k }
++    | some n => some { n with const := k.max n.const }
+
+ def normalizeAux (l : Level) (path : List Name) (k : Nat) (acc : NormLevel) : NormLevel :=
+   match l with
+@@ -98,20 +106,18 @@ def normalizeAux (l : Level) (path : List Name) (k : Nat) (acc : NormLevel) : No
+   | .succ u => normalizeAux u path (k+1) acc
+   | .max u v => normalizeAux u path k acc |> normalizeAux v path k
+   | .imax u (.succ v) => normalizeAux u path k acc |> normalizeAux v path (k+1)
+-  | .imax u (.max v w) =>
+-    normalizeAux (.imax u v) path k acc |> normalizeAux (.imax u w) path k
+-  | .imax u (.imax v w) =>
+-    normalizeAux (.imax u w) path k acc |> normalizeAux (.imax v w) path k
++  | .imax u (.max v w) => normalizeAux (.imax u v) path k acc |> normalizeAux (.imax u w) path k
++  | .imax u (.imax v w) => normalizeAux (.imax u w) path k acc |> normalizeAux (.imax v w) path k
+   | .imax u (.param v) =>
+     match orderedInsert Name.cmp v path with
+-    | some path' => acc.addNode v path' |> normalizeAux u path' k
+-    | none => normalizeAux u path k acc
++    | some path' => acc.addConst k path |>.addNode v k path' |> normalizeAux u path' k
++    | none =>
++      let acc := if k = 0 then acc else acc.addVar v k path
++      normalizeAux u path k acc
+   | .mvar _ | .imax _ (.mvar _) => acc -- unreachable
+   | .param v =>
+     match orderedInsert Name.cmp v path with
+-    | some path' =>
+-      let acc := acc.addConst k path |>.addNode v path'
+-      if k = 0 then acc else acc.addVar v k path'
++    | some path' => acc.addConst k path |>.addNode v k path'
+     | none => if k = 0 then acc else acc.addVar v k path
+
+ def subsumeVars : List VarNode → List VarNode → List VarNode
+@@ -123,67 +129,110 @@ def subsumeVars : List VarNode → List VarNode → List VarNode
+     | .eq => if x.offset ≤ y.offset then subsumeVars xs ys else x :: subsumeVars xs ys
+     | .gt => subsumeVars (x :: xs) ys
+
+-def findParent (f : List Name → Bool) : (l₁ l₂ : List Name) → List Name
+-  | _, [] => []
+-  | l₁, a :: l₂ => if f (l₁.reverseAux l₂) then [a] else findParent f (a :: l₁) l₂
+-
+-def NormLevel.subsumption (acc : NormLevel) (paths := false) : NormLevel :=
++/-- Remove from `n₁` the sublevels dominated by `n₂`, whose condition set is a subset of
++`n₁`'s: `C(c)` is dominated by `C(c')` when `c ≤ c'` and by `V(x+k)` when `c ≤ k + 1`, and
++`V(x+k)` is dominated by `V(x+k')` when `k ≤ k'`.
++
++`same` says the two sit at the *same* condition set, where a variable may still discharge the
++constant but the variables must not discharge themselves. -/
++def Node.subsumeBy (same : Bool) (n₁ n₂ : Node) : Node :=
++  let n₁ :=
++    if n₁.const = 0 ||
++      (same || n₁.const > n₂.const) &&
++      (n₂.var.isEmpty || n₁.const > n₂.var.foldl (·.max ·.offset) 0 + 1)
++    then n₁ else { n₁ with const := 0 }
++  if same || n₂.var.isEmpty then n₁ else { n₁ with var := subsumeVars n₁.var n₂.var }
++
++/-- Remove the parts of the sublevels at `(p₁, n₁)` that are dominated by the sublevels
++at `(p₂, n₂)`. -/
++def Node.subsume (p₁ : List Name) (n₁ : Node) (p₂ : List Name) (n₂ : Node) : Node :=
++  if subset compare p₂ p₁ then n₁.subsumeBy (p₁.length == p₂.length) n₂ else n₁
++
++/-- Remove the parts of the sublevels at `(p₁, n₁)` dominated by other entries of the map. -/
++def NormLevel.minimize (acc : NormLevel) (p₁ : List Name) (n₁ : Node) : Node :=
++  acc.foldl (init := n₁) (Node.subsume p₁)
++
++def NormLevel.subsumption (acc : NormLevel) : NormLevel :=
+   acc.foldl (init := acc) fun acc p₁ n₁ =>
+-    let n₁ := acc.foldl (init := n₁) fun n₁ p₂ n₂ =>
+-      if !subset compare p₂ p₁ then n₁ else
+-      let same := p₁.length == p₂.length
+-      let n₁ :=
+-        if n₁.const = 0 ||
+-          (same || n₁.const > n₂.const) &&
+-          (n₂.var.isEmpty || n₁.const > n₁.var.foldl (·.max ·.offset) 0 + 1)
+-        then n₁ else { n₁ with const := 0 }
+-      if same || n₂.var.isEmpty then n₁ else { n₁ with var := subsumeVars n₁.var n₂.var }
+-    let n₁ := if paths then
+-      let path := findParent acc.contains [] p₁
+-      let var := if let [v] := path then subsumeVars n₁.var [⟨v, 0⟩] else n₁.var
+-      { n₁ with path, var }
+-    else n₁
+-    acc.insert p₁ n₁
+-
+-def normalize (l : Level) (paths := false) : NormLevel :=
+-  Normalize.normalizeAux l [] 0 (.insert {} [] default) |>.subsumption paths
+-
+-def leVars : List VarNode → List VarNode → Bool
+-  | [], _ => true
+-  | _, [] => false
+-  | x :: xs, y :: ys =>
+-    match Name.cmp x.var y.var with
+-    | .lt => false
+-    | .eq => x.offset ≤ y.offset && leVars xs ys
+-    | .gt => leVars (x :: xs) ys
+-
++    let n := acc.minimize p₁ n₁
++    if n.isEmpty then acc.erase p₁ else acc.insert p₁ n
++
++def normalize (l : Level) : NormLevel :=
++  Normalize.normalizeAux l [] 0 {} |>.subsumption
++
++/-- Sublevel comparison, following Theorem 39 of the paper: `l₁ ≤ l₂` iff every sublevel
++of `l₁` is dominated by some sublevel of `l₂`, where
++`C(E, L) ≤ C(F, K) ↔ F ⊆ E ∧ L ≤ K`, `C(E, L) ≤ V(F, x, K) ↔ F ⊆ E ∧ L ≤ K + 1`,
++and `V(E, x, L) ≤ V(F, y, K) ↔ F ⊆ E ∧ x = y ∧ L ≤ K`.
++
++Each sublevel picks its own dominator, and a node bundles several of them, so it is not
++enough to look for a single entry of `l₂` dominating a whole node of `l₁`: for
++`imax 2 v ≤ max 2 v` the constant is dominated at `∅` and the variable at `{v}`. Instead
++each entry of `l₂` discharges what it can from the sublevels of `n₁` that are still
++outstanding, which is the same `subsumeBy` step minimization uses; the node is dominated
++once nothing is left, and the fold stops there. -/
+ def NormLevel.le (l₁ l₂ : NormLevel) : Bool :=
+   l₁.all fun p₁ n₁ =>
+-    if n₁.const = 0 && n₁.var.isEmpty then true else
+-    l₂.any fun p₂ n₂ =>
+-      (!n₂.var.isEmpty || n₁.var.isEmpty) &&
+-      subset compare p₂ p₁ &&
+-      (n₂.const ≤ n₁.const || n₂.var.any (n₂.const ≤ ·.offset + 1)) &&
+-      leVars n₁.var n₂.var
+-
+-def NormLevel.buildPaths : StateM NormLevel Unit := do
+-  (← get).foldlM (init := ()) fun _ p _ => do
+-    let n := (← get).get! p
+-    if let [v] := n.path then
+-      let l ← getPath (p.erase v) p.length
+-      setPath p (v :: l)
++    -- `none` means nothing is left to discharge, which stops the fold
++    Option.isNone <| l₂.foldlM (init := n₁) (m := Option) fun n p₂ n₂ =>
++      if subset compare p₂ p₁ then
++        let n := n.subsumeBy false n₂
++        if n.isEmpty then none else some n
++      else some n
++
++/-!
++Reconstruction of a `Level` from a `NormLevel`.
++
++The paper's canonical form is a set of sublevels `C(S, k)`, `V(S, v+k)`; it does not address
++which such sets are expressible as level expressions. Reifying a sublevel with conditions `S`
++requires nesting it under an imax chain `imax (… imax (imax (_) v₁) …) vₙ` where
++`{v₁, …, vₙ} = S`, and each edge of such a chain itself contributes the sublevel
++`V(S', vᵢ, 0)` where `S'` is the set of conditions up to that point. So a chain order is
++admissible only if each such edge contribution is dominated by the canonical form, i.e.
++there is some `V(T, vᵢ+k)` with `T ⊆ S'` among the sublevels. Canonical forms produced by
++`normalizeAux` always admit at least one such order for every key
++(each key is the condition set of some `imax` chain suffix of the input, whose edges put
++the required `V` entries at subsets of the key, and subsumption only moves coverage to
++smaller sets).
++
++To make the output canonical, the choice of chain must depend only on the canonical
++sublevels, not on incidental map keys (which record which `imax` chains appeared
++syntactically in the input). For each key we take the lexicographically least admissible
++chain, computed greedily. This is well-defined: domination of `V(S', v, 0)` is monotone
++in `S'`, so extending the set of conditions added so far never invalidates other elements,
++and a greedy choice never needs to be revisited (checking that the remainder stays
++completable before committing to each element). -/
++
++/-- Is the edge contribution `V(acc ∪ {a}, a, 0)` dominated by the normal form?
++True iff some `V(T, a+k)` with `T ⊆ acc ∪ {a}` is present. -/
++def NormLevel.addable (s : NormLevel) (a : Name) (acc : List Name) : Bool :=
++  s.any fun p n => n.var.any (·.var == a) && subset compare (p.erase a) acc
++
++/-- Can the elements of `rem` be added to the condition set `acc` one at a time, each
++addition being `addable` at that point? Since `addable` is monotone in `acc`, adding any
++addable element preserves completability, so a greedy check is complete. -/
++def NormLevel.feasible (s : NormLevel) (acc rem : List Name) : Bool :=
++  go rem.length acc rem
+ where
+-  setPath (p path : List Name) : StateM NormLevel Unit :=
+-    modify (·.modify p ({ · with path }))
+-
+-  getPath (p : List Name) (depth : Nat) : StateM NormLevel (List Name) := do
+-    let n := (← get).get! p
+-    if let [v] := n.path then
+-      if let depth + 1 := depth then
+-        let l ← getPath (p.erase v) depth
+-        setPath p (v :: l)
+-        return v :: l
+-    return n.path
++  go : Nat → List Name → List Name → Bool
++  | 0, _, rem => rem.isEmpty
++  | fuel+1, acc, rem =>
++    match rem.find? (s.addable · acc) with
++    | none => rem.isEmpty
++    | some a => go fuel ((orderedInsert Name.cmp a acc).getD acc) (rem.erase a)
++
++/-- The lexicographically least admissible imax chain building the condition set `p`,
++listed innermost (last-added) first: at each step, remove the least element that is
++`addable` on top of the rest and whose remainder is still completable.
++This depends only on the sublevels of `s`, not on its key set, so equal normal forms
++reify to equal levels. (The fallback returns the remaining set in sorted order;
++it is not reachable for normal forms produced by `normalizeAux`.) -/
++def NormLevel.lexChain (s : NormLevel) : Nat → List Name → List Name
++  | 0, p => p
++  | fuel+1, p =>
++    match p.find? fun a => s.addable a (p.erase a) && s.feasible [] (p.erase a) with
++    | some a => a :: s.lexChain fuel (p.erase a)
++    | none => p
+
+ structure Tree where
+   const : Nat
+@@ -205,22 +254,17 @@ def Tree.modify (path : List Name) (f : Tree → Tree) (t : Tree) : Tree :=
+   | a :: p => modify p (t := t) fun t => { t with child := modifyAt f a t.child }
+
+ def NormLevel.toTree (acc : NormLevel) : Tree :=
+-  (buildPaths.run acc).run.2.foldl (init := ⟨0, [], []⟩) fun t _ n =>
+-    t.modify n.path fun t => { t with const := n.const, var := n.var }
+-
+-def treeVarDedup : List VarNode → List (Name × Tree) → List VarNode
+-  | [], _ => []
+-  | xs, [] => xs
+-  | x :: xs, y :: ys =>
+-    match Name.cmp x.1 y.1 with
+-    | .lt => x :: treeVarDedup xs (y :: ys)
+-    | .eq => if x.2 = 0 then treeVarDedup xs ys else x :: treeVarDedup xs ys
+-    | .gt => treeVarDedup (x :: xs) ys
++  acc.foldl (init := ⟨0, [], []⟩) fun t p n =>
++    let path := acc.lexChain p.length p
++    -- the edge into this tree node already contributes `V(p, v, 0)` for the innermost
++    -- chain element `v`, so an explicit `v+0` entry would be redundant
++    let var := if let v :: _ := path then subsumeVars n.var [⟨v, 0⟩] else n.var
++    t.modify path fun t => { t with const := n.const, var }
+
+ def Tree.reify : Tree → Level
+   | { const, var, child } =>
+     let l := child.foldr mkChild none
+-    let l := (treeVarDedup var child).foldr (init := l) fun n r =>
++    let l := var.foldr (init := l) fun n r =>
+       some (mkMax (addOffset (.param n.var) n.offset) r)
+     match l with
+     | none => ofNat const
+@@ -237,7 +281,7 @@ where
+
+ end Normalize
+
+-def normalize' (l : Level) : Level := (Normalize.normalize l (paths := true)).toTree.reify
++def normalize' (l : Level) : Level := (Normalize.normalize l).toTree.reify
+
+ def isEquiv' (u v : Level) : Bool := u == v || Normalize.normalize u == Normalize.normalize v
+
+@@ -250,12 +294,18 @@ def geq' (u v : Level) : Bool := (Normalize.normalize v).le (Normalize.normalize
+ --     logInfo m!"{normalize' (← Elab.Term.elabLevel l)}"
+ --     -- logInfo m!"{repr <| Normalize.normalize (← Elab.Term.elabLevel l) }"
+
++-- local elab "normalize " l:level " ≤ " l':level : command => do
++--   Elab.Command.runTermElabM fun _ => do
++--     logInfo m!"{geq' (← Elab.Term.elabLevel l') (← Elab.Term.elabLevel l)}"
++--     -- logInfo m!"{repr <| Normalize.normalize (← Elab.Term.elabLevel l)}"
++--     -- logInfo m!"{repr <| Normalize.normalize (← Elab.Term.elabLevel l')}"
++
+ -- universe u v w
+ -- /-- info: max 1 u -/
+ -- #guard_msgs in normalize max u 1
+ -- /-- info: u -/
+ -- #guard_msgs in normalize imax 1 u
+--- /-- info: max 1 (imax (u+1) u) -/
++-- /-- info: max 1 (imax (u + 1) u) -/
+ -- #guard_msgs in normalize u+1
+ -- /-- info: imax 2 u -/
+ -- #guard_msgs in normalize imax 2 u
+@@ -265,5 +315,7 @@ def geq' (u v : Level) : Bool := (Normalize.normalize v).le (Normalize.normalize
+ -- #guard_msgs in normalize max (imax (imax u v) w) (imax (imax u w) v)
+ -- /-- info: u -/
+ -- #guard_msgs in normalize imax u u
+--- /-- info: max 1 (imax (u+1) u) -/
++-- /-- info: max 1 (imax (u + 1) u) -/
+ -- #guard_msgs in normalize imax u (u+1)
++-- /-- info: max 1 (imax (max (v + 1) (imax (u + 1) u)) v) -/
++-- #guard_msgs in normalize imax u v + 1
+diff --git a/Lean4Lean/Primitive.lean b/Lean4Lean/Primitive.lean
+index 5e532f7..b3137e3 100644
+--- a/Lean4Lean/Primitive.lean
++++ b/Lean4Lean/Primitive.lean
+@@ -28,19 +28,23 @@ structure Reflection where
+   toDec : Expr
+
+ def Reflection.defn₁ : Reflection where
+-  type := q(fun p b => (b = true → p) ∧ (¬b = true → ¬p))
+-  ofTrue := q(fun p (H : (true = true → p) ∧ (¬true = true → ¬p)) => H.1 rfl)
+-  ofFalse := q(fun p (H : (false = true → p) ∧ (¬false = true → ¬p)) => H.2 Bool.noConfusion)
+-  toDec := q(fun p b (H : (b = true → p) ∧ (¬b = true → ¬p)) =>
+-    if h : b = true then isTrue (H.1 h) else isFalse (H.2 h))
++  type := q(fun p b => ∀ {q : Prop}, ((b = true → p) → (¬b = true → ¬p) → q) → q)
++  ofTrue := q(fun p (H : ∀ {q : Prop}, ((true = true → p) → (¬true = true → ¬p) → q) → q) =>
++    H fun h _ => h rfl)
++  ofFalse := q(fun p (H : ∀ {q : Prop}, ((false = true → p) → (¬false = true → ¬p) → q) → q) =>
++    H fun _ h => h Bool.noConfusion)
++  toDec := q(fun p b (H : ∀ {q : Prop}, ((b = true → p) → (¬b = true → ¬p) → q) → q) =>
++    if h : b = true then isTrue (H fun h' _ => h' h) else isFalse (H fun _ h' => h' h))
+
+ def Reflection.defn₂ : Reflection where
+-  type := q(fun p b => (b = true → p) ∧ (b = false → ¬p))
+-  ofTrue := q(fun p (H : (true = true → p) ∧ (true = false → ¬p)) => H.1 rfl)
+-  ofFalse := q(fun p (H : (false = true → p) ∧ (false = false → ¬p)) => H.2 rfl)
+-  toDec := q(fun p b (H : (b = true → p) ∧ (b = false → ¬p)) =>
++  type := q(fun p b => ∀ {q : Prop}, ((b = true → p) → (b = false → ¬p) → q) → q)
++  ofTrue := q(fun p (H : ∀ {q : Prop}, ((true = true → p) → (true = false → ¬p) → q) → q) =>
++    H fun h _ => h rfl)
++  ofFalse := q(fun p (H : ∀ {q : Prop}, ((false = true → p) → (false = false → ¬p) → q) → q) =>
++    H fun _ h => h rfl)
++  toDec := q(fun p b (H : ∀ {q : Prop}, ((b = true → p) → (b = false → ¬p) → q) → q) =>
+     b.casesOn (motive := fun b' => b = b' → Decidable p)
+-      (fun h => isFalse (H.2 h)) (fun h => isTrue (H.1 h)) rfl)
++      (fun h => isFalse (H fun _ h' => h' h)) (fun h => isTrue (H fun h' _ => h' h)) rfl)
+
+ def Reflection.check (r : Reflection) (fail : ∀ {α}, M α) : M Unit := do
+   unless ← isDefEq (← checkType r.type) q(Prop → Bool → Prop) do fail
+@@ -60,8 +64,8 @@ def Condition.natLE : Condition where
+   impl := .reflectNatNat
+     (asBool := q(Nat.ble))
+     (reflect := .defn₁)
+-    (proof := q(fun n m =>
+-      And.intro (@Nat.le_of_ble_eq_true n m) (@Nat.not_le_of_not_ble_eq_true n m)))
++    (proof := q(fun n m {q : Prop} (H : _ → _ → q) =>
++      H (@Nat.le_of_ble_eq_true n m) (@Nat.not_le_of_not_ble_eq_true n m)))
+
+ def Condition.natEq : Condition where
+   prop := q(@Eq Nat)
+@@ -69,7 +73,8 @@ def Condition.natEq : Condition where
+   impl := .reflectNatNat
+     (asBool := q(Nat.beq))
+     (reflect := .defn₂)
+-    (proof := q(fun n m => And.intro (@Nat.eq_of_beq_eq_true n m) (@Nat.ne_of_beq_eq_false n m)))
++    (proof := q(fun n m {q : Prop} (H : _ → _ → q) =>
++      H (@Nat.eq_of_beq_eq_true n m) (@Nat.ne_of_beq_eq_false n m)))
+
+ def Condition.bool : Condition where
+   prop := q(fun x : Bool => x = true)
+@@ -117,19 +122,18 @@ def Condition.check (cond : Condition) (fail : ∀ {α}, M α)
+   _ ← checkType cond.dec
+   match cond.impl with
+   | .reflectNatNat asBool reflect proof =>
+-    unless ← isDefEq (← inferType cond.prop) q(Nat → Nat → Prop) do fail
+     reflect.check fail
+-    if ite then reflect.checkITE fail
+-    if dite then reflect.checkNatDITE fail
+     let y := .bvar 0; let x := .bvar 1
+-    let e := .lam0 q(Nat) <| .lam0 q(Nat) <| mkApp3 reflect.toDec
++    let e := .lam0 q(Nat) <| .lam0 q(Nat) <| mkApp3
++      (.lam0 q(Prop) <| .lam0 q(Bool) <| .lam0 (mkApp2 reflect.type (.bvar 1) (.bvar 0)) <|
++        mkApp3 reflect.toDec (.bvar 2) (.bvar 1) (.bvar 0))
+       (mkApp2 cond.prop x y) (mkApp2 asBool x y) (mkApp2 proof x y)
+     _ ← checkType e
+-    unless ← isDefEq (← inferType asBool) q(Nat → Nat → Bool) do fail
+-    unless ← isProp (← inferType proof) do fail
+     unless ← isDefEq e cond.dec do fail
++    if ite then reflect.checkITE fail
++    if dite then reflect.checkNatDITE fail
+   | .bool =>
+-    unless ← isDefEq (← inferType cond.prop) q(Bool → Prop) do fail
++    unless ← isDefEq (← checkType cond.prop) q(Bool → Prop) do fail
+     let b := .bvar 0
+     if ite then
+       let natITE := .lam0 q(Bool) <|
+@@ -169,6 +173,7 @@ def unfoldWellFounded (e : Expr) (fvs : Array Expr) (eq_def : Expr) (fail : ∀
+   return (← getLCtx).mkLambda fvs rhs
+
+ def checkPrimitiveDef (v : DefinitionVal) : M Bool := do
++  unless v.safety == .safe do return false
+   let fail {α} : M α := throw <| .other s!"invalid form for primitive def {v.name}"
+   let tru := q(true)
+   let fal := q(false)
+diff --git a/Lean4Lean/Quot.lean b/Lean4Lean/Quot.lean
+index d0b7d5f..87670e0 100644
+--- a/Lean4Lean/Quot.lean
++++ b/Lean4Lean/Quot.lean
+@@ -38,6 +38,10 @@ def checkEqType (env : Environment) : Except Exception Unit := do
+ def Environment.addQuot (env : Environment) : Except Exception Environment := do
+   if env.quotInit then return env
+   checkEqType env
++  env.checkName ``Quot
++  env.checkName ``Quot.mk
++  env.checkName ``Quot.lift
++  env.checkName ``Quot.ind
+   ExprBuildT.run do
+   let u := .param `u
+   withLocalDecl `α (.sort u) .implicit fun α => do
+diff --git a/Lean4Lean/TypeChecker.lean b/Lean4Lean/TypeChecker.lean
+index 1522f17..92d2d0b 100644
+--- a/Lean4Lean/TypeChecker.lean
++++ b/Lean4Lean/TypeChecker.lean
+@@ -185,8 +185,11 @@ def inferLet (e : Expr) (inferOnly : Bool) : RecM Expr := loop #[] e where
+     let r := r.cheapBetaReduce
+     return (← getLCtx).mkForall fvars r
+
+-def isProp (e : Expr) : RecM Bool :=
+-  return (← whnf (← inferType e)) == .prop
++def getSortLevel (e : Expr) : RecM Level := do
++  let .sort u ← ensureSortCore (← inferType e) e | unreachable!
++  return u
++
++def isProp (e : Expr) : RecM Bool := return (← getSortLevel e).isAlwaysZero
+
+ def inferProj (typeName : Name) (idx : Nat) (struct structType : Expr) : RecM Expr := do
+   let e := Expr.proj typeName idx struct
+@@ -204,16 +207,16 @@ def inferProj (typeName : Name) (idx : Nat) (struct structType : Expr) : RecM Ex
+   for i in [:I_val.numParams] do
+     let .forallE _ _ b _ ← whnf r | fail
+     r := b.instantiate1 args[i]!
+-  let isPropType ← isProp type
++  let maybePropType := !(← getSortLevel type).isNeverZero
+   for i in [:idx] do
+     let .forallE _ dom b _ ← whnf r | fail
+     if b.hasLooseBVars then
+-      if isPropType then if !(← isProp dom) then fail
++      if maybePropType then if !(← isProp dom) then fail
+       r := b.instantiate1 (.proj I_name i struct)
+     else
+       r := b
+   let .forallE _ dom _ _ ← whnf r | fail
+-  if isPropType then if !(← isProp dom) then fail
++  if maybePropType then if !(← isProp dom) then fail
+   return dom
+
+ def inferType' (e : Expr) (inferOnly : Bool) : RecM Expr := do
+@@ -392,7 +395,6 @@ def reduceBinNatPred (f : Nat → Nat → Bool) (a b : Expr) : RecM (Option Expr
+   return toExpr <| f v1 v2
+
+ def reduceNat (e : Expr) : RecM (Option Expr) := do
+-  if e.hasFVar then return none
+   let nargs := e.getAppNumArgs
+   if nargs == 1 then
+     let f := e.appFn!

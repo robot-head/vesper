@@ -45,6 +45,13 @@ impl World {
                     }
                 }
                 Item::Effect(e) => {
+                    if crate::capability_effects::is_capability_effect(&e.name) {
+                        errors.push(crate::capability_effects::reserved_declaration(
+                            &e.name,
+                            e.span.clone(),
+                        ));
+                        continue;
+                    }
                     if w.effects.insert(e.name.clone(), e.clone()).is_some() {
                         errors.push(Diagnostic::new(
                             "E0100",
@@ -392,6 +399,9 @@ pub(crate) fn check_core(
         }
     }
     if diagnostics.is_empty() && traits.is_none() {
+        diagnostics.extend(crate::capability_effects::check_world(&world));
+    }
+    if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::ir_check::validate(
             &world,
             &crate::ir::lower_world(&world),
@@ -608,6 +618,11 @@ impl Checker<'_> {
                 && !labels.insert(label)
             {
                 self.error("E0400", "duplicate lexical capability label", span.clone());
+            }
+            if crate::capability_effects::is_capability_effect(&e.name) {
+                self.diagnostics
+                    .extend(crate::capability_effects::row_entry(e, span.clone()));
+                continue;
             }
             if let Some(decl) = self.world.effects.get(&e.name) {
                 if e.args.len() != decl.generics.len() {
@@ -2494,7 +2509,9 @@ impl Checker<'_> {
         self.observations.pop().unwrap().1
     }
     fn require_effect(&mut self, effect: &Effect, env: &Env, span: Span) {
-        if self.dead != 0 {
+        // Built-in capability effects constrain callees, not callers: they are
+        // never requested from the caller's row (see `capability_effects`).
+        if self.dead != 0 || crate::capability_effects::is_capability_effect(&effect.name) {
             return;
         }
         let resolved = self.resolve_effect(effect);
@@ -3110,6 +3127,11 @@ impl Checker<'_> {
             &self.generics.clone(),
             span.clone(),
         );
+        if crate::capability_effects::is_capability_effect(&effect.name) {
+            self.diagnostics
+                .push(crate::capability_effects::handler_rejected(effect, span));
+            return Type::Infer;
+        }
         let Some(decl) = self.world.effects.get(&effect.name) else {
             self.error("E0400", "unknown handled effect", span);
             return Type::Infer;

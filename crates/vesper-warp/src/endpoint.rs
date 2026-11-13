@@ -62,22 +62,45 @@
 //! [`WarpEndpoint::open_connection`] still opens a connection from
 //! caller-supplied 1-RTT keys.
 //!
-//! What this is not: no Retry, 0-RTT, Version Negotiation, stateless
-//! reset or NEW_TOKEN; a short-header packet coalesced after long-header
-//! packets in one received datagram is dropped (ours never coalesce);
-//! Initial and Handshake packets are recovered but not fed to BBRv3
-//! (whose snapshots are keyed by application packet number) and not
-//! paced; no connection migration; and no hardware EDT, RSS or crypto
-//! offload. With [`SoftNic`](vesper_warp_umem::SoftNic) the
-//! "NIC" is lane 3's deterministic model; with lane 3's gated AF_XDP
-//! backend it is a real socket, which this crate's tests do not exercise.
+//! Lifecycle (wave six, issue #247; `docs/parallel-results/warp-lifecycle.md`):
+//! Retry with its integrity tag and AEAD address-validation tokens,
+//! NEW_TOKEN, Version Negotiation both ways, stateless reset (sent for
+//! unknown connection IDs, detected on undecryptable packets),
+//! NEW_CONNECTION_ID / RETIRE_CONNECTION_ID, PATH_CHALLENGE /
+//! PATH_RESPONSE path validation with client migration
+//! ([`WarpEndpoint::migrate`]) and server-side following, coalesced
+//! Initial + Handshake + 0-RTT sends (one paced datagram), coalesced
+//! 1-RTT and 0-RTT receive, a bounded buffer for packets whose keys have
+//! not arrived, the peer's max_idle_timeout, max_ack_delay and
+//! max_udp_payload_size, Initial and Handshake packets in BBRv3's flight
+//! and pacing, application CONNECTION_CLOSE ([`WarpEndpoint::close`]),
+//! closing and draining periods (3×PTO) that free the slot, RFC 9218
+//! stream priorities, and 0-RTT with resumption, anti-replay (server
+//! side, in lane 12) and clean rejection. The caller supplies UDP
+//! addresses with [`WarpEndpoint::set_rx_source`]; the [`TxTap`] reports
+//! destinations.
+//!
+//! What this is not: 1-RTT packets are not coalesced after long-header
+//! packets on send; the sequence-0 connection ID stays in the shard table
+//! until the connection closes; the idle timer restarts only on receive,
+//! not on the first ack-eliciting send after it (RFC 9000 §10.1); the
+//! server never migrates itself (no preferred_address); and no hardware
+//! EDT, RSS or crypto offload. With
+//! [`SoftNic`](vesper_warp_umem::SoftNic) the "NIC" is lane 3's
+//! deterministic model; with lane 3's gated AF_XDP backend it is a real
+//! socket, which this crate's tests do not exercise.
 
 use std::fmt;
 
 use vesper_warp_bbr::BbrConfig;
-use vesper_warp_crypto::{CryptoError, OneRttKeys, TAG_LEN, Unprotected};
+use vesper_warp_crypto::{
+    CryptoError, OneRttKeys, Opener, Sealer, TAG_LEN, Unprotected, retry_integrity_tag,
+    verify_retry_integrity,
+};
 use vesper_warp_shard::{ConnState, ConnTable, ConnectionId, SlotHandle, TableConfig};
-use vesper_warp_tls::{Event as TlsEvent, QuicTls, ServerCids, Space, TransportParameters};
+use vesper_warp_tls::{
+    EarlyData, Event as TlsEvent, QuicTls, ServerCids, Space, TransportParameters,
+};
 use vesper_warp_umem::{
     DescError, InFlightQuicPkt, RxHarvested, TxStaged, UmemError, UmemFrame, XdpNic, Xsk,
     XskBackend,
@@ -94,8 +117,13 @@ use crate::handshake::{
     MIN_ORIGINAL_DCID, NO_CREDIT, TlsError, peer_params, pn_space,
 };
 use crate::header::{
-    HeaderError, HeaderParser, LongHeader, LongPacketType, ParsedPacket, ProtectedHeader,
-    write_long,
+    HeaderError, HeaderParser, LongHeader, LongPacketType, ParsedPacket, ProtectedHeader, QUIC_V1,
+    RETRY_TAG_LEN, write_long, write_retry, write_version_negotiation,
+};
+use crate::lifecycle::{
+    AddressValidation, Cids, LifecycleConfig, LocalCid, MAX_ACTIVE_CIDS, MAX_TOKEN_LEN,
+    MIN_STATELESS_RESET, Path, PathProbe, PeerAddr, PeerCid, ResetKey, TokenError, TokenKey,
+    TokenKind,
 };
 use crate::packet_number::{PnLen, TruncatedPn, encoded_len};
 use crate::recovery::{
@@ -103,8 +131,8 @@ use crate::recovery::{
     TimeoutAction,
 };
 use crate::stream::{
-    PacketFrames, PeerParams, ReadOutcome, Role, StreamConfig, StreamError, StreamEvent, StreamSet,
-    TransportError,
+    PacketFrames, PeerParams, Priority, ReadOutcome, Role, StreamConfig, StreamError, StreamEvent,
+    StreamSet, TransportError,
 };
 use crate::{PacketType, PnSpace};
 
@@ -127,6 +155,25 @@ const MAX_LONG_HEADER: usize = 1 + 4 + 1 + 20 + 1 + 20 + 1 + 2 + 4;
 pub(crate) const ACK_RANGES: usize = 32;
 /// CONNECTION_CLOSE frame type for transport errors.
 const CLOSE_FRAME_CRYPTO: u64 = 0x06;
+/// Marker frame type for an application close (sent as frame 0x1d).
+const APP_CLOSE: u64 = u64::MAX;
+/// NEW_TOKEN tokens a client keeps (one per server name, newest kept).
+const MAX_CACHED_TOKENS: usize = 16;
+/// Bytes a coalesced long-header packet leaves for the packet after it.
+const COALESCE_RESERVE: usize = 128;
+/// Longest stateless reset we send (RFC 9000 §10.3 suggests resets look
+/// like short 1-RTT packets).
+const MAX_STATELESS_RESET: usize = 43;
+/// Pacing slack for coalesced handshake datagrams (see `dgram_finish`).
+const HANDSHAKE_BURST_NS: u64 = 1_000_000;
+/// RFC 9000 §20.1 APPLICATION_ERROR.
+const APPLICATION_ERROR: u64 = 0x0c;
+// Our own tokens fit wherever a peer's NEW_TOKEN token fits.
+const _: () = assert!(MAX_TOKEN_LEN <= crate::stream::MAX_NEW_TOKEN_LEN);
+/// Longest Retry token a client echoes. Tokens are opaque and must come
+/// back unchanged, so a Retry with a longer one is refused, not truncated.
+const MAX_RETRY_TOKEN_LEN: usize = 512;
+const _: () = assert!(crate::stream::MAX_NEW_TOKEN_LEN <= MAX_RETRY_TOKEN_LEN);
 
 /// Which §35.3 CID lookup to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +241,9 @@ pub struct EndpointConfig {
     pub tx_reserve: u32,
     /// Completion-ring entries harvested per [`WarpEndpoint::poll`].
     pub completion_batch: u32,
+    /// Retry, tokens, stateless reset, connection IDs, migration and
+    /// buffering (wave six, issue #247).
+    pub lifecycle: LifecycleConfig,
 }
 
 impl Default for EndpointConfig {
@@ -219,6 +269,7 @@ impl Default for EndpointConfig {
             tx_reserve: 64,
             key_update_interval: 1 << 22,
             completion_batch: 64,
+            lifecycle: LifecycleConfig::default(),
         }
     }
 }
@@ -259,6 +310,25 @@ pub enum DropReason {
     Transport(TransportError),
     /// The connection is closed or closing.
     Closed,
+    /// Server: the client Initial carried no valid token; a Retry was sent
+    /// instead (RFC 9000 §8.1.2).
+    RetrySent,
+    /// Server: the Initial's token was refused.
+    InvalidToken(TokenError),
+    /// Server: an Initial of another QUIC version; Version Negotiation
+    /// was sent (RFC 9000 §6.1).
+    VersionNegotiationSent,
+    /// Client: a Retry that is unexpected, duplicated or fails its
+    /// integrity tag (RFC 9000 §17.2.5.2).
+    BadRetry,
+    /// Client: a Version Negotiation packet that must be ignored (it lists
+    /// our version, or the connection already received a packet).
+    IgnoredVersionNegotiation,
+    /// The datagram was a stateless reset for one of our connections,
+    /// which is now closed (RFC 9000 §10.3.1).
+    StatelessReset,
+    /// Held until the keys to open it are installed (RFC 9001 §5.7).
+    Buffered,
 }
 
 /// Why a connection was closed.
@@ -275,6 +345,15 @@ pub enum ConnectionError {
         /// `Some` for a transport close, `None` for an application close.
         frame_type: Option<u64>,
     },
+    /// We closed it with [`WarpEndpoint::close`].
+    Application { error_code: u64 },
+    /// Neither side sent anything within the idle timeout (RFC 9000
+    /// §10.1); closed silently.
+    IdleTimeout,
+    /// The peer sent a stateless reset (RFC 9000 §10.3).
+    StatelessReset,
+    /// Client: the server supports none of our versions (RFC 9000 §6.2).
+    VersionNegotiation,
 }
 
 /// Result of one [`WarpEndpoint::poll_and_step_quic_rx_one`].
@@ -337,6 +416,10 @@ pub enum WarpError {
     /// The server may not send more before the client's address is
     /// validated (RFC 9000 §8.1).
     AmplificationLimited,
+    /// Migration needs a spare peer connection ID (RFC 9000 §9.5).
+    NoConnectionId,
+    /// The peer sent `disable_active_migration` (RFC 9000 §18.2).
+    MigrationDisabled,
 }
 
 impl fmt::Display for WarpError {
@@ -426,6 +509,28 @@ impl Responder for Discard {
 /// NIC's tx ring (a capture point for tests and simulators).
 pub trait TxTap {
     fn on_transmit(&mut self, conn: SlotHandle, pn: u64, edt_ns: u64, datagram: &[u8]);
+
+    /// [`TxTap::on_transmit`] with the datagram's destination (wave six):
+    /// the connection's path, or a path being validated. `None` when the
+    /// caller supplies no addresses. Defaults to `on_transmit`.
+    fn on_transmit_to(
+        &mut self,
+        conn: SlotHandle,
+        pn: u64,
+        edt_ns: u64,
+        datagram: &[u8],
+        to: Option<PeerAddr>,
+    ) {
+        let _ = to;
+        self.on_transmit(conn, pn, edt_ns, datagram);
+    }
+
+    /// A datagram sent without a connection: Retry, Version Negotiation or
+    /// a stateless reset, to the source of the datagram that caused it.
+    /// Defaults to ignoring it.
+    fn on_stateless(&mut self, datagram: &[u8], to: Option<PeerAddr>) {
+        let _ = (datagram, to);
+    }
 }
 
 impl TxTap for () {
@@ -503,6 +608,37 @@ pub struct EndpointStats {
     pub amplification_blocked: u64,
     /// Connection events dropped because the queue was full.
     pub connection_events_dropped: u64,
+    // Wave six (issue #247).
+    pub retries_sent: u64,
+    pub retries_received: u64,
+    pub version_negotiations_sent: u64,
+    pub version_negotiations_received: u64,
+    pub tokens_issued: u64,
+    pub tokens_accepted: u64,
+    pub tokens_refused: u64,
+    pub stateless_resets_sent: u64,
+    pub stateless_resets_received: u64,
+    pub path_challenges_sent: u64,
+    pub path_responses_sent: u64,
+    pub paths_validated: u64,
+    pub path_failures: u64,
+    pub migrations: u64,
+    pub cids_issued: u64,
+    pub cids_retired: u64,
+    /// Datagrams held for keys, replayed, and dropped for lack of room.
+    pub datagrams_buffered: u64,
+    pub datagrams_replayed: u64,
+    pub datagrams_buffer_full: u64,
+    /// Packets sent after another packet in the same datagram, and
+    /// received that way.
+    pub coalesced_sent: u64,
+    pub coalesced_received: u64,
+    pub idle_timeouts: u64,
+    /// Connection slots freed at the end of closing/draining or by a
+    /// timeout.
+    pub slots_freed: u64,
+    pub zero_rtt_packets_sent: u64,
+    pub zero_rtt_packets_received: u64,
 }
 
 /// A connection's non-tile state. The tile (lane 6) holds the hot scalars:
@@ -535,6 +671,42 @@ struct Conn {
     error: Option<ConnectionError>,
     /// When CONNECTION_CLOSE was last sent (closing state, RFC 9000 §10.2.1).
     close_sent_ns: Option<u64>,
+    // Wave six (issue #247).
+    /// When closing or draining ends and the slot is freed.
+    close_deadline_ns: Option<u64>,
+    /// Idle timeout in force: ours, or the smaller of ours and the peer's
+    /// once its transport parameters arrive; 0 is none (RFC 9000 §10.1).
+    idle_timeout_ns: u64,
+    /// The lifecycle timer as armed in the endpoint's wheel.
+    life_timer: Option<(TimerHandle, u64)>,
+    /// Largest datagram we send on this connection (ours, or the peer's
+    /// smaller `max_udp_payload_size`).
+    max_datagram: u16,
+    path: Path,
+    probe: Option<PathProbe>,
+    /// A PATH_CHALLENGE to answer and where it came from.
+    challenge_rx: Option<([u8; 8], Option<PeerAddr>)>,
+    path_response_rx: Option<[u8; 8]>,
+    cids: Cids,
+    /// Our sequence numbers the peer retired in the packet being processed.
+    retired_rx: [Option<u64>; MAX_ACTIVE_CIDS],
+    /// The active peer connection ID was retired; switch to a spare.
+    peer_cid_retired: bool,
+    /// Client: a NEW_TOKEN token from the packet being processed.
+    token_rx: Option<([u8; crate::stream::MAX_NEW_TOKEN_LEN], u8)>,
+    /// The server's NEW_TOKEN was issued.
+    token_issued: bool,
+    /// Client: 0-RTT packet protection, until 1-RTT keys or rejection.
+    zero_rtt_sealer: Option<Sealer>,
+    /// Server: 0-RTT packet protection, until confirmation.
+    zero_rtt_opener: Option<Opener>,
+    /// Server: when the retained 0-RTT opener is dropped (RFC 9001 §4.9.3,
+    /// three PTOs after confirmation, for reordered 0-RTT packets).
+    zero_rtt_discard_ns: Option<u64>,
+    /// The received packet was non-probing (RFC 9000 §9.1).
+    non_probing_rx: bool,
+    /// The peer's `disable_active_migration`.
+    peer_disables_migration: bool,
 }
 
 /// A packet waiting for its earliest departure time.
@@ -553,6 +725,8 @@ struct Staged {
     /// A CONNECTION_CLOSE packet: the only one sent once a connection is
     /// closing.
     close: bool,
+    /// Destination (the connection's path unless probing another).
+    to: Option<PeerAddr>,
 }
 
 /// A parked in-flight packet (§35.2 `park_for_ack_or_pto`).
@@ -606,6 +780,9 @@ pub struct WarpEndpoint<B: XskBackend, R: Responder, T: TxTap = ()> {
     scratch: Box<[u8]>,
     /// The application's reply frames.
     app_out: Box<[u8]>,
+    /// Holds a pending application reply in `app_out` while path frames
+    /// use that buffer (preallocated, same size).
+    app_saved: Box<[u8]>,
     /// Frames of the packet being built from the stream layer.
     record: PacketFrames,
     app: R,
@@ -621,6 +798,39 @@ pub struct WarpEndpoint<B: XskBackend, R: Responder, T: TxTap = ()> {
     rx_copy: Box<[u8]>,
     /// In-order CRYPTO bytes on their way to TLS.
     tls_buf: Box<[u8]>,
+    // Wave six (issue #247).
+    /// The remote address of harvested datagrams, set by the caller.
+    rx_from: Option<PeerAddr>,
+    token_key: TokenKey,
+    reset_key: ResetKey,
+    /// Connection IDs we issue after the handshake one (client endpoints;
+    /// a server uses its listener's source).
+    cid_source: Box<dyn crate::handshake::CidSource>,
+    /// Extra connection IDs we issued, routed to their connection.
+    alt_cids: Vec<(ConnectionId, SlotHandle)>,
+    /// Idle, closing/draining and path-validation deadlines.
+    life_timers: Wheel<SlotHandle>,
+    /// Client: NEW_TOKEN tokens by server name, newest last.
+    tokens: Vec<(Box<str>, Box<[u8]>)>,
+    /// Datagrams waiting for keys, with their source.
+    buffered: std::collections::VecDeque<(Box<[u8]>, usize, Option<PeerAddr>)>,
+    buffer_pool: Vec<Box<[u8]>>,
+    /// Keys were installed since the buffered datagrams were last tried.
+    keys_changed: bool,
+    /// Freed slots' last handle and why it closed.
+    closed: Vec<Option<(SlotHandle, ConnectionError)>>,
+    /// A datagram being assembled from coalesced long-header packets.
+    dgram: Box<[u8]>,
+    dgram_len: usize,
+    dgram_pad: bool,
+    dgram_eliciting: bool,
+    dgram_probe: bool,
+    dgram_first_pn: u64,
+    /// Stateless packets (Retry, Version Negotiation, reset).
+    stateless_buf: Box<[u8]>,
+    /// Destination of the next packet built, when not the connection's
+    /// path (path validation).
+    next_to: Option<Option<PeerAddr>>,
 }
 
 fn lease_key(conn: SlotHandle, pn: u64) -> u64 {
@@ -665,7 +875,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         conns.resize_with(config.max_connections as usize, || None);
         let buf = usize::from(config.max_datagram) + TAG_LEN;
         // Long-header frames are built after a maximal header gap.
-        let scratch_len = buf + MAX_LONG_HEADER;
+        let scratch_len = buf + MAX_LONG_HEADER + MAX_RETRY_TOKEN_LEN + 8;
         let rx_frame = xsk.config().frame_size as usize;
         let mut endpoint = Self {
             config,
@@ -680,6 +890,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             events: Vec::with_capacity(config.max_tracked_per_conn + 8),
             scratch: vec![0u8; scratch_len].into_boxed_slice(),
             app_out: vec![0u8; buf].into_boxed_slice(),
+            app_saved: vec![0u8; buf].into_boxed_slice(),
             record: PacketFrames::default(),
             app,
             tap,
@@ -691,7 +902,39 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             ),
             rx_copy: vec![0u8; rx_frame].into_boxed_slice(),
             tls_buf: vec![0u8; config.streams.crypto_buffer as usize].into_boxed_slice(),
+            rx_from: None,
+            token_key: TokenKey::random(),
+            reset_key: ResetKey::random(),
+            cid_source: Box::new(crate::handshake::RandomCids),
+            alt_cids: Vec::with_capacity(config.max_connections as usize * (MAX_ACTIVE_CIDS - 1)),
+            life_timers: Wheel::new(wheel(config.max_connections))
+                .map_err(|_| WarpError::Config("invalid lifecycle wheel"))?,
+            tokens: Vec::with_capacity(MAX_CACHED_TOKENS),
+            buffered: std::collections::VecDeque::with_capacity(usize::from(
+                config.lifecycle.buffered_datagrams,
+            )),
+            buffer_pool: (0..config.lifecycle.buffered_datagrams)
+                .map(|_| vec![0u8; rx_frame].into_boxed_slice())
+                .collect(),
+            keys_changed: false,
+            closed: vec![None; config.max_connections as usize],
+            dgram: vec![0u8; usize::from(config.max_datagram)].into_boxed_slice(),
+            dgram_len: 0,
+            dgram_pad: false,
+            dgram_eliciting: false,
+            dgram_probe: false,
+            dgram_first_pn: 0,
+            stateless_buf: vec![0u8; usize::from(config.max_datagram).max(MIN_INITIAL_DATAGRAM)]
+                .into_boxed_slice(),
+            next_to: None,
         };
+        if config.lifecycle.active_connection_id_limit < 2
+            || usize::from(config.lifecycle.active_connection_id_limit) > MAX_ACTIVE_CIDS
+        {
+            return Err(WarpError::Config(
+                "active_connection_id_limit must be 2..=8",
+            ));
+        }
         if config.tx_reserve >= endpoint.xsk.config().frame_count {
             return Err(WarpError::Config("tx_reserve leaves no receive frames"));
         }
@@ -805,11 +1048,17 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             BbrConfig::quic(u32::from(self.config.max_datagram)),
             now_ns,
             self.config.max_tracked_per_conn,
-        )?;
+        )?
+        .with_max_lead_ns(self.config.launch_horizon_ns);
         let state = ConnState::new(
             peer,
             cc.cwnd_bytes(),
-            now_ns.saturating_add(self.config.idle_timeout_ns),
+            // Zero disables the idle timeout (as in `touch_idle`).
+            if self.config.idle_timeout_ns == 0 {
+                u64::MAX
+            } else {
+                now_ns.saturating_add(self.config.idle_timeout_ns)
+            },
         );
         let handle = self.table.insert(&local, &state).map_err(|e| {
             WarpError::Shard(match e {
@@ -843,9 +1092,1102 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             streams,
             error: None,
             close_sent_ns: None,
+            close_deadline_ns: None,
+            idle_timeout_ns: self.config.idle_timeout_ns,
+            life_timer: None,
+            max_datagram: self.config.max_datagram,
+            path: Path {
+                remote: self.rx_from,
+                validated: true,
+                ..Path::default()
+            },
+            probe: None,
+            challenge_rx: None,
+            path_response_rx: None,
+            cids: Cids::new(),
+            retired_rx: [None; MAX_ACTIVE_CIDS],
+            peer_cid_retired: false,
+            token_rx: None,
+            token_issued: false,
+            zero_rtt_sealer: None,
+            zero_rtt_opener: None,
+            zero_rtt_discard_ns: None,
+            non_probing_rx: false,
+            peer_disables_migration: false,
         });
+        self.closed[handle.index() as usize] = None;
         self.write_tile(handle);
         Ok(handle)
+    }
+
+    // ----- lifecycle (wave six, issue #247) ------------------------------
+
+    /// The remote address of the datagrams harvested from now on (the
+    /// caller's driver knows it; UMEM frames carry only the QUIC datagram).
+    /// `None` (the default) disables path tracking and migration.
+    pub fn set_rx_source(&mut self, from: Option<PeerAddr>) {
+        self.rx_from = from;
+    }
+
+    /// Replaces the address-validation token key, so that several
+    /// endpoints (or a restarted one) accept each other's tokens.
+    pub fn set_token_key(&mut self, key: TokenKey) {
+        self.token_key = key;
+    }
+
+    /// Replaces the stateless-reset key, so that endpoints sharing an
+    /// address can reset each other's connections (RFC 9000 §10.3.2).
+    pub fn set_reset_key(&mut self, key: ResetKey) {
+        self.reset_key = key;
+    }
+
+    /// Where a client endpoint draws the connection IDs it issues after the
+    /// handshake (a server uses its listener's source).
+    pub fn set_cid_source(&mut self, source: Box<dyn crate::handshake::CidSource>) {
+        self.cid_source = source;
+    }
+
+    /// NEW_TOKEN tokens a client holds, by server name.
+    pub fn stored_tokens(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.tokens.iter().map(|(n, t)| (&**n, &**t))
+    }
+
+    /// Sets a stream's RFC 9218 priority: lower urgency is sent first;
+    /// non-incremental streams of one urgency go one at a time in stream
+    /// order, incremental ones share round-robin.
+    pub fn stream_set_priority(
+        &mut self,
+        conn: SlotHandle,
+        stream_id: u64,
+        priority: Priority,
+    ) -> Result<(), WarpError> {
+        Ok(self.streams_mut(conn)?.set_priority(stream_id, priority)?)
+    }
+
+    /// Closes a connection with an application error (CONNECTION_CLOSE
+    /// 0x1d; APPLICATION_ERROR in Initial/Handshake packets, RFC 9000
+    /// §10.2.3). The connection enters the closing state: later packets are
+    /// answered with the close, and the slot is freed after three PTOs
+    /// with a [`ConnectionEvent::Closed`].
+    pub fn close(
+        &mut self,
+        conn: SlotHandle,
+        error_code: u64,
+        now_ns: u64,
+    ) -> Result<(), WarpError> {
+        let c = self.conn_mut(conn)?;
+        if let Some(e) = c.error {
+            return Err(WarpError::ConnectionClosed(e));
+        }
+        c.error = Some(ConnectionError::Application { error_code });
+        self.send_close_code(conn, error_code, APP_CLOSE, now_ns)?;
+        self.sync_life(conn, now_ns);
+        Ok(())
+    }
+
+    /// Client: moves the connection to a new path (RFC 9000 §9.2) after
+    /// the caller rebinds its socket: switches to a spare peer connection
+    /// ID, resets congestion control, and validates the path with a padded
+    /// PATH_CHALLENGE. [`ConnectionEvent::PathValidated`] or
+    /// [`ConnectionEvent::PathFailed`] follows.
+    pub fn migrate(&mut self, conn: SlotHandle, now_ns: u64) -> Result<(), WarpError> {
+        if self.config.role != Role::Client || !self.config.lifecycle.migration {
+            return Err(WarpError::Config(
+                "migration needs a client endpoint with migration on",
+            ));
+        }
+        let c = self.conn(conn)?;
+        if let Some(e) = c.error {
+            return Err(WarpError::ConnectionClosed(e));
+        }
+        if c.hs
+            .as_ref()
+            .is_some_and(|h| !h.tls.is_handshake_confirmed())
+        {
+            return Err(WarpError::Handshaking);
+        }
+        if c.peer_disables_migration {
+            return Err(WarpError::MigrationDisabled);
+        }
+        if c.cids.spare_peer().is_none() {
+            return Err(WarpError::NoConnectionId);
+        }
+        self.switch_peer_cid(conn);
+        self.reset_cc(conn, now_ns)?;
+        self.stats.migrations += 1;
+        let remote = self.conn(conn)?.path.remote;
+        self.start_probe(conn, remote, None, now_ns);
+        Ok(())
+    }
+
+    /// A fresh congestion controller (RFC 9002 §6.3 after Retry, §9.4 on a
+    /// new path, RFC 9001 §4.6.2 after 0-RTT rejection).
+    fn reset_cc(&mut self, slot: SlotHandle, now_ns: u64) -> Result<(), WarpError> {
+        let cc = QuicBbr::new(
+            BbrConfig::quic(u32::from(self.config.max_datagram)),
+            now_ns,
+            self.config.max_tracked_per_conn,
+        )?
+        .with_max_lead_ns(self.config.launch_horizon_ns);
+        let c = self.conn_mut(slot)?;
+        c.cc = cc;
+        c.last_edt_ns = now_ns;
+        Ok(())
+    }
+
+    /// Sends to the next spare peer connection ID and retires the current
+    /// one (RFC 9000 §5.1.2).
+    fn switch_peer_cid(&mut self, slot: SlotHandle) -> bool {
+        let Ok(c) = self.conn_mut(slot) else {
+            return false;
+        };
+        let Some(next) = c.cids.spare_peer() else {
+            return false;
+        };
+        let old = c.cids.active_peer_seq;
+        c.cids.active_peer_seq = next.seq;
+        if c.cids.peer_cid(old).is_some() {
+            c.cids.remove_peer(old);
+            c.streams.queue_retire_connection_id(old);
+        }
+        if let Ok(mut st) = self.table.get(slot) {
+            st.peer_cid = next.cid;
+            let _ = self.table.set(slot, &st);
+        }
+        true
+    }
+
+    /// Issues connection IDs up to `min(peer limit, ours)` once the
+    /// handshake is confirmed (RFC 9000 §5.1.1), each with its reset token.
+    fn issue_cids(&mut self, slot: SlotHandle) {
+        let n = usize::from(self.config.cid_len);
+        if n == 0 {
+            return;
+        }
+        for _ in 0..MAX_ACTIVE_CIDS {
+            let Ok(c) = self.conn(slot) else {
+                return;
+            };
+            if c.error.is_some() || c.cids.active_local() as u64 >= c.cids.issue_limit {
+                return;
+            }
+            if self.alt_cids.len() >= self.alt_cids.capacity() {
+                return;
+            }
+            let mut cid = [0u8; 20];
+            let mut fresh = false;
+            for _ in 0..8 {
+                match self.listener.as_mut() {
+                    Some(l) => l.cids.next_cid(&mut cid[..n]),
+                    None => self.cid_source.next_cid(&mut cid[..n]),
+                }
+                if self.lookup(&cid[..n]).is_none() {
+                    fresh = true;
+                    break;
+                }
+            }
+            if !fresh {
+                return;
+            }
+            let Ok(id) = ConnectionId::from_slice(&cid[..n]) else {
+                return;
+            };
+            let token = self.reset_key.token(&cid[..n]);
+            let c = self.conns[slot.index() as usize].as_mut().expect("live");
+            let seq = c.cids.next_local_seq;
+            let Some(free) = c.cids.local.iter_mut().find(|l| l.is_none()) else {
+                return;
+            };
+            if !c.streams.queue_new_connection_id(seq, 0, &cid[..n], token) {
+                return;
+            }
+            *free = Some(LocalCid { seq, cid: id });
+            c.cids.next_local_seq += 1;
+            self.alt_cids.push((id, slot));
+            self.stats.cids_issued += 1;
+        }
+    }
+
+    /// Starts validating `addr` with a padded PATH_CHALLENGE (RFC 9000
+    /// §8.2.1). `fallback` is the path to return to on failure.
+    fn start_probe(
+        &mut self,
+        slot: SlotHandle,
+        addr: Option<PeerAddr>,
+        fallback: Option<Option<PeerAddr>>,
+        now_ns: u64,
+    ) {
+        let initial_pto = 3 * self.config.initial_rtt_ns;
+        let Ok(c) = self.conn_mut(slot) else {
+            return;
+        };
+        let mut challenge = [0u8; 8];
+        crate::lifecycle::random(&mut challenge);
+        // RFC 9000 §8.2.4: three times the larger of the current PTO and
+        // the initial one.
+        let pto = c.recovery.rtt().pto_base_ns().max(initial_pto);
+        c.probe = Some(PathProbe {
+            addr,
+            challenge,
+            deadline_ns: now_ns.saturating_add(pto.saturating_mul(3)),
+            fallback,
+            sent_ns: now_ns,
+        });
+        self.send_challenge(slot, now_ns);
+        self.sync_life(slot, now_ns);
+    }
+
+    fn send_challenge(&mut self, slot: SlotHandle, now_ns: u64) {
+        let Some(probe) = self.conn(slot).ok().and_then(|c| c.probe) else {
+            return;
+        };
+        if self
+            .send_path_frame(
+                slot,
+                Frame::PathChallenge(probe.challenge),
+                probe.addr,
+                true,
+                now_ns,
+            )
+            .is_ok()
+        {
+            self.stats.path_challenges_sent += 1;
+        }
+        if let Ok(c) = self.conn_mut(slot)
+            && let Some(p) = c.probe.as_mut()
+        {
+            p.sent_ns = now_ns;
+        }
+    }
+
+    /// A PATH_CHALLENGE or PATH_RESPONSE in its own packet to `to`,
+    /// padded to the full datagram when `pad` (RFC 9000 §8.2.1, §8.2.2).
+    fn send_path_frame(
+        &mut self,
+        slot: SlotHandle,
+        frame: Frame<'_>,
+        to: Option<PeerAddr>,
+        pad: bool,
+        now_ns: u64,
+    ) -> Result<u64, WarpError> {
+        if self.conn(slot)?.keys.is_none() {
+            return Err(WarpError::KeysUnavailable);
+        }
+        let mut n = frame.encode(&mut self.app_out)?;
+        if pad {
+            let budget = self.frame_budget(slot, false, now_ns);
+            if budget > n {
+                self.app_out[n..budget].fill(0); // PADDING
+                n = budget;
+            }
+        }
+        self.next_to = Some(to);
+        // A probe: ack-eliciting, not paced, outside the congestion window.
+        let out = self.send(slot, Source::Fresh, false, n, Kind::Probe, now_ns);
+        self.next_to = None;
+        out
+    }
+
+    /// Acts on the connection-ID, path and token frames of a processed
+    /// 1-RTT (or 0-RTT) packet, and on a change of the peer's address.
+    /// [`Self::after_lifecycle_inner`], keeping `app_out[..pending]` (the
+    /// application's reply, not yet sent) intact across path frames.
+    fn after_lifecycle(
+        &mut self,
+        slot: SlotHandle,
+        pn: u64,
+        datagram_len: usize,
+        pending: usize,
+        now_ns: u64,
+    ) {
+        if pending > 0 {
+            self.app_saved[..pending].copy_from_slice(&self.app_out[..pending]);
+        }
+        self.after_lifecycle_inner(slot, pn, datagram_len, now_ns);
+        if pending > 0 {
+            self.app_out[..pending].copy_from_slice(&self.app_saved[..pending]);
+        }
+    }
+
+    fn after_lifecycle_inner(
+        &mut self,
+        slot: SlotHandle,
+        pn: u64,
+        datagram_len: usize,
+        now_ns: u64,
+    ) {
+        let from = self.rx_from;
+        let server = self.config.role == Role::Server;
+        let migration = self.config.lifecycle.migration;
+        let Ok(c) = self.conn_mut(slot) else {
+            return;
+        };
+        if c.error.is_some() {
+            return;
+        }
+        // Our connection IDs the peer retired: forget them, issue more.
+        let retired = std::mem::replace(&mut c.retired_rx, [None; MAX_ACTIVE_CIDS]);
+        let mut gone = [None; MAX_ACTIVE_CIDS];
+        let mut seq0_retired = false;
+        for (i, seq) in retired.into_iter().flatten().enumerate() {
+            if seq == 0 {
+                // The handshake ID stays routable in the connection table
+                // (its tile is keyed by it) until the connection ends.
+                seq0_retired = true;
+                continue;
+            }
+            for l in &mut c.cids.local {
+                if let Some(e) = l
+                    && e.seq == seq
+                {
+                    gone[i] = Some(e.cid);
+                    *l = None;
+                    break;
+                }
+            }
+        }
+        let mut any_retired = false;
+        if seq0_retired {
+            self.stats.cids_retired += 1;
+        }
+        for cid in gone.into_iter().flatten() {
+            self.alt_cids.retain(|(id, h)| !(*h == slot && *id == cid));
+            self.stats.cids_retired += 1;
+            any_retired = true;
+        }
+        let c = self.conns[slot.index() as usize].as_mut().expect("live");
+        let switch = std::mem::take(&mut c.peer_cid_retired);
+        let token = c.token_rx.take();
+        let response = c.path_response_rx.take();
+        let challenge = c.challenge_rx.take();
+        let non_probing = c.non_probing_rx;
+        let largest = c.received.largest() == Some(pn);
+        let confirmed = c.hs.as_ref().is_none_or(|h| h.tls.is_handshake_confirmed());
+        if any_retired {
+            self.issue_cids(slot);
+        }
+        if switch {
+            self.switch_peer_cid(slot);
+        }
+        if let Some((t, len)) = token {
+            self.store_token(slot, &t[..usize::from(len)]);
+        }
+        if let Some(data) = response {
+            let c = self.conns[slot.index() as usize].as_mut().expect("live");
+            if let Some(probe) = c.probe
+                && probe.challenge == data
+            {
+                c.probe = None;
+                if probe.addr == c.path.remote {
+                    c.path.validated = true;
+                }
+                self.stats.paths_validated += 1;
+                self.push_conn_event(ConnectionEvent::PathValidated(slot));
+            }
+        }
+        // RFC 9000 §9.3: the server follows a client that sends its
+        // largest packet number so far, non-probing, from a new address.
+        let c = self.conns[slot.index() as usize].as_mut().expect("live");
+        if server && from.is_some() && from != c.path.remote {
+            if c.path.remote.is_none() {
+                c.path.remote = from;
+            } else if (migration || crate::lifecycle::port_only_change(c.path.remote, from))
+                && confirmed
+                && non_probing
+                && largest
+            {
+                // disable_active_migration does not forbid NAT rebinding
+                // (§18.2): a port-only change is followed and validated
+                // even with migration off.
+                let old = c.path;
+                let rebinding = crate::lifecycle::port_only_change(old.remote, from);
+                c.path = Path {
+                    remote: from,
+                    validated: false,
+                    received: datagram_len as u64,
+                    sent: 0,
+                };
+                self.stats.migrations += 1;
+                self.push_conn_event(ConnectionEvent::PeerMigrated(slot));
+                // §9.5: a new path gets a new connection ID when we have one.
+                self.switch_peer_cid(slot);
+                if !rebinding {
+                    let _ = self.reset_cc(slot, now_ns);
+                }
+                let fallback = old.validated.then_some(old.remote);
+                self.start_probe(slot, from, fallback, now_ns);
+            }
+        } else if let Some(c) = self.conns[slot.index() as usize].as_mut()
+            && !c.path.validated
+            && from == c.path.remote
+        {
+            c.path.received += datagram_len as u64;
+        }
+        if let Some((data, to)) = challenge {
+            // Padded unless that would exceed 3× what the path sent us.
+            let pad = datagram_len >= MIN_INITIAL_DATAGRAM / 3;
+            if self
+                .send_path_frame(slot, Frame::PathResponse(data), to, pad, now_ns)
+                .is_ok()
+            {
+                self.stats.path_responses_sent += 1;
+            }
+        }
+    }
+
+    /// Client: keeps a NEW_TOKEN token for the next connection to the same
+    /// server name (RFC 9000 §8.1.3), replacing an older one.
+    fn store_token(&mut self, slot: SlotHandle, token: &[u8]) {
+        let Some(name) = self
+            .conn(slot)
+            .ok()
+            .and_then(|c| c.hs.as_ref())
+            .and_then(|h| h.server_name.clone())
+        else {
+            return;
+        };
+        self.tokens.retain(|(n, _)| *n != name);
+        if self.tokens.len() >= MAX_CACHED_TOKENS {
+            self.tokens.remove(0);
+        }
+        self.tokens.push((name, token.into()));
+        self.push_conn_event(ConnectionEvent::NewToken(slot));
+    }
+
+    /// Server: after confirmation, a NEW_TOKEN token for the client's
+    /// address, so its next connection skips address validation.
+    fn issue_new_token(&mut self, slot: SlotHandle, now_ns: u64) {
+        if self.config.role != Role::Server || self.config.lifecycle.new_token_lifetime_ns == 0 {
+            return;
+        }
+        let Ok(c) = self.conn(slot) else {
+            return;
+        };
+        if c.token_issued {
+            return;
+        }
+        let addr = c.path.remote;
+        let mut token = [0u8; MAX_TOKEN_LEN];
+        let n = self
+            .token_key
+            .seal(TokenKind::NewToken, addr, now_ns, &mut token);
+        let c = self.conns[slot.index() as usize].as_mut().expect("live");
+        if c.streams.queue_new_token(&token[..n]) {
+            c.token_issued = true;
+            self.stats.tokens_issued += 1;
+        }
+    }
+
+    /// Refreshes the idle deadline after a received packet (RFC 9000
+    /// §10.1).
+    fn touch_idle(&mut self, slot: SlotHandle, now_ns: u64) {
+        let Ok(c) = self.conn(slot) else {
+            return;
+        };
+        let timeout = c.idle_timeout_ns;
+        let deadline = if timeout == 0 {
+            u64::MAX
+        } else {
+            // At least three PTOs, so probes can run first.
+            now_ns.saturating_add(timeout.max(c.recovery.rtt().pto_base_ns().saturating_mul(3)))
+        };
+        if let Ok(mut st) = self.table.get(slot) {
+            st.idle_deadline_ns = deadline;
+            let _ = self.table.set(slot, &st);
+        }
+    }
+
+    /// Re-arms the connection's lifecycle timer: the end of closing or
+    /// draining (three PTOs after the close, RFC 9000 §10.2), the idle
+    /// deadline, or the path probe's retransmission and give-up times. The
+    /// wheel entry is moved only when the deadline came earlier; a later
+    /// deadline is picked up when the old entry fires.
+    fn sync_life(&mut self, slot: SlotHandle, now_ns: u64) {
+        let idle = self
+            .table
+            .get(slot)
+            .map_or(u64::MAX, |t| t.idle_deadline_ns);
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            return;
+        };
+        if c.handle != slot {
+            return;
+        }
+        let pto = c
+            .recovery
+            .rtt()
+            .pto_base_ns()
+            .saturating_add(c.recovery.max_ack_delay_ns());
+        if c.error.is_some() && c.close_deadline_ns.is_none() {
+            c.close_deadline_ns = Some(now_ns.saturating_add(pto.saturating_mul(3)));
+        }
+        if let Some(d) = c.zero_rtt_discard_ns
+            && (now_ns >= d || c.error.is_some())
+        {
+            c.zero_rtt_opener = None;
+            c.zero_rtt_discard_ns = None;
+        }
+        let mut want = c.close_deadline_ns.unwrap_or(u64::MAX);
+        if c.error.is_none() {
+            want = want.min(idle);
+            if let Some(d) = c.zero_rtt_discard_ns {
+                want = want.min(d);
+            }
+            if let Some(p) = c.probe {
+                want = want.min(p.deadline_ns).min(p.sent_ns.saturating_add(pto));
+            }
+        }
+        if want == u64::MAX {
+            return;
+        }
+        if c.life_timer.as_ref().is_some_and(|(_, d)| *d <= want) {
+            return;
+        }
+        if let Some((h, _)) = c.life_timer.take() {
+            let _ = self.life_timers.cancel(h);
+        }
+        if let Ok(h) = self.life_timers.insert(want, slot) {
+            c.life_timer = Some((h, want));
+        }
+    }
+
+    /// A lifecycle timer fired.
+    fn on_life_timer(&mut self, slot: SlotHandle, now_ns: u64) {
+        let idle = self
+            .table
+            .get(slot)
+            .map_or(u64::MAX, |t| t.idle_deadline_ns);
+        let Ok(c) = self.conn_mut(slot) else {
+            return;
+        };
+        c.life_timer = None;
+        if let Some(deadline) = c.close_deadline_ns
+            && now_ns >= deadline
+        {
+            let error = c.error.unwrap_or(ConnectionError::IdleTimeout);
+            self.free_slot(slot, error, now_ns);
+            return;
+        }
+        if c.error.is_none() && now_ns >= idle {
+            // Closed silently (RFC 9000 §10.1).
+            self.stats.idle_timeouts += 1;
+            self.free_slot(slot, ConnectionError::IdleTimeout, now_ns);
+            return;
+        }
+        let pto = c
+            .recovery
+            .rtt()
+            .pto_base_ns()
+            .saturating_add(c.recovery.max_ack_delay_ns());
+        if c.error.is_none()
+            && let Some(p) = c.probe
+        {
+            if now_ns >= p.deadline_ns {
+                c.probe = None;
+                if let Some(back) = p.fallback {
+                    // RFC 9000 §9.3.2: back to the last validated path.
+                    c.path = Path {
+                        remote: back,
+                        validated: true,
+                        ..Path::default()
+                    };
+                }
+                self.stats.path_failures += 1;
+                self.push_conn_event(ConnectionEvent::PathFailed(slot));
+            } else if now_ns >= p.sent_ns.saturating_add(pto) {
+                self.send_challenge(slot, now_ns);
+            }
+        }
+        self.sync_life(slot, now_ns);
+    }
+
+    /// Frees a connection's slot at the end of its life and reports it.
+    fn free_slot(&mut self, slot: SlotHandle, error: ConnectionError, now_ns: u64) {
+        if let Ok(c) = self.conn_mut(slot) {
+            c.error.get_or_insert(error);
+        }
+        let error = self.conn(slot).ok().and_then(|c| c.error).unwrap_or(error);
+        if self.close_connection(slot, now_ns).is_ok() {
+            self.stats.slots_freed += 1;
+            self.closed[slot.index() as usize] = Some((slot, error));
+            self.push_conn_event(ConnectionEvent::Closed { conn: slot, error });
+        }
+    }
+
+    /// Does the datagram end in a stateless reset token of one of our
+    /// connections' peers (RFC 9000 §10.3.1)? Every connection is checked
+    /// in constant time per token.
+    fn reset_for(&self, datagram: &[u8]) -> Option<SlotHandle> {
+        if datagram.len() < MIN_STATELESS_RESET {
+            return None;
+        }
+        let tail = &datagram[datagram.len() - crate::frame::RESET_TOKEN_LEN..];
+        self.conns
+            .iter()
+            .flatten()
+            .find(|c| c.error.is_none() && c.cids.reset_matches(tail))
+            .map(|c| c.handle)
+    }
+
+    /// A received stateless reset: the connection drains silently.
+    fn on_stateless_reset(&mut self, slot: SlotHandle, now_ns: u64) {
+        self.stats.stateless_resets_received += 1;
+        if let Ok(c) = self.conn_mut(slot) {
+            c.error = Some(ConnectionError::StatelessReset);
+            // RFC 9000 §10.3.1: no further packets; the slot goes now.
+            c.close_deadline_ns = Some(now_ns);
+        }
+        self.free_slot(slot, ConnectionError::StatelessReset, now_ns);
+    }
+
+    /// Answers a short-header packet for an unknown connection ID with a
+    /// stateless reset (RFC 9000 §10.3): shorter than the trigger (so two
+    /// endpoints cannot loop), at least 21 bytes, otherwise unpredictable.
+    fn send_stateless_reset(&mut self, dcid: &[u8], received_len: usize, now_ns: u64) {
+        if !self.config.lifecycle.stateless_reset || dcid.is_empty() {
+            return;
+        }
+        let len = received_len.saturating_sub(1).min(MAX_STATELESS_RESET);
+        if len < MIN_STATELESS_RESET {
+            return;
+        }
+        let token = self.reset_key.token(dcid);
+        let buf = &mut self.stateless_buf;
+        crate::lifecycle::random(&mut buf[..len - crate::frame::RESET_TOKEN_LEN]);
+        // A short header's first bits: form 0, fixed bit 1.
+        buf[0] = 0x40 | (buf[0] & 0x3f);
+        buf[len - crate::frame::RESET_TOKEN_LEN..len].copy_from_slice(&token);
+        if self.send_stateless(len, now_ns) {
+            self.stats.stateless_resets_sent += 1;
+        }
+    }
+
+    /// Sends `stateless_buf[..len]` without a connection, to the source of
+    /// the datagram being processed.
+    fn send_stateless(&mut self, len: usize, now_ns: u64) -> bool {
+        let Ok(mut frame) = self.xsk.alloc_tx(len as u16) else {
+            return false;
+        };
+        match self.xsk.tx_bytes_mut(&mut frame) {
+            Ok(bytes) => bytes[..len].copy_from_slice(&self.stateless_buf[..len]),
+            Err(_) => {
+                let _ = self.xsk.abandon_tx(frame);
+                return false;
+            }
+        }
+        self.tap
+            .on_stateless(&self.stateless_buf[..len], self.rx_from);
+        match self.xsk.submit_paced_tx(frame, 0, now_ns) {
+            Ok(pkt) => {
+                let _ = self.xsk.retire(pkt);
+                true
+            }
+            Err(refused) => {
+                self.stats.tx_abandoned += 1;
+                let _ = self.xsk.abandon_tx(refused.into_owner());
+                false
+            }
+        }
+    }
+
+    /// Server: Version Negotiation for a long-header datagram of another
+    /// version (RFC 9000 §6.1), only for datagrams large enough to be a
+    /// client's first Initial.
+    fn send_version_negotiation(&mut self, datagram: &[u8], total: usize, now_ns: u64) -> bool {
+        if self.config.role != Role::Server
+            || self.listener.is_none()
+            || total < MIN_INITIAL_DATAGRAM
+        {
+            return false;
+        }
+        // The version-independent invariants (RFC 8999 §5.1).
+        let Some(&dcid_len) = datagram.get(5) else {
+            return false;
+        };
+        let d0 = 6;
+        let d1 = d0 + usize::from(dcid_len);
+        let Some(&scid_len) = datagram.get(d1) else {
+            return false;
+        };
+        let s1 = d1 + 1 + usize::from(scid_len);
+        if s1 > datagram.len() {
+            return false;
+        }
+        let mut cids = [0u8; 512];
+        let dcid_n = usize::from(dcid_len);
+        let scid_n = usize::from(scid_len);
+        cids[..dcid_n].copy_from_slice(&datagram[d0..d1]);
+        cids[256..256 + scid_n].copy_from_slice(&datagram[d1 + 1..s1]);
+        let mut unused = [0u8; 1];
+        crate::lifecycle::random(&mut unused);
+        // Our version plus a reserved greasing one (RFC 9000 §15).
+        let versions = [QUIC_V1, 0x1a2a_3a4a];
+        // Reply's DCID is the client's SCID and vice versa.
+        let Ok(n) = write_version_negotiation(
+            &mut self.stateless_buf,
+            unused[0],
+            &cids[256..256 + scid_n],
+            &cids[..dcid_n],
+            &versions,
+        ) else {
+            return false;
+        };
+        if self.send_stateless(n, now_ns) {
+            self.stats.version_negotiations_sent += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Server: a Retry for a token-less client Initial (RFC 9000 §8.1.2),
+    /// carrying a token bound to the client's address and original DCID.
+    fn send_retry(&mut self, pkt: &[u8], header: &ProtectedHeader, now_ns: u64) -> bool {
+        let odcid = header.dcid(pkt);
+        let client_scid = header.scid(pkt);
+        let n = usize::from(self.config.cid_len);
+        let mut scid = [0u8; 20];
+        if let Some(l) = self.listener.as_mut() {
+            l.cids.next_cid(&mut scid[..n]);
+        }
+        let mut od = [0u8; 20];
+        od[..odcid.len()].copy_from_slice(odcid);
+        let mut token = [0u8; MAX_TOKEN_LEN];
+        let token_len = self.token_key.seal(
+            TokenKind::Retry {
+                odcid: od,
+                len: odcid.len() as u8,
+            },
+            self.rx_from,
+            now_ns,
+            &mut token,
+        );
+        let tag = [0u8; RETRY_TAG_LEN];
+        let Ok(len) = write_retry(
+            &mut self.stateless_buf,
+            client_scid,
+            &scid[..n],
+            &token[..token_len],
+            &tag,
+        ) else {
+            return false;
+        };
+        let body = len - RETRY_TAG_LEN;
+        let Ok(tag) = retry_integrity_tag(odcid, &self.stateless_buf[..body]) else {
+            return false;
+        };
+        self.stateless_buf[body..len].copy_from_slice(&tag);
+        if self.send_stateless(len, now_ns) {
+            self.stats.retries_sent += 1;
+            return true;
+        }
+        false
+    }
+
+    /// Client: a Retry packet (RFC 9000 §17.2.5.2). Verified, it restarts
+    /// the handshake toward the server's new connection ID with its token;
+    /// packet numbers continue, recovery and congestion state reset, and
+    /// every CRYPTO and 0-RTT byte is sent again.
+    fn on_retry(
+        &mut self,
+        pkt: &[u8],
+        dcid: &[u8],
+        scid: &[u8],
+        token: &[u8],
+        now_ns: u64,
+    ) -> Result<SlotHandle, DropReason> {
+        let slot = self.lookup(dcid).ok_or(DropReason::UnknownCid)?;
+        let c = self.conn_mut(slot).map_err(|_| DropReason::UnknownCid)?;
+        if c.error.is_some() {
+            return Err(DropReason::Closed);
+        }
+        let hs = c.hs.as_mut().ok_or(DropReason::BadRetry)?;
+        if hs.is_server() || hs.retried || hs.peer_scid_known || token.len() > MAX_RETRY_TOKEN_LEN {
+            return Err(DropReason::BadRetry);
+        }
+        verify_retry_integrity(hs.original_dcid.as_bytes(), pkt)
+            .map_err(|_| DropReason::BadRetry)?;
+        let new_dcid = ConnectionId::from_slice(scid).map_err(|_| DropReason::BadRetry)?;
+        hs.tls.on_retry(scid).map_err(|_| DropReason::BadRetry)?;
+        hs.retried = true;
+        hs.token = Some(token.into());
+        // Every Initial CRYPTO byte goes again under the new keys.
+        let ls = &mut hs.spaces[0];
+        let resend: Vec<(u64, u32)> = ls.sent.drain(..).map(|(_, o, l)| (o, l)).collect();
+        for (off, len) in resend {
+            c.streams
+                .crypto_mut(PnSpace::Initial)
+                .on_lost(off, len as usize);
+        }
+        c.recovery.reset_space(PnSpace::Initial, now_ns);
+        // 0-RTT packets the server dropped: their frames go again.
+        c.recovery.reset_space(PnSpace::ApplicationData, now_ns);
+        c.streams.on_all_packets_lost();
+        if let Ok(mut st) = self.table.get(slot) {
+            st.peer_cid = new_dcid;
+            let _ = self.table.set(slot, &st);
+        }
+        let _ = self.reset_cc(slot, now_ns);
+        self.stats.retries_received += 1;
+        self.push_conn_event(ConnectionEvent::Retried(slot));
+        self.apply_tls_events(slot, now_ns)
+            .map_err(DropReason::Handshake)?;
+        Ok(slot)
+    }
+
+    /// Client: a Version Negotiation packet (RFC 9000 §6.2). One that
+    /// lists our version, or arrives after any packet was processed, is
+    /// ignored; otherwise the connection ends.
+    fn on_version_negotiation(
+        &mut self,
+        dcid: &[u8],
+        lists_v1: bool,
+        now_ns: u64,
+    ) -> Result<SlotHandle, DropReason> {
+        let slot = self.lookup(dcid).ok_or(DropReason::UnknownCid)?;
+        let c = self.conn(slot).map_err(|_| DropReason::UnknownCid)?;
+        let Some(hs) = c.hs.as_ref() else {
+            return Err(DropReason::IgnoredVersionNegotiation);
+        };
+        if hs.is_server() || lists_v1 || hs.peer_scid_known || hs.retried || c.error.is_some() {
+            return Err(DropReason::IgnoredVersionNegotiation);
+        }
+        self.stats.version_negotiations_received += 1;
+        if let Ok(c) = self.conn_mut(slot) {
+            c.error = Some(ConnectionError::VersionNegotiation);
+        }
+        self.free_slot(slot, ConnectionError::VersionNegotiation, now_ns);
+        Ok(slot)
+    }
+
+    /// Holds a datagram (or the rest of one) whose keys are not installed
+    /// yet (RFC 9001 §5.7), in a preallocated buffer.
+    fn buffer_datagram(&mut self, bytes: &[u8]) -> bool {
+        let Some(mut buf) = self.buffer_pool.pop() else {
+            self.stats.datagrams_buffer_full += 1;
+            return false;
+        };
+        if bytes.len() > buf.len() {
+            self.buffer_pool.push(buf);
+            return false;
+        }
+        buf[..bytes.len()].copy_from_slice(bytes);
+        // Keys installed before this point did not open it.
+        self.keys_changed = false;
+        self.buffered.push_back((buf, bytes.len(), self.rx_from));
+        self.stats.datagrams_buffered += 1;
+        true
+    }
+
+    /// Tries the buffered datagrams again once keys changed.
+    fn replay_buffered(&mut self, now_ns: u64) -> Result<(), WarpError> {
+        if !self.keys_changed || self.buffered.is_empty() {
+            return Ok(());
+        }
+        self.keys_changed = false;
+        let from = self.rx_from;
+        for _ in 0..self.buffered.len() {
+            let Some((mut buf, len, src)) = self.buffered.pop_front() else {
+                break;
+            };
+            self.rx_from = src;
+            self.stats.datagrams_replayed += 1;
+            let out = if buf.first().is_some_and(|b| b & 0x80 != 0) {
+                self.process_long_datagram(&mut buf[..len], now_ns)
+                    .map(|_| ())
+            } else {
+                match self.process_copied(&mut buf[..len], len, now_ns) {
+                    Ok(_) => Ok(()),
+                    Err((_, DropReason::KeysUnavailable)) => {
+                        self.buffer_datagram(&buf[..len]);
+                        Ok(())
+                    }
+                    Err((_, reason)) => {
+                        self.count_drop(&reason);
+                        Ok(())
+                    }
+                }
+            };
+            self.buffer_pool.push(buf);
+            if let Err(e) = out {
+                self.rx_from = from;
+                return Err(e);
+            }
+        }
+        self.rx_from = from;
+        Ok(())
+    }
+
+    /// A short-header or 0-RTT packet copied out of its UMEM frame
+    /// (coalesced after long-header packets, or replayed from the buffer):
+    /// opened, scanned and answered from fresh frames.
+    fn process_copied(
+        &mut self,
+        pkt: &mut [u8],
+        datagram_len: usize,
+        now_ns: u64,
+    ) -> Result<(SlotHandle, u64), (Option<SlotHandle>, DropReason)> {
+        let header = match self.parser.parse(pkt) {
+            Ok(ParsedPacket::Protected(h))
+                if matches!(h.packet_type, PacketType::OneRtt | PacketType::ZeroRtt) =>
+            {
+                h
+            }
+            Ok(_) => return Err((None, DropReason::NotOneRtt)),
+            Err(e) => return Err((None, DropReason::Header(e))),
+        };
+        let ty = header.packet_type;
+        let dcid = header.dcid(pkt);
+        let routed = self.lookup(dcid).or_else(|| {
+            self.initial_dcids
+                .iter()
+                .find(|(c, _)| c.as_bytes() == dcid)
+                .map(|(_, h)| *h)
+        });
+        let Some(slot) = routed else {
+            if ty == PacketType::OneRtt
+                && let Some(reset) = self.reset_for(pkt)
+            {
+                self.on_stateless_reset(reset, now_ns);
+                return Err((None, DropReason::StatelessReset));
+            }
+            // A 0-RTT packet may precede the Initial that opens its
+            // connection.
+            return Err((
+                None,
+                if ty == PacketType::ZeroRtt {
+                    DropReason::KeysUnavailable
+                } else {
+                    DropReason::UnknownCid
+                },
+            ));
+        };
+        let fail = |r| (Some(slot), r);
+        let idx = slot.index() as usize;
+        let c = self.conns[idx]
+            .as_mut()
+            .ok_or(fail(DropReason::UnknownCid))?;
+        if let Some(error) = c.error {
+            self.answer_while_closing(slot, error, now_ns);
+            return Err(fail(DropReason::Closed));
+        }
+        let largest = c.received.largest();
+        let (header_len, payload_len, pn) = if ty == PacketType::OneRtt {
+            match open_bytes(c, pkt, &header, largest, now_ns) {
+                Ok(v) => v,
+                Err(DropReason::Crypto(e)) => {
+                    if c.cids.reset_matches(&pkt[pkt.len().saturating_sub(16)..])
+                        && pkt.len() >= MIN_STATELESS_RESET
+                    {
+                        self.on_stateless_reset(slot, now_ns);
+                        return Err(fail(DropReason::StatelessReset));
+                    }
+                    return Err(fail(DropReason::Crypto(e)));
+                }
+                Err(e) => return Err(fail(e)),
+            }
+        } else {
+            if self.config.role != Role::Server {
+                return Err(fail(DropReason::NotOneRtt));
+            }
+            let pending = c.hs.as_ref().is_some_and(|h| {
+                h.tls.zero_rtt_key_state() == vesper_warp_tls::KeyState::Pending
+                    && !h.tls.is_handshake_complete()
+            });
+            let Some(opener) = c.zero_rtt_opener.as_mut() else {
+                return Err(fail(if pending {
+                    DropReason::KeysUnavailable
+                } else {
+                    DropReason::NotOneRtt
+                }));
+            };
+            let opened = opener
+                .open_packet(&mut pkt[..header.packet_end], header.pn_offset, |u| {
+                    reconstruct(u, largest)
+                })
+                .map_err(|e| fail(DropReason::Crypto(e)))?;
+            let u = header
+                .packet_number_field(pkt)
+                .map_err(|e| fail(DropReason::Header(e)))?;
+            u.check_reserved_bits()
+                .map_err(|_| fail(DropReason::ReservedBits))?;
+            c.received
+                .check(opened.packet_number)
+                .map_err(|e| fail(DropReason::Duplicate(e)))?;
+            self.stats.zero_rtt_packets_received += 1;
+            (opened.header_len, opened.payload_len, opened.packet_number)
+        };
+        self.events.clear();
+        let rx = self.rx_context(ty);
+        let c = self.conns[idx].as_mut().expect("live");
+        let scanned = scan_bytes(
+            c,
+            &mut self.events,
+            &mut self.app,
+            &mut self.app_out,
+            &pkt[header_len..header_len + payload_len],
+            slot,
+            pn,
+            now_ns,
+            self.config.stream_mode,
+            rx,
+        );
+        let acked_any = self
+            .events
+            .iter()
+            .any(|e| matches!(e, CongestionEvent::Acked { .. }));
+        self.resolve_events(slot, PnSpace::ApplicationData, None);
+        let (ack_eliciting, app_len) = match scanned {
+            Ok(v) => v,
+            Err(DropReason::Transport(e)) => {
+                self.write_tile(slot);
+                self.stats.transport_errors += 1;
+                if let Ok(c) = self.conn_mut(slot) {
+                    c.error = Some(ConnectionError::Local(e));
+                }
+                let _ = self.send_close(slot, e, now_ns);
+                return Err(fail(DropReason::Transport(e)));
+            }
+            Err(reason) => {
+                self.write_tile(slot);
+                return Err(fail(reason));
+            }
+        };
+        self.stats.rx_processed += 1;
+        if ty == PacketType::OneRtt
+            && self
+                .conn(slot)
+                .is_ok_and(|c| c.hs.is_some() && c.error.is_none())
+            && let Err(code) = self.after_one_rtt(slot, acked_any, now_ns)
+        {
+            self.write_tile(slot);
+            return Err(fail(DropReason::Handshake(code)));
+        }
+        if self.conn(slot).is_ok_and(|c| c.error.is_some()) {
+            self.stats.closes_received += 1;
+            self.write_tile(slot);
+            return Ok((slot, pn));
+        }
+        self.after_lifecycle(slot, pn, datagram_len, app_len, now_ns);
+        self.touch_idle(slot, now_ns);
+        self.write_tile(slot);
+        if app_len > 0 {
+            let _ = self.send(slot, Source::Fresh, true, app_len, Kind::Normal, now_ns);
+        }
+        if self.config.stream_mode == StreamMode::Reliable {
+            let _ = self.flush(slot, now_ns);
+        }
+        let owed = self.conn(slot).is_ok_and(|c| {
+            c.error.is_none() && c.received.ack_deadline().is_some() && c.keys.is_some()
+        });
+        if ack_eliciting
+            && owed
+            && self
+                .send(slot, Source::Fresh, true, 0, Kind::Normal, now_ns)
+                .is_err()
+        {
+            self.defer_ack(slot);
+        }
+        Ok((slot, pn))
     }
 
     // ----- handshake (issue #135) ---------------------------------------
@@ -872,9 +2214,17 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 "the original destination connection ID must have 8 to 20 bytes",
             ));
         }
-        let params = local_transport_params(&self.config, local_cid);
+        let params = local_transport_params(&self.config, local_cid, None);
         let tls = QuicTls::client(setup, server_name, &params, original_dcid)?;
-        let hs = self.new_hs(tls, local_cid);
+        let mut hs = self.new_hs(tls, local_cid);
+        hs.server_name = Some(server_name.into());
+        hs.original_dcid = ConnectionId::from_slice(original_dcid)
+            .map_err(|_| WarpError::Config("connection ID too long"))?;
+        // RFC 9000 §8.1.3: a token from this server's NEW_TOKEN.
+        if let Some(i) = self.tokens.iter().position(|(n, _)| &**n == server_name) {
+            let (_, token) = self.tokens.remove(i);
+            hs.token = Some(token);
+        }
         let status = HandshakeStatus {
             confirmed: false,
             peer_completed_address_validation: false,
@@ -970,8 +2320,47 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return Err(DropReason::UnknownCid);
         }
         let odcid = header.dcid(pkt);
-        if datagram_len < MIN_INITIAL_DATAGRAM || odcid.len() < MIN_ORIGINAL_DCID {
+        if datagram_len < MIN_INITIAL_DATAGRAM {
             return Err(DropReason::BadInitial);
+        }
+        // Address validation (RFC 9000 §8.1): a Retry or NEW_TOKEN token.
+        let token = header.token(pkt);
+        let lifetimes = (
+            self.config.lifecycle.retry_token_lifetime_ns,
+            self.config.lifecycle.new_token_lifetime_ns,
+        );
+        let mut validated = false;
+        let mut retry_odcid = None;
+        if !token.is_empty() {
+            match self.token_key.open(token, self.rx_from, now_ns, lifetimes) {
+                Ok(TokenKind::Retry { odcid, len }) => {
+                    validated = true;
+                    retry_odcid = Some((odcid, len));
+                    self.stats.tokens_accepted += 1;
+                }
+                Ok(TokenKind::NewToken) => {
+                    validated = true;
+                    self.stats.tokens_accepted += 1;
+                }
+                Err(e) => {
+                    self.stats.tokens_refused += 1;
+                    // §8.1.3: a bad NEW_TOKEN token is ignored; a bad
+                    // Retry token means a forged or replayed Retry.
+                    if crate::lifecycle::is_retry_token(token) {
+                        return Err(DropReason::InvalidToken(e));
+                    }
+                }
+            }
+        }
+        if retry_odcid.is_none() && odcid.len() < MIN_ORIGINAL_DCID {
+            return Err(DropReason::BadInitial);
+        }
+        if !validated && self.config.lifecycle.address_validation == AddressValidation::Retry {
+            return Err(if self.send_retry(pkt, header, now_ns) {
+                DropReason::RetrySent
+            } else {
+                DropReason::AcceptRefused
+            });
         }
         if self.initial_dcids.len() >= self.initial_dcids.capacity() {
             return Err(DropReason::AcceptRefused);
@@ -990,15 +2379,25 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if !fresh {
             return Err(DropReason::AcceptRefused);
         }
-        let params = local_transport_params(&self.config, &local[..n]);
+        let reset = self
+            .config
+            .lifecycle
+            .stateless_reset
+            .then(|| self.reset_key.token(&local[..n]));
+        let params = local_transport_params(&self.config, &local[..n], reset);
+        let listener = self.listener.as_mut().expect("checked");
+        let original = retry_odcid.as_ref().map(|(o, l)| &o[..usize::from(*l)]);
         let cids = ServerCids {
-            original_dcid: odcid,
+            original_dcid: original.unwrap_or(odcid),
             client_scid: header.scid(pkt),
-            retry_scid: None,
+            retry_scid: original.map(|_| odcid),
         };
         let tls = QuicTls::server(&listener.setup, &params, cids)
             .map_err(|_| DropReason::AcceptRefused)?;
-        let hs = self.new_hs(tls, &local[..n]);
+        let mut hs = self.new_hs(tls, &local[..n]);
+        if validated && let Some(amp) = hs.amp.as_mut() {
+            amp.validated = true;
+        }
         let status = HandshakeStatus {
             confirmed: false,
             // RFC 9002: a server assumes the peer validated its address.
@@ -1050,10 +2449,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
         let out = self.process_long_datagram(&mut buf[..len], now_ns);
         self.rx_copy = buf;
-        out
+        let out = out?;
+        self.replay_buffered(now_ns)?;
+        Ok(out)
     }
 
     fn count_drop(&mut self, reason: &DropReason) {
+        if matches!(reason, DropReason::Buffered) {
+            // Held for its keys (`datagrams_buffered`), not dropped.
+            return;
+        }
         self.stats.rx_dropped += 1;
         match reason {
             DropReason::Crypto(_) => self.stats.rx_dropped_crypto += 1,
@@ -1077,8 +2482,49 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             let rest = &mut dgram[off..];
             let header = match self.parser.parse(rest) {
                 Ok(ParsedPacket::Protected(h)) => h,
+                Ok(ParsedPacket::Retry(r)) if first && self.config.role == Role::Client => {
+                    let mut ids = [0u8; 40];
+                    let (d, sc) = (r.dcid.len(), r.scid.len());
+                    ids[..d].copy_from_slice(r.dcid);
+                    ids[20..20 + sc].copy_from_slice(r.scid);
+                    let token_at = rest.len() - RETRY_TAG_LEN - r.token.len();
+                    let token_len = r.token.len();
+                    let (pkt, token) = (&*rest, &rest[token_at..token_at + token_len]);
+                    match self.on_retry(pkt, &ids[..d], &ids[20..20 + sc], token, now_ns) {
+                        Ok(slot) => processed = Some((slot, 0)),
+                        Err(reason) => {
+                            dropped.get_or_insert(reason);
+                        }
+                    }
+                    break;
+                }
+                Ok(ParsedPacket::VersionNegotiation(vn))
+                    if first && self.config.role == Role::Client =>
+                {
+                    let mut dcid = [0u8; 255];
+                    let d = vn.dcid.len();
+                    dcid[..d].copy_from_slice(vn.dcid);
+                    let lists_v1 = vn.versions().any(|v| v == QUIC_V1);
+                    if let Err(reason) = self.on_version_negotiation(&dcid[..d], lists_v1, now_ns) {
+                        dropped.get_or_insert(reason);
+                    }
+                    break;
+                }
                 Ok(_) => {
                     dropped.get_or_insert(DropReason::NotOneRtt);
+                    break;
+                }
+                Err(HeaderError::UnsupportedVersion(_)) if first => {
+                    let total_bytes = &*rest;
+                    let mut copy = [0u8; 600];
+                    let n = total_bytes.len().min(copy.len());
+                    copy[..n].copy_from_slice(&total_bytes[..n]);
+                    let sent = self.send_version_negotiation(&copy[..n], total, now_ns);
+                    dropped.get_or_insert(if sent {
+                        DropReason::VersionNegotiationSent
+                    } else {
+                        DropReason::Header(HeaderError::UnsupportedVersion(0))
+                    });
                     break;
                 }
                 Err(e) => {
@@ -1087,18 +2533,45 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 }
             };
             let end = header.packet_end;
+            if !first {
+                self.stats.coalesced_received += 1;
+            }
             match header.packet_type {
-                PacketType::OneRtt => {
-                    dropped.get_or_insert(DropReason::CoalescedOneRtt);
-                    break;
-                }
-                PacketType::ZeroRtt => {
-                    dropped.get_or_insert(DropReason::NotOneRtt);
+                PacketType::OneRtt | PacketType::ZeroRtt => {
+                    let short = header.packet_type == PacketType::OneRtt;
+                    let len = if short { rest.len() } else { end };
+                    match self.process_copied(&mut rest[..len], total, now_ns) {
+                        Ok(v) => processed = Some(v),
+                        Err((_, DropReason::KeysUnavailable)) => {
+                            let reason = if self.buffer_datagram(&rest[..len]) {
+                                DropReason::Buffered
+                            } else {
+                                DropReason::KeysUnavailable
+                            };
+                            dropped.get_or_insert(reason);
+                        }
+                        Err((_, reason)) => {
+                            dropped.get_or_insert(reason);
+                        }
+                    }
+                    if short {
+                        break;
+                    }
                 }
                 PacketType::Initial | PacketType::Handshake => {
                     let datagram = if first { total } else { 0 };
                     match self.process_long_packet(&mut rest[..end], &header, datagram, now_ns) {
                         Ok(v) => processed = Some(v),
+                        Err((_, DropReason::KeysUnavailable))
+                            if header.packet_type == PacketType::Handshake =>
+                        {
+                            let reason = if self.buffer_datagram(&rest[..end]) {
+                                DropReason::Buffered
+                            } else {
+                                DropReason::KeysUnavailable
+                            };
+                            dropped.get_or_insert(reason);
+                        }
                         Err((slot, reason)) => {
                             if let (Some(slot), DropReason::Transport(e)) = (slot, &reason) {
                                 self.stats.transport_errors += 1;
@@ -1125,10 +2598,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         self.stats.rx_processed += 1;
         let live = self.conn(slot).is_ok_and(|c| c.error.is_none());
         if live {
-            if let Ok(mut st) = self.table.get(slot) {
-                st.idle_deadline_ns = now_ns.saturating_add(self.config.idle_timeout_ns);
-                let _ = self.table.set(slot, &st);
-            }
+            self.touch_idle(slot, now_ns);
             if self.drive_tls(slot, now_ns).is_ok() {
                 self.flush_handshake(slot, now_ns)?;
                 if self.conn(slot).is_ok_and(|c| c.error.is_none()) {
@@ -1261,7 +2731,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let mut peer_close = None;
         let mut handshake_acked = false;
         let Conn {
-            recovery, streams, ..
+            recovery,
+            streams,
+            cc,
+            ..
         } = conn;
         let info = scan_payload(payload, header.packet_type, |f| {
             if failure.is_some() {
@@ -1276,10 +2749,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                             return;
                         }
                     };
+                    cc.begin_ack();
                     match recovery.on_ack_received(space, ack, delay, now_ns, &mut |ev| {
-                        record_long_event(events, ev)
+                        record_long_event(cc, space, events, ev, now_ns)
                     }) {
-                        Ok(_) => handshake_acked |= space == PnSpace::Handshake,
+                        Ok(outcome) => {
+                            handshake_acked |= space == PnSpace::Handshake;
+                            if let Err(e) = cc.end_ack(now_ns, outcome.rtt_sample) {
+                                debug_assert!(false, "BBR rejected an ACK: {e:?}");
+                            }
+                        }
                         Err(e) => failure = Some(DropReason::Recovery(e)),
                     }
                 }
@@ -1443,6 +2922,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             let Some(ev) = hs.tls.poll_event() else {
                 break;
             };
+            if matches!(ev, TlsEvent::KeysReady(_) | TlsEvent::ZeroRttKeys(_)) {
+                self.keys_changed = true;
+            }
             match ev {
                 TlsEvent::KeysReady(k) => match k.space() {
                     Space::Data => {
@@ -1476,20 +2958,85 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     hs.pending[i].extend(data.iter());
                 }
                 TlsEvent::PeerTransportParameters(p) => {
+                    // A client that used remembered parameters for 0-RTT
+                    // applies the server's own once it knows whether 0-RTT
+                    // was accepted (`EarlyData`).
                     // RFC 9000 §18.2: TRANSPORT_PARAMETER_ERROR.
-                    if c.streams.set_peer_params(peer_params(&p)).is_err() {
+                    if !hs.zero_rtt_params && c.streams.set_peer_params(peer_params(&p)).is_err() {
                         return Err(self.fail_handshake(slot, 0x08, now_ns));
                     }
                     // Values above 20 are rejected by lane 12's decoder.
                     c.peer_ack_exponent = u8::try_from(p.ack_delay_exponent).unwrap_or(20);
                     hs.peer_params_applied = true;
+                    apply_lifecycle_params(c, &p, &self.config, now_ns);
                 }
+                TlsEvent::RememberedTransportParameters(p) => {
+                    // Client: 0-RTT stream limits come from the session's
+                    // remembered parameters (RFC 9000 §7.4.1).
+                    if c.streams.set_peer_params(peer_params(&p)).is_ok() {
+                        hs.peer_params_applied = true;
+                        hs.zero_rtt_params = true;
+                    }
+                }
+                TlsEvent::ZeroRttKeys(k) => {
+                    let server = hs.is_server();
+                    let installed = if server {
+                        k.into_opener().map(|o| c.zero_rtt_opener = Some(o))
+                    } else {
+                        k.into_sealer().map(|s| c.zero_rtt_sealer = Some(s))
+                    };
+                    if let Err(e) = installed {
+                        return Err(self.fail_handshake(slot, e.quic_error_code(), now_ns));
+                    }
+                }
+                TlsEvent::EarlyData(EarlyData::Accepted) if !hs.is_server() => {
+                    let fresh = hs.tls.peer_transport_parameters().map(peer_params);
+                    hs.zero_rtt_params = false;
+                    // RFC 9000 §7.4.1: the server may not reduce the
+                    // remembered limits when it accepts 0-RTT.
+                    if let Some(p) = fresh
+                        && c.streams.raise_peer_params(p).is_err()
+                    {
+                        return Err(self.fail_handshake(slot, 0x0a, now_ns));
+                    }
+                    self.push_conn_event(ConnectionEvent::ZeroRttAccepted(slot));
+                }
+                TlsEvent::EarlyData(EarlyData::Rejected) if !hs.is_server() => {
+                    let fresh = hs.tls.peer_transport_parameters().map(peer_params);
+                    let was_zero_rtt = std::mem::take(&mut hs.zero_rtt_params);
+                    c.zero_rtt_sealer = None;
+                    if was_zero_rtt {
+                        // RFC 9001 §4.6.2: everything sent in 0-RTT is
+                        // gone; streams start afresh under the real limits.
+                        let p = fresh.unwrap_or(NO_CREDIT);
+                        if c.streams.reset_streams(p).is_err() {
+                            return Err(self.fail_handshake(slot, 0x08, now_ns));
+                        }
+                        c.recovery.reset_space(PnSpace::ApplicationData, now_ns);
+                        let _ = self.reset_cc(slot, now_ns);
+                    }
+                    self.push_conn_event(ConnectionEvent::ZeroRttRejected(slot));
+                }
+                TlsEvent::EarlyData(_) => {}
                 TlsEvent::HandshakeComplete => {
+                    c.zero_rtt_sealer = None;
                     self.push_conn_event(ConnectionEvent::HandshakeComplete(slot));
                 }
                 TlsEvent::SendHandshakeDone => c.streams.queue_handshake_done(),
                 TlsEvent::HandshakeConfirmed => {
+                    if c.zero_rtt_opener.is_some() {
+                        // Kept briefly for 0-RTT packets that the client's
+                        // Finished overtook; `sync_life` drops it.
+                        let pto = c
+                            .recovery
+                            .rtt()
+                            .pto_base_ns()
+                            .saturating_add(c.recovery.max_ack_delay_ns());
+                        c.zero_rtt_discard_ns = Some(now_ns.saturating_add(pto.saturating_mul(3)));
+                    }
                     self.push_conn_event(ConnectionEvent::HandshakeConfirmed(slot));
+                    self.issue_cids(slot);
+                    self.issue_new_token(slot, now_ns);
                 }
                 TlsEvent::DiscardKeys(space) => {
                     let pns = pn_space(space);
@@ -1501,6 +3048,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     }
                     if pns != PnSpace::ApplicationData {
                         c.recovery.discard_space(pns, now_ns);
+                        // RFC 9002 §6.4: the space's packets leave the flight.
+                        if let Err(e) = c.cc.discard_space(pns, now_ns) {
+                            debug_assert!(false, "BBR rejected a discard: {e:?}");
+                        }
                     }
                     if space == Space::Initial {
                         self.initial_dcids.retain(|(_, h)| *h != slot);
@@ -1569,38 +3120,80 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         code
     }
 
-    /// Sends owed Initial/Handshake ACKs and pending CRYPTO data.
+    /// Whether a long-header space has an owed ACK or CRYPTO data to send.
+    fn long_wants(&self, slot: SlotHandle, space: PnSpace) -> bool {
+        let Ok(c) = self.conn(slot) else {
+            return false;
+        };
+        let Some(hs) = c.hs.as_ref() else {
+            return false;
+        };
+        let ls = &hs.spaces[if space == PnSpace::Initial { 0 } else { 1 }];
+        ls.sealer.is_some()
+            && (ls.received.ack_deadline().is_some() || c.streams.crypto(space).has_data())
+    }
+
+    /// Sends owed Initial/Handshake ACKs and pending CRYPTO data, coalescing
+    /// an Initial and a Handshake packet (and a client's 0-RTT packet) into
+    /// one datagram where they fit (RFC 9000 §12.2).
     fn flush_handshake(&mut self, slot: SlotHandle, now_ns: u64) -> Result<u32, WarpError> {
         let mut sent = 0;
         if self.conn(slot)?.error.is_some() || self.conn(slot)?.hs.is_none() {
             return Ok(sent);
         }
         self.move_pending(slot);
-        for space in [PnSpace::Initial, PnSpace::Handshake] {
-            for _ in 0..self.config.max_tracked_per_conn {
-                let c = self.conns[slot.index() as usize].as_mut().expect("live");
-                if c.error.is_some() {
-                    return Ok(sent);
-                }
-                let has_data = c.streams.crypto(space).has_data();
-                let Some(ls) = c.hs.as_mut().and_then(|h| h.long(space)) else {
-                    break;
-                };
-                if ls.sealer.is_none() {
-                    break;
-                }
-                let ack = ls.received.ack_deadline().is_some();
-                if !ack && !has_data {
-                    break;
-                }
-                match self.send_long(slot, space, LongKind::Normal, now_ns) {
-                    Ok(_) => sent += 1,
-                    Err(WarpError::AmplificationLimited) => return Ok(sent),
-                    Err(WarpError::Umem(_)) => return Ok(sent),
-                    Err(e) => return Err(e),
-                }
-                self.move_pending(slot);
+        for _ in 0..self.config.max_tracked_per_conn {
+            if self.conn(slot)?.error.is_some() {
+                return Ok(sent);
             }
+            let initial = self.long_wants(slot, PnSpace::Initial);
+            let handshake = self.long_wants(slot, PnSpace::Handshake);
+            let zero_rtt = self.zero_rtt_wants(slot, now_ns);
+            if !initial && !handshake && !zero_rtt {
+                break;
+            }
+            self.dgram_begin();
+            let mut stop = false;
+            let mut result = Ok(());
+            if initial {
+                let last = !handshake && !zero_rtt;
+                match self.send_long(slot, PnSpace::Initial, LongKind::Normal, last, now_ns) {
+                    Ok(_) => sent += 1,
+                    Err(WarpError::AmplificationLimited | WarpError::Umem(_)) => stop = true,
+                    Err(WarpError::PacketTooLarge { .. }) => {}
+                    Err(e) => result = Err(e),
+                }
+            }
+            // The client may have discarded Initial keys on this send.
+            if !stop && result.is_ok() && handshake {
+                match self.send_long(
+                    slot,
+                    PnSpace::Handshake,
+                    LongKind::Normal,
+                    !zero_rtt,
+                    now_ns,
+                ) {
+                    Ok(_) => sent += 1,
+                    Err(WarpError::AmplificationLimited | WarpError::Umem(_)) => stop = true,
+                    Err(WarpError::PacketTooLarge { .. }) => {}
+                    Err(e) => result = Err(e),
+                }
+            }
+            if !stop && result.is_ok() && zero_rtt {
+                match self.send_zero_rtt(slot, now_ns) {
+                    Ok(true) => sent += 1,
+                    Ok(false) => {}
+                    Err(WarpError::Umem(_)) => stop = true,
+                    Err(_) => {}
+                }
+            }
+            let empty = self.dgram_len == 0;
+            self.dgram_finish(slot, false, now_ns);
+            result?;
+            if stop || empty {
+                break;
+            }
+            self.move_pending(slot);
         }
         Ok(sent)
     }
@@ -1622,24 +3215,29 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         for &(_, off, len) in &ls.sent {
             streams.crypto_mut(space).on_lost(off, len as usize);
         }
-        self.send_long(slot, space, LongKind::Probe, now_ns)?;
+        self.dgram_begin();
+        let out = self.send_long(slot, space, LongKind::Probe, true, now_ns);
+        self.dgram_finish(slot, false, now_ns);
+        out?;
         self.stats.probes_sent += 1;
         Ok(())
     }
 
-    /// Builds, seals and sends one Initial or Handshake packet in its own
-    /// datagram: an owed ACK, then CRYPTO data (lost ranges first), then
-    /// PING for a probe or CONNECTION_CLOSE for a close; ack-eliciting
-    /// Initials (all client Initials) are padded to 1200 bytes. Returns the
-    /// packet number.
+    /// Builds and seals one Initial or Handshake packet at the end of the
+    /// datagram being assembled (`self.dgram`): an owed ACK, then CRYPTO
+    /// data (lost ranges first), then PING for a probe or CONNECTION_CLOSE
+    /// for a close. A packet that is not `last` leaves room for the next
+    /// coalesced packet; the `last` one is padded so that a datagram
+    /// carrying a client Initial or an ack-eliciting server Initial reaches
+    /// 1200 bytes (RFC 9000 §14.1). Returns the packet number.
     fn send_long(
         &mut self,
         slot: SlotHandle,
         space: PnSpace,
         kind: LongKind,
+        last: bool,
         now_ns: u64,
     ) -> Result<u64, WarpError> {
-        let max = usize::from(self.config.max_datagram);
         let exponent = self.config.ack_delay_exponent;
         let tile = self
             .table
@@ -1647,10 +3245,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             .map_err(|_| WarpError::StaleConnection)?;
         let idx = slot.index() as usize;
         let c = self.conns[idx].as_mut().ok_or(WarpError::StaleConnection)?;
+        let max = usize::from(c.max_datagram).min(self.dgram.len());
         let largest_acked = c.recovery.largest_acked(space);
         let Conn { hs, streams, .. } = c;
         let hs = hs.as_mut().ok_or(WarpError::KeysUnavailable)?;
-        if let Some(amp) = hs.amp
+        if self.dgram_len == 0
+            && let Some(amp) = hs.amp
             && !amp.allows(max as u64)
         {
             self.stats.amplification_blocked += 1;
@@ -1660,16 +3260,38 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let mut scid = [0u8; 20];
         let scid_len = hs.local_cid().len();
         scid[..scid_len].copy_from_slice(hs.local_cid());
+        let mut token = [0u8; MAX_RETRY_TOKEN_LEN];
+        let mut token_len = 0;
+        if client
+            && space == PnSpace::Initial
+            && let Some(t) = hs.token.as_deref()
+            && t.len() <= token.len()
+        {
+            // Always whole: `on_retry` and the token cache bound the length.
+            token_len = t.len();
+            token[..token_len].copy_from_slice(t);
+        }
         let ls = hs.long(space).ok_or(WarpError::KeysUnavailable)?;
         let Some(sealer) = ls.sealer.as_ref() else {
             return Err(WarpError::KeysUnavailable);
         };
-        let pn = sealer.next_packet_number();
+        // Packet numbers continue across a Retry's new Initial keys.
+        let pn = sealer.next_packet_number().max(ls.next_pn);
+        // Room left in the datagram; a coalesced successor needs some.
+        let room = max.saturating_sub(self.dgram_len).saturating_sub(if last {
+            0
+        } else {
+            COALESCE_RESERVE
+        });
 
         // Frames after a maximal header, moved once its length is known.
         let scratch = &mut self.scratch;
-        let base = MAX_LONG_HEADER;
-        let limit = max.saturating_sub(TAG_LEN).min(scratch.len());
+        let base = MAX_LONG_HEADER + token_len + 8;
+        let header_max = base;
+        let limit = (base + room.saturating_sub(header_max + TAG_LEN)).min(scratch.len());
+        if limit <= base {
+            return Err(WarpError::PacketTooLarge { len: header_max });
+        }
         let mut at = base;
         let mut has_ack = false;
         let mut crypto = None;
@@ -1688,8 +3310,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     .received
                     .ack_frame(now_ns, exponent)
                     .map_err(|_| WarpError::Config("bad ack_delay_exponent"))?
+                    && let Ok(n) = Frame::Ack(ack).encode(&mut scratch[at..limit])
                 {
-                    at += Frame::Ack(ack).encode(&mut scratch[at..limit])?;
+                    at += n;
                     has_ack = true;
                 }
                 // Room for a PING after the CRYPTO frame.
@@ -1730,7 +3353,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 return Err(WarpError::PacketNumbersExhausted);
             }
         };
-        let pad_initial = space == PnSpace::Initial && (client || ack_eliciting);
+        if space == PnSpace::Initial && (client || ack_eliciting) {
+            self.dgram_pad = true;
+        }
+        let pad_to = if last && self.dgram_pad {
+            MIN_INITIAL_DATAGRAM.saturating_sub(self.dgram_len)
+        } else {
+            0
+        };
         let dcid = tile.peer_cid;
         let header = |payload_len: usize, pn_bytes: usize, out: &mut [u8]| {
             write_long(
@@ -1739,24 +3369,25 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     ty,
                     dcid: dcid.as_bytes(),
                     scid: &scid[..scid_len],
-                    token: &[],
+                    token: &token[..token_len],
                     full_pn: pn,
                     pn_len: PnLen::new(pn_bytes as u8).expect("1..=4 bytes"),
                     payload_len,
                 },
             )
         };
+        let dgram_len = self.dgram_len;
         let layout: Result<_, WarpError> = 'layout: {
             // The header-protection sample needs pn_len + payload >= 4.
             let mut pn_bytes = shortest.max(4usize.saturating_sub(frames_len));
             let mut pad = 0;
-            if pad_initial {
+            if pad_to > 0 {
                 pn_bytes = shortest;
-                let probe = match header(MIN_INITIAL_DATAGRAM, pn_bytes, &mut scratch[..base]) {
+                let probe = match header(pad_to, pn_bytes, &mut scratch[..base]) {
                     Ok(p) => p,
                     Err(e) => break 'layout Err(e.into()),
                 };
-                pad = MIN_INITIAL_DATAGRAM.saturating_sub(probe.header_len + frames_len + TAG_LEN);
+                pad = pad_to.saturating_sub(probe.header_len + frames_len + TAG_LEN);
             }
             if at + pad > scratch.len() {
                 break 'layout Err(WarpError::PacketTooLarge { len: at + pad });
@@ -1770,7 +3401,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             scratch.copy_within(base..base + payload, written.header_len);
             let plain_len = written.header_len + payload;
             let total = plain_len + TAG_LEN;
-            if total > max {
+            if dgram_len + total > max {
                 break 'layout Err(WarpError::PacketTooLarge { len: total });
             }
             Ok((pad, payload, written, plain_len, total))
@@ -1782,38 +3413,24 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 return Err(e);
             }
         };
-        let mut frame = match self.xsk.alloc_tx(total as u16) {
-            Ok(f) => f,
-            Err(e) => {
-                requeue(streams);
-                return Err(WarpError::Umem(e));
-            }
-        };
+        let out = &mut self.dgram[dgram_len..dgram_len + total];
+        out[..plain_len].copy_from_slice(&scratch[..plain_len]);
         let sealer = ls.sealer.as_mut().expect("checked");
         let sealed = match sealer.ticket(pn) {
             Err(e) => Err(WarpError::Crypto(e)),
-            Ok(ticket) => match self.xsk.tx_bytes_mut(&mut frame) {
-                Err(e) => {
-                    let _ = sealer.abandon(ticket);
-                    Err(WarpError::Umem(e))
-                }
-                Ok(bytes) => {
-                    bytes[..plain_len].copy_from_slice(&scratch[..plain_len]);
-                    match sealer.seal(ticket, bytes, written.pn_offset, payload) {
-                        Ok(_) => Ok(()),
-                        Err(err) => {
-                            let _ = sealer.abandon(err.ticket);
-                            Err(WarpError::Crypto(err.error))
-                        }
-                    }
+            Ok(ticket) => match sealer.seal(ticket, out, written.pn_offset, payload) {
+                Ok(_) => Ok(()),
+                Err(err) => {
+                    let _ = sealer.abandon(err.ticket);
+                    Err(WarpError::Crypto(err.error))
                 }
             },
         };
         if let Err(e) = sealed {
             requeue(streams);
-            let _ = self.xsk.abandon_tx(frame);
             return Err(e);
         }
+        ls.next_pn = pn + 1;
         let in_flight = !matches!(kind, LongKind::Close { .. }) && (ack_eliciting || pad > 0);
         let sent = recovery::SentPacket {
             pn,
@@ -1827,10 +3444,22 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             if let Some((off, len)) = crypto {
                 c.streams.crypto_mut(space).on_lost(off, len as usize);
             }
-            let _ = self.xsk.abandon_tx(frame);
             return Err(WarpError::Recovery(e));
         }
+        // Handshake packets are in BBR's flight too; they bypass its
+        // congestion-window guard (the handshake must progress).
+        if let Err(e) = c.cc.on_packet_sent_in(space, now_ns, sent, true) {
+            debug_assert!(false, "BBR rejected a handshake packet: {e:?}");
+        }
         c.last_sent_ns = sent.sent_ns;
+        if self.dgram_len == 0 {
+            self.dgram_first_pn = pn;
+        } else {
+            self.stats.coalesced_sent += 1;
+        }
+        self.dgram_len += total;
+        self.dgram_eliciting |= in_flight;
+        self.dgram_probe |= kind == LongKind::Probe;
         let hs = c.hs.as_mut().expect("checked");
         if let Some(amp) = hs.amp.as_mut() {
             amp.sent += total as u64;
@@ -1851,19 +3480,6 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
         self.stats.packets_sent += 1;
         self.stats.handshake_packets_sent += 1;
-        if let Ok(bytes) = self.xsk.tx_bytes_mut(&mut frame) {
-            self.tap.on_transmit(slot, pn, now_ns, bytes);
-        }
-        // Not leased: lost CRYPTO data is resent from the CRYPTO buffer.
-        match self.xsk.submit_paced_tx(frame, pn, now_ns) {
-            Ok(pkt) => {
-                let _ = self.xsk.retire(pkt);
-            }
-            Err(refused) => {
-                self.stats.tx_abandoned += 1;
-                let _ = self.xsk.abandon_tx(refused.into_owner());
-            }
-        }
         if discard_initial {
             let _ = self.apply_tls_events(slot, now_ns);
         }
@@ -1871,9 +3487,261 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         Ok(pn)
     }
 
+    /// Starts assembling a datagram of coalesced long-header packets.
+    fn dgram_begin(&mut self) {
+        self.dgram_len = 0;
+        self.dgram_pad = false;
+        self.dgram_eliciting = false;
+        self.dgram_probe = false;
+    }
+
+    /// Sends the assembled datagram in one tx frame, paced by BBR unless it
+    /// is a probe or carries nothing in flight (RFC 9002 §7.7).
+    fn dgram_finish(&mut self, slot: SlotHandle, close: bool, now_ns: u64) {
+        if self.dgram_len == 0 {
+            return;
+        }
+        if self.dgram_pad && self.dgram_len < MIN_INITIAL_DATAGRAM {
+            // The coalesced successor of a padded-for Initial could not be
+            // built: pad the datagram itself. The zeros parse as an invalid
+            // short header and are discarded by the receiver (RFC 9000
+            // §12.2), after the packets before them.
+            let n = MIN_INITIAL_DATAGRAM.min(self.dgram.len());
+            self.dgram[self.dgram_len..n].fill(0);
+            if let Some(Some(c)) = self.conns.get_mut(slot.index() as usize)
+                && let Some(amp) = c.hs.as_mut().and_then(|h| h.amp.as_mut())
+            {
+                amp.sent += (n - self.dgram_len) as u64;
+            }
+            self.dgram_len = n;
+        }
+        let total = self.dgram_len;
+        self.dgram_len = 0;
+        let mut frame = match self.xsk.alloc_tx(total as u16) {
+            Ok(f) => f,
+            Err(_) => {
+                // Recovery declares the packets lost and CRYPTO is resent.
+                self.stats.tx_abandoned += 1;
+                return;
+            }
+        };
+        match self.xsk.tx_bytes_mut(&mut frame) {
+            Ok(bytes) => bytes[..total].copy_from_slice(&self.dgram[..total]),
+            Err(_) => {
+                self.stats.tx_abandoned += 1;
+                let _ = self.xsk.abandon_tx(frame);
+                return;
+            }
+        }
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            let _ = self.xsk.abandon_tx(frame);
+            return;
+        };
+        let edt_ns = if self.dgram_eliciting && !self.dgram_probe && !close {
+            let edt = c.cc.schedule_edt_ns(total as u32, now_ns);
+            // RFC 9002 §7.7 permits a burst: a handshake flight whose pacing
+            // slot is within the burst allowance leaves now (the schedule
+            // still advances), so a ClientHello split over two Initials is
+            // not held back a whole poll interval.
+            if edt <= now_ns.saturating_add(HANDSHAKE_BURST_NS) {
+                now_ns
+            } else {
+                edt
+            }
+        } else {
+            now_ns
+        };
+        c.last_edt_ns = c.last_edt_ns.max(edt_ns);
+        let to = c.path.remote;
+        let staged = Staged {
+            conn: slot,
+            frame,
+            pn: self.dgram_first_pn,
+            edt_ns,
+            // Not leased: lost CRYPTO data is resent from the CRYPTO buffer.
+            park: false,
+            tapped: false,
+            carried: true,
+            close,
+            to,
+        };
+        self.launch_or_queue(staged, now_ns);
+    }
+
+    /// Client: whether a 0-RTT packet should go out now.
+    fn zero_rtt_wants(&mut self, slot: SlotHandle, now_ns: u64) -> bool {
+        let room = self.launch_has_room(slot, now_ns);
+        let Ok(c) = self.conn_mut(slot) else {
+            return false;
+        };
+        c.error.is_none()
+            && c.keys.is_none()
+            && c.zero_rtt_sealer.is_some()
+            && c.cc.can_send()
+            && room
+            && c.streams.has_pending()
+    }
+
+    /// Client: appends a 0-RTT packet of stream frames to the datagram
+    /// being assembled (RFC 9001 §4.6.1), padded when the datagram carries
+    /// an Initial. 0-RTT shares the application packet-number space and
+    /// its recovery, BBR and stream records with 1-RTT. Returns whether a
+    /// packet was added.
+    fn send_zero_rtt(&mut self, slot: SlotHandle, now_ns: u64) -> Result<bool, WarpError> {
+        let tile = self
+            .table
+            .get(slot)
+            .map_err(|_| WarpError::StaleConnection)?;
+        let pn = tile.next_tx_pn;
+        if pn >= MAX_SEND_PN {
+            return Err(WarpError::PacketNumbersExhausted);
+        }
+        let idx = slot.index() as usize;
+        let c = self.conns[idx].as_mut().ok_or(WarpError::StaleConnection)?;
+        let max = usize::from(c.max_datagram).min(self.dgram.len());
+        let room = max.saturating_sub(self.dgram_len);
+        if room <= MAX_LONG_HEADER + TAG_LEN + 8 {
+            return Ok(false);
+        }
+        let mut scid = [0u8; 20];
+        let scid_len = match c.hs.as_ref() {
+            Some(hs) => {
+                let l = hs.local_cid();
+                scid[..l.len()].copy_from_slice(l);
+                l.len()
+            }
+            None => return Ok(false),
+        };
+        let budget = (room - MAX_LONG_HEADER - TAG_LEN).min(self.app_out.len());
+        let len = c
+            .streams
+            .fill(&mut self.app_out[..budget], &mut self.record);
+        if len == 0 {
+            self.record.clear();
+            return Ok(false);
+        }
+        let shortest = match encoded_len(pn, c.recovery.largest_acked(PnSpace::ApplicationData)) {
+            Ok(l) => l.bytes(),
+            Err(_) => {
+                c.streams.requeue(&self.record);
+                self.record.clear();
+                return Err(WarpError::PacketNumbersExhausted);
+            }
+        };
+        let pad_to = if self.dgram_pad {
+            MIN_INITIAL_DATAGRAM.saturating_sub(self.dgram_len)
+        } else {
+            0
+        };
+        let dcid = tile.peer_cid;
+        let header = |payload_len: usize, pn_bytes: usize, out: &mut [u8]| {
+            write_long(
+                out,
+                &LongHeader {
+                    ty: LongPacketType::ZeroRtt,
+                    dcid: dcid.as_bytes(),
+                    scid: &scid[..scid_len],
+                    token: &[],
+                    full_pn: pn,
+                    pn_len: PnLen::new(pn_bytes as u8).expect("1..=4 bytes"),
+                    payload_len,
+                },
+            )
+        };
+        let scratch = &mut self.scratch;
+        let dgram_len = self.dgram_len;
+        let layout: Result<_, WarpError> = 'layout: {
+            let mut pn_bytes = shortest.max(4usize.saturating_sub(len));
+            let mut pad = 0;
+            if pad_to > 0 {
+                pn_bytes = shortest;
+                let probe = match header(pad_to, pn_bytes, &mut scratch[..MAX_LONG_HEADER]) {
+                    Ok(p) => p,
+                    Err(e) => break 'layout Err(e.into()),
+                };
+                pad = pad_to.saturating_sub(probe.header_len + len + TAG_LEN);
+            }
+            let payload = len + pad;
+            let written = match header(payload + TAG_LEN, pn_bytes, &mut scratch[..MAX_LONG_HEADER])
+            {
+                Ok(w) => w,
+                Err(e) => break 'layout Err(e.into()),
+            };
+            let plain_len = written.header_len + payload;
+            let total = plain_len + TAG_LEN;
+            if dgram_len + total > max || plain_len > scratch.len() {
+                break 'layout Err(WarpError::PacketTooLarge { len: total });
+            }
+            scratch[written.header_len..written.header_len + len]
+                .copy_from_slice(&self.app_out[..len]);
+            scratch[written.header_len + len..plain_len].fill(0); // PADDING
+            Ok((payload, written, plain_len, total))
+        };
+        let (payload, written, plain_len, total) = match layout {
+            Ok(l) => l,
+            Err(e) => {
+                c.streams.requeue(&self.record);
+                self.record.clear();
+                return Err(e);
+            }
+        };
+        let out = &mut self.dgram[dgram_len..dgram_len + total];
+        out[..plain_len].copy_from_slice(&scratch[..plain_len]);
+        let sealer = c.zero_rtt_sealer.as_mut().expect("checked by the caller");
+        let sealed = match sealer.ticket(pn) {
+            Err(e) => Err(WarpError::Crypto(e)),
+            Ok(ticket) => match sealer.seal(ticket, out, written.pn_offset, payload) {
+                Ok(_) => Ok(()),
+                Err(err) => {
+                    let _ = sealer.abandon(err.ticket);
+                    Err(WarpError::Crypto(err.error))
+                }
+            },
+        };
+        let sent = recovery::SentPacket {
+            pn,
+            sent_ns: now_ns.max(c.last_sent_ns),
+            bytes: total as u32,
+            ack_eliciting: true,
+            in_flight: true,
+        };
+        let recorded = sealed.and_then(|()| {
+            c.recovery
+                .on_packet_sent(PnSpace::ApplicationData, sent)
+                .map_err(WarpError::Recovery)
+                .and_then(|()| {
+                    c.cc.on_packet_sent(now_ns, sent, false)
+                        .map_err(WarpError::Cc)
+                })
+        });
+        if let Err(e) = recorded {
+            c.streams.requeue(&self.record);
+            self.record.clear();
+            return Err(e);
+        }
+        c.last_sent_ns = sent.sent_ns;
+        if let Ok(mut st) = self.table.get(slot) {
+            st.next_tx_pn = pn + 1;
+            let _ = self.table.set(slot, &st);
+        }
+        if self.dgram_len == 0 {
+            self.dgram_first_pn = pn;
+        } else {
+            self.stats.coalesced_sent += 1;
+        }
+        self.dgram_len += total;
+        self.dgram_eliciting = true;
+        self.settle_record(slot, &Ok((pn, true)));
+        self.stats.packets_sent += 1;
+        self.stats.zero_rtt_packets_sent += 1;
+        Ok(true)
+    }
+
     /// CONNECTION_CLOSE with `code` in every space we hold send keys for
-    /// (Initial, Handshake, 1-RTT): the peer may not have the later ones
-    /// yet (RFC 9000 §10.2.3).
+    /// (Initial and Handshake coalesced, then 1-RTT): the peer may not have
+    /// the later ones yet (RFC 9000 §10.2.3). `frame_type` [`APP_CLOSE`]
+    /// sends an application close (0x1d) in 1-RTT and APPLICATION_ERROR in
+    /// the long-header spaces, which may not carry one.
     fn send_close_code(
         &mut self,
         slot: SlotHandle,
@@ -1882,26 +3750,42 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         now_ns: u64,
     ) -> Result<(), WarpError> {
         let mut any = false;
-        for space in [PnSpace::Initial, PnSpace::Handshake] {
-            let has = self
-                .conns
+        let long_close = if frame_type == APP_CLOSE {
+            LongKind::Close {
+                code: APPLICATION_ERROR,
+                frame_type: 0,
+            }
+        } else {
+            LongKind::Close { code, frame_type }
+        };
+        let has = |me: &mut Self, space| {
+            me.conns
                 .get_mut(slot.index() as usize)
                 .and_then(Option::as_mut)
                 .and_then(|c| c.hs.as_mut())
                 .and_then(|h| h.long(space))
-                .is_some_and(|ls| ls.sealer.is_some());
-            if has
+                .is_some_and(|ls| ls.sealer.is_some())
+        };
+        let spaces = [has(self, PnSpace::Initial), has(self, PnSpace::Handshake)];
+        self.dgram_begin();
+        for (i, space) in [PnSpace::Initial, PnSpace::Handshake]
+            .into_iter()
+            .enumerate()
+        {
+            let last = i == 1 || !spaces[1];
+            if spaces[i]
                 && self
-                    .send_long(slot, space, LongKind::Close { code, frame_type }, now_ns)
+                    .send_long(slot, space, long_close, last, now_ns)
                     .is_ok()
             {
                 any = true;
             }
         }
+        self.dgram_finish(slot, true, now_ns);
         if self.conn(slot)?.keys.is_some() {
             let n = Frame::ConnectionClose(crate::frame::ConnectionClose {
                 error_code: code,
-                frame_type: Some(frame_type),
+                frame_type: (frame_type != APP_CLOSE).then_some(frame_type),
                 reason: b"",
             })
             .encode(&mut self.app_out)?;
@@ -1938,8 +3822,19 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 self.park_key(key.pn, now_ns, lease);
             }
         }
+        if let Some(Some(c)) = self.conns.get_mut(conn.index() as usize)
+            && let Some((h, _)) = c.life_timer.take()
+        {
+            let _ = self.life_timers.cancel(h);
+        }
+        if let Some(Some(c)) = self.conns.get_mut(conn.index() as usize)
+            && let Some((h, _)) = c.timer.take()
+        {
+            let _ = self.timers.cancel(h);
+        }
         self.conns[conn.index() as usize] = None;
         self.initial_dcids.retain(|(_, h)| *h != conn);
+        self.alt_cids.retain(|(_, h)| *h != conn);
         self.table
             .remove(conn)
             .map_err(|_| WarpError::StaleConnection)?;
@@ -2049,9 +3944,19 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         self.conn_mut(conn).ok()?.streams.poll_event()
     }
 
-    /// Why a connection was closed, if it was.
+    /// Why a connection was closed, if it was; also after its slot was
+    /// freed (until the slot is reused).
     pub fn connection_error(&self, conn: SlotHandle) -> Option<ConnectionError> {
-        self.conn(conn).ok()?.error
+        match self.conn(conn) {
+            Ok(c) => c.error,
+            Err(_) => self
+                .closed
+                .get(conn.index() as usize)
+                .copied()
+                .flatten()
+                .filter(|(h, _)| *h == conn)
+                .map(|(_, e)| e),
+        }
     }
 
     fn conn(&self, h: SlotHandle) -> Result<&Conn, WarpError> {
@@ -2103,12 +4008,27 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
     }
 
+    fn rx_context(&self, ty: PacketType) -> RxContext {
+        RxContext {
+            ty,
+            from: self.rx_from,
+            cid_limit: usize::from(self.config.lifecycle.active_connection_id_limit),
+            server: self.config.role == Role::Server,
+        }
+    }
+
     fn lookup(&self, dcid: &[u8]) -> Option<SlotHandle> {
         let found = match self.config.cid_lookup {
             CidLookup::Index => self.table.lookup(dcid),
             CidLookup::TileScan => self.table.lookup_cid_simd(dcid),
         };
-        found.ok().flatten()
+        found.ok().flatten().or_else(|| {
+            // Connection IDs issued after the handshake (wave six).
+            self.alt_cids
+                .iter()
+                .find(|(c, _)| c.as_bytes() == dcid)
+                .map(|(_, h)| *h)
+        })
     }
 
     /// Returns a received frame to the fill ring and reports the drop.
@@ -2154,12 +4074,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     dcid[..d.len()].copy_from_slice(d);
                     Ok(Some((h, dcid, d.len())))
                 }
-                Ok(ParsedPacket::Protected(h))
-                    if matches!(h.packet_type, PacketType::Initial | PacketType::Handshake) =>
-                {
-                    Ok(None)
-                }
-                Ok(_) => Err(DropReason::NotOneRtt),
+                // Long headers (Initial, 0-RTT, Handshake, Retry, Version
+                // Negotiation, other versions) take the copying path.
+                Ok(_) | Err(HeaderError::UnsupportedVersion(_)) => Ok(None),
                 Err(e) => Err(DropReason::Header(e)),
             },
         };
@@ -2171,6 +4088,19 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
 
         // 2. CID lookup in the shard's tiles (lane 6).
         let Some(slot) = self.lookup(&dcid[..dcid_len]) else {
+            // A stateless reset for one of ours, or a packet for a
+            // connection we lost: answer that with a reset (RFC 9000 §10.3).
+            let len = self.xsk.view_frame_bytes(&frame).map_or(0, <[u8]>::len);
+            let reset = self
+                .xsk
+                .view_frame_bytes(&frame)
+                .ok()
+                .and_then(|b| self.reset_for(b));
+            if let Some(victim) = reset {
+                self.on_stateless_reset(victim, now_ns);
+                return self.drop_rx(frame, DropReason::StatelessReset);
+            }
+            self.send_stateless_reset(&dcid[..dcid_len], len, now_ns);
             return self.drop_rx(frame, DropReason::UnknownCid);
         };
         let (Ok(tile), Ok(_)) = (self.table.get(slot), self.conn(slot)) else {
@@ -2201,6 +4131,36 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         );
         let (opened_header_len, payload_len, pn) = match opened {
             Ok(v) => v,
+            Err(DropReason::KeysUnavailable) => {
+                // 1-RTT before its keys (reordering around the handshake).
+                let mut held = false;
+                if let Ok(bytes) = self.xsk.view_frame_bytes(&frame) {
+                    let mut copy = std::mem::take(&mut self.rx_copy);
+                    let n = bytes.len().min(copy.len());
+                    copy[..n].copy_from_slice(&bytes[..n]);
+                    held = self.buffer_datagram(&copy[..n]);
+                    self.rx_copy = copy;
+                }
+                let reason = if held {
+                    DropReason::Buffered
+                } else {
+                    DropReason::KeysUnavailable
+                };
+                return self.drop_rx(frame, reason);
+            }
+            Err(DropReason::Crypto(e)) => {
+                let reset = self.xsk.view_frame_bytes(&frame).ok().is_some_and(|b| {
+                    b.len() >= MIN_STATELESS_RESET
+                        && self
+                            .conn(slot)
+                            .is_ok_and(|c| c.cids.reset_matches(&b[b.len() - 16..]))
+                });
+                if reset {
+                    self.on_stateless_reset(slot, now_ns);
+                    return self.drop_rx(frame, DropReason::StatelessReset);
+                }
+                return self.drop_rx(frame, DropReason::Crypto(e));
+            }
             Err(reason) => return self.drop_rx(frame, reason),
         };
 
@@ -2208,6 +4168,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         // pass through the BBRv3 adapter (lane 2); STREAM frames go to the
         // application, whose reply frames collect in `app_out`.
         self.events.clear();
+        let rx = self.rx_context(PacketType::OneRtt);
         let conn = self.conns[slot.index() as usize]
             .as_mut()
             .expect("checked above");
@@ -2223,6 +4184,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             pn,
             now_ns,
             self.config.stream_mode,
+            rx,
         );
         // Retire the leases recovery resolved (lanes 3, 4).
         let acked_any = self
@@ -2268,10 +4230,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             };
         }
         self.stats.rx_processed += 1;
-        if let Ok(mut st) = self.table.get(slot) {
-            st.idle_deadline_ns = now_ns.saturating_add(self.config.idle_timeout_ns);
-            let _ = self.table.set(slot, &st);
-        }
+        let datagram_len = self.xsk.view_frame_bytes(&frame).map_or(0, <[u8]>::len);
+        self.after_lifecycle(slot, pn, datagram_len, app_len, now_ns);
+        self.touch_idle(slot, now_ns);
         self.write_tile(slot);
 
         if !ack_eliciting {
@@ -2514,7 +4475,11 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let (code, frame_type) = match error {
             ConnectionError::Local(e) => (e.code.code(), e.frame_type),
             ConnectionError::Handshake { error_code } => (error_code, CLOSE_FRAME_CRYPTO),
-            ConnectionError::Peer { .. } => return,
+            ConnectionError::Application { error_code } => (error_code, APP_CLOSE),
+            ConnectionError::Peer { .. }
+            | ConnectionError::IdleTimeout
+            | ConnectionError::StatelessReset
+            | ConnectionError::VersionNegotiation => return,
         };
         let Ok(c) = self.conn(slot) else {
             return;
@@ -2574,9 +4539,29 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             // Not due after all (the deadline moved): re-arm.
             self.sync_timer(slot);
         }
+        loop {
+            let fired = match self.life_timers.poll(now_ns) {
+                Ok(Some(fired)) => fired,
+                Ok(None) => break,
+                Err(_) => return Err(WarpError::Config("clock went backwards")),
+            };
+            let slot = fired.payload;
+            match self.conns.get_mut(slot.index() as usize) {
+                Some(Some(c)) if c.handle == slot => c.life_timer = None,
+                _ => continue,
+            }
+            self.on_life_timer(slot, now_ns);
+        }
+        self.replay_buffered(now_ns)?;
         self.flush_deferred_acks(now_ns)?;
         self.flush_handshakes(now_ns)?;
         self.flush_all(now_ns)?;
+        for i in 0..self.conns.len() {
+            if let Some(c) = self.conns[i].as_ref() {
+                let h = c.handle;
+                self.sync_life(h, now_ns);
+            }
+        }
         Ok(report)
     }
 
@@ -2644,6 +4629,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.leases.next_wake_hint_ns(),
             self.launch.next_wake_hint_ns(),
             self.timers.next_wake_hint_ns(),
+            self.life_timers.next_wake_hint_ns(),
         ]
         .into_iter()
         .flatten()
@@ -2719,9 +4705,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let action = if space == PnSpace::ApplicationData {
             recovery.on_timeout(now_ns, &mut |ev| record_event(cc, events, ev, now_ns))
         } else {
-            // Long-header packets are not in BBR's flight (see the module
-            // docs): their losses only reach the CRYPTO buffers.
-            recovery.on_timeout(now_ns, &mut |ev| record_long_event(events, ev))
+            // Long-header losses reach BBR and the CRYPTO buffers.
+            recovery.on_timeout(now_ns, &mut |ev| {
+                record_long_event(cc, space, events, ev, now_ns)
+            })
         };
         self.resolve_events(slot, space, fired);
         if let TimeoutAction::SendProbe { space, packets, .. } = action
@@ -3052,6 +5039,19 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.stats.amplification_blocked += 1;
             return Err((rx, WarpError::AmplificationLimited));
         }
+        // RFC 9000 §9.3: 3× limit on a migrated path until it is validated.
+        let to_path = self.next_to.is_none_or(|to| {
+            self.conns[slot.index() as usize]
+                .as_ref()
+                .is_some_and(|c| c.path.remote == to)
+        });
+        if to_path
+            && let Some(Some(c)) = self.conns.get(slot.index() as usize)
+            && !c.path.allows(total as u64)
+        {
+            self.stats.amplification_blocked += 1;
+            return Err((rx, WarpError::AmplificationLimited));
+        }
 
         // The received frame turned around in place (same chunk and data
         // offset), or a fresh frame (lane 3).
@@ -3162,11 +5162,20 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if let Some(amp) = conn.hs.as_mut().and_then(|h| h.amp.as_mut()) {
             amp.sent += total as u64;
         }
+        if to_path && !conn.path.validated {
+            conn.path.sent += total as u64;
+        }
         self.write_tile(slot);
         self.stats.packets_sent += 1;
         if !ack_eliciting {
             self.stats.ack_only_sent += 1;
         }
+        let to = match self.next_to.take() {
+            Some(to) => to,
+            None => self.conns[slot.index() as usize]
+                .as_ref()
+                .and_then(|c| c.path.remote),
+        };
         Ok(Staged {
             conn: slot,
             frame,
@@ -3176,6 +5185,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             tapped: false,
             carried: data_len > 0,
             close: kind == Kind::Close,
+            to,
         })
     }
 
@@ -3207,8 +5217,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return false;
         };
         self.launch.len() < self.config.launch_capacity as usize
-            && c.cc.controller().next_edt_ns()
-                <= now_ns.saturating_add(self.config.launch_horizon_ns)
+            && c.cc.next_edt_ns(now_ns) <= now_ns.saturating_add(self.config.launch_horizon_ns)
     }
 
     fn release_launches(&mut self, now_ns: u64) -> u32 {
@@ -3231,6 +5240,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             park,
             tapped,
             close,
+            to,
             ..
         } = staged;
         // Closing or draining (RFC 9000 §10.2): nothing but CONNECTION_CLOSE
@@ -3247,7 +5257,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return;
         }
         if !tapped && let Ok(bytes) = self.xsk.tx_bytes_mut(&mut frame) {
-            self.tap.on_transmit(conn, pn, edt_ns, bytes);
+            self.tap.on_transmit_to(conn, pn, edt_ns, bytes, to);
         }
         match self.xsk.submit_paced_tx(frame, pn, edt_ns) {
             Ok(pkt) if park => {
@@ -3270,6 +5280,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     tapped: true,
                     carried: true,
                     close,
+                    to,
                 };
                 let at = retry.edt_ns;
                 if let Err(refused) = self.launch.submit(now_ns, at, retry) {
@@ -3322,9 +5333,11 @@ impl<B: XskBackend, R: Responder, T: TxTap> Drop for WarpEndpoint<B, R, T> {
             leases,
             launch,
             timers,
+            life_timers,
             ..
         } = self;
         timers.drain(|_, _| {});
+        life_timers.drain(|_, _| {});
         launch.drain(|_, staged| {
             let _ = xsk.abandon_tx(staged.frame);
         });
@@ -3369,6 +5382,17 @@ fn open_in_place<B: XskBackend>(
     now_ns: u64,
 ) -> Result<(usize, usize, u64), DropReason> {
     let buf = xsk.rx_bytes_mut(frame).map_err(DropReason::Umem)?;
+    open_bytes(conn, buf, header, largest_rx_pn, now_ns)
+}
+
+/// Steps 3-5 on a short-header packet's bytes (in a UMEM frame or a copy).
+fn open_bytes(
+    conn: &mut Conn,
+    buf: &mut [u8],
+    header: &crate::header::ProtectedHeader,
+    largest_rx_pn: Option<u64>,
+    now_ns: u64,
+) -> Result<(usize, usize, u64), DropReason> {
     let packet =
         buf.get_mut(..header.packet_end)
             .ok_or(DropReason::Header(HeaderError::Truncated {
@@ -3410,17 +5434,61 @@ fn scan_in_place<B: XskBackend, R: Responder>(
     pn: u64,
     now_ns: u64,
     mode: StreamMode,
+    rx: RxContext,
+) -> Result<(bool, usize), DropReason> {
+    let buf = xsk.rx_bytes_mut(frame).map_err(DropReason::Umem)?;
+    scan_bytes(
+        conn,
+        events,
+        app,
+        app_out,
+        &buf[payload],
+        slot,
+        pn,
+        now_ns,
+        mode,
+        rx,
+    )
+}
+
+/// What the frame scan needs to know about the received packet.
+#[derive(Debug, Clone, Copy)]
+struct RxContext {
+    ty: PacketType,
+    /// Where the datagram came from.
+    from: Option<PeerAddr>,
+    /// Our `active_connection_id_limit`.
+    cid_limit: usize,
+    server: bool,
+}
+
+/// Step 6 on an opened 1-RTT or 0-RTT payload; returns (ack-eliciting,
+/// reply length). Connection-ID, path and token frames are recorded on
+/// the connection for the endpoint to act on after the scan.
+#[allow(clippy::too_many_arguments)]
+fn scan_bytes<R: Responder>(
+    conn: &mut Conn,
+    events: &mut Vec<CongestionEvent>,
+    app: &mut R,
+    app_out: &mut [u8],
+    payload: &[u8],
+    slot: SlotHandle,
+    pn: u64,
+    now_ns: u64,
+    mode: StreamMode,
+    rx: RxContext,
 ) -> Result<(bool, usize), DropReason> {
     let exponent = conn.peer_ack_exponent;
-    let buf = xsk.rx_bytes_mut(frame).map_err(DropReason::Umem)?;
-    let payload = &buf[payload];
     let mut app_len = 0usize;
     let mut failure: Option<DropReason> = None;
     let mut peer_close = None;
-    let info = scan_payload(payload, PacketType::OneRtt, |f| {
+    let mut non_probing = false;
+    let violation = |code, frame_type| DropReason::Transport(TransportError { code, frame_type });
+    let info = scan_payload(payload, rx.ty, |f| {
         if failure.is_some() {
             return;
         }
+        non_probing |= !f.is_probing();
         match f {
             Frame::Ack(ack) => {
                 if let Err(reason) = on_ack_frame(conn, events, ack, now_ns, exponent) {
@@ -3459,10 +5527,53 @@ fn scan_in_place<B: XskBackend, R: Responder>(
                 }
             }
             Frame::HandshakeDone => {
-                if let Some(hs) = conn.hs.as_mut() {
+                if rx.server {
+                    // RFC 9000 §19.20: only a server sends HANDSHAKE_DONE.
+                    failure = Some(violation(
+                        crate::TransportErrorCode::ProtocolViolation,
+                        crate::frame::HANDSHAKE_DONE,
+                    ));
+                } else if let Some(hs) = conn.hs.as_mut() {
                     hs.done_received = true;
                 }
             }
+            Frame::NewToken { token } => {
+                if rx.server {
+                    // RFC 9000 §19.7: a server never receives NEW_TOKEN.
+                    failure = Some(violation(
+                        crate::TransportErrorCode::ProtocolViolation,
+                        crate::frame::NEW_TOKEN,
+                    ));
+                } else if token.len() <= crate::stream::MAX_NEW_TOKEN_LEN {
+                    let mut t = [0u8; crate::stream::MAX_NEW_TOKEN_LEN];
+                    t[..token.len()].copy_from_slice(token);
+                    conn.token_rx = Some((t, token.len() as u8));
+                }
+            }
+            Frame::NewConnectionId {
+                seq,
+                retire_prior_to,
+                cid,
+                reset_token,
+            } => {
+                if let Err(reason) = on_new_cid(conn, *seq, *retire_prior_to, cid, reset_token, rx)
+                {
+                    failure = Some(reason);
+                }
+            }
+            Frame::RetireConnectionId { seq } => {
+                // RFC 9000 §19.16: a sequence number we never issued.
+                if *seq >= conn.cids.next_local_seq {
+                    failure = Some(violation(
+                        crate::TransportErrorCode::ProtocolViolation,
+                        crate::frame::RETIRE_CONNECTION_ID,
+                    ));
+                } else if let Some(slot) = conn.retired_rx.iter_mut().find(|s| s.is_none()) {
+                    *slot = Some(*seq);
+                }
+            }
+            Frame::PathChallenge(data) => conn.challenge_rx = Some((*data, rx.from)),
+            Frame::PathResponse(data) => conn.path_response_rx = Some(*data),
             _ => {}
         }
     })
@@ -3470,6 +5581,7 @@ fn scan_in_place<B: XskBackend, R: Responder>(
     if let Some(reason) = failure {
         return Err(reason);
     }
+    conn.non_probing_rx = non_probing;
     if let Some(close) = peer_close {
         conn.error = Some(close);
     }
@@ -3477,6 +5589,62 @@ fn scan_in_place<B: XskBackend, R: Responder>(
         .on_packet_received(pn, now_ns, info.ack_eliciting, Ecn::NotEct)
         .map_err(DropReason::Duplicate)?;
     Ok((info.ack_eliciting, app_len))
+}
+
+/// A NEW_CONNECTION_ID frame (RFC 9000 §5.1.1, §19.15).
+fn on_new_cid(
+    conn: &mut Conn,
+    seq: u64,
+    retire_prior_to: u64,
+    cid: &[u8],
+    reset_token: &[u8; crate::frame::RESET_TOKEN_LEN],
+    rx: RxContext,
+) -> Result<(), DropReason> {
+    let violation = |code| {
+        DropReason::Transport(TransportError {
+            code,
+            frame_type: crate::frame::NEW_CONNECTION_ID,
+        })
+    };
+    let Ok(id) = ConnectionId::from_slice(cid) else {
+        return Err(violation(crate::TransportErrorCode::FrameEncodingError));
+    };
+    if retire_prior_to > seq {
+        // §19.15: Retire Prior To may not exceed the frame's own sequence.
+        return Err(violation(crate::TransportErrorCode::FrameEncodingError));
+    }
+    // Retirements first, so that an ID replacing a retired one does not
+    // count against the active_connection_id_limit (§5.1.2).
+    if retire_prior_to > conn.cids.peer_retire_prior_to {
+        conn.cids.peer_retire_prior_to = retire_prior_to;
+        for i in 0..MAX_ACTIVE_CIDS {
+            let Some(p) = conn.cids.peer[i] else {
+                continue;
+            };
+            if p.seq < retire_prior_to {
+                conn.cids.peer[i] = None;
+                conn.streams.queue_retire_connection_id(p.seq);
+                if p.seq == conn.cids.active_peer_seq {
+                    conn.peer_cid_retired = true;
+                }
+            }
+        }
+    }
+    let entry = PeerCid {
+        seq,
+        cid: id,
+        token: Some(*reset_token),
+    };
+    match conn.cids.add_peer(entry, rx.cid_limit) {
+        Ok(()) => {}
+        Err(0x09) => return Err(violation(crate::TransportErrorCode::ConnectionIdLimitError)),
+        Err(_) => return Err(violation(crate::TransportErrorCode::ProtocolViolation)),
+    }
+    if seq < conn.cids.peer_retire_prior_to {
+        // Already retired by an earlier Retire Prior To (a late frame).
+        conn.streams.queue_retire_connection_id(seq);
+    }
+    Ok(())
 }
 
 /// One ACK frame: RFC 9002 recovery (lane 1) and its events through the
@@ -3527,9 +5695,19 @@ fn record_event(
     }
 }
 
-/// A long-header space's recovery event: acknowledgements and losses are
-/// kept for the CRYPTO buffers; nothing reaches BBR.
-fn record_long_event(events: &mut Vec<CongestionEvent>, ev: CongestionEvent) {
+/// A long-header space's recovery event: it reaches BBR under its own
+/// space's snapshots, and acknowledgements and losses are kept for the
+/// CRYPTO buffers.
+fn record_long_event(
+    cc: &mut QuicBbr,
+    space: PnSpace,
+    events: &mut Vec<CongestionEvent>,
+    ev: CongestionEvent,
+    now_ns: u64,
+) {
+    if let Err(e) = cc.on_event_in(space, now_ns, ev) {
+        debug_assert!(false, "BBR rejected an event: {e:?}");
+    }
     if matches!(
         ev,
         CongestionEvent::Acked { .. } | CongestionEvent::Lost { .. }
@@ -3540,9 +5718,16 @@ fn record_long_event(events: &mut Vec<CongestionEvent>, ev: CongestionEvent) {
 }
 
 /// The transport parameters an endpoint advertises (RFC 9000 §18.2).
-fn local_transport_params(config: &EndpointConfig, local_cid: &[u8]) -> TransportParameters {
+fn local_transport_params(
+    config: &EndpointConfig,
+    local_cid: &[u8],
+    reset: Option<[u8; crate::frame::RESET_TOKEN_LEN]>,
+) -> TransportParameters {
     let w = u64::from(config.streams.stream_window);
     TransportParameters {
+        // Server only (RFC 9000 §18.2): the token for its handshake CID.
+        stateless_reset_token: reset,
+        active_connection_id_limit: u64::from(config.lifecycle.active_connection_id_limit),
         initial_source_connection_id: vesper_warp_tls::ConnectionId::new(local_cid).ok(),
         max_idle_timeout_ms: config.idle_timeout_ns / 1_000_000,
         max_udp_payload_size: u64::from(config.max_datagram),
@@ -3554,9 +5739,48 @@ fn local_transport_params(config: &EndpointConfig, local_cid: &[u8]) -> Transpor
         initial_max_streams_uni: config.streams.max_streams_uni,
         ack_delay_exponent: u64::from(config.ack_delay_exponent),
         max_ack_delay_ms: config.max_ack_delay_ns.div_ceil(1_000_000),
-        // No connection migration (see the module docs).
-        disable_active_migration: true,
+        disable_active_migration: !config.lifecycle.migration,
         ..TransportParameters::default()
+    }
+}
+
+/// The peer's transport parameters beyond the stream limits (wave six):
+/// idle timeout, `max_ack_delay`, `max_udp_payload_size`, connection-ID
+/// limit, migration, and the reset token of its handshake connection ID.
+fn apply_lifecycle_params(
+    c: &mut Conn,
+    p: &TransportParameters,
+    config: &EndpointConfig,
+    now_ns: u64,
+) {
+    // RFC 9000 §10.1: the smaller of the two non-zero timeouts.
+    let peer_idle = p.max_idle_timeout_ms.saturating_mul(1_000_000);
+    let ours = config.idle_timeout_ns;
+    c.idle_timeout_ns = match (ours, peer_idle) {
+        (0, x) | (x, 0) => x,
+        (a, b) => a.min(b),
+    };
+    c.recovery
+        .set_max_ack_delay_ns(p.max_ack_delay_ms.saturating_mul(1_000_000), now_ns);
+    let peer_max = u16::try_from(p.max_udp_payload_size).unwrap_or(u16::MAX);
+    c.max_datagram = config
+        .max_datagram
+        .min(peer_max.max(MIN_INITIAL_DATAGRAM as u16));
+    let ours = u64::from(config.lifecycle.active_connection_id_limit);
+    c.cids.issue_limit = ours.min(p.active_connection_id_limit.max(2));
+    c.peer_disables_migration = p.disable_active_migration;
+    if c.cids.peer_cid(0).is_none() {
+        // Sequence 0 is the connection ID the peer's packets came from.
+        let peer = c.cids.peer.iter_mut().find(|s| s.is_none());
+        if let (Some(slot), Some(cid)) = (peer, p.initial_source_connection_id)
+            && let Ok(cid) = ConnectionId::from_slice(cid.as_bytes())
+        {
+            *slot = Some(PeerCid {
+                seq: 0,
+                cid,
+                token: p.stateless_reset_token,
+            });
+        }
     }
 }
 

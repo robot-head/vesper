@@ -10,6 +10,7 @@ pub use vesper_pulse::frames;
 #[cfg(target_os = "linux")]
 pub use vesper_pulse::{io_driver, scheduler};
 pub use vesper_syntax::{lexer, parser};
+pub mod capability_effects;
 pub mod check;
 pub mod database;
 pub mod doctest;
