@@ -888,6 +888,7 @@ fn encode_graph(
 
 fn translate_math(
     nodes: &[Math],
+    variable_count: usize,
     builder: &mut Builder,
     budget: &mut WitnessBudget,
 ) -> Result<Vec<TermId>, WitnessError> {
@@ -907,7 +908,12 @@ fn translate_math(
         };
         let node = match node {
             Math::Num(n) => TermNode::Const(*n as i128),
-            Math::Input(id) => TermNode::InputVar(*id),
+            Math::Input(id) => {
+                if *id as usize >= variable_count {
+                    return Err(WitnessError::UnknownVariable);
+                }
+                TermNode::InputVar(*id)
+            }
             Math::Add(ids) | Math::Sub(ids) | Math::Mul(ids) => {
                 let op = match node {
                     Math::Add(_) => IntOp::Add,
@@ -1022,6 +1028,7 @@ pub(super) fn propose_rewrite(
         Err(error) => return Err(error),
     };
     let mut builder = Builder::new(bound.kind(), limits);
+    let variable_count = bound.variable_count();
     let mut source_map = Vec::new();
     budget.reserve(&mut source_map, bound.terms().len())?;
     for (index, term) in bound.terms().iter().enumerate() {
@@ -1057,10 +1064,11 @@ pub(super) fn propose_rewrite(
                 budget: remaining,
             } = run_graph(&expression, budget)?;
             budget = remaining;
-            let best_map = translate_math(best.as_ref(), &mut builder, &mut budget)?;
+            let best_map =
+                translate_math(best.as_ref(), variable_count, &mut builder, &mut budget)?;
             let best = *best_map.last().ok_or(WitnessError::InvalidTermIndex)?;
             if best != folded {
-                let raw = translate_math(graph.nodes(), &mut builder, &mut budget)?;
+                let raw = translate_math(graph.nodes(), variable_count, &mut builder, &mut budget)?;
                 explain_records(&mut builder, &raw, &records, folded, best, &mut budget)?;
             }
             best
