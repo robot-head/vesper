@@ -1,5 +1,6 @@
 //! Pure checked-source adapter for the root-free documentation library.
 mod links;
+pub mod sources;
 
 use crate::{
     ast::*,
@@ -270,12 +271,12 @@ fn build_document(
     limits: Limits,
 ) -> Result<Document, String> {
     let limitations = vec![
-        "Checked source metadata; no audited artifact-bound evidence: unverified".into(),
+        "Checked source metadata; proof badges come only from supplied proof-audit reports, otherwise unverified".into(),
         "Search excludes generic, open-row, unresolved and effectful-arrow binder contracts".into(),
-        "Layouts describe the native eight-byte ABI, not wire or tiled layouts".into(),
+        "Struct layouts describe the native eight-byte ABI; wire layouts come only from compiled Bridge declarations; no tiled layouts".into(),
         "A terminal path is not an all-path ownership or termination proof".into(),
         "Local intra-doc links cover documented source declarations; package, generic, Self and trait-method links are unsupported".into(),
-        "No doctest, JIT, WASM, proof certificate, or semver-diff execution".into(),
+        "No doctest, JIT, WASM, proof-cache certificate, or semver-diff execution".into(),
     ];
     let mut document = Document {
         schema_version: 1,
