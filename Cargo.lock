@@ -4227,6 +4227,7 @@ dependencies = [
 name = "vesper-crucible"
 version = "0.1.0"
 dependencies = [
+ "vesper-alloc",
  "vesper-simpulse",
 ]
 
