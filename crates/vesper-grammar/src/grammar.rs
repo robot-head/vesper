@@ -9,6 +9,8 @@ use crate::framing::{self, Remainder};
 use crate::{Error, ErrorKind, Result, add, bound, charge, mul};
 use core::ops::Range;
 
+pub const HARD_MAX_REPETITIONS: usize = 4096;
+
 #[derive(Clone, Debug)]
 pub struct Branch {
     pub id: u16,
@@ -26,6 +28,13 @@ pub enum Rule {
     Frame(usize),
     Sequence(Vec<usize>),
     Choice(Vec<Branch>),
+    /// Exactly `count` child parses; no count bytes are present on the wire.
+    Repeat {
+        rule: usize,
+        count: usize,
+    },
+    /// A canonical unsigned ULEB128 count followed by that many child parses.
+    Counted(usize),
 }
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -40,6 +49,9 @@ pub struct Limits {
     pub max_metadata_bytes: usize,
     pub max_capture_bytes: usize,
     pub max_work: usize,
+    /// Bounds each fixed or wire-supplied repetition count. Zero permits zero
+    /// counts only; values above HARD_MAX_REPETITIONS are invalid settings.
+    pub max_repetitions: usize,
 }
 impl Default for Limits {
     fn default() -> Self {
@@ -55,6 +67,7 @@ impl Default for Limits {
             max_metadata_bytes: 64 * 1024,
             max_capture_bytes: 256 * 1024,
             max_work: 4 * 1024 * 1024,
+            max_repetitions: 1024,
         }
     }
 }
@@ -87,6 +100,9 @@ impl<'g> Grammar<'g> {
     /// Borrows rule owners, and allocates one bounded metadata vector. Invalid
     /// rules never consume or modify the caller's rule definitions.
     pub fn validate(rules: &'g [Rule], root: usize, limits: Limits) -> Result<Self> {
+        if limits.max_repetitions > HARD_MAX_REPETITIONS {
+            return Err(Error::new(ErrorKind::Rule, 0));
+        }
         if rules.is_empty() || root >= rules.len() {
             return Err(Error::new(ErrorKind::Rule, root));
         }
@@ -97,7 +113,13 @@ impl<'g> Grammar<'g> {
         let mut literals = 0;
         for (id, rule) in rules.iter().enumerate() {
             let (single, sequence, branches): (Option<usize>, &[usize], &[Branch]) = match rule {
-                Rule::Frame(child) => (Some(*child), &[], &[]),
+                Rule::Frame(child) | Rule::Counted(child) => (Some(*child), &[], &[]),
+                Rule::Repeat { rule, count } => {
+                    if *count > limits.max_repetitions {
+                        return Err(Error::new(ErrorKind::CountLimit, id));
+                    }
+                    (Some(*rule), &[], &[])
+                }
                 Rule::Sequence(children) => (None, children, &[]),
                 Rule::Choice(branches) => {
                     if branches.is_empty() {
@@ -238,6 +260,21 @@ fn build(
             result.first = [u64::MAX; 4];
             result.height = add(child.height, 1)?;
         }
+        Rule::Repeat { rule, count } => {
+            // Even zero-count/unreachable children participate in reference,
+            // cycle and full DAG-height validation.
+            let child = build(*rule, rules, meta, work, max_depth, depth + 1)?;
+            result.height = add(child.height, 1)?;
+            result.nullable = *count == 0 || child.nullable;
+            if *count != 0 {
+                result.union(child);
+            }
+        }
+        Rule::Counted(child) => {
+            let child = build(*child, rules, meta, work, max_depth, depth + 1)?;
+            result.first = [u64::MAX; 4];
+            result.height = add(child.height, 1)?;
+        }
         Rule::Sequence(children) => {
             result.nullable = true;
             for &child in children {
@@ -359,6 +396,14 @@ impl Run<'_, '_, '_> {
                     self.rule(child, depth + 1)?;
                 }
             }
+            Rule::Repeat { rule, count } => self.repeat(*rule, *count, depth)?,
+            Rule::Counted(child) => {
+                let count = self.number()?;
+                self.captures[event].number = Some(count);
+                let count = usize::try_from(count)
+                    .map_err(|_| Error::new(ErrorKind::Overflow, self.pos))?;
+                self.repeat(*child, count, depth)?;
+            }
             Rule::Choice(branches) => {
                 let byte = *self
                     .input
@@ -379,6 +424,28 @@ impl Run<'_, '_, '_> {
             }
         }
         self.captures[event].range.end = self.pos;
+        Ok(())
+    }
+    fn repeat(&mut self, child: usize, count: usize, depth: usize) -> Result<()> {
+        if count > self.grammar.limits.max_repetitions {
+            return Err(Error::new(ErrorKind::CountLimit, self.pos));
+        }
+        // Every child, even a nullable one, costs at least one visit/event/work
+        // unit. Refuse impossible counts before iteration. Descendant visits
+        // retain their own cumulative guards; this never refunds a budget.
+        let visits = add(self.captures.len(), count)?;
+        bound(
+            visits,
+            self.grammar.limits.max_events,
+            ErrorKind::CountLimit,
+        )?;
+        if visits > self.capacity {
+            return Err(Error::new(ErrorKind::AllocationLimit, self.pos));
+        }
+        bound(count, self.work, ErrorKind::WorkLimit)?;
+        for _ in 0..count {
+            self.rule(child, depth + 1)?;
+        }
         Ok(())
     }
     fn literal(&mut self, bytes: &[u8]) -> Result<()> {
