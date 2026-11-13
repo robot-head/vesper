@@ -44,7 +44,8 @@ Actual Linux validation, one job/debug0/incremental0, exclusive cache
 - `cargo test -p vesper-alloc --all-targets`:93passed, zero ignored;
   72old allocator tests,10flat-core dependency tests,8arena-core tests and
   3new private arena unit tests.
-- `cargo test -p vesper-alloc --doc`:21passed, zero ignored across this actual
+- `cargo test -p vesper-alloc --doc`:25passed (4runnable and21compile-fail),
+  zero ignored across this actual
   combined source. Arena checks owner cloning, nonstatic payload rejection,
   projection borrowing and key/owner invariance between valid static function
   pointer types; a positive ordinary coercion controls the variance regression.
