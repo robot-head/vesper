@@ -76,23 +76,35 @@ pub fn page_crc32c(bytes: &[u8]) -> Result<u32, PageError> {
     if bytes.len() != PAGE_SIZE {
         return Err(PageError::Size);
     }
-    Ok(crc32c(bytes.iter().enumerate().map(|(i, b)| {
-        if CRC_RANGE.contains(&i) {
-            0
-        } else {
-            *b
-        }
-    })))
+    let mut crc = crc32c_update(!0, &bytes[..CRC_RANGE.start]);
+    crc = crc32c_update(crc, &[0; 4]);
+    Ok(!crc32c_update(crc, &bytes[CRC_RANGE.end..]))
 }
-fn crc32c(bytes: impl IntoIterator<Item = u8>) -> u32 {
-    let mut crc = !0u32;
-    for byte in bytes {
-        crc ^= u32::from(byte);
-        for _ in 0..8 {
+const CRC_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0;
+    while i < 256 {
+        let mut crc = i as u32;
+        let mut bit = 0;
+        while bit < 8 {
             crc = (crc >> 1) ^ if crc & 1 == 0 { 0 } else { 0x82f6_3b78 };
+            bit += 1;
         }
+        table[i] = crc;
+        i += 1;
     }
-    !crc
+    table
+};
+/// Table-driven CRC32C state update; callers apply the initial and final XOR.
+pub(crate) fn crc32c_update(mut crc: u32, bytes: &[u8]) -> u32 {
+    for &byte in bytes {
+        crc = (crc >> 8) ^ CRC_TABLE[((crc ^ u32::from(byte)) & 0xff) as usize];
+    }
+    crc
+}
+/// Castagnoli CRC32C of a whole byte string (used by WAL frames and headers).
+pub fn crc32c(bytes: &[u8]) -> u32 {
+    !crc32c_update(!0, bytes)
 }
 
 /// Validated page bytes. Mutations never expose raw mutable bytes.
@@ -299,6 +311,6 @@ mod tests {
     use super::*;
     #[test]
     fn standard_castagnoli_check_vector() {
-        assert_eq!(crc32c(b"123456789".iter().copied()), 0xe306_9283);
+        assert_eq!(crc32c(b"123456789"), 0xe306_9283);
     }
 }

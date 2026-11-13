@@ -1,9 +1,13 @@
-# Quarry host SQL and page core
+# Quarry host SQL, page core and durable store
 
-`vesper-quarry` is a dependency-free, bounded host library implementing the catalog,
-query checking, relational optimization, reference row execution, and recoverable
-slotted-page/pin slices of specification §24. It performs no I/O. It is **not** an embedded transactional
-storage engine, source `@sql` macro, WASI component, or compiler integration.
+`vesper-quarry` is a bounded host library implementing the catalog, query
+checking, relational optimization, reference row execution, vectorized
+single-table execution, recoverable slotted-page/pin slices, and a durable
+write-ahead-logged page store of specification §24. Its only dependency is
+`vesper-simd` (for the selection-mask counting kernel). It is **not** a source
+`@sql` macro, WASI component, or compiler integration: source `@sql` remains a
+Forge-macro step, and nothing here is reachable from Vesper source yet. The
+durable store holds opaque records; it is not yet connected to the SQL catalog.
 
 Run the self-checking example from the repository after workspace registration:
 
@@ -160,9 +164,10 @@ Tests cover expected results, all nullable Boolean truth-table combinations,
 bag joins, multi-join nullability, typed scalar/bind validation, stale catalogs,
 atomic failures, unsupported SQL, resource exhaustion, and 3,584 before/after
 optimizer comparisons (64 nullable input subsets × four joins × 14 predicates).
-No source-mode safety, allocation-free execution, SIMD/AoSoA, egglog integration,
-WAL/ARIES/MVCC, crash recovery, tenant capability enforcement,
-network/database service, or Lean proof is provided by this host slice.
+No source-mode safety, allocation-free execution, AoSoA tiles, egglog
+integration, MVCC, tenant capability enforcement, network/database service, or
+Lean proof is provided by this host slice. The vectorized executor and the
+durable store are described below.
 
 
 ## Slotted pages and recoverable buffer-pool pins (§24.2)
@@ -262,6 +267,141 @@ teardown, deliberately favoring retained ownership/state over unsafe reuse.
 Maintain the pool while its pins are live and explicitly commit/abort/release.
 This is a host protocol, not Vesper compile-time linear exhaustion, automatic
 cancellation recovery, latch-free optimistic traversal, zero-copy DMA, io_uring,
-durable WAL/ARIES, MVCC, B+Tree storage, tenant isolation, or a formal pin proof.
-LSN checks validate numeric ordering only; they do not prove a WAL record exists
-or reached durable storage.
+MVCC, B+Tree storage, tenant isolation, or a formal pin proof. On its own the
+pool's LSN checks validate numeric ordering only; the `durable` module below is
+what ties page LSNs to WAL records that reached the device.
+
+## Durable store: file-backed pages, WAL recovery and checkpoints
+
+`durable::Db<D: device::Device>` stores opaque records (up to 16,347 bytes) in
+the slotted pages above, through the same `BufferPool` pin protocol, over a
+data file and a write-ahead log. Run the self-checking crash example:
+
+```sh
+cargo run -p vesper-quarry --example quarry_durable
+```
+
+### Devices and the crash model
+
+`Device` is positional read/write/set_len/sync over two files. `FsDevice`
+uses `std::fs` (`quarry.data`, `quarry.wal`; `sync` is `File::sync_all`, and
+the directory is synced after creation on Unix). `SimDevice` is a
+deterministic crash/fsync model: writes are visible at once and durable only
+after `sync` of that file. `crash(choice)` returns the medium after a power
+loss: `LoseUnsynced`, `KeepUnsynced`, or `Subset { seed }` (a seeded subset of
+the unsynced operations of each file survives in order, and the last surviving
+write per file is torn at a seeded byte). `crash_after(n)` makes the
+`n+1`-th mutating operation fail with `Crashed`. This models a page cache; it
+says nothing about whether a real filesystem, kernel or disk honours `fsync`.
+Quarry does not reuse `vesper-sim-session`'s `wal-frame-v1` model: that model
+logs checked source values for the CEK evaluator, not byte pages.
+
+### Log format
+
+The log starts with two 32-byte header slots (`QRYWAL01`, generation, base LSN,
+CRC32C); the valid header with the larger generation wins. Frames follow from
+byte 64: `[len u32][lsn u64][crc u32][payload]`, CRC32C over generation, length,
+LSN and payload. LSNs are consecutive record numbers from the base. Scanning
+stops at the first torn header, torn payload, oversize length, bad checksum or
+out-of-sequence LSN (`wal::TailDefect`), and recovery durably cuts the file
+there before writing anything. A frame that checks but does not decode is
+`Corrupt`, not a tail. Binding the generation into each frame's CRC makes
+frames left over from before a truncation invalid even if their bytes survive.
+
+Records (`wal::LogRecord`): `PageImage` (full page before its first change
+after a checkpoint, or a new page), `Insert`, `Update` (before and after slot
+images), `Compensation` (redo-only, with `undo_next`), `Commit`, `End`.
+
+### Protocol
+
+- **Steal / no-force.** Changes go to an exclusive pin's staged page; the
+  record is appended and the pin released dirty at its LSN
+  (`unpin_dirty(pin, lsn)`). Every failure releases the pin with
+  `unpin_aborted`; `stats().pinned` is 0 after every call, including
+  corrupt-page and full-page errors (tested). Eviction is LRU over unpinned
+  frames; a dirty victim is written after the log is flushed through its page
+  LSN (the WAL rule), so uncommitted pages may reach disk.
+- **Torn pages.** A page's first change after a checkpoint logs its full image
+  first (as PostgreSQL's full-page writes do). Redo restores that image over a
+  missing, checksum-failing or older page, then replays. A corrupt page that
+  no logged image covers is reported as `Corrupt`, never repaired silently.
+- **Commit** appends `Commit` and syncs the log; `Ok` means durable.
+  **Abort** undoes the transaction's changes newest first, logging a
+  `Compensation` per change and then `End`; it does not sync.
+- **Recovery** (`Db::open`): cut the log tail; redo every page change whose
+  LSN is newer than its page (repeating history, losers included); roll back
+  every transaction without `Commit`/`End`, newest change first across all
+  losers, resuming partially undone ones from their last compensation's
+  `undo_next`; then checkpoint. Recovery is crash-safe and is tested by
+  crashing it at every one of its own device operations.
+- **Checkpoint** (sharp): requires no active transaction; writes back every
+  resident page, syncs the data file, writes the other header slot with the
+  next generation and base LSN, syncs, truncates the log to its headers and
+  syncs. A crash in between leaves either the old header (old frames replay
+  idempotently against durable pages) or the new one (old frames fail the
+  generation check).
+- **Concurrency.** Up to 64 transactions; a page changed by an active
+  transaction is locked to it until commit/abort (no-wait: `Conflict`).
+  Readers of a locked page get `Conflict` (no dirty reads, no MVCC). This
+  page-granular exclusion is what makes undo always fit its page.
+- **Log space.** Each change reserves room for its compensation and each
+  transaction for its `Commit`/`End`, so `LogFull` is reported before a
+  rollback could run out of log. Recovery may append compensations past the
+  limit (bounded by the records it undoes).
+- **Failures.** Any I/O, crash or corruption error inside a call poisons the
+  handle (`State` afterwards); reopen to recover. A commit that fails with an
+  I/O error has an unknown outcome until reopening.
+- **Owners.** `Txn` is non-Clone and `#[must_use]`; `commit` and `abort` are
+  its only exits. A dropped `Txn` is counted (`leaked_txns`), keeps its locks
+  and blocks checkpoints until the store is reopened, whose recovery rolls it
+  back. This is Rust ownership plus a counter, not Vesper's source-level
+  linear typing.
+
+Limits (`DbLimits`): 2–256 frames, up to 65,536 pages (1 GiB), 64 KiB–256 MiB
+of log, 1–64 active transactions. Deletes leave tombstones and slots are never
+reused or compacted away; there is no free-space map beyond the transaction's
+last page and the last page of the file, no B+Tree, no secondary index, no
+fuzzy checkpoint, no group commit, no `O_DIRECT`/io_uring, and no hardware
+CRC32C (a table-driven software CRC is used).
+
+### Crash-point testing
+
+`tests/durable.rs` runs a seeded workload (two interleaved transactions,
+inserts, updates, deletes of 1–3 KiB records, commits, aborts and checkpoints
+over a three-frame pool) and then, for **every** device operation index of the
+run, reruns it crashing there and recovers under four crash choices. The
+recovered contents must equal the state after exactly the acknowledged
+commits, or after one more when that commit was in flight. Two seeds give 270
+crash points and 1,080 recoveries; the test also asserts that the enumeration
+exercised page-image repair, redo, loser rollback, resumed rollback and torn
+log tails. A second test crashes recovery itself at each of its device
+operations for three crash points. Disabling page-image repair, loser undo or
+the WAL rule each makes the test fail.
+
+## Vectorized execution
+
+`vector::VectorEngine` plus `PreparedQuery::execute_vectorized` and
+`PreparedQuery::aggregate_vectorized` run single-table plans (a scan with its
+pushed predicates and any filters above it) over column batches (default
+1,024 rows, configurable 1–65,536). Each batch transposes the table's columns
+into typed vectors with byte null masks; predicates evaluate as whole-batch
+loops into three-valued byte masks (Kleene AND/OR/NOT, IS [NOT] NULL, NULL
+constants), and comparisons of fixed-width columns against constants or
+columns run as straight slice loops. The selection mask is counted by the
+`vesper-simd` Baseline128 JIT byte scanner when `VectorEngine::detect()` finds
+it (`simd_active()`), otherwise by a portable count; the count sizes the
+selection vector and answers `COUNT(*)`/`COUNT(col)`. Rustc auto-vectorization
+of the comparison loops is not claimed and no speedup was measured.
+
+Results (rows, order and column definitions) equal the row executor's;
+`work` counts batch cells and is not comparable. Joins return
+`ErrorKind::Unsupported`. Aggregates (`vector::Aggregate`): `CountRows`,
+`Count`, `Sum` (U64/I64 exact, `Overflow` iff the exact total does not fit;
+F64 in row order), `Min`, `Max` (first wins among equals), with
+`vector::aggregate_rows` as the row-at-a-time reference. SQL has no aggregate
+syntax yet, so aggregates are host calls over a query's output columns.
+
+`tests/vector.rs` compares 39 predicates × 5 projections, unoptimized and
+optimized, under five engine/batch configurations (including batch size 1 and
+7), against the row executor; and 16 aggregates for every predicate against
+`aggregate_rows`.

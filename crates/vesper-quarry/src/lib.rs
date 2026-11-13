@@ -1,4 +1,5 @@
-//! Bounded host SQL execution, checked slotted pages, and recoverable page pins.
+//! Bounded host SQL execution (row and vectorized), checked slotted pages,
+//! recoverable page pins, and a durable WAL-recovered record store.
 //! See the crate README for grammar, resource accounting, and integration boundaries.
 #![forbid(unsafe_code)]
 
@@ -6,8 +7,12 @@ mod execute;
 mod parse;
 mod plan;
 
+pub mod device;
+pub mod durable;
 pub mod page;
 pub mod pool;
+pub mod vector;
+pub mod wal;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -87,6 +92,9 @@ pub enum ErrorKind {
     Stale,
     Data,
     Overflow,
+    /// A valid query shape this executor does not implement (for example a
+    /// join in the vectorized executor).
+    Unsupported,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {

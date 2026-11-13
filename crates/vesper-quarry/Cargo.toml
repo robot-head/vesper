@@ -3,4 +3,7 @@ name = "vesper-quarry"
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "Bounded deterministic host SQL catalog, checked relational plans and reference executor"
+description = "Bounded deterministic host SQL catalog, checked plans, row and vectorized executors, and a durable WAL-recovered page store"
+
+[dependencies]
+vesper-simd = { path = "../vesper-simd" }

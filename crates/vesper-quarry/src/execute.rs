@@ -11,8 +11,8 @@ use std::mem::size_of;
 /// Data is explicitly tied to a complete schema snapshot; mutations validate before replacement.
 #[derive(Clone, Debug)]
 pub struct DataSet {
-    catalog: HermeticCatalog,
-    tables: BTreeMap<String, Vec<Vec<Value>>>,
+    pub(crate) catalog: HermeticCatalog,
+    pub(crate) tables: BTreeMap<String, Vec<Vec<Value>>>,
 }
 impl DataSet {
     pub fn new(catalog: &HermeticCatalog) -> Self {
@@ -45,7 +45,11 @@ impl DataSet {
         Ok(())
     }
 }
-fn validate_rows(catalog: &HermeticCatalog, table: &str, rows: &[Vec<Value>]) -> Result<()> {
+pub(crate) fn validate_rows(
+    catalog: &HermeticCatalog,
+    table: &str,
+    rows: &[Vec<Value>],
+) -> Result<()> {
     let cols = catalog
         .tables
         .get(table)
@@ -68,7 +72,7 @@ fn validate_rows(catalog: &HermeticCatalog, table: &str, rows: &[Vec<Value>]) ->
     }
     Ok(())
 }
-fn row_bytes(row: &[Value]) -> Result<usize> {
+pub(crate) fn row_bytes(row: &[Value]) -> Result<usize> {
     row.iter().try_fold(0, |n, v| {
         add(
             add(n, size_of::<Value>())?,
@@ -80,7 +84,7 @@ fn row_bytes(row: &[Value]) -> Result<usize> {
         )
     })
 }
-fn rows_bytes(rows: &[Vec<Value>]) -> Result<usize> {
+pub(crate) fn rows_bytes(rows: &[Vec<Value>]) -> Result<usize> {
     rows.iter().try_fold(0, |n, r| {
         add(n, add(size_of::<Vec<Value>>(), row_bytes(r)?)?)
     })
@@ -204,7 +208,7 @@ impl PreparedQuery {
         })
     }
 }
-fn check_inputs(plan: &RelPlan, data: &DataSet) -> Result<()> {
+pub(crate) fn check_inputs(plan: &RelPlan, data: &DataSet) -> Result<()> {
     match plan {
         RelPlan::Scan { table, .. } => {
             if data.tables.contains_key(table) {
