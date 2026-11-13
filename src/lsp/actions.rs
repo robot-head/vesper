@@ -153,13 +153,21 @@ pub fn format_document(
     expected: SourceStamp,
 ) -> Result<Formatting, ActionError> {
     document.validate(expected)?;
+    // Reserve two finite stages from one 128 Mi-unit operation allowance.
+    // A failed normal attempt cannot lend its unused units to the fallback.
     let limits = vesper_fmt::Limits {
         max_input_bytes: MAX_SOURCE_BYTES,
         max_output_bytes: MAX_SOURCE_BYTES,
+        max_work: 64 * 1024 * 1024,
         ..vesper_fmt::Limits::default()
     };
-    let formatted = vesper_fmt::format_source(document.source, limits)
-        .map_err(|error| ActionError::FormatterUnavailable(error.to_string()))?;
+    let formatted = match vesper_fmt::format_source(document.source, limits) {
+        Ok(formatted) => formatted,
+        Err(error @ (vesper_fmt::Error::Syntax { .. } | vesper_fmt::Error::OpaqueMacro)) => {
+            return format_complete_declarations(document, limits, error);
+        }
+        Err(error) => return Err(ActionError::FormatterUnavailable(error.to_string())),
+    };
     let edits = if formatted.changed {
         vec![replacement(document, formatted.output)?]
     } else {
@@ -170,6 +178,63 @@ pub fn format_document(
         uri: document.uri.to_owned(),
         stamp: document.stamp,
         provenance: json!({"document":identity_json(document.uri,document.stamp),"formatter":"vesper-fmt","line_width":100,"indent_spaces":4,"token_and_comment_conserved":true}),
+    })
+}
+fn format_complete_declarations(
+    document: &ActionDocument<'_>,
+    limits: vesper_fmt::Limits,
+    original_error: vesper_fmt::Error,
+) -> Result<Formatting, ActionError> {
+    let partial = vesper_fmt::format_recovery_source(document.source, limits)
+        .map_err(|error| ActionError::FormatterUnavailable(error.to_string()))?;
+    if partial.formatted_declarations() == 0 {
+        return Err(ActionError::FormatterUnavailable(
+            original_error.to_string(),
+        ));
+    }
+    if partial.source_hash() != document.stamp.source_hash {
+        return Err(ActionError::Invariant("formatter source identity differs"));
+    }
+    if partial.edits().len() > 256 {
+        return Err(ActionError::FormatterUnavailable(
+            "format edit limit".into(),
+        ));
+    }
+    let mut bytes = 0usize;
+    for edit in partial.edits() {
+        bytes = bytes
+            .checked_add(edit.replacement().len())
+            .filter(|n| *n <= MAX_SOURCE_BYTES)
+            .ok_or_else(|| ActionError::FormatterUnavailable("format edit byte limit".into()))?;
+    }
+    let mut edits = Vec::new();
+    edits
+        .try_reserve_exact(partial.edits().len())
+        .map_err(|_| ActionError::FormatterUnavailable("format edit allocation".into()))?;
+    let mut previous_end = 0;
+    for edit in partial.edits() {
+        let span = edit.span();
+        if span.start < previous_end || document.source.get(span.clone()).is_none() {
+            return Err(ActionError::Invariant("formatter edit ranges differ"));
+        }
+        let range = document
+            .index
+            .range(ByteSpan {
+                start: span.start,
+                end: span.end,
+            })
+            .map_err(|error| ActionError::InvalidRange(error.to_string()))?;
+        edits.push(TextEdit {
+            range,
+            new_text: edit.replacement().to_owned(),
+        });
+        previous_end = span.end;
+    }
+    Ok(Formatting {
+        edits,
+        uri: document.uri.to_owned(),
+        stamp: document.stamp,
+        provenance: json!({"document":identity_json(document.uri,document.stamp),"formatter":"vesper-fmt","line_width":100,"indent_spaces":4,"token_and_comment_conserved":true,"scope":"complete_declarations","syntax_only":true,"semantic_checked":false,"formatted_declarations":partial.formatted_declarations()}),
     })
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
