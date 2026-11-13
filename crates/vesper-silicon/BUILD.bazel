@@ -1,0 +1,8 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    # tests/lean.rs reads and elaborates ../../lean/SiliconFrames.lean; Lean
+    # rejects symlinked runfiles, so that test runs in a copy of regular files.
+    copy_test_cwd = ["test/lean"],
+    extra_test_data = ["//:lean"],
+)
