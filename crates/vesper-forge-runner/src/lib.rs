@@ -40,6 +40,10 @@
 mod error;
 mod identity;
 mod key;
+pub mod quote_key;
+pub mod quote_record;
+pub mod quote_runner;
+pub mod quote_session;
 mod record;
 mod request;
 mod runner;

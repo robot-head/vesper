@@ -1,0 +1,27 @@
+/// Standalone experimental Expr quotation transport. No host identities cross
+/// this ABI. Slot ordinals refer to this invocation only and are not authority.
+package vesper:forge-quote@0.1.0;
+
+interface types {
+    record span { file: u32, start: u32, end: u32 }
+    record def-id { %package: u32, item: u32 }
+    enum delimiter { paren, bracket, brace }
+    variant token-kind { ident, punct, int-literal, string-literal, open(delimiter), close(delimiter) }
+    enum macro-kind { proc-macro, derive-macro }
+    enum category { expr }
+    record input-token { kind: token-kind, text: string, reported-span: option<span> }
+    record input-slot { category: category, tokens: list<input-token> }
+    record invocation { protocol-version: u32, kind: macro-kind, entry: string, args: list<string>, slots: list<input-slot> }
+    enum severity { error, warning, note }
+    record slice { offset: u32, len: u32 }
+    record packed-generated { kind: token-kind, text: slice, reported-span: option<span>, claimed-def: option<def-id> }
+    variant packed-item { generated(packed-generated), input-slot(u32) }
+    record packed-diagnostic { severity: severity, message: slice, reported-span: option<span> }
+    record packed-result { items: list<packed-item>, diagnostics: list<packed-diagnostic>, text: list<u8> }
+}
+interface quotation {
+    use types.{invocation, packed-result};
+    protocol-version: func() -> u32;
+    run: func(invocation: invocation) -> result<packed-result, packed-result>;
+}
+world sandboxed-quotation { export quotation; }

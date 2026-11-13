@@ -34,12 +34,15 @@ mod error;
 mod host;
 mod identity;
 mod lex;
+#[cfg(feature = "sandbox-transport")]
+pub mod quote_transport;
 mod registry;
 mod resolve;
 pub mod syntax;
 mod token;
 #[cfg(feature = "sandbox-transport")]
 pub mod transport;
+pub mod typed_quote;
 
 pub use authority::{
     AUTHORITY_SCHEMA_VERSION, AcceptedExpansion, Authority, AuthorityArg, AuthorityAudit,
