@@ -164,6 +164,8 @@ const COALESCE_RESERVE: usize = 128;
 /// Longest stateless reset we send (RFC 9000 §10.3 suggests resets look
 /// like short 1-RTT packets).
 const MAX_STATELESS_RESET: usize = 43;
+/// Pacing slack for coalesced handshake datagrams (see `dgram_finish`).
+const HANDSHAKE_BURST_NS: u64 = 1_000_000;
 /// RFC 9000 §20.1 APPLICATION_ERROR.
 const APPLICATION_ERROR: u64 = 0x0c;
 // Our own tokens fit wherever a peer's NEW_TOKEN token fits.
@@ -2453,6 +2455,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     }
 
     fn count_drop(&mut self, reason: &DropReason) {
+        if matches!(reason, DropReason::Buffered) {
+            // Held for its keys (`datagrams_buffered`), not dropped.
+            return;
+        }
         self.stats.rx_dropped += 1;
         match reason {
             DropReason::Crypto(_) => self.stats.rx_dropped_crypto += 1,
@@ -3532,7 +3538,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return;
         };
         let edt_ns = if self.dgram_eliciting && !self.dgram_probe && !close {
-            c.cc.schedule_edt_ns(total as u32, now_ns)
+            let edt = c.cc.schedule_edt_ns(total as u32, now_ns);
+            // RFC 9002 §7.7 permits a burst: a handshake flight whose pacing
+            // slot is within the burst allowance leaves now (the schedule
+            // still advances), so a ClientHello split over two Initials is
+            // not held back a whole poll interval.
+            if edt <= now_ns.saturating_add(HANDSHAKE_BURST_NS) {
+                now_ns
+            } else {
+                edt
+            }
         } else {
             now_ns
         };

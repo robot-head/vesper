@@ -238,6 +238,10 @@ pub struct QuicTls {
     /// Client: Handshake-space data (EncryptedExtensions) reached rustls,
     /// so its transport parameters are the server's, not remembered ones.
     hs_read: bool,
+    /// Client: the remembered (resumption) parameters rustls reported
+    /// before the server's EncryptedExtensions, so they are never taken
+    /// for the server's own.
+    remembered: Option<Vec<u8>>,
 }
 
 fn reassemblers(capacity: usize, max_ranges: usize) -> [CryptoReassembler; 3] {
@@ -350,6 +354,7 @@ impl QuicTls {
             early: EarlyData::None,
             zero_rtt_keys: KeyState::Pending,
             hs_read: false,
+            remembered: None,
         }
     }
 
@@ -746,11 +751,25 @@ impl QuicTls {
         // Before EncryptedExtensions a resuming client's rustls holds the
         // remembered parameters, not this server's.
         if self.side == Side::Client && !self.hs_read {
+            if self.remembered.is_none() {
+                self.remembered = self.conn.quic_transport_parameters().map(<[u8]>::to_vec);
+            }
             return Ok(());
         }
         let Some(bytes) = self.conn.quic_transport_parameters() else {
             return Ok(());
         };
+        // Handshake data reached rustls before EncryptedExtensions did
+        // (split or reordered CRYPTO): still the remembered list. A
+        // server's own list normally differs (its connection IDs); one
+        // that is byte-identical is taken once the handshake completes,
+        // when EncryptedExtensions has certainly been read.
+        if self.side == Side::Client
+            && self.conn.is_handshaking()
+            && self.remembered.as_deref() == Some(bytes)
+        {
+            return Ok(());
+        }
         let peer = match self.side {
             Side::Client => Side::Server,
             Side::Server => Side::Client,
@@ -814,6 +833,9 @@ impl QuicTls {
         let Some(remembered) = self.conn.quic_transport_parameters() else {
             return Ok(());
         };
+        if self.remembered.is_none() {
+            self.remembered = Some(remembered.to_vec());
+        }
         // A ticket from a server whose parameters no longer decode cannot
         // bound 0-RTT; send none (the handshake itself still resumes).
         let Ok(params) = TransportParameters::decode(remembered, Side::Server) else {

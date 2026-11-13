@@ -400,7 +400,10 @@ fn retry_validates_the_client_address() {
         server_setup(),
     );
     net.handshake(200);
-    assert_eq!(net.server.stats().retries_sent, 1);
+    // One Retry per token-less Initial datagram: two when a post-quantum
+    // key share splits the ClientHello. The client follows only the first.
+    let retries = net.server.stats().retries_sent;
+    assert!((1..=2).contains(&retries), "{retries}");
     assert_eq!(net.client.stats().retries_received, 1);
     assert_eq!(net.server.stats().tokens_accepted, 1);
     assert!(net.events[0].contains(&ConnectionEvent::Retried(net.c_conn)));
@@ -411,7 +414,7 @@ fn retry_validates_the_client_address() {
     assert!(net.client.stored_tokens().next().is_some());
     net.connect();
     net.handshake(200);
-    assert_eq!(net.server.stats().retries_sent, 1, "no second Retry");
+    assert_eq!(net.server.stats().retries_sent, retries, "no second Retry");
     assert_eq!(net.server.stats().tokens_accepted, 2);
     transfer(&mut net, 3, 5_000, 5_000, 400);
 }
@@ -807,24 +810,50 @@ fn rejected_zero_rtt_resets_streams_and_the_application_resends() {
 fn handshake_packets_before_their_keys_are_buffered() {
     let mut net = Net::new(12, 0, 0);
     net.deliver(0);
-    // The server's first datagram coalesces its Initial and a Handshake
-    // packet. Split, the Handshake packet arrives first: the client has no
-    // Handshake keys yet and holds it until the Initial installs them.
-    let (first, _) = net.server.tap_mut().out.remove(0);
+    // The server's first datagram with a Handshake packet coalesces it
+    // after its Initial (with a post-quantum ClientHello in two Initials,
+    // an ACK-only Initial may come first). Split, the Handshake packet
+    // arrives first: the client has no Handshake keys yet and holds it
+    // until the Initial installs them.
     let parser = HeaderParser::new(8).unwrap();
+    let coalesced = |d: &[u8]| match parser.parse(d) {
+        Ok(ParsedPacket::Protected(h)) => h.packet_end < d.len(),
+        _ => false,
+    };
+    let at = net
+        .server
+        .tap()
+        .out
+        .iter()
+        .position(|(d, _)| coalesced(d))
+        .expect("a coalesced datagram");
+    let now = net.now;
+    for (d, _) in net.server.tap_mut().out.drain(..at).collect::<Vec<_>>() {
+        Net::deliver_one(&mut net.client, &d, net.server_addr, now);
+    }
+    let (first, _) = net.server.tap_mut().out.remove(0);
     let ParsedPacket::Protected(h) = parser.parse(&first).unwrap() else {
         panic!("a protected packet");
     };
     assert_eq!(h.packet_type, PacketType::Initial);
     let (initial, handshake) = first.split_at(h.packet_end);
-    assert!(!handshake.is_empty(), "coalesced");
-    let now = net.now;
+    let received = net.client.stats().handshake_packets_received;
     Net::deliver_one(&mut net.client, handshake, net.server_addr, now);
     assert_eq!(net.client.stats().datagrams_buffered, 1);
     Net::deliver_one(&mut net.client, initial, net.server_addr, now);
+    // A post-quantum ServerHello can run on into the next Initial; the
+    // Handshake keys (and the replay) come with the rest of the flight.
+    let rest: Vec<_> = net.server.tap_mut().out.drain(..).collect();
+    for (d, _) in rest {
+        if net.client.stats().datagrams_replayed > 0 {
+            break;
+        }
+        Net::deliver_one(&mut net.client, &d, net.server_addr, now);
+    }
     let st = net.client.stats();
     assert_eq!(st.datagrams_replayed, 1, "{st:?}");
-    assert_eq!(st.handshake_packets_received, 2, "{st:?}");
+    assert_eq!(st.rx_dropped, 0, "{st:?}");
+    assert!(st.handshake_packets_received - received >= 2, "{st:?}");
     net.handshake(200);
     transfer(&mut net, 12, 2_000, 2_000, 200);
 }

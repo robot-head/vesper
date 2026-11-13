@@ -590,7 +590,10 @@ fn quinn_client_to_warp_server() {
 fn warp_client_follows_a_quinn_retry() {
     let (mut link, conn) = warp_client(LifecycleConfig::default(), true, 0);
     link.handshake();
-    assert_eq!(link.quinn.retries_sent, 1);
+    assert!(
+        (1..=2).contains(&link.quinn.retries_sent),
+        "one per Initial datagram"
+    );
     assert_eq!(link.warp.stats().retries_received, 1);
     assert!(link.warp_events.contains(&ConnectionEvent::Retried(conn)));
     let mut rng = Rng(3);
@@ -605,7 +608,10 @@ fn quinn_client_follows_a_warp_retry() {
     };
     let mut link = warp_server(retry, 0);
     link.handshake();
-    assert_eq!(link.warp.stats().retries_sent, 1);
+    assert!(
+        (1..=2).contains(&link.warp.stats().retries_sent),
+        "one per Initial datagram"
+    );
     assert_eq!(link.warp.stats().tokens_accepted, 1);
     let mut rng = Rng(4);
     quinn_client_exchange(&mut link, &rng.bytes(10_000), &rng.bytes(10_000));
@@ -862,7 +868,8 @@ fn warp_client_reuses_a_quinn_new_token() {
     let mut link = Link::new(warp, Quinn::new(Some(Arc::new(server)), true), 0);
     link.warp_conn = Some(first);
     link.handshake();
-    assert_eq!(link.quinn.retries_sent, 1);
+    let retries = link.quinn.retries_sent;
+    assert!((1..=2).contains(&retries), "one per Initial datagram");
     link.until("NEW_TOKEN from quinn", |l| {
         l.warp_events.contains(&ConnectionEvent::NewToken(first))
     });
@@ -878,7 +885,7 @@ fn warp_client_reuses_a_quinn_new_token() {
     link.warp_conn = Some(second);
     link.quinn.events.clear();
     link.handshake();
-    assert_eq!(link.quinn.retries_sent, 1, "no second Retry");
+    assert_eq!(link.quinn.retries_sent, retries, "no second Retry");
     let mut rng = Rng(9);
     warp_client_exchange(&mut link, second, &rng.bytes(5_000), &rng.bytes(5_000));
 }
@@ -909,7 +916,8 @@ fn quinn_client_reuses_a_warp_new_token() {
     let mut link = Link::new(warp, quinn, 0);
     link.base = base;
     link.handshake();
-    assert_eq!(link.warp.stats().retries_sent, 1);
+    let retries = link.warp.stats().retries_sent;
+    assert!((1..=2).contains(&retries), "one per Initial datagram");
     link.until("NEW_TOKEN sent", |l| l.warp.stats().tokens_issued == 1);
     for _ in 0..20 {
         link.step();
@@ -925,7 +933,7 @@ fn quinn_client_reuses_a_warp_new_token() {
     link.quinn.events.clear();
     link.warp_conn = None;
     link.handshake();
-    assert_eq!(link.warp.stats().retries_sent, 1, "no second Retry");
+    assert_eq!(link.warp.stats().retries_sent, retries, "no second Retry");
     assert_eq!(link.warp.stats().tokens_accepted, 2);
     let mut rng = Rng(10);
     quinn_client_exchange(&mut link, &rng.bytes(5_000), &rng.bytes(5_000));
@@ -962,6 +970,6 @@ fn quinn_client_gets_version_negotiation_from_warp() {
         link.quinn.lost(),
         Some(quinn_proto::ConnectionError::VersionMismatch)
     ));
-    assert_eq!(link.warp.stats().version_negotiations_sent, 1);
+    assert!((1..=2).contains(&link.warp.stats().version_negotiations_sent));
     assert_eq!(link.warp.stats().accepted, 0);
 }

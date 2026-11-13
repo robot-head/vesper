@@ -165,12 +165,34 @@ loss; the endpoint just no longer lets it stop sending entirely.
 The ignored `handshake_seed_sweep` in `handshake_endpoint.rs` now runs the
 40%/20% data phase too (previously handshake only). With 500 seeds
 (`SEEDS=500 cargo test --release -p vesper-warp --test handshake_endpoint
-handshake_seed_sweep -- --ignored`), 496 data phases complete and 4 end in
-an idle timeout. None stall. Each idle timeout was checked: at this loss
+handshake_seed_sweep -- --ignored`), 499 data phases complete and 1 ends in
+an idle timeout (4 before the handshake-burst change below). None stall.
+The idle timeouts were checked: at this loss
 rate a run of about seven lost PTO probe round trips (0.64⁷ ≈ 4%) backs
 off past the 30 s idle timeout, and the connection closes as RFC 9000
 §10.1 requires. The sweep accepts that outcome, but at most 5% of seeds,
 and fails on any other.
+
+### Post-quantum ClientHello (found in CI)
+
+The Windows and Bazel builds negotiate X25519MLKEM768 (rustls's
+`prefer-post-quantum`, enabled there by feature unification), so the
+ClientHello spans two Initial packets and the ServerHello two Initials.
+Three fixes followed, all tested locally by building with that feature:
+
+* A coalesced handshake datagram whose pacing slot is within 1 ms leaves
+  immediately (RFC 9002 §7.7 burst allowance; the pacing schedule still
+  advances), so the second ClientHello Initial is not held a poll interval.
+* `vesper-warp-tls`: a resuming client could take its remembered transport
+  parameters for the server's when Handshake CRYPTO reached rustls before
+  EncryptedExtensions, and close with TRANSPORT_PARAMETER_ERROR. The
+  remembered list is now recorded and never taken for the server's while the
+  handshake is still running.
+* A datagram held for its keys is no longer also counted in `rx_dropped`.
+
+A server answers each token-less Initial datagram with its own Retry (or
+VN), as quinn does too, so a split ClientHello can draw two; the client
+follows the first and ignores the rest (RFC 9000 §17.2.5.2).
 
 ## Interop with quinn-proto
 
