@@ -221,6 +221,13 @@ derivation, host integrity or the unfinished implementation proof closure.
 
 ## Integration and validation
 
+Actual control-baseline inventory resolves 6261 regular artifact paths across
+1584 modules, totaling 1,463,175,880 bytes. Set `artifact_files` DEFAULT to8192,
+preserving HARD8192 and the 2GiB default/4GiB HARD byte caps. The initial4096
+default cannot accommodate this mandatory measured envelope. Counts remain
+observations, never golden acceptance values; every actual file remains bound.
+This measured refinement was published on #300 before the default changed.
+
 The private acceptance seam exposes production protocol DTOs and a closed
 `process::testing::probe(Command, ProbeKind, timeout_ms, &Limits)`. Its result
 reports the observed error, actual child reap/reader/watcher joins, and retained
