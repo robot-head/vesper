@@ -1299,7 +1299,7 @@ impl<'a> Machine<'a> {
                         .iter()
                         .find(|c| c.name.is(&["Eq"]))
                         .ok_or_else(|| coverage_error("Eq prerequisite missing"))?;
-                    if !self.covered(eq.id) {
+                    if eq.form != 4 || eq.skip != 0 || !self.covered(eq.id) {
                         return Err(coverage_error("quotient before Eq"));
                     }
                 }
