@@ -858,8 +858,15 @@ pub mod testing {
             kind,
             ProbeKind::ShortWrites | ProbeKind::QueuePressure | ProbeKind::QueueCancel
         );
+        let mut parser_limits = limits.clone();
+        parser_limits.inventory_bytes = limits
+            .inventory_bytes
+            .checked_sub(transport_bytes(limits)?)
+            .filter(|n| *n > 0)
+            .ok_or_else(|| error(ErrorKind::OutputLimit, "probe parser reservation"))?;
         let token = "0".repeat(32);
-        let mut machine = super::super::protocol::Machine::new(3, 2, &token, limits, &[], None)?;
+        let mut machine =
+            super::super::protocol::Machine::new(3, 2, &token, &parser_limits, &[], None)?;
         let mut frames = 0u64;
         let outcome = run(command, timeout_ms, limits, Output::Framed, |bytes, _| {
             frames += 1;
