@@ -9,7 +9,7 @@ lane builds and tests through Bazel; see [bazel.md](bazel.md).
 | `Test all targets` (Linux x86_64) | BuildBuddy Workflows, remote execution for builds | rustfmt, Clippy, workspace tests, Lean |
 | `Native and acceptance scripts` (Linux x86_64) | BuildBuddy Workflows | AArch64 objects under QEMU, host native executables, acceptance scripts |
 | macOS (AArch64) | `macos-latest` (Apple silicon) | rustfmt, Clippy, workspace tests, Lean, host native executables, acceptance scripts |
-| Windows (x86_64 MSVC) | `windows-latest` | rustfmt, Clippy, workspace tests, Lean, acceptance scripts; native executable linking skipped |
+| Windows (x86_64 MSVC) | `windows-latest` | Cargo (Bazel cannot link MSVC on Windows yet): Clippy, workspace tests, Lean models; native executable linking skipped |
 
 The platform lanes check out sources with `core.autocrlf=false` so that span and
 snapshot tests see the same bytes as Linux.

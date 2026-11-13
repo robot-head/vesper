@@ -23,10 +23,12 @@ bazel build //:bin/vesper && bazel-bin/bin/vesper --help
 bazel run @rules_rust//:rustfmt                   # reformat every Rust target
 ```
 
-On Windows, the hermetic toolchain uses the MSVC runtime and asks you to accept
-the [Visual Studio license](https://visualstudio.microsoft.com/license-terms):
-if you may use it, add `common --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1`
-to `user.bazelrc`. CI does this on GitHub's Windows runners.
+Native Windows builds do not link yet: the hermetic toolchain links MSVC
+binaries through `clang-cl`, and rustc passes it `link.exe`-style arguments
+(rules_rs 0.2.4 with llvm 0.8.26). Use Cargo on Windows for now; CI does the
+same. Bazel first asks you to accept the
+[Visual Studio license](https://visualstudio.microsoft.com/license-terms) with
+`common --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1` in `user.bazelrc`.
 
 Tests that run Lean use `VESPER_LEAN` when it is set; give it the real binary
 (`VESPER_LEAN=$(elan which lean) bazel test //...`), because Bazel runs tests
@@ -101,7 +103,7 @@ directory, so library code must not keep `env!("CARGO_MANIFEST_DIR")` or
 | Where | What |
 | --- | --- |
 | [BuildBuddy Workflows](https://www.buildbuddy.io/docs/workflows-config) (`buildbuddy.yaml`) | Linux: `bazel test //...` (all tests, Clippy, rustfmt), Lean models, AArch64 QEMU checks, native executables, every acceptance script |
-| GitHub Actions (`.github/workflows/platforms.yml`) | macOS and Windows: `bazel test //...`, Lean models, acceptance scripts. BuildBuddy's hosted workflows are Linux-only |
+| GitHub Actions (`.github/workflows/platforms.yml`) | macOS: `bazel test //...`, Lean models, acceptance scripts. Windows: `cargo clippy`, `cargo test`, Lean models (see above). BuildBuddy's hosted workflows are Linux-only |
 
 On BuildBuddy, compile actions run on remote executors (`--config=rbe_build`)
 and tests run in the workflow VM, which has Lean and QEMU installed. BuildBuddy

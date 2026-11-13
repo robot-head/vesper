@@ -37,8 +37,6 @@ jobs:
         include:
           - name: macOS (AArch64)
             os: macos-latest
-          - name: Windows (x86_64 MSVC)
-            os: windows-latest
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -89,3 +87,37 @@ jobs:
           scripts/test-recovery.sh
           scripts/test-source-tooling.sh
           scripts/test-source-macros.sh
+
+  # Cargo, not Bazel: the hermetic toolchain links MSVC binaries through
+  # clang-cl, whose argument syntax rustc's MSVC linker flavor does not speak
+  # (rules_rs 0.2.4, llvm 0.8.26). See docs/bazel.md.
+  windows:
+    name: Windows (x86_64 MSVC)
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Lean toolchain manager
+        shell: pwsh
+        run: |
+          curl.exe -O --location https://raw.githubusercontent.com/leanprover/elan/master/elan-init.ps1
+          ./elan-init.ps1 -NoPrompt $true -DefaultToolchain none
+          Remove-Item elan-init.ps1
+          "$env:USERPROFILE\.elan\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - run: lean --version
+      - run: cargo clippy --workspace --locked --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
+        env:
+          VESPER_LEAN: lean
+      - run: scripts/ci/check-lean-models.sh
