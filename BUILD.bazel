@@ -14,6 +14,15 @@ vesper_crate(
         "//crates/vesper-grammar:files",
         "//crates/vesper-loom-trust:files",
     ],
+    # Six tests run serially, each kernel-replaying Lean's Std; on macOS
+    # runners the target needs well over 15 minutes, so it runs on Linux
+    # (BuildBuddy) only.
+    test_target_compatible_with = {
+        "test/proof_audit_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+    },
 )
 # Narrow slices of the root package for members that read them.
 filegroup(

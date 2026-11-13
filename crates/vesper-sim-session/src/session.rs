@@ -1166,12 +1166,25 @@ impl<'w> Session<'w> {
                         .map(|w| w.held_by(&name))
                         .unwrap_or_default();
                     if !held.is_empty() {
+                        // The finished task can never consume its frames: drop
+                        // their owners as the source program lost them, so the
+                        // software NIC's audit reports the leak.
+                        let warp = self.model.as_ref().and_then(|m| m.warp.as_ref());
+                        let audit = warp
+                            .map(|w| {
+                                let audit = w.leak_task(&name);
+                                w.commit();
+                                audit
+                            })
+                            .and_then(Result::err)
+                            .map(|e| format!("{e:?}"))
+                            .unwrap_or_default();
                         return Err(Fault::stall(
                             token,
                             SessionError::Conservation {
                                 task: name,
                                 message: format!(
-                                    "the task finished while still holding UMEM frames {held:?}"
+                                    "the task finished while still holding UMEM frames {held:?}: {audit}"
                                 ),
                             },
                         ));
