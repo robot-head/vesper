@@ -15,6 +15,7 @@ use egg::{
     Applier, AstSize, ENodeOrVar, Extractor, Id, Language, PatternAst, RecExpr, Rewrite,
     RewriteScheduler, Runner, SearchMatches, StopReason, Subst, Symbol, Var,
 };
+use std::mem::size_of;
 use std::sync::{Arc, Mutex};
 
 const RAW_NODES: usize = 2048;
@@ -42,7 +43,7 @@ pub(super) struct RewriteProposal {
 pub(super) enum RewriteOutcome {
     Barrier,
     Unchanged,
-    Candidate(RewriteProposal),
+    Candidate(Box<RewriteProposal>),
 }
 
 fn checked_add(a: usize, b: usize) -> Result<usize, WitnessError> {
@@ -127,10 +128,10 @@ impl Builder {
         if self.terms.len() >= self.limits.max_terms {
             return Err(WitnessError::Limit);
         }
-        if let Some(children) = children(node) {
-            if children.iter().any(|id| *id as usize >= self.terms.len()) {
-                return Err(WitnessError::NonTopologicalTerm);
-            }
+        if let Some(children) = children(node)
+            && children.iter().any(|id| *id as usize >= self.terms.len())
+        {
+            return Err(WitnessError::NonTopologicalTerm);
         }
         let id = TermId::try_from(self.terms.len()).map_err(|_| WitnessError::Limit)?;
         grow(&mut self.terms, self.limits.max_terms, budget)?;
@@ -649,7 +650,7 @@ impl Applier<Math, ()> for RecordingApplier {
             return Vec::new();
         }
         let mut bindings = [Id::from(0); 3];
-        for index in 0..arity {
+        for (index, binding) in bindings.iter_mut().enumerate().take(arity) {
             let Some(id) = substitution.get(self.variables[index]) else {
                 state.fail(WitnessError::InvalidSubstitution);
                 return Vec::new();
@@ -658,7 +659,7 @@ impl Applier<Math, ()> for RecordingApplier {
                 state.fail(WitnessError::InvalidSubstitution);
                 return Vec::new();
             }
-            bindings[index] = *id;
+            *binding = *id;
         }
         let Capture {
             budget, records, ..
@@ -688,14 +689,14 @@ impl Applier<Math, ()> for RecordingApplier {
         let result = self
             .inner
             .apply_one(graph, class, substitution, pattern, name);
-        if !result.is_empty() {
-            if let Ok(mut state) = self.capture.lock() {
-                state.records.push(Record {
-                    rule: self.rule,
-                    bindings,
-                    len: arity as u8,
-                });
-            }
+        if !result.is_empty()
+            && let Ok(mut state) = self.capture.lock()
+        {
+            state.records.push(Record {
+                rule: self.rule,
+                bindings,
+                len: arity as u8,
+            });
         }
         result
     }
@@ -996,10 +997,10 @@ fn encode_graph(
         if !reachable[index] {
             continue;
         }
-        if let TermNode::Const(n) = terms[index].node {
-            if i64::try_from(n).is_err() {
-                return Ok(None);
-            }
+        if let TermNode::Const(n) = terms[index].node
+            && i64::try_from(n).is_err()
+        {
+            return Ok(None);
         }
         if let Some(children) = children(terms[index].node) {
             for child in children {
@@ -1230,11 +1231,12 @@ pub(super) fn propose_rewrite(
         output,
         conclusion,
     };
-    Ok(RewriteOutcome::Candidate(RewriteProposal {
+    budget.metadata(size_of::<RewriteProposal>())?;
+    Ok(RewriteOutcome::Candidate(Box::new(RewriteProposal {
         candidate,
         certificate,
         budget,
-    }))
+    })))
 }
 
 #[cfg(test)]
@@ -1268,7 +1270,7 @@ mod tests {
         (expression, checked.expression_types)
     }
 
-    fn proposal(source: &Expr, types: &TypeMap) -> RewriteProposal {
+    fn proposal(source: &Expr, types: &TypeMap) -> Box<RewriteProposal> {
         let outcome =
             propose_rewrite(source, types, WitnessLimits::default()).expect("bounded producer");
         let RewriteOutcome::Candidate(mut proposal) = outcome else {
