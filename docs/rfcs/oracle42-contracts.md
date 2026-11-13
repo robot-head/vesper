@@ -435,9 +435,13 @@ check original, optimize an actual cloned module with actual TypeMap, recheck
 optimized module; use the two resulting checked Worlds. For each World execute
 two Runtime settings and two jit_with_options settings. Runtime::optimize is
 set explicitly and fuel set100000. Each JIT is a real compile/finalize/execute,
-not an evaluator result relabeled native. Strictly decode actual runtime Value:
-Tuple length2, Bool tag, UInt matching8/32/64 for unsigned or Int for i64; value
-fits kind. Overflow carries same-kind zero, otherwise it is a decode failure.
+not an evaluator result relabeled native. Decode against the checked return
+type: Tuple length2 and Bool tag. Native results require UInt matching8/32/64
+for unsigned or Int for i64. The evaluator may retain an unsuffixed Int inside
+an unsigned aggregate; accept it only when its unchanged mathematical value
+fits the declared kind. Never mask, truncate, reinterpret negative Int as
+unsigned, or accept a mismatched explicit UInt width. Overflow must carry
+numeric zero under that same typed interpretation, otherwise decoding fails.
 Backend errors, unexpected tuple layout, timeout, panic or fuel exhaustion are
 harness failures; never map arbitrary errors to overflow.
 
@@ -486,6 +490,11 @@ path for worker/fault-peer spawn and executable hashing. Do not canonicalize a
 bare name against cwd or substitute an unrelated PATH fallback after failure.
 Hash that resolved binary's actual bytes incrementally with a bounded read
 buffer (at most64KiB), recording worker_blake3; never load the binary wholesale.
+Tool launchers are different: preserve their invocation path/basename for
+`lean --version`, `lean --print-prefix`, and `rustc --version`. Canonicalizing a
+rustc symlink to rustup changes dispatch and reports the wrong tool. After the
+Lean launcher resolves its pinned prefix, use the actual prefix binary for
+compilation/execution. Worker/fault-peer canonicalization above is unchanged.
 Private `--worker` is exclusive with public options. Unknown/duplicate/malformed
 options fail nonzero. Successful stdout is serialized RunReport JSON; failure
 stdout is serialized RunFailure JSON with exact top-level fields error,
@@ -684,10 +693,11 @@ and total artifact contents obey artifact_bytes. Output JSON is capped64KiB.
 Top-level case/call/answer coverage counts exclude shrink activity; shrink_calls
 records that separately. Terminal Lean counters are checked against the sum of
 normal corpus and shrink traffic, including any explicit invalid probes only
-when running dedicated protocol tests. Transcript hashes cover actual LEAN
-wire traffic in order, including READY/BYE and shrink frames, excluding Rust
+when running dedicated protocol tests. Transcript hashes cover confirmed
+complete LEAN frames in order, including READY/BYE and shrink frames, excluding Rust
 worker IPC. They are independent of worker scheduling; corpus hash covers
-original cases in committed ID order.
+original cases in committed ID order. On failed I/O, partial/unconfirmed frame
+prefixes are excluded; failed reports do not claim a complete raw-byte trace.
 
 Numeric counters are u64 checked before increment; per-run upper counts are
 derived from100000+fixed negatives+64 shrink attempts and lexical sequence cap.
@@ -704,8 +714,8 @@ selector u16LE and arity u8. Scope maps to the wire input/local tags; intrinsic 
 It excludes case ID/intent. The incremental corpus digest hashes domain
 `vesper.oracle42.corpus\0`, schema1 u16LE, suite valid-count u64LE, seed u64LE,
 then each original case's id u64LE, intent u8 (valid0/negative1), and32-byte
-semantic fingerprint in case order. Requests/responses hash exact LEAN framed
-bytes in wire order, including READY/BYE and shrink traffic; they exclude Rust
+semantic fingerprint in case order. Requests/responses hash exact confirmed,
+complete LEAN framed bytes in wire order, including READY/BYE and shrink traffic; they exclude Rust
 worker IPC. Model/driver hash exact copied bytes. These are inspection associations,
 not kernel certificates. Report records hashes even for an incomplete run when
 available, with exact observed counts. Eight backend outcomes are not eight
