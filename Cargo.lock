@@ -4096,6 +4096,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-chrono"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "serde_json",
+ "vesper-ffi",
+ "vesper-simpulse",
+]
+
+[[package]]
 name = "vesper-core"
 version = "0.1.0"
 dependencies = [
