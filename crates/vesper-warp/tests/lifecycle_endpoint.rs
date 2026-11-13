@@ -843,7 +843,7 @@ fn handshake_packets_before_their_keys_are_buffered() {
     Net::deliver_one(&mut net.client, initial, net.server_addr, now);
     // A post-quantum ServerHello can run on into the next Initial; the
     // Handshake keys (and the replay) come with the rest of the flight.
-    let rest: Vec<_> = net.server.tap_mut().out.drain(..).collect();
+    let rest = std::mem::take(&mut net.server.tap_mut().out);
     for (d, _) in rest {
         if net.client.stats().datagrams_replayed > 0 {
             break;
