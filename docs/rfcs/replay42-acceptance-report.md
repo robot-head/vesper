@@ -66,9 +66,9 @@ by the coordinator against the integrated real model and exporter:
 The final focused rerun validates the combined final source and the added
 missing-object negative. The earlier broad regression is evidence for its
 stated source revision; it is not relabeled as a full-package rerun of the
-later revision. The coordinator also reported the final formatting check
-passed. Final strict Clippy was still running when this report was updated,
-so no final Clippy result is claimed here.
+later revision. Final all-target package Clippy with warnings denied passed
+on `ed70d8d` in 19.82 seconds (`/tmp/replay42-root-final-clippy.log`). The
+coordinator reported final formatting and diff checks passed as well.
 
 Two fixture corrections preceded the passing runs: an unsupported Unicode
 identifier was replaced with an admitted ASCII identifier while retaining a
