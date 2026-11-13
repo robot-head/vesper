@@ -366,7 +366,7 @@ impl KvPool {
         }
         self.append_with(sequence, position, |out, plane| {
             let source = if plane == 0 { key } else { value };
-            for (chunk, v) in out.chunks_exact_mut(4).zip(source) {
+            for (chunk, v) in out.as_chunks_mut::<4>().0.iter_mut().zip(source) {
                 chunk.copy_from_slice(&v.to_le_bytes());
             }
         })

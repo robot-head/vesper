@@ -211,8 +211,10 @@ impl Matrix {
                 let row_bytes =
                     &bytes[row * (cols / BLOCK) * Q8_0_BYTES..][..(cols / BLOCK) * Q8_0_BYTES];
                 for (block, out) in row_bytes
-                    .chunks_exact(Q8_0_BYTES)
-                    .zip(out.chunks_exact_mut(BLOCK))
+                    .as_chunks::<Q8_0_BYTES>()
+                    .0
+                    .iter()
+                    .zip(out.as_chunks_mut::<BLOCK>().0.iter_mut())
                 {
                     dequantize_q8_0_block(block, out);
                 }
@@ -221,8 +223,10 @@ impl Matrix {
                 let row_bytes =
                     &bytes[row * (cols / BLOCK) * Q4_0_BYTES..][..(cols / BLOCK) * Q4_0_BYTES];
                 for (block, out) in row_bytes
-                    .chunks_exact(Q4_0_BYTES)
-                    .zip(out.chunks_exact_mut(BLOCK))
+                    .as_chunks::<Q4_0_BYTES>()
+                    .0
+                    .iter()
+                    .zip(out.as_chunks_mut::<BLOCK>().0.iter_mut())
                 {
                     dequantize_q4_0_block(block, out);
                 }
@@ -256,8 +260,10 @@ impl Matrix {
                 let blocks = cols / BLOCK;
                 let row_bytes = &bytes[row * blocks * Q8_0_BYTES..(row + 1) * blocks * Q8_0_BYTES];
                 for (block, x) in row_bytes
-                    .chunks_exact(Q8_0_BYTES)
-                    .zip(x.chunks_exact(BLOCK))
+                    .as_chunks::<Q8_0_BYTES>()
+                    .0
+                    .iter()
+                    .zip(x.as_chunks::<BLOCK>().0.iter())
                 {
                     let d = decode_fp16(u16::from_le_bytes([block[0], block[1]]));
                     for (q, x) in block[2..].iter().zip(x) {
@@ -269,8 +275,10 @@ impl Matrix {
                 let blocks = cols / BLOCK;
                 let row_bytes = &bytes[row * blocks * Q4_0_BYTES..(row + 1) * blocks * Q4_0_BYTES];
                 for (block, x) in row_bytes
-                    .chunks_exact(Q4_0_BYTES)
-                    .zip(x.chunks_exact(BLOCK))
+                    .as_chunks::<Q4_0_BYTES>()
+                    .0
+                    .iter()
+                    .zip(x.as_chunks::<BLOCK>().0.iter())
                 {
                     let d = decode_fp16(u16::from_le_bytes([block[0], block[1]]));
                     for (i, x) in x.iter().enumerate() {
@@ -315,7 +323,7 @@ fn check_rows(data: &[f32], cols: usize) -> Result<(), Error> {
 pub fn quantize_q8_0(data: &[f32], cols: usize) -> Result<Vec<u8>, Error> {
     check_rows(data, cols)?;
     let mut out = Vec::with_capacity(data.len() / BLOCK * Q8_0_BYTES);
-    for block in data.chunks_exact(BLOCK) {
+    for block in data.as_chunks::<BLOCK>().0.iter() {
         let amax = block.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         let d = amax / 127.0;
         let id = if d != 0.0 { 1.0 / d } else { 0.0 };
@@ -330,7 +338,7 @@ pub fn quantize_q8_0(data: &[f32], cols: usize) -> Result<Vec<u8>, Error> {
 pub fn quantize_q4_0(data: &[f32], cols: usize) -> Result<Vec<u8>, Error> {
     check_rows(data, cols)?;
     let mut out = Vec::with_capacity(data.len() / BLOCK * Q4_0_BYTES);
-    for block in data.chunks_exact(BLOCK) {
+    for block in data.as_chunks::<BLOCK>().0.iter() {
         let mut amax = 0.0f32;
         let mut max = 0.0f32;
         for &v in block {

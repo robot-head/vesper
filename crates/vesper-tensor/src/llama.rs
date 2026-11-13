@@ -102,7 +102,7 @@ impl<'a> Reader<'a> {
         let mut out = Vec::new();
         out.try_reserve_exact(n)
             .map_err(|_| Error::Limit("allocation"))?;
-        for b in bytes.chunks_exact(4) {
+        for b in bytes.as_chunks::<4>().0.iter() {
             let v = f32::from_le_bytes([b[0], b[1], b[2], b[3]]);
             if !v.is_finite() {
                 return Err(Error::NonFinite);
@@ -346,10 +346,10 @@ impl Model {
             match pool.format() {
                 KvFormat::F32 => pool.append_f32(sequence, position, &s.k, &s.v),
                 KvFormat::Bf16 => {
-                    for (dst, src) in s.k16.chunks_exact_mut(2).zip(&s.k) {
+                    for (dst, src) in s.k16.as_chunks_mut::<2>().0.iter_mut().zip(&s.k) {
                         dst.copy_from_slice(&encode_bf16(*src).to_le_bytes());
                     }
-                    for (dst, src) in s.v16.chunks_exact_mut(2).zip(&s.v) {
+                    for (dst, src) in s.v16.as_chunks_mut::<2>().0.iter_mut().zip(&s.v) {
                         dst.copy_from_slice(&encode_bf16(*src).to_le_bytes());
                     }
                     let step = |bytes| crate::kv::Bf16Step {
