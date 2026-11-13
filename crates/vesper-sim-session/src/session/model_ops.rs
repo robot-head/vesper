@@ -122,7 +122,37 @@ fn warp_error(task: &str, error: WarpError) -> SessionError {
 }
 
 impl<'w> Session<'w> {
+    /// One model operation. The Warp NICs are shared by every copy of the
+    /// model state, so a step that fails is rolled back on them explicitly
+    /// (the rest of the copy is simply dropped).
     pub(super) fn model_op(
+        &mut self,
+        index: usize,
+        bound: &BoundOperation,
+        arguments: &Json,
+    ) -> Result<ModelStep, SessionError> {
+        let result = self.model_op_step(index, bound, arguments);
+        self.settle_warp(result.is_ok());
+        result
+    }
+
+    /// A model-internal timer task fired; see [`Self::model_op`].
+    pub(super) fn fire(&mut self, internal: &Internal) -> Result<(), SessionError> {
+        let result = self.fire_step(internal);
+        self.settle_warp(result.is_ok());
+        result
+    }
+
+    fn settle_warp(&self, committed: bool) {
+        if let Some(warp) = self.model.as_ref().and_then(|m| m.warp.as_ref()) {
+            match committed {
+                true => warp.commit(),
+                false => warp.rollback(),
+            }
+        }
+    }
+
+    fn model_op_step(
         &mut self,
         index: usize,
         bound: &BoundOperation,
@@ -464,6 +494,7 @@ impl<'w> Session<'w> {
         }
         self.check_model(&events)?;
         self.model = Some(model);
+        self.settle_warp(true);
         self.commit_model(events);
         if uses_request {
             self.next_request += 1;
@@ -471,8 +502,7 @@ impl<'w> Session<'w> {
         Ok(step)
     }
 
-    /// A model-internal timer task fired.
-    pub(super) fn fire(&mut self, internal: &Internal) -> Result<(), SessionError> {
+    fn fire_step(&mut self, internal: &Internal) -> Result<(), SessionError> {
         let now = self.sim.now_ns();
         let plan = self
             .plan
@@ -814,6 +844,7 @@ impl<'w> Session<'w> {
         self.check_model(&events)?;
         // Commit the model step, then apply its SimPulse side effects.
         self.model = Some(model);
+        self.settle_warp(true);
         self.commit_model(events);
         for (request, outcome, json) in deliveries {
             self.deliveries.insert(request, (outcome, json));
