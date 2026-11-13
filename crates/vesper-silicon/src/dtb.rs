@@ -33,6 +33,7 @@
 use std::collections::BTreeMap;
 
 use crate::Arch;
+pub use crate::dma::DmaCoherence;
 use crate::frames::{FrameAllocator, FrameError, PAGE_BYTES};
 use crate::irq::{Cpu, IsrCtx};
 use crate::ledger::Ledger;
@@ -742,20 +743,6 @@ pub struct Hart {
     /// `riscv,isa`, when present.
     pub isa: Option<String>,
     pub cbom_block_bytes: Option<u32>,
-}
-
-/// How a device's DMA interacts with the CPU caches.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DmaCoherence {
-    Coherent,
-    /// RISC-V non-coherent DMA maintained with Zicbom `cbo.*` instructions
-    /// on blocks of this size.
-    Zicbom {
-        block_bytes: u32,
-    },
-    /// Arm non-coherent DMA (`DC CVAC` / `DC IVAC`); the line size comes
-    /// from `CTR_EL0`, which the tree does not state.
-    ArmNonCoherent,
 }
 
 /// What the Silicon models take from a devicetree.

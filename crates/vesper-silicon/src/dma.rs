@@ -12,9 +12,23 @@
 //! * AArch64 (non-coherent): `DC CVAC` per cache line + `DSB SY` before the
 //!   device reads or writes the buffer; after a device write, `DC IVAC` per
 //!   line + `DSB SY` before the CPU reads it.
-//! * RISC-V: `FENCE IORW, IORW` at both points. Cache-block management
-//!   (Zicbom) is not modelled; this is the ordering the design names.
+//! * RISC-V, coherent DMA: `FENCE IORW, IORW` at both points.
+//! * RISC-V, non-coherent DMA ([`DmaCoherence::Zicbom`], selected from the
+//!   devicetree by [`crate::dtb::Platform::dma_coherence`]): `CBO.CLEAN` per
+//!   cache block + `FENCE IORW, IORW` before the device touches the buffer;
+//!   after a device write, `FENCE IORW, IORW` + `CBO.INVAL` per block before
+//!   the CPU reads (the order Linux's `arch_sync_dma_for_{device,cpu}` uses
+//!   on RISC-V). A receive buffer that does not cover whole cache blocks is
+//!   rejected: invalidating a shared block would discard the CPU's writes to
+//!   the other bytes of that block ([`NonCoherentCache`] demonstrates it).
 //! * x86_64: none; DMA is cache-coherent.
+//!
+//! [`NonCoherentCache`] is a software model of one write-back cache in front
+//! of memory that a bus master accesses directly. It executes the
+//! cache-maintenance instructions above, so tests can check that a sequence
+//! makes CPU and device views agree and that leaving any operation out
+//! exposes stale data. It models data, not timing or ordering: fences are
+//! no-ops in it.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -115,6 +129,35 @@ pub enum DmaError {
     NotComplete,
     /// The transfer was submitted to a different engine.
     ForeignTransfer,
+    /// A non-coherent receive buffer that does not start and end on cache
+    /// block boundaries.
+    PartialCacheBlock {
+        phys: u64,
+        len: u32,
+        block: u32,
+    },
+    /// The coherence mode does not exist on the engine's architecture.
+    CoherenceMismatch {
+        arch: Arch,
+        coherence: DmaCoherence,
+    },
+    /// An access outside a [`NonCoherentCache`]'s memory window.
+    OutOfWindow {
+        addr: u64,
+    },
+}
+
+/// How a device's DMA interacts with the CPU caches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmaCoherence {
+    /// Hardware keeps caches coherent; only ordering barriers are needed.
+    Coherent,
+    /// RISC-V non-coherent DMA maintained with Zicbom `cbo.*` instructions
+    /// on blocks of this size (`riscv,cbom-block-size`).
+    Zicbom { block_bytes: u32 },
+    /// Arm non-coherent DMA (`DC CVAC` / `DC IVAC`); the line size comes
+    /// from `CTR_EL0`, which a devicetree does not state.
+    ArmNonCoherent,
 }
 
 static NEXT_ENGINE: AtomicU64 = AtomicU64::new(1);
@@ -130,6 +173,13 @@ pub enum BarrierInst {
     DsbSy,
     /// RISC-V `FENCE IORW, IORW`.
     FenceIorwIorw,
+    /// RISC-V Zicbom `CBO.CLEAN`: write the block back if dirty, keep it.
+    CboClean(u64),
+    /// RISC-V Zicbom `CBO.FLUSH`: write back if dirty, then invalidate.
+    CboFlush(u64),
+    /// RISC-V Zicbom `CBO.INVAL`: discard the block without writing back
+    /// (with `menvcfg.CBIE = 11`; `01` executes it as a flush).
+    CboInval(u64),
 }
 
 impl std::fmt::Display for BarrierInst {
@@ -139,6 +189,9 @@ impl std::fmt::Display for BarrierInst {
             BarrierInst::DcIvac(a) => write!(f, "dc ivac, {a:#x}"),
             BarrierInst::DsbSy => f.write_str("dsb sy"),
             BarrierInst::FenceIorwIorw => f.write_str("fence iorw, iorw"),
+            BarrierInst::CboClean(a) => write!(f, "cbo.clean ({a:#x})"),
+            BarrierInst::CboFlush(a) => write!(f, "cbo.flush ({a:#x})"),
+            BarrierInst::CboInval(a) => write!(f, "cbo.inval ({a:#x})"),
         }
     }
 }
@@ -184,6 +237,56 @@ pub fn dma_barriers(
                 a = a.checked_add(line).ok_or(DmaError::RegionOverflow)?;
             }
             out.push(BarrierInst::DsbSy);
+            out
+        }
+    })
+}
+
+/// Block-aligned addresses of every `block`-byte cache block that overlaps
+/// `[phys, phys + len)`.
+fn blocks(phys: u64, len: u32, block: u32) -> Result<Vec<u64>, DmaError> {
+    if block == 0 || !block.is_power_of_two() {
+        return Err(DmaError::BadLineSize(block));
+    }
+    if len == 0 {
+        return Err(DmaError::EmptyBuffer);
+    }
+    let end = phys
+        .checked_add(u64::from(len))
+        .ok_or(DmaError::RegionOverflow)?;
+    let block = u64::from(block);
+    let mut a = phys & !(block - 1);
+    let mut out = Vec::new();
+    while a < end {
+        out.push(a);
+        a = a.checked_add(block).ok_or(DmaError::RegionOverflow)?;
+    }
+    Ok(out)
+}
+
+/// The RISC-V Zicbom sequence for non-coherent DMA on `[phys, phys + len)`
+/// with `block`-byte cache blocks. After a device write the range must cover
+/// whole blocks ([`DmaError::PartialCacheBlock`] otherwise).
+pub fn zicbom_barriers(
+    phase: DmaPhase,
+    phys: u64,
+    len: u32,
+    block: u32,
+) -> Result<Vec<BarrierInst>, DmaError> {
+    let bs = blocks(phys, len, block)?;
+    Ok(match phase {
+        DmaPhase::BeforeDevice => {
+            let mut out: Vec<_> = bs.into_iter().map(BarrierInst::CboClean).collect();
+            out.push(BarrierInst::FenceIorwIorw);
+            out
+        }
+        DmaPhase::AfterDeviceWrite => {
+            let mask = u64::from(block) - 1;
+            if phys & mask != 0 || u64::from(len) & mask != 0 {
+                return Err(DmaError::PartialCacheBlock { phys, len, block });
+            }
+            let mut out = vec![BarrierInst::FenceIorwIorw];
+            out.extend(bs.into_iter().map(BarrierInst::CboInval));
             out
         }
     })
@@ -238,6 +341,7 @@ pub struct DmaEngine {
     id: u64,
     arch: Arch,
     line: u32,
+    coherence: DmaCoherence,
     channels: Vec<Channel>,
     ring: Vec<[u8; 16]>,
     /// Slot owned by an in-flight (or completed, unpolled) transfer.
@@ -255,6 +359,30 @@ impl DmaEngine {
         line: u32,
         ledger: &Ledger,
     ) -> Result<Self, DmaError> {
+        let coherence = match arch {
+            Arch::Aarch64 => DmaCoherence::ArmNonCoherent,
+            Arch::X86_64 | Arch::Riscv64 => DmaCoherence::Coherent,
+        };
+        Self::with_coherence(arch, coherence, channels, ring_slots, line, ledger)
+    }
+
+    /// An engine for a device with the given coherence (for example from
+    /// [`crate::dtb::Platform::dma_coherence`]). `line` is the Arm cache-line
+    /// size for [`DmaCoherence::ArmNonCoherent`]; for
+    /// [`DmaCoherence::Zicbom`] the block size comes from the variant.
+    pub fn with_coherence(
+        arch: Arch,
+        coherence: DmaCoherence,
+        channels: u8,
+        ring_slots: u16,
+        line: u32,
+        ledger: &Ledger,
+    ) -> Result<Self, DmaError> {
+        let line = match (arch, coherence) {
+            (Arch::Riscv64, DmaCoherence::Zicbom { block_bytes }) => block_bytes,
+            (Arch::Aarch64, DmaCoherence::ArmNonCoherent) | (_, DmaCoherence::Coherent) => line,
+            _ => return Err(DmaError::CoherenceMismatch { arch, coherence }),
+        };
         if line == 0 || !line.is_power_of_two() {
             return Err(DmaError::BadLineSize(line));
         }
@@ -263,6 +391,7 @@ impl DmaEngine {
             id: NEXT_ENGINE.fetch_add(1, Ordering::Relaxed),
             arch,
             line,
+            coherence,
             channels: vec![Channel::Idle; channels as usize],
             ring: vec![[0; 16]; slots],
             slot_busy: vec![false; slots],
@@ -275,6 +404,25 @@ impl DmaEngine {
     /// Barrier instructions executed so far, in order.
     pub fn barriers(&self) -> &[BarrierInst] {
         &self.barriers
+    }
+
+    pub fn coherence(&self) -> DmaCoherence {
+        self.coherence
+    }
+
+    fn sequence(&self, phase: DmaPhase, phys: u64, len: u32) -> Result<Vec<BarrierInst>, DmaError> {
+        match self.coherence {
+            DmaCoherence::Zicbom { block_bytes } => zicbom_barriers(phase, phys, len, block_bytes),
+            DmaCoherence::ArmNonCoherent => dma_barriers(self.arch, phase, phys, len, self.line),
+            DmaCoherence::Coherent => {
+                let seq = dma_barriers(self.arch, phase, phys, len, self.line)?;
+                // Coherent Arm DMA needs ordering but no cache maintenance.
+                Ok(seq
+                    .into_iter()
+                    .filter(|b| !matches!(b, BarrierInst::DcCvac(_) | BarrierInst::DcIvac(_)))
+                    .collect())
+            }
+        }
     }
 
     pub fn descriptor(&self, slot: u16) -> Option<SgDmaDescWire> {
@@ -318,10 +466,17 @@ impl DmaEngine {
             Some(_) => return Err((buf, DmaError::ChannelBusy(channel))),
         }
         let (phys, len) = buf.dma_region();
-        let seq = match dma_barriers(self.arch, DmaPhase::BeforeDevice, phys, len, self.line) {
+        let seq = match self.sequence(DmaPhase::BeforeDevice, phys, len) {
             Ok(s) => s,
             Err(e) => return Err((buf, e)),
         };
+        // Check the post-receive sequence now, so a buffer that cannot be
+        // invalidated safely is refused before the device owns it.
+        if direction == Direction::FromDevice
+            && let Err(e) = self.sequence(DmaPhase::AfterDeviceWrite, phys, len)
+        {
+            return Err((buf, e));
+        }
         let n = self.ring.len();
         let Some(slot) = (0..n)
             .map(|k| (self.next_slot as usize + k) % n)
@@ -403,10 +558,8 @@ impl DmaEngine {
         self.slot_busy[xfer.desc_slot as usize] = false;
         if xfer.direction == Direction::FromDevice {
             let (phys, len) = xfer.owned_buf.dma_region();
-            // Region was validated at submit; recomputing cannot fail.
-            if let Ok(seq) =
-                dma_barriers(self.arch, DmaPhase::AfterDeviceWrite, phys, len, self.line)
-            {
+            // Validated at submit; recomputing cannot fail.
+            if let Ok(seq) = self.sequence(DmaPhase::AfterDeviceWrite, phys, len) {
                 self.barriers.extend(seq);
             }
         }
@@ -416,5 +569,144 @@ impl DmaEngine {
         } = xfer;
         token.discharge();
         Ok((result, owned_buf))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Line {
+    data: Vec<u8>,
+    dirty: bool,
+}
+
+/// A write-back cache with `block`-byte lines in front of a memory window
+/// `[base, base + size)` that a bus master reads and writes directly.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NonCoherentCache {
+    base: u64,
+    block: u64,
+    memory: Vec<u8>,
+    lines: std::collections::BTreeMap<u64, Line>,
+}
+
+impl NonCoherentCache {
+    pub fn new(base: u64, size: usize, block: u32) -> Result<Self, DmaError> {
+        if block == 0 || !block.is_power_of_two() || base % u64::from(block) != 0 {
+            return Err(DmaError::BadLineSize(block));
+        }
+        base.checked_add(size as u64)
+            .ok_or(DmaError::RegionOverflow)?;
+        Ok(Self {
+            base,
+            block: u64::from(block),
+            memory: vec![0; size],
+            lines: Default::default(),
+        })
+    }
+
+    fn index(&self, addr: u64) -> Result<usize, DmaError> {
+        addr.checked_sub(self.base)
+            .and_then(|o| usize::try_from(o).ok())
+            .filter(|&o| o < self.memory.len())
+            .ok_or(DmaError::OutOfWindow { addr })
+    }
+
+    fn line_of(&mut self, addr: u64) -> Result<(&mut Line, usize), DmaError> {
+        self.index(addr)?;
+        let tag = addr & !(self.block - 1);
+        let start = self.index(tag)?;
+        let end = (start + self.block as usize).min(self.memory.len());
+        let fill = self.memory[start..end].to_vec();
+        let line = self.lines.entry(tag).or_insert(Line {
+            data: fill,
+            dirty: false,
+        });
+        Ok((line, (addr - tag) as usize))
+    }
+
+    /// A CPU store (allocates the line, marks it dirty).
+    pub fn cpu_write(&mut self, addr: u64, bytes: &[u8]) -> Result<(), DmaError> {
+        for (k, &b) in bytes.iter().enumerate() {
+            let (line, off) = self.line_of(addr + k as u64)?;
+            line.data[off] = b;
+            line.dirty = true;
+        }
+        Ok(())
+    }
+
+    /// A CPU load (allocates the line from memory on a miss).
+    pub fn cpu_read(&mut self, addr: u64, len: usize) -> Result<Vec<u8>, DmaError> {
+        (0..len)
+            .map(|k| {
+                let (line, off) = self.line_of(addr + k as u64)?;
+                Ok(line.data[off])
+            })
+            .collect()
+    }
+
+    /// The bus master reads memory directly, bypassing the cache.
+    pub fn device_read(&self, addr: u64, len: usize) -> Result<Vec<u8>, DmaError> {
+        let i = self.index(addr)?;
+        let j = i.checked_add(len).filter(|&j| j <= self.memory.len());
+        let j = j.ok_or(DmaError::OutOfWindow { addr })?;
+        Ok(self.memory[i..j].to_vec())
+    }
+
+    /// The bus master writes memory directly; cached copies become stale.
+    pub fn device_write(&mut self, addr: u64, bytes: &[u8]) -> Result<(), DmaError> {
+        let i = self.index(addr)?;
+        let j = i
+            .checked_add(bytes.len())
+            .filter(|&j| j <= self.memory.len());
+        let j = j.ok_or(DmaError::OutOfWindow { addr })?;
+        self.memory[i..j].copy_from_slice(bytes);
+        Ok(())
+    }
+
+    fn writeback(&mut self, tag: u64) {
+        if let Some(line) = self.lines.get_mut(&tag)
+            && line.dirty
+        {
+            let start = (tag - self.base) as usize;
+            self.memory[start..start + line.data.len()].copy_from_slice(&line.data);
+            line.dirty = false;
+        }
+    }
+
+    /// Executes one barrier or cache-maintenance instruction. Fences and
+    /// `DSB` order accesses, which this data-only model does not track.
+    pub fn execute(&mut self, inst: &BarrierInst) -> Result<(), DmaError> {
+        let mask = !(self.block - 1);
+        let tag = |a: u64| a & mask;
+        match *inst {
+            BarrierInst::CboClean(a) | BarrierInst::DcCvac(a) => {
+                self.index(a)?;
+                self.writeback(tag(a));
+            }
+            BarrierInst::CboFlush(a) => {
+                self.index(a)?;
+                self.writeback(tag(a));
+                self.lines.remove(&tag(a));
+            }
+            BarrierInst::CboInval(a) | BarrierInst::DcIvac(a) => {
+                self.index(a)?;
+                self.lines.remove(&tag(a));
+            }
+            BarrierInst::DsbSy | BarrierInst::FenceIorwIorw => {}
+        }
+        Ok(())
+    }
+
+    pub fn execute_all(&mut self, insts: &[BarrierInst]) -> Result<(), DmaError> {
+        insts.iter().try_for_each(|i| self.execute(i))
+    }
+
+    /// Evicts every line (writing dirty ones back), as cache pressure may at
+    /// any time.
+    pub fn evict_all(&mut self) {
+        let tags: Vec<u64> = self.lines.keys().copied().collect();
+        for t in tags {
+            self.writeback(t);
+        }
+        self.lines.clear();
     }
 }
