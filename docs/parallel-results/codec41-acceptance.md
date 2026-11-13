@@ -64,6 +64,23 @@ retains its canonical-byte and complete transactional-output assertions. A
 final-source rerun will be recorded after the coordinator supplies the reviewed
 follow-up implementation.
 
+## Final reviewed-source rerun
+
+After the coordinator's final integration/review, this lane imported only codec
+follow-ups c11a3ed and574ad85 after the original da7dc01. Their dependency-only
+copies here are669a82d and9a2da4b; they are not acceptance-owned commits. Parser
+source remains1ec2df6. Root's combined integration is11a1058; the extra parser
+unit-test commit18fe4a3 is covered there rather than copied into this lane.
+
+Against that final reviewed implementation, the unchanged
+`cargo test --locked -p vesper-grammar --test codec_acceptance` again passes all
+13tests with zero failures/ignores. The actual `--example codec` run again passes
+its independent byte/value/output-suffix assertions and prints the same13byte
+batch and changed-value300->ac02 result. No production code, expectation, limit or
+oracle changed for the rerun. The earlier broad/strict results remain attributed
+to their tested source heads; the coordinator separately performs the final
+combined suite/Clippy checks.
+
 No Lean model or conditional/echo theorem was added. Source macros, recursive PEG,
 SIMD, constant-time/cryptographic/source-linearity and Rust-refinement proof,
 timing/RSS and other-platform execution remain outside this lane's evidence.
