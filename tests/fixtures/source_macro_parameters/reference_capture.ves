@@ -1,0 +1,3 @@
+macro own() -> expr { quote { { let value = 42; value } } }
+fn forward(in value: i64) -> i64 { own!() }
+fn main() -> i64 { forward(0) }

@@ -35,7 +35,7 @@ pub use identity::{ExecutionIdentity, IdentityMismatch, SEMANTICS, executable_sh
 pub use model::{
     CrashChoice, DurableLog, DurableState, FailOp, FailureSpec, Fault, LinkSpec, LogSpec,
     LostState, MODEL_SEMANTICS, ModelEvent, ModelLimits, ModelSnapshot, ModelSpec, NetworkSpec,
-    ProcessSpec, StaleSource, TimedFault, WARP_MODEL_SEMANTICS,
+    ProcessSpec, RETIRED_WARP_MODEL_SEMANTICS, StaleSource, TimedFault, WARP_MODEL_SEMANTICS,
 };
 pub use program::{CheckedProgram, SourceRejected};
 pub use scenario::{

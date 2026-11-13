@@ -13,5 +13,7 @@ vesper-warp-bbr = { path = "../vesper-warp-bbr" }
 vesper-warp-crypto = { path = "../vesper-warp-crypto" }
 vesper-warp-shard = { path = "../vesper-warp-shard" }
 vesper-warp-tcp = { path = "../vesper-warp-tcp" }
+# Wave-five integration A (issue #135): the TLS 1.3 handshake.
+vesper-warp-tls = { path = "../vesper-warp-tls" }
 vesper-warp-umem = { path = "../vesper-warp-umem" }
 vesper-warp-wheel = { path = "../vesper-warp-wheel" }

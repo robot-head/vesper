@@ -25,6 +25,7 @@ class SnapshotTests(unittest.TestCase):
             shutil.copyfile(ROOT / "docs" / name, self.root / "docs" / name)
         self.path = self.root / "docs/specification-source.json"
         self.metadata = json.loads(self.path.read_text(encoding="utf-8"))
+        self.latest = self.metadata["numbered_section_count"]
 
     def check(self):
         self.path.write_text(json.dumps(self.metadata, ensure_ascii=False), encoding="utf-8")
@@ -41,20 +42,22 @@ class SnapshotTests(unittest.TestCase):
 
     def test_missing_numbered_section_fails(self):
         del self.metadata["sections"]["37"]
-        with self.assertRaisesRegex(ValueError, "sections 1 through 41"):
+        with self.assertRaisesRegex(ValueError, f"sections 1 through {self.latest}"):
             self.check()
 
     def test_latest_section_cannot_be_omitted_or_substituted(self):
-        original = self.metadata["sections"].pop("41")
-        with self.assertRaisesRegex(ValueError, "sections 1 through 41"):
+        latest = str(self.latest)
+        previous = str(self.latest - 1)
+        original = self.metadata["sections"].pop(latest)
+        with self.assertRaisesRegex(ValueError, f"sections 1 through {self.latest}"):
             self.check()
-        self.metadata["sections"]["41"] = dict(self.metadata["sections"]["40"])
+        self.metadata["sections"][latest] = dict(self.metadata["sections"][previous])
         with self.assertRaisesRegex(ValueError, "numbered heading identity"):
             self.check()
-        self.metadata["sections"]["41"] = original
+        self.metadata["sections"][latest] = original
 
     def test_section_count_is_explicit_bounded_integer(self):
-        for count in [None, True, False, "41", 0, -1, 100, 41.0]:
+        for count in [None, True, False, str(self.latest), 0, -1, 100, float(self.latest)]:
             with self.subTest(count=count):
                 self.metadata["numbered_section_count"] = count
                 with self.assertRaisesRegex(ValueError, "invalid numbered section count"):
@@ -100,7 +103,7 @@ class SnapshotTests(unittest.TestCase):
         del self.metadata["appendices"]["A"]
         with self.assertRaisesRegex(ValueError, "appendix inventory"):
             self.check()
-        self.metadata["appendices"]["A"] = dict(appendix, title=self.metadata["sections"]["41"]["title"])
+        self.metadata["appendices"]["A"] = dict(appendix, title=self.metadata["sections"][str(self.latest)]["title"])
         with self.assertRaisesRegex(ValueError, "appendix heading identity"):
             self.check()
         self.metadata["appendices"]["A"] = dict(appendix, sha256="0" * 64)

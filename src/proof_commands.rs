@@ -174,9 +174,9 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     }
 }
 
-struct Stage(PathBuf);
+pub(crate) struct Stage(pub(crate) PathBuf);
 impl Stage {
-    fn new() -> Result<Self, String> {
+    pub(crate) fn new() -> Result<Self, String> {
         static NEXT: AtomicU64 = AtomicU64::new(0);
         for _ in 0..64 {
             let path = env::temp_dir().join(format!(
@@ -299,7 +299,7 @@ fn capture(mut reader: impl Read) -> std::io::Result<(Vec<u8>, bool)> {
     Ok((saved, truncated))
 }
 
-fn execute(command: &mut Command, timeout: Duration) -> Result<Output, String> {
+pub(crate) fn execute(command: &mut Command, timeout: Duration) -> Result<Output, String> {
     let mut child = command
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -426,14 +426,14 @@ fn digest_file(path: &Path, relative: &Path) -> Result<FileDigest, String> {
     })
 }
 
-fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, String> {
-    let launcher = options
-        .lean
-        .clone()
-        .or_else(|| env::var("VESPER_LEAN").ok())
-        .unwrap_or_else(|| "lean".into());
+pub(crate) struct LeanToolchain {
+    pub(crate) prefix: PathBuf,
+    pub(crate) binary: PathBuf,
+    pub(crate) version: String,
+}
+pub(crate) fn lean_toolchain(launcher: &str) -> Result<LeanToolchain, String> {
     let prefix = execute(
-        Command::new(&launcher).arg("--print-prefix"),
+        Command::new(launcher).arg("--print-prefix"),
         Duration::from_secs(30),
     )?;
     let prefix = PathBuf::from(
@@ -457,6 +457,54 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
     if !version.contains("version 4.24.0,") {
         return Err(format!("proof-audit requires Lean 4.24.0; found {version}"));
     }
+    Ok(LeanToolchain {
+        prefix,
+        binary,
+        version,
+    })
+}
+
+/// Reuse the normal kernel replay with an empty axiom policy. The caller owns
+/// freshly generated artifacts; source strings and reported flags never approve.
+pub(crate) fn audit_generated(
+    root: &Path,
+    module: &str,
+    theorems: &[&str],
+    lean: &str,
+    timeout: u64,
+) -> Result<serde_json::Value, String> {
+    if !name_valid(module)
+        || theorems.is_empty()
+        || theorems.len() > 128
+        || theorems.iter().any(|name| !name_valid(name))
+        || !(1..=300).contains(&timeout)
+    {
+        return Err("invalid generated proof audit request".into());
+    }
+    let options = Options {
+        theorems: theorems.iter().map(|name| (*name).to_owned()).collect(),
+        lean: Some(lean.to_owned()),
+        timeout: Some(timeout),
+        ..Options::default()
+    };
+    let report = audit(&options, root, module)?;
+    if !report.accepted || !report.kernel_replayed || !report.forbidden_axioms.is_empty() {
+        return Err("generated theorem failed the empty-axiom kernel audit".into());
+    }
+    serde_json::to_value(report).map_err(|error| error.to_string())
+}
+
+fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, String> {
+    let launcher = options
+        .lean
+        .clone()
+        .or_else(|| env::var("VESPER_LEAN").ok())
+        .unwrap_or_else(|| "lean".into());
+    let LeanToolchain {
+        prefix,
+        binary,
+        version,
+    } = lean_toolchain(&launcher)?;
     let stage = Stage::new()?;
     let snapshot = stage.0.join("artifacts");
     fs::create_dir(&snapshot).map_err(|e| e.to_string())?;

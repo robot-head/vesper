@@ -6,4 +6,6 @@ description = "Bounded lossless-CST canonical source formatting"
 license = "MIT OR Apache-2.0"
 
 [dependencies]
+blake3 = "1.8"
+vesper-lean-syntax = { path = "../vesper-lean-syntax" }
 vesper-syntax = { path = "../vesper-syntax" }

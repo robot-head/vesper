@@ -422,9 +422,10 @@ struct Body {
     resolved: ResolvedBody,
     lowered: LoweredBody,
 }
-struct Edit {
+struct Edit<'a> {
     span: Span,
     body: Option<usize>,
+    parameter: Option<&'a lower::ParameterRename>,
 }
 fn valid_span(text: &str, span: &Span) -> bool {
     span.start <= span.end && text.get(span.clone()).is_some()
@@ -457,10 +458,15 @@ fn render(
     limits: CompileLimits,
     work: &mut Work,
 ) -> Result<(Arc<str>, Vec<SourceMapSegment>), CompileFailure> {
+    let parameter_count = bodies.iter().try_fold(0usize, |n, body| {
+        n.checked_add(body.lowered.parameter_renames().len())
+            .ok_or_else(|| failure(Stage::Resource, "parameter edit count overflow"))
+    })?;
     let edit_count = source
         .definitions()
         .len()
         .checked_add(bodies.len())
+        .and_then(|n| n.checked_add(parameter_count))
         .ok_or_else(|| failure(Stage::Resource, "source edit count overflow"))?;
     work.charge(mul(edit_count, std::mem::size_of::<Edit>())?)?;
     let mut edits = Vec::new();
@@ -470,15 +476,39 @@ fn render(
     edits.extend(source.definitions().iter().map(|d| Edit {
         span: d.span.clone(),
         body: None,
+        parameter: None,
     }));
     for (index, body) in bodies.iter().enumerate() {
+        let function = source
+            .function(body.function)
+            .map_err(|e| stage_error(Stage::Lower, e))?;
+        let parameters = source
+            .parameter_name_spans(body.function)
+            .map_err(|e| stage_error(Stage::Lower, e))?;
+        if body.lowered.function_id() != Some(body.function)
+            || body.lowered.parameter_renames().len() != function.header.params.len()
+            || parameters.len() != function.header.params.len()
+        {
+            return Err(failure(Stage::Lower, "lowered parameter function mismatch"));
+        }
+        for (ordinal, rename) in body.lowered.parameter_renames().iter().enumerate() {
+            work.charge(1)?;
+            if rename.ordinal() != ordinal || rename.original() != &parameters[ordinal] {
+                return Err(failure(
+                    Stage::Lower,
+                    "lowered parameter declaration mismatch",
+                ));
+            }
+            edits.push(Edit {
+                span: rename.original().clone(),
+                body: None,
+                parameter: Some(rename),
+            });
+        }
         edits.push(Edit {
-            span: source
-                .function(body.function)
-                .map_err(|e| stage_error(Stage::Lower, e))?
-                .body_span
-                .clone(),
+            span: function.body_span.clone(),
             body: Some(index),
+            parameter: None,
         });
     }
     edits.sort_by_key(|e| e.span.start);
@@ -492,7 +522,12 @@ fn render(
         end = edit.span.end;
         length = length
             .checked_sub(edit.span.len())
-            .and_then(|n| n.checked_add(edit.body.map_or(0, |i| bodies[i].lowered.source().len())))
+            .and_then(|n| {
+                n.checked_add(edit.body.map_or_else(
+                    || edit.parameter.map_or(0, |p| p.name().len()),
+                    |i| bodies[i].lowered.source().len(),
+                ))
+            })
             .ok_or_else(|| failure(Stage::Resource, "expanded source size overflow"))?;
     }
     if length > limits.max_expanded_bytes {
@@ -506,6 +541,7 @@ fn render(
         edits
             .len()
             .checked_add(1)
+            .and_then(|n| n.checked_add(parameter_count))
             .ok_or_else(|| failure(Stage::Resource, "source map count overflow"))?,
         |n, b| {
             n.checked_add(b.lowered.segments().len())
@@ -569,6 +605,10 @@ fn render(
                     name,
                 ));
             }
+        } else if let Some(parameter) = edit.parameter {
+            let at = output.len();
+            output.push_str(parameter.name());
+            raw_maps.push((at..output.len(), edit.span.clone(), MapKind::Source, None));
         }
         cursor = edit.span.end;
     }
@@ -777,12 +817,7 @@ pub fn expand_source(
             replacements.push((invocation.span.clone(), expression));
         }
         let resolved = host
-            .resolve_expr_body(
-                &imported,
-                function.body_span.clone(),
-                replacements,
-                &mut typed,
-            )
+            .resolve_expr_function_body(&imported, &parsed, function.id, replacements, &mut typed)
             .map_err(|e| typed_error(Stage::Resolve, e))?;
         let lowered = lower::lower_body(
             &resolved,
@@ -864,9 +899,11 @@ pub fn expand_source(
             ));
         }
     }
-    let derived = authority::derive(
+    let derived = authority::derive_expanded(
         &checked,
         &bindings,
+        &parsed,
+        &bodies,
         AuthorityLimits {
             max_source_bytes: limits.max_expanded_bytes,
             max_metadata_bytes: limits.max_metadata_bytes,

@@ -56,6 +56,20 @@ impl<'a> Document<'a> {
         }
         self.nodes.get(id.index).ok_or(Error::InvalidDoc)
     }
+    /// Project this exact arena, preserving expanded shared-node occurrences.
+    /// This proves a document model only; it does not establish source checking.
+    pub fn proof_model(
+        &self,
+        root: DocId,
+        limits: crate::proof_model::ProofLimits,
+    ) -> Result<crate::proof_model::DocumentModel, crate::proof_model::ProofError> {
+        crate::proof_model::project(self, root, limits)
+    }
+    pub(crate) fn proof_node(&self, id: DocId) -> Result<&Doc<'a>, crate::proof_model::ProofError> {
+        self.node(id)
+            .map(|node| &node.doc)
+            .map_err(|_| crate::proof_model::ProofError::InvalidDocument)
+    }
     pub fn push(&mut self, doc: Doc<'a>) -> Result<DocId, Error> {
         self.work.charge(1)?;
         if self.nodes.len() >= self.limits.max_doc_nodes {

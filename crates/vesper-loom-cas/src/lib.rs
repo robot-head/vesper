@@ -51,6 +51,7 @@ mod error;
 mod fsutil;
 mod id;
 mod store;
+pub mod transfer;
 mod tree;
 
 pub use derivation::{DerivationInputs, DerivationKey, InputSchema};

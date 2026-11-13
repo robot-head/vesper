@@ -1,0 +1,36 @@
+vesper.migrate/1 report for C header `legacy_codec.h`
+
+functions lifted: 7
+  legacy_parse_batch_header_into [vsys]
+    assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+    assumed: `out` + `out_len` lifted to a nocapture unique slice: a C header cannot show that the callee does not retain the pointer
+  legacy_crc32c [vsys]
+    assumed: `data` + `len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+  legacy_encode [vsys]
+    assumed: `src` + `src_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+    assumed: `dst` + `dst_len` lifted to a nocapture unique slice: a C header cannot show that the callee does not retain the pointer
+  legacy_status [vsys]
+  legacy_version [vsys]
+  legacy_reset [vsys]
+  legacy_crc_table [vsys]
+
+wire layouts: 2
+  batch_header: 24 bytes, align 8
+  decoder_stats: 32 bytes, align 8
+
+refusals: 13
+  enum codec_status (ImplementationDefinedCarrier): a C enum's ABI carrier is implementation-defined; pass it through a fixed-width typedef
+  fn legacy_fill (Aggregate): parameter `stats` points to struct `decoder_stats`; .vsys models only scalar pointees
+  fn legacy_flush (UnsupportedItem): `()` or K&R parameters declare no prototype in C; write `(void)`
+  fn legacy_inline_helper (UnsupportedItem): static functions have no linkable symbol
+  fn legacy_last_status (ImplementationDefinedCarrier): returns a C `_Bool`/enum
+  fn legacy_log (Variadic): variadic functions have no fixed ABI signature
+  fn legacy_offset (PlatformDependentWidth): return type: `long` is 32-bit on Windows and 64-bit on LP64 targets; use a fixed-width integer
+  fn legacy_parse_batch_header (PointerParameter): parameter `out_crc` is a single-element pointer not followed by a size_t length; Bridge .vsys accepts pointer parameters only as nocapture CSlice
+  fn legacy_ratio (Floating): return type: floating point carrier
+  fn legacy_register (FunctionPointer): parameter `callback`: function pointers and callbacks are unsupported
+  global legacy_global_counter (UnsupportedItem): global variables are not part of a Bridge sys-spec
+  struct padded_record (WireLayout): wire layout padded_record.value: offset 1 requires alignment 4; add explicit ZeroPad[3]
+  union legacy_word (Union): unions overlay fields and have no FieldTree or wire layout
+
+limits: finite differential shadowing is not an equivalence proof; MPK/PKRU isolation was not exercised.
