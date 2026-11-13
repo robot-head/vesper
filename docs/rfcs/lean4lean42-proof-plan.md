@@ -184,9 +184,133 @@ The existing arithmetic oracle is executable differential evidence, not a
 substitute for any of these proof or provenance gates.
 
 The next reviewable result is a pinned, reviewed 4.24 candidate patch plus an
-actual build/rejection/coverage report. Until that exists, the unchanged
-historical CLI is unsuitable for an external-check acceptance claim. A later
-pilot may honestly say that specified Vesper model/artifact declarations were
-externally rechecked with enumerated assumptions; a claim of a fully verified
-checker requires separate closure of the implementation proof holes and its
-remaining trust assumptions.
+actual build/rejection/coverage report. The coordinator's prototype below is
+progress toward that result; the unchanged historical CLI remains unsuitable.
+An audited pilot may honestly say that specified Vesper model/artifact
+declarations were externally rechecked with enumerated assumptions; a claim of
+a fully verified checker requires separate closure of the implementation proof
+holes and its remaining trust assumptions.
+
+## Coordinator prototype: observed evidence, not a completed security audit
+
+The coordinator supplied `/tmp/lean4lean42-port6.diff` and the actual
+`/tmp/lean4lean42-model-check-47qniaf5/results-port6.json`. This lane inspected
+those files without running the checker. The recorded patch SHA-256 is
+`17d11684630a4c7d7aa0981235449313df0e9ec34980041d4c55e201fda4b555`.
+
+| Coordinator-executed target/control | Observed result |
+|---|---|
+| Fresh `RewriteWitness` | Exit 0; 84,702 declarations; 173.966 seconds |
+| Fresh `ArithmeticOracle` | Exit 0; 86,270 declarations; 172.626 seconds |
+| `UniverseControls`, coordinator-reported | Valid FloatSpec-like datatype accepted by both kernels; undersized universe rejected by the candidate's universe check |
+| Exact `DeclFVar` controls, coordinator-reported | Three cache-primed invalid declarations rejected; three closed controls accepted |
+
+The patch retains primitive checks and universe checks. Besides the three value
+guards, it imports the actual fresh target with `importAll`, adapts the private
+`mainModule?` API explicitly, applies the exact
+[`d7a52a83bea3e93968672b89ba88af4372b08f23`](https://github.com/digama0/lean4lean/commit/d7a52a83bea3e93968672b89ba88af4372b08f23)
+Church-encoded primitive reflection repair, and applies
+[`bc9a736be9c318209992e91ef6a218864b817dcf`](https://github.com/digama0/lean4lean/commit/bc9a736be9c318209992e91ef6a218864b817dcf)'s
+constant comparison correction in `NormLevel.le`. These observed successes do
+not exercise arbitrary malicious declarations, close Verify's proof holes, or
+waive the reachable paths below.
+
+## Disposition of later fixes against the actual 4.24 prototype
+
+“Required” below means a reviewed targeted backport and an actual discriminating
+control before presenting the candidate as a hardened external checker. It is
+not a request to transplant entire later-version commits. All newly recommended
+tests in this table are **unexecuted by this lane**. Native 4.24 is a comparison
+baseline, not a negative-result authority: it can contain the same later-fixed
+bug, so a hardened candidate may intentionally reject a declaration it accepts.
+
+The main adversarial source is
+[`KernelHardening.lean` at `5518bf8`](https://github.com/digama0/lean4lean/blob/5518bf83860bab48e8d53f1f447cdd6c50c30c3f/Lean4Lean/Tests/KernelHardening.lean),
+alongside `Tests.NestedInductive`, `Tests.DeclFVar`, and `Tests.Environment`.
+Those tests assemble actual `Declaration`/`Expr` values; elaborator rejection
+must not replace the candidate check.
+
+Full upstream revisions for the principal outstanding changes are
+`d7e70a5f09d514db2a2b3a052f3a9d2dde153da6`,
+`997e2985e513793c3dcc2e5ffead983f6b7d1cba`,
+`5518bf83860bab48e8d53f1f447cdd6c50c30c3f`,
+`cbb70bc3500060f22098c838f92e56bd363834e6`,
+`80d3dbef8b8130e49cedbdc4a22fdf0217222ee3`, and
+`4172c0fadafa54a8cb39787843f262883bb20e5b`.
+
+| Fix/source | Reachability in `4faf` plus port6 | Disposition and focused control |
+|---|---|---|
+| `779c51f`: safe-definition/theorem/opaque value closure | Present in port6; all three original entry points were exposed | Retain the applied guards and six actual coordinator controls. Keep error-path assertions; a cold unknown FVar is not the cache exploit. |
+| `d7e70a5`: dropped nested-inductive parameters (#14577) | Missing. Port6 abstracts `aux2nested` early and never checks the discarded applications after reconstruction | **Required coupled backport.** Store applications open over the saved parameter context, abstract on restoration, then check them against the final environment. Test `NestedInductive.treeDecl` accepted, `badDecl` containing `Bad0 Bool.true` rejected, and `nestedIllTypedParams`' double projection rejected specifically as invalid projection. Adding a check to the old abstracted representation alone regresses valid nested declarations into loose-bound-variable errors. |
+| `5518bf8`: original inductive/constructor closure (#14607) | Missing before nested elimination. Existing `checkConstructors` checks transformed constructor types, so elimination can hide the original bad term | **Required.** Check original inductive and constructor types for MVars/FVars before rewriting. Use `nestedBadDecl` with the bad nested argument `.fvar l4lBadFVar` and `.mvar l4lBadMVar`, plus a closed nested counterpart. Assert the intended free-variable/metavariable error. |
+| `5518bf8`: constructor `_nested` auxiliary reservation (#14616) | Missing. A constructor may name an auxiliary actually generated by another constructor in the same block | **Required constructor scan.** Use `nestedAuxRealDecl`: one constructor nests `List I`, another names the generated `_nested.List_1`. Require the reserved-prefix error and accept an ordinary nested block. A nonexistent auxiliary only tests unknown-constant rejection and does not discriminate the hole. Include the `.proj`-name scan branch separately. |
+| `997e298` plus `5518bf8`: normalized Prop recognition, projection/eta restrictions, recursor universes (#14613/#14615) | Missing. Port6 uses syntactic `.prop` equality and `.isZero` in these paths | **Required coordinated fix.** Use `isAlwaysZero` where identifying a proposition permits an operation; use `isNeverZero` where ruling out Prop permits data projection or structure eta. Also update constructor-result, large-eliminator and K-target classification sites. Admit `imaxDataDecl` at `Sort (imax 1 0)`, inspect its recursor to ensure no large-elimination level, then reject `imaxLeakDecl` projecting Bool from a proof. Add valid Bool data projection and ordinary Prop controls. Do not substitute `!isAlwaysZero` for the conservative receiver restriction at uncertain universes. |
+| `5518bf8`: mutual-block universe lists and duplicate names (#14608/#14632) | Missing. Port6 checks headers under one `M.run` with the first member's level parameters and inserts all names only afterward | **Required small guards.** Test `L4LMutA [u]` and `L4LMutB []` with the same `u`-using type/body: reject for unequal universe parameter lists. Test duplicate `L4LMutDup` members `Nat := 0` and `Bool := true`: reject duplicate name before overwriting. Accept two distinct, equally parameterized members. Existing per-header duplicate-universe checks do not enforce either block invariant. |
+| `5518bf8`: four quotient name checks | Missing. `addQuot` can reach direct insertion with `quotInit = false` | **Required small guards.** With a valid Eq environment before quotient initialization, preoccupy each of `Quot`, `Quot.mk`, `Quot.lift`, `Quot.ind` independently and require duplicate-name rejection without replacing it. Accept a clean initialization and the already-initialized idempotent call. `checkEqType` does not establish these fresh-name conditions. |
+| `cbb70bc`: reject non-safe primitive definitions | Missing from port6's `checkPrimitiveDef` | **Required safety guard/test.** Clone the genuine Nat.add `DefinitionVal` with `.partial`; it must not be recognized as a logical primitive. Retain a genuine safe positive. For this older API `.ok false` from the recognizer is appropriate; whole-declaration admission must then reject the reserved primitive name. Do not require the current refactored recognizer's precise error protocol. |
+| `80d3dbe`: primitive checking after body typing and strengthened reflection/recursion checks | The large later refactor is not present; port6 still invokes the recognizer while evaluating `checkConstantVal`'s primitive argument, before body admission | **Review/test obligation, not a blind 649-line backport.** The current ordering explicitly ensures defeq consumers see already typed terms, and the new reflection check validates proposition/boolean/evidence argument types together. Build a minimal equivalent admission-order fix or justify the older preconditions; test wrong primitive type/body, ill-typed reflection evidence and altered Nat.mod/div/gcd/bitwise equations alongside their genuine definitions. No concrete false-acceptance exploit for this older recognizer is claimed from source inspection alone. |
+| `4172c0f`: level canonicity, subsumption and per-sublevel comparison | Still missing after `bc9a736`. Port6's `NormLevel.le` requires one right node to dominate a bundled constant and variables | **Known reachable incompleteness; fix or report unsupported input.** Test `imax 2 v <= max 2 v` and the valid declaration `inductive Foo.{v} (b : Sort v) : Sort (max 2 v) | mk : (Type → b) → Foo b`. Upstream documents rejection by the old algorithm. Include `imax u (max u v)` versus `max u v` equality and bounded independent semantic level comparisons. This is not evidence of a False-acceptance exploit, and does not invalidate the completed fixed-model replays. |
+| `29d9243`, later level fast paths/reification changes | Different revision-specific algorithms and Std APIs | Do not replace the 4.24 algorithm with current Std operations merely because their names match. Preserve/check the corrected port semantics, document incomplete cases, and separately review any later algorithm transplant and its soundness assumptions. Later successful proof builds do not automatically prove the old code. |
+| `d41b637`: remove `reduceNat`'s `hasFVar` filter | Port6 retains the filter; upstream says native Lean removed it in 4.19 | Compatibility/reduction control rather than a demonstrated soundness fix. Test a local variable erased by a reducible lambda before primitive arithmetic; do not relax arithmetic checks to obtain a positive result. False rejection or fuel exhaustion remains incomplete, never success. |
+| `5b1385a`: replay Eq before Quot | Explicit Eq replay is absent in port6; existing successful runs happened to find a workable dependency order | Reviewed small ordering repair recommended for deterministic replay. Build a fresh inventory that reaches quotient information before Eq and require actual Eq replay plus successful quotient initialization. Do not skip `checkEqType` or synthesize quotient initialization metadata. |
+| `4b60e53`: move K-target computation earlier | Same read-only flag computation on `stats`/`indTypes`; upstream says no observable change | Phase alignment, not an additional demonstrated security patch. The normalized-Prop K-target fix above is material; this later movement alone is not. Retain recursor flag/level controls. |
+| `67f63b0`: erase primitive domain metadata for exported text | Addresses lean4export dropping borrow-marker `mdata`; port6 uses actual 4.24 `.olean` data | Later transport compatibility, not required just to replay the measured `.olean` models. If a text-export path is introduced, test both metadata-preserving and metadata-erased genuine primitives and reject a wrong semantic type; do not silently broaden all primitive comparisons. |
+
+### Checks that are not automatically required backports
+
+The `5518bf8` commit deliberately distinguishes reachable bugs from redundant
+defenses. The selected older port still needs its own invariant review; the
+upstream explanation is not a completed proof of this port.
+
+* **Projection structure-name rechecks during reduction/equality (#14631).**
+  Port6's `inferProj` already requires the supplied name to equal the actual
+  receiver type's head. Reduction/defeq thereafter compare the projection index.
+  Keep that ordering invariant; test a wrong structure name through `checkType`
+  (reject), an exact valid projection (accept/reduce), and index `2^32` on a
+  one-field structure (remain stuck under whnf and reject typing, never truncate
+  to field zero). The source uses Nat indices. Do not demand that arbitrary
+  *unchecked* projection terms satisfy a typed-defeq contract. Add the redundant
+  name comparison only if a reachable checked path violates this invariant.
+* **Scanning an inductive's own type for `_nested` (#14616).** The documented
+  exploit rewrites constructor types; auxiliary names are not in scope while
+  the block's own types are checked. The constructor scan is mandatory above.
+  Reserving the prefix in the own-type path is additional policy/defense; test
+  the existing unknown-name failure rather than claiming it closes the same hole.
+* **Rechecking restored constructor/recursor types and rule RHSs (#14621), and
+  replacing restoration assertions with exceptions (#14632).** Upstream labels
+  these redundant after correct nested elimination, and retains total Lean
+  accesses rather than C++ release-build out-of-bounds reads. Do not waive them
+  because the port has a complete verified eliminator: it does not. First apply
+  the actual nested closure/parameter/auxiliary fixes and test valid recursion,
+  nested parameters/indices, and candidate-generated recursor shapes. Port6's
+  replay already compares postponed constructor/recursor information to the
+  independently regenerated information; explicitly mutate a stored constructor
+  type and recursor rule/constructor name to test that rejection. Those replay
+  comparisons do not themselves prove the generator correct. Any reachable
+  assertion/default path or malformed generated rule demands a checked error or
+  recheck, not a successful fallback through `Inhabited.default`.
+  Current `divergences.md` contains a contradictory later assertion paragraph
+  claiming restored-type rechecks are retained; the actual `Add.lean` tail
+  checks only the discarded auxiliary applications. This disposition follows
+  the code rather than treating that sentence as an implemented guard.
+* **Dynamic fuel and native recursion caps (#13956, `8865b15`).** The old code
+  already uses fixed explicit fuel; the later configurable API is not a required
+  soundness repair. Run a shallow accepted/deep refused control under the actual
+  selected bounds and enforce process deadlines. A fuel refusal establishes
+  incompleteness, not rejection of a logical counterexample.
+
+### Suggested execution order for the coordinator
+
+First run the raw-declaration controls for dropped nested parameters, original
+FVar/MVar closure, the generated `_nested` auxiliary, normalized-Prop projection
+and recursor levels, mutual headers/names, quotient collisions, and partial
+primitives. For each, retain a closed valid counterpart and assert the intended
+rejection reason. Establish that the unsafe original form was actually reached:
+an unrelated missing-constant or loader error cannot discharge the test.
+
+Then rerun both exact fresh model closures after the chosen repairs and run
+the constructor/recursor mutation controls. Finally extend the level and
+primitive boundary controls where a general checker claim is intended. Keep
+source patch digests, actual command logs and target inventories tied to each
+candidate. The port6 successes remain useful evidence for that exact candidate;
+none of the newly proposed controls is reported as passing until executed.
