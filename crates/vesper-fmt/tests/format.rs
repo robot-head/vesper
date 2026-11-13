@@ -244,3 +244,102 @@ fn ribbon_reserves_following_braces_and_breaks_member_chains() {
         "{output}"
     );
 }
+
+#[test]
+fn overlong_lines_break_delimited_lists_not_every_space() {
+    // §39.3 signature shape: parameters break one per line, projections and
+    // the eff row stay intact, and no token is added for the last parameter.
+    let source = "fn filter_ids_unoptimized(inout shard.{metrics.requests}: WorkerShard, \
+        in shard.{config.limit}: WorkerShard, in raw_ids: Slice[u64]) -> u32 eff [Alloc] { \
+        let total = compute_something_long(first_argument_value, second_argument_value, \
+        third_argument_value, fourth_argument_value); total }";
+    assert_eq!(
+        verify(source),
+        "fn filter_ids_unoptimized(
+    inout shard.{metrics.requests}: WorkerShard,
+    in shard.{config.limit}: WorkerShard,
+    in raw_ids: Slice[u64]
+) -> u32 eff [Alloc] {
+    let total = compute_something_long(
+        first_argument_value,
+        second_argument_value,
+        third_argument_value,
+        fourth_argument_value
+    );
+    total
+}
+"
+    );
+}
+
+#[test]
+fn source_trailing_comma_keeps_a_list_vertical() {
+    let output =
+        verify("fn f(inout shard.{metrics}: WorkerShard, in raw: Slice[u64],) -> u32 { 0 }");
+    assert_eq!(
+        output,
+        "fn f(\n    inout shard.{metrics}: WorkerShard,\n    in raw: Slice[u64],\n) -> u32 {\n    0\n}\n"
+    );
+    // Without the trailing comma the same list fits on one line.
+    assert_eq!(
+        verify("fn f(inout shard.{metrics}: WorkerShard, in raw: Slice[u64]) -> u32 { 0 }"),
+        "fn f(inout shard.{metrics}: WorkerShard, in raw: Slice[u64]) -> u32 {\n    0\n}\n"
+    );
+}
+
+#[test]
+fn overlong_chains_and_infix_operators_break_with_nesting() {
+    let output = verify(
+        "fn main() -> i64 { let value = some_object.first_method(argument_one).second_method(argument_two).third_method(argument_three); \
+         let long = alpha_value_number_one + beta_value_number_two + gamma_value_number_three + delta_value_four; long }",
+    );
+    assert_eq!(
+        output,
+        "fn main() -> i64 {
+    let value = some_object
+        .first_method(argument_one)
+        .second_method(argument_two)
+        .third_method(argument_three);
+    let long = alpha_value_number_one
+        + beta_value_number_two
+        + gamma_value_number_three
+        + delta_value_four;
+    long
+}
+"
+    );
+    // Paths never split, even when the line must break.
+    let long = "fn main() -> i64 { Region::scoped(first_argument_value) + Region::scoped(second_argument_value) + Region::scoped(third_argument_value) }";
+    let output = verify(long);
+    assert!(
+        output.contains("    Region::scoped(first_argument_value)\n        + Region::scoped("),
+        "{output}"
+    );
+}
+
+#[test]
+fn generics_and_effect_rows_break_inside_their_brackets() {
+    let rows = (0..14)
+        .map(|i| format!("Capability{i}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let output = verify(&format!(
+        "fn id[T: mod linear](x: T) -> T eff [{rows}] {{ x }}"
+    ));
+    assert!(
+        output.lines().all(|line| line.chars().count() <= 100),
+        "{output}"
+    );
+    assert!(output.starts_with("fn id[T: mod linear](x: T)"), "{output}");
+    assert!(output.contains("\n    Capability0,\n"), "{output}");
+    assert!(output.contains("\n] {\n    x\n}\n"), "{output}");
+}
+
+#[test]
+fn comments_inside_broken_lists_are_conserved() {
+    let output = verify("fn main() -> i64 { call(alpha, // first\n beta /* second */, gamma) }");
+    assert!(
+        output.contains("alpha,\n        // first\n        beta /* second */"),
+        "{output}"
+    );
+}

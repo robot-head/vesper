@@ -1,0 +1,4 @@
+fn helper() -> i64 { 42 }
+macro call() -> expr { quote { helper() } }
+fn forward(in helper: i64) -> i64 { call!() }
+fn main() -> i64 { forward(0) }

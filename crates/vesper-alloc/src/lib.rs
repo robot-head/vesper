@@ -55,6 +55,13 @@
 //! assert_eq!(r.vec_as_slice(&names).unwrap(), ["ada", "bob"]);
 //! ```
 //!
+//! [`RegionTiled2`] stores Copy rows in actual region-backed two-column tiles.
+//! Each column starts at a 64-byte boundary; projections expose only initialized
+//! lanes and can borrow both fields mutably together. Counts remain in region
+//! storage, preserving the existing watermark and stale-handle rules. This host
+//! profile supports tile widths 8/16/32/64 and a 64 KiB complete-tile ceiling;
+//! cold side arrays, source-language lowering and SIMD are separate work.
+//!
 //! `RegionBox<T>` is invariant in `T`, so a handle cannot be reinterpreted at
 //! a shorter lifetime and used to store a dangling borrow:
 //!
@@ -86,8 +93,9 @@ pub use error::{
     StringError, ValueAllocError,
 };
 pub use region::{
-    CHUNK_ALIGN, Region, RegionBox, RegionBytes, RegionConfig, RegionId, RegionSlice, RegionStats,
-    RegionStr, RegionString, RegionVec, Watermark,
+    CHUNK_ALIGN, HARD_MAX_TILE_BYTES, Region, RegionBox, RegionBytes, RegionConfig, RegionId,
+    RegionSlice, RegionStats, RegionStr, RegionString, RegionTiled2, RegionVec, TiledError,
+    Watermark,
 };
 
 /// Version of the proposed Alloc/Region lowering contract described in

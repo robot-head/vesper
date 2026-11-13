@@ -12,7 +12,7 @@ use vesper::{
     },
 };
 
-const HELP: &str = "Usage: vesper forge <check|expand> SOURCE [--package @local/source] [--policy FILE] [--json]\n\nCheck declarative Expr macros using whole-body hygiene, the ordinary checker and actual compiler-derived authority.\ncheck returns bounded JSON; expand writes exactly the fully checked expanded source.\nMacro-bearing functions must be top-level, nongeneric and have no parameters.\nSource Tier2, attributes, derives, recursive/nested macros and other categories are unsupported.\nNo native code or WASI component is executed. Existing check/LSP behavior is unchanged.\n";
+const HELP: &str = "Usage: vesper forge <check|expand> SOURCE [--package @local/source] [--policy FILE] [--json]\n\nCheck declarative Expr macros using whole-body hygiene, the ordinary checker and actual compiler-derived authority.\ncheck returns bounded JSON; expand writes exactly the fully checked expanded source.\nMacro-bearing functions must be top-level and nongeneric, with at most eight plain named parameters.\nProjected parameters, source Tier2, attributes, derives, recursive/nested macros and other categories are unsupported.\nNo native code or WASI component is executed. Existing check/LSP behavior is unchanged.\n";
 const MAX_POLICY: usize = 64 * 1024;
 const MAX_JSON: usize = 2 * 1024 * 1024;
 struct Args {

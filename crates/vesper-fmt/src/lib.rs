@@ -6,8 +6,13 @@
 #![forbid(unsafe_code)]
 mod doc;
 mod macro_source;
+mod proof_lean;
+pub mod proof_model;
+mod proof_source;
 pub mod recovery;
 pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
+pub use proof_model::{DocumentModel, ProofError, ProofLimits};
+pub use proof_source::{FormatVerification, format_for_verification};
 pub use recovery::{RecoveryEdit, RecoveryFormatResult, format_recovery_source};
 use vesper_syntax::{
     lexer::{self, Token, TokenKind as K},
@@ -185,7 +190,17 @@ fn guarded_lex(
     )?;
     Ok(tokens)
 }
-fn once(source: &str, limits: Limits, work: &mut Work) -> Result<(String, bool), Error> {
+pub(crate) struct ModelCapture<'a> {
+    pub(crate) limits: ProofLimits,
+    pub(crate) model: &'a mut Option<DocumentModel>,
+    pub(crate) error: &'a mut Option<ProofError>,
+}
+fn once(
+    source: &str,
+    limits: Limits,
+    work: &mut Work,
+    capture: Option<ModelCapture<'_>>,
+) -> Result<(String, bool), Error> {
     let (tokens, macros) = match guarded_lex(source, limits, work, false) {
         Ok(tokens) => (tokens, false),
         Err(Error::OpaqueMacro) => (guarded_lex(source, limits, work, true)?, true),
@@ -248,6 +263,17 @@ fn once(source: &str, limits: Limits, work: &mut Work) -> Result<(String, bool),
     let output = document.render(root)?;
     work.charge(document.work_used())?;
     work.charge(output.len())?;
+    if let Some(capture) = capture {
+        match document.proof_model(root, capture.limits) {
+            Ok(model) => *capture.model = Some(model),
+            Err(error) => {
+                *capture.error = Some(error);
+                // The verification adapter returns the precise projection
+                // error. Ordinary formatting never enters this capture path.
+                return Err(Error::Conservation);
+            }
+        }
+    }
     Ok((output, macros))
 }
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
@@ -261,10 +287,18 @@ pub(crate) fn format_with_work(
     limits: Limits,
     work: &mut Work,
 ) -> Result<FormatResult, Error> {
+    format_with_capture(source, limits, work, None)
+}
+pub(crate) fn format_with_capture(
+    source: &str,
+    limits: Limits,
+    work: &mut Work,
+    capture: Option<ModelCapture<'_>>,
+) -> Result<FormatResult, Error> {
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }
-    let (output, macros) = once(source, limits, work)?;
+    let (output, macros) = once(source, limits, work, capture)?;
     let original = guarded_lex(source, limits, work, macros)?;
     let rewritten = guarded_lex(&output, limits, work, macros)?;
     let a = pieces(source, &original);
@@ -276,7 +310,7 @@ pub(crate) fn format_with_work(
     {
         return Err(Error::Conservation);
     }
-    let (second, second_macros) = once(&output, limits, work)?;
+    let (second, second_macros) = once(&output, limits, work, None)?;
     if second != output || macros != second_macros {
         return Err(Error::NotIdempotent);
     }
@@ -301,7 +335,47 @@ enum Gap {
     None,
     Soft,
     Empty,
+    /// Break point before an infix operator; nested one level when broken.
+    Operator,
+    /// Break point before `->`, in its own group so it breaks only when the
+    /// return type cannot follow an already laid-out parameter list.
+    Return,
     Hard,
+}
+fn is_binary_operator(kind: K) -> bool {
+    matches!(
+        kind,
+        K::Plus
+            | K::Minus
+            | K::Star
+            | K::Slash
+            | K::Percent
+            | K::EqEq
+            | K::Ne
+            | K::Lt
+            | K::Le
+            | K::Gt
+            | K::Ge
+            | K::And
+            | K::Or
+    )
+}
+/// Whether a token can end an operand, so a following `-`/`*` is infix.
+fn ends_operand(kind: K) -> bool {
+    matches!(
+        kind,
+        K::Lower
+            | K::Upper
+            | K::Int
+            | K::Float
+            | K::String
+            | K::True
+            | K::False
+            | K::SelfKw
+            | K::RParen
+            | K::RBracket
+            | K::RBrace
+    )
 }
 fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) -> Gap {
     if previous.kind == K::Dollar
@@ -329,8 +403,17 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     if current.kind == K::Dot && matches!(previous.kind, K::Int | K::Float) {
         return Gap::Soft;
     }
-    if matches!(current.kind, K::Dot | K::ColonColon) {
+    if current.kind == K::Dot {
         return Gap::Empty;
+    }
+    if current.kind == K::ColonColon {
+        return Gap::None;
+    }
+    if current.kind == K::Arrow {
+        return Gap::Return;
+    }
+    if is_binary_operator(current.kind) && ends_operand(previous.kind) {
+        return Gap::Operator;
     }
     if matches!(
         current.kind,
@@ -369,6 +452,11 @@ fn sequence<'a>(
     block: bool,
     document: &mut Document<'a>,
 ) -> Result<DocId, Error> {
+    // A delimited, non-block list breaks at its comma separators: those soft
+    // lines belong to the enclosing delimiter group, and every item is its own
+    // group. Ordinary spaces never break, so an overlong line breaks its
+    // delimiters (and member-chain dots) before anything else.
+    let list = end.is_some() && !block;
     let mut output = Vec::new();
     let mut line = Vec::new();
     let mut previous: Option<Piece<'a>> = None;
@@ -377,13 +465,35 @@ fn sequence<'a>(
         let current = atoms[*pos];
         let is_block = current.kind == K::LBrace && previous.is_none_or(|p| p.kind != K::Dot);
         let spacing = previous.map_or(Gap::None, |p| gap(p, current, block, previous_block));
+        let after_comma = previous.is_some_and(|p| p.kind == K::Comma);
+        let near_comment = matches!(current.kind, K::Comment | K::BlockComment)
+            || previous.is_some_and(|p| p.kind == K::BlockComment);
         match spacing {
             Gap::Hard => {
                 concat_group(&mut line, document, &mut output)?;
                 output.push(document.push(Doc::HardLine)?);
             }
-            Gap::Soft if !is_block => line.push(document.push(Doc::SoftLineOrSpace)?),
-            Gap::Empty => line.push(document.push(Doc::SoftLineOrEmpty)?),
+            Gap::Soft if list && after_comma => {
+                concat_group(&mut line, document, &mut output)?;
+                output.push(document.push(Doc::SoftLineOrSpace)?);
+            }
+            Gap::Soft if !is_block && near_comment => {
+                line.push(document.push(Doc::SoftLineOrSpace)?)
+            }
+            Gap::Soft if !is_block => line.push(document.push(Doc::Text(" "))?),
+            Gap::Return => {
+                concat_group(&mut line, document, &mut output)?;
+                let lead = document.push(Doc::SoftLineOrSpace)?;
+                line.push(document.push(Doc::Nest(4, lead))?);
+            }
+            Gap::Empty | Gap::Operator => {
+                let lead = document.push(if matches!(spacing, Gap::Empty) {
+                    Doc::SoftLineOrEmpty
+                } else {
+                    Doc::SoftLineOrSpace
+                })?;
+                line.push(document.push(Doc::Nest(4, lead))?);
+            }
             _ => {}
         }
         if is_block {
@@ -403,6 +513,9 @@ fn sequence<'a>(
             let start = document.push(Doc::Text(current.text))?;
             let inner = sequence(atoms, pos, Some(close), is_block, document)?;
             let last_is_line_comment = *pos > 0 && atoms[*pos - 1].kind == K::Comment;
+            // The formatter never adds or removes tokens, so a source trailing
+            // comma is kept and selects the vertical layout.
+            let trailing_comma = !is_block && *pos > 0 && atoms[*pos - 1].kind == K::Comma;
             let closing = atoms
                 .get(*pos)
                 .filter(|a| a.kind == close)
@@ -412,18 +525,19 @@ fn sequence<'a>(
             if empty {
                 document.push(Doc::Concat(vec![start, finish]))?
             } else {
-                let lead = document.push(if is_block {
+                let lead = document.push(if is_block || trailing_comma {
                     Doc::HardLine
                 } else {
                     Doc::SoftLineOrEmpty
                 })?;
                 let content = document.push(Doc::Concat(vec![lead, inner]))?;
                 let nest = document.push(Doc::Nest(4, content))?;
-                let trail = document.push(if is_block || last_is_line_comment {
-                    Doc::HardLine
-                } else {
-                    Doc::SoftLineOrEmpty
-                })?;
+                let trail =
+                    document.push(if is_block || last_is_line_comment || trailing_comma {
+                        Doc::HardLine
+                    } else {
+                        Doc::SoftLineOrEmpty
+                    })?;
                 let all = document.push(Doc::Concat(vec![start, nest, trail, finish]))?;
                 document.push(Doc::Group(all))?
             }

@@ -6,7 +6,7 @@ use std::{
 };
 pub use vesper::tooling::doc::document_source;
 use vesper_doc::{Document, Limits};
-pub const HELP: &str = "Usage: vesper doc FILE [--json] [-o OUTPUT] [--query QUERY.json]\n\nCheck source and generate deterministic local API documentation.\nDefault: escaped static HTML on stdout. --json: typed JSON metadata and search results.\n-o creates a new local output file; existing files are preserved. --query reads a full structural JSON query (no wildcard/generic inference).\nSource is limited to 128 KiB and bounded tokens/nesting/items/types; query to 32 KiB; output to 2 MiB.\nGenerated private Pact helpers are excluded. Layouts describe the native eight-byte ABI, not wire formats.\nNo audited proof evidence is accepted by this command; documentation is unverified. No network, JIT or doctest execution.\n";
+pub const HELP: &str = "Usage: vesper doc FILE [--json] [-o OUTPUT] [--query QUERY.json]\n\nCheck source and generate deterministic local API documentation.\nDefault: escaped static HTML on stdout. --json: typed JSON metadata and search results.\n-o creates a new local output file; existing files are preserved. --query reads a full structural JSON query (no wildcard/generic inference).\nSource is limited to 128 KiB and bounded tokens/nesting/items/types; query to 32 KiB; output to 2 MiB.\nLocal intra-doc references such as [Type::method] resolve against documented checked declarations; unknown, ambiguous or unsupported references fail generation.\nGenerated private Pact helpers are excluded. Layouts describe the native eight-byte ABI, not wire formats.\nNo audited proof evidence is accepted by this command; documentation is unverified. No network, JIT or doctest execution.\n";
 
 fn read_file(path: &str, limit: usize) -> Result<String, String> {
     if !fs::symlink_metadata(path)
@@ -114,7 +114,7 @@ fn generate(args: Vec<String>) -> Result<Option<Rendered>, String> {
     let bytes = if json {
         vesper_doc::to_json(&report, limits.max_output_bytes)?
     } else {
-        vesper_doc::render_html(&report, limits)?
+        vesper_doc::render_document_html(&report.document, &report, limits)?
     };
     Ok(Some(Rendered { bytes, output }))
 }
