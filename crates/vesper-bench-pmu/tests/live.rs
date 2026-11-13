@@ -63,3 +63,66 @@ fn unsupported_target_reports_structured_unavailable() {
         Ok(_) => panic!("unsupported target cannot produce a hardware provider"),
     }
 }
+
+fn exercise<O>(name: &str, mut counters: O)
+where
+    O: vesper_bench::WindowObserver<
+            Observation = vesper_bench_pmu::CounterDelta,
+            Error = vesper_bench_pmu::Unavailable,
+        >,
+{
+    let config = RunConfig {
+        epochs: 1,
+        warmup_epochs: 0,
+        operations_per_window: 8,
+        ..RunConfig::default()
+    };
+    match run_abba_observed(config, &mut Work, &mut Work, &mut counters) {
+        Ok(run) => {
+            assert_eq!(run.observations().len(), 4);
+            for w in run.observations() {
+                assert!(w.observation.cycles() > 0);
+                assert!(w.observation.instructions() > 0);
+            }
+            eprintln!("LIVE_{name}_ACTUAL_COUNTERS: four real windows");
+        }
+        Err(error) => eprintln!("LIVE_{name}_UNAVAILABLE_DURING_OBSERVATION: {error}"),
+    }
+}
+
+#[test]
+fn rdpmc_is_actual_counters_or_explicit_unavailable_with_a_host_reason() {
+    use vesper_bench_pmu::{RdpmcCounters, UnavailableReason, host_pmu_status};
+    let status = host_pmu_status();
+    match RdpmcCounters::open() {
+        Ok(counters) => exercise("RDPMC", counters),
+        Err(error) => {
+            eprintln!("LIVE_RDPMC_UNAVAILABLE: {error}; host {status:?}");
+            if cfg!(not(all(target_os = "linux", target_arch = "x86_64"))) {
+                assert_eq!(error.reason, UnavailableReason::UnsupportedPlatform);
+            } else if status.cpu_pmu_device == Some(false) {
+                // No hardware PMU device at all: the kernel must say so.
+                assert_eq!(error.reason, UnavailableReason::NoHardwarePmu);
+            }
+        }
+    }
+}
+
+#[test]
+fn kpc_is_actual_counters_or_explicit_unavailable() {
+    use vesper_bench_pmu::{KpcCounters, UnavailableReason};
+    match KpcCounters::open() {
+        Ok(counters) => exercise("KPC", counters),
+        Err(error) => {
+            eprintln!("LIVE_KPC_UNAVAILABLE: {error}");
+            if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+                // The framework and symbols resolve on every macOS AArch64
+                // host; only privilege or counter state may be missing.
+                assert_ne!(error.reason, UnavailableReason::LibraryMissing);
+                assert_ne!(error.reason, UnavailableReason::UnsupportedPlatform);
+            } else {
+                assert_eq!(error.reason, UnavailableReason::UnsupportedPlatform);
+            }
+        }
+    }
+}

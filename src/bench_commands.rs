@@ -14,13 +14,17 @@ use vesper::{
 };
 use vesper_bench::{
     Analysis, Arm, BenchCase, BodyStatus, ClockStatus, Decision, Invocation, ObservedRunError,
-    ObservedWindow, PairedSample, RunConfig, RunError, RunReport, WindowCompletion, analyze_pairs,
-    run_abba, run_abba_observed,
+    ObservedWindow, PairedSample, RunConfig, RunError, RunReport, WindowCompletion, WindowObserver,
+    analyze_pairs, run_abba, run_abba_observed,
 };
 
-use vesper_bench_pmu::{CounterDelta, PerfGroup, Unavailable};
-
-const PMU_PROVIDER: &str = "linux.perf_event_open.group_read";
+use vesper_bench::layout::{
+    ENV_PADDING_VAR, HeapShim, LayoutPlan, LayoutVerdict, MAX_LAYOUT_RUNS, MIN_LAYOUT_RUNS,
+    env_padding_value, layout_plan, layout_survival, with_stack_padding,
+};
+use vesper_bench_pmu::{
+    CounterDelta, KpcCounters, PerfGroup, Provider, RdpmcCounters, Unavailable, host_pmu_status,
+};
 const MAX_SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_CALLS: usize = 1_000_000;
 const HELP: &str = r#"Usage: vesper bench FILE [options]
@@ -34,20 +38,34 @@ The default baseline is a separately compiled copy of FILE.
   --samples N              Measured epochs, 1..64 (default: 12)
   --warmup N               Report-excluded warmup epochs, 0..64 (default: 1)
   --iterations N           Calls per measured window, 1..65536 (default: 128)
-  --pmu                    Strictly require real Linux perf group observations
+  --pmu                    Strictly require real hardware counter observations
+  --pmu-provider group|rdpmc|kpc
+                           Counter mechanism (implies --pmu). group: Linux
+                           perf_event_open group-read syscalls (Linux default);
+                           rdpmc: Linux x86_64 user-space RDPMC via the perf
+                           mmap page; kpc: macOS AArch64 kperf fixed counters,
+                           root only (macOS default)
   --metric time|cycles|instructions
                            Selected metric (default: time); counters imply --pmu
   --max-regression-bp N     Gate the SELECTED metric with the paired-median 95% CI
+  --randomize-layout N     Stabilizer-style: run N (6..32) child processes, each
+                           with its own heap offset, stack padding and
+                           environment size, and report whether the A/B
+                           difference survives layout randomization
+  --layout-seed N          Seed for --randomize-layout (default: 0)
   --json                   Machine-readable report, including failures
   -h, --help               Show help
 
 Inputs: bounded regular UTF-8 files containing ordinary nongeneric pure scalar
 functions. Recursive/indirect/aggregate/imported/fallible kernels are unsupported.
 Measurements: std::time::Instant nanoseconds, including Rust/JIT dispatch, loop
-and result-storage overhead. Optional PMU uses perf_event_open/group-read syscalls;
-counts also include enable-return/clock/observer dispatch boundary overhead.
-Unavailable PMU is inconclusive with no clock fallback. PMU availability
-supplies no evidence about allocation, SIMD, layout randomization or causal profiling.
+and result-storage overhead. Optional PMU counts include clock/observer dispatch boundary overhead.
+Unavailable PMU is inconclusive with no clock fallback and reports why (for
+example no hardware PMU device, perf_event_paranoid, or kpc without root).
+PMU availability supplies no evidence about allocation or SIMD.
+Layout randomization moves data and stack placement, not machine code. Causal
+profiling is a library API (vesper_bench::causal) for instrumented host
+threads; this command does not run it.
 The elapsed budget is checked between
 windows, not a hard timeout. Exact large ratio bounds are decimal JSON strings.
 Without an explicit threshold this command measures; it does not enforce a gate.
@@ -67,11 +85,11 @@ impl Metric {
             Self::Instructions => "instructions",
         }
     }
-    fn provider(self) -> &'static str {
+    fn provider(self, pmu: Provider) -> &'static str {
         if self == Self::Time {
             "std::time::Instant"
         } else {
-            PMU_PROVIDER
+            pmu.as_str()
         }
     }
     fn unit(self) -> &'static str {
@@ -92,6 +110,18 @@ struct Options {
     threshold: Option<i64>,
     metric: Metric,
     pmu: bool,
+    provider: Provider,
+    layouts: Option<usize>,
+    layout_seed: u64,
+    layout_run: Option<(u64, u32)>,
+    forwarded: Vec<String>,
+}
+fn default_provider() -> Provider {
+    if cfg!(target_os = "macos") {
+        Provider::MacosKpc
+    } else {
+        Provider::LinuxGroupRead
+    }
 }
 fn argument(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
     args.next()
@@ -103,8 +133,13 @@ fn count(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<usize, S
         .map_err(|_| format!("{flag} requires a nonnegative integer"))
 }
 fn options(args: Vec<String>) -> Result<Option<Options>, String> {
+    let mut forwarded = Vec::new();
     let mut args = args.into_iter();
     let mut path = None;
+    let mut provider = None;
+    let mut layouts = None;
+    let mut layout_seed = 0u64;
+    let mut layout_run = None;
     let mut baseline = None;
     let mut entry = String::from("main");
     let mut baseline_entry = None;
@@ -119,23 +154,77 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
                 return Ok(None);
             }
             "--json" => {}
-            "--pmu" => pmu = true,
+            "--pmu" => {
+                pmu = true;
+                forwarded.push(arg);
+            }
+            "--pmu-provider" => {
+                let value = argument(&mut args, "--pmu-provider")?;
+                provider = Some(match value.as_str() {
+                    "group" => Provider::LinuxGroupRead,
+                    "rdpmc" => Provider::LinuxRdpmc,
+                    "kpc" => Provider::MacosKpc,
+                    _ => return Err("--pmu-provider requires group, rdpmc or kpc".into()),
+                });
+                forwarded.extend([arg, value]);
+            }
+            "--randomize-layout" => {
+                let n = count(&mut args, "--randomize-layout")?;
+                if !(MIN_LAYOUT_RUNS..=32).contains(&n) {
+                    return Err("--randomize-layout requires 6..32 layouts".into());
+                }
+                layouts = Some(n);
+            }
+            "--layout-seed" => {
+                layout_seed = argument(&mut args, "--layout-seed")?
+                    .parse()
+                    .map_err(|_| "--layout-seed requires a nonnegative integer")?;
+            }
+            // Internal: one child of --randomize-layout.
+            "--layout-run" => {
+                let value = argument(&mut args, "--layout-run")?;
+                let (seed, run) = value
+                    .split_once(':')
+                    .and_then(|(s, r)| Some((s.parse().ok()?, r.parse().ok()?)))
+                    .ok_or("--layout-run requires SEED:RUN")?;
+                if run as usize >= MAX_LAYOUT_RUNS {
+                    return Err("--layout-run index out of range".into());
+                }
+                layout_run = Some((seed, run));
+            }
             "--metric" => {
-                metric = match argument(&mut args, "--metric")?.as_str() {
+                let value = argument(&mut args, "--metric")?;
+                metric = match value.as_str() {
                     "time" => Metric::Time,
                     "cycles" => Metric::Cycles,
                     "instructions" => Metric::Instructions,
                     _ => return Err("--metric requires time, cycles or instructions".into()),
-                }
+                };
+                forwarded.extend([arg, value]);
             }
-            "--baseline" => baseline = Some(PathBuf::from(argument(&mut args, "--baseline")?)),
-            "--entry" => entry = argument(&mut args, "--entry")?,
+            "--baseline" => {
+                let value = argument(&mut args, "--baseline")?;
+                baseline = Some(PathBuf::from(&value));
+                forwarded.extend([arg, value]);
+            }
+            "--entry" => {
+                entry = argument(&mut args, "--entry")?;
+                forwarded.extend([arg, entry.clone()]);
+            }
             "--baseline-entry" => {
-                baseline_entry = Some(argument(&mut args, "--baseline-entry")?);
+                let value = argument(&mut args, "--baseline-entry")?;
+                baseline_entry = Some(value.clone());
+                forwarded.extend([arg, value]);
             }
-            "--samples" => config.epochs = count(&mut args, "--samples")?,
-            "--warmup" => config.warmup_epochs = count(&mut args, "--warmup")?,
-            "--iterations" => config.operations_per_window = count(&mut args, "--iterations")?,
+            "--samples" | "--warmup" | "--iterations" => {
+                let n = count(&mut args, &arg)?;
+                match arg.as_str() {
+                    "--samples" => config.epochs = n,
+                    "--warmup" => config.warmup_epochs = n,
+                    _ => config.operations_per_window = n,
+                }
+                forwarded.extend([arg, n.to_string()]);
+            }
             "--max-regression-bp" => {
                 let value = argument(&mut args, "--max-regression-bp")?
                     .parse::<i64>()
@@ -147,6 +236,7 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
             }
             _ if arg.starts_with('-') => return Err(format!("unknown bench option '{arg}'")),
             _ => {
+                forwarded.push(arg.clone());
                 if path.replace(PathBuf::from(arg)).is_some() {
                     return Err(
                         "bench accepts one candidate file; use --baseline for comparison".into(),
@@ -182,7 +272,12 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
         config,
         threshold,
         metric,
-        pmu: pmu || metric != Metric::Time,
+        pmu: pmu || provider.is_some() || metric != Metric::Time,
+        provider: provider.unwrap_or_else(default_provider),
+        layouts: if layout_run.is_some() { None } else { layouts },
+        layout_seed,
+        layout_run,
+        forwarded,
     }))
 }
 fn read_source(path: &Path) -> Result<String, String> {
@@ -583,6 +678,7 @@ fn validate_pmu(
     config: RunConfig,
     report: &RunReport,
     windows: &[ObservedWindow<CounterDelta>],
+    provider: Provider,
 ) -> Result<PmuData, String> {
     if windows.len() != expected_windows(config)?
         || report.epochs().len() != config.epochs
@@ -630,7 +726,7 @@ fn validate_pmu(
                 return Err("PMU/Instant actual window mismatch".into());
             }
         }
-        if d.provider() != PMU_PROVIDER
+        if d.provider_kind() != provider
             || d.unit() != "hardware events"
             || d.cycles() == 0
             || d.instructions() == 0
@@ -671,12 +767,17 @@ fn primary_error_json(e: &RunError<String, String>) -> Json {
         }
     }
 }
-fn unavailable_outcome(metric: Metric, error: &Unavailable) -> Outcome {
+fn host_json() -> Json {
+    let h = host_pmu_status();
+    json!({"perf_event_paranoid":h.perf_event_paranoid,"cpu_pmu_device":h.cpu_pmu_device,"rdpmc_sysfs":h.rdpmc_sysfs})
+}
+fn unavailable_outcome(metric: Metric, provider: Provider, error: &Unavailable) -> Outcome {
     let message = error.to_string();
+    let provider = provider.as_str();
     Outcome {
         data: json!({"schema":"vesper.bench/1","status":"inconclusive","metric":metric.name(),
-        "provider_requested":PMU_PROVIDER,"unit":metric.unit(),"error":message,
-        "pmu":{"requested":true,"status":"unavailable","provider":PMU_PROVIDER,"unavailable":unavailable_json(error)},
+        "provider_requested":provider,"unit":metric.unit(),"error":message,
+        "pmu":{"requested":true,"status":"unavailable","provider":provider,"unavailable":unavailable_json(error),"host":host_json()},
         "evidence":{"hardware_pmu":"unavailable","zero_allocation":"unavailable","vectorization":"unavailable"}}),
         text: format!("{message}; requested PMU measurement is inconclusive (no fallback)\n"),
         gate_failure: Some(message),
@@ -684,8 +785,10 @@ fn unavailable_outcome(metric: Metric, error: &Unavailable) -> Outcome {
 }
 fn observed_error_outcome(
     metric: Metric,
+    provider: Provider,
     error: ObservedRunError<String, String, Unavailable>,
 ) -> Outcome {
+    let provider = provider.as_str();
     let message = error.to_string();
     let (status, primary, observer, completion, observer_cleanup_errors) = match &error {
         ObservedRunError::Run {
@@ -717,9 +820,9 @@ fn observed_error_outcome(
     };
     let secondary=observer.map(|e|json!({"phase":format!("{:?}",e.phase),"invocation":invocation_json(e.invocation),"unavailable":unavailable_json(&e.error)}));
     Outcome {
-        data: json!({"schema":"vesper.bench/1","status":status,"metric":metric.name(),"provider_requested":PMU_PROVIDER,"unit":metric.unit(),
+        data: json!({"schema":"vesper.bench/1","status":status,"metric":metric.name(),"provider_requested":provider,"unit":metric.unit(),
         "error":message,"primary_error":primary,"observer_error":secondary,"observer_cleanup_errors":observer_cleanup_errors,"completion":completion.map(completion_json),
-        "pmu":{"requested":true,"status":if observer.is_some(){"unavailable"}else{"incomplete"},"provider":PMU_PROVIDER},
+        "pmu":{"requested":true,"status":if observer.is_some(){"unavailable"}else{"incomplete"},"provider":provider},
         "evidence":{"hardware_pmu":"unavailable","zero_allocation":"unavailable","vectorization":"unavailable"}}),
         text: format!("{message}; requested PMU run failed without fallback\n"),
         gate_failure: Some(message),
@@ -731,10 +834,184 @@ struct Outcome {
     text: String,
     gate_failure: Option<String>,
 }
+type Observed = (RunReport, Vec<ObservedWindow<CounterDelta>>);
+fn observe<O>(
+    options: &Options,
+    baseline: &mut SourceCase,
+    candidate: &mut SourceCase,
+    opened: Result<O, Unavailable>,
+) -> Result<Observed, Box<Outcome>>
+where
+    O: WindowObserver<Observation = CounterDelta, Error = Unavailable>,
+{
+    let mut counters =
+        opened.map_err(|e| Box::new(unavailable_outcome(options.metric, options.provider, &e)))?;
+    run_abba_observed(options.config, baseline, candidate, &mut counters)
+        .map(|run| run.into_parts())
+        .map_err(|e| Box::new(observed_error_outcome(options.metric, options.provider, e)))
+}
+fn plan_json(plan: LayoutPlan) -> Json {
+    json!({"seed":plan.seed.to_string(),"run":plan.run,"heap_offset_bytes":plan.heap_offset_bytes,
+        "stack_padding_bytes":plan.stack_padding_bytes,"env_padding_bytes":plan.env_padding_bytes,
+        "run_seed":plan.run_seed.to_string()})
+}
 fn execute(args: Vec<String>) -> Result<Option<Outcome>, String> {
     let Some(options) = options(args)? else {
         return Ok(None);
     };
+    if let Some(layouts) = options.layouts {
+        let exe = std::env::current_exe().map_err(|e| format!("current executable: {e}"))?;
+        return randomize_layouts(&options, layouts, |plan| {
+            let output = std::process::Command::new(&exe)
+                .arg("bench")
+                .args(&options.forwarded)
+                .args(["--json", "--layout-run"])
+                .arg(format!("{}:{}", plan.seed, plan.run))
+                .env(ENV_PADDING_VAR, env_padding_value(plan.env_padding_bytes))
+                .stdin(std::process::Stdio::null())
+                .output()
+                .map_err(|e| format!("layout run {}: {e}", plan.run))?;
+            let stdout = String::from_utf8(output.stdout)
+                .map_err(|_| format!("layout run {}: non-UTF-8 report", plan.run))?;
+            let line = stdout
+                .lines()
+                .rev()
+                .find(|l| l.starts_with('{'))
+                .ok_or_else(|| format!("layout run {}: no JSON report", plan.run))?;
+            serde_json::from_str(line).map_err(|e| format!("layout run {}: {e}", plan.run))
+        })
+        .map(Some);
+    }
+    if let Some((seed, run)) = options.layout_run {
+        let plan = layout_plan(seed, run);
+        let shim = HeapShim::new(plan.heap_offset_bytes).map_err(|e| e.to_string())?;
+        let outcome = with_stack_padding(plan.stack_padding_bytes, || measure(options));
+        drop(shim);
+        let env = std::env::var_os(ENV_PADDING_VAR).map_or(0, |v| v.len());
+        return outcome.map(|o| {
+            o.map(|mut o| {
+                o.data["layout"] = plan_json(plan);
+                o.data["layout"]["observed_env_padding_bytes"] = json!(env);
+                o
+            })
+        });
+    }
+    measure(options)
+}
+/// Sums the selected-metric pairs of one child report into one layout sample.
+fn child_sample(data: &Json, metric: Metric) -> Result<PairedSample, String> {
+    if data["status"] != "measured" {
+        return Err(format!(
+            "layout run did not measure: {}",
+            data["error"].as_str().unwrap_or("unknown status")
+        ));
+    }
+    let suffix = if metric == Metric::Time {
+        "ns"
+    } else {
+        metric.name()
+    };
+    let pairs = data["pairs"]
+        .as_array()
+        .filter(|p| !p.is_empty())
+        .ok_or("layout run report has no pairs")?;
+    let field = |pair: &Json, key: String| -> Result<u64, String> {
+        pair[&key]
+            .as_str()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| format!("layout run pair lacks {key}"))
+    };
+    let (mut baseline, mut candidate, mut operations) = (0u64, 0u64, 0u64);
+    for pair in pairs {
+        baseline = baseline
+            .checked_add(field(pair, format!("baseline_total_{suffix}"))?)
+            .ok_or("layout baseline total overflow")?;
+        candidate = candidate
+            .checked_add(field(pair, format!("candidate_total_{suffix}"))?)
+            .ok_or("layout candidate total overflow")?;
+        operations = operations
+            .checked_add(
+                pair["operations_per_arm"]
+                    .as_u64()
+                    .ok_or("layout run pair lacks operations")?,
+            )
+            .ok_or("layout operation overflow")?;
+    }
+    PairedSample::new(baseline, candidate, operations).map_err(|e| e.to_string())
+}
+fn randomize_layouts(
+    options: &Options,
+    layouts: usize,
+    mut run_child: impl FnMut(LayoutPlan) -> Result<Json, String>,
+) -> Result<Outcome, String> {
+    let mut samples = Vec::with_capacity(layouts);
+    let mut runs = Vec::with_capacity(layouts);
+    for run in 0..layouts {
+        let plan = layout_plan(options.layout_seed, run as u32);
+        let data = run_child(plan)?;
+        if data["status"] == "measured"
+            && (data["layout"]["run"] != json!(plan.run)
+                || data["layout"]["observed_env_padding_bytes"]
+                    != json!(env_padding_value(plan.env_padding_bytes).len()))
+        {
+            return Err(format!("layout run {run}: report does not match its plan"));
+        }
+        let sample = match child_sample(&data, options.metric) {
+            Ok(sample) => sample,
+            Err(message) => {
+                // A child that could not measure (e.g. PMU unavailable) makes
+                // the whole randomized comparison inconclusive; keep its report.
+                return Ok(Outcome {
+                    data: json!({"schema":"vesper.bench/1","status":if data["status"]=="inconclusive"{"inconclusive"}else{"error"},
+                        "metric":options.metric.name(),"error":message,"layout_run":plan_json(plan),"child":data}),
+                    text: format!("layout run {run}: {message}\n"),
+                    gate_failure: Some(message),
+                });
+            }
+        };
+        samples.push(sample);
+        runs.push(json!({"plan":plan_json(plan),"sample":pair_json(sample, options.metric),
+            "source_blake3":{"candidate":data["candidate"]["source_blake3"],"baseline":data["baseline"]["source_blake3"]}}));
+    }
+    let survival = layout_survival(&samples).map_err(|e| e.to_string())?;
+    let analysis =
+        analyze_pairs(&samples, options.threshold.unwrap_or(0)).map_err(|e| e.to_string())?;
+    let gate_failure = options.threshold.and_then(|_| match analysis.decision {
+        Decision::Pass => None,
+        Decision::Regression => Some("benchmark confidence gate detected a regression".into()),
+        Decision::Inconclusive => Some("benchmark confidence gate is inconclusive".into()),
+    });
+    let median = survival.analysis.median_upper.regression_bp_bounds();
+    let verdict = survival.verdict.as_str();
+    let text = format!(
+        "{} vs {}: {} randomized layouts (heap offset, stack padding, environment size), provider {} ({})\nmedian upper ratio: {}..{} basis points; layout verdict: {}{}\nlayouts move data and stack placement only, not machine code\n",
+        options.path.display(),
+        options.baseline.display(),
+        layouts,
+        options.metric.provider(options.provider),
+        options.metric.unit(),
+        median.floor,
+        median.ceil,
+        verdict,
+        match survival.verdict {
+            LayoutVerdict::DoesNotSurvive => " (the difference may be a layout artifact)",
+            _ => "",
+        },
+    );
+    Ok(Outcome {
+        data: json!({"schema":"vesper.bench/1","status":"layout_randomized","metric":options.metric.name(),
+            "provider":options.metric.provider(options.provider),"unit":options.metric.unit(),
+            "candidate":{"path":options.path,"entry":options.entry},"baseline":{"path":options.baseline,"entry":options.baseline_entry},
+            "layout":{"seed":options.layout_seed.to_string(),"layouts":layouts,"runs":runs,
+                "verdict":verdict,"survives":survival.verdict.survives(),
+                "method":"one aggregate paired sample per randomized child process; exact >=95% median-ratio interval tested against ratio 1",
+                "scope":"randomizes heap offset (live block + allocator state), stack padding (real frames) and environment size per process; machine code, function entries and globals are not relocated"},
+            "analysis":analysis_json(&analysis, options.threshold, options.metric)}),
+        text,
+        gate_failure,
+    })
+}
+fn measure(options: Options) -> Result<Option<Outcome>, String> {
     // Both compilation phases precede run_abba and every timed window.
     let mut baseline = SourceCase::compile(&options.baseline, &options.baseline_entry)
         .map_err(|error| format!("baseline {}: {error}", options.baseline.display()))?;
@@ -744,17 +1021,25 @@ fn execute(args: Vec<String>) -> Result<Option<Outcome>, String> {
         return Err("source changed while preparing the same-file comparison".into());
     }
     let (report, pmu) = if options.pmu {
-        let mut provider = match PerfGroup::open() {
-            Ok(p) => p,
-            Err(e) => return Ok(Some(unavailable_outcome(options.metric, &e))),
+        let observed = match options.provider {
+            Provider::LinuxGroupRead => {
+                observe(&options, &mut baseline, &mut candidate, PerfGroup::open())
+            }
+            Provider::LinuxRdpmc => observe(
+                &options,
+                &mut baseline,
+                &mut candidate,
+                RdpmcCounters::open(),
+            ),
+            Provider::MacosKpc => {
+                observe(&options, &mut baseline, &mut candidate, KpcCounters::open())
+            }
         };
-        let observed =
-            match run_abba_observed(options.config, &mut baseline, &mut candidate, &mut provider) {
-                Ok(run) => run,
-                Err(error) => return Ok(Some(observed_error_outcome(options.metric, error))),
-            };
-        let (report, windows) = observed.into_parts();
-        let pmu = validate_pmu(options.config, &report, &windows)?;
+        let (report, windows) = match observed {
+            Ok(parts) => parts,
+            Err(outcome) => return Ok(Some(*outcome)),
+        };
+        let pmu = validate_pmu(options.config, &report, &windows, options.provider)?;
         (report, Some(pmu))
     } else {
         (
@@ -795,7 +1080,7 @@ fn execute(args: Vec<String>) -> Result<Option<Outcome>, String> {
         options.baseline.display(),
         report.epochs().len(),
         report.total_body_calls(),
-        options.metric.provider(),
+        options.metric.provider(options.provider),
         options.metric.unit(),
         median.floor,
         median.ceil,
@@ -803,7 +1088,7 @@ fn execute(args: Vec<String>) -> Result<Option<Outcome>, String> {
     );
     let mut data = json!({
         "schema": "vesper.bench/1", "status": status, "metric":options.metric.name(),
-        "provider": options.metric.provider(), "unit": options.metric.unit(),
+        "provider": options.metric.provider(options.provider), "unit": options.metric.unit(),
         "candidate": {"path": options.path, "entry": options.entry, "source_blake3": candidate.source_id, "jit": stats_json(candidate.runner.stats())},
         "baseline": {"path": options.baseline, "entry": options.baseline_entry, "source_blake3": baseline.source_id, "jit": stats_json(baseline.runner.stats())},
         "config": {"epochs": options.config.epochs, "warmup_epochs": options.config.warmup_epochs, "operations_per_window": options.config.operations_per_window},
@@ -816,11 +1101,15 @@ fn execute(args: Vec<String>) -> Result<Option<Outcome>, String> {
     let text = if let Some(pmu) = pmu {
         data["clock"] = json!({"provider":report.provider().as_str(),"unit":report.unit().as_str(),"elapsed_run_ns":report.elapsed_run_nanos().to_string(),
             "pairs":report.pairs().iter().copied().map(|p|pair_json(p,Metric::Time)).collect::<Vec<_>>()});
-        data["pmu"] = json!({"requested":true,"status":"measured","provider":PMU_PROVIDER,
-            "cycles_unit":"cycles","instructions_unit":"instructions","windows":pmu.windows,
-            "cycles_pairs":pmu.cycles.iter().copied().map(|p|pair_json(p,Metric::Cycles)).collect::<Vec<_>>(),
-            "instructions_pairs":pmu.instructions.iter().copied().map(|p|pair_json(p,Metric::Instructions)).collect::<Vec<_>>(),
-            "scope":"current-thread user hardware counts include enable-return, dispatch, Instant and observer boundary overhead through disable; syscall reads; no RDPMC or body-only calibration"});
+        data["pmu"] = json!({"requested":true,"status":"measured","provider":options.provider.as_str(),
+        "cycles_unit":"cycles","instructions_unit":"instructions","windows":pmu.windows,
+        "cycles_pairs":pmu.cycles.iter().copied().map(|p|pair_json(p,Metric::Cycles)).collect::<Vec<_>>(),
+        "instructions_pairs":pmu.instructions.iter().copied().map(|p|pair_json(p,Metric::Instructions)).collect::<Vec<_>>(),
+        "scope":match options.provider {
+            Provider::LinuxGroupRead => "current-thread user hardware counts include enable-return, dispatch, Instant and observer boundary overhead through disable; syscall reads; no body-only calibration",
+            Provider::LinuxRdpmc => "current-thread user hardware counts read with RDPMC under the perf mmap sequence lock; include dispatch, Instant and observer boundary overhead between reads; no body-only calibration",
+            Provider::MacosKpc => "current-thread fixed kpc counters (cycles, instructions); include dispatch, Instant and observer boundary overhead between reads; no body-only calibration",
+        }});
         data["evidence"]["hardware_pmu"] = json!("available");
         if options.metric != Metric::Time {
             data.as_object_mut()
@@ -828,7 +1117,8 @@ fn execute(args: Vec<String>) -> Result<Option<Outcome>, String> {
                 .remove("elapsed_run_ns");
         }
         format!(
-            "{text}PMU: {PMU_PROVIDER}; hardware counts include clock/dispatch/observer boundary overhead; availability supplies no allocation/SIMD evidence\n"
+            "{text}PMU: {}; hardware counts include clock/dispatch/observer boundary overhead; availability supplies no allocation/SIMD evidence\n",
+            options.provider.as_str()
         )
     } else {
         text
@@ -973,7 +1263,7 @@ mod pmu_tests {
             }),
             completion: Some(completion),
         };
-        let outcome = observed_error_outcome(Metric::Instructions, error);
+        let outcome = observed_error_outcome(Metric::Instructions, Provider::LinuxGroupRead, error);
         assert_eq!(outcome.data["status"], "error");
         assert_eq!(outcome.data["primary_error"]["error"], "primary body error");
         assert_eq!(outcome.data["primary_error"]["cleanup_errors"], 2);
@@ -985,6 +1275,7 @@ mod pmu_tests {
         assert!(outcome.gate_failure.is_some());
         let cleanup_failure = observed_error_outcome(
             Metric::Cycles,
+            Provider::LinuxGroupRead,
             ObservedRunError::Observer {
                 error: ObservationFailure {
                     phase: ObservationPhase::Before,
@@ -1001,5 +1292,147 @@ mod pmu_tests {
         );
         assert_eq!(cleanup_failure.data["status"], "error");
         assert_eq!(cleanup_failure.data["observer_cleanup_errors"], 1);
+    }
+}
+
+#[cfg(test)]
+mod metronome_tests {
+    use super::*;
+    fn parse(args: &[&str]) -> Options {
+        options(args.iter().map(|s| s.to_string()).collect())
+            .unwrap()
+            .unwrap()
+    }
+    #[test]
+    fn readme_bench_row_names_only_flags_this_command_has() {
+        let readme = include_str!("../README.md");
+        let row = readme
+            .lines()
+            .find(|l| l.starts_with("| `vesper bench` |"))
+            .expect("README has a vesper bench row");
+        let flags: Vec<&str> = row
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .filter(|w| w.starts_with("--") && w.len() > 2)
+            .collect();
+        assert!(flags.len() >= 3, "{flags:?}");
+        for flag in flags {
+            assert!(HELP.contains(flag), "README names {flag}, help lacks it");
+        }
+        for mechanism in [
+            "rdpmc",
+            "kpc",
+            "group",
+            "randomize-layout",
+            "vesper_bench::causal",
+        ] {
+            assert!(HELP.contains(mechanism), "help lacks {mechanism}");
+        }
+        // Claims the command does not make.
+        for absent in ["12-cycle", "CAS", "--causal", "--asm", "cargo-show-asm"] {
+            assert!(!row.contains(absent), "README row still claims {absent}");
+        }
+    }
+    #[test]
+    fn layout_and_provider_flags_parse_and_forward_only_measurement_arguments() {
+        let o = parse(&[
+            "c.ves",
+            "--baseline",
+            "b.ves",
+            "--samples",
+            "6",
+            "--pmu-provider",
+            "rdpmc",
+            "--randomize-layout",
+            "8",
+            "--layout-seed",
+            "9",
+            "--max-regression-bp",
+            "50",
+            "--json",
+        ]);
+        assert_eq!(o.provider, Provider::LinuxRdpmc);
+        assert!(o.pmu);
+        assert_eq!((o.layouts, o.layout_seed), (Some(8), 9));
+        assert_eq!(
+            o.forwarded,
+            [
+                "c.ves",
+                "--baseline",
+                "b.ves",
+                "--samples",
+                "6",
+                "--pmu-provider",
+                "rdpmc"
+            ]
+        );
+        let child = parse(&["c.ves", "--randomize-layout", "8", "--layout-run", "9:3"]);
+        assert_eq!((child.layouts, child.layout_run), (None, Some((9, 3))));
+        assert_eq!(parse(&["c.ves"]).provider, default_provider());
+        for bad in [
+            vec!["c.ves", "--randomize-layout", "5"],
+            vec!["c.ves", "--randomize-layout", "33"],
+            vec!["c.ves", "--pmu-provider", "nope"],
+            vec!["c.ves", "--layout-run", "1"],
+            vec!["c.ves", "--layout-run", "1:64"],
+            vec!["c.ves", "--layout-seed", "-1"],
+        ] {
+            assert!(options(bad.iter().map(|s| s.to_string()).collect()).is_err());
+        }
+    }
+    fn child(plan: LayoutPlan, baseline: u64, candidate: u64) -> Json {
+        json!({"schema":"vesper.bench/1","status":"measured",
+            "layout":{"run":plan.run,"observed_env_padding_bytes":env_padding_value(plan.env_padding_bytes).len()},
+            "pairs":[pair_json(PairedSample::new(baseline, candidate, 4).unwrap(), Metric::Time),
+                     pair_json(PairedSample::new(baseline, candidate, 4).unwrap(), Metric::Time)]})
+    }
+    #[test]
+    fn layout_driver_aggregates_children_and_tests_survival() {
+        let o = parse(&[
+            "c.ves",
+            "--randomize-layout",
+            "6",
+            "--max-regression-bp",
+            "0",
+        ]);
+        let mut seen = Vec::new();
+        let outcome = randomize_layouts(&o, 6, |plan| {
+            seen.push(plan.run);
+            assert_eq!(plan, layout_plan(0, plan.run));
+            Ok(child(plan, 100, 150))
+        })
+        .unwrap();
+        assert_eq!(seen, [0, 1, 2, 3, 4, 5]);
+        assert_eq!(outcome.data["layout"]["verdict"], "candidate_slower");
+        assert_eq!(outcome.data["layout"]["survives"], true);
+        assert_eq!(
+            outcome.data["layout"]["runs"][0]["sample"]["baseline_total_ns"],
+            "200"
+        );
+        assert!(
+            outcome.gate_failure.is_some(),
+            "a 50% regression fails a 0bp gate"
+        );
+        // Alternating wins and losses: the difference does not survive.
+        let mixed = randomize_layouts(&o, 6, |plan| {
+            Ok(if plan.run % 2 == 0 {
+                child(plan, 100, 70)
+            } else {
+                child(plan, 100, 130)
+            })
+        })
+        .unwrap();
+        assert_eq!(mixed.data["layout"]["verdict"], "does_not_survive");
+        // A child that reports a different plan is rejected.
+        assert!(
+            randomize_layouts(&o, 6, |plan| Ok(child(layout_plan(1, plan.run + 1), 1, 1))).is_err()
+        );
+        // A child that could not measure makes the comparison inconclusive.
+        let unavailable = randomize_layouts(&o, 6, |_| {
+            Ok(json!({"status":"inconclusive","error":"PMU unavailable"}))
+        })
+        .unwrap();
+        assert_eq!(unavailable.data["status"], "inconclusive");
+        assert!(unavailable.gate_failure.is_some());
+        assert!(child_sample(&json!({"status":"measured","pairs":[]}), Metric::Time).is_err());
     }
 }
