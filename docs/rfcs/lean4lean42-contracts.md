@@ -104,6 +104,9 @@ cap. Hash domain is `vesper.lean4lean42.build_outputs\0`, schema1 u16LE,
 count u32LE, then each FileDigest in order: path length u32LE+UTF-8, bytes u64LE,
 32-byte BLAKE3. Compare the complete set, lengths and hashes before/after use.
 Setup logs and the receipt live outside these generated directories.
+Their exact root names are `setup-inputs.json`, `build.stdout`, `build.stderr`
+and `setup-receipt.json`. The validated setup input must name exactly those
+two log files; a source file cannot be disguised as an excluded log path.
 
 Inventory/replay children use only the private model and pinned sysroot search
 roots. Control-baseline/control children additionally use the candidate and
@@ -159,6 +162,14 @@ an integration-test executable or later compatible driver has identical bytes.
 Ordinary run revalidates the profile, pinned inputs, candidate/compiler bytes,
 generated outputs, control baseline and actual controls; it never trusts a
 prior matched=true field alone. Incompatible input/profile changes fail.
+
+Ordinary CLI without `--lean` uses the bounded receipt's recorded actual
+compiler path. `Config.lean` remains a concrete PathBuf: the thin CLI supplies
+that path when no override was given. An override must resolve to the same
+validated compiler/prefix and bytes before execution. Do not invoke a manager
+proxy that could install a toolchain during an offline run; reject an unmatched
+launcher as ToolIdentity instead. Explicit setup owns initial launcher probes
+and records the actual compiler and Lake paths.
 
 Atomic setup publication must preserve path association: the checker/source/
 generated entries are tool-root-relative, while compiler paths identify the
