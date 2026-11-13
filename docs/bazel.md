@@ -80,6 +80,8 @@ Edit the crate's `BUILD.bazel` (see existing ones for examples):
 - `copy_test_cwd`: tests that must see regular files instead of runfiles
   symlinks (Lean's `--root`, code that rejects symlinked inputs).
 - `test_tags`: extra tags per test, for example `no-remote-exec`.
+- `test_target_compatible_with`: platform constraints for one test, for
+  example to skip `//:test/proof_audit_cli` on macOS, where it is too slow.
 
 ### How tests see their environment
 
