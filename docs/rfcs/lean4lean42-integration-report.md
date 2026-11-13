@@ -58,12 +58,20 @@ The first focused acceptance attempt failed before mathematical replay because
 its synthetic quotient fixture omitted the required Eq prerequisite; the
 fixture was corrected without relaxing production validation. The initial
 strict Clippy pass reported nine source warnings; their routine refactoring
-fixes await the final rerun. These failed attempts are not counted as complete
+fixes and a test-only needless borrow are resolved. The actual targeted strict
+Clippy rerun passed in 2.07 seconds. These failed attempts are not counted as complete
 acceptance passes.
 
-At this checkpoint the corrected target1 independent replay, fresh setup of the
-corrected source, complete production Rust acceptance, final package regression
-and hosted platform checks remain pending. No unexecuted result is claimed.
+The corrected target1 independent replay also completed: 88337 eligible IDs,
+1252 constructor / 815 recursor comparisons, 368 target-owned constants and
+37 required roots, zero pending, clean EOF/exit0 in 197.303 seconds. Both complete
+independent replays used the same unchanged checker/model/artifact bytes before
+and after. A second fresh setup of the corrected source passed with all 94
+controls and the complete envelopes.
+
+At this checkpoint complete production Rust acceptance, final package
+regression and hosted platform checks remain pending. No unexecuted result is
+claimed.
 
 ## Process and receipt limits
 
