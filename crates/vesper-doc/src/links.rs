@@ -230,7 +230,7 @@ fn inventory(targets: &[LinkTarget], budget: &mut Budget) -> Result<Vec<LinkTarg
     // A quadratic comparison envelope is finite even for an adversarial sort.
     let longest = targets.iter().map(|t| t.path.len()).max().unwrap_or(0);
     budget.work(mul(mul(targets.len(), targets.len())?, add(longest, 1)?)?)?;
-    result.sort();
+    result.sort_unstable();
     Ok(result)
 }
 
@@ -345,32 +345,85 @@ fn run(bytes: &[u8], start: usize, byte: u8) -> usize {
     bytes[start..].iter().take_while(|&&b| b == byte).count()
 }
 fn balanced_end(
-    bytes: &[u8],
+    lines: &[Line<'_>],
+    line: usize,
     start: usize,
     open: u8,
     close: u8,
     budget: &mut Budget,
-) -> Result<Option<usize>, LinkError> {
+) -> Result<Option<(usize, usize)>, LinkError> {
     let mut depth = 1usize;
-    let mut at = start + 1;
-    while at < bytes.len() {
-        budget.work(1)?;
-        if bytes[at] == b'\\' {
-            at = (at + 2).min(bytes.len());
-            continue;
-        }
-        if bytes[at] == open {
-            depth = add(depth, 1)?;
-        } else if bytes[at] == close {
-            depth -= 1;
-            if depth == 0 {
-                return Ok(Some(at + 1));
+    let mut quote = None;
+    let mut angle = false;
+    for (index, text) in lines.iter().enumerate().skip(line) {
+        let bytes = text.text.as_bytes();
+        let mut at = if index == line { start + 1 } else { 0 };
+        while at < bytes.len() {
+            budget.work(1)?;
+            let byte = bytes[at];
+            if byte == b'\\' {
+                at = (at + 2).min(bytes.len());
+                continue;
             }
+            if open == b'(' {
+                if let Some(delimiter) = quote {
+                    if byte == delimiter {
+                        quote = None;
+                    }
+                    at += 1;
+                    continue;
+                }
+                if angle {
+                    if byte == b'>' {
+                        angle = false;
+                    }
+                    at += 1;
+                    continue;
+                }
+                if matches!(byte, b'\'' | b'"') {
+                    quote = Some(byte);
+                    at += 1;
+                    continue;
+                }
+                if byte == b'<' {
+                    angle = true;
+                    at += 1;
+                    continue;
+                }
+            }
+            if byte == open {
+                depth = add(depth, 1)?;
+            } else if byte == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok(Some((index, at + 1)));
+                }
+            }
+            at += 1;
         }
-        at += 1;
     }
     Ok(None)
 }
+fn next_markdown(
+    lines: &[Line<'_>],
+    line: usize,
+    start: usize,
+    budget: &mut Budget,
+) -> Result<Option<(usize, usize)>, LinkError> {
+    for index in line..lines.len().min(line + 2) {
+        let bytes = lines[index].text.as_bytes();
+        let mut at = if index == line { start } else { 0 };
+        while matches!(bytes.get(at), Some(b' ' | b'\t' | b'\r')) {
+            budget.work(1)?;
+            at += 1;
+        }
+        if at < bytes.len() {
+            return Ok(Some((index, at)));
+        }
+    }
+    Ok(None)
+}
+
 fn close_ticks(
     lines: &[Line<'_>],
     line: usize,
@@ -529,23 +582,41 @@ fn group(
             b'[' | b'!' if bytes[at] == b'[' || bytes.get(at + 1) == Some(&b'[') => {
                 let image = bytes[at] == b'!';
                 let start = at + usize::from(image);
-                let Some(end) = balanced_end(bytes, start, b'[', b']', budget)? else {
-                    at = bytes.len();
+                let Some((end_line, end)) = balanced_end(lines, line, start, b'[', b']', budget)?
+                else {
+                    line = lines.len();
                     continue;
                 };
-                let mut next = end;
-                while matches!(bytes.get(next), Some(b' ' | b'\t')) {
-                    budget.work(1)?;
-                    next += 1;
-                }
-                if bytes.get(next) == Some(&b'(') {
-                    at = balanced_end(bytes, next, b'(', b')', budget)?.unwrap_or(bytes.len());
-                } else if bytes.get(next) == Some(&b'[') {
-                    at = balanced_end(bytes, next, b'[', b']', budget)?.unwrap_or(bytes.len());
-                } else if bytes.get(next) == Some(&b':') {
-                    at = bytes.len();
+                let next = next_markdown(lines, end_line, end, budget)?;
+                if let Some((next_line, next_at)) =
+                    next.filter(|&(i, p)| lines[i].text.as_bytes()[p] == b'(')
+                {
+                    if let Some((i, p)) =
+                        balanced_end(lines, next_line, next_at, b'(', b')', budget)?
+                    {
+                        line = i;
+                        at = p;
+                    } else {
+                        line = lines.len();
+                    }
+                } else if let Some((next_line, next_at)) =
+                    next.filter(|&(i, p)| lines[i].text.as_bytes()[p] == b'[')
+                {
+                    if let Some((i, p)) =
+                        balanced_end(lines, next_line, next_at, b'[', b']', budget)?
+                    {
+                        line = i;
+                        at = p;
+                    } else {
+                        line = lines.len();
+                    }
+                } else if next
+                    .is_some_and(|(i, p)| i == end_line && lines[i].text.as_bytes()[p] == b':')
+                {
+                    line = end_line + 1;
+                    at = 0;
                 } else {
-                    if !image {
+                    if !image && end_line == line {
                         occurrence(
                             &text[start + 1..end - 1],
                             lines[line].start + start..lines[line].start + end,
@@ -553,6 +624,7 @@ fn group(
                             budget,
                         )?;
                     }
+                    line = end_line;
                     at = end;
                 }
             }
@@ -721,6 +793,40 @@ pub fn validate_report(
             return Err(error("invalid", "invalid link diagnostic"));
         }
         end = diagnostic.span.end;
+    }
+    Ok(())
+}
+
+// A separate finite rendering stage prepays new temporary anchor storage and
+// every typed-section scan/copy before the renderer allocates those anchors.
+// Serialized/output buffers retain the existing independent output byte cap.
+pub(crate) fn render_preflight(
+    document: &Document,
+    targets: &[LinkTarget],
+    limits: LinkLimits,
+) -> Result<(), LinkError> {
+    let mut budget = Budget::new(limits)?;
+    if document.doc_comments.len() > 4096 {
+        return Err(resource());
+    }
+    for target in targets {
+        target_valid(target, limits)?;
+        budget.metadata(mul(add(32, mul(target.path.len(), 2)?)?, 4)?)?;
+        budget.work(mul(add(target.path.len(), 1)?, 16)?)?;
+    }
+    let mut bytes = 0usize;
+    for comment in &document.doc_comments {
+        bytes = add(bytes, comment.text.len())?;
+        if bytes > limits.max_source_bytes {
+            return Err(resource());
+        }
+        budget.work(mul(add(comment.text.len(), 1)?, 16)?)?;
+    }
+    for reference in &document.intra_doc_links.references {
+        budget.work(mul(
+            add(add(reference.display.len(), reference.anchor.len())?, 1)?,
+            16,
+        )?)?;
     }
     Ok(())
 }

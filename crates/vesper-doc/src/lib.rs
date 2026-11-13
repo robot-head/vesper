@@ -700,6 +700,7 @@ pub fn render_document_html(
     let targets = links::document_targets(document, link_limits).map_err(|e| e.to_string())?;
     links::validate_report(&document.intra_doc_links, &targets, link_limits)
         .map_err(|e| e.to_string())?;
+    links::render_preflight(document, &targets, link_limits).map_err(|e| e.to_string())?;
     if document.doc_comments.len() > 4096 {
         return Err("documentation comment count exceeded".into());
     }
