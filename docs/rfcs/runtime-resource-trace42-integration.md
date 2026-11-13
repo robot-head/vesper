@@ -72,12 +72,32 @@ The earlier integration source also passed 104 focused backend, numeric, effect
 optimization and source-native suspension regressions, plus all 65 simulation
 package tests, including the genuine nested tracked-value JSON refusal. The
 first strict Clippy attempt found only the Execution size regression described
-above. Final boxed-source package regression and all-target Clippy are pending;
-this checkpoint does not claim their success.
+above. The final boxed production source then passed `cargo test -p vesper
+--locked`: 1069 test executions across 90 result records, zero failures, ignored
+tests or filters. This includes both genuine external-model replay and the real
+arithmetic oracle matrix, plus all six proof-audit CLI tests.
+
+A subsequent test-only swap control conserves both actual resources while
+reversing their physical field routing. Its two consume events must carry the
+opposite mint identities at the unchanged left/right pattern sites; counts alone
+would miss this difference. All five private tests, covering twenty-four real
+handoffs, passed on that source (zero failed/ignored, 91 unrelated library tests
+deliberately filtered). The earlier full package result is not relabeled as an
+unfiltered run of that newly added test.
+
+`cargo clippy -p vesper -p vesper-sim-session --locked --all-targets -- -D warnings`
+passed in 37.62 seconds on the final source. Workspace formatting, actual CLI
+format checking of all six new Vesper fixtures, Bazel metadata synchronization
+and whitespace checks also passed. Logs are
+`/tmp/runtime-resource42-root-full.log`,
+`/tmp/runtime-resource42-final-carriers.log`, and
+`/tmp/runtime-resource42-final-clippy.log` in the execution workspace. These local
+Linux results do not claim hosted macOS/Windows execution.
 
 The executed and coordinator worktrees have byte-identical contents for all
-fifteen changed Rust/fixture files. Their actual SHA-256 associations and source
-heads are recorded in runtime-resource-trace42-source-manifest.json. This is an
+fifteen changed Rust/fixture files. Their actual SHA-256 associations, source
+heads and separate validation checkpoints are recorded in
+runtime-resource-trace42-source-manifest.json. This is an
 input association, not proof of binary derivation or a hostile-host attestation.
 
 ## Remaining boundaries

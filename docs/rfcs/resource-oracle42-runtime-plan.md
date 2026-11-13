@@ -1,5 +1,7 @@
 # Resource differential oracle: runtime feasibility and pending seam (#309)
 
+Historical planning checkpoint for #309. The separately claimed #317 now implements the reference-evaluator provider with its own narrower [frozen API/profile](runtime-resource-trace42-contracts.md) and [actual evidence](runtime-resource-trace42-integration.md). The model/native/generator/campaign proposals below remain future work; they are not implemented behavior or a full-harness source authorization.
+
 This is a read-only implementation plan under public issue309. The only owned
 change is this new document. Source inspected is main
 `c226ee98695135ad59e64318213e79f911ad6325`, including merged295/278/287. No Cargo,

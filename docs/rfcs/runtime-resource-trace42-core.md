@@ -1,5 +1,7 @@
 # Reference resource observation core (#317)
 
+Final coordinator validation passed the eight core tests within the unfiltered 1069-test package run. Final all-target strict Clippy for the compiler and simulation package also passed. The original core-author checkpoint below remains source-only; see [integration evidence](runtime-resource-trace42-integration.md).
+
 This coherent source checkpoint implements the core side of frozen contract
 `f8e4abb` and its actual-World revalidation/fallible-finalization amendments.
 Only new `src/runtime/resource_trace.rs` and this report are owned by this lane.

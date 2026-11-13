@@ -1,5 +1,7 @@
 # Resource oracle planning resolutions (#309)
 
+Historical planning checkpoint for #309. The separately claimed #317 now implements the reference-evaluator provider with its own narrower [frozen API/profile](runtime-resource-trace42-contracts.md) and [actual evidence](runtime-resource-trace42-integration.md). The model/native/generator/campaign proposals below remain future work; they are not implemented behavior or a full-harness source authorization.
+
 This records the reviewed model, runtime and independent acceptance plans at
 main `c226ee98695135ad59e64318213e79f911ad6325`. It is not a frozen source
 contract and authorizes no resource-oracle source writer. All three planning

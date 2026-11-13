@@ -1,5 +1,7 @@
 # Independent resource-oracle acceptance plan (#309)
 
+Historical planning checkpoint for #309. The separately claimed #317 now implements the reference-evaluator provider with its own narrower [frozen API/profile](runtime-resource-trace42-contracts.md) and [actual evidence](runtime-resource-trace42-integration.md). The model/native/generator/campaign proposals below remain future work; they are not implemented behavior or a full-harness source authorization.
+
 This is a read-only feasibility and acceptance plan against main `c226ee98695135ad59e64318213e79f911ad6325`. It owns only this document. No compiler, model, test, dependency or build file was edited; no Cargo build, CLI probe, Lean compilation or replay was executed by this lane. The available compiled CLI is an older `20ee` baseline and is not evidence about this source revision. Proposed APIs and limits below are recommendations for a future published contract, not implemented interfaces.
 
 The immediate blocker is an executed resource-identity observation seam in both real backends. A Lean resource model, generator and trace comparator can be useful foundations, but cannot establish differential resource behavior until actual evaluator and native executions emit their own identity-bearing events. Pending external #307/#308 source belongs to its existing owners and must be reviewed through its actual published API before this blocker is considered resolved.

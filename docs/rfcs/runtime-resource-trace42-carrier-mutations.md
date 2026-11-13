@@ -1,5 +1,7 @@
 # Private actual-carrier fault controls (#317)
 
+Final coordinator execution passed all five private tests and 24 handoffs on dd364f6 (0 failed/ignored, 91 other library tests deliberately filtered). The production-identical preceding full package run passed 1069 test executions with the earlier four-test private module. Final strict all-target Clippy passed. The chronology below distinguishes those checkpoints; see [integration evidence](runtime-resource-trace42-integration.md).
+
 This independent lane owns only
 `src/runtime/resource_trace_acceptance.rs` and this report. The runtime writer
 owns the private test-module registration. No production observation hook,

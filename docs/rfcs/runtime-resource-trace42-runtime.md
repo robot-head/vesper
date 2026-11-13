@@ -1,5 +1,7 @@
 # Reference runtime resource provider (#317)
 
+Final coordinator validation on boxed production source passed all 1069 package test executions, with zero failures/ignored/filters, including the genuine external Lean checker and arithmetic oracle matrices. The final test-only swap addition then passed all five private controls (24 handoffs); final all-target Clippy passed. Earlier writer-specific evidence below is attributed to its original checkpoints; see [integration evidence](runtime-resource-trace42-integration.md).
+
 This report covers the runtime/compatibility lane under the frozen
 runtime-resource-trace42 contract. Source was authored against main1d63dd0.
 No native provider, resource oracle, Lean resource model, campaign, exhaustion

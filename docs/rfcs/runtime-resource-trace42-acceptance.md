@@ -1,5 +1,7 @@
 # Reference resource provider: independent acceptance (#317)
 
+Final coordinator validation passed all 1069 unfiltered package test executions, including these seventeen integration tests. After the test-only swap addition, all five private controls (24 handoffs) passed; strict all-target Clippy for both affected packages passed after the private storage fix. The failed and passing earlier attempts below are historical checkpoints, not the current verdict; see [integration evidence](runtime-resource-trace42-integration.md).
+
 This lane owns only `tests/runtime_resource_trace.rs`, its six new fixture files under `tests/fixtures/runtime_resource_trace/`, and this report. It was authored against main `1d63dd0e84fa77e651fc0f9c66cc7df65c8c5dd4` and the published `runtime-resource-trace42-contracts.md` freeze `f8e4abb`, including the coordinator's cross-World attachment, whole-clause transaction and typed boundary amendments. Core and runtime implementation are separate writers' work. No source, dependency, native, build metadata or existing test files were edited here.
 
 ## Authored checks
