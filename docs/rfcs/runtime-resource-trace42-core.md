@@ -38,6 +38,23 @@ identity, epochs/foreign/missing/dead/wrong carriers, traversal admission,
 configuration revalidation and checked nonce/borrow/drop edges. They are not
 yet executed at this checkpoint.
 
+## Runtime boundary refinement
+
+The approved integration refinement adds `BoundaryTypeMismatch` for the
+runtime's bounded typed entry/result shape guard. Core actual-carrier
+validation runs first, retaining MissingIdentity/ForeignRun/ForeignInstance/
+WrongKind/MalformedCarrier precedence; only the subsequent typed shape guard
+uses BoundaryTypeMismatch. Committed selected-pattern nominal mismatches use
+WrongKind. There is no global constructor-basename rejection: a legitimate
+unselected enum may have a variant sharing a selected struct's name.
+
+This first provider explicitly supports monomorphic entry boundary schemas
+built from admitted scalars/unit/tuples/nongeneric ADTs. Unsupported callable
+**results**, generic aggregate boundaries and unknown schemas return
+UnsupportedValue, as do unsupported callable inputs. Internal generic helpers
+are not disabled by this boundary policy. The runtime writer owns the actual
+bounded type/value guard; the core does not claim a general host-value typechecker.
+
 ## Executed evidence at checkpoint
 
 ```sh

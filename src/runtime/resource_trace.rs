@@ -86,6 +86,7 @@ pub enum ResourceTraceFailure {
     ValueNodeLimit,
     ValueDepthLimit,
     UnsupportedValue,
+    BoundaryTypeMismatch,
     InstanceExhausted,
     RunExhausted,
     SerialExhausted,
