@@ -208,7 +208,7 @@ fn unknown_unsupported_and_non_minimal_types() {
         parse_frame(&[0x41, 0x00], PacketType::OneRtt),
         Err(FrameError::UnknownType(0x100))
     );
-    for ty in [0x04u8, 0x05, 0x07, 0x12, 0x18, 0x1a, 0x1b] {
+    for ty in [0x07u8, 0x18, 0x19, 0x1a, 0x1b] {
         assert_eq!(
             parse_frame(&[ty, 0, 0, 0], PacketType::OneRtt),
             Err(FrameError::Unsupported(u64::from(ty)))

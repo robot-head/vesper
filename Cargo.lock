@@ -3639,6 +3639,7 @@ dependencies = [
  "vesper-doc",
  "vesper-fiber-abi",
  "vesper-fmt",
+ "vesper-forge",
  "vesper-grammar",
  "vesper-lean-syntax",
  "vesper-lint",
@@ -3776,6 +3777,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "vesper-loom-sandbox",
+ "vesper-syntax",
 ]
 
 [[package]]
@@ -3783,6 +3785,7 @@ name = "vesper-forge-runner"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -4104,6 +4107,15 @@ name = "vesper-warp-tcp"
 version = "0.1.0"
 dependencies = [
  "vesper-ffi",
+]
+
+[[package]]
+name = "vesper-warp-tls"
+version = "0.1.0"
+dependencies = [
+ "rustls",
+ "vesper-warp-crypto",
+ "zeroize",
 ]
 
 [[package]]
