@@ -7,6 +7,9 @@ use super::{
 use crate::{Budget, Error, Limits, ZSet};
 use std::collections::BTreeMap;
 
+#[path = "durable.rs"]
+pub(super) mod durable;
+
 const MAGIC: &[u8; 8] = b"VFLUXCP1";
 const VERSION: u16 = 1;
 /// Image/parse/validation ceilings. Hard caps: 64MiB image, 1M rows, 4M cells,
@@ -231,7 +234,7 @@ impl Identity<'_> {
         Ok(())
     }
 }
-fn identity(
+pub(super) fn identity(
     c: &Circuit,
     source: Option<&SourceState>,
     limits: CheckpointLimits,
@@ -421,6 +424,77 @@ fn validate_state(
     }
     Ok(())
 }
+fn write_source(w: &mut Writer, source: Option<&SourceState>) -> Result<(), Error> {
+    match source {
+        None => w.u8(0)?,
+        Some(s) => {
+            w.u8(1)?;
+            w.usize(s.policy.max_batch_bytes)?;
+            w.usize(s.policy.max_records)?;
+            w.u32(u32::try_from(s.policy.bindings.len()).map_err(|_| Error::Overflow)?)?;
+            for (b, next) in s.policy.bindings.iter().zip(&s.next) {
+                w.u32(b.partition_id)?;
+                w.u16(b.schema_id)?;
+                w.usize(b.input)?;
+                w.u64(b.first_lsn)?;
+                w.u8(match b.weights {
+                    WeightPolicy::Unit => 0,
+                    WeightPolicy::NonZero => 1,
+                })?;
+                w.u64(*next)?;
+            }
+        }
+    }
+    Ok(())
+}
+fn read_source(
+    r: &mut Reader<'_, '_>,
+    circuit: &Circuit,
+    limits: CheckpointLimits,
+) -> Result<Option<SourceState>, Error> {
+    let source = match r.u8()? {
+        0 => None,
+        1 => {
+            let max_batch_bytes = r.usize()?;
+            let max_records = r.usize()?;
+            let count = usize::try_from(r.u32()?).map_err(|_| Error::Overflow)?;
+            if count > limits.max_sources || count > 1024 {
+                return Err(Error::Limit("checkpoint sources"));
+            }
+            let mut bindings = Vec::new();
+            let mut next = Vec::new();
+            for _ in 0..count {
+                let partition_id = r.u32()?;
+                let schema_id = r.u16()?;
+                let input = r.usize()?;
+                let first_lsn = r.u64()?;
+                let weights = match r.u8()? {
+                    0 => WeightPolicy::Unit,
+                    1 => WeightPolicy::NonZero,
+                    _ => return Err(Error::Checkpoint("weight policy")),
+                };
+                let next_lsn = r.u64()?;
+                bindings.push(SourceBinding {
+                    partition_id,
+                    schema_id,
+                    input,
+                    first_lsn,
+                    weights,
+                });
+                next.push(next_lsn);
+            }
+            let policy = CdcPolicy {
+                bindings,
+                max_batch_bytes,
+                max_records,
+            };
+            policy.validate(circuit)?;
+            Some(SourceState { policy, next })
+        }
+        _ => return Err(Error::Checkpoint("source tag")),
+    };
+    Ok(source)
+}
 impl Executor {
     /// Snapshot all original-node integrals (including input integrals), tick
     /// count and source offsets in one bounded image. Frontier owners are absent.
@@ -450,26 +524,7 @@ impl Executor {
         w.u16(0)?;
         w.put(&id)?;
         w.u64(self.ticks)?;
-        match &self.source {
-            None => w.u8(0)?,
-            Some(s) => {
-                w.u8(1)?;
-                w.usize(s.policy.max_batch_bytes)?;
-                w.usize(s.policy.max_records)?;
-                w.u32(u32::try_from(s.policy.bindings.len()).map_err(|_| Error::Overflow)?)?;
-                for (b, next) in s.policy.bindings.iter().zip(&s.next) {
-                    w.u32(b.partition_id)?;
-                    w.u16(b.schema_id)?;
-                    w.usize(b.input)?;
-                    w.u64(b.first_lsn)?;
-                    w.u8(match b.weights {
-                        WeightPolicy::Unit => 0,
-                        WeightPolicy::NonZero => 1,
-                    })?;
-                    w.u64(*next)?;
-                }
-            }
-        }
+        write_source(&mut w, self.source.as_ref())?;
         w.u32(u32::try_from(self.prior.len()).map_err(|_| Error::Overflow)?)?;
         for set in &self.prior {
             w.u32(u32::try_from(set.width).map_err(|_| Error::Overflow)?)?;
@@ -520,47 +575,7 @@ impl Executor {
             return Err(Error::Checkpoint("identity"));
         }
         let ticks = r.u64()?;
-        let source = match r.u8()? {
-            0 => None,
-            1 => {
-                let max_batch_bytes = r.usize()?;
-                let max_records = r.usize()?;
-                let count = usize::try_from(r.u32()?).map_err(|_| Error::Overflow)?;
-                if count > limits.max_sources || count > 1024 {
-                    return Err(Error::Limit("checkpoint sources"));
-                }
-                let mut bindings = Vec::new();
-                let mut next = Vec::new();
-                for _ in 0..count {
-                    let partition_id = r.u32()?;
-                    let schema_id = r.u16()?;
-                    let input = r.usize()?;
-                    let first_lsn = r.u64()?;
-                    let weights = match r.u8()? {
-                        0 => WeightPolicy::Unit,
-                        1 => WeightPolicy::NonZero,
-                        _ => return Err(Error::Checkpoint("weight policy")),
-                    };
-                    let next_lsn = r.u64()?;
-                    bindings.push(SourceBinding {
-                        partition_id,
-                        schema_id,
-                        input,
-                        first_lsn,
-                        weights,
-                    });
-                    next.push(next_lsn);
-                }
-                let policy = CdcPolicy {
-                    bindings,
-                    max_batch_bytes,
-                    max_records,
-                };
-                policy.validate(&self.circuit)?;
-                Some(SourceState { policy, next })
-            }
-            _ => return Err(Error::Checkpoint("source tag")),
-        };
+        let source = read_source(&mut r, &self.circuit, limits)?;
         if source.as_ref().map(|s| &s.policy) != self.source.as_ref().map(|s| &s.policy) {
             return Err(Error::Checkpoint("source policy"));
         }
@@ -608,6 +623,7 @@ impl Executor {
         self.prior = prior;
         self.ticks = ticks;
         self.source = source;
+        self.lineage = super::fresh_lineage();
         Ok(())
     }
 }

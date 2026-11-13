@@ -4327,6 +4327,9 @@ name = "vesper-flux"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "tempfile",
+ "vesper-loom-cas",
+ "vesper-simpulse",
 ]
 
 [[package]]
