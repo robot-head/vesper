@@ -1,8 +1,8 @@
 # Region-backed scalar flat table foundation (§15.5)
 
 This contract is the coordinator-reviewed interface for claims 220–223. The
-public claims precede source writers. It is drafted on base `9f0e2f5`; source
-implementation starts only after coordinator review and publication. Interface
+public claims precede source writers. It is frozen on base `9f0e2f5` after coordinator review; source
+implementation is authorized after this contract is pushed. Interface
 amendments must be published before dependent implementation changes.
 
 | Claim | Branch/lane | Exclusive writes |
@@ -361,8 +361,8 @@ strict package all-target Clippy, formatting and diff checks in its private
 cache. Coordinator runs combined actual tests/docs/example and independent
 Miri where available, recording executed evidence and limits honestly. No
 ignored tests, weakened caps, fabricated source stubs or hosted/platform claims
-stand in for actual execution. No runtime/build begins on this draft until
-coordinator publication authorizes the source lanes.
+stand in for actual execution. Runtime/test work starts after coordinator publication of this frozen
+contract and remains inside the exclusive paths above.
 
 This establishes scalar 16-lane control-group shape, bounded runtime probing,
 actual inline region storage and ordinary Rust affine ownership. It does not

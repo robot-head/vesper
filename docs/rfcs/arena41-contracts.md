@@ -4,8 +4,8 @@ Claims220(parent),224(source),225(model) and226(lifecycle) were publicly created
 before writers. Base main9f0e2f5. Root checked actual open-PR files and claims for
 allocator overlap. Parallel flat-table221–223 and reserved tiled206/215, external
 Claude121–136, root CLI/core/Cargo, build/workflow and other claimed paths remain
-separate. Publish amendments before dependent source changes. This is a draft:
-source starts only after root review and publication.
+separate. Publish amendments before dependent source changes. Root has reviewed and frozen this contract:
+source work is authorized after its publication to the integration branch.
 
 |Claim|Branch|Exclusive writes|
 |---|---|---|
@@ -16,8 +16,8 @@ source starts only after root review and publication.
 
 Reports are `docs/rfcs/arena41-{source,model,acceptance}-report.md`; root owns its
 integration report. Separate worktrees/private caches, one Cargo job, debug0,
-incremental0. Root alone registers the empty development module and later
-reexports actual implemented types. No Vec/slab/tiled/allocator metadata,
+incremental0. Root alone registers the module and reexports actual implemented types after
+importing a coherent source commit; independent tests wait for those exports. No Vec/slab/tiled/allocator metadata,
 dependency/Cargo, compiler, CLI, BUILD/workflow/wrapper, or unrelated test edits.
 Claims stay reserved through reviewed merge. No source builds until publication.
 

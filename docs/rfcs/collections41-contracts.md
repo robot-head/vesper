@@ -27,8 +27,8 @@ Each writer uses a separate worktree and private small target cache, one Cargo
 job, debug0 and incremental0. The shared root target and coordinator Miri target
 are coordinator-only. No existing Vec/slab algorithms, allocator metadata hooks,
 tiled.rs, error.rs, Cargo/dependencies, BUILD/workflows, wrappers, compiler/core
-AST or CLI edits. The coordinator alone registers empty development modules,
-then actual public types after coherent source. New implementation modules
+AST or CLI edits. The coordinator alone registers each module and reexports its actual public
+types after importing a coherent source commit; test lanes wait for those exports. New implementation modules
 forbid unsafe code and use existing checked RegionVec APIs and safe slice splits.
 
 These collections own ordinary affine Rust payloads, including non-Copy values
@@ -44,3 +44,13 @@ amendments are published before dependent edits. Actual native, ownership,
 model/layout/lifecycle, strict Clippy, formatting and relevant strict-provenance
 Miri results are required before completion; hosted/platform success remains
 separate until executed.
+
+## Coordinator publication
+
+The coordinator reviewed and froze both component contracts before runtime/test
+writers started. The live design refresh through section 42 leaves section 15
+byte-identical; claim 227 handles that snapshot separately. Arena usable capacity
+is capped at u32::MAX while existing RegionVec may physically over-reserve.
+Logical slot/byte checks still precede insertion and allocation. No allocator
+growth redesign or public key forge API is authorized. Root alone publishes
+interface amendments before dependent writers change their code.
