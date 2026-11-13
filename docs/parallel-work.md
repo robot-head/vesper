@@ -3,6 +3,10 @@
 Base checkpoint: `c5328d0`. Integration branch: `main` (the `work` branch was merged in PR #9). Remote: https://github.com/robot-head/vesper.
 The expanded design lives in [specification.txt](specification.txt); the implemented core baseline is [core-specification-baseline.txt](core-specification-baseline.txt).
 
+## Sixth wave: depth in every started section
+
+The [sixth-wave prompt index](agent-prompts/wave-six/README.md) runs integration B (#136, CLI and compiler hooks for the wave-five crates) and twenty-four lanes under the [wave-six contracts](rfcs/wave-six-contracts.md). Claim issues are #243–#266: lanes 1–22 add depth to existing crates (Bridge pointers and MPK, Chrono traces and checkpoints, Kinetic, Aegis vendor samples, Warp lifecycle, HTTP/3, SIMD JSON, Lens, Beacon, Quarry and Flux durability, Aether UFFD, Metronome, Codex docs, source capability effects, metatheory, Chorus, eBPF, Silicon, Crucible, Tensor inference, Windows fibers); lanes 23 and 24 follow integration B. The [section status review](rfcs/wave-six-review.md) lists what is left for later. Other agents hold §42 (#230–#242, PR #238).
+
 ## Fifth wave: every unstarted section and the Warp gaps
 
 The [fifth-wave prompt index](agent-prompts/wave-five/README.md) splits the ten design sections that had no code at `af03122` (§23 Vault, §25 Chorus, §26 Silicon, §27 eBPF, §29 Crucible and migrate, §30 Nexus, §31 Chrono, §32 Resonance, §33 Aegis, §36 Kinetic) and the three gaps left by the Warp integration (TLS handshake, stream retransmission, source simulation on the software NIC) into fourteen concurrent lanes under the [wave-five contracts](rfcs/wave-five-contracts.md). Claim issues are #121–#134; integration steps are #135 (Warp handshake) and #136 (CLI and compiler hooks). The [section status review](rfcs/wave-five-review.md) lists what remains in the sections that already have code. Other agents hold §16.4 macros (#103–#110) and §39 formatting (#111–#120); wave five does not touch those paths.
