@@ -1351,7 +1351,7 @@ mod tests {
     #[test]
     fn unsupported_and_invalid_spans_publish_explicit_unavailable_warnings() {
         let mut session = running(true);
-        let unavailable = open(&mut session, "opaque:a", "fn main(){let x=0;let x=(x,x);}");
+        let unavailable = open(&mut session, "opaque:a", "fn main(){let x=Some(0);}");
         assert_eq!(unavailable["vesper"]["status"], "analysis_unavailable");
         assert_eq!(unavailable["diagnostics"][0]["severity"], 2);
         assert_eq!(

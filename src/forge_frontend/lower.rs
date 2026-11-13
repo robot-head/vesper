@@ -206,6 +206,7 @@ struct Builder<'a> {
     seen_refs: BTreeSet<usize>,
     seen_binders: BTreeSet<BinderId>,
     anchors: Vec<usize>,
+    tuple_closes: BTreeMap<usize, usize>,
     parameters: BTreeSet<BinderId>,
     parameter_renames: Vec<ParameterRename>,
     counter: usize,
@@ -276,6 +277,7 @@ impl<'a> Builder<'a> {
             seen_refs: BTreeSet::new(),
             seen_binders: BTreeSet::new(),
             anchors: Vec::new(),
+            tuple_closes: BTreeMap::new(),
             parameters: BTreeSet::new(),
             parameter_renames: Vec::new(),
             counter: 0,
@@ -654,6 +656,34 @@ impl<'a> Builder<'a> {
                     *open,
                 )
             }
+            ExprShape::Tuple {
+                open,
+                close,
+                values,
+            } => {
+                self.punctuation(*open, "(")?;
+                self.punctuation(*close, ")")?;
+                if open >= close || values.len() > self.budget.limits.max_nodes {
+                    return Err(LowerError::InvalidInventory("tuple bounds"));
+                }
+                let storage = values
+                    .len()
+                    .checked_mul(std::mem::size_of::<Expr>())
+                    .and_then(|n| n.checked_add(std::mem::size_of::<(usize, usize)>() * 2))
+                    .ok_or(LowerError::Budget(Resource::Work))?;
+                self.budget.charge(storage)?;
+                if self.tuple_closes.insert(*open, *close).is_some() {
+                    return Err(LowerError::InvalidInventory("tuple delimiter identity"));
+                }
+                let mut lowered = Vec::new();
+                lowered
+                    .try_reserve_exact(values.len())
+                    .map_err(|_| LowerError::Allocation)?;
+                for value in values {
+                    lowered.push(self.expr(value, depth + 1)?);
+                }
+                (ExprKind::Tuple(lowered), *open)
+            }
             ExprShape::Block {
                 open,
                 close,
@@ -754,6 +784,20 @@ fn preflight_shape(shape: &ExprShape, budget: &mut Budget) -> Result<(), LowerEr
                     add(a, depth + 1)?;
                 }
             }
+            ExprShape::Tuple { values, .. } => {
+                if values.len() > max_nodes {
+                    return Err(LowerError::Budget(Resource::Nodes));
+                }
+                budget.charge(
+                    values
+                        .len()
+                        .checked_mul(std::mem::size_of::<Expr>())
+                        .ok_or(LowerError::Budget(Resource::Work))?,
+                )?;
+                for value in values {
+                    add(value, depth + 1)?;
+                }
+            }
             ExprShape::Block {
                 statements, tail, ..
             } => {
@@ -785,6 +829,7 @@ struct Emitter<'a> {
     segments: Vec<LowerSegment>,
     body: &'a ResolvedBody,
     anchors: &'a [usize],
+    tuple_closes: &'a BTreeMap<usize, usize>,
     budget: &'a mut Budget,
 }
 impl Emitter<'_> {
@@ -813,10 +858,35 @@ impl Emitter<'_> {
                 expansion: *expansion,
             },
         };
-        self.source
-            .try_reserve(text.len())
-            .map_err(|_| LowerError::Allocation)?;
-        reserve(&mut self.segments, 1)?;
+        // Explicit geometric growth prepays both new storage and old payload
+        // copies before either reserve. Tuple punctuation may cause many writes.
+        if end > self.source.capacity() {
+            let capacity = end
+                .max(self.source.capacity().saturating_mul(2))
+                .max(32)
+                .min(self.budget.limits.max_output_bytes);
+            self.budget
+                .charge(checked_add(capacity, self.source.len())?)?;
+            self.source
+                .try_reserve_exact(capacity - self.source.len())
+                .map_err(|_| LowerError::Allocation)?;
+        }
+        if self.segments.len() == self.segments.capacity() {
+            let capacity = self
+                .segments
+                .len()
+                .saturating_mul(2)
+                .max(8)
+                .min(self.budget.limits.max_map_entries);
+            self.budget.charge(
+                checked_add(capacity, self.segments.len())?
+                    .checked_mul(std::mem::size_of::<LowerSegment>())
+                    .ok_or(LowerError::Budget(Resource::Work))?,
+            )?;
+            self.segments
+                .try_reserve_exact(capacity - self.segments.len())
+                .map_err(|_| LowerError::Allocation)?;
+        }
         let span = self.source.len()..end;
         self.source.push_str(text);
         self.segments.push(LowerSegment {
@@ -901,6 +971,24 @@ impl Emitter<'_> {
                 }
                 self.emit(")", token)?;
             }
+            ExprKind::Tuple(values) => {
+                let close = *self
+                    .tuple_closes
+                    .get(&token)
+                    .ok_or(LowerError::InvalidInventory("tuple closing anchor"))?;
+                self.emit("(", token)?;
+                let singleton = values.len() == 1;
+                for (i, value) in values.iter_mut().enumerate() {
+                    if i > 0 {
+                        self.emit(", ", token)?;
+                    }
+                    self.expr(value, depth + 1)?;
+                }
+                if singleton {
+                    self.emit(",", token)?;
+                }
+                self.emit(")", close)?;
+            }
             ExprKind::Block { statements, tail } => {
                 self.emit("{", token)?;
                 for statement in statements {
@@ -963,6 +1051,7 @@ pub fn lower_body(
         segments: Vec::new(),
         body,
         anchors: &builder.anchors,
+        tuple_closes: &builder.tuple_closes,
         budget: &mut builder.budget,
     };
     emitter.expr(&mut expected, 0)?;
@@ -1041,6 +1130,17 @@ pub fn shape_matches(
                         return Ok(false);
                     }
                     push(&a.expr, &b.expr)?;
+                }
+            }
+            (ExprKind::Tuple(a), ExprKind::Tuple(b)) => {
+                if a.len() != b.len() {
+                    return Ok(false);
+                }
+                if a.len() > limits.max_nodes {
+                    return Err(LowerError::Budget(Resource::Nodes));
+                }
+                for (a, b) in a.iter().zip(b) {
+                    push(a, b)?;
                 }
             }
             (
