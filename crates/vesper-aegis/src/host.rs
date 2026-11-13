@@ -358,7 +358,7 @@ impl BounceAperture {
             Ok(c) => c.cells,
             Err(e) => return Err((bounce, e)),
         };
-        let parts = [&sealed.nonce[..], sealed.ciphertext, &sealed.tag[..]];
+        let parts = sealed.parts();
         let total: usize = parts.iter().map(|p| p.len()).sum();
         if total > cells.len() {
             let cap = cells.len();
@@ -478,28 +478,78 @@ pub struct SealedFrame<'a> {
     pub(crate) tag: [u8; 16],
 }
 
-/// Borrowed view of a [`SealedFrame`] for egress.
+/// A Vault-sealed frame (§23.3 `EncryptedFrameWireHeader` then
+/// ciphertext). Only [`crate::gate::VaultEnclaveGate`] builds one, from a
+/// successful `AeadSealer::seal_in_place`.
+#[derive(Debug)]
+pub struct SealedVaultFrame<'a> {
+    pub(crate) header: [u8; vesper_vault::FRAME_HEADER_LEN],
+    pub(crate) ciphertext: &'a [u8],
+}
+
+/// Borrowed view of sealed output for egress: `head || ciphertext || tail`.
 #[derive(Clone, Copy, Debug)]
 pub struct CiphertextSlice<'a> {
-    nonce: [u8; 12],
+    head: [u8; vesper_vault::FRAME_HEADER_LEN],
+    head_len: usize,
     ciphertext: &'a [u8],
-    tag: [u8; 16],
+    tail: [u8; 16],
+    tail_len: usize,
 }
 
 impl<'a> CiphertextSlice<'a> {
+    /// `nonce[12] || ciphertext || tag[16]`.
     pub fn from_sealed(frame: &SealedFrame<'a>) -> Self {
+        let mut head = [0u8; vesper_vault::FRAME_HEADER_LEN];
+        head[..12].copy_from_slice(&frame.nonce);
         CiphertextSlice {
-            nonce: frame.nonce,
+            head,
+            head_len: 12,
             ciphertext: frame.ciphertext,
-            tag: frame.tag,
+            tail: frame.tag,
+            tail_len: 16,
         }
     }
 
+    /// `header[28] || ciphertext` (Vault frame layout).
+    pub fn from_vault_sealed(frame: &SealedVaultFrame<'a>) -> Self {
+        CiphertextSlice {
+            head: frame.header,
+            head_len: vesper_vault::FRAME_HEADER_LEN,
+            ciphertext: frame.ciphertext,
+            tail: [0; 16],
+            tail_len: 0,
+        }
+    }
+
+    fn parts(&self) -> [&[u8]; 3] {
+        [
+            &self.head[..self.head_len],
+            self.ciphertext,
+            &self.tail[..self.tail_len],
+        ]
+    }
+
     pub fn len(&self) -> usize {
-        12 + self.ciphertext.len() + 16
+        self.head_len + self.ciphertext.len() + self.tail_len
     }
 
     pub fn is_empty(&self) -> bool {
         false
     }
+}
+
+/// §33.2 `attest_channel_binding`: ask the TEE for a quote/report whose
+/// report data binds `transcript_hash`. No hardware backend exists (no TEE
+/// in the cloud sandbox or CI, and no TDX/SNP/CCA guest driver interface is
+/// implemented), so this always returns
+/// [`TeeError::HardwareUnavailable`] and writes nothing to `dest`.
+pub fn attest_channel_binding<'r>(
+    dest: &'r mut PrivateRegion,
+    transcript_hash: &[u8; 48],
+) -> Result<PrivateSlice<'r>, TeeError> {
+    let _ = (dest, transcript_hash);
+    Err(TeeError::HardwareUnavailable {
+        what: "TEE quote generation (attest_channel_binding)",
+    })
 }
