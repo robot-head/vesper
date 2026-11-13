@@ -5,9 +5,9 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-use vesper_fmt::{Limits, format_source};
+use vesper_fmt::{FormatResult, Limits, format_recovery_source, format_source};
 const MAX_BYTES: u64 = 256 * 1024;
-const HELP: &str = "Usage: vesper fmt FILE [--check] [--json]\n\nFormat the currently supported Vesper grammar with a canonical 100-column ribbon.\nCheck mode never writes and exits nonzero when formatting is needed.\nInputs are bounded to 256 KiB regular UTF-8 files without final symlinks.\nInvalid/incomplete syntax, opaque macro payloads and resource failures leave input unchanged.\nToken/string/comment bytes are preserved; indivisible leaves may exceed 100 columns.\n";
+const HELP: &str = "Usage: vesper fmt FILE [--recovery] [--check] [--json]\n\nFormat supported Vesper source and expression macros with a canonical 100-column ribbon.\nRecovery mode formats only complete functions and preserves damaged or opaque source bytes.\nCheck mode never writes and exits nonzero when formatting is needed.\nInputs are bounded to 256 KiB regular UTF-8 files without final symlinks.\nDefault mode rejects invalid/incomplete source; failures always leave input unchanged.\nToken/string/comment bytes are preserved; indivisible leaves may exceed 100 columns.\n";
 struct Input {
     text: String,
     metadata: fs::Metadata,
@@ -144,6 +144,7 @@ fn replace_at_stage(
 fn execute(args: Vec<String>) -> Result<(serde_json::Value, bool), String> {
     let mut path = None;
     let mut check = false;
+    let mut recovery = false;
     let mut positional = false;
     for arg in args {
         if !positional {
@@ -153,6 +154,10 @@ fn execute(args: Vec<String>) -> Result<(serde_json::Value, bool), String> {
                     continue;
                 }
                 "--json" => continue,
+                "--recovery" => {
+                    recovery = true;
+                    continue;
+                }
                 "--" => {
                     positional = true;
                     continue;
@@ -167,8 +172,24 @@ fn execute(args: Vec<String>) -> Result<(serde_json::Value, bool), String> {
     }
     let path = path.ok_or("fmt requires a file; see fmt --help")?;
     let input = open_input(&path)?;
-    let result = format_source(&input.text, Limits::default())
-        .map_err(|e| format!("cannot format source: {e}"))?;
+    let (result, edits) = if recovery {
+        let partial = format_recovery_source(&input.text, Limits::default())
+            .map_err(|e| format!("cannot format recovery source: {e}"))?;
+        let count = partial.edits().len();
+        (
+            FormatResult {
+                changed: partial.changed(),
+                output: partial.into_output(),
+            },
+            Some(count),
+        )
+    } else {
+        (
+            format_source(&input.text, Limits::default())
+                .map_err(|e| format!("cannot format source: {e}"))?,
+            None,
+        )
+    };
     let status = if check && result.changed {
         "needs_format"
     } else if result.changed {
@@ -176,7 +197,10 @@ fn execute(args: Vec<String>) -> Result<(serde_json::Value, bool), String> {
     } else {
         "unchanged"
     };
-    let report = serde_json::json!({"schema_version":1,"status":status,"changed":result.changed,"check":check,"input_bytes":input.text.len(),"output_bytes":result.output.len(),"width":100});
+    let mut report = serde_json::json!({"schema_version":1,"status":status,"changed":result.changed,"check":check,"input_bytes":input.text.len(),"output_bytes":result.output.len(),"width":100,"mode":if recovery {"recovery"} else {"source"}});
+    if let Some(count) = edits {
+        report["edits"] = count.into();
+    }
     if result.changed && !check {
         replace(&path, &input, &result.output)?;
     }
