@@ -122,8 +122,12 @@ controlled environment fixes `LEAN_NUM_THREADS=1`; it preserves required OS
 settings, inherited standard proxy variables (upper/lower case), and CA trust
 settings with TLS verification enabled. Setup does not print proxy values or
 dump the environment. Proxy values are redacted from reported command errors.
-On Windows the controlled loader PATH contains only the selected sysroot's bin
-and required OS directories. Git hooks/global configuration are disabled for
+On Windows the controlled loader PATH contains the selected sysroot's bin and
+required OS directories. During the named build only, setup also adds the
+selected absolute Git executable's parent: Lean 4.24 Lake invokes Git to verify
+an existing dependency's HEAD. This published setup-only exception inherits no
+ambient PATH entries and is removed before sealing. The ordinary offline Rust
+environment remains unchanged. Git hooks/global configuration are disabled for
 the immutable fetch/checkouts.
 
 Ordinary `lean4lean42 --tool-root ...` is a distinct offline operation; it does

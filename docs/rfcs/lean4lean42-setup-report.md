@@ -57,6 +57,16 @@ The root's canonical `/tmp/vesper-lean4lean42-root-source` was inspected only,
 never mutated. These are source-normalization checks, not compiler/control
 success evidence. Windows literal-alias handling remains unexecuted here.
 
+Published amendment `db9cc44` subsequently permits the selected absolute Git
+executable's parent in Windows' controlled build PATH. Real pinned
+`Lake/Load/Materialize.lean` invokes Git to verify an already materialized
+dependency's HEAD. The script adds only that directory alongside the existing
+compiler/OS roots for the named build, restores the ordinary environment before
+sealing, and never copies ambient PATH entries into that build policy. Python
+compilation and whitespace checks pass after this source correction; no Windows
+build/runtime execution is claimed by this writer. No pins, receipt schema,
+source manifest or ordinary offline Rust environment changes are involved.
+
 Final root-owned pins/source manifest and the assembled genuine Rust driver
 were unavailable for a positive setup run at this checkpoint. No Git fetch,
 Lean/Lake build, source preflight/seal, receipt, complete replay or positive

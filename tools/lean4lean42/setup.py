@@ -662,7 +662,18 @@ def setup(args):
         # BLAKE3 implementation approve source identity BEFORE Lake executes it.
         commands.run([driver, "--verify-setup-source", stage])
         build_argv = [str(actual_lake), "build", "lean4lean"]
-        stdout, stderr = commands.run(build_argv, cwd=stage)
+        ordinary_environment = commands.environment
+        if os.name == "nt":
+            # Lake verifies an existing dependency's HEAD through Git. Add only
+            # the explicitly selected executable directory for this build.
+            commands.environment = dict(ordinary_environment)
+            roots = ordinary_environment["PATH"].split(os.pathsep)
+            roots.insert(1, str(git.parent))
+            commands.environment["PATH"] = os.pathsep.join(dict.fromkeys(roots))
+        try:
+            stdout, stderr = commands.run(build_argv, cwd=stage)
+        finally:
+            commands.environment = ordinary_environment
         if source_paths(stage) != before:
             fail("build changed the source file set")
         for name, data in [("build.stdout", stdout), ("build.stderr", stderr)]:
