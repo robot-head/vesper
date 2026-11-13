@@ -1299,7 +1299,7 @@ fn reject_ast(base: &Fixture, label: &str, module: Module) {
     );
     let text = output.diagnostic();
     assert!(
-        text.contains("error:"),
+        text.contains(": error:") || text.contains(": error("),
         "actual elaboration/kernel error, not a launch failure: {text}"
     );
 }
