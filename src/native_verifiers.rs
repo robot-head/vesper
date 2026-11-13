@@ -19,9 +19,14 @@
 //! Annotations the source language cannot express yet (secret parameters,
 //! stack budgets, realtime roots, allowed float calls) come from a JSON
 //! policy file ([`NativeVerifierPolicy`], schema
-//! `vesper.native-verifiers/1`). Lane 24 later derives the same policies from
-//! source capability effects; it should build a [`NativeVerifierPolicy`] and
-//! call [`verify_emitted`], leaving the hook point unchanged.
+//! `vesper.native-verifiers/1`). The source capability effects
+//! `eff [ConstTime]`, `eff [Realtime]` and `eff [DetFloat]` (lane 15) imply
+//! the same policies: [`policy_from_capabilities`] derives them from
+//! [`crate::capability_effects::capability_policies`] and the emitted set, and
+//! [`verify_native_with_capabilities`] runs the verifiers those effects imply
+//! (lane 24, issue #266). `vesper build` and `vesper emit --emit
+//! object|clif` call it, so a capability program is checked at the backend
+//! without any flag.
 //!
 //! Findings name source functions (instance keys) and carry the source span
 //! of the function. Instruction-level source spans are not available: the
@@ -325,6 +330,7 @@ fn resolve_list(names: &Names, list: &[String], what: &str) -> Result<Vec<String
 /// relocations). This measures the code `vesper build` emits, not a
 /// re-compilation under Silicon's own analysis flags.
 fn measure_emitted(
+    world: &World,
     functions: &[EmittedFunction],
     target: Option<&str>,
 ) -> Result<vesper_silicon::stack::CallGraph, String> {
@@ -332,7 +338,7 @@ fn measure_emitted(
         Context, FinalizedRelocTarget, control::ControlPlane, ir::ExternalName,
     };
     use vesper_silicon::stack::{CallGraph, CallSite, ExternalCall, FnId, FnNode, IndirectCall};
-    let isa = crate::native::object_isa(target)?;
+    let isa = crate::native::object_isa_for(world, target)?;
     let x86 = match isa.triple().architecture {
         target_lexicon::Architecture::X86_64 => true,
         target_lexicon::Architecture::Aarch64(_) => false,
@@ -540,7 +546,7 @@ pub fn verify_emitted(
                 .notes
                 .push("stack: the policy has no stack roots; only recursion and unbounded calls are reported".into());
         }
-        let measured = measure_emitted(functions, target)?;
+        let measured = measure_emitted(world, functions, target)?;
         let mut graph = stack_bound::StackGraph::from(&measured);
         for f in &mut graph.functions {
             f.name = names.source(&f.name);
@@ -659,6 +665,9 @@ pub fn verify_emitted(
 
     if verifiers.contains(&NativeVerifier::DetFloat) {
         let mut det = vesper_kinetic::DetFloatPolicy {
+            // Object emission enables Cranelift's NaN canonicalisation for
+            // programs with DetFloat functions (`native::object_isa_for`).
+            codegen_canonicalizes_nans: crate::native::needs_nan_canonicalization(world),
             allow_fma: policy.det_float.allow_fma,
             allowed_float_calls: policy.det_float.allowed_float_calls.clone(),
             user_names: names
@@ -763,4 +772,253 @@ pub fn render(report: &NativeVerifierReport, file: &str, source: &str) -> String
         ));
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Policies from source capability effects (lane 24, issue #266).
+
+/// The verifiers the capability effects of `world` imply: `const-time` for
+/// `eff [ConstTime]`, `realtime` for `eff [Realtime]` and `detfloat` for
+/// `eff [DetFloat]`. Empty for a program without capability effects.
+pub fn capability_verifiers(world: &World) -> BTreeSet<NativeVerifier> {
+    use crate::capability_effects::{Capability, capabilities};
+    let mut out = BTreeSet::new();
+    for f in world.functions.values() {
+        for c in capabilities(&f.effects) {
+            out.insert(match c {
+                Capability::ConstTime => NativeVerifier::ConstTime,
+                Capability::Realtime => NativeVerifier::Realtime,
+                Capability::DetFloat => NativeVerifier::DetFloat,
+            });
+        }
+    }
+    out
+}
+
+/// The source facts for `world`'s capability effects.
+fn source_capabilities(
+    world: &World,
+) -> Result<crate::capability_effects::CapabilityPolicies, String> {
+    // `capability_policies` reads only the world of an accepted program; the
+    // backend is only reached for programs that checked.
+    let checked = crate::check::Checked {
+        world: world.clone(),
+        diagnostics: Vec::new(),
+        expression_types: Default::default(),
+    };
+    crate::capability_effects::capability_policies(&checked).map_err(|e| e.to_string())
+}
+
+/// Emitted instance keys of source function `name` (one for a non-generic
+/// function, one per instance for a generic one).
+fn instances_of<'a>(functions: &'a [EmittedFunction], name: &str) -> Vec<&'a EmittedFunction> {
+    functions.iter().filter(|f| f.source == name).collect()
+}
+
+/// Why a capability function has no Cranelift function of its own.
+fn not_emitted(world: &World, name: &str) -> String {
+    let inlined = world.functions.get(name).is_some_and(|f| {
+        f.effects.tail.is_some()
+            || f.effects
+                .instances
+                .iter()
+                .any(|e| !crate::capability_effects::is_capability_effect(&e.name))
+            || f.params
+                .iter()
+                .any(|p| matches!(p.ty, crate::ast::Type::Function { .. }))
+            || matches!(f.result, crate::ast::Type::Function { .. })
+    });
+    if inlined {
+        format!(
+            "'{name}' is specialized into its callers (its row has non-capability effects or it takes or returns a function value); its code is checked only inside callers that carry the same capability"
+        )
+    } else {
+        format!("'{name}' is not reachable from the entry and was not compiled")
+    }
+}
+
+/// Derive a [`NativeVerifierPolicy`] from the source capability effects of
+/// `world` for the emitted set `functions`, on top of `base` (a policy file,
+/// or an empty policy). Entries in `base` win: a function the file already
+/// names keeps the file's entry.
+///
+/// - `eff [ConstTime]`: one `const_time` entry per emitted function, with its
+///   secret-typed parameters (`Secret[T]`, `SecU64`, ...) as `secret`, its
+///   declassification-gate callees as `declassify` and its other (ConstTime)
+///   callees as `constant_time_callees`. Generic ConstTime functions are
+///   reported, not checked.
+/// - `eff [Realtime]`: every emitted realtime function is a realtime root
+///   (the source roots are a subset, and a root that was specialized into
+///   its caller has no function to start from), with its `Realtime` effect;
+///   unbounded loops are rejected, since the source has no loops.
+/// - `eff [DetFloat]`: `det_float.functions` lists the emitted DetFloat
+///   functions; their DetFloat callees are allowed float calls; no FMA.
+///
+/// Returns the policy, notes about capability functions that could not be
+/// checked on their own, and findings for capability functions the backend
+/// cannot check at all (reachable generic ConstTime functions).
+pub fn policy_from_capabilities(
+    world: &World,
+    functions: &[EmittedFunction],
+    base: &NativeVerifierPolicy,
+) -> Result<CapabilityPolicy, String> {
+    let caps = source_capabilities(world)?;
+    let mut policy = base.clone();
+    let mut notes = Vec::new();
+    let mut findings = Vec::new();
+    let emitted: BTreeSet<&str> = functions.iter().map(|f| f.key.as_str()).collect();
+    // Source callee names -> the emitted instance keys of those functions
+    // (a callee that was specialized into its caller has none).
+    let keep_emitted = |list: &[String]| -> Vec<String> {
+        list.iter()
+            .flat_map(|n| instances_of(functions, n))
+            .map(|f| f.key.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    };
+
+    for ct in &caps.const_time {
+        let source = world
+            .functions
+            .get(&ct.function)
+            .ok_or_else(|| format!("capability policy names unknown function '{}'", ct.function))?;
+        if !source.generics.is_empty() {
+            // Reachable generic instances cannot be checked: the parameter
+            // mapping needs concrete layouts. Reject rather than pass.
+            if !instances_of(functions, &ct.function).is_empty() {
+                findings.push(NativeFinding {
+                    verifier: NativeVerifier::ConstTime,
+                    function: ct.function.clone(),
+                    inst: None,
+                    rule: "capability.generic-unsupported".into(),
+                    message: "eff [ConstTime] on a generic function is not checked by the backend verifier yet; make the function concrete".into(),
+                    span: Some((source.span.start, source.span.end)),
+                });
+            }
+            continue;
+        }
+        if !emitted.contains(ct.function.as_str()) {
+            notes.push(format!("const-time: {}", not_emitted(world, &ct.function)));
+            continue;
+        }
+        if policy.const_time.contains_key(&ct.function) {
+            continue;
+        }
+        let secret = ct
+            .secret_params
+            .iter()
+            .map(|&i| {
+                source.params.get(i).map(|p| p.name.clone()).ok_or_else(|| {
+                    format!("capability policy: '{}' has no parameter {i}", ct.function)
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        policy.const_time.insert(
+            ct.function.clone(),
+            ConstTimeEntry {
+                secret,
+                declassify: keep_emitted(&ct.declassify_callees),
+                constant_time_callees: keep_emitted(&ct.constant_time_callees),
+            },
+        );
+    }
+
+    let rt_effect = crate::capability_effects::Capability::Realtime.name();
+    for rt in &caps.realtime.functions {
+        let instances = instances_of(functions, &rt.function);
+        if instances.is_empty() {
+            notes.push(format!("realtime: {}", not_emitted(world, &rt.function)));
+            continue;
+        }
+        for f in instances {
+            policy
+                .realtime
+                .roots
+                .entry(f.key.clone())
+                .or_insert(rt.stack_budget_bytes);
+            // Only Realtime is a runtime-relevant effect here: ConstTime and
+            // DetFloat constrain the body and are not Resonance effects.
+            policy
+                .realtime
+                .effects
+                .entry(f.key.clone())
+                .or_insert_with(|| vec![rt_effect.to_string()]);
+        }
+    }
+    if caps.realtime.reject_unbounded_loops {
+        policy.realtime.reject_unbounded_loops = true;
+    }
+
+    let mut det: Vec<String> = Vec::new();
+    for d in &caps.det_float {
+        let instances = instances_of(functions, &d.function);
+        if instances.is_empty() {
+            notes.push(format!("detfloat: {}", not_emitted(world, &d.function)));
+            continue;
+        }
+        det.extend(instances.iter().map(|f| f.key.clone()));
+        for callee in keep_emitted(&d.allowed_float_calls) {
+            if !policy.det_float.allowed_float_calls.contains(&callee) {
+                policy.det_float.allowed_float_calls.push(callee);
+            }
+        }
+        policy.det_float.allow_fma |= d.allow_fma;
+    }
+    if !det.is_empty() {
+        let list = policy.det_float.functions.get_or_insert_with(Vec::new);
+        for f in det {
+            if !list.contains(&f) {
+                list.push(f);
+            }
+        }
+    }
+    Ok(CapabilityPolicy {
+        policy,
+        notes,
+        findings,
+    })
+}
+
+/// Result of [`policy_from_capabilities`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CapabilityPolicy {
+    pub policy: NativeVerifierPolicy,
+    pub notes: Vec<String>,
+    pub findings: Vec<NativeFinding>,
+}
+
+/// Compile `entry` and run `requested` plus the verifiers the program's
+/// capability effects imply ([`capability_verifiers`]), with the policy from
+/// [`policy_from_capabilities`] layered under `base`. With no requested
+/// verifier and no capability effect this runs nothing and is exactly
+/// [`crate::native::object_with_options`]; the report's `verifiers` is
+/// then empty.
+pub fn verify_native_with_capabilities(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    requested: &BTreeSet<NativeVerifier>,
+    base: &NativeVerifierPolicy,
+) -> Result<(Vec<u8>, String, NativeVerifierReport), String> {
+    let mut verifiers = requested.clone();
+    verifiers.extend(capability_verifiers(world));
+    if verifiers.is_empty() {
+        let (bytes, clif) = crate::native::object_with_options(world, entry, target, optimize)?;
+        let report = NativeVerifierReport {
+            verifiers,
+            functions: 0,
+            findings: Vec::new(),
+            stack: None,
+            notes: Vec::new(),
+        };
+        return Ok((bytes, clif, report));
+    }
+    let (bytes, clif, functions) = emit_and_collect(world, entry, target, optimize)?;
+    let derived = policy_from_capabilities(world, &functions, base)?;
+    let mut report = verify_emitted(world, &functions, target, &verifiers, &derived.policy)?;
+    report.notes.extend(derived.notes);
+    report.findings.splice(0..0, derived.findings);
+    Ok((bytes, clif, report))
 }
