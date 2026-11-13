@@ -599,6 +599,61 @@ fn migration_to_a_dead_path_falls_back() {
 }
 
 #[test]
+fn a_zero_idle_timeout_disables_it() {
+    let never = |role| EndpointConfig {
+        idle_timeout_ns: 0,
+        ..config(role)
+    };
+    let mut net = Net::with(
+        12,
+        0,
+        0,
+        never(Role::Client),
+        never(Role::Server),
+        client_setup(),
+        server_setup(),
+    );
+    // Poll the fresh connection before any answer: it must not time out.
+    for _ in 0..3 {
+        net.client.poll(net.now).unwrap();
+    }
+    net.handshake(200);
+    net.steps(300);
+    assert_eq!(net.client.connection_error(net.c_conn), None);
+    assert_eq!(net.client.stats().idle_timeouts, 0);
+    assert_eq!(net.server.stats().idle_timeouts, 0);
+    transfer(&mut net, 12, 1_000, 1_000, 200);
+}
+
+#[test]
+fn nat_rebinding_is_followed_with_migration_disabled() {
+    let off = LifecycleConfig {
+        migration: false,
+        ..LifecycleConfig::default()
+    };
+    let mut net = Net::with(
+        13,
+        0,
+        0,
+        with_lifecycle(Role::Client, off),
+        with_lifecycle(Role::Server, off),
+        client_setup(),
+        server_setup(),
+    );
+    net.handshake(200);
+    net.steps(10);
+    transfer(&mut net, 13, 2_000, 2_000, 200);
+    // The client's NAT moves it to a new port; it does not migrate itself.
+    net.client_addr = addr("192.0.2.1:6000");
+    transfer(&mut net, 14, 20_000, 20_000, 600);
+    net.steps(20);
+    let st = net.server.stats();
+    assert_eq!(st.migrations, 1, "the server followed the rebinding");
+    assert!(net.events[1].contains(&ConnectionEvent::PathValidated(net.s())));
+    assert_eq!(net.misdirected, 0, "nothing went to the old port after it");
+}
+
+#[test]
 fn an_idle_connection_times_out_on_both_sides() {
     let idle = EndpointConfig {
         idle_timeout_ns: 2_000 * MS,

@@ -168,6 +168,10 @@ const MAX_STATELESS_RESET: usize = 43;
 const APPLICATION_ERROR: u64 = 0x0c;
 // Our own tokens fit wherever a peer's NEW_TOKEN token fits.
 const _: () = assert!(MAX_TOKEN_LEN <= crate::stream::MAX_NEW_TOKEN_LEN);
+/// Longest Retry token a client echoes. Tokens are opaque and must come
+/// back unchanged, so a Retry with a longer one is refused, not truncated.
+const MAX_RETRY_TOKEN_LEN: usize = 512;
+const _: () = assert!(crate::stream::MAX_NEW_TOKEN_LEN <= MAX_RETRY_TOKEN_LEN);
 
 /// Which §35.3 CID lookup to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -694,6 +698,9 @@ struct Conn {
     zero_rtt_sealer: Option<Sealer>,
     /// Server: 0-RTT packet protection, until confirmation.
     zero_rtt_opener: Option<Opener>,
+    /// Server: when the retained 0-RTT opener is dropped (RFC 9001 §4.9.3,
+    /// three PTOs after confirmation, for reordered 0-RTT packets).
+    zero_rtt_discard_ns: Option<u64>,
     /// The received packet was non-probing (RFC 9000 §9.1).
     non_probing_rx: bool,
     /// The peer's `disable_active_migration`.
@@ -771,6 +778,9 @@ pub struct WarpEndpoint<B: XskBackend, R: Responder, T: TxTap = ()> {
     scratch: Box<[u8]>,
     /// The application's reply frames.
     app_out: Box<[u8]>,
+    /// Holds a pending application reply in `app_out` while path frames
+    /// use that buffer (preallocated, same size).
+    app_saved: Box<[u8]>,
     /// Frames of the packet being built from the stream layer.
     record: PacketFrames,
     app: R,
@@ -863,7 +873,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         conns.resize_with(config.max_connections as usize, || None);
         let buf = usize::from(config.max_datagram) + TAG_LEN;
         // Long-header frames are built after a maximal header gap.
-        let scratch_len = buf + MAX_LONG_HEADER + crate::stream::MAX_NEW_TOKEN_LEN + 8;
+        let scratch_len = buf + MAX_LONG_HEADER + MAX_RETRY_TOKEN_LEN + 8;
         let rx_frame = xsk.config().frame_size as usize;
         let mut endpoint = Self {
             config,
@@ -878,6 +888,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             events: Vec::with_capacity(config.max_tracked_per_conn + 8),
             scratch: vec![0u8; scratch_len].into_boxed_slice(),
             app_out: vec![0u8; buf].into_boxed_slice(),
+            app_saved: vec![0u8; buf].into_boxed_slice(),
             record: PacketFrames::default(),
             app,
             tap,
@@ -1040,7 +1051,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let state = ConnState::new(
             peer,
             cc.cwnd_bytes(),
-            now_ns.saturating_add(self.config.idle_timeout_ns),
+            // Zero disables the idle timeout (as in `touch_idle`).
+            if self.config.idle_timeout_ns == 0 {
+                u64::MAX
+            } else {
+                now_ns.saturating_add(self.config.idle_timeout_ns)
+            },
         );
         let handle = self.table.insert(&local, &state).map_err(|e| {
             WarpError::Shard(match e {
@@ -1093,6 +1109,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             token_issued: false,
             zero_rtt_sealer: None,
             zero_rtt_opener: None,
+            zero_rtt_discard_ns: None,
             non_probing_rx: false,
             peer_disables_migration: false,
         });
@@ -1371,7 +1388,32 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
 
     /// Acts on the connection-ID, path and token frames of a processed
     /// 1-RTT (or 0-RTT) packet, and on a change of the peer's address.
-    fn after_lifecycle(&mut self, slot: SlotHandle, pn: u64, datagram_len: usize, now_ns: u64) {
+    /// [`Self::after_lifecycle_inner`], keeping `app_out[..pending]` (the
+    /// application's reply, not yet sent) intact across path frames.
+    fn after_lifecycle(
+        &mut self,
+        slot: SlotHandle,
+        pn: u64,
+        datagram_len: usize,
+        pending: usize,
+        now_ns: u64,
+    ) {
+        if pending > 0 {
+            self.app_saved[..pending].copy_from_slice(&self.app_out[..pending]);
+        }
+        self.after_lifecycle_inner(slot, pn, datagram_len, now_ns);
+        if pending > 0 {
+            self.app_out[..pending].copy_from_slice(&self.app_saved[..pending]);
+        }
+    }
+
+    fn after_lifecycle_inner(
+        &mut self,
+        slot: SlotHandle,
+        pn: u64,
+        datagram_len: usize,
+        now_ns: u64,
+    ) {
         let from = self.rx_from;
         let server = self.config.role == Role::Server;
         let migration = self.config.lifecycle.migration;
@@ -1447,7 +1489,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if server && from.is_some() && from != c.path.remote {
             if c.path.remote.is_none() {
                 c.path.remote = from;
-            } else if migration && confirmed && non_probing && largest {
+            } else if (migration || crate::lifecycle::port_only_change(c.path.remote, from))
+                && confirmed
+                && non_probing
+                && largest
+            {
+                // disable_active_migration does not forbid NAT rebinding
+                // (§18.2): a port-only change is followed and validated
+                // even with migration off.
                 let old = c.path;
                 let rebinding = crate::lifecycle::port_only_change(old.remote, from);
                 c.path = Path {
@@ -1570,9 +1619,18 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if c.error.is_some() && c.close_deadline_ns.is_none() {
             c.close_deadline_ns = Some(now_ns.saturating_add(pto.saturating_mul(3)));
         }
+        if let Some(d) = c.zero_rtt_discard_ns
+            && (now_ns >= d || c.error.is_some())
+        {
+            c.zero_rtt_opener = None;
+            c.zero_rtt_discard_ns = None;
+        }
         let mut want = c.close_deadline_ns.unwrap_or(u64::MAX);
         if c.error.is_none() {
             want = want.min(idle);
+            if let Some(d) = c.zero_rtt_discard_ns {
+                want = want.min(d);
+            }
             if let Some(p) = c.probe {
                 want = want.min(p.deadline_ns).min(p.sent_ns.saturating_add(pto));
             }
@@ -1841,7 +1899,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return Err(DropReason::Closed);
         }
         let hs = c.hs.as_mut().ok_or(DropReason::BadRetry)?;
-        if hs.is_server() || hs.retried || hs.peer_scid_known {
+        if hs.is_server() || hs.retried || hs.peer_scid_known || token.len() > MAX_RETRY_TOKEN_LEN {
             return Err(DropReason::BadRetry);
         }
         verify_retry_integrity(hs.original_dcid.as_bytes(), pkt)
@@ -2107,7 +2165,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.write_tile(slot);
             return Ok((slot, pn));
         }
-        self.after_lifecycle(slot, pn, datagram_len, now_ns);
+        self.after_lifecycle(slot, pn, datagram_len, app_len, now_ns);
         self.touch_idle(slot, now_ns);
         self.write_tile(slot);
         if app_len > 0 {
@@ -2960,7 +3018,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 }
                 TlsEvent::SendHandshakeDone => c.streams.queue_handshake_done(),
                 TlsEvent::HandshakeConfirmed => {
-                    c.zero_rtt_opener = None;
+                    if c.zero_rtt_opener.is_some() {
+                        // Kept briefly for 0-RTT packets that the client's
+                        // Finished overtook; `sync_life` drops it.
+                        let pto = c
+                            .recovery
+                            .rtt()
+                            .pto_base_ns()
+                            .saturating_add(c.recovery.max_ack_delay_ns());
+                        c.zero_rtt_discard_ns = Some(now_ns.saturating_add(pto.saturating_mul(3)));
+                    }
                     self.push_conn_event(ConnectionEvent::HandshakeConfirmed(slot));
                     self.issue_cids(slot);
                     self.issue_new_token(slot, now_ns);
@@ -3187,14 +3254,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let mut scid = [0u8; 20];
         let scid_len = hs.local_cid().len();
         scid[..scid_len].copy_from_slice(hs.local_cid());
-        let mut token = [0u8; crate::stream::MAX_NEW_TOKEN_LEN];
+        let mut token = [0u8; MAX_RETRY_TOKEN_LEN];
         let mut token_len = 0;
         if client
             && space == PnSpace::Initial
             && let Some(t) = hs.token.as_deref()
+            && t.len() <= token.len()
         {
-            token_len = t.len().min(token.len());
-            token[..token_len].copy_from_slice(&t[..token_len]);
+            // Always whole: `on_retry` and the token cache bound the length.
+            token_len = t.len();
+            token[..token_len].copy_from_slice(t);
         }
         let ls = hs.long(space).ok_or(WarpError::KeysUnavailable)?;
         let Some(sealer) = ls.sealer.as_ref() else {
@@ -4147,7 +4216,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
         self.stats.rx_processed += 1;
         let datagram_len = self.xsk.view_frame_bytes(&frame).map_or(0, <[u8]>::len);
-        self.after_lifecycle(slot, pn, datagram_len, now_ns);
+        self.after_lifecycle(slot, pn, datagram_len, app_len, now_ns);
         self.touch_idle(slot, now_ns);
         self.write_tile(slot);
 
@@ -5525,20 +5594,12 @@ fn on_new_cid(
     let Ok(id) = ConnectionId::from_slice(cid) else {
         return Err(violation(crate::TransportErrorCode::FrameEncodingError));
     };
-    let entry = PeerCid {
-        seq,
-        cid: id,
-        token: Some(*reset_token),
-    };
-    match conn.cids.add_peer(entry, rx.cid_limit) {
-        Ok(()) => {}
-        Err(0x09) => return Err(violation(crate::TransportErrorCode::ConnectionIdLimitError)),
-        Err(_) => return Err(violation(crate::TransportErrorCode::ProtocolViolation)),
+    if retire_prior_to > seq {
+        // §19.15: Retire Prior To may not exceed the frame's own sequence.
+        return Err(violation(crate::TransportErrorCode::FrameEncodingError));
     }
-    if seq < conn.cids.peer_retire_prior_to {
-        // Already retired by the peer's own Retire Prior To.
-        conn.streams.queue_retire_connection_id(seq);
-    }
+    // Retirements first, so that an ID replacing a retired one does not
+    // count against the active_connection_id_limit (§5.1.2).
     if retire_prior_to > conn.cids.peer_retire_prior_to {
         conn.cids.peer_retire_prior_to = retire_prior_to;
         for i in 0..MAX_ACTIVE_CIDS {
@@ -5553,6 +5614,20 @@ fn on_new_cid(
                 }
             }
         }
+    }
+    let entry = PeerCid {
+        seq,
+        cid: id,
+        token: Some(*reset_token),
+    };
+    match conn.cids.add_peer(entry, rx.cid_limit) {
+        Ok(()) => {}
+        Err(0x09) => return Err(violation(crate::TransportErrorCode::ConnectionIdLimitError)),
+        Err(_) => return Err(violation(crate::TransportErrorCode::ProtocolViolation)),
+    }
+    if seq < conn.cids.peer_retire_prior_to {
+        // Already retired by an earlier Retire Prior To (a late frame).
+        conn.streams.queue_retire_connection_id(seq);
     }
     Ok(())
 }
