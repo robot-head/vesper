@@ -702,14 +702,42 @@ pub fn resolve_invocation(path: &Path) -> Result<PathBuf, Error> {
                     }
                 }
                 return if p.is_absolute() {
-                    Ok(p)
+                    normalized_invocation(&p)
                 } else {
-                    Ok(std::env::current_dir()?.join(p))
+                    normalized_invocation(&std::env::current_dir()?.join(p))
                 };
             }
         }
     }
     Err(identity("executable not found"))
+}
+fn normalized_invocation(path: &Path) -> Result<PathBuf, Error> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| identity("executable basename"))?;
+    let parent = path.parent().ok_or_else(|| identity("executable parent"))?;
+    Ok(fs::canonicalize(parent)?.join(name))
+}
+fn same_invocation(left: &Path, right: &Path) -> Result<bool, Error> {
+    let left = resolve_invocation(left)?;
+    let right = resolve_invocation(right)?;
+    let names = if cfg!(windows) {
+        left.file_name()
+            .and_then(|x| x.to_str())
+            .zip(right.file_name().and_then(|x| x.to_str()))
+            .is_some_and(|(a, b)| a.eq_ignore_ascii_case(b))
+    } else {
+        left.file_name() == right.file_name()
+    };
+    Ok(names
+        && left.parent() == right.parent()
+        && fs::canonicalize(left)? == fs::canonicalize(right)?)
+}
+fn build_recipe(argv: &[String], lake: &Path) -> Result<bool, Error> {
+    Ok(argv.len() == 3
+        && argv[1] == "build"
+        && argv[2] == "lean4lean"
+        && same_invocation(Path::new(&argv[0]), lake)?)
 }
 fn command(
     program: &Path,
@@ -1147,8 +1175,7 @@ fn validate_receipt(
     let lake = sysroot
         .join("bin")
         .join(if cfg!(windows) { "lake.exe" } else { "lake" });
-    if Path::new(&r.compiler_path) != lean
-        || r.build_argv != [text(&lake)?, "build".into(), "lean4lean".into()]
+    if !same_invocation(Path::new(&r.compiler_path), &lean)? || !build_recipe(&r.build_argv, &lake)?
     {
         return Err(identity("receipt actual compiler/build recipe"));
     }
@@ -1212,8 +1239,7 @@ pub fn seal(root: &Path) -> Result<Receipt, Error> {
     let lake = sysroot
         .join("bin")
         .join(if cfg!(windows) { "lake.exe" } else { "lake" });
-    if resolve_invocation(Path::new(&setup.lake))? != lake
-        || setup.build_argv != [text(&lake)?, "build".into(), "lean4lean".into()]
+    if !same_invocation(Path::new(&setup.lake), &lake)? || !build_recipe(&setup.build_argv, &lake)?
     {
         return Err(identity("setup Lake/build recipe"));
     }
@@ -1523,7 +1549,7 @@ pub fn execute(
     let (lean, sysroot) = validate_receipt(&root, &r, &i, &config.limits)?;
     // Offline overrides must already name the bound actual compiler. In
     // particular, never execute an elan proxy to discover a replacement here.
-    if resolve_invocation(&config.lean)? != lean {
+    if !same_invocation(&config.lean, &lean)? {
         return Err(identity(
             "offline compiler override is not the sealed actual compiler",
         ));
@@ -1779,6 +1805,9 @@ pub fn execute(
             report.targets[index].status = TargetStatus::Complete;
         }
         validate_receipt(&root, &r, &i, &config.limits)?;
+        if read_bytes(&root.join("setup-receipt.json"), 4 * MIB)? != receipt_bytes {
+            return Err(identity("setup receipt bytes changed during run"));
+        }
         for t in &report.targets {
             let name = format!("{}.lean", t.target.module());
             if Some(file_digest(
