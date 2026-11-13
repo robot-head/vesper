@@ -15,6 +15,8 @@
 //!   the §3 state machines, connection and stream flow control, stream
 //!   limits, CRYPTO buffers per packet-number space, and §13.3
 //!   retransmission of lost frames (wave five, issue #133).
+//! * [`lifecycle`]: address-validation and Retry tokens, stateless reset
+//!   tokens, connection-ID tables and path state (wave six, issue #247).
 //!
 //! Receive order (wave-four contract): [`header::parse`] reports the
 //! protected packet-number offset; packet protection (lane 5) removes header

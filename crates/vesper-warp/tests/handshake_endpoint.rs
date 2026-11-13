@@ -619,10 +619,12 @@ fn a_handshake_packet_coalesced_after_the_initial_is_processed() {
     while net.client.poll_and_step_quic_rx_one(now).unwrap() != RxOutcome::Idle {}
     let stats = net.client.stats();
     assert!(net.server.stats().coalesced_sent >= 1);
-    assert!(stats.coalesced_received > before.coalesced_received, "{stats:?}");
     assert!(
-        stats.handshake_packets_received - before.handshake_packets_received
-            > flight.len() as u64
+        stats.coalesced_received > before.coalesced_received,
+        "{stats:?}"
+    );
+    assert!(
+        stats.handshake_packets_received - before.handshake_packets_received > flight.len() as u64
     );
     assert_eq!(stats.rx_dropped, before.rx_dropped, "{stats:?}");
     net.blackhole[1] = false;
@@ -846,6 +848,7 @@ fn handshake_seed_sweep() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(500);
+    let mut idle_timeouts = 0;
     for seed in 0..seeds {
         for (loss, reorder) in [(300_000, 100_000), (200_000, 300_000)] {
             let mut net = Net::new(seed, loss, reorder);
@@ -853,12 +856,36 @@ fn handshake_seed_sweep() {
             assert_established(&net);
             transfer(&mut net, seed, 4_000, 4_000, 5_000);
         }
-        // 40% loss: the handshake alone (BBRv3's loss response can slow
-        // the data phase far beyond the step budget at this rate).
+        // 40% loss with 20% reordering, data phase included: the seed-246
+        // stall (wave six, `docs/parallel-results/warp-lifecycle.md`) was
+        // BBRv3's pacing schedule running tens of seconds ahead.
         let mut net = Net::new(seed, 400_000, 200_000);
         net.handshake(5_000);
         assert_established(&net);
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            transfer(&mut net, seed, 4_000, 4_000, 20_000);
+        }));
+        if done.is_err() {
+            // At this loss rate a run of lost PTO probes can back off past
+            // the 30 s idle timeout (RFC 9000 §10.1): a correct close, not
+            // a stall. Anything else fails the sweep.
+            let idle = Some(vesper_warp::endpoint::ConnectionError::IdleTimeout);
+            assert!(
+                net.client.connection_error(net.c_conn) == idle
+                    || net
+                        .s_conn
+                        .is_some_and(|s| net.server.connection_error(s) == idle),
+                "seed {seed}: the data phase stalled"
+            );
+            idle_timeouts += 1;
+        }
     }
+    // Rare: about 0.64^7 for seven lost probe round trips in a row.
+    assert!(
+        idle_timeouts * 20 <= seeds,
+        "{idle_timeouts} idle timeouts in {seeds} seeds"
+    );
+    eprintln!("40%/20% data phase: {idle_timeouts} idle timeouts in {seeds} seeds");
 }
 
 /// Runs harness bookkeeping without counting its allocations.

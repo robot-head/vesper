@@ -72,7 +72,10 @@ fn table_3_permissions() {
 fn malformed_lifecycle_frames_are_typed_errors() {
     let malformed = |wire: &[u8]| {
         assert!(
-            matches!(parse_frame(wire, PacketType::OneRtt), Err(FrameError::Malformed { .. })),
+            matches!(
+                parse_frame(wire, PacketType::OneRtt),
+                Err(FrameError::Malformed { .. })
+            ),
             "{wire:x?}"
         )
     };

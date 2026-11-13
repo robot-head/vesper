@@ -12,18 +12,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::Rng;
+use vesper_warp::PacketType;
 use vesper_warp::endpoint::{
     ConnectionError, Discard, EndpointConfig, RxOutcome, TxTap, WarpEndpoint, WarpError,
 };
+use vesper_warp::handshake::tls::FixedTime;
 use vesper_warp::handshake::tls::rustls::RootCertStore;
 use vesper_warp::handshake::tls::rustls::pki_types::{
     CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, UnixTime,
 };
-use vesper_warp::handshake::tls::FixedTime;
 use vesper_warp::handshake::{
     CidSource, ClientSetup, ConnectionEvent, HandshakePhase, Listener, ServerSetup,
 };
-use vesper_warp::PacketType;
 use vesper_warp::header::{HeaderParser, ParsedPacket, write_version_negotiation};
 use vesper_warp::lifecycle::{AddressValidation, LifecycleConfig, PeerAddr};
 use vesper_warp::stream::{Priority, ReadOutcome, Role, StreamConfig};
@@ -151,9 +151,7 @@ impl Net {
         let mut c = endpoint(client_cfg);
         c.set_cid_source(Box::new(CountingCids(0xc1, 0x80)));
         c.set_rx_source(Some(addr("198.51.100.7:443")));
-        let first = c
-            .connect(&setup, SERVER_NAME, &CID0, &ODCID0, 0)
-            .unwrap();
+        let first = c.connect(&setup, SERVER_NAME, &CID0, &ODCID0, 0).unwrap();
         Self {
             client: c,
             server: s,
@@ -507,7 +505,9 @@ fn a_server_that_lost_state_resets_the_connection() {
     let s = net.s();
     net.server.close_connection(s, net.now).unwrap();
     let sid = net.client.open_stream(net.c_conn, false).unwrap();
-    net.client.stream_write(net.c_conn, sid, b"anyone there?").unwrap();
+    net.client
+        .stream_write(net.c_conn, sid, b"anyone there?")
+        .unwrap();
     net.steps(10);
     assert_eq!(net.server.stats().stateless_resets_sent, 1);
     assert_eq!(net.client.stats().stateless_resets_received, 1);
@@ -559,7 +559,9 @@ fn migration_to_a_dead_path_falls_back() {
     // replaying it): the server starts validating that address with the
     // 3× limit, nobody answers there, and it falls back.
     let sid = net.client.open_stream(net.c_conn, false).unwrap();
-    net.client.stream_write(net.c_conn, sid, b"from a spoofed address").unwrap();
+    net.client
+        .stream_write(net.c_conn, sid, b"from a spoofed address")
+        .unwrap();
     net.client.flush(net.c_conn, net.now).unwrap();
     let out = std::mem::take(&mut net.client.tap_mut().out);
     let spoofed = addr("203.0.113.66:1");
@@ -580,7 +582,10 @@ fn migration_to_a_dead_path_falls_back() {
         }
     }
     let received: u64 = out.iter().map(|(d, _)| d.len() as u64).sum();
-    assert!(to_spoofed <= 3 * received + 1200, "{to_spoofed} for {received}");
+    assert!(
+        to_spoofed <= 3 * received + 1200,
+        "{to_spoofed} for {received}"
+    );
     let st = net.server.stats();
     assert_eq!(st.path_failures, 1, "{st:?}");
     while let Some(e) = net.server.poll_connection_event() {
@@ -652,8 +657,16 @@ fn an_application_close_drains_and_frees_both_slots() {
     net.steps(200);
     assert!(net.client.connection(net.c_conn).is_none());
     assert!(net.server.connection(s).is_none());
-    assert!(net.events[0].iter().any(|e| matches!(e, ConnectionEvent::Closed { .. })));
-    assert!(net.events[1].iter().any(|e| matches!(e, ConnectionEvent::Closed { .. })));
+    assert!(
+        net.events[0]
+            .iter()
+            .any(|e| matches!(e, ConnectionEvent::Closed { .. }))
+    );
+    assert!(
+        net.events[1]
+            .iter()
+            .any(|e| matches!(e, ConnectionEvent::Closed { .. }))
+    );
     assert_eq!(net.client.table().len(), 0);
     assert_eq!(net.server.table().len(), 0);
 }
@@ -715,7 +728,10 @@ fn rejected_zero_rtt_resets_streams_and_the_application_resends() {
         ServerSetup::from_config((**accepting.config()).clone(), vec![ALPN.to_vec()]).unwrap();
     let mut server = endpoint(config(Role::Server));
     server
-        .listen(Listener::with_cids(refusing, Box::new(CountingCids(0x6e, 0))))
+        .listen(Listener::with_cids(
+            refusing,
+            Box::new(CountingCids(0x6e, 0)),
+        ))
         .unwrap();
     net.server = server;
     net.connect();
@@ -765,15 +781,34 @@ fn stream_priorities_order_the_sends() {
     let bulk = net.client.open_stream(net.c_conn, false).unwrap();
     let urgent = net.client.open_stream(net.c_conn, false).unwrap();
     net.client
-        .stream_set_priority(net.c_conn, urgent, Priority { urgency: 0, incremental: false })
+        .stream_set_priority(
+            net.c_conn,
+            urgent,
+            Priority {
+                urgency: 0,
+                incremental: false,
+            },
+        )
         .unwrap();
-    net.client.stream_write(net.c_conn, bulk, &[1; 20_000]).unwrap();
-    net.client.stream_write(net.c_conn, urgent, &[2; 500]).unwrap();
+    net.client
+        .stream_write(net.c_conn, bulk, &[1; 20_000])
+        .unwrap();
+    net.client
+        .stream_write(net.c_conn, urgent, &[2; 500])
+        .unwrap();
     net.client.stream_finish(net.c_conn, urgent).unwrap();
-    assert!(net
-        .client
-        .stream_set_priority(net.c_conn, urgent, Priority { urgency: 8, incremental: false })
-        .is_err());
+    assert!(
+        net.client
+            .stream_set_priority(
+                net.c_conn,
+                urgent,
+                Priority {
+                    urgency: 8,
+                    incremental: false
+                }
+            )
+            .is_err()
+    );
     let mut buf = vec![0u8; 32 * 1024];
     let mut urgent_done_at = None;
     let mut bulk_bytes_then = 0;
@@ -803,8 +838,8 @@ fn lossy_sweep_of_handshake_opened_connections() {
     // resumption and reliable streams, over loss and reordering.
     let mut failures = Vec::new();
     for seed in 0..12u64 {
-        let (loss, reorder) = [(50_000, 50_000), (150_000, 100_000), (250_000, 200_000)]
-            [(seed % 3) as usize];
+        let (loss, reorder) =
+            [(50_000, 50_000), (150_000, 100_000), (250_000, 200_000)][(seed % 3) as usize];
         let retry = LifecycleConfig {
             address_validation: if seed % 2 == 0 {
                 AddressValidation::Retry

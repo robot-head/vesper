@@ -20,7 +20,10 @@ fn the_pacing_schedule_stays_within_its_lead() {
     for _ in 0..5_000 {
         last = cc.schedule_edt_ns(1200, now);
         assert!(last <= now + lead, "launch {last} beyond the lead");
-        assert!(cc.next_edt_ns(now) <= now + lead, "schedule beyond the lead");
+        assert!(
+            cc.next_edt_ns(now) <= now + lead,
+            "schedule beyond the lead"
+        );
     }
     assert!(last > now, "the schedule still paces");
     assert!(

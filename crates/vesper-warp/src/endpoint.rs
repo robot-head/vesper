@@ -62,15 +62,33 @@
 //! [`WarpEndpoint::open_connection`] still opens a connection from
 //! caller-supplied 1-RTT keys.
 //!
-//! What this is not: no Retry, 0-RTT, Version Negotiation, stateless
-//! reset or NEW_TOKEN; a short-header packet coalesced after long-header
-//! packets in one received datagram is dropped (ours never coalesce);
-//! Initial and Handshake packets are recovered but not fed to BBRv3
-//! (whose snapshots are keyed by application packet number) and not
-//! paced; no connection migration; and no hardware EDT, RSS or crypto
-//! offload. With [`SoftNic`](vesper_warp_umem::SoftNic) the
-//! "NIC" is lane 3's deterministic model; with lane 3's gated AF_XDP
-//! backend it is a real socket, which this crate's tests do not exercise.
+//! Lifecycle (wave six, issue #247; `docs/parallel-results/warp-lifecycle.md`):
+//! Retry with its integrity tag and AEAD address-validation tokens,
+//! NEW_TOKEN, Version Negotiation both ways, stateless reset (sent for
+//! unknown connection IDs, detected on undecryptable packets),
+//! NEW_CONNECTION_ID / RETIRE_CONNECTION_ID, PATH_CHALLENGE /
+//! PATH_RESPONSE path validation with client migration
+//! ([`WarpEndpoint::migrate`]) and server-side following, coalesced
+//! Initial + Handshake + 0-RTT sends (one paced datagram), coalesced
+//! 1-RTT and 0-RTT receive, a bounded buffer for packets whose keys have
+//! not arrived, the peer's max_idle_timeout, max_ack_delay and
+//! max_udp_payload_size, Initial and Handshake packets in BBRv3's flight
+//! and pacing, application CONNECTION_CLOSE ([`WarpEndpoint::close`]),
+//! closing and draining periods (3×PTO) that free the slot, RFC 9218
+//! stream priorities, and 0-RTT with resumption, anti-replay (server
+//! side, in lane 12) and clean rejection. The caller supplies UDP
+//! addresses with [`WarpEndpoint::set_rx_source`]; the [`TxTap`] reports
+//! destinations.
+//!
+//! What this is not: 1-RTT packets are not coalesced after long-header
+//! packets on send; the sequence-0 connection ID stays in the shard table
+//! until the connection closes; the idle timer restarts only on receive,
+//! not on the first ack-eliciting send after it (RFC 9000 §10.1); the
+//! server never migrates itself (no preferred_address); and no hardware
+//! EDT, RSS or crypto offload. With
+//! [`SoftNic`](vesper_warp_umem::SoftNic) the "NIC" is lane 3's
+//! deterministic model; with lane 3's gated AF_XDP backend it is a real
+//! socket, which this crate's tests do not exercise.
 
 use std::fmt;
 
@@ -900,7 +918,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if config.lifecycle.active_connection_id_limit < 2
             || usize::from(config.lifecycle.active_connection_id_limit) > MAX_ACTIVE_CIDS
         {
-            return Err(WarpError::Config("active_connection_id_limit must be 2..=8"));
+            return Err(WarpError::Config(
+                "active_connection_id_limit must be 2..=8",
+            ));
         }
         if config.tx_reserve >= endpoint.xsk.config().frame_count {
             return Err(WarpError::Config("tx_reserve leaves no receive frames"));
@@ -1130,7 +1150,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     /// §10.2.3). The connection enters the closing state: later packets are
     /// answered with the close, and the slot is freed after three PTOs
     /// with a [`ConnectionEvent::Closed`].
-    pub fn close(&mut self, conn: SlotHandle, error_code: u64, now_ns: u64) -> Result<(), WarpError> {
+    pub fn close(
+        &mut self,
+        conn: SlotHandle,
+        error_code: u64,
+        now_ns: u64,
+    ) -> Result<(), WarpError> {
         let c = self.conn_mut(conn)?;
         if let Some(e) = c.error {
             return Err(WarpError::ConnectionClosed(e));
@@ -1148,13 +1173,18 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     /// [`ConnectionEvent::PathFailed`] follows.
     pub fn migrate(&mut self, conn: SlotHandle, now_ns: u64) -> Result<(), WarpError> {
         if self.config.role != Role::Client || !self.config.lifecycle.migration {
-            return Err(WarpError::Config("migration needs a client endpoint with migration on"));
+            return Err(WarpError::Config(
+                "migration needs a client endpoint with migration on",
+            ));
         }
         let c = self.conn(conn)?;
         if let Some(e) = c.error {
             return Err(WarpError::ConnectionClosed(e));
         }
-        if c.hs.as_ref().is_some_and(|h| !h.tls.is_handshake_confirmed()) {
+        if c.hs
+            .as_ref()
+            .is_some_and(|h| !h.tls.is_handshake_confirmed())
+        {
             return Err(WarpError::Handshaking);
         }
         if c.peer_disables_migration {
@@ -1293,7 +1323,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return;
         };
         if self
-            .send_path_frame(slot, Frame::PathChallenge(probe.challenge), probe.addr, true, now_ns)
+            .send_path_frame(
+                slot,
+                Frame::PathChallenge(probe.challenge),
+                probe.addr,
+                true,
+                now_ns,
+            )
             .is_ok()
         {
             self.stats.path_challenges_sent += 1;
@@ -1516,7 +1552,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     /// wheel entry is moved only when the deadline came earlier; a later
     /// deadline is picked up when the old entry fires.
     fn sync_life(&mut self, slot: SlotHandle, now_ns: u64) {
-        let idle = self.table.get(slot).map_or(u64::MAX, |t| t.idle_deadline_ns);
+        let idle = self
+            .table
+            .get(slot)
+            .map_or(u64::MAX, |t| t.idle_deadline_ns);
         let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
             return;
         };
@@ -1535,9 +1574,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if c.error.is_none() {
             want = want.min(idle);
             if let Some(p) = c.probe {
-                want = want
-                    .min(p.deadline_ns)
-                    .min(p.sent_ns.saturating_add(pto));
+                want = want.min(p.deadline_ns).min(p.sent_ns.saturating_add(pto));
             }
         }
         if want == u64::MAX {
@@ -1556,7 +1593,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
 
     /// A lifecycle timer fired.
     fn on_life_timer(&mut self, slot: SlotHandle, now_ns: u64) {
-        let idle = self.table.get(slot).map_or(u64::MAX, |t| t.idle_deadline_ns);
+        let idle = self
+            .table
+            .get(slot)
+            .map_or(u64::MAX, |t| t.idle_deadline_ns);
         let Ok(c) = self.conn_mut(slot) else {
             return;
         };
@@ -1675,7 +1715,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 return false;
             }
         }
-        self.tap.on_stateless(&self.stateless_buf[..len], self.rx_from);
+        self.tap
+            .on_stateless(&self.stateless_buf[..len], self.rx_from);
         match self.xsk.submit_paced_tx(frame, 0, now_ns) {
             Ok(pkt) => {
                 let _ = self.xsk.retire(pkt);
@@ -1813,7 +1854,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let ls = &mut hs.spaces[0];
         let resend: Vec<(u64, u32)> = ls.sent.drain(..).map(|(_, o, l)| (o, l)).collect();
         for (off, len) in resend {
-            c.streams.crypto_mut(PnSpace::Initial).on_lost(off, len as usize);
+            c.streams
+                .crypto_mut(PnSpace::Initial)
+                .on_lost(off, len as usize);
         }
         c.recovery.reset_space(PnSpace::Initial, now_ns);
         // 0-RTT packets the server dropped: their frames go again.
@@ -1889,7 +1932,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.rx_from = src;
             self.stats.datagrams_replayed += 1;
             let out = if buf.first().is_some_and(|b| b & 0x80 != 0) {
-                self.process_long_datagram(&mut buf[..len], now_ns).map(|_| ())
+                self.process_long_datagram(&mut buf[..len], now_ns)
+                    .map(|_| ())
             } else {
                 match self.process_copied(&mut buf[..len], len, now_ns) {
                     Ok(_) => Ok(()),
@@ -1959,7 +2003,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         };
         let fail = |r| (Some(slot), r);
         let idx = slot.index() as usize;
-        let c = self.conns[idx].as_mut().ok_or(fail(DropReason::UnknownCid))?;
+        let c = self.conns[idx]
+            .as_mut()
+            .ok_or(fail(DropReason::UnknownCid))?;
         if let Some(error) = c.error {
             self.answer_while_closing(slot, error, now_ns);
             return Err(fail(DropReason::Closed));
@@ -2048,7 +2094,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         };
         self.stats.rx_processed += 1;
         if ty == PacketType::OneRtt
-            && self.conn(slot).is_ok_and(|c| c.hs.is_some() && c.error.is_none())
+            && self
+                .conn(slot)
+                .is_ok_and(|c| c.hs.is_some() && c.error.is_none())
             && let Err(code) = self.after_one_rtt(slot, acked_any, now_ns)
         {
             self.write_tile(slot);
@@ -2071,7 +2119,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let owed = self.conn(slot).is_ok_and(|c| {
             c.error.is_none() && c.received.ack_deadline().is_some() && c.keys.is_some()
         });
-        if ack_eliciting && owed && self.send(slot, Source::Fresh, true, 0, Kind::Normal, now_ns).is_err() {
+        if ack_eliciting
+            && owed
+            && self
+                .send(slot, Source::Fresh, true, 0, Kind::Normal, now_ns)
+                .is_err()
+        {
             self.defer_ack(slot);
         }
         Ok((slot, pn))
@@ -2388,8 +2441,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     let d = vn.dcid.len();
                     dcid[..d].copy_from_slice(vn.dcid);
                     let lists_v1 = vn.versions().any(|v| v == QUIC_V1);
-                    if let Err(reason) = self.on_version_negotiation(&dcid[..d], lists_v1, now_ns)
-                    {
+                    if let Err(reason) = self.on_version_negotiation(&dcid[..d], lists_v1, now_ns) {
                         dropped.get_or_insert(reason);
                     }
                     break;
@@ -3041,7 +3093,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             }
             // The client may have discarded Initial keys on this send.
             if !stop && result.is_ok() && handshake {
-                match self.send_long(slot, PnSpace::Handshake, LongKind::Normal, !zero_rtt, now_ns) {
+                match self.send_long(
+                    slot,
+                    PnSpace::Handshake,
+                    LongKind::Normal,
+                    !zero_rtt,
+                    now_ns,
+                ) {
                     Ok(_) => sent += 1,
                     Err(WarpError::AmplificationLimited | WarpError::Umem(_)) => stop = true,
                     Err(WarpError::PacketTooLarge { .. }) => {}
@@ -3145,9 +3203,11 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         // Packet numbers continue across a Retry's new Initial keys.
         let pn = sealer.next_packet_number().max(ls.next_pn);
         // Room left in the datagram; a coalesced successor needs some.
-        let room = max
-            .saturating_sub(self.dgram_len)
-            .saturating_sub(if last { 0 } else { COALESCE_RESERVE });
+        let room = max.saturating_sub(self.dgram_len).saturating_sub(if last {
+            0
+        } else {
+            COALESCE_RESERVE
+        });
 
         // Frames after a maximal header, moved once its length is known.
         let scratch = &mut self.scratch;
@@ -3566,8 +3626,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 .on_packet_sent(PnSpace::ApplicationData, sent)
                 .map_err(WarpError::Recovery)
                 .and_then(|()| {
-                    c.cc
-                        .on_packet_sent(now_ns, sent, false)
+                    c.cc.on_packet_sent(now_ns, sent, false)
                         .map_err(WarpError::Cc)
                 })
         });
@@ -3625,9 +3684,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         };
         let spaces = [has(self, PnSpace::Initial), has(self, PnSpace::Handshake)];
         self.dgram_begin();
-        for (i, space) in [PnSpace::Initial, PnSpace::Handshake].into_iter().enumerate() {
+        for (i, space) in [PnSpace::Initial, PnSpace::Handshake]
+            .into_iter()
+            .enumerate()
+        {
             let last = i == 1 || !spaces[1];
-            if spaces[i] && self.send_long(slot, space, long_close, last, now_ns).is_ok() {
+            if spaces[i]
+                && self
+                    .send_long(slot, space, long_close, last, now_ns)
+                    .is_ok()
+            {
                 any = true;
             }
         }
@@ -5333,9 +5399,7 @@ fn scan_bytes<R: Responder>(
     let mut failure: Option<DropReason> = None;
     let mut peer_close = None;
     let mut non_probing = false;
-    let violation = |code, frame_type| {
-        DropReason::Transport(TransportError { code, frame_type })
-    };
+    let violation = |code, frame_type| DropReason::Transport(TransportError { code, frame_type });
     let info = scan_payload(payload, rx.ty, |f| {
         if failure.is_some() {
             return;
@@ -5609,21 +5673,23 @@ fn apply_lifecycle_params(
     c.recovery
         .set_max_ack_delay_ns(p.max_ack_delay_ms.saturating_mul(1_000_000), now_ns);
     let peer_max = u16::try_from(p.max_udp_payload_size).unwrap_or(u16::MAX);
-    c.max_datagram = config.max_datagram.min(peer_max.max(MIN_INITIAL_DATAGRAM as u16));
+    c.max_datagram = config
+        .max_datagram
+        .min(peer_max.max(MIN_INITIAL_DATAGRAM as u16));
     let ours = u64::from(config.lifecycle.active_connection_id_limit);
     c.cids.issue_limit = ours.min(p.active_connection_id_limit.max(2));
     c.peer_disables_migration = p.disable_active_migration;
     if c.cids.peer_cid(0).is_none() {
         // Sequence 0 is the connection ID the peer's packets came from.
         let peer = c.cids.peer.iter_mut().find(|s| s.is_none());
-        if let (Some(slot), Some(cid)) = (peer, p.initial_source_connection_id) {
-            if let Ok(cid) = ConnectionId::from_slice(cid.as_bytes()) {
-                *slot = Some(PeerCid {
-                    seq: 0,
-                    cid,
-                    token: p.stateless_reset_token,
-                });
-            }
+        if let (Some(slot), Some(cid)) = (peer, p.initial_source_connection_id)
+            && let Ok(cid) = ConnectionId::from_slice(cid.as_bytes())
+        {
+            *slot = Some(PeerCid {
+                seq: 0,
+                cid,
+                token: p.stateless_reset_token,
+            });
         }
     }
 }

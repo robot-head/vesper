@@ -14,10 +14,12 @@ use bytes::BytesMut;
 use common::Rng;
 use quinn_proto::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn_proto::{
-    ClientConfig, Connection, ConnectionHandle, DatagramEvent, Dir, Endpoint, Event,
-    ServerConfig, StreamId, TransportConfig, VarInt,
+    ClientConfig, Connection, ConnectionHandle, DatagramEvent, Dir, Endpoint, Event, ServerConfig,
+    StreamId, TransportConfig, VarInt,
 };
-use vesper_warp::endpoint::{ConnectionError, Discard, EndpointConfig, RxOutcome, TxTap, WarpEndpoint};
+use vesper_warp::endpoint::{
+    ConnectionError, Discard, EndpointConfig, RxOutcome, TxTap, WarpEndpoint,
+};
 use vesper_warp::handshake::tls::FixedTime;
 use vesper_warp::handshake::tls::rustls;
 use vesper_warp::handshake::tls::rustls::RootCertStore;
@@ -163,7 +165,11 @@ impl quinn_proto::crypto::HmacKey for ResetKey {
     fn signature_len(&self) -> usize {
         32
     }
-    fn verify(&self, data: &[u8], signature: &[u8]) -> Result<(), quinn_proto::crypto::CryptoError> {
+    fn verify(
+        &self,
+        data: &[u8],
+        signature: &[u8],
+    ) -> Result<(), quinn_proto::crypto::CryptoError> {
         let mut want = [0u8; 32];
         self.sign(data, &mut want);
         if signature == want {
@@ -497,13 +503,20 @@ fn warp_client(lifecycle: LifecycleConfig, retry: bool, loss_ppm: u64) -> (Link,
 fn warp_server(lifecycle: LifecycleConfig, loss_ppm: u64) -> Link {
     let mut warp = warp(Role::Server, lifecycle);
     let (certs, key) = cert();
-    warp.listen(Listener::new(ServerSetup::new(certs, key, vec![ALPN.to_vec()]).unwrap()))
-        .unwrap();
+    warp.listen(Listener::new(
+        ServerSetup::new(certs, key, vec![ALPN.to_vec()]).unwrap(),
+    ))
+    .unwrap();
     let mut quinn = Quinn::new(None, false);
     let base = Instant::now();
     let (ch, c) = quinn
         .ep
-        .connect(base, quinn_client_config(), "192.0.2.1:4433".parse().unwrap(), SERVER_NAME)
+        .connect(
+            base,
+            quinn_client_config(),
+            "192.0.2.1:4433".parse().unwrap(),
+            SERVER_NAME,
+        )
         .unwrap();
     quinn.conn = Some((ch, c));
     let mut link = Link::new(warp, quinn, loss_ppm);
@@ -526,9 +539,14 @@ fn warp_client_to_quinn_server() {
     assert_ne!(before, link.warp.connection(conn).unwrap().tile.peer_cid);
     warp_client_exchange(&mut link, conn, &rng.bytes(30_000), &rng.bytes(30_000));
     link.until("path validated", |l| {
-        l.warp_events.contains(&ConnectionEvent::PathValidated(conn))
+        l.warp_events
+            .contains(&ConnectionEvent::PathValidated(conn))
     });
-    assert!(link.warp.stats().path_responses_sent >= 1, "{:?}", link.warp.stats());
+    assert!(
+        link.warp.stats().path_responses_sent >= 1,
+        "{:?}",
+        link.warp.stats()
+    );
 
     link.warp.close(conn, 0x42, link.now).unwrap();
     link.until("quinn sees the close", |l| l.quinn.lost().is_some());
@@ -550,11 +568,15 @@ fn quinn_client_to_warp_server() {
     assert_eq!(link.warp.stats().cids_issued, 3);
 
     let at = link.at();
-    link.quinn
-        .conn()
-        .close(at, VarInt::from_u32(0x17), bytes::Bytes::from_static(b"bye"));
+    link.quinn.conn().close(
+        at,
+        VarInt::from_u32(0x17),
+        bytes::Bytes::from_static(b"bye"),
+    );
     let conn = link.warp_conn.unwrap();
-    link.until("warp sees the close", |l| l.warp.connection_error(conn).is_some());
+    link.until("warp sees the close", |l| {
+        l.warp.connection_error(conn).is_some()
+    });
     assert_eq!(
         link.warp.connection_error(conn),
         Some(ConnectionError::Peer {
@@ -614,7 +636,9 @@ fn warp_client_sends_zero_rtt_to_quinn() {
         .unwrap()
         .with_zero_rtt();
     let odcid = [0x83, 1, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
-    let first = warp.connect(&setup, SERVER_NAME, &[0xc1; 8], &odcid, 0).unwrap();
+    let first = warp
+        .connect(&setup, SERVER_NAME, &[0xc1; 8], &odcid, 0)
+        .unwrap();
     let quinn = Quinn::new(Some(quinn_server_config_with(true)), false);
     let mut link = Link::new(warp, quinn, 0);
     link.warp_conn = Some(first);
@@ -665,8 +689,18 @@ fn warp_client_sends_zero_rtt_to_quinn() {
     assert!(got == up && down_got == down);
     // quinn's server reports no 0-RTT state of its own; its TLS stack's
     // acceptance reaches Warp through EncryptedExtensions.
-    assert!(link.warp_events.contains(&ConnectionEvent::ZeroRttAccepted(second)));
-    assert!(link.warp.connection(second).unwrap().tls.unwrap().is_resumed());
+    assert!(
+        link.warp_events
+            .contains(&ConnectionEvent::ZeroRttAccepted(second))
+    );
+    assert!(
+        link.warp
+            .connection(second)
+            .unwrap()
+            .tls
+            .unwrap()
+            .is_resumed()
+    );
 }
 
 #[test]
@@ -684,7 +718,12 @@ fn quinn_client_sends_zero_rtt_to_warp() {
     quinn.conn = Some(
         quinn
             .ep
-            .connect(base, quinn_client_config_from(tls.clone()), warp_addr, SERVER_NAME)
+            .connect(
+                base,
+                quinn_client_config_from(tls.clone()),
+                warp_addr,
+                SERVER_NAME,
+            )
             .unwrap(),
     );
     let mut link = Link::new(warp, quinn, 0);
@@ -706,7 +745,10 @@ fn quinn_client_sends_zero_rtt_to_warp() {
     link.quinn.conn = Some((ch, c));
     link.quinn.events.clear();
     link.warp_conn = None;
-    assert!(link.quinn.conn().has_0rtt(), "quinn resumed with early data");
+    assert!(
+        link.quinn.conn().has_0rtt(),
+        "quinn resumed with early data"
+    );
     let up = rng.bytes(2_000);
     let down = rng.bytes(2_000);
     let id = link.quinn.conn().streams().open(Dir::Bi).unwrap();
@@ -737,7 +779,10 @@ fn quinn_client_sends_zero_rtt_to_warp() {
     });
     assert!(got == up && down_got == down);
     assert!(link.warp.stats().zero_rtt_packets_received >= 1);
-    assert!(link.quinn.conn().accepted_0rtt(), "Warp accepted the early data");
+    assert!(
+        link.quinn.conn().accepted_0rtt(),
+        "Warp accepted the early data"
+    );
 }
 
 #[test]
@@ -755,7 +800,10 @@ fn quinn_accepts_a_warp_stateless_reset() {
     let mut sent = 0;
     write_quinn(&mut link.quinn, id, b"anyone there?", &mut sent);
     link.until("quinn sees the reset", |l| l.quinn.lost().is_some());
-    assert!(matches!(link.quinn.lost(), Some(quinn_proto::ConnectionError::Reset)));
+    assert!(matches!(
+        link.quinn.lost(),
+        Some(quinn_proto::ConnectionError::Reset)
+    ));
     assert_eq!(link.warp.stats().stateless_resets_sent, 1);
 }
 
@@ -775,4 +823,145 @@ fn warp_accepts_a_quinn_stateless_reset() {
         l.warp.connection_error(conn) == Some(ConnectionError::StatelessReset)
     });
     assert_eq!(link.warp.stats().stateless_resets_received, 1);
+}
+
+/// A quinn token log that refuses reuse exactly (quinn's own Bloom-filter
+/// log needs its `bloom` feature).
+#[derive(Default)]
+struct ExactTokenLog(std::sync::Mutex<std::collections::HashSet<u128>>);
+
+impl quinn_proto::TokenLog for ExactTokenLog {
+    fn check_and_insert(
+        &self,
+        nonce: u128,
+        _issued: std::time::SystemTime,
+        _lifetime: Duration,
+    ) -> Result<(), quinn_proto::TokenReuseError> {
+        if self.0.lock().unwrap().insert(nonce) {
+            Ok(())
+        } else {
+            Err(quinn_proto::TokenReuseError)
+        }
+    }
+}
+
+#[test]
+fn warp_client_reuses_a_quinn_new_token() {
+    let mut server = (*quinn_server_config()).clone();
+    let mut tokens = quinn_proto::ValidationTokenConfig::default();
+    tokens.log(Arc::new(ExactTokenLog::default())).sent(1);
+    server.validation_token_config(tokens);
+    let mut warp = warp(Role::Client, LifecycleConfig::default());
+    let quinn_addr: SocketAddr = "198.51.100.7:443".parse().unwrap();
+    warp.set_rx_source(Some(quinn_addr));
+    let setup = ClientSetup::with_time(roots(), vec![ALPN.to_vec()], time()).unwrap();
+    let odcid = [0x83, 1, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+    let first = warp
+        .connect(&setup, SERVER_NAME, &[0xc1; 8], &odcid, 0)
+        .unwrap();
+    let mut link = Link::new(warp, Quinn::new(Some(Arc::new(server)), true), 0);
+    link.warp_conn = Some(first);
+    link.handshake();
+    assert_eq!(link.quinn.retries_sent, 1);
+    link.until("NEW_TOKEN from quinn", |l| {
+        l.warp_events.contains(&ConnectionEvent::NewToken(first))
+    });
+
+    // The token validates the address: quinn sends no second Retry.
+    let odcid = [0x83, 2, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+    link.warp.set_rx_source(Some(quinn_addr));
+    let now = link.now;
+    let second = link
+        .warp
+        .connect(&setup, SERVER_NAME, &[0xc2; 8], &odcid, now)
+        .unwrap();
+    link.warp_conn = Some(second);
+    link.quinn.events.clear();
+    link.handshake();
+    assert_eq!(link.quinn.retries_sent, 1, "no second Retry");
+    let mut rng = Rng(9);
+    warp_client_exchange(&mut link, second, &rng.bytes(5_000), &rng.bytes(5_000));
+}
+
+#[test]
+fn quinn_client_reuses_a_warp_new_token() {
+    let retry = LifecycleConfig {
+        address_validation: AddressValidation::Retry,
+        ..LifecycleConfig::default()
+    };
+    let mut warp = warp(Role::Server, retry);
+    let (certs, key) = cert();
+    warp.listen(Listener::new(
+        ServerSetup::new(certs, key, vec![ALPN.to_vec()]).unwrap(),
+    ))
+    .unwrap();
+    // One ClientConfig, so both connections share quinn's token store.
+    let client = quinn_client_config();
+    let warp_addr: SocketAddr = "192.0.2.1:4433".parse().unwrap();
+    let mut quinn = Quinn::new(None, false);
+    let base = Instant::now();
+    quinn.conn = Some(
+        quinn
+            .ep
+            .connect(base, client.clone(), warp_addr, SERVER_NAME)
+            .unwrap(),
+    );
+    let mut link = Link::new(warp, quinn, 0);
+    link.base = base;
+    link.handshake();
+    assert_eq!(link.warp.stats().retries_sent, 1);
+    link.until("NEW_TOKEN sent", |l| l.warp.stats().tokens_issued == 1);
+    for _ in 0..20 {
+        link.step();
+    }
+
+    let at = link.at();
+    let (ch, c) = link
+        .quinn
+        .ep
+        .connect(at, client, warp_addr, SERVER_NAME)
+        .unwrap();
+    link.quinn.conn = Some((ch, c));
+    link.quinn.events.clear();
+    link.warp_conn = None;
+    link.handshake();
+    assert_eq!(link.warp.stats().retries_sent, 1, "no second Retry");
+    assert_eq!(link.warp.stats().tokens_accepted, 2);
+    let mut rng = Rng(10);
+    quinn_client_exchange(&mut link, &rng.bytes(5_000), &rng.bytes(5_000));
+}
+
+#[test]
+fn quinn_client_gets_version_negotiation_from_warp() {
+    let mut warp = warp(Role::Server, LifecycleConfig::default());
+    let (certs, key) = cert();
+    warp.listen(Listener::new(
+        ServerSetup::new(certs, key, vec![ALPN.to_vec()]).unwrap(),
+    ))
+    .unwrap();
+    // quinn offers draft-29, which Warp does not speak.
+    let mut config = quinn_proto::EndpointConfig::new(Arc::new(ResetKey));
+    config.supported_versions(vec![0xff00_001d, 1]);
+    let mut quinn = Quinn::new(None, false);
+    quinn.ep = Endpoint::new(Arc::new(config), None, false, Some([7; 32]));
+    let mut client = quinn_client_config();
+    client.version(0xff00_001d);
+    let base = Instant::now();
+    quinn.conn = Some(
+        quinn
+            .ep
+            .connect(base, client, "192.0.2.1:4433".parse().unwrap(), SERVER_NAME)
+            .unwrap(),
+    );
+    let mut link = Link::new(warp, quinn, 0);
+    link.base = base;
+    link.until("quinn sees the version mismatch", |l| {
+        l.quinn.lost().is_some()
+    });
+    assert!(matches!(
+        link.quinn.lost(),
+        Some(quinn_proto::ConnectionError::VersionMismatch)
+    ));
+    assert_eq!(link.warp.stats().version_negotiations_sent, 1);
+    assert_eq!(link.warp.stats().accepted, 0);
 }

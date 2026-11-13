@@ -2343,10 +2343,8 @@ impl StreamSet {
                     }
                 }
             }
-            SentFrame::NewToken => {
-                if self.new_token.is_some_and(|t| !t.pending) {
-                    self.new_token = None;
-                }
+            SentFrame::NewToken if self.new_token.is_some_and(|t| !t.pending) => {
+                self.new_token = None;
             }
             _ => {}
         }

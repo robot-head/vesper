@@ -73,7 +73,10 @@ fn resumed_session_carries_zero_rtt_keys_both_ways() {
     let remembered = client.remembered.clone().expect("remembered parameters");
     let sp = server_params();
     assert_eq!(remembered.initial_max_data, sp.initial_max_data);
-    assert_eq!(remembered.initial_max_streams_uni, sp.initial_max_streams_uni);
+    assert_eq!(
+        remembered.initial_max_streams_uni,
+        sp.initial_max_streams_uni
+    );
     assert_eq!(client.zero_rtt.as_ref().unwrap().side(), Side::Client);
     // The ClientHello reaches the server, which accepts early data.
     let mut server = server(&s);
@@ -120,8 +123,7 @@ fn a_server_refusing_early_data_is_a_clean_rejection() {
     let s = server_setup().with_zero_rtt();
     first_connection(&c, &s);
     // Same session store, early data turned off.
-    let refusing =
-        ServerSetup::from_config((**s.config()).clone(), vec![ALPN.to_vec()]).unwrap();
+    let refusing = ServerSetup::from_config((**s.config()).clone(), vec![ALPN.to_vec()]).unwrap();
     assert!(!refusing.zero_rtt());
     let mut client = client_peer(&c);
     assert_eq!(client.tls.early_data(), EarlyData::Offered);
