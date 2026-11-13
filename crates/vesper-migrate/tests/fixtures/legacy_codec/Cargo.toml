@@ -1,0 +1,5 @@
+# Fixture crate for vesper migrate (analysed as text; not a workspace member).
+[package]
+name = "legacy-codec"
+version = "0.8.0"
+edition = "2024"
