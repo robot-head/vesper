@@ -9,7 +9,13 @@
 //! * [`rollback`]: snapshot ring with linear [`rollback::RollbackTicket`]s.
 //! * [`snapshot`]: the 48-byte §36.2 header and canonical world hashes.
 //!
-//! Not here: the GPU broadphase (Ignis), Tensor gradients and the compiler's
+//! * [`crmath`]: correctly rounded `sin`, `cos`, `atan2`, `exp`, `log`.
+//! * [`lbvh`]: 64-bit Morton LBVH broadphase (Karras construction).
+//! * [`gjk`]: GJK distance and EPA penetration for convex shapes.
+//! * [`diff`]: reverse-mode gradients of an XPBD simulation as Tensor host
+//!   tensors.
+//!
+//! Not here: the GPU broadphase (Ignis; no GPU in CI) and the compiler's
 //! `eff [DetFloat]` source effect. Ownership-based linearity in this crate is
 //! host-library discipline, not an implementation of Vesper's source typing
 //! rules.
@@ -19,6 +25,7 @@
 pub mod coloring;
 pub mod crmath;
 pub mod detfloat;
+pub mod diff;
 pub mod gjk;
 pub mod lbvh;
 pub mod morton;
