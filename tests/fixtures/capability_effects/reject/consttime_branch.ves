@@ -1,0 +1,24 @@
+// expect: E0702
+copy struct Secret[T] {
+    value: T,
+}
+
+fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    if value == 0 {
+        Secret {
+            value: 1
+        }
+    } else {
+        Secret {
+            value: 2
+        }
+    }
+}
+
+fn main() -> u64 {
+    0
+}
