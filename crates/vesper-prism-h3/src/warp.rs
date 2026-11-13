@@ -6,10 +6,11 @@
 //! implicitly and in order (RFC 9000 §3.2), and this does not depend on the
 //! bounded stream-event queue, which can drop events.
 //!
-//! Warp has no application CONNECTION_CLOSE yet: [`Transport::close`]
-//! records the HTTP/3 code ([`PeerStreams::closed_with`]) and frees the
-//! connection with [`WarpEndpoint::close_connection`]; the peer learns of
-//! it by idle timeout, not by an error code.
+//! [`Transport::close`] records the HTTP/3 code
+//! ([`PeerStreams::closed_with`]) and closes the connection with
+//! [`WarpEndpoint::close`], so the peer receives it in an application
+//! CONNECTION_CLOSE (RFC 9000 §19.19, RFC 9114 §8). Warp frees the slot
+//! after its closing period.
 
 use vesper_warp::endpoint::{Responder as WarpResponder, TxTap, WarpEndpoint, WarpError};
 use vesper_warp::stream::{Role, StreamError, stream_id};
@@ -129,7 +130,9 @@ impl<B: XskBackend, R: WarpResponder, T: TxTap> Transport for WarpTransport<'_, 
     fn close(&mut self, code: Code) {
         if self.peers.closed.is_none() {
             self.peers.closed = Some(code);
-            let _ = self.endpoint.close_connection(self.conn, self.now_ns);
+            // Already closed (by the peer or a transport error): the
+            // existing close stands.
+            let _ = self.endpoint.close(self.conn, code.0, self.now_ns);
         }
     }
 }
