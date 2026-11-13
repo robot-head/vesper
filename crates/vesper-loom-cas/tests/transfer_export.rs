@@ -77,6 +77,10 @@ fn writable(path: &std::path::Path) {
     #[cfg(not(unix))]
     {
         let mut permissions = fs::metadata(path).unwrap().permissions();
+        #[allow(
+            clippy::permissions_set_readonly_false,
+            reason = "non-Unix fixture clears the Windows readonly attribute; Unix uses mode 0600"
+        )]
         permissions.set_readonly(false);
         fs::set_permissions(path, permissions).unwrap();
     }
