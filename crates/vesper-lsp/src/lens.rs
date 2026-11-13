@@ -192,6 +192,10 @@ impl CancelToken {
     fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
+    /// True when both handles belong to the same job.
+    pub fn same_job(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// Requests that have not been answered yet. Cancelling a pending request
@@ -234,9 +238,19 @@ impl PendingRequests {
             None => false,
         }
     }
-    /// True when `id` was still pending and should now be answered.
-    pub fn finish(&mut self, id: &Id) -> bool {
-        self.take(id).is_some()
+    /// True when `id` is still pending *for this job* and should now be
+    /// answered. A late completion of a cancelled job never matches a later
+    /// request that reuses its ID.
+    pub fn finish(&mut self, id: &Id, job: &CancelToken) -> bool {
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|(pending, token)| pending == id && token.same_job(job))
+        else {
+            return false;
+        };
+        self.pending.swap_remove(index);
+        true
     }
     /// Cancel every pending request (server exit), returning their IDs.
     pub fn cancel_all(&mut self) -> Vec<Id> {

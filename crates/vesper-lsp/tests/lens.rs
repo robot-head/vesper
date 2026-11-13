@@ -124,9 +124,14 @@ fn pending_requests_answer_once() {
     assert!(pending.cancel(&Id::Integer(7)));
     assert!(token.is_cancelled());
     // Cancelled work is never answered again, and a second cancel is a no-op.
-    assert!(!pending.finish(&Id::Integer(7)));
+    assert!(!pending.finish(&Id::Integer(7), &token));
     assert!(!pending.cancel(&Id::Integer(7)));
-    assert!(pending.finish(&Id::String("x".into())));
+    // A client may reuse a cancelled ID; the old job's completion must not
+    // answer the new request.
+    let reused = pending.begin(Id::Integer(7)).unwrap();
+    assert!(!pending.finish(&Id::Integer(7), &token));
+    assert!(pending.finish(&Id::Integer(7), &reused));
+    assert!(pending.finish(&Id::String("x".into()), &other));
     assert!(!other.is_cancelled());
     let last = pending.begin(Id::Integer(1)).unwrap();
     assert_eq!(pending.cancel_all(), [Id::Integer(1)]);

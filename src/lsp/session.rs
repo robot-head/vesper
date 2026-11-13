@@ -540,6 +540,9 @@ impl Session {
         // survive in the mirror, including IDs of still-open documents.
         self.files.clear();
         self.recovery.clear();
+        // Cached Lens views hold whole checker states; keep only open buffers
+        // reachable, and rebuild them lazily from the new database.
+        self.lens_views.borrow_mut().clear();
         self.db = Database::default();
         for document in self.documents.iter() {
             self.files.insert(

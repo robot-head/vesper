@@ -93,7 +93,7 @@ struct Event {
 }
 impl Binding {
     fn visible_at(&self, at: usize) -> bool {
-        self.origin.end <= at && at <= self.scope.end && self.scope.start <= self.origin.start
+        self.origin.end <= at && at <= self.scope.end
     }
     /// A consumption has happened before `at` on the path through `at`.
     pub(crate) fn consumed_before(&self, at: usize) -> Option<&Span> {
@@ -639,11 +639,20 @@ impl Walker<'_> {
         }
     }
     fn args(&mut self, args: &[Arg], params: &[Param], default: Pass) -> Result<(), Unavailable> {
+        let passes: Vec<Pass> = params.iter().map(|p| p.pass).collect();
+        self.args_by_pass(args, &passes, default)
+    }
+    fn args_by_pass(
+        &mut self,
+        args: &[Arg],
+        passes: &[Pass],
+        default: Pass,
+    ) -> Result<(), Unavailable> {
         for (i, a) in args.iter().enumerate() {
             let pass = if a.explicit {
                 a.pass
             } else {
-                params.get(i).map(|p| p.pass).unwrap_or(default)
+                passes.get(i).copied().unwrap_or(default)
             };
             self.expr(&a.expr, pass == Pass::Sink)?;
         }
@@ -733,9 +742,16 @@ impl Walker<'_> {
                         }
                     }
                 }
+                // A function value (local closure binding or any other callee
+                // expression): like the checker, the callee is used owned and
+                // its arguments follow the modes of its function type.
                 _ => {
-                    self.expr(callee, false)?;
-                    self.args(args, &[], Pass::Sink)?;
+                    let passes: Vec<Pass> = match self.ty_of(callee) {
+                        Type::Function { params, .. } => params.iter().map(|(p, _)| *p).collect(),
+                        _ => Vec::new(),
+                    };
+                    self.expr(callee, true)?;
+                    self.args_by_pass(args, &passes, Pass::Sink)?;
                 }
             },
             ExprKind::Field(base, _) => self.expr(base, false)?,
@@ -776,11 +792,13 @@ impl Walker<'_> {
             ExprKind::Closure { params, body, .. } => {
                 self.scopes.push(Vec::new());
                 for p in params {
+                    // A closure parameter's span may run into its body.
+                    let origin = p.span.start..p.span.end.min(body.span.start).max(p.span.start);
                     self.bind(
                         &p.name,
-                        p.span.clone(),
+                        origin,
                         p.ty.clone(),
-                        false,
+                        p.pass == Pass::Sink,
                         body.span.clone(),
                     )?;
                 }

@@ -212,6 +212,10 @@ fn child(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Its own process group, so cancellation and timeouts also stop the Lean
+    // process that `vesper proof-audit` launches.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(command, 0);
     let mut process = command.spawn().map_err(|e| format!("start process: {e}"))?;
     let capture = |pipe: Option<Box<dyn Read + Send>>| {
         thread::spawn(move || {
@@ -239,8 +243,7 @@ fn child(
     let deadline = Instant::now() + timeout;
     let status = loop {
         if cancel.is_cancelled() || Instant::now() >= deadline {
-            let _ = process.kill();
-            let _ = process.wait();
+            kill_tree(&mut process);
             let _ = (stdout.join(), stderr.join());
             if cancel.is_cancelled() {
                 return Ok(None);
@@ -263,6 +266,35 @@ fn child(
         .find(|line| !line.trim().is_empty())
         .unwrap_or("");
     Err(format!("{status}: {first}"))
+}
+
+/// Kill a child and every process in its tree, then reap the child.
+fn kill_tree(process: &mut std::process::Child) {
+    let pid = process.id().to_string();
+    #[cfg(unix)]
+    let tree = ["/bin/kill", "/usr/bin/kill"].iter().any(|kill| {
+        Command::new(kill)
+            .args(["-KILL", "--", &format!("-{pid}")])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    });
+    #[cfg(windows)]
+    let tree = Command::new("taskkill")
+        .args(["/T", "/F", "/PID", &pid])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    #[cfg(not(any(unix, windows)))]
+    let tree = false;
+    if !tree {
+        let _ = process.kill();
+    }
+    let _ = process.wait();
 }
 
 /// A private staging directory removed on drop.

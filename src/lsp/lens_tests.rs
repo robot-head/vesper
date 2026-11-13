@@ -465,6 +465,52 @@ fn hover_and_inlay_hints_show_outstanding_obligations() {
     client.close();
 }
 
+#[test]
+fn closure_sink_parameters_and_function_value_calls_follow_checker_modes() {
+    let mut client = Client::start(LensConfig::default());
+    let uri = "untitled:closure.ves";
+    let text = with_main(
+        "    let f: fn @copy (sink WriteTxn) -> u64 = | sink t: WriteTxn | t.commit();\n    let tx = open_txn(1);\n    f(tx)\n",
+    );
+    let published = client.open(uri, &text);
+    assert_eq!(published["vesper"]["status"], "checked", "{published}");
+    // The closure's sink parameter is an owned obligation inside its body.
+    let (line, column) = position_of(&text, "t.commit()");
+    let hover = client.at("textDocument/hover", uri, line, column);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert!(value.contains("- t: WriteTxn"), "{value}");
+    // Passing `tx` to the function value's sink parameter consumes it.
+    let id = client.request(
+        "textDocument/inlayHint",
+        json!({"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},
+            "end":{"line":200,"character":0}}}),
+    );
+    let response = client.response(id);
+    let (call_line, _) = position_of(&text, "f(tx)");
+    let labels: Vec<_> = response["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|h| h["data"]["vesper"]["binding"] == "tx" || h["data"]["vesper"]["binding"] == "t")
+        .map(|h| (h["data"]["vesper"]["binding"].clone(), h["label"].clone()))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            (
+                json!("t"),
+                json!(format!("linear: consumed on line {}", line + 1))
+            ),
+            (
+                json!("tx"),
+                json!(format!("linear: consumed on line {}", call_line + 1))
+            )
+        ],
+        "{response}"
+    );
+    client.close();
+}
+
 #[cfg(unix)]
 mod fake_lean {
     use super::*;
@@ -477,11 +523,20 @@ mod fake_lean {
         /// A stand-in Lean whose compile step sleeps when `slow` is set, and
         /// an auditor that reports an accepted empty-axiom replay.
         pub(super) fn new(name: &str, slow: bool, accept: bool) -> Self {
+            Self::with_compile(
+                name,
+                if slow { "exec /bin/sleep 30" } else { "exit 0" },
+                accept,
+            )
+        }
+        /// `compile` is the shell body run for a compile invocation; `$DIR`
+        /// is the toolchain directory.
+        pub(super) fn with_compile(name: &str, compile: &str, accept: bool) -> Self {
             let dir = std::env::temp_dir()
                 .join(format!("vesper-lens-fake-{name}-{}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(dir.join("bin")).unwrap();
-            let compile = if slow { "exec /bin/sleep 30" } else { "exit 0" };
+            let compile = compile.replace("$DIR", &dir.display().to_string());
             let lean = format!(
                 "#!/bin/sh\ncase \"$1\" in\n--print-prefix) echo '{}' ;;\n--version) echo 'Lean (version 4.24.0, fake)' ;;\n*) {compile} ;;\nesac\n",
                 dir.display()
@@ -623,6 +678,53 @@ fn proof_lens_records_proved_failed_and_stale_requests() {
     let (status, title) = lens_status(&mut client, uri, "double");
     assert_eq!(status, "failed");
     assert!(title.contains("failed at kernel"), "{title}");
+    client.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn proof_lens_cancellation_stops_the_whole_process_tree() {
+    // The compile step forks a grandchild, as `vesper proof-audit` forks Lean.
+    let toolchain = fake_lean::Toolchain::with_compile(
+        "tree",
+        "/bin/sleep 30 & echo $! > '$DIR/grandchild'; wait",
+        true,
+    );
+    let marker = toolchain.dir.join("grandchild");
+    let mut client = Client::start(toolchain.config());
+    let uri = "untitled:tree.ves";
+    client.open(uri, PROVABLE);
+    let id = client.request("workspace/executeCommand", audit_args(uri, "double"));
+    let started = std::time::Instant::now();
+    let pid = loop {
+        if let Ok(text) = std::fs::read_to_string(&marker)
+            && let Ok(pid) = text.trim().parse::<u32>()
+        {
+            break pid;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "grandchild never started"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    client.notify("$/cancelRequest", json!({"id": id}));
+    assert_eq!(client.response(id)["error"]["code"], -32800);
+    let alive = || {
+        std::process::Command::new("/bin/sh")
+            .args(["-c", &format!("kill -0 {pid} 2>/dev/null")])
+            .status()
+            .unwrap()
+            .success()
+    };
+    let started = std::time::Instant::now();
+    while alive() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "grandchild {pid} survived cancel"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
     client.close();
 }
 

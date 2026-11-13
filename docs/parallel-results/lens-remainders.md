@@ -123,6 +123,14 @@ late completion, a repeated cancel, and cancels for unknown or answered IDs
 send nothing. `exit` cancels every pending job. The bookkeeping is
 `vesper_lsp::lens::PendingRequests`/`CancelToken`.
 
+A completion is matched to its job token, not just its ID, so a cancelled
+job cannot answer a later request that reuses the ID. Each child runs in its
+own process group on Unix (`taskkill /T` on Windows), so cancellation and
+timeouts also stop the Lean process that `vesper proof-audit` starts. The
+reader queue holds at most 8 frames, which keeps the old backpressure. Cached
+Lens views are dropped whenever the session database is rebuilt, including on
+every `didClose`.
+
 ### Root-free crate additions (`crates/vesper-lsp`)
 
 `lens.rs` holds `rank_methods`/`CompletionTier`, `ProofLedger`/`ProofStatus`,
@@ -132,7 +140,7 @@ benchmark client is there too. README section added.
 
 ## Tests
 
-Stdio session tests (`src/lsp/lens_tests.rs`) drive `serve_with` over
+Stdio session tests (`src/lsp/lens_tests.rs`, 8) drive `serve_with` over
 in-memory pipes with the server on its own thread, using real Content-Length
 frames:
 
@@ -160,6 +168,12 @@ frames:
   fail at `extract`, a stale version gives -32801, an unknown command gives
   -32602, an edited source resets to `not_attempted`, a damaged buffer has no
   lenses, and a rejecting audit gives `failed at kernel`.
+- `closure_sink_parameters_and_function_value_calls_follow_checker_modes`:
+  a closure's sink parameter is an owned obligation in its body, and passing
+  a linear value to a function value's sink parameter consumes it.
+- `proof_lens_cancellation_stops_the_whole_process_tree` (unix): the
+  stand-in compile forks a grandchild, and after cancel the grandchild is
+  gone.
 - `proof_lens_with_real_lean_and_auditor`: real Lean 4.24.0 and the real
   `vesper proof-audit`, run when `VESPER_LEAN` and `VESPER_LENS_AUDITOR` are
   set and skipped otherwise. Locally: `proved`, 7.1 s.
@@ -222,7 +236,7 @@ Exact commands, with `CARGO_TARGET_DIR` set to a private directory and
 `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`:
 
 - `cargo fmt --all -- --check`: clean.
-- `cargo test --locked -p vesper --lib lsp`: 26 passed, including the 6 Lens
+- `cargo test --locked -p vesper --lib lsp`: 28 passed, including the 8 Lens
   session tests and one updated existing capability test.
 - `cargo test --locked -p vesper-lsp`: transport, documents and 5 new lens
   tests pass.
