@@ -205,6 +205,17 @@ vesper-loom-audit = { path = "crates/vesper-loom-audit" }
 vesper-loom-cas = { path = "crates/vesper-loom-cas" }
 vesper-pact = { path = "crates/vesper-pact" }
 vesper-pact-binding = { path = "crates/vesper-pact-binding" }
+# Integration B (#136): wave-five verifiers and tools wired into the CLI.
+vesper-aegis = { path = "crates/vesper-aegis" }
+vesper-chrono = { path = "crates/vesper-chrono" }
+vesper-crucible = { path = "crates/vesper-crucible" }
+vesper-ebpf = { path = "crates/vesper-ebpf" }
+vesper-kinetic = { path = "crates/vesper-kinetic" }
+vesper-ffi = { path = "crates/vesper-ffi" }
+vesper-migrate = { path = "crates/vesper-migrate" }
+vesper-resonance = { path = "crates/vesper-resonance" }
+vesper-silicon = { path = "crates/vesper-silicon" }
+vesper-vault = { path = "crates/vesper-vault" }
 ariadne = "0.5"
 petgraph = "0.8"
 egg = "0.10"
