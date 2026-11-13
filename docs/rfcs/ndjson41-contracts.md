@@ -1,15 +1,15 @@
 # Validated NDJSON batches and transactional EventEnvelope columns
 
-**Coordinator review draft: no runtime writers start until root publishes the
-reviewed contract.** Public claims210–213 precede writers. Base is float PR204
+**Reviewed frozen contract: runtime writers start only after publication.**
+Public claims210–213 precede writers. Base is float PR204
 headf60f11e. Fresh external issue/PR filename checks found no serde overlap;
 Claude121–136/main/native,193BUILD and other pending source paths remain reserved.
 
 | Claim | Branch | Exclusive writes |
 | --- | --- | --- |
 | #210 | ndjson41/integration | this contract, integration report, narrow lib.rs module registrations after publication |
-| #211 | ndjson41/batch | new src/ndjson.rs, tests/ndjson.rs, docs/parallel-results/ndjson41-batch.md |
-| #212 | ndjson41/columns | new src/event_columns.rs, tests/event_columns.rs, docs/parallel-results/ndjson41-columns.md |
+| #211 | ndjson41/batch | new src/ndjson.rs, tests/ndjson.rs, docs/rfcs/ndjson41-batch-report.md |
+| #212 | ndjson41/columns | new src/event_columns.rs, tests/event_columns.rs, docs/rfcs/ndjson41-columns-report.md |
 | #213 | ndjson41/acceptance | new tests/ndjson_roundtrip.rs, examples/ndjson_columns.rs, scripts/check-ndjson-columns.py, NDJSON.md profile, acceptance report |
 
 Source/test/example/profile paths above are relative to crates/vesper-serde;
@@ -18,6 +18,8 @@ helper, float, README, allocator, core, CLI, Cargo, BUILD, workflow or wrapper
 files. Only coordinator registers `pub mod ndjson; pub mod event_columns;` in
 lib.rs. No new dependency. Separate private caches, one Cargo job/debug0/
 incremental0; root target is coordinator-only. Claims stay reserved through merge.
+Acceptance and integration reports are docs/rfcs/ndjson41-acceptance-report.md
+and docs/rfcs/ndjson41-integration-report.md respectively.
 
 ## Public batch API and source ownership
 
@@ -289,11 +291,20 @@ aligned AoSoA allocator, incremental chunks, SIMD/native backend, zero-total-hea
 latency/RSS or proof claim. This slice provides actual host validation and
 caller-owned parallel columns; allocator integration is a separate prerequisite.
 
-## Review questions before publication
+## Coordinator review decisions
 
-1. Confirm the proposed numeric caps and fixed framing/schema work units; they
-   are logical admission accounting, not timing promises.
-2. Confirm public RecordRef::json_error is desirable for callers; it validates
-   the supplied local offset and grants no checked/proof status.
-3. Confirm common EventField/ErrorKind live in ndjson so A compiles independently
-   of B, and root registers both runtime modules only when their files exist.
+The stated numeric caps and framing/schema work units are approved as logical
+admission accounting, without CPU/time claims. Public RecordRef::json_error is
+retained for callers and validates local offsets in 0..=payload length, including
+legitimate EOF errors; it grants no checked/proof status. Common EventField and
+ErrorKind live in ndjson, so the batch implementation compiles independently.
+Coordinator first registers empty development modules; actual public APIs follow
+their coherent source implementations, without placeholder success paths.
+
+ProjectionLimits::validate(self) returns Result<(),ndjson::Error>. Used alone,
+configuration errors have offset0/record0/line1; read_event/project_into relocate
+them to the cursor's current record or EOF before returning. Configuration is
+validated before schema evaluation. In addition to schema work, read_event
+prepays one cursor-commit unit; nonempty project_into prepays three column-slot
+write units per row plus one cursor-commit unit, with checked arithmetic before
+any output write. These fixed-size operation units are not CPU instructions.

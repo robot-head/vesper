@@ -10,6 +10,8 @@
 
 pub mod archive;
 pub mod binary;
+pub mod event_columns;
+pub mod ndjson;
 pub mod streamvbyte;
 
 mod encode;
