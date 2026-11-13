@@ -39,6 +39,9 @@ pub enum NetFail {
     Timeout,
     Crashed,
     Shutdown,
+    /// The peer's bytes on a stream transport could not be decoded (bad
+    /// header, unknown record, oversized field, invalid UTF-8).
+    Malformed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -233,6 +236,140 @@ pub struct Z;
 pub struct S<N>(PhantomData<N>);
 pub struct End;
 
+/// N-ary internal choice towards `To` over the branch list `Bs` (built with
+/// [`branches!`](crate::branches)). The branch is chosen by its message type.
+pub struct SelectN<To, Bs>(PhantomData<(To, Bs)>);
+/// N-ary external choice offered by `From` over the branch list `Bs`.
+pub struct OfferN<From, Bs>(PhantomData<(From, Bs)>);
+/// Empty branch list.
+pub struct BNil;
+/// Branch list cell: branch `B` (a [`Branch`]), then the rest `T`.
+pub struct BCons<B, T>(PhantomData<(B, T)>);
+
+/// Fan-out: send the same message `M` to every role of the role list `Tos`
+/// (built with [`roles!`](crate::roles)), in order, then `Next`. Describes
+/// itself as one `Send` per role, so it matches a choreography that sends
+/// `M` from this role to each of them in turn.
+pub struct Broadcast<Tos, M, Next>(PhantomData<(Tos, M, Next)>);
+/// Fan-in: receive one `M` from every role of `Froms`, in order, then `Next`.
+pub struct Gather<Froms, M, Next>(PhantomData<(Froms, M, Next)>);
+/// Empty role list.
+pub struct RNil;
+/// Role list cell.
+pub struct RCons<R, T>(PhantomData<(R, T)>);
+
+/// Branch list type: `branches![Branch<A, P>, Branch<B, Q>, ...]`.
+#[macro_export]
+macro_rules! branches {
+    () => { $crate::session::BNil };
+    ($h:ty $(, $t:ty)* $(,)?) => {
+        $crate::session::BCons<$h, $crate::branches!($($t),*)>
+    };
+}
+
+/// Role list type: `roles![F1, F2, ...]`.
+#[macro_export]
+macro_rules! roles {
+    () => { $crate::session::RNil };
+    ($h:ty $(, $t:ty)* $(,)?) => {
+        $crate::session::RCons<$h, $crate::roles!($($t),*)>
+    };
+}
+
+/// Type-level index of a branch in a branch list (inferred).
+pub struct Here;
+/// The branch is further down the list.
+pub struct There<I>(PhantomData<I>);
+
+/// The branch of list `Self` that carries message `M`, at index `I`. The
+/// index is inferred, so `select(&msg)` picks the branch by message type;
+/// a message that is not in the list, or appears twice, does not compile:
+///
+/// ```compile_fail
+/// use vesper_chorus::session::{Branch, End, SelectN, Session};
+/// use vesper_chorus::{branches, role, unit_message};
+/// role!(S = "S");
+/// unit_message!(Get = "Get");
+/// unit_message!(Put = "Put");
+/// unit_message!(Other = "Other");
+/// fn f(s: Session<SelectN<S, branches![Branch<Get, End>, Branch<Put, End>]>>) {
+///     let _ = s.select(&Other); // `Other` is not a branch
+/// }
+/// ```
+///
+/// Using a session in a state it is not in does not compile either:
+///
+/// ```compile_fail
+/// use vesper_chorus::session::{Branch, End, OfferN, Session};
+/// use vesper_chorus::{branches, role, unit_message};
+/// role!(C = "C");
+/// unit_message!(Get = "Get");
+/// fn f(s: Session<OfferN<C, branches![Branch<Get, End>]>>) {
+///     let _ = s.select(&Get); // an offer cannot select
+/// }
+/// ```
+///
+/// The same code with a branch that exists compiles:
+///
+/// ```
+/// use vesper_chorus::session::{Branch, End, SelectN, Session};
+/// use vesper_chorus::{branches, role, unit_message};
+/// role!(S = "S");
+/// unit_message!(Get = "Get");
+/// unit_message!(Put = "Put");
+/// fn f(s: Session<SelectN<S, branches![Branch<Get, End>, Branch<Put, End>]>>) {
+///     if let Ok(s) = s.select(&Put) {
+///         s.close();
+///     }
+/// }
+/// ```
+pub trait Pick<M, I> {
+    /// The protocol after that branch's message.
+    type Next;
+}
+impl<M, P, T> Pick<M, Here> for BCons<Branch<M, P>, T> {
+    type Next = P;
+}
+impl<M, H, T: Pick<M, I>, I> Pick<M, There<I>> for BCons<H, T> {
+    type Next = T::Next;
+}
+
+/// A type-level list of branches.
+pub trait BranchList {
+    fn describe_all(cx: &mut Describe<'_>, out: &mut Vec<LBranch>) -> Result<(), ChorusError>;
+}
+impl BranchList for BNil {
+    fn describe_all(_: &mut Describe<'_>, _: &mut Vec<LBranch>) -> Result<(), ChorusError> {
+        Ok(())
+    }
+}
+impl<B: BranchSpec, T: BranchList> BranchList for BCons<B, T> {
+    fn describe_all(cx: &mut Describe<'_>, out: &mut Vec<LBranch>) -> Result<(), ChorusError> {
+        out.push(B::describe_branch(cx)?);
+        T::describe_all(cx, out)
+    }
+}
+
+/// A type-level list of roles.
+pub trait RoleList {
+    fn names(out: &mut Vec<&'static str>);
+}
+impl RoleList for RNil {
+    fn names(_: &mut Vec<&'static str>) {}
+}
+impl<R: RoleName, T: RoleList> RoleList for RCons<R, T> {
+    fn names(out: &mut Vec<&'static str>) {
+        out.push(R::NAME);
+        T::names(out);
+    }
+}
+
+fn role_names<L: RoleList>() -> Vec<&'static str> {
+    let mut v = Vec::new();
+    L::names(&mut v);
+    v
+}
+
 pub trait Nat {
     const VALUE: usize;
 }
@@ -314,6 +451,65 @@ impl<F: RoleName, L: BranchSpec, R: BranchSpec> Protocol for Offer<F, L, R> {
         let peer = cx.role(F::NAME)?;
         let branches = vec![L::describe_branch(cx)?, R::describe_branch(cx)?];
         Ok(LocalType::choice(false, peer, branches))
+    }
+}
+/// Describes an n-ary choice. One branch is a plain send or receive (as in
+/// projection); no branches describes an empty choice, which no
+/// projection produces, so binding it fails with `TypestateMismatch`.
+fn describe_choice<Bs: BranchList>(
+    cx: &mut Describe<'_>,
+    send: bool,
+    peer: RoleId,
+) -> Result<LocalType, ChorusError> {
+    let mut branches = Vec::new();
+    Bs::describe_all(cx, &mut branches)?;
+    if branches.is_empty() {
+        return Ok(if send {
+            LocalType::Select { peer, branches }
+        } else {
+            LocalType::Offer { peer, branches }
+        });
+    }
+    Ok(LocalType::choice(send, peer, branches))
+}
+impl<To: RoleName, Bs: BranchList> Protocol for SelectN<To, Bs> {
+    fn describe(cx: &mut Describe<'_>) -> Result<LocalType, ChorusError> {
+        let peer = cx.role(To::NAME)?;
+        describe_choice::<Bs>(cx, true, peer)
+    }
+}
+impl<F: RoleName, Bs: BranchList> Protocol for OfferN<F, Bs> {
+    fn describe(cx: &mut Describe<'_>) -> Result<LocalType, ChorusError> {
+        let peer = cx.role(F::NAME)?;
+        describe_choice::<Bs>(cx, false, peer)
+    }
+}
+impl<Tos: RoleList, M: Message, N: Protocol> Protocol for Broadcast<Tos, M, N> {
+    fn describe(cx: &mut Describe<'_>) -> Result<LocalType, ChorusError> {
+        let mut t = N::describe(cx)?;
+        for r in role_names::<Tos>().into_iter().rev() {
+            t = LocalType::Send {
+                peer: cx.role(r)?,
+                label: M::LABEL.to_owned(),
+                payload: M::PAYLOAD.to_owned(),
+                next: Box::new(t),
+            };
+        }
+        Ok(t)
+    }
+}
+impl<Froms: RoleList, M: Message, N: Protocol> Protocol for Gather<Froms, M, N> {
+    fn describe(cx: &mut Describe<'_>) -> Result<LocalType, ChorusError> {
+        let mut t = N::describe(cx)?;
+        for r in role_names::<Froms>().into_iter().rev() {
+            t = LocalType::Recv {
+                peer: cx.role(r)?,
+                label: M::LABEL.to_owned(),
+                payload: M::PAYLOAD.to_owned(),
+                next: Box::new(t),
+            };
+        }
+        Ok(t)
     }
 }
 impl<A: ActionName, N: Protocol> Protocol for Act<A, N> {
@@ -679,6 +875,9 @@ pub trait Transport: std::marker::Send {
     }
     /// The local end `me` of `channel` was dropped or faulted.
     fn abandon(&mut self, _channel: u64, _me: RoleId) {}
+    /// The local end `me` of `channel` closed at `End`: nothing more will be
+    /// sent or received on it. Stream transports end their streams here.
+    fn finish(&mut self, _channel: u64, _me: RoleId) {}
 }
 
 #[derive(Default)]
@@ -1169,9 +1368,170 @@ impl<N, P, E> Session<Var<S<N>>, (P, E)> {
 
 impl<E> Session<End, E> {
     pub fn close(mut self) {
-        let ep = self.take();
+        let mut ep = self.take();
         debug_assert!(ep.monitor.is_end());
+        ep.transport.finish(ep.channel, ep.me);
         ep.auditor.update(|c| c.closed += 1);
+    }
+}
+
+// ---------------------------------------------------------------- n-ary choice, fan-out
+
+impl<To: RoleName, Bs, E> Session<SelectN<To, Bs>, E> {
+    /// Select the branch that carries `M` (its index `I` is inferred).
+    pub fn select<M: Message, I>(mut self, msg: &M) -> Result<Session<Bs::Next, E>, Fault>
+    where
+        Bs: Pick<M, I>,
+    {
+        let mut ep = self.take();
+        match ep.send(To::NAME, msg) {
+            Ok(()) => Ok(Session::wrap(ep)),
+            Err(e) => Err(fault(ep, e)),
+        }
+    }
+}
+
+/// A received n-ary choice, not yet matched against the branch list `Bs`.
+/// Walk it with [`Choice::split`]. It is a linear owner like [`Session`].
+#[must_use = "a received choice must be matched to its branch"]
+pub struct Choice<Bs, E> {
+    ep: Option<Endpoint>,
+    frame: Frame,
+    _p: PhantomData<fn() -> (Bs, E)>,
+}
+
+/// One step of matching a [`Choice`]: the first branch of the list, or the
+/// rest of the list.
+pub enum Case<M, S, Rest> {
+    This(M, S),
+    Other(Rest),
+}
+
+impl<Bs, E> Choice<Bs, E> {
+    /// The label the peer selected.
+    pub fn label(&self) -> &str {
+        &self.frame.label
+    }
+    fn take(&mut self) -> Endpoint {
+        self.ep.take().expect("live choice")
+    }
+}
+
+impl<M: Message, P, T, E> Choice<BCons<Branch<M, P>, T>, E> {
+    /// Is the selected branch the first one in the list?
+    #[allow(clippy::type_complexity)]
+    pub fn split(mut self) -> Result<Case<M, Session<P, E>, Choice<T, E>>, Fault> {
+        let ep = self.take();
+        let frame = std::mem::replace(
+            &mut self.frame,
+            Frame {
+                channel: 0,
+                from: RoleId(0),
+                to: RoleId(0),
+                seq: 0,
+                label: String::new(),
+                payload_ty: String::new(),
+                body: Vec::new(),
+            },
+        );
+        if frame.label == M::LABEL && frame.payload_ty == M::PAYLOAD {
+            match decode::<M>(&frame) {
+                Ok(m) => Ok(Case::This(m, Session::wrap(ep))),
+                Err(e) => Err(fault(ep, e)),
+            }
+        } else {
+            Ok(Case::Other(Choice {
+                ep: Some(ep),
+                frame,
+                _p: PhantomData,
+            }))
+        }
+    }
+}
+
+impl<E> Choice<BNil, E> {
+    /// No branch matched. The monitor accepted the frame against the
+    /// projection, and binding checked the branch list against the same
+    /// projection, so this is unreachable for a bound session; it is still a
+    /// typed fault rather than a panic.
+    pub fn exhausted(mut self) -> Fault {
+        let ep = self.take();
+        let found = format!("label {}", self.frame.label);
+        let e = ep.monitor.violation(found);
+        fault(ep, e)
+    }
+}
+
+impl<Bs, E> Drop for Choice<Bs, E> {
+    fn drop(&mut self) {
+        if let Some(mut ep) = self.ep.take() {
+            ep.transport.abandon(ep.channel, ep.me);
+            ep.auditor.leak(LeakRecord {
+                channel: ep.channel,
+                role: ep.monitor.role.clone(),
+                state: format!("unmatched choice {}", self.frame.label),
+            });
+        }
+    }
+}
+
+impl<F: RoleName, Bs, E> Session<OfferN<F, Bs>, E> {
+    pub fn offer(mut self) -> Result<Choice<Bs, E>, Fault> {
+        let mut ep = self.take();
+        match ep.recv_checked(F::NAME, true) {
+            Ok(f) => Ok(Choice {
+                ep: Some(ep),
+                frame: f.expect("blocking receive returns a frame"),
+                _p: PhantomData,
+            }),
+            Err(e) => Err(fault(ep, e)),
+        }
+    }
+
+    pub fn try_offer(mut self) -> TryRecv<Choice<Bs, E>, Self> {
+        let mut ep = self.take();
+        match ep.recv_checked(F::NAME, false) {
+            Ok(None) => TryRecv::Empty(Session::wrap(ep)),
+            Ok(Some(frame)) => TryRecv::Ready(Choice {
+                ep: Some(ep),
+                frame,
+                _p: PhantomData,
+            }),
+            Err(e) => TryRecv::Fault(fault(ep, e)),
+        }
+    }
+}
+
+impl<Tos: RoleList, M: Message, N, E> Session<Broadcast<Tos, M, N>, E> {
+    /// Send `msg` to every role of `Tos`, in order.
+    pub fn broadcast(mut self, msg: &M) -> Result<Session<N, E>, Fault> {
+        let mut ep = self.take();
+        for to in role_names::<Tos>() {
+            if let Err(e) = ep.send(to, msg) {
+                return Err(fault(ep, e));
+            }
+        }
+        Ok(Session::wrap(ep))
+    }
+}
+
+impl<Froms: RoleList, M: Message, N, E> Session<Gather<Froms, M, N>, E> {
+    /// Receive one `M` from every role of `Froms`, in order (blocking).
+    /// Frames from later roles that arrive early are buffered by the
+    /// transport meanwhile.
+    pub fn gather(mut self) -> Result<(Vec<M>, Session<N, E>), Fault> {
+        let mut ep = self.take();
+        let mut out = Vec::new();
+        for from in role_names::<Froms>() {
+            let r = ep
+                .recv_checked(from, true)
+                .and_then(|f| decode::<M>(&f.expect("blocking receive returns a frame")));
+            match r {
+                Ok(m) => out.push(m),
+                Err(e) => return Err(fault(ep, e)),
+            }
+        }
+        Ok((out, Session::wrap(ep)))
     }
 }
 

@@ -19,6 +19,19 @@
 //! never diverge. [`QuorumRule::HalfFloor`] is a deliberately wrong
 //! non-majority quorum the checker must catch.
 //!
+//! Depth (wave six lane 17): with [`RaftConfig::snapshot_threshold`] set,
+//! nodes compact committed prefixes into a snapshot and a leader whose
+//! follower lags behind its snapshot sends it with an InstallSnapshot
+//! exchange ([`SNAPSHOT_CHOREOGRAPHY`]); with
+//! [`RaftConfig::membership_per_mille`] set, the leader changes the voting
+//! membership one server at a time through configuration entries in the
+//! log (Ongaro's single-server rule: a node uses the latest configuration in
+//! its log, committed or not; a leader proposes a change only after it has
+//! committed an entry of its own term and while no change is pending; a
+//! leader removed by a committed change steps down; non-members do not
+//! campaign). The checker additionally reports any change to a compacted
+//! entry.
+//!
 //! What this is: a deterministic model of the Raft election and log
 //! replication rules, executed and checked. What it is not: a production
 //! consensus implementation, Paxos, a real network, or the source
@@ -52,6 +65,39 @@ Follower -> Leader {
     Reject(AppendAck) { }
 }
 ";
+
+/// InstallSnapshot exchange between a leader and one lagging follower. The
+/// image is the compacted prefix of the leader's log (in this model the
+/// state machine is the command history, so the prefix is its image).
+pub const SNAPSHOT_CHOREOGRAPHY: &str = "\
+roles Leader, Follower;
+Leader -> Follower: InstallSnapshot(SnapshotImage);
+Follower: persist;
+Follower -> Leader: Installed(AppendAck);
+";
+
+/// The `cmd` of a configuration entry: this flag ORed with the bit mask of
+/// voting members (so membership change supports at most 63 nodes).
+pub const CONFIG_FLAG: u64 = 1 << 63;
+
+/// Voting members named by the newest configuration entry of `log`, or
+/// `initial` if it has none.
+pub fn config_of(log: &[Entry], initial: u64) -> u64 {
+    log.iter()
+        .rev()
+        .find(|e| e.cmd & CONFIG_FLAG != 0)
+        .map_or(initial, |e| e.cmd & !CONFIG_FLAG)
+}
+
+fn config_index(log: &[Entry]) -> u64 {
+    log.iter()
+        .rposition(|e| e.cmd & CONFIG_FLAG != 0)
+        .map_or(0, |i| i as u64 + 1)
+}
+
+fn member(mask: u64, id: u32) -> bool {
+    id < 64 && mask >> id & 1 == 1
+}
 
 // ---------------------------------------------------------------- wire
 
@@ -294,6 +340,16 @@ pub struct RaftConfig {
     pub max_log: usize,
     pub max_batch: usize,
     pub max_steps: usize,
+    /// Compact once `commit - snapshot_index` reaches this (0: never).
+    pub snapshot_threshold: u64,
+    /// Voting members at start: nodes `0..initial_members` (the others are
+    /// spare servers that membership changes can add).
+    pub initial_members: u32,
+    /// Chance per heartbeat that an eligible leader proposes adding or
+    /// removing one server (0: fixed membership).
+    pub membership_per_mille: u32,
+    /// Membership never shrinks below this.
+    pub min_members: u32,
 }
 
 impl RaftConfig {
@@ -317,6 +373,10 @@ impl RaftConfig {
             max_log: 48,
             max_batch: 8,
             max_steps: 2_000_000,
+            snapshot_threshold: 0,
+            initial_members: nodes,
+            membership_per_mille: 0,
+            min_members: 3,
         }
     }
 }
@@ -333,6 +393,8 @@ pub enum Violation {
     /// A node committed an entry that differs from the cluster's committed
     /// entry at that index.
     CommittedDivergence { node: u32, index: usize },
+    /// A node changed an entry inside its compacted snapshot prefix.
+    CompactedEntryChanged { node: u32, index: usize },
 }
 
 /// Invariant checker over the whole cluster.
@@ -403,6 +465,11 @@ impl Checker {
         }
     }
 
+    pub fn compacted_changed(&mut self, now: u64, node: u32, index: usize) {
+        self.checks += 1;
+        self.record(now, Violation::CompactedEntryChanged { node, index });
+    }
+
     pub fn leaders(&self) -> &BTreeMap<u64, u32> {
         &self.leaders
     }
@@ -443,6 +510,11 @@ enum RpcKind {
         peer: u32,
         sent_last: u64,
     },
+    Snapshot {
+        term: u64,
+        peer: u32,
+        last: u64,
+    },
 }
 
 struct Outstanding {
@@ -475,6 +547,10 @@ struct Node {
     term: u64,
     voted_for: Option<u32>,
     log: Vec<Entry>,
+    /// Entries `1..=snap_index` are compacted into the snapshot.
+    snap_index: u64,
+    snap_term: u64,
+    initial_members: u64,
     // volatile
     role: Role,
     commit: u64,
@@ -487,6 +563,9 @@ struct Node {
     outstanding: BTreeMap<u64, Outstanding>,
     next_channel: u64,
     inbox: Vec<Packet>,
+    /// When this node last accepted a current leader's AppendEntries or
+    /// InstallSnapshot (volatile).
+    last_leader_contact: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -504,11 +583,19 @@ pub struct RaftStats {
     pub rejected_frames: u64,
     pub timeouts: u64,
     pub proposals: u64,
+    pub compactions: u64,
+    pub snapshots_sent: u64,
+    pub snapshots_installed: u64,
+    pub config_changes: u64,
+    pub leader_step_downs: u64,
+    /// Vote requests ignored under leader stickiness.
+    pub sticky_vote_denials: u64,
 }
 
 struct Protocols {
     vote: Choreography,
     append: Choreography,
+    snapshot: Choreography,
 }
 
 const CANDIDATE: RoleId = RoleId(0);
@@ -533,6 +620,7 @@ enum NodeEvent {
     Leader { term: u64 },
     LogChanged,
     Committed,
+    CompactedChanged { index: usize },
 }
 
 impl Node {
@@ -567,14 +655,45 @@ impl Node {
         self.votes.clear();
     }
 
+    /// Voting members of this node's newest configuration.
+    fn members(&self) -> u64 {
+        config_of(&self.log, self.initial_members)
+    }
+
+    /// Servers a leader replicates to: the newest configuration, plus the
+    /// previous one while the newest is uncommitted, so that a server being
+    /// removed still receives the entry that removes it.
+    fn replication_targets(&self) -> u64 {
+        let at = config_index(&self.log);
+        let mut targets = self.members();
+        if at > self.commit {
+            targets |= config_of(&self.log[..at as usize - 1], self.initial_members);
+        }
+        targets
+    }
+
+    /// Leader stickiness (Raft thesis §4.2.3), used when membership can
+    /// change: a server that heard from a current leader within the minimum
+    /// election timeout ignores a vote request, so that a removed server
+    /// that never learned of its removal cannot depose the leader.
+    fn heard_from_leader(&self, cx: &Ctx<'_>) -> bool {
+        cx.cfg.membership_per_mille > 0
+            && (self.role == Role::Leader
+                || self
+                    .last_leader_contact
+                    .is_some_and(|t| cx.now < t.saturating_add(cx.cfg.election_min_ns)))
+    }
+
     fn quorum(&self, cx: &Ctx<'_>) -> usize {
-        cx.cfg.quorum.size(self.n) as usize
+        cx.cfg.quorum.size(self.members().count_ones()) as usize
     }
 
     fn crash(&mut self) {
         self.up = false;
         self.role = Role::Follower;
-        self.commit = 0;
+        // The snapshot is committed state and survives the crash.
+        self.commit = self.snap_index;
+        self.last_leader_contact = None;
         self.votes.clear();
         self.inbox.clear();
         for (_, o) in std::mem::take(&mut self.outstanding) {
@@ -605,8 +724,9 @@ impl Node {
         self.votes.insert(self.id);
         self.reset_election(cx);
         let (li, lt) = self.last();
+        let members = self.members();
         for p in 0..self.n {
-            if p == self.id {
+            if p == self.id || !member(members, p) {
                 continue;
             }
             let ch = self.new_channel();
@@ -643,7 +763,9 @@ impl Node {
     }
 
     fn maybe_win(&mut self, cx: &mut Ctx<'_>) {
-        if self.role == Role::Candidate && self.votes.len() >= self.quorum(cx) {
+        let members = self.members();
+        let votes = self.votes.iter().filter(|v| member(members, **v)).count();
+        if self.role == Role::Candidate && votes >= self.quorum(cx) {
             self.role = Role::Leader;
             cx.stats.leaders_elected += 1;
             let next = self.log.len() as u64 + 1;
@@ -666,12 +788,21 @@ impl Node {
             // A quorum the leader alone satisfies (one node) commits now.
             self.advance_commit(cx);
         }
+        self.maybe_change_membership(cx);
+        if self.role != Role::Leader {
+            return;
+        }
+        let targets = self.replication_targets();
         for p in 0..self.n {
-            if p == self.id {
+            if p == self.id || !member(targets, p) {
                 continue;
             }
             let next = self.next_index[p as usize].clamp(1, self.log.len() as u64 + 1);
             let prev = next - 1;
+            if prev < self.snap_index {
+                self.send_snapshot(cx, p);
+                continue;
+            }
             let prev_term = if prev == 0 {
                 0
             } else {
@@ -724,21 +855,125 @@ impl Node {
             .saturating_add(self.local_to_virtual(cx.cfg.heartbeat_ns));
     }
 
+    /// Single-server membership change: only once an entry of this term is
+    /// committed and no configuration entry is pending.
+    fn maybe_change_membership(&mut self, cx: &mut Ctx<'_>) {
+        if cx.cfg.membership_per_mille == 0
+            || self.log.len() >= cx.cfg.max_log
+            || self.commit == 0
+            || self.log[self.commit as usize - 1].term != self.term
+            || config_index(&self.log) > self.commit
+            || !cx.rng.chance(cx.cfg.membership_per_mille)
+        {
+            return;
+        }
+        let members = self.members();
+        let r = cx.rng.range(0, u64::from(self.n) - 1) as u32;
+        let next = if member(members, r) {
+            if members.count_ones() <= cx.cfg.min_members {
+                return;
+            }
+            members & !(1 << r)
+        } else {
+            members | (1 << r)
+        };
+        self.log.push(Entry {
+            term: self.term,
+            cmd: CONFIG_FLAG | next,
+        });
+        cx.stats.config_changes += 1;
+        cx.events.push(NodeEvent::LogChanged);
+        if member(next, r) {
+            // A new member starts from the beginning of the log.
+            self.next_index[r as usize] = 1;
+            self.match_index[r as usize] = 0;
+        }
+        self.advance_commit(cx);
+    }
+
+    fn send_snapshot(&mut self, cx: &mut Ctx<'_>, p: u32) {
+        let h = RaftAppendWireHeader {
+            term: self.term,
+            leader_id: self.id,
+            follower_slot: p,
+            prev_log_index: self.snap_index,
+            prev_log_term: self.snap_term,
+            leader_commit: self.commit,
+        };
+        let body = encode_batch(&h, &self.log[..self.snap_index as usize]);
+        let ch = self.new_channel();
+        let mut s = RawSession::open(&cx.protocols.snapshot, "Leader", ch, cx.auditor)
+            .expect("snapshot choreography projects");
+        s.on_send(FOLLOWER, "InstallSnapshot", "SnapshotImage")
+            .expect("projection starts with InstallSnapshot");
+        cx.stats.snapshots_sent += 1;
+        cx.out.push(Packet {
+            src: self.id,
+            dst: p,
+            channel: ch,
+            from_role: LEADER,
+            label: "InstallSnapshot",
+            payload_ty: "SnapshotImage",
+            body,
+            request: true,
+        });
+        self.outstanding.insert(
+            ch,
+            Outstanding {
+                session: s,
+                deadline: cx.now.saturating_add(cx.cfg.rpc_timeout_ns),
+                kind: RpcKind::Snapshot {
+                    term: self.term,
+                    peer: p,
+                    last: self.snap_index,
+                },
+            },
+        );
+    }
+
     fn advance_commit(&mut self, cx: &mut Ctx<'_>) {
         let q = self.quorum(cx);
+        let members = self.members();
         for idx in (self.commit + 1..=self.log.len() as u64).rev() {
             if self.log[idx as usize - 1].term != self.term {
                 continue;
             }
-            let count = 1
+            let count = usize::from(member(members, self.id))
                 + (0..self.n)
-                    .filter(|p| *p != self.id && self.match_index[*p as usize] >= idx)
+                    .filter(|p| {
+                        *p != self.id && member(members, *p) && self.match_index[*p as usize] >= idx
+                    })
                     .count();
             if count >= q {
                 self.commit = idx;
                 cx.events.push(NodeEvent::Committed);
                 break;
             }
+        }
+        // A leader that a committed configuration removed steps down.
+        if self.role == Role::Leader
+            && !member(members, self.id)
+            && config_index(&self.log) <= self.commit
+        {
+            cx.stats.leader_step_downs += 1;
+            self.role = Role::Follower;
+        }
+    }
+
+    /// Compact the committed prefix once it is long enough.
+    fn maybe_compact(&mut self, cx: &mut Ctx<'_>) {
+        let t = cx.cfg.snapshot_threshold;
+        if t > 0 && self.commit >= self.snap_index.saturating_add(t) {
+            self.snap_index = self.commit;
+            self.snap_term = self.log[self.commit as usize - 1].term;
+            cx.stats.compactions += 1;
+        }
+    }
+
+    /// Record an attempted change at `idx` (0-based) inside the snapshot.
+    fn guard_compacted(&self, cx: &mut Ctx<'_>, idx: usize) {
+        if (idx as u64) < self.snap_index {
+            cx.events.push(NodeEvent::CompactedChanged { index: idx });
         }
     }
 
@@ -762,14 +997,18 @@ impl Node {
                         return;
                     }
                 };
-                if req.term > self.term {
+                let sticky = req.term > self.term && self.heard_from_leader(cx);
+                if sticky {
+                    cx.stats.sticky_vote_denials += 1;
+                } else if req.term > self.term {
                     self.become_follower(req.term);
                 }
                 let up_to_date = (req.last_log_term, req.last_log_index) >= {
                     let (i, t) = self.last();
                     (t, i)
                 };
-                let grant = req.term == self.term
+                let grant = !sticky
+                    && req.term == self.term
                     && self.voted_for.is_none_or(|v| v == req.candidate)
                     && up_to_date;
                 if grant {
@@ -822,6 +1061,7 @@ impl Node {
                         self.become_follower(h.term);
                     }
                     self.reset_election(cx);
+                    self.last_leader_contact = Some(cx.now);
                     let prev = h.prev_log_index;
                     let prev_ok = prev == 0
                         || (prev <= self.log.len() as u64
@@ -832,6 +1072,7 @@ impl Node {
                             let idx = prev as usize + k;
                             if idx < self.log.len() {
                                 if self.log[idx].term != e.term {
+                                    self.guard_compacted(cx, idx);
                                     self.log.truncate(idx);
                                     self.log.push(*e);
                                     changed = true;
@@ -870,6 +1111,90 @@ impl Node {
                     channel: pk.channel,
                     from_role: FOLLOWER,
                     label,
+                    payload_ty: "AppendAck",
+                    body: ack.encode(),
+                    request: false,
+                });
+                if let Err((_, s)) = s.close() {
+                    s.fault(FaultReason::Violation);
+                }
+            }
+            "InstallSnapshot" => {
+                let mut s = match RawSession::open(
+                    &cx.protocols.snapshot,
+                    "Follower",
+                    pk.channel,
+                    cx.auditor,
+                ) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let decoded = s
+                    .on_recv(pk.from_role, pk.label, pk.payload_ty)
+                    .ok()
+                    .and_then(|()| decode_batch(&pk.body).ok())
+                    .filter(|(h, image)| {
+                        // The image is exactly the prefix up to the
+                        // snapshot point, ending in its term.
+                        image.len() as u64 == h.prev_log_index
+                            && image.last().map_or(0, |e| e.term) == h.prev_log_term
+                    });
+                let Some((h, image)) = decoded else {
+                    cx.stats.rejected_frames += 1;
+                    s.fault(FaultReason::Violation);
+                    return;
+                };
+                let mut accepted = false;
+                let last = h.prev_log_index;
+                if h.term >= self.term {
+                    if h.term > self.term || self.role != Role::Follower {
+                        self.become_follower(h.term);
+                    }
+                    self.reset_election(cx);
+                    self.last_leader_contact = Some(cx.now);
+                    accepted = true;
+                    if last > self.commit {
+                        let have = last as usize <= self.log.len()
+                            && (last == 0 || self.log[last as usize - 1].term == h.prev_log_term);
+                        if !have {
+                            // Discard the log and take the image.
+                            let first_diff = self
+                                .log
+                                .iter()
+                                .zip(&image)
+                                .position(|(a, b)| a != b)
+                                .unwrap_or(self.log.len().min(image.len()));
+                            if first_diff < self.log.len() {
+                                self.guard_compacted(cx, first_diff);
+                            }
+                            self.log = image;
+                            cx.events.push(NodeEvent::LogChanged);
+                        }
+                        self.commit = last;
+                        cx.events.push(NodeEvent::Committed);
+                        if last > self.snap_index {
+                            self.snap_index = last;
+                            self.snap_term = h.prev_log_term;
+                        }
+                        cx.stats.snapshots_installed += 1;
+                    }
+                }
+                s.on_action("persist")
+                    .expect("Follower persists before replying");
+                s.on_send(LEADER, "Installed", "AppendAck")
+                    .expect("Follower projection answers Installed");
+                let ack = AppendAck {
+                    follower_id: self.id,
+                    term: self.term,
+                    match_index: if accepted { last } else { 0 },
+                    accepted,
+                };
+                cx.out.push(Packet {
+                    src: self.id,
+                    dst: pk.src,
+                    channel: pk.channel,
+                    from_role: FOLLOWER,
+                    label: "Installed",
                     payload_ty: "AppendAck",
                     body: ack.encode(),
                     request: false,
@@ -947,6 +1272,26 @@ impl Node {
                     self.next_index[p] = self.next_index[p].saturating_sub(1).max(1);
                 }
             }
+            RpcKind::Snapshot { term, peer, last } => {
+                let Ok(ack) = AppendAck::decode(&pk.body) else {
+                    cx.stats.rejected_frames += 1;
+                    return;
+                };
+                if ack.term > self.term {
+                    self.become_follower(ack.term);
+                    self.reset_election(cx);
+                    return;
+                }
+                if self.role != Role::Leader || term != self.term || ack.follower_id != peer {
+                    return;
+                }
+                if ack.accepted && ack.match_index == last {
+                    let p = peer as usize;
+                    self.match_index[p] = self.match_index[p].max(last);
+                    self.next_index[p] = self.next_index[p].max(last + 1);
+                    self.advance_commit(cx);
+                }
+            }
         }
     }
 
@@ -978,11 +1323,17 @@ impl Node {
             o.session.fault(FaultReason::Net(NetFail::Timeout));
         }
         if self.role != Role::Leader && cx.now >= self.election_deadline {
-            self.start_election(cx);
+            if member(self.members(), self.id) {
+                self.start_election(cx);
+            } else {
+                // A non-member does not campaign.
+                self.reset_election(cx);
+            }
         }
         if self.role == Role::Leader && cx.now >= self.heartbeat_deadline {
             self.send_appends(cx);
         }
+        self.maybe_compact(cx);
     }
 
     fn next_wake(&self) -> u64 {
@@ -1087,6 +1438,8 @@ pub struct RaftRunReport {
     pub committed: usize,
     pub checks: u64,
     pub end_ns: u64,
+    /// Each node's newest configuration (voting-member bit mask).
+    pub members: Vec<u64>,
 }
 
 #[derive(Debug)]
@@ -1125,11 +1478,30 @@ pub fn run_cluster(
     if cfg.max_batch as u64 > u64::from(MAX_BATCH) {
         return Err(RaftRunError::Config("max_batch exceeds the wire limit"));
     }
+    if cfg.snapshot_threshold > 0 && cfg.max_log as u64 > u64::from(MAX_BATCH) {
+        return Err(RaftRunError::Config(
+            "snapshots need max_log within the wire limit (the image is one batch)",
+        ));
+    }
+    if cfg.initial_members == 0 || cfg.initial_members > cfg.nodes {
+        return Err(RaftRunError::Config("initial_members must be in 1..=nodes"));
+    }
+    if (cfg.membership_per_mille > 0 || cfg.initial_members < cfg.nodes) && cfg.nodes > 63 {
+        return Err(RaftRunError::Config(
+            "membership change supports at most 63 nodes",
+        ));
+    }
     let protocols = Protocols {
         vote: parse_choreography(VOTE_CHOREOGRAPHY).expect("vote choreography parses"),
         append: parse_choreography(APPEND_CHOREOGRAPHY).expect("append choreography parses"),
+        snapshot: parse_choreography(SNAPSHOT_CHOREOGRAPHY).expect("snapshot choreography parses"),
     };
     let n = cfg.nodes;
+    let initial_members = if cfg.initial_members >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << cfg.initial_members) - 1
+    };
     let mut rng = SplitMix(seed ^ 0x7261_6674_2d73_696d);
     let plan = ChaosPlan::generate(cfg, &mut rng);
     let auditor = LeakAuditor::new();
@@ -1146,6 +1518,9 @@ pub fn run_cluster(
             term: 0,
             voted_for: None,
             log: Vec::new(),
+            snap_index: 0,
+            snap_term: 0,
+            initial_members,
             role: Role::Follower,
             commit: 0,
             votes: BTreeSet::new(),
@@ -1157,6 +1532,7 @@ pub fn run_cluster(
             outstanding: BTreeMap::new(),
             next_channel: 0,
             inbox: Vec::new(),
+            last_leader_contact: None,
         })
         .collect();
     // Initial election timers.
@@ -1306,6 +1682,9 @@ pub fn run_cluster(
                             NodeEvent::Committed => {
                                 checker.committed(now, i, &nodes[iu].log, nodes[iu].commit)
                             }
+                            NodeEvent::CompactedChanged { index } => {
+                                checker.compacted_changed(now, i, index)
+                            }
                         }
                     }
                 }
@@ -1366,6 +1745,7 @@ pub fn run_cluster(
         fnv(&mut digest, node.term);
         fnv(&mut digest, node.voted_for.map_or(u64::MAX, u64::from));
         fnv(&mut digest, node.commit);
+        fnv(&mut digest, node.snap_index);
         for e in &node.log {
             fnv(&mut digest, e.term);
             fnv(&mut digest, e.cmd);
@@ -1394,5 +1774,6 @@ pub fn run_cluster(
         committed: checker.committed_len(),
         checks: checker.checks,
         end_ns: sim.now_ns(),
+        members: nodes.iter().map(Node::members).collect(),
     })
 }

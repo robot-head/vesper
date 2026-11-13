@@ -4268,6 +4268,10 @@ name = "vesper-chorus"
 version = "0.1.0"
 dependencies = [
  "vesper-simpulse",
+ "vesper-warp",
+ "vesper-warp-crypto",
+ "vesper-warp-shard",
+ "vesper-warp-umem",
 ]
 
 [[package]]
