@@ -1,8 +1,8 @@
 diff --git a/Main.lean b/Main.lean
-index e23b981..c36134d 100644
+index e23b981..2c48a98 100644
 --- a/Main.lean
 +++ b/Main.lean
-@@ -2,365 +2,645 @@
+@@ -2,365 +2,649 @@
  Copyright (c) 2023 Scott Morrison. All rights reserved.
  Released under Apache 2.0 license as described in the file LICENSE.
  Authors: Scott Morrison
@@ -626,6 +626,10 @@ index e23b981..c36134d 100644
 -  for n in names do replayConstant n
 -
 +        let group := ci.owners
++        -- Kernel string-literal support requires this checked declaration even
++        -- though it is not a dependency of String's stored constructor type.
++        for memberName in info.all do
++          if memberName == ``String then replayId (← lookupId ``Char.ofNat)
 +        clearWork group
 +        let mut types : List InductiveType := []
 +        -- Wire groups use sorted ordinals; declaration construction preserves

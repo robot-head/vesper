@@ -62,3 +62,22 @@ explicit remaining-counter underflow check was added as well. The revised real
 executable build passed (55 jobs), retained in
 `/tmp/lean4lean42-machine-build2.log`. Complete external model replays remain
 unexecuted by this lane pending the coordinator's lease.
+
+## First real fresh replay failure and prerequisite correction
+
+Under the coordinator's explicit full-replay lease, both exact bundled sources
+were compiled into `/tmp/lean4lean42-replay-validation` with the pinned compiler.
+Native target0 inventory passed and reported87495 total/86647 eligible constants,
+800 modules and33 required roots. Actual MODE1 then failed after56 successful
+additions with `[1,10,"checker","unknown constant: Char.ofNat"]`; it emitted no
+done and exited1. Target1 was not started after that failure. Retained failed
+summaries/raw frames/input hashes are in the `failed-f48c78e` subdirectory.
+
+The new replay branch had omitted upstream's checked Char.ofNat prerequisite
+before String's primitive inductive addition. Char.ofNat is needed by kernel
+string-literal support but is not a dependency of String's stored constructor
+type. The correction explicitly schedules that genuine declaration through
+replayId before adding String; it does not preload an unchecked constant or
+weaken a primitive check. The revised executable build passed (55 jobs), logged
+in `/tmp/lean4lean42-machine-build3.log`. Complete replay success remains pending
+after this correction; the failed attempt is not counted as a positive result.
