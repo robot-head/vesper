@@ -1,0 +1,5 @@
+linear struct Tx {}
+fn make() -> Tx { Tx {} }
+fn consume(sink tx: Tx) { let Tx {} = tx; }
+macro duplicate($x: expr) -> expr { quote { { consume($x); consume($x) } } }
+fn main() { let tx = make(); duplicate!(tx) }
