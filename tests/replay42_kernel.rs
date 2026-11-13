@@ -1408,6 +1408,14 @@ fn negative_matrix(base: &Fixture) {
     assert!(bytes.len() > 64);
     fs::write(&artifact, &bytes[..11]).unwrap();
     audit_error(fixture.audit(&[FINAL.into()], POLICY));
+    fs::remove_file(&artifact).unwrap();
+    assert!(!artifact.exists());
+    assert_eq!(
+        fs::read_to_string(fixture.root.join("ReplayGenerated.lean")).unwrap(),
+        lean,
+        "source text is preserved and cannot substitute for the missing object"
+    );
+    audit_error(fixture.audit(&[FINAL.into()], POLICY));
 
     // Missing/wrong explicit tool selections are errors, never skipped success.
     for lean in [

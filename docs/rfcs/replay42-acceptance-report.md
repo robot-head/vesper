@@ -34,7 +34,8 @@ existing structured Lean AST and the fixed ReplayGenerated module identity.
 * Hostile caller-owned ASTs change the folded output, nominal U64/I64 type,
   proof reference and totality evidence. Actual Lean rejection and absent
   compiled output are required. A truncated actual compiled object must fail
-  audit. Missing/wrong tool selections and the forbidden sorryAx policy option
+  audit; removing that object while preserving the source must also fail.
+  Missing/wrong tool selections and the forbidden sorryAx policy option
   must fail without invented success reports.
 * An AST-only Classical.choice theorem separates kernel validity from policy:
   empty and restricted genuine policies reject it; an explicitly broadened
