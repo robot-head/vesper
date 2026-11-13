@@ -24,3 +24,10 @@ vesper-warp-tcp = { path = "../vesper-warp-tcp" }
 vesper-warp-tls = { path = "../vesper-warp-tls" }
 vesper-warp-umem = { path = "../vesper-warp-umem" }
 vesper-warp-wheel = { path = "../vesper-warp-wheel" }
+
+[dev-dependencies]
+# Wave six (issue #247): interop against an independent QUIC stack, in
+# tests only. Pinned exactly; aws-lc-rs, the provider the workspace's
+# rustls already uses.
+bytes = "=1.12.1"
+quinn-proto = { version = "=0.11.13", default-features = false, features = ["rustls-aws-lc-rs"] }
