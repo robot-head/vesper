@@ -58,6 +58,7 @@ struct ExpansionState {
     record: ExpansionRecord,
     arena: BTreeMap<u32, Vec<HostToken>>,
     status: ExpansionStatus,
+    typed_alive: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 #[derive(Clone, Debug)]
@@ -73,6 +74,7 @@ pub(crate) struct GlobalBinding {
 /// positions and could mint the same identity with different meanings.
 #[derive(Debug)]
 pub struct HygieneHost {
+    pub(crate) typed_owner: std::sync::Arc<()>,
     session: SessionId,
     pub(crate) registry: DefinitionRegistry,
     pub(crate) quote_limits: QuoteLimits,
@@ -105,6 +107,7 @@ impl HygieneHost {
         quote_limits: QuoteLimits,
     ) -> Self {
         Self {
+            typed_owner: std::sync::Arc::new(()),
             session,
             registry,
             quote_limits,
@@ -365,6 +368,7 @@ impl HygieneHost {
                 },
                 arena,
                 status: ExpansionStatus::Open,
+                typed_alive: None,
             },
         );
         Ok(Expansion { id, splices })
@@ -405,8 +409,44 @@ impl HygieneHost {
         Ok(())
     }
 
+    pub(crate) fn typed_bind_expansion(
+        &mut self,
+        id: ExpansionId,
+        alive: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> Result<(), ForgeError> {
+        self.open(id)?;
+        self.expansion_state
+            .get_mut(&id.index)
+            .expect("validated expansion")
+            .typed_alive = Some(alive);
+        Ok(())
+    }
+    pub(crate) fn typed_retire_count(&self) -> usize {
+        self.expansion_state.len()
+    }
+    pub(crate) fn retire_typed_expansions(&mut self) {
+        for state in self.expansion_state.values_mut() {
+            if state.status == ExpansionStatus::Open
+                && state
+                    .typed_alive
+                    .as_ref()
+                    .is_some_and(|alive| !alive.load(std::sync::atomic::Ordering::Relaxed))
+            {
+                state.status = ExpansionStatus::Failed;
+                state.arena.clear();
+            }
+        }
+    }
     fn open(&self, id: ExpansionId) -> Result<(), ForgeError> {
-        match self.state(id)?.status {
+        let state = self.state(id)?;
+        if state
+            .typed_alive
+            .as_ref()
+            .is_some_and(|alive| !alive.load(std::sync::atomic::Ordering::Relaxed))
+        {
+            return Err(ForgeError::ExpansionClosed(id));
+        }
+        match state.status {
             ExpansionStatus::Open => Ok(()),
             _ => Err(ForgeError::ExpansionClosed(id)),
         }
@@ -414,6 +454,9 @@ impl HygieneHost {
 
     fn close(&mut self, id: ExpansionId, ok: bool) {
         if let Some(st) = self.expansion_state.get_mut(&id.index) {
+            if let Some(alive) = &st.typed_alive {
+                alive.store(false, std::sync::atomic::Ordering::Relaxed);
+            }
             st.status = if ok {
                 ExpansionStatus::Finished
             } else {

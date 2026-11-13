@@ -55,6 +55,7 @@ members = [
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
+    "crates/vesper-warp-tls",
     "crates/vesper-crucible",
     "experiments/native-pulse",
 ]
@@ -112,6 +113,7 @@ default-members = [
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
+    "crates/vesper-warp-tls",
     "crates/vesper-crucible",
     "experiments/native-pulse",
 ]
@@ -137,6 +139,7 @@ polyval = { version = "=0.6.2", features = ["zeroize"] }
 sha2 = "0.10.9"
 subtle = "2.6.1"
 zeroize = { version = "1.9.1", features = ["zeroize_derive"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
 
 [package]
 default-run = "vesper"
@@ -147,6 +150,7 @@ edition = "2024"
 [dependencies]
 blake3 = "1.8"
 vesper-core = { path = "crates/vesper-core" }
+vesper-forge = { path = "crates/vesper-forge", default-features = false }
 vesper-simd = { path = "crates/vesper-simd" }
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }
