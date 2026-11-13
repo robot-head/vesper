@@ -130,10 +130,13 @@ The integration checkpoint registers every delivered library plus the native exp
 
 ## Acceptance commands
 
+CI builds and tests with Bazel ([bazel.md](bazel.md)). A new workspace member
+needs a `BUILD.bazel`: run `python3 tools/bazel/sync_build_files.py` after
+registering it. Files read from outside the crate directory must be declared
+in that file (`extra_compile_data`, `extra_test_data`).
+
 ```sh
-cargo fmt --all -- --check
-VESPER_LEAN=lean cargo test --workspace --locked
-cargo clippy --workspace --locked --all-targets -- -D warnings
+VESPER_LEAN=$(elan which lean) bazel test //...   # tests, Clippy and rustfmt
 lean lean/Foundations.lean
 lean lean/RuntimeFrames.lean
 lean lean/SpecificationCounterexample.lean

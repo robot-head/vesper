@@ -1,0 +1,23 @@
+# Host and remote-execution platforms. See docs/bazel.md.
+
+# rules_rs resolves the Windows Rust toolchain by ABI, so the Windows host
+# platform names MSVC explicitly (selected in .bazelrc).
+platform(
+    name = "local_windows_msvc",
+    constraint_values = [
+        "@llvm//constraints/windows/abi:msvc",
+    ],
+    parents = ["@platforms//host"],
+)
+
+# BuildBuddy Cloud's Linux executors. The C/C++ and Rust toolchains are
+# hermetic (downloaded by Bazel), so the image only provides a shell and libc.
+platform(
+    name = "rbe_linux_x86_64",
+    exec_properties = {
+        "OSFamily": "Linux",
+        "Arch": "amd64",
+        "container-image": "docker://gcr.io/flame-public/rbe-ubuntu24-04:latest",
+    },
+    parents = ["@rules_rs//rs/platforms:x86_64-unknown-linux-gnu"],
+)

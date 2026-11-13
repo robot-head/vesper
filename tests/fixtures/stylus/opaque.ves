@@ -1,0 +1,4 @@
+fn opaque(){unknown!{ fn fake( )->i64{42} }}
+// fn comment_fake( )->i64{42}
+fn literal( )->String{"fn string_fake( )->i64{42}"}
+fn main( )->i64{42}

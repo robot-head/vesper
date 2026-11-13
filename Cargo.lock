@@ -932,6 +932,7 @@ dependencies = [
  "cranelift-native 0.125.4",
  "libc",
  "log",
+ "memmap2",
  "region",
  "target-lexicon",
  "wasmtime-internal-jit-icache-coherence 38.0.4",
@@ -2246,6 +2247,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "57804b2c9b69967f1536a56f86297e367a33b19e98852ed624b84551cdbc0d90"
 dependencies = [
  "rustix",
+]
+
+[[package]]
+name = "memmap2"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "723e3ebdcdc5c023db1df315364573789f8857c11b631a2fdfad7c00f5c046b4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]
@@ -3654,6 +3664,7 @@ dependencies = [
  "vesper-doc",
  "vesper-fiber-abi",
  "vesper-fmt",
+ "vesper-forge",
  "vesper-grammar",
  "vesper-lean-syntax",
  "vesper-lint",
@@ -3800,6 +3811,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "vesper-loom-sandbox",
+ "vesper-syntax",
 ]
 
 [[package]]
@@ -3807,6 +3819,7 @@ name = "vesper-forge-runner"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -3964,6 +3977,14 @@ dependencies = [
  "serde_json",
  "vesper-serde",
  "vesper-span",
+]
+
+[[package]]
+name = "vesper-nexus"
+version = "0.1.0"
+dependencies = [
+ "vesper-ffi",
+ "wasmtime",
 ]
 
 [[package]]

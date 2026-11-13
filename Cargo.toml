@@ -57,6 +57,7 @@ members = [
     "crates/vesper-warp-tcp",
     "crates/vesper-warp-tls",
     "crates/vesper-ebpf",
+    "crates/vesper-nexus",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -115,6 +116,7 @@ default-members = [
     "crates/vesper-warp-tcp",
     "crates/vesper-warp-tls",
     "crates/vesper-ebpf",
+    "crates/vesper-nexus",
     "experiments/native-pulse",
 ]
 
@@ -150,6 +152,7 @@ edition = "2024"
 [dependencies]
 blake3 = "1.8"
 vesper-core = { path = "crates/vesper-core" }
+vesper-forge = { path = "crates/vesper-forge", default-features = false }
 vesper-simd = { path = "crates/vesper-simd" }
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }
