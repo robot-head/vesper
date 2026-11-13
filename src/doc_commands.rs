@@ -5,8 +5,12 @@ use std::{
     io::{Read, Write},
 };
 pub use vesper::tooling::doc::document_source;
-use vesper_doc::{Document, Limits};
-pub const HELP: &str = "Usage: vesper doc FILE [--json] [-o OUTPUT] [--query QUERY.json]\n\nCheck source and generate deterministic local API documentation.\nDefault: escaped static HTML on stdout. --json: typed JSON metadata and search results.\n-o creates a new local output file; existing files are preserved. --query reads a full structural JSON query (no wildcard/generic inference).\nSource is limited to 128 KiB and bounded tokens/nesting/items/types; query to 32 KiB; output to 2 MiB.\nLocal intra-doc references such as [Type::method] resolve against documented checked declarations; unknown, ambiguous or unsupported references fail generation.\nGenerated private Pact helpers are excluded. Layouts describe the native eight-byte ABI, not wire formats.\nNo audited proof evidence is accepted by this command; documentation is unverified. No network, JIT or doctest execution.\n";
+use vesper_doc::{
+    Document, Limits,
+    badges::{self, Badge},
+    visual::{self, Visuals},
+};
+pub const HELP: &str = "Usage: vesper doc FILE [--json] [-o OUTPUT] [--query QUERY.json] [--wire LAYOUTS.json] [--proof-audit REPORT.json ...]\n\nCheck source and generate deterministic local API documentation.\nDefault: escaped static HTML on stdout. --json: typed JSON metadata and search results.\n-o creates a new local output file; existing files are preserved. --query reads a full structural JSON query (no wildcard/generic inference).\nSource is limited to 128 KiB and bounded tokens/nesting/items/types; query to 32 KiB; output to 2 MiB.\nLocal intra-doc references such as [Type::method] resolve against documented checked declarations; unknown, ambiguous or unsupported references fail generation.\nGenerated private Pact helpers are excluded. Struct byte rulers describe the native eight-byte ABI, not wire formats.\n--wire compiles vesper-wire-layouts JSON declarations with the Bridge layout checker (explicit endianness, no implicit\npadding) into 16-byte field-span records and SVG cache-line rulers. Linear typestate graphs are rendered as SVG.\n--proof-audit (repeatable, up to 16) reads `vesper proof-audit --json` reports. An item is proved/audited only when\nevery @proof(Name) anchor in its docs names a theorem in an accepted kernel-replayed audit; otherwise unverified.\nBadges describe Lean theorems about models, not the Rust or Vesper implementation. No network, JIT or doctest execution.\n";
 
 fn read_file(path: &str, limit: usize) -> Result<String, String> {
     if !fs::symlink_metadata(path)
@@ -47,6 +51,9 @@ struct Report {
     status: &'static str,
     document: Document,
     search: Option<vesper_doc::SearchResults>,
+    visuals: Visuals,
+    badges: Vec<Badge>,
+    proof_audits: Vec<String>,
 }
 struct Rendered {
     bytes: Vec<u8>,
@@ -56,6 +63,8 @@ fn generate(args: Vec<String>) -> Result<Option<Rendered>, String> {
     let mut input = None;
     let mut output = None;
     let mut query = None;
+    let mut wire = None;
+    let mut audits = Vec::new();
     let mut json = false;
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
@@ -85,6 +94,26 @@ fn generate(args: Vec<String>) -> Result<Option<Rendered>, String> {
                         .ok_or("--query requires a query JSON file")?,
                 );
             }
+            "--wire" => {
+                if wire.is_some() {
+                    return Err("duplicate --wire".into());
+                }
+                wire = Some(
+                    args.next()
+                        .filter(|p| !p.starts_with('-'))
+                        .ok_or("--wire requires a wire layout JSON file")?,
+                );
+            }
+            "--proof-audit" => {
+                if audits.len() == 16 {
+                    return Err("at most 16 --proof-audit reports".into());
+                }
+                audits.push(
+                    args.next()
+                        .filter(|p| !p.starts_with('-'))
+                        .ok_or("--proof-audit requires a proof-audit JSON report")?,
+                );
+            }
             _ if arg.starts_with('-') => return Err(format!("unknown doc option '{arg}'")),
             _ => {
                 if input.replace(arg).is_some() {
@@ -105,16 +134,40 @@ fn generate(args: Vec<String>) -> Result<Option<Rendered>, String> {
     } else {
         None
     };
+    let wire = match wire {
+        Some(path) => visual::compile_wire_input(&read_file(&path, 64 * 1024)?)
+            .map_err(|e| format!("{path}: {e}"))?,
+        None => Vec::new(),
+    };
+    let visuals = visual::visuals(&document.types, &document.graph, &document.functions, &wire)?;
+    let mut parsed = Vec::new();
+    for path in &audits {
+        parsed.push(
+            badges::parse_audit(&read_file(path, 8 * 1024 * 1024)?)
+                .map_err(|e| format!("{path}: {e}"))?,
+        );
+    }
+    let badges = badges::badges(&document, &parsed)?;
     let report = Report {
         schema_version: 1,
         status: "valid",
         document,
         search,
+        visuals,
+        badges,
+        proof_audits: parsed.iter().map(|a| a.module.clone()).collect(),
     };
     let bytes = if json {
         vesper_doc::to_json(&report, limits.max_output_bytes)?
     } else {
-        vesper_doc::render_document_html(&report.document, &report, limits)?
+        visual::render_codex_html(
+            &report.document,
+            &report,
+            &report.visuals,
+            &report.badges,
+            parsed.len(),
+            limits,
+        )?
     };
     Ok(Some(Rendered { bytes, output }))
 }

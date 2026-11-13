@@ -4077,16 +4077,22 @@ dependencies = [
  "serde",
  "serde_json",
  "target-lexicon",
+ "vesper-aegis",
  "vesper-beacon",
  "vesper-bench",
  "vesper-bench-pmu",
+ "vesper-chrono",
  "vesper-core",
+ "vesper-crucible",
  "vesper-diagnostics",
  "vesper-doc",
+ "vesper-ebpf",
+ "vesper-ffi",
  "vesper-fiber-abi",
  "vesper-fmt",
  "vesper-forge",
  "vesper-grammar",
+ "vesper-kinetic",
  "vesper-lean-syntax",
  "vesper-lint",
  "vesper-loom-admission",
@@ -4096,14 +4102,18 @@ dependencies = [
  "vesper-loom-solver",
  "vesper-loom-trust",
  "vesper-lsp",
+ "vesper-migrate",
  "vesper-pact",
  "vesper-pact-binding",
  "vesper-pulse",
+ "vesper-resonance",
  "vesper-semver",
  "vesper-serde",
+ "vesper-silicon",
  "vesper-simd",
  "vesper-span",
  "vesper-syntax",
+ "vesper-vault",
 ]
 
 [[package]]
@@ -4218,6 +4228,8 @@ dependencies = [
  "serde",
  "serde_json",
  "vesper-core",
+ "vesper-ffi",
+ "vesper-simpulse",
  "vesper-syntax",
 ]
 
@@ -4507,6 +4519,16 @@ dependencies = [
 [[package]]
 name = "vesper-prism"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-prism-h3"
+version = "0.1.0"
+dependencies = [
+ "vesper-prism",
+ "vesper-warp",
+ "vesper-warp-shard",
+ "vesper-warp-umem",
+]
 
 [[package]]
 name = "vesper-pulse"

@@ -313,6 +313,7 @@ fn compile<M: Module>(
     world: &World,
     entry: &str,
     optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
     if !entry_fn.effects.instances.is_empty() || entry_fn.effects.tail.is_some() {
@@ -332,8 +333,30 @@ fn compile<M: Module>(
         crate::ir_opt::optimize(world, &mut program)?;
     }
     let ids = declare_instances(m, world, entry, &instances)?;
-    let clif = define_instances(m, world, &instances, &ids, &program)?;
+    let clif = define_instances_observed(m, world, &instances, &ids, &program, observer)?;
     Ok((ids, clif))
+}
+/// One Cranelift function emitted by this backend, handed to the
+/// integration-B verifier hook ([`crate::native_verifiers`]) after the body
+/// is finalized and before machine code is generated from it. The hook only
+/// observes a clone: compilation and the emitted code are unchanged.
+///
+/// `function.name` is set to `u0:<func_id>`, the name direct calls between
+/// emitted functions use, so call graphs resolve across the set.
+#[derive(Clone)]
+pub struct EmittedFunction {
+    /// Monomorphized instance key (the source name for non-generic functions).
+    pub key: String,
+    /// Source function name of the instance.
+    pub source: String,
+    /// Object/JIT symbol (`entry` keeps its name, others are local).
+    pub symbol: String,
+    /// `cranelift_module::FuncId` index, the `u0:<index>` user name.
+    pub func_id: u32,
+    pub function: ir::Function,
+    /// `(func_id, symbol)` of every function this one references, defined
+    /// or imported (for example `fmod`).
+    pub callees: Vec<(u32, String)>,
 }
 /// Declare every monomorphized ordinary function. `entry` is exported under
 /// its source name when it is itself an ordinary instance.
@@ -373,6 +396,16 @@ fn define_instances<M: Module>(
     instances: &InstanceMap,
     ids: &BTreeMap<String, FuncId>,
     program: &crate::ir::Program,
+) -> Result<String, String> {
+    define_instances_observed(m, world, instances, ids, program, None)
+}
+fn define_instances_observed<M: Module>(
+    m: &mut M,
+    world: &World,
+    instances: &InstanceMap,
+    ids: &BTreeMap<String, FuncId>,
+    program: &crate::ir::Program,
+    mut observer: Option<&mut dyn FnMut(EmittedFunction)>,
 ) -> Result<String, String> {
     let mut clif = String::new();
     for (key, (name, generic_vars)) in instances {
@@ -472,6 +505,40 @@ fn define_instances<M: Module>(
             c.b.finalize();
         }
         clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
+        if let Some(observe) = observer.as_mut() {
+            let id = ids[key];
+            let mut function = ctx.func.clone();
+            function.name = ir::UserFuncName::user(0, id.as_u32());
+            let declarations = m.declarations();
+            let callees = function
+                .params
+                .user_named_funcs()
+                .values()
+                .filter(|name| name.namespace == 0)
+                .map(|name| {
+                    let callee = FuncId::from_u32(name.index);
+                    (
+                        name.index,
+                        declarations
+                            .get_function_decl(callee)
+                            .linkage_name(callee)
+                            .into_owned(),
+                    )
+                })
+                .collect();
+            observe(EmittedFunction {
+                key: key.clone(),
+                source: name.clone(),
+                symbol: m
+                    .declarations()
+                    .get_function_decl(id)
+                    .linkage_name(id)
+                    .into_owned(),
+                func_id: id.as_u32(),
+                function,
+                callees,
+            });
+        }
         m.define_function(ids[key], &mut ctx)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
@@ -502,7 +569,7 @@ pub fn jit_with_options(
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.symbol("fmod", native_float_remainder as *const u8);
     let mut m = JITModule::new(builder);
-    let (ids, _) = compile(&mut m, world, entry, optimize)?;
+    let (ids, _) = compile(&mut m, world, entry, optimize, None)?;
     m.finalize_definitions().map_err(|e| e.to_string())?;
     let code = m.get_finalized_function(ids[entry]);
     // SAFETY: compile() verified the signature and entry arity above. The module
@@ -559,6 +626,13 @@ pub fn object_with_options(
     target: Option<&str>,
     optimize: bool,
 ) -> Result<(Vec<u8>, String), String> {
+    object_with_observer(world, entry, target, optimize, None)
+}
+/// The ISA (target and codegen flags) object emission compiles with. The
+/// stack verifier measures frames with exactly this ISA.
+pub fn object_isa(
+    target: Option<&str>,
+) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
     let mut flags = settings::builder();
     flags.set("is_pic", "true").map_err(|e| e.to_string())?;
     let builder = if let Some(target) = target {
@@ -577,10 +651,23 @@ pub fn object_with_options(
     let isa = builder
         .finish(settings::Flags::new(flags))
         .map_err(|e| e.to_string())?;
+    Ok(isa)
+}
+/// [`object_with_options`] that also hands every emitted Cranelift function
+/// to `observer` (the integration-B verifier hook). With `None` it is
+/// exactly `object_with_options`.
+pub fn object_with_observer(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+) -> Result<(Vec<u8>, String), String> {
+    let isa = object_isa(target)?;
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     let mut m = ObjectModule::new(builder);
-    let (_, clif) = compile(&mut m, world, entry, optimize)?;
+    let (_, clif) = compile(&mut m, world, entry, optimize, observer)?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
 }

@@ -1,0 +1,8 @@
+// expect: E0721
+fn apply[r: eff](sink f: fn(u64) -> u64 eff [r], x: u64) -> u64 eff [Realtime | r] {
+    f(x)
+}
+
+fn main() -> u64 {
+    0
+}
