@@ -259,10 +259,7 @@ fn validate_controls(report: &Value, expected: &[ExpectedControl]) {
         if !expected.expected_accept {
             refused += 1;
         }
-        assert_eq!(
-            serde_json::to_value(expected.kind).unwrap(),
-            actual["kind"]
-        );
+        assert_eq!(serde_json::to_value(expected.kind).unwrap(), actual["kind"]);
     }
     assert_eq!(kinds, [52, 15, 27]);
     assert_eq!(refused, 37);
