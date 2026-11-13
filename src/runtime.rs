@@ -4,6 +4,8 @@ use crate::{ast::*, check::World};
 use std::{cell::RefCell, collections::BTreeMap, fmt, rc::Rc};
 
 pub mod resource_trace;
+#[cfg(test)]
+mod resource_trace_acceptance;
 use resource_trace::{
     ResourceConsume, ResourceIdentity, ResourceTraceCompletion, ResourceTraceConfig,
     ResourceTraceEngine, ResourceTraceError, ResourceTraceFailure, ResourceTraceObserver,
