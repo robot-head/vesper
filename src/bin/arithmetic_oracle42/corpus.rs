@@ -90,7 +90,7 @@ fn make_boundary_table(kind: Kind) -> [i128; 256] {
         .into_iter()
         .chain(0..=255)
     {
-        if value >= min && value <= max && !values[..len].contains(&value) {
+        if (min..=max).contains(&value) && !values[..len].contains(&value) {
             values[len] = value;
             len += 1;
             if len == 256 {
@@ -135,7 +135,7 @@ impl Tape {
         table: &[i128],
         out: &mut Code,
     ) {
-        if budget == 1 || depth == MAX_DEPTH || self.next() % 4 == 0 {
+        if budget == 1 || depth == MAX_DEPTH || self.next().is_multiple_of(4) {
             let scope = self.next() % 3;
             let index = self.next();
             out.push(match scope {
@@ -332,7 +332,7 @@ fn validate_program(p: &Program) -> Result<(), HarnessError> {
     }
     for i in &p.inputs {
         let (min, max) = bounds(i.kind);
-        if i.value < min || i.value > max {
+        if !(min..=max).contains(&i.value) {
             return Err(error("input value outside declared kind"));
         }
     }
