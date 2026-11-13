@@ -151,6 +151,49 @@ fn ci_rank_order_is_an_exact_seeded_full_subset_and_tables_follow_boundary_order
 }
 
 #[test]
+fn frozen_tape_draw_order_has_a_fixed_nonmandatory_postfix_fixture() {
+    use Node::{Checked as C, Int as N, Variable as V};
+    let x = |i| V(Scope::Input, i);
+    let t = |i| V(Scope::Local, i);
+    let w = |op| Node::Call(Callee::Intrinsic(op), 2);
+    let c = case_at(Suite::Full100000, 0, 4 * 17).unwrap();
+    assert_eq!(
+        c.program.inputs,
+        vec![
+            Input {
+                kind: Kind::U8,
+                value: 15
+            },
+            Input {
+                kind: Kind::U8,
+                value: 0
+            }
+        ]
+    );
+    assert_eq!(
+        c.program.locals,
+        vec![
+            vec![x(1), N(59), x(1), w(Op::Mul), C(Op::Sub)],
+            vec![t(0), N(13), C(Op::Add)],
+        ]
+    );
+    assert_eq!(
+        c.program.result,
+        vec![
+            x(0),
+            N(65),
+            x(0),
+            w(Op::Mul),
+            N(77),
+            C(Op::Add),
+            t(0),
+            w(Op::Sub),
+            C(Op::Mul)
+        ]
+    );
+}
+
+#[test]
 fn isolated_negative_matrix_matches_actual_parser_or_checker_single_codes() {
     let cases = negative_cases(128).unwrap();
     assert_eq!(cases.len(), 15);

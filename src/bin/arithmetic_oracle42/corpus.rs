@@ -759,7 +759,23 @@ pub fn semantic_fingerprint(case: &Case) -> Result<[u8; 32], HarnessError> {
 }
 
 fn add_shrink(out: &mut Vec<Case>, original: &Case, p: Program) -> Result<(), HarnessError> {
-    if out.len() == 64 || p == original.program || out.iter().any(|c| c.program == p) {
+    fn size(p: &Program) -> (usize, usize, u128) {
+        let nodes = p.locals.iter().map(Vec::len).sum::<usize>() + p.result.len();
+        let values = p.inputs.iter().map(|i| i.value).chain(
+            p.locals
+                .iter()
+                .chain(std::iter::once(&p.result))
+                .flatten()
+                .filter_map(|n| match n {
+                    Node::Int(v) => Some(*v),
+                    _ => None,
+                }),
+        );
+        let magnitude = values.fold(0u128, |sum, n| sum.saturating_add(n.unsigned_abs()));
+        (nodes, p.locals.len(), magnitude)
+    }
+    if out.len() == 64 || size(&p) >= size(&original.program) || out.iter().any(|c| c.program == p)
+    {
         return Ok(());
     }
     validate_program(&p)?;
