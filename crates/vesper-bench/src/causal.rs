@@ -174,7 +174,8 @@ pub struct CausalThread {
     local_delay_ns: u64,
 }
 
-fn pause(nanos: u64) {
+/// Pauses for at least `nanos`; returns the nanoseconds actually paused.
+fn pause(nanos: u64) -> u64 {
     let start = Instant::now();
     let target = Duration::from_nanos(nanos);
     // Sleep for the bulk, spin for the last millisecond.
@@ -184,6 +185,7 @@ fn pause(nanos: u64) {
     while start.elapsed() < target {
         std::hint::spin_loop();
     }
+    u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
 
 impl CausalThread {
@@ -202,9 +204,11 @@ impl CausalThread {
             return 0;
         }
         let owed = global - self.local_delay_ns;
-        pause(owed);
-        self.local_delay_ns = global;
-        self.shared.paused_ns.fetch_add(owed, Ordering::AcqRel);
+        let actual = pause(owed);
+        // Like Coz, an overshoot (a late wakeup) is credited against later
+        // delays instead of silently lengthening the experiment.
+        self.local_delay_ns = global.saturating_add(actual.saturating_sub(owed));
+        self.shared.paused_ns.fetch_add(actual, Ordering::AcqRel);
         owed
     }
     /// Runs an instrumented region. If it is the selected region, other threads
@@ -259,7 +263,8 @@ pub struct CausalPoint {
     pub speedup_pct: u32,
     /// Median run by effective period.
     pub run: ExperimentRun,
-    /// Predicted end-to-end speedup in basis points of the baseline period
+    /// Median over repetitions of the predicted end-to-end speedup against
+    /// the adjacent baseline run, in basis points of that baseline period
     /// (positive is faster), floored.
     pub predicted_speedup_bp: i64,
 }
@@ -329,42 +334,52 @@ pub fn profile<E>(
         }
     }
     let _disarm = Disarm(profiler);
-    let mut experiment = |selected: Option<RegionId>, pct: u32| {
-        let mut runs = Vec::with_capacity(config.repetitions);
-        for _ in 0..config.repetitions {
-            profiler.reset(selected, pct);
-            let start = Instant::now();
-            program(profiler).map_err(CausalError::Program)?;
-            let elapsed = u64::try_from(start.elapsed().as_nanos())
-                .map_err(|_| CausalError::Harness(Error::ClockOverflow))?;
-            let delay = profiler.global_delay_nanos();
-            let progress = profiler.progress_count(point);
-            if progress == 0 {
-                return Err(CausalError::Harness(Error::EmptyEvidence));
-            }
-            let effective = elapsed
-                .checked_sub(delay)
-                .filter(|e| *e > 0)
-                .ok_or(CausalError::DelayExceedsElapsed { elapsed, delay })?;
-            runs.push(ExperimentRun {
-                elapsed_ns: elapsed,
-                global_delay_ns: delay,
-                effective_ns: effective,
-                progress,
-            });
+    let mut run_once = |selected: Option<RegionId>, pct: u32| {
+        profiler.reset(selected, pct);
+        let start = Instant::now();
+        program(profiler).map_err(CausalError::Program)?;
+        let elapsed = u64::try_from(start.elapsed().as_nanos())
+            .map_err(|_| CausalError::Harness(Error::ClockOverflow))?;
+        let delay = profiler.global_delay_nanos();
+        let progress = profiler.progress_count(point);
+        if progress == 0 {
+            return Err(CausalError::Harness(Error::EmptyEvidence));
         }
-        Ok(median(runs))
+        let effective = elapsed
+            .checked_sub(delay)
+            .filter(|e| *e > 0)
+            .ok_or(CausalError::DelayExceedsElapsed { elapsed, delay })?;
+        Ok(ExperimentRun {
+            elapsed_ns: elapsed,
+            global_delay_ns: delay,
+            effective_ns: effective,
+            progress,
+        })
     };
-    let baseline = experiment(None, 0)?;
+    let mut baselines = Vec::with_capacity(config.repetitions);
+    for _ in 0..config.repetitions {
+        baselines.push(run_once(None, 0)?);
+    }
+    let baseline = median(baselines);
     let mut points = Vec::new();
     for (index, region) in profiler.shared.regions.iter().enumerate() {
         for &pct in &config.speedups_pct {
-            let run = experiment(Some(RegionId(index)), pct)?;
+            // Each experiment run is paired with an adjacent baseline run, so
+            // drift in machine load between experiments cancels per pair.
+            let mut runs = Vec::with_capacity(config.repetitions);
+            let mut predictions = Vec::with_capacity(config.repetitions);
+            for _ in 0..config.repetitions {
+                let paired = run_once(None, 0)?;
+                let run = run_once(Some(RegionId(index)), pct)?;
+                predictions.push(predicted_bp(paired, run).map_err(CausalError::Harness)?);
+                runs.push(run);
+            }
+            predictions.sort_unstable();
             points.push(CausalPoint {
                 region,
                 speedup_pct: pct,
-                run,
-                predicted_speedup_bp: predicted_bp(baseline, run).map_err(CausalError::Harness)?,
+                run: median(runs),
+                predicted_speedup_bp: predictions[predictions.len() / 2],
             });
         }
     }
@@ -444,7 +459,7 @@ mod tests {
         // The other thread owes exactly the charged delay, once.
         assert_eq!(b.delay_point(), charged);
         assert_eq!(b.delay_point(), 0);
-        assert_eq!(p.paused_nanos(), charged);
+        assert!(p.paused_nanos() >= charged);
         // A non-selected region charges nobody.
         b.region(cold, || std::thread::sleep(Duration::from_millis(1)));
         assert_eq!(p.global_delay_nanos(), charged);

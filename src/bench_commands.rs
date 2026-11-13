@@ -41,10 +41,10 @@ The default baseline is a separately compiled copy of FILE.
   --pmu                    Strictly require real hardware counter observations
   --pmu-provider group|rdpmc|kpc
                            Counter mechanism (implies --pmu). group: Linux
-                           perf_event_open group-read syscalls (Linux default);
+                           perf_event_open group-read syscalls (default);
                            rdpmc: Linux x86_64 user-space RDPMC via the perf
                            mmap page; kpc: macOS AArch64 kperf fixed counters,
-                           root only (macOS default)
+                           root only
   --metric time|cycles|instructions
                            Selected metric (default: time); counters imply --pmu
   --max-regression-bp N     Gate the SELECTED metric with the paired-median 95% CI
@@ -116,12 +116,10 @@ struct Options {
     layout_run: Option<(u64, u32)>,
     forwarded: Vec<String>,
 }
+/// Plain `--pmu` keeps meaning the group-read provider on every platform;
+/// RDPMC and kpc are explicit opt-ins.
 fn default_provider() -> Provider {
-    if cfg!(target_os = "macos") {
-        Provider::MacosKpc
-    } else {
-        Provider::LinuxGroupRead
-    }
+    Provider::LinuxGroupRead
 }
 fn argument(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String, String> {
     args.next()

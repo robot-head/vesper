@@ -35,7 +35,8 @@ Cargo.lock and `tools/bazel/sync_build_files.py` produced no diff.
   a `cpu` PMU device exists and the `rdpmc` sysfs knob. The existing
   group-read provider is unchanged apart from carrying its provider tag.
 * `vesper bench --pmu-provider group|rdpmc|kpc` selects the mechanism (default
-  group on Linux, kpc on macOS). An unavailable provider's JSON now includes
+  group everywhere, so plain `--pmu` keeps its meaning and the root-owned
+  `tests/bench_cli.rs` expectations hold; RDPMC and kpc are opt-ins). An unavailable provider's JSON now includes
   the host status.
 
 On this cloud host (no `cpu` PMU device, `perf_event_paranoid=2`) every
@@ -94,7 +95,13 @@ point or `delay_point()`. `profile(&profiler, &config, program)` runs baseline
 experiments and `repetitions` runs per (region, speedup), computes effective
 time as elapsed minus inserted delay, and reports the exact predicted
 end-to-end speedup `1 - period_s/period_0` in basis points per region.
-Inserted delay exceeding elapsed time is a typed error, not a prediction.
+Each experiment run is paired with an adjacent baseline run and the median
+per-pair prediction is reported, so load drift between experiments cancels;
+like Coz, a pause that overshoots (late wakeup) is credited against later
+delay. Inserted delay exceeding elapsed time is a typed error, not a
+prediction. The test is tagged `exclusive` in Bazel: the first macOS CI run,
+sharing three cores with other test actions, produced negative predictions for
+every region before these changes.
 
 Known-bottleneck test (`crates/vesper-bench/tests/causal.rs`): two threads per
 round, "slow" spins 8 ms and "fast" 3 ms, then meet at a barrier; the round is a
