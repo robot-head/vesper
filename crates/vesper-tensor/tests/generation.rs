@@ -302,6 +302,33 @@ fn sessions_are_explicitly_released_and_leaks_are_counted() {
 }
 
 #[test]
+fn cache_rejects_invalid_public_configs() {
+    let (model, _) = load();
+    let good = model.config();
+    let cases = [
+        vesper_tensor::llama::Config { heads: 0, ..good },
+        vesper_tensor::llama::Config {
+            kv_heads: 3,
+            ..good
+        },
+        vesper_tensor::llama::Config { dim: 60, ..good },
+        vesper_tensor::llama::Config { dim: 24, ..good },
+        vesper_tensor::llama::Config { seq_len: 0, ..good },
+        vesper_tensor::llama::Config {
+            layers: 1000,
+            ..good
+        },
+    ];
+    for config in cases {
+        assert!(
+            KvCache::new(config, KvFormat::F32, 1).is_err(),
+            "{config:?}"
+        );
+    }
+    assert!(KvCache::new(good, KvFormat::F32, 0).is_err());
+}
+
+#[test]
 fn sequence_length_limit_is_a_typed_error() {
     let (model, _) = load();
     let mut cache = KvCache::new(model.config(), KvFormat::F32, 1).unwrap();

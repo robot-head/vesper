@@ -54,7 +54,7 @@ evidence that the Vesper source typing rules (`linear struct KvPageLease`,
 
 ## Tests and evidence
 
-There are 22 new integration tests, and all the existing Tensor tests still pass.
+There are 23 new integration tests, and all the existing Tensor tests still pass.
 
 - `tests/inference_ops.rs` (11 tests) checks against independent references.
   These are hand-computed values and separately written f64 implementations.
@@ -85,6 +85,8 @@ There are 22 new integration tests, and all the existing Tensor tests still pass
   - Logits for 40 positions match an independent f64 forward pass with
     contiguous K/V (relative error below 1e-4), for FP32 and Q8_0 weights.
   - Session release, foreign caches, leak counting and the sequence-slot limit.
+  - `KvCache::new` validates public `Config` values (zero heads, bad GQA
+    ratio, odd head width and so on) instead of panicking.
   - Filling all 512 positions (32 pages per layer), then a typed
     `Limit("sequence length")` error.
   - Malformed checkpoints: truncated, trailing byte, NaN weight, zero or
@@ -109,7 +111,7 @@ cargo fmt --all -- --check                                        # pass
 cargo clippy --workspace --locked --all-targets -- -D warnings    # pass
 cargo test -p vesper-tensor --locked                              # pass, all targets
 cargo test --release -p vesper-tensor --test generation           # pass
-cargo test --workspace --locked                                   # see the PR for the result
+cargo test --workspace --locked                                   # stops in vesper-loom-build (14 failures, UnknownFingerprint engine_dependencies; not touched here, host-specific); CI runs the full suite
 cargo run --release -p vesper-tensor --example generate           # matches reference
 ```
 

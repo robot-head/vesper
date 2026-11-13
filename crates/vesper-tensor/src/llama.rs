@@ -45,6 +45,35 @@ pub struct Config {
     pub shared_classifier: bool,
 }
 impl Config {
+    /// Checks every dimension is positive and within the hard ceilings,
+    /// `dim % heads == 0`, `heads % kv_heads == 0` and an even head width.
+    pub fn validate(&self) -> Result<(), Error> {
+        let bounds = [
+            (self.dim, MAX_DIM, "dim"),
+            (self.hidden_dim, 4 * MAX_DIM, "hidden_dim"),
+            (self.layers, MAX_LAYERS, "layers"),
+            (self.heads, MAX_DIM, "heads"),
+            (self.kv_heads, MAX_DIM, "kv_heads"),
+            (self.vocab, MAX_VOCAB, "vocab"),
+            (self.seq_len, MAX_SEQ_LEN, "seq_len"),
+        ];
+        for (value, max, what) in bounds {
+            if value == 0 {
+                return Err(Error::Malformed(what));
+            }
+            if value > max {
+                return Err(Error::Limit(what));
+            }
+        }
+        if !self.dim.is_multiple_of(self.heads) {
+            return Err(Error::Shape("dim must be a multiple of heads"));
+        }
+        crate::shape::gqa_ratio(self.heads as u64, self.kv_heads as u64)?;
+        if !self.head_dim().is_multiple_of(2) {
+            return Err(Error::Shape("RoPE needs an even head width"));
+        }
+        Ok(())
+    }
     pub fn head_dim(&self) -> usize {
         self.dim / self.heads
     }
@@ -151,10 +180,6 @@ impl Model {
             MAX_VOCAB,
         )?;
         let seq_len = positive(r.i32()?, "seq_len", MAX_SEQ_LEN)?;
-        if !dim.is_multiple_of(heads) {
-            return Err(Error::Shape("dim must be a multiple of heads"));
-        }
-        crate::shape::gqa_ratio(heads as u64, kv_heads as u64)?;
         let config = Config {
             dim,
             hidden_dim,
@@ -165,10 +190,8 @@ impl Model {
             seq_len,
             shared_classifier,
         };
+        config.validate()?;
         let head_dim = config.head_dim();
-        if !head_dim.is_multiple_of(2) {
-            return Err(Error::Shape("RoPE needs an even head width"));
-        }
         let kv_dim = config.kv_dim();
         let embedding = r.floats(vocab.checked_mul(dim).ok_or(Error::Overflow)?)?;
         let per_layer = |r: &mut Reader<'_>, n: usize| -> Result<Vec<Vec<f32>>, Error> {
@@ -288,12 +311,12 @@ impl Model {
             kept,
         ))
     }
-    /// Payload bytes of every weight (excluding container overhead).
+    /// Payload bytes of every weight the model owns (excluding container
+    /// overhead). A shared classifier is a separate FP32 copy of the
+    /// embedding and is counted.
     pub fn weight_bytes(&self) -> usize {
         let mut total = (self.embedding.len() + self.rms_final.len()) * 4;
-        if !self.config.shared_classifier {
-            total += self.classifier.payload_bytes();
-        }
+        total += self.classifier.payload_bytes();
         for l in &self.layers {
             total += (l.rms_attention.len() + l.rms_ffn.len()) * 4;
             for m in [&l.wq, &l.wk, &l.wv, &l.wo, &l.w1, &l.w2, &l.w3] {
@@ -437,6 +460,7 @@ impl KvCache {
     /// One pool per layer, each with enough 16-token pages for
     /// `max_sequences` full-length sequences.
     pub fn new(config: Config, format: KvFormat, max_sequences: usize) -> Result<Self, Error> {
+        config.validate()?;
         let pages_per_sequence = config.seq_len.div_ceil(TOKENS_PER_PAGE);
         let pages = pages_per_sequence
             .checked_mul(max_sequences)

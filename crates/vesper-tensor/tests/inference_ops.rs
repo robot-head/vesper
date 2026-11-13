@@ -124,6 +124,8 @@ fn silu_swiglu_softmax_argmax() {
         Err(Error::Shape("softmax of empty vector"))
     );
     assert_eq!(softmax(&mut [f32::NAN]), Err(Error::NonFinite));
+    assert_eq!(softmax(&mut [0.0, f32::NAN]), Err(Error::NonFinite));
+    assert_eq!(softmax(&mut [f32::INFINITY, 0.0]), Err(Error::NonFinite));
 
     assert_eq!(argmax(&[1.0, 5.0, 5.0, -1.0]).unwrap(), 1);
     assert_eq!(argmax(&[f32::NAN]), Err(Error::NonFinite));

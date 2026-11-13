@@ -98,6 +98,10 @@ pub fn softmax(x: &mut [f32]) -> Result<(), Error> {
     if x.is_empty() {
         return Err(Error::Shape("softmax of empty vector"));
     }
+    // `f32::max` ignores NaN, so reject NaN inputs explicitly.
+    if x.iter().any(|v| v.is_nan()) {
+        return Err(Error::NonFinite);
+    }
     let max = x.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     if !max.is_finite() {
         return Err(Error::NonFinite);
