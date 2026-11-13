@@ -20,8 +20,11 @@ and label it a backend execution, or pass the Lean answer into either backend.
 There is an independent piece ready now: merged295 already makes
 vesper-crucible a root Cargo dependency. The future standalone harness can use
 its actual Source, ChoiceTape, replay and shrinking APIs without changing Cargo
-or copying a similarly named PRNG. Native/compiler work remains owned by
-external307/308; this document authorizes no edits or duplicate ownership there.
+or copying a similarly named PRNG. Native/compiler paths remain reserved by
+external307/308; those issues are **not promised to implement resource hooks**.
+The missing resource APIs are prerequisites for a separately claimed follow-up
+after their edits merge or explicit ownership coordination, not a request to
+broaden their existing scope. This document authorizes no overlapping edits.
 
 ## What exists in this source snapshot
 
@@ -133,6 +136,13 @@ Required properties before freezing a dependent executable harness:
    resource. The ID is not reconstructed from the source environment or guest
    scalar payload. Native and evaluator implementations are independently
    instrumented, not one backend's trace relabelled as the other.
+   **Out-of-band does not mean detached:** UID metadata must be inseparably
+   coupled to the actual value/carrier and follow the real native aggregate
+   load/store/projection/copy path. A separate syntax-driven shadow ledger can
+   remain correct while the actual carrier aliases the wrong resource; that
+   design is insufficient even if its event list is ordered. Mutation tests
+   must corrupt the actual carrier/projection/copy and show that the observed
+   identity changes or fails, rather than only corrupting the observer's list.
 2. Consume events originate only at the agreed actual terminal operation,
    carrying the resource that reached it. They are not emitted just because a
    syntactic sink call exists or a host reference was dropped. Wrappers transfer
@@ -261,16 +271,24 @@ valid, Lean answers and each of eight completed-mode counts separately. Achieve
 at least100000 **actually completed valid** programs for the full claim, plus
 isolated negatives. A full pilot/prefix/tape count cannot be extrapolated.
 Store only bounded fingerprints for uniqueness; if distinct-source claims are
-made, preserve actual differing executable inputs or structure, not comments or
-case IDs. No claim of distinct resource traces follows from distinct programs.
+made, preserve actual differing parsed executable literals or structure, not
+comments or case IDs. Embedded invocation literals in a checked main wrapper
+change the closed source program; changing only out-of-band runtime inputs to
+one unchanged parsed program is invocation uniqueness, not100000 synthesized
+programs. Report these separately. No claim of distinct resource traces follows
+from distinct programs. Before source freeze, fix a versioned canonical byte
+schema for ordered actions/sites/kinds/IDs, typed outcome and residual ownership;
+hashes summarize those exact compared bytes, not an unspecified equivalence.
 
 ## Ownership, prerequisites and actual acceptance
 
 Current approved edits are this plan only. Before implementation, root should
 freeze the model+runtime+acceptance plans together and publish child ownership:
 
-1. Resolve the dynamic observer/primitive/API dependency with307/308 and an
-   explicitly claimed Runtime owner; no competing native/main/lib edits.
+1. After307/308 merge or explicit ownership coordination, separately claim and
+   implement the dynamic observer/primitive/API dependency and Runtime work;
+   their present scopes do not imply those hooks. No competing native/main/lib
+   edits are authorized by this plan.
 2. Model lane owns a new fixed ResourceOracle model/driver, with the existing
    metatheory bridge and nominal-root identity gap stated honestly. External
    metatheory258/289 remain reserved; do not copy/edit their unfinished proofs.
