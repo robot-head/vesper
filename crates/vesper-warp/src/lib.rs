@@ -34,6 +34,7 @@ pub mod ack;
 pub mod cc;
 pub mod endpoint;
 pub mod frame;
+pub mod handshake;
 pub mod header;
 pub mod packet_number;
 pub mod recovery;

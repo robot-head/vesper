@@ -1,0 +1,7 @@
+//! [Channel] is genuinely ambiguous, but [Channel::read] remains resolvable.
+//! [missing], [Self::commit], [@local/type::method], [Box[i64]] and [i64] have no supported target.
+//! [current] still resolves even when other references are rejected.
+copy struct Channel {}
+linear effect Channel { fn read() -> i64; }
+fn current() -> i64 { 42 }
+fn main() -> i64 { current() }

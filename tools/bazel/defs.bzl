@@ -98,7 +98,8 @@ def vesper_crate(
         test_tags = {},
         copy_test_cwd = [],
         test_size = "medium",
-        test_target_compatible_with = {}):
+        test_target_compatible_with = {},
+        test_timeouts = {}):
     """Declares the Cargo targets of the workspace member in this package.
 
     Args:
@@ -119,6 +120,8 @@ def vesper_crate(
       test_size: Bazel size for every test target.
       test_target_compatible_with: map from test target name to its
         `target_compatible_with`, to skip one test on some platforms.
+      test_timeouts: map from test target name to a Bazel timeout, such as
+        "long". Unlisted tests keep the default determined by their size.
     """
     pkg = native.package_name()
     if pkg not in PACKAGES:
@@ -236,6 +239,7 @@ def vesper_crate(
             env = test_env,
             path_binaries = path_binaries,
             size = test_size,
+            timeout = test_timeouts.get(label),
             target_compatible_with = test_target_compatible_with.get(label, []),
             tags = test_tags.get(label, []),
         )

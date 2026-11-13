@@ -46,10 +46,10 @@ separate unary node; floats can be built through explicit function applications,
 without this library choosing float/NaN serialization or arithmetic semantics.
 
 The implemented subset includes applications/named arguments, explicit/implicit/
-instance binders, lambdas, forall/arrows, let/if/match, tuples/product types,
+instance binders, lambdas, forall/arrows, let/if/match, lists, tuples/product types,
 projections, records/updates, record/signed literal patterns, `do` lets/binds/local
 assignment, typed monadic binds, local instances, scalar operators,
-definitions/abbreviations/partial definitions, structures/inductives/classes,
+ordinary/noncomputable definitions, abbreviations/partial definitions, structures/inductives/classes,
 instances, mutual definition/type groups, namespaces, theorems/examples and
 evaluation/check commands. Empty records are supported for empty effect dictionaries.
 `Term::Infer` explicitly requests Lean elaboration (`_`); unresolved metavariables

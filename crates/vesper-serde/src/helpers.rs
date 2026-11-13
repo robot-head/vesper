@@ -89,6 +89,8 @@ impl JsonSizeBound {
     pub const U32: Self = Self::Bounded(10);
     pub const U64: Self = Self::Bounded(20);
     pub const I64: Self = Self::Bounded(20);
+    /// Finite binary64 host encoding ceiling; nonfinite values still reject.
+    pub const F64: Self = Self::Bounded(512);
     pub const BOOL: Self = Self::Bounded(5);
     /// Conservative quoted-string ceiling for at most `max_utf8_bytes` input
     /// bytes. Each control byte may need six output bytes (`\\u00xx`).

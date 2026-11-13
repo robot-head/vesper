@@ -540,6 +540,42 @@ impl HeaderParser {
             .map_err(|_| HeaderError::FieldOverflow)?;
         Ok(pn_offset + pn_len.bytes())
     }
+
+    /// Like [`Self::write_short`], but for a Destination Connection ID of
+    /// any length up to [`MAX_CID_LEN`]: the peer's connection IDs need not
+    /// be as long as the ones this endpoint issues (and parses).
+    pub fn write_short_to_peer(
+        &self,
+        out: &mut [u8],
+        dcid: &[u8],
+        spin: bool,
+        key_phase: bool,
+        full_pn: u64,
+        pn_len: PnLen,
+    ) -> Result<usize, HeaderError> {
+        if dcid.len() == self.dcid_len {
+            return self.write_short(out, dcid, spin, key_phase, full_pn, pn_len);
+        }
+        if dcid.len() > MAX_CID_LEN {
+            return Err(HeaderError::CidTooLong(dcid.len()));
+        }
+        let pn_offset = 1 + dcid.len();
+        let needed = pn_offset + 4;
+        if out.len() < needed {
+            return Err(HeaderError::Truncated {
+                needed,
+                available: out.len(),
+            });
+        }
+        out[0] = FIXED_BIT
+            | if spin { SPIN_BIT } else { 0 }
+            | if key_phase { KEY_PHASE } else { 0 }
+            | pn_len.first_byte_bits();
+        out[1..pn_offset].copy_from_slice(dcid);
+        crate::packet_number::write_truncated(full_pn, pn_len, &mut out[pn_offset..])
+            .map_err(|_| HeaderError::FieldOverflow)?;
+        Ok(pn_offset + pn_len.bytes())
+    }
 }
 
 fn take<'a>(r: &mut Reader<'a>, len: usize) -> Result<&'a [u8], HeaderError> {

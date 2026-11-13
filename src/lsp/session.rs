@@ -1,5 +1,5 @@
 //! In-memory bounded editor lifecycle. URIs are labels, never filesystem paths.
-use super::{actions, navigation, search};
+use super::{actions, macro_preview, navigation, search};
 use crate::{
     database::{self, Database, RecoveryFile, SourceFile, SyntaxSnapshot},
     tooling::{
@@ -160,7 +160,10 @@ impl Session {
                 "documentSymbolProvider":true,"workspaceSymbolProvider":true,
                 "documentFormattingProvider":true,
                 "codeActionProvider":code_actions,
-                "experimental":{"vesperRecoveryStatus":{"scope":"syntax_only","version":1}}
+                "experimental":{
+                    "vesperRecoveryStatus":{"scope":"syntax_only","version":1},
+                    "vesperMacroPreview":{"version":1,"tier":1,"scope":"expanded_source_only"}
+                }
             },"serverInfo":{"name":"vesper","version":env!("CARGO_PKG_VERSION")}}));
         }
         self.running()?;
@@ -181,6 +184,7 @@ impl Session {
                 | "workspace/symbol"
                 | "vesper/signatureSearch"
                 | "vesper/recoveryStatus"
+                | "vesper/macroPreview"
                 | "textDocument/formatting"
                 | "textDocument/codeAction"
         ) {
@@ -188,6 +192,7 @@ impl Session {
         }
         let params = object(params.as_ref())?;
         match method {
+            "vesper/macroPreview" => self.macro_preview(params),
             "vesper/recoveryStatus" => self.recovery_status(document_uri(params)?),
             "textDocument/hover" | "textDocument/definition" => {
                 let uri = document_uri(params)?;
@@ -371,6 +376,45 @@ impl Session {
             .get(uri)
             .ok_or_else(|| ServerError::params("document URI is not open"))
     }
+    fn macro_preview(&self, params: &serde_json::Map<String, Value>) -> Result<Value, ServerError> {
+        if params.len() != 1 || !params.contains_key("textDocument") {
+            return Err(ServerError::params("macro preview takes only textDocument"));
+        }
+        let text_document = object(Some(field(params, "textDocument")?))?;
+        if text_document
+            .keys()
+            .any(|key| key != "uri" && key != "version")
+        {
+            return Err(ServerError::params("unknown macro preview document field"));
+        }
+        let uri = string(field(text_document, "uri")?, "uri")?;
+        let expected = text_document.get("version").map(version).transpose()?;
+        let current = self.document(uri)?;
+        if expected.is_some_and(|expected| expected != current.version()) {
+            return Err(ServerError::new(-32801, "Document version has changed"));
+        }
+        let unavailable = || ServerError {
+            code: ANALYSIS_UNAVAILABLE,
+            message: "Macro preview is unavailable".into(),
+            data: Some(json!({"status":"preview_unavailable","scope":"expanded_source_only"})),
+        };
+        let limits = macro_preview::Limits::default();
+        // Bound the exact mirror comparison before traversing either source.
+        // URI labels never cause filesystem access or execution.
+        if current.text().len() > limits.max_source_bytes || uri.len() > limits.max_uri_bytes {
+            return Err(unavailable());
+        }
+        let file = *self.files.get(uri).ok_or_else(unavailable)?;
+        if file.text(&self.db) != current.text() {
+            return Err(unavailable());
+        }
+        let snapshot = database::macro_preview::preview(&self.db, file);
+        let document =
+            macro_preview::Document::new(uri, current.version(), current.text(), snapshot)
+                .map_err(|_| unavailable())?;
+        // This result never replaces guarded_analysis or changes diagnostics.
+        macro_preview::render(&document, limits).map_err(|_| unavailable())
+    }
     fn snapshot(&self, uri: &str) -> Result<Arc<CheckedSource>, ServerError> {
         let document = self.document(uri)?;
         let file = *self
@@ -414,7 +458,11 @@ impl Session {
             .get(uri)
             .expect("accepted transaction retained document");
         if let Some(file) = self.files.get(uri) {
-            file.set_text(&mut self.db).to(document.text().to_owned());
+            // The store already bounded both texts. Preserve the actual input
+            // and its memoized results for byte-identical version-only changes.
+            if file.text(&self.db) != document.text() {
+                file.set_text(&mut self.db).to(document.text().to_owned());
+            }
         } else {
             self.files.insert(
                 uri.to_owned(),
@@ -1022,6 +1070,81 @@ mod tests {
             "effect_ceiling":{"instances":[],"tail":null}})
     }
     #[test]
+    fn macro_preview_rejects_client_authority_and_stale_versions_before_compilation() {
+        let mut session = running(false);
+        open(&mut session, "untitled:preview", "fn main() -> i64 { 42 }");
+        for params in [
+            json!({"textDocument":{"uri":"untitled:preview"},"policy":{}}),
+            json!({"textDocument":{"uri":"untitled:preview","approved":true}}),
+            json!({"textDocument":{"uri":"untitled:preview","source":"forged"}}),
+            json!({"textDocument":{"uri":"untitled:preview","version":null}}),
+            json!({"textDocument":{"uri":"untitled:preview","version":2147483648_i64}}),
+        ] {
+            assert_eq!(
+                session
+                    .request("vesper/macroPreview", Some(params))
+                    .unwrap_err()
+                    .code,
+                -32602
+            );
+        }
+        let stale = session
+            .request(
+                "vesper/macroPreview",
+                Some(json!({
+                    "textDocument":{"uri":"untitled:preview","version":0}
+                })),
+            )
+            .unwrap_err();
+        assert_eq!(stale.code, -32801);
+    }
+
+    #[test]
+    fn macro_preview_never_uses_a_stale_source_mirror() {
+        let mut session = running(false);
+        let uri = "untitled:preview";
+        open(&mut session, uri, "fn main() -> i64 { 42 }");
+        let file = session.files[uri];
+        file.set_text(&mut session.db)
+            .to("fn main() -> i64 { 7 }".into());
+        let error = session
+            .request(
+                "vesper/macroPreview",
+                Some(json!({"textDocument":{"uri":uri}})),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ANALYSIS_UNAVAILABLE);
+        assert_eq!(error.data.unwrap()["status"], "preview_unavailable");
+        assert_eq!(
+            session.document(uri).unwrap().text(),
+            "fn main() -> i64 { 42 }"
+        );
+    }
+    #[test]
+    fn macro_preview_noop_reuses_actual_artifact_with_current_document_version() {
+        let mut session = running(false);
+        let uri = "untitled:macro";
+        let source = include_str!("../../tests/fixtures/source_macros/keep.ves");
+        open(&mut session, uri, source);
+        let before = database::macro_preview::preview(&session.db, session.files[uri])
+            .outcome()
+            .unwrap();
+        change(&mut session, uri, 2, source);
+        let after = database::macro_preview::preview(&session.db, session.files[uri])
+            .outcome()
+            .unwrap();
+        assert!(Arc::ptr_eq(&before, &after));
+        let result = session
+            .request(
+                "vesper/macroPreview",
+                Some(json!({"textDocument":{"uri":uri,"version":2}})),
+            )
+            .unwrap();
+        assert_eq!(result["version"], 2);
+        assert_eq!(result["status"], "expanded_checked");
+        assert_eq!(result["expanded_source"], after.expanded_source());
+    }
+    #[test]
     fn code_actions_require_negotiated_literal_and_versioned_edit_support() {
         for capabilities in [
             json!({}),
@@ -1228,7 +1351,7 @@ mod tests {
     #[test]
     fn unsupported_and_invalid_spans_publish_explicit_unavailable_warnings() {
         let mut session = running(true);
-        let unavailable = open(&mut session, "opaque:a", "fn main(){let x=0;let x=(x,x);}");
+        let unavailable = open(&mut session, "opaque:a", "fn main(){let x=Some(0);}");
         assert_eq!(unavailable["vesper"]["status"], "analysis_unavailable");
         assert_eq!(unavailable["diagnostics"][0]["severity"], 2);
         assert_eq!(
