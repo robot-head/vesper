@@ -10,6 +10,18 @@ actual Lean4Lean.addDecl or its checker/primitive entrypoint directly.
 namespace Vesper.Lean4Lean42Controls
 open Lean Lean4Lean TypeChecker
 
+-- Shared by the actual replay comparison sites and raw metadata controls.
+deriving instance BEq for ConstantVal
+deriving instance BEq for ConstructorVal
+deriving instance BEq for RecursorRule
+deriving instance BEq for RecursorVal
+
+def constructorMetadataMatches (generated imported : ConstructorVal) : Bool :=
+  generated == imported
+
+def recursorMetadataMatches (generated imported : RecursorVal) : Bool :=
+  generated == imported
+
 structure ControlResult where
   id : String
   expectedAccept : Bool
@@ -509,11 +521,39 @@ private def edges (env : Kernel.Environment) : ControlM Unit := do
   expectError "fuel.deep-refusal" "deep_recursion" <|
     TypeChecker.M.run env (x := whnf (deepNat 1200))
 
+private def metadata (env : Kernel.Environment) : ControlM Unit := do
+  let fresh ← match Lean4Lean.addDecl env treeDecl with
+    | .ok e => pure e
+    | .error _ => throw "metadata fixture generation failed"
+  let some (.ctorInfo ctor) := fresh.find? `Tree0.node
+    | throw "metadata fixture constructor missing"
+  let some (.recInfo recursor) := fresh.find? `Tree0.rec
+    | throw "metadata fixture recursor missing"
+  let first :: rest := recursor.rules | throw "metadata fixture rule missing"
+  let constructorResult (id : String) (expected : Bool) (imported : ConstructorVal) := do
+    let actual := constructorMetadataMatches ctor imported
+    record id expected actual
+      (if expected then "metadata_equal" else "constructor_metadata_mismatch")
+      (if actual then "metadata_equal" else "constructor_metadata_mismatch")
+  let recursorResult (id : String) (expected : Bool) (imported : RecursorVal) := do
+    let actual := recursorMetadataMatches recursor imported
+    record id expected actual
+      (if expected then "metadata_equal" else "recursor_metadata_mismatch")
+      (if actual then "metadata_equal" else "recursor_metadata_mismatch")
+  constructorResult "metadata.constructor.exact" true {ctor with type := ctor.type}
+  constructorResult "metadata.constructor.changed-type" false
+    {ctor with type := .const ``Bool []}
+  recursorResult "metadata.recursor.exact" true {recursor with rules := first :: rest}
+  recursorResult "metadata.recursor.changed-rule-rhs" false
+    {recursor with rules := {first with rhs := .const ``Bool.true []} :: rest}
+  recursorResult "metadata.recursor.changed-rule-constructor" false
+    {recursor with rules := {first with ctor := `NotTree0} :: rest}
+
 /-- Execute the fixed raw controls against the caller's fixed umbrella baseline.
 The baseline consists of the compiled control module and its genuine imports;
 unverified candidates are supplied only to the actual candidate checker. -/
 def runControls (baseline : Kernel.Environment) : IO (Array ControlResult) := do
-  let (result, rows) ← ((do core baseline; extended baseline; levels baseline; edges baseline : ControlM Unit).run).run #[]
+  let (result, rows) ← ((do core baseline; extended baseline; levels baseline; edges baseline; metadata baseline : ControlM Unit).run).run #[]
   let complete := result.isOk
   pure (rows.push ⟨"suite.complete", true, complete, "completed",
     if complete then "completed" else "fixture_failure", complete⟩)

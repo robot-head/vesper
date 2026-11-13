@@ -622,6 +622,41 @@
       "kind": "checker_expr"
     },
     {
+      "id": "metadata.constructor.exact",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "metadata_equal",
+      "kind": "condition"
+    },
+    {
+      "id": "metadata.constructor.changed-type",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "constructor_metadata_mismatch",
+      "kind": "condition"
+    },
+    {
+      "id": "metadata.recursor.exact",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "metadata_equal",
+      "kind": "condition"
+    },
+    {
+      "id": "metadata.recursor.changed-rule-rhs",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "recursor_metadata_mismatch",
+      "kind": "condition"
+    },
+    {
+      "id": "metadata.recursor.changed-rule-constructor",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "recursor_metadata_mismatch",
+      "kind": "condition"
+    },
+    {
       "id": "suite.complete",
       "source": "tools/lean4lean42/controls/VesperControls.lean",
       "expected_accept": true,
@@ -928,7 +963,7 @@
         "5518bf83860bab48e8d53f1f447cdd6c50c30c3f",
         "4b60e53d1531ec785494a3d765f3a1cc0afd07bd"
       ],
-      "disposition": "retain existing restoration structure and K phase; actual restored constructor/recursor types and flags checked by controls",
+      "disposition": "retain existing restoration structure and K phase; actual restored constructor/recursor types and flags checked by controls; shared structural helpers now exercise genuine generated metadata with changed ctor type, rule RHS and rule constructor name",
       "changed_files": [],
       "control_ids": [
         "nested.valid.stored-constructor-type",
@@ -936,13 +971,19 @@
         "prop.normalized.constructor",
         "prop.normalized.no-large-elimination",
         "prop.normalized.not-k-target",
-        "prop.normalized.reject-bool-projection"
+        "prop.normalized.reject-bool-projection",
+        "metadata.constructor.exact",
+        "metadata.constructor.changed-type",
+        "metadata.recursor.exact",
+        "metadata.recursor.changed-rule-rhs",
+        "metadata.recursor.changed-rule-constructor"
       ],
       "remaining_obligations": [
-        "Final replay must reject mutated stored constructor/recursor metadata in its separate comparison path. No complete eliminator proof is claimed."
+        "The separate Main replay path must call these same helpers at actual postponed comparisons and be exercised in assembled replay. No complete eliminator proof is claimed."
       ],
       "execution_refs": [
-        "focused-runtime-controls"
+        "focused-runtime-controls",
+        "shared-metadata-runtime-controls"
       ]
     },
     {
@@ -996,7 +1037,7 @@
   "source_sha256": {
     "tools/lean4lean42/patches/kernel.patch": "f244667d85e91656feb91ab0e4d36238efdad0aaebbf901a5e2ed342336cc388",
     "tools/lean4lean42/patches/toolchain.patch": "720457143a4b66be681fce1b0a1386188ca0be1aa04a185b9150dc6022691f50",
-    "tools/lean4lean42/controls/VesperControls.lean": "3a197b3fa68e105a9b5fc20e2776aac0b37baec0c7ad25d0f443f6235cf3b05d",
+    "tools/lean4lean42/controls/VesperControls.lean": "0fba2d74c324bbdbf0e4fd1f4cefb9c01a74ba2272b77dcf8e923a81eec0851b",
     "tools/lean4lean42/controls/Check.lean": "f7196163385d161f1a4e392a9b9b760196d76f6bc260415ade3068a582c38789"
   },
   "executions": [
@@ -1011,7 +1052,22 @@
       "build_command": "/home/agent/.local/share/vesper-lean/bin/lake build Lean4Lean.VesperControls",
       "build_exit_code": 0,
       "build_log_path": "/tmp/lean4lean42-control-build.log",
-      "build_log_sha256": "fe6fd28d52441ccaa2c7963445cf5b69d19e2eb5145f59038d6f708b7b86caef"
+      "build_log_sha256": "fe6fd28d52441ccaa2c7963445cf5b69d19e2eb5145f59038d6f708b7b86caef",
+      "controls_source_sha256": "3a197b3fa68e105a9b5fc20e2776aac0b37baec0c7ad25d0f443f6235cf3b05d"
+    },
+    {
+      "id": "shared-metadata-runtime-controls",
+      "command": "LEAN_NUM_THREADS=1 /home/agent/.local/share/vesper-lean/bin/lake env lean --run /workspace/vesper-worktrees/lean4lean42-replay/tools/lean4lean42/controls/Check.lean",
+      "cwd": "/tmp/vesper-lean4lean42-replay-worker",
+      "exit_code": 0,
+      "control_count": 94,
+      "log_path": "/tmp/lean4lean42-metadata-controls.log",
+      "log_sha256": "522f5da96c1bd6229bc94cc2063e95d09067e8f59ff6049a9f6bafe1ade0d80d",
+      "controls_source_sha256": "0fba2d74c324bbdbf0e4fd1f4cefb9c01a74ba2272b77dcf8e923a81eec0851b",
+      "build_command": "LEAN_NUM_THREADS=1 /home/agent/.local/share/vesper-lean/bin/lake build Lean4Lean.VesperControls",
+      "build_exit_code": 0,
+      "build_log_path": "/tmp/lean4lean42-metadata-control-build.log",
+      "build_log_sha256": "c529cc554e8f55dc9977da1164666746f50d3c5c93ace7a2dd8d9e602ad1a6a5"
     }
   ],
   "unexecuted": [

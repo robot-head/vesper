@@ -164,3 +164,35 @@ existing sorry/project-axiom obligations. The manifest explicitly retains these
 limits, distinguishes unapplied native-level/domain-metadata/phase changes, and
 keeps restoration invariants separate from any full verified-eliminator claim.
 There is no new complete self-verification or §42-completion claim.
+
+## Shared postponed-metadata comparisons (published amendment)
+
+After public #298 comment6854116683 and contract amendment `859429c`, the fixed
+umbrella now exposes `constructorMetadataMatches` and `recursorMetadataMatches`
+in `Vesper.Lean4Lean42Controls`. They perform exact structural BEq over every
+ConstructorVal/RecursorVal field; the four existing upstream Main BEq instances
+move into the umbrella. The Main-only replay patch must use these same helpers,
+not a separate comparison model.
+
+Five condition controls use the real freshly generated Tree0 constructor and
+recursor metadata from actual `Lean4Lean.addDecl treeDecl`: matching constructor,
+changed constructor type, matching recursor, changed rule RHS, and changed rule
+constructor name. These are metadata comparisons, not raw kernel refusals.
+Their stable reasons are metadata_equal, constructor_metadata_mismatch and
+recursor_metadata_mismatch. The prior89 case IDs/outcomes are retained, with the
+five comparisons inserted before suite.complete. The pinned inventory is now94.
+
+Actual commands in `/tmp/vesper-lean4lean42-replay-worker`:
+
+```sh
+LEAN_NUM_THREADS=1 /home/agent/.local/share/vesper-lean/bin/lake build Lean4Lean.VesperControls
+LEAN_NUM_THREADS=1 /home/agent/.local/share/vesper-lean/bin/lake env lean --run /workspace/vesper-worktrees/lean4lean42-replay/tools/lean4lean42/controls/Check.lean
+```
+
+The build and actual IO invocation passed, ending `CONTROLS PASSED 94`.
+Logs are `/tmp/lean4lean42-metadata-control-build.log` and
+`/tmp/lean4lean42-metadata-controls.log`; exact command/log/current source hashes
+are recorded in known-fixes.json, with the old89-case execution explicitly
+associated with its old source hash. No full fresh model replay was run by this
+lane. Actual Main comparison integration remains required in the separate
+replay patch and coordinator validation.
