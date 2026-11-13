@@ -1,0 +1,52 @@
+// Constant-time byte equality and boolean negation over secrets, declassified
+// once at the verdict: the backend const-time verifier accepts every function.
+copy struct Secret[T] {
+    value: T,
+}
+
+fn ct_eq(a: Secret[u8], b: Secret[u8]) -> Secret[bool] eff [ConstTime] {
+    let Secret {
+        value: x
+    }
+    = a;
+    let Secret {
+        value: y
+    }
+    = b;
+    Secret {
+        value: wrapping_sub(x, y) == 0
+    }
+}
+
+fn ct_not(a: Secret[bool]) -> Secret[bool] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = a;
+    Secret {
+        value: !value
+    }
+}
+
+fn declassify_bool(s: Secret[bool]) -> bool eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    value
+}
+
+fn main() -> u64 {
+    let a: Secret[u8] = Secret {
+        value: 7
+    };
+    let b: Secret[u8] = Secret {
+        value: 7
+    };
+    let verdict = declassify_bool(ct_not(ct_eq(a, b)));
+    if verdict {
+        1
+    } else {
+        0
+    }
+}

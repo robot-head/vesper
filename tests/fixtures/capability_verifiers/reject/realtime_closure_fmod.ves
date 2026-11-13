@@ -1,0 +1,14 @@
+// expect: realtime/rt-unknown-callee
+// A Realtime closure is specialized into the plain function that contains it,
+// so that function is checked as a realtime root as a whole; the closure's
+// float remainder still reaches libc fmod.
+fn main() -> u64 {
+    let f = | x: f64 | -> f64 eff [Realtime] {
+        x % 2.0
+    };
+    if f(7.5) > 1.0 {
+        1
+    } else {
+        0
+    }
+}

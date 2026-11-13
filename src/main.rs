@@ -382,7 +382,9 @@ fn native_code(
     policy: Option<&std::path::Path>,
     (file, source): (&str, &str),
 ) -> Result<(Vec<u8>, String), String> {
-    if verifiers.is_empty() {
+    // Capability effects (`eff [ConstTime]`, ...) imply their verifiers
+    // even without a flag (lane 24).
+    if verifiers.is_empty() && vesper::native_verifiers::capability_verifiers(world).is_empty() {
         return native::object_with_options(world, entry, target, opt);
     }
     let policy = match policy {
@@ -394,8 +396,9 @@ fn native_code(
             ..Default::default()
         },
     };
-    let (bytes, clif, report) =
-        vesper::native_verifiers::verify_native(world, entry, target, opt, verifiers, &policy)?;
+    let (bytes, clif, report) = vesper::native_verifiers::verify_native_with_capabilities(
+        world, entry, target, opt, verifiers, &policy,
+    )?;
     eprint!(
         "{}",
         vesper::native_verifiers::render(&report, file, source)
