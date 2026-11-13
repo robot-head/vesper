@@ -6,7 +6,13 @@
 //! process gets [`UnavailableReason::PermissionDenied`] before any kpc state
 //! is changed. With root, the fixed counter class is enabled for counting and
 //! thread counting; Apple Silicon fixed counter 0 is core cycles and 1 is
-//! retired instructions. Drop turns thread counting back off.
+//! retired instructions.
+//!
+//! `kpc_set_counting` and `kpc_set_thread_counting` change system-wide kernel
+//! state, not just this thread's. So at most one `KpcCounters` exists per
+//! process (a second open is `InvalidState`), the previous counting classes
+//! are saved on open, and Drop restores exactly those. Another process that
+//! changes kpc configuration while counters are open is not detected.
 use crate::{CounterDelta, Provider, Unavailable, UnavailableReason, checked_delta};
 use std::{
     ffi::{CStr, c_int, c_void},
@@ -21,12 +27,15 @@ const KPC_CLASS_FIXED_MASK: u32 = 1;
 const MAX_COUNTERS: usize = 32;
 
 type GetCount = unsafe extern "C" fn(u32) -> u32;
+type GetClasses = unsafe extern "C" fn() -> u32;
 type SetClasses = unsafe extern "C" fn(u32) -> c_int;
 type GetThreadCounters = unsafe extern "C" fn(u32, u32, *mut u64) -> c_int;
 
 struct Symbols {
     handle: *mut c_void,
     get_counter_count: GetCount,
+    get_counting: GetClasses,
+    get_thread_counting: GetClasses,
     set_counting: SetClasses,
     set_thread_counting: SetClasses,
     get_thread_counters: GetThreadCounters,
@@ -63,27 +72,34 @@ fn load() -> Result<Symbols, Unavailable> {
     let resolved = (|| {
         Ok::<_, Unavailable>((
             symbol(c"kpc_get_counter_count")?,
+            symbol(c"kpc_get_counting")?,
+            symbol(c"kpc_get_thread_counting")?,
             symbol(c"kpc_set_counting")?,
             symbol(c"kpc_set_thread_counting")?,
             symbol(c"kpc_get_thread_counters")?,
         ))
     })();
-    let (count, counting, thread_counting, thread_counters) = match resolved {
-        Ok(s) => s,
-        Err(e) => {
-            // SAFETY: close the handle opened above on the failure path.
-            unsafe {
-                libc::dlclose(handle);
+    let (count, get_counting, get_thread_counting, counting, thread_counting, thread_counters) =
+        match resolved {
+            Ok(s) => s,
+            Err(e) => {
+                // SAFETY: close the handle opened above on the failure path.
+                unsafe {
+                    libc::dlclose(handle);
+                }
+                return Err(e);
             }
-            return Err(e);
-        }
-    };
+        };
     // SAFETY: these are the documented C signatures of the kperf exports
     // (used by Apple's own tools and xnu tests); pointers are nonnull.
     unsafe {
         Ok(Symbols {
             handle,
             get_counter_count: std::mem::transmute::<*mut c_void, GetCount>(count),
+            get_counting: std::mem::transmute::<*mut c_void, GetClasses>(get_counting),
+            get_thread_counting: std::mem::transmute::<*mut c_void, GetClasses>(
+                get_thread_counting,
+            ),
             set_counting: std::mem::transmute::<*mut c_void, SetClasses>(counting),
             set_thread_counting: std::mem::transmute::<*mut c_void, SetClasses>(thread_counting),
             get_thread_counters: std::mem::transmute::<*mut c_void, GetThreadCounters>(
@@ -97,10 +113,14 @@ fn load() -> Result<Symbols, Unavailable> {
 pub struct KpcCounters {
     symbols: Symbols,
     fixed: u32,
+    previous_counting: u32,
+    previous_thread_counting: u32,
     origin: u64,
     generation: u64,
     active: Option<u64>,
     thread: u64,
+    // Released after Drop has restored the saved classes.
+    _ownership: Ownership,
     _thread_bound: PhantomData<Rc<()>>,
 }
 pub struct KpcSnapshot {
@@ -121,6 +141,27 @@ fn thread_id() -> u64 {
 }
 
 static NEXT_ORIGIN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+/// The process-wide kpc configuration has one owner at a time.
+static OWNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+struct Ownership;
+impl Ownership {
+    fn acquire() -> Result<Self, Unavailable> {
+        OWNED
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .map(|_| Ownership)
+            .map_err(|_| Unavailable::new(UnavailableReason::InvalidState, "kpc already owned"))
+    }
+}
+impl Drop for Ownership {
+    fn drop(&mut self) {
+        OWNED.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 impl KpcCounters {
     pub fn open() -> Result<Self, Unavailable> {
@@ -132,6 +173,7 @@ impl KpcCounters {
                 "kpc requires root",
             ));
         }
+        let ownership = Ownership::acquire()?;
         // SAFETY: resolved kperf functions with plain integer arguments.
         let fixed = unsafe { (symbols.get_counter_count)(KPC_CLASS_FIXED_MASK) };
         if !(2..=MAX_COUNTERS as u32).contains(&fixed) {
@@ -140,30 +182,42 @@ impl KpcCounters {
                 "kpc fixed counter count",
             ));
         }
-        // SAFETY: as above.
-        if unsafe { (symbols.set_counting)(KPC_CLASS_FIXED_MASK) } != 0 {
-            return Err(Unavailable::new(
-                UnavailableReason::PermissionDenied,
-                "kpc_set_counting",
-            ));
-        }
-        // SAFETY: as above.
-        if unsafe { (symbols.set_thread_counting)(KPC_CLASS_FIXED_MASK) } != 0 {
-            return Err(Unavailable::new(
-                UnavailableReason::PermissionDenied,
-                "kpc_set_thread_counting",
-            ));
-        }
+        // SAFETY: as above; the getters take no arguments.
+        let (previous_counting, previous_thread_counting) =
+            unsafe { ((symbols.get_counting)(), (symbols.get_thread_counting)()) };
         let origin = NEXT_ORIGIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // From here on Drop restores the saved classes, on every path.
         let counters = Self {
             symbols,
             fixed,
+            previous_counting,
+            previous_thread_counting,
+            _ownership: ownership,
             origin,
             generation: 0,
             active: None,
             thread: thread_id(),
             _thread_bound: PhantomData,
         };
+        // Add the fixed class to whatever was already counting.
+        // SAFETY: as above.
+        if unsafe { (counters.symbols.set_counting)(previous_counting | KPC_CLASS_FIXED_MASK) } != 0
+        {
+            return Err(Unavailable::new(
+                UnavailableReason::PermissionDenied,
+                "kpc_set_counting",
+            ));
+        }
+        // SAFETY: as above.
+        if unsafe {
+            (counters.symbols.set_thread_counting)(previous_thread_counting | KPC_CLASS_FIXED_MASK)
+        } != 0
+        {
+            return Err(Unavailable::new(
+                UnavailableReason::PermissionDenied,
+                "kpc_set_thread_counting",
+            ));
+        }
         counters.read()?;
         Ok(counters)
     }
@@ -184,9 +238,11 @@ impl KpcCounters {
 }
 impl Drop for KpcCounters {
     fn drop(&mut self) {
-        // SAFETY: resolved function; turning thread counting off is idempotent.
+        // Restore exactly the classes that were counting before open.
+        // SAFETY: resolved functions with plain integer arguments.
         unsafe {
-            (self.symbols.set_thread_counting)(0);
+            (self.symbols.set_thread_counting)(self.previous_thread_counting);
+            (self.symbols.set_counting)(self.previous_counting);
         }
     }
 }

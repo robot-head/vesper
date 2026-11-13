@@ -184,15 +184,21 @@ fn open(config: u64, leader: Option<RawFd>) -> Result<OwnedFd, Unavailable> {
 
 fn rdpmc(counter: u32) -> u64 {
     let (lo, hi): (u32, u32);
+    // RDPMC is not serializing. LFENCE before it waits for earlier
+    // instructions to complete locally; LFENCE after it keeps later
+    // instructions from starting before the read, so window boundaries do
+    // not drift into or out of the measured body.
     // SAFETY: only reached after the kernel page granted cap_user_rdpmc with a
     // nonzero index for an event of this thread, so CR4.PCE permits RDPMC.
     unsafe {
         std::arch::asm!(
+            "lfence",
             "rdpmc",
+            "lfence",
             in("ecx") counter,
             out("eax") lo,
             out("edx") hi,
-            options(nostack, nomem, preserves_flags)
+            options(nostack, preserves_flags)
         );
     }
     (u64::from(hi) << 32) | u64::from(lo)

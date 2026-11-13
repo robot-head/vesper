@@ -45,7 +45,11 @@ struct Shared {
     progress_names: Vec<&'static str>,
     selected: AtomicUsize,
     speedup_pct: AtomicU32,
+    /// Monotonic across experiments; an experiment's delay is the growth
+    /// since `start_delay_ns`.
     global_delay_ns: AtomicU64,
+    start_delay_ns: AtomicU64,
+    generation: AtomicU64,
     paused_ns: AtomicU64,
     progress: Vec<AtomicU64>,
     region_visits: Vec<AtomicU64>,
@@ -87,6 +91,8 @@ impl CausalProfiler {
                 selected: AtomicUsize::new(NONE),
                 speedup_pct: AtomicU32::new(0),
                 global_delay_ns: AtomicU64::new(0),
+                start_delay_ns: AtomicU64::new(0),
+                generation: AtomicU64::new(0),
                 paused_ns: AtomicU64::new(0),
                 progress: counters(progress.len()),
                 region_visits: counters(regions.len()),
@@ -115,11 +121,14 @@ impl CausalProfiler {
     pub fn thread(&self) -> CausalThread {
         CausalThread {
             shared: Arc::clone(&self.shared),
+            generation: self.shared.generation.load(Ordering::Acquire),
             local_delay_ns: self.shared.global_delay_ns.load(Ordering::Acquire),
         }
     }
+    /// Delay inserted since the current experiment began.
     pub fn global_delay_nanos(&self) -> u64 {
-        self.shared.global_delay_ns.load(Ordering::Acquire)
+        let s = &self.shared;
+        s.global_delay_ns.load(Ordering::Acquire) - s.start_delay_ns.load(Ordering::Acquire)
     }
     /// Nanoseconds threads actually spent paused for virtual speedup.
     pub fn paused_nanos(&self) -> u64 {
@@ -147,7 +156,12 @@ impl CausalProfiler {
         {
             c.store(0, Ordering::Release);
         }
-        s.global_delay_ns.store(0, Ordering::Release);
+        // Keep the global count monotonic and open a new generation, so a
+        // handle retained from an earlier experiment starts caught up with
+        // this one instead of keeping stale credit or stale debt.
+        s.start_delay_ns
+            .store(s.global_delay_ns.load(Ordering::Acquire), Ordering::Release);
+        s.generation.fetch_add(1, Ordering::AcqRel);
         s.paused_ns.store(0, Ordering::Release);
     }
 }
@@ -156,6 +170,7 @@ impl CausalProfiler {
 /// local delay count.
 pub struct CausalThread {
     shared: Arc<Shared>,
+    generation: u64,
     local_delay_ns: u64,
 }
 
@@ -173,7 +188,15 @@ fn pause(nanos: u64) {
 
 impl CausalThread {
     /// Pays any virtual-speedup delay this thread owes. Returns nanoseconds paused.
+    fn sync_generation(&mut self) {
+        let generation = self.shared.generation.load(Ordering::Acquire);
+        if generation != self.generation {
+            self.generation = generation;
+            self.local_delay_ns = self.shared.start_delay_ns.load(Ordering::Acquire);
+        }
+    }
     pub fn delay_point(&mut self) -> u64 {
+        self.sync_generation();
         let global = self.shared.global_delay_ns.load(Ordering::Acquire);
         if global <= self.local_delay_ns {
             return 0;
@@ -190,6 +213,7 @@ impl CausalThread {
         self.delay_point();
         let start = Instant::now();
         let result = f();
+        self.sync_generation();
         let elapsed = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let s = &self.shared;
         s.region_visits[region.0].fetch_add(1, Ordering::AcqRel);
@@ -296,6 +320,15 @@ pub fn profile<E>(
     let point = profiler
         .progress_point(config.progress_point)
         .map_err(CausalError::Harness)?;
+    // Every exit, including program and harness errors, turns virtual
+    // speedup off again.
+    struct Disarm<'a>(&'a CausalProfiler);
+    impl Drop for Disarm<'_> {
+        fn drop(&mut self) {
+            self.0.reset(None, 0);
+        }
+    }
+    let _disarm = Disarm(profiler);
     let mut experiment = |selected: Option<RegionId>, pct: u32| {
         let mut runs = Vec::with_capacity(config.repetitions);
         for _ in 0..config.repetitions {
@@ -335,7 +368,6 @@ pub fn profile<E>(
             });
         }
     }
-    profiler.reset(None, 0);
     Ok(CausalReport {
         progress_point: config.progress_point,
         baseline,
@@ -423,5 +455,46 @@ mod tests {
         assert!(p.region("missing").is_err());
         assert!(CausalProfiler::new(&["x", "x"], &["p"]).is_err());
         assert!(CausalProfiler::new(&[], &["p"]).is_err());
+    }
+    #[test]
+    fn retained_handles_neither_keep_credit_nor_debt_across_experiments() {
+        let p = CausalProfiler::new(&["hot"], &["done"]).unwrap();
+        let hot = p.region("hot").unwrap();
+        let mut a = p.thread();
+        let mut b = p.thread();
+        p.reset(Some(hot), 100);
+        // b keeps credit from executing the region; a is left owing.
+        b.region(hot, || std::thread::sleep(Duration::from_millis(2)));
+        p.reset(Some(hot), 100);
+        assert_eq!(p.global_delay_nanos(), 0);
+        assert_eq!(a.delay_point(), 0, "stale debt was not dropped");
+        a.region(hot, || std::thread::sleep(Duration::from_millis(2)));
+        let charged = p.global_delay_nanos();
+        assert_eq!(b.delay_point(), charged, "stale credit skipped new delay");
+    }
+    #[test]
+    fn a_failing_program_leaves_virtual_speedup_disabled() {
+        let p = CausalProfiler::new(&["hot"], &["done"]).unwrap();
+        let hot = p.region("hot").unwrap();
+        let done = p.progress_point("done").unwrap();
+        let mut calls = 0;
+        let config = CausalConfig {
+            speedups_pct: vec![50],
+            repetitions: 1,
+            progress_point: "done",
+        };
+        let result = profile(&p, &config, |p| {
+            calls += 1;
+            p.thread().progress(done);
+            if calls == 2 {
+                Err("selected experiment failed")
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(result, Err(CausalError::Program(_))));
+        p.thread()
+            .region(hot, || std::thread::sleep(Duration::from_millis(1)));
+        assert_eq!(p.global_delay_nanos(), 0);
     }
 }
