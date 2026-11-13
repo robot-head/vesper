@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use cranelift_codegen::ir::{Block, BlockArg, Function, InstructionData, Opcode, Value, ValueDef};
 
 use crate::VerifierFinding;
-use crate::svd::{DeviceModel, FieldAccess, RegisterClass, RegisterModel};
+use crate::svd::{DeviceModel, RegisterClass, RegisterModel};
 
 pub const RULE_RMW_W1C: &str = "silicon.mmio.rmw_of_write_clear_register";
 pub const RULE_RC_READ: &str = "silicon.mmio.read_to_clear_outside_consume";

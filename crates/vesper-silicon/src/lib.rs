@@ -29,6 +29,7 @@
 
 pub mod atomic;
 pub mod dma;
+pub mod dtb;
 pub mod frames;
 pub mod hazard;
 pub mod irq;
