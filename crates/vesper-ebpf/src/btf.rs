@@ -628,3 +628,135 @@ impl BtfBuilder {
         out
     }
 }
+
+/// Path of the running kernel's BTF.
+pub const VMLINUX_PATH: &str = "/sys/kernel/btf/vmlinux";
+
+/// Parse the running kernel's BTF ([`VMLINUX_PATH`]).
+pub fn host_vmlinux() -> Result<Btf, BtfError> {
+    let bytes = std::fs::read(VMLINUX_PATH).map_err(|e| bad(format!("{VMLINUX_PATH}: {e}")))?;
+    Btf::parse(&bytes)
+}
+
+/// Write the BTF id of each kfunc call's target (`FUNC` named
+/// [`KfuncRef::name`](crate::program::KfuncRef) in `target`) into its `CALL`
+/// immediate, as libbpf does for `__ksym` externs in vmlinux. The result
+/// is what `BPF_PROG_LOAD` takes (BTF object fd 0 = vmlinux).
+pub fn resolve_kfuncs(prog: &crate::Program, target: &Btf) -> Result<crate::Program, BtfError> {
+    let mut out = prog.clone();
+    for k in &prog.kfuncs {
+        let id = target
+            .func_id(&k.name)
+            .ok_or_else(|| bad(format!("kfunc {} is not in the target BTF", k.name)))?;
+        let slot = out
+            .insns
+            .get_mut(k.slot)
+            .ok_or_else(|| bad(format!("kfunc {} at missing slot {}", k.name, k.slot)))?;
+        if slot.code != 0x85 || slot.src != crate::insn::pseudo::KFUNC_CALL {
+            return Err(bad(format!("slot {} is not a kfunc call", k.slot)));
+        }
+        slot.imm = i32::try_from(id).map_err(|_| bad("BTF id out of range"))?;
+        slot.off = 0;
+    }
+    Ok(out)
+}
+
+/// A `.BTF.ext` / `BPF_PROG_LOAD` func_info record (`struct
+/// bpf_func_info`): the subprogram starting at instruction `insn_off` has
+/// BTF type `type_id` (a `FUNC`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FuncInfo {
+    pub insn_off: u32,
+    pub type_id: u32,
+}
+
+impl FuncInfo {
+    pub const REC_SIZE: u32 = 8;
+
+    pub fn bytes(infos: &[FuncInfo]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(infos.len() * 8);
+        for f in infos {
+            out.extend_from_slice(&f.insn_off.to_le_bytes());
+            out.extend_from_slice(&f.type_id.to_le_bytes());
+        }
+        out
+    }
+}
+
+/// Entry slots of every subprogram: 0, the targets of BPF-to-BPF calls and
+/// of `BPF_PSEUDO_FUNC` loads, sorted.
+pub fn subprog_starts(prog: &crate::Program) -> Vec<usize> {
+    use crate::insn::{class, pseudo};
+    let mut starts = vec![0usize];
+    let n = prog.insns.len() as i64;
+    for (pc, i) in prog.insns.iter().enumerate() {
+        let local_call = i.code == (class::JMP | 0x80) && i.src == pseudo::CALL;
+        let func_load = i.code == 0x18 && i.src == pseudo::FUNC;
+        if local_call || func_load {
+            let t = pc as i64 + 1 + i.imm as i64;
+            if (0..n).contains(&t) {
+                starts.push(t as usize);
+            }
+        }
+    }
+    starts.sort_unstable();
+    starts.dedup();
+    starts
+}
+
+fn c_identifier(s: &str) -> String {
+    let mut out: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect();
+    if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, '_');
+    }
+    out
+}
+
+/// The `FUNC` types of a program's subprograms: the main program is
+/// `int name(void *ctx)` (global), every other subprogram (BPF-to-BPF
+/// callee or `bpf_loop` callback) is `int name(u64 a1, void *a2)`
+/// (static, so the kernel verifies it in its caller's context). Returns
+/// the builder (to add more types, e.g. for maps) and one func_info record
+/// per subprogram.
+pub fn add_func_types(b: &mut BtfBuilder, prog: &crate::Program) -> Vec<FuncInfo> {
+    let int = b.int("int", 4, true);
+    let u64t = b.int("unsigned long long", 8, false);
+    let void_ptr = b.ptr(0);
+    let main_proto = b.func_proto(int, &[("ctx", void_ptr)]);
+    let sub_proto = b.func_proto(int, &[("a1", u64t), ("a2", void_ptr)]);
+    let mut infos = Vec::new();
+    for start in subprog_starts(prog) {
+        let named = prog
+            .functions
+            .iter()
+            .find(|(_, e)| *e == start)
+            .map(|(n, _)| n.clone());
+        let (name, proto, linkage) = if start == 0 {
+            (named.unwrap_or_else(|| prog.name.clone()), main_proto, FUNC_GLOBAL)
+        } else {
+            (
+                named.unwrap_or_else(|| format!("sub_{start}")),
+                sub_proto,
+                FUNC_STATIC,
+            )
+        };
+        let id = b.func(&c_identifier(&name), proto, linkage);
+        infos.push(FuncInfo {
+            insn_off: start as u32,
+            type_id: id,
+        });
+    }
+    infos
+}
+
+/// Program BTF for `BPF_PROG_LOAD` (`prog_btf_fd`) with func_info: the
+/// kernel requires it for programs that pass callbacks (`bpf_loop`).
+pub fn program_btf(prog: &crate::Program) -> (Vec<u8>, Vec<FuncInfo>) {
+    let mut b = BtfBuilder::new();
+    let infos = add_func_types(&mut b, prog);
+    (b.finish(), infos)
+}
+

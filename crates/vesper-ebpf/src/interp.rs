@@ -479,7 +479,21 @@ struct Frame {
     saved: [Value; 4],
     fp: Value,
     ret_pc: usize,
+    /// Set when the frame runs a `bpf_loop` callback.
+    lp: Option<LoopFrame>,
 }
+
+#[derive(Clone, Copy)]
+struct LoopFrame {
+    entry: usize,
+    i: u64,
+    n: u64,
+    arg: Value,
+}
+
+/// `BPF_MAX_LOOPS`.
+const BPF_MAX_LOOPS: u64 = 1 << 23;
+const E2BIG: u64 = 7;
 
 const HEADROOM: usize = 256;
 
@@ -606,6 +620,15 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                 Imm64::Value(v) => set!(dst, Value::scalar(v)),
                 // map "pointers" are tagged scalars: the map index
                 Imm64::MapFd(i) => set!(dst, Value::scalar(MAP_TAG | i as u32 as u64)),
+                // callback "pointers" are tagged scalars: the entry slot
+                Imm64::Pseudo {
+                    src: crate::insn::pseudo::FUNC,
+                    imm_lo,
+                    ..
+                } => set!(
+                    dst,
+                    Value::scalar(FUNC_TAG | (pc as i64 + 1 + imm_lo as i64) as u32 as u64)
+                ),
                 Imm64::Pseudo { .. } => break Err(InterpError::UnsupportedInsn { pc }),
             },
             Insn::Ldx {
@@ -738,12 +761,57 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                     saved: [regs[6], regs[7], regs[8], regs[9]],
                     fp: regs[10],
                     ret_pc: next,
+                    lp: None,
                 });
                 regs[10] = new_stack(env);
                 init[6..=9].fill(false);
                 init[0] = false;
                 pc = (pc as i64 + 1 + off as i64) as usize;
                 continue;
+            }
+            Insn::Call(CallTarget::Helper(h::LOOP)) => {
+                let n = get!(Reg::R1).v;
+                let cb = get!(Reg::R2);
+                let arg = get!(Reg::R3);
+                if cb.prov.is_some() || cb.v & !0xffff_ffff != FUNC_TAG {
+                    break Err(InterpError::BadHelperArg {
+                        pc,
+                        detail: "bpf_loop callback is not a function".into(),
+                    });
+                }
+                if n > BPF_MAX_LOOPS {
+                    set!(Reg::R0, Value::scalar(E2BIG.wrapping_neg()));
+                    init[1..=5].fill(false);
+                } else if n == 0 {
+                    set!(Reg::R0, Value::scalar(0));
+                    init[1..=5].fill(false);
+                } else {
+                    if frames.len() + 1 >= 8 {
+                        break Err(InterpError::CallDepth { pc });
+                    }
+                    let entry = (cb.v & 0xffff_ffff) as usize;
+                    frames.push(Frame {
+                        saved: [regs[6], regs[7], regs[8], regs[9]],
+                        fp: regs[10],
+                        ret_pc: next,
+                        lp: Some(LoopFrame { entry, i: 0, n, arg }),
+                    });
+                    regs[10] = new_stack(env);
+                    init.fill(false);
+                    init[10] = true;
+                    set!(Reg::R1, Value::scalar(0));
+                    set!(Reg::R2, arg);
+                    pc = entry;
+                    continue;
+                }
+            }
+            Insn::Call(CallTarget::Kfunc(_))
+                if prog.kfuncs.iter().any(|k| {
+                    k.slot == pc && crate::helpers::KFUNCS.contains(&k.name.as_str())
+                }) =>
+            {
+                // bpf_preempt_disable/enable: no observable effect here
+                init[0..=5].fill(false);
             }
             Insn::Call(CallTarget::Helper(id)) => {
                 let a: [Value; 5] = [regs[1], regs[2], regs[3], regs[4], regs[5]];
@@ -766,6 +834,33 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
             Insn::Exit => {
                 let r0 = get!(Reg::R0);
                 match frames.pop() {
+                    Some(mut f) if f.lp.is_some() => {
+                        let mut lp = f.lp.expect("loop frame");
+                        if let Some(p) = regs[10].prov {
+                            env.regions[p as usize].live = false;
+                        }
+                        if r0.v != 0 || lp.i + 1 == lp.n {
+                            regs[6..=9].copy_from_slice(&f.saved);
+                            init.fill(false);
+                            init[6..=9].fill(true);
+                            init[10] = true;
+                            regs[10] = f.fp;
+                            let done = if r0.v != 0 { lp.i + 1 } else { lp.n };
+                            set!(Reg::R0, Value::scalar(done));
+                            pc = f.ret_pc;
+                        } else {
+                            lp.i += 1;
+                            f.lp = Some(lp);
+                            frames.push(f);
+                            regs[10] = new_stack(env);
+                            init.fill(false);
+                            init[10] = true;
+                            set!(Reg::R1, Value::scalar(lp.i));
+                            set!(Reg::R2, lp.arg);
+                            pc = lp.entry;
+                        }
+                        continue;
+                    }
                     Some(f) => {
                         if let Some(p) = regs[10].prov {
                             env.regions[p as usize].live = false;
@@ -805,6 +900,7 @@ const BPF_NOEXIST: u64 = 1;
 const BPF_EXIST: u64 = 2;
 
 const MAP_TAG: u64 = 0xbbf0_0000_0000_0000;
+const FUNC_TAG: u64 = 0xbbf1_0000_0000_0000;
 
 fn resolve(
     env: &XdpEnv,
@@ -1115,6 +1211,16 @@ fn call_helper(
             held.remove(pos);
             env.regions[r as usize].live = false;
             Ok(Value::scalar(0))
+        }
+        h::TAIL_CALL => {
+            let m = map_of(env, pc, a[1])?;
+            match &env.maps[m] {
+                // the interpreter installs no programs: every slot is empty
+                // and the call falls through, as the kernel's does for an
+                // empty slot
+                MapState::Kv { def, .. } if def.kind == MapKind::ProgArray => Ok(Value::scalar(0)),
+                _ => Err(bad("bpf_tail_call needs a program array")),
+            }
         }
         _ => Err(bad("unsupported helper")),
     }

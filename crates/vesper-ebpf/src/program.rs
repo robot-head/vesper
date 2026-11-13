@@ -485,6 +485,28 @@ impl Asm {
         Ok(self)
     }
 
+    /// `dst = *(size *)(src + <CO-RE field offset>)`: a load whose offset
+    /// is the byte offset of a field (`spec` of kind
+    /// [`FieldByteOffset`](crate::core::CoreKind::FieldByteOffset)),
+    /// relocated for the target kernel.
+    pub fn core_ldx(
+        &mut self,
+        size: Size,
+        dst: Reg,
+        src: Reg,
+        spec: crate::core::CoreSpec,
+    ) -> Result<&mut Self, crate::core::CoreError> {
+        let slot = self.slots.len();
+        let v = spec.local_value()?;
+        let off = i16::try_from(v).map_err(|_| crate::core::CoreError::BadInstruction {
+            slot,
+            detail: format!("local offset {v} does not fit 16 bits"),
+        })?;
+        self.ldx(size, dst, src, off);
+        self.core_relos.push(crate::core::CoreRelo { slot, spec });
+        Ok(self)
+    }
+
     /// Record a source position for the next instruction (`.BTF.ext`
     /// line info).
     pub fn line(&mut self, file: &str, line: u32, col: u32, text: &str) -> &mut Self {

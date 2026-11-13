@@ -21,7 +21,7 @@ const BPF_PROG_LOAD: libc::c_long = 5;
 const BPF_PROG_TEST_RUN: libc::c_long = 10;
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
 const BPF_BTF_LOAD: libc::c_long = 18;
-const ATTR_SIZE: usize = 128;
+const ATTR_SIZE: usize = 144;
 const LOG_SIZE: usize = 1 << 22;
 
 /// An owned kernel file descriptor (map or program).
@@ -161,13 +161,35 @@ pub fn relocate(prog: &Program, fds: &[i32]) -> Result<Vec<RawInsn>, LoadError> 
     Ok(insns)
 }
 
-/// Create the program's maps and load it as an XDP program.
+/// Create the program's maps, apply CO-RE relocations and kfunc ids
+/// ([`prepare`]) and load the program.
 pub fn load(prog: &Program) -> Result<Loaded, LoadError> {
     probe()?;
     load_unprobed(prog)
 }
 
+/// The host kernel's parsed BTF, read once.
+fn vmlinux() -> Result<&'static crate::btf::Btf, LoadError> {
+    static BTF: std::sync::OnceLock<Result<crate::btf::Btf, String>> = std::sync::OnceLock::new();
+    BTF.get_or_init(|| crate::btf::host_vmlinux().map_err(|e| e.to_string()))
+        .as_ref()
+        .map_err(|e| LoadError::Invalid(e.clone()))
+}
+
+/// What a loader does before `BPF_PROG_LOAD`: CO-RE relocations and kfunc
+/// BTF ids against the running kernel's BTF.
+pub fn prepare(prog: &Program) -> Result<Program, LoadError> {
+    if prog.core_relos.is_empty() && prog.kfuncs.is_empty() {
+        return Ok(prog.clone());
+    }
+    let btf = vmlinux()?;
+    let p = crate::core::apply(prog, btf).map_err(|e| LoadError::Invalid(e.to_string()))?;
+    crate::btf::resolve_kfuncs(&p, btf).map_err(|e| LoadError::Invalid(e.to_string()))
+}
+
 fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
+    let prepared = prepare(prog)?;
+    let prog = &prepared;
     let mut maps = Vec::new();
     for def in &prog.maps {
         maps.push(create_map(def)?);
@@ -178,6 +200,16 @@ fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
     let mut license = prog.license.clone().into_bytes();
     license.push(0);
     let insn_cnt = u32::try_from(insns.len()).map_err(|_| LoadError::Invalid("too long".into()))?;
+    // Programs that pass callbacks need program BTF with func_info.
+    let has_callbacks = insns
+        .iter()
+        .any(|i| i.code == 0x18 && i.src == pseudo::FUNC);
+    let (btf_fd, func_info) = if has_callbacks {
+        let (btf, infos) = crate::btf::program_btf(prog);
+        (Some(load_btf(&btf)?), crate::btf::FuncInfo::bytes(&infos))
+    } else {
+        (None, Vec::new())
+    };
     let name: String = prog
         .name
         .chars()
@@ -199,6 +231,12 @@ fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
             put_u64(&mut a, 32, log.as_mut_ptr() as u64);
         }
         put_name(&mut a, 48, &name)?;
+        if let Some(fd) = &btf_fd {
+            put_u32(&mut a, 72, fd.raw() as u32);
+            put_u32(&mut a, 76, crate::btf::FuncInfo::REC_SIZE);
+            put_u64(&mut a, 80, func_info.as_ptr() as u64);
+            put_u32(&mut a, 88, (func_info.len() / 8) as u32);
+        }
         Ok(bpf(BPF_PROG_LOAD, &mut a))
     };
     match attempt(None)? {
