@@ -27,6 +27,27 @@ const KEY_THEOREMS: [&str; 12] = [
     "txn_across_abort_rejected",
 ];
 
+/// Resolve an elan proxy to the pinned toolchain's real binary from the
+/// checkout (which holds `lean-toolchain`), as `tests/proof_audit_cli.rs` does.
+fn resolve_lean(lean: String) -> String {
+    let Ok(output) = std::process::Command::new(&lean)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .arg("--print-prefix")
+        .output()
+    else {
+        return lean;
+    };
+    let prefix = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    let binary = PathBuf::from(prefix)
+        .join("bin")
+        .join(format!("lean{}", std::env::consts::EXE_SUFFIX));
+    if output.status.success() && binary.is_file() {
+        binary.to_string_lossy().into_owned()
+    } else {
+        lean
+    }
+}
+
 fn model() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lean/MetatheoryFull.lean")
 }
@@ -151,9 +172,12 @@ fn metatheory_compiles_with_only_standard_axioms() {
     let _cleanup = Cleanup(dir.clone());
     std::fs::write(dir.join("MetatheoryFull.lean"), &source).expect("copy model");
 
+    let lean = resolve_lean(lean);
+    // Run from the checkout so an unresolved elan proxy still finds
+    // `lean-toolchain`; the source itself is the private copy.
     let out = std::process::Command::new(&lean)
-        .current_dir(&dir)
-        .arg("MetatheoryFull.lean")
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .arg(dir.join("MetatheoryFull.lean"))
         .output()
         .expect("spawn Lean");
     let stdout = String::from_utf8(out.stdout).expect("UTF-8 report");

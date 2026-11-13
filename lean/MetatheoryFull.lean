@@ -170,10 +170,10 @@ inductive ArithOp : Type where
 
 def u64Bound : Nat := 2 ^ 64
 
-/-- `vesper.arith.checked/1` on u64: exact result in range, otherwise abort. -/
+/-- `vesper.arith.checked/1` on u64: exact result in range (operands and result), otherwise abort. -/
 def ArithOp.eval : ArithOp → Nat → Nat → Option Nat
   | .add, a, b => if a + b < u64Bound then some (a + b) else none
-  | .sub, a, b => if b ≤ a then some (a - b) else none
+  | .sub, a, b => if b ≤ a ∧ a - b < u64Bound then some (a - b) else none
   | .mul, a, b => if a * b < u64Bound then some (a * b) else none
 
 /-- Values are a syntactic subset (`IsVal`). Operands of primitives are atoms
@@ -1940,7 +1940,7 @@ end Exhaustion
 /-! ## Checked arithmetic -/
 
 theorem ArithOp.eval_some {op : ArithOp} {a b c : Nat} (h : op.eval a b = some c) :
-    (op = .add ∧ c = a + b ∧ c < u64Bound) ∨ (op = .sub ∧ b ≤ a ∧ c = a - b) ∨
+    (op = .add ∧ c = a + b ∧ c < u64Bound) ∨ (op = .sub ∧ b ≤ a ∧ c = a - b ∧ c < u64Bound) ∨
       (op = .mul ∧ c = a * b ∧ c < u64Bound) := by
   cases op <;> simp only [ArithOp.eval] at h <;> split at h <;> simp_all
 
