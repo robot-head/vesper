@@ -14,7 +14,7 @@ dependent source changes.
 | Lean model/driver, child pending | new `lean/ArithmeticOracle.lean`; `docs/rfcs/oracle42-model-report.md` |
 | Corpus, child pending | new `src/bin/arithmetic_oracle42/corpus.rs`; `tests/oracle42_corpus.rs`; corpus report |
 | Runner, child pending | new `src/bin/arithmetic_oracle42/{mod,protocol,process,worker}.rs`; `tests/oracle42_runner.rs`; runner report |
-| Independent acceptance, child pending | new `tests/oracle42_acceptance.rs`; acceptance report |
+| Independent acceptance, child pending | new `tests/oracle42_acceptance.rs`; new `src/bin/arithmetic_oracle42/fault_peer.rs`; acceptance report |
 
 Reports other than the model report are
 `docs/rfcs/oracle42-{corpus,runner,acceptance,integration}-report.md`.
@@ -701,9 +701,13 @@ authority is always the real Lean response. Heavy100000 run is explicit and
 reported separately; it is not silently substituted into routine default CI.
 
 Root coordinator alone chooses/executes package/Cargo/Bazel/Lean checks under
-explicit build leases. Existing model-CI script must compile the new static
-model/driver via `lean -o` if coverage is claimed; it must not execute the
-long-lived IO server in the model-CI compile loop. New oracle tests get narrow measured BUILD
+explicit build leases. Existing script's ordinary per-file checks do not emit
+oleans, so the coordinator's narrow dependency block uses a fresh mktemp root
+with trap cleanup, `lean -o tmp/RewriteWitness.olean lean/RewriteWitness.lean`,
+then explicit `LEAN_PATH=tmp` plus known compiler libraries and
+`lean -o tmp/ArithmeticOracle.olean lean/ArithmeticOracle.lean`, preserving all
+old model checks. It must not execute the long-lived IO server in the model-CI
+compile loop. New oracle tests get narrow measured BUILD
 timeouts, initially long900s for acceptance, no platform skips; actual hard
 target enforcement is not a worst-case workload completion promise. Current
 planning probes (32programs/160CLI commands and3persistent Lean frames) prove
@@ -711,11 +715,74 @@ feasibility only: they do not establish this contract's128/full8-way matrix or
 100000-program run. Reports distinguish authored checks, coordinator execution,
 and measured results precisely.
 
-Draft review point still requiring coordinator decision before freeze: portable
-hostile-peer process fixtures/test seams for deterministic worker response,
-BYE, stalls/stderr floods, and cleanup injection. The independent acceptance
-lane cannot inject private session internals using only run()/decode_answer().
-Choose a bounded runner-owned test transport/private binary peer mode or divide
-internal negative tests explicitly; do not claim cross-platform fake-shell
-process evidence as portable acceptance. A fake peer must never supply a
-positive reference result or replace the actual Lean completion matrix.
+## Portable transport-only fault probes
+
+The independent acceptance lane owns `fault_peer.rs`, compiled in debug and
+release builds of this developer-only oracle binary so actual release-profile
+integration tests use the same genuine executable. The coordinator's thin
+binary privately dispatches exclusive `--fault-peer MODE` to it. It never
+enters normal run(), supplies numeric oracle answers, or emits a RunReport.
+Allowed modes: malformed, oversize, truncated_header, truncated_payload, stall,
+stderr_flood, reordered, bad_bye, short_writes, crash. Short_writes exchanges only a fixed transport marker; it is
+not a language value or an oracle success response. No arbitrary script/Lean
+replacement is used as positive evidence.
+
+Runner-owned `#[cfg(test)] process::testing` provides a bounded probe API using
+the SAME production framing, concurrent readers/writer, ready/answer/BYE
+parsers, OS deadlines, and kill/reap/thread-join cleanup. It does not implement
+a second transport that could pass while the real runner fails. Its exact
+DTO/signatures are:
+
+```rust
+// All types Debug + Clone; enum also Copy + Eq + PartialEq.
+pub enum ProbeKind {
+    Malformed, Oversize, TruncatedHeader, TruncatedPayload, Stall,
+    StderrFlood, Reordered, BadBye, ShortWrites, Crash,
+}
+pub struct ProbeLimits {
+    pub frame_bytes: usize, pub stderr_bytes: usize,
+    pub timeout_ms: u64, pub shutdown_timeout_ms: u64,
+}
+pub struct TransportProbeReport {
+    pub kind: ProbeKind, pub observed: Option<FailureKind>,
+    pub child_reaped: bool, pub reader_joined: bool, pub writer_joined: bool,
+    pub stderr_joined: bool, pub max_frame_bytes: usize, pub stderr_bytes: usize,
+}
+pub fn probe(command: std::process::Command, kind: ProbeKind, limits: ProbeLimits)
+    -> Result<TransportProbeReport, HarnessError>;
+
+// Independent fault_peer.rs, registered by coordinator's thin binary:
+pub fn run(mode: &str) -> Result<(), crate::oracle::HarnessError>;
+```
+
+Probe limits are positive and respectively <=65536 bytes,65536 bytes,120000ms,
+5000ms. Report max_frame_bytes and stderr_bytes are retained bytes, <=local
+caps; an overflow fault is detected even when excess bytes are not retained.
+`observed=None` only for the fixed-marker ShortWrites roundtrip; otherwise the
+failure classification comes from actual production parsing/process control,
+not a lookup of the requested kind. Tests assert expected failure separately.
+Actual wait/reap and pipe thread joins determine the booleans; they are not
+inferred from sending a kill request.
+
+Exact peer behavior: malformed sends a frame containing b"["; oversize sends
+header65537 without payload; truncated_header sends only2 header bytes;
+truncated_payload sends length5 then b"[" and EOF; stall parks without output;
+stderr_flood writes65537 bytes then parks; reordered emits a framed
+invalid_request response with id1 while the probe expects0 (no numeric value);
+bad_bye emits BYE with seen1 and all other counters0 when production expected
+all0; crash exits23. Short_writes sends only b"oracle42-transport-marker" as a
+frame, flushing each header/payload byte individually; the production frame
+reader compares that fixed marker without invoking semantic answer parsing.
+Production ready parsing is also directly covered by runner tests and the real
+Lean handshake; malformed/protocol sequences must not be converted to a marker.
+Unit short-read/write adapters additionally force short operations because OS
+pipes may coalesce individual writes. A fault peer cannot choose arbitrary
+payloads or supply a valid language value. The probe chooses the corresponding
+production parse operation (answer/terminal/frame) and expected sequence/counter.
+
+The probe takes an explicit Command, bounded caps and a closed plan,
+returns only TransportProbeReport, and cannot bypass run()'s actual tool
+version/source checks or produce a RunReport. Integration tests launch the
+genuine CARGO_BIN_EXE binary with its private peer mode. Verify actual process
+reaping and bounded buffers, not a mocked boolean or only error text. No
+cross-platform claim relies on a shell fake executable.
