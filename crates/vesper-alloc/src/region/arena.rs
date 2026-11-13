@@ -232,10 +232,14 @@ fn successor(current: u64) -> Option<u64> {
 }
 
 fn mint_id(counter: &AtomicU64) -> Result<ArenaId, ArenaError> {
-    counter
-        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, successor)
-        .map(ArenaId)
-        .map_err(|_| ArenaError::ExhaustedArenaIds)
+    let mut current = counter.load(Ordering::Relaxed);
+    loop {
+        let next = successor(current).ok_or(ArenaError::ExhaustedArenaIds)?;
+        match counter.compare_exchange_weak(current, next, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return Ok(ArenaId(current)),
+            Err(found) => current = found,
+        }
+    }
 }
 
 fn prospective_generation(current: u64) -> Result<(u64, u64), ArenaError> {
@@ -316,6 +320,17 @@ impl<B: ChunkBacking> Region<B> {
         }
         let count = request_entries::<T>(items)?;
         let id = mint_id(&NEXT_ARENA_ID)?;
+        self.arena_allocate_validated(count, id)
+    }
+
+    // Keep complete Entry<T> temporaries out of the layout-validation frame.
+    // Only the checked constructor calls this helper for a <=64KiB entry type.
+    #[inline(never)]
+    fn arena_allocate_validated<T>(
+        &mut self,
+        count: usize,
+        id: ArenaId,
+    ) -> Result<RegionSlotArena<T>, ArenaError> {
         let mut entries = self.vec_with_capacity(count)?;
         // A fresh checked buffer has capacity >=1; this push cannot allocate
         // or run payload code, and the complete entry type is already bounded.
@@ -502,5 +517,87 @@ impl<B: ChunkBacking> Region<B> {
             },
             error: error.error,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::RegionConfig;
+
+    #[test]
+    fn local_identity_and_generation_successors_exhaust_without_wrapping() {
+        let counter = AtomicU64::new(u64::MAX - 1);
+        assert_eq!(mint_id(&counter).unwrap().bits(), u64::MAX - 1);
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(mint_id(&counter), Err(ArenaError::ExhaustedArenaIds));
+        assert_eq!(counter.load(Ordering::Relaxed), u64::MAX);
+        assert_eq!(
+            prospective_generation(u64::MAX - 1),
+            Ok((u64::MAX - 1, u64::MAX))
+        );
+        assert_eq!(
+            prospective_generation(u64::MAX),
+            Err(ArenaError::ExhaustedGenerations)
+        );
+    }
+
+    #[test]
+    fn exhausted_local_arena_preserves_input_and_keeps_existing_values_usable() {
+        let mut region = Region::new(RegionConfig::default()).unwrap();
+        let mut owner = region.arena_with_capacity::<String>(2).unwrap();
+        let first = region
+            .arena_insert(&mut owner, String::from("first"))
+            .unwrap();
+        header_mut(region.vec_as_mut_slice(&owner.entries).unwrap()).next_generation = u64::MAX - 1;
+        let last = region
+            .arena_insert(&mut owner, String::from("last"))
+            .unwrap();
+        assert_eq!(last.generation(), u64::MAX - 1);
+        let rejected = String::from("original allocation");
+        let original = rejected.as_ptr();
+        let stats = region.stats();
+        let error = region.arena_insert(&mut owner, rejected).unwrap_err();
+        assert_eq!(error.error, ArenaError::ExhaustedGenerations);
+        assert_eq!(error.value.as_ptr(), original);
+        assert_eq!(region.stats(), stats);
+        let (a, b) = region.arena_get_disjoint_mut(&owner, first, last).unwrap();
+        a.push_str(" updated");
+        b.push_str(" updated");
+        assert_eq!(
+            region.arena_remove(&mut owner, first).unwrap(),
+            "first updated"
+        );
+        region.arena_reserve(&mut owner, 0).unwrap();
+        assert_eq!(region.arena_get(&owner, last).unwrap(), "last updated");
+        assert_eq!(region.arena_len(&owner).unwrap(), 1);
+        region.arena_release(owner).unwrap();
+    }
+
+    #[test]
+    fn private_malformed_slot_and_generation_are_checked_without_public_forge_api() {
+        let mut region = Region::new(RegionConfig::default()).unwrap();
+        let mut owner = region.arena_new::<String>().unwrap();
+        let key = region
+            .arena_insert(&mut owner, String::from("value"))
+            .unwrap();
+        let outside = ArenaKey {
+            slot: u32::MAX,
+            ..key
+        };
+        assert_eq!(region.arena_get(&owner, outside), Err(ArenaError::StaleKey));
+        let wrong_generation = ArenaKey {
+            generation: u64::MAX,
+            ..key
+        };
+        assert_eq!(
+            region.arena_get(&owner, wrong_generation),
+            Err(ArenaError::StaleKey)
+        );
+        assert_eq!(
+            region.arena_get_disjoint_mut(&owner, key, wrong_generation),
+            Err(ArenaError::StaleKey)
+        );
+        assert_eq!(region.arena_get(&owner, key).unwrap(), "value");
     }
 }
