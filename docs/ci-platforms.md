@@ -8,7 +8,7 @@ lane builds and tests through Bazel; see [bazel.md](bazel.md).
 | --- | --- | --- |
 | `Test all targets` (Linux x86_64) | BuildBuddy Workflows, remote execution for builds | rustfmt, Clippy, workspace tests, Lean |
 | `Native and acceptance scripts` (Linux x86_64) | BuildBuddy Workflows | AArch64 objects under QEMU, host native executables, acceptance scripts |
-| macOS (AArch64) | `macos-latest` (Apple silicon) | rustfmt, Clippy, workspace tests, Lean, host native executables, acceptance scripts |
+| macOS (AArch64) | `macos-latest` (Apple silicon) | rustfmt, Clippy, workspace tests, Lean, host native executables, acceptance scripts (minus the [Linux-only suites](#linux-only-suites)) |
 | Windows (x86_64 MSVC) | `windows-latest` | Cargo (Bazel cannot link MSVC on Windows yet): Clippy, workspace tests, Lean models; native executable linking skipped |
 
 The platform lanes check out sources with `core.autocrlf=false` so that span and
@@ -51,6 +51,35 @@ All handoff libraries and `experiments/native-pulse` are registered in both root
 | `vesper-ignis` | GPU-independent planner only. D3D12 acceptance still needs Windows hardware and a real executor. |
 
 The integration checkpoint was validated on Linux. These platform jobs configure additional acceptance checks; their presence does not establish a passing macOS/Windows run or hardware validation. Wasmtime 50 and the compiler currently use separate Cranelift versions, so clean workspace builds need more memory and disk than the earlier compiler-only workspace.
+
+## Linux-only suites
+
+macOS runners are the slowest and scarcest part of CI, so a few long suites
+whose subject does not depend on the host OS run on Linux (BuildBuddy) only.
+Each one is still built everywhere, and the tests that exercise the same code
+paths on every OS (process spawning, file system, paths) keep running there.
+
+| Suite | Why it is platform-neutral | macOS | Windows |
+| --- | --- | --- | --- |
+| `//:test/lean4lean42_acceptance` | Lean kernel replay of both model import closures through the external checker (~15 min on macOS) | Skipped (`BUILD.bazel`) | Ignored (`cfg_attr`) |
+| `//:test/proof_audit_cli` | Six serial kernel replays of Lean's Std (>15 min on macOS) | Skipped (`BUILD.bazel`) | Runs |
+| `scripts/test-format-proof.sh` | Serial Lean witness replay (~3.5 min on macOS) | Not run | Runs against the Cargo binary |
+
+Because nothing else uses it, the macOS and Windows lanes also no longer
+prepare the pinned external Lean4Lean checker (`VESPER_LEAN4LEAN42_ROOT`),
+which took about 6 minutes on macOS. Add a suite here only when it is long,
+its result cannot differ by OS, and Linux CI runs it. Keep platform-sensitive
+tests (fibers, MPK, ABI, codegen, file system, networking) on every lane.
+
+Other CI time savers:
+
+- The acceptance scripts look executables up in a file written by
+  `scripts/ci/prebuild-acceptance.sh` (`VESPER_BAZEL_EXECUTABLES`, see
+  `scripts/bazel-lib.sh`) instead of running `bazel build` and `bazel cquery`
+  for each of about forty executables.
+- Pushes to main share one concurrency group: a newer merge replaces a run
+  that is still waiting, instead of each merge holding a macOS runner.
+- The Windows Cargo cache is saved from main only; PRs restore it.
 
 ## Required checks
 

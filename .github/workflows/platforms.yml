@@ -15,20 +15,24 @@ on:
   merge_group:
 
 # PR runs share one group per PR (refs/pull/N/merge), so a newer push cancels
-# the older run. Every other run (pushes to main and merge queue groups) gets
-# its own group keyed by run id: a shared group would replace a pending run
-# with a newer one, so a burst of merges could leave a commit with no CI
-# result, and a queued group would never report its required checks. The
-# queue cancels runs for groups it drops by itself.
+# the older run. Pushes to main share one group without cancelling: the run in
+# progress finishes, and a newer push replaces any run still waiting. A burst
+# of merges therefore tests the first and the last commit instead of holding
+# one scarce macOS runner per merge (they are the CI bottleneck), and every
+# commit on main is still covered by the PR run that merged it. Merge queue
+# groups keep their own group keyed by run id, because a queued group must
+# report its required checks; the queue cancels groups it drops by itself.
 concurrency:
-  group: platforms-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
-  cancel-in-progress: true
+  group: platforms-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # Per-platform lanes build and test every workspace member on the host OS.
   # Platform-specific code is gated with cfg in the crates themselves (for
   # example, Pulse's io_uring driver is Linux-only), so these lanes check that
-  # the portable surface really is portable. See docs/ci-platforms.md.
+  # the portable surface really is portable. Long, platform-neutral Lean
+  # replays run on Linux (BuildBuddy) only; see "Linux-only suites" in
+  # docs/ci-platforms.md.
   platform:
     name: ${{ matrix.name }}
     strategy:
@@ -70,19 +74,25 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Prepare the pinned external Lean4Lean checker
-        run: |
-          export VESPER_LEAN4LEAN42_ROOT="$RUNNER_TEMP/vesper-lean4lean42"
-          echo "VESPER_LEAN4LEAN42_ROOT=$VESPER_LEAN4LEAN42_ROOT" >> "$GITHUB_ENV"
-          scripts/ci/prepare-lean4lean42.sh "$VESPER_LEAN4LEAN42_ROOT"
-      - run: bazel test //...
+      # No external Lean4Lean checker here: its only user,
+      # //:test/lean4lean42_acceptance, runs on Linux only (BUILD.bazel).
+      # `short` lists every test with its time, to keep the slow ones visible.
+      - run: bazel test --test_summary=short //...
       - run: scripts/ci/check-lean-models.sh
+      # One Bazel invocation for every executable the scripts below run,
+      # instead of a build and a cquery (~20 s here) per executable.
+      - name: Prebuild the acceptance executables
+        run: |
+          scripts/ci/prebuild-acceptance.sh "$RUNNER_TEMP/bazel-executables"
+          echo "VESPER_BAZEL_EXECUTABLES=$RUNNER_TEMP/bazel-executables" >> "$GITHUB_ENV"
       # On Apple silicon the host is real AArch64 hardware, so native code
       # runs here rather than under QEMU. The native executable driver does
       # not yet support linking with MSVC.
       - name: Validate host native executables
         if: runner.os != 'Windows'
         run: scripts/test-native-host.sh
+      # test-format-proof.sh (a serial Lean witness replay, over three
+      # minutes here) runs on Linux and against the Windows Cargo binary.
       - name: Run the acceptance scripts
         run: |
           scripts/test-canonical-protocols.sh
@@ -92,7 +102,6 @@ jobs:
           scripts/test-recovery.sh
           scripts/test-source-tooling.sh
           scripts/test-source-macros.sh
-          scripts/test-format-proof.sh
           scripts/test-macro-preview.sh
           scripts/test-source-macro-parameters.sh
           scripts/test-source-macro-tuples.sh
@@ -117,7 +126,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # Only main saves the cache; PRs restore it. Each save took about two
+      # minutes, and PR caches pushed main's out of the 10 GB repository limit.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install Lean toolchain manager
         shell: pwsh
         run: |
@@ -129,18 +142,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Build the external-check driver
-        run: cargo build -p vesper --locked --bin lean4lean42
-      - name: Prepare the pinned external Lean4Lean checker
-        run: |
-          export VESPER_LEAN4LEAN42_ROOT="$RUNNER_TEMP/vesper-lean4lean42"
-          echo "VESPER_LEAN4LEAN42_ROOT=$VESPER_LEAN4LEAN42_ROOT" >> "$GITHUB_ENV"
-          python tools/lean4lean42/setup.py \
-            --directory "$VESPER_LEAN4LEAN42_ROOT" \
-            --driver "$PWD/target/debug/lean4lean42.exe" \
-            --lean "$(elan which lean)" \
-            --lake "$(elan which lake)" \
-            --git git
+      # No external Lean4Lean checker: tests/lean4lean42_acceptance.rs, its
+      # only user, is ignored on Windows and runs on Linux.
       - run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - run: cargo test --workspace --locked
         env:

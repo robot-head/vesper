@@ -1241,6 +1241,12 @@ fn binding_refusals(root: &Path, receipt: &Value) {
 }
 
 #[test]
+// Platform-neutral Lean replay; CI runs it on Linux only (docs/ci-platforms.md),
+// and macOS skips it in BUILD.bazel. `cargo test -- --ignored` still runs it.
+#[cfg_attr(
+    windows,
+    ignore = "long platform-neutral Lean replay; runs on Linux CI (docs/ci-platforms.md)"
+)]
 fn genuine_both_model_replay_and_independent_refusal_matrix() {
     let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
     let started = Instant::now();

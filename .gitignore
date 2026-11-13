@@ -8,3 +8,4 @@ __pycache__/
 # change Cargo.lock constantly. Bazel regenerates it locally.
 /MODULE.bazel.lock
 /.ci-lean-path
+/.ci-bazel-executables

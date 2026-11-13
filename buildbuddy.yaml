@@ -47,11 +47,16 @@ actions:
           - "*"
     env:
       BAZEL_FLAGS: "--config=ci --config=rbe_build"
+      # Written by the prebuild step below; scripts/bazel-lib.sh reads it.
+      VESPER_BAZEL_EXECUTABLES: ".ci-bazel-executables"
     steps:
       - run: |
           sudo apt-get update
           sudo apt-get install -y python-is-python3 qemu-user binutils-aarch64-linux-gnu
       - run: "scripts/ci/install-lean.sh"
+      # One Bazel build for every executable the scripts run, instead of a
+      # build and a cquery per executable.
+      - run: "scripts/ci/prebuild-acceptance.sh .ci-bazel-executables"
       - run: |
           python scripts/check-specification-snapshot.py
           python -m unittest discover -s scripts/tests -p test_specification_snapshot.py
