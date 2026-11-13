@@ -778,7 +778,6 @@ enum FrameEvent {
 }
 enum InputEvent {
     Bytes(Vec<u8>, bool),
-    Close,
 }
 fn read_frame(input: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     let mut header = [0; 4];
@@ -947,22 +946,17 @@ impl LeanSession {
         let (outgoing, writes) = mpsc::sync_channel(1);
         let writer_fault = fault.clone();
         let writer = thread::spawn(move || {
-            while let Ok(event) = writes.recv() {
-                match event {
-                    InputEvent::Close => break,
-                    InputEvent::Bytes(bytes, fragmented) => {
-                        let result = if fragmented {
-                            bytes.iter().try_for_each(|byte| {
-                                input.write_all(&[*byte]).and_then(|()| input.flush())
-                            })
-                        } else {
-                            input.write_all(&bytes).and_then(|()| input.flush())
-                        };
-                        if result.is_err() {
-                            writer_fault.store(true, Ordering::Relaxed);
-                            break;
-                        }
-                    }
+            while let Ok(InputEvent::Bytes(bytes, fragmented)) = writes.recv() {
+                let result = if fragmented {
+                    bytes
+                        .iter()
+                        .try_for_each(|byte| input.write_all(&[*byte]).and_then(|()| input.flush()))
+                } else {
+                    input.write_all(&bytes).and_then(|()| input.flush())
+                };
+                if result.is_err() {
+                    writer_fault.store(true, Ordering::Relaxed);
+                    break;
                 }
             }
         });
@@ -1057,11 +1051,9 @@ impl LeanSession {
         self.payload(independent, fragmented)
     }
     fn close_input(&mut self) {
-        if let Some(input) = self.outgoing.take() {
-            input
-                .try_send(InputEvent::Close)
-                .unwrap_or_else(|_| panic!("close after one completed request"));
-        }
+        // Disconnection drains the one queued frame before the writer closes
+        // stdin, including intentionally fragmented/truncated fatal probes.
+        self.outgoing.take();
     }
     fn wait(&mut self) -> ExitStatus {
         let deadline = Instant::now() + Duration::from_secs(5);
