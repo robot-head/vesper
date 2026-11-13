@@ -20,9 +20,9 @@ No substitute API, guest identity, manufactured CheckedSource or fake executable
 was used. Changes stay in lower.rs and the new forge_tuples tests/report, leaving
 external158 workflows, build files and test wrappers untouched.
 
-## Validation and remaining integration dependency
+## Local validation and final integration
 
-On Linux/Rust1.99.1:
+The initial lane checks on Linux/Rust1.99.1 passed:
 
 - Existing root library, authority, lowering and parameter suites passed70tests
   in4suites with zero ignored. This includes real parameter/header protections
@@ -37,18 +37,25 @@ On Linux/Rust1.99.1:
 - Strict targeted Clippy for the root library and old/new compiler tests,
   workspace formatting and whitespace checks passed.
 
-The complete new target currently has3passing and8failing tests, none ignored.
-All eight end-to-end cases reach the existing frontend admission refusal:
-`inferred tuple aggregate construction is unsupported before checking`, with the
-actual expanded diagnostic candidate attached. The lowerer's tuple output is
-therefore not yet an accepted compiler artifact. Those tests remain strict for
-current helper-body authority drift, caller origin, actual linear tuple errors,
-field typing, repeated provenance, arity and whole-output bounds.
+At the initial lane checkpoint, the complete new target had3passing and8failing
+end-to-end tests, none ignored. All eight failures reached the existing frontend
+admission refusal, `inferred tuple aggregate construction is unsupported before
+checking`, with the actual expanded diagnostic candidate attached. The
+coordinator was notified immediately; those tests were kept strict rather than
+bypassing the guard. Admission required a separately claimed bounded pre-checker
+growth envelope preserving refusal of exponential inferred types, such as
+25repeated `let x=(x,x)` assignments.
 
-The coordinator was notified immediately. Frontend admission is outside this
-lane's ownership and must retain protection against exponential inferred types,
-such as25repeated `let x=(x,x)` assignments. Removing that refusal without a
-bounded pre-checker growth envelope would be unsafe. This lane did not weaken or
-bypass it. Full actual compiler/CLI/stdio validation must run after the separately
-claimed safe admission change; native hosted and executable acceptance remain
-root/#170/#158 responsibilities.
+The coordinator's final root integration at2d32fb8 includes that bounded
+frontend admission and the subsequent closed-header/annotation safeguards. The
+coordinator reports132passing tests in12integrated suites, including all11tests
+in forge_tuples and all6tuple CLI tests. The formerly blocked cases now exercise
+actual compiler acceptance/refusal for helper-body authority drift, caller
+origin, linear tuple errors, field typing, repeated provenance, arity and output
+bounds. Strict whole-workspace checks also passed.
+
+These final results are attributed to the coordinator's actual root integration;
+this report update did not run another build or write any build cache. The early
+admission refusal is historical evidence, not a remaining integration blocker.
+Native hosted and executable acceptance details remain in the coordinator/#170/
+#158 reports; this lane does not infer hosted results from local Linux checks.
