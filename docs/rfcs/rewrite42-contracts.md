@@ -508,7 +508,22 @@ may become Barrier. Limit/allocation/invalid-limit errors are never Barrier,
 even during initial admission. This distinction prevents resource refusal from
 silently retrying child rewrites. There is no silent
 unchecked fallback, post-error partially installed candidate or success flag
-without exact input/output comparison. Existing optimizer callers remain valid.
+without exact input/output comparison. Existing optimizer callers remain valid. Coordinator defines this private
+installation seam and uses it from actual traversal (private adversarial tests
+may invoke it; it grants no public authority):
+
+```rust
+fn install_proposal(
+    expression: &mut Expr, types: &TypeMap,
+    proposal: certificate::RewriteProposal,
+) -> Result<(), witness::WitnessError>;
+```
+
+It performs full verify_with_budget before its sole candidate assignment. Any
+Err leaves expression unchanged. The CLI enables AST optimization by default;
+actual CLI comparisons use the default path versus `--no-opt`. There is no
+`--opt` alias in this scope, and `check` returns before optimization. No main.rs
+change is authorized.
 
 Checker tests cover each rule/kind, all folds including U64 multiplication and
 signed endpoints, valid congruence/symmetry/transitivity, real prior guard proof,
