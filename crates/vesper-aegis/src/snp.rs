@@ -1,6 +1,7 @@
 //! AMD SEV-SNP `ATTESTATION_REPORT` (versions 2 and 3, 1184 bytes), signed
 //! with ECDSA P-384/SHA-384 by the VCEK.
 
+use crate::amd::{SnpCollateral, SnpTcbBaseline, VerifiedSnpReport, verify_snp_collateral};
 use crate::chain::{Curve, TrustRoot, verify_chain};
 use crate::claims::{
     AttestationClaims, ENCLAVE_FLAG_DEBUG_DISABLED, ENCLAVE_FLAG_SMT_MITIGATED, GuestRuntimeClaims,
@@ -201,7 +202,7 @@ impl SnpReport {
 /// `0..0x2A0`; report data equals the Vesper binding of `runtime`. SNP has
 /// no runtime measurement registers, so the supply-chain digests are bound
 /// by report data only. Not checked: VLEK-signed reports (rejected), AMD
-/// KDS TCB collateral and CRLs.
+/// KDS TCB collateral and CRLs; use [`verify_snp_report_with_collateral`].
 pub fn verify_snp_report(
     bytes: &[u8],
     vcek_chain: &[Vec<u8>],
@@ -225,6 +226,16 @@ pub fn verify_snp_report(
         &report.signature_r_s,
         "SNP report (VCEK)",
     )?;
+    snp_vesper_claims(&report, runtime)
+}
+
+/// Check the Vesper report-data binding of a signature-verified report and
+/// normalize it. SNP has no runtime measurement registers, so the
+/// supply-chain digests are bound by report data only.
+pub fn snp_vesper_claims(
+    report: &SnpReport,
+    runtime: &GuestRuntimeClaims,
+) -> Result<AttestationClaims, AttestError> {
     if !ct_eq(&report.report_data, &runtime.report_data()) {
         return Err(AttestError::BindingMismatch {
             what: "SNP report data does not match runtime claims",
@@ -249,6 +260,22 @@ pub fn verify_snp_report(
     claims.snp_reported_tcb = Some(tcb);
     claims.snp_vmpl = Some(report.vmpl);
     Ok(claims)
+}
+
+/// [`crate::amd::verify_snp_collateral`] (VCEK or VLEK chain, optional
+/// CRL, certificate-to-report binding, optional TCB baseline) followed by
+/// the Vesper binding of [`snp_vesper_claims`].
+pub fn verify_snp_report_with_collateral(
+    bytes: &[u8],
+    collateral: &SnpCollateral,
+    root: &TrustRoot,
+    now_ns: u64,
+    baseline: Option<&SnpTcbBaseline>,
+    runtime: &GuestRuntimeClaims,
+) -> Result<(AttestationClaims, VerifiedSnpReport), AttestError> {
+    let verified = verify_snp_collateral(bytes, collateral, root, now_ns, baseline)?;
+    let claims = snp_vesper_claims(&verified.report, runtime)?;
+    Ok((claims, verified))
 }
 
 fn unsupported(field: &'static str, value: u64) -> ParseError {

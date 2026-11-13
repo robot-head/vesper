@@ -10,6 +10,7 @@ pub use vesper_pulse::frames;
 #[cfg(target_os = "linux")]
 pub use vesper_pulse::{io_driver, scheduler};
 pub use vesper_syntax::{lexer, parser};
+pub mod capability_effects;
 pub mod check;
 pub mod database;
 pub mod doctest;
@@ -26,7 +27,10 @@ mod lean_ir;
 pub(crate) mod lean_nodes;
 pub mod lsp;
 pub mod native;
+pub mod native_coverage;
+pub mod native_verifiers;
 pub mod optimize;
 pub mod pact_frontend;
 pub mod runtime;
+pub mod stack_bound;
 pub mod tooling;

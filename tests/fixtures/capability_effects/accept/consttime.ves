@@ -1,0 +1,55 @@
+// Branch-free 64-bit tag check: the secret difference is computed with
+// wrapping arithmetic and declassified once, at the verdict.
+copy struct Secret[T] {
+    value: T,
+}
+
+fn ct_diff(a: Secret[u64], b: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    let Secret {
+        value: x
+    }
+    = a;
+    let Secret {
+        value: y
+    }
+    = b;
+    Secret {
+        value: wrapping_sub(x, y)
+    }
+}
+
+fn ct_is_zero(a: Secret[u64]) -> Secret[bool] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = a;
+    Secret {
+        value: value == 0
+    }
+}
+
+fn declassify_bool(s: Secret[bool]) -> bool eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    value
+}
+
+fn verify_tag(tag: Secret[u64], expected: Secret[u64]) -> bool eff [ConstTime] {
+    declassify_bool(ct_is_zero(ct_diff(tag, expected)))
+}
+
+fn main() -> bool {
+    let tag: Secret[u64] = Secret {
+        value: 7
+    };
+    let expected: Secret[u64] = Secret {
+        value: 7
+    };
+    if verify_tag(tag, expected) {
+        true
+    } else {
+        false
+    }
+}

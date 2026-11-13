@@ -15,6 +15,8 @@
 //!   the §3 state machines, connection and stream flow control, stream
 //!   limits, CRYPTO buffers per packet-number space, and §13.3
 //!   retransmission of lost frames (wave five, issue #133).
+//! * [`lifecycle`]: address-validation and Retry tokens, stateless reset
+//!   tokens, connection-ID tables and path state (wave six, issue #247).
 //!
 //! Receive order (wave-four contract): [`header::parse`] reports the
 //! protected packet-number offset; packet protection (lane 5) removes header
@@ -36,6 +38,7 @@ pub mod endpoint;
 pub mod frame;
 pub mod handshake;
 pub mod header;
+pub mod lifecycle;
 pub mod packet_number;
 pub mod recovery;
 pub mod stream;
@@ -95,6 +98,8 @@ pub enum TransportErrorCode {
     StreamStateError,
     FinalSizeError,
     CryptoBufferExceeded,
+    /// 0x09 (wave six): more connection IDs than `active_connection_id_limit`.
+    ConnectionIdLimitError,
 }
 
 impl TransportErrorCode {
@@ -107,6 +112,7 @@ impl TransportErrorCode {
             Self::FrameEncodingError => 0x07,
             Self::ProtocolViolation => 0x0a,
             Self::CryptoBufferExceeded => 0x0d,
+            Self::ConnectionIdLimitError => 0x09,
         }
     }
 }

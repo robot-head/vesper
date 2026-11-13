@@ -1,0 +1,17 @@
+// expect: E0723
+linear effect Ask {
+    fn ask() -> u64;
+}
+
+fn process() -> u64 eff [Realtime] {
+    handle Ask in {
+        Ask::ask()
+    } with {
+        return value => value,
+        ask(resume) => resume(7),
+    }
+}
+
+fn main() -> u64 {
+    process()
+}

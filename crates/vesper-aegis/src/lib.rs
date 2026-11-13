@@ -12,13 +12,20 @@
 //!   partition, single-fetch snapshots and Iago validators.
 //! - [`gate`]: the §33.3 inference gate over a simulated shared ring.
 //!
-//! Hardware TDX, SEV-SNP and CCA are not exercised by this crate's tests:
-//! all evidence is generated with test keys and test certificate chains.
+//! - [`roots`], [`intel`], [`amd`]: pinned Intel/AMD vendor roots, Intel
+//!   DCAP collateral (TCB info, QE identity, CRLs, TCB status) and AMD
+//!   VCEK/VLEK collateral, verified against real published samples in
+//!   `tests/vendor_samples.rs`.
+//!
+//! No TEE hardware is exercised: real vendor samples are verified as data,
+//! negative cases use generated chains, and `attest_channel_binding`
+//! returns `TeeError::HardwareUnavailable`.
 //! Linear owners are Rust host-library discipline, not the Vesper source
 //! typing rules for `linear struct`.
 
 #![forbid(unsafe_code)]
 
+pub mod amd;
 pub mod cca;
 pub mod chain;
 pub mod claims;
@@ -26,11 +33,14 @@ pub mod error;
 pub mod gate;
 pub mod gpa;
 pub mod host;
+pub mod intel;
 mod linear;
 pub mod policy;
 mod reader;
+pub mod roots;
 pub mod snp;
 pub mod tdx;
+pub mod time;
 
 pub use chain::{Curve, EcPublicKey, TrustRoot};
 pub use claims::{

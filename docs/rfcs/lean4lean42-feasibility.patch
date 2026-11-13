@@ -1,0 +1,216 @@
+diff --git a/Lean4Lean/Environment.lean b/Lean4Lean/Environment.lean
+index e7f4981..ae1e427 100644
+--- a/Lean4Lean/Environment.lean
++++ b/Lean4Lean/Environment.lean
+@@ -43,6 +43,7 @@ def addDefinition (env : Environment) (v : DefinitionVal) (check := true) :
+     if check then
+       M.run env (safety := .safe) (lctx := {}) (lparams := v.levelParams) do
+         checkConstantVal env v.toConstantVal (← checkPrimitiveDef v)
++        checkNoMVarNoFVar env v.name v.value
+         let valType ← TypeChecker.checkType v.value
+         if !(← isDefEq valType v.type) then
+           throw <| .declTypeMismatch env (.defnDecl v) valType
+@@ -56,6 +57,7 @@ def addTheorem (env : Environment) (v : TheoremVal) (check := true) :
+       if !(← isProp v.type) then
+         throw <| .thmTypeIsNotProp env v.name v.type
+       checkConstantVal env v.toConstantVal
++      checkNoMVarNoFVar env v.name v.value
+       let valType ← TypeChecker.checkType v.value
+       if !(← isDefEq valType v.type) then
+         throw <| .declTypeMismatch env (.thmDecl v) valType
+@@ -66,6 +68,7 @@ def addOpaque (env : Environment) (v : OpaqueVal) (check := true) :
+   if check then
+     M.run env (safety := .safe) (lctx := {}) (lparams := v.levelParams) do
+       checkConstantVal env v.toConstantVal
++      checkNoMVarNoFVar env v.name v.value
+       let valType ← TypeChecker.checkType v.value
+       if !(← isDefEq valType v.type) then
+         throw <| .declTypeMismatch env (.opaqueDecl v) valType
+diff --git a/Lean4Lean/Environment/Basic.lean b/Lean4Lean/Environment/Basic.lean
+index 9d12e85..5a1c3d0 100644
+--- a/Lean4Lean/Environment/Basic.lean
++++ b/Lean4Lean/Environment/Basic.lean
+@@ -58,7 +58,7 @@ def checkName (env : Environment) (n : Name)
+     if primitives.contains n then
+       throw <| .other s!"unexpected use of primitive name {n}"
+ 
+-open private subsumesInfo Kernel.Environment.mk moduleNames moduleNameMap parts toEffectiveImport
++open private subsumesInfo Kernel.Environment.mk moduleNames moduleNameMap parts toEffectiveImport mainModule?
+   from Lean.Environment
+ 
+ def empty (mainModule : Name) (trustLevel : UInt32 := 0) : Environment :=
+@@ -82,7 +82,7 @@ def finalizeImport (s : ImportState) (imports : Array Import) (mainModule : Name
+     (trustLevel : UInt32 := 0) : Except Exception Environment := do
+   let modules := (moduleNames s).filterMap ((moduleNameMap s)[·]?)
+   let moduleData ← modules.mapM fun mod => do
+-    let some data := mod.mainModule? |
++    let some data := mainModule? mod |
+       throw <| .other s!"missing data file for module {mod.module}"
+     return data
+   let numPrivateConsts := moduleData.foldl (init := 0) fun numPrivateConsts data => Id.run do
+diff --git a/Lean4Lean/Level.lean b/Lean4Lean/Level.lean
+index dd12bc3..cd76dec 100644
+--- a/Lean4Lean/Level.lean
++++ b/Lean4Lean/Level.lean
+@@ -31,11 +31,17 @@ namespace Normalize
+ 
+ local instance : Ord Name := ⟨Name.cmp⟩
+ 
++/-- represents v+n -/
+ structure VarNode where
+   var : Name
+   offset : Nat
+   deriving BEq, Ord, Repr
+ 
++/-- An key-value pair `vs => { path, const, var }` in NormLevel represents
++the max of `C(vs, const)` and `V(vs, v, n)` for each `v+n ∈ var`, using the `C` and `V` sublevel
++functions from <https://lmf.cnrs.fr/downloads/Perso/long.pdf>.
++The `path` assists in ensuring the invariant that for each suffix `vs' <:+ path`,
++`vs'` is also in the `NormLevel` map. -/
+ structure Node where
+   path : List Name := []
+   const : Nat := 0
+@@ -98,10 +104,8 @@ def normalizeAux (l : Level) (path : List Name) (k : Nat) (acc : NormLevel) : No
+   | .succ u => normalizeAux u path (k+1) acc
+   | .max u v => normalizeAux u path k acc |> normalizeAux v path k
+   | .imax u (.succ v) => normalizeAux u path k acc |> normalizeAux v path (k+1)
+-  | .imax u (.max v w) =>
+-    normalizeAux (.imax u v) path k acc |> normalizeAux (.imax u w) path k
+-  | .imax u (.imax v w) =>
+-    normalizeAux (.imax u w) path k acc |> normalizeAux (.imax v w) path k
++  | .imax u (.max v w) => normalizeAux (.imax u v) path k acc |> normalizeAux (.imax u w) path k
++  | .imax u (.imax v w) => normalizeAux (.imax u w) path k acc |> normalizeAux (.imax v w) path k
+   | .imax u (.param v) =>
+     match orderedInsert Name.cmp v path with
+     | some path' => acc.addNode v path' |> normalizeAux u path' k
+@@ -163,7 +167,7 @@ def NormLevel.le (l₁ l₂ : NormLevel) : Bool :=
+     l₂.any fun p₂ n₂ =>
+       (!n₂.var.isEmpty || n₁.var.isEmpty) &&
+       subset compare p₂ p₁ &&
+-      (n₂.const ≤ n₁.const || n₂.var.any (n₂.const ≤ ·.offset + 1)) &&
++      (n₁.const ≤ n₂.const || n₂.var.any (n₁.const ≤ ·.offset + 1)) &&
+       leVars n₁.var n₂.var
+ 
+ def NormLevel.buildPaths : StateM NormLevel Unit := do
+@@ -250,6 +254,12 @@ def geq' (u v : Level) : Bool := (Normalize.normalize v).le (Normalize.normalize
+ --     logInfo m!"{normalize' (← Elab.Term.elabLevel l)}"
+ --     -- logInfo m!"{repr <| Normalize.normalize (← Elab.Term.elabLevel l) }"
+ 
++-- local elab "normalize " l:level " ≤ " l':level : command => do
++--   Elab.Command.runTermElabM fun _ => do
++--     logInfo m!"{geq' (← Elab.Term.elabLevel l') (← Elab.Term.elabLevel l)}"
++--     -- logInfo m!"{repr <| Normalize.normalize (← Elab.Term.elabLevel l)}"
++--     -- logInfo m!"{repr <| Normalize.normalize (← Elab.Term.elabLevel l')}"
++
+ -- universe u v w
+ -- /-- info: max 1 u -/
+ -- #guard_msgs in normalize max u 1
+diff --git a/Lean4Lean/Primitive.lean b/Lean4Lean/Primitive.lean
+index 5e532f7..4911654 100644
+--- a/Lean4Lean/Primitive.lean
++++ b/Lean4Lean/Primitive.lean
+@@ -28,19 +28,23 @@ structure Reflection where
+   toDec : Expr
+ 
+ def Reflection.defn₁ : Reflection where
+-  type := q(fun p b => (b = true → p) ∧ (¬b = true → ¬p))
+-  ofTrue := q(fun p (H : (true = true → p) ∧ (¬true = true → ¬p)) => H.1 rfl)
+-  ofFalse := q(fun p (H : (false = true → p) ∧ (¬false = true → ¬p)) => H.2 Bool.noConfusion)
+-  toDec := q(fun p b (H : (b = true → p) ∧ (¬b = true → ¬p)) =>
+-    if h : b = true then isTrue (H.1 h) else isFalse (H.2 h))
++  type := q(fun p b => ∀ {q : Prop}, ((b = true → p) → (¬b = true → ¬p) → q) → q)
++  ofTrue := q(fun p (H : ∀ {q : Prop}, ((true = true → p) → (¬true = true → ¬p) → q) → q) =>
++    H fun h _ => h rfl)
++  ofFalse := q(fun p (H : ∀ {q : Prop}, ((false = true → p) → (¬false = true → ¬p) → q) → q) =>
++    H fun _ h => h Bool.noConfusion)
++  toDec := q(fun p b (H : ∀ {q : Prop}, ((b = true → p) → (¬b = true → ¬p) → q) → q) =>
++    if h : b = true then isTrue (H fun h' _ => h' h) else isFalse (H fun _ h' => h' h))
+ 
+ def Reflection.defn₂ : Reflection where
+-  type := q(fun p b => (b = true → p) ∧ (b = false → ¬p))
+-  ofTrue := q(fun p (H : (true = true → p) ∧ (true = false → ¬p)) => H.1 rfl)
+-  ofFalse := q(fun p (H : (false = true → p) ∧ (false = false → ¬p)) => H.2 rfl)
+-  toDec := q(fun p b (H : (b = true → p) ∧ (b = false → ¬p)) =>
++  type := q(fun p b => ∀ {q : Prop}, ((b = true → p) → (b = false → ¬p) → q) → q)
++  ofTrue := q(fun p (H : ∀ {q : Prop}, ((true = true → p) → (true = false → ¬p) → q) → q) =>
++    H fun h _ => h rfl)
++  ofFalse := q(fun p (H : ∀ {q : Prop}, ((false = true → p) → (false = false → ¬p) → q) → q) =>
++    H fun _ h => h rfl)
++  toDec := q(fun p b (H : ∀ {q : Prop}, ((b = true → p) → (b = false → ¬p) → q) → q) =>
+     b.casesOn (motive := fun b' => b = b' → Decidable p)
+-      (fun h => isFalse (H.2 h)) (fun h => isTrue (H.1 h)) rfl)
++      (fun h => isFalse (H fun _ h' => h' h)) (fun h => isTrue (H fun h' _ => h' h)) rfl)
+ 
+ def Reflection.check (r : Reflection) (fail : ∀ {α}, M α) : M Unit := do
+   unless ← isDefEq (← checkType r.type) q(Prop → Bool → Prop) do fail
+@@ -60,8 +64,8 @@ def Condition.natLE : Condition where
+   impl := .reflectNatNat
+     (asBool := q(Nat.ble))
+     (reflect := .defn₁)
+-    (proof := q(fun n m =>
+-      And.intro (@Nat.le_of_ble_eq_true n m) (@Nat.not_le_of_not_ble_eq_true n m)))
++    (proof := q(fun n m {q : Prop} (H : _ → _ → q) =>
++      H (@Nat.le_of_ble_eq_true n m) (@Nat.not_le_of_not_ble_eq_true n m)))
+ 
+ def Condition.natEq : Condition where
+   prop := q(@Eq Nat)
+@@ -69,7 +73,8 @@ def Condition.natEq : Condition where
+   impl := .reflectNatNat
+     (asBool := q(Nat.beq))
+     (reflect := .defn₂)
+-    (proof := q(fun n m => And.intro (@Nat.eq_of_beq_eq_true n m) (@Nat.ne_of_beq_eq_false n m)))
++    (proof := q(fun n m {q : Prop} (H : _ → _ → q) =>
++      H (@Nat.eq_of_beq_eq_true n m) (@Nat.ne_of_beq_eq_false n m)))
+ 
+ def Condition.bool : Condition where
+   prop := q(fun x : Bool => x = true)
+diff --git a/Main.lean b/Main.lean
+index e23b981..8b18151 100644
+--- a/Main.lean
++++ b/Main.lean
+@@ -284,7 +284,7 @@ unsafe def replayFromImports (module : Name) (verbose := false) (compare := fals
+ 
+ unsafe def replayFromFresh (module : Name)
+     (verbose := false) (compare := false) (decl : Option Name := none) : IO Nat := do
+-  Lean.withImportModules #[] {} (trustLevel := 0) fun env => do
++  Lean.withImportModules #[{ module, importAll := true }] {} (trustLevel := 0) fun env => do
+     let ctx := { newConstants := env.constants.map₁, verbose, compare }
+     Prod.fst <$> replay ctx (.empty module) decl
+ 
+diff --git a/lake-manifest.json b/lake-manifest.json
+index ad39250..092d1a5 100644
+--- a/lake-manifest.json
++++ b/lake-manifest.json
+@@ -5,10 +5,10 @@
+    "type": "git",
+    "subDir": null,
+    "scope": "",
+-   "rev": "d117e2c28cba42e974bc22568ac999492a34e812",
++   "rev": "8da40b72fece29b7d3fe3d768bac4c8910ce9bee",
+    "name": "batteries",
+    "manifestFile": "lake-manifest.json",
+-   "inputRev": "v4.23.0",
++   "inputRev": "8da40b72fece29b7d3fe3d768bac4c8910ce9bee",
+    "inherited": false,
+    "configFile": "lakefile.toml"}],
+  "name": "lean4lean",
+diff --git a/lakefile.toml b/lakefile.toml
+index 8bbd508..18f379b 100644
+--- a/lakefile.toml
++++ b/lakefile.toml
+@@ -4,7 +4,7 @@ defaultTargets = ["Lean4Lean", "lean4lean", "Lean4Lean.Theory", "Lean4Lean.Verif
+ [[require]]
+ name = "batteries"
+ git = "https://github.com/leanprover-community/batteries"
+-rev = "v4.23.0"
++rev = "8da40b72fece29b7d3fe3d768bac4c8910ce9bee"
+ 
+ [[lean_lib]]
+ name = "Lean4Lean"
+diff --git a/lean-toolchain b/lean-toolchain
+index 7f254a9..c00a535 100644
+--- a/lean-toolchain
++++ b/lean-toolchain
+@@ -1 +1 @@
+-leanprover/lean4:v4.23.0
++leanprover/lean4:v4.24.0

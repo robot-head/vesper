@@ -1,0 +1,13 @@
+// expect: E0708
+fn run(sink f: fn(f64) -> f64 eff [DetFloat], x: f64) -> f64 {
+    f(x)
+}
+
+fn main() -> f64 {
+    run(
+        | x: f64 | -> f64 {
+            x * 2.0
+        },
+        1.0
+    )
+}

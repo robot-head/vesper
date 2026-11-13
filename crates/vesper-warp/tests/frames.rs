@@ -208,11 +208,23 @@ fn unknown_unsupported_and_non_minimal_types() {
         parse_frame(&[0x41, 0x00], PacketType::OneRtt),
         Err(FrameError::UnknownType(0x100))
     );
+    // Wave six implements the last RFC 9000 frames; short or malformed
+    // encodings of them are typed errors.
     for ty in [0x07u8, 0x18, 0x19, 0x1a, 0x1b] {
-        assert_eq!(
-            parse_frame(&[ty, 0, 0, 0], PacketType::OneRtt),
-            Err(FrameError::Unsupported(u64::from(ty)))
-        );
+        let wire = [ty, 0, 0, 0];
+        let r = parse_frame(&wire, PacketType::OneRtt);
+        if ty == 0x19 {
+            // RETIRE_CONNECTION_ID with sequence number 0 is well formed.
+            assert!(r.is_ok());
+        } else {
+            assert!(
+                matches!(
+                    r,
+                    Err(FrameError::Truncated { .. } | FrameError::Malformed { .. })
+                ),
+                "{ty:#x}: {r:?}"
+            );
+        }
     }
     // PING as a two-byte varint.
     assert_eq!(

@@ -21,7 +21,7 @@ const BPF_PROG_LOAD: libc::c_long = 5;
 const BPF_PROG_TEST_RUN: libc::c_long = 10;
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
 const BPF_BTF_LOAD: libc::c_long = 18;
-const ATTR_SIZE: usize = 128;
+const ATTR_SIZE: usize = 144;
 const LOG_SIZE: usize = 1 << 22;
 
 /// An owned kernel file descriptor (map or program).
@@ -161,13 +161,57 @@ pub fn relocate(prog: &Program, fds: &[i32]) -> Result<Vec<RawInsn>, LoadError> 
     Ok(insns)
 }
 
-/// Create the program's maps and load it as an XDP program.
+/// Create the program's maps, apply CO-RE relocations and kfunc ids
+/// ([`prepare`]) and load the program.
 pub fn load(prog: &Program) -> Result<Loaded, LoadError> {
     probe()?;
     load_unprobed(prog)
 }
 
+/// The host kernel's parsed BTF, read once.
+fn vmlinux() -> Result<&'static crate::btf::Btf, LoadError> {
+    static BTF: std::sync::OnceLock<Result<crate::btf::Btf, String>> = std::sync::OnceLock::new();
+    BTF.get_or_init(|| crate::btf::host_vmlinux().map_err(|e| e.to_string()))
+        .as_ref()
+        .map_err(|e| LoadError::Invalid(e.clone()))
+}
+
+/// What a loader does before `BPF_PROG_LOAD`: CO-RE relocations and kfunc
+/// BTF ids against the running kernel's BTF.
+pub fn prepare(prog: &Program) -> Result<Program, LoadError> {
+    if prog.core_relos.is_empty() && prog.kfuncs.is_empty() {
+        return Ok(prog.clone());
+    }
+    let btf = vmlinux()?;
+    let p = crate::core::apply(prog, btf).map_err(|e| LoadError::Invalid(e.to_string()))?;
+    crate::btf::resolve_kfuncs(&p, btf).map_err(|e| LoadError::Invalid(e.to_string()))
+}
+
+/// Load `prog` with its program BTF, func info, line info and CO-RE
+/// relocation records (`BPF_PROG_LOAD` `core_relos`): the kernel applies
+/// the CO-RE relocations itself, against its own BTF. kfunc ids are still
+/// resolved here, as a loader does.
+pub fn load_with_ext(prog: &Program) -> Result<Loaded, LoadError> {
+    probe()?;
+    load_inner(prog, true)
+}
+
 fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
+    load_inner(prog, false)
+}
+
+fn load_inner(prog: &Program, kernel_ext: bool) -> Result<Loaded, LoadError> {
+    let prepared = if kernel_ext {
+        if prog.kfuncs.is_empty() {
+            prog.clone()
+        } else {
+            crate::btf::resolve_kfuncs(prog, vmlinux()?)
+                .map_err(|e| LoadError::Invalid(e.to_string()))?
+        }
+    } else {
+        prepare(prog)?
+    };
+    let prog = &prepared;
     let mut maps = Vec::new();
     for def in &prog.maps {
         maps.push(create_map(def)?);
@@ -178,6 +222,32 @@ fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
     let mut license = prog.license.clone().into_bytes();
     license.push(0);
     let insn_cnt = u32::try_from(insns.len()).map_err(|_| LoadError::Invalid("too long".into()))?;
+    // Programs that pass callbacks need program BTF with func_info.
+    let has_callbacks = insns
+        .iter()
+        .any(|i| i.code == 0x18 && i.src == pseudo::FUNC);
+    let (mut func_info, mut line_info, mut core_relos) = (Vec::new(), Vec::new(), Vec::new());
+    let btf_fd = if has_callbacks || kernel_ext {
+        let mut p = prog.clone();
+        // kfunc ids are already in the instructions: no extern types
+        p.kfuncs.clear();
+        let ob =
+            crate::btf_ext::build(&p, "prog").map_err(|e| LoadError::Invalid(e.to_string()))?;
+        func_info = crate::btf::FuncInfo::bytes(&ob.func_info);
+        for r in &ob.line_records {
+            for w in [r[0] / 8, r[1], r[2], r[3]] {
+                line_info.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        for r in &ob.core_records {
+            for w in r {
+                core_relos.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        Some(load_btf(&ob.btf)?)
+    } else {
+        None
+    };
     let name: String = prog
         .name
         .chars()
@@ -199,6 +269,22 @@ fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
             put_u64(&mut a, 32, log.as_mut_ptr() as u64);
         }
         put_name(&mut a, 48, &name)?;
+        if let Some(fd) = &btf_fd {
+            put_u32(&mut a, 72, fd.raw() as u32);
+            put_u32(&mut a, 76, crate::btf::FuncInfo::REC_SIZE);
+            put_u64(&mut a, 80, func_info.as_ptr() as u64);
+            put_u32(&mut a, 88, (func_info.len() / 8) as u32);
+            if !line_info.is_empty() {
+                put_u32(&mut a, 92, 16);
+                put_u64(&mut a, 96, line_info.as_ptr() as u64);
+                put_u32(&mut a, 104, (line_info.len() / 16) as u32);
+            }
+            if !core_relos.is_empty() {
+                put_u32(&mut a, 116, (core_relos.len() / 16) as u32);
+                put_u64(&mut a, 128, core_relos.as_ptr() as u64);
+                put_u32(&mut a, 136, 16);
+            }
+        }
         Ok(bpf(BPF_PROG_LOAD, &mut a))
     };
     match attempt(None)? {

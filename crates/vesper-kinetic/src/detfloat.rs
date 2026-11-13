@@ -96,6 +96,18 @@ impl DetFloatPolicy {
         self.codegen_canonicalizes_nans = flags.enable_nan_canonicalization();
         self
     }
+
+    /// Allow calls to this crate's correctly rounded transcendentals by
+    /// their symbols ([`crate::crmath::SYMBOLS`]). Correct rounding fixes
+    /// every result, so these calls are deterministic on every target.
+    pub fn with_correctly_rounded_math(mut self) -> Self {
+        for symbol in crate::crmath::SYMBOLS {
+            if !self.allowed_float_calls.iter().any(|s| s == symbol) {
+                self.allowed_float_calls.push((*symbol).to_string());
+            }
+        }
+        self
+    }
 }
 
 /// The function could not be audited.

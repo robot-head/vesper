@@ -19,8 +19,23 @@ queries and linear-obligation provenance, as a host library.
   lineage queries, step-back by replay from the nearest snapshot.
 * `simpulse`: recording a SimPulse session and rebuilding its journal.
 
-Hardware branch tracing (Intel PT, CoreSight), native activation
-checkpoints and the `vesper replay` CLI are unavailable (`Unavailable`).
+* `ipt` and `ipt_flow`: Intel PT packet decoder (every packet kind the
+  instruction trace uses, all IP-compression modes) and a flow reconstructor
+  that walks a code image with `iced-x86` to rebuild the branch trace.
+* `ete`: Arm CoreSight ETE / ETMv4 instruction-trace element decoder
+  (A-Sync, trace info, timestamps, context, addresses, atoms, exceptions).
+* `hwpath`: maps reconstructed branches onto effect records by TSC interval
+  so a reverse watchpoint names the instruction-level path to a write.
+* `capture`: gated `perf_event_open` capture (Linux, `intel_pt` / `cs_etm` /
+  `arm_spe` PMU); returns `Unavailable` with the reason when there is none.
+* `checkpoint`: native fiber activation checkpoints stored as snapshot
+  epochs, restored by deterministic re-execution of the resume journal onto
+  a fresh stack and verified against the capture.
+
+The decoders are tested on independently encoded streams, not on traces
+captured on hardware; capture has only run its unavailable path. A
+checkpoint holds no stack-byte or register image, because `vesper-fiber-abi`
+exposes none (see `Unavailable`). The `vesper replay` CLI is integration B.
 Rust ownership of `ReplaySession` is library discipline, not an
 implementation of Vesper's linear typing rules. `lean/ChronoReplay.lean`
 proves properties of a model, not of this code.

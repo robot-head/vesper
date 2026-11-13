@@ -13,3 +13,15 @@ size_t bridge_copy(const uint8_t *src, size_t src_len,
     for (size_t i = 0; i < count; ++i) dst[i] = src[i] ^ 0x5a;
     return count;
 }
+/* Single-element nocapture pointers: one scalar inout, one struct out. */
+void bridge_crc_update(uint32_t *crc, const uint8_t *data, size_t len) {
+    uint32_t c = *crc;
+    for (size_t i = 0; i < len; ++i) c = c * 31u + data[i];
+    *crc = c;
+}
+typedef struct bridge_pair { uint32_t lo; uint32_t hi; } bridge_pair;
+int32_t bridge_split(uint64_t value, bridge_pair *out) {
+    out->lo = (uint32_t)value;
+    out->hi = (uint32_t)(value >> 32);
+    return 1;
+}

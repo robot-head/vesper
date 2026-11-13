@@ -1,7 +1,7 @@
 /-!
 # Vesper Kinetic: greedy colouring disjointness and Morton interleaving
 
-Model identifier: `vesper.kinetic.coloring-morton-model/1`.
+Model identifier: `vesper.kinetic.coloring-morton-model/2`.
 
 This file models two pure algorithms of `crates/vesper-kinetic` over `Nat`:
 
@@ -34,6 +34,18 @@ It proves, about these Lean definitions:
   modulo `2^n`, hence exactly for 10-bit inputs; `morton_10bit_injective`:
   distinct 10-bit triples have distinct codes; `interleave_lt`: the code fits
   in `3n` bits.
+* `morton_21bit_roundtrip`, `morton_21bit_injective` and `morton_21bit_lt`:
+  the same for the LBVH's 21-bit axes, whose codes fit in 63 bits.
+* `sorted_prefix_between` and `monotone_keys_prefix_range` (the ordering
+  fact the Karras LBVH construction relies on): if two keys of a sorted
+  array agree on every bit at position `k` and above (`a / 2^k = c / 2^k`),
+  every key between them agrees with both, so the keys sharing a prefix
+  form one contiguous index range; that range is what each internal node
+  covers.
+* `augKey_lt_iff` and `augKey_injective`: the tie-broken sort key
+  `code · 2^32 + index` orders by code, then index, and is injective, so
+  the sort order (and the tree) is unique even with duplicate codes;
+  `augKey_div`: its bits at 32 and above are the code.
 
 It is **not** a proof about the Rust code (the magic-mask `spread` /
 `compact`, the BMI2 path, the bitmask colourer or the sort), nor about
@@ -44,7 +56,7 @@ not a refinement proof).
 
 namespace Vesper.KineticColoring
 
-def modelId : String := "vesper.kinetic.coloring-morton-model/1"
+def modelId : String := "vesper.kinetic.coloring-morton-model/2"
 def modelClaim : String :=
   "Lean model of greedy colouring and Morton codes; proofs cover the model, not Rust"
 
@@ -251,6 +263,90 @@ theorem interleave_lt : ∀ (n x y z : Nat), interleave n x y z < 2 ^ (3 * n)
     rw [e]
     omega
 
+theorem morton_21bit_roundtrip (x y z : Nat)
+    (hx : x < 2097152) (hy : y < 2097152) (hz : z < 2097152) :
+    deinterleaveX 21 (interleave 21 x y z) = x ∧
+    deinterleaveY 21 (interleave 21 x y z) = y ∧
+    deinterleaveZ 21 (interleave 21 x y z) = z := by
+  have h := morton_deinterleave_interleave 21 x y z
+  have p : (2 : Nat) ^ 21 = 2097152 := by decide
+  rw [p, Nat.mod_eq_of_lt hx, Nat.mod_eq_of_lt hy, Nat.mod_eq_of_lt hz] at h
+  exact h
+
+theorem morton_21bit_injective (x y z x' y' z' : Nat)
+    (hx : x < 2097152) (hy : y < 2097152) (hz : z < 2097152)
+    (hx' : x' < 2097152) (hy' : y' < 2097152) (hz' : z' < 2097152)
+    (h : interleave 21 x y z = interleave 21 x' y' z') :
+    x = x' ∧ y = y' ∧ z = z' := by
+  have a := morton_21bit_roundtrip x y z hx hy hz
+  have b := morton_21bit_roundtrip x' y' z' hx' hy' hz'
+  rw [h] at a
+  exact ⟨a.1.symm.trans b.1, a.2.1.symm.trans b.2.1, a.2.2.symm.trans b.2.2⟩
+
+theorem morton_21bit_lt (x y z : Nat) : interleave 21 x y z < 2 ^ 63 :=
+  interleave_lt 21 x y z
+
+/-! ## LBVH key order -/
+
+/-- Keys between two keys that agree above bit `k` agree with both. -/
+theorem sorted_prefix_between {k a b c : Nat} (hab : a ≤ b) (hbc : b ≤ c)
+    (hac : a / 2 ^ k = c / 2 ^ k) :
+    a / 2 ^ k = b / 2 ^ k ∧ b / 2 ^ k = c / 2 ^ k := by
+  have h1 : a / 2 ^ k ≤ b / 2 ^ k := Nat.div_le_div_right hab
+  have h2 : b / 2 ^ k ≤ c / 2 ^ k := Nat.div_le_div_right hbc
+  omega
+
+/-- For a sorted array (`key` monotone in the index), the indices whose keys
+share the prefix of `key i` above bit `k` are contiguous: if `key m` shares
+it, so does every `key j` with `i ≤ j ≤ m`. -/
+theorem monotone_keys_prefix_range (key : Nat → Nat)
+    (mono : ∀ i j, i ≤ j → key i ≤ key j) {k i j m : Nat}
+    (hij : i ≤ j) (hjm : j ≤ m) (h : key i / 2 ^ k = key m / 2 ^ k) :
+    key i / 2 ^ k = key j / 2 ^ k :=
+  (sorted_prefix_between (mono i j hij) (mono j m hjm) h).1
+
+/-- The LBVH sort key: Morton code, then primitive index (below `2^32`). -/
+def augKey (code index : Nat) : Nat := code * 4294967296 + index
+
+theorem augKey_lt_iff {c1 c2 i1 i2 : Nat} (h1 : i1 < 4294967296) (h2 : i2 < 4294967296) :
+    augKey c1 i1 < augKey c2 i2 ↔ c1 < c2 ∨ (c1 = c2 ∧ i1 < i2) := by
+  unfold augKey
+  constructor
+  · intro h
+    by_cases hc : c1 < c2
+    · exact Or.inl hc
+    · right
+      have : c1 = c2 := by
+        rcases Nat.lt_or_ge c2 c1 with g | g
+        · have : c2 * 4294967296 + 4294967296 ≤ c1 * 4294967296 := by
+            have := Nat.mul_le_mul_right 4294967296 g
+            simpa [Nat.succ_mul] using this
+          omega
+        · omega
+      subst this
+      exact ⟨rfl, by omega⟩
+  · intro h
+    rcases h with hc | ⟨rfl, hi⟩
+    · have : c1 * 4294967296 + 4294967296 ≤ c2 * 4294967296 := by
+        have := Nat.mul_le_mul_right 4294967296 hc
+        simpa [Nat.succ_mul] using this
+      omega
+    · omega
+
+theorem augKey_div {c i : Nat} (h : i < 4294967296) : augKey c i / 4294967296 = c := by
+  unfold augKey
+  omega
+
+theorem augKey_injective {c1 c2 i1 i2 : Nat} (h1 : i1 < 4294967296) (h2 : i2 < 4294967296)
+    (h : augKey c1 i1 = augKey c2 i2) : c1 = c2 ∧ i1 = i2 := by
+  have e1 := augKey_div (c := c1) h1
+  have e2 := augKey_div (c := c2) h2
+  rw [h] at e1
+  have hc : c1 = c2 := e1.symm.trans e2
+  subst hc
+  unfold augKey at h
+  exact ⟨rfl, by omega⟩
+
 #print axioms colorAll_pairwise_disjoint
 #print axioms colorAll_constraints
 #print axioms same_color_constraints_disjoint_bodies
@@ -258,5 +354,13 @@ theorem interleave_lt : ∀ (n x y z : Nat), interleave n x y z < 2 ^ (3 * n)
 #print axioms morton_10bit_roundtrip
 #print axioms morton_10bit_injective
 #print axioms interleave_lt
+#print axioms morton_21bit_roundtrip
+#print axioms morton_21bit_injective
+#print axioms morton_21bit_lt
+#print axioms sorted_prefix_between
+#print axioms monotone_keys_prefix_range
+#print axioms augKey_lt_iff
+#print axioms augKey_div
+#print axioms augKey_injective
 
 end Vesper.KineticColoring

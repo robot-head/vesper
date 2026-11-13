@@ -1,3 +1,8 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
-vesper_crate()
+vesper_crate(
+    # tests/lean_model.rs reads lean/BeaconRedaction.lean and its fixture; Lean
+    # rejects symlinked runfiles outside --root, so it runs in a regular copy.
+    copy_test_cwd = ["test/lean_model"],
+    extra_test_data = ["//:lean"],
+)
