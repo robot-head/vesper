@@ -7,6 +7,7 @@ use crate::claims::{
     SupplyChainEvidence, TeeArch, ct_eq, single_extend,
 };
 use crate::error::{AttestError, Format, ParseError};
+use crate::intel::{TdxCollateral, VerifiedTdxQuote, verify_tdx_collateral};
 use crate::reader::Reader;
 use ring::digest;
 
@@ -217,6 +218,32 @@ impl QeReportBody {
 impl TdxQuote {
     /// Bounds-checked parse; the input must contain exactly one quote.
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
+        let (quote, used) = Self::parse_prefix(bytes)?;
+        if used != bytes.len() {
+            return Err(ParseError::TrailingBytes {
+                format: Format::TdxQuoteV4,
+                extra: bytes.len() - used,
+            });
+        }
+        Ok(quote)
+    }
+
+    /// Parse a quote from a fixed-size quote buffer: bytes after the
+    /// quote's declared length must all be zero.
+    pub fn parse_padded(bytes: &[u8]) -> Result<Self, ParseError> {
+        let (quote, used) = Self::parse_prefix(bytes)?;
+        if bytes[used..].iter().any(|&b| b != 0) {
+            return Err(ParseError::TrailingBytes {
+                format: Format::TdxQuoteV4,
+                extra: bytes.len() - used,
+            });
+        }
+        Ok(quote)
+    }
+
+    /// Parse one quote from the start of `bytes`; returns it and the number
+    /// of bytes it occupies (header, body, length and signature data).
+    pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
         let mut r = Reader::new(bytes, Format::TdxQuoteV4);
         let header = TdxQuoteHeader::parse(&mut r)?;
         let body = TdReportBody::parse(&mut r)?;
@@ -225,7 +252,7 @@ impl TdxQuote {
             return Err(over_budget("signature_data_len", MAX_SIG_DATA_LEN, sig_len));
         }
         let sig = r.take(sig_len, "signature_data")?;
-        r.finish()?;
+        let used = r.position();
 
         let mut s = Reader::new(sig, Format::TdxQuoteV4);
         let quote_signature = s.array("quote_signature")?;
@@ -251,16 +278,19 @@ impl TdxQuote {
         let pck_chain_pem = c.take(inner_size, "pck_cert_data")?.to_vec();
         c.finish()?;
 
-        Ok(TdxQuote {
-            header,
-            body,
-            quote_signature,
-            attestation_key,
-            qe_report,
-            qe_report_signature,
-            qe_auth_data,
-            pck_chain_pem,
-        })
+        Ok((
+            TdxQuote {
+                header,
+                body,
+                quote_signature,
+                attestation_key,
+                qe_report,
+                qe_report_signature,
+                qe_auth_data,
+                pck_chain_pem,
+            },
+            used,
+        ))
     }
 
     /// Header and body: the bytes the attestation key signs.
@@ -320,26 +350,14 @@ impl TdxQuote {
     }
 }
 
-/// Verify a TDX quote end to end and normalize it.
-///
-/// Checks: PCK chain to `root` at `now_ns`; PCK signature over the QE
-/// report; QE report data binds the attestation key and QE auth data;
-/// attestation-key signature over header and body; report data equals the
-/// Vesper binding of `runtime`; RTMR[2]/RTMR[3] equal one extend with the
-/// claimed Loom.lock and `.olean` digests. Not checked: Intel TCB-info and
-/// QE-identity collateral (TCB status, QE MRSIGNER), CRLs.
-pub fn verify_tdx_quote(
-    bytes: &[u8],
-    root: &TrustRoot,
-    now_ns: u64,
-    runtime: &GuestRuntimeClaims,
-) -> Result<AttestationClaims, AttestError> {
-    let quote = TdxQuote::parse(bytes)?;
-    let certs = pem_certificates(&quote.pck_chain_pem)?;
-    let (leaf, rest) = certs
-        .split_first()
-        .ok_or(ParseError::Pem("no certificates"))?;
-    let pck = verify_chain(leaf, rest, root, now_ns, Curve::P256)?;
+/// Check the signatures inside a quote, given the PCK key from a verified
+/// chain: PCK signature over the QE report, QE report data binding the
+/// attestation key and QE auth data, attestation-key signature over header
+/// and body.
+pub(crate) fn verify_quote_signatures(
+    quote: &TdxQuote,
+    pck: &EcPublicKey,
+) -> Result<(), AttestError> {
     pck.verify_fixed(
         &quote.qe_report.encode(),
         &quote.qe_report_signature,
@@ -356,7 +374,16 @@ pub fn verify_tdx_quote(
         &quote.signed_bytes(),
         &quote.quote_signature,
         "TDX quote (attestation key)",
-    )?;
+    )
+}
+
+/// Check the Vesper binding of a signature-verified quote and normalize it:
+/// report data equals the binding of `runtime`, RTMR[2]/RTMR[3] equal one
+/// extend with the claimed Loom.lock and `.olean` digests.
+pub fn tdx_vesper_claims(
+    quote: &TdxQuote,
+    runtime: &GuestRuntimeClaims,
+) -> Result<AttestationClaims, AttestError> {
     if !ct_eq(&quote.body.report_data, &runtime.report_data()) {
         return Err(AttestError::BindingMismatch {
             what: "TD report data does not match runtime claims",
@@ -391,6 +418,47 @@ pub fn verify_tdx_quote(
         runtime,
         SupplyChainEvidence::RegisterReplay,
     ))
+}
+
+/// Verify a TDX quote end to end and normalize it.
+///
+/// Checks: PCK chain to `root` at `now_ns`; PCK signature over the QE
+/// report; QE report data binds the attestation key and QE auth data;
+/// attestation-key signature over header and body; report data equals the
+/// Vesper binding of `runtime`; RTMR[2]/RTMR[3] equal one extend with the
+/// claimed Loom.lock and `.olean` digests. Not checked here: Intel TCB-info
+/// and QE-identity collateral and CRLs; use
+/// [`verify_tdx_quote_with_collateral`] for those.
+pub fn verify_tdx_quote(
+    bytes: &[u8],
+    root: &TrustRoot,
+    now_ns: u64,
+    runtime: &GuestRuntimeClaims,
+) -> Result<AttestationClaims, AttestError> {
+    let quote = TdxQuote::parse(bytes)?;
+    let certs = pem_certificates(&quote.pck_chain_pem)?;
+    let (leaf, rest) = certs
+        .split_first()
+        .ok_or(ParseError::Pem("no certificates"))?;
+    let pck = verify_chain(leaf, rest, root, now_ns, Curve::P256)?;
+    verify_quote_signatures(&quote, &pck)?;
+    tdx_vesper_claims(&quote, runtime)
+}
+
+/// [`crate::intel::verify_tdx_collateral`] (chains, CRLs, TCB info, QE
+/// identity, TCB status) followed by the Vesper binding of
+/// [`tdx_vesper_claims`]. The TCB status is returned, not judged: pass it
+/// to [`crate::intel::TcbAcceptance::check`].
+pub fn verify_tdx_quote_with_collateral(
+    bytes: &[u8],
+    collateral: &TdxCollateral,
+    root: &TrustRoot,
+    now_ns: u64,
+    runtime: &GuestRuntimeClaims,
+) -> Result<(AttestationClaims, VerifiedTdxQuote), AttestError> {
+    let verified = verify_tdx_collateral(bytes, collateral, root, now_ns)?;
+    let claims = tdx_vesper_claims(&verified.quote, runtime)?;
+    Ok((claims, verified))
 }
 
 fn unsupported(field: &'static str, value: u64) -> ParseError {

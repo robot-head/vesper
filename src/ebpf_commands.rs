@@ -62,6 +62,10 @@ fn program(path: &Path, bytes: &[u8]) -> Result<Program, String> {
         map_relocs: Vec::new(),
         functions: Vec::new(),
         license: "Dual MIT/GPL".into(),
+        attach: String::new(),
+        kfuncs: Vec::new(),
+        core_relos: Vec::new(),
+        lines: Vec::new(),
     })
 }
 

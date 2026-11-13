@@ -386,6 +386,37 @@ impl LossRecovery {
         self.spaces[space.index()].sent.len()
     }
 
+    /// The peer's `max_ack_delay` from its transport parameters (wave six).
+    pub fn set_max_ack_delay_ns(&mut self, max_ack_delay_ns: u64, now_ns: u64) {
+        self.config.max_ack_delay_ns = max_ack_delay_ns;
+        self.set_timer(now_ns);
+    }
+
+    /// The `max_ack_delay` in force.
+    pub const fn max_ack_delay_ns(&self) -> u64 {
+        self.config.max_ack_delay_ns
+    }
+
+    /// Forgets every packet of `space` without congestion events, keeping
+    /// the space usable: a client after Retry (RFC 9002 §6.3) or after its
+    /// 0-RTT packets were rejected. Returns the bytes removed from flight.
+    pub fn reset_space(&mut self, space: PnSpace, now_ns: u64) -> u64 {
+        let s = &mut self.spaces[space.index()];
+        let mut removed = 0;
+        for e in s.sent.drain(..) {
+            if e.state == State::InFlight && e.pkt.in_flight {
+                removed += u64::from(e.pkt.bytes);
+            }
+        }
+        s.loss_time = None;
+        s.time_of_last_ack_eliciting = None;
+        s.ack_eliciting_in_flight = 0;
+        self.bytes_in_flight -= removed;
+        self.pto_count = 0;
+        self.set_timer(now_ns);
+        removed
+    }
+
     pub fn set_handshake_status(&mut self, status: HandshakeStatus, now_ns: u64) {
         self.handshake = status;
         self.set_timer(now_ns);

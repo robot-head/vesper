@@ -168,7 +168,7 @@ fn tdx_chain_failures_are_rejected() {
     let q = tdx_quote(&expired, &ak, &TdxParams::default());
     assert!(matches!(
         verify_tdx_quote(&q, &expired.root, NOW_NS, &rt),
-        Err(AttestError::CertificateChain(_))
+        Err(AttestError::CertificateExpired)
     ));
     // PCK on the wrong curve.
     let p384 = chain(Curve::P256, Curve::P384, false);

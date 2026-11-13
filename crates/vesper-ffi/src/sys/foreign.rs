@@ -2,11 +2,17 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
-    Width { bits: u8 },
+    Width {
+        bits: u8,
+    },
     InvalidBool,
-    InvalidEnum { name: String },
+    InvalidEnum {
+        name: String,
+    },
     NullAddress,
-    MisalignedAddress { alignment: u8 },
+    MisalignedAddress {
+        alignment: u8,
+    },
     NonzeroVoid,
     ForeignErrorCode(u64),
     ErrorCodeBudget,
@@ -14,7 +20,17 @@ pub enum ValidationError {
     ArgumentKind,
     SliceRangeOverflow,
     SliceTooLarge,
-    OverlappingSlices { other: usize },
+    OverlappingSlices {
+        other: usize,
+    },
+    /// A single-element pointer that is not declared `Option[T]` was null.
+    NullPointer,
+    /// A single-element pointer's address is not aligned for its pointee.
+    MisalignedPointer {
+        alignment: usize,
+    },
+    /// The pointee range `[address, address + size)` wraps the address space.
+    PointerRangeOverflow,
 }
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -193,6 +209,9 @@ pub enum RawArgument {
     /// Element count, not byte count. Numeric checks do not prove an allocation
     /// exists; the unsafe caller remains responsible for valid borrowed memory.
     Slice { address: u64, length: u64 },
+    /// Address of exactly one pointee (`0` only for a declared `Option[T]`).
+    /// Like slices, this is a numeric check only.
+    Pointer { address: u64 },
 }
 #[must_use = "failed preparation retains arguments and their owner"]
 #[derive(Debug)]
@@ -266,6 +285,9 @@ impl FunctionDescriptor {
                     raw.push((AbiType::Pointer, address));
                     raw.push((AbiType::Integer(Scalar::Usize), length));
                 }
+                (ParameterType::Pointer { .. }, RawArgument::Pointer { address }) => {
+                    raw.push((AbiType::Pointer, address));
+                }
                 _ => unreachable!("arguments validated before allocation"),
             }
         }
@@ -281,8 +303,27 @@ impl FunctionDescriptor {
         if args.len() != self.parameters.len() {
             return Err((None, ValidationError::ArgumentCount));
         }
-        // At most the configured parameter cap (hard limit 32) ranges.
-        let mut ranges: Vec<(usize, u64, u64, Access)> = vec![];
+        // At most the configured parameter cap (hard limit 32) ranges:
+        // (argument, first byte, last byte, callee may write).
+        let mut ranges: Vec<(usize, u64, u64, bool)> = vec![];
+        fn claim(
+            ranges: &mut Vec<(usize, u64, u64, bool)>,
+            i: usize,
+            first: u64,
+            last: u64,
+            writes: bool,
+        ) -> Result<(), (Option<usize>, ValidationError)> {
+            for (other, f, l, other_writes) in ranges.iter() {
+                if first <= *l && *f <= last && (writes || *other_writes) {
+                    return Err((
+                        Some(i),
+                        ValidationError::OverlappingSlices { other: *other },
+                    ));
+                }
+            }
+            ranges.push((i, first, last, writes));
+            Ok(())
+        }
         for (i, (p, a)) in self.parameters.iter().zip(args).enumerate() {
             match (&p.ty, a) {
                 (ParameterType::Value(t), RawArgument::Bits(bits)) => {
@@ -306,19 +347,32 @@ impl FunctionDescriptor {
                         let last = base
                             .checked_add(bytes - 1)
                             .ok_or((Some(i), ValidationError::SliceRangeOverflow))?;
-                        for (other, first, end, other_access) in &ranges {
-                            if *base <= *end
-                                && *first <= last
-                                && (*access == Access::Inout || *other_access == Access::Inout)
-                            {
-                                return Err((
-                                    Some(i),
-                                    ValidationError::OverlappingSlices { other: *other },
-                                ));
-                            }
-                        }
-                        ranges.push((i, *base, last, *access));
+                        claim(&mut ranges, i, *base, last, *access == Access::Inout)?;
                     }
+                }
+                (
+                    ParameterType::Pointer {
+                        pointee,
+                        access,
+                        nullable,
+                    },
+                    RawArgument::Pointer { address },
+                ) => {
+                    if *address == 0 {
+                        if *nullable {
+                            continue;
+                        }
+                        return Err((Some(i), ValidationError::NullPointer));
+                    }
+                    let alignment = pointee.alignment();
+                    if !address.is_multiple_of(alignment as u64) {
+                        return Err((Some(i), ValidationError::MisalignedPointer { alignment }));
+                    }
+                    // Pointee sizes are at most 1 MiB, so size - 1 fits.
+                    let last = address
+                        .checked_add(pointee.size() as u64 - 1)
+                        .ok_or((Some(i), ValidationError::PointerRangeOverflow))?;
+                    claim(&mut ranges, i, *address, last, access.writes())?;
                 }
                 _ => return Err((Some(i), ValidationError::ArgumentKind)),
             }

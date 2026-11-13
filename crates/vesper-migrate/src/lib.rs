@@ -34,7 +34,7 @@ pub mod synth;
 
 use std::fmt;
 
-pub use vesper_ffi::sys::{Access, Scalar};
+pub use vesper_ffi::sys::{Access, PointerAccess, Scalar};
 
 /// Schema tag carried by every rendered migration artefact.
 pub const SCHEMA: &str = "vesper.migrate/1";
@@ -158,8 +158,10 @@ pub enum RefusalReason {
     Aggregate,
     /// An unresolved, opaque or `void` pointee.
     OpaquePointer,
-    /// A single-element pointer parameter (an out-parameter). Bridge `.vsys`
-    /// accepts pointer parameters only as `nocapture` pointer/length slices.
+    /// A single-element pointer parameter whose pointee has no `.vsys` form:
+    /// a struct without a checked wire layout, or a Rust borrow of an
+    /// unsupported type. Scalar and wire-struct pointees are lifted to
+    /// `nocapture in|out|inout name: T`.
     PointerParameter,
     /// An item form outside the supported subset (globals, macros, traits, ...).
     UnsupportedItem,
@@ -167,6 +169,13 @@ pub enum RefusalReason {
     UnsupportedType,
     /// A malformed `vesper-migrate:` annotation.
     BadAnnotation,
+    /// An array parameter, or a byte pointer, with no following length: its
+    /// extent is unknown, so it is neither a slice nor one element.
+    ArrayWithoutLength,
+    /// Two pointer parameters to the same pointee type, at least one a single
+    /// pointer and at least one written: a signature cannot show they are
+    /// distinct objects.
+    AliasingPointers,
 }
 
 /// One item that was deliberately not lifted, with a human-readable reason.
@@ -225,11 +234,37 @@ pub enum SysValue {
     Address { pointee: Scalar, nullable: bool },
 }
 
-/// A `.vsys` parameter: a value or a `nocapture` pointer/length slice.
+/// The pointee of a single-element `.vsys` pointer parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SysPointee {
+    Scalar(Scalar),
+    /// A lifted struct, emitted as a `.vsys` `wire struct`.
+    Struct(String),
+}
+
+impl SysPointee {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Scalar(s) => s.name(),
+            Self::Struct(n) => n,
+        }
+    }
+}
+
+/// A `.vsys` parameter: a value, a `nocapture` pointer/length slice, or a
+/// `nocapture` pointer to exactly one scalar or wire struct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SysParam {
     Value(SysValue),
-    Slice { element: Scalar, access: Access },
+    Slice {
+        element: Scalar,
+        access: Access,
+    },
+    Pointer {
+        pointee: SysPointee,
+        access: PointerAccess,
+        nullable: bool,
+    },
 }
 
 /// The C-ABI view of one function.

@@ -2,6 +2,8 @@
 //! depend only on the single snapshot, even while a concurrent
 //! "hypervisor" thread rewrites shared memory.
 
+#![allow(deprecated)] // the legacy EnclaveGate shim is still tested
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use vesper_aegis::gate::*;
