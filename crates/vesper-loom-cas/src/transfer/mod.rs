@@ -12,6 +12,7 @@ mod export;
 mod import;
 
 pub use export::export_pack;
+pub use import::import_pack;
 
 pub(crate) const MAGIC: &[u8; 8] = b"VSPACK01";
 pub(crate) const PACK_VERSION: u32 = 1;
