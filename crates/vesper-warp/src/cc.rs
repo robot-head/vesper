@@ -157,6 +157,9 @@ impl Snapshots {
     }
 }
 
+/// Default [`QuicBbr::with_max_lead_ns`]: one second.
+pub const DEFAULT_MAX_LEAD_NS: u64 = 1_000_000_000;
+
 /// BBRv3 driven by lane 1's [`recovery::LossRecovery`] events.
 ///
 /// Per ACK frame: [`QuicBbr::begin_ack`], every event the recovery sink
@@ -175,6 +178,11 @@ pub struct QuicBbr {
     /// Application-data, Initial and Handshake snapshots (by `PnSpace`).
     spaces: [Snapshots; 3],
     acked: Vec<bbr::Delivered>,
+    /// Longest lead BBR's EDT schedule may have over the clock before the
+    /// adapter paces from the clock instead (see [`QuicBbr::schedule_edt_ns`]).
+    max_lead_ns: u64,
+    /// The adapter's own schedule while BBR's is too far ahead.
+    local_edt_ns: Option<u64>,
 }
 
 impl QuicBbr {
@@ -189,7 +197,28 @@ impl QuicBbr {
                 Snapshots::new(capacity),
             ],
             acked: Vec::with_capacity(capacity),
+            max_lead_ns: DEFAULT_MAX_LEAD_NS,
+            local_edt_ns: None,
         })
+    }
+
+    /// Sets the largest lead of BBR's pacing schedule over the clock (the
+    /// endpoint uses its launch-queue horizon).
+    #[must_use]
+    pub fn with_max_lead_ns(mut self, ns: u64) -> Self {
+        self.max_lead_ns = ns;
+        self
+    }
+
+    /// The earliest departure for the next packet: BBR's, or the adapter's
+    /// own schedule while BBR's is stale.
+    pub fn next_edt_ns(&self, now_ns: u64) -> u64 {
+        let bbr = self.bbr.next_edt_ns();
+        if bbr > now_ns.saturating_add(self.max_lead_ns) {
+            self.local_edt_ns.unwrap_or(now_ns)
+        } else {
+            bbr
+        }
     }
 
     /// The controller.
@@ -219,7 +248,26 @@ impl QuicBbr {
         self.bbr.pacing_rate_bytes_per_sec()
     }
     /// §35.3 `advance_bbrv3_edt`: departure time for `bytes` sent at `now_ns`.
+    ///
+    /// Wave six (the seed-246 stall in `docs/parallel-results/warp-lifecycle.md`):
+    /// a packet scheduled while BBR's pacing rate has collapsed (a tiny
+    /// bandwidth sample under heavy loss) can push BBR's schedule tens of
+    /// seconds ahead. Nothing then fits the launch horizon, nothing is in
+    /// flight, no ACK brings a new sample, and the connection stalls until
+    /// the clock catches up. While BBR's schedule leads the clock by more
+    /// than `max_lead_ns`, the adapter paces from the clock at BBR's
+    /// current rate instead, so packets keep flowing and BBR keeps getting
+    /// samples.
     pub fn schedule_edt_ns(&mut self, bytes: u32, now_ns: u64) -> u64 {
+        if self.bbr.next_edt_ns() > now_ns.saturating_add(self.max_lead_ns) {
+            let delay = bbr::pacing_delay_ns(bytes, self.bbr.pacing_rate_bytes_per_sec());
+            let (launch, next) = bbr::edt_step(self.local_edt_ns.unwrap_or(now_ns), now_ns, delay);
+            // The adapter's schedule is itself held within `max_lead_ns`,
+            // so a rate that collapses further cannot stall it the same way.
+            self.local_edt_ns = Some(next.min(now_ns.saturating_add(self.max_lead_ns)));
+            return launch;
+        }
+        self.local_edt_ns = None;
         self.bbr.schedule_edt_ns(bytes, now_ns)
     }
     /// The send guard (`bytes_in_flight < cwnd`).

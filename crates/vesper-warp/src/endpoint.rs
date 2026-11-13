@@ -1015,7 +1015,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             BbrConfig::quic(u32::from(self.config.max_datagram)),
             now_ns,
             self.config.max_tracked_per_conn,
-        )?;
+        )?
+        .with_max_lead_ns(self.config.launch_horizon_ns);
         let state = ConnState::new(
             peer,
             cc.cwnd_bytes(),
@@ -1177,7 +1178,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             BbrConfig::quic(u32::from(self.config.max_datagram)),
             now_ns,
             self.config.max_tracked_per_conn,
-        )?;
+        )?
+        .with_max_lead_ns(self.config.launch_horizon_ns);
         let c = self.conn_mut(slot)?;
         c.cc = cc;
         c.last_edt_ns = now_ns;
@@ -5065,8 +5067,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return false;
         };
         self.launch.len() < self.config.launch_capacity as usize
-            && c.cc.controller().next_edt_ns()
-                <= now_ns.saturating_add(self.config.launch_horizon_ns)
+            && c.cc.next_edt_ns(now_ns) <= now_ns.saturating_add(self.config.launch_horizon_ns)
     }
 
     fn release_launches(&mut self, now_ns: u64) -> u32 {
