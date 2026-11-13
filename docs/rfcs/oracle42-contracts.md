@@ -149,7 +149,7 @@ pub enum OracleAnswer {
 pub struct Mode { pub ast_optimized: bool, pub ir_optimized: bool }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RustAnswer {
-    Outcomes { evaluator: [Outcome; 4], jit: [Outcome; 4] },
+    Outcomes { evaluator: Box<[Outcome; 4]>, jit: Box<[Outcome; 4]> },
     Diagnostic { phase: DiagnosticPhase, codes: Vec<String> },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -157,7 +157,12 @@ pub enum DiagnosticPhase { Parse, Check }
 ```
 
 The four array slots are `(AST off, IR off)`, `(AST off, IR on)`,
-`(AST on, IR off)`, `(AST on, IR on)`, in that order. Kind/Op/Scope wire tags are
+`(AST on, IR off)`, `(AST on, IR on)`, in that order.
+
+The bounded outcome arrays and partial error report use boxes to keep enum and
+error carriers small; their serialized JSON shapes remain unchanged. This
+amendment follows actual strict-Clippy findings and precedes dependent edits.
+Kind/Op/Scope wire tags are
 the explicit mapping below, never Rust enum layout. Source diagnostic classes
 are not provided as expected oracle answers in `Case`. All diagnostic code
 strings are bounded ASCII and the internal transport has explicit field/count
@@ -193,7 +198,7 @@ pub enum FailureKind {
 }
 pub struct HarnessError { pub kind: FailureKind, pub detail: String }
 pub struct RunFailure {
-    pub error: HarnessError, pub case_id: Option<u64>, pub partial: RunReport,
+    pub error: HarnessError, pub case_id: Option<u64>, pub partial: Box<RunReport>,
 }
 pub fn run(config: &RunConfig) -> Result<RunReport, RunFailure>;
 ```
