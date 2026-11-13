@@ -32,10 +32,13 @@ pub const HARD_MAX_WORK: usize = 2 * 1024 * 1024 * 1024;
 
 /// Logical resource limits; these exclude allocator bookkeeping and caller data.
 /// All fields must be positive and no greater than the corresponding hard cap.
+/// Canonical destination-root prefixes and their legacy Store path copies are
+/// excluded with filesystem path resolution; these are not process RSS caps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TransferLimits {
     pub max_pack_bytes: usize,
     pub max_objects: usize,
+    /// Maximum path length in objects, including the root (depth one).
     pub max_depth: usize,
     pub max_tree_entries: usize,
     pub max_metadata_bytes: usize,
