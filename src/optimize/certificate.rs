@@ -875,7 +875,7 @@ fn run_graph(
     if actual.len() != RULE_COUNT {
         return Err(WitnessError::UnknownRule);
     }
-    let variables = [
+    let pattern_variables = [
         "?x".parse()
             .map_err(|_| WitnessError::InvalidSubstitution)?,
         "?y".parse()
@@ -887,7 +887,7 @@ fn run_graph(
         rule.applier = Arc::new(RecordingApplier {
             inner: rule.applier.clone(),
             rule: index as u16 + 1,
-            variables,
+            variables: pattern_variables,
             capture: capture.clone(),
         });
     }
