@@ -1,10 +1,11 @@
-# Executable Lean arithmetic oracle (§42): draft contract
+# Executable Lean arithmetic oracle (§42): frozen contract
 
-Parent public claim #269 precedes this design. This is a review draft, not
-authorization for runtime writers. Child claims #272–#275 exist before any
-runtime writer starts; source work begins only after the reviewed
-contract is pushed and linked to all claims. Interface amendments precede
-dependent source changes.
+Parent #269 and child claims #272–#275 precede implementation. The coordinator
+reviewed this contract with independent Lean/model, corpus/compiler-probe and
+acceptance/process reviews. Source writers begin only after this frozen version
+is pushed and linked to all claims. Interface amendments likewise precede
+dependent source changes. The base includes main `7e1bab8`, with the merged
+arithmetic witness/model foundation and the owner's Silicon/wave-six work.
 
 ## Ownership and scope
 
@@ -334,8 +335,9 @@ Do not compare complete general diagnostic sets or source spans to Lean blame.
 
 Every frame is four unsigned little-endian length bytes followed by exactly
 that many payload bytes. Read header/payload using exact loops handling short
-reads. Reject length above the local cap before allocating payload. A request
-is at most default16KiB/HARD64KiB; a response is at most512 bytes. Every response
+reads. Reject length above the local cap before allocating payload. The static
+Lean server has a fixed65536-byte request cap; the Rust encoder defaults to
+16384 bytes and may configure at most65536. A response is at most512 bytes. Every response
 is flushed. One request is outstanding at Lean; IDs start0, increase by1, and
 are at most9999999999. Terminate fatal(sequence_limit) before counter/ID overflow.
 
@@ -436,7 +438,9 @@ harness failures; never map arbitrary errors to overflow.
 
 The public JIT API creates a fresh module per invocation and exposes no reusable
 compiled handle. Its underlying executable allocations are intentionally not
-freed on module Drop. Recycle each Rust worker after32 cases by default, HARD128.
+freed on module Drop. Recycle each Rust worker after32 handled corpus frames by
+default, HARD128, including static-negative cases. For jobs1 with the default
+batch cap, the128-valid/15-negative suite uses five workers and four recycles.
 Do not change native APIs or use unsafe free tricks. Wait/reap old worker before
 replacement, keeping live workers <=jobs (1..4). No hard process-RSS claim.
 
@@ -605,6 +609,9 @@ serve shrink requests, before final EOF/BYE.
 Artifact directory is caller-selected, created if needed without deleting
 existing files. Unique per-run subdirectory; no overwrite of unrelated files.
 Bound total artifact bytes (default1MiB/HARD4MiB), preflight before writing.
+Exclude report.json and failure.json from their own ArtifactInfo digest
+inventory to avoid self-reference; their complete bytes still count against
+artifact_bytes. Every listed content file has an independently verifiable hash.
 Keep report JSON, exact source/request/response of original first mismatch,
 per-mode differences, optional shrunken source/request/response, model/driver
 and transcript hashes, tool/version/seed/config. No100000-file default archive;
@@ -672,8 +679,10 @@ and total artifact contents obey artifact_bytes. Output JSON is capped64KiB.
 Top-level case/call/answer coverage counts exclude shrink activity; shrink_calls
 records that separately. Terminal Lean counters are checked against the sum of
 normal corpus and shrink traffic, including any explicit invalid probes only
-when running dedicated protocol tests. Transcript hashes cover all actual wire
-traffic in order, including shrink frames; corpus hash covers original cases.
+when running dedicated protocol tests. Transcript hashes cover actual LEAN
+wire traffic in order, including READY/BYE and shrink frames, excluding Rust
+worker IPC. They are independent of worker scheduling; corpus hash covers
+original cases in committed ID order.
 
 Numeric counters are u64 checked before increment; per-run upper counts are
 derived from100000+fixed negatives+64 shrink attempts and lexical sequence cap.
@@ -690,8 +699,9 @@ selector u16LE and arity u8. Scope maps to the wire input/local tags; intrinsic 
 It excludes case ID/intent. The incremental corpus digest hashes domain
 `vesper.oracle42.corpus\0`, schema1 u16LE, suite valid-count u64LE, seed u64LE,
 then each original case's id u64LE, intent u8 (valid0/negative1), and32-byte
-semantic fingerprint in case order. Requests/responses hash exact framed bytes in wire
-order; model/driver hash exact copied bytes. These are inspection associations,
+semantic fingerprint in case order. Requests/responses hash exact LEAN framed
+bytes in wire order, including READY/BYE and shrink traffic; they exclude Rust
+worker IPC. Model/driver hash exact copied bytes. These are inspection associations,
 not kernel certificates. Report records hashes even for an incomplete run when
 available, with exact observed counts. Eight backend outcomes are not eight
 programs; AST node visits or frame count are not extra valid cases.
