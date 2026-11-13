@@ -1,0 +1,124 @@
+//! Differential evidence against the Linux kernel, when the host permits
+//! `bpf()` (Linux with CAP_BPF); otherwise each test reports that the
+//! evidence is unavailable and passes.
+//!
+//! * Every random program this crate's verifier accepts must also be
+//!   accepted by the kernel verifier (the soundness direction).
+//! * For those programs, `BPF_PROG_TEST_RUN` and this crate's interpreter
+//!   must agree on the return value and the output packet over the same
+//!   packet sequence (map state evolves in both).
+//! * Programs this crate rejects are loaded too, and the agreement rate is
+//!   printed; the kernel accepting more is expected (see the lane report).
+
+#![cfg(target_os = "linux")]
+
+mod common;
+
+use common::{GenOptions, Rng, random_packet, random_program};
+use vesper_ebpf::interp::{XdpEnv, run_xdp};
+use vesper_ebpf::kernel::{self, LoadError};
+use vesper_ebpf::{VerifierPolicy, verify};
+
+fn available() -> bool {
+    match kernel::probe() {
+        Ok(()) => true,
+        Err(e) => {
+            eprintln!("kernel BPF evidence unavailable on this host: {e}");
+            false
+        }
+    }
+}
+
+#[test]
+fn kernel_accepts_what_we_accept_and_executes_identically() {
+    if !available() {
+        return;
+    }
+    kernel::pin_to_cpu(0).expect("pin to CPU 0");
+    let n: u64 = std::env::var("VESPER_EBPF_DIFF_PROGRAMS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1500);
+    let seed: u64 = std::env::var("VESPER_EBPF_DIFF_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0x1234_5678_9abc_def1);
+    let mut rng = Rng(seed);
+    let policy = VerifierPolicy::default();
+    let (mut ours, mut both, mut kernel_only, mut neither) = (0, 0, 0, 0);
+    let mut runs = 0;
+    for i in 0..n {
+        let prog = random_program(&mut rng, GenOptions::default());
+        let mine = verify(&prog, &policy);
+        let theirs = kernel::load(&prog);
+        match (&mine, &theirs) {
+            (Ok(_), Ok(_)) => both += 1,
+            (Ok(_), Err(LoadError::Rejected { log, .. })) => {
+                panic!(
+                    "program {i}: accepted here, rejected by the kernel:\n{log}\n{}",
+                    vesper_ebpf::insn::disassemble(&prog.insns)
+                );
+            }
+            (Ok(_), Err(e)) => panic!("program {i}: kernel load failed: {e}"),
+            (Err(_), Ok(_)) => kernel_only += 1,
+            (Err(_), Err(_)) => neither += 1,
+        }
+        if mine.is_ok() {
+            ours += 1;
+            let loaded = theirs.expect("checked above");
+            let mut env = XdpEnv::new(&prog);
+            for _ in 0..8 {
+                let mut pkt = random_packet(&mut rng);
+                // BPF_PROG_TEST_RUN needs at least an Ethernet header
+                pkt.resize(pkt.len().max(14), 0);
+                let k = kernel::test_run(&loaded.prog, &pkt).expect("test run");
+                let u = run_xdp(&prog, &mut env, &pkt).expect("interpreter on an accepted program");
+                assert_eq!(
+                    (k.retval as u64, &k.packet),
+                    (u.ret, &u.packet),
+                    "program {i}: kernel and interpreter disagree on packet {pkt:02x?}\n{}",
+                    vesper_ebpf::insn::disassemble(&prog.insns)
+                );
+                runs += 1;
+            }
+        }
+    }
+    eprintln!(
+        "accepted by both {both}, kernel only {kernel_only}, neither {neither} (ours {ours}); {runs} identical test runs"
+    );
+    assert!(both >= 100);
+}
+
+#[test]
+fn kernel_agrees_on_the_rule_corpus() {
+    use common::corpus::{Kernel, corpus};
+    if !available() {
+        return;
+    }
+    let mut wrong = Vec::new();
+    for case in corpus() {
+        if case.kernel == Kernel::NotLoaded {
+            continue;
+        }
+        let got = kernel::load(&case.prog);
+        let ok = matches!(
+            (case.kernel, &got),
+            (Kernel::Accepts | Kernel::AcceptsButStricterHere, Ok(_))
+                | (Kernel::Rejects, Err(LoadError::Rejected { .. }))
+        );
+        if !ok {
+            let detail = match &got {
+                Ok(_) => "kernel accepted".to_owned(),
+                Err(LoadError::Rejected { log, .. }) => {
+                    log.lines().rev().take(4).collect::<Vec<_>>().join(" | ")
+                }
+                Err(e) => e.to_string(),
+            };
+            wrong.push(format!(
+                "{} (expected kernel {:?}): {detail}",
+                case.name, case.kernel
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+}
