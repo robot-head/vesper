@@ -7,10 +7,12 @@ publish = false
 
 [dependencies]
 blake3 = "1.8"
+bytemuck = "=1.25.2"
 cranelift-codegen = "0.125"
 num-bigint = "=0.4.8"
 num-traits = "=0.2.19"
 sha2 = { workspace = true }
+vesper-alloc = { path = "../vesper-alloc" }
 
 [dev-dependencies]
 cranelift-frontend = "0.125"

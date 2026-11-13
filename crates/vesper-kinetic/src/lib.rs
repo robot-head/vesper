@@ -19,6 +19,7 @@
 pub mod coloring;
 pub mod crmath;
 pub mod detfloat;
+pub mod lbvh;
 pub mod morton;
 pub mod rollback;
 pub mod snapshot;
@@ -31,4 +32,7 @@ pub use morton::MortonError;
 pub use rollback::{ResimulateError, RollbackError, RollbackTicket, SnapshotRing};
 pub use snapshot::{KineticSnapshotWireHdr, SNAPSHOT_HEADER_LEN, WorldHashes, hash_world};
 pub use tile::{Body, RigidBodyTile, TILE_WIDTH, TiledBodies};
-pub use world::{DistanceConstraint, SphereCollider, StepError, World, WorldConfig};
+pub use world::{
+    BATCH_WIDTH, BroadphaseMode, ContactMaterial, DistanceConstraint, SolverMode, SphereCollider,
+    StepError, World, WorldConfig,
+};

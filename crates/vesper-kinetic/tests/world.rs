@@ -3,9 +3,10 @@
 mod common;
 
 use common::{RADIUS, anchor, dynamic};
+use vesper_alloc::{Region, RegionConfig};
 use vesper_kinetic::{
-    DistanceConstraint, KineticSnapshotWireHdr, SNAPSHOT_HEADER_LEN, SphereCollider, StepError,
-    World, WorldConfig, hash_world,
+    BroadphaseMode, DistanceConstraint, KineticSnapshotWireHdr, SNAPSHOT_HEADER_LEN,
+    SphereCollider, StepError, World, WorldConfig, hash_world,
 };
 
 const BALL: [SphereCollider; 1] = [SphereCollider { radius: RADIUS }];
@@ -326,4 +327,50 @@ fn coincident_centres_are_separated_deterministically() {
         "joint error {}",
         w.max_joint_error()
     );
+}
+
+#[test]
+fn lbvh_broadphase_has_no_search_radius_limit() {
+    // The rocket that the bounded cell search refuses still meets its
+    // partner through the LBVH, whose boxes cover the whole sweep.
+    // 300 units/s with 8 substeps moves 0.31 per substep (less than a
+    // diameter, so the substeps can resolve the contact) but 2.5 per tick,
+    // beyond the cell search radius.
+    let cfg = WorldConfig {
+        gravity: [0.0; 3],
+        ground_y: None,
+        substeps: 8,
+        ..common::config()
+    };
+    let bodies = [
+        dynamic([0.0; 3], [300.0, 0.0, 0.0]),
+        dynamic([2.0, 0.0, 0.0], [0.0; 3]),
+    ];
+    let mut cells = World::new(cfg, &bodies, &BALL, &[]).unwrap();
+    assert_eq!(cells.step(), Err(StepError::SweepTooLarge { body: 0 }));
+    let mut w = World::new(cfg, &bodies, &BALL, &[]).unwrap();
+    w.set_broadphase(BroadphaseMode::Lbvh);
+    let h = w.step().unwrap();
+    assert_eq!(h.manifold_count, 1);
+    let (a, b) = (w.bodies().get(0).unwrap(), w.bodies().get(1).unwrap());
+    assert!(a.pos[0] < b.pos[0], "no tunnelling: {:?} {:?}", a.pos, b.pos);
+}
+
+#[test]
+fn a_too_small_step_arena_is_a_typed_error_and_changes_nothing() {
+    let mut w = common::scene();
+    let mut arena = Region::new(RegionConfig::bounded(256)).unwrap();
+    let before = hash_world(w.tick(), w.bodies());
+    assert!(matches!(w.step_in(&mut arena), Err(StepError::Arena(_))));
+    assert_eq!(w.tick(), 0);
+    assert_eq!(hash_world(w.tick(), w.bodies()), before);
+    // The failed step left nothing behind in the arena.
+    assert_eq!(arena.stats().used_bytes, 0);
+    assert_eq!(arena.stats().checkpoints, 0);
+    // A correctly sized arena works and matches `step`.
+    let mut arena = Region::new(w.step_arena_config()).unwrap();
+    let mut reference = common::scene();
+    for _ in 0..5 {
+        assert_eq!(w.step_in(&mut arena).unwrap(), reference.step().unwrap());
+    }
 }
