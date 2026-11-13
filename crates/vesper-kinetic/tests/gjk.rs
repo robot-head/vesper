@@ -317,3 +317,37 @@ fn malformed_shapes_are_typed_errors() {
         Err(GjkError::Degenerate)
     );
 }
+
+#[test]
+fn tiny_separated_shapes_keep_their_distance() {
+    let a = Shape::Sphere {
+        center: [0.0; 3],
+        radius: 1e-11,
+    };
+    let b = Shape::Sphere {
+        center: [1e-10, 0.0, 0.0],
+        radius: 1e-11,
+    };
+    let s = separation(&a, &b).unwrap();
+    assert!((s.distance - 8e-11).abs() < 1e-24, "{s:?}");
+    assert_eq!(s.normal, [1.0, 0.0, 0.0]);
+    assert!(!intersects(&a, &b).unwrap());
+}
+
+#[test]
+fn thin_hulls_are_not_mistaken_for_flat_ones() {
+    // A long needle whose extreme points win every axis and diagonal
+    // direction, overlapping itself.
+    let mut v = vec![[1.0, 2.0, 4.0], [-1.0, -2.0, -4.0]];
+    for k in 0..3 {
+        for s in [0.001, -0.001] {
+            let mut p = [0.0; 3];
+            p[k] = s;
+            v.push(p);
+        }
+    }
+    let n = Shape::Polytope { vertices: &v };
+    let s = separation(&n, &n).unwrap();
+    assert!(s.distance < 0.0, "{s:?}");
+    assert!(intersects(&n, &n).unwrap());
+}

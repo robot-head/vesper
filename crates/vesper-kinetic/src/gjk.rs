@@ -300,8 +300,9 @@ fn gjk_cores(sa: &Shape, sb: &Shape) -> Result<GjkOutcome, GjkError> {
     let mut simplex = vec![first];
     let mut lambdas = vec![1.0];
     let mut v = first.w;
-    // Scale for the relative tolerances.
-    let size = norm(first.w).max(1.0);
+    // Scale for the relative tolerances (no absolute floor, so tiny but
+    // separated shapes keep their positive distance).
+    let size = norm(first.w);
     let mut converged = false;
     for _ in 0..GJK_MAX_ITER {
         let vv = dot(v, v);
@@ -350,8 +351,7 @@ pub fn separation(a: &Shape, b: &Shape) -> Result<Separation, GjkError> {
     b.validate()?;
     let g = gjk_cores(a, b)?;
     let radii = a.radius() + b.radius();
-    let core_scale = norm(sub(a.some_point(), b.some_point())).max(1.0);
-    if g.distance > 1e-9 * core_scale {
+    if g.distance > 0.0 {
         // n points from a to b: v = core_a − core_b is the closest point.
         let normal = scale(g.v, -1.0 / g.distance);
         return Ok(Separation {
@@ -486,7 +486,7 @@ fn epa(sa: &Shape, sb: &Shape, seed: &[SupportPoint]) -> Result<CorePenetration,
     }
     // Initial tetrahedron of large volume.
     let p0 = 0;
-    let far = |from: &dyn Fn(V) -> f64| -> usize {
+    let far = |from: &dyn Fn(V) -> f64, cand: &[SupportPoint]| -> usize {
         let mut best = 0;
         let mut best_v = f64::NEG_INFINITY;
         for (i, c) in cand.iter().enumerate() {
@@ -499,12 +499,23 @@ fn epa(sa: &Shape, sb: &Shape, seed: &[SupportPoint]) -> Result<CorePenetration,
         best
     };
     let a0 = cand[p0].w;
-    let p1 = far(&|w| norm(sub(w, a0)));
+    let p1 = far(&|w| norm(sub(w, a0)), &cand);
     let a1 = cand[p1].w;
-    let p2 = far(&|w| norm(cross(sub(w, a0), sub(a1, a0))));
+    // The fixed directions can all pick the ends of a long thin hull, so
+    // query the directions perpendicular to the line found so far (and
+    // then to the plane) before concluding the difference is flat.
+    let u = flat_normal(sub(a1, a0), [0.0; 3]);
+    let v = cross(sub(a1, a0), u);
+    for d in [u, scale(u, -1.0), v, scale(v, -1.0)] {
+        cand.push(core_support_point(sa, sb, d));
+    }
+    let p2 = far(&|w| norm(cross(sub(w, a0), sub(a1, a0))), &cand);
     let a2 = cand[p2].w;
     let plane = cross(sub(a1, a0), sub(a2, a0));
-    let p3 = far(&|w| dot(sub(w, a0), plane).abs());
+    for d in [plane, scale(plane, -1.0)] {
+        cand.push(core_support_point(sa, sb, d));
+    }
+    let p3 = far(&|w| dot(sub(w, a0), plane).abs(), &cand);
     let a3 = cand[p3].w;
     let extent = norm(sub(a1, a0));
     if !(extent > 1e-12) {

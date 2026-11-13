@@ -90,7 +90,7 @@ fn batched_solver_lbvh_and_arena_match_the_scalar_golden_hash() {
 }
 
 const GOLDEN_FRICTION_SHA256: &str =
-    "3b97ec94181efcd265e4c6454b7a35c67151f0c227a10b363ebbe6b595e93576";
+    "d9c065c8b8e798da74a4bb566108d1ad0d3656ce7e7610e2b6e0bb5674928d5d";
 
 /// With friction and restitution on, scalar and batched projection still
 /// agree bit for bit, and the result is pinned across architectures.

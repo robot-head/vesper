@@ -178,3 +178,31 @@ fn materials_are_validated() {
     }
     assert_eq!(w.contact_material(), ContactMaterial::default());
 }
+
+#[test]
+fn restitution_uses_the_approach_speed_even_when_projection_cancels_the_impact() {
+    // No gravity, one substep, touching the ground and moving down: the
+    // projection restores the height, so the post-projection normal speed
+    // is zero, but the approach speed was 2 m/s and e = 1 must bounce.
+    let config = WorldConfig {
+        gravity: [0.0; 3],
+        substeps: 1,
+        contact_margin: 0.125,
+        ..WorldConfig::default()
+    };
+    let mut w = World::new(
+        config,
+        &[common::dynamic([0.0, R, 0.0], [0.0, -2.0, 0.0])],
+        &[SphereCollider { radius: R }],
+        &[],
+    )
+    .unwrap();
+    w.set_contact_material(ContactMaterial {
+        restitution: 1.0,
+        ..ContactMaterial::default()
+    })
+    .unwrap();
+    w.step().unwrap();
+    let vy = w.bodies().get(0).unwrap().vel[1];
+    assert!((vy - 2.0).abs() < 1e-5, "rebound speed {vy}");
+}

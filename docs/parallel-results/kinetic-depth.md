@@ -116,7 +116,7 @@ the golden scene (600 ticks) in all eight combinations of solver mode,
 broadphase and arena and requires the committed wave-five golden SHA-256
 and BLAKE3 values, which are unchanged by this lane. With friction and
 restitution on, scalar and batched agree bit for bit and are pinned at
-`3b97ec94181efcd265e4c6454b7a35c67151f0c227a10b363ebbe6b595e93576` (300 ticks).
+`d9c065c8b8e798da74a4bb566108d1ad0d3656ce7e7610e2b6e0bb5674928d5d` (300 ticks).
 
 Measured (release, 1,000 resting spheres, same noisy host): Scalar 2.77 ms,
 Batched16 3.25 ms per tick with the cell broadphase; 0.49 ms and 0.48 ms with
@@ -181,7 +181,7 @@ tangential displacement of the substep is cancelled if it is below
 `μ_s · corr`, otherwise reduced by `μ_k · corr`, shared by inverse mass. The
 velocity pass (Müller et al. 2020 §3.6) sets each pushing contact's normal
 relative velocity to `−e · v̄n` of the pre-substep approach speed, with
-`e = 0` below `2·|g|₁·h`. All zero (the default) skips both, which is why
+`e = 0` when that approach speed is below `2·|g|₁·h`. All zero (the default) skips both, which is why
 the golden hash is unchanged.
 
 Evidence (`tests/contacts.rs`, both solver modes where relevant): a ball on
@@ -266,10 +266,23 @@ Rust 1.97.0, Lean 4.24.0 (GitHub release tarball):
 
 - `cargo fmt --all -- --check`: clean.
 - `cargo clippy -p vesper-kinetic --locked --all-targets -- -D warnings`: clean.
-- `VESPER_LEAN=lean cargo test -p vesper-kinetic --locked`: 70 tests pass
+- `VESPER_LEAN=lean cargo test -p vesper-kinetic --locked`: 73 tests pass
   (debug; the golden file takes about 13 s).
 - `cargo clippy --workspace --locked --all-targets -- -D warnings` and
   `VESPER_LEAN=lean cargo test --workspace --locked`: see the PR.
+
+## Review fixes
+
+Codex review of the first push found three issues, all fixed with
+regression tests: the restitution low-speed cutoff looked at the
+post-projection normal speed, so an impact that projection fully cancelled
+never bounced (now uses the approach speed; the friction golden hash was
+re-pinned); GJK treated separations below an absolute `1e-9` as overlap, so
+tiny disjoint shapes reported a collision (now only a zero core distance,
+with purely relative tolerances, counts); and EPA's flatness test could
+mistake a long thin hull for a flat one when every fixed probe direction
+picked its two endpoints (it now probes the directions perpendicular to the
+line and plane found so far).
 
 ## Remaining gaps
 

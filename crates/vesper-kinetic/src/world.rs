@@ -1298,7 +1298,7 @@ impl World {
     /// Velocity pass (Müller et al. 2020 §3.6): for every contact that
     /// pushed this substep, set the normal relative velocity to
     /// `−e · v̄n` (the restitution of the pre-substep approach speed), with
-    /// `e = 0` below `2·|g|₁·h`. Contacts are visited in colour order.
+    /// `e = 0` when `|v̄n|` is below `2·|g|₁·h`. Contacts are visited in colour order.
     fn apply_restitution(&mut self, h: f32, contacts: &[[u32; 2]], state: &[[f32; 4]]) {
         let joints = self.joints.len();
         let g = self.config.gravity;
@@ -1349,7 +1349,8 @@ impl World {
                 ];
                 let vn = det::dot(rel, n);
                 let vn_prev = det::dot(rel_prev, n);
-                let e_here = if vn.abs() <= threshold { 0.0 } else { e };
+                // The low-speed cutoff looks at the approach speed, like `wanted`.
+                let e_here = if vn_prev.abs() <= threshold { 0.0 } else { e };
                 let wanted = if vn_prev < 0.0 {
                     det::neg(det::mul(e_here, vn_prev))
                 } else {
