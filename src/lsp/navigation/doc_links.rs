@@ -70,6 +70,15 @@ struct Inventory<'a> {
     budget: Budget,
 }
 impl Inventory<'_> {
+    fn local_name(&mut self, name: &str) -> Result<bool, Error> {
+        self.budget.work(add(name.len(), 1)?)?;
+        let mut bytes = name.bytes();
+        Ok(name != "Self"
+            && bytes
+                .next()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_')
+            && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_'))
+    }
     fn path(&mut self, owner: Option<&str>, name: &str) -> Result<String, Error> {
         self.budget.work(add(name.len(), 1)?)?;
         let bytes = if let Some(owner) = owner {
@@ -135,6 +144,14 @@ impl Inventory<'_> {
         source: &Function,
         owner: Option<&str>,
     ) -> Result<(), Error> {
+        if !self.local_name(&source.name)? {
+            return Ok(());
+        }
+        if let Some(name) = owner
+            && !self.local_name(name)?
+        {
+            return Ok(());
+        }
         let path = self.path(owner, &source.name)?;
         self.budget.lookup(world.functions.len(), path.len())?;
         let actual = world.functions.get(&path).ok_or(Error::InvalidSpan)?;
@@ -164,6 +181,9 @@ impl Inventory<'_> {
             match item {
                 Item::Function(f) => self.function(world, f, None)?,
                 Item::Adt(a) => {
+                    if !self.local_name(&a.name)? {
+                        continue;
+                    }
                     self.budget.lookup(world.adts.len(), a.name.len())?;
                     if world.adts.get(&a.name).map(|d| &d.span) != Some(&a.span) {
                         return Err(Error::InvalidSpan);
@@ -172,6 +192,9 @@ impl Inventory<'_> {
                     self.push(path, TargetKind::Type, &a.span, &a.name)?;
                 }
                 Item::Effect(e) => {
+                    if !self.local_name(&e.name)? {
+                        continue;
+                    }
                     self.budget.lookup(world.effects.len(), e.name.len())?;
                     let actual = world.effects.get(&e.name).ok_or(Error::InvalidSpan)?;
                     if actual.span != e.span {
@@ -181,6 +204,9 @@ impl Inventory<'_> {
                     self.push(path, TargetKind::Effect, &e.span, &e.name)?;
                     for operation in &e.ops {
                         self.budget.work(1)?;
+                        if !self.local_name(&operation.name)? {
+                            continue;
+                        }
                         for candidate in &actual.ops {
                             self.budget
                                 .work(add(add(candidate.name.len(), operation.name.len())?, 1)?)?;
@@ -211,6 +237,9 @@ impl Inventory<'_> {
                     }
                 }
                 Item::Trait(t) => {
+                    if !self.local_name(&t.name)? {
+                        continue;
+                    }
                     for name in &world.elaboration.traits {
                         self.budget.work(add(add(name.len(), t.name.len())?, 1)?)?;
                     }
