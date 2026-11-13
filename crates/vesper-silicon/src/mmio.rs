@@ -25,6 +25,11 @@
 //!
 //! ```compile_fail
 //! # use vesper_silicon::mmio::*;
+//! fn pop(r: &Reg<ConsumeWrite>) -> u64 { r.read() } // FIFO reads must be consumes
+//! ```
+//!
+//! ```compile_fail
+//! # use vesper_silicon::mmio::*;
 //! fn poke(r: &Reg<ReadOnly>) { r.write(1); } // read-only registers have no write
 //! ```
 //!
@@ -160,8 +165,10 @@ impl SimBus {
             let m = f.mask();
             let wf = w & m;
             v = match f.access {
-                FieldAccess::ReadWrite | FieldAccess::WriteOnly => (v & !m) | wf,
-                FieldAccess::ReadOnly | FieldAccess::ReadToClear => v,
+                FieldAccess::ReadWrite
+                | FieldAccess::WriteOnly
+                | FieldAccess::ReadSideEffectWrite => (v & !m) | wf,
+                FieldAccess::ReadOnly | FieldAccess::ReadToClear | FieldAccess::ReadSideEffect => v,
                 FieldAccess::Write1ToClear => v & !wf,
                 FieldAccess::Write1ToSet => v | wf,
                 FieldAccess::Write1ToToggle => v ^ wf,
@@ -199,6 +206,7 @@ marker!(
     WriteOnly => WriteOnly,
     Write1ToClear => WriteClear,
     ReadToClear => ReadToClear,
+    ConsumeWrite => ConsumeWrite,
 );
 
 /// A register bound to a bus with access policy `A`.
@@ -318,10 +326,33 @@ impl Reg<Write1ToClear> {
 
 impl Reg<ReadToClear> {
     /// The only read: returns the value and the hardware clears the
-    /// read-to-clear bits.
+    /// read-to-clear bits (or performs the read side effect).
     pub fn consume(&self) -> u64 {
         self.raw_read()
     }
+}
+
+impl Reg<ConsumeWrite> {
+    /// The only read, with its side effect (FIFO pop, spinlock claim). The
+    /// software bus does not model the side effect beyond logging the read.
+    pub fn consume(&self) -> u64 {
+        self.raw_read()
+    }
+
+    /// A plain write (FIFO push, spinlock release).
+    pub fn write(&self, v: u64) -> Result<(), BusError> {
+        self.raw_write(v)
+    }
+}
+
+/// Claims the peripheral singleton `name` on `bus`; a second claim fails.
+/// Generated peripheral structs (see [`crate::pac`]) call this from `take`.
+pub fn claim_peripheral(bus: &Bus, name: &str) -> Result<(), BusError> {
+    let mut b = bus.borrow_mut();
+    if !b.taken.insert(name.to_string()) {
+        return Err(BusError::AlreadyTaken(name.to_string()));
+    }
+    Ok(())
 }
 
 /// SPI typestate markers.

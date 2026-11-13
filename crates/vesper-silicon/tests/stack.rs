@@ -8,7 +8,7 @@ use vesper_silicon::stack::{
     Program, RULE_BUDGET, RULE_EXTERNAL, RULE_INDIRECT, RULE_RECURSION, StackPolicy, StackRoot,
 };
 
-const ISAS: [Arch; 2] = [Arch::X86_64, Arch::Aarch64];
+const ISAS: [Arch; 3] = [Arch::X86_64, Arch::Aarch64, Arch::Riscv64];
 
 fn policy(root: &str, budget: u32) -> StackPolicy {
     StackPolicy {
@@ -108,11 +108,21 @@ fn worst_path_and_budget_on_both_isas() {
 fn isas_split_frames_differently() {
     // x86_64 pays an 8-byte return address per activation; AArch64 instead
     // pushes the 16-byte frame record itself.
+    // riscv64 is like AArch64: `jal` writes `ra`, and the prologue stores
+    // `ra`/`fp` in a 16-byte record below the caller's SP.
     let x = Program::compile(Arch::X86_64, tree()).unwrap();
     let a = Program::compile(Arch::Aarch64, tree()).unwrap();
-    for (mx, ma) in x.measurements().iter().zip(a.measurements()) {
+    let r = Program::compile(Arch::Riscv64, tree()).unwrap();
+    for ((mx, ma), mr) in x
+        .measurements()
+        .iter()
+        .zip(a.measurements())
+        .zip(r.measurements())
+    {
         assert_eq!(mx.prologue.call_push_bytes, 8);
         assert_eq!(ma.prologue.call_push_bytes, 0);
+        assert_eq!(mr.prologue.call_push_bytes, 0);
+        assert_eq!(mr.prologue.frame_record_bytes, 16);
     }
 }
 
@@ -241,10 +251,8 @@ fn unknown_root_and_unsupported_isa_are_typed_errors() {
     let r = p.check_stack(&policy("nope", 1));
     assert_eq!(r.findings[0].rule, vesper_silicon::stack::RULE_UNKNOWN_ROOT);
     assert!(matches!(
-        Program::compile(Arch::Riscv64, tree()),
-        Err(vesper_silicon::stack::StackError::UnsupportedIsa(
-            Arch::Riscv64
-        ))
+        Program::compile_with_isa_flags(Arch::Riscv64, &[("no_such_flag", "true")], tree()),
+        Err(vesper_silicon::stack::StackError::IsaSetup(_))
     ));
     let dup = vec![func("x", 0, &[], false), func("x", 0, &[], false)];
     assert!(matches!(
@@ -272,5 +280,71 @@ fn callee_saved_clobbers_are_counted() {
         if arch == Arch::Aarch64 {
             assert!(m.prologue.clobber_push_bytes > 0, "{m:?}");
         }
+    }
+}
+
+/// Cranelift's riscv64 output, base and compressed, against the layout.
+#[test]
+fn riscv64_frames_match_the_layout_with_and_without_compressed_encodings() {
+    let fs = || {
+        vec![
+            func("a", 32, &["leaf"], false),
+            func("mid", 3000, &[], false),
+            func("big", 70_000, &[], false),
+            common::clobbering("hot", "leaf", 12),
+            func("leaf", 0, &[], false),
+        ]
+    };
+    let base = Program::compile(Arch::Riscv64, fs()).unwrap();
+    let rvc = Program::compile_with_isa_flags(
+        Arch::Riscv64,
+        &[("has_zca", "true"), ("has_zcd", "true")],
+        fs(),
+    )
+    .unwrap();
+    for (b, c) in base.measurements().iter().zip(rvc.measurements()) {
+        // Compressed code is shorter but the SP accounting is identical.
+        assert!(c.code_bytes < b.code_bytes, "{b:?} {c:?}");
+        assert_eq!(b.prologue.total(), c.prologue.total(), "{b:?} {c:?}");
+        assert_eq!(b.cranelift_frame_size, c.cranelift_frame_size);
+        // On riscv64 the whole frame is the record plus Cranelift's layout:
+        // the decoder finds exactly that, not merely at least that.
+        assert_eq!(
+            b.prologue.total(),
+            Some(16 + b.cranelift_frame_size),
+            "{b:?}"
+        );
+        assert_eq!(b.prologue.total().unwrap() % 16, 0);
+    }
+    let frame = |p: &Program, n: &str| {
+        p.graph().functions[p.graph().id_of(n).unwrap().0 as usize].frame_bytes
+    };
+    assert_eq!(frame(&base, "big"), 16 + 70_000);
+    assert_eq!(frame(&base, "mid"), 16 + 3008);
+    assert_eq!(frame(&base, "leaf"), 16);
+    // The clobber save area (s1 live across the call) is part of the frame.
+    let hot = base
+        .measurements()
+        .iter()
+        .find(|m| m.name == "hot")
+        .unwrap();
+    assert!(hot.cranelift_frame_size >= 8, "{hot:?}");
+
+    let r = rvc.check_stack(&policy("a", frame(&rvc, "a") + 16));
+    assert!(r.findings.is_empty(), "{:?}", r.findings);
+    assert_eq!(r.roots[0].worst_path, ["a", "leaf"]);
+    assert_eq!(r.roots[0].worst_case_bytes, Some(16 + 32 + 16));
+}
+
+#[test]
+fn outgoing_stack_arguments_are_part_of_the_frame() {
+    // 16 integer arguments: 8 (riscv64, AArch64) or 6 (x86_64) in registers,
+    // the rest in the caller's outgoing area, which `frame_size` excludes.
+    for arch in ISAS {
+        let few = Program::compile(arch, vec![common::many_args_caller("c", "ext", 4)]).unwrap();
+        let many = Program::compile(arch, vec![common::many_args_caller("c", "ext", 16)]).unwrap();
+        let (f, m) = (&few.measurements()[0], &many.measurements()[0]);
+        let (tf, tm) = (f.prologue.total().unwrap(), m.prologue.total().unwrap());
+        assert!(tm >= tf + 8 * 8, "{arch:?} few={f:?} many={m:?}");
     }
 }

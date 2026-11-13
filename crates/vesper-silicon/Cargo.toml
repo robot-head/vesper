@@ -2,12 +2,12 @@
 name = "vesper-silicon"
 version = "0.1.0"
 edition = "2024"
-description = "Vesper Silicon (§26): Cranelift stack-depth analysis, SVD MMIO hazards, typestate peripherals, IrqGuard and DMA/page-frame conservation models"
+description = "Vesper Silicon (§26): Cranelift stack-depth analysis (x86_64, AArch64, riscv64), SVD MMIO hazards and typestate accessor generation, devicetree input, IrqGuard and DMA/page-frame conservation models with Zicbom"
 license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
-cranelift-codegen = { version = "0.125", features = ["arm64", "x86"] }
+cranelift-codegen = { version = "0.125", features = ["arm64", "riscv64", "x86"] }
 svd-parser = { version = "=0.14.10", features = ["expand"] }
 
 [dev-dependencies]

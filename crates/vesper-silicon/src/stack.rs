@@ -1,7 +1,7 @@
 //! §26.5 worst-case stack-depth analysis over real Cranelift functions.
 //!
 //! [`Program::compile`] compiles every function with `cranelift-codegen`
-//! 0.125 for x86_64 or AArch64, measures each activation's stack bytes from
+//! 0.125 for x86_64, AArch64 or riscv64, measures each activation's stack bytes from
 //! the emitted prologue (see [`crate::prologue`]), cross-checks that number
 //! against Cranelift's own frame layout, and builds the wave-five
 //! [`CallGraph`] from the IR's `call`, `call_indirect`, `return_call` and
@@ -213,10 +213,20 @@ pub struct Program {
 
 /// Builds the Cranelift ISA used for analysis.
 pub fn target_isa(arch: Arch) -> Result<std::sync::Arc<dyn TargetIsa>, StackError> {
+    target_isa_with(arch, &[])
+}
+
+/// Builds the analysis ISA with extra ISA-specific settings, for example
+/// `[("has_zca", "true"), ("has_zcd", "true")]` for riscv64 code that uses the
+/// compressed encodings. An unknown setting is [`StackError::IsaSetup`].
+pub fn target_isa_with(
+    arch: Arch,
+    isa_flags: &[(&str, &str)],
+) -> Result<std::sync::Arc<dyn TargetIsa>, StackError> {
     let name = match arch {
         Arch::X86_64 => "x86_64",
         Arch::Aarch64 => "aarch64",
-        Arch::Riscv64 => return Err(StackError::UnsupportedIsa(arch)),
+        Arch::Riscv64 => "riscv64",
     };
     let mut flags = settings::builder();
     for (k, v) in [
@@ -229,7 +239,12 @@ pub fn target_isa(arch: Arch) -> Result<std::sync::Arc<dyn TargetIsa>, StackErro
             .set(k, v)
             .map_err(|e| StackError::IsaSetup(format!("{k}={v}: {e}")))?;
     }
-    let builder = isa::lookup_by_name(name).map_err(|e| StackError::IsaSetup(e.to_string()))?;
+    let mut builder = isa::lookup_by_name(name).map_err(|e| StackError::IsaSetup(e.to_string()))?;
+    for (k, v) in isa_flags {
+        builder
+            .set(k, v)
+            .map_err(|e| StackError::IsaSetup(format!("{k}={v}: {e}")))?;
+    }
     builder
         .finish(settings::Flags::new(flags))
         .map_err(|e| StackError::IsaSetup(e.to_string()))
@@ -239,7 +254,17 @@ impl Program {
     /// Compiles and measures every function. Function names (`User` or
     /// `Testcase`) must be unique; callees are resolved by the same names.
     pub fn compile(arch: Arch, functions: Vec<Function>) -> Result<Self, StackError> {
-        let isa = target_isa(arch)?;
+        Self::compile_with_isa_flags(arch, &[], functions)
+    }
+
+    /// [`Program::compile`] with extra ISA-specific settings (see
+    /// [`target_isa_with`]).
+    pub fn compile_with_isa_flags(
+        arch: Arch,
+        isa_flags: &[(&str, &str)],
+        functions: Vec<Function>,
+    ) -> Result<Self, StackError> {
+        let isa = target_isa_with(arch, isa_flags)?;
         let mut ids: HashMap<String, FnId> = HashMap::new();
         for (i, f) in functions.iter().enumerate() {
             let name = symbol_of_user_func(&f.name);
@@ -270,7 +295,7 @@ impl Program {
             let measured = match arch {
                 Arch::X86_64 => prologue::measure_x86_64(code),
                 Arch::Aarch64 => prologue::measure_aarch64(code),
-                Arch::Riscv64 => unreachable!("rejected by target_isa"),
+                Arch::Riscv64 => prologue::measure_riscv64(code),
             };
             let total = measured.total().ok_or_else(|| StackError::Overflow {
                 function: name.clone(),
