@@ -1,0 +1,47 @@
+name: Set up Bazel
+description: >-
+  Installs Bazelisk and configures Bazel for CI. With a BuildBuddy API key it
+  uses BuildBuddy's remote cache; without one (for example on pull requests from forks) it falls back to a GitHub
+  Actions disk cache. See docs/bazel.md.
+inputs:
+  buildbuddy-api-key:
+    description: BuildBuddy API key; empty disables BuildBuddy.
+    required: false
+    default: ''
+  cache-name:
+    description: Disk-cache key used when there is no BuildBuddy key.
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: bazel-contrib/setup-bazel@0.19.2
+      with:
+        bazelisk-cache: true
+        repository-cache: true
+        disk-cache: ${{ inputs.buildbuddy-api-key == '' && inputs.cache-name || false }}
+    - name: Configure Bazel
+      shell: bash
+      env:
+        BUILDBUDDY_API_KEY: ${{ inputs.buildbuddy-api-key }}
+      run: |
+        {
+          echo 'common --config=ci'
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            # Short output root: Windows paths are limited to 260 characters.
+            echo 'startup --output_user_root=C:/_bzl'
+            # The hermetic LLVM toolchain links against the MSVC runtime of the
+            # Visual Studio on GitHub's Windows images; the owner accepted its
+            # license for CI.
+            echo 'common --repo_env=BAZEL_MSVC_RUNTIME_VISUAL_STUDIO_EULA=1'
+          fi
+          if [[ -n "$BUILDBUDDY_API_KEY" ]]; then
+            echo 'common --config=buildbuddy'
+            echo "common --remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY"
+            echo "common --build_metadata=ROLE=CI"
+          fi
+        } > user.bazelrc
+        if [[ -n "$BUILDBUDDY_API_KEY" ]]; then
+          echo "BuildBuddy: enabled (results link is printed by each Bazel command)"
+        else
+          echo "BuildBuddy: no API key, using the GitHub Actions disk cache"
+        fi
