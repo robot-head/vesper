@@ -41,7 +41,8 @@ Setup performs these operations in private sibling staging/scratch directories:
    declarations must pin Batteries
    `8da40b72fece29b7d3fe3d768bac4c8910ce9bee`.
 3. Fetch that exact Batteries commit into `.lake/packages/batteries`, verify
-   HEAD, and copy only the fixed controls umbrella to
+   HEAD, normalize its single fixed documentation alias as described below,
+   and copy only the fixed controls umbrella to
    `Lean4Lean/VesperControls.lean`.
 4. Run `DRIVER --verify-setup-source STAGING_DIRECTORY`. This genuine Rust
    preflight verifies embedded BLAKE3 pins and the complete expected source
@@ -88,6 +89,18 @@ for selected in-sysroot runtime-library aliases. Paths are sorted by normalized
 relative UTF-8 bytes. Python checks at most 8192 source files, 256 MiB of stated
 source lengths, 4096 UTF-8 bytes per path, and conservatively at most 32768 walk
 entries. Rust independently streams actual contents and verifies full hashes.
+
+The sole published source normalization is Batteries `docs/README.md`, mode
+`120000`, blob `32d46ee883b58d6a383eed06eb98f33aa6530ded`, target `../README.md`.
+After the immutable checkout, setup verifies the actual commit, tree entry,
+index mode/blob, blob target text, regular root README's pinned bytes, and
+actual filesystem symlink target. On Windows only, Git's regular literal alias
+file is accepted when it contains exactly the pinned target text and is not a
+reparse point. Setup then materializes only this documentation leaf as a regular
+copy of the exact pinned root README bytes. The full manifest includes and
+hashes it; this is not an omitted documentation/input file or a general source
+alias exception. Any changed target, metadata, root bytes or other source alias
+fails. The immutable Git metadata remains unchanged by materialization.
 
 The whole explicit operation has an 1800-second deadline. Tool probes have
 30-second deadlines. Exit is accepted only when observed before the deadline.

@@ -20,6 +20,7 @@ import time
 PROFILE = "vesper.lean4lean42/1"
 UPSTREAM = "4faf51403bc4cb35cf6666d91fc9c938ae46d3aa"
 BATTERIES = "8da40b72fece29b7d3fe3d768bac4c8910ce9bee"
+BATTERIES_DOC_ALIAS_BLOB = "32d46ee883b58d6a383eed06eb98f33aa6530ded"
 LEAN_COMMIT = "797c613eb9b6d4ec95db23e3e00af9ac6657f24b"
 RELEASE = "leanprover/lean4:v4.24.0"
 TOOL = Path(__file__).resolve().parent
@@ -467,6 +468,49 @@ def checkout(commands, git, hooks, directory, url, commit):
         fail("detached Git source identity mismatch")
 
 
+def normalize_batteries_readme(commands, git, hooks, dependency):
+    """Normalize exactly the published immutable documentation alias, once."""
+    real_directory(dependency)
+    real_directory(dependency / "docs")
+
+    def query(*args):
+        data, _ = commands.run(git_command(git, hooks, "-C", dependency, *args))
+        return data
+
+    if query("rev-parse", "--verify", "HEAD").decode("ascii").strip() != BATTERIES:
+        fail("documentation normalization requires exact Batteries commit")
+    path = "docs/README.md"
+    expected = f"120000 blob {BATTERIES_DOC_ALIAS_BLOB}\t{path}\0".encode("ascii")
+    if query("ls-tree", "-z", BATTERIES, "--", path) != expected:
+        fail("pinned Batteries documentation alias metadata mismatch")
+    index = f"120000 {BATTERIES_DOC_ALIAS_BLOB} 0\t{path}\0".encode("ascii")
+    if query("ls-files", "--stage", "-z", "--", path) != index:
+        fail("checked-out Batteries documentation alias index changed")
+    if query("cat-file", "blob", BATTERIES_DOC_ALIAS_BLOB) != b"../README.md":
+        fail("pinned Batteries documentation alias target mismatch")
+    root_entry = query("ls-tree", "-z", BATTERIES, "--", "README.md")
+    if re.fullmatch(rb"100644 blob [0-9a-f]{40}\tREADME\.md\x00", root_entry) is None:
+        fail("pinned Batteries root README is not a regular source file")
+    source = query("show", BATTERIES + ":README.md")
+    if read_bounded(dependency / "README.md", LOG_BYTES) != source:
+        fail("Batteries root README differs from pinned regular bytes")
+    leaf = dependency / path
+    info = leaf.lstat()
+    if stat.S_ISLNK(info.st_mode):
+        if os.readlink(leaf) != "../README.md":
+            fail("actual Batteries documentation alias target changed")
+    elif (os.name == "nt" and stat.S_ISREG(info.st_mode)
+          and not getattr(info, "st_file_attributes", 0) & 0x400):
+        if read_bounded(leaf, LOG_BYTES) != b"../README.md":
+            fail("Windows literal documentation alias text changed")
+    else:
+        fail("expected only the pinned documentation symlink or Windows literal alias")
+    leaf.unlink()
+    with leaf.open("xb") as stream:
+        stream.write(source)
+    regular(leaf)
+
+
 def validate_dependency(stage):
     if (stage / "lean-toolchain").read_text(encoding="utf-8").strip() != RELEASE:
         fail("patched Lean toolchain mismatch")
@@ -605,6 +649,7 @@ def setup(args):
         dependency = stage / ".lake" / "packages" / "batteries"
         dependency.parent.mkdir(parents=True, exist_ok=True)
         checkout(commands, git, hooks, dependency, "https://github.com/leanprover-community/batteries.git", BATTERIES)
+        normalize_batteries_readme(commands, git, hooks, dependency)
         overlay = stage / OVERLAY["destination"]
         if os.path.lexists(overlay):
             fail("controls overlay destination already exists")

@@ -7,6 +7,14 @@ Owned paths are only `tools/lean4lean42/setup.py`, its README, and this report.
 No patch, controls, pins, manifest, Rust, Cargo, existing CLI or CI file is
 modified by this lane.
 
+The subsequently published `65f3f62` amendment resolves a genuine clean-source
+assembly blocker: pinned Batteries has one tracked `docs/README.md` symlink.
+The narrow normalization helper verifies exact immutable commit/tree/index
+mode/blob, literal target, actual filesystem target, and pinned regular root
+README bytes before materializing only that leaf. The manifest still includes
+the complete regular result. Windows' literal Git alias representation is
+handled explicitly; all other source aliases/reparse inputs remain rejected.
+
 The stdlib-only Python script validates the exact fixed recipe, immutable
 commits, ordered patch paths and controls overlay; selects Lean/Lake without
 losing launcher basenames; obtains the actual 4.24 compiler prefix; and uses
@@ -39,6 +47,15 @@ Actual writer checks on Linux:
   refusal. Process checks observed actual child exit/reaping, closed pipe
   handles and joined readers. No fake successful compiler/checker was used.
 - `git diff --check`: passed.
+
+Four additional actual Linux checks passed against a private Git clone of the
+genuine pinned Batteries repository: positive normalization produces an included
+regular leaf with exact pinned root README bytes; a changed actual symlink
+target is refused without materialization; changed Git index mode/blob is
+refused; and changed root README bytes are refused before replacing the alias.
+The root's canonical `/tmp/vesper-lean4lean42-root-source` was inspected only,
+never mutated. These are source-normalization checks, not compiler/control
+success evidence. Windows literal-alias handling remains unexecuted here.
 
 Final root-owned pins/source manifest and the assembled genuine Rust driver
 were unavailable for a positive setup run at this checkpoint. No Git fetch,
