@@ -3950,6 +3950,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-nexus"
+version = "0.1.0"
+dependencies = [
+ "vesper-ffi",
+ "wasmtime",
+]
+
+[[package]]
 name = "vesper-pact"
 version = "0.1.0"
 dependencies = [
