@@ -60,3 +60,10 @@ were fixture baselines, distinct from the feature runs above. No source
 execution, guest/component, Lean, certificate, other-platform, timing or RSS
 result is claimed here. Root runs integrated Cargo and workspace checks
 separately; hosted native evidence remains pending.
+
+Final hardening rerun: the same actual executable path rebuilt from the
+coordinator's final source `b884a8c` (integration head `9c12e67`, including library
+commit `2f94869`) again passes all five Rust executable tests with zero failures
+or ignores, and all 49 Python commands. This follow-up changes only this report;
+no test expectations, production code, limits, caches or build files changed.
+These remain local Linux results, without a BuildBuddy or other-platform claim.
