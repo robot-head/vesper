@@ -21,6 +21,7 @@ pub enum Value<'a> {
 pub struct CodecLimits {
     pub max_values: usize,
     pub max_metadata_bytes: usize,
+    /// Encoder-only wire-size bound. Decode uses the grammar's input bound.
     pub max_output_bytes: usize,
     pub max_depth: usize,
     pub max_work: usize,
@@ -90,7 +91,10 @@ impl Budget {
         bound(self.visits, self.max_visits, ErrorKind::CountLimit)?;
         self.work(1)
     }
-    fn children(&mut self, count: usize) -> Result<()> {
+    fn children(&mut self, count: usize, depth: usize) -> Result<()> {
+        if count != 0 {
+            bound(add(depth, 1)?, self.max_depth, ErrorKind::DepthLimit)?;
+        }
         bound(
             count,
             self.max_visits.saturating_sub(self.visits),
@@ -107,8 +111,8 @@ impl Budget {
         )?;
         self.work(bytes)
     }
-    fn values<'a>(&mut self, count: usize) -> Result<Vec<Value<'a>>> {
-        self.children(count)?;
+    fn values<'a>(&mut self, count: usize, depth: usize) -> Result<Vec<Value<'a>>> {
+        self.children(count, depth)?;
         self.metadata(mul(count, size_of::<Value<'_>>())?)?;
         let mut values = Vec::new();
         values
@@ -116,15 +120,18 @@ impl Budget {
             .map_err(|_| Error::new(ErrorKind::AllocationFailed, 0))?;
         Ok(values)
     }
-    fn boxed(&mut self) -> Result<()> {
-        self.children(1)?;
+    fn boxed(&mut self, depth: usize) -> Result<()> {
+        self.children(1, depth)?;
         self.metadata(size_of::<Value<'_>>())
     }
 }
 
 /// Decode real bytes into logical values. No Capture vector is allocated, so
 /// max_capture_bytes is not consumed: max_events bounds visits and the codec's
-/// metadata cap bounds the actual value vectors/boxes instead.
+/// metadata cap bounds the actual value vectors/boxes instead. max_output_bytes
+/// is encoder-only. A successfully decoded value may need larger output/work/
+/// storage budgets for serialization; there is no unconditional same-budget
+/// roundtrip guarantee.
 pub fn decode_exact<'a>(
     grammar: &Grammar<'_>,
     input: &'a [u8],
@@ -186,7 +193,7 @@ impl<'a> Reader<'_, '_, 'a> {
             self.grammar.limits.max_repetitions,
             ErrorKind::CountLimit,
         )?;
-        let mut values = self.budget.values(count)?;
+        let mut values = self.budget.values(count, depth)?;
         for _ in 0..count {
             values.push(self.node(child, depth + 1)?);
         }
@@ -220,7 +227,7 @@ impl<'a> Reader<'_, '_, 'a> {
                     return Err(Error::new(ErrorKind::UnexpectedEof, self.end));
                 }
                 if let Rule::Frame(child) = &self.grammar.rules[id] {
-                    self.budget.boxed()?;
+                    self.budget.boxed(depth)?;
                     let previous_end = self.end;
                     self.end = end;
                     let value = self.node(*child, depth + 1)?;
@@ -236,7 +243,7 @@ impl<'a> Reader<'_, '_, 'a> {
                 }
             }
             Rule::Sequence(children) => {
-                let mut values = self.budget.values(children.len())?;
+                let mut values = self.budget.values(children.len(), depth)?;
                 for &child in children {
                     values.push(self.node(child, depth + 1)?);
                 }
@@ -264,7 +271,7 @@ impl<'a> Reader<'_, '_, 'a> {
                     }
                 }
                 let (branch, child) = selected.ok_or(Error::new(ErrorKind::Mismatch, self.pos))?;
-                self.budget.boxed()?;
+                self.budget.boxed(depth)?;
                 let value = self.node(child, depth + 1)?;
                 Ok(Value::Choice {
                     branch,
@@ -342,7 +349,7 @@ impl<'p> Planner<'p, '_> {
             self.grammar.limits.max_repetitions,
             ErrorKind::CountLimit,
         )?;
-        self.plan.budget.children(values.len())?;
+        self.plan.budget.children(values.len(), depth)?;
         for value in values {
             self.node(child, value, depth + 1)?;
         }
@@ -371,7 +378,7 @@ impl<'p> Planner<'p, '_> {
                 self.bytes(bytes)
             }
             (Rule::Frame(child), Value::Frame(value)) => {
-                self.plan.budget.children(1)?;
+                self.plan.budget.children(1, depth)?;
                 let prefix = self.plan.push(Write::Number(0, 0))?;
                 let start = self.plan.len;
                 self.node(*child, value, depth + 1)?;
@@ -393,7 +400,7 @@ impl<'p> Planner<'p, '_> {
                 if children.len() != values.len() {
                     return Err(Error::new(ErrorKind::Mismatch, 0));
                 }
-                self.plan.budget.children(values.len())?;
+                self.plan.budget.children(values.len(), depth)?;
                 for (&child, value) in children.iter().zip(values) {
                     self.node(child, value, depth + 1)?;
                 }
@@ -409,7 +416,7 @@ impl<'p> Planner<'p, '_> {
                     }
                 }
                 let child = selected.ok_or(Error::new(ErrorKind::Mismatch, 0))?;
-                self.plan.budget.children(1)?;
+                self.plan.budget.children(1, depth)?;
                 self.node(child, value, depth + 1)
             }
             (Rule::Repeat { rule, count }, Value::Repeat(values)) => {
