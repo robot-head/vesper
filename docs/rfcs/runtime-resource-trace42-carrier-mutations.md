@@ -59,9 +59,31 @@ spans.
 
 ## Validation status
 
-Source authored and formatted; `git diff --check` passed. No Cargo build or test
-has been executed by this lane: the coordinator has not yet granted the shared
-build lease. Runtime evidence remains pending and will be recorded only after
-the actual combined source compiles and executes. Existing public integration
-tests separately distinguish optimized IR rejection of mutated checked Worlds
-from these post-validation dynamic carrier controls.
+Source authored and formatted; `git diff --check` passed. This lane performed no
+Cargo execution. The coordinator executed the actual combined implementation at
+`9ccb1da5ae8f7720d52ce89c08ccd8648be3f376`; the full log is
+`/tmp/runtime-resource42-independent-final.log`. Its library target passed
+95 tests in 12.95 seconds and its public `runtime_resource_trace` integration
+target passed 17 tests in 0.63 seconds, with zero failures, ignored tests or
+filters. The build took 42.57 seconds.
+
+All four private `runtime::resource_trace_acceptance` tests appear as successful
+executed tests in that log, covering the twenty real handoffs described above:
+
+- `valid_private_handoffs_consume_the_two_actual_identities_in_both_ir_modes`
+- `duplicate_actual_carrier_fails_sequentially_after_one_consume_in_both_ir_modes`
+- `duplicate_actual_carrier_refuses_the_entire_batch_in_both_ir_modes`
+- `actual_missing_and_wrong_headers_keep_precise_transaction_prefixes_in_both_ir_modes`
+
+This provides actual post-IR carrier-fault evidence in both modes: the valid
+program was checked, optimized when configured, executed to mint real carriers,
+then faulted at the private value handoff. It is distinct from the public
+integration tests' optimized-IR rejection of mutated checked Worlds, which does
+not execute those dynamic mutants. Source review by the independent runtime
+reviewer found no actionable issue in this lane.
+
+The subsequent focused strict Clippy invocation failed on the existing public
+`Execution` enum's size after adding the inline observation engine. The runtime
+writer is changing private engine storage rather than allowing the lint. Final
+Clippy and regression validation after that storage change remain pending; this
+report does not claim those later checks passed.
