@@ -403,7 +403,7 @@ measurements, **not expected successful counts**:
 | ArithmeticOracle |89237 /88337|86 /814 /0|1252 /815|368|820|
 
 The maximum observed JSON-encoded name was294 bytes /20 components; aggregate
-JSON-encoded names were6,536,611 /6,649,344 bytes. Maximum observed inductive/quotient
+JSON-encoded names were6,536,611 /6,653,469 bytes. Maximum observed inductive/quotient
 group size was4. Existing recommended name/count/storage limits cover these
 observations. Old CLI additions equal eligible minus constructors/recursors,
 but repeated idempotent quotient additions must disappear in the new driver;
