@@ -70,7 +70,11 @@ pub extern "C" fn legacy_header_len() -> usize {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn legacy_classify(code: u32) -> ParseError {
-    if code == 1 { ParseError::Short } else { ParseError::BadMagic }
+    if code == 1 {
+        ParseError::Short
+    } else {
+        ParseError::BadMagic
+    }
 }
 
 /// A cursor that stores a borrow: refused (BorrowingType).
