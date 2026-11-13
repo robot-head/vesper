@@ -1,7 +1,7 @@
 //! Independent actual-value acceptance for the reference evaluator provider.
 //! No native/resource-oracle or exhaustion theorem is inferred from this slice.
 use vesper::{
-    ast::{Expr, ExprKind, Statement},
+    ast::{Expr, ExprKind, Literal, PatternKind, Statement},
     check::{self, World},
     optimize, parser,
     runtime::{
@@ -347,6 +347,86 @@ fn owning_handler_returns_consume_but_borrowed_operation_patterns_do_not() {
                 &function_span(HANDLERS, entry, "Ticket {}", 1)
             );
         }
+    }
+}
+
+#[test]
+fn entire_operation_clause_binding_commits_owned_consumes_atomically() {
+    let world = checked(HANDLERS);
+    for optimize in [false, true] {
+        let (result, report) = execute(
+            &world,
+            &["Ticket"],
+            Limits::default(),
+            optimize,
+            "clause_transaction",
+            vec![],
+        );
+        answer(result);
+        assert_closed(&report);
+        assert_eq!(
+            actions(&report),
+            [Action::Mint, Action::Mint, Action::Consume, Action::Consume]
+        );
+        assert_eq!(report.events()[2].identity(), report.events()[0].identity());
+        assert_eq!(report.events()[3].identity(), report.events()[1].identity());
+
+        let (result, report) = execute(
+            &world,
+            &["Ticket"],
+            Limits {
+                max_events: 3,
+                ..Limits::default()
+            },
+            optimize,
+            "clause_transaction",
+            vec![],
+        );
+        assert!(result.is_err());
+        failure(&report, Failure::EventLimit);
+        assert_eq!(actions(&report), [Action::Mint, Action::Mint]);
+        assert_eq!(report.live().len(), 2);
+
+        // The source checker requires irrefutable operation patterns. Begin
+        // with its genuine accepted World, then corrupt only the actual late
+        // scalar pattern. Earlier owned arguments must not be consumed during
+        // a failed whole-clause binding transaction.
+        let mut changed = world.clone();
+        let body = changed
+            .functions
+            .get_mut("clause_transaction")
+            .unwrap()
+            .body
+            .as_mut()
+            .unwrap();
+        let ExprKind::Block {
+            tail: Some(handle), ..
+        } = &mut body.kind
+        else {
+            panic!()
+        };
+        let ExprKind::Handle { ops, .. } = &mut handle.kind else {
+            panic!()
+        };
+        let clause = ops
+            .iter_mut()
+            .find(|clause| clause.name == "consume")
+            .unwrap();
+        assert!(matches!(&clause.pats[2].kind, PatternKind::Bind(name) if name == "expected"));
+        clause.pats[2].kind = PatternKind::Literal(Literal::Bool(true));
+        let (result, report) = execute(
+            &changed,
+            &["Ticket"],
+            Limits::default(),
+            optimize,
+            "clause_transaction",
+            vec![],
+        );
+        assert!(result.is_err());
+        assert_eq!(report.status(), Status::RuntimeError);
+        assert!(report.failure().is_none());
+        assert_eq!(actions(&report), [Action::Mint, Action::Mint]);
+        assert_eq!(report.live().len(), 2);
     }
 }
 
