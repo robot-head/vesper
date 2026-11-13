@@ -86,8 +86,9 @@ pub use error::{
     StringError, ValueAllocError,
 };
 pub use region::{
-    CHUNK_ALIGN, Region, RegionBox, RegionBytes, RegionConfig, RegionId, RegionSlice, RegionStats,
-    RegionStr, RegionString, RegionVec, Watermark,
+    CHUNK_ALIGN, HARD_MAX_TILE_BYTES, Region, RegionBox, RegionBytes, RegionConfig, RegionId,
+    RegionSlice, RegionStats, RegionStr, RegionString, RegionTiled2, RegionVec, TiledError,
+    Watermark,
 };
 
 /// Version of the proposed Alloc/Region lowering contract described in
