@@ -27,6 +27,7 @@ fn batch(sink pair: Pair) {
 #[derive(Clone, Copy)]
 enum Mutation {
     None,
+    SwapChildren,
     DuplicateRight,
     MissingRightIdentity,
     WrongRightType,
@@ -66,6 +67,13 @@ fn mutate(pair: &mut Value, mutation: Mutation) {
     let Value::Data { fields, .. } = pair else {
         panic!("expected actual Pair")
     };
+    if matches!(mutation, Mutation::SwapChildren) {
+        let actual_left = fields.remove("left").unwrap();
+        let actual_right = fields.remove("right").unwrap();
+        fields.insert("left".into(), actual_right);
+        fields.insert("right".into(), actual_left);
+        return;
+    }
     if matches!(mutation, Mutation::DuplicateRight) {
         let actual_left = fields["left"].clone();
         fields.insert("right".into(), actual_left);
@@ -89,7 +97,7 @@ fn mutate(pair: &mut Value, mutation: Mutation) {
         Mutation::NonemptyRight => {
             fields.insert("unexpected".into(), Value::Int(7));
         }
-        Mutation::DuplicateRight => unreachable!(),
+        Mutation::SwapChildren | Mutation::DuplicateRight => unreachable!(),
     }
 }
 
@@ -216,6 +224,30 @@ fn valid_private_handoffs_consume_the_two_actual_identities_in_both_ir_modes() {
                 let consume = &report.events()[index + 2];
                 assert_eq!(consume.action(), Action::Consume);
                 assert_eq!(consume.identity(), report.events()[index].identity());
+                assert_eq!(consume.site(), &pattern_site(sink, side));
+            }
+        }
+    }
+}
+
+#[test]
+fn swapped_actual_carriers_reverse_consume_identities_at_unchanged_sites_in_both_ir_modes() {
+    for optimized in [false, true] {
+        for sink in ["sequential", "batch"] {
+            let (result, report) = handoff(optimized, sink, Mutation::SwapChildren);
+            assert!(result.is_ok(), "{result:?}");
+            assert_eq!(report.status(), Status::Completed);
+            assert!(report.failure().is_none());
+            assert!(report.live().is_empty());
+            assert_eq!(report.events().len(), 4);
+            assert_eq!(report.events()[0].action(), Action::Mint);
+            assert_eq!(report.events()[1].action(), Action::Mint);
+            for (index, side) in ["left", "right"].into_iter().enumerate() {
+                let consume = &report.events()[index + 2];
+                let original_opposite_mint = &report.events()[1 - index];
+                assert_eq!(consume.action(), Action::Consume);
+                assert_eq!(consume.identity(), original_opposite_mint.identity());
+                assert_eq!(consume.kind(), original_opposite_mint.kind());
                 assert_eq!(consume.site(), &pattern_site(sink, side));
             }
         }

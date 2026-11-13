@@ -21,7 +21,8 @@ or replaces any optimizer pass. The program is validated again after `make`.
 The tests inspect the actual returned carrier and require two distinct opaque
 identities corresponding to two genuine `Mint` events and the exact constructor
 expression source spans. Only then do they change the actual returned value:
-clone its actual left carrier into its right field, remove the right identity,
+swap its actual left and right carriers, clone its actual left carrier into its
+right field, remove the right identity,
 change its right nominal type while retaining its matching constructor name, or
 add an unexpected right carrier field. The unchanged compiled sink helper then
 executes in the same epoch through `run_execution`.
@@ -34,12 +35,19 @@ would test previous-run admission instead of this in-run carrier fault.
 
 ## Independent expectations
 
-Four tests cover twenty source-checked handoff executions across optimization
-off and on:
+Five tests cover twenty-four source-checked handoff executions across
+optimization off and on:
 
 - Unchanged sequential and batch values consume the actual two minted identities
   in source-pattern order, with exact atomic constructor `Pattern.span` ranges
   and no residuals.
+- Swapping the actual left and right carriers conserves both resources and
+  successfully consumes them. Both sinks must record the second minted identity
+  at the unchanged left pattern and the first minted identity at the unchanged
+  right pattern. The two mint/two consume counts and empty residual alone could
+  not distinguish this permutation from unchanged routing; checking the actual
+  identity/site association prevents reconstructing consumption from expected
+  constructor or source-field order.
 - A duplicated right carrier passed to sequential consumes commits the first
   real consume, then produces `AlreadyConsumed` at the right pattern. The second
   genuinely minted identity remains live with its original mint site.
@@ -67,8 +75,8 @@ Cargo execution. The coordinator executed the actual combined implementation at
 target passed 17 tests in 0.63 seconds, with zero failures, ignored tests or
 filters. The build took 42.57 seconds.
 
-All four private `runtime::resource_trace_acceptance` tests appear as successful
-executed tests in that log, covering the twenty real handoffs described above:
+The original four private `runtime::resource_trace_acceptance` tests appear as
+successful executed tests in that log, covering the original twenty real handoffs:
 
 - `valid_private_handoffs_consume_the_two_actual_identities_in_both_ir_modes`
 - `duplicate_actual_carrier_fails_sequentially_after_one_consume_in_both_ir_modes`
@@ -87,3 +95,11 @@ The subsequent focused strict Clippy invocation failed on the existing public
 writer is changing private engine storage rather than allowing the lint. Final
 Clippy and regression validation after that storage change remain pending; this
 report does not claim those later checks passed.
+
+The fifth test,
+`swapped_actual_carriers_reverse_consume_identities_at_unchanged_sites_in_both_ir_modes`,
+adds four handoffs after the recorded run. Its source is formatted and diff
+checked, but its execution is pending the coordinator's combined-source build
+lease. The original four tests' assertions remain unchanged. Full-suite evidence
+against the earlier four-test source must not be reported as execution of this
+new swap control.
