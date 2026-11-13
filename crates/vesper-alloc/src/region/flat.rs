@@ -111,6 +111,7 @@ struct Group<K, V> {
 
 impl<K, V> Group<K, V> {
     // Full values are created only after constructor layout validation.
+    #[inline(never)]
     fn empty() -> Self {
         Self {
             control: [EMPTY; FLAT_GROUP_WIDTH],
@@ -343,6 +344,9 @@ fn rehash<K, V>(groups: &mut [Group<K, V>]) {
     }
 }
 
+// Keep the complete Group stack frame out of generic constructor preflight,
+// including optimized builds of representable but refused huge field types.
+#[inline(never)]
 fn initialize<K: 'static, V: 'static, R: ChunkBacking>(
     region: &mut Region<R>,
     groups: &mut RegionVec<Group<K, V>>,
