@@ -1,0 +1,3 @@
+// fn fake(){} stays a comment 🦀
+macro keep($value:expr)->expr{quote{$value}}
+fn main( )->i64{/* quote {$fake} */let text="fn fake(){ keep!(0) } 😀";keep!(42)}

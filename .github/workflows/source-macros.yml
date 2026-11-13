@@ -99,8 +99,9 @@ jobs:
           cargo clippy --locked --all-targets --no-default-features
           -p vesper -p vesper-forge -p vesper-syntax -p vesper-core
           -p vesper-span -p vesper-diagnostics -- -D warnings
-      - name: Execute actual source expansion and checked normal artifacts
-        run: scripts/test-source-macros.sh
+      # scripts/test-source-macros.sh runs through Bazel in the BuildBuddy
+      # and Platforms workflows. This workflow keeps the Cargo-only feature
+      # checks (--no-default-features, the default CLI dependency graph).
 
   structured-component-foundation:
     name: Separate structured WASI foundation (not source Tier2)

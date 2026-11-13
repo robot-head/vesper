@@ -2,14 +2,9 @@
 # Actual host source tooling/CLI acceptance; elapsed time is never a speed gate.
 set -euo pipefail
 cd "$(dirname "$0")/.."
-export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-1}"
-export CARGO_PROFILE_DEV_DEBUG="${CARGO_PROFILE_DEV_DEBUG:-0}"
-export CARGO_PROFILE_TEST_DEBUG="${CARGO_PROFILE_TEST_DEBUG:-0}"
-export CARGO_INCREMENTAL="${CARGO_INCREMENTAL:-0}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-target/source-tooling}"
+. scripts/bazel-lib.sh
 
-cargo build --locked -p vesper --bin vesper
-binary="$CARGO_TARGET_DIR/debug/vesper"
+binary="$(bazel_executable //:bin/vesper)"
 # MSYS can report an extensionless executable path as existing via its .exe
 # fallback, while native Python needs the actual filename. Prefer that file.
 if [[ -f "$binary.exe" ]]; then
@@ -24,5 +19,5 @@ for pair in \
   'vesper-fmt canonical' \
   'vesper-bench paired_callbacks'; do
   read -r package example <<< "$pair"
-  cargo run --locked -p "$package" --example "$example"
+  bazel_exec "//crates/$package:example/$example"
 done
