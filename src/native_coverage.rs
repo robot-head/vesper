@@ -29,6 +29,10 @@
 //! input-to-state solver), translated to the tape encodings of the target's
 //! parameters.
 //!
+//! Running instrumented code is only reachable through [`NativeCoverage`],
+//! which owns the buffer; [`object_with_coverage`] emits object bytes that
+//! are never executed in-process.
+//!
 //! Limits: native code runs without a fuel bound, so a target that does not
 //! terminate hangs the campaign (the evaluator cross-check never starts);
 //! effects other than unlabeled `Fail[..]` are rejected; instrumentation of
@@ -72,7 +76,7 @@ const CASE: &str = "__vesper_fuzz_case";
 /// The host-owned buffer the instrumented code writes. Words are atomics,
 /// so the host reads and resets them between runs through shared
 /// references while compiled code stores to the same addresses during a
-/// run (which only happens inside [`InstrumentedJit::run`]).
+/// run (which only happens inside `NativeCoverage::run`).
 pub struct CoverageBuffer {
     words: Box<[AtomicU64]>,
 }
@@ -529,7 +533,13 @@ impl NativeCoverage {
             instrumenter = instrumenter.with_arg_stub(&format!("{STUB_PREFIX}arg_{i}"), i);
         }
         let mut hook = |key: &str, func: &mut ir::Function| instrumenter.rewrite(key, func);
-        let jit = InstrumentedJit::compile(&wrapped, CASE, &mut hook)
+        // SAFETY: the instrumentation only loads and stores whole words
+        // inside `buffer` (fixed offsets below `WORDS`, edge slots masked
+        // below `EDGE_SLOTS`, log slots clamped to `MAX_CMP_LOG`). The boxed
+        // buffer never moves, is owned by the returned value, is never
+        // handed out mutably, and is dropped after `jit` (field order). Its
+        // words are atomics, so the host only touches them atomically.
+        let jit = unsafe { InstrumentedJit::compile(&wrapped, CASE, &mut hook) }
             .map_err(|e| format!("--native-coverage: '{target}' does not compile natively: {e}"))?;
         if instrumenter.stats().stubs != params.len() {
             return Err("--native-coverage: an argument stub was not emitted".into());

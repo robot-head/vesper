@@ -698,7 +698,11 @@ pub fn object_instrumented(
 /// zero-argument `i64` entry can be called repeatedly (`vesper fuzz
 /// --native-coverage`). Code pointers never escape; calls borrow the owner
 /// exclusively and dropping it frees the module after every call returned.
-pub struct InstrumentedJit {
+///
+/// Crate-private: the hook can embed arbitrary addresses, so only
+/// [`crate::native_coverage::NativeCoverage`], which owns the buffer the
+/// instrumentation writes and drops it after this owner, constructs one.
+pub(crate) struct InstrumentedJit {
     module: Option<JITModule>,
     code: *const u8,
     _single_thread: std::marker::PhantomData<Rc<()>>,
@@ -707,7 +711,19 @@ impl InstrumentedJit {
     /// Compile `entry` (no parameters, `i64` result, every effect handled)
     /// and everything it reaches, unoptimized at the IR level, rewriting
     /// each function through `instrument`.
-    pub fn compile(world: &World, entry: &str, instrument: Instrument<'_>) -> Result<Self, String> {
+    ///
+    /// # Safety
+    ///
+    /// Every memory access `instrument` inserts must target memory that is
+    /// valid for that access for as long as the returned owner can be
+    /// [`run`](Self::run), and must not alias Rust data except through
+    /// atomics or interior mutability. Cranelift's verifier does not check
+    /// embedded addresses.
+    pub(crate) unsafe fn compile(
+        world: &World,
+        entry: &str,
+        instrument: Instrument<'_>,
+    ) -> Result<Self, String> {
         let f = world.functions.get(entry).ok_or("missing entry function")?;
         if !f.params.is_empty() || f.result.name() != "i64" {
             return Err("instrumented JIT entry must be `fn() -> i64`".into());
@@ -743,10 +759,11 @@ impl InstrumentedJit {
         Ok(owned)
     }
     /// Call the entry once.
-    pub fn run(&mut self) -> i64 {
+    pub(crate) fn run(&mut self) -> i64 {
         // SAFETY: compile() checked that the entry takes no arguments and
         // returns one i64 in the host C ABI; the exclusively borrowed owner
         // keeps the executable memory alive and the pointer never escapes.
+        // Instrumented accesses are valid by compile()'s safety contract.
         unsafe {
             let call: unsafe extern "C" fn() -> i64 = std::mem::transmute(self.code);
             call()

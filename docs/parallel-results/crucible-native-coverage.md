@@ -126,10 +126,15 @@ On the cloud host (Linux x86_64, Rust 1.97):
   use: transmuting the finalized entry to `extern "C" fn() -> i64` and
   calling it, and `JITModule::free_memory` on drop. They are needed to
   compile a campaign once instead of once per input (integration B's
-  `--native` compiles a wrapper per input). `src/native_coverage.rs` has no
-  unsafe code: the buffer is `Box<[AtomicU64]>`, written by compiled code
-  only during `run` and read through atomics between runs, and the
-  `NativeCoverage` field order drops the JIT before the buffer.
+  `--native` compiles a wrapper per input). Because the hook can embed any
+  address, `InstrumentedJit` is crate-private and its `compile` is an
+  `unsafe fn` whose contract is that every inserted access stays valid while
+  the owner can run (review on #307). Its one caller,
+  `NativeCoverage::compile` in `src/native_coverage.rs`, discharges it in a
+  single `unsafe` call: the buffer is a boxed `[AtomicU64]` owned by
+  `NativeCoverage`, every access is at a fixed or clamped offset inside it,
+  and the field order drops the JIT before the buffer. The public API has no
+  way to run instrumented code against memory it does not own.
 - **Absolute buffer address** instead of a data symbol or a hidden
   parameter, so the hook needs no module declarations and the function
   signatures stay unchanged. An instrumented object is therefore only
