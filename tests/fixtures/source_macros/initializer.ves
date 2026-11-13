@@ -1,2 +1,12 @@
-macro initialize($arg: expr) -> expr { quote { { let x = $arg; x } } }
-fn main() -> i64 { let x = 42; initialize!(x) }
+macro initialize($arg: expr) -> expr {
+    quote {
+        {
+            let x = $arg;
+            x
+        }
+    }
+}
+fn main() -> i64 {
+    let x = 42;
+    initialize!(x)
+}

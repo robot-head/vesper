@@ -1,12 +1,20 @@
-linear effect Audit { fn event(); }
-copy struct Counters { hits: u64, limit: u64 }
+linear effect Audit {
+    fn event();
+}
+copy struct Counters {
+    hits: u64,
+    limit: u64
+}
 
 fn update(inout counters: Counters) eff [Audit] {
     counters.hits = wrapping_add(counters.hits, counters.limit);
 }
 
 fn main() -> u64 eff [Audit] {
-    let counters = Counters { hits: 1, limit: 41 };
+    let counters = Counters {
+        hits: 1,
+        limit: 41
+    };
     update(inout counters);
     counters.hits
 }

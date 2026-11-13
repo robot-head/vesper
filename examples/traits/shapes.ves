@@ -1,6 +1,11 @@
 // Traits with an associated type, a canonical impl and two named models.
-struct Point { x: i64, y: i64 }
-struct Counter { n: i64 }
+struct Point {
+    x: i64,
+    y: i64
+}
+struct Counter {
+    n: i64
+}
 
 trait Score {
     type Out: mod copy;
@@ -9,17 +14,23 @@ trait Score {
 
 impl Score for Point {
     type Out = i64;
-    fn score(in self) -> i64 { wrapping_add(self.x, self.y) }
+    fn score(in self) -> i64 {
+        wrapping_add(self.x, self.y)
+    }
 }
 
 model ByX: Score for Point {
     type Out = i64;
-    fn score(in self) -> i64 { self.x }
+    fn score(in self) -> i64 {
+        self.x
+    }
 }
 
 model ByY: Score for Point {
     type Out = i64;
-    fn score(in self) -> Self::Out { self.y }
+    fn score(in self) -> Self::Out {
+        self.y
+    }
 }
 
 trait Source {
@@ -30,11 +41,16 @@ trait Source {
 impl Source for Counter {
     type Item = i64;
     fn next(inout self) -> Option[i64] {
-        if self.n == 0 { None } else { self.n = wrapping_sub(self.n, 1); Some(self.n) }
+        if self.n == 0 {
+            None
+        } else {
+            self.n = wrapping_sub(self.n, 1);
+            Some(self.n)
+        }
     }
 }
 
-fn total(in p: Point) -> <Point as Score>::Out {
+fn total(in p: Point) -> < Point as Score >::Out {
     let canonical = p.score();
     let by_x = {
         use model ByX;
@@ -46,17 +62,31 @@ fn total(in p: Point) -> <Point as Score>::Out {
         wrapping_add(wrapping_mul(a, 100), b)
     };
     let explicit = ByY::score(p);
-    wrapping_add(wrapping_add(wrapping_mul(canonical, 10000), by_x), wrapping_mul(explicit, 1000000))
+    wrapping_add(
+        wrapping_add(wrapping_mul(canonical, 10000), by_x),
+        wrapping_mul(explicit, 1000000)
+    )
 }
 
 fn drain(inout c: Counter) -> i64 {
-    let first: Counter::Item = match c.next() { Some(v) => v, None => 0 };
-    let second = match Source::next(inout c) { Some(v) => v, None => 0 };
+    let first: Counter::Item = match c.next() {
+        Some(v) => v,
+        None => 0
+    };
+    let second = match Source::next(inout c) {
+        Some(v) => v,
+        None => 0
+    };
     wrapping_add(wrapping_mul(first, 10), second)
 }
 
 fn main() -> i64 {
-    let p = Point { x: 3, y: 4 };
-    let c = Counter { n: 5 };
+    let p = Point {
+        x: 3,
+        y: 4
+    };
+    let c = Counter {
+        n: 5
+    };
     wrapping_add(total(p), wrapping_mul(drain(inout c), 100000000))
 }
