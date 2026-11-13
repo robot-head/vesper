@@ -44,12 +44,11 @@ fn canonical_i128_worker_data_never_passes_through_json_numbers() {
         i128::from(u64::MAX) + 1,
         i128::MAX,
     ] {
-        for node in [Node::Int(value)] {
-            let bytes = serde_json::to_vec(&node).unwrap();
-            let text = String::from_utf8(bytes.clone()).unwrap();
-            assert!(text.contains(&format!("\"{value}\"")));
-            assert_eq!(serde_json::from_slice::<Node>(&bytes).unwrap(), node);
-        }
+        let node = Node::Int(value);
+        let bytes = serde_json::to_vec(&node).unwrap();
+        let text = String::from_utf8(bytes.clone()).unwrap();
+        assert!(text.contains(&format!("\"{value}\"")));
+        assert_eq!(serde_json::from_slice::<Node>(&bytes).unwrap(), node);
         let input = Input {
             kind: Kind::I64,
             value,
@@ -289,8 +288,10 @@ fn invalid_run_limits_fail_before_any_child_is_spawned() {
 
 #[test]
 fn configured_source_cap_refuses_before_oracle_request_or_compiler_worker() {
-    let mut limits = HarnessLimits::default();
-    limits.source_bytes = 1;
+    let limits = HarnessLimits {
+        source_bytes: 1,
+        ..HarnessLimits::default()
+    };
     let config = RunConfig {
         suite: Suite::Ci128,
         seed: 0,
