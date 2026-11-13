@@ -288,6 +288,31 @@ fn invalid_run_limits_fail_before_any_child_is_spawned() {
 }
 
 #[test]
+fn configured_source_cap_refuses_before_oracle_request_or_compiler_worker() {
+    let mut limits = HarnessLimits::default();
+    limits.source_bytes = 1;
+    let config = RunConfig {
+        suite: Suite::Ci128,
+        seed: 0,
+        jobs: 1,
+        lean: std::env::var_os("VESPER_LEAN")
+            .unwrap_or_else(|| "lean".into())
+            .into(),
+        worker_exe: env!("CARGO_BIN_EXE_arithmetic_oracle42").into(),
+        artifacts: None,
+        limits,
+    };
+    // This is a genuine Lean handshake/BYE, not a fake successful reference.
+    let failure = run(&config).unwrap_err();
+    assert_eq!(failure.error.kind, FailureKind::UnsupportedProfile);
+    assert_eq!(failure.case_id, Some(0));
+    assert_eq!(failure.partial.lean_spawns, 1);
+    assert_eq!(failure.partial.lean_requests, 0);
+    assert_eq!(failure.partial.rust_worker_spawns, 0);
+    assert_eq!(failure.partial.parser_calls, 0);
+}
+
+#[test]
 fn real_peer_deadline_stderr_and_truncation_reap_and_join() {
     let binary = process::resolve_executable(std::path::Path::new(env!(
         "CARGO_BIN_EXE_arithmetic_oracle42"
