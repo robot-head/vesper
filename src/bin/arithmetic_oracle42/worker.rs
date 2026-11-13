@@ -48,28 +48,95 @@ fn parser_range_negative(case: &Case) -> bool {
             .any(|n| matches!(n, Node::Int(n) if n.unsigned_abs() > u128::from(u64::MAX)))
 }
 
-fn decode(value: Value, kind: Kind) -> Result<Outcome, HarnessError> {
-    let Value::Tuple(parts) = value else {
-        return Err(invariant("backend result is not a tagged tuple"));
+#[derive(Clone, Copy)]
+enum Backend {
+    Evaluator,
+    Native,
+}
+
+impl Backend {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Evaluator => "evaluator",
+            Self::Native => "native",
+        }
+    }
+}
+
+// Never format an aggregate recursively: carrier diagnostics remain bounded
+// even when a backend unexpectedly returns an unsupported compound value.
+fn carrier(value: &Value) -> String {
+    match value {
+        Value::Int(n) => format!("Int({n})"),
+        Value::UInt(n, width) => format!("UInt({n}, {width})"),
+        Value::Bool(b) => format!("Bool({b})"),
+        Value::Tuple(parts) => format!("Tuple(len={})", parts.len()),
+        _ => "non-integer value".into(),
+    }
+}
+
+fn decode_error(detail: &str, value: &Value) -> HarnessError {
+    invariant(format!("{detail}; carrier={}", carrier(value)))
+}
+
+fn mode_error(
+    error: HarnessError,
+    backend: Backend,
+    ast_optimized: bool,
+    ir_optimized: bool,
+) -> HarnessError {
+    HarnessError::new(
+        error.kind,
+        format!(
+            "{} AST optimized={ast_optimized}, IR optimized={ir_optimized}: {}",
+            backend.name(),
+            error.detail
+        ),
+    )
+}
+
+fn decode(value: Value, kind: Kind, backend: Backend) -> Result<Outcome, HarnessError> {
+    let parts = match value {
+        Value::Tuple(parts) => parts,
+        other => return Err(decode_error("backend result is not a tagged tuple", &other)),
     };
     let [Value::Bool(overflow), value] = parts.as_slice() else {
-        return Err(invariant("backend result must be exactly (bool, K)"));
+        return Err(invariant(format!(
+            "backend result must be exactly (bool, K); carrier=Tuple(len={})",
+            parts.len()
+        )));
     };
     let n = match (kind, value) {
         (Kind::U8, Value::UInt(n, 8))
         | (Kind::U32, Value::UInt(n, 32))
         | (Kind::U64, Value::UInt(n, 64)) => i128::from(*n),
         (Kind::I64, Value::Int(n)) => i128::from(*n),
-        _ => return Err(invariant("backend tagged payload has the wrong value kind")),
+        // Runtime can retain an unsuffixed Int in an unsigned aggregate.
+        // Preserve that exact mathematical value; never reinterpret its bits.
+        (Kind::U8 | Kind::U32 | Kind::U64, Value::Int(n))
+            if matches!(backend, Backend::Evaluator) && *n >= 0 =>
+        {
+            i128::from(*n)
+        }
+        _ => {
+            return Err(decode_error(
+                "backend tagged payload has the wrong value kind",
+                value,
+            ));
+        }
     };
     if !kind.fits(n) {
-        return Err(invariant(
+        return Err(decode_error(
             "backend tagged payload is outside its declared kind",
+            value,
         ));
     }
     if *overflow {
         if n != 0 {
-            return Err(invariant("overflow result must carry same-kind zero"));
+            return Err(decode_error(
+                "overflow result must carry same-kind zero",
+                value,
+            ));
         }
         Ok(Outcome::Overflow)
     } else {
@@ -81,27 +148,42 @@ fn execute_mode(
     world: &check::World,
     kind: Kind,
     evaluator_fuel: u64,
+    ast_optimized: bool,
     ir_optimized: bool,
 ) -> Result<(Outcome, Outcome), HarnessError> {
     let mut runtime = Runtime::new(world);
     runtime.optimize = ir_optimized;
     runtime.fuel = evaluator_fuel;
     let evaluated = runtime.run("main", Vec::new()).map_err(|e| {
-        HarnessError::new(
-            if e == "execution fuel exhausted" {
-                FailureKind::Fuel
-            } else {
-                FailureKind::Invariant
-            },
-            e,
+        mode_error(
+            HarnessError::new(
+                if e == "execution fuel exhausted" {
+                    FailureKind::Fuel
+                } else {
+                    FailureKind::Invariant
+                },
+                e,
+            ),
+            Backend::Evaluator,
+            ast_optimized,
+            ir_optimized,
         )
     })?;
-    let evaluated = decode(evaluated, kind)?;
+    let evaluated = decode(evaluated, kind, Backend::Evaluator)
+        .map_err(|e| mode_error(e, Backend::Evaluator, ast_optimized, ir_optimized))?;
     // Each invocation genuinely compiles, finalizes and executes a fresh JIT.
     // The worker process lifetime bounds retained executable allocations.
-    let native = native::jit_with_options(world, "main", ir_optimized)
-        .map_err(|e| HarnessError::new(FailureKind::Invariant, e))?;
-    Ok((evaluated, decode(native, kind)?))
+    let native = native::jit_with_options(world, "main", ir_optimized).map_err(|e| {
+        mode_error(
+            HarnessError::new(FailureKind::Invariant, e),
+            Backend::Native,
+            ast_optimized,
+            ir_optimized,
+        )
+    })?;
+    let native = decode(native, kind, Backend::Native)
+        .map_err(|e| mode_error(e, Backend::Native, ast_optimized, ir_optimized))?;
+    Ok((evaluated, native))
 }
 
 /// Execute the actual parsed, source-bound program in all eight settings.
@@ -143,10 +225,10 @@ pub fn execute_case(case: &Case, evaluator_fuel: u64) -> Result<RustAnswer, Harn
         return Err(invariant("AST-optimized source failed the real checker"));
     }
     let kind = case.program.kind;
-    let (e0, j0) = execute_mode(&original.world, kind, evaluator_fuel, false)?;
-    let (e1, j1) = execute_mode(&original.world, kind, evaluator_fuel, true)?;
-    let (e2, j2) = execute_mode(&optimized.world, kind, evaluator_fuel, false)?;
-    let (e3, j3) = execute_mode(&optimized.world, kind, evaluator_fuel, true)?;
+    let (e0, j0) = execute_mode(&original.world, kind, evaluator_fuel, false, false)?;
+    let (e1, j1) = execute_mode(&original.world, kind, evaluator_fuel, false, true)?;
+    let (e2, j2) = execute_mode(&optimized.world, kind, evaluator_fuel, true, false)?;
+    let (e3, j3) = execute_mode(&optimized.world, kind, evaluator_fuel, true, true)?;
     Ok(RustAnswer::Outcomes {
         evaluator: Box::new([e0, e1, e2, e3]),
         jit: Box::new([j0, j1, j2, j3]),
