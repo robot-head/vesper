@@ -18,6 +18,16 @@ name. Structural wrappers and tuples transfer selected children's identities;
 their independent nominal obligations are not part of this selected-type trace.
 The approved field restriction `k_i ⊑ m_i` is unchanged.
 
+Observed public entry functions are monomorphic. Entry/result boundary values
+support scalars, unit, tuples and nongeneric ADTs. Generic aggregate, callable,
+closure, continuation and unresolved boundary schemas are explicitly unsupported;
+this does not disable generic helpers inside an observed execution. The runtime
+walks actual values against borrowed declared parameter/result and World field
+types with the same node/depth caps, without cloning/substituting arbitrary type
+trees. After actual carrier validation, a shape mismatch is BoundaryTypeMismatch.
+Core MissingIdentity/ForeignInstance/ForeignRun/WrongKind/MalformedCarrier errors
+retain precedence. Result-shape refusal after execution retains its actual prefix.
+
 `Value::Data` gets `resource_identity: Option<ResourceIdentity>`. Its opaque
 identity travels inside the actual value through Clone, slots, aggregate
 packing/projection, parameter/return transfer and `qualify_value`. Guest fields,
@@ -33,11 +43,20 @@ Constructor Pattern.span for consume sites. IR match-arm instruction spans may
 refer to the initializer or first arm body and are not consume provenance.
 Never fabricate a zero span for host-forged callable constructors: refuse an
 observed construction without a genuine operation site.
+Resolve a committed pattern's nominal declaration against the actual World;
+where selected types are involved it must agree with the actual carrier's type.
+An unselected header cannot bypass a selected pattern's observation. Conversely,
+an unselected enum's same-named qualified variant is not a selected resource just
+because its constructor basename collides.
 
 Full pure pattern matching precedes consumption. Collect terminal atoms in
 source-pattern depth-first order; validate all identities, batch duplicates and
 the complete remaining event capacity before committing any consume in that
 pattern. A failed or unselected probe produces no event.
+An operation clause's entire parameter-pattern list is one such transaction:
+match every owned value and actual borrowed referent before committing the
+combined owned terminal-atom batch. A later parameter mismatch or capacity
+refusal cannot leave an earlier parameter's consume event behind.
 
 ## Frozen typed API
 
