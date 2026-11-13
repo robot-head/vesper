@@ -161,6 +161,16 @@ fn apostrophes_inside_bare_uris_do_not_hide_following_real_unknown_links() {
 }
 
 #[test]
+fn apostrophes_in_parenthesized_titles_do_not_hide_following_real_unknown_links() {
+    let source = "//! [guide](https://example.invalid/ (it's a title)) [Missing]\nfn main(){}\n";
+    let report = analyze(source, &[], LinkLimits::default()).unwrap();
+    assert_eq!(report.status, LinkStatus::Rejected);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.diagnostics[0].code, "unknown");
+    assert_eq!(&source[report.diagnostics[0].span.clone()], "[Missing]");
+}
+
+#[test]
 fn code_spans_inside_explicit_link_and_image_labels_protect_their_closing_brackets() {
     for prefix in ["", "!"] {
         let source = format!(
@@ -179,6 +189,35 @@ fn code_spans_inside_explicit_link_and_image_labels_protect_their_closing_bracke
             report.diagnostics
         );
         assert_eq!(report.references.len(), 1);
+        assert_eq!(report.references[0].display, "main");
+    }
+}
+
+#[test]
+fn reference_definition_continued_titles_skip_inner_links_but_preserve_following_links() {
+    for title in [
+        "  \"[Missing]\"",
+        "  '[Missing]'",
+        "  ([Missing])",
+        "  \"multi\n//! [Missing]\"",
+        "  (it's a [Missing] title)",
+    ] {
+        let source = format!(
+            "//! [guide]: https://example.invalid/\n//! {title}\n//! [main]\nfn main(){{}}\n"
+        );
+        let report = analyze(
+            &source,
+            &[target("main", TargetKind::Function)],
+            LinkLimits::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            report.status,
+            LinkStatus::Resolved,
+            "{title:?} {:?}",
+            report.diagnostics
+        );
+        assert_eq!(report.references.len(), 1, "{title:?}");
         assert_eq!(report.references[0].display, "main");
     }
 }

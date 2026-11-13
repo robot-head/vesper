@@ -422,7 +422,7 @@ fn balanced_end(
                 destination_separated = true;
             }
             // An apostrophe inside a bare URI is a sub-delimiter, not a title.
-            if destination_separated && matches!(byte, b'\'' | b'"') {
+            if destination_separated && depth == 1 && matches!(byte, b'\'' | b'"') {
                 quote = Some(byte);
                 at += 1;
                 continue;
@@ -488,6 +488,54 @@ fn close_ticks(
             } else {
                 pos += 1;
             }
+        }
+    }
+    Ok(None)
+}
+fn continued_definition_title(
+    lines: &[Line<'_>],
+    line: usize,
+    budget: &mut Budget,
+) -> Result<Option<usize>, LinkError> {
+    let Some(value) = lines.get(line) else {
+        return Ok(None);
+    };
+    let trimmed = value.text.trim_start_matches([' ', '\t']);
+    budget.work(value.text.len() - trimmed.len() + 1)?;
+    let Some(&open) = trimmed.as_bytes().first() else {
+        return Ok(None);
+    };
+    if !matches!(open, b'\'' | b'"' | b'(') {
+        return Ok(None);
+    }
+    let close = if open == b'(' { b')' } else { open };
+    let mut at = value.text.len() - trimmed.len() + 1;
+    let mut depth = 1usize;
+    for (index, value) in lines.iter().enumerate().skip(line) {
+        if index != line {
+            at = 0;
+        }
+        let bytes = value.text.as_bytes();
+        if value.text.trim().is_empty() {
+            return Ok(None);
+        }
+        while at < bytes.len() {
+            budget.work(1)?;
+            if bytes[at] == b'\\' {
+                at = (at + 2).min(bytes.len());
+                continue;
+            }
+            if open == b'(' && bytes[at] == open {
+                depth = add(depth, 1)?;
+            }
+            if bytes[at] == close {
+                depth -= 1;
+                if depth == 0 {
+                    budget.work(bytes.len() - at)?;
+                    return Ok(value.text[at + 1..].trim().is_empty().then_some(index + 1));
+                }
+            }
+            at += 1;
         }
     }
     Ok(None)
@@ -670,7 +718,8 @@ fn group(
                 } else if next
                     .is_some_and(|(i, p)| i == end_line && lines[i].text.as_bytes()[p] == b':')
                 {
-                    line = end_line + 1;
+                    line = continued_definition_title(lines, end_line + 1, budget)?
+                        .unwrap_or(end_line + 1);
                     at = 0;
                 } else {
                     if !image && end_line == line {
