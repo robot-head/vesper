@@ -228,6 +228,14 @@ default cannot accommodate this mandatory measured envelope. Counts remain
 observations, never golden acceptance values; every actual file remains bound.
 This measured refinement was published on #300 before the default changed.
 
+The actual 141010-frame control-baseline stream (139422 constants) exhausted
+the initial64MiB inventory metadata default at frame139772 under the production
+parser and transport reservation. The same genuine stream passed at80MiB,
+returning an inventory with35,211,162 retained bytes plus the separately paid
+uniqueness/parser/transport bookkeeping. Set `inventory_bytes` DEFAULT to80MiB;
+preserve HARD128MiB. This published measured refinement does not change any
+name/count/file/deadline bound or turn native inventory into fresh coverage.
+
 The private acceptance seam exposes production protocol DTOs and a closed
 `process::testing::probe(Command, ProbeKind, timeout_ms, &Limits)`. Its result
 reports the observed error, actual child reap/reader/watcher joins, and retained
