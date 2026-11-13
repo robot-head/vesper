@@ -1,0 +1,125 @@
+linear struct Ticket {}
+linear struct Stamp {}
+linear struct Ghost {}
+copy struct Envelope {
+    ticket: Ticket,
+    answer: i64
+}
+copy struct Pair {
+    left: Ticket,
+    right: Ticket
+}
+
+fn mint() -> Ticket {
+    Ticket {}
+}
+fn close(sink ticket: Ticket) {
+    let Ticket {}
+    = ticket;
+}
+fn relay(sink ticket: Ticket) -> Ticket {
+    ticket
+}
+fn inspect(in ticket: Ticket) -> i64 {
+    42
+}
+
+fn simple() -> i64 {
+    let ticket = Ticket {};
+    let Ticket {}
+    = ticket;
+    42
+}
+
+fn named_constructor() -> i64 {
+    let ticket = Ticket;
+    let Ticket {}
+    = ticket;
+    42
+}
+
+fn repeated_site() -> i64 {
+    let first = mint();
+    let second = mint();
+    close(second);
+    close(first);
+    42
+}
+
+fn transfer() -> i64 {
+    let ticket = Ticket {};
+    let answer = inspect(in ticket);
+    let envelope = Envelope {
+        ticket: relay(ticket),
+        answer: answer
+    };
+    let copied = envelope.answer;
+    let Envelope {
+        ticket,
+        answer
+    }
+    = envelope;
+    let ticket = relay(ticket);
+    let (ticket, n) = (ticket, copied);
+    close(ticket);
+    n
+}
+
+fn branch(in choice: bool) -> i64 {
+    let ticket = Ticket {};
+    if choice {
+        let Ticket {}
+        = ticket;
+        42
+    } else {
+        close(ticket);
+        42
+    }
+}
+
+fn shadow() -> i64 {
+    let ticket = Ticket {};
+    let Ticket {}
+    = ticket;
+    let ticket = Ticket {};
+    let Ticket {}
+    = ticket;
+    42
+}
+
+fn kinds() -> i64 {
+    let ticket = Ticket {};
+    let stamp = Stamp {};
+    let ghost = Ghost {};
+    let Ghost {}
+    = ghost;
+    let Stamp {}
+    = stamp;
+    let Ticket {}
+    = ticket;
+    42
+}
+
+fn returned() -> Ticket {
+    Ticket {}
+}
+fn accept(sink ticket: Ticket) -> i64 {
+    let Ticket {}
+    = ticket;
+    42
+}
+fn return_pair() -> (Ticket, Ticket) {
+    (Ticket {}, Ticket {})
+}
+fn echo(in value: i64) -> i64 {
+    value
+}
+fn nested(
+    in value: (
+        (
+            i64,
+        ),
+    )
+) -> i64 {
+    42
+}

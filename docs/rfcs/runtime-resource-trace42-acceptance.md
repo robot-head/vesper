@@ -1,0 +1,30 @@
+# Reference resource provider: independent acceptance (#317)
+
+This lane owns only `tests/runtime_resource_trace.rs`, its five new fixture files under `tests/fixtures/runtime_resource_trace/`, and this report. It was authored against main `1d63dd0e84fa77e651fc0f9c66cc7df65c8c5dd4` and the published `runtime-resource-trace42-contracts.md` freeze `f8e4abb`, including the coordinator's cross-World attachment amendment. Core and runtime implementation are separate writers' work. No source, dependency, native, build metadata or existing test files were edited here.
+
+## Authored checks
+
+Fifteen independent integration tests exercise actual parser/checker output, then the real reference `Runtime`. Fixtures cover selected empty linear structs, empty constructor names and record construction, terminal destructuring, helper/sink identity transfer, borrowing, structural wrappers, copy-field projection, tuple transfer, shadowing, distinct resources minted at one helper site, two selected kinds and unselected-type isolation. Both Runtime IR optimization settings execute; a smaller actual AST optimizer off/on × IR optimizer off/on matrix checks repeated mints and failed match probes with exact original pattern provenance. This is four reference-interpreter configurations, not the eight-way evaluator/native resource oracle.
+
+The match fixture intentionally probes a tuple's Ticket pattern successfully before its boolean component fails, then selects another arm. Only the selected owning pattern may consume, at its own original byte span. Internal handler fixtures separately cover an owning return pattern and a borrowed operation-handler constructor pattern. Borrowed patterns and probes must not consume. Expected byte positions come from the current canonically formatted source, not fixed offsets from an earlier formatting pass.
+
+Carrier mutation controls first parse and check valid source. They then alter the actual cloned World's executable expression routing while retaining genuine spans: route a record's second field through the first value, route the second close through the first binding, alias both elements of one terminal pattern, duplicate a returned owner, or return an already consumed owner. The real Runtime must reject those actual carriers and preserve the exact event prefix and live distinct owner. These controls do not fabricate identities or modify event lists.
+
+Other tests cover ordinary unobserved values without identities; completed returned owners remaining visible in residuals; missing, foreign-instance and prior-run entry carriers; corrupted real carrier metadata; repeat epochs and immutable prior observer snapshots; zero/exact event and resource capacities; total lifetime mint capacity including consumed history; all-or-nothing terminal pattern batches; returned/entry traversal limits; real runtime-error and bounded fuel-sweep prefixes; invalid type selections; cross-World configuration refusal/revalidation; reconfiguration refusal; and explicit traced external-session refusal. No successful cleanup events are inferred on error or fuel exhaustion. Completed returned ownership is not treated as an exhaustion theorem.
+
+## Executed evidence so far
+
+The writer executed only ordinary baseline preflight using the coordinator-provided existing binary `/workspace/vesper/target/parallel-next/debug/vesper`, whose production code the coordinator identified as matching this lane's base. It does not contain the new observation provider and supplies no instrumented feature evidence:
+
+- `vesper fmt tests/fixtures/runtime_resource_trace` canonically formatted the five owned fixtures; `vesper fmt ... --check` then passed for all five.
+- `vesper check <fixture> --no-opt` passed separately for all five actual fixture files. The carrier-mutation fixture was checked again after adding the transactional alias case and passed.
+- `rustfmt --edition 2024 --check tests/runtime_resource_trace.rs` passed.
+- Whitespace checks passed for the owned edits.
+
+No Cargo build/test, instrumented Runtime execution, native execution, Lean process or external replay has been run by this lane. The fifteen new tests remain **pending compilation and execution against the combined actual core/runtime implementation**. Tests were not stubbed to claim a pass. The coordinator owns the shared Cargo lease and will supply coherent source commits and actual execution evidence.
+
+The real JSON encoder lives in the reverse-dependent `vesper-sim-session` crate, and the existing native suspension test encoder is private to that separate test. This root integration target cannot import either without changing dependencies or copying an encoder. Their required refusal of tracked carriers is therefore left to the runtime writer's owned compatibility checks and coordinator regression run, not claimed by this target. No alternative Layout encoder is introduced.
+
+## Scope
+
+This checks the finite reference-evaluator identity provider prerequisite only. Native resource observation, external lifetimes, physical resources, a new executable Lean resource model, ChoiceTape generation/shrinking, a 100,000-program resource campaign, full diagnostic equivalence, compiler refinement and full §42 remain outside this evidence. Existing arithmetic and prior external-model replay results are not resource-provider test results.
