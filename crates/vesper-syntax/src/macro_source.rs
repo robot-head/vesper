@@ -11,6 +11,8 @@ pub struct Limits {
     pub max_macros: usize,
     pub max_functions: usize,
     pub max_invocations: usize,
+    /// Macro slots and plain parameters of macro-bearing functions. Ordinary
+    /// support-function parameters retain their existing source/token bounds.
     pub max_parameters: usize,
     pub max_depth: usize,
     pub max_metadata_bytes: usize,
@@ -210,6 +212,7 @@ pub struct MacroSource {
     tokens: Vec<Token>,
     definitions: Vec<MacroDefinition>,
     functions: Vec<SourceFunction>,
+    parameter_names: Vec<Vec<Span>>,
     invocations: Vec<Invocation>,
     support_items: Module,
 }
@@ -249,6 +252,15 @@ impl MacroSource {
         }
         self.functions
             .get(id.index)
+            .ok_or_else(|| Error::new(ErrorKind::ForeignId, None))
+    }
+    /// Actual header identifier tokens, in parameter order. The inventory is
+    /// sealed with this source; changing a public header clone cannot change it.
+    pub fn parameter_name_spans(&self, id: FunctionId) -> Result<&[Span], Error> {
+        self.function(id)?;
+        self.parameter_names
+            .get(id.index)
+            .map(Vec::as_slice)
             .ok_or_else(|| Error::new(ErrorKind::ForeignId, None))
     }
     pub fn invocation(&self, id: InvocationId) -> Result<&Invocation, Error> {
@@ -329,6 +341,7 @@ struct SourceParser<'a> {
     pos: usize,
     definitions: Vec<MacroDefinition>,
     functions: Vec<SourceFunction>,
+    parameter_names: Vec<Vec<Span>>,
     invocations: Vec<Invocation>,
     support_items: Module,
     budget: Budget,
@@ -510,7 +523,11 @@ impl SourceParser<'_> {
             self.budget.limits.max_functions,
             Resource::Functions,
         )?;
-        self.budget.metadata(size_of::<SourceFunction>())?;
+        self.budget.metadata(add(
+            size_of::<SourceFunction>(),
+            size_of::<Vec<Span>>(),
+            Resource::Metadata,
+        )?)?;
         let begin = self.pos;
         let mut body = self.pos + 1;
         while body < self.significant.len() {
@@ -549,9 +566,37 @@ impl SourceParser<'_> {
         let function_index = self.functions.len();
         let invocation_start = self.invocations.len();
         if has_macro {
-            if !header.generics.is_empty() || !header.params.is_empty() {
+            self.budget.work(header.params.len())?;
+            if !header.generics.is_empty()
+                || header.params.iter().any(|p| !p.projections.is_empty())
+            {
                 return Err(self.fail(ErrorKind::Unsupported));
             }
+            bound(
+                header.params.len(),
+                self.budget.limits.max_parameters,
+                Resource::Parameters,
+            )?;
+            // Reject original duplicate names before any later alpha-renaming
+            // could turn an invalid header into distinct valid bindings.
+            for (i, param) in header.params.iter().enumerate() {
+                for previous in &header.params[..i] {
+                    self.budget.work(add(
+                        param.name.len(),
+                        previous.name.len(),
+                        Resource::Work,
+                    )?)?;
+                    if param.name == previous.name {
+                        return Err(Error::new(
+                            ErrorKind::DuplicateName,
+                            Some(param.span.clone()),
+                        ));
+                    }
+                }
+            }
+        }
+        let parameter_names = self.parameter_names(&header, begin..body)?;
+        if has_macro {
             self.pos = body;
             self.expr(ExprMode::Caller(function_index), 1)?;
             if self.pos != close + 1 {
@@ -581,6 +626,15 @@ impl SourceParser<'_> {
         self.functions
             .try_reserve(1)
             .map_err(|_| self.fail(ErrorKind::Allocation))?;
+        self.budget.work(mul(
+            add(self.parameter_names.len(), 1, Resource::Work)?,
+            size_of::<Vec<Span>>(),
+            Resource::Work,
+        )?)?;
+        self.parameter_names
+            .try_reserve_exact(1)
+            .map_err(|_| self.fail(ErrorKind::Allocation))?;
+        self.parameter_names.push(parameter_names);
         self.functions.push(SourceFunction {
             id: FunctionId {
                 source_hash: self.hash,
@@ -592,6 +646,69 @@ impl SourceParser<'_> {
             invocations: ids,
         });
         Ok(())
+    }
+    fn parameter_names(
+        &mut self,
+        header: &FunctionHeader,
+        significant_header: Span,
+    ) -> Result<Vec<Span>, Error> {
+        // One monotone pass over this bounded header, plus exact name checks.
+        // Reserve the entire scan and retained-span envelope before traversing
+        // tokens or allocating the inventory. Parsed header storage was already
+        // covered by stage() before invoking the actual header parser.
+        self.budget.work(add(
+            significant_header.len(),
+            mul(header.params.len(), 4, Resource::Work)?,
+            Resource::Work,
+        )?)?;
+        self.budget.metadata(mul(
+            header.params.len(),
+            size_of::<Span>(),
+            Resource::Metadata,
+        )?)?;
+        let mut names = Vec::new();
+        names
+            .try_reserve_exact(header.params.len())
+            .map_err(|_| self.fail(ErrorKind::Allocation))?;
+        let mut cursor = significant_header.start;
+        let mut previous_end = header.span.start;
+        for param in &header.params {
+            if param.span.start < previous_end
+                || param.span.end > header.span.end
+                || self.source.get(param.span.clone()).is_none()
+            {
+                return Err(Error::new(ErrorKind::Syntax, Some(param.span.clone())));
+            }
+            previous_end = param.span.end;
+            while cursor < significant_header.end
+                && self.tokens[self.significant[cursor]].span.start < param.span.start
+            {
+                cursor += 1;
+            }
+            if cursor < significant_header.end
+                && matches!(
+                    self.tokens[self.significant[cursor]].kind,
+                    K::In | K::Inout | K::Sink
+                )
+            {
+                cursor += 1;
+            }
+            let token = (cursor < significant_header.end)
+                .then(|| &self.tokens[self.significant[cursor]])
+                .ok_or_else(|| Error::new(ErrorKind::Syntax, Some(param.span.clone())))?;
+            self.budget
+                .work(add(token.span.len(), param.name.len(), Resource::Work)?)?;
+            if !matches!(token.kind, K::Lower | K::SelfKw)
+                || token.span.start < param.span.start
+                || token.span.end > param.span.end
+                || self.source.get(token.span.clone()) != Some(param.name.as_str())
+            {
+                return Err(Error::new(ErrorKind::Syntax, Some(param.span.clone())));
+            }
+            names.push(token.span.clone());
+            cursor += 1;
+        }
+        Ok(names)
     }
     fn support(&mut self) -> Result<(), Error> {
         if matches!(self.kind(), K::Copy | K::Affine | K::Linear)
@@ -854,6 +971,7 @@ pub fn parse(source: &str, limits: Limits) -> Result<MacroSource, Error> {
         pos: 0,
         definitions: vec![],
         functions: vec![],
+        parameter_names: vec![],
         invocations: vec![],
         support_items: Module::default(),
         budget,
@@ -899,6 +1017,7 @@ pub fn parse(source: &str, limits: Limits) -> Result<MacroSource, Error> {
         tokens: p.tokens,
         definitions: p.definitions,
         functions: p.functions,
+        parameter_names: p.parameter_names,
         invocations: p.invocations,
         support_items: p.support_items,
     })

@@ -10,6 +10,7 @@ use vesper_forge::{
     BinderId, DefId, DefKind, ExpansionId, HygieneHost, Origin, Resolution, TokenKind,
     typed_quote::{ExprShape, ExprStatement, ResolvedBody, TokenProvenance},
 };
+use vesper_syntax::macro_source::FunctionId;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LowerLimits {
@@ -95,14 +96,40 @@ pub struct LowerSegment {
     pub span: Span,
     pub origin: SegmentOrigin,
 }
+/// An alpha-renamed declaration identifier derived from a sealed host parameter.
+#[derive(Debug)]
+pub struct ParameterRename {
+    ordinal: usize,
+    original: Span,
+    name: String,
+}
+impl ParameterRename {
+    pub fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+    pub fn original(&self) -> &Span {
+        &self.original
+    }
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
 #[derive(Debug)]
 pub struct LoweredBody {
+    function: Option<FunctionId>,
+    parameter_renames: Vec<ParameterRename>,
     source: String,
     expected: Expr,
     segments: Vec<LowerSegment>,
     work_used: usize,
 }
 impl LoweredBody {
+    pub fn function_id(&self) -> Option<FunctionId> {
+        self.function
+    }
+    pub fn parameter_renames(&self) -> &[ParameterRename] {
+        &self.parameter_renames
+    }
     pub fn source(&self) -> &str {
         &self.source
     }
@@ -179,6 +206,8 @@ struct Builder<'a> {
     seen_refs: BTreeSet<usize>,
     seen_binders: BTreeSet<BinderId>,
     anchors: Vec<usize>,
+    parameters: BTreeSet<BinderId>,
+    parameter_renames: Vec<ParameterRename>,
     counter: usize,
 }
 impl<'a> Builder<'a> {
@@ -247,6 +276,8 @@ impl<'a> Builder<'a> {
             seen_refs: BTreeSet::new(),
             seen_binders: BTreeSet::new(),
             anchors: Vec::new(),
+            parameters: BTreeSet::new(),
+            parameter_renames: Vec::new(),
             counter: 0,
         };
         for name in bindings.global_names() {
@@ -304,9 +335,69 @@ impl<'a> Builder<'a> {
                 return Err(LowerError::InvalidInventory("binder"));
             }
             let raw = host.text(fragment.tokens[binder.token].text());
-            this.validate_binder(raw)?;
+            this.budget.charge(body.parameters().len())?;
+            let self_parameter = raw == "self"
+                && body
+                    .parameters()
+                    .iter()
+                    .any(|parameter| parameter.binder() == binder.id);
+            if self_parameter {
+                // SelfKw is a real parameter-name token, never a newly allowed
+                // body-local keyword binder. The sealed parameter provenance is
+                // checked below before its fresh name can reach rendering.
+                this.budget.charge(raw.len())?;
+                if raw.len() > limits.max_identifier_bytes {
+                    return Err(LowerError::Budget(Resource::Identifier));
+                }
+            } else {
+                this.validate_binder(raw)?;
+            }
             let name = this.fresh()?;
             this.names.insert(binder.id, name);
+        }
+        // Parameter declarations are real header tokens appended by the sealed
+        // host. Their binders are active before the body, but their spellings are
+        // alpha-renamed alongside all body-local binders to prevent global capture.
+        this.budget.charge(
+            body.parameters()
+                .len()
+                .checked_mul(
+                    std::mem::size_of::<ParameterRename>() + std::mem::size_of::<BinderId>() * 4,
+                )
+                .ok_or(LowerError::Budget(Resource::Work))?,
+        )?;
+        reserve(&mut this.parameter_renames, body.parameters().len())?;
+        for (ordinal, parameter) in body.parameters().iter().enumerate() {
+            this.budget.charge(1)?;
+            if parameter.ordinal() != ordinal
+                || this.binders.get(&parameter.token()) != Some(&parameter.binder())
+                || !this.parameters.insert(parameter.binder())
+                || !this.active.insert(parameter.binder())
+                || !this.seen_binders.insert(parameter.binder())
+            {
+                return Err(LowerError::InvalidInventory("parameter binder"));
+            }
+            let provenance = body
+                .provenance()
+                .get(parameter.token())
+                .ok_or(LowerError::InvalidInventory("parameter token"))?;
+            if !matches!(provenance, TokenProvenance::Source { span } if span == parameter.name_span())
+            {
+                return Err(LowerError::InvalidInventory("parameter provenance"));
+            }
+            let name = this
+                .names
+                .get(&parameter.binder())
+                .ok_or(LowerError::InvalidInventory("parameter name"))?;
+            this.budget.charge(name.len())?;
+            this.parameter_renames.push(ParameterRename {
+                ordinal,
+                original: parameter.name_span().clone(),
+                name: name.clone(),
+            });
+        }
+        if body.function_id().is_none() && !body.parameters().is_empty() {
+            return Err(LowerError::InvalidInventory("parameter function"));
         }
         for operation in &fragment.operations {
             this.budget.charge(1)?;
@@ -863,7 +954,7 @@ pub fn lower_body(
     let mut expected = builder.expr(body.shape(), 0)?;
     if builder.seen_refs.len() != builder.refs.len()
         || builder.seen_binders.len() != builder.names.len()
-        || !builder.active.is_empty()
+        || builder.active != builder.parameters
     {
         return Err(LowerError::InvalidInventory("unused resolution inventory"));
     }
@@ -880,6 +971,8 @@ pub fn lower_body(
     drop(emitter);
     let work_used = limits.max_work - builder.budget.remaining;
     Ok(LoweredBody {
+        function: body.function_id(),
+        parameter_renames: builder.parameter_renames,
         source,
         expected,
         segments,

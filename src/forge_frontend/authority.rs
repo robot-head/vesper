@@ -215,7 +215,26 @@ fn header<'a>(
     effects: &'a Effects,
     b: &mut Budget,
 ) -> Result<Vec<u8>, AuthorityFailure> {
-    b.charge(params.len())?;
+    header_names(name, generics, params, result, effects, None, b)
+}
+fn header_names<'a>(
+    name: &'a str,
+    generics: &'a [Generic],
+    params: &'a [Param],
+    result: &'a Type,
+    effects: &'a Effects,
+    renames: Option<&'a [super::lower::ParameterRename]>,
+    b: &mut Budget,
+) -> Result<Vec<u8>, AuthorityFailure> {
+    let parameter_storage = params
+        .len()
+        .checked_mul(std::mem::size_of::<ParameterHeader<'_>>())
+        .ok_or_else(|| resource("parameter_header_storage"))?;
+    b.charge(parameter_storage)?;
+    b.bytes = b
+        .bytes
+        .checked_sub(parameter_storage)
+        .ok_or_else(|| resource("parameter_header_storage"))?;
     for p in params {
         b.name(&p.name)?;
         type_walk(&p.ty, 0, b, false)?;
@@ -227,8 +246,9 @@ fn header<'a>(
         generics,
         params: params
             .iter()
-            .map(|p| ParameterHeader {
-                name: &p.name,
+            .enumerate()
+            .map(|(i, p)| ParameterHeader {
+                name: renames.map_or(p.name.as_str(), |names| names[i].name()),
                 pass: p.pass,
                 ty: &p.ty,
                 projections: &p.projections,
@@ -976,6 +996,7 @@ impl CheckedAuthorityBundle {
 fn compare_mapping(
     checked: &CheckedSource,
     bindings: &SourceBindings,
+    expanded: Option<(&MacroSource, &[super::Body])>,
     b: &mut Budget,
 ) -> Result<(), AuthorityFailure> {
     let world = checked.world();
@@ -995,7 +1016,29 @@ fn compare_mapping(
         return Err(AuthorityFailure::Mapping("checked_function_mapping"));
     }
     for (name, f) in &world.functions {
-        if Some(&function_header(f, b)?) != bindings.functions.get(name) {
+        let renamed;
+        let expected = if let Some((syntax, bodies)) = expanded
+            && let Some(body) = bodies.iter().find(|body| body.name == *name)
+            && !body.lowered.parameter_renames().is_empty()
+        {
+            let original = &syntax
+                .function(body.function)
+                .map_err(|_| AuthorityFailure::Mapping("parameter_function"))?
+                .header;
+            renamed = header_names(
+                &original.name,
+                &original.generics,
+                &original.params,
+                &original.result,
+                &original.effects,
+                Some(body.lowered.parameter_renames()),
+                b,
+            )?;
+            Some(&renamed)
+        } else {
+            bindings.functions.get(name)
+        };
+        if Some(&function_header(f, b)?) != expected {
             return Err(AuthorityFailure::Mapping("checked_function_header"));
         }
     }
@@ -1064,6 +1107,88 @@ pub fn derive(
     bindings: &SourceBindings,
     limits: AuthorityLimits,
 ) -> Result<CheckedAuthorityBundle, AuthorityFailure> {
+    derive_inner(checked, bindings, None, limits)
+}
+
+// Only the source compiler can supply private Body records containing actual
+// sealed host/lowering outcomes. Public derive keeps original header equality.
+pub(super) fn derive_expanded(
+    checked: &CheckedSource,
+    bindings: &SourceBindings,
+    syntax: &MacroSource,
+    bodies: &[super::Body],
+    limits: AuthorityLimits,
+) -> Result<CheckedAuthorityBundle, AuthorityFailure> {
+    derive_inner(checked, bindings, Some((syntax, bodies)), limits)
+}
+fn validate_parameter_renames(
+    syntax: &MacroSource,
+    bodies: &[super::Body],
+    bindings: &SourceBindings,
+    b: &mut Budget,
+) -> Result<(), AuthorityFailure> {
+    if syntax.source_hash() != bindings.source_hash || bodies.len() > bindings.functions.len() {
+        return Err(AuthorityFailure::ForeignSource);
+    }
+    b.charge(syntax.source().len())?;
+    if *blake3::hash(syntax.source().as_bytes()).as_bytes() != bindings.source_hash {
+        return Err(AuthorityFailure::ForeignSource);
+    }
+    // Prepay the bounded duplicate-ID scan without allocating a temporary set
+    // outside the remaining authority metadata allowance.
+    b.charge(
+        bodies
+            .len()
+            .checked_mul(bodies.len())
+            .ok_or_else(|| resource("parameter_inventory_overflow"))?,
+    )?;
+    for (index, body) in bodies.iter().enumerate() {
+        b.charge(syntax.source().len())?;
+        let function = syntax
+            .function(body.function)
+            .map_err(|_| AuthorityFailure::Mapping("parameter_function"))?;
+        let spans = syntax
+            .parameter_name_spans(body.function)
+            .map_err(|_| AuthorityFailure::Mapping("parameter_spans"))?;
+        let renames = body.lowered.parameter_renames();
+        if body.name != function.header.name
+            || !bindings.functions.contains_key(&body.name)
+            || bodies[..index]
+                .iter()
+                .any(|previous| previous.function == body.function)
+            || body.resolved.original_source() != syntax.source()
+            || body.resolved.function_id() != Some(body.function)
+            || body.lowered.function_id() != Some(body.function)
+            || spans.len() != function.header.params.len()
+            || renames.len() != spans.len()
+            || body.resolved.parameters().len() != spans.len()
+        {
+            return Err(AuthorityFailure::Mapping("parameter_association"));
+        }
+        b.charge(renames.len())?;
+        for (i, rename) in renames.iter().enumerate() {
+            let parameter = &function.header.params[i];
+            let resolved = &body.resolved.parameters()[i];
+            b.name(rename.name())?;
+            b.charge(parameter.name.len())?;
+            if rename.ordinal() != i
+                || resolved.ordinal() != i
+                || rename.original() != &spans[i]
+                || resolved.name_span() != &spans[i]
+                || syntax.source().get(spans[i].clone()) != Some(parameter.name.as_str())
+            {
+                return Err(AuthorityFailure::Mapping("parameter_identity"));
+            }
+        }
+    }
+    Ok(())
+}
+fn derive_inner(
+    checked: &CheckedSource,
+    bindings: &SourceBindings,
+    expanded: Option<(&MacroSource, &[super::Body])>,
+    limits: AuthorityLimits,
+) -> Result<CheckedAuthorityBundle, AuthorityFailure> {
     let mut b = Budget::new(limits)?;
     b.charge(bindings.work_used)?;
     b.bytes = b
@@ -1077,7 +1202,17 @@ pub fn derive(
         return Err(resource("definition_limit"));
     }
     b.charge(checked.source().len())?;
-    compare_mapping(checked, bindings, &mut b)?;
+    if let Some((syntax, bodies)) = expanded {
+        validate_parameter_renames(syntax, bodies, bindings, &mut b)?;
+        b.charge(
+            bindings
+                .functions
+                .len()
+                .checked_mul(bodies.len())
+                .ok_or_else(|| resource("parameter_mapping_work"))?,
+        )?;
+    }
+    compare_mapping(checked, bindings, expanded, &mut b)?;
     let world = checked.world();
     let mut static_callees = BTreeSet::new();
     for f in world.functions.values() {
@@ -1337,4 +1472,131 @@ pub fn derive(
         identity,
         unsupported,
     })
+}
+
+#[cfg(test)]
+mod parameter_header_tests {
+    use super::*;
+    use crate::{
+        forge_frontend::{Body, CompileLimits, InvocationInfo, Work, lower, render},
+        tooling::frontend::{AnalysisLimits, check_source},
+    };
+    use vesper_forge::{
+        HygieneHost, InvocationSite, SessionId,
+        typed_quote::{TypedBudget, TypedLimits},
+    };
+
+    #[test]
+    fn private_parameter_header_association_rejects_every_unintended_header_change() {
+        let source = "macro fixed()->expr{quote{42}} fn target(in n:i64)->i64{fixed!()}";
+        let syntax = vesper_syntax::macro_source::parse(source, Default::default()).unwrap();
+        let bindings = bind_source(&syntax, "@local/source", AuthorityLimits::default()).unwrap();
+        let mut host = HygieneHost::new(SessionId(17), bindings.registry().clone());
+        for name in bindings.global_names() {
+            if let Some(def) = bindings.def_id(name) {
+                host.declare_global(bindings.source_package(), name, def)
+                    .unwrap();
+            }
+        }
+        let mut budget = TypedBudget::new(TypedLimits::default()).unwrap();
+        let imported = host
+            .import_expr_source(bindings.source_package(), source, &mut budget)
+            .unwrap();
+        let function = &syntax.functions()[0];
+        let invocation = syntax.invocation(function.invocations[0]).unwrap();
+        let definition = syntax.definition(invocation.definition).unwrap();
+        let def = bindings.macro_def(definition.id).unwrap();
+        let quotation = host
+            .expr_quotation(
+                &imported,
+                def,
+                definition.quote_span.clone(),
+                &[],
+                &mut budget,
+            )
+            .unwrap();
+        let expansion = host
+            .begin_expr_expansion(
+                def,
+                InvocationSite::Source(bindings.source_package()),
+                vec![],
+                &mut budget,
+            )
+            .unwrap();
+        let expansion_id = expansion.id();
+        let expression = host
+            .finish_expr(expansion, quotation.items(), &mut budget)
+            .unwrap();
+        let resolved = host
+            .resolve_expr_function_body(
+                &imported,
+                &syntax,
+                function.id,
+                vec![(invocation.span.clone(), expression)],
+                &mut budget,
+            )
+            .unwrap();
+        let lowered = lower::lower_body(&resolved, &host, &bindings, Default::default()).unwrap();
+        let parameter_name = lowered.parameter_renames()[0].name().to_owned();
+        let bodies = [Body {
+            function: function.id,
+            name: function.header.name.clone(),
+            resolved,
+            lowered,
+        }];
+        let origins = BTreeMap::from([(
+            expansion_id,
+            InvocationInfo {
+                name: "fixed".into(),
+                span: invocation.span.clone(),
+                function: function.id,
+            },
+        )]);
+        let (candidate, _) = render(
+            &syntax,
+            &bodies,
+            &origins,
+            CompileLimits::default(),
+            &mut Work {
+                remaining: 16 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let checked = check_source(&candidate, AnalysisLimits::default()).unwrap();
+        derive_expanded(
+            &checked,
+            &bindings,
+            &syntax,
+            &bodies,
+            AuthorityLimits::default(),
+        )
+        .unwrap();
+        for (original, replacement) in [
+            (parameter_name.as_str(), "wrong_parameter"),
+            ("in ", "inout "),
+            (":i64", ":u64"),
+            ("->i64", "->u64"),
+            ("target(", "target[T]("),
+            ("->i64", "->i64 eff[Fail[ArithOverflow]]"),
+        ] {
+            let changed = candidate.replacen(original, replacement, 1);
+            assert_ne!(changed, candidate.as_ref());
+            let checked = check_source(&changed, AnalysisLimits::default()).unwrap();
+            let refusal = derive_expanded(
+                &checked,
+                &bindings,
+                &syntax,
+                &bodies,
+                AuthorityLimits::default(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    refusal,
+                    AuthorityFailure::Mapping("checked_function_header")
+                ),
+                "{refusal:?}"
+            );
+        }
+    }
 }
