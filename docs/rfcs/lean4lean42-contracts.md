@@ -124,6 +124,15 @@ Rust may be authored/formatted before those data exist; it must wait for root's
 assembled inputs before compilation/positive execution. No fake digest or
 successful placeholder receipt is introduced to make parallel work appear done.
 
+Before the named build, setup invokes the exclusive private operation
+`DRIVER --verify-setup-source STAGING_DIRECTORY`. This validates the embedded
+pins, patch/overlay/known-fixes bytes and the complete actual patched source and
+dependency tree against the embedded source manifest. It writes no receipt,
+runs no compiler/checker and supplies no positive replay evidence. This lets
+the standard-library-only Python setup verify BLAKE3 through the genuine Rust
+driver before executing build inputs. The post-build sealer must repeat source
+validation and all of its other gates; a preflight result cannot replace it.
+
 `pins.json` has schema1 and exact fields: profile, upstream_commit,
 batteries_commit, lean_release, lean_commit, patches, controls_overlay,
 known_fixes_blake3, source_manifest_blake3, build_argv,
