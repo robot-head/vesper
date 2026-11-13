@@ -526,8 +526,11 @@ fn a_shared_tree_first_visited_shallow_cannot_bypass_a_later_deep_path_limit() {
     root.insert_dir("z-deeper", deeper_id).unwrap();
     let root_id = source.put_tree(&root).unwrap().id;
     let pack = export_pack(&source, root_id, TransferLimits::default()).unwrap();
+    // Root is level1: the cached shared tree is reached at level4, within the
+    // cap, but its blob would be level5. A check of only the revisit's own
+    // depth would wrongly accept this closure without accounting for height.
     let limits = TransferLimits {
-        max_depth: 3,
+        max_depth: 4,
         ..TransferLimits::default()
     };
     assert!(export_pack(&source, root_id, limits).is_err());
