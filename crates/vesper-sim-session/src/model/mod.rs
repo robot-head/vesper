@@ -12,8 +12,9 @@
 //!   spawns the process's restart tasks.
 //! - `wal-frame-v1`: see [`wal`].
 //! - `net-v1`: see [`net`].
-//! - `umem-v1` and `datagram-v1` (scenario version 3 only): see [`warp`],
-//!   [`umem`] and [`link`].
+//! - `umem-softnic-v1`, `datagram-v1` and `ack-path-v1` (scenario version 3
+//!   only): see [`warp`], [`umem`] (frames on the `vesper-warp-umem` software
+//!   NIC) and [`link`].
 //!
 //! Every fault, failure, crash choice, recovery and model transition is a
 //! [`ModelEvent`] in a model trace kept separate from the SimPulse v1 journal.
@@ -31,7 +32,13 @@ use wal::{CrashApplied, TailDamage, Wal, WalLimits, WalRecord};
 
 pub const MODEL_SEMANTICS: &str = "vesper-sim-models-v1(process-epochs-v1,wal-frame-v1,net-v1)";
 /// Model semantics of scenario version 3 (with a `warp` section).
-pub const WARP_MODEL_SEMANTICS: &str =
+///
+/// `vesper-sim-models-v2(…,umem-v1,datagram-v1)` (the private frame model of
+/// wave four) is no longer produced: a recording that names it fails replay
+/// with an identity mismatch on `model_semantics`.
+pub const WARP_MODEL_SEMANTICS: &str = "vesper-sim-models-v3(process-epochs-v1,wal-frame-v1,net-v1,umem-softnic-v1,datagram-v1,ack-path-v1)";
+/// The wave-four Warp model semantics, rejected on replay.
+pub const RETIRED_WARP_MODEL_SEMANTICS: &str =
     "vesper-sim-models-v2(process-epochs-v1,wal-frame-v1,net-v1,umem-v1,datagram-v1)";
 
 /// Hard upper bounds applied regardless of model limits.
