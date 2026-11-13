@@ -32,6 +32,16 @@ What is proved, about the models defined in this file only:
   term `t` preserves log matching, given that every entry of term `t`
   anywhere agrees with the leader's log up to that entry (the property
   election safety provides, assumed here rather than derived).
+* `system_log_matching` and `system_entries_owned` (wave six): in every
+  reachable state of a modelled cluster whose steps are leader appends (by
+  a node holding a strict majority of that term's ballots) and follower
+  appends under the rule above, every pair of logs satisfies log matching,
+  and every entry of term `t` was copied from the unique majority holder of
+  `t`. This combines `election_safety` with the append lemmas; the one
+  assumption is that a leader's log still extends what it appended in its
+  term when it appends again (see the section).
+
+The session-duality model is in `ChorusQuorum/SessionDuality.lean`.
 
 Logs are lists of entry terms. This is a model of the protocol rules, not a
 theorem about the Rust code in `crates/vesper-chorus`, which is checked by
@@ -266,6 +276,238 @@ theorem leader_append_preserves_matching (leader x : Log) (t : Nat)
     rw [hx] at hxl
     simp at hxl
 
+/-! ## Whole-system log matching (wave six lane 17)
+
+The append lemmas above each preserve log matching under a hypothesis;
+here they are combined with election safety into an invariant of a whole
+modelled cluster. A state holds every node's log and, per term `t` and
+node `c`, a ghost log: what `c`'s log was right after it last appended an
+entry of term `t` as leader (`[]` if it never did). `ballots t` is the
+final ballot vector of term `t` (`castVote` never changes a recorded vote).
+
+Steps:
+* `leaderAppend t c`: `c` holds a strict majority in `ballots t`, and its
+  log still extends its own ghost for `t` (a leader of `t` never loses its
+  own entries of `t` while it leads: it only truncates after accepting an
+  append of a higher term, after which it no longer leads `t`; this is an
+  assumption of the model). `c` appends an entry of term `t`.
+* `followerAppend f l prev k`: the modelled AppendEntries rule
+  (`appendEntries`) applied by node `f` to node `l`'s log, for any `l`.
+
+`system_log_matching`: in every reachable state every pair of logs
+satisfies `Matching`. `system_entries_owned`: every entry of term `t`
+anywhere agrees with the ghost log of a node that holds a majority of
+term `t`, and by `election_safety` that node is unique. Again this is a
+theorem about the model, not about the Rust simulation.
+-/
+
+structure Sys where
+  logs : Nat → Log
+  ghost : Nat → Nat → Log
+
+def Leads (ballots : Nat → Ballots) (t c : Nat) : Prop :=
+  2 * count (votesFor c (ballots t)) > (ballots t).length
+
+def setLog (s : Sys) (c : Nat) (l : Log) : Nat → Log :=
+  fun j => if j = c then l else s.logs j
+
+inductive Step (ballots : Nat → Ballots) : Sys → Sys → Prop
+  | leaderAppend (s : Sys) (t c : Nat)
+      (hlead : Leads ballots t c)
+      (hpre : (s.logs c).take (s.ghost t c).length = s.ghost t c) :
+      Step ballots s
+        { logs := setLog s c (s.logs c ++ [t]),
+          ghost := fun t' c' => if t' = t ∧ c' = c then s.logs c ++ [t] else s.ghost t' c' }
+  | followerAppend (s : Sys) (f l prev k : Nat) (f' : Log)
+      (hlen : prev ≤ (s.logs l).length)
+      (h : appendEntries (s.logs f) (s.logs l) prev ((s.logs l)[prev - 1]?.getD 0) k = some f') :
+      Step ballots s { s with logs := setLog s f f' }
+
+def initSys : Sys := { logs := fun _ => [], ghost := fun _ _ => [] }
+
+inductive Reach (ballots : Nat → Ballots) : Sys → Prop
+  | init : Reach ballots initSys
+  | step (s s' : Sys) : Reach ballots s → Step ballots s s' → Reach ballots s'
+
+/-- Every entry of term `t` agrees, up to it, with the ghost log of a node
+that leads `t`. -/
+def Owned (ballots : Nat → Ballots) (s : Sys) : Prop :=
+  ∀ j i t, (s.logs j)[i]? = some t →
+    ∃ c, Leads ballots t c ∧ i < (s.ghost t c).length ∧
+      (s.logs j).take (i + 1) = (s.ghost t c).take (i + 1)
+
+def AllMatching (s : Sys) : Prop := ∀ a b, Matching (s.logs a) (s.logs b)
+
+theorem matching_refl (a : Log) : Matching a a := fun _ _ _ _ => rfl
+
+theorem leads_unique {ballots : Nat → Ballots} {t c c' : Nat}
+    (h : Leads ballots t c) (h' : Leads ballots t c') : c = c' :=
+  election_safety (ballots t) c c' h h'
+
+theorem take_succ_of_lt {l : Log} {i : Nat} (h : i < l.length) (t : Nat) :
+    (l ++ [t]).take (i + 1) = l.take (i + 1) :=
+  List.take_append_of_le_length (by omega)
+
+/-- The ghost of a leading node is a prefix of its log, so the two agree
+below the ghost's length. -/
+theorem ghost_take {g l : Log} {i : Nat} (hpre : l.take g.length = g) (hi : i < g.length) :
+    g.take (i + 1) = l.take (i + 1) := by
+  conv => lhs; rw [← hpre]
+  rw [List.take_take, Nat.min_eq_left (by omega)]
+
+theorem ghost_len_le {g l : Log} (hpre : l.take g.length = g) : g.length ≤ l.length := by
+  have := congrArg List.length hpre
+  simp at this
+  omega
+
+theorem owned_leaderAppend (ballots : Nat → Ballots) (s : Sys) (t c : Nat)
+    (hlead : Leads ballots t c)
+    (hpre : (s.logs c).take (s.ghost t c).length = s.ghost t c)
+    (ho : Owned ballots s) :
+    Owned ballots
+      { logs := setLog s c (s.logs c ++ [t]),
+        ghost := fun t' c' => if t' = t ∧ c' = c then s.logs c ++ [t] else s.ghost t' c' } := by
+  intro j i u hj
+  simp only [setLog] at hj ⊢
+  -- The witness for an entry of term `u` already in some log.
+  have old : ∀ x : Log, x[i]? = some u →
+      (∃ c', Leads ballots u c' ∧ i < (s.ghost u c').length ∧
+        x.take (i + 1) = (s.ghost u c').take (i + 1)) →
+      ∃ c', Leads ballots u c' ∧
+        i < (if u = t ∧ c' = c then s.logs c ++ [t] else s.ghost u c').length ∧
+        x.take (i + 1) = (if u = t ∧ c' = c then s.logs c ++ [t] else s.ghost u c').take (i + 1) := by
+    intro x _ ⟨c', hl, hi, htake⟩
+    refine ⟨c', hl, ?_⟩
+    by_cases hc : u = t ∧ c' = c
+    · rw [if_pos hc]
+      obtain ⟨hu, hcc⟩ := hc
+      subst hu; subst hcc
+      have hle := ghost_len_le hpre
+      refine ⟨by simp; omega, ?_⟩
+      rw [htake, ghost_take hpre hi, take_succ_of_lt (by omega)]
+    · rw [if_neg hc]; exact ⟨hi, htake⟩
+  by_cases hjc : j = c
+  · rw [if_pos hjc] at hj ⊢
+    by_cases hi : i < (s.logs c).length
+    · rw [List.getElem?_append_left hi] at hj
+      rw [take_succ_of_lt hi]
+      exact old _ hj (ho c i u hj)
+    · -- The new entry, at the end.
+      rw [List.getElem?_append_right (by omega)] at hj
+      have hi' : i = (s.logs c).length := by
+        cases hlt : i - (s.logs c).length with
+        | zero => omega
+        | succ n => simp [hlt] at hj
+      subst hi'
+      simp at hj
+      subst hj
+      exact ⟨c, hlead, by simp, by simp⟩
+  · rw [if_neg hjc] at hj ⊢
+    exact old _ hj (ho j i u hj)
+
+theorem matching_leaderAppend (ballots : Nat → Ballots) (s : Sys) (t c : Nat)
+    (hlead : Leads ballots t c)
+    (hpre : (s.logs c).take (s.ghost t c).length = s.ghost t c)
+    (ho : Owned ballots s) (hm : AllMatching s) :
+    AllMatching { s with logs := setLog s c (s.logs c ++ [t]) } := by
+  -- The leader owns term `t` against every log (election safety).
+  have own : ∀ j, OwnsTerm t (s.logs c) (s.logs j) := by
+    intro j i hj
+    obtain ⟨c', hl, hi, htake⟩ := ho j i t hj
+    have := leads_unique hl hlead
+    subst this
+    rw [htake, ghost_take hpre hi]
+  have step : ∀ j, Matching (s.logs c ++ [t]) (s.logs j) := fun j =>
+    leader_append_preserves_matching (s.logs c) (s.logs j) t (hm c j) (own j)
+  intro a b
+  simp only [setLog]
+  by_cases ha : a = c <;> by_cases hb : b = c
+  · rw [if_pos ha, if_pos hb]; exact matching_refl _
+  · rw [if_pos ha, if_neg hb]; exact step b
+  · rw [if_neg ha, if_pos hb]; exact matching_symm (step a)
+  · rw [if_neg ha, if_neg hb]; exact hm a b
+
+theorem prefix_entry {l : Log} {m i t : Nat} (h : (l.take m)[i]? = some t) :
+    i < m ∧ l[i]? = some t := by
+  rw [List.getElem?_take] at h
+  split at h
+  · exact ⟨by assumption, h⟩
+  · simp at h
+
+theorem followerAppend_shape (s : Sys) (f l prev k : Nat) (f' : Log)
+    (hm : AllMatching s) (hlen : prev ≤ (s.logs l).length)
+    (h : appendEntries (s.logs f) (s.logs l) prev ((s.logs l)[prev - 1]?.getD 0) k = some f') :
+    f' = (s.logs l).take (prev + k) := by
+  have hprev : prev = 0 ∨ (s.logs l)[prev - 1]? = some ((s.logs l)[prev - 1]?.getD 0) := by
+    by_cases h0 : prev = 0
+    · exact Or.inl h0
+    · right
+      have : prev - 1 < (s.logs l).length := by omega
+      simp [List.getElem?_eq_getElem this]
+  exact append_yields_leader_prefix (s.logs f) (s.logs l) prev k f' (hm l f) hprev hlen h
+
+theorem owned_followerAppend (ballots : Nat → Ballots) (s : Sys) (f l prev k : Nat) (f' : Log)
+    (hf' : f' = (s.logs l).take (prev + k)) (ho : Owned ballots s) :
+    Owned ballots { s with logs := setLog s f f' } := by
+  intro j i u hj
+  simp only [setLog] at hj ⊢
+  by_cases hjf : j = f
+  · rw [if_pos hjf] at hj ⊢
+    subst hf'
+    obtain ⟨hik, hl⟩ := prefix_entry hj
+    obtain ⟨c, hlead, hi, htake⟩ := ho l i u hl
+    refine ⟨c, hlead, hi, ?_⟩
+    rw [List.take_take, Nat.min_eq_left (by omega), htake]
+  · rw [if_neg hjf] at hj ⊢
+    exact ho j i u hj
+
+theorem matching_followerAppend (s : Sys) (f l prev k : Nat) (f' : Log)
+    (hf' : f' = (s.logs l).take (prev + k)) (hm : AllMatching s) :
+    AllMatching { s with logs := setLog s f f' } := by
+  have step : ∀ j, Matching f' (s.logs j) := fun j => by
+    rw [hf']; exact matching_take (prev + k) (hm l j)
+  intro a b
+  simp only [setLog]
+  by_cases ha : a = f <;> by_cases hb : b = f
+  · rw [if_pos ha, if_pos hb]; exact matching_refl _
+  · rw [if_pos ha, if_neg hb]; exact step b
+  · rw [if_neg ha, if_pos hb]; exact matching_symm (step a)
+  · rw [if_neg ha, if_neg hb]; exact hm a b
+
+theorem system_invariant (ballots : Nat → Ballots) (s : Sys) (h : Reach ballots s) :
+    AllMatching s ∧ Owned ballots s := by
+  induction h with
+  | init =>
+    refine ⟨fun _ _ => matching_refl [], ?_⟩
+    intro j i t hj
+    simp [initSys] at hj
+  | step s s' _ hstep ih =>
+    obtain ⟨hm, ho⟩ := ih
+    cases hstep with
+    | leaderAppend t c hlead hpre =>
+      exact ⟨matching_leaderAppend ballots s t c hlead hpre ho hm,
+        owned_leaderAppend ballots s t c hlead hpre ho⟩
+    | followerAppend f l prev k f' hlen happ =>
+      have hf' := followerAppend_shape s f l prev k f' hm hlen happ
+      exact ⟨matching_followerAppend s f l prev k f' hf' hm,
+        owned_followerAppend ballots s f l prev k f' hf' ho⟩
+
+/-- Whole-system log matching: in every reachable state of the modelled
+cluster, any two logs that hold an entry with the same index and term agree
+on every entry up to it. -/
+theorem system_log_matching (ballots : Nat → Ballots) (s : Sys) (h : Reach ballots s)
+    (a b : Nat) : Matching (s.logs a) (s.logs b) :=
+  (system_invariant ballots s h).1 a b
+
+/-- Every entry of term `t` anywhere was copied from the unique leader of
+`t`: the node holding a majority of `ballots t`. -/
+theorem system_entries_owned (ballots : Nat → Ballots) (s : Sys) (h : Reach ballots s)
+    (j i t : Nat) (hj : (s.logs j)[i]? = some t) :
+    ∃ c, Leads ballots t c ∧ (∀ c', Leads ballots t c' → c' = c) ∧
+      (s.logs j).take (i + 1) = (s.ghost t c).take (i + 1) := by
+  obtain ⟨c, hl, _, htake⟩ := (system_invariant ballots s h).2 j i t hj
+  exact ⟨c, hl, fun c' h' => leads_unique h' hl, htake⟩
+
 /-! ## Executable fixture checked from Rust -/
 
 /-- Majority sizes for 0..64 nodes; `crates/vesper-chorus/tests/lean.rs`
@@ -285,5 +527,7 @@ def majorityTable : List Nat := (List.range 65).map majority
 #print axioms append_yields_leader_prefix
 #print axioms follower_append_preserves_matching
 #print axioms leader_append_preserves_matching
+#print axioms system_log_matching
+#print axioms system_entries_owned
 
 end Vesper.ChorusQuorum
