@@ -44,6 +44,24 @@ main/lib/native/checker, existing oracle/model/witness/proof-audit/metatheory,
 or external lane edits. Runtime/kernel helper text is fixed handwritten Lean;
 any dynamically generated Lean uses `vesper-lean-syntax` exactly once.
 
+## Shared stored-metadata comparison controls
+
+The #298 umbrella exposes `constructorMetadataMatches` and
+`recursorMetadataMatches`, each taking generated and imported Lean metadata and
+returning exact structural equality over every field. The four existing Main
+BEq instances move into the umbrella. Production postponed comparisons in
+#299 call these same helpers; successful lookup alone never supplies coverage.
+
+Five additional required condition controls use constructor/recursor metadata
+from an actual freshly checked Tree0 block: unchanged constructor and recursor
+positives, and constructor type, recursor rule RHS and recursor rule constructor
+mutations as negatives. Expected reasons are `metadata_equal`,
+`constructor_metadata_mismatch` and `recursor_metadata_mismatch`. Preserve all
+89 existing controls. The manifest becomes 94 required cases after execution;
+these condition refusals are not raw-declaration kernel refusals. Update the
+existing registry, source hashes and report without changing kernel semantics.
+This amendment was published on #298 before dependent source edits.
+
 ## Required roots and inventory accounting
 
 The arithmetic roots `checkExpr`, `checkProgram`, `evalSteps` and
