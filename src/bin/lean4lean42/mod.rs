@@ -497,11 +497,29 @@ pub struct Receipt {
 pub fn run(config: &Config) -> Result<Report, Failure> {
     let started = Instant::now();
     let mut report = Report::new(config.limits.clone());
-    let result = config
+    let mut artifact_directory = None;
+    let mut result = config
         .limits
         .validate()
-        .and_then(|()| artifact::execute(config, &mut report));
+        .and_then(|()| artifact::execute(config, &mut report, &mut artifact_directory));
     report.elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    report.status = match &result {
+        Ok(()) => Status::Complete,
+        Err(e) if e.kind == ErrorKind::UnsupportedCandidate => Status::Unsupported,
+        Err(_) => Status::Failed,
+    };
+    if let Err(error) = &result {
+        match error.kind {
+            ErrorKind::Timeout => report.timeouts = 1,
+            ErrorKind::Crash => report.crashes = 1,
+            ErrorKind::Protocol => report.protocol_errors = 1,
+            _ => {}
+        }
+    }
+    if let Err(e) = artifact::save_report(config, artifact_directory.as_deref(), &report) {
+        result = Err(e);
+        report.status = Status::Failed;
+    }
     match result {
         Ok(()) => {
             report.status = Status::Complete;
@@ -513,12 +531,6 @@ pub fn run(config: &Config) -> Result<Report, Failure> {
             } else {
                 Status::Failed
             };
-            match error.kind {
-                ErrorKind::Timeout => report.timeouts += 1,
-                ErrorKind::Crash => report.crashes += 1,
-                ErrorKind::Protocol => report.protocol_errors += 1,
-                _ => {}
-            }
             Err(Failure {
                 error,
                 partial: Box::new(report),
