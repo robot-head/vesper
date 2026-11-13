@@ -1048,3 +1048,99 @@ fn emitted_schemas_are_subsets_of_the_upstream_otap_schemas() {
         );
     }
 }
+
+// ---------------------------------------------------------------- review fixes
+
+#[test]
+fn receiver_scopes_schema_ids_to_one_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = std::thread::spawn(move || {
+        let mut receiver = OtapReceiver::default();
+        let mut summaries = Vec::new();
+        for _ in 0..2 {
+            let (stream, _) = listener.accept().unwrap();
+            summaries.push(receiver.serve(stream, |_| {}).unwrap());
+        }
+        summaries
+    });
+    let record = records()[0];
+    for _ in 0..2 {
+        // A fresh encoder per connection reuses `spans:0`.
+        let mut exporter = TraceExporter::new(
+            TraceEncoder::new(EncoderConfig::default()),
+            FramedTransport::new(TcpStream::connect(addr).unwrap()),
+        );
+        exporter.export_spans(&[record.into()]).unwrap();
+    }
+    let summaries = server.join().unwrap();
+    assert_eq!(
+        summaries,
+        vec![
+            ServeSummary {
+                accepted: 1,
+                rejected: 0
+            };
+            2
+        ]
+    );
+}
+
+#[test]
+fn attribute_rows_are_bounded_at_the_encoder() {
+    const KEYS: [&str; 17] = [
+        "k0", "k1", "k2", "k3", "k4", "k5", "k6", "k7", "k8", "k9", "k10", "k11", "k12", "k13",
+        "k14", "k15", "k16",
+    ];
+    let mut span = OtapSpan::from(SpanRecord {
+        attribute: PrimaryAttribute::None,
+        ..records()[1]
+    });
+    for (i, key) in KEYS.iter().enumerate() {
+        span.attributes.insert(key, i as i64).unwrap();
+    }
+    let spans = vec![span; 4096]; // 69,632 attribute rows
+    let mut encoder = TraceEncoder::new(EncoderConfig::default());
+    assert!(matches!(
+        encoder.encode_spans(&spans),
+        Err(EncodeError::AttributeRowLimit)
+    ));
+    // At the bound, the default decoder accepts what the encoder produced.
+    let fits = &spans[..MAX_BATCH_ROWS / KEYS.len()];
+    let batch = encoder.encode_spans(fits).unwrap();
+    let decoded = OtapDecoder::default().decode(&batch).unwrap();
+    assert_eq!(decoded.spans.len(), fits.len());
+}
+
+#[test]
+fn dictionary_expansion_is_charged_against_a_decoded_string_budget() {
+    // Many rows referencing one dictionary value: the encoded batch is
+    // small, the decoded strings are not.
+    let mut spans = Vec::new();
+    for _ in 0..1000 {
+        let mut s = OtapSpan::from(SpanRecord {
+            attribute: PrimaryAttribute::None,
+            ..records()[1]
+        });
+        s.attributes
+            .insert("route", "/a/very/long/route/name")
+            .unwrap();
+        spans.push(s);
+    }
+    let batch = TraceEncoder::new(EncoderConfig::default())
+        .encode_spans(&spans)
+        .unwrap();
+    let mut tight = OtapDecoder::new(DecodeLimits {
+        max_decoded_string_bytes: 20_000,
+        ..DecodeLimits::default()
+    });
+    assert!(matches!(
+        tight.decode(&batch),
+        Err(DecodeError::DecodedTooLarge)
+    ));
+    let mut roomy = OtapDecoder::new(DecodeLimits {
+        max_decoded_string_bytes: 100_000,
+        ..DecodeLimits::default()
+    });
+    assert_eq!(roomy.decode(&batch).unwrap().spans.len(), 1000);
+}

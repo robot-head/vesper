@@ -55,6 +55,9 @@ impl Default for EncoderConfig {
 #[derive(Debug)]
 pub enum EncodeError {
     RowLimit,
+    /// The batch's spans carry more than [`MAX_BATCH_ROWS`] attributes in
+    /// total; split it into smaller batches.
+    AttributeRowLimit,
     /// A batch alone needs more distinct values than one dictionary can hold.
     DictionaryOverflow {
         column: &'static str,
@@ -412,6 +415,11 @@ impl TraceEncoder {
             }
         }
 
+        // Attribute rows are bounded like span rows, so every batch this
+        // encoder produces fits a default decoder's row limit.
+        if attrs.len() > MAX_BATCH_ROWS {
+            return Err(EncodeError::AttributeRowLimit);
+        }
         let mut payloads = Vec::with_capacity(2);
         let spans_columns = [
             ("name", names.iter().flatten().copied().collect()),

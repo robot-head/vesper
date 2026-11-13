@@ -173,6 +173,8 @@ impl OtapReceiver {
         mut stream: S,
         mut on_batch: impl FnMut(DecodedBatch),
     ) -> Result<ServeSummary, TransportError> {
+        // Schema ids are scoped to one connection: a new peer starts fresh.
+        self.decoder.reset();
         let mut summary = ServeSummary::default();
         while let Some(body) = read_frame(&mut stream, self.max_frame)? {
             let status = match BatchArrowRecords::decode(body.as_slice()) {

@@ -173,6 +173,8 @@ schema comparison.
   sum/min/max, exemplars, metric data-point attributes, logs. The decoder
   rejects those payload types with a typed error.
 - Ids are plain; upstream delta/quasi-delta id encodings are not decoded.
+- A batch whose spans carry more than 65,536 attributes in total is
+  `EncodeError::AttributeRowLimit`; callers split it (no automatic splitting).
 - Allocating adapter: no zero-allocation, zero-copy, `IORING_OP_SEND_ZC`,
   AoSoA or DMA claim, and no performance measurement.
 - Source `Trace` propagation (evidence vector, fiber inheritance) and the

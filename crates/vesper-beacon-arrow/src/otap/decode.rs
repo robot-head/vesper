@@ -21,6 +21,7 @@ use arrow_array::{
     Array, ArrayRef, RecordBatch,
 };
 use arrow_schema::{ArrowError, DataType, TimeUnit};
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Clone, Copy, Debug)]
@@ -33,6 +34,10 @@ pub struct DecodeLimits {
     /// IPC bytes accepted over a stream's lifetime (bounds dictionary growth).
     pub max_stream_bytes: usize,
     pub max_rows: usize,
+    /// Bytes of owned strings one batch may decode into. Dictionary columns
+    /// expand each referenced value per row, so this bounds the expansion
+    /// independently of the encoded size.
+    pub max_decoded_string_bytes: usize,
 }
 impl Default for DecodeLimits {
     fn default() -> Self {
@@ -43,6 +48,7 @@ impl Default for DecodeLimits {
             max_payload_bytes: 16 << 20,
             max_stream_bytes: 256 << 20,
             max_rows: super::encode::MAX_BATCH_ROWS,
+            max_decoded_string_bytes: 64 << 20,
         }
     }
 }
@@ -82,6 +88,8 @@ pub enum DecodeError {
     BadAttribute(u8),
     UnsupportedMetricType(u8),
     HistogramShape,
+    /// Decoded strings would exceed `max_decoded_string_bytes`.
+    DecodedTooLarge,
     Arrow(ArrowError),
 }
 impl std::fmt::Display for DecodeError {
@@ -137,6 +145,7 @@ struct RxStream {
 pub struct OtapDecoder {
     limits: DecodeLimits,
     streams: HashMap<String, RxStream>,
+    string_budget: Cell<usize>,
 }
 impl Default for OtapDecoder {
     fn default() -> Self {
@@ -148,6 +157,7 @@ impl OtapDecoder {
         Self {
             limits,
             streams: HashMap::new(),
+            string_budget: Cell::new(limits.max_decoded_string_bytes),
         }
     }
     pub fn stream_count(&self) -> usize {
@@ -166,6 +176,7 @@ impl OtapDecoder {
     }
 
     fn decode_inner(&mut self, batch: &BatchArrowRecords) -> Result<DecodedBatch, DecodeError> {
+        self.string_budget.set(self.limits.max_decoded_string_bytes);
         if !batch.headers.is_empty() {
             return Err(DecodeError::HeadersUnsupported);
         }
@@ -209,7 +220,7 @@ impl OtapDecoder {
         }
         if let Some(attrs) = records.get(&ArrowPayloadType::SpanAttrs) {
             let ids = span_ids.ok_or(DecodeError::MissingMainRecord)?;
-            attach_attributes(&mut out.spans, ids, attrs)?;
+            attach_attributes(&mut out.spans, ids, attrs, &self.string_budget)?;
         }
         match (
             records.get(&ArrowPayloadType::UnivariateMetrics),
@@ -280,6 +291,7 @@ impl OtapDecoder {
         &self,
         batch: &RecordBatch,
     ) -> Result<(Vec<DecodedSpan>, Option<Vec<u16>>), DecodeError> {
+        let budget = &self.string_budget;
         let n = batch.num_rows();
         let ids = u16_ids(batch, "id")?;
         let start = column(batch, "start_time_unix_nano")?;
@@ -307,7 +319,7 @@ impl OtapDecoder {
                 _ => Err(DecodeError::ColumnType("flags")),
             })
             .transpose()?;
-        let names = strings(column(batch, "name")?, "name")?;
+        let names = strings(column(batch, "name")?, "name", budget)?;
         let (codes, messages) = match optional(batch, "status") {
             None => (None, vec![None; n]),
             Some(status) => {
@@ -323,7 +335,7 @@ impl OtapDecoder {
                     })
                     .transpose()?;
                 let message = match status.column_by_name("status_message") {
-                    Some(c) => strings(c, "status.status_message")?,
+                    Some(c) => strings(c, "status.status_message", budget)?,
                     None => vec![None; n],
                 };
                 // A null status struct row nulls both children.
@@ -381,15 +393,16 @@ impl OtapDecoder {
         metrics: &RecordBatch,
         points: &RecordBatch,
     ) -> Result<Vec<DecodedHistogram>, DecodeError> {
+        let budget = &self.string_budget;
         let metric_ids = u16_ids(metrics, "id")?.ok_or(DecodeError::MissingColumn("id"))?;
         let types = column(metrics, "metric_type")?;
         let types = match types.data_type() {
             DataType::UInt8 => types.as_primitive::<UInt8Type>(),
             _ => return Err(DecodeError::ColumnType("metric_type")),
         };
-        let names = strings(column(metrics, "name")?, "name")?;
+        let names = strings(column(metrics, "name")?, "name", budget)?;
         let units = match optional(metrics, "unit") {
-            Some(c) => strings(c, "unit")?,
+            Some(c) => strings(c, "unit", budget)?,
             None => vec![None; metrics.num_rows()],
         };
         let mut by_id = HashMap::new();
@@ -501,6 +514,7 @@ fn attach_attributes(
     spans: &mut [DecodedSpan],
     ids: Option<Vec<u16>>,
     attrs: &RecordBatch,
+    budget: &Cell<usize>,
 ) -> Result<(), DecodeError> {
     let index: HashMap<u16, usize> = ids
         .ok_or(DecodeError::MissingColumn("id"))?
@@ -509,7 +523,7 @@ fn attach_attributes(
         .map(|(row, id)| (id, row))
         .collect();
     let parents = u16_ids(attrs, "parent_id")?.ok_or(DecodeError::MissingColumn("parent_id"))?;
-    let keys = strings(column(attrs, "key")?, "key")?;
+    let keys = strings(column(attrs, "key")?, "key", budget)?;
     let types = column(attrs, "type")?;
     let types = match types.data_type() {
         DataType::UInt8 => types.as_primitive::<UInt8Type>(),
@@ -517,7 +531,7 @@ fn attach_attributes(
     };
     let n = attrs.num_rows();
     let strs = match optional(attrs, "str") {
-        Some(c) => strings(c, "str")?,
+        Some(c) => strings(c, "str", budget)?,
         None => vec![None; n],
     };
     let ints = optional(attrs, "int")
@@ -629,11 +643,26 @@ fn fixed<'a>(
         _ => Err(DecodeError::ColumnType(name)),
     }
 }
-/// Strings from plain `Utf8` or `Dictionary<u8|u16, Utf8>` columns.
-fn strings(c: &ArrayRef, name: &'static str) -> Result<Vec<Option<String>>, DecodeError> {
+fn take(budget: &Cell<usize>, s: &str) -> Result<String, DecodeError> {
+    let left = budget
+        .get()
+        .checked_sub(s.len())
+        .ok_or(DecodeError::DecodedTooLarge)?;
+    budget.set(left);
+    Ok(s.to_owned())
+}
+
+/// Strings from plain `Utf8` or `Dictionary<u8|u16, Utf8>` columns, charged
+/// against `budget` before each copy.
+fn strings(
+    c: &ArrayRef,
+    name: &'static str,
+    budget: &Cell<usize>,
+) -> Result<Vec<Option<String>>, DecodeError> {
     fn from_dict<K: arrow_array::types::ArrowDictionaryKeyType>(
         c: &ArrayRef,
         name: &'static str,
+        budget: &Cell<usize>,
     ) -> Result<Vec<Option<String>>, DecodeError> {
         let d = c.as_dictionary::<K>();
         let values = match d.values().data_type() {
@@ -648,21 +677,21 @@ fn strings(c: &ArrayRef, name: &'static str) -> Result<Vec<Option<String>>, Deco
                     if k >= values.len() || values.is_null(k) {
                         return Err(DecodeError::NullValue(name));
                     }
-                    Ok(values.value(k).to_owned())
+                    take(budget, values.value(k))
                 })
                 .transpose()
             })
             .collect()
     }
     match c.data_type() {
-        DataType::Utf8 => Ok(c
+        DataType::Utf8 => c
             .as_string::<i32>()
             .iter()
-            .map(|s| s.map(str::to_owned))
-            .collect()),
+            .map(|s| s.map(|s| take(budget, s)).transpose())
+            .collect(),
         DataType::Dictionary(k, v) if **v == DataType::Utf8 => match **k {
-            DataType::UInt8 => from_dict::<UInt8Type>(c, name),
-            DataType::UInt16 => from_dict::<UInt16Type>(c, name),
+            DataType::UInt8 => from_dict::<UInt8Type>(c, name, budget),
+            DataType::UInt16 => from_dict::<UInt16Type>(c, name, budget),
             _ => Err(DecodeError::ColumnType(name)),
         },
         _ => Err(DecodeError::ColumnType(name)),
