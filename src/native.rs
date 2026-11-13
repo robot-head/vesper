@@ -233,7 +233,22 @@ pub fn needs_nan_canonicalization(world: &World) -> bool {
     world.functions.values().any(|f| {
         crate::capability_effects::capabilities(&f.effects)
             .contains(&crate::capability_effects::Capability::DetFloat)
+            || closure_capabilities(f).contains(&crate::capability_effects::Capability::DetFloat)
     })
+}
+/// Capability effects declared on closure literals anywhere in `f`'s body.
+/// Closures are specialized into the function that contains them, so their
+/// code is part of that function's Cranelift function.
+pub fn closure_capabilities(f: &Function) -> BTreeSet<crate::capability_effects::Capability> {
+    let mut out = BTreeSet::new();
+    if let Some(body) = &f.body {
+        visit(body, &mut |e| {
+            if let ExprKind::Closure { effects, .. } = &e.kind {
+                out.extend(crate::capability_effects::capabilities(effects));
+            }
+        });
+    }
+    out
 }
 /// A function whose only effects are unlabeled `Fail` instances, such as a
 /// recursive function using checked arithmetic. `raise` never resumes (its

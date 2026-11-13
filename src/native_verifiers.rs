@@ -781,18 +781,23 @@ pub fn render(report: &NativeVerifierReport, file: &str, source: &str) -> String
 /// `eff [ConstTime]`, `realtime` for `eff [Realtime]` and `detfloat` for
 /// `eff [DetFloat]`. Empty for a program without capability effects.
 pub fn capability_verifiers(world: &World) -> BTreeSet<NativeVerifier> {
-    use crate::capability_effects::{Capability, capabilities};
+    use crate::capability_effects::capabilities;
     let mut out = BTreeSet::new();
     for f in world.functions.values() {
-        for c in capabilities(&f.effects) {
-            out.insert(match c {
-                Capability::ConstTime => NativeVerifier::ConstTime,
-                Capability::Realtime => NativeVerifier::Realtime,
-                Capability::DetFloat => NativeVerifier::DetFloat,
-            });
-        }
+        let mut caps = capabilities(&f.effects);
+        caps.extend(crate::native::closure_capabilities(f));
+        out.extend(caps.into_iter().map(cap_verifier));
     }
     out
+}
+
+fn cap_verifier(c: crate::capability_effects::Capability) -> NativeVerifier {
+    use crate::capability_effects::Capability;
+    match c {
+        Capability::ConstTime => NativeVerifier::ConstTime,
+        Capability::Realtime => NativeVerifier::Realtime,
+        Capability::DetFloat => NativeVerifier::DetFloat,
+    }
 }
 
 /// The source facts for `world`'s capability effects.
@@ -862,6 +867,19 @@ pub fn policy_from_capabilities(
     functions: &[EmittedFunction],
     base: &NativeVerifierPolicy,
 ) -> Result<CapabilityPolicy, String> {
+    derive_policy(world, functions, base, false)
+}
+
+/// [`policy_from_capabilities`]; with `explicit_det_float_all`, an absent
+/// `det_float.functions` in `base` stays absent (audit every emitted
+/// function), because `--verify=detfloat` was asked for explicitly.
+fn derive_policy(
+    world: &World,
+    functions: &[EmittedFunction],
+    base: &NativeVerifierPolicy,
+    explicit_det_float_all: bool,
+) -> Result<CapabilityPolicy, String> {
+    let explicit_det_float_all = explicit_det_float_all && base.det_float.functions.is_none();
     let caps = source_capabilities(world)?;
     let mut policy = base.clone();
     let mut notes = Vec::new();
@@ -965,7 +983,64 @@ pub fn policy_from_capabilities(
         }
         policy.det_float.allow_fma |= d.allow_fma;
     }
-    if !det.is_empty() {
+    // A capability closure is specialized into the function that contains
+    // it, so its code can only be checked as part of that function. When the
+    // container does not carry the capability itself, check the whole
+    // container under it (stricter than the closure alone, never weaker), or
+    // reject it where that is not possible (ConstTime needs the closure's
+    // secret parameters, which the container's signature does not have).
+    {
+        use crate::capability_effects::{Capability, capabilities};
+        for f in world.functions.values() {
+            let own = capabilities(&f.effects);
+            for cap in crate::native::closure_capabilities(f) {
+                if own.contains(&cap) {
+                    continue;
+                }
+                let instances = instances_of(functions, &f.name);
+                if instances.is_empty() {
+                    notes.push(format!(
+                        "{}: a closure in {}",
+                        cap_verifier(cap).name(),
+                        not_emitted(world, &f.name)
+                    ));
+                    continue;
+                }
+                match cap {
+                    Capability::ConstTime => findings.push(NativeFinding {
+                        verifier: NativeVerifier::ConstTime,
+                        function: f.name.clone(),
+                        inst: None,
+                        rule: "capability.closure-unsupported".into(),
+                        message: "an eff [ConstTime] closure is specialized into this function, which is not ConstTime; the backend cannot tell which of its values are secret. Move the closure body into a named ConstTime function".into(),
+                        span: Some((f.span.start, f.span.end)),
+                    }),
+                    Capability::Realtime => {
+                        notes.push(format!(
+                            "realtime: '{}' contains an eff [Realtime] closure and is checked as a realtime root as a whole",
+                            f.name
+                        ));
+                        for i in instances {
+                            policy.realtime.roots.entry(i.key.clone()).or_insert(None);
+                            policy
+                                .realtime
+                                .effects
+                                .entry(i.key.clone())
+                                .or_insert_with(|| vec![rt_effect.to_string()]);
+                        }
+                    }
+                    Capability::DetFloat => {
+                        notes.push(format!(
+                            "detfloat: '{}' contains an eff [DetFloat] closure and is audited as a whole",
+                            f.name
+                        ));
+                        det.extend(instances.iter().map(|i| i.key.clone()));
+                    }
+                }
+            }
+        }
+    }
+    if !det.is_empty() && !explicit_det_float_all {
         let list = policy.det_float.functions.get_or_insert_with(Vec::new);
         for f in det {
             if !list.contains(&f) {
@@ -1016,7 +1091,12 @@ pub fn verify_native_with_capabilities(
         return Ok((bytes, clif, report));
     }
     let (bytes, clif, functions) = emit_and_collect(world, entry, target, optimize)?;
-    let derived = policy_from_capabilities(world, &functions, base)?;
+    let derived = derive_policy(
+        world,
+        &functions,
+        base,
+        requested.contains(&NativeVerifier::DetFloat),
+    )?;
     let mut report = verify_emitted(world, &functions, target, &verifiers, &derived.policy)?;
     report.notes.extend(derived.notes);
     report.findings.splice(0..0, derived.findings);

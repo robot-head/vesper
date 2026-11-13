@@ -487,3 +487,38 @@ fn vesper_build_runs_the_capability_verifiers() {
     );
     assert!(!exe.exists(), "a rejected program must not be linked");
 }
+
+/// An explicit `--verify=detfloat` keeps auditing every emitted function;
+/// the DetFloat annotations only narrow the automatic check.
+#[test]
+fn explicit_detfloat_request_still_audits_every_function() {
+    let temp = Temp::new();
+    let file = temp.path("mixed.ves");
+    fs::write(
+        &file,
+        "fn half(x: f64) -> f64 eff [DetFloat] {\n    x * 0.5\n}\n\nfn wrap(x: f64) -> f64 {\n    x % 2.0\n}\n\nfn main() -> f64 {\n    half(wrap(7.5))\n}\n",
+    )
+    .unwrap();
+    let f = file.to_str().unwrap();
+    for target in TARGETS {
+        let out = temp.path("out.o");
+        let base = [
+            "emit",
+            f,
+            "--emit",
+            "object",
+            "--target",
+            target,
+            "-o",
+            out.to_str().unwrap(),
+        ];
+        let automatic = vesper(&base);
+        assert!(automatic.status.success(), "{}", stderr(&automatic));
+        let mut explicit = base.to_vec();
+        explicit.push("--verify=detfloat");
+        let o = vesper(&explicit);
+        let err = stderr(&o);
+        assert!(!o.status.success(), "{err}");
+        assert!(err.contains("error[detfloat/detfloat.libm]: wrap"), "{err}");
+    }
+}

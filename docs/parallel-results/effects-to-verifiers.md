@@ -83,7 +83,7 @@ programs that use capability effects.
   layouts, so the build rejects it explicitly with
   `const-time/capability.generic-unsupported` instead of skipping it.
 
-`tests/capability_verifiers.rs` (8 tests), every object case for both
+`tests/capability_verifiers.rs` (9 tests), every object case for both
 `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`:
 
 - accepted fixtures build and report the implied verifiers;
@@ -106,7 +106,7 @@ Run on Linux x86_64 (cloud host, Rust 1.97):
 
 - `cargo fmt --all -- --check`: clean.
 - `cargo clippy -p vesper --locked --all-targets -- -D warnings`: clean.
-- `cargo test --locked --test capability_verifiers`: 8 passed.
+- `cargo test --locked --test capability_verifiers`: 9 passed.
 - `cargo test --locked --test native_verifiers_cli --test capability_effects`:
   8 + 19 passed (integration B's identical-code test included).
 - `cargo test -p vesper --locked`: see the PR.
@@ -139,6 +139,32 @@ that produces them. The backend rejections in this lane are therefore Realtime
 (`fmod`) and the explicit generic ConstTime limit. The verifiers still run on
 every capability function, so a future construct or codegen change that
 introduces such a pattern is caught.
+
+## Closures
+
+A capability declared only on a closure (`|x: f64| -> f64 eff [Realtime] { .. }`
+inside a plain function) also implies its verifier and, for DetFloat, NaN
+canonicalisation. Closures are specialized into the function that contains
+them, so that whole function is checked under the closure's capability: as a
+realtime root, or audited for DetFloat. That is stricter than the closure
+alone and never weaker (`reject/realtime_closure_fmod.ves`). A ConstTime
+closure in a non-ConstTime function is rejected as
+`const-time/capability.closure-unsupported`, because the container's
+signature does not say which values are secret.
+
+An explicit `--verify=detfloat` without a `det_float.functions` list still
+audits every emitted function; DetFloat annotations narrow only the automatic
+check.
+
+## Source-rule findings left to a follow-up
+
+The Codex review of this PR also reported two source-rule holes in
+`src/capability_effects.rs` (lane 15's file, merged in #278, outside this
+lane's paths): assignments to a function-typed local are not
+capability-coerced, and a ConstTime handler's state taint is not propagated
+into its return clause. The backend verifiers do not catch either (Vault does
+not forbid secret return values, and an assigned function value is specialized
+statically). They need a lane-15 follow-up.
 
 ## Remaining gaps
 
