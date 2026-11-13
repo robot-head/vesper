@@ -1,0 +1,12 @@
+[package]
+name = "vesper-migrate"
+version = "0.1.0"
+edition = "2024"
+description = "vesper migrate: C header and Rust crate signature lifting to Bridge sys-specs, Vesper externs and differential shadowing"
+
+[dependencies]
+vesper-ffi = { path = "../vesper-ffi" }
+lang-c = "=0.15.1"
+syn = { version = "=2.0.119", default-features = false, features = ["full", "parsing", "printing", "visit", "clone-impls", "extra-traits"] }
+proc-macro2 = { version = "=1.0.107", default-features = false, features = ["span-locations"] }
+quote = { version = "=1.0.47", default-features = false }

@@ -182,7 +182,8 @@ def run(binary, work):
             assert path.read_bytes() == data
     path = h.source(b"fn main(){42}")
     h.execute("fmt", path, "--bad", success=False)
-    h.execute("fmt", work, "--recovery", success=False)
+    # A directory is walked; --check reports its noncanonical files without writing.
+    h.execute("fmt", work, "--recovery", "--check", success=False)
     assert path.read_bytes() == b"fn main(){42}"
 
     for source, code in [(b"linear struct Tx{} fn leak(sink tx:Tx){}", "E0302"), (b"linear struct Tx{} fn make()->Tx{Tx{}} fn consume(sink tx:Tx){let Tx{}=tx;} fn main(){let tx=make();consume(tx);consume(tx)}", "E0303")]:
