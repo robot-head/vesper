@@ -116,6 +116,17 @@ impl HygieneHost {
         tokens: Vec<HostToken>,
         term: Term,
     ) -> Result<ResolvedFragment, ForgeError> {
+        self.resolve_preparsed_with_parameters(tokens, term, &[])
+    }
+
+    // Parameter tokens are actual source identifiers appended by the sealed
+    // typed host. Keeping them outside Term preserves the lexical wire format.
+    pub(crate) fn resolve_preparsed_with_parameters(
+        &mut self,
+        tokens: Vec<HostToken>,
+        term: Term,
+        parameters: &[usize],
+    ) -> Result<ResolvedFragment, ForgeError> {
         for t in &tokens {
             self.validate_token(t)?;
         }
@@ -149,7 +160,8 @@ impl HygieneHost {
             operations: Vec::new(),
             aliases: HashMap::new(),
         };
-        r.term(&term, &Ctx::default())?;
+        let ctx = r.parameters(parameters)?;
+        r.term(&term, &ctx)?;
         let Resolver {
             binders,
             references,
@@ -269,6 +281,47 @@ fn collect_origins(t: &Term, tokens: &[HostToken], out: &mut BTreeSet<Origin>) {
 }
 
 impl Resolver<'_> {
+    fn parameters(&mut self, parameters: &[usize]) -> Result<Ctx, ForgeError> {
+        let mut ctx = Ctx::default();
+        for &index in parameters {
+            let token = self.tokens.get(index).ok_or(ForgeError::Parse {
+                token: index,
+                expected: "source parameter identifier",
+            })?;
+            if token.kind != crate::TokenKind::Ident
+                || !matches!(token.origin, Origin::Source { .. })
+                || token.claimed_def.is_some()
+                || self
+                    .locals
+                    .iter()
+                    .any(|binding| binding.symbol == token.text)
+            {
+                return Err(ForgeError::Parse {
+                    token: index,
+                    expected: "distinct source parameter identifier",
+                });
+            }
+            // Source-ranked scopes cover original body/antiquotation tokens,
+            // and never grant a caller binding capture of generated tokens.
+            ctx = ctx.with(self.host.fresh_scope()?, token.origin);
+            let scopes = token.scopes.union(&ctx.for_origin(token.origin));
+            let binder = self.host.fresh_binder()?;
+            self.locals.push(LocalBinding {
+                symbol: token.text,
+                scopes: scopes.clone(),
+                binder,
+            });
+            self.binders.push(BinderInfo {
+                id: binder,
+                token: index,
+                name: self.host.text(token.text).to_owned(),
+                origin: token.origin,
+                scopes,
+            });
+        }
+        Ok(ctx)
+    }
+
     fn term(&mut self, t: &Term, ctx: &Ctx) -> Result<(), ForgeError> {
         match t {
             Term::Lit(_) => Ok(()),

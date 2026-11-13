@@ -21,9 +21,11 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod string;
+mod tiled;
 mod vec;
 
 pub use string::{RegionStr, RegionString};
+pub use tiled::{HARD_MAX_TILE_BYTES, RegionTiled2, TiledError};
 pub use vec::{RegionSlice, RegionVec};
 
 /// Minimum alignment of every chunk base.

@@ -1,4 +1,6 @@
 //! Pure checked-source adapter for the root-free documentation library.
+mod links;
+
 use crate::{
     ast::*,
     check::{self, World},
@@ -272,14 +274,15 @@ fn build_document(
         "Search excludes generic, open-row, unresolved and effectful-arrow binder contracts".into(),
         "Layouts describe the native eight-byte ABI, not wire or tiled layouts".into(),
         "A terminal path is not an all-path ownership or termination proof".into(),
-        "No doctest, JIT, link resolution, WASM, proof certificate, or semver-diff execution"
-            .into(),
+        "Local intra-doc links cover documented source declarations; package, generic, Self and trait-method links are unsupported".into(),
+        "No doctest, JIT, WASM, proof certificate, or semver-diff execution".into(),
     ];
     let mut document = Document {
         schema_version: 1,
         source_bytes: source.len(),
         module_docs: vesper_doc::comments(source, source.len() + 1).0,
         doc_comments: vesper_doc::doc_comments(source),
+        intra_doc_links: Default::default(),
         functions: vec![],
         types: vec![],
         effects: vec![],
@@ -356,6 +359,7 @@ fn build_document(
         .graph
         .states
         .sort_by(|a, b| a.identity.cmp(&b.identity));
+    links::populate(&mut document, source, limits)?;
     document.validate(limits)?;
     Ok(document)
 }

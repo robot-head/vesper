@@ -55,10 +55,13 @@ members = [
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
+    "crates/vesper-aegis",
     "crates/vesper-resonance",
     "crates/vesper-warp-tls",
     "crates/vesper-migrate",
+    "crates/vesper-crucible",
     "crates/vesper-nexus",
+    "crates/vesper-vault",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -115,10 +118,13 @@ default-members = [
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
+    "crates/vesper-aegis",
     "crates/vesper-resonance",
     "crates/vesper-warp-tls",
     "crates/vesper-migrate",
+    "crates/vesper-crucible",
     "crates/vesper-nexus",
+    "crates/vesper-vault",
     "experiments/native-pulse",
 ]
 
@@ -144,6 +150,15 @@ sha2 = "0.10.9"
 subtle = "2.6.1"
 zeroize = { version = "1.9.1", features = ["zeroize_derive"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
+cranelift-codegen = { version = "0.125", features = ["arm64"] }
+cranelift-frontend = "0.125"
+getrandom = "0.4"
+libc = "0.2"
+ml-kem = { version = "=0.3.4", default-features = false, features = ["zeroize"] }
+rand_core = "0.10"
+region = "3.0.2"
+shake = "0.1"
+x25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize", "static_secrets", "precomputed-tables"] }
 
 [package]
 default-run = "vesper"
@@ -196,6 +211,7 @@ serde_json = { workspace = true }
 salsa = "0.24"
 
 [target.'cfg(unix)'.dependencies]
+getrandom = "0.4"
 libc = "0.2"
 
 [profile.release]

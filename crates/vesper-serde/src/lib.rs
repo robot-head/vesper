@@ -10,13 +10,17 @@
 
 pub mod archive;
 pub mod binary;
+pub mod event_columns;
+pub mod ndjson;
 pub mod streamvbyte;
 
 mod encode;
+mod float;
 mod helpers;
 mod index;
 
 pub use encode::{EncodeLimits, Value, encode_into, encoded_size};
+pub use float::FloatLimits;
 pub use helpers::{JsonSizeBound, SwarFieldMatcher, compute_escaped_mask_64};
 pub use index::{Cursor, IndexedJson, JsonStr, JsonString, Kind, Limits, Node, ObjectFields};
 

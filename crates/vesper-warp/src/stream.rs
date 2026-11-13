@@ -897,6 +897,9 @@ pub enum SentFrame {
         uni: bool,
         limit: u64,
     },
+    /// HANDSHAKE_DONE (server only, RFC 9001 §4.1.2): resent until
+    /// acknowledged.
+    HandshakeDone,
 }
 
 /// Most retransmittable frames one packet carries.
@@ -1027,6 +1030,9 @@ pub struct StreamSet {
     rx_highest: u64,
     rx_consumed: u64,
     max_data_pending: bool,
+    /// HANDSHAKE_DONE queued by the handshake layer, and acknowledged.
+    handshake_done_pending: bool,
+    handshake_done_acked: bool,
     crypto: [CryptoStream; 3],
     /// (packet number, frame) in packet-number order.
     sent: VecDeque<(u64, SentFrame)>,
@@ -1078,6 +1084,8 @@ impl StreamSet {
             rx_highest: 0,
             rx_consumed: 0,
             max_data_pending: false,
+            handshake_done_pending: false,
+            handshake_done_acked: false,
             crypto: [crypto(), crypto(), crypto()],
             sent: VecDeque::with_capacity(cfg.tracked_frames),
             events: VecDeque::with_capacity(cfg.event_capacity),
@@ -1542,6 +1550,46 @@ impl StreamSet {
         Ok(())
     }
 
+    /// The peer's transport parameters as the handshake negotiated them
+    /// (RFC 9000 §7.4), replacing the ones given at construction. Limits
+    /// only grow, as if MAX_DATA and MAX_STREAMS had arrived; it is refused
+    /// once a stream exists, since per-stream credit was already taken
+    /// from the old values.
+    pub fn set_peer_params(&mut self, peer: PeerParams) -> Result<(), &'static str> {
+        if peer.initial_max_streams_bidi > frame::MAX_STREAM_COUNT
+            || peer.initial_max_streams_uni > frame::MAX_STREAM_COUNT
+        {
+            return Err("peer stream limits out of range");
+        }
+        if !self.streams.is_empty() || self.local_opened != [0; 2] || self.remote_opened != [0; 2] {
+            return Err("peer transport parameters after streams were opened");
+        }
+        self.peer = peer;
+        self.peer_max_streams[BIDI] =
+            self.peer_max_streams[BIDI].max(peer.initial_max_streams_bidi);
+        self.peer_max_streams[UNI] = self.peer_max_streams[UNI].max(peer.initial_max_streams_uni);
+        self.tx_max_data = self.tx_max_data.max(peer.initial_max_data);
+        Ok(())
+    }
+
+    /// The peer's transport parameters in force.
+    pub const fn peer_params(&self) -> &PeerParams {
+        &self.peer
+    }
+
+    /// Queues a HANDSHAKE_DONE frame (server, RFC 9001 §4.1.2). It goes
+    /// out with the next 1-RTT packet and is resent until acknowledged.
+    pub fn queue_handshake_done(&mut self) {
+        if !self.handshake_done_acked {
+            self.handshake_done_pending = true;
+        }
+    }
+
+    /// Whether the peer acknowledged our HANDSHAKE_DONE.
+    pub const fn handshake_done_acked(&self) -> bool {
+        self.handshake_done_acked
+    }
+
     /// A CRYPTO frame received in `space` (for the handshake layer).
     pub fn on_crypto_frame(
         &mut self,
@@ -1589,6 +1637,7 @@ impl StreamSet {
         self.detect_blocked();
         let conn_credit = self.tx_max_data.saturating_sub(self.tx_sent);
         self.max_data_pending
+            || self.handshake_done_pending
             || self.data_blocked_pending
             || self.max_streams_pending.iter().any(|p| *p)
             || self.streams_blocked_pending.iter().any(|p| *p)
@@ -1628,6 +1677,9 @@ impl StreamSet {
                     Err(_) => return at,
                 }
             }};
+        }
+        if self.handshake_done_pending && control!(Frame::HandshakeDone, SentFrame::HandshakeDone) {
+            self.handshake_done_pending = false;
         }
         if self.max_data_pending && control!(Frame::MaxData(self.rx_max_data), SentFrame::MaxData) {
             self.max_data_pending = false;
@@ -1949,6 +2001,10 @@ impl StreamSet {
                     self.maybe_retire(i);
                 }
             }
+            SentFrame::HandshakeDone => {
+                self.handshake_done_acked = true;
+                self.handshake_done_pending = false;
+            }
             _ => {}
         }
     }
@@ -2001,6 +2057,11 @@ impl StreamSet {
                 }
             }
             SentFrame::MaxData => self.max_data_pending = true,
+            SentFrame::HandshakeDone => {
+                if !self.handshake_done_acked {
+                    self.handshake_done_pending = true;
+                }
+            }
             SentFrame::MaxStreamData { stream_id } => {
                 if let Some(i) = self.find(stream_id)
                     && let Some(r) = self.streams[i].recv.as_mut()

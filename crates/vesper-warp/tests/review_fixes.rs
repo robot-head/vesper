@@ -76,8 +76,8 @@ fn keys_update_on_the_packet_interval_and_traffic_continues() {
     assert!(c.key_updates + s.key_updates > 1, "c={c:?} s={s:?}");
     assert_eq!(c.rx_dropped + s.rx_dropped, 0, "c={c:?} s={s:?}");
     assert_eq!(c.packets_lost + s.packets_lost, 0);
-    let ck = p.client.connection(p.c_conn).unwrap().keys;
-    let sk = p.server.connection(p.s_conn).unwrap().keys;
+    let ck = p.client.connection(p.c_conn).unwrap().keys.unwrap();
+    let sk = p.server.connection(p.s_conn).unwrap().keys.unwrap();
     assert!(ck.send_generation() > 1 && ck.recv_generation() > 1);
     assert!(sk.send_generation() > 1 && sk.recv_generation() > 1);
     assert_clean(&mut p.client);
@@ -102,6 +102,7 @@ fn explicit_key_update_is_accepted_by_the_peer() {
             .connection(p.s_conn)
             .unwrap()
             .keys
+            .unwrap()
             .recv_generation(),
         1
     );

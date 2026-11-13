@@ -295,6 +295,7 @@ pub enum Term {
     Arrow(Box<Term>, Box<Term>),
     ProductType(Vec<Term>),
     Tuple(Vec<Term>),
+    List(Vec<Term>),
     Let {
         binding: Box<LetBinding>,
         body: Box<Term>,
@@ -365,6 +366,7 @@ impl Term {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DefinitionKind {
     Def,
+    NoncomputableDef,
     PartialDef,
     Abbrev,
 }
@@ -685,6 +687,14 @@ impl Printer {
                         .join(" × ")
                 )
             }
+            Term::List(values) => format!(
+                "[{}]",
+                values
+                    .iter()
+                    .map(Self::term)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            ),
             Term::Tuple(values) => {
                 Self::tuple_length(values.len())?;
                 format!(
@@ -910,6 +920,7 @@ impl Printer {
                 "{} {} {} : {} := {}",
                 match value.kind {
                     DefinitionKind::Def => "def",
+                    DefinitionKind::NoncomputableDef => "noncomputable def",
                     DefinitionKind::PartialDef => "partial def",
                     DefinitionKind::Abbrev => "abbrev",
                 },

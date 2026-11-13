@@ -1,0 +1,7 @@
+linear struct Tx {}
+fn make() -> Tx { Tx {} }
+fn consume(sink value: Tx) { let Tx {} = value; }
+fn score(sink value: (Tx, Tx)) { let (left, right) = value; consume(left); consume(right); }
+macro pair($value: expr) -> expr { quote { ($value, $value) } }
+fn forward(sink value: Tx) -> (Tx, Tx) { pair!(value) }
+fn main() { score(forward(make())) }
