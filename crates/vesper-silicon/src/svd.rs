@@ -5,6 +5,11 @@
 //! parsed device into a flat register model whose every field carries one
 //! [`FieldAccess`] kind. SVD combinations this model does not represent are
 //! rejected with [`SvdError::UnsupportedAccess`] rather than approximated.
+//!
+//! Supported `readAction`s are `clear` ([`FieldAccess::ReadToClear`]) and
+//! `modify` ([`FieldAccess::ReadSideEffect`] / [`FieldAccess::ReadSideEffectWrite`]:
+//! the RP2040 SVD marks FIFO pops, latching timer reads and hardware
+//! spinlocks this way); `set` and `modifyExternal` are rejected.
 
 use std::collections::BTreeSet;
 
@@ -28,6 +33,13 @@ pub enum FieldAccess {
     Write1ToToggle,
     /// `modifiedWriteValues=zeroToClear`: writing 0 clears, writing 1 keeps.
     Write0ToClear,
+    /// `readAction=modify` on a read-only field: a read has a side effect
+    /// (pops a FIFO, latches a counter); it must be an explicit consume.
+    ReadSideEffect,
+    /// `readAction=modify` on a writable field (a FIFO data register such
+    /// as a UART `DR`, or a hardware spinlock): reads are consuming, writes
+    /// are plain writes.
+    ReadSideEffectWrite,
 }
 
 impl FieldAccess {
@@ -45,7 +57,21 @@ impl FieldAccess {
     }
 
     pub fn writable(self) -> bool {
-        !matches!(self, FieldAccess::ReadOnly | FieldAccess::ReadToClear)
+        !matches!(
+            self,
+            FieldAccess::ReadOnly | FieldAccess::ReadToClear | FieldAccess::ReadSideEffect
+        )
+    }
+
+    /// A CPU read changes device state (`readAction=clear` or `modify`), so
+    /// it may only happen as an explicit consume.
+    pub fn consuming_read(self) -> bool {
+        matches!(
+            self,
+            FieldAccess::ReadToClear
+                | FieldAccess::ReadSideEffect
+                | FieldAccess::ReadSideEffectWrite
+        )
     }
 }
 
@@ -75,8 +101,12 @@ pub enum RegisterClass {
     ReadOnly,
     /// Every field write-only.
     WriteOnly,
-    /// Contains a read-to-clear field: reads are consuming.
+    /// Contains a read-to-clear field, or only read-side-effect and
+    /// read-only fields: reads are consuming and there are no writes.
     ReadToClear,
+    /// Contains a `readAction=modify` field and writable fields (FIFO data
+    /// registers, hardware spinlocks): reads are consuming, writes are plain.
+    ConsumeWrite,
     /// Contains a W1C/W1T/W0C field: no read-modify-write.
     WriteClear,
     /// Plain read/write (read-only and write-1-to-set bits may be mixed in).
@@ -134,6 +164,12 @@ impl RegisterModel {
             RegisterClass::WriteOnly
         } else if self.has(FieldAccess::ReadToClear) {
             RegisterClass::ReadToClear
+        } else if self.fields.iter().any(|f| f.access.consuming_read()) {
+            if self.fields.iter().any(|f| f.access.writable()) {
+                RegisterClass::ConsumeWrite
+            } else {
+                RegisterClass::ReadToClear
+            }
         } else if self.fields.iter().any(|f| f.access.rmw_hazard()) {
             RegisterClass::WriteClear
         } else {
@@ -394,9 +430,10 @@ fn classify(
         detail,
     };
     let access = access.unwrap_or(Access::ReadWrite);
-    let read_clears = match read_action {
-        None => false,
-        Some(ReadAction::Clear) => true,
+    let (read_clears, read_modifies) = match read_action {
+        None => (false, false),
+        Some(ReadAction::Clear) => (true, false),
+        Some(ReadAction::Modify) => (false, true),
         Some(other) => return Err(unsupported(format!("readAction={other:?}"))),
     };
     let kind = match access {
@@ -408,12 +445,14 @@ fn classify(
             }
             if read_clears {
                 FieldAccess::ReadToClear
+            } else if read_modifies {
+                FieldAccess::ReadSideEffect
             } else {
                 FieldAccess::ReadOnly
             }
         }
         Access::WriteOnly | Access::WriteOnce => {
-            if read_clears {
+            if read_clears || read_modifies {
                 return Err(unsupported("readAction on a write-only field".to_string()));
             }
             match mwv {
@@ -434,13 +473,15 @@ fn classify(
                 Some(ModifiedWriteValues::ZeroToClear) => FieldAccess::Write0ToClear,
                 Some(m) => return Err(unsupported(format!("modifiedWriteValues={m:?}"))),
             };
+            if (read_clears || read_modifies) && w != FieldAccess::ReadWrite {
+                return Err(unsupported(
+                    "readAction with modifiedWriteValues".to_string(),
+                ));
+            }
             if read_clears {
-                if w != FieldAccess::ReadWrite {
-                    return Err(unsupported(
-                        "readAction=clear with modifiedWriteValues".to_string(),
-                    ));
-                }
                 FieldAccess::ReadToClear
+            } else if read_modifies {
+                FieldAccess::ReadSideEffectWrite
             } else {
                 w
             }

@@ -1,0 +1,12 @@
+[package]
+name = "vesper-prism-h3"
+version = "0.1.0"
+edition = "2024"
+description = "QPACK (RFC 9204) and HTTP/3 (RFC 9114) for Vesper Prism over Vesper Warp (design section 17)"
+publish = false
+
+[dependencies]
+vesper-prism = { path = "../vesper-prism" }
+vesper-warp = { path = "../vesper-warp" }
+vesper-warp-shard = { path = "../vesper-warp-shard" }
+vesper-warp-umem = { path = "../vesper-warp-umem" }

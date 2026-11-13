@@ -14,7 +14,10 @@
 
 #![deny(unsafe_code)]
 
+pub mod btf;
+pub mod btf_ext;
 pub mod callgraph;
+pub mod core;
 pub mod elf;
 pub mod helpers;
 pub mod insn;
@@ -29,7 +32,7 @@ pub mod wire;
 
 pub use callgraph::{CallGraph, FnId, FnNode};
 pub use insn::{Insn, RawInsn, Reg};
-pub use program::{Asm, MapDef, MapKind, Program, ProgramType};
+pub use program::{Asm, KfuncRef, LineInfo, MapDef, MapKind, Program, ProgramType};
 pub use verifier::{
     BPF_MAX_STACK_BYTES, VerifierFinding, VerifierPolicy, VerifyError, VerifyReport, findings,
     verify,

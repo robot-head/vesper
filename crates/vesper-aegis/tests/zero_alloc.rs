@@ -2,6 +2,8 @@
 //! no heap allocation per request, measured with a counting global
 //! allocator on this thread.
 
+#![allow(deprecated)] // the legacy EnclaveGate shim is still tested
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use vesper_aegis::gate::*;
@@ -75,4 +77,56 @@ fn gate_steady_state_does_not_allocate() {
     }
     COUNTING.with(|c| c.set(false));
     assert_eq!(ALLOCS.with(Cell::get), 0);
+}
+
+#[test]
+fn vault_gate_steady_state_does_not_allocate() {
+    use vesper_vault::{
+        AeadOpener, AeadSealer, ChaCha20Poly1305, FRAME_HEADER_LEN, LockPolicy, SecretSlot,
+    };
+    let slot = |b: u8| SecretSlot::<32>::from_fn(LockPolicy::BestEffort, |k| k.fill(b)).unwrap();
+    let aad = [3u8; 48];
+    let mut tenant = AeadSealer::<ChaCha20Poly1305>::new(slot(1), 0);
+    // Fresh frames, sealed before counting starts (the gate rejects replays).
+    let frames: Vec<Vec<u8>> = (0..1016)
+        .map(|_| {
+            let mut f = vec![7u8; FRAME_HEADER_LEN + 200];
+            let t = tenant.mint_nonce().unwrap();
+            tenant.seal_in_place(t, &aad, &mut f).unwrap();
+            f
+        })
+        .collect();
+    let mut gate = VaultEnclaveGate::new(
+        AeadOpener::<ChaCha20Poly1305>::new(slot(1), 0),
+        AeadSealer::new(slot(2), 0),
+        aad,
+    );
+    let mut ap = BounceAperture::new(1, 512);
+    let host = ap.host_side();
+    let mut scratch = PrivateRegion::with_capacity(4096);
+    let mut eval = |p: &[u8], r: &mut [u8; REPLY_LEN]| r[0] = p.len() as u8;
+    let mut run = |ap: &mut BounceAperture, scratch: &mut PrivateRegion, frame: &[u8]| {
+        host.write(0, 0, frame);
+        let grant = ap.grant(0).unwrap();
+        gate.process_attested_enclave_req(
+            ap,
+            scratch,
+            grant,
+            UntrustedHostVal::from_host(frame.len() as u32),
+            &mut eval,
+        )
+        .unwrap();
+    };
+    let (warm, steady) = frames.split_at(16);
+    for f in warm {
+        run(&mut ap, &mut scratch, f);
+    }
+    ALLOCS.with(|a| a.set(0));
+    COUNTING.with(|c| c.set(true));
+    for f in steady {
+        run(&mut ap, &mut scratch, f);
+    }
+    COUNTING.with(|c| c.set(false));
+    assert_eq!(ALLOCS.with(Cell::get), 0);
+    let _ = (gate.retire(), tenant.retire());
 }

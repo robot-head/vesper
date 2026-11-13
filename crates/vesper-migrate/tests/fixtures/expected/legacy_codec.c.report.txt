@@ -1,6 +1,10 @@
 vesper.migrate/1 report for C header `legacy_codec.h`
 
-functions lifted: 7
+functions lifted: 10
+  legacy_parse_batch_header [vsys]
+    assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+    assumed: `out_crc` lifted to a non-null nocapture inout pointer to one `u32`: a C header cannot show non-null, single-element or non-retention
+    assumed: `out_count` lifted to a non-null nocapture inout pointer to one `i32`: a C header cannot show non-null, single-element or non-retention
   legacy_parse_batch_header_into [vsys]
     assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
     assumed: `out` + `out_len` lifted to a nocapture unique slice: a C header cannot show that the callee does not retain the pointer
@@ -13,22 +17,30 @@ functions lifted: 7
   legacy_version [vsys]
   legacy_reset [vsys]
   legacy_crc_table [vsys]
+  legacy_read_header [vsys]
+    assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+    assumed: `out_hdr` lifted to a non-null nocapture inout pointer to one `batch_header`: a C header cannot show non-null, single-element or non-retention
+  legacy_fill [vsys]
+    assumed: `stats` lifted to a non-null nocapture inout pointer to one `decoder_stats`: a C header cannot show non-null, single-element or non-retention
 
 wire layouts: 2
   batch_header: 24 bytes, align 8
   decoder_stats: 32 bytes, align 8
 
-refusals: 13
+refusals: 16
   enum codec_status (ImplementationDefinedCarrier): a C enum's ABI carrier is implementation-defined; pass it through a fixed-width typedef
-  fn legacy_fill (Aggregate): parameter `stats` points to struct `decoder_stats`; .vsys models only scalar pointees
+  fn legacy_attach (OpaquePointer): parameter `context` has an opaque, void or nested pointee
   fn legacy_flush (UnsupportedItem): `()` or K&R parameters declare no prototype in C; write `(void)`
   fn legacy_inline_helper (UnsupportedItem): static functions have no linkable symbol
   fn legacy_last_status (ImplementationDefinedCarrier): returns a C `_Bool`/enum
   fn legacy_log (Variadic): variadic functions have no fixed ABI signature
   fn legacy_offset (PlatformDependentWidth): return type: `long` is 32-bit on Windows and 64-bit on LP64 targets; use a fixed-width integer
-  fn legacy_parse_batch_header (PointerParameter): parameter `out_crc` is a single-element pointer not followed by a size_t length; Bridge .vsys accepts pointer parameters only as nocapture CSlice
+  fn legacy_pack (PointerParameter): parameter `record` points to struct `padded_record`, which has no checked wire layout
   fn legacy_ratio (Floating): return type: floating point carrier
   fn legacy_register (FunctionPointer): parameter `callback`: function pointers and callbacks are unsupported
+  fn legacy_set_name (ArrayWithoutLength): byte pointer `name` has no size_t length: a buffer or string of unknown extent, not one element
+  fn legacy_sum4 (ArrayWithoutLength): array parameter `values` is not followed by a size_t length; its extent is unknown
+  fn legacy_swap (AliasingPointers): `a` and `b` point to the same type and one is written; a signature cannot show they are distinct objects
   global legacy_global_counter (UnsupportedItem): global variables are not part of a Bridge sys-spec
   struct padded_record (WireLayout): wire layout padded_record.value: offset 1 requires alignment 4; add explicit ZeroPad[3]
   union legacy_word (Union): unions overlay fields and have no FieldTree or wire layout

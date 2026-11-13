@@ -3,7 +3,8 @@
 //! The emitted relocatable object follows the layout libbpf and aya load:
 //!
 //! * one executable section per program, named after its program type
-//!   (`xdp`), holding the instructions with `LD_IMM64` map immediates set
+//!   (`xdp`, `tc`, `tracepoint/<category>/<event>`, `kprobe/<function>`),
+//!   holding the instructions with `LD_IMM64` map immediates set
 //!   to zero and an `R_BPF_64_64` relocation (in `.relxdp`) to the map's
 //!   symbol for each;
 //! * `license` with the NUL-terminated license string;
@@ -12,8 +13,13 @@
 //!   as clang does, as pointers to arrays whose length is the value);
 //! * `.BTF` with the minimal type information describing `.maps`
 //!   (`int`, the array and pointer types, one struct and `VAR` per map and
-//!   the `.maps` `DATASEC`). No `.BTF.ext` (line info, CO-RE) is emitted:
-//!   `@btf_core` relocations are out of scope.
+//!   the `.maps` `DATASEC`);
+//! * for programs with subprograms, kfunc calls, CO-RE relocations or line
+//!   info, a richer `.BTF` and a `.BTF.ext` instead ([`crate::btf_ext`]):
+//!   one `FUNC` per subprogram (func info), line info, CO-RE relocation
+//!   records with their local types, and extern `FUNC`s in `.ksyms` for
+//!   kfuncs, whose call sites carry an `R_BPF_64_32` relocation against an
+//!   undefined symbol of the kfunc's name (as clang emits for `__ksym`).
 //!
 //! Map definitions are read back from the BTF by [`read_object`], so the
 //! round trip exercises the same information an external loader uses.
@@ -51,7 +57,41 @@ impl std::error::Error for ElfError {}
 pub fn section_name(t: ProgramType) -> &'static str {
     match t {
         ProgramType::Xdp => "xdp",
+        ProgramType::SchedCls => "classifier",
+        ProgramType::Tracepoint => "tracepoint",
+        ProgramType::Kprobe => "kprobe",
     }
+}
+
+/// The program section of `prog`: the type's name, then `/` and the
+/// attach target when there is one (`kprobe/do_unlinkat`,
+/// `tracepoint/syscalls/sys_enter_openat`).
+pub fn program_section(prog: &Program) -> String {
+    if prog.attach.is_empty() {
+        section_name(prog.prog_type).to_owned()
+    } else {
+        format!("{}/{}", section_name(prog.prog_type), prog.attach)
+    }
+}
+
+/// Program type and attach target of a program section name (libbpf
+/// names, including the `classifier` and `tp` aliases).
+pub fn parse_section(name: &str) -> Option<(ProgramType, String)> {
+    let (head, attach) = match name.split_once('/') {
+        Some((h, a)) => (h, a.to_owned()),
+        None => (name, String::new()),
+    };
+    let t = match head {
+        "xdp" => ProgramType::Xdp,
+        "tc" | "classifier" => ProgramType::SchedCls,
+        "tracepoint" | "tp" => ProgramType::Tracepoint,
+        "kprobe" => ProgramType::Kprobe,
+        _ => return None,
+    };
+    if t == ProgramType::Xdp && !attach.is_empty() {
+        return None;
+    }
+    Some((t, attach))
 }
 
 // ---------------------------------------------------------------- BTF ---
@@ -323,12 +363,21 @@ pub fn parse_maps_btf(btf: &[u8]) -> Result<Vec<(u64, MapDef)>, ElfError> {
 
 // ---------------------------------------------------------------- ELF ---
 
+/// Whether the object needs function BTF and `.BTF.ext`: subprograms,
+/// kfunc calls, CO-RE relocations or line info.
+fn needs_ext(prog: &Program) -> bool {
+    !prog.kfuncs.is_empty()
+        || !prog.core_relos.is_empty()
+        || !prog.lines.is_empty()
+        || crate::btf::subprog_starts(prog).len() > 1
+}
+
 /// Emit a relocatable BPF ELF object for `prog`.
 pub fn write_object(prog: &Program) -> Result<Vec<u8>, ElfError> {
     let mut obj = Object::new(BinaryFormat::Elf, Architecture::Bpf, Endianness::Little);
     let text = obj.add_section(
         Vec::new(),
-        section_name(prog.prog_type).as_bytes().to_vec(),
+        program_section(prog).into_bytes(),
         SectionKind::Text,
     );
     // map immediates are zero in the object; the relocation names the map
@@ -358,8 +407,26 @@ pub fn write_object(prog: &Program) -> Result<Vec<u8>, ElfError> {
     });
 
     let mut map_syms: Vec<SymbolId> = Vec::new();
+    let rich = needs_ext(prog);
+    let ext = if rich {
+        Some(
+            crate::btf_ext::build(prog, &program_section(prog))
+                .map_err(|e| ElfError::Write(e.to_string()))?,
+        )
+    } else {
+        None
+    };
+    if let Some(ext) = &ext {
+        let btf_sec = obj.add_section(Vec::new(), b".BTF".to_vec(), SectionKind::Metadata);
+        obj.set_section_data(btf_sec, ext.btf.clone(), 4);
+        let ext_sec = obj.add_section(Vec::new(), b".BTF.ext".to_vec(), SectionKind::Metadata);
+        obj.set_section_data(ext_sec, ext.ext.clone(), 4);
+    }
     if !prog.maps.is_empty() {
-        let (btf, offsets, size) = maps_btf(&prog.maps);
+        let (btf, offsets, size) = match &ext {
+            Some(e) => (Vec::new(), e.map_offsets.clone(), e.maps_size),
+            None => maps_btf(&prog.maps),
+        };
         let maps: SectionId = obj.add_section(Vec::new(), b".maps".to_vec(), SectionKind::Data);
         obj.set_section_data(maps, vec![0u8; size as usize], 8);
         for (m, off) in prog.maps.iter().zip(&offsets) {
@@ -375,8 +442,10 @@ pub fn write_object(prog: &Program) -> Result<Vec<u8>, ElfError> {
                 flags: SymbolFlags::None,
             }));
         }
-        let btf_sec = obj.add_section(Vec::new(), b".BTF".to_vec(), SectionKind::Metadata);
-        obj.set_section_data(btf_sec, btf, 4);
+        if ext.is_none() {
+            let btf_sec = obj.add_section(Vec::new(), b".BTF".to_vec(), SectionKind::Metadata);
+            obj.set_section_data(btf_sec, btf, 4);
+        }
     }
 
     // the entry function and named subprograms
@@ -405,6 +474,34 @@ pub fn write_object(prog: &Program) -> Result<Vec<u8>, ElfError> {
         });
     }
 
+    // kfunc calls: R_BPF_64_32 against an undefined global symbol
+    let mut kfunc_syms: HashMap<&str, SymbolId> = HashMap::new();
+    for k in &prog.kfuncs {
+        let sym = *kfunc_syms.entry(k.name.as_str()).or_insert_with(|| {
+            obj.add_symbol(Symbol {
+                name: k.name.as_bytes().to_vec(),
+                value: 0,
+                size: 0,
+                kind: SymbolKind::Text,
+                scope: SymbolScope::Dynamic,
+                weak: false,
+                section: SymbolSection::Undefined,
+                flags: SymbolFlags::None,
+            })
+        });
+        obj.add_relocation(
+            text,
+            Relocation {
+                offset: k.slot as u64 * 8,
+                symbol: sym,
+                addend: 0,
+                flags: RelocationFlags::Elf {
+                    r_type: object::elf::R_BPF_64_32,
+                },
+            },
+        )
+        .map_err(|e| ElfError::Write(e.to_string()))?;
+    }
     for &(at, map) in &prog.map_relocs {
         let sym = *map_syms
             .get(map)
@@ -434,7 +531,21 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
         return Err(ElfError::Malformed("not a BPF object".into()));
     }
     let sec = |n: &str| file.section_by_name(n);
-    let text = sec("xdp").ok_or_else(|| ElfError::Malformed("no xdp section".into()))?;
+    let mut found = None;
+    for s in file.sections() {
+        if s.kind() != SectionKind::Text {
+            continue;
+        }
+        let n = s.name().map_err(|e| ElfError::Read(e.to_string()))?;
+        if let Some(t) = parse_section(n) {
+            if found.is_some() {
+                return Err(ElfError::Malformed("more than one program section".into()));
+            }
+            found = Some((s, t));
+        }
+    }
+    let (text, (prog_type, attach)) =
+        found.ok_or_else(|| ElfError::Malformed("no program section".into()))?;
     let code = text.data().map_err(|e| ElfError::Read(e.to_string()))?;
     let mut insns = slots_from_bytes(code).map_err(|e| ElfError::Malformed(e.to_string()))?;
     let license = match sec("license") {
@@ -449,15 +560,71 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
     let mut maps: Vec<MapDef> = Vec::new();
     let mut map_at: Vec<u64> = Vec::new();
     let maps_index = sec(".maps").map(|s| s.index());
-    if let Some(b) = sec(".BTF") {
-        let d = b.data().map_err(|e| ElfError::Read(e.to_string()))?;
-        for (off, def) in parse_maps_btf(d)? {
-            map_at.push(off);
-            maps.push(def);
+    let text_name = text
+        .name()
+        .map_err(|e| ElfError::Read(e.to_string()))?
+        .to_owned();
+    let mut ext = crate::btf_ext::ObjectExt::default();
+    let malformed = |e: crate::btf::BtfError| ElfError::Malformed(e.to_string());
+    match (sec(".BTF"), sec(".BTF.ext")) {
+        (Some(b), Some(x)) => {
+            let d = b.data().map_err(|e| ElfError::Read(e.to_string()))?;
+            let btf = crate::btf::Btf::parse(d).map_err(malformed)?;
+            for (off, def) in crate::btf_ext::maps_from_btf(&btf).map_err(malformed)? {
+                map_at.push(off);
+                maps.push(def);
+            }
+            let xd = x.data().map_err(|e| ElfError::Read(e.to_string()))?;
+            ext = crate::btf_ext::parse_ext(&btf, xd, &text_name).map_err(malformed)?;
         }
+        (Some(b), None) => {
+            let d = b.data().map_err(|e| ElfError::Read(e.to_string()))?;
+            for (off, def) in parse_maps_btf(d)? {
+                map_at.push(off);
+                maps.push(def);
+            }
+        }
+        (None, Some(_)) => return Err(ElfError::Malformed(".BTF.ext without .BTF".into())),
+        (None, None) => {}
     }
+    let mut kfuncs = Vec::new();
     let mut map_relocs = Vec::new();
     for (off, rel) in text.relocations() {
+        if rel.flags()
+            == (RelocationFlags::Elf {
+                r_type: object::elf::R_BPF_64_32,
+            })
+        {
+            // a kfunc call: an undefined symbol named after the function
+            let object::RelocationTarget::Symbol(si) = rel.target() else {
+                return Err(ElfError::Malformed("relocation without symbol".into()));
+            };
+            let sym = file
+                .symbol_by_index(si)
+                .map_err(|e| ElfError::Read(e.to_string()))?;
+            if !sym.is_undefined() || off % 8 != 0 {
+                return Err(ElfError::Malformed(format!(
+                    "unsupported call relocation at {off}"
+                )));
+            }
+            let slot = (off / 8) as usize;
+            let s = insns
+                .get_mut(slot)
+                .ok_or_else(|| ElfError::Malformed("relocation past the code".into()))?;
+            if s.code != 0x85 {
+                return Err(ElfError::Malformed("kfunc relocation on a non-call".into()));
+            }
+            s.src = pseudo::KFUNC_CALL;
+            s.imm = 0;
+            kfuncs.push(crate::program::KfuncRef {
+                slot,
+                name: sym
+                    .name()
+                    .map_err(|e| ElfError::Read(e.to_string()))?
+                    .to_owned(),
+            });
+            continue;
+        }
         if rel.flags()
             != (RelocationFlags::Elf {
                 r_type: object::elf::R_BPF_64_64,
@@ -513,13 +680,18 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
         }
     }
     functions.sort_by_key(|(_, e)| *e);
+    kfuncs.sort_by_key(|k| k.slot);
     Ok(Program {
         name,
-        prog_type: ProgramType::Xdp,
+        prog_type,
         insns,
         maps,
         map_relocs,
         functions,
         license,
+        attach,
+        kfuncs,
+        core_relos: ext.core_relos,
+        lines: ext.lines,
     })
 }

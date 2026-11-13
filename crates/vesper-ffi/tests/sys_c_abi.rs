@@ -67,6 +67,9 @@ fn actual_static_c_calls_match_lowered_signature_and_foreign_validation() {
         fn bridge_state() -> ForeignVal[State];
         fn bridge_address() -> ForeignVal[Ptr[u32]];
         fn bridge_copy(nocapture in src: CSlice[u8], nocapture inout dst: CSlice[u8]) -> ForeignVal[usize];
+        wire struct Pair {{ lo: u32, hi: u32 }}
+        fn bridge_crc_update(nocapture inout crc: u32, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+        fn bridge_split(value: u64, nocapture out out: Pair) -> ForeignVal[i32];
     }}"#
     );
     let library = parse(&source, Limits::default()).unwrap();
@@ -120,6 +123,37 @@ fn actual_static_c_calls_match_lowered_signature_and_foreign_validation() {
     assert_eq!(numbers.len(), 6);
     assert_eq!(&numbers[..5], &[42, 65519, 2, 9, 4]);
     assert_eq!(lines.next(), Some("91 90 165 218"));
+    // 7 folded over [1, 0, 255, 128] with c = c * 31 + byte.
+    let expected_crc = [1u32, 0, 255, 128]
+        .iter()
+        .fold(7u32, |c, b| c.wrapping_mul(31).wrapping_add(*b));
+    assert_eq!(lines.next(), Some(format!("{expected_crc} 1 9 5").as_str()));
+    assert_eq!(
+        library
+            .function("bridge_crc_update")
+            .unwrap()
+            .abi()
+            .parameters,
+        vec![
+            AbiType::Pointer,
+            AbiType::Pointer,
+            AbiType::Integer(Scalar::Usize)
+        ]
+    );
+    let split = library.function("bridge_split").unwrap();
+    assert_eq!(
+        split.abi().parameters,
+        vec![AbiType::Integer(Scalar::U64), AbiType::Pointer]
+    );
+    assert_eq!(
+        split.parameters()[1].ty().pointer_layout(),
+        Some(PointerLayout {
+            size: 8,
+            alignment: 4,
+            access: PointerAccess::Out,
+            nullable: false
+        })
+    );
     for (symbol, bits, expected) in [
         ("bridge_sum", numbers[0], ValidatedValue::Unsigned(42)),
         ("bridge_negative", numbers[1], ValidatedValue::Signed(-17)),

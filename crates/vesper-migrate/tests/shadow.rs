@@ -13,8 +13,16 @@ mod stats;
 
 use parse::{HEADER_LEN, ParseError};
 use stats::DecoderStats;
+use vesper_ffi::isolation::{IsolationDomain, RegionId, Unavailable, UnavailableReason};
 use vesper_ffi::{Declaration, Endian, Field, Integer, Registry, WireLayout, WireType, split_wire};
 use vesper_migrate::shadow::{self, Isolation, Outcome, ShadowConfig, ShadowReport, SplitMix64};
+
+/// Isolated runs fork; serialize the tests so no other test thread is
+/// printing a panic (holding std's panic locks) at the instant of a fork.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 type Observed = (Result<i64, ParseError>, (u32, i32));
 
@@ -119,6 +127,7 @@ fn run(bug: Option<&'static str>, with_boundary: bool) -> ShadowReport<Vec<u8>, 
 
 #[test]
 fn migrated_parser_agrees_with_legacy_on_generated_inputs() {
+    let _serial = serial();
     assert_eq!(
         layout().size(),
         HEADER_LEN,
@@ -137,6 +146,7 @@ fn migrated_parser_agrees_with_legacy_on_generated_inputs() {
 
 #[test]
 fn planted_divergences_are_caught_with_their_input() {
+    let _serial = serial();
     for bug in ["off-by-one", "magic", "endian"] {
         let report = run(Some(bug), false);
         let d = report
@@ -170,6 +180,7 @@ fn planted_divergences_are_caught_with_their_input() {
 
 #[test]
 fn panics_are_outcomes_not_harness_failures() {
+    let _serial = serial();
     let report = shadow::run(
         ShadowConfig {
             seed: 1,
@@ -194,6 +205,7 @@ fn panics_are_outcomes_not_harness_failures() {
 
 #[test]
 fn runs_are_reproducible_from_the_seed() {
+    let _serial = serial();
     let a = run(Some("endian"), false);
     let b = run(Some("endian"), false);
     assert_eq!(a.divergence, b.divergence);
@@ -203,4 +215,141 @@ fn runs_are_reproducible_from_the_seed() {
         (0..64).map(|_| r1.next_u64()).collect::<Vec<_>>(),
         (0..64).map(|_| r2.next_u64()).collect::<Vec<_>>()
     );
+}
+
+/// The isolated harness: the migrated side stores its outputs in a
+/// Vesper-owned buffer inside the isolation domain; the legacy side runs with
+/// that buffer write-protected.
+fn isolated(
+    domain: Result<&IsolationDomain, &Unavailable>,
+    out: Option<RegionId>,
+    bug: Option<&'static str>,
+    stray_write: bool,
+) -> ShadowReport<Vec<u8>, Observed> {
+    let l = layout();
+    shadow::run_isolated(
+        ShadowConfig {
+            seed: 0xC0DEC,
+            cases: 4_000,
+        },
+        boundary(),
+        generator,
+        |raw: &Vec<u8>| {
+            if stray_write && raw.len() == HEADER_LEN + 3 {
+                // A legacy bug writing past its own buffer into Vesper memory.
+                if let (Ok(d), Some(r)) = (domain, out) {
+                    d.write(r, 0, &[0xEE]).unwrap();
+                }
+            }
+            legacy(raw)
+        },
+        |raw: &Vec<u8>| {
+            let o = migrated(&l, raw, bug);
+            if let (Ok(d), Some(r)) = (domain, out) {
+                let (_, (crc, count)) = o;
+                d.write(r, 0, &crc.to_le_bytes()).unwrap();
+                d.write(r, 4, &count.to_le_bytes()).unwrap();
+            }
+            o
+        },
+        domain,
+        std::time::Duration::from_secs(120),
+    )
+}
+
+fn domain() -> Option<(IsolationDomain, RegionId)> {
+    match IsolationDomain::new() {
+        Ok(mut d) => {
+            let r = d.add_region(64).unwrap();
+            note(&format!("shadow isolation exercised: {:?}", d.mechanism()));
+            Some((d, r))
+        }
+        Err(u) => {
+            note(&format!("shadow isolation unavailable on this host: {u}"));
+            None
+        }
+    }
+}
+
+#[test]
+fn isolated_shadow_agrees_and_reports_the_hardware_mechanism() {
+    let _serial = serial();
+    let Some((d, r)) = domain() else { return };
+    let report = isolated(Ok(&d), Some(r), None, false);
+    assert!(report.agreed(), "{report}");
+    assert_eq!(report.cases_run, 4_005);
+    assert_eq!(
+        report.isolation,
+        Isolation::Hardware {
+            mechanism: d.mechanism()
+        }
+    );
+    assert!(report.to_string().contains("write-protected"), "{report}");
+}
+
+#[test]
+fn a_legacy_write_into_vesper_memory_is_a_typed_shadow_failure() {
+    let _serial = serial();
+    let Some((d, r)) = domain() else { return };
+    let report = isolated(Ok(&d), Some(r), None, true);
+    assert!(!report.agreed());
+    assert!(report.divergence.is_none());
+    let v = report
+        .isolation_failure
+        .as_ref()
+        .expect("violation reported");
+    assert!(v.is_protection_violation(), "{report}");
+    let input = v.input.as_ref().unwrap();
+    assert_eq!(
+        input.len(),
+        HEADER_LEN + 3,
+        "the regenerated input is the trigger"
+    );
+    assert_eq!(report.cases_run, v.case.unwrap() + 1);
+    // The fault happened in the child; this process keeps its rights.
+    d.write(r, 0, &[1]).unwrap();
+}
+
+#[test]
+fn isolated_divergences_are_recovered_with_their_outcomes() {
+    let _serial = serial();
+    let Some((d, r)) = domain() else { return };
+    let report = isolated(Ok(&d), Some(r), Some("endian"), false);
+    let div = report.divergence.as_ref().expect("planted bug caught");
+    assert_ne!(div.legacy, div.replacement);
+    assert!(report.isolation_failure.is_none());
+    // Same first divergence as the in-process harness over the same stream.
+    let plain = shadow::run(
+        ShadowConfig {
+            seed: 0xC0DEC,
+            cases: 4_000,
+        },
+        boundary(),
+        generator,
+        |raw: &Vec<u8>| legacy(raw),
+        |raw: &Vec<u8>| migrated(&layout(), raw, Some("endian")),
+    );
+    assert_eq!(plain.divergence.unwrap().case, div.case);
+}
+
+#[test]
+fn without_pku_or_poe_the_isolated_harness_says_so() {
+    let _serial = serial();
+    let u = Unavailable {
+        reason: UnavailableReason::CpuLacksFeature,
+        detail: "test host".into(),
+    };
+    let report = isolated(Err(&u), None, None, false);
+    assert!(report.agreed(), "{report}");
+    assert!(
+        matches!(report.isolation, Isolation::Unavailable { reason } if reason.contains("lacks PKU/POE"))
+    );
+    assert!(report.to_string().contains("isolation unavailable"));
+}
+
+/// Written straight to the stderr handle, which the test harness does not
+/// capture, so CI logs record whether hardware isolation was exercised.
+fn note(line: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stderr(), "{line}");
 }

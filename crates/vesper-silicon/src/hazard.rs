@@ -10,8 +10,8 @@
 //!   report counts them so a caller can see what was not analysed.
 //!
 //! Rules: read-modify-write of a register that has a W1C, W1T or W0C field;
-//! a plain read of a register with a read-to-clear field outside an explicit
-//! consume; a write that sets bits of a read-only field (or any write to a
+//! a plain read of a register with a read-to-clear or read-side-effect
+//! (`readAction=modify`) field outside an explicit consume; a write that sets bits of a read-only field (or any write to a
 //! fully read-only register); a read of a write-only register; a value wider
 //! than the register.
 
@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use cranelift_codegen::ir::{Block, BlockArg, Function, InstructionData, Opcode, Value, ValueDef};
 
 use crate::VerifierFinding;
-use crate::svd::{DeviceModel, FieldAccess, RegisterClass, RegisterModel};
+use crate::svd::{DeviceModel, RegisterClass, RegisterModel};
 
 pub const RULE_RMW_W1C: &str = "silicon.mmio.rmw_of_write_clear_register";
 pub const RULE_RC_READ: &str = "silicon.mmio.read_to_clear_outside_consume";
@@ -62,7 +62,7 @@ fn write_findings(r: &RegisterModel, value: u64, out: &mut Vec<(&'static str, St
             format!("value {value:#x} wider than {}-bit {}", r.size_bits, r.path),
         ));
     }
-    if r.class() == RegisterClass::ReadOnly {
+    if !r.fields.iter().any(|f| f.access.writable()) {
         out.push((
             RULE_WRITE_RO,
             format!("write to read-only register {}", r.path),
@@ -105,14 +105,23 @@ fn read_findings(r: &RegisterModel, consume: bool, out: &mut Vec<(&'static str, 
             format!("read of write-only register {}", r.path),
         ));
     }
-    if !consume && r.has(FieldAccess::ReadToClear) {
-        out.push((
-            RULE_RC_READ,
-            format!(
-                "plain read of read-to-clear register {}; use an explicit consume",
-                r.path
-            ),
-        ));
+    if !consume {
+        let consuming: Vec<&str> = r
+            .fields
+            .iter()
+            .filter(|f| f.access.consuming_read())
+            .map(|f| f.name.as_str())
+            .collect();
+        if !consuming.is_empty() {
+            out.push((
+                RULE_RC_READ,
+                format!(
+                    "plain read of {} whose read has a side effect on field(s) {}; use an explicit consume",
+                    r.path,
+                    consuming.join(", ")
+                ),
+            ));
+        }
     }
 }
 
@@ -375,7 +384,7 @@ pub fn check_function(func: &Function, model: &DeviceModel, policy: &MmioPolicy)
                             (v as u64) & ((1u64 << acc.bits) - 1)
                         };
                         write_findings(r, v, &mut out);
-                    } else if r.class() == RegisterClass::ReadOnly {
+                    } else if !r.fields.iter().any(|f| f.access.writable()) {
                         out.push((
                             RULE_WRITE_RO,
                             format!("write to read-only register {}", r.path),

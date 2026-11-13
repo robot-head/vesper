@@ -226,3 +226,34 @@ pub fn clobbering(name: &str, callee: &str, live: usize) -> Function {
     b.finalize();
     f
 }
+
+/// `name(x)` calls `callee` with `args` copies of `x` (all `i64`), so with
+/// more arguments than argument registers the caller reserves an outgoing
+/// argument area.
+pub fn many_args_caller(name: &str, callee: &str, args: usize) -> Function {
+    let mut f = Function::with_name_signature(UserFuncName::testcase(name), sig());
+    let mut ctx = FunctionBuilderContext::new();
+    let mut b = FunctionBuilder::new(&mut f, &mut ctx);
+    let blk = b.create_block();
+    b.append_block_params_for_function_params(blk);
+    b.switch_to_block(blk);
+    b.seal_block(blk);
+    let x = b.block_params(blk)[0];
+    let mut s = Signature::new(CallConv::SystemV);
+    for _ in 0..args {
+        s.params.push(AbiParam::new(types::I64));
+    }
+    s.returns.push(AbiParam::new(types::I64));
+    let sigref = b.import_signature(s);
+    let fref = b.import_function(ExtFuncData {
+        name: ExternalName::testcase(callee),
+        signature: sigref,
+        colocated: true,
+    });
+    let argv = vec![x; args];
+    let c = b.ins().call(fref, &argv);
+    let r = b.inst_results(c)[0];
+    b.ins().return_(&[r]);
+    b.finalize();
+    f
+}

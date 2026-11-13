@@ -313,6 +313,8 @@ fn compile<M: Module>(
     world: &World,
     entry: &str,
     optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+    instrument: Option<Instrument<'_>>,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
     if !entry_fn.effects.instances.is_empty() || entry_fn.effects.tail.is_some() {
@@ -332,8 +334,36 @@ fn compile<M: Module>(
         crate::ir_opt::optimize(world, &mut program)?;
     }
     let ids = declare_instances(m, world, entry, &instances)?;
-    let clif = define_instances(m, world, &instances, &ids, &program)?;
+    let clif =
+        define_instances_observed(m, world, &instances, &ids, &program, observer, instrument)?;
     Ok((ids, clif))
+}
+/// Lane-23 instrumentation hook ([`crate::native_coverage`]): rewrites each
+/// finalized function, by instance key, before the CLIF text, the observer
+/// and machine-code generation see it. Only explicit coverage entry points
+/// pass one; every other build passes `None` and emits unchanged code.
+pub type Instrument<'a> = &'a mut dyn FnMut(&str, &mut ir::Function) -> Result<(), String>;
+/// One Cranelift function emitted by this backend, handed to the
+/// integration-B verifier hook ([`crate::native_verifiers`]) after the body
+/// is finalized and before machine code is generated from it. The hook only
+/// observes a clone: compilation and the emitted code are unchanged.
+///
+/// `function.name` is set to `u0:<func_id>`, the name direct calls between
+/// emitted functions use, so call graphs resolve across the set.
+#[derive(Clone)]
+pub struct EmittedFunction {
+    /// Monomorphized instance key (the source name for non-generic functions).
+    pub key: String,
+    /// Source function name of the instance.
+    pub source: String,
+    /// Object/JIT symbol (`entry` keeps its name, others are local).
+    pub symbol: String,
+    /// `cranelift_module::FuncId` index, the `u0:<index>` user name.
+    pub func_id: u32,
+    pub function: ir::Function,
+    /// `(func_id, symbol)` of every function this one references, defined
+    /// or imported (for example `fmod`).
+    pub callees: Vec<(u32, String)>,
 }
 /// Declare every monomorphized ordinary function. `entry` is exported under
 /// its source name when it is itself an ordinary instance.
@@ -373,6 +403,17 @@ fn define_instances<M: Module>(
     instances: &InstanceMap,
     ids: &BTreeMap<String, FuncId>,
     program: &crate::ir::Program,
+) -> Result<String, String> {
+    define_instances_observed(m, world, instances, ids, program, None, None)
+}
+fn define_instances_observed<M: Module>(
+    m: &mut M,
+    world: &World,
+    instances: &InstanceMap,
+    ids: &BTreeMap<String, FuncId>,
+    program: &crate::ir::Program,
+    mut observer: Option<&mut dyn FnMut(EmittedFunction)>,
+    mut instrument: Option<Instrument<'_>>,
 ) -> Result<String, String> {
     let mut clif = String::new();
     for (key, (name, generic_vars)) in instances {
@@ -471,7 +512,44 @@ fn define_instances<M: Module>(
             c.b.seal_all_blocks();
             c.b.finalize();
         }
+        if let Some(rewrite) = instrument.as_mut() {
+            rewrite(key, &mut ctx.func)?;
+        }
         clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
+        if let Some(observe) = observer.as_mut() {
+            let id = ids[key];
+            let mut function = ctx.func.clone();
+            function.name = ir::UserFuncName::user(0, id.as_u32());
+            let declarations = m.declarations();
+            let callees = function
+                .params
+                .user_named_funcs()
+                .values()
+                .filter(|name| name.namespace == 0)
+                .map(|name| {
+                    let callee = FuncId::from_u32(name.index);
+                    (
+                        name.index,
+                        declarations
+                            .get_function_decl(callee)
+                            .linkage_name(callee)
+                            .into_owned(),
+                    )
+                })
+                .collect();
+            observe(EmittedFunction {
+                key: key.clone(),
+                source: name.clone(),
+                symbol: m
+                    .declarations()
+                    .get_function_decl(id)
+                    .linkage_name(id)
+                    .into_owned(),
+                func_id: id.as_u32(),
+                function,
+                callees,
+            });
+        }
         m.define_function(ids[key], &mut ctx)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
         m.clear_context(&mut ctx);
@@ -502,7 +580,7 @@ pub fn jit_with_options(
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.symbol("fmod", native_float_remainder as *const u8);
     let mut m = JITModule::new(builder);
-    let (ids, _) = compile(&mut m, world, entry, optimize)?;
+    let (ids, _) = compile(&mut m, world, entry, optimize, None, None)?;
     m.finalize_definitions().map_err(|e| e.to_string())?;
     let code = m.get_finalized_function(ids[entry]);
     // SAFETY: compile() verified the signature and entry arity above. The module
@@ -559,6 +637,13 @@ pub fn object_with_options(
     target: Option<&str>,
     optimize: bool,
 ) -> Result<(Vec<u8>, String), String> {
+    object_with_observer(world, entry, target, optimize, None)
+}
+/// The ISA (target and codegen flags) object emission compiles with. The
+/// stack verifier measures frames with exactly this ISA.
+pub fn object_isa(
+    target: Option<&str>,
+) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
     let mut flags = settings::builder();
     flags.set("is_pic", "true").map_err(|e| e.to_string())?;
     let builder = if let Some(target) = target {
@@ -577,12 +662,124 @@ pub fn object_with_options(
     let isa = builder
         .finish(settings::Flags::new(flags))
         .map_err(|e| e.to_string())?;
+    Ok(isa)
+}
+/// [`object_with_options`] that also hands every emitted Cranelift function
+/// to `observer` (the integration-B verifier hook). With `None` it is
+/// exactly `object_with_options`.
+pub fn object_with_observer(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+) -> Result<(Vec<u8>, String), String> {
+    object_instrumented(world, entry, target, optimize, observer, None)
+}
+/// [`object_with_observer`] with the lane-23 [`Instrument`] hook. With
+/// `instrument: None` it is exactly `object_with_observer`.
+pub fn object_instrumented(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+    instrument: Option<Instrument<'_>>,
+) -> Result<(Vec<u8>, String), String> {
+    let isa = object_isa(target)?;
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     let mut m = ObjectModule::new(builder);
-    let (_, clif) = compile(&mut m, world, entry, optimize)?;
+    let (_, clif) = compile(&mut m, world, entry, optimize, observer, instrument)?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
+}
+/// A JIT module compiled once with the lane-23 [`Instrument`] hook, whose
+/// zero-argument `i64` entry can be called repeatedly (`vesper fuzz
+/// --native-coverage`). Code pointers never escape; calls borrow the owner
+/// exclusively and dropping it frees the module after every call returned.
+///
+/// Crate-private: the hook can embed arbitrary addresses, so only
+/// [`crate::native_coverage::NativeCoverage`], which owns the buffer the
+/// instrumentation writes and drops it after this owner, constructs one.
+pub(crate) struct InstrumentedJit {
+    module: Option<JITModule>,
+    code: *const u8,
+    _single_thread: std::marker::PhantomData<Rc<()>>,
+}
+impl InstrumentedJit {
+    /// Compile `entry` (no parameters, `i64` result, every effect handled)
+    /// and everything it reaches, unoptimized at the IR level, rewriting
+    /// each function through `instrument`.
+    ///
+    /// # Safety
+    ///
+    /// Every memory access `instrument` inserts must target memory that is
+    /// valid for that access for as long as the returned owner can be
+    /// [`run`](Self::run), and must not alias Rust data except through
+    /// atomics or interior mutability. Cranelift's verifier does not check
+    /// embedded addresses.
+    pub(crate) unsafe fn compile(
+        world: &World,
+        entry: &str,
+        instrument: Instrument<'_>,
+    ) -> Result<Self, String> {
+        let f = world.functions.get(entry).ok_or("missing entry function")?;
+        if !f.params.is_empty() || f.result.name() != "i64" {
+            return Err("instrumented JIT entry must be `fn() -> i64`".into());
+        }
+        let mut flags = settings::builder();
+        flags
+            .set("use_colocated_libcalls", "false")
+            .map_err(|e| e.to_string())?;
+        flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+        let isa = cranelift_native::builder()
+            .map_err(str::to_string)?
+            .finish(settings::Flags::new(flags))
+            .map_err(|e| e.to_string())?;
+        let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        builder.symbol("fmod", native_float_remainder as *const u8);
+        let mut owned = Self {
+            module: Some(JITModule::new(builder)),
+            code: std::ptr::null(),
+            _single_thread: std::marker::PhantomData,
+        };
+        let m = owned.module.as_mut().expect("owned JIT module");
+        let (ids, _) = compile(m, world, entry, false, None, Some(instrument))?;
+        let sig = signature(m, world, f)?;
+        if !sig.params.is_empty()
+            || sig.returns.len() != 1
+            || sig.returns[0].value_type != types::I64
+            || sig.call_conv != m.target_config().default_call_conv
+        {
+            return Err("instrumented JIT ABI mismatch".into());
+        }
+        m.finalize_definitions().map_err(|e| e.to_string())?;
+        owned.code = m.get_finalized_function(ids[entry]);
+        Ok(owned)
+    }
+    /// Call the entry once.
+    pub(crate) fn run(&mut self) -> i64 {
+        // SAFETY: compile() checked that the entry takes no arguments and
+        // returns one i64 in the host C ABI; the exclusively borrowed owner
+        // keeps the executable memory alive and the pointer never escapes.
+        // Instrumented accesses are valid by compile()'s safety contract.
+        unsafe {
+            let call: unsafe extern "C" fn() -> i64 = std::mem::transmute(self.code);
+            call()
+        }
+    }
+}
+impl Drop for InstrumentedJit {
+    fn drop(&mut self) {
+        if let Some(module) = self.module.take() {
+            // SAFETY: the code pointer is private, calls need &mut self and
+            // return an owned scalar, and this owner is !Send/!Sync.
+            unsafe {
+                module.free_memory();
+            }
+        }
+    }
 }
 
 #[derive(Clone)]

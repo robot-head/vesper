@@ -24,6 +24,16 @@ Models of three Chrono claims, with what is proved about each model:
   `t`. `reverse_watch_finds_latest_mutation`: for a strictly increasing
   write list it is a write before `t` and no write before `t` is later.
 
+* Activation checkpoints. `checkpointAt step s0 es e` is the state after
+  the first `e` events (the image a checkpoint at epoch `e` holds).
+  `checkpoint_restore_replays_to_live`: restoring it and replaying the
+  suffix `es.drop e` equals the live run over all of `es`.
+  `reexecuted_checkpoint_replays_to_live`: a state rebuilt by re-executing a
+  journal equal to the recorded prefix is that checkpoint, so it too replays
+  to the live run. `restoreAt` models a byte-image restore that must land at
+  the captured base: `restore_rejects_relocation` and
+  `restore_at_captured_base`.
+
 These are theorems about these models only, not about the Rust crate
 `crates/vesper-chrono`. Its tests replay a real SimPulse recording and check
 the same properties at run time, and `tests/lean_model.rs` compares
@@ -278,6 +288,50 @@ theorem reverse_watch_finds_latest_mutation (xs : List Nat) (t h : Nat)
   · have := hmax w hw hwt; omega
   · omega
 
+/-! ## Activation checkpoints -/
+
+/-- The state a checkpoint at epoch `e` holds: the first `e` events applied. -/
+def checkpointAt {S E : Type} (step : S → E → Option S) (s0 : S) (es : List E) (e : Nat) :
+    Option S :=
+  runSteps step s0 (es.take e)
+
+/-- Restoring the checkpoint at epoch `e` and replaying the suffix equals the
+live run. -/
+theorem checkpoint_restore_replays_to_live {S E : Type} (step : S → E → Option S)
+    (s0 : S) (es : List E) (e : Nat) (c : S) (hc : checkpointAt step s0 es e = some c) :
+    runSteps step c (es.drop e) = runSteps step s0 es := by
+  have h := replay_from_snapshot step s0 (es.take e) (es.drop e)
+  rw [List.take_append_drop] at h
+  unfold checkpointAt at hc
+  rw [h, hc]
+  rfl
+
+/-- A state rebuilt by re-executing a journal that equals the recorded prefix
+replays the suffix to the live run. -/
+theorem reexecuted_checkpoint_replays_to_live {S E : Type} (step : S → E → Option S)
+    (s0 : S) (es journal : List E) (e : Nat) (r : S)
+    (hj : journal = es.take e) (hr : runSteps step s0 journal = some r) :
+    runSteps step r (es.drop e) = runSteps step s0 es := by
+  subst hj
+  exact checkpoint_restore_replays_to_live step s0 es e r hr
+
+/-- A byte image of an activation captured at `base`. -/
+structure Image where
+  base : Nat
+  words : List Nat
+  deriving DecidableEq
+
+/-- A byte-copy restore succeeds only at the captured base address. -/
+def restoreAt (img : Image) (base : Nat) : Option Image :=
+  if base = img.base then some img else none
+
+theorem restore_rejects_relocation (img : Image) (base : Nat) (h : base ≠ img.base) :
+    restoreAt img base = none := by
+  simp [restoreAt, h]
+
+theorem restore_at_captured_base (img : Image) : restoreAt img img.base = some img := by
+  simp [restoreAt]
+
 end Vesper.ChronoReplay
 
 #print axioms Vesper.ChronoReplay.chrono_replay_reproduces_live_execution
@@ -286,3 +340,7 @@ end Vesper.ChronoReplay
 #print axioms Vesper.ChronoReplay.lineage_creation_precedes
 #print axioms Vesper.ChronoReplay.lineage_complete
 #print axioms Vesper.ChronoReplay.reverse_watch_finds_latest_mutation
+#print axioms Vesper.ChronoReplay.checkpoint_restore_replays_to_live
+#print axioms Vesper.ChronoReplay.reexecuted_checkpoint_replays_to_live
+#print axioms Vesper.ChronoReplay.restore_rejects_relocation
+#print axioms Vesper.ChronoReplay.restore_at_captured_base
