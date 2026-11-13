@@ -95,13 +95,32 @@ fn ours(input: &[u8], limits: Limits) -> Outcome {
     }
 }
 
+fn percent_decode(stored: &str) -> String {
+    let bytes = stored.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+            out.push(u8::from_str_radix(hex, 16).unwrap());
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).unwrap()
+}
+
 fn corpus() -> Vec<(String, Vec<u8>)> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/data/JSONTestSuite/test_parsing");
     let mut files: Vec<(String, Vec<u8>)> = std::fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
         .map(|entry| {
             let path = entry.unwrap().path();
-            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            // Stored percent-encoded (`+` and `#` are not portable in Bazel
+            // runfiles); restore the upstream name.
+            let name = percent_decode(&path.file_name().unwrap().to_string_lossy());
             (name, std::fs::read(&path).unwrap())
         })
         .collect();
@@ -113,6 +132,11 @@ fn corpus() -> Vec<(String, Vec<u8>)> {
     open.push(b'\n');
     files.push(("n_structure_open_array_object.json".into(), open));
     files.sort();
+    assert!(
+        files
+            .iter()
+            .any(|(n, _)| n == "n_structure_trailing_#.json")
+    );
     files
 }
 
