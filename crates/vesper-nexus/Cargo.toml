@@ -1,0 +1,10 @@
+[package]
+name = "vesper-nexus"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Nexus: generational WIT resource tables, fuel quanta and shared plugin rings over Wasmtime components"
+publish = false
+
+[dependencies]
+vesper-ffi = { path = "../vesper-ffi" }
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "async", "runtime", "std", "wat", "stack-switching", "gc", "gc-null"] }

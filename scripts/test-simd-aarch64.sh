@@ -1,12 +1,14 @@
 #!/bin/sh
 # Execute emitted AArch64 Baseline128 code without a target libc/sysroot.
 set -eu
+cd "$(dirname "$0")/.."
+. scripts/bazel-lib.sh
 assembler=${AARCH64_AS:-aarch64-linux-gnu-as}
 linker=${AARCH64_LD:-aarch64-linux-gnu-ld}
 emulator=${QEMU_AARCH64:-qemu-aarch64}
 artifacts=$(mktemp -d)
 trap 'rm -rf "$artifacts"' EXIT HUP INT TERM
-cargo run -p vesper-simd --locked --example emit_objects -- "$artifacts"
+bazel_exec //crates/vesper-simd:example/emit_objects "$artifacts"
 python3 - "$artifacts" <<'PY'
 import pathlib
 import struct
