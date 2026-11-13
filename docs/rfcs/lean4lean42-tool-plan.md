@@ -232,13 +232,58 @@ read the retained logs `/tmp/lean4lean42-feasibility-build.log` and
 `Lean4Lean.Environment.Basic` target. These are actual compatibility failures,
 not merely predicted risks.
 
-The coordinator reported a third experiment using the opened private alias
-through explicit `mainModule? mod` application instead of field notation. Its
-outcome is not established by this update. Do not infer build success, a complete
-compatibility patch or external model acceptance from the proposed correction.
-Further private-API, proof or runtime adaptations may remain. Identical kernel
-files and familiar declaration signatures cannot replace compilation and the
-required rejection/coverage checks.
+The coordinator's third experiment used the opened private alias through
+explicit `mainModule? mod` application instead of field notation. Its actual
+log `/tmp/lean4lean42-feasibility-build3.log` ends with “Build completed
+successfully (53 jobs).” This establishes that the temporary runtime-checker
+build completed, not that proof libraries or external model checks succeeded.
+
+The coordinator then compiled both exact model sources successfully and ran
+actual `--fresh RewriteWitness` and `--fresh ArithmeticOracle` checks. Retained
+`/tmp/lean4lean42-model-check-47qniaf5/results.json` records both compilation
+exit codes0; both external checks exit1 with `(kernel) unknown constant
+'And.left'`, in 0.567 and 0.516 seconds respectively. The initial model-compilation
+attempt's SIGXFSZ came from the coordinator's too-small 1MiB artifact cap; after
+raising the compiler-artifact cap to64MiB both compilations passed. That earlier
+harness quota failure is not a compiler semantic rejection.
+
+### Source diagnosis: primitive checker quote prerequisites
+
+This lane independently read the actual verbose transcript and source, without
+editing or building the experiment. The transcript's last declaration is
+`adding defnDecl Nat.mod`; it has already replayed `And` and `And.casesOn`, but
+not `And.left`. Base `Main.replayConstant` recursively schedules only names
+found in the declaration's own type/value (plus its explicit primitive-string
+special case). The checker itself introduces additional quoted terms:
+
+- `Primitive.lean:30`–43 defines `Reflection.defn₁`/`defn₂` with `H.1` and
+  `H.2`, which introduce `And.left`/`And.right`.
+- `Condition.natLE` uses that reflection; its checker validates the extra quoted
+  reflection expressions.
+- The `Nat.mod` admission clause invokes this checker at `Primitive.lean:239`.
+
+Thus the observed endpoint has a concrete checker-introduced prerequisite-order
+explanation. It is not evidence that the model source or `.olean` lacks an
+`And.left` declaration. Importing more artifact data does not by itself establish
+that quote-only prerequisites are replayed before this check; it can change
+incidental iteration order without repairing the dependency relation.
+
+An exact later upstream correction is
+[d7a52a83bea3e93968672b89ba88af4372b08f23](https://github.com/digama0/lean4lean/commit/d7a52a83bea3e93968672b89ba88af4372b08f23),
+“fix: don't use And in primitive checking.” Its 31-line, Primitive-only diff
+replaces the conjunction and projections with continuation/Church-encoded
+pairs, removing the extra `And` dependency while preserving the actual
+reflection/primitive checks. This is a narrow applicable port candidate, not an
+executed fix in this lane. Do not bypass primitive checking or preload unchecked
+constants as a substitute. Review any subsequent prerequisite failures in the
+same way and rerun the real models after each actual correction.
+
+The coordinator also reported a fourth import experiment with
+`importAll := true`; its outcome is not established by this update. No external
+model acceptance or complete port has been established. Further private-API,
+proof, primitive or runtime adaptations may remain. Identical kernel files and
+familiar declaration signatures cannot replace compilation and the required
+rejection/coverage checks.
 
 ## Evidence and limits
 
@@ -256,8 +301,8 @@ Immutable references:
 
 At the initial source review, compatibility/port compilation and external
 checks were unexecuted. The separately attributed coordinator update now records
-only the observed failed builds; this lane still performed no builds or source
-changes. A successful candidate build, external model checks, rejection tests,
-elapsed-time measurements and platform behavior have not been established by
-this document. It does not claim those gates passed or authorize repository
-implementation outside the separately published scope.
+the coordinator's successful third runtime build, successful model compilation
+and failed external model checks; this lane still performed no builds or source
+changes. External acceptance, rejection-control success and broad platform
+behavior remain unestablished. It does not claim those gates passed or authorize
+repository implementation outside the separately published scope.
