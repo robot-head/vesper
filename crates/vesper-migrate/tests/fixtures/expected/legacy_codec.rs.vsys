@@ -8,9 +8,17 @@ sys library LegacyCodecAbi (
     pkg_config = "legacy-codec ^0.8.0"
 ) {
     enum ParseError: u32 { Short = 1, BadMagic = 2 }
+    wire struct DecoderStats { last_crc: u32, record_count: i32, bytes_seen: u64 }
+    fn legacy_bump_crc(nocapture inout crc: u32, byte: u8) -> ForeignVal[Unit];
     fn legacy_classify(code: u32) -> ForeignVal[ParseError];
     fn legacy_header_len() -> ForeignVal[usize];
     // assumed: `raw_bytes` + `raw_len` form a nocapture slice (from annotation)
+    // assumed: `out_crc` is a non-null nocapture inout element (from annotation)
+    // assumed: `out_count` is a non-null nocapture inout element (from annotation)
+    fn legacy_parse_batch_header(nocapture in raw_bytes: CSlice[u8], nocapture inout out_crc: u32, nocapture inout out_count: i32) -> ForeignVal[i32];
+    // assumed: `raw_bytes` + `raw_len` form a nocapture slice (from annotation)
     // assumed: `out` + `out_len` form a nocapture slice (from annotation)
     fn legacy_parse_batch_header_into(nocapture in raw_bytes: CSlice[u8], nocapture inout out: CSlice[u32]) -> ForeignVal[i32];
+    // assumed: `stats` is a non-null nocapture out element (from annotation)
+    fn legacy_reset_stats(nocapture out stats: DecoderStats) -> ForeignVal[Unit];
 }

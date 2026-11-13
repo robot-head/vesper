@@ -6,3 +6,8 @@ description = "Checked wire layouts, views and declarative C ABI contracts for V
 
 [dependencies]
 blake3 = "1.8"
+
+# The one gated unsafe module (`isolation::hw`) issues pkey syscalls, maps
+# isolated regions and contains faulting children on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.177"
