@@ -77,5 +77,6 @@ same request ID, preserving the actual size boundary.
 
 These results validate the bounded CI128 profile and its actual process paths.
 The release build and full 100000-program execution were still pending at this
-report update. No full-run count, throughput extrapolation or compiler
-refinement proof is claimed.
+checkpoint. The coordinator's subsequent completed full run is recorded in the
+[integration report](oracle42-integration-report.md). This report does not
+claim a throughput extrapolation or compiler refinement proof.

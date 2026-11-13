@@ -96,6 +96,10 @@ Source/backend equivalence, process cleanup/fault injection and complete corpus
 counts require the separately owned integration and acceptance runs. The
 existing mathematical model source remains unchanged.
 
+The coordinator subsequently completed the eight-mode CI profile and full
+100000-program execution. See the [integration report](oracle42-integration-report.md)
+for that separate evidence; it does not widen this lane's proof claims.
+
 ## Terminal sequence-bound follow-up
 
 Independent review identified the terminal counter boundary: dispatching ID

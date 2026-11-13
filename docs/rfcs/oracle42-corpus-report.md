@@ -61,8 +61,9 @@ This run actually generated and checked uniqueness of all 100,000 typed
 argument pairs and fingerprints, parsed/checked/bound all 128 CI sources at
 three seeds, and exercised the 15 isolated diagnostics plus shrink, hash and
 AST-tampering checks. The 100,000-case test is generation coverage, not 100,000
-runtime oracle comparisons. Strict Clippy, the complete eight-setting runtime
-oracle matrix and the full 100,000-program execution remain pending evidence.
+runtime oracle comparisons. At this checkpoint, strict Clippy, the complete
+eight-setting runtime oracle matrix and the full 100,000-program execution
+were still pending.
 The same log's separate runner test target had an unrelated fixture-size
 assertion failure under repair by its owner; it is not reported as a passing
 combined runner suite.
@@ -76,8 +77,9 @@ excluded unknown-callee calls, which produce two Rust diagnostics. These probes
 do not establish the new eight-setting oracle matrix or a completed full run.
 
 Owned source/test checkpoints are `31e3892`, `aa093c1`, `dd49e79`, and style-only
-`4604410`. Lean process,
-Lean process, worker scheduling, execution counts, actual mismatch shrinking,
-and full-run completion remain separate coordinator/runner evidence. There is
+`4604410`. Lean process, worker scheduling, execution counts, actual mismatch
+shrinking, and full-run completion are separate coordinator/runner evidence.
+The subsequent completed full run and regression results are recorded in the
+[integration report](oracle42-integration-report.md). There is
 no full-parser oracle, semantic-result uniqueness, whole-compiler refinement,
 timing extrapolation, source linearity, allocation/RSS or performance claim.
