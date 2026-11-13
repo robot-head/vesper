@@ -104,7 +104,8 @@ impl Fixture {
         let output = self.command(mode, options);
         assert!(
             output.status.success(),
-            "{}\n{}",
+            "{mode} {options:?}: status {}\n{}\n{}",
+            output.status,
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -232,15 +233,52 @@ fn actual_shadowed_callee_identity_and_span_survive_child_folds() {
 }
 
 #[test]
-fn actual_depth_refusal_keeps_original_hir_bytes_and_program_behavior() {
-    let expression = "x".to_owned() + &" + 0".repeat(70);
+fn actual_node_budget_refusal_keeps_original_hir_bytes_and_program_behavior() {
+    fn balanced_addition(leaves: &[&str]) -> String {
+        assert!(!leaves.is_empty());
+        if let [leaf] = leaves {
+            return (*leaf).to_owned();
+        }
+        let (left, right) = leaves.split_at(leaves.len() / 2);
+        format!(
+            "({} + {})",
+            balanced_addition(left),
+            balanced_addition(right)
+        )
+    }
+    // 257 leaves + 256 additions exceed the default 512 input occurrences,
+    // while depth 10 keeps frontend recursion shallow on a 1 MiB CLI stack.
+    let mut leaves = ["0"; 257];
+    leaves[0] = "x";
+    let expression = balanced_addition(&leaves);
     let fixture = Fixture::new(&format!(
         "fn f(x: i64) -> i64 eff [Fail[ArithOverflow]] {{ {expression} }} fn main() -> i64 {{ handle Fail[ArithOverflow] in {{ f(42) }} with {{ return v => v, raise(e, k) => 43, }} }}"
     ));
     fixture.agrees("42");
     let before = fixture.success("emit", &["--emit", "hir", "--no-opt"]);
+    let original: Value = serde_json::from_slice(&before).unwrap();
+    let mut pending = vec![(tail(body(&original, "f")), 1)];
+    let (mut occurrences, mut depth) = (0, 0);
+    while let Some((expression, level)) = pending.pop() {
+        occurrences += 1;
+        depth = depth.max(level);
+        if let Some(binary) = expression["kind"].get("Binary") {
+            assert_eq!(binary[0], "+");
+            pending.push((&binary[1], level + 1));
+            pending.push((&binary[2], level + 1));
+        } else {
+            assert!(
+                expression["kind"] == serde_json::json!({"Name": "x"})
+                    || expression["kind"] == serde_json::json!({"Literal": {"Int": 0}})
+            );
+        }
+    }
+    assert_eq!((occurrences, depth), (513, 10));
     let after = fixture.success("emit", &["--emit", "hir"]);
-    assert_eq!(after, before);
+    assert_eq!(
+        after, before,
+        "input-node refusal must retain the whole island"
+    );
     assert_eq!(after, fixture.success("emit", &["--emit", "hir"]));
 }
 

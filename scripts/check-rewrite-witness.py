@@ -95,6 +95,14 @@ def guarded(kind, expression, fallback="42"):
     return f"fn main() -> {kind} {{ handle Fail[ArithOverflow] in {{ {expression} }} with {{ return v => v, raise(e, k) => {fallback}, }} }}"
 
 
+def balanced_addition(leaves):
+    assert leaves
+    if len(leaves) == 1:
+        return leaves[0]
+    middle = len(leaves) // 2
+    return f"({balanced_addition(leaves[:middle])} + {balanced_addition(leaves[middle:])})"
+
+
 def run(binary, work):
     h = Harness(binary, work)
     folds = [("2 + 3", 5), ("9 - 4", 5), ("2 * 3", 6),
@@ -167,10 +175,27 @@ def run(binary, work):
         source = "fn overflow() -> i64 eff [Fail[ArithOverflow]] { 9223372036854775807 + 1 } fn division() -> i64 eff [Fail[RuntimeError]] { 1 / 0 } " + f"fn main() -> i64 {{ handle Fail[RuntimeError] in {{ handle Fail[ArithOverflow] in {{ wrapping_mul({arguments}) }} with {{ return v => v, raise(e, k) => 10, }} }} with {{ return v => v, raise(e, k) => 20, }} }}"
         h.agree(source, expected)
 
-    source = "fn f(x: i64) -> i64 eff [Fail[ArithOverflow]] { x" + " + 0" * 70 + " } " + guarded("i64", "f(42)", "43")
+    # 513 AST occurrences exceed the default 512-node admission budget without
+    # requiring deep frontend recursion on the Windows CLI's 1 MiB stack.
+    expression = balanced_addition(["x"] + ["0"] * 256)
+    source = f"fn f(x: i64) -> i64 eff [Fail[ArithOverflow]] {{ {expression} }} " + guarded("i64", "f(42)", "43")
     path = h.agree(source, "42")
     original, rewritten = h.hir(path, True), h.hir(path)
-    assert original == rewritten == h.hir(path), "resource refusal must keep the complete island unchanged"
+    pending = [(tail(body(load(original), "f")), 1)]
+    occurrences, depth = 0, 0
+    while pending:
+        expression, level = pending.pop()
+        occurrences += 1
+        depth = max(depth, level)
+        kind = expression["kind"]
+        if isinstance(kind, dict) and "Binary" in kind:
+            operator, left, right = kind["Binary"]
+            assert operator == "+"
+            pending.extend([(left, level + 1), (right, level + 1)])
+        else:
+            assert kind in [{"Name": "x"}, {"Literal": {"Int": 0}}]
+    assert (occurrences, depth) == (513, 10)
+    assert original == rewritten == h.hir(path), "input-node refusal must keep the complete island unchanged"
 
     path = h.source("fn main() -> u8 { 255 + 1 }")
     original = h.execute("run", path, "--json", "--no-opt", status=1)

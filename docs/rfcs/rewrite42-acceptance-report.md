@@ -37,8 +37,11 @@ existing IR optimization disabled and enabled. Structural assertions require:
 
 Five actual executable CLI tests independently compare default execution against
 `--no-opt`, inspect serialized HIR folds and callee identity, test deterministic
-outputs and preserve source file bytes. The deep-refusal case compares raw HIR
-bytes rather than imposing serde's reader recursion ceiling on valid output.
+outputs and preserve source file bytes. The input-node-refusal case uses a
+balanced addition tree with 257 leaves and 256 operators. Its actual parsed HIR
+must contain 513 expression occurrences at depth 10, exceeding the default
+512-input-node admission limit while staying shallow. It compares raw HIR
+bytes and requires the complete original island, including children and spans.
 Original semantic errors must precede optimization and retain actual diagnostics.
 The harness accepts `VESPER_REWRITE_WITNESS_BINARY` with the Cargo executable
 fallback, using bounded child lifetime/output and disposable temporary sources.
@@ -51,7 +54,7 @@ whole-island refusal. No existing `.ves` fixture is edited. No public serialized
 certificate, proof flag, fabricated World, Lean source or approval is supplied.
 
 Actual execution is performed by the coordinator, as required by the published
-contract. Final critical integration head `2260c6a` passes:
+contract. The earlier Linux critical integration head `2260c6a` passed:
 
 - All 129 critical tests across six targets, including all eight runtime tests
   and five actual CLI tests, with zero failures or ignores. Genuine nested
@@ -67,12 +70,30 @@ contract. Final critical integration head `2260c6a` passes:
 The initial coordinator pass exposed ill-typed positive fixtures and a genuine
 producer-budget refusal on a required simplification. The fixture correction
 adds existing effect rows/lexical handlers around checked variable arithmetic,
-preserving every structural expectation and the full depth-70 original-HIR
-comparison. Successful identity/depth cases use a distinct failure fallback.
+preserving every structural expectation. The direct in-process runtime test
+still retains its depth-70 original-AST comparison. Successful identity and
+resource-refusal cases use a distinct failure fallback.
 The producer owner separately fixes its bounded accounting. No compiler effect
 policy, optimization expectation or witness cap is relaxed.
 
-The full root-package final rerun is separate and was still in progress when
-this acceptance update was written; the 129-test targeted result does not claim
-whole-workspace execution. No hosted, Lean, full Rust/source refinement,
+PR238's Windows run subsequently exposed a stack overflow in the CLI's original
+left-associated depth-70 fixture. The other four CLI tests and strict Clippy
+passed in that run; this was not a passing Windows acceptance result. The CLI
+and independent Python refusal cases now use the balanced 513-node fixture
+described above. Both inspect actual unoptimized HIR occurrence/depth counts,
+retain deterministic byte equality, and compare evaluator/JIT results with and
+without optimization. CLI success failures now identify command mode, options
+and exit status. No main-thread stack policy, compiler resource limit or
+workflow changes are part of this correction.
+
+Before this fixture update, the coordinator executed the exact balanced source
+with a Linux 1 MiB stack: JSON checking, unoptimized/optimized HIR, evaluator and
+JIT all passed (seven commands). Both HIR byte streams were identical at 377771
+bytes, and all four execution commands returned 42. This evidence belongs to the
+coordinator's actual binary probe, not a writer build. The updated Rust/Python
+test runs and Windows rerun remain pending at this commit; the low-stack Linux
+probe does not claim Windows success.
+
+The earlier 129-test targeted result does not claim whole-workspace execution.
+No hosted, Lean, full Rust/source refinement,
 self-hosting/DDC, timing, RSS or production-performance claim is made.
