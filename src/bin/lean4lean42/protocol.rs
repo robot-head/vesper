@@ -70,13 +70,16 @@ impl Name {
                 .all(|(a, b)| matches!(a,Component::String(s) if s.as_str()==*b))
     }
     pub fn strings(&self) -> Option<Vec<&str>> {
-        self.components
-            .iter()
-            .map(|c| match c {
-                Component::String(s) => Some(s.as_str()),
-                Component::Number(_) => None,
-            })
-            .collect()
+        self.validate().ok()?;
+        let mut parts = Vec::new();
+        parts.try_reserve_exact(self.components.len()).ok()?;
+        for component in &self.components {
+            match component {
+                Component::String(value) => parts.push(value.as_str()),
+                Component::Number(_) => return None,
+            }
+        }
+        Some(parts)
     }
     pub fn hash(&self, hash: &mut blake3::Hasher) {
         hash.update(&(self.components.len() as u16).to_le_bytes());
@@ -779,7 +782,9 @@ impl<'a> Machine<'a> {
         {
             return Err(invalid("mode/target/token"));
         }
-        if (mode == 1) != expected_inventory.is_some() {
+        if (mode == 1 && expected_inventory.is_none())
+            || (expected_inventory.is_some() && !matches!(mode, 0 | 1))
+        {
             return Err(invalid("expected inventory mode"));
         }
         if mode == 2 && controls.is_empty() || controls.len() > 256 {
@@ -802,6 +807,21 @@ impl<'a> Machine<'a> {
             cap: limits.inventory_bytes,
         };
         budget.charge(add(size_of::<Self>(), 32)?)?;
+        // A payload has at most one Value node per source byte. Allow geometric
+        // Vec growth/reallocation plus decoded strings and bounded Name/owner
+        // copies with an eight-Value-size envelope per byte. It is paid before
+        // serde parsing, reused serially, and separate from the transport queue.
+        budget.charge(mul(mul(8, size_of::<Value>())?, limits.frame_bytes)?)?;
+        budget.charge(mul(controls.len(), size_of::<ExpectedControl>())?)?;
+        for control in controls {
+            budget.charge(add(
+                control.id.capacity(),
+                add(
+                    control.source.capacity(),
+                    control.expected_reason.capacity(),
+                )?,
+            )?)?;
+        }
         if let Some(expected) = expected_inventory {
             budget.charge(expected.retained_bytes()?)?;
             if expected.target != target
@@ -932,8 +952,8 @@ impl<'a> Machine<'a> {
             (Phase::Work, 5) => self.cover(a)?,
             (Phase::ControlsHeader, 7) => {
                 arr(&value, 3)?;
-                let n = uint(&a[2])? as usize;
-                if n != self.registry.len() {
+                let n = self.registry.len();
+                if uint(&a[2])? != n as u64 {
                     return Err(Error::new(
                         ErrorKind::Controls,
                         "control count differs from registry",
@@ -1332,7 +1352,7 @@ impl<'a> Machine<'a> {
         Ok(())
     }
     fn control(&mut self, a: &[Value]) -> Result<(), Error> {
-        if a.len() != 9 || uint(&a[2])? as usize != self.controls.len() {
+        if a.len() != 9 || uint(&a[2])? != self.controls.len() as u64 {
             return Err(invalid("control ordinal/arity"));
         }
         let index = self.controls.len();
@@ -1465,7 +1485,7 @@ impl<'a> Machine<'a> {
         if self.failed || self.phase != Phase::Done {
             return Err(invalid("incomplete/failed session"));
         }
-        let inventory = if self.mode == 0 {
+        let inventory = if self.mode == 0 && self.expected.is_none() {
             Some(Inventory {
                 target: self.target,
                 modules: self.modules,
@@ -1496,4 +1516,163 @@ impl<'a> Machine<'a> {
 struct InventoryRef<'a> {
     modules: &'a [ModuleRecord],
     constants: &'a [Constant],
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const TOKEN: &str = "00000000000000000000000000000000";
+    fn hello(mode: u8) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!([
+            1, 0, TOKEN, mode, 2, "4.24.0", PROFILE
+        ]))
+        .unwrap()
+    }
+
+    #[test]
+    fn lexical_controls_are_rejected_before_json_normalization() {
+        for tag in ["-0", "+0", "0.0", "0e0", "false", "null"] {
+            let packet = format!("[1,{tag},\"{TOKEN}\",3,2,\"4.24.0\",\"{PROFILE}\"]");
+            let limits = Limits::default();
+            let mut machine = Machine::new(3, 2, TOKEN, &limits, &[], None).unwrap();
+            assert!(machine.feed(packet.as_bytes()).is_err(), "{tag}");
+            // A later genuine hello cannot repair a rejected stream.
+            assert!(machine.feed(&hello(3)).is_err());
+            assert!(machine.finish().is_err());
+        }
+        assert!(decode(br#"[1,0,{"x":0}]"#, 16384).is_err());
+        assert!(decode(b"[[[[[[[[[0]]]]]]]]]", 16384).is_err());
+        assert!(decode(b"[18446744073709551616]", 16384).is_err());
+    }
+
+    #[test]
+    fn exact_name_components_and_numeric_bounds_are_distinct() {
+        let samples = [
+            serde_json::json!([[0, "a.b"]]),
+            serde_json::json!([[0, "a"], [0, "b"]]),
+            serde_json::json!([[0, "1"]]),
+            serde_json::json!([[1, "1"]]),
+            serde_json::json!([[1, "18446744073709551615"]]),
+        ];
+        let mut hashes = BTreeSet::new();
+        for sample in samples {
+            let mut budget = Budget {
+                used: 0,
+                cap: 65536,
+            };
+            let name = parse_name(&sample, &mut budget).unwrap();
+            let mut hash = blake3::Hasher::new();
+            name.hash(&mut hash);
+            assert!(hashes.insert(*hash.finalize().as_bytes()));
+        }
+        for invalid_name in [
+            serde_json::json!([[1, "01"]]),
+            serde_json::json!([[1, "-0"]]),
+            serde_json::json!([[1, "18446744073709551616"]]),
+            serde_json::json!([[0, ""]]),
+            serde_json::json!([]),
+        ] {
+            assert!(
+                parse_name(
+                    &invalid_name,
+                    &mut Budget {
+                        used: 0,
+                        cap: 65536
+                    }
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn decoded_frame_scratch_is_reserved_at_admission() {
+        let limits = Limits {
+            inventory_bytes: size_of::<Machine<'_>>() + 32,
+            ..Limits::default()
+        };
+        assert!(matches!(
+            Machine::new(3, 2, TOKEN, &limits, &[], None),
+            Err(Error {
+                kind: ErrorKind::OutputLimit,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn borrowed_control_capacity_is_part_of_metadata_admission() {
+        let cap = size_of::<Machine<'_>>() + 2048;
+        let limits = Limits {
+            frame_bytes: 1,
+            inventory_bytes: cap,
+            ..Limits::default()
+        };
+        let mut registry = vec![ExpectedControl {
+            id: "id".into(),
+            source: "tools/lean4lean42/controls/VesperControls.lean".into(),
+            kind: ControlKind::Condition,
+            expected_accept: false,
+            expected_reason: "reject".into(),
+        }];
+        assert!(Machine::new(2, 2, TOKEN, &limits, &registry, None).is_ok());
+        let mut id = String::with_capacity(cap + 1);
+        id.push_str("id");
+        registry[0].id = id;
+        assert!(matches!(
+            Machine::new(2, 2, TOKEN, &limits, &registry, None),
+            Err(Error {
+                kind: ErrorKind::OutputLimit,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn matched_flag_does_not_authorize_wrong_control_result() {
+        let registry = [ExpectedControl {
+            id: "negative".into(),
+            source: "tools/lean4lean42/controls/VesperControls.lean".into(),
+            kind: ControlKind::CheckerExpr,
+            expected_accept: false,
+            expected_reason: "rejected".into(),
+        }];
+        let limits = Limits::default();
+        let mut machine = Machine::new(2, 2, TOKEN, &limits, &registry, None).unwrap();
+        machine.feed(&hello(2)).unwrap();
+        machine.feed(b"[1,7,1]").unwrap();
+        let error = machine
+            .feed(br#"[1,8,0,"negative",0,1,"rejected","rejected",1]"#)
+            .unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Controls);
+        assert!(machine.finish().is_err());
+    }
+
+    #[test]
+    fn malformed_expected_inventory_refuses_before_owner_indexing() {
+        let name = Name {
+            components: vec![Component::String("RewriteWitness".into())],
+        };
+        let inv = Inventory {
+            target: 0,
+            modules: vec![ModuleRecord {
+                id: 0,
+                name: name.clone(),
+                path: "/negative-only/RewriteWitness.olean".into(),
+            }],
+            constants: vec![Constant {
+                id: 0,
+                name,
+                module_id: u32::MAX,
+                form: 5,
+                skip: 0,
+                owners: vec![u32::MAX],
+            }],
+            totals: totals_zero(1),
+            blake3: [0; 32],
+        };
+        assert!(Machine::new(1, 0, TOKEN, &Limits::default(), &[], Some(&inv)).is_err());
+        assert!(Machine::new(0, 0, TOKEN, &Limits::default(), &[], Some(&inv)).is_err());
+    }
 }
