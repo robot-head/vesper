@@ -145,7 +145,7 @@ impl Default for Limits {
             name_bytes: 16 * 1024 * 1024,
             inventory_bytes: 64 * 1024 * 1024,
             artifact_bytes: 2 * 1024 * 1024 * 1024,
-            artifact_files: 4096,
+            artifact_files: 8192,
             report_bytes: 256 * 1024,
             compiler_runtime_files: 128,
             compiler_runtime_bytes: 2 * 1024 * 1024 * 1024,
