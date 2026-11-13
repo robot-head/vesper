@@ -434,16 +434,14 @@ mod scalar {
 
     pub(super) fn run<R: Recorder>(input: &[u8], sink: &mut Sink<'_>, rec: &mut R) -> RunOutcome {
         let mut carry = Carry::default();
-        let mut chunks = input.chunks_exact(64);
+        let (blocks, rest) = input.as_chunks::<64>();
         let mut base = 0u32;
-        for chunk in chunks.by_ref() {
-            let block: &[u8; 64] = chunk.try_into().expect("64-byte chunk");
+        for block in blocks {
             let m = reference_block(classify(block), &mut carry);
             rec.record(&m);
             sink.push(&m, base);
             base += 64;
         }
-        let rest = chunks.remainder();
         if !rest.is_empty() {
             let m = reference_block(classify(&padded_tail(rest)), &mut carry);
             rec.record(&m);

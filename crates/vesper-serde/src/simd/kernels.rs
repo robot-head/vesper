@@ -309,15 +309,14 @@ mod x86 {
     ) -> RunOutcome {
         let mut carry = Carry::default();
         let mut k = Sse::new();
-        let mut chunks = input.chunks_exact(64);
+        let (blocks, rest) = input.as_chunks::<64>();
         let mut base = 0u32;
-        for chunk in chunks.by_ref() {
-            let m = k.block(chunk.try_into().expect("64-byte chunk"), &mut carry);
+        for block in blocks {
+            let m = k.block(block, &mut carry);
             rec.record(&m);
             sink.push(&m, base);
             base = base.wrapping_add(64);
         }
-        let rest = chunks.remainder();
         if !rest.is_empty() {
             let m = k.block(&padded_tail(rest), &mut carry);
             rec.record(&m);
@@ -469,15 +468,14 @@ mod x86 {
     ) -> RunOutcome {
         let mut carry = Carry::default();
         let mut k = Avx::new();
-        let mut chunks = input.chunks_exact(64);
+        let (blocks, rest) = input.as_chunks::<64>();
         let mut base = 0u32;
-        for chunk in chunks.by_ref() {
-            let m = k.block(chunk.try_into().expect("64-byte chunk"), &mut carry);
+        for block in blocks {
+            let m = k.block(block, &mut carry);
             rec.record(&m);
             sink.push(&m, base);
             base = base.wrapping_add(64);
         }
-        let rest = chunks.remainder();
         if !rest.is_empty() {
             let m = k.block(&padded_tail(rest), &mut carry);
             rec.record(&m);
@@ -651,15 +649,14 @@ mod arm {
     ) -> RunOutcome {
         let mut carry = Carry::default();
         let mut k = Neon::new();
-        let mut chunks = input.chunks_exact(64);
+        let (blocks, rest) = input.as_chunks::<64>();
         let mut base = 0u32;
-        for chunk in chunks.by_ref() {
-            let m = k.block(chunk.try_into().expect("64-byte chunk"), &mut carry);
+        for block in blocks {
+            let m = k.block(block, &mut carry);
             rec.record(&m);
             sink.push(&m, base);
             base = base.wrapping_add(64);
         }
-        let rest = chunks.remainder();
         if !rest.is_empty() {
             let m = k.block(&padded_tail(rest), &mut carry);
             rec.record(&m);
