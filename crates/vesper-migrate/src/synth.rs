@@ -7,13 +7,121 @@
 
 use std::fmt::Write as _;
 
-use vesper_ffi::sys::{self, LibraryDescriptor, LinkMode, ParameterType, Target, ValueType};
-use vesper_ffi::{Declaration, Registry};
+use vesper_ffi::sys::{
+    self, LibraryDescriptor, LinkMode, ParameterType, Pointee, Target, ValueType,
+};
+use vesper_ffi::{Declaration, Endian, Registry, WireType};
 
 use crate::{
     Access, ErrorKind, LiftedStruct, MigrateError, Migration, Origin, Refusal, RefusalReason,
-    SysParam, SysValue,
+    SysParam, SysPointee, SysValue,
 };
+
+/// Memory a pointer parameter may name, for the aliasing check: the exact
+/// pointee type. C also lets `uint32_t *` and `int32_t *` (and any byte
+/// pointer) alias; those pairs are not refused here, which is why every lifted
+/// pointer carries an `assumed:` line and why the Bridge's `prepare_call`
+/// rejects overlapping written ranges at each call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AliasClass {
+    Scalar(sys::Scalar),
+    Struct(String),
+}
+
+/// The first pair of pointer parameters to the same pointee type where at
+/// least one is a *single* pointer and at least one is written. Slice/slice pairs keep the
+/// earlier behaviour (an `assumed:` line, plus the Bridge's call-time overlap
+/// check in `prepare_call`).
+pub fn aliasing_pair(params: &[(String, SysParam)]) -> Option<String> {
+    let class = |p: &SysParam| match p {
+        SysParam::Slice { element, access } => Some((
+            AliasClass::Scalar(*element),
+            *access == Access::Inout,
+            false,
+        )),
+        SysParam::Pointer {
+            pointee, access, ..
+        } => Some((
+            match pointee {
+                SysPointee::Scalar(s) => AliasClass::Scalar(*s),
+                SysPointee::Struct(n) => AliasClass::Struct(n.clone()),
+            },
+            access.writes(),
+            true,
+        )),
+        SysParam::Value(_) => None,
+    };
+    for (i, (a, pa)) in params.iter().enumerate() {
+        let Some((ca, wa, sa)) = class(pa) else {
+            continue;
+        };
+        for (b, pb) in &params[i + 1..] {
+            let Some((cb, wb, sb)) = class(pb) else {
+                continue;
+            };
+            if ca == cb && (wa || wb) && (sa || sb) {
+                return Some(format!(
+                    "`{a}` and `{b}` point to the same type and one is written; a signature cannot show they are distinct objects"
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// Refuse the `.vsys` signature of any function whose single-pointer struct
+/// pointee has no checked wire layout.
+pub fn check_pointer_pointees(m: &mut Migration) {
+    let laid_out: std::collections::BTreeSet<String> = m
+        .structs
+        .iter()
+        .filter(|s| s.wire.is_ok())
+        .map(|s| s.name.clone())
+        .collect();
+    for f in &mut m.functions {
+        let Ok(sig) = &f.sys else { continue };
+        let missing = sig.params.iter().find_map(|(n, p)| match p {
+            SysParam::Pointer {
+                pointee: SysPointee::Struct(s),
+                ..
+            } if !laid_out.contains(s) => Some((n.clone(), s.clone())),
+            _ => None,
+        });
+        if let Some((param, s)) = missing {
+            let item = match m.origin {
+                Origin::CHeader { .. } => format!("fn {}", f.name),
+                Origin::RustCrate { .. } => format!("fn {}: vsys", f.name),
+            };
+            f.sys = Err(Refusal::new(
+                item,
+                RefusalReason::PointerParameter,
+                format!(
+                    "parameter `{param}` points to struct `{s}`, which has no checked wire layout"
+                ),
+            ));
+        }
+    }
+}
+
+fn wire_field(t: &WireType) -> String {
+    match t {
+        WireType::Integer(i) => format!(
+            "{}{}{}",
+            if i.signed { "i" } else { "u" },
+            i.bits,
+            match i.endian {
+                Endian::Native => "",
+                Endian::Little => "le",
+                Endian::Big => "be",
+            }
+        ),
+        WireType::ByteArray(n) => format!("ByteArray[{n}]"),
+        WireType::ZeroPad(n) => format!("ZeroPad[{n}]"),
+        WireType::Struct(n) => n.clone(),
+        // Not reachable for a declaration that compiled.
+        other => format!("{other:?}"),
+    }
+}
 
 /// Words that cannot be parameter names in Vesper or `.vsys` text.
 const RESERVED: &[&str] = &[
@@ -262,6 +370,7 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
     }
     out.push_str("\n) {\n");
     let mut used_enums = std::collections::BTreeSet::new();
+    let mut used_structs = std::collections::BTreeSet::new();
     let mut omitted = vec![];
     let mut fns = String::new();
     for f in &m.functions {
@@ -293,6 +402,24 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                     },
                     element.name()
                 ),
+                SysParam::Pointer {
+                    pointee,
+                    access,
+                    nullable,
+                } => {
+                    if let SysPointee::Struct(st) = pointee {
+                        used_structs.insert(st.clone());
+                    }
+                    if *nullable {
+                        format!(
+                            "nocapture {} {n}: Option[{}]",
+                            access.keyword(),
+                            pointee.name()
+                        )
+                    } else {
+                        format!("nocapture {} {n}: {}", access.keyword(), pointee.name())
+                    }
+                }
             })
             .collect();
         if let SysValue::Enum(e) = &sig.result {
@@ -324,6 +451,38 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
             vs.join(", ")
         );
     }
+    // Wire struct pointees and, transitively, the structs they contain.
+    let decls: std::collections::BTreeMap<&str, &Declaration> = m
+        .structs
+        .iter()
+        .filter_map(|s| s.wire.as_ref().ok().map(|d| (s.name.as_str(), d)))
+        .collect();
+    let mut pending: Vec<String> = used_structs.iter().cloned().collect();
+    while let Some(n) = pending.pop() {
+        let Some(d) = decls.get(n.as_str()) else {
+            continue;
+        };
+        for f in &d.fields {
+            if let WireType::Struct(inner) = &f.ty
+                && used_structs.insert(inner.clone())
+            {
+                pending.push(inner.clone());
+            }
+        }
+    }
+    for n in &used_structs {
+        let Some(d) = decls.get(n.as_str()) else {
+            return Err(fail(format!(
+                "pointee struct `{n}` has no wire layout; run check_pointer_pointees"
+            )));
+        };
+        let fields: Vec<String> = d
+            .fields
+            .iter()
+            .map(|f| format!("{}: {}", f.name, wire_field(&f.ty)))
+            .collect();
+        let _ = writeln!(out, "    wire struct {n} {{ {} }}", fields.join(", "));
+    }
     out.push_str(&fns);
     out.push_str("}\n");
     let descriptor = sys::parse(&out, sys::Limits::default()).map_err(|e| {
@@ -353,6 +512,31 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                                     access: a,
                                 },
                             ) => element == e && access == a,
+                            (
+                                ParameterType::Pointer {
+                                    pointee,
+                                    access,
+                                    nullable,
+                                },
+                                SysParam::Pointer {
+                                    pointee: e,
+                                    access: a,
+                                    nullable: z,
+                                },
+                            ) => {
+                                access == a
+                                    && nullable == z
+                                    && match (pointee, e) {
+                                        (Pointee::Scalar(x), SysPointee::Scalar(y)) => x == y,
+                                        (Pointee::Struct(x), SysPointee::Struct(y)) => {
+                                            x.name() == y
+                                                && decls
+                                                    .get(y.as_str())
+                                                    .is_some_and(|d| x.declaration() == *d)
+                                        }
+                                        _ => false,
+                                    }
+                            }
                             _ => false,
                         }
                 });

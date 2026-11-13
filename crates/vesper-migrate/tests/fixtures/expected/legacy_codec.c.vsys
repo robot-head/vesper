@@ -7,6 +7,12 @@ sys library LegacyCodecAbi (
     header = "legacy_codec.h",
     pkg_config = "legacy-codec ^0.8.0"
 ) {
+    wire struct batch_header { base_offset: i64, batch_length: i32, leader_epoch: i32, magic: u8, reserved: ByteArray[3], crc: u32 }
+    wire struct decoder_stats { last_crc: u32, record_count: i32, last: batch_header }
+    // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+    // assumed: `out_crc` lifted to a non-null nocapture inout pointer to one `u32`: a C header cannot show non-null, single-element or non-retention
+    // assumed: `out_count` lifted to a non-null nocapture inout pointer to one `i32`: a C header cannot show non-null, single-element or non-retention
+    fn legacy_parse_batch_header(nocapture in raw_bytes: CSlice[u8], nocapture inout out_crc: u32, nocapture inout out_count: i32) -> ForeignVal[i32];
     // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
     // assumed: `out` + `out_len` lifted to a nocapture unique slice: a C header cannot show that the callee does not retain the pointer
     fn legacy_parse_batch_header_into(nocapture in raw_bytes: CSlice[u8], nocapture inout out: CSlice[u32]) -> ForeignVal[i32];
@@ -19,4 +25,9 @@ sys library LegacyCodecAbi (
     fn legacy_version() -> ForeignVal[u32];
     fn legacy_reset() -> ForeignVal[Unit];
     fn legacy_crc_table() -> ForeignVal[NullablePtr[u32]];
+    // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
+    // assumed: `out_hdr` lifted to a non-null nocapture inout pointer to one `batch_header`: a C header cannot show non-null, single-element or non-retention
+    fn legacy_read_header(nocapture in raw_bytes: CSlice[u8], nocapture inout out_hdr: batch_header) -> ForeignVal[i32];
+    // assumed: `stats` lifted to a non-null nocapture inout pointer to one `decoder_stats`: a C header cannot show non-null, single-element or non-retention
+    fn legacy_fill(nocapture inout stats: decoder_stats) -> ForeignVal[i32];
 }

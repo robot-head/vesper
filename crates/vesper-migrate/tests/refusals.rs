@@ -94,7 +94,8 @@ fn c_type_refusals() {
         reason(&m, "fn f2"),
         RefusalReason::ImplementationDefinedCarrier
     );
-    assert_eq!(reason(&m, "fn f3"), RefusalReason::PointerParameter);
+    // A single scalar out-pointer now lifts (see single_pointer_lifting).
+    assert!(m.function("f3").is_some_and(|f| f.sys.is_ok()));
     assert_eq!(reason(&m, "fn f4"), RefusalReason::OpaquePointer);
     assert_eq!(reason(&m, "fn f5"), RefusalReason::Aggregate);
     assert_eq!(reason(&m, "fn f6"), RefusalReason::UnsupportedType);
@@ -271,10 +272,8 @@ fn rust_c_abi_requires_extern_c_and_no_mangle() {
     );
     assert_eq!(reason(&m, "fn mangled: vsys"), RefusalReason::NotCAbi);
     assert_eq!(reason(&m, "fn sys_abi: vsys"), RefusalReason::NotCAbi);
-    assert_eq!(
-        reason(&m, "fn borrowed: vsys"),
-        RefusalReason::PointerParameter
-    );
+    // `&u32` in a C-ABI function is a non-null nocapture `in` pointer.
+    assert!(m.function("borrowed").is_some_and(|f| f.sys.is_ok()));
     assert_eq!(reason(&m, "fn sliced: vsys"), RefusalReason::NotCAbi);
     assert_eq!(
         reason(&m, "fn wide: vsys"),
@@ -282,12 +281,16 @@ fn rust_c_abi_requires_extern_c_and_no_mangle() {
     );
     assert_eq!(reason(&m, "fn float: vsys"), RefusalReason::Floating);
     let spec = synth::sys_spec(&m, &opts()).unwrap();
-    assert_eq!(spec.descriptor.functions().len(), 1);
+    assert_eq!(spec.descriptor.functions().len(), 2);
     assert!(
         spec.text
             .contains("fn ok(x: u32, y: bool) -> ForeignVal[i64];")
     );
-    assert_eq!(spec.omitted.len(), 6);
+    assert!(
+        spec.text
+            .contains("fn borrowed(nocapture in x: u32) -> ForeignVal[u32];")
+    );
+    assert_eq!(spec.omitted.len(), 5);
 }
 
 #[test]
@@ -477,4 +480,134 @@ fn truncated_and_corrupted_fixtures_never_panic() {
             let _ = synth::vesper_declarations(&m);
         }
     }
+}
+
+#[test]
+fn c_single_pointers_lift_and_unsafe_shapes_stay_refused() {
+    let m = header(
+        "struct pair { uint32_t lo; uint32_t hi; };
+         struct gap { uint8_t a; uint32_t b; };
+         int32_t out_scalar(uint32_t *out_crc, int32_t *out_count);
+         int32_t in_scalar(const uint64_t *key);
+         int32_t out_struct(const uint8_t *src, size_t len, struct pair *out);
+         void swap(uint32_t *a, uint32_t *b);
+         void shared_twice(const uint32_t *a, const uint32_t *b);
+         void into_slice(uint32_t *total, const uint32_t *values, size_t n);
+         void pair_twice(struct pair *a, const struct pair *b);
+         uint32_t fixed(const uint32_t v[4]);
+         uint32_t open(uint32_t v[]);
+         void bytes(uint8_t *buf);
+         void opaque(void *ctx);
+         void nested(uint32_t **out);
+         void padded(struct gap *g);
+         void structs(struct pair *p, size_t n);",
+    );
+    let sys = |name: &str| {
+        let f = m
+            .function(name)
+            .unwrap_or_else(|| panic!("{name}: {:#?}", m.all_refusals()));
+        f.sys.clone().unwrap()
+    };
+    use vesper_migrate::{PointerAccess, Scalar, SysParam, SysPointee};
+    assert_eq!(
+        sys("out_scalar").params,
+        vec![
+            (
+                "out_crc".to_string(),
+                SysParam::Pointer {
+                    pointee: SysPointee::Scalar(Scalar::U32),
+                    access: PointerAccess::Inout,
+                    nullable: false
+                }
+            ),
+            (
+                "out_count".to_string(),
+                SysParam::Pointer {
+                    pointee: SysPointee::Scalar(Scalar::I32),
+                    access: PointerAccess::Inout,
+                    nullable: false
+                }
+            ),
+        ]
+    );
+    assert!(matches!(
+        &sys("in_scalar").params[0].1,
+        SysParam::Pointer {
+            access: PointerAccess::In,
+            ..
+        }
+    ));
+    assert!(matches!(
+        &sys("out_struct").params[1].1,
+        SysParam::Pointer { pointee: SysPointee::Struct(n), .. } if n == "pair"
+    ));
+    // Two shared pointers to one type may alias harmlessly.
+    assert!(m.function("shared_twice").is_some());
+    for (item, why) in [
+        ("fn swap", RefusalReason::AliasingPointers),
+        ("fn into_slice", RefusalReason::AliasingPointers),
+        ("fn pair_twice", RefusalReason::AliasingPointers),
+        ("fn fixed", RefusalReason::ArrayWithoutLength),
+        ("fn open", RefusalReason::ArrayWithoutLength),
+        ("fn bytes", RefusalReason::ArrayWithoutLength),
+        ("fn opaque", RefusalReason::OpaquePointer),
+        ("fn nested", RefusalReason::OpaquePointer),
+        ("fn padded", RefusalReason::PointerParameter),
+        ("fn structs", RefusalReason::Aggregate),
+    ] {
+        assert_eq!(reason(&m, item), why, "{item}");
+        assert!(m.function(&item[3..]).is_none(), "{item} must not lift");
+    }
+    let spec = synth::sys_spec(&m, &opts()).unwrap();
+    assert!(spec.text.contains("wire struct pair { lo: u32, hi: u32 }"));
+    assert!(!spec.text.contains("wire struct gap"));
+    assert!(spec.text.contains(
+        "fn out_scalar(nocapture inout out_crc: u32, nocapture inout out_count: i32) -> ForeignVal[i32];"
+    ));
+}
+
+#[test]
+fn rust_single_pointers_annotations_and_aliasing() {
+    let m = crate_src(
+        r#"
+        #[repr(C)] pub struct Pair { pub lo: u32, pub hi: u32 }
+        pub struct Loose { pub lo: u32 }
+        /// vesper-migrate: out out
+        #[no_mangle] pub unsafe extern "C" fn raw_out(out: *mut Pair) {}
+        /// vesper-migrate: key in
+        #[no_mangle] pub unsafe extern "C" fn raw_in(key: *const u64) -> u64 { 0 }
+        #[no_mangle] pub extern "C" fn by_ref(p: &mut Pair, n: &u32) {}
+        #[no_mangle] pub extern "C" fn loose(p: &mut Loose) {}
+        /// vesper-migrate: a inout
+        /// vesper-migrate: b in
+        #[no_mangle] pub unsafe extern "C" fn alias(a: *mut u32, b: *const u32) {}
+        /// vesper-migrate: a out len n
+        #[no_mangle] pub unsafe extern "C" fn out_slice(a: *mut u32, n: usize) {}
+        /// vesper-migrate: a out
+        #[no_mangle] pub unsafe extern "C" fn const_out(a: *const u32) {}
+        /// vesper-migrate: a inout
+        #[no_mangle] pub unsafe extern "C" fn opaque(a: *mut core::ffi::c_void) {}
+        "#,
+    );
+    let spec = synth::sys_spec(&m, &opts()).unwrap();
+    for line in [
+        "wire struct Pair { lo: u32, hi: u32 }",
+        "fn raw_out(nocapture out out: Pair) -> ForeignVal[Unit];",
+        "fn raw_in(nocapture in key: u64) -> ForeignVal[u64];",
+        "fn by_ref(nocapture inout p: Pair, nocapture in n: u32) -> ForeignVal[Unit];",
+    ] {
+        assert!(spec.text.contains(line), "{line}\n{}", spec.text);
+    }
+    assert_eq!(
+        reason(&m, "fn loose: vsys"),
+        RefusalReason::PointerParameter
+    );
+    assert_eq!(
+        reason(&m, "fn alias: vsys"),
+        RefusalReason::AliasingPointers
+    );
+    assert_eq!(reason(&m, "fn out_slice"), RefusalReason::BadAnnotation);
+    assert_eq!(reason(&m, "fn const_out"), RefusalReason::BadAnnotation);
+    // `c_void` is not a lifted type at all.
+    assert_eq!(reason(&m, "fn opaque"), RefusalReason::UnsupportedType);
 }

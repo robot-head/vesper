@@ -21,9 +21,14 @@
 //! functions get Vesper declarations and a [`RefusalReason::NotCAbi`] note.
 //!
 //! Raw-pointer annotation (a doc line on the function, valid Rust):
-//! `/// vesper-migrate: <param> in|inout [len <len_param>]`. `len` folds the
-//! following `usize` parameter into a slice; without it the pointer is a
-//! single non-null element.
+//! `/// vesper-migrate: <param> in|out|inout [len <len_param>]`. `len` folds
+//! the following `usize` parameter into a slice (`in`/`inout` only); without
+//! it the pointer is a single non-null element, lifted to
+//! `nocapture in|out|inout name: T` for an integer or wire-struct pointee.
+//! Two annotated raw pointers to the same type, one of them written, are
+//! refused as [`RefusalReason::AliasingPointers`]. In C-ABI functions,
+//! `&T`/`&mut T` of an integer or struct lift to `nocapture in|inout`
+//! single pointers (Rust references are non-null and never alias a `&mut`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -39,8 +44,8 @@ use vesper_ffi::{Declaration, Endian, Field, Integer, WireType};
 
 use crate::{
     Access, ErrorKind, LiftedEnum, LiftedField, LiftedFunction, LiftedParam, LiftedStruct, Limits,
-    MigrateError, Migration, Mode, Origin, Refusal, RefusalReason, Scalar, SysParam, SysSignature,
-    SysValue, lift::LegacyRustParamSummary,
+    MigrateError, Migration, Mode, Origin, PointerAccess, Refusal, RefusalReason, Scalar, SysParam,
+    SysPointee, SysSignature, SysValue, lift::LegacyRustParamSummary,
 };
 
 const INTERIOR: &[&str] = &[
@@ -833,7 +838,7 @@ impl Scan<'_> {
 }
 
 struct PtrAnnotation {
-    access: Access,
+    access: PointerAccess,
     len: Option<String>,
 }
 
@@ -852,7 +857,7 @@ fn annotations(
                 item,
                 RefusalReason::BadAnnotation,
                 format!(
-                    "expected `vesper-migrate: <param> in|inout [len <param>]`, got `{}`",
+                    "expected `vesper-migrate: <param> in|out|inout [len <param>]`, got `{}`",
                     line.trim()
                 ),
             )
@@ -863,10 +868,15 @@ fn annotations(
             _ => return Err(bad()),
         };
         let access = match *access {
-            "in" => Access::In,
-            "inout" => Access::Inout,
+            "in" => PointerAccess::In,
+            "out" => PointerAccess::Out,
+            "inout" => PointerAccess::Inout,
             _ => return Err(bad()),
         };
+        if access == PointerAccess::Out && len.is_some() {
+            // An out slice would expose uninitialized elements.
+            return Err(bad());
+        }
         if out
             .insert(param.to_string(), PtrAnnotation { access, len })
             .is_some()
@@ -1018,6 +1028,7 @@ impl Analyzer {
             slot.get_or_insert_with(|| Refusal::new(format!("fn {display}: vsys"), why.0, why.1));
         };
         let mut assumptions = vec![];
+        let mut raw_pointers: Vec<(String, SysParam)> = vec![];
         let mut skip_len: Option<String> = None;
         let safe = crate::synth::safe_idents(raw.iter().map(|p| p.name.as_str()));
         for (index, p) in raw.iter().enumerate() {
@@ -1041,28 +1052,41 @@ impl Analyzer {
                             ),
                         )));
                     };
-                    if note.access == Access::Inout && !mutable {
+                    if note.access.writes() && !mutable {
                         return Err(refuse((
                             RefusalReason::BadAnnotation,
-                            format!("`{}` is `*const` but annotated inout", p.name),
+                            format!(
+                                "`{}` is `*const` but annotated {}",
+                                p.name,
+                                note.access.keyword()
+                            ),
                         )));
                     }
-                    let mode = if note.access == Access::In {
+                    let mode = if note.access == PointerAccess::In {
                         Mode::In
                     } else {
                         Mode::Inout
                     };
-                    let RTy::Scalar(e) = **inner else {
-                        return Err(refuse((
-                            RefusalReason::OpaquePointer,
-                            format!(
-                                "annotated raw pointer `{}` must point to a fixed-width integer",
-                                p.name
-                            ),
-                        )));
+                    let pointee = match &**inner {
+                        RTy::Scalar(e) => SysPointee::Scalar(*e),
+                        RTy::Named(n) if note.len.is_none() && self.structs.contains_key(n) => {
+                            SysPointee::Struct(n.clone())
+                        }
+                        _ => {
+                            return Err(refuse((
+                                RefusalReason::OpaquePointer,
+                                format!(
+                                    "annotated raw pointer `{}` must point to a fixed-width integer (or, without `len`, a crate struct)",
+                                    p.name
+                                ),
+                            )));
+                        }
                     };
                     match &note.len {
                         Some(len) => {
+                            let SysPointee::Scalar(e) = pointee else {
+                                unreachable!("struct pointees are refused with len")
+                            };
                             let next = raw.get(index + 1);
                             if !next.is_some_and(|n| {
                                 &n.name == len && n.ty == RTy::Scalar(Scalar::Usize)
@@ -1080,13 +1104,16 @@ impl Analyzer {
                                 "`{}` + `{len}` form a nocapture slice (from annotation)",
                                 p.name
                             ));
-                            sys_params.push((
-                                pname.clone(),
-                                SysParam::Slice {
-                                    element: e,
-                                    access: note.access,
+                            let param = SysParam::Slice {
+                                element: e,
+                                access: if note.access == PointerAccess::In {
+                                    Access::In
+                                } else {
+                                    Access::Inout
                                 },
-                            ));
+                            };
+                            raw_pointers.push((pname.clone(), param.clone()));
+                            sys_params.push((pname.clone(), param));
                             lifted.push(LiftedParam {
                                 name: pname,
                                 mode,
@@ -1096,24 +1123,22 @@ impl Analyzer {
                         }
                         None => {
                             assumptions.push(format!(
-                                "`{}` is a non-null nocapture element (from annotation)",
-                                p.name
+                                "`{}` is a non-null nocapture {} element (from annotation)",
+                                p.name,
+                                note.access.keyword()
                             ));
-                            sys_refuse(
-                                (
-                                    RefusalReason::PointerParameter,
-                                    format!(
-                                        "`{}`: Bridge .vsys accepts pointer parameters only as nocapture CSlice",
-                                        p.name
-                                    ),
-                                ),
-                                &mut sys_err,
-                            );
+                            let param = SysParam::Pointer {
+                                pointee: pointee.clone(),
+                                access: note.access,
+                                nullable: false,
+                            };
+                            raw_pointers.push((pname.clone(), param.clone()));
+                            sys_params.push((pname.clone(), param));
                             lifted.push(LiftedParam {
                                 name: pname,
                                 mode,
                                 footprint: None,
-                                ty: e.name().into(),
+                                ty: pointee.name().to_owned(),
                             });
                         }
                     }
@@ -1151,12 +1176,33 @@ impl Analyzer {
                             ty: inner.vesper(),
                         }
                     };
+                    let access = if *mutable {
+                        PointerAccess::Inout
+                    } else {
+                        PointerAccess::In
+                    };
                     match &**inner {
-                        RTy::Scalar(_) => sys_refuse(
+                        RTy::Scalar(e) => sys_params.push((
+                            pname.clone(),
+                            SysParam::Pointer {
+                                pointee: SysPointee::Scalar(*e),
+                                access,
+                                nullable: false,
+                            },
+                        )),
+                        RTy::Named(n) if self.structs.contains_key(n) => sys_params.push((
+                            pname.clone(),
+                            SysParam::Pointer {
+                                pointee: SysPointee::Struct(n.clone()),
+                                access,
+                                nullable: false,
+                            },
+                        )),
+                        RTy::Named(n) => sys_refuse(
                             (
                                 RefusalReason::PointerParameter,
                                 format!(
-                                    "`{}`: Bridge .vsys accepts pointer parameters only as nocapture CSlice",
+                                    "`{}`: borrowed `{n}` is not an integer or wire struct; point to its integer carrier",
                                     p.name
                                 ),
                             ),
@@ -1211,6 +1257,9 @@ impl Analyzer {
                 RefusalReason::BadAnnotation,
                 format!("length parameter `{len}` not found"),
             )));
+        }
+        if let Some(why) = crate::synth::aliasing_pair(&raw_pointers) {
+            sys_refuse((RefusalReason::AliasingPointers, why), &mut sys_err);
         }
         let sys_result = match self.sys_value(&result) {
             Ok(v) => Some(v),
@@ -1723,11 +1772,13 @@ fn analyze(krate: Crate, limits: Limits) -> Result<Migration, MigrateError> {
     }
     functions.sort_by(|x, y| x.name.cmp(&y.name));
     refusals.sort();
-    Ok(Migration {
+    let mut m = Migration {
         origin: Origin::RustCrate { name: krate.name },
         functions,
         structs,
         enums,
         refusals,
-    })
+    };
+    crate::synth::check_pointer_pointees(&mut m);
+    Ok(m)
 }
