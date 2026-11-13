@@ -4,11 +4,13 @@
 mod support;
 
 use support::*;
-use vesper_warp::endpoint::{Discard, Echo, EndpointConfig, Responder, WarpError};
+use vesper_warp::endpoint::{Discard, Echo, EndpointConfig, Responder, StreamMode, WarpError};
 
 fn config() -> EndpointConfig {
     EndpointConfig {
         initial_rtt_ns: 20 * MS,
+        // The wave-four raw path: the Responder sees STREAM frames.
+        stream_mode: StreamMode::Raw,
         ..EndpointConfig::default()
     }
 }
