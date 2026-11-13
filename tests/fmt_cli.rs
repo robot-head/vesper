@@ -92,14 +92,55 @@ fn syntax_utf8_macro_and_input_budget_fail_without_any_writes() {
 }
 #[test]
 fn options_and_missing_files_fail() {
-    assert!(!invoke(vec![]));
+    // A bare `vesper fmt` formats the working directory, so it is only run
+    // against the actual binary inside a disposable fixture directory.
     assert!(!invoke(vec!["--bad".into()]));
     assert!(!invoke(vec!["first".into(), "second".into()]));
     let f = Fixture::new();
     assert!(!f.run(&[]));
     assert!(invoke(vec!["--help".into()]));
     assert!(!invoke(vec!["--".into(), "--help".into()]));
-    assert!(!invoke(vec![f.0.to_string_lossy().into_owned()]));
+    // A directory argument is walked; this one only holds a missing file.
+    assert!(invoke(vec![f.0.to_string_lossy().into_owned()]));
+}
+#[test]
+fn bare_fmt_checks_and_formats_the_working_directory() {
+    let Some(binary) = option_env!("CARGO_BIN_EXE_vesper") else {
+        return;
+    };
+    let f = Fixture::new();
+    fs::create_dir(f.0.join("src")).unwrap();
+    fs::write(f.0.join("src/a.ves"), "fn main( )->u64{1}").unwrap();
+    fs::write(f.0.join("b.ves"), "fn main() -> u64 {\n    2\n}\n").unwrap();
+    let run = |args: &[&str]| {
+        std::process::Command::new(binary)
+            .arg("fmt")
+            .args(args)
+            .current_dir(&f.0)
+            .output()
+            .unwrap()
+    };
+    let check = run(&["--check", "--json"]);
+    assert!(!check.status.success());
+    let report: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(report["status"], "needs_format");
+    assert_eq!(report["file_count"], 2);
+    assert_eq!(report["needs_format"], 1);
+    assert_eq!(
+        fs::read_to_string(f.0.join("src/a.ves")).unwrap(),
+        "fn main( )->u64{1}"
+    );
+    assert!(run(&[]).status.success());
+    assert_eq!(
+        fs::read_to_string(f.0.join("src/a.ves")).unwrap(),
+        "fn main() -> u64 {\n    1\n}\n"
+    );
+    let clean = run(&["--check"]);
+    assert!(
+        clean.status.success(),
+        "{}",
+        String::from_utf8_lossy(&clean.stdout)
+    );
 }
 #[cfg(unix)]
 #[test]

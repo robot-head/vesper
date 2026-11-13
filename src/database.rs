@@ -2,7 +2,10 @@
 //!
 //! Semantic editor consumers must use [`guarded_analysis`]. Recovery inputs
 //! support diagnostic-only analysis; the original parse/check/diagnostics queries
-//! below retain their historical batch behavior.
+//! below retain their historical batch behavior. Explicit [`macro_preview`]
+//! results describe checked expanded source, never original-source semantics.
+pub mod macro_preview;
+
 use crate::{
     ast::{self, Diagnostic},
     check::{self, Checked},

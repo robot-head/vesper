@@ -1,0 +1,14 @@
+//! Café 😀 [close], [`Tx::commit`], [Ask::ask], [Score], [i64::score], [Point::score], [Tx], [Ask] and [ask].
+//! A fake declaration spelling fn close must not supply the target token.
+linear struct Tx { id: u64 }
+impl Tx {
+    fn commit(sink self) -> u64 { let Tx { id } = self; id }
+}
+linear effect Ask { fn ask() -> i64; }
+trait Score { fn score(in self) -> i64; }
+copy struct Point { x: i64 }
+impl Point { fn score(in self) -> i64 { self.x } }
+impl i64 { fn score(in self) -> i64 { self } }
+fn ask() -> i64 { 1 }
+fn close(sink tx: Tx) -> u64 { tx.commit() }
+fn main() -> i64 { let close = 42; close }

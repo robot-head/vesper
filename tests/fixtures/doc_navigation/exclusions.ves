@@ -1,0 +1,16 @@
+//! [present] is the only real link.
+//! `ordinary [NoInline]` and ``two ` delimiters [NoDouble]``.
+//! \[NoEscape] and ![NoImage](evil.png) and [NoUrl](https://example.invalid).
+//! [NoReference][id]
+//! [id]: https://example.invalid
+//! [T-CallProj] is prose.
+//! ```vesper
+//! [NoFence]
+//! ```
+//! ~~~~text
+//! [NoTilde]
+//! ~~~~
+//// [NoFourSlash]
+// [NoOrdinary]
+fn text() -> String { "/// [NoString]" }
+fn present() -> i64 { 42 }

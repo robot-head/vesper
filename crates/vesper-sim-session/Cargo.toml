@@ -12,6 +12,7 @@ path = "src/bin/vesper-sim.rs"
 [dependencies]
 vesper = { path = "../.." }
 vesper-simpulse = { path = "../vesper-simpulse" }
+vesper-warp-umem = { path = "../vesper-warp-umem" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

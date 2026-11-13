@@ -248,6 +248,7 @@ fn bad_packets_are_dropped_and_their_frames_recycled() {
         .connection(p.s_conn)
         .unwrap()
         .keys
+        .unwrap()
         .authentication_failures();
     assert_eq!(opener_failures, 1);
     assert_umem_clean(&mut p.server);

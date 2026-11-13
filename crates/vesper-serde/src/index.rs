@@ -1,4 +1,4 @@
-use crate::{Error, ErrorKind};
+use crate::{Error, ErrorKind, FloatLimits};
 
 const HARD_DEPTH: usize = 128;
 
@@ -174,6 +174,28 @@ impl<'d, 'a> Node<'d, 'a> {
             .parse()
             .map_err(|_| Error::new(ErrorKind::Number, self.token().start))
     }
+    /// Convert an already validated JSON number to finite scalar binary64.
+    ///
+    /// Conversion may round, including underflow to signed zero. The original
+    /// spelling remains available through `raw`; overflow to infinity fails.
+    /// Byte and logical-work admission happen before Rust's scalar conversion.
+    pub fn as_f64(self, limits: FloatLimits) -> Result<f64, Error> {
+        let token = self.token();
+        if token.kind != Kind::Number {
+            return Err(Error::new(ErrorKind::Type, token.start));
+        }
+        let raw = self.raw();
+        limits
+            .preflight(raw.len())
+            .map_err(|e| Error::new(e.kind, token.start))?;
+        let value = raw
+            .parse::<f64>()
+            .map_err(|_| Error::new(ErrorKind::Number, token.start))?;
+        if !value.is_finite() {
+            return Err(Error::new(ErrorKind::Number, token.start));
+        }
+        Ok(value)
+    }
     pub fn as_bool(self) -> Result<bool, Error> {
         if self.kind() != Kind::Bool {
             return Err(Error::new(ErrorKind::Type, self.token().start));
@@ -285,6 +307,16 @@ impl<'d, 'a> Cursor<'d, 'a> {
             .peek()
             .ok_or(Error::new(ErrorKind::End, self.doc.input.len()))?;
         let result = node.string()?.decode(scratch)?;
+        self.index = node.token().next;
+        Ok(result)
+    }
+    /// Read a finite binary64 number. Every failure preserves the cursor, so
+    /// callers can retry admission or read the same validated value as raw JSON.
+    pub fn read_f64(&mut self, limits: FloatLimits) -> Result<f64, Error> {
+        let node = self
+            .peek()
+            .ok_or(Error::new(ErrorKind::End, self.doc.input.len()))?;
+        let result = node.as_f64(limits)?;
         self.index = node.token().next;
         Ok(result)
     }

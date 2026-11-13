@@ -15,6 +15,18 @@ No checker/native/compiler production code is changed.
    comment byte in its original order relative to both comments and code.
 5. Reparse and a second formatting pass giving byte-identical output.
 
+Layout follows Wadler-Lindig groups with Prettier-style lookahead. Spaces inside
+a line never break. An overlong line breaks, outermost first, at: delimited
+`(...)`, `[...]` and `.{...}` lists (one comma-separated item per line, each item
+its own group so `shard.{metrics}` projections and paths stay together), the
+`->` return type (its own group, so it only moves to an indented line when it
+cannot follow the parameter list), member-chain dots and infix operators (both
+indented one level). `::` paths never split. The formatter never adds or removes
+tokens, so a broken list keeps exactly the commas in the source; a source
+trailing comma selects the vertical layout even when the list would fit, which
+keeps both forms idempotent. A statement with no break point can still exceed
+the ribbon.
+
 Line comments always have a hard newline before the next token, including closing
 delimiters. Nested block comments, CR bytes in line comments, Unicode text and
 string spelling are preserved. Whitespace and blank lines outside tokens are
@@ -55,7 +67,9 @@ inserted nodes, so cross-document references and cycles cannot silently resolve.
 Cached flat widths and indentation arithmetic are checked. Iterative rendering
 and bounded lookahead choose flat/broken groups. Both creation and rendering
 charge work; repeated/shared subtrees cannot bypass output/work limits. The arena
-avoids recursive Doc destruction. No O(N), timing or conservation theorem is claimed.
+avoids recursive Doc destruction. No O(N), timing or Rust-renderer refinement
+theorem is claimed. The separate document-model proof path below has a narrower
+kernel-checked comment-conservation theorem.
 
 Defaults are 256 KiB input, 1 MiB output, 8,192 lexer tokens, 100,000 Doc nodes,
 24 delimiter levels and 128 Mi deterministic work units. Token and delimiter
@@ -69,7 +83,15 @@ and output bytes; they are not measured CPU instructions or an RSS limit.
 Existing lexer/parser internal allocations are not converted into fallible arena
 APIs. There is no OOM/crash-recovery guarantee or zero-allocation claim.
 
-`src/fmt_commands.rs` provides `vesper fmt FILE [--recovery] [--check] [--json]`.
+`src/fmt_commands.rs` provides `vesper fmt [PATH...] [--recovery] [--check] [--json]`.
+With no PATH it formats the current directory. Directory arguments are walked
+for `.ves` files in sorted order without following symlinks, skipping hidden,
+`target/` and `bazel-*` directories (at most 200,000 entries). Each file uses the
+single-file commit below; one failing file is reported in the `files` array and
+does not stop the others. A single non-directory PATH keeps the original
+single-file JSON report; multi-file runs report `file_count`, `formatted`,
+`needs_format`, `errors` and per-file entries, and exit nonzero on any error or,
+with `--check`, any noncanonical file.
 The explicit recovery flag selects the complete-declaration mode. JSON retains
 schema_version1, adds mode source/recovery, and includes the edit count in recovery
 mode. Check mode never writes and reports noncanonical
@@ -94,6 +116,51 @@ with a fresh budget. A recovery fallback offers only current-source UTF16 edits
 for complete declarations, with syntax-only provenance. With no safe complete
 declarations, formatting remains unavailable. No edit is automatically applied,
 and no URI is treated as a filesystem path.
+
+## Explicit document-model verification
+
+```sh
+vesper verify example.ves --format --json
+vesper verify example.ves --format --emit-lean > FormatWitness.lean
+```
+
+This explicit operation captures the actual first rendered formatter Doc arena.
+It retains the projection only after the normal source token/comment conservation,
+reparse and idempotence checks succeed. A private `FormatVerification` associates
+the current source/output hashes and checks that actual lexer comment payloads
+match the projected document. `format_for_verification` does not create checked
+program semantics or a kernel certificate by itself.
+
+`Document::proof_model` validates current-owner Doc IDs and preflights expanded
+occurrences, including shared repeated children, payload bytes, depth, retained
+comment copies, metadata and work before cloning. Model fields are private and
+cannot be deserialized from cached approval. The Lean witness uses only the
+central structured AST, including list literals and a typed noncomputable
+document definition. Source payloads remain escaped strings.
+
+The CLI compiles the bundled total logical model and witness with real Lean
+4.24.0 in private staging, then reuses the existing kernel-replay auditor with an
+empty axiom policy. No accepted report or `--emit-lean` witness is published
+before that replay succeeds. The report scope is `formatter_document_model`;
+verification never writes the source and ordinary fmt/LSP/check do not start Lean.
+The selected Lean toolchain and artifact parser remain trusted.
+
+The model proves ordered tagged-comment conservation for arbitrary group-choice
+schedules and includes the generic projection-subset/disjointness lemma. Its
+public concat operation normalizes lists to binary append so strict kernel replay
+requires no nested inductive recursor. Logical definitions are noncomputable to
+omit unsafe codegen helpers; the auditor policy is unchanged. This is not a proof
+that the Rust renderer refines Lean, that the lexer is correct, that a program is
+semantically valid, or that a particular autofix is certified. Runtime token
+conservation and source association remain separate checks.
+
+The source-proof profile caps input at128KiB, output256KiB, tokens8192 and format
+work128Mi units, retaining tighter caller limits. Projection/emission default to
+4096 expanded nodes,128KiB payload, depth64,1MiB metadata/Lean output and64Mi work
+units each. Finite HARD ceilings are explicit in ProofLimits. Default logical
+work is prepaid across128Mi formatting+64Mi projection+64Mi emission; failures
+never recycle a stage's allowance. Escaped printer temporaries are preflighted.
+Valid larger inputs can refuse verification; this is not an RSS or timing claim.
 
 Run the independent example with:
 

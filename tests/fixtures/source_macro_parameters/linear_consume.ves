@@ -1,0 +1,6 @@
+linear struct Tx {}
+fn make() -> Tx { Tx {} }
+fn consume(sink tx: Tx) -> i64 { let Tx {} = tx; 42 }
+macro keep($x: expr) -> expr { quote { $x } }
+fn forward(sink value: Tx) -> Tx { keep!(value) }
+fn main() -> i64 { let tx = make(); consume(forward(tx)) }

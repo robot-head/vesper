@@ -1,0 +1,34 @@
+[package]
+name = "vesper-vault"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Vault: constant-time SSA taint verifier, secret scalars, locked secret slots, nonce-safe AEAD and hybrid X25519MLKEM768 (design section 23)"
+publish = false
+
+[dependencies]
+# Not called directly: enable zeroize-on-drop of the AES key schedule and the
+# GHASH/Poly1305 state inside aes-gcm and chacha20poly1305 through Cargo
+# feature unification, as crates/vesper-warp-crypto does.
+aes = { workspace = true }
+aes-gcm = { workspace = true }
+chacha20 = { workspace = true }
+chacha20poly1305 = { workspace = true }
+poly1305 = { workspace = true }
+polyval = { workspace = true }
+cranelift-codegen = { workspace = true }
+getrandom = { workspace = true }
+ml-kem = { workspace = true }
+rand_core = { workspace = true }
+region = { workspace = true }
+x25519-dalek = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+cranelift-frontend = { workspace = true }
+shake = { workspace = true }
+
+[target.'cfg(unix)'.dev-dependencies]
+libc = { workspace = true }
