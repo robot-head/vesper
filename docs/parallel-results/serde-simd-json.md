@@ -48,7 +48,9 @@ read, unescaped strings borrow the input, unknown subtrees skip in O(1).
 Duplicate keys (by decoded scalar equality) are still rejected, with the same
 work accounting; the comparison now has a no-decode fast path for unescaped
 keys that charges exactly the same units (unit-tested against the decoded loop).
-`IndexedJson` now stores bytes and converts token spans to `&str` on access.
+After stage 2, one safe `core::str::from_utf8` pass over the whole input
+yields the `&str` the document keeps, so every token view stays an O(1)
+slice (a review finding against per-access span validation).
 
 **§20.5 ingestion.**
 - `NdjsonBatch::parse` uses `ndjson::Engine::detect()` (SIMD when available,
@@ -102,12 +104,12 @@ objects) and a 3.4 MB, 20,000-line telemetry NDJSON file:
 
 | Path | Stage 1 MB/s | Full parse (stage 1+2) MB/s | NDJSON → tiles MB/s |
 | --- | ---: | ---: | ---: |
-| Scalar reference | 311 | 211 | 151 |
-| SSE4.2 | 2,404 | 578 | 268 |
-| AVX2 | 3,203 | 638 | 282 |
+| Scalar reference | 319 | 210 | 162 |
+| SSE4.2 | 2,361 | 575 | 302 |
+| AVX2 | 3,003 | 583 | 304 |
 
-For scale on the same data: recursive-descent `IndexedJson::parse` 287 MB/s,
-`serde_json::from_slice::<Value>` 139 MB/s (it builds a DOM, so it is not a like
+For scale on the same data: recursive-descent `IndexedJson::parse` 272 MB/s,
+`serde_json::from_slice::<Value>` 138 MB/s (it builds a DOM, so it is not a like
 for like comparison). Stage 2 (token tape and duplicate-key checks) now
 dominates. No AArch64 throughput was measured (QEMU timings are meaningless).
 
@@ -143,9 +145,11 @@ test data lives inside the crate, which `vesper_crate()` already includes.
   scalar parser is a full differential oracle.
 - Keep duplicate-key rejection (ambiguous input is an error), at the cost of the
   two `y_object_duplicated_key*` JSONTestSuite cases.
-- Validate UTF-8 in the kernel but convert spans with safe `core::str` on
-  access instead of `from_utf8_unchecked`, so a kernel bug can at worst panic or
-  error, never cause undefined behaviour.
+- Validate UTF-8 in the kernel (which rejects first and is differentially
+  tested) but obtain the document's `&str` with one safe `core::str::from_utf8`
+  pass instead of `from_utf8_unchecked`, so a kernel bug can at worst produce a
+  typed `Utf8` error, never undefined behaviour. The cost is a second, fast
+  validation pass per document.
 - Compare floats with serde_json to 4 ulps: serde_json without
   `float_roundtrip` is not correctly rounded; ours is `str::parse`.
 

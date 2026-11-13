@@ -75,11 +75,18 @@ impl<'a> IndexedJson<'a> {
             .map_err(|_| Error::new(ErrorKind::AllocationFailed, 0))?;
         let work_used = build(input, index, &limits, plan.capacity, &mut tokens)?;
         Ok(Self {
-            input,
+            input: whole_str(input)?,
             tokens,
             work_used,
         })
     }
+}
+
+/// The stage 1 kernel already rejected invalid UTF-8; this one safe pass
+/// (std's validator, very fast on ASCII) yields the `&str` that keeps every
+/// token view an O(1) slice without `from_utf8_unchecked`.
+fn whole_str(input: &[u8]) -> Result<&str, Error> {
+    core::str::from_utf8(input).map_err(|e| Error::new(ErrorKind::Utf8, e.valid_up_to()))
 }
 
 /// A reusable two-stage parser. The structural index and token tape keep
@@ -148,8 +155,15 @@ impl SimdParser {
                 return Err(e);
             }
         };
+        let text = match whole_str(input) {
+            Ok(text) => text,
+            Err(e) => {
+                self.tokens = tokens;
+                return Err(e);
+            }
+        };
         let doc = IndexedJson {
-            input,
+            input: text,
             tokens,
             work_used,
         };

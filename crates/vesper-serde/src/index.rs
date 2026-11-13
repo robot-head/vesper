@@ -56,9 +56,8 @@ pub(crate) struct Token {
 /// length, token count and index-byte allowance. No strings or DOM are allocated.
 #[derive(Debug)]
 pub struct IndexedJson<'a> {
-    /// Entirely valid UTF-8: checked by `core::str` (scalar parser) or by the
-    /// stage 1 kernel (SIMD parser). Spans are converted to `&str` on access.
-    pub(crate) input: &'a [u8],
+    /// The whole input as validated UTF-8, so token views are O(1) slices.
+    pub(crate) input: &'a str,
     pub(crate) tokens: Vec<Token>,
     pub(crate) work_used: usize,
 }
@@ -96,7 +95,7 @@ impl<'a> IndexedJson<'a> {
             return Err(parser.err(ErrorKind::Syntax));
         }
         Ok(Self {
-            input,
+            input: text,
             tokens: parser.tokens,
             work_used: parser.work,
         })
@@ -131,7 +130,8 @@ impl<'a> IndexedJson<'a> {
             && self.work_used == other.work_used
     }
     pub(crate) fn span(&self, start: usize, end: usize) -> &'a str {
-        core::str::from_utf8(&self.input[start..end]).expect("validated UTF-8 at token boundaries")
+        // Token boundaries are ASCII bytes, hence character boundaries.
+        &self.input[start..end]
     }
 }
 
