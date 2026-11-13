@@ -225,7 +225,8 @@ fn unicode_crlf_spans_and_lexical_exclusions_keep_exact_original_association() {
 
 #[test]
 fn actual_checker_and_parser_failures_take_precedence_over_broken_links() {
-    let syntax = document_source("/// [Missing]\nfn main( {", Limits::default()).unwrap_err();
+    let syntax =
+        document_source("/// [Missing]\nfn main() { let = 0; }", Limits::default()).unwrap_err();
     assert!(syntax.contains("source parse failed"), "{syntax}");
     assert!(!syntax.contains("intra-doc"));
     for source in [
