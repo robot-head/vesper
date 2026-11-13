@@ -40,7 +40,7 @@ row for it. The discipline binds callees instead:
   rows take no type arguments (E0400).
 - **Function types (E0708).** A function type carrying `C` is inhabited only by
   code checked under `C`: a closure literal flowing into such a position
-  (call argument, annotated `let`, struct field, function result, through
+  (call argument, annotated `let`, assignment, struct field, function result, through
   `if`/`match`/block tails) must declare `C` itself (`|x: f64| -> f64 eff
   [DetFloat] { .. }`), or a named function must carry it. Closures written
   lexically inside a capability body are checked under the enclosing
@@ -183,7 +183,9 @@ evidence for any of them.
   call through a secret-typed parameter. Generic parameters instantiated with a
   non-secret type reject secret arguments; there is no interprocedural
   secret-parameter inference.
-- Secrets that flow through a handler's `resume` value or handler state are
+- Handler state is secret when its initializer is, or when any operation
+  clause computes a secret (it may resume with it); the return clause binds
+  the final state with that taint. Values a handler's `resume` returns are
   tracked only by type.
 - The evaluator (`vesper run`) allocates on its own heap whatever the source
   says; the realtime rules are about the native backend, whose values live in
@@ -191,3 +193,15 @@ evidence for any of them.
 - No Lean model or proof of these rules; no backend verification. Lane 24
   runs the Vault, Resonance and Kinetic verifiers on the emitted Cranelift
   functions from `capability_policies`.
+
+## Follow-up (#310)
+
+Codex's review of lane 24 (PR #308) found two source holes, now closed with
+regression tests that fail without the fix:
+
+- Assigning to a function-typed place now gets the same capability coercion
+  as `let` and arguments, and a local that held a lexically checked closure
+  loses that exemption once something else is assigned to it
+  (`assignments_into_capability_function_types_are_coerced`).
+- Secret handler state reaches the `return` clause, including state made
+  secret by an operation clause (`secret_handler_state_reaches_the_return_clause`).

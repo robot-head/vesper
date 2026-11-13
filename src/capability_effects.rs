@@ -706,6 +706,17 @@ impl<'w> Walker<'w> {
             ExprKind::Assign(op, place, value) => {
                 let p = self.expr(place);
                 let v = self.expr(value);
+                if let Some(target) = self.ty(place) {
+                    self.coerce(value, &target);
+                }
+                // A local that held a lexically checked closure no longer
+                // does once anything else is assigned to it.
+                if let ExprKind::Name(n) = &place.kind
+                    && !matches!(value.kind, ExprKind::Closure { .. })
+                    && let Some(l) = self.local_mut(n)
+                {
+                    l.lexical_callable = false;
+                }
                 if op != "=" {
                     self.binary(e, op.trim_end_matches('='), place, value, p, p | v);
                 }
@@ -961,15 +972,58 @@ impl<'w> Walker<'w> {
                 );
             }
         }
-        let state_taint = state.as_ref().is_some_and(|(_, v)| self.expr(v));
+        let mut state_taint = state.as_ref().is_some_and(|(_, v)| self.expr(v));
         let b = self.with_scope(|w| w.expr(body));
         let mut t = b;
+        // Operation clauses resume with the next state, so a clause that
+        // computes anything secret may make the state secret. Taint is a
+        // single bit, so a second pass reaches the fixpoint (duplicate
+        // diagnostics are removed by the checker).
+        for _ in 0..2 {
+            let ops_taint = self.op_clauses(effect, state, ops, state_taint);
+            t |= ops_taint;
+            if state.is_none() || state_taint || !ops_taint {
+                break;
+            }
+            state_taint = true;
+        }
+        // The return clause binds the body's value and, with state, the
+        // final state: both carry their taint.
+        let final_state = state.is_some() && state_taint;
         t |= self.with_scope(|w| {
-            for p in &ret.pats {
-                w.bind_pattern(p, b, None);
+            match (ret.pats.as_slice(), state.is_some()) {
+                // `return (value, state)`, written as two patterns or as one
+                // pair: each component keeps its own taint.
+                ([value, st], true) => {
+                    w.bind_pattern(value, b, None);
+                    w.bind_pattern(st, final_state, None);
+                }
+                ([p], true)
+                    if let PatternKind::Tuple(ps) = &p.kind
+                        && let [value, st] = ps.as_slice() =>
+                {
+                    w.bind_pattern(value, b, None);
+                    w.bind_pattern(st, final_state, None);
+                }
+                (pats, _) => {
+                    for p in pats {
+                        w.bind_pattern(p, b || final_state, None);
+                    }
+                }
             }
             w.expr(&ret.body)
         });
+        t
+    }
+
+    fn op_clauses(
+        &mut self,
+        effect: &Effect,
+        state: &Option<(Pattern, Box<Expr>)>,
+        ops: &[Clause],
+        state_taint: bool,
+    ) -> bool {
+        let mut t = false;
         for op in ops {
             t |= self.with_scope(|w| {
                 let n = op.pats.len();
