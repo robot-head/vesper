@@ -173,6 +173,7 @@ mod tests {
             ty: "Result".into(),
             constructor: constructor.into(),
             fields: [("0".into(), value)].into(),
+            resource_identity: None,
         }
     }
     impl Handler for Count {

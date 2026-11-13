@@ -159,6 +159,7 @@ fn decode_at(world: &World, ty: &Type, json: &Json, depth: usize) -> Result<Valu
                     ty: adt.name.clone(),
                     constructor: variant.name.clone(),
                     fields,
+                    resource_identity: None,
                 })
             }
         },
@@ -176,6 +177,17 @@ pub fn encode(world: &World, ty: &Type, value: &Value) -> Result<Json, String> {
 }
 
 fn encode_at(world: &World, ty: &Type, value: &Value, depth: usize) -> Result<Json, String> {
+    if matches!(
+        value,
+        Value::Data {
+            resource_identity: Some(_),
+            ..
+        }
+    ) {
+        return Err(
+            "tracked resource identity cannot cross an uninstrumented JSON boundary".into(),
+        );
+    }
     if depth > MAX_DEPTH {
         return Err("value nesting exceeds the scenario limit".into());
     }
@@ -214,6 +226,7 @@ fn encode_at(world: &World, ty: &Type, value: &Value, depth: usize) -> Result<Js
                     ty: data_ty,
                     constructor,
                     fields,
+                    ..
                 },
             ) if data_ty == name => {
                 let adt = world.adts.get(name).ok_or_else(mismatch)?;
