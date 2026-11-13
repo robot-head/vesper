@@ -5,13 +5,15 @@
 //! Unicode scalar equality, including escaped spellings, in every object.
 //! Unescaped strings borrow input; escaped strings use explicit caller scratch.
 //! There are no source-language, SIMD, arena, linear-resource, or speed claims.
-#![forbid(unsafe_code)]
+// `unsafe` is denied everywhere except the gated `simd::kernels` module.
+#![deny(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
 pub mod archive;
 pub mod binary;
 pub mod event_columns;
 pub mod ndjson;
+pub mod simd;
 pub mod streamvbyte;
 
 mod encode;
@@ -46,6 +48,8 @@ pub enum ErrorKind {
     Overflow,
     Type,
     End,
+    /// The requested stage 1 instruction-set path is not available here.
+    IsaUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
