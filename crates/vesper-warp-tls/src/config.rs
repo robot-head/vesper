@@ -27,6 +27,7 @@ const CLIENT_HS: &str = "CLIENT_HANDSHAKE_TRAFFIC_SECRET";
 const SERVER_HS: &str = "SERVER_HANDSHAKE_TRAFFIC_SECRET";
 const CLIENT_APP: &str = "CLIENT_TRAFFIC_SECRET_0";
 const SERVER_APP: &str = "SERVER_TRAFFIC_SECRET_0";
+const CLIENT_EARLY: &str = "CLIENT_EARLY_TRAFFIC_SECRET";
 
 /// Secrets captured during one driver call. Zeroized on drop.
 #[derive(Default)]
@@ -35,6 +36,8 @@ pub(crate) struct Captured {
     pub server_hs: Option<Zeroizing<Vec<u8>>>,
     pub client_app: Option<Zeroizing<Vec<u8>>>,
     pub server_app: Option<Zeroizing<Vec<u8>>>,
+    /// The 0-RTT secret (RFC 9001 §4.6), client and server alike.
+    pub client_early: Option<Zeroizing<Vec<u8>>>,
 }
 
 thread_local! {
@@ -63,6 +66,7 @@ fn merge(into: &mut Captured, from: Captured) {
         server_hs,
         client_app,
         server_app,
+        client_early,
     } = from;
     if client_hs.is_some() {
         into.client_hs = client_hs;
@@ -75,6 +79,9 @@ fn merge(into: &mut Captured, from: Captured) {
     }
     if server_app.is_some() {
         into.server_app = server_app;
+    }
+    if client_early.is_some() {
+        into.client_early = client_early;
     }
 }
 
@@ -94,6 +101,7 @@ impl KeyLog for ExportSecrets {
                     SERVER_HS => c.server_hs = v,
                     CLIENT_APP => c.client_app = v,
                     SERVER_APP => c.server_app = v,
+                    CLIENT_EARLY => c.client_early = v,
                     _ => {}
                 }
             }
@@ -101,7 +109,10 @@ impl KeyLog for ExportSecrets {
     }
 
     fn will_log(&self, label: &str) -> bool {
-        matches!(label, CLIENT_HS | SERVER_HS | CLIENT_APP | SERVER_APP)
+        matches!(
+            label,
+            CLIENT_HS | SERVER_HS | CLIENT_APP | SERVER_APP | CLIENT_EARLY
+        )
     }
 }
 
@@ -191,8 +202,11 @@ impl ClientSetup {
     }
 
     /// Uses a caller-built configuration (for example with a custom
-    /// [`rustls::client::danger::ServerCertVerifier`]). 0-RTT is disabled and the secret export
-    /// hook replaces any `key_log`.
+    /// [`rustls::client::danger::ServerCertVerifier`]). 0-RTT is disabled
+    /// (see [`ClientSetup::with_zero_rtt`]) and the secret export hook
+    /// replaces any `key_log`. Session resumption uses the configuration's
+    /// `resumption` store (rustls's default: 256 sessions in memory, shared
+    /// by every connection made from this setup and its clones).
     pub fn from_config(mut config: ClientConfig, alpn: Vec<Vec<u8>>) -> Result<Self, TlsError> {
         check_alpn(&alpn)?;
         config.alpn_protocols = alpn;
@@ -205,6 +219,20 @@ impl ClientSetup {
 
     pub fn config(&self) -> &Arc<ClientConfig> {
         &self.config
+    }
+
+    /// Offers 0-RTT (RFC 9001 §4.6) when a resumed session's ticket allows
+    /// it. The session store is kept, so tickets received by connections
+    /// made from the original setup are used.
+    #[must_use]
+    pub fn with_zero_rtt(mut self) -> Self {
+        Arc::make_mut(&mut self.config).enable_early_data = true;
+        self
+    }
+
+    /// Whether 0-RTT is offered.
+    pub fn zero_rtt(&self) -> bool {
+        self.config.enable_early_data
     }
 }
 
@@ -231,8 +259,11 @@ impl ServerSetup {
         Self::from_config(config, alpn)
     }
 
-    /// Uses a caller-built configuration. 0-RTT is disabled and the secret
-    /// export hook replaces any `key_log`.
+    /// Uses a caller-built configuration. 0-RTT is disabled (see
+    /// [`ServerSetup::with_zero_rtt`]) and the secret export hook replaces
+    /// any `key_log`. Resumption tickets are rustls's stateful kind
+    /// (`session_storage`, by default 256 sessions in memory) unless the
+    /// configuration enables a `ticketer`.
     pub fn from_config(mut config: ServerConfig, alpn: Vec<Vec<u8>>) -> Result<Self, TlsError> {
         check_alpn(&alpn)?;
         config.alpn_protocols = alpn;
@@ -245,5 +276,25 @@ impl ServerSetup {
 
     pub fn config(&self) -> &Arc<ServerConfig> {
         &self.config
+    }
+
+    /// Accepts 0-RTT on resumed sessions (RFC 9001 §4.6.1: the ticket's
+    /// `max_early_data_size` is 0xffffffff for QUIC).
+    ///
+    /// Anti-replay: rustls accepts early data only for stateful tickets
+    /// and looks them up with `StoresServerSessions::take`, which removes
+    /// the session, so each ticket admits 0-RTT at most once per session
+    /// store (RFC 8446 §8.1 single-use tickets). Clones of this setup share
+    /// the store. A configuration with a stateless `ticketer` never
+    /// accepts 0-RTT.
+    #[must_use]
+    pub fn with_zero_rtt(mut self) -> Self {
+        Arc::make_mut(&mut self.config).max_early_data_size = u32::MAX;
+        self
+    }
+
+    /// Whether 0-RTT can be accepted.
+    pub fn zero_rtt(&self) -> bool {
+        self.config.max_early_data_size != 0 && !self.config.ticketer.enabled()
     }
 }
