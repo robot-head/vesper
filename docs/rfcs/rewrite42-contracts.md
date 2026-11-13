@@ -442,12 +442,18 @@ pub(super) struct RewriteProposal {
 pub(super) enum RewriteOutcome {
     Barrier,
     Unchanged,
-    Candidate(RewriteProposal),
+    Candidate(Box<RewriteProposal>),
 }
 pub(super) fn propose_rewrite(
     source: &Expr, types: &TypeMap, limits: WitnessLimits,
 ) -> Result<RewriteOutcome, WitnessError>;
 ```
+
+Candidate carries a Box<RewriteProposal> so the empty outcomes do not require
+storing the full proposal inline. Charge size_of::<RewriteProposal>() against
+the same cumulative budget BEFORE this allocation and handoff; actual physical
+OOM retains the documented ordinary Rust boundary. This indirection changes no
+public DTO/checker API and adds no budget reset.
 
 BoundSource fields cannot be certificate-provided or publicly forged. Admission
 may represent duplicate structural nodes. The output builder independently
@@ -535,7 +541,7 @@ may invoke it; it grants no public authority):
 ```rust
 fn install_proposal(
     expression: &mut Expr, types: &TypeMap,
-    proposal: certificate::RewriteProposal,
+    proposal: Box<certificate::RewriteProposal>,
 ) -> Result<(), witness::WitnessError>;
 ```
 
