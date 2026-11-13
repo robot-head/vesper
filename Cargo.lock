@@ -4214,6 +4214,17 @@ name = "vesper-ignis"
 version = "0.1.0"
 
 [[package]]
+name = "vesper-kinetic"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "sha2",
+ "target-lexicon",
+]
+
+[[package]]
 name = "vesper-lean-syntax"
 version = "0.1.0"
 
