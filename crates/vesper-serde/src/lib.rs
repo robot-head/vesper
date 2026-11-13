@@ -20,10 +20,12 @@ mod encode;
 mod float;
 mod helpers;
 mod index;
+mod stage2;
 
 pub use encode::{EncodeLimits, Value, encode_into, encoded_size};
 pub use float::FloatLimits;
 pub use helpers::{JsonSizeBound, SwarFieldMatcher, compute_escaped_mask_64};
+pub use stage2::SimdParser;
 pub use index::{Cursor, IndexedJson, JsonStr, JsonString, Kind, Limits, Node, ObjectFields};
 
 /// A stable, allocation-free error category. Offsets are input byte positions

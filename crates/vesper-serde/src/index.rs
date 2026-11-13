@@ -1,6 +1,6 @@
 use crate::{Error, ErrorKind, FloatLimits};
 
-const HARD_DEPTH: usize = 128;
+pub(crate) const HARD_DEPTH: usize = 128;
 
 /// Parse limits also bound the single token-vector allocation. Recursive descent
 /// has an additional hard ceiling of 128 containers, even if max_depth is larger.
@@ -40,15 +40,15 @@ pub enum Kind {
     Object,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Token {
-    start: usize,
-    end: usize,
-    next: usize,
-    kind: Kind,
-    decoded_len: usize,
-    escaped: bool,
-    depth: usize,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Token {
+    pub(crate) start: usize,
+    pub(crate) end: usize,
+    pub(crate) next: usize,
+    pub(crate) kind: Kind,
+    pub(crate) decoded_len: usize,
+    pub(crate) escaped: bool,
+    pub(crate) depth: usize,
 }
 
 /// Validated immutable JSON with a bounded scalar structural index. Construction
@@ -56,9 +56,11 @@ struct Token {
 /// length, token count and index-byte allowance. No strings or DOM are allocated.
 #[derive(Debug)]
 pub struct IndexedJson<'a> {
-    input: &'a str,
-    tokens: Vec<Token>,
-    work_used: usize,
+    /// Entirely valid UTF-8: checked by `core::str` (scalar parser) or by the
+    /// stage 1 kernel (SIMD parser). Spans are converted to `&str` on access.
+    pub(crate) input: &'a [u8],
+    pub(crate) tokens: Vec<Token>,
+    pub(crate) work_used: usize,
 }
 impl<'a> IndexedJson<'a> {
     pub fn parse(input: &'a [u8], limits: Limits) -> Result<Self, Error> {
@@ -94,7 +96,7 @@ impl<'a> IndexedJson<'a> {
             return Err(parser.err(ErrorKind::Syntax));
         }
         Ok(Self {
-            input: text,
+            input,
             tokens: parser.tokens,
             work_used: parser.work,
         })
@@ -121,6 +123,16 @@ impl<'a> IndexedJson<'a> {
     pub fn work_used(&self) -> usize {
         self.work_used
     }
+    /// Whether two documents have identical token tapes and work accounting,
+    /// as the scalar and SIMD parsers must on every accepted input.
+    pub fn same_tape(&self, other: &IndexedJson<'_>) -> bool {
+        self.input == other.input
+            && self.tokens == other.tokens
+            && self.work_used == other.work_used
+    }
+    pub(crate) fn span(&self, start: usize, end: usize) -> &'a str {
+        core::str::from_utf8(&self.input[start..end]).expect("validated UTF-8 at token boundaries")
+    }
 }
 
 /// A syntax-validated subtree, suitable for raw forwarding. Cannot be forged
@@ -145,7 +157,7 @@ impl<'d, 'a> Node<'d, 'a> {
     }
     pub fn raw(self) -> &'a str {
         let t = self.token();
-        &self.doc.input[t.start..t.end]
+        self.doc.span(t.start, t.end)
     }
     pub fn string(self) -> Result<JsonString<'a>, Error> {
         let t = self.token();
@@ -153,7 +165,7 @@ impl<'d, 'a> Node<'d, 'a> {
             return Err(Error::new(ErrorKind::Type, t.start));
         }
         Ok(JsonString {
-            raw: &self.doc.input[t.start + 1..t.end - 1],
+            raw: self.doc.span(t.start + 1, t.end - 1),
             decoded_len: t.decoded_len,
             escaped: t.escaped,
         })
@@ -396,15 +408,14 @@ impl Iterator for DecodedChars<'_> {
         if ch != '\\' {
             return Some(ch);
         }
-        Some(escape(self.raw, &mut self.pos).expect("validated escape"))
+        Some(escape(self.raw.as_bytes(), &mut self.pos).expect("validated escape"))
     }
 }
 
-fn hex4(text: &str, pos: &mut usize) -> Result<u32, Error> {
+fn hex4(text: &[u8], pos: &mut usize) -> Result<u32, Error> {
     let mut n = 0;
     for _ in 0..4 {
         let b = *text
-            .as_bytes()
             .get(*pos)
             .ok_or(Error::new(ErrorKind::Escape, *pos))?;
         *pos += 1;
@@ -418,9 +429,8 @@ fn hex4(text: &str, pos: &mut usize) -> Result<u32, Error> {
     }
     Ok(n)
 }
-fn escape(text: &str, pos: &mut usize) -> Result<char, Error> {
+pub(crate) fn escape(text: &[u8], pos: &mut usize) -> Result<char, Error> {
     let b = *text
-        .as_bytes()
         .get(*pos)
         .ok_or(Error::new(ErrorKind::Escape, *pos))?;
     *pos += 1;
@@ -436,7 +446,7 @@ fn escape(text: &str, pos: &mut usize) -> Result<char, Error> {
         b'u' => {
             let hi = hex4(text, pos)?;
             let code = if (0xd800..=0xdbff).contains(&hi) {
-                if text.as_bytes().get(*pos..pos.saturating_add(2)) != Some(b"\\u") {
+                if text.get(*pos..pos.saturating_add(2)) != Some(b"\\u") {
                     return Err(Error::new(ErrorKind::Escape, *pos));
                 }
                 *pos += 2;
@@ -606,7 +616,7 @@ impl Parser<'_> {
                     escaped = true;
                     self.step()?;
                     let old = self.pos;
-                    let ch = escape(self.text, &mut self.pos)?;
+                    let ch = escape(self.text.as_bytes(), &mut self.pos)?;
                     self.tick(self.pos - old)?;
                     decoded_len = decoded_len
                         .checked_add(ch.len_utf8())
@@ -635,42 +645,17 @@ impl Parser<'_> {
         self.tokens[index].escaped = escaped;
         Ok(())
     }
-    fn token_string(&self, index: usize) -> JsonString<'_> {
-        let t = self.tokens[index];
-        JsonString {
-            raw: &self.text[t.start + 1..t.end - 1],
-            decoded_len: t.decoded_len,
-            escaped: t.escaped,
-        }
-    }
     fn duplicate(&mut self, start: usize, current: usize) -> Result<(), Error> {
-        let mut previous = start;
-        while previous < current {
-            self.tick(1)?;
-            let mut a = self.token_string(previous).chars();
-            let mut b = self.token_string(current).chars();
-            let mut units = 0usize;
-            let equal = loop {
-                units = units
-                    .checked_add(24)
-                    .ok_or(self.err(ErrorKind::WorkLimit))?;
-                // Enforce while comparing, rather than after an unbounded key scan.
-                if units > self.limits.max_work - self.work {
-                    return Err(self.err(ErrorKind::WorkLimit));
-                }
-                match (a.next(), b.next()) {
-                    (None, None) => break true,
-                    (Some(x), Some(y)) if x == y => {}
-                    _ => break false,
-                }
-            };
-            self.tick(units)?;
-            if equal {
-                return Err(self.err(ErrorKind::DuplicateKey));
-            }
-            previous = self.tokens[previous + 1].next;
-        }
-        Ok(())
+        let at = self.pos;
+        check_duplicate(
+            &self.tokens,
+            self.text.as_bytes(),
+            start,
+            current,
+            &mut self.work,
+            self.limits.max_work,
+            at,
+        )
     }
     fn container(&mut self, index: usize, depth: usize, object: bool) -> Result<(), Error> {
         self.step()?;
@@ -700,4 +685,60 @@ impl Parser<'_> {
             self.ws()?;
         }
     }
+}
+
+fn key_string<'a>(input: &'a [u8], t: &Token, at: usize) -> Result<JsonString<'a>, Error> {
+    let raw = core::str::from_utf8(&input[t.start + 1..t.end - 1])
+        .map_err(|_| Error::new(ErrorKind::Utf8, at))?;
+    Ok(JsonString {
+        raw,
+        decoded_len: t.decoded_len,
+        escaped: t.escaped,
+    })
+}
+
+/// Reject `current` if it equals an earlier key of the object whose first key
+/// token is `start`. Both parsers share this, so their work totals agree.
+pub(crate) fn check_duplicate(
+    tokens: &[Token],
+    input: &[u8],
+    start: usize,
+    current: usize,
+    work: &mut usize,
+    max_work: usize,
+    at: usize,
+) -> Result<(), Error> {
+    let err = |kind| Error::new(kind, at);
+    let tick = |work: &mut usize, amount: usize| -> Result<(), Error> {
+        *work = work.checked_add(amount).ok_or(err(ErrorKind::WorkLimit))?;
+        if *work > max_work {
+            return Err(err(ErrorKind::WorkLimit));
+        }
+        Ok(())
+    };
+    let mut previous = start;
+    while previous < current {
+        tick(work, 1)?;
+        let mut a = key_string(input, &tokens[previous], at)?.chars();
+        let mut b = key_string(input, &tokens[current], at)?.chars();
+        let mut units = 0usize;
+        let equal = loop {
+            units = units.checked_add(24).ok_or(err(ErrorKind::WorkLimit))?;
+            // Enforce while comparing, rather than after an unbounded key scan.
+            if units > max_work - *work {
+                return Err(err(ErrorKind::WorkLimit));
+            }
+            match (a.next(), b.next()) {
+                (None, None) => break true,
+                (Some(x), Some(y)) if x == y => {}
+                _ => break false,
+            }
+        };
+        tick(work, units)?;
+        if equal {
+            return Err(err(ErrorKind::DuplicateKey));
+        }
+        previous = tokens[previous + 1].next;
+    }
+    Ok(())
 }
