@@ -10,6 +10,11 @@ use std::alloc::Layout;
 use std::fmt;
 use std::mem::{MaybeUninit, align_of, size_of};
 
+// Private spelling aliases only; the public result remains an optional tuple
+// of slices borrowed from the region, without a separate projection owner.
+type Columns<'a, A, B> = Result<Option<(&'a [A], &'a [B])>, HandleError>;
+type ColumnsMut<'a, A, B> = Result<Option<(&'a mut [A], &'a mut [B])>, HandleError>;
+
 /// Maximum complete tile size, including both columns, row count and padding.
 pub const HARD_MAX_TILE_BYTES: usize = 64 * 1024;
 
@@ -140,11 +145,18 @@ impl<A: Copy, B: Copy, const N: usize> Tile2<A, B, N> {
 /// let mut tiles = r.tiled2_new::<&str, u32, 16>().unwrap();
 /// r.tiled2_push(&mut tiles, local.as_str(), 1).unwrap();
 /// ```
-/// The owner cannot be reinterpreted at a shorter payload lifetime:
+/// Function-pointer fields themselves satisfy Copy+'static. Ordinary function
+/// pointers can narrow their accepted input lifetime:
+/// ```
+/// fn narrow(value: fn(&str)) -> fn(&'static str) { value }
+/// fn inspect(_: &str) {}
+/// narrow(inspect)("example");
+/// ```
+/// The invariant owner prevents that same field-type coercion:
 /// ```compile_fail
 /// use vesper_alloc::RegionTiled2;
-/// fn shorten<'a>(owner: RegionTiled2<&'static str, u32, 16>)
-///     -> RegionTiled2<&'a str, u32, 16> { owner }
+/// fn narrow(owner: RegionTiled2<fn(&str), u32, 16>)
+///     -> RegionTiled2<fn(&'static str), u32, 16> { owner }
 /// ```
 /// A projected view prevents mutation and rewind while it remains live:
 /// ```compile_fail
@@ -210,7 +222,7 @@ fn validate_layout<A: Copy, B: Copy, const N: usize>() -> Result<(), TiledError>
 
 fn tile_capacity<const N: usize>(rows: usize) -> Result<usize, AllocError> {
     (rows / N)
-        .checked_add(usize::from(rows % N != 0))
+        .checked_add(usize::from(!rows.is_multiple_of(N)))
         .ok_or(AllocError::SizeOverflow)
 }
 
@@ -293,7 +305,7 @@ impl<R: ChunkBacking> Region<R> {
         &'a self,
         owner: &RegionTiled2<A, B, N>,
         tile: usize,
-    ) -> Result<Option<(&'a [A], &'a [B])>, HandleError> {
+    ) -> Columns<'a, A, B> {
         Ok(self
             .vec_as_slice(&owner.tiles)?
             .get(tile)
@@ -305,7 +317,7 @@ impl<R: ChunkBacking> Region<R> {
         &'a mut self,
         owner: &RegionTiled2<A, B, N>,
         tile: usize,
-    ) -> Result<Option<(&'a mut [A], &'a mut [B])>, HandleError> {
+    ) -> ColumnsMut<'a, A, B> {
         Ok(self
             .vec_as_mut_slice(&owner.tiles)?
             .get_mut(tile)
