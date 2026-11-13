@@ -21,8 +21,8 @@ The supplied design remains at the recorded §42 revision modified
 #228 and region collections #229 are merged. Final source was tested after
 importing main `49a69e4`, preserving the owner's formatter #236, Chrono #139,
 Kinetic #141, Migrate #140 and earlier changes. Integrated tree `dd101bb` adds
-those owner changes to implementation head `2260c6a`; subsequent commits add
-reports only.
+those owner changes to implementation head `2260c6a`. Subsequent commits add
+reports and the shallow CLI/Python resource-refusal fixture described below.
 
 The diff changes `src/optimize.rs`, three new optimizer modules, dedicated new
 tests/script and these reports/contracts. Existing compiler core/numeric, main,
@@ -108,10 +108,22 @@ Coordinator Linux Rust 1.99.1, one build job, debug0/incremental0, pinned Lean
   default optimization versus `--no-opt`, evaluator/JIT/HIR and deterministic
   outputs. Covers four kinds, six folds, overflow/high unsigned products,
   totality, intrinsic shadowing/original callee spans, child barriers and whole
-  depth-refused island retention. All pass; input files remain unchanged.
+  resource-refused island retention. All pass; input files remain unchanged.
+
+Windows CI on `f58d498` exposed a stack overflow in the CLI fixture's deeply
+left-associated 70-addition source. The CLI/Python fixture now uses a balanced
+513-node, depth-10 island, exceeding the default 512 input-node limit without
+deep frontend recursion. Its unoptimized parsed HIR shape is checked, and the
+whole optimized HIR must remain byte-identical; retrying child folds would
+change it. Direct in-process depth-70 coverage remains enabled. After this
+test-only correction, the coordinator reran all five actual CLI tests and the
+340-command/49-program Python oracle successfully. A separate seven-command
+probe of the shallow source passed with a 1 MiB Linux stack and identical
+377,771-byte HIR. This probe does not substitute for required Windows CI.
 
 Logs: `/tmp/rewrite42-integrated-{tests,clippy,python,fmt,bazel}.log` with aggregate
 exit0; focused logs use `/tmp/rewrite42-{critical,clippy,python}-fixed.log`.
+Fixture-correction logs are `/tmp/rewrite42-shallow-{cli,python}.log`.
 Lane reports preserve their intermediate execution heads and authoring limits;
 their totals are not added to these combined counts. No new Miri or sanitizer
 run is claimed. Hosted/platform checks are separate and required before merge.
