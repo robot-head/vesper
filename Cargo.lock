@@ -4352,10 +4352,15 @@ name = "vesper-kinetic"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytemuck",
  "cranelift-codegen 0.125.4",
  "cranelift-frontend 0.125.4",
+ "num-bigint",
+ "num-traits",
  "sha2",
  "target-lexicon",
+ "vesper-alloc",
+ "vesper-tensor",
 ]
 
 [[package]]
