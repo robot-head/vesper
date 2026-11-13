@@ -7,7 +7,7 @@ use super::witness::{
     self, Equality, IntOp, ProofId, Reason, RewriteCertificate, TermId, TermNode, WitnessError,
     WitnessLimits,
 };
-use crate::ast::{Arg, Expr, ExprKind, Literal, Pass, Type, TypeMap};
+use crate::ast::{Expr, ExprKind, Literal, Pass, Type, TypeMap};
 use crate::numeric::IntegerKind;
 use std::{fmt, mem::size_of};
 use vesper_lean_syntax::{
@@ -263,14 +263,15 @@ impl PreparedLean {
     pub fn into_module(self) -> Module {
         self.module
     }
-    pub fn render(mut self) -> Result<RenderedLean, ExportError> {
+    pub fn render(self) -> Result<RenderedLean, ExportError> {
         // AST/all printer temporaries/output growth were prepaid before AST
         // construction. This is the sole serialization, never a measurement pass.
         bound(self.budget.metadata, self.budget.limits.max_metadata_bytes)?;
         let source = self.module.render().map_err(|_| ExportError::LeanSyntax)?;
         bound(source.len(), self.manifest.source_bytes_upper_bound)?;
         bound(source.len(), self.budget.limits.max_source_bytes)?;
-        self.budget.work(source.len())?;
+        // The complete upper bound was charged for this hash before AST
+        // construction, so rendering does not reset or charge it a second time.
         let source_blake3 = *blake3::hash(source.as_bytes()).as_bytes();
         Ok(RenderedLean {
             source,
@@ -1246,6 +1247,7 @@ fn export_bound(
         add(plan.stats.metadata, render_copies)?,
     )?)?;
     let binding_blake3 = binding_hash(source, candidate, types, c, witness_limits, &mut budget)?;
+    budget.work(add(c.terms.len(), c.proofs.len())?)?;
     budget.work(certificate_bytes(c)?)?;
     let certificate_blake3 = certificate_hash(c);
     budget.work(model_source().len())?;
