@@ -1,0 +1,18 @@
+// expect: E0703
+copy struct Secret[T] {
+    value: T,
+}
+
+fn halve(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    Secret {
+        value: value / 2
+    }
+}
+
+fn main() -> u64 {
+    0
+}

@@ -1,11 +1,14 @@
 //! RFC 9000 §19 frames: zero-copy parse and encode for the supported subset.
 //!
-//! Supported: PADDING, PING, ACK (with ranges and ECN counts), RESET_STREAM,
-//! STOP_SENDING, CRYPTO, STREAM (all OFF/LEN/FIN variants), MAX_DATA,
-//! MAX_STREAM_DATA, MAX_STREAMS, DATA_BLOCKED, STREAM_DATA_BLOCKED,
-//! STREAMS_BLOCKED, CONNECTION_CLOSE (both variants) and HANDSHAKE_DONE. Data-carrying frames borrow their bytes
-//! from the payload. Other RFC 9000 frame types are
-//! [`FrameError::Unsupported`]; unregistered types are
+//! Supported: every RFC 9000 frame: PADDING, PING, ACK (with ranges and
+//! ECN counts), RESET_STREAM, STOP_SENDING, CRYPTO, NEW_TOKEN, STREAM (all
+//! OFF/LEN/FIN variants), MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS,
+//! DATA_BLOCKED, STREAM_DATA_BLOCKED, STREAMS_BLOCKED, NEW_CONNECTION_ID,
+//! RETIRE_CONNECTION_ID, PATH_CHALLENGE, PATH_RESPONSE, CONNECTION_CLOSE
+//! (both variants) and HANDSHAKE_DONE (the last six frame types joined in
+//! wave six, issue #247). Data-carrying frames borrow their bytes from the
+//! payload. [`FrameError::Unsupported`] is kept for API stability and no
+//! longer produced; unregistered types are
 //! [`FrameError::UnknownType`]; frames not permitted in the packet type
 //! (RFC 9000 §12.4, Table 3) are [`FrameError::NotAllowed`].
 
@@ -19,6 +22,7 @@ const ACK_ECN: u64 = 0x03;
 const RESET_STREAM: u64 = 0x04;
 const STOP_SENDING: u64 = 0x05;
 const CRYPTO: u64 = 0x06;
+pub(crate) const NEW_TOKEN: u64 = 0x07;
 const STREAM: u64 = 0x08;
 const STREAM_OFF: u64 = 0x04;
 const STREAM_LEN: u64 = 0x02;
@@ -35,9 +39,15 @@ const STREAMS_BLOCKED_UNI: u64 = 0x17;
 /// Largest stream count a MAX_STREAMS or STREAMS_BLOCKED frame may carry
 /// (RFC 9000 §19.11: a stream ID must stay below 2^62).
 pub const MAX_STREAM_COUNT: u64 = 1 << 60;
+pub(crate) const NEW_CONNECTION_ID: u64 = 0x18;
+pub(crate) const RETIRE_CONNECTION_ID: u64 = 0x19;
+const PATH_CHALLENGE: u64 = 0x1a;
+const PATH_RESPONSE: u64 = 0x1b;
+/// Stateless reset token length (RFC 9000 §10.3).
+pub const RESET_TOKEN_LEN: usize = 16;
 const CLOSE_TRANSPORT: u64 = 0x1c;
 const CLOSE_APPLICATION: u64 = 0x1d;
-const HANDSHAKE_DONE: u64 = 0x1e;
+pub(crate) const HANDSHAKE_DONE: u64 = 0x1e;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
@@ -285,6 +295,26 @@ pub enum Frame<'a> {
     },
     ConnectionClose(ConnectionClose<'a>),
     HandshakeDone,
+    /// NEW_TOKEN (§19.7): an address-validation token for a future
+    /// connection; never empty.
+    NewToken {
+        token: &'a [u8],
+    },
+    /// NEW_CONNECTION_ID (§19.15).
+    NewConnectionId {
+        seq: u64,
+        retire_prior_to: u64,
+        cid: &'a [u8],
+        reset_token: &'a [u8; RESET_TOKEN_LEN],
+    },
+    /// RETIRE_CONNECTION_ID (§19.16).
+    RetireConnectionId {
+        seq: u64,
+    },
+    /// PATH_CHALLENGE (§19.17).
+    PathChallenge([u8; 8]),
+    /// PATH_RESPONSE (§19.18).
+    PathResponse([u8; 8]),
 }
 
 impl Frame<'_> {
@@ -342,7 +372,24 @@ impl Frame<'_> {
                 }
             }
             Self::HandshakeDone => HANDSHAKE_DONE,
+            Self::NewToken { .. } => NEW_TOKEN,
+            Self::NewConnectionId { .. } => NEW_CONNECTION_ID,
+            Self::RetireConnectionId { .. } => RETIRE_CONNECTION_ID,
+            Self::PathChallenge(_) => PATH_CHALLENGE,
+            Self::PathResponse(_) => PATH_RESPONSE,
         }
+    }
+
+    /// RFC 9000 §9.1 probing frames: a packet with nothing else is a
+    /// probing packet and does not move the connection to its path.
+    pub const fn is_probing(&self) -> bool {
+        matches!(
+            self,
+            Self::Padding { .. }
+                | Self::PathChallenge(_)
+                | Self::PathResponse(_)
+                | Self::NewConnectionId { .. }
+        )
     }
 
     /// Encodes the frame, returning the bytes written.
@@ -440,6 +487,30 @@ impl Frame<'_> {
                 w.varint(c.reason.len() as u64)?;
                 w.bytes(c.reason)?;
             }
+            Self::NewToken { token } => {
+                if token.is_empty() {
+                    return Err(VarIntError::BadLength(0));
+                }
+                w.varint(token.len() as u64)?;
+                w.bytes(token)?;
+            }
+            Self::NewConnectionId {
+                seq,
+                retire_prior_to,
+                cid,
+                reset_token,
+            } => {
+                if retire_prior_to > seq || cid.is_empty() || cid.len() > 20 {
+                    return Err(VarIntError::BadLength(0));
+                }
+                w.varint(*seq)?;
+                w.varint(*retire_prior_to)?;
+                w.u8(cid.len() as u8)?;
+                w.bytes(cid)?;
+                w.bytes(&reset_token[..])?;
+            }
+            Self::RetireConnectionId { seq } => w.varint(*seq)?,
+            Self::PathChallenge(d) | Self::PathResponse(d) => w.bytes(d)?,
         }
         Ok(())
     }
@@ -512,6 +583,10 @@ pub const fn allowed(frame_type: u64, packet_type: PacketType) -> bool {
         PADDING | PING => true,
         ACK | ACK_ECN | CRYPTO => !matches!(packet_type, ZeroRtt),
         CLOSE_TRANSPORT => true,
+        NEW_TOKEN | PATH_RESPONSE | HANDSHAKE_DONE => matches!(packet_type, OneRtt),
+        NEW_CONNECTION_ID | RETIRE_CONNECTION_ID | PATH_CHALLENGE => {
+            matches!(packet_type, ZeroRtt | OneRtt)
+        }
         RESET_STREAM
         | STOP_SENDING
         | 0x08..=0x0f
@@ -519,13 +594,8 @@ pub const fn allowed(frame_type: u64, packet_type: PacketType) -> bool {
         | CLOSE_APPLICATION => {
             matches!(packet_type, ZeroRtt | OneRtt)
         }
-        HANDSHAKE_DONE => matches!(packet_type, OneRtt),
         _ => false,
     }
-}
-
-const fn is_registered_unsupported(frame_type: u64) -> bool {
-    matches!(frame_type, 0x07 | 0x18..=0x1b)
 }
 
 /// Parses one frame from the front of `buf`; returns it and its length.
@@ -546,9 +616,6 @@ fn parse_one<'a>(r: &mut Reader<'a>, packet_type: PacketType) -> Result<Frame<'a
     }
     if ty > HANDSHAKE_DONE {
         return Err(FrameError::UnknownType(ty));
-    }
-    if is_registered_unsupported(ty) {
-        return Err(FrameError::Unsupported(ty));
     }
     if !allowed(ty, packet_type) {
         return Err(FrameError::NotAllowed {
@@ -685,6 +752,44 @@ fn parse_one<'a>(r: &mut Reader<'a>, packet_type: PacketType) -> Result<Frame<'a
             })
         }
         HANDSHAKE_DONE => Frame::HandshakeDone,
+        NEW_TOKEN => {
+            let len = vi(r, truncated)?;
+            if len == 0 {
+                return Err(malformed);
+            }
+            Frame::NewToken {
+                token: take(r, len, truncated)?,
+            }
+        }
+        NEW_CONNECTION_ID => {
+            let seq = vi(r, truncated)?;
+            let retire_prior_to = vi(r, truncated)?;
+            let len = r.u8().ok_or(truncated)?;
+            // §19.15: a length outside 1..=20, or Retire Prior To above the
+            // sequence number, is a FRAME_ENCODING_ERROR.
+            if len == 0 || len > 20 || retire_prior_to > seq {
+                return Err(malformed);
+            }
+            let cid = take(r, u64::from(len), truncated)?;
+            let token = take(r, RESET_TOKEN_LEN as u64, truncated)?;
+            Frame::NewConnectionId {
+                seq,
+                retire_prior_to,
+                cid,
+                reset_token: token.try_into().map_err(|_| truncated)?,
+            }
+        }
+        RETIRE_CONNECTION_ID => Frame::RetireConnectionId {
+            seq: vi(r, truncated)?,
+        },
+        PATH_CHALLENGE | PATH_RESPONSE => {
+            let d: [u8; 8] = take(r, 8, truncated)?.try_into().map_err(|_| truncated)?;
+            if ty == PATH_CHALLENGE {
+                Frame::PathChallenge(d)
+            } else {
+                Frame::PathResponse(d)
+            }
+        }
         _ => return Err(FrameError::UnknownType(ty)),
     };
     Ok(frame)

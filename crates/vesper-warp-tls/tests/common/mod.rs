@@ -106,6 +106,8 @@ pub struct Peer {
     pub log: Vec<String>,
     pub peer_params: Option<TransportParameters>,
     pub send_handshake_done: bool,
+    pub zero_rtt: Option<vesper_warp_tls::ZeroRttKeys>,
+    pub remembered: Option<TransportParameters>,
     sent_handshake: bool,
     recv_handshake: bool,
     peer_scid: Vec<u8>,
@@ -120,6 +122,8 @@ impl Peer {
             log: Vec::new(),
             peer_params: None,
             send_handshake_done: false,
+            zero_rtt: None,
+            remembered: None,
             sent_handshake: false,
             recv_handshake: false,
             peer_scid: peer_scid.to_vec(),
@@ -152,6 +156,15 @@ impl Peer {
                 }
                 Event::HandshakeConfirmed => self.log.push("confirmed".into()),
                 Event::DiscardKeys(s) => self.log.push(format!("discard {s:?}")),
+                Event::ZeroRttKeys(k) => {
+                    self.log.push("0rtt keys".into());
+                    self.zero_rtt = Some(k);
+                }
+                Event::RememberedTransportParameters(p) => {
+                    self.log.push("remembered params".into());
+                    self.remembered = Some(p);
+                }
+                Event::EarlyData(e) => self.log.push(format!("early {e:?}")),
             }
         }
     }
