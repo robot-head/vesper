@@ -36,6 +36,7 @@ pub mod endpoint;
 pub mod frame;
 pub mod handshake;
 pub mod header;
+pub mod lifecycle;
 pub mod packet_number;
 pub mod recovery;
 pub mod stream;

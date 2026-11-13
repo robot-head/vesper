@@ -75,9 +75,14 @@
 use std::fmt;
 
 use vesper_warp_bbr::BbrConfig;
-use vesper_warp_crypto::{CryptoError, OneRttKeys, TAG_LEN, Unprotected};
+use vesper_warp_crypto::{
+    CryptoError, OneRttKeys, Opener, Sealer, TAG_LEN, Unprotected, retry_integrity_tag,
+    verify_retry_integrity,
+};
 use vesper_warp_shard::{ConnState, ConnTable, ConnectionId, SlotHandle, TableConfig};
-use vesper_warp_tls::{Event as TlsEvent, QuicTls, ServerCids, Space, TransportParameters};
+use vesper_warp_tls::{
+    EarlyData, Event as TlsEvent, QuicTls, ServerCids, Space, TransportParameters,
+};
 use vesper_warp_umem::{
     DescError, InFlightQuicPkt, RxHarvested, TxStaged, UmemError, UmemFrame, XdpNic, Xsk,
     XskBackend,
@@ -94,8 +99,13 @@ use crate::handshake::{
     MIN_ORIGINAL_DCID, NO_CREDIT, TlsError, peer_params, pn_space,
 };
 use crate::header::{
-    HeaderError, HeaderParser, LongHeader, LongPacketType, ParsedPacket, ProtectedHeader,
-    write_long,
+    HeaderError, HeaderParser, LongHeader, LongPacketType, ParsedPacket, ProtectedHeader, QUIC_V1,
+    RETRY_TAG_LEN, write_long, write_retry, write_version_negotiation,
+};
+use crate::lifecycle::{
+    AddressValidation, Cids, LifecycleConfig, LocalCid, MAX_ACTIVE_CIDS, MAX_TOKEN_LEN,
+    MIN_STATELESS_RESET, Path, PathProbe, PeerAddr, PeerCid, ResetKey, TokenError, TokenKey,
+    TokenKind,
 };
 use crate::packet_number::{PnLen, TruncatedPn, encoded_len};
 use crate::recovery::{
@@ -103,8 +113,8 @@ use crate::recovery::{
     TimeoutAction,
 };
 use crate::stream::{
-    PacketFrames, PeerParams, ReadOutcome, Role, StreamConfig, StreamError, StreamEvent, StreamSet,
-    TransportError,
+    PacketFrames, PeerParams, Priority, ReadOutcome, Role, StreamConfig, StreamError, StreamEvent,
+    StreamSet, TransportError,
 };
 use crate::{PacketType, PnSpace};
 
@@ -127,6 +137,10 @@ const MAX_LONG_HEADER: usize = 1 + 4 + 1 + 20 + 1 + 20 + 1 + 2 + 4;
 pub(crate) const ACK_RANGES: usize = 32;
 /// CONNECTION_CLOSE frame type for transport errors.
 const CLOSE_FRAME_CRYPTO: u64 = 0x06;
+/// Marker frame type for an application close (sent as frame 0x1d).
+const APP_CLOSE: u64 = u64::MAX;
+/// NEW_TOKEN tokens a client keeps (one per server name, newest kept).
+const MAX_CACHED_TOKENS: usize = 16;
 
 /// Which §35.3 CID lookup to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -194,6 +208,9 @@ pub struct EndpointConfig {
     pub tx_reserve: u32,
     /// Completion-ring entries harvested per [`WarpEndpoint::poll`].
     pub completion_batch: u32,
+    /// Retry, tokens, stateless reset, connection IDs, migration and
+    /// buffering (wave six, issue #247).
+    pub lifecycle: LifecycleConfig,
 }
 
 impl Default for EndpointConfig {
@@ -219,6 +236,7 @@ impl Default for EndpointConfig {
             tx_reserve: 64,
             key_update_interval: 1 << 22,
             completion_batch: 64,
+            lifecycle: LifecycleConfig::default(),
         }
     }
 }
@@ -259,6 +277,25 @@ pub enum DropReason {
     Transport(TransportError),
     /// The connection is closed or closing.
     Closed,
+    /// Server: the client Initial carried no valid token; a Retry was sent
+    /// instead (RFC 9000 §8.1.2).
+    RetrySent,
+    /// Server: the Initial's token was refused.
+    InvalidToken(TokenError),
+    /// Server: an Initial of another QUIC version; Version Negotiation
+    /// was sent (RFC 9000 §6.1).
+    VersionNegotiationSent,
+    /// Client: a Retry that is unexpected, duplicated or fails its
+    /// integrity tag (RFC 9000 §17.2.5.2).
+    BadRetry,
+    /// Client: a Version Negotiation packet that must be ignored (it lists
+    /// our version, or the connection already received a packet).
+    IgnoredVersionNegotiation,
+    /// The datagram was a stateless reset for one of our connections,
+    /// which is now closed (RFC 9000 §10.3.1).
+    StatelessReset,
+    /// Held until the keys to open it are installed (RFC 9001 §5.7).
+    Buffered,
 }
 
 /// Why a connection was closed.
@@ -275,6 +312,15 @@ pub enum ConnectionError {
         /// `Some` for a transport close, `None` for an application close.
         frame_type: Option<u64>,
     },
+    /// We closed it with [`WarpEndpoint::close`].
+    Application { error_code: u64 },
+    /// Neither side sent anything within the idle timeout (RFC 9000
+    /// §10.1); closed silently.
+    IdleTimeout,
+    /// The peer sent a stateless reset (RFC 9000 §10.3).
+    StatelessReset,
+    /// Client: the server supports none of our versions (RFC 9000 §6.2).
+    VersionNegotiation,
 }
 
 /// Result of one [`WarpEndpoint::poll_and_step_quic_rx_one`].
@@ -426,6 +472,28 @@ impl Responder for Discard {
 /// NIC's tx ring (a capture point for tests and simulators).
 pub trait TxTap {
     fn on_transmit(&mut self, conn: SlotHandle, pn: u64, edt_ns: u64, datagram: &[u8]);
+
+    /// [`TxTap::on_transmit`] with the datagram's destination (wave six):
+    /// the connection's path, or a path being validated. `None` when the
+    /// caller supplies no addresses. Defaults to `on_transmit`.
+    fn on_transmit_to(
+        &mut self,
+        conn: SlotHandle,
+        pn: u64,
+        edt_ns: u64,
+        datagram: &[u8],
+        to: Option<PeerAddr>,
+    ) {
+        let _ = to;
+        self.on_transmit(conn, pn, edt_ns, datagram);
+    }
+
+    /// A datagram sent without a connection: Retry, Version Negotiation or
+    /// a stateless reset, to the source of the datagram that caused it.
+    /// Defaults to ignoring it.
+    fn on_stateless(&mut self, datagram: &[u8], to: Option<PeerAddr>) {
+        let _ = (datagram, to);
+    }
 }
 
 impl TxTap for () {
@@ -503,6 +571,37 @@ pub struct EndpointStats {
     pub amplification_blocked: u64,
     /// Connection events dropped because the queue was full.
     pub connection_events_dropped: u64,
+    // Wave six (issue #247).
+    pub retries_sent: u64,
+    pub retries_received: u64,
+    pub version_negotiations_sent: u64,
+    pub version_negotiations_received: u64,
+    pub tokens_issued: u64,
+    pub tokens_accepted: u64,
+    pub tokens_refused: u64,
+    pub stateless_resets_sent: u64,
+    pub stateless_resets_received: u64,
+    pub path_challenges_sent: u64,
+    pub path_responses_sent: u64,
+    pub paths_validated: u64,
+    pub path_failures: u64,
+    pub migrations: u64,
+    pub cids_issued: u64,
+    pub cids_retired: u64,
+    /// Datagrams held for keys, replayed, and dropped for lack of room.
+    pub datagrams_buffered: u64,
+    pub datagrams_replayed: u64,
+    pub datagrams_buffer_full: u64,
+    /// Packets sent after another packet in the same datagram, and
+    /// received that way.
+    pub coalesced_sent: u64,
+    pub coalesced_received: u64,
+    pub idle_timeouts: u64,
+    /// Connection slots freed at the end of closing/draining or by a
+    /// timeout.
+    pub slots_freed: u64,
+    pub zero_rtt_packets_sent: u64,
+    pub zero_rtt_packets_received: u64,
 }
 
 /// A connection's non-tile state. The tile (lane 6) holds the hot scalars:
@@ -535,6 +634,37 @@ struct Conn {
     error: Option<ConnectionError>,
     /// When CONNECTION_CLOSE was last sent (closing state, RFC 9000 §10.2.1).
     close_sent_ns: Option<u64>,
+    // Wave six (issue #247).
+    /// When closing or draining ends and the slot is freed.
+    close_deadline_ns: Option<u64>,
+    /// Idle timeout in force: ours, or the smaller of ours and the peer's
+    /// once its transport parameters arrive; 0 is none (RFC 9000 §10.1).
+    idle_timeout_ns: u64,
+    /// The lifecycle timer as armed in the endpoint's wheel.
+    life_timer: Option<(TimerHandle, u64)>,
+    /// Largest datagram we send on this connection (ours, or the peer's
+    /// smaller `max_udp_payload_size`).
+    max_datagram: u16,
+    path: Path,
+    probe: Option<PathProbe>,
+    /// A PATH_CHALLENGE to answer and where it came from.
+    challenge_rx: Option<([u8; 8], Option<PeerAddr>)>,
+    path_response_rx: Option<[u8; 8]>,
+    cids: Cids,
+    /// Our sequence numbers the peer retired in the packet being processed.
+    retired_rx: [Option<u64>; MAX_ACTIVE_CIDS],
+    /// The active peer connection ID was retired; switch to a spare.
+    peer_cid_retired: bool,
+    /// Client: a NEW_TOKEN token from the packet being processed.
+    token_rx: Option<([u8; crate::stream::MAX_NEW_TOKEN_LEN], u8)>,
+    /// The server's NEW_TOKEN was issued.
+    token_issued: bool,
+    /// Client: 0-RTT packet protection, until 1-RTT keys or rejection.
+    zero_rtt_sealer: Option<Sealer>,
+    /// Server: 0-RTT packet protection, until confirmation.
+    zero_rtt_opener: Option<Opener>,
+    /// The received packet was non-probing (RFC 9000 §9.1).
+    non_probing_rx: bool,
 }
 
 /// A packet waiting for its earliest departure time.
@@ -553,6 +683,8 @@ struct Staged {
     /// A CONNECTION_CLOSE packet: the only one sent once a connection is
     /// closing.
     close: bool,
+    /// Destination (the connection's path unless probing another).
+    to: Option<PeerAddr>,
 }
 
 /// A parked in-flight packet (§35.2 `park_for_ack_or_pto`).
@@ -621,6 +753,39 @@ pub struct WarpEndpoint<B: XskBackend, R: Responder, T: TxTap = ()> {
     rx_copy: Box<[u8]>,
     /// In-order CRYPTO bytes on their way to TLS.
     tls_buf: Box<[u8]>,
+    // Wave six (issue #247).
+    /// The remote address of harvested datagrams, set by the caller.
+    rx_from: Option<PeerAddr>,
+    token_key: TokenKey,
+    reset_key: ResetKey,
+    /// Connection IDs we issue after the handshake one (client endpoints;
+    /// a server uses its listener's source).
+    cid_source: Box<dyn crate::handshake::CidSource>,
+    /// Extra connection IDs we issued, routed to their connection.
+    alt_cids: Vec<(ConnectionId, SlotHandle)>,
+    /// Idle, closing/draining and path-validation deadlines.
+    life_timers: Wheel<SlotHandle>,
+    /// Client: NEW_TOKEN tokens by server name, newest last.
+    tokens: Vec<(Box<str>, Box<[u8]>)>,
+    /// Datagrams waiting for keys, with their source.
+    buffered: std::collections::VecDeque<(Box<[u8]>, usize, Option<PeerAddr>)>,
+    buffer_pool: Vec<Box<[u8]>>,
+    /// Keys were installed since the buffered datagrams were last tried.
+    keys_changed: bool,
+    /// Freed slots' last handle and why it closed.
+    closed: Vec<Option<(SlotHandle, ConnectionError)>>,
+    /// A datagram being assembled from coalesced long-header packets.
+    dgram: Box<[u8]>,
+    dgram_len: usize,
+    dgram_pad: bool,
+    dgram_eliciting: bool,
+    dgram_probe: bool,
+    dgram_first_pn: u64,
+    /// Stateless packets (Retry, Version Negotiation, reset).
+    stateless_buf: Box<[u8]>,
+    /// Destination of the next packet built, when not the connection's
+    /// path (path validation).
+    next_to: Option<Option<PeerAddr>>,
 }
 
 fn lease_key(conn: SlotHandle, pn: u64) -> u64 {
@@ -691,7 +856,37 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             ),
             rx_copy: vec![0u8; rx_frame].into_boxed_slice(),
             tls_buf: vec![0u8; config.streams.crypto_buffer as usize].into_boxed_slice(),
+            rx_from: None,
+            token_key: TokenKey::random(),
+            reset_key: ResetKey::random(),
+            cid_source: Box::new(crate::handshake::RandomCids),
+            alt_cids: Vec::with_capacity(config.max_connections as usize * (MAX_ACTIVE_CIDS - 1)),
+            life_timers: Wheel::new(wheel(config.max_connections))
+                .map_err(|_| WarpError::Config("invalid lifecycle wheel"))?,
+            tokens: Vec::with_capacity(MAX_CACHED_TOKENS),
+            buffered: std::collections::VecDeque::with_capacity(usize::from(
+                config.lifecycle.buffered_datagrams,
+            )),
+            buffer_pool: (0..config.lifecycle.buffered_datagrams)
+                .map(|_| vec![0u8; rx_frame].into_boxed_slice())
+                .collect(),
+            keys_changed: false,
+            closed: vec![None; config.max_connections as usize],
+            dgram: vec![0u8; usize::from(config.max_datagram)].into_boxed_slice(),
+            dgram_len: 0,
+            dgram_pad: false,
+            dgram_eliciting: false,
+            dgram_probe: false,
+            dgram_first_pn: 0,
+            stateless_buf: vec![0u8; usize::from(config.max_datagram).max(MIN_INITIAL_DATAGRAM)]
+                .into_boxed_slice(),
+            next_to: None,
         };
+        if config.lifecycle.active_connection_id_limit < 2
+            || usize::from(config.lifecycle.active_connection_id_limit) > MAX_ACTIVE_CIDS
+        {
+            return Err(WarpError::Config("active_connection_id_limit must be 2..=8"));
+        }
         if config.tx_reserve >= endpoint.xsk.config().frame_count {
             return Err(WarpError::Config("tx_reserve leaves no receive frames"));
         }
@@ -843,7 +1038,28 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             streams,
             error: None,
             close_sent_ns: None,
+            close_deadline_ns: None,
+            idle_timeout_ns: self.config.idle_timeout_ns,
+            life_timer: None,
+            max_datagram: self.config.max_datagram,
+            path: Path {
+                remote: self.rx_from,
+                validated: true,
+                ..Path::default()
+            },
+            probe: None,
+            challenge_rx: None,
+            path_response_rx: None,
+            cids: Cids::new(),
+            retired_rx: [None; MAX_ACTIVE_CIDS],
+            peer_cid_retired: false,
+            token_rx: None,
+            token_issued: false,
+            zero_rtt_sealer: None,
+            zero_rtt_opener: None,
+            non_probing_rx: false,
         });
+        self.closed[handle.index() as usize] = None;
         self.write_tile(handle);
         Ok(handle)
     }
@@ -2517,7 +2733,11 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let (code, frame_type) = match error {
             ConnectionError::Local(e) => (e.code.code(), e.frame_type),
             ConnectionError::Handshake { error_code } => (error_code, CLOSE_FRAME_CRYPTO),
-            ConnectionError::Peer { .. } => return,
+            ConnectionError::Application { error_code } => (error_code, APP_CLOSE),
+            ConnectionError::Peer { .. }
+            | ConnectionError::IdleTimeout
+            | ConnectionError::StatelessReset
+            | ConnectionError::VersionNegotiation => return,
         };
         let Ok(c) = self.conn(slot) else {
             return;
@@ -3170,6 +3390,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if !ack_eliciting {
             self.stats.ack_only_sent += 1;
         }
+        let to = match self.next_to.take() {
+            Some(to) => to,
+            None => self.conns[slot.index() as usize]
+                .as_ref()
+                .and_then(|c| c.path.remote),
+        };
         Ok(Staged {
             conn: slot,
             frame,
@@ -3179,6 +3405,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             tapped: false,
             carried: data_len > 0,
             close: kind == Kind::Close,
+            to,
         })
     }
 
@@ -3234,6 +3461,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             park,
             tapped,
             close,
+            to,
             ..
         } = staged;
         // Closing or draining (RFC 9000 §10.2): nothing but CONNECTION_CLOSE
@@ -3250,7 +3478,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return;
         }
         if !tapped && let Ok(bytes) = self.xsk.tx_bytes_mut(&mut frame) {
-            self.tap.on_transmit(conn, pn, edt_ns, bytes);
+            self.tap.on_transmit_to(conn, pn, edt_ns, bytes, to);
         }
         match self.xsk.submit_paced_tx(frame, pn, edt_ns) {
             Ok(pkt) if park => {
@@ -3273,6 +3501,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     tapped: true,
                     carried: true,
                     close,
+                    to,
                 };
                 let at = retry.edt_ns;
                 if let Err(refused) = self.launch.submit(now_ns, at, retry) {

@@ -6,6 +6,13 @@ description = "Sans-IO QUIC packet core (RFC 9000 headers, frames, packet number
 publish = false
 
 [dependencies]
+# Wave six (issue #247): address-validation tokens (AES-256-GCM), stateless
+# reset tokens (HMAC-SHA-256) and constant-time comparisons.
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
 vesper-ffi = { path = "../vesper-ffi" }
 # Wave-four integration (issue #45): the end-to-end §35.3 path wires every
 # Warp lane together here. No lane crate depends back on this one.
