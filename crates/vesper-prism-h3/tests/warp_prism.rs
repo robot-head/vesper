@@ -13,10 +13,15 @@ use vesper_prism::service::{Flow, Middleware, ParsedRequest, Service};
 use vesper_prism::target::TargetLimits;
 use vesper_prism_h3::client::{ClientConnection, ClientEvent, ClientRequest, ClientResponse};
 use vesper_prism_h3::connection::{H3Config, ServerConnection};
+use vesper_prism_h3::error::Code;
+use vesper_prism_h3::frame::{self, Settings};
 use vesper_prism_h3::prism::{self, answer, serve};
 use vesper_prism_h3::qpack::Field;
+use vesper_prism_h3::transport::Transport;
 use vesper_prism_h3::warp::{PeerStreams, WarpTransport};
-use vesper_warp::endpoint::{Discard, EndpointConfig, RxOutcome, TxTap, WarpEndpoint};
+use vesper_warp::endpoint::{
+    ConnectionError, Discard, EndpointConfig, RxOutcome, TxTap, WarpEndpoint,
+};
 use vesper_warp::handshake::tls::FixedTime;
 use vesper_warp::handshake::tls::rustls::RootCertStore;
 use vesper_warp::handshake::tls::rustls::pki_types::{
@@ -181,7 +186,10 @@ impl Net {
                 .flatten()
                 .min()
         {
-            self.now = self.now.max(w);
+            // Skip ahead to the next timer (PTO, pacing), but never more
+            // than 100 ms at a time: a quiet connection must not jump past
+            // its idle timeout (Warp applies the peer's, RFC 9000 §10.1).
+            self.now = self.now.max(w.min(self.now + 100 * MS));
         }
     }
 
@@ -465,4 +473,39 @@ fn http3_over_a_lossy_link() {
         assert_eq!(r.body, body);
     }
     assert!(net.h3s.error().is_none() && net.h3c.error().is_none());
+}
+
+#[test]
+fn http3_connection_errors_reach_the_peer_as_close_codes() {
+    let service = service();
+    let mut net = Net::new(13, 0);
+    net.handshake(&service);
+    // A second client control stream is H3_STREAM_CREATION_ERROR (RFC 9114
+    // §6.2.1); the server closes the QUIC connection with that code.
+    let mut t = net.client_t();
+    let id = t.open_uni().unwrap();
+    let mut w = Vec::new();
+    frame::put_varint(&mut w, frame::STREAM_CONTROL);
+    Settings::default().encode(&mut w);
+    assert_eq!(t.write(id, &w).unwrap(), w.len());
+    let want = Code::STREAM_CREATION_ERROR;
+    for _ in 0..200 {
+        net.step(&service);
+        if net.client.connection_error(net.c_conn).is_some() {
+            break;
+        }
+    }
+    assert_eq!(net.h3s.error().map(|e| e.code()), Some(want));
+    assert_eq!(net.s_peers.closed_with(), Some(want));
+    assert_eq!(
+        net.server.connection_error(net.s_conn.unwrap()),
+        Some(ConnectionError::Application { error_code: want.0 })
+    );
+    assert_eq!(
+        net.client.connection_error(net.c_conn),
+        Some(ConnectionError::Peer {
+            error_code: want.0,
+            frame_type: None
+        })
+    );
 }
