@@ -1,4 +1,22 @@
-fn increment(in value: u64) -> u64 eff [Fail[ArithOverflow]] { value + 1 }
-macro keep($value: expr) -> expr { quote { ($value,) } }
-fn forward(in ignored: u64) -> (u64,) eff [Fail[ArithOverflow]] { keep!(increment(41)) }
-fn main() -> u64 eff [Fail[ArithOverflow]] { let (n,) = forward(0); n }
+fn increment(in value: u64) -> u64 eff [Fail[ArithOverflow]] {
+    value + 1
+}
+macro keep($value: expr) -> expr {
+    quote {
+        (
+            $value,
+        )
+    }
+}
+fn forward(in ignored: u64)
+    -> (
+    u64,
+) eff [Fail[ArithOverflow]] {
+    keep!(increment(41))
+}
+fn main() -> u64 eff [Fail[ArithOverflow]] {
+    let (
+        n,
+    ) = forward(0);
+    n
+}

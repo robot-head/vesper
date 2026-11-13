@@ -90,6 +90,8 @@ impl Work {
 struct Piece<'a> {
     kind: K,
     text: &'a str,
+    /// The source whitespace before this token held a blank line.
+    blank: bool,
 }
 fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
     tokens
@@ -98,6 +100,7 @@ fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
         .map(|t| Piece {
             kind: t.kind,
             text: &source[t.span.clone()],
+            blank: false,
         })
         .collect()
 }
@@ -220,6 +223,7 @@ fn once(
     // The CST is the lowering source. Exact source slices are anchored by each
     // lossless token's byte range; compare against lexer evidence before use.
     let mut atoms = Vec::new();
+    let mut blank = false;
     let mut expected = tokens.iter().filter(|t| t.kind != K::Eof);
     for element in syntax.descendants_with_tokens() {
         if let Some(token) = element.into_token() {
@@ -233,10 +237,13 @@ fn once(
             if token.text() != &source[start..end] || token.kind().0 != kind as u16 {
                 return Err(Error::Conservation);
             }
-            if kind != K::Whitespace {
+            if kind == K::Whitespace {
+                blank |= source[start..end].matches('\n').nth(1).is_some();
+            } else {
                 atoms.push(Piece {
                     kind,
                     text: &source[start..end],
+                    blank: std::mem::take(&mut blank),
                 });
             }
         }
@@ -335,7 +342,47 @@ enum Gap {
     None,
     Soft,
     Empty,
+    /// Break point before an infix operator; nested one level when broken.
+    Operator,
+    /// Break point before `->`, in its own group so it breaks only when the
+    /// return type cannot follow an already laid-out parameter list.
+    Return,
     Hard,
+}
+fn is_binary_operator(kind: K) -> bool {
+    matches!(
+        kind,
+        K::Plus
+            | K::Minus
+            | K::Star
+            | K::Slash
+            | K::Percent
+            | K::EqEq
+            | K::Ne
+            | K::Lt
+            | K::Le
+            | K::Gt
+            | K::Ge
+            | K::And
+            | K::Or
+    )
+}
+/// Whether a token can end an operand, so a following `-`/`*` is infix.
+fn ends_operand(kind: K) -> bool {
+    matches!(
+        kind,
+        K::Lower
+            | K::Upper
+            | K::Int
+            | K::Float
+            | K::String
+            | K::True
+            | K::False
+            | K::SelfKw
+            | K::RParen
+            | K::RBracket
+            | K::RBrace
+    )
 }
 fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) -> Gap {
     if previous.kind == K::Dollar
@@ -363,8 +410,17 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
     if current.kind == K::Dot && matches!(previous.kind, K::Int | K::Float) {
         return Gap::Soft;
     }
-    if matches!(current.kind, K::Dot | K::ColonColon) {
+    if current.kind == K::Dot {
         return Gap::Empty;
+    }
+    if current.kind == K::ColonColon {
+        return Gap::None;
+    }
+    if current.kind == K::Arrow {
+        return Gap::Return;
+    }
+    if is_binary_operator(current.kind) && ends_operand(previous.kind) {
+        return Gap::Operator;
     }
     if matches!(
         current.kind,
@@ -386,12 +442,12 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
             Gap::None
         };
     }
-    if current.kind == K::LParen
-        && !matches!(previous.kind, K::If | K::Match | K::In | K::Inout | K::Sink)
+    // Calls, tuple-struct patterns, macro invocations and generic arguments
+    // attach to what they apply to; after a keyword or operator they are a
+    // separate parenthesized/bracketed operand.
+    if matches!(current.kind, K::LParen | K::LBracket)
+        && (ends_operand(previous.kind) || matches!(previous.kind, K::Bang | K::Fn))
     {
-        return Gap::None;
-    }
-    if current.kind == K::LBracket && previous.kind != K::Eff {
         return Gap::None;
     }
     Gap::Soft
@@ -403,21 +459,58 @@ fn sequence<'a>(
     block: bool,
     document: &mut Document<'a>,
 ) -> Result<DocId, Error> {
+    // A delimited, non-block list breaks at its comma separators: those soft
+    // lines belong to the enclosing delimiter group, and every item is its own
+    // group. Ordinary spaces never break, so an overlong line breaks its
+    // delimiters (and member-chain dots) before anything else.
+    let list = end.is_some() && !block;
     let mut output = Vec::new();
     let mut line = Vec::new();
     let mut previous: Option<Piece<'a>> = None;
     let mut previous_block = false;
+    let mut previous_unary = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         let is_block = current.kind == K::LBrace && previous.is_none_or(|p| p.kind != K::Dot);
-        let spacing = previous.map_or(Gap::None, |p| gap(p, current, block, previous_block));
+        let spacing = if previous_unary {
+            Gap::None
+        } else {
+            previous.map_or(Gap::None, |p| gap(p, current, block, previous_block))
+        };
+        let after_comma = previous.is_some_and(|p| p.kind == K::Comma);
+        let near_comment = matches!(current.kind, K::Comment | K::BlockComment)
+            || previous.is_some_and(|p| p.kind == K::BlockComment);
         match spacing {
             Gap::Hard => {
                 concat_group(&mut line, document, &mut output)?;
+                // Keep at most one blank line where the source had one or more
+                // between two items; the bare newline leaves no indentation.
+                if current.blank {
+                    output.push(document.push(Doc::Text("\n"))?);
+                }
                 output.push(document.push(Doc::HardLine)?);
             }
-            Gap::Soft if !is_block => line.push(document.push(Doc::SoftLineOrSpace)?),
-            Gap::Empty => line.push(document.push(Doc::SoftLineOrEmpty)?),
+            Gap::Soft if list && after_comma => {
+                concat_group(&mut line, document, &mut output)?;
+                output.push(document.push(Doc::SoftLineOrSpace)?);
+            }
+            Gap::Soft if !is_block && near_comment => {
+                line.push(document.push(Doc::SoftLineOrSpace)?)
+            }
+            Gap::Soft if !is_block => line.push(document.push(Doc::Text(" "))?),
+            Gap::Return => {
+                concat_group(&mut line, document, &mut output)?;
+                let lead = document.push(Doc::SoftLineOrSpace)?;
+                line.push(document.push(Doc::Nest(4, lead))?);
+            }
+            Gap::Empty | Gap::Operator => {
+                let lead = document.push(if matches!(spacing, Gap::Empty) {
+                    Doc::SoftLineOrEmpty
+                } else {
+                    Doc::SoftLineOrSpace
+                })?;
+                line.push(document.push(Doc::Nest(4, lead))?);
+            }
             _ => {}
         }
         if is_block {
@@ -437,6 +530,9 @@ fn sequence<'a>(
             let start = document.push(Doc::Text(current.text))?;
             let inner = sequence(atoms, pos, Some(close), is_block, document)?;
             let last_is_line_comment = *pos > 0 && atoms[*pos - 1].kind == K::Comment;
+            // The formatter never adds or removes tokens, so a source trailing
+            // comma is kept and selects the vertical layout.
+            let trailing_comma = !is_block && *pos > 0 && atoms[*pos - 1].kind == K::Comma;
             let closing = atoms
                 .get(*pos)
                 .filter(|a| a.kind == close)
@@ -446,18 +542,19 @@ fn sequence<'a>(
             if empty {
                 document.push(Doc::Concat(vec![start, finish]))?
             } else {
-                let lead = document.push(if is_block {
+                let lead = document.push(if is_block || trailing_comma {
                     Doc::HardLine
                 } else {
                     Doc::SoftLineOrEmpty
                 })?;
                 let content = document.push(Doc::Concat(vec![lead, inner]))?;
                 let nest = document.push(Doc::Nest(4, content))?;
-                let trail = document.push(if is_block || last_is_line_comment {
-                    Doc::HardLine
-                } else {
-                    Doc::SoftLineOrEmpty
-                })?;
+                let trail =
+                    document.push(if is_block || last_is_line_comment || trailing_comma {
+                        Doc::HardLine
+                    } else {
+                        Doc::SoftLineOrEmpty
+                    })?;
                 let all = document.push(Doc::Concat(vec![start, nest, trail, finish]))?;
                 document.push(Doc::Group(all))?
             }
@@ -474,6 +571,9 @@ fn sequence<'a>(
             line.push(node);
         }
         previous_block = is_block;
+        // A prefix `-`/`!` binds to its operand with no space.
+        previous_unary = matches!(current.kind, K::Minus | K::Bang)
+            && previous.is_none_or(|p| !ends_operand(p.kind));
         previous = Some(Piece {
             kind: match current.kind {
                 K::LParen => K::RParen,
@@ -482,6 +582,7 @@ fn sequence<'a>(
                 _ => current.kind,
             },
             text: current.text,
+            blank: false,
         });
     }
     concat_group(&mut line, document, &mut output)?;

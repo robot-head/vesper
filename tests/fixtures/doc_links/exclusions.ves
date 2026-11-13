@@ -12,5 +12,9 @@
 //! ~~~~
 //// [NoFourSlash]
 // [NoOrdinary]
-fn text() -> String { "/// [NoString]" }
-fn present() -> i64 { 42 }
+fn text() -> String {
+    "/// [NoString]"
+}
+fn present() -> i64 {
+    42
+}

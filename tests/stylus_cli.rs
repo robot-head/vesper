@@ -257,10 +257,12 @@ fn malformed_unsupported_and_resource_failures_leave_inputs_unchanged() {
                 .arg("fmt")
                 .arg(&f.dir)
                 .arg("--recovery")
+                .arg("--check")
         )
         .status
         .success()
     );
+    f.unchanged(b"fn main(){42}");
 }
 #[test]
 fn formatting_never_repairs_actual_linear_exhaustion_or_duplicate_use() {

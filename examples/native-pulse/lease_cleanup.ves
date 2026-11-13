@@ -1,21 +1,44 @@
 // Every path releases the linear lease through `release`, which parks on a
 // cleanup pause. Cancelling the read therefore re-parks before the exit.
-linear struct Lease { slot: u64 }
-copy struct Word { v: u64 }
-copy enum Io { Got(u64), IoFailed(u64), IoCancelled }
-copy enum Tick { Ticked, TickFailed(u32), TickCancelled }
+linear struct Lease {
+    slot: u64
+}
+copy struct Word {
+    v: u64
+}
+copy enum Io {
+    Got(u64),
+    IoFailed(u64),
+    IoCancelled
+}
+copy enum Tick {
+    Ticked,
+    TickFailed(u32),
+    TickCancelled
+}
 linear effect Pulse {
     fn pause() -> Tick;
     fn read(inout buf: Word) -> Io;
 }
 fn release(sink lease: Lease) -> u64 eff [Pulse] {
-    let flushed: u64 = match Pulse::pause() { Ticked => 10, TickFailed(c) => 20, TickCancelled => 30, };
-    let Lease { slot } = lease;
+    let flushed: u64 = match Pulse::pause() {
+        Ticked => 10,
+        TickFailed(c) => 20,
+        TickCancelled => 30,
+    };
+    let Lease {
+        slot
+    }
+    = lease;
     wrapping_add(slot, flushed)
 }
 fn main() -> u64 eff [Pulse] {
-    let lease = Lease { slot: 1000 };
-    let buf = Word { v: 0 };
+    let lease = Lease {
+        slot: 1000
+    };
+    let buf = Word {
+        v: 0
+    };
     match Pulse::read(inout buf) {
         Got(n) => wrapping_add(release(lease), wrapping_add(n, buf.v)),
         IoFailed(code) => wrapping_add(release(lease), wrapping_mul(code, 100)),

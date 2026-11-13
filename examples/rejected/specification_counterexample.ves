@@ -1,11 +1,19 @@
-linear struct Ticket { id: u64 }
+linear struct Ticket {
+    id: u64
+}
 
 // The document's unqualified kinding formula makes this wrapper copy.
 // Vesper rejects the mode-relaxing override with E0105.
-copy struct Wrapper { ticket: Ticket @@ copy }
+copy struct Wrapper {
+    ticket: Ticket @@copy
+}
 
 fn main() {
-    let ticket = Ticket { id: 1 };
-    let wrapper = Wrapper { ticket };
+    let ticket = Ticket {
+        id: 1
+    };
+    let wrapper = Wrapper {
+        ticket
+    };
     // Weakening a copy wrapper would lose its nested linear obligation.
 }

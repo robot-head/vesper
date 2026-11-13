@@ -1,3 +1,36 @@
-fn score(in value: ((), (i64,), (i64, i64))) -> i64 { let ((), (a,), (b, c)) = value; wrapping_add(a, wrapping_add(b, c)) }
-macro keep($value: expr) -> expr { quote { ($value) } }
-fn main() -> i64 { score(keep!(((), (20,), (10, 12)))) }
+fn score(
+    in value: (
+        (),
+        (
+            i64,
+        ),
+        (i64, i64)
+    )
+) -> i64 {
+    let (
+        (),
+        (
+            a,
+        ),
+        (b, c)
+    ) = value;
+    wrapping_add(a, wrapping_add(b, c))
+}
+macro keep($value: expr) -> expr {
+    quote {
+        ($value)
+    }
+}
+fn main() -> i64 {
+    score(
+        keep!(
+            (
+                (),
+                (
+                    20,
+                ),
+                (10, 12)
+            )
+        )
+    )
+}
