@@ -97,7 +97,21 @@ impl Fixture {
         fs::create_dir(&dir).unwrap();
         let path = dir.join("original-🦀.ves");
         fs::write(&path, DISK).unwrap();
-        let uri = format!("file://{}", path.display()).replace('🦀', "%F0%9F%A6%80");
+        let text = path.to_string_lossy().replace('\\', "/");
+        let mut uri = if text.starts_with('/') {
+            "file://".to_owned()
+        } else {
+            "file:///".to_owned()
+        };
+        for byte in text.bytes() {
+            if byte.is_ascii_alphanumeric()
+                || matches!(byte, b'/' | b':' | b'-' | b'_' | b'.' | b'~')
+            {
+                uri.push(char::from(byte));
+            } else {
+                uri.push_str(&format!("%{byte:02X}"));
+            }
+        }
         Self { dir, path, uri }
     }
     fn run(&self, mut messages: Vec<Value>) -> Vec<Value> {
