@@ -8,6 +8,8 @@ publish = false
 [dependencies]
 blake3 = "1.8"
 cranelift-codegen = "0.125"
+num-bigint = "=0.4.8"
+num-traits = "=0.2.19"
 sha2 = { workspace = true }
 
 [dev-dependencies]
