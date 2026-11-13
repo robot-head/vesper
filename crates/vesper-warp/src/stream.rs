@@ -2242,6 +2242,14 @@ impl StreamSet {
         }
     }
 
+    /// Every recorded packet was lost at once (wave six): a client whose
+    /// 0-RTT packets a Retry discarded queues their frames again.
+    pub fn on_all_packets_lost(&mut self) {
+        while let Some(&(pn, _)) = self.sent.front() {
+            self.on_packet_lost(pn);
+        }
+    }
+
     /// RFC 9002 acknowledged a packet: its ranges free buffer space.
     pub fn on_packet_acked(&mut self, pn: u64) {
         let mut frames = PacketFrames::default();

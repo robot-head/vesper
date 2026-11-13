@@ -104,6 +104,12 @@ const TOKEN_PLAIN_MAX: usize = 8 + 1 + 16 + 2 + 1 + 20;
 /// Longest token this endpoint issues.
 pub const MAX_TOKEN_LEN: usize = 1 + NONCE_LEN + TOKEN_PLAIN_MAX + TAG_LEN;
 
+/// Whether a token claims to come from our Retry (its kind byte is not
+/// secret); such a token must validate or the Initial is dropped.
+pub(crate) fn is_retry_token(token: &[u8]) -> bool {
+    token.first() == Some(&TOKEN_RETRY)
+}
+
 /// What a validated token says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TokenKind {
@@ -339,8 +345,6 @@ pub(crate) struct Cids {
     /// How many IDs we may issue (`min(peer limit, ours)`); 1 until the
     /// peer's transport parameters arrive.
     pub issue_limit: u64,
-    /// Our extra IDs were issued after confirmation.
-    pub issued: bool,
 }
 
 impl Cids {
@@ -352,7 +356,6 @@ impl Cids {
             active_peer_seq: 0,
             peer_retire_prior_to: 0,
             issue_limit: 1,
-            issued: false,
         }
     }
 

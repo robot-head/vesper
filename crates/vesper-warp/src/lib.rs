@@ -96,6 +96,8 @@ pub enum TransportErrorCode {
     StreamStateError,
     FinalSizeError,
     CryptoBufferExceeded,
+    /// 0x09 (wave six): more connection IDs than `active_connection_id_limit`.
+    ConnectionIdLimitError,
 }
 
 impl TransportErrorCode {
@@ -108,6 +110,7 @@ impl TransportErrorCode {
             Self::FrameEncodingError => 0x07,
             Self::ProtocolViolation => 0x0a,
             Self::CryptoBufferExceeded => 0x0d,
+            Self::ConnectionIdLimitError => 0x09,
         }
     }
 }

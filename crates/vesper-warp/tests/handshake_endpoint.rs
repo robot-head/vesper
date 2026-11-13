@@ -501,6 +501,9 @@ fn untrusted_certificate_closes_with_a_crypto_error() {
     let mut net = Net::with_client(3, 0, 0, client_setup_with(ROGUE_CA, ALPN));
     for _ in 0..40 {
         net.step();
+        if net.client.connection_error(net.c_conn).is_some() {
+            break;
+        }
     }
     // bad_certificate (42) or unknown_ca (48) as CRYPTO_ERROR 0x100 + alert.
     let err = net.client.connection_error(net.c_conn).unwrap();
@@ -512,6 +515,16 @@ fn untrusted_certificate_closes_with_a_crypto_error() {
         "{error_code:#x}"
     );
     assert!(net.client.connection(net.c_conn).unwrap().keys.is_none());
+    for _ in 0..40 {
+        net.step();
+    }
+    // Wave six: after the closing (client) and draining (server) periods
+    // both slots are freed; the error is still reported.
+    assert!(net.client.connection(net.c_conn).is_none());
+    assert!(net.events[0].contains(&ConnectionEvent::Closed {
+        conn: net.c_conn,
+        error: err
+    }));
     // The server got the CONNECTION_CLOSE with the same code.
     assert_eq!(
         net.server.connection_error(net.s()),
@@ -522,7 +535,7 @@ fn untrusted_certificate_closes_with_a_crypto_error() {
     );
     assert_eq!(
         net.client.open_stream(net.c_conn, false),
-        Err(WarpError::ConnectionClosed(err))
+        Err(WarpError::StaleConnection)
     );
 }
 

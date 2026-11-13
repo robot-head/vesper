@@ -22,7 +22,7 @@ const ACK_ECN: u64 = 0x03;
 const RESET_STREAM: u64 = 0x04;
 const STOP_SENDING: u64 = 0x05;
 const CRYPTO: u64 = 0x06;
-const NEW_TOKEN: u64 = 0x07;
+pub(crate) const NEW_TOKEN: u64 = 0x07;
 const STREAM: u64 = 0x08;
 const STREAM_OFF: u64 = 0x04;
 const STREAM_LEN: u64 = 0x02;
@@ -39,15 +39,15 @@ const STREAMS_BLOCKED_UNI: u64 = 0x17;
 /// Largest stream count a MAX_STREAMS or STREAMS_BLOCKED frame may carry
 /// (RFC 9000 §19.11: a stream ID must stay below 2^62).
 pub const MAX_STREAM_COUNT: u64 = 1 << 60;
-const NEW_CONNECTION_ID: u64 = 0x18;
-const RETIRE_CONNECTION_ID: u64 = 0x19;
+pub(crate) const NEW_CONNECTION_ID: u64 = 0x18;
+pub(crate) const RETIRE_CONNECTION_ID: u64 = 0x19;
 const PATH_CHALLENGE: u64 = 0x1a;
 const PATH_RESPONSE: u64 = 0x1b;
 /// Stateless reset token length (RFC 9000 §10.3).
 pub const RESET_TOKEN_LEN: usize = 16;
 const CLOSE_TRANSPORT: u64 = 0x1c;
 const CLOSE_APPLICATION: u64 = 0x1d;
-const HANDSHAKE_DONE: u64 = 0x1e;
+pub(crate) const HANDSHAKE_DONE: u64 = 0x1e;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
