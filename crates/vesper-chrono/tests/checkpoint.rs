@@ -4,7 +4,7 @@
 //! resume to the same result, reject relocation under `SameAddress`, and
 //! store checkpoints as Chrono snapshot epochs.
 
-use vesper_chrono::checkpoint::{CHECKPOINT_MAGIC, capture_epoch, checkpoint_from_bundle};
+use vesper_chrono::checkpoint::CHECKPOINT_MAGIC;
 use vesper_chrono::{ActivationCheckpoint, CheckpointError, CheckpointLimits, ResumeTag};
 
 #[test]
@@ -76,7 +76,9 @@ fn image_round_trips_and_rejects_damage() {
 mod native {
     use super::*;
     use std::rc::Rc;
-    use vesper_chrono::checkpoint::{RecordedActivation, Step};
+    use vesper_chrono::checkpoint::{
+        RecordedActivation, Step, capture_epoch, checkpoint_from_bundle,
+    };
     use vesper_chrono::{
         AddressPolicy, Bundle, BundleKey, BundleLimits, FlightRecorder, RecorderConfig,
         RedactionPolicy, ReplaySession,

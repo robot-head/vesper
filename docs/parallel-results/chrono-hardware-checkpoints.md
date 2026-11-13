@@ -102,7 +102,7 @@ cargo clippy -p vesper-chrono --all-targets --locked -- -D warnings ok
 cargo test -p vesper-chrono                                        ok (all suites)
 VESPER_LEAN=<lean 4.24.0> cargo test -p vesper-chrono --test lean_model   ok
 lean lean/ChronoReplay.lean (4.24.0, GitHub release zip)           ok; new theorems use only propext
-cargo test --workspace --locked                                    see PR checks
+cargo test --workspace --locked                                    ok (vesper-loom-build needs VLB_CARGO_LOCK when the target dir is outside the repo)
 ```
 
 Hardware capture check on this host (from `tests/capture.rs`):
