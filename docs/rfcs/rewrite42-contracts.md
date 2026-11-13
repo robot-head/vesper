@@ -1,29 +1,37 @@
-# Bounded AST rewrite witnesses (§42): review draft
+# Bounded AST rewrite witnesses (§42): frozen contract
 
 Public parent claim #230 precedes implementation. The coordinator checked open
-claims and actual external PR files for overlapping optimizer paths. This is a
-documentation-only design checkpoint, not authorization to write runtime code.
-The coordinator reviews and publishes the contract before source writers start;
-interface amendments likewise precede dependent edits.
+claims and actual external PR files for overlapping optimizer paths. The coordinator has reviewed this contract. Source/test work starts only after
+this frozen version is pushed and linked from the public claims. Interface
+amendments likewise precede dependent edits.
 
 ## Ownership and scope
 
-| Lane | Exclusive implementation writes after publication |
-|---|---|
-| Coordinator | `src/optimize.rs` mandatory gate/module registration, this contract, integration/review report |
-| Checker | new `src/optimize/witness.rs`, checker-local unit tests, checker report |
-| Producer | new `src/optimize/certificate.rs`, producer-local unit tests, producer report |
-| Independent adversarial/runtime | new dedicated optimizer witness tests and fixtures, acceptance report |
+| Claim | Lane | Exclusive implementation writes after publication |
+|---|---|---|
+|230|Coordinator|`src/optimize.rs` gate/module registration, this contract, integration/review report|
+|232|Checker|new `src/optimize/witness.rs`, `tests/rewrite_core.rs`, checker report|
+|233|Producer|new `src/optimize/certificate.rs` including its unit tests, producer report|
+|234|Independent adversarial|new `src/optimize/adversarial_tests.rs`, `tests/rewrite_witness.rs`, adversarial report|
+|235|Independent runtime/CLI|new `tests/rewrite_runtime.rs`, `tests/rewrite_cli.rs`, `scripts/check-rewrite-witness.py`, acceptance report|
 
-Reports are `docs/rfcs/rewrite42-{checker,producer,acceptance,integration}-report.md`.
-The coordinator exposes `pub mod witness` and keeps `mod certificate` private
-under optimize; external tests use `vesper::optimize::witness`. Specific child
-claims/worktrees are assigned before their writers start. No
-Cargo/dependency, core AST/numeric, main/lib, native, IR/ir_opt, formatter,
-allocator, BUILD/workflow, external-agent or unrelated test edits. Each writer
-uses a private small target, one job, debug0 and incremental0. No push/PR/merge
-is delegated. Optional Lean models are deferred; any later generated Lean uses
-the existing Lean AST seam, never formatted source strings.
+Reports are `docs/rfcs/rewrite42-{checker,producer,adversarial,acceptance,integration}-report.md`.
+Coordinator exposes `pub mod witness`, keeps `mod certificate` private, and
+registers the private adversarial test module after its source exists. External
+public-checker tests use `vesper::optimize::witness`; private adversarial tests
+can corrupt genuine producer output without introducing a public trust hook.
+No Cargo/dependency, core AST/numeric, main/lib, native, IR/ir_opt, formatter,
+allocator, BUILD/workflow, existing fixture or unrelated test edits. External
+formatter claim231 is acknowledged and does not include these new Rust tests.
+
+Writers initially author and rustfmt only. Actual full compiler builds/tests
+are coordinator-only in one stable integration worktree/cache to avoid copying
+large compiler dependencies into four caches. Writers wait for coherent shared
+source/registration before runtime verification; the coordinator records actual
+commands and relays outcomes, and may grant an explicit exclusive build-cache
+lease later. No worker may claim an unexecuted test or build. No push/PR/merge is
+delegated. Optional Lean models are deferred; any later generated Lean uses the
+existing Lean AST seam, never formatted source strings.
 
 The scope is the existing AST optimizer's pure integer islands. The actual egg
 Runner/Extractor still proposes candidates; an independent Rust checker gates
@@ -358,7 +366,11 @@ fresh budget for its standalone input. There is no whole-process RSS claim.
 
 Private producer ceilings are fixed, not caller-increasable in this profile:
 8 iterations, 2048 raw append-only egraph nodes, 128 substitutions per rule per
-iteration, and 4096 successful recorded rule applications. These supplement,
+iteration, and 4096 successful recorded rule applications. A non-saturated
+Runner stop (iteration/node/time/other resource stop) refuses the whole attempt.
+A capped search reporting its full match cap may conservatively refuse rather
+than assume that all matches were seen; never materialize an unbounded match
+list to discover its length. These supplement,
 not replace, WitnessLimits. Enforce before applying growth-producing work;
 Runner's ordinary post-iteration node limit alone is insufficient. Include
 recording/substitution storage and proof construction in the same producer
@@ -407,9 +419,14 @@ pub(super) struct RewriteProposal {
     pub(super) certificate: RewriteCertificate,
     pub(super) budget: WitnessBudget,
 }
+pub(super) enum RewriteOutcome {
+    Barrier,
+    Unchanged,
+    Candidate(RewriteProposal),
+}
 pub(super) fn propose_rewrite(
     source: &Expr, types: &TypeMap, limits: WitnessLimits,
-) -> Result<Option<RewriteProposal>, WitnessError>;
+) -> Result<RewriteOutcome, WitnessError>;
 ```
 
 BoundSource fields cannot be certificate-provided or publicly forged. Admission
@@ -461,7 +478,7 @@ composes the prefix and Runner witnesses.
 The current Math::Num(i64) range remains the graph profile. Check every constant
 reachable from the folded root before graph admission. If a reachable constant
 is outside i64, a distinct literal-range-ineligible outcome permits a fold-only
-proposal with the complete prefix witness; if nothing changed, return None.
+proposal with the complete prefix witness; if nothing changed, return RewriteOutcome::Unchanged.
 This is not a fallback after search failure. If admission passes and any later
 Runner/capture/search/proof/resource operation refuses, discard the entire
 prefix/proposal and retain the original island. Constants eliminated by the
@@ -473,8 +490,14 @@ AST is installed. Every fold-only proposal still passes the full exact gate.
 The gate borrows the actual source while proposing and verifying. It performs
 `*expression = proposal.candidate` only after successful full verification with
 the proposal's cumulative budget through verify_with_budget.
-None/Err at any producer/admission/checker/resource step retains the complete
-original island, including spans and existing child nodes. There is no silent
+RewriteOutcome::Unchanged or any Err retains the complete original island,
+including spans and existing child nodes. RewriteOutcome::Barrier is returned
+only when initial admission finds structurally unsupported syntax or unsupported
+source typing/intrinsic resolution; it authorizes ordinary recursive traversal
+of independently admitted children. After admission succeeds, no later error
+may become Barrier. Limit/allocation/invalid-limit errors are never Barrier,
+even during initial admission. This distinction prevents resource refusal from
+silently retrying child rewrites. There is no silent
 unchecked fallback, post-error partially installed candidate or success flag
 without exact input/output comparison. Existing optimizer callers remain valid.
 
@@ -500,20 +523,24 @@ name/occurrence/resource bounds, and full original-AST preservation on refusal.
 Compare actual evaluator/native behavior through existing supported checked
 arithmetic tests. No need to modify an unrelated backend or baseline test.
 
-Each lane runs appropriate actual tests, Rustdocs, strict Clippy, formatting and
-diff checks using private caches. Coordinator combines all suites and records
-actual execution and limitations. Do not ignore tests, relax limits, fabricate
+Coordinator executes appropriate actual tests, Rustdocs, strict Clippy,
+formatting and diff checks on the combined coherent source. All lanes report
+only checks actually executed; root combines independent suites and records
+execution and limitations. Do not ignore tests, relax limits, fabricate
 stubs, emit raw Lean strings, or claim hosted/Lean/proof/linear-time/performance
-success without corresponding evidence. This draft grants no implementation
-authorization until coordinator publication.
+success without corresponding evidence. Source/test authorization begins with coordinator publication of this frozen
+contract.
 
-## Explicit coordinator-review decisions
+## Coordinator publication decisions
 
-The proposed values/seams still require publication, not writer inference:
-4MiB/16MiB default/HARD logical metadata accounting; a move-only private budget
-carried in RewriteProposal into the same full gate; public checker module path
-`optimize::witness`; exact original same-op callee inventories; and the explicit
-literal-range-only fold profile. The contextual-literal exception and maximal
-island ordering incorporate the coordinator's review instructions. There is no
-remaining known semantic feasibility blocker, and no source authorization is
-implied by this draft commit.
+Approved: 4MiB/16MiB default/HARD logical metadata accounting; the move-only
+cumulative budget passed into the same full checker; public optimize::witness;
+original same-op callee inventories; contextual literal metadata with actual AST
+value authority; maximal-island ordering; witnessed fold prefixes and the
+explicit range-only fold profile. The three-outcome private producer seam
+separates an unsupported barrier from unchanged/refused admitted islands.
+
+All five public claims precede their source writers. Parent230 records the
+actual external-file overlap checks, and fresh formatter231 ownership remains
+separate. No source or build started during draft review. Claims stay reserved
+through reviewed protected merge.
