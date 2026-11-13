@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "status": "audited",
+  "accepted": true,
+  "kernel_replayed": true,
+  "cache_eligible": false,
+  "module": "CodexLedger",
+  "lean_version": "Lean (version 4.24.0, x86_64-unknown-linux-gnu, commit 0000000000000000000000000000000000000000, Release)",
+  "lean_binary_blake3": "0000000000000000000000000000000000000000000000000000000000000001",
+  "auditor_blake3": "0000000000000000000000000000000000000000000000000000000000000002",
+  "artifact_inventory_blake3": "0000000000000000000000000000000000000000000000000000000000000003",
+  "checked_constants": 12,
+  "allowed_axioms": [],
+  "forbidden_axioms": [],
+  "theorems": [
+    { "name": "Codex.Ledger.commit_total", "axioms": [], "type_repr": "∀ (id total : Nat), Codex.Ledger.commit { id := id, total := total } = total" }
+  ],
+  "artifact_files": [
+    { "path": "CodexLedger.olean", "bytes": 4096, "blake3": "0000000000000000000000000000000000000000000000000000000000000004" }
+  ],
+  "imports": []
+}

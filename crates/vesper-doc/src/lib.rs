@@ -3,7 +3,10 @@
 //! renders deterministic escaped local documents. It never authorizes a proof
 //! badge, compiler correctness claim or all-path ownership conclusion.
 #![forbid(unsafe_code)]
+pub mod badges;
 pub mod links;
+pub mod sim;
+pub mod visual;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
