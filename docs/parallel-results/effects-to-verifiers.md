@@ -156,15 +156,13 @@ An explicit `--verify=detfloat` without a `det_float.functions` list still
 audits every emitted function; DetFloat annotations narrow only the automatic
 check.
 
-## Source-rule findings left to a follow-up
+## Source-rule findings fixed in a follow-up
 
 The Codex review of this PR also reported two source-rule holes in
-`src/capability_effects.rs` (lane 15's file, merged in #278, outside this
-lane's paths): assignments to a function-typed local are not
-capability-coerced, and a ConstTime handler's state taint is not propagated
-into its return clause. The backend verifiers do not catch either (Vault does
-not forbid secret return values, and an assigned function value is specialized
-statically). They need a lane-15 follow-up.
+`src/capability_effects.rs` (lane 15's file): assignments to a function-typed
+local were not capability-coerced, and a ConstTime handler's state taint was
+not propagated into its return clause. Both were fixed on `main` by #311
+(closes #310).
 
 ## Remaining gaps
 
