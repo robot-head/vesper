@@ -3,7 +3,7 @@
 Bounded scalar Rust host JSON and binary codec slices from design §20.
 It has no dependencies and forbids unsafe code. It does not provide source
 macros, source Region typing, linear-resource deserialization, SIMD kernels,
-float conversion, arbitrary object-graph archives, NDJSON/AoSoA ingestion, or
+arbitrary object-graph archives, NDJSON/AoSoA ingestion, or
 throughput guarantees. The versioned tree archive below is an explicit host
 format, not a generic source-derive archive ABI.
 
@@ -19,7 +19,8 @@ assert_eq!(id, 42);
 `IndexedJson::parse` validates all syntax, Unicode, UTF-8, numbers and nested
 unknown fields before publishing any `Node`. Numbers follow JSON grammar and
 can be arbitrarily large within the input/work bounds; `as_u64`/`as_i64`
-separately check representability. No floating-point parsing is advertised.
+separately check representability. `as_f64` additionally supports the bounded
+finite binary64 profile below; arbitrary raw numbers retain their original role.
 Duplicate object keys are rejected by decoded Unicode scalar equality in all
 objects. Thus `"id"` and `"\u0069d"` conflict. Unicode normalization and case
 folding are not applied. Members in separate objects may reuse keys.
@@ -43,7 +44,7 @@ use quadratic duplicate checks, stopped by this work allowance. Work units are
 a deterministic budget, not CPU instructions or elapsed time. `work_used()` and
 `index_capacity_bytes()` expose accounting on success.
 
-`Value`/`encode_into` support null, bool, exact u64/i64, UTF-8 strings, arrays,
+`Value`/`encode_into` support null, bool, exact u64/i64, finite f64, UTF-8 strings, arrays,
 objects and validated raw `Node`s. Preflight checks duplicate keys, all limits,
 checked sizes and output capacity before any write; errors preserve every output
 byte. Raw embeddings also count nested depth/tokens/decoded-string bytes against
@@ -56,7 +57,7 @@ quote/backslash/control/non-ASCII keys. `matches_window` checks lexical bytes
 including the closing quote without over-reading short windows; it does not
 validate JSON. `matches_key` operates on validated keys and includes the decoded
 fallback for escaped-equivalent spellings. `JsonSizeBound` offers checked integer,
-boolean and conservative string ceilings. `Dynamic { static_ceiling }` bounds
+boolean, finite binary64 and conservative string ceilings. `Dynamic { static_ceiling }` bounds
 only the statically bounded contribution after excluding dynamic payloads; it
 provides neither an upper nor a lower bound on total encoded size. The scalar escape-mask reference
 carries backslash parity across 64-byte blocks; it is not used as a SIMD proof.
@@ -66,6 +67,48 @@ Run the self-checking example with:
 ```sh
 cargo run -p vesper-serde --example bounded_json
 ```
+
+## Finite binary64 JSON
+
+`Node::as_f64(FloatLimits)` and transactional `Cursor::read_f64(FloatLimits)`
+convert already validated Number nodes using Rust's standard scalar binary64
+conversion. IEEE rounding, subnormals and underflow to correctly signed zero are
+supported. Overflow to Infinity returns `Number` at the original token start;
+non-number nodes retain `Type`, and empty cursors retain `End`. Every failed
+cursor conversion preserves its position for retry or raw forwarding. Existing
+integer conversions and raw number spellings remain unchanged.
+
+`FloatLimits` defaults to 4,096 number bytes and 32 Mi logical work units, with
+HARD caps of 65,536 bytes and 128 Mi units. Before scalar conversion it prepays
+checked `bytes² + 512` work;
+invalid byte settings return `InputLimit`, invalid work settings `WorkLimit`.
+These units are deterministic admission accounting, not CPU instructions or
+elapsed-time bounds. A valid enormous JSON number may remain raw-forwardable
+even when finite f64 conversion refuses it.
+
+`Value::F64` rejects all NaN signs/payloads and both Infinities during complete
+recursive preflight, before changing any output byte. Finite numbers format in
+a stack buffer of 512 bytes; `JsonSizeBound::F64` is `Bounded(512)`. Encoding then
+decoding preserves exact binary64 bits, including negative zero. Decimal inputs
+may round; this is neither arbitrary-precision decimal equality nor a unique
+canonical decimal encoding. The encoder pays two conservative formatting passes
+plus output work under the unchanged default work limit, so large float arrays
+may require an explicitly larger finite allowance. Encoding/formatting adds no
+dynamic allocation; the existing JSON parser still uses its bounded token Vec.
+
+Run the actual self-checking finite corpus and independent Python interoperability:
+
+```sh
+cargo build -p vesper-serde --example finite_float_json
+python3 scripts/check-float-json.py --binary target/debug/examples/finite_float_json
+```
+
+The example emits bounded JSON-lines records containing bit strings and actual
+encoded numeric values. Python parses both integer and fractional spellings as
+float, rejects non-JSON constants, and compares exact packed binary64 bits. This
+is a finite scalar host profile, not Eisel-Lemire/Dragonbox/SIMD conversion,
+source derives/Region typing, DetFloat arithmetic/backend verification or a
+throughput, allocation-free whole-process, RSS or proof guarantee.
 
 
 ## Binary codecs (§20.4)
