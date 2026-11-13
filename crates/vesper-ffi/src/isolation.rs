@@ -131,12 +131,17 @@ pub struct Rights {
     pub write: bool,
 }
 
-/// Identifies one region of one domain (keys are unique among live domains).
+/// Identifies one region of one domain. Carries the domain's process-unique
+/// generation, not its key: a freed key can be reallocated to a later domain,
+/// and an id from the old domain must not resolve there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionId {
-    key: i32,
+    domain: u64,
     index: usize,
 }
+
+/// Source of domain generations; never reused within a process.
+static NEXT_DOMAIN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 #[derive(Debug)]
 struct Region {
@@ -160,6 +165,7 @@ pub fn probe() -> Result<Mechanism, Unavailable> {
 /// then frees the key, so the key is never reused while pages carry it.
 pub struct IsolationDomain {
     key: i32,
+    generation: u64,
     mechanism: Mechanism,
     regions: Vec<Region>,
     _not_sync: PhantomData<Cell<()>>,
@@ -179,6 +185,7 @@ impl IsolationDomain {
         let (mechanism, key) = hw::alloc_key()?;
         Ok(Self {
             key,
+            generation: NEXT_DOMAIN.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             mechanism,
             regions: vec![],
             _not_sync: PhantomData,
@@ -203,12 +210,12 @@ impl IsolationDomain {
         let (base, mapped) = hw::map_tagged(len, self.key)?;
         self.regions.push(Region { base, len, mapped });
         Ok(RegionId {
-            key: self.key,
+            domain: self.generation,
             index: self.regions.len() - 1,
         })
     }
     fn region(&self, id: RegionId) -> Result<&Region, DomainError> {
-        if id.key != self.key {
+        if id.domain != self.generation {
             return Err(DomainError::UnknownRegion);
         }
         self.regions.get(id.index).ok_or(DomainError::UnknownRegion)
@@ -722,8 +729,10 @@ mod hw {
             }
         }
         let mut messages: Vec<u64> = bytes
-            .chunks_exact(8)
-            .map(|c| u64::from_le_bytes(c.try_into().expect("8-byte chunk")))
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| u64::from_le_bytes(*c))
             .collect();
         let fault = messages
             .len()

@@ -891,6 +891,8 @@ struct RawParam {
     name: String,
     ty: RTy,
     receiver: bool,
+    /// A `&'static` borrow: the callee may keep it, so it is not `nocapture`.
+    static_ref: bool,
 }
 
 impl Analyzer {
@@ -962,10 +964,16 @@ impl Analyzer {
                         },
                         None => base,
                     };
+                    let static_ref = r
+                        .reference
+                        .as_ref()
+                        .and_then(|(_, l)| l.as_ref())
+                        .is_some_and(|l| l.ident == "static");
                     raw.push(RawParam {
                         name: "self".into(),
                         ty,
                         receiver: true,
+                        static_ref,
                     });
                 }
                 FnArg::Typed(t) => {
@@ -984,10 +992,16 @@ impl Analyzer {
                     let ty = self
                         .rty(&t.ty, self_ty, 0)
                         .map_err(|(r, d)| refuse((r, format!("parameter `{}`: {d}", pi.ident))))?;
+                    let static_ref = matches!(
+                        &*t.ty,
+                        syn::Type::Reference(r)
+                            if r.lifetime.as_ref().is_some_and(|l| l.ident == "static")
+                    );
                     raw.push(RawParam {
                         name: pi.ident.to_string(),
                         ty,
                         receiver: false,
+                        static_ref,
                     });
                 }
             }
@@ -1182,6 +1196,16 @@ impl Analyzer {
                         PointerAccess::In
                     };
                     match &**inner {
+                        _ if p.static_ref => sys_refuse(
+                            (
+                                RefusalReason::PointerParameter,
+                                format!(
+                                    "`{}`: a `&'static` borrow may be kept by the callee, so it is not a `nocapture` pointer",
+                                    p.name
+                                ),
+                            ),
+                            &mut sys_err,
+                        ),
                         RTy::Scalar(e) => sys_params.push((
                             pname.clone(),
                             SysParam::Pointer {

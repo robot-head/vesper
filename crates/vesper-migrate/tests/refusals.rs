@@ -578,6 +578,7 @@ fn rust_single_pointers_annotations_and_aliasing() {
         #[no_mangle] pub unsafe extern "C" fn raw_in(key: *const u64) -> u64 { 0 }
         #[no_mangle] pub extern "C" fn by_ref(p: &mut Pair, n: &u32) {}
         #[no_mangle] pub extern "C" fn loose(p: &mut Loose) {}
+        #[no_mangle] pub extern "C" fn keep(p: &'static u32) {}
         /// vesper-migrate: a inout
         /// vesper-migrate: b in
         #[no_mangle] pub unsafe extern "C" fn alias(a: *mut u32, b: *const u32) {}
@@ -606,6 +607,9 @@ fn rust_single_pointers_annotations_and_aliasing() {
         reason(&m, "fn alias: vsys"),
         RefusalReason::AliasingPointers
     );
+    // The callee may keep a `&'static` borrow, so it is not `nocapture`.
+    assert_eq!(reason(&m, "fn keep: vsys"), RefusalReason::PointerParameter);
+    assert!(!spec.text.contains("fn keep("), "{}", spec.text);
     assert_eq!(reason(&m, "fn out_slice"), RefusalReason::BadAnnotation);
     assert_eq!(reason(&m, "fn const_out"), RefusalReason::BadAnnotation);
     // `c_void` is not a lifted type at all.

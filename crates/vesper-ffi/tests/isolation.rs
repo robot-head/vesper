@@ -227,6 +227,12 @@ fn other_domains_and_bounds_are_checked() {
     );
     // `rb` has index 0 like `ra`, but belongs to `b`.
     assert_eq!(a.region_len(rb), Err(DomainError::UnknownRegion));
+    // A freed key may be handed to the next domain; old ids stay dead there.
+    drop(b);
+    let mut c = IsolationDomain::new().unwrap();
+    let rc = c.add_region(16).unwrap();
+    assert_ne!(rb, rc);
+    assert_eq!(c.region_len(rb), Err(DomainError::UnknownRegion));
 }
 
 /// Written straight to the stderr handle, which the test harness does not
