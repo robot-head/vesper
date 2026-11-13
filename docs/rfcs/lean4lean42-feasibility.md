@@ -40,6 +40,10 @@ BLAKE3 artifact scheme:
 | Recorded port patch | `17d11684630a4c7d7aa0981235449313df0e9ec34980041d4c55e201fda4b555` |
 | Actual experimental checker executable | `5b02bccb7f020b9fa1bfc02be0a179d921f9ddf4dcf1895b9728253f005925ae` |
 
+The patch preserves ordinary unified-diff blank context lines, including their
+single leading space. Its bytes are retained exactly; whitespace checks for the
+other repository files exclude this data artifact.
+
 The executable hash identifies the observed build; it does not prove that an
 arbitrary binary was derived from these sources.
 
