@@ -38,8 +38,6 @@ jobs:
           - name: macOS (AArch64)
             os: macos-latest
     runs-on: ${{ matrix.os }}
-    env:
-      VESPER_LEAN4LEAN42_ROOT: ${{ runner.temp }}/vesper-lean4lean42
     defaults:
       run:
         shell: bash
@@ -73,7 +71,10 @@ jobs:
         with:
           python-version: '3.13'
       - name: Prepare the pinned external Lean4Lean checker
-        run: scripts/ci/prepare-lean4lean42.sh "$VESPER_LEAN4LEAN42_ROOT"
+        run: |
+          export VESPER_LEAN4LEAN42_ROOT="$RUNNER_TEMP/vesper-lean4lean42"
+          echo "VESPER_LEAN4LEAN42_ROOT=$VESPER_LEAN4LEAN42_ROOT" >> "$GITHUB_ENV"
+          scripts/ci/prepare-lean4lean42.sh "$VESPER_LEAN4LEAN42_ROOT"
       - run: bazel test //...
       - run: scripts/ci/check-lean-models.sh
       # On Apple silicon the host is real AArch64 hardware, so native code
@@ -107,7 +108,6 @@ jobs:
       CARGO_BUILD_JOBS: 2
       CARGO_PROFILE_DEV_DEBUG: 0
       CARGO_PROFILE_TEST_DEBUG: 0
-      VESPER_LEAN4LEAN42_ROOT: ${{ runner.temp }}/vesper-lean4lean42
     defaults:
       run:
         shell: bash
@@ -132,13 +132,15 @@ jobs:
       - name: Build the external-check driver
         run: cargo build -p vesper --locked --bin lean4lean42
       - name: Prepare the pinned external Lean4Lean checker
-        run: >-
-          python tools/lean4lean42/setup.py
-          --directory "$VESPER_LEAN4LEAN42_ROOT"
-          --driver "$PWD/target/debug/lean4lean42.exe"
-          --lean "$(elan which lean)"
-          --lake "$(elan which lake)"
-          --git git
+        run: |
+          export VESPER_LEAN4LEAN42_ROOT="$RUNNER_TEMP/vesper-lean4lean42"
+          echo "VESPER_LEAN4LEAN42_ROOT=$VESPER_LEAN4LEAN42_ROOT" >> "$GITHUB_ENV"
+          python tools/lean4lean42/setup.py \
+            --directory "$VESPER_LEAN4LEAN42_ROOT" \
+            --driver "$PWD/target/debug/lean4lean42.exe" \
+            --lean "$(elan which lean)" \
+            --lake "$(elan which lake)" \
+            --git git
       - run: cargo clippy --workspace --locked --all-targets -- -D warnings
       - run: cargo test --workspace --locked
         env:
