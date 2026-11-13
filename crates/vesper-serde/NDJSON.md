@@ -58,7 +58,9 @@ actual columns, checks typed cursor agreement and reencodes them through the
 existing scalar codec. Python supplies an independent corpus and verifies exact
 u64 IDs, Unicode strings and nested raw metadata; malformed batches and later
 schema errors emit no records. Encoding/parser work remains under unchanged
-finite codec limits. Source derives/Region typing, linear construction, actual
-TiledSeq/aligned AoSoA allocation, incremental chunks, SIMD/native backends,
-zero-total-heap operation and performance/formal-proof guarantees remain outside
-this slice.
+finite codec limits. Records are indexed by the stage 1 SIMD structural index
+when the CPU supports it (`Engine::detect()`), with identical batches and
+projections to the scalar engine. The separate `tiles` module provides aligned
+16-wide AoSoA telemetry tiles. Source derives/Region typing, linear construction,
+a generic `TiledSeq`, incremental chunks, native backends and performance
+guarantees remain outside this slice.

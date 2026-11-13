@@ -1,28 +1,36 @@
-//! Bounded, scalar host codec foundations for design section 20.
+//! Bounded host codec foundations for design section 20.
 //!
 //! An [`IndexedJson`] validates the *entire* immutable input before exposing raw
 //! views or constant-time subtree skips. Duplicate keys are rejected by decoded
 //! Unicode scalar equality, including escaped spellings, in every object.
 //! Unescaped strings borrow input; escaped strings use explicit caller scratch.
-//! There are no source-language, SIMD, arena, linear-resource, or speed claims.
-#![forbid(unsafe_code)]
+//! It is built either by scalar recursive descent or by the two-stage §20.3
+//! path: a SIMD structural index ([`simd`]) then a tape builder over it
+//! ([`IndexedJson::parse_simd`], [`SimdParser`]). There are no source-language,
+//! arena, or linear-resource claims.
+// `unsafe` is denied everywhere except the gated `simd::kernels` module.
+#![deny(unsafe_code)]
 #![doc = include_str!("../README.md")]
 
 pub mod archive;
 pub mod binary;
 pub mod event_columns;
 pub mod ndjson;
+pub mod simd;
 pub mod streamvbyte;
+pub mod tiles;
 
 mod encode;
 mod float;
 mod helpers;
 mod index;
+mod stage2;
 
 pub use encode::{EncodeLimits, Value, encode_into, encoded_size};
 pub use float::FloatLimits;
 pub use helpers::{JsonSizeBound, SwarFieldMatcher, compute_escaped_mask_64};
 pub use index::{Cursor, IndexedJson, JsonStr, JsonString, Kind, Limits, Node, ObjectFields};
+pub use stage2::SimdParser;
 
 /// A stable, allocation-free error category. Offsets are input byte positions
 /// for parsing, and zero for encoder/helper errors.
@@ -46,6 +54,8 @@ pub enum ErrorKind {
     Overflow,
     Type,
     End,
+    /// The requested stage 1 instruction-set path is not available here.
+    IsaUnavailable,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
