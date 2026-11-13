@@ -4038,6 +4038,7 @@ dependencies = [
  "sha2",
  "vesper",
  "vesper-simpulse",
+ "vesper-warp-umem",
 ]
 
 [[package]]
