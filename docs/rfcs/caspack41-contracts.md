@@ -123,3 +123,38 @@ registry authentication/TUF, signing/quorum admission, garbage collection,
 source-language effect confinement or Lean certificate validity. Payload identity
 does not authorize execution. Actual local tests/examples/strict Clippy required;
 hosted/platform/RBE claims await execution.
+
+## Shared helper API supplement (claim196 scaffold)
+
+The crate-private helpers in `transfer/mod.rs` are `Budget::new(limits)`,
+`limits() -> TransferLimits`, `work(usize)`, `metadata(usize)`, `entries(usize)`,
+`reserve_metadata<T>(&mut Vec<T>, additional)`,
+`reserve_payload(&mut Vec<u8>, additional)`, and
+`reserve_pack(&mut Vec<u8>, additional)`. `additional` is relative to vector
+length, matching `Vec::try_reserve_exact`. Helpers check arithmetic, charge
+before reservation, and use fallible exact reservations. They charge nothing
+when the requested new length fits existing capacity; every growth charges the
+FULL requested new capacity, cumulatively, rather than only the growth delta.
+Payload requests across all object buffers share max_pack_bytes; the one final
+pack buffer has a separate cumulative max_pack_bytes allowance. Both categories
+also check their logical lengths against that cap, including no-growth calls.
+Metadata requests charge requested capacity times element size. Every reserve
+also prepays requested-capacity copy/initialization work. General graph/hash/
+serialization/copy work must still be charged explicitly by callers. Checked
+`add`/`mul` arithmetic helpers return `TransferError::Limit` on overflow.
+
+`decode_tree(domain, bytes, &mut Budget) -> Result<Tree, TransferError>` scans the
+fixed raw header, count, name lengths and complete entry extents before invoking
+the existing strict decoder. Aggregate entries are charged first. Names are
+bounded to255bytes. The conservative allocation envelope is2048bytes per entry
+for both maps' logical sparse BTree nodes, plus32times aggregate name bytes for
+original/previous/error/casefold strings (Unicode lowercase needs at most3times
+UTF8bytes), plus16times `(16 +64*entries +wire_bytes)` for decode/reencoding and
+eventual publication encode buffers including geometric Vec growth. Allocator
+bookkeeping is excluded. Work prepays that envelope plus
+`entries*(bit_length(entries)+1)*64*255` for bounded tree/name comparisons and
+transformations, in addition to the initial raw-byte scan. This intentionally
+conservative envelope can refuse combinations beneath individual field caps.
+Importer still prepays generic Store publication scratch/path allocations and
+hash/read/write work for every object before opening the destination; graph
+metadata, visits and canonical-order checks are owned by exporter/importer.
