@@ -188,6 +188,10 @@ fault peers exercise only refusal/cleanup/transport paths. Success requires
 both complete target replays and all binding/control conditions, with separately
 reported not-run axiom and implementation-proof audits.
 
+Default integration acceptance obtains the genuine prepared tool root from
+`VESPER_LEAN4LEAN42_ROOT`; absence is a hard failure, never a skipped pass.
+Ordinary CLI still requires its explicit `--tool-root` argument.
+
 Root coordinates Cargo and complete replay leases, integrates final manifests,
 and claims any narrow CI setup/timeout edits before writing them. The final
 protected PR must include actual setup, complete replay/event coverage,
