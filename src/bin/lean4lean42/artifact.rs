@@ -1354,34 +1354,112 @@ fn create_file(path: &Path, bytes: &[u8]) -> Result<(), Error> {
     f.sync_all()?;
     Ok(())
 }
-fn evidence(config: &Config, space: &Path, name: &str, report: &mut Report) -> Result<(), Error> {
-    if let Some(parent) = &config.artifacts {
-        relative(name)?;
-        if report.artifacts.len() >= 16 {
-            return Err(Error::new(ErrorKind::Artifact, "retained artifact count"));
+fn copy_evidence(from: &Path, to: &Path, expected: &FileDigest, end: Instant) -> Result<(), Error> {
+    let mut input = File::open(from)?;
+    let mut output = OpenOptions::new().create_new(true).write(true).open(to)?;
+    let mut hash = blake3::Hasher::new();
+    let mut bytes = 0;
+    let mut buffer = [0u8; 65536];
+    loop {
+        timely(end)?;
+        let n = input.read(&mut buffer)?;
+        if n == 0 {
+            break;
         }
-        let used = report
-            .artifacts
-            .iter()
-            .try_fold(0u64, |n, f| checked(n, f.bytes))?;
-        let mut f = file_digest(
-            space,
-            &space.join(name),
-            config.limits.artifact_bytes.saturating_sub(used),
-            until(config.limits.inventory_timeout_ms),
-        )?;
-        let base = fs::canonicalize(parent)?;
-        f.path = label(&base, &space.join(name))?;
-        if report.artifacts.iter().any(|old| old.path == f.path) {
+        bytes = checked(bytes, n as u64)?;
+        if bytes > expected.bytes {
             return Err(Error::new(
                 ErrorKind::Artifact,
-                "duplicate retained artifact",
+                "evidence source grew after preflight",
             ));
         }
-        reserve(&mut report.artifacts, 1)?;
-        report.artifacts.push(f);
+        output.write_all(&buffer[..n])?;
+        hash.update(&buffer[..n]);
     }
+    if bytes != expected.bytes || hash.finalize().as_bytes() != &expected.blake3 {
+        return Err(Error::new(
+            ErrorKind::Artifact,
+            "evidence source changed after preflight",
+        ));
+    }
+    output.sync_all()?;
     Ok(())
+}
+fn publish_evidence(
+    config: &Config,
+    models: &Path,
+    report: &mut Report,
+) -> Result<Option<PathBuf>, Error> {
+    let Some(parent) = &config.artifacts else {
+        return Ok(None);
+    };
+    let mut names = BTreeSet::new();
+    for t in &report.targets {
+        if let Some(f) = &t.source {
+            names.insert(f.path.clone());
+        }
+        for f in &t.model_artifacts {
+            names.insert(f.path.clone());
+        }
+    }
+    for name in ["setup-receipt.json", "controls.json"] {
+        if present(&models.join(name))? {
+            names.insert(name.into());
+        }
+    }
+    if names.len() + 1 > 16 {
+        return Err(Error::new(
+            ErrorKind::Artifact,
+            "retained evidence file count",
+        ));
+    }
+    let end = until(config.limits.inventory_timeout_ms);
+    let mut files = Vec::new();
+    let mut bytes = config.limits.report_bytes as u64;
+    // Compiler output is always private. Account the entire actual publication
+    // and reserve the maximum report bytes BEFORE creating a retained directory.
+    for name in names {
+        relative(&name)?;
+        let f = file_digest(
+            models,
+            &models.join(name),
+            config.limits.artifact_bytes.saturating_sub(bytes),
+            end,
+        )?;
+        bytes = checked(bytes, f.bytes)?;
+        if bytes > config.limits.artifact_bytes {
+            return Err(Error::new(
+                ErrorKind::Artifact,
+                "retained evidence byte cap",
+            ));
+        }
+        reserve(&mut files, 1)?;
+        files.push(f);
+    }
+    if bytes > config.limits.artifact_bytes {
+        return Err(Error::new(
+            ErrorKind::Artifact,
+            "retained report reservation",
+        ));
+    }
+    let mut publication = Workspace::new(Some(parent))?;
+    publication.retained = false;
+    let base = fs::canonicalize(parent)?;
+    let mut published = Vec::new();
+    reserve(&mut published, files.len())?;
+    for mut f in files {
+        copy_evidence(
+            &models.join(&f.path),
+            &publication.path.join(&f.path),
+            &f,
+            end,
+        )?;
+        f.path = label(&base, &publication.path.join(&f.path))?;
+        published.push(f);
+    }
+    report.artifacts = published;
+    publication.retained = true;
+    Ok(Some(publication.path.clone()))
 }
 pub fn save_report(config: &Config, dir: Option<&Path>, report: &Report) -> Result<(), Error> {
     if let Some(dir) = dir {
@@ -1440,7 +1518,8 @@ pub fn execute(
     regular_meta(&config.tool_root)?;
     let root = fs::canonicalize(&config.tool_root)?;
     let i = inputs()?;
-    let r = read_receipt(&root)?;
+    let receipt_bytes = read_bytes(&root.join("setup-receipt.json"), 4 * MIB)?;
+    let r: Receipt = bounded_json(&receipt_bytes, 4 * MIB)?;
     let (lean, sysroot) = validate_receipt(&root, &r, &i, &config.limits)?;
     // Offline overrides must already name the bound actual compiler. In
     // particular, never execute an elan proxy to discover a replacement here.
@@ -1450,6 +1529,12 @@ pub fn execute(
         ));
     }
     if let Some(parent) = &config.artifacts {
+        if config.limits.artifact_bytes < config.limits.report_bytes as u64 {
+            return Err(Error::new(
+                ErrorKind::Artifact,
+                "artifact budget cannot reserve the bounded final report",
+            ));
+        }
         fs::create_dir_all(parent)?;
         regular_meta(parent)?;
         let parent = fs::canonicalize(parent)?;
@@ -1460,277 +1545,266 @@ pub fn execute(
             ));
         }
     }
-    let models = Workspace::new(config.artifacts.as_deref())?;
-    if config.artifacts.is_some() {
-        *artifact_directory = Some(models.path.clone());
-    }
-    let (actual, actual_root) = compiler(&lean, &models.path, &config.limits, Some(report))?;
-    if actual != lean || actual_root != sysroot {
-        return Err(identity("offline compiler prefix mismatch"));
-    }
-    report.tools = Some(ToolInfo {
-        profile: r.profile.clone(),
-        upstream_commit: r.upstream_commit.clone(),
-        batteries_commit: r.batteries_commit.clone(),
-        lean_release: r.lean_release.clone(),
-        lean_commit: r.lean_commit.clone(),
-        checker_blake3: r.checker_blake3,
-        compiler_blake3: r.compiler_blake3,
-        compiler_runtime_manifest_blake3: r.compiler_runtime_manifest_blake3,
-        receipt_blake3: digest(&read_bytes(&root.join("setup-receipt.json"), 4 * MIB)?),
-        pins_blake3: r.pins_blake3,
-        known_fixes_blake3: r.known_fixes_blake3,
-        source_manifest_blake3: r.source_manifest_blake3,
-        build_output_manifest_blake3: r.build_output_manifest_blake3,
-        control_inventory_blake3: r.control_inventory_blake3,
-        control_import_manifest_blake3: r.control_import_manifest_blake3,
-        os: std::env::consts::OS.into(),
-        arch: std::env::consts::ARCH.into(),
-    });
-    machine(
-        &root,
-        &models.path,
-        &sysroot,
-        &i,
-        3,
-        2,
-        &config.limits,
-        None,
-        Some(report),
-        None,
-    )?;
-    {
-        let (before, _) = machine(
+    let models = Workspace::new(None)?;
+    let result = (|| -> Result<(), Error> {
+        let (actual, actual_root) = compiler(&lean, &models.path, &config.limits, Some(report))?;
+        if actual != lean || actual_root != sysroot {
+            return Err(identity("offline compiler prefix mismatch"));
+        }
+        report.tools = Some(ToolInfo {
+            profile: r.profile.clone(),
+            upstream_commit: r.upstream_commit.clone(),
+            batteries_commit: r.batteries_commit.clone(),
+            lean_release: r.lean_release.clone(),
+            lean_commit: r.lean_commit.clone(),
+            checker_blake3: r.checker_blake3,
+            compiler_blake3: r.compiler_blake3,
+            compiler_runtime_manifest_blake3: r.compiler_runtime_manifest_blake3,
+            receipt_blake3: digest(&receipt_bytes),
+            pins_blake3: r.pins_blake3,
+            known_fixes_blake3: r.known_fixes_blake3,
+            source_manifest_blake3: r.source_manifest_blake3,
+            build_output_manifest_blake3: r.build_output_manifest_blake3,
+            control_inventory_blake3: r.control_inventory_blake3,
+            control_import_manifest_blake3: r.control_import_manifest_blake3,
+            os: std::env::consts::OS.into(),
+            arch: std::env::consts::ARCH.into(),
+        });
+        machine(
             &root,
             &models.path,
             &sysroot,
             &i,
-            0,
+            3,
             2,
             &config.limits,
             None,
             Some(report),
             None,
         )?;
-        let before = before
-            .inventory
-            .ok_or_else(|| identity("missing native control baseline"))?;
-        let envelope =
-            import_envelope(&before, &root, &models.path, &sysroot, true, &config.limits)?;
-        if before.blake3 != r.control_inventory_blake3
-            || envelope.hash != r.control_import_manifest_blake3
         {
-            return Err(identity("control baseline does not match sealed inputs"));
+            let (before, _) = machine(
+                &root,
+                &models.path,
+                &sysroot,
+                &i,
+                0,
+                2,
+                &config.limits,
+                None,
+                Some(report),
+                None,
+            )?;
+            let before = before
+                .inventory
+                .ok_or_else(|| identity("missing native control baseline"))?;
+            let envelope =
+                import_envelope(&before, &root, &models.path, &sysroot, true, &config.limits)?;
+            if before.blake3 != r.control_inventory_blake3
+                || envelope.hash != r.control_import_manifest_blake3
+            {
+                return Err(identity("control baseline does not match sealed inputs"));
+            }
+            let (controls, _) = machine(
+                &root,
+                &models.path,
+                &sysroot,
+                &i,
+                2,
+                2,
+                &config.limits,
+                None,
+                Some(report),
+                None,
+            )?;
+            report.controls = controls.controls;
+            report.controls_blake3 = controls.controls_blake3;
+            if report.controls != r.controls || report.controls_blake3 != Some(r.controls_blake3) {
+                return Err(Error::new(
+                    ErrorKind::Controls,
+                    "actual controls differ from sealed candidate",
+                ));
+            }
+            let (after, _) = machine(
+                &root,
+                &models.path,
+                &sysroot,
+                &i,
+                0,
+                2,
+                &config.limits,
+                Some(&before),
+                Some(report),
+                None,
+            )?;
+            if after.inventory_blake3 != Some(before.blake3)
+                || import_envelope(&before, &root, &models.path, &sysroot, true, &config.limits)?
+                    .hash
+                    != envelope.hash
+            {
+                return Err(identity("control baseline changed during checks"));
+            }
         }
-        let (controls, _) = machine(
-            &root,
-            &models.path,
-            &sysroot,
-            &i,
-            2,
-            2,
-            &config.limits,
-            None,
-            Some(report),
-            None,
-        )?;
-        report.controls = controls.controls;
-        report.controls_blake3 = controls.controls_blake3;
-        if report.controls != r.controls || report.controls_blake3 != Some(r.controls_blake3) {
-            return Err(Error::new(
-                ErrorKind::Controls,
-                "actual controls differ from sealed candidate",
-            ));
-        }
-        let (after, _) = machine(
-            &root,
-            &models.path,
-            &sysroot,
-            &i,
-            0,
-            2,
-            &config.limits,
-            Some(&before),
-            Some(report),
-            None,
-        )?;
-        if after.inventory_blake3 != Some(before.blake3)
-            || import_envelope(&before, &root, &models.path, &sysroot, true, &config.limits)?.hash
-                != envelope.hash
+        for (index, (target, bytes)) in [
+            (Target::RewriteWitness, MODEL0),
+            (Target::ArithmeticOracle, MODEL1),
+        ]
+        .into_iter()
+        .enumerate()
         {
-            return Err(identity("control baseline changed during checks"));
-        }
-    }
-    for (index, (target, bytes)) in [
-        (Target::RewriteWitness, MODEL0),
-        (Target::ArithmeticOracle, MODEL1),
-    ]
-    .into_iter()
-    .enumerate()
-    {
-        let source_name = format!("{}.lean", target.module());
-        let source_path = models.path.join(&source_name);
-        create_file(&source_path, bytes)?;
-        let source = file_digest(
-            &models.path,
-            &source_path,
-            4 * MIB as u64,
-            until(config.limits.inventory_timeout_ms),
-        )?;
-        report.targets[index].source = Some(source);
-        evidence(config, &models.path, &source_name, report)?;
-        let mut c = command(
-            &lean,
-            &models.path,
-            Some(&sysroot),
-            &roots(&root, &models.path, &sysroot, false),
-        )?;
-        c.arg("-o")
-            .arg(models.path.join(format!("{}.olean", target.module())))
-            .arg(&source_path);
-        let mut observation_error = None;
-        let out = process::capture_observed(
-            c,
-            config.limits.compile_timeout_ms,
-            &config.limits,
-            65536,
-            |o| {
-                if let Err(e) = observed(report, Some(index), 0, o) {
-                    observation_error = Some(e)
+            let source_name = format!("{}.lean", target.module());
+            let source_path = models.path.join(&source_name);
+            create_file(&source_path, bytes)?;
+            let source = file_digest(
+                &models.path,
+                &source_path,
+                4 * MIB as u64,
+                until(config.limits.inventory_timeout_ms),
+            )?;
+            report.targets[index].source = Some(source);
+            let mut c = command(
+                &lean,
+                &models.path,
+                Some(&sysroot),
+                &roots(&root, &models.path, &sysroot, false),
+            )?;
+            c.arg("-o")
+                .arg(models.path.join(format!("{}.olean", target.module())))
+                .arg(&source_path);
+            let mut observation_error = None;
+            let out = process::capture_observed(
+                c,
+                config.limits.compile_timeout_ms,
+                &config.limits,
+                65536,
+                |o| {
+                    if let Err(e) = observed(report, Some(index), 0, o) {
+                        observation_error = Some(e)
+                    }
+                },
+            );
+            let out = match out {
+                Ok(out) => out,
+                Err(e) => {
+                    report.targets[index].status = TargetStatus::Failed;
+                    return Err(e);
                 }
-            },
-        );
-        let out = match out {
-            Ok(out) => out,
-            Err(e) => {
-                report.targets[index].status = TargetStatus::Failed;
+            };
+            if let Some(e) = observation_error {
                 return Err(e);
             }
-        };
-        if let Some(e) = observation_error {
-            return Err(e);
-        }
-        if out.process.exit != 0 {
-            report.targets[index].status = TargetStatus::Failed;
-            return Err(Error::new(
-                ErrorKind::Compile,
-                "bundled model failed native compilation",
-            ));
-        }
-        report.targets[index].model_artifacts = target_files(&models.path, target, &config.limits)?;
-        report.targets[index].status = TargetStatus::Compiled;
-        let names = report.targets[index]
-            .model_artifacts
-            .iter()
-            .map(|f| f.path.clone())
-            .collect::<Vec<_>>();
-        for name in names {
-            evidence(config, &models.path, &name, report)?;
-        }
-    }
-    for index in 0..2 {
-        let target = report.targets[index].target;
-        let (native, _) = match machine(
-            &root,
-            &models.path,
-            &sysroot,
-            &i,
-            0,
-            target.tag(),
-            &config.limits,
-            None,
-            Some(report),
-            Some(index),
-        ) {
-            Ok(v) => v,
-            Err(e) => {
+            if out.process.exit != 0 {
                 report.targets[index].status = TargetStatus::Failed;
-                return Err(e);
+                return Err(Error::new(
+                    ErrorKind::Compile,
+                    "bundled model failed native compilation",
+                ));
             }
-        };
-        let native = native
-            .inventory
-            .ok_or_else(|| identity("missing native target inventory"))?;
-        let before = import_envelope(
-            &native,
-            &root,
-            &models.path,
-            &sysroot,
-            false,
-            &config.limits,
-        )?;
-        report.targets[index].status = TargetStatus::Inventoried;
-        report.targets[index].inventory = Some(native.totals.clone());
-        report.targets[index].inventory_blake3 = Some(native.blake3);
-        report.targets[index].import_files = before.files;
-        report.targets[index].import_bytes = before.bytes;
-        report.targets[index].import_manifest_blake3 = Some(before.hash);
-        let (replayed, _) = match machine(
-            &root,
-            &models.path,
-            &sysroot,
-            &i,
-            1,
-            target.tag(),
-            &config.limits,
-            Some(&native),
-            Some(report),
-            Some(index),
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                report.targets[index].status = TargetStatus::Failed;
-                return Err(e);
+            report.targets[index].model_artifacts =
+                target_files(&models.path, target, &config.limits)?;
+            report.targets[index].status = TargetStatus::Compiled;
+        }
+        for index in 0..2 {
+            let target = report.targets[index].target;
+            let (native, _) = match machine(
+                &root,
+                &models.path,
+                &sysroot,
+                &i,
+                0,
+                target.tag(),
+                &config.limits,
+                None,
+                Some(report),
+                Some(index),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    report.targets[index].status = TargetStatus::Failed;
+                    return Err(e);
+                }
+            };
+            let native = native
+                .inventory
+                .ok_or_else(|| identity("missing native target inventory"))?;
+            let before = import_envelope(
+                &native,
+                &root,
+                &models.path,
+                &sysroot,
+                false,
+                &config.limits,
+            )?;
+            report.targets[index].status = TargetStatus::Inventoried;
+            report.targets[index].inventory = Some(native.totals.clone());
+            report.targets[index].inventory_blake3 = Some(native.blake3);
+            report.targets[index].import_files = before.files;
+            report.targets[index].import_bytes = before.bytes;
+            report.targets[index].import_manifest_blake3 = Some(before.hash);
+            let (replayed, _) = match machine(
+                &root,
+                &models.path,
+                &sysroot,
+                &i,
+                1,
+                target.tag(),
+                &config.limits,
+                Some(&native),
+                Some(report),
+                Some(index),
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    report.targets[index].status = TargetStatus::Failed;
+                    return Err(e);
+                }
+            };
+            report.targets[index].coverage = replayed.coverage;
+            report.targets[index].coverage_blake3 = replayed.coverage_blake3;
+            if import_envelope(
+                &native,
+                &root,
+                &models.path,
+                &sysroot,
+                false,
+                &config.limits,
+            )?
+            .hash
+                != before.hash
+            {
+                return Err(identity(
+                    "model import envelope changed during external replay",
+                ));
             }
-        };
-        report.targets[index].coverage = replayed.coverage;
-        report.targets[index].coverage_blake3 = replayed.coverage_blake3;
-        if import_envelope(
-            &native,
-            &root,
-            &models.path,
-            &sysroot,
-            false,
-            &config.limits,
-        )?
-        .hash
-            != before.hash
-        {
-            return Err(identity(
-                "model import envelope changed during external replay",
-            ));
+            report.targets[index].status = TargetStatus::Complete;
         }
-        report.targets[index].status = TargetStatus::Complete;
-    }
-    validate_receipt(&root, &r, &i, &config.limits)?;
-    for t in &report.targets {
-        let name = format!("{}.lean", t.target.module());
-        if Some(file_digest(
-            &models.path,
-            &models.path.join(name),
-            4 * MIB as u64,
-            until(config.limits.inventory_timeout_ms),
-        )?) != t.source
-            || target_files(&models.path, t.target, &config.limits)? != t.model_artifacts
-        {
-            return Err(identity(
-                "bundled model source/artifact changed during replay",
-            ));
+        validate_receipt(&root, &r, &i, &config.limits)?;
+        for t in &report.targets {
+            let name = format!("{}.lean", t.target.module());
+            if Some(file_digest(
+                &models.path,
+                &models.path.join(name),
+                4 * MIB as u64,
+                until(config.limits.inventory_timeout_ms),
+            )?) != t.source
+                || target_files(&models.path, t.target, &config.limits)? != t.model_artifacts
+            {
+                return Err(identity(
+                    "bundled model source/artifact changed during replay",
+                ));
+            }
         }
-    }
+        Ok(())
+    })();
     if config.artifacts.is_some() {
-        create_file(
-            &models.path.join("setup-receipt.json"),
-            &read_bytes(&root.join("setup-receipt.json"), 4 * MIB)?,
-        )?;
-        evidence(config, &models.path, "setup-receipt.json", report)?;
+        create_file(&models.path.join("setup-receipt.json"), &receipt_bytes)?;
         let controls = serde_json::to_vec(&report.controls)
             .map_err(|_| identity("controls evidence serialization"))?;
         if controls.len() > MIB {
             return Err(limit("control evidence bytes"));
         }
         create_file(&models.path.join("controls.json"), &controls)?;
-        evidence(config, &models.path, "controls.json", report)?;
     }
-    Ok(())
+    *artifact_directory = publish_evidence(config, &models.path, report)?;
+    result
 }
