@@ -103,8 +103,14 @@ records, zero failures/ignored, with exactly two explicit filters: the genuine
 replay matrix already passed above, and the known clean-main Lens cancellation
 case tracked separately. Its real proof-lens Lean/auditor path was enabled.
 These counts do not add the 11 included helper checks from the focused 12-test
-run a second time. Full current-head hosted checks and the separate Lens fix
-remain pending.
+run a second time. The separate test-only Lens fix is now PR #306: the corrected tree and new
+live/stopped/zombie state controls pass, and its cancellation-response regression
+also passes. The response test overlaps the 989 remaining-package results;
+adding the separately executed genuine matrix plus the fixed tree and new
+state control gives 992 distinct passing tests for the composed sources, rather
+than adding either full helper suite again. The test-only fix remains separate
+pending protected merge; no production Lens change is part of this PR.
+Full current-head hosted checks remain pending.
 
 Source inspection also found that pinned Lake verifies a local package revision
 through Git on Windows. Explicit setup now adds only the selected Git directory
