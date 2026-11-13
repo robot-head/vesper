@@ -1,0 +1,9 @@
+[package]
+name = "vesper-chorus"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Chorus: choreographies, endpoint projection, linear session channels, simulated quorum replication and a software RDMA model (design section 25)"
+publish = false
+
+[dependencies]
+vesper-simpulse = { path = "../vesper-simpulse" }
