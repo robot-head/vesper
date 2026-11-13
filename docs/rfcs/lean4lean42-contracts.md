@@ -167,10 +167,13 @@ checker path is `.lake/build/bin/lean4lean`; append `.exe` only on Windows.
 `source-manifest.json` is schema1 plus files, the sorted complete expected
 FileDigest array for the patched upstream and pinned dependency sources and
 fixed overlay. Bind every source file; reject additions/removals/substitutions.
-Ignore only Git metadata, generated `.lake/build` trees, generated Lake state
-outside the explicitly pinned `.lake/packages/batteries` source tree, and the
-fixed root setup input/log/receipt files. Do not treat arbitrary new `.lean`,
-lakefile, manifest or native build inputs as generated state. Document the exact
+Ignore only Git metadata, the exact root and Batteries `.lake/build` trees,
+and the four fixed root setup input/log/receipt files. Include every other
+regular entry, including unknown entries under `.lake`; no blanket Lake-state
+omission is allowed. Actual pinned TOML builds have no other generated cache
+leaves. A future generated exception requires a published contract amendment.
+Do not treat arbitrary new `.lean`, lakefile, manifest or native build inputs
+as generated state. Document the exact
 source walk in setup and reuse the same rules in the Rust sealer/runtime.
 Source-manifest hash domain is `vesper.lean4lean42.sources\0`, schema1 u16LE,
 count u32LE, then FileDigest fields in the same encoding as build outputs.
