@@ -901,7 +901,7 @@ fn run_graph(
             let mut state = hook_capture
                 .lock()
                 .map_err(|_| "witness capture poisoned".to_owned())?;
-            if state.error.is_some() {
+            if state.error.is_some() || !state.charge(runner.egraph.nodes().len()) {
                 Err("witness budget refused".to_owned())
             } else if root_has_leaf(&runner.egraph, &runner.roots, kind, variables) {
                 // This only terminates search at AstSize's global lower
@@ -915,6 +915,14 @@ fn run_graph(
         .with_expr(expression)
         .run(&actual);
     let mut state = capture.lock().map_err(|_| WitnessError::Limit)?;
+    if let Some(error) = state.error {
+        return Err(error);
+    }
+    state
+        .budget
+        .as_mut()
+        .ok_or(WitnessError::Limit)?
+        .work(runner.egraph.nodes().len())?;
     normal_completion(
         &runner.stop_reason,
         &runner.egraph,
