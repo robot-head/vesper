@@ -80,6 +80,8 @@ Edit the crate's `BUILD.bazel` (see existing ones for examples):
 - `copy_test_cwd`: tests that must see regular files instead of runfiles
   symlinks (Lean's `--root`, code that rejects symlinked inputs).
 - `test_tags`: extra tags per test, for example `no-remote-exec`.
+- `test_timeouts`: a longer Bazel timeout (`long`, `eternal`) for one test that
+  outgrows the default 300 s on slow runners.
 
 ### How tests see their environment
 

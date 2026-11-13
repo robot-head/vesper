@@ -14,6 +14,9 @@ vesper_crate(
         "//crates/vesper-grammar:files",
         "//crates/vesper-loom-trust:files",
     ],
+    # Runs Lean serially on many fixtures; macOS runners need more than the
+    # medium size's 300 s.
+    test_timeouts = {"test/proof_audit_cli": "long"},
 )
 # Narrow slices of the root package for members that read them.
 filegroup(
