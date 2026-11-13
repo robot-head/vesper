@@ -365,3 +365,72 @@ fn cdc_offsets_are_durable() {
         Err(Error::Checkpoint("identity"))
     );
 }
+
+#[test]
+fn reuse_never_crosses_stores_or_missing_objects() {
+    let (_a_dir, a) = store();
+    let (_b_dir, b) = store();
+    let all = ticks();
+    let mut e = circuit().executor();
+    let mut ckpt = DurableCheckpointer::new();
+    e.tick(&all[0]).unwrap();
+    ckpt.checkpoint(&e, &a, cp()).unwrap();
+    e.tick(&all[1]).unwrap();
+    // Switching stores rewrites every arrangement into the new store.
+    let into_b = ckpt.checkpoint(&e, &b, cp()).unwrap();
+    assert_eq!(into_b.reused, 0);
+    let mut r = circuit().executor();
+    DurableCheckpointer::new()
+        .restore(&mut r, &b, &into_b.manifest, cp())
+        .unwrap();
+    assert_eq!(r.materialized(), e.materialized());
+    // An arrangement deleted from the store behind the checkpointer's back is
+    // rewritten instead of referenced.
+    let arrangements = DurableCheckpointer::new()
+        .restore(&mut circuit().executor(), &b, &into_b.manifest, cp())
+        .unwrap()
+        .arrangements;
+    std::fs::remove_file(b.object_path(&arrangements[1])).unwrap();
+    let again = ckpt.checkpoint(&e, &b, cp()).unwrap();
+    assert_eq!(again.written, 1);
+    DurableCheckpointer::new()
+        .restore(&mut circuit().executor(), &b, &again.manifest, cp())
+        .unwrap();
+}
+
+#[test]
+fn a_checkpoint_accepted_under_limits_restores_under_the_same_limits() {
+    let (_dir, store) = store();
+    let all = ticks();
+    let mut e = circuit().executor();
+    e.tick(&all[0]).unwrap();
+    e.tick(&all[1]).unwrap();
+    let mut tight = None;
+    for max_work in 1..10_000 {
+        let limits = CheckpointLimits { max_work, ..cp() };
+        if let Ok(report) = DurableCheckpointer::new().checkpoint(&e, &store, limits) {
+            tight = Some((limits, report));
+            break;
+        }
+    }
+    let (limits, report) = tight.expect("some budget admits the checkpoint");
+    let mut r = circuit().executor();
+    DurableCheckpointer::new()
+        .restore(&mut r, &store, &report.manifest, limits)
+        .unwrap();
+    assert_eq!(r.materialized(), e.materialized());
+    // The aggregate cell bound is enforced from the manifest.
+    let few_cells = CheckpointLimits {
+        max_total_cells: 3,
+        ..cp()
+    };
+    assert_eq!(
+        DurableCheckpointer::new().restore(
+            &mut circuit().executor(),
+            &store,
+            &report.manifest,
+            few_cells
+        ),
+        Err(Error::Limit("checkpoint state"))
+    );
+}

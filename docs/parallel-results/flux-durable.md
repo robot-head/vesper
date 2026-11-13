@@ -23,6 +23,9 @@ immutable BLAKE3 store.
   digest, width and row count, and an optional parent-manifest digest.
 - Arrangement `VFLUXAR1` v1: fingerprint, node index, width, row count and the
   canonical rows (i64 LE cells and weight).
+- Creation reserves the exact restore parse work, so an accepted checkpoint
+  restores under the same limits; reuse is bound to the destination store and
+  skips objects no longer present.
 - Incremental: the executor keeps a per-node change counter, bumped when a
   tick's delta for that node's integral is nonzero, and a process-local
   *lineage* replaced on every restore (in-memory or durable). A checkpointer
@@ -141,8 +144,8 @@ All twelve theorems use only `propext`/`Quot.sound` (checked by
 Run on the cloud host (x86_64 Linux) with an isolated target dir:
 
 - `cargo fmt --all -- --check`: clean.
-- `VESPER_LEAN=<lean 4.24.0> cargo test -p vesper-flux --locked`: 35 tests
-  (34 integration including the Lean check, 1 unit) pass; the crash-at-every-step test takes
+- `VESPER_LEAN=<lean 4.24.0> cargo test -p vesper-flux --locked`: 37 tests
+  (36 integration including the Lean check, 1 unit) pass; the crash-at-every-step test takes
   about 5 s in debug.
 - `cargo clippy --workspace --locked --all-targets -- -D warnings`: see the PR
   for the result on the final head.

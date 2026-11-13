@@ -59,6 +59,8 @@ pub struct DurableRestore {
 
 #[derive(Debug)]
 struct Committed {
+    /// Store the arrangements live in; reuse never crosses stores.
+    store: std::path::PathBuf,
     lineage: u64,
     fingerprint: [u8; 32],
     versions: Vec<u64>,
@@ -138,6 +140,35 @@ fn encode_arrangement(
     Ok(w.bytes)
 }
 
+/// Exact charged reads of [`DurableCheckpointer::restore`]'s parser.
+fn parse_work(exec: &Executor) -> Result<usize, Error> {
+    // Manifest: magic, version, flags, fingerprint, ticks, source tag, node
+    // count, parent tag and parent digest (upper bound), then digest, width
+    // and row count per node. Source metadata: two limits, a count and six
+    // fields per binding. Arrangement: magic, version, flags, fingerprint,
+    // node, width, count, then one read per cell and one per weight.
+    let mut work = 9usize;
+    if let Some(source) = &exec.source {
+        work = source
+            .policy
+            .bindings
+            .len()
+            .checked_mul(6)
+            .and_then(|n| n.checked_add(work + 3))
+            .ok_or(Error::Overflow)?;
+    }
+    for set in &exec.prior {
+        let reads = set.width.checked_add(1).ok_or(Error::Overflow)?;
+        work = set
+            .len()
+            .checked_mul(reads)
+            .and_then(|n| n.checked_add(10))
+            .and_then(|n| n.checked_add(work))
+            .ok_or(Error::Overflow)?;
+    }
+    Ok(work)
+}
+
 impl DurableCheckpointer {
     pub fn new() -> Self {
         Self::default()
@@ -170,8 +201,12 @@ impl DurableCheckpointer {
             limits,
             &mut budget,
         )?;
+        // Reserve exactly the restore parse work, so a successful checkpoint is
+        // restorable under the same limits (as the in-memory image does).
+        budget.charge(parse_work(exec)?)?;
         let reuse = self.committed.as_ref().filter(|p| {
-            p.lineage != 0
+            p.store.as_path() == store.root()
+                && p.lineage != 0
                 && p.lineage == exec.lineage
                 && p.fingerprint == fingerprint
                 && p.versions.len() == exec.versions.len()
@@ -181,13 +216,13 @@ impl DurableCheckpointer {
         for (node, set) in exec.prior.iter().enumerate() {
             if let Some(p) = reuse
                 && p.versions[node] == exec.versions[node]
+                && store.contains(&p.arrangements[node]).map_err(storage)?
             {
                 arrangements.push(p.arrangements[node]);
                 reused += 1;
                 continue;
             }
             let blob = encode_arrangement(&fingerprint, node, set, limits)?;
-            budget.charge(blob.len() / 8 + 1)?;
             let ingested = store.put_blob(Domain::Artifact, &blob).map_err(storage)?;
             bytes = bytes.checked_add(ingested.size).ok_or(Error::Overflow)?;
             arrangements.push(ingested.id);
@@ -221,6 +256,7 @@ impl DurableCheckpointer {
             .map_err(storage)?;
         bytes = bytes.checked_add(ingested.size).ok_or(Error::Overflow)?;
         self.committed = Some(Committed {
+            store: store.root().to_path_buf(),
             lineage: exec.lineage,
             fingerprint,
             versions: exec.versions.clone(),
@@ -273,7 +309,7 @@ impl DurableCheckpointer {
             return Err(Error::Checkpoint("node count"));
         }
         let mut entries = Vec::with_capacity(count);
-        let mut total_rows = 0usize;
+        let (mut total_rows, mut total_cells) = (0usize, 0usize);
         for n in &c.nodes {
             let digest: [u8; 32] = r
                 .take(32)?
@@ -285,7 +321,10 @@ impl DurableCheckpointer {
                 return Err(Error::Checkpoint("row schema"));
             }
             total_rows = total_rows.checked_add(rows).ok_or(Error::Overflow)?;
-            if total_rows > limits.max_total_rows {
+            total_cells = total_cells
+                .checked_add(rows.checked_mul(width).ok_or(Error::Overflow)?)
+                .ok_or(Error::Overflow)?;
+            if total_rows > limits.max_total_rows || total_cells > limits.max_total_cells {
                 return Err(Error::Limit("checkpoint state"));
             }
             entries.push((blob_id(digest), width, rows));
@@ -352,6 +391,7 @@ impl DurableCheckpointer {
         exec.source = source;
         exec.lineage = super::super::fresh_lineage();
         self.committed = Some(Committed {
+            store: store.root().to_path_buf(),
             lineage: exec.lineage,
             fingerprint,
             versions: exec.versions.clone(),
