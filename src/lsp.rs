@@ -23,11 +23,14 @@ use std::{
 };
 use vesper_lsp::{
     Envelope, Id, ProtocolErrorKind, ProtocolLimits, ResponsePayload, encode_frame,
-    lens::{PendingRequests, ProofStatus, cancel_params},
+    lens::{CancelToken, PendingRequests, ProofStatus, cancel_params},
     parse_envelope, read_frame,
 };
 
 const REQUEST_CANCELLED: i32 = -32800;
+/// Frames read ahead of the session. A full queue stops the reader, so a
+/// burst or a stalled client keeps the old read-one-handle-one backpressure.
+const READ_AHEAD: usize = 8;
 
 enum Event {
     Frame(Vec<u8>),
@@ -35,6 +38,7 @@ enum Event {
     Eof,
     Proof {
         id: Id,
+        token: CancelToken,
         job: Box<proof_lens::Job>,
         status: Option<ProofStatus>,
     },
@@ -56,7 +60,7 @@ pub fn serve_with<R: BufRead + Send + 'static>(
     let limits = ProtocolLimits::default();
     let mut session = session::Session::with_config(config)?;
     let mut pending = PendingRequests::new(64).map_err(|e| e.to_string())?;
-    let (events, inbox) = mpsc::channel();
+    let (events, inbox) = mpsc::sync_channel(READ_AHEAD);
     let input = events.clone();
     // Detached: a blocked read must not keep `exit` from returning.
     thread::spawn(move || {
@@ -88,8 +92,13 @@ pub fn serve_with<R: BufRead + Send + 'static>(
                 finish(&mut pending);
                 return Err(error);
             }
-            Event::Proof { id, job, status } => {
-                if pending.finish(&id) {
+            Event::Proof {
+                id,
+                token,
+                job,
+                status,
+            } => {
+                if pending.finish(&id, &token) {
                     let payload = match status {
                         Some(status) => ResponsePayload::Result(session.finish_proof(&job, status)),
                         None => cancelled(),
@@ -139,6 +148,7 @@ pub fn serve_with<R: BufRead + Send + 'static>(
                                 let status = proof_lens::run(&job, &token);
                                 let _ = events.send(Event::Proof {
                                     id,
+                                    token,
                                     job: Box::new(job),
                                     status,
                                 });
