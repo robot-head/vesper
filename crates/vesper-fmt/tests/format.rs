@@ -385,3 +385,13 @@ fn small_macro_modules_with_several_functions_fit_the_default_budget() {
     assert!(output.contains("macro bump() -> expr {"), "{output}");
     assert!(!format_source(&output, Limits::default()).unwrap().changed);
 }
+
+#[test]
+fn comment_heavy_macro_modules_are_not_refused_by_the_allowance_estimate() {
+    let source = format!(
+        "{}macro keep($x:expr)->expr{{quote{{$x}}}}fn main()->i64{{keep!(42)}}",
+        "//c\n".repeat(800)
+    );
+    let output = format_source(&source, Limits::default()).unwrap().output;
+    assert!(output.ends_with("keep!(42)\n}\n"), "{output}");
+}

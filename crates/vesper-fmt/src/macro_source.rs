@@ -28,7 +28,8 @@ fn allowance(source: &str, tokens: &[Token]) -> Result<usize, Error> {
         })
         .and_then(|n| source.len().checked_mul(16).and_then(|s| n.checked_add(s)))
         .and_then(|n| n.checked_add(64 * 1024))
-        .filter(|&n| n <= 16 * 1024 * 1024)
+        // The estimate is conservative; the parser enforces its actual budget.
+        .map(|n| n.min(16 * 1024 * 1024))
         .ok_or(Error::WorkLimit)
 }
 
