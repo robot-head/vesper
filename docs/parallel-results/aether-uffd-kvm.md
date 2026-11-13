@@ -162,9 +162,15 @@ These are theorems about the Lean models, not about the Rust code.
 Commands with `CARGO_TARGET_DIR` outside the checkout, `CARGO_INCREMENTAL=0`,
 `CARGO_PROFILE_{DEV,TEST}_DEBUG=0`:
 
-- `cargo fmt --all -- --check`: CHECK_FMT
-- `cargo clippy --workspace --locked --all-targets -- -D warnings`: CHECK_CLIPPY
-- `cargo test --workspace --locked`: CHECK_TEST
+- `cargo fmt --all -- --check`: clean
+- `cargo clippy --workspace --locked --all-targets -- -D warnings`: clean
+- `cargo test --workspace --locked --no-fail-fast`: 3,335 tests pass; only
+  `vesper-loom-build`'s `build` and `cli` targets fail, with
+  `UnknownFingerprint { missing: ["engine_dependencies"] }`. Its build script
+  finds `Cargo.lock` by walking up from the target directory, which here is
+  outside the checkout. With `VLB_CARGO_LOCK=$PWD/Cargo.lock`,
+  `cargo test -p vesper-loom-build --locked` passes (26 tests). Not related to
+  this lane.
 - `cargo test -p vesper-aether` with
   `VESPER_LEAN=lean-4.24.0-linux/bin/lean` (release zip): all pass.
 - `cargo clippy -p vesper-aether --features blake3/pure --all-targets --locked
