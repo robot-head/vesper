@@ -39,11 +39,38 @@ parse errors and hover remains unavailable after a successful preview. Formattin
 must conserve ordered comments/nontrivia tokens, reparse and remain byte-idempotent
 for ordinary nested, repeated and punctuation-rich tuple fixtures.
 
-Static validation passed: standalone Rust compilation and strict Clippy using
-existing read-only serde_json/blake3 artifacts; rustfmt, Python compilation and
-whitespace checks. No compiler dependencies or heavy toolchain were rebuilt.
-Actual runtime validation awaits the integrated tuple-aware compiler; static
-checks are not represented as executable results. Native Linux/macOS/Windows
-coverage is coordinated with #158 and remains separate pending evidence. The
-Rust target accepts `VESPER_SOURCE_MACRO_TUPLES_BINARY`; the Python script takes
-`--binary REALPATH` for actual Bazel/Cargo-produced executables.
+Actual validation against the integrated tuple-aware executable at
+`/workspace/vesper/target/parallel-next/debug/vesper` passed:
+
+- Six independent Rust tests, zero failures and zero ignored tests. All twenty
+  positive artifacts separately passed ordinary checking and executed to42.
+- The Python harness passed157commands,21stdio sessions and108JSON-RPC requests,
+  including23explicit normal expanded-source runs to42 and one intentional
+  unhandled-entry refusal. All accepted previews matched separately compiled
+  actual Forge artifacts, maps and audits.
+- Generated-helper body drift was rejected independently for both nested calls;
+  the caller-origin effect case remained accepted with its real declared row.
+- Standalone Rust compilation and strict Clippy using existing read-only
+  serde_json/blake3 artifacts; rustfmt, Python compilation and whitespace checks.
+
+The first executable Python pass reached its formatter checks and truthfully
+refused the full repeated fixture with WorkLimit. The existing formatter syntax
+gate prepays a source-dependent stage of tokens²*4+bytes*16+64KiB, capped16Mi,
+which is distinct from the compiler profile. Three compact actual tuple programs
+now exercise successful formatting, ordered comments/nontrivia conservation,
+reparse/idempotence and separate normal execution under that unchanged allowance.
+The larger support-function fixture remains a conservative formatting refusal;
+no formatter cap or production code was changed to conceal that limitation.
+
+Before integration, six independent ordinary nonmacro programs also checked and
+ran to42, verifying the fixtures' underlying unit/singleton/nested, inout order,
+string punctuation and linear-product semantics. These were ordinary language
+baselines, not evidence of macro expansion; the actual macro results above were
+run against the real integrated compiler afterward.
+
+No compiler dependencies or heavy toolchain were rebuilt by this lane. Native
+Linux/macOS/Windows coverage is coordinated with #158 and remains separate pending
+evidence; local Linux results do not claim other-platform execution. The Rust
+target accepts `VESPER_SOURCE_MACRO_TUPLES_BINARY`; the Python script takes
+`--binary REALPATH` for actual Bazel/Cargo-produced executables. Root runs the
+integrated Cargo and workspace checks separately.

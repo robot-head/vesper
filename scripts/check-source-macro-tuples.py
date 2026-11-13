@@ -321,9 +321,16 @@ def run(binary, work):
     assert refused["source_map"] == [] and refused["audits"] == []
     assert "expanded_blake3" not in refused
 
-    for name in ["repeated", "punctuation", "nested"]:
+    # Keep this success corpus within the formatter's independently prepaid
+    # macro syntax-gate allowance. Larger support-function programs can truthfully
+    # refuse WorkLimit; the compiler/preview corpus above uses its own profile.
+    format_sources = {
+        "repeated": "macro twice($value:expr)->expr{quote{($value, /* , ) λ 🦀 */ $value)}} fn   main(/* header , ) */)->i64{let value=twice!(21);42}",
+        "punctuation": 'macro make()->expr{quote{("comma, ) 🦀", /* tuple , ) λ */)}} fn   main()->i64{let value=make!();42}',
+        "nested": "macro make()->expr{quote{((),(20,),(10,12))}} fn   main()->i64{let value=make!();42}",
+    }
+    for name, original in format_sources.items():
         path = work / f"format-{name}.ves"
-        original = fixture(name).replace("fn main", "fn   main").replace(" -> ", "->")
         path.write_bytes(original.encode("utf-8"))
         changed = load(h.execute("fmt", path, "--json"))
         assert changed["changed"] is True
