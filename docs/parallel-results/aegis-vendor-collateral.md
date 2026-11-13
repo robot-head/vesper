@@ -193,8 +193,13 @@ Commands run from the repository root with an isolated target directory
   (exit 0).
 - `cargo test --workspace --locked`: 926 passed, 1 failed on the first run;
   the failure was the new mutation fuzz finding the embedded-root issue in
-  decision 6. After the fix `cargo test -p vesper-aegis` passes in full;
-  the workspace rerun is recorded in the PR.
+  decision 6. After the fix, on the merged head (`7ab090e`, with
+  `VLB_CARGO_LOCK` set because `vesper-loom-build`'s build script cannot
+  find `Cargo.lock` from a target directory outside the checkout):
+  `cargo test --workspace --locked --no-fail-fast` gives 3411 passed,
+  1 failed. The one failure is `vesper --test replay42_kernel`, which
+  needs a `lean` binary on `PATH` (none in the sandbox; it came in with
+  PR #267, not this lane).
 
 Bazel is not installed in the sandbox; CI runs `bazel test //...` on
 BuildBuddy. The new data files are inside the crate directory, which
