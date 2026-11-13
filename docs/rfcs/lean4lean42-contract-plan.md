@@ -100,9 +100,21 @@ limit rather than claiming an executable hash proves its own provenance.
 
 Before every run, verify the receipt's pinned profile against repository-owned
 pins, relevant source/patch/dependency identities, and actual executable bytes.
-Use the same resolved executable for hashing and spawn. Resolve a bare compiler
-name by PATH first, then canonicalize that found path; do not reinterpret it as
-cwd-relative. Reject missing/wrong tools, altered files or incompatible setup.
+Use the same selected actual tool for hashing and spawn. Preserve launcher
+argv0 during initial discovery: resolve a bare lean/lake name through PATH
+without following its final symlink, and invoke that path with its original
+lean/lake basename for --version and lean --print-prefix. Never canonicalize an
+elan/rustup-style multi-call shim to its underlying executable and then execute
+it under the wrong name. Do not reinterpret a bare name as cwd-relative.
+After these probes, canonicalize the reported sysroot directory and select its
+bin/lean and bin/lake paths (with the actual platform executable suffix).
+Probe those actual tools too: Lean must report4.24.0 and compiler commit
+797c613eb9b6d4ec95db23e3e00af9ac6657f24b, and --print-prefix must resolve to that
+same canonical sysroot. Lake's version must agree with the selected4.24 tool.
+Use these actual sysroot program paths for builds/replays, preserving their
+argv0 as well; canonical file resolution is for identity checks/hashing, not a
+reason to execute a differently named alias target. Reject missing/wrong tools,
+altered files or incompatible setup.
 Record actual platform-specific executable hashes, not a fabricated universal
 binary hash. Runtime checking is offline and cannot repair setup silently.
 
@@ -143,6 +155,8 @@ pub struct Limits {
     pub artifact_bytes: u64,
     pub artifact_files: usize,
     pub report_bytes: usize,
+    pub compiler_runtime_files: usize,
+    pub compiler_runtime_bytes: u64,
 }
 pub struct Config {
     pub tool_root: PathBuf,
@@ -294,6 +308,8 @@ the contract is frozen; all values positive and validated before spawn:
 | resolved artifact bytes, streamed |2 GiB|4 GiB|
 | one generated model artifact |64 MiB|128 MiB|
 | final report |256 KiB|1 MiB|
+| selected compiler-runtime library entries |128|256|
+| selected compiler-runtime library bytes, streamed |2 GiB|4 GiB|
 
 Maximum two target runs are sequential. Compile/setup are explicit phases with
 their own deadlines; setup does not run during ordinary replay. Retain only
@@ -569,6 +585,16 @@ expectedAccept or matched=true alone is not authority. Fixture errors must not
 be confused with the intended negative reason. Keep per-kind control evidence
 so a condition check is not described as a raw declaration rejection.
 
+The actual kernel manifest's exact top-level allowlist is schema, role,
+upstream_base, lean_toolchain, batteries_commit, controls, fixes, source_sha256,
+executions, unexecuted. Validate schema/role/pins/controls structurally. Other
+documentary values may be opaque but must remain within a4 MiB total document,
+nesting<=32, strings<=64 KiB and at most65536 aggregate JSON values; hash the
+complete exact bytes against repository pins. Reject an unknown top-level key.
+Expectation entries have exactly the five fields above; the runtime
+ControlResult has six. Documentary executions/fixes text is review evidence,
+never a runtime success receipt and never a substitute for executing controls.
+
 ### BLAKE3 setup sealing without a Python dependency
 
 Refine setup CLI to require `--driver PATH` as well as the exact compiler/Lake/
@@ -585,7 +611,10 @@ DRIVER --seal-setup STAGING_DIRECTORY
 This private mode is exclusive with ordinary run options. STAGING_DIRECTORY
 contains bounded setup-inputs.json (<=16 KiB) with schema1 and exact fields
 lean, lake, git, build_argv, build_exit, build_stdout, build_stderr. Tool paths
-are absolute canonical strings; build_argv is an array of<=32 strings, total
+are absolute resolved launcher paths preserving their lean/lake argv0 for the
+initial probes (not final-symlink-canonicalized shim paths). The sealer discovers
+and binds actual bin/lean and bin/lake under the same canonical4.24 sysroot as
+described above. build_argv is an array of<=32 strings, total
 <=8192 bytes, with the repository-pinned build recipe; build_exit must be0.
 Log paths are relative regular files under staging, <=64 KiB retained each;
 output-overflow flags, if needed, must be part of a separately reviewed recipe
@@ -605,7 +634,8 @@ requested absent destination. Ordinary run neither fetches nor repairs setup.
 Exact receipt fields (serde names shown) are schema, profile, upstream_commit,
 batteries_commit, lean_release, lean_commit, pins_blake3, known_fixes_blake3,
 patches, source_manifest, source_manifest_blake3, compiler_path, sysroot,
-compiler_blake3, checker_relative_path, checker_blake3, driver_blake3,
+compiler_blake3, compiler_runtime_manifest, compiler_runtime_manifest_blake3,
+checker_relative_path, checker_blake3, driver_blake3,
 build_argv, build_exit, build_stdout_blake3, build_stderr_blake3, controls,
 controls_blake3. Patches is the repository-pinned ordered array of
 `{path,blake3}`. Source_manifest is an ordered array of
@@ -630,6 +660,11 @@ serialize null when not observed, not fabricated zero-success evidence.
 ```rust
 pub type Digest = [u8; 32];
 pub struct FileDigest { pub path: String, pub bytes: u64, pub blake3: Digest }
+pub struct LibraryLink { pub path: String, pub target: String }
+pub struct CompilerRuntimeFile {
+    pub path: String, pub canonical_target: String, pub links: Vec<LibraryLink>,
+    pub bytes: u64, pub blake3: Digest,
+}
 pub enum ControlKind { RawDeclaration, CheckerExpr, Condition }
 pub struct ControlRecord {
     pub id: String, pub kind: ControlKind,
@@ -667,6 +702,7 @@ pub struct ToolInfo {
     pub profile: String, pub upstream_commit: String,
     pub batteries_commit: String, pub lean_release: String, pub lean_commit: String,
     pub checker_blake3: Digest, pub compiler_blake3: Digest,
+    pub compiler_runtime_manifest_blake3: Digest,
     pub receipt_blake3: Digest, pub pins_blake3: Digest,
     pub known_fixes_blake3: Digest, pub source_manifest_blake3: Digest,
     pub os: String, pub arch: String,
@@ -719,6 +755,69 @@ then pinned index u32LE and all ControlRecord fields with UTF-8 lengths u32LE,
 boolean u8 and ControlKind u8 in declaration order. Raw per-process stdout and
 stderr digests additionally hash their exact bytes incrementally. These hashes
 are inspection associations, not proof certificates or executable attestation.
+
+### Selected compiler-runtime library binding
+
+Binding only bin/lean is insufficient for this dynamically linked compiler.
+The coordinator's Linux inspection found libInit_shared,
+libleanshared_1/libleanshared_2/libleanshared among its loaded dependencies;
+the direct lib/lean envelope currently has13 files totaling486,041,402 bytes.
+Those are observations, not a fixed successful file count. The candidate
+external checker is static; that fact does not eliminate the model compiler's
+runtime-library identity obligation.
+
+The fixed recipe enumerates only direct entries under canonical SYSROOT/lib/lean
+whose filename ends `.a`, `.lib`, `.dylib`, `.dll`, or `.so` optionally followed
+by one or more `.DIGITS` suffixes; it also selects direct SYSROOT/bin/*.dll.
+Suffix matching is case-sensitive on Unix and ASCII-case-insensitive on Windows.
+There is no recursive traversal. Select matching regular files **and aliases**;
+do not silently ignore a selected symlink. Both selected directories must be
+real directories under the canonical sysroot; a symlinked selected directory is
+explicitly unsupported in this initial recipe. Reject a selected non-file,
+broken alias, cycle or target outside the canonical sysroot.
+
+The receipt compiler_runtime_manifest is an ordered Vec<CompilerRuntimeFile>,
+sorted by original normalized sysroot-relative path's UTF-8 bytes. Each path
+and canonical_target is a normalized relative path without dot/dotdot, <=4096
+UTF-8 bytes. A regular file has identical path/canonical_target and an empty
+links array. An alias records its ordered read_link chain, at most16 steps,
+then the canonical regular target. LibraryLink.path is the normalized relative
+path at that step; LibraryLink.target preserves the raw link text (<=4096 UTF-8
+bytes, possibly relative with dotdot or absolute). Resolve each step and require
+it remain within the canonical sysroot; raw link targets are not permission to
+read outside it. No alias target is executed under a changed argv0.
+
+Preflight/check file-count and aggregate byte arithmetic before hashing. Defaults
+are128 entries /2 GiB, HARD256 /4 GiB; count every selected path and its complete
+target byte length, including repeated content reached through multiple aliases.
+Use a<=64 KiB read buffer and check actual length/hash, not just stat size. The
+envelope is separate from source_manifest and resolved model/import artifacts:
+it has independent counters and does not consume their source/artifact counts.
+Include its bounded manifest storage/hash work in setup/run logical accounting.
+
+The sealer records compiler_runtime_manifest and
+compiler_runtime_manifest_blake3 in the receipt; ordinary run recomputes both
+before tool use and after completion, comparing the entire selected set, link
+chains, canonical targets, lengths and digests. Addition/removal/substitution or
+changed alias resolution fails ToolIdentity even if bin/lean is unchanged.
+ToolInfo carries compiler_runtime_manifest_blake3 as the exact observed envelope
+association; report the actual profile and platform rather than a universal
+binary/library identity.
+
+Hash domain is the bytes `vesper.lean4lean42.compiler_runtime\0`, then schema1
+u16LE and entry count u32LE. For each sorted entry: path u32LE byte length+UTF-8,
+canonical_target u32LE length+UTF-8, link count u8, each link's path and raw
+target using the same u32LE length+UTF-8 encoding, then bytes u64LE and32-byte
+file BLAKE3. This typed hash is independent of JSON serialization whitespace.
+
+Clear ambient loader substitution variables for compiler/tool children,
+including LD_PRELOAD/LD_LIBRARY_PATH and applicable DYLD insertion/library path
+overrides. Use the controlled empty cwd; Windows loader PATH entries are limited
+to the selected tool/bin roots and required OS directories. This is a selected
+compiler-library envelope under a controlled invocation, not a proof of the OS
+loader, all system libraries, entire toolchain derivation or a hostile host's
+execution. Private copied model sources/artifacts continue to reject symlinks;
+the explicit library-alias rule does not relax their binding policy.
 
 ### Streaming and cancellation rule
 
