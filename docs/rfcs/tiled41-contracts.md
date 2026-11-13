@@ -4,18 +4,18 @@ Claims206–209 were created before source writers. Base main2d58c85 includes
 merged194. Coordinator checked open claims and actual external PR files for
 allocator overlap. Claude121–136/root CLI/core/Cargo and all other externally
 owned paths remain reserved. Publish interface amendments before dependent
-source changes. This document is the contract draft; no runtime implementation
-is authorized until coordinator review and publication.
+source changes. This reviewed contract is frozen before runtime implementation;
+source writers start only after its publication.
 
 |Claim|Branch|Exclusive writes|
 |---|---|---|
 |206|tiled41/integration|this contract, region.rs/lib.rs module registration and actual reexports, integration/review report|
 |207|tiled41/source|new `crates/vesper-alloc/src/region/tiled.rs`, new `tests/tiled_core.rs`, source report|
 |208|tiled41/layout|new `crates/vesper-alloc/tests/tiled_layout.rs`, layout report|
-|209|tiled41/lifecycle|new `crates/vesper-alloc/tests/tiled_region.rs`, new `examples/tiled.rs`, new `crates/vesper-alloc/TILED.md`, lifecycle report|
+|209|tiled41/lifecycle|new `crates/vesper-alloc/tests/tiled_region.rs`, new `examples/tiled_columns.rs`, new `crates/vesper-alloc/TILED.md`, lifecycle report|
 
 All test/example paths in the table are under `crates/vesper-alloc/`; reports
-are `docs/parallel-results/tiled41-{source,layout,lifecycle,integration}.md`.
+are `docs/rfcs/tiled41-{source,layout,acceptance,integration}-report.md`.
 Separate worktrees and private small Cargo caches, one job, debug0 and
 incremental0. No Cargo/dependency, BUILD, workflow, wrapper, root CLI/core AST,
 compiler, existing allocator algorithms, or unrelated test rewrites. Root alone
@@ -45,7 +45,7 @@ pub enum TiledError {
 `region(&self) -> RegionId`. It is neither Clone nor Copy. Existing RegionVec
 type invariance and never-reused region/slot/serial identity are retained by
 the private owner. No public raw handle constructor, byte reinterpretation,
-borrowed field types, mutable frozen alias, serde reconstruction or trust token
+nonstatic borrowed field types, mutable frozen alias, serde reconstruction or trust token
 is added. TiledError implements Debug, Display and std::error::Error, with the
 wrapped RegionError exposed as its error source. Existing public error enums
 are not extended. Allocation errors convert through RegionError::Alloc.

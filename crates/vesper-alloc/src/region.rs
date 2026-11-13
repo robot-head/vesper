@@ -21,6 +21,7 @@ use std::ptr::{self, NonNull};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 mod string;
+mod tiled;
 mod vec;
 
 pub use string::{RegionStr, RegionString};
