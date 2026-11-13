@@ -84,6 +84,19 @@ fn assert_closed(report: &Report) {
     assert!(report.live().is_empty());
 }
 
+fn assert_optimized_world_guard(result: Result<Value, String>, report: &Report) {
+    let error = result.unwrap_err();
+    assert!(
+        error.starts_with("optimized IR failed ownership validation: "),
+        "{error}"
+    );
+    assert!(error.contains("code: \"E0410\""), "{error}");
+    assert_eq!(report.status(), Status::RuntimeError);
+    assert!(report.failure().is_none());
+    assert!(report.events().is_empty());
+    assert!(report.live().is_empty());
+}
+
 #[test]
 fn actual_construction_and_terminal_patterns_have_original_sites() {
     let world = checked(LIFE);
@@ -537,6 +550,10 @@ fn actual_checked_world_carrier_routing_mutants_refuse_aliasing() {
                 "routing",
                 vec![],
             );
+            if optimize {
+                assert_optimized_world_guard(result, &report);
+                continue;
+            }
             assert!(result.is_err());
             failure(&report, Failure::AlreadyConsumed);
             assert_eq!(
@@ -562,6 +579,10 @@ fn actual_checked_world_carrier_routing_mutants_refuse_aliasing() {
             "batch",
             vec![],
         );
+        if optimize {
+            assert_optimized_world_guard(result, &report);
+            continue;
+        }
         assert!(result.is_err());
         failure(&report, Failure::DuplicateIdentity);
         assert_eq!(actions(&report), [Action::Mint, Action::Mint]);
@@ -626,6 +647,10 @@ fn actual_returned_carriers_are_validated_without_claiming_exhaustion() {
                 function,
                 vec![],
             );
+            if optimize {
+                assert_optimized_world_guard(result, &report);
+                continue;
+            }
             assert!(result.is_err());
             failure(&report, reason);
             assert_eq!(actions(&report), prefix);
@@ -772,6 +797,10 @@ fn actual_entry_and_return_shapes_cannot_bypass_selected_carrier_validation() {
             "wrong_return",
             vec![],
         );
+        if optimize {
+            assert_optimized_world_guard(result, &report);
+            continue;
+        }
         assert!(result.is_err());
         failure(&report, Failure::BoundaryTypeMismatch);
         assert_eq!(actions(&report), [Action::Mint]);
@@ -939,14 +968,18 @@ fn runtime_errors_and_fuel_cutoffs_keep_prefix_and_residual_without_cleanup() {
             "error_after_mint",
             vec![],
         );
-        assert!(result.is_err());
-        assert_eq!(report.status(), Status::RuntimeError);
-        assert!(report.failure().is_none());
-        assert_eq!(actions(&report), [Action::Mint]);
-        assert_eq!(report.live().len(), 1);
+        if optimize {
+            assert_optimized_world_guard(result, &report);
+        } else {
+            assert!(result.is_err());
+            assert_eq!(report.status(), Status::RuntimeError);
+            assert!(report.failure().is_none());
+            assert_eq!(actions(&report), [Action::Mint]);
+            assert_eq!(report.live().len(), 1);
+        }
 
         let world = checked(LIFE);
-        let (_, complete) = execute(
+        let (result, complete) = execute(
             &world,
             &["Ticket"],
             Limits::default(),
@@ -954,6 +987,8 @@ fn runtime_errors_and_fuel_cutoffs_keep_prefix_and_residual_without_cleanup() {
             "simple",
             vec![],
         );
+        answer(result);
+        assert_closed(&complete);
         let expected = actions(&complete);
         let mut witnessed_live_prefix = false;
         let mut witnessed_completion = false;
