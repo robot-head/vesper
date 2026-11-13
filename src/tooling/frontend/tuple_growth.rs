@@ -224,6 +224,11 @@ impl<'a> Admission<'a> {
         match t {
             Type::Named(_, ts) | Type::Tuple(ts) => {
                 if let Type::Named(name, args) = t {
+                    // Explicit source `_` is retained as a named placeholder
+                    // by the current parser; omitted annotations use Infer.
+                    if name == "_" {
+                        return Err(UNCERTAIN.into());
+                    }
                     self.nominal_arity(name, args.len())?;
                     v.bound.bytes = 128usize.checked_add(name.len()).ok_or(BUDGET)?;
                 }
@@ -238,7 +243,11 @@ impl<'a> Admission<'a> {
             // Supporting that needs a separate envelope; do not assume a
             // source arrow is the checker-refined result in tuple programs.
             Type::Function { .. } | Type::Row(_) => return Err(UNCERTAIN.into()),
-            Type::Infer | Type::IntLiteral(_) => (),
+            // Header/annotation holes are not closed source evidence. The
+            // checker may refine them or use a refined function result on a
+            // later pass; a one-node placeholder cannot bound those clones.
+            Type::Infer => return Err(UNCERTAIN.into()),
+            Type::IntLiteral(_) => (),
         }
         self.bounded(v.bound)?;
         Ok(v)

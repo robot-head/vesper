@@ -81,3 +81,18 @@ Final follow-up validation: all 12 admission integration tests, all 11 actual
 lowering/authority tuple tests and all 8 recovery tests pass. Strict targeted
 Clippy, all 5 existing frontend unit tests, workspace formatting and diff checks
 pass. No core checker or limits changed.
+
+Closed-header review follow-up: `ty` explicitly refuses `Type::Infer` and the
+current parser's `Type::Named("_", [])` source placeholder in analyzed parameters, returns, nominal arguments, fields and partial let annotations.
+This is a conservative clarification of the closed source profile, not an
+additional demonstrated resource exploit: the actual parser retains explicit
+`_` as `Named("_", [])`, and the current non-function `refine_annotation` fallback
+keeps the expected type rather than filling that placeholder from the body.
+`Type::IntLiteral` remains separately bounded.
+Unannotated lets still use their actual initializer envelope; tuple and function
+alias initializer inference remain supported. New small-limit tests cover
+inferred-result function values and nested header/annotation holes. A direct
+private admission assertion uses the real parser without entering the checker.
+Closed-profile clarification validation: 13 admission integration tests, 11 tuple
+lowering/authority tests, 8 recovery tests and 6 frontend unit tests pass. Strict
+targeted Clippy, workspace formatting and diff checks pass.

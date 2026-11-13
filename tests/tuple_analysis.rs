@@ -289,3 +289,38 @@ fn short_circuit_rhs_prepays_environment_copies_even_when_dead() {
     )
     .unwrap();
 }
+
+#[test]
+fn header_and_annotation_holes_refuse_while_initializer_inference_remains_supported() {
+    let values = ["0"; 12].join(",");
+    let mut inferred = format!("fn grow()->_{{({values})}} fn main(){{let x=grow;");
+    for _ in 0..4 {
+        inferred.push_str("let x=(x,x);");
+    }
+    inferred.push('}');
+    for source in [
+        inferred.as_str(),
+        "fn f(in p:(_,i64)){(p,p);}",
+        "fn f()->(i64,_){(1,2)}",
+        "fn f(){let x:(_,i64)=(true,42);(x,x);}",
+        "fn f(){let x:(i64,(_,i64))=(1,(true,42));(x,x);}",
+    ] {
+        let parsed = parser::parse(source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let failure = check_source(
+            source,
+            AnalysisLimits {
+                max_type_nodes: 64,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(failure, AnalysisFailure::Unsupported { ref reason }
+            if reason.contains("before checking")),
+            "{source}: {failure:?}"
+        );
+    }
+    accepted("fn f()->((i64,bool),(i64,bool)){let x=(42,true);(x,x)}");
+    accepted("fn helper(in n:i64)->i64{n} fn f()->(i64,i64){let g=helper;let x=g(42);(x,x)}");
+}

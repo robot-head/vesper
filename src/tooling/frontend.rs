@@ -974,6 +974,25 @@ mod tests {
         ));
     }
     #[test]
+    fn tuple_header_and_annotation_holes_refuse_in_direct_preflight() {
+        for source in [
+            "fn grow()->_{(0,0)} fn main(){let x=grow;(x,x);}",
+            "fn f(in p:(_,i64)){(p,p);}",
+            "fn f(){let x:(_,i64)=(true,42);(x,x);}",
+        ] {
+            let parsed = parser::parse(source);
+            assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+            assert!(
+                editor_ast_guard(&parsed.module, AnalysisLimits::default())
+                    .unwrap_err()
+                    .contains("unsupported before checking")
+            );
+        }
+        let parsed = parser::parse("fn f()->(i64,i64){let x=42;(x,x)}");
+        assert!(parsed.diagnostics.is_empty());
+        editor_ast_guard(&parsed.module, AnalysisLimits::default()).unwrap();
+    }
+    #[test]
     fn scalar_inference_and_complete_latent_arrow_are_supported() {
         assert!(matches!(
             check_source("fn value()->_{42}", AnalysisLimits::default()),
