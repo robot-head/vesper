@@ -43,6 +43,9 @@ fn execute(
     let observer = runtime.observe_resources(config).unwrap();
     let result = runtime.run(entry, args);
     let report = observer.snapshot().unwrap();
+    if let Err(error) = &result {
+        eprintln!("entry={entry} ir_optimized={optimize}: {error}");
+    }
     (result, report)
 }
 
