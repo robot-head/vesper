@@ -734,7 +734,7 @@ impl RewriteScheduler<Math, ()> for BoundedScheduler {
                     .filter(|node| node.matches(pattern_node))
                     .count();
                 combinations = match combinations.checked_mul(count) {
-                    Some(count) => count.min(MATCHES),
+                    Some(count) => count,
                     None => {
                         state.fail(WitnessError::Limit);
                         return Vec::new();
@@ -766,7 +766,12 @@ impl RewriteScheduler<Math, ()> for BoundedScheduler {
             // Matcher machines allocate bounded register/scratch storage per
             // visited class, even without a match. Match/outer result vectors
             // have full geometric capacity requests, not just live lengths.
-            .and_then(|budget| budget.metadata((graph.nodes().len() + combinations) * 512))
+            .and_then(|budget| {
+                // Charge potential failed branches too, not just the capped
+                // number of successful substitutions returned by egg.
+                let scratch = checked_mul(checked_add(graph.nodes().len(), combinations)?, 512)?;
+                budget.metadata(scratch)
+            })
         {
             state.fail(error);
             return Vec::new();
