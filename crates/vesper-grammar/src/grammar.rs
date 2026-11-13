@@ -3,6 +3,8 @@
 //! require nonnullable, disjoint alternatives; FOLLOW-dependent epsilon choices
 //! are explicitly unsupported. All rule references, including unreachable ones,
 //! are validated. Shared DAG rules are legal; recursion is not.
+pub mod codec;
+
 use crate::framing::{self, Remainder};
 use crate::{Error, ErrorKind, Result, add, bound, charge, mul};
 use core::ops::Range;
