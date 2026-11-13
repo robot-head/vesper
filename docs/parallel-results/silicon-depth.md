@@ -206,16 +206,29 @@ cargo test --workspace --locked                                   # see below
 cargo clippy --workspace --locked --all-targets -- -D warnings    # see below
 ```
 
-`vesper-silicon`: 12 unit tests, 9 atomic, 9 dtb, 2 lean (elaboration skipped
-without `VESPER_LEAN`), 6 rp2040, 14 runtime, 12 stack, 4 svd, 7 zicbom, and
+`vesper-silicon`: 12 unit tests, 9 atomic, 10 dtb, 2 lean (elaboration skipped
+without `VESPER_LEAN`), 6 rp2040, 14 runtime, 12 stack, 4 svd, 8 zicbom, and
 8 doctests (5 `compile_fail`), all passing.
 
-Workspace test and Clippy results: see the end of this section (updated when the runs finish).
+Workspace: `cargo clippy --workspace --locked --all-targets -- -D warnings`
+is clean. `cargo test --workspace --locked --no-fail-fast` ran 3356 tests:
+3340 passed, 16 failed, all in `vesper-loom-build` (`tests/build.rs`,
+`tests/cli.rs`) with `UnknownFingerprint { missing: ["engine_dependencies"] }`.
+The same tests fail the same way on `origin/main` (`07322e3`) on this host,
+so they are environmental and unrelated to this lane. CI's Bazel/Windows/macOS
+runs are the reference.
 
 Bazel was not run locally (no Bazel on this host); the crate's
 `BUILD.bazel` is unchanged (`sync_build_files.py` produces no diff), and all
 new fixtures live inside the crate directory, which `vesper_crate` already
 globs.
+
+Review follow-ups (Codex on the first push): implicit interrupt parents
+(a device that is a child of its controller), subtrees under a disabled bus
+skipped, versioned ISA extensions (`zicbom1p0`) accepted, writes to fully
+read-only side-effect registers flagged, and coherent DMA builds its
+ordering-only barrier without enumerating cache lines. Covered by
+`fixtures/dtb/vesper-edge-cases.dts` and new tests.
 
 ## Decisions
 
