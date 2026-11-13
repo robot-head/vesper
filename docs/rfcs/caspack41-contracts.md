@@ -10,6 +10,11 @@ Importer prepays these reads/hash work, staging hash/write/copy and fixed Store
 buffers/path envelope before Store::open. Existing public verification/read APIs
 retain their behavior. Logical byte/work caps do not promise bounded OS I/O
 duration, lock waiting, caller-path resolution or immunity to external mutation.
+The filesystem-resolved canonical destination-root prefix and its legacy Store
+path copies are excluded along with caller-path resolution; their size cannot
+be inferred from pack bytes before opening a new destination. Fixed relative
+paths and a conservative caller-input-path envelope are prepaid. These are
+logical pack admission caps, not a whole-Store allocator/RSS guarantee.
 
 Claims196–199 precede writers. Base main5d0922e. Fresh open issues and actual
 external PR files139–147,149–151,163,165,173,193 show no CAS/serde overlap.
