@@ -350,6 +350,17 @@ fn pure_children_inside_barriers_rewrite_without_moving_effect_or_failure_order(
     };
     assert_eq!(operation, "/");
     assert!(matches!(&left.kind, ExprKind::Name(name) if name == "x"));
+    let source = "fn f(x: i64) -> i64 eff [Fail[RuntimeError]] { x / 1 } fn main() -> i64 { handle Fail[RuntimeError] in { f(20 + 22) } with { return v => v + 0, raise(e, k) => 42 + 0, } }";
+    let after = agree(source, "42");
+    let ExprKind::Handle { body, ret, ops, .. } = &tail(function(&after, "main")).kind else {
+        panic!("handler barrier")
+    };
+    assert!(matches!(&tail(&ret.body).kind, ExprKind::Name(name) if name == "v"));
+    assert_eq!(tail(&ops[0].body).kind, ExprKind::Literal(Literal::Int(42)));
+    let ExprKind::Call { args, .. } = &tail(body).kind else {
+        panic!("handler body call")
+    };
+    assert_eq!(args[0].expr.kind, ExprKind::Literal(Literal::Int(42)));
     agree(
         "fn next(inout n: i64) -> i64 { n = wrapping_add(n, 1); n } fn main() -> i64 { let n = 0; let a = wrapping_mul(next(inout n), 0); let b = next(inout n); wrapping_add(wrapping_mul(n, 100), wrapping_add(wrapping_mul(a, 10), b)) }",
         "202",

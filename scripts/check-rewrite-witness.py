@@ -155,6 +155,12 @@ def run(binary, work):
     path = h.agree(source, "42")
     division = tail(body(load(h.hir(path)), "f"))["kind"]["Binary"]
     assert division[0] == "/" and division[1]["kind"] == {"Name": "x"}
+    source = "fn f(x: i64) -> i64 eff [Fail[RuntimeError]] { x / 1 } fn main() -> i64 { handle Fail[RuntimeError] in { f(20 + 22) } with { return v => v + 0, raise(e, k) => 42 + 0, } }"
+    path = h.agree(source, "42")
+    handler = tail(body(load(h.hir(path)), "main"))["kind"]["Handle"]
+    assert tail(handler["ret"]["body"])["kind"] == {"Name": "v"}
+    assert tail(handler["ops"][0]["body"])["kind"] == {"Literal": {"Int": 42}}
+    assert tail(handler["body"])["kind"]["Call"]["args"][0]["expr"]["kind"] == {"Literal": {"Int": 42}}
     h.agree("fn next(inout n: i64) -> i64 { n = wrapping_add(n, 1); n } fn main() -> i64 { let n = 0; let a = wrapping_mul(next(inout n), 0); let b = next(inout n); wrapping_add(wrapping_mul(n, 100), wrapping_add(wrapping_mul(a, 10), b)) }", "202")
     for arguments, expected in [("overflow(), division()", "10"), ("division(), overflow()", "20")]:
         source = "fn overflow() -> i64 eff [Fail[ArithOverflow]] { 9223372036854775807 + 1 } fn division() -> i64 eff [Fail[RuntimeError]] { 1 / 0 } " + f"fn main() -> i64 {{ handle Fail[RuntimeError] in {{ handle Fail[ArithOverflow] in {{ wrapping_mul({arguments}) }} with {{ return v => v, raise(e, k) => 10, }} }} with {{ return v => v, raise(e, k) => 20, }} }}"
