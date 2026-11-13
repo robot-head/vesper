@@ -212,8 +212,9 @@ Commands run from the repository root with an isolated target directory
 | `cargo clippy -p vesper-chorus --locked --all-targets -- -D warnings` | clean |
 | `VESPER_LEAN=…/lean-4.24.0-linux/bin/lean cargo test -p vesper-chorus --locked` | all pass (see below) |
 | `lean ChorusQuorum.lean`, `lean ChorusQuorum/SessionDuality.lean` (in `lean/`) | pass, no warnings |
-| `cargo clippy --workspace --locked --all-targets -- -D warnings` | WORKSPACE_CLIPPY |
-| `cargo test --workspace --locked` (with `VESPER_LEAN`) | WORKSPACE_TEST |
+| `cargo clippy --workspace --locked --all-targets -- -D warnings` | clean |
+| `cargo test --workspace --locked --no-fail-fast --exclude vesper-loom-build` (with `VESPER_LEAN`) | 3,384 passed, 0 failed, in 459 test binaries |
+| `cargo test -p vesper-loom-build` | 14 failures in `tests/build.rs` (`UnknownFingerprint { missing: ["engine_dependencies"] }`): the build identity is not available in this container; this crate is unchanged by this lane and runs in CI |
 
 Bazel is not installed in this cloud container; the crate's `BUILD.bazel`
 already declares `//:lean` as test data (the glob covers the new
