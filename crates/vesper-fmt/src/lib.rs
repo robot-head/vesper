@@ -90,6 +90,8 @@ impl Work {
 struct Piece<'a> {
     kind: K,
     text: &'a str,
+    /// The source whitespace before this token held a blank line.
+    blank: bool,
 }
 fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
     tokens
@@ -98,6 +100,7 @@ fn pieces<'a>(source: &'a str, tokens: &[Token]) -> Vec<Piece<'a>> {
         .map(|t| Piece {
             kind: t.kind,
             text: &source[t.span.clone()],
+            blank: false,
         })
         .collect()
 }
@@ -220,6 +223,7 @@ fn once(
     // The CST is the lowering source. Exact source slices are anchored by each
     // lossless token's byte range; compare against lexer evidence before use.
     let mut atoms = Vec::new();
+    let mut blank = false;
     let mut expected = tokens.iter().filter(|t| t.kind != K::Eof);
     for element in syntax.descendants_with_tokens() {
         if let Some(token) = element.into_token() {
@@ -233,10 +237,13 @@ fn once(
             if token.text() != &source[start..end] || token.kind().0 != kind as u16 {
                 return Err(Error::Conservation);
             }
-            if kind != K::Whitespace {
+            if kind == K::Whitespace {
+                blank |= source[start..end].matches('\n').nth(1).is_some();
+            } else {
                 atoms.push(Piece {
                     kind,
                     text: &source[start..end],
+                    blank: std::mem::take(&mut blank),
                 });
             }
         }
@@ -435,12 +442,12 @@ fn gap(previous: Piece<'_>, current: Piece<'_>, block: bool, after_block: bool) 
             Gap::None
         };
     }
-    if current.kind == K::LParen
-        && !matches!(previous.kind, K::If | K::Match | K::In | K::Inout | K::Sink)
+    // Calls, tuple-struct patterns, macro invocations and generic arguments
+    // attach to what they apply to; after a keyword or operator they are a
+    // separate parenthesized/bracketed operand.
+    if matches!(current.kind, K::LParen | K::LBracket)
+        && (ends_operand(previous.kind) || matches!(previous.kind, K::Bang | K::Fn))
     {
-        return Gap::None;
-    }
-    if current.kind == K::LBracket && previous.kind != K::Eff {
         return Gap::None;
     }
     Gap::Soft
@@ -461,16 +468,26 @@ fn sequence<'a>(
     let mut line = Vec::new();
     let mut previous: Option<Piece<'a>> = None;
     let mut previous_block = false;
+    let mut previous_unary = false;
     while *pos < atoms.len() && Some(atoms[*pos].kind) != end {
         let current = atoms[*pos];
         let is_block = current.kind == K::LBrace && previous.is_none_or(|p| p.kind != K::Dot);
-        let spacing = previous.map_or(Gap::None, |p| gap(p, current, block, previous_block));
+        let spacing = if previous_unary {
+            Gap::None
+        } else {
+            previous.map_or(Gap::None, |p| gap(p, current, block, previous_block))
+        };
         let after_comma = previous.is_some_and(|p| p.kind == K::Comma);
         let near_comment = matches!(current.kind, K::Comment | K::BlockComment)
             || previous.is_some_and(|p| p.kind == K::BlockComment);
         match spacing {
             Gap::Hard => {
                 concat_group(&mut line, document, &mut output)?;
+                // Keep at most one blank line where the source had one or more
+                // between two items; the bare newline leaves no indentation.
+                if current.blank {
+                    output.push(document.push(Doc::Text("\n"))?);
+                }
                 output.push(document.push(Doc::HardLine)?);
             }
             Gap::Soft if list && after_comma => {
@@ -554,6 +571,9 @@ fn sequence<'a>(
             line.push(node);
         }
         previous_block = is_block;
+        // A prefix `-`/`!` binds to its operand with no space.
+        previous_unary = matches!(current.kind, K::Minus | K::Bang)
+            && previous.is_none_or(|p| !ends_operand(p.kind));
         previous = Some(Piece {
             kind: match current.kind {
                 K::LParen => K::RParen,
@@ -562,6 +582,7 @@ fn sequence<'a>(
                 _ => current.kind,
             },
             text: current.text,
+            blank: false,
         });
     }
     concat_group(&mut line, document, &mut output)?;

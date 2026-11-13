@@ -1,4 +1,6 @@
-linear effect Counter { fn next() -> i64; }
+linear effect Counter {
+    fn next() -> i64;
+}
 
 fn main() -> i64 {
     handle Fail[ArithOverflow] in {

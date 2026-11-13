@@ -58,6 +58,8 @@ actions:
       - run: "scripts/test-native-host.sh"
       - run: "scripts/test-canonical-protocols.sh"
       - run: "scripts/test-diagnostics.sh"
+      # Every tracked .ves file must be `vesper fmt` canonical (scripts/fmt-exclude.txt).
+      - run: "scripts/test-fmt.sh"
       - run: "scripts/test-editor.sh"
       - run: "scripts/test-expansion-foundations.sh"
       - run: "scripts/test-recovery.sh"

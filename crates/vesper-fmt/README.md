@@ -27,10 +27,15 @@ trailing comma selects the vertical layout even when the list would fit, which
 keeps both forms idempotent. A statement with no break point can still exceed
 the ribbon.
 
+Prefix `-`/`!` bind to their operand, calls/generic arguments attach to what they
+apply to, and a keyword such as `return` keeps a space before `(`. Where the source
+has one or more blank lines between two items or statements, exactly one is kept;
+blank lines just inside a block are dropped.
+
 Line comments always have a hard newline before the next token, including closing
 delimiters. Nested block comments, CR bytes in line comments, Unicode text and
-string spelling are preserved. Whitespace and blank lines outside tokens are
-canonicalized; a terminal LF is emitted. The ribbon counts Unicode scalar values,
+string spelling are preserved. Whitespace outside tokens is
+canonicalized (up to one blank line is kept between items); a terminal LF is emitted. The ribbon counts Unicode scalar values,
 not terminal cells/graphemes. Indivisible tokens and comment payloads are never
 reflowed and may exceed 100 columns. Groups reserve following punctuation/brace
 space; member chains have empty flat-mode break points.

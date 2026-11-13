@@ -1,5 +1,16 @@
 linear struct Tx {}
-fn make() -> Tx { Tx {} }
-macro ignore() -> expr { quote { 42 } }
-fn forward(sink value: Tx) -> i64 { ignore!() }
-fn main() -> i64 { let tx = make(); forward(tx) }
+fn make() -> Tx {
+    Tx {}
+}
+macro ignore() -> expr {
+    quote {
+        42
+    }
+}
+fn forward(sink value: Tx) -> i64 {
+    ignore!()
+}
+fn main() -> i64 {
+    let tx = make();
+    forward(tx)
+}
