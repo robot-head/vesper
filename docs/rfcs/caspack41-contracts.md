@@ -1,5 +1,16 @@
 # Verified portable CAS closure packs (§8.2.6)
 
+Pre-writer publication amendment (#196/#197): the exporter lane's exclusive
+store.rs scope also bounds private occupied-object checks during publication by
+the already-hashed staged size plus one probe byte. Pass that expected size to
+both ordinary and locked repair checks, using the same regular nofollow-open
+handle; mismatches retain existing quarantine/repair discipline. Four publication
+attempts with two checks each admit at most eight bounded checks per object.
+Importer prepays these reads/hash work, staging hash/write/copy and fixed Store
+buffers/path envelope before Store::open. Existing public verification/read APIs
+retain their behavior. Logical byte/work caps do not promise bounded OS I/O
+duration, lock waiting, caller-path resolution or immunity to external mutation.
+
 Claims196–199 precede writers. Base main5d0922e. Fresh open issues and actual
 external PR files139–147,149–151,163,165,173,193 show no CAS/serde overlap.
 Claude121–136/main/native and193BUILD/Bazel files remain reserved, as do separate
