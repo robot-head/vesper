@@ -1,8 +1,8 @@
 diff --git a/Main.lean b/Main.lean
-index e23b981..7f603c8 100644
+index e23b981..c36134d 100644
 --- a/Main.lean
 +++ b/Main.lean
-@@ -2,365 +2,641 @@
+@@ -2,365 +2,645 @@
  Copyright (c) 2023 Scott Morrison. All rights reserved.
  Released under Apache 2.0 license as described in the file LICENSE.
  Authors: Scott Morrison
@@ -551,6 +551,7 @@ index e23b981..7f603c8 100644
 +  let ci ← entryAt id
 +  if !(← get).remaining[id]! then return
 +  if ci.skip != 0 then coverageError "attempt to replay a skipped constant"
++  if (← get).remainingCount == 0 then coverageError "remaining counter underflow"
 +  modify fun s => {s with
 +    remaining := s.remaining.set! id false
 +    pending := s.pending.set! id true
@@ -627,10 +628,13 @@ index e23b981..7f603c8 100644
 +        let group := ci.owners
 +        clearWork group
 +        let mut types : List InductiveType := []
-+        for member in group do
-+          let e ← entryAt member
++        -- Wire groups use sorted ordinals; declaration construction preserves
++        -- the original mutual order, which generated recursor metadata records.
++        for memberName in info.all do
++          let e ← entryAt (← lookupId memberName)
 +          let some (.inductInfo i) := some e.info | coverageError "inductive group form"
-+          if i.levelParams != info.levelParams || i.numParams != info.numParams || i.isUnsafe then
++          if i.all != info.all || i.levelParams != info.levelParams ||
++              i.numParams != info.numParams || i.isUnsafe then
 +            coverageError "mixed inductive group headers or eligibility"
 +          let mut ctors : List Constructor := []
 +          for name in i.ctors do

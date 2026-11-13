@@ -36,3 +36,29 @@ unblocks assembly of actual source pins without a placeholder patch or fake
 receipt. Further actual results and any fixes will be recorded in follow-ups.
 No axiom-hygiene, complete implementation verification or §42-completion claim
 is made.
+
+## Small machine probes and mutual-order follow-up
+
+Actual `/tmp/lean4lean42-machine-probe.py` invoked the real built executable
+with controlled sysroot/search paths and framed pipe reads. Profile mode passed
+(two frames, clean exit0). Seven malformed argument vectors and a nonempty
+stdin request failed closed. Controls mode invoked the real94-case suite,
+matched every ID/expected reason/actual outcome against the fixed repository
+inventory, and passed (97 frames,7876 stdout bytes, exit0).
+
+Native MODE0/TARGET2 inventory passed with139422 constants,1584 modules and
+10335275 canonical typed-name bytes, emitting141010 frames/15879202 bytes.
+The probe independently recomputed header counts, contiguous IDs, exact Name
+identities/bytes, owner relationships, forms/skips, and zero-work terminal
+fields. These are observed counts, not hardcoded acceptance totals. The log is
+`/tmp/lean4lean42-machine-probe.log`. This native binding check is not fresh
+external coverage of the control baseline.
+
+Source review then corrected mutual reconstruction: wire OWNER_IDS remain
+sorted ordinals, while the actual reconstructed inductive declaration follows
+the original InductiveVal.all order and checks identical ordered all-lists and
+headers. Sorted wire order must not reorder generated recursor metadata. An
+explicit remaining-counter underflow check was added as well. The revised real
+executable build passed (55 jobs), retained in
+`/tmp/lean4lean42-machine-build2.log`. Complete external model replays remain
+unexecuted by this lane pending the coordinator's lease.
