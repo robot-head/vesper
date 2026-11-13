@@ -221,6 +221,13 @@ derivation, host integrity or the unfinished implementation proof closure.
 
 ## Integration and validation
 
+Explicit Windows setup adds only the selected absolute Git executable's parent
+directory to its controlled build PATH, alongside the selected compiler bin and
+required OS directories. Lean4.24 Lake calls Git to verify a local dependency's
+HEAD even when its exact pinned checkout already exists. This published #301
+recipe amendment permits that required local revision check; it does not change
+the ordinary offline Rust loader/search policy or permit ambient PATH entries.
+
 Actual control-baseline inventory resolves 6261 regular artifact paths across
 1584 modules, totaling 1,463,175,880 bytes. Set `artifact_files` DEFAULT to8192,
 preserving HARD8192 and the 2GiB default/4GiB HARD byte caps. The initial4096
