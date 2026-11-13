@@ -595,19 +595,29 @@ fn a_handshake_packet_coalesced_after_the_initial_is_processed() {
     net.step();
     net.step();
     let flight = net.sent[1].clone();
-    assert!(flight.len() >= 2, "{} server datagrams", flight.len());
-    assert_eq!(flight[0][0] & 0xb0, 0x80, "an Initial first");
-    assert_eq!(flight[1][0] & 0xb0, 0xa0, "then a Handshake packet");
-    let mut coalesced = flight[0].clone();
-    coalesced.extend_from_slice(&flight[1]);
+    // The first Handshake datagram, and the Initial before it (the one
+    // with the ServerHello; with a post-quantum key share the ClientHello
+    // spans two Initials and the server may acknowledge the first alone).
+    let hs = flight
+        .iter()
+        .position(|d| d[0] & 0xb0 == 0xa0)
+        .expect("a Handshake datagram");
+    assert!(hs >= 1, "an Initial first");
+    assert!(flight[..hs].iter().all(|d| d[0] & 0xb0 == 0x80));
+    let now = net.now;
+    for d in &flight[..hs - 1] {
+        net.client.xsk_mut().backend_mut().deliver(d);
+    }
+    while net.client.poll_and_step_quic_rx_one(now).unwrap() != RxOutcome::Idle {}
+    let mut coalesced = flight[hs - 1].clone();
+    coalesced.extend_from_slice(&flight[hs]);
     let before = net.client.stats().handshake_packets_received;
     net.client.xsk_mut().backend_mut().deliver(&coalesced);
-    let now = net.now;
     while net.client.poll_and_step_quic_rx_one(now).unwrap() != RxOutcome::Idle {}
     let stats = net.client.stats();
     assert_eq!(stats.handshake_packets_received - before, 2, "{stats:?}");
     // The rest of the flight, then the handshake finishes.
-    for d in &flight[2..] {
+    for d in &flight[hs + 1..] {
         net.client.xsk_mut().backend_mut().deliver(d);
     }
     net.blackhole[1] = false;
@@ -678,10 +688,12 @@ fn alpn_mismatch_fails_the_handshake() {
 #[test]
 fn server_respects_the_anti_amplification_limit() {
     let mut net = Net::new(5, 0, 0);
-    // Only the first client datagram (the ClientHello) reaches the server.
+    // Only the client's first flight (the ClientHello: one Initial, or two
+    // when a post-quantum key share makes it larger) reaches the server.
     net.step();
     net.blackhole[0] = true;
-    let received = 1200;
+    let received: u64 = net.sent[0].iter().map(|d| d.len() as u64).sum();
+    assert!(received >= 1200);
     for _ in 0..400 {
         net.step();
     }
@@ -693,7 +705,12 @@ fn server_respects_the_anti_amplification_limit() {
         server_tx <= bytes,
         "server sent {server_tx} bytes before validating a {received}-byte client"
     );
-    assert!(sent.amplification_blocked > 0, "{sent:?}");
+    // With a one-Initial ClientHello the server's flight alone exceeds
+    // the limit; a two-Initial one (post-quantum key share) leaves room
+    // for the whole flight.
+    if received == 1200 {
+        assert!(sent.amplification_blocked > 0, "{sent:?}");
+    }
 }
 
 #[test]
