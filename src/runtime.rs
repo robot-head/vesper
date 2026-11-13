@@ -426,6 +426,11 @@ impl<'a> Runtime<'a> {
         if let Some(trace) = &mut self.resource_trace {
             let limits = trace.limits();
             let mut pending = Vec::new();
+            if !roots.is_empty() && limits.max_value_depth == 0 {
+                return Err(trace
+                    .fail(ResourceTraceFailure::ValueDepthLimit, None)
+                    .to_string());
+            }
             for &(pattern, value) in roots.iter().rev() {
                 trace_push(
                     &mut pending,
@@ -463,8 +468,16 @@ impl<'a> Runtime<'a> {
                 }
                 match (&pattern.kind, value) {
                     (PatternKind::Tuple(patterns), Value::Tuple(values)) => {
+                        let next_depth = trace_child_depth(
+                            trace,
+                            nodes,
+                            pending.len(),
+                            patterns.len(),
+                            depth,
+                            Some(&pattern.span),
+                        )?;
                         for (p, v) in patterns.iter().zip(values).rev() {
-                            trace_push(&mut pending, (p, v, depth + 1), limits.max_value_nodes)
+                            trace_push(&mut pending, (p, v, next_depth), limits.max_value_nodes)
                                 .map_err(|reason| {
                                     trace.fail(reason, Some(p.span.clone())).to_string()
                                 })?;
@@ -519,6 +532,14 @@ impl<'a> Runtime<'a> {
                                 trace.fail(reason, Some(pattern.span.clone())).to_string()
                             })?;
                         } else {
+                            let next_depth = trace_child_depth(
+                                trace,
+                                nodes,
+                                pending.len(),
+                                patterns.len(),
+                                depth,
+                                Some(&pattern.span),
+                            )?;
                             for (name, p) in patterns.iter().rev() {
                                 let v = fields.get(name).ok_or_else(|| {
                                     trace
@@ -528,10 +549,14 @@ impl<'a> Runtime<'a> {
                                         )
                                         .to_string()
                                 })?;
-                                trace_push(&mut pending, (p, v, depth + 1), limits.max_value_nodes)
-                                    .map_err(|reason| {
-                                        trace.fail(reason, Some(p.span.clone())).to_string()
-                                    })?;
+                                trace_push(
+                                    &mut pending,
+                                    (p, v, next_depth),
+                                    limits.max_value_nodes,
+                                )
+                                .map_err(|reason| {
+                                    trace.fail(reason, Some(p.span.clone())).to_string()
+                                })?;
                             }
                         }
                     }
@@ -568,6 +593,11 @@ impl<'a> Runtime<'a> {
         }
         let limits = trace.limits();
         let mut pending = Vec::new();
+        if !values.is_empty() && limits.max_value_depth == 0 {
+            return Err(trace
+                .fail(ResourceTraceFailure::ValueDepthLimit, None)
+                .to_string());
+        }
         if result {
             let ty = self
                 .world
@@ -619,9 +649,15 @@ impl<'a> Runtime<'a> {
                             .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
                             .to_string());
                     }
+                    let next_depth =
+                        trace_child_depth(trace, nodes, pending.len(), types.len(), depth, None)?;
                     for (ty, value) in types.iter().zip(values).rev() {
-                        trace_push(&mut pending, (ty, value, depth + 1), limits.max_value_nodes)
-                            .map_err(|reason| trace.fail(reason, None).to_string())?;
+                        trace_push(
+                            &mut pending,
+                            (ty, value, next_depth),
+                            limits.max_value_nodes,
+                        )
+                        .map_err(|reason| trace.fail(reason, None).to_string())?;
                     }
                 }
                 Type::Named(name, args) if args.is_empty() => {
@@ -684,6 +720,14 @@ impl<'a> Runtime<'a> {
                             .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
                             .to_string());
                     }
+                    let next_depth = trace_child_depth(
+                        trace,
+                        nodes,
+                        pending.len(),
+                        variant.fields.len(),
+                        depth,
+                        None,
+                    )?;
                     for field in variant.fields.iter().rev() {
                         let value = fields.get(&field.name).ok_or_else(|| {
                             trace
@@ -692,7 +736,7 @@ impl<'a> Runtime<'a> {
                         })?;
                         trace_push(
                             &mut pending,
-                            (&field.ty, value, depth + 1),
+                            (&field.ty, value, next_depth),
                             limits.max_value_nodes,
                         )
                         .map_err(|reason| trace.fail(reason, None).to_string())?;
@@ -2194,6 +2238,38 @@ impl<'a> Runtime<'a> {
         env.extend(bindings);
         Ok(self.lowered_control("handler_clause", clause.body, env))
     }
+}
+// Prepay every scheduled visit and depth before growing a traversal stack.
+fn trace_child_depth(
+    trace: &mut ResourceTraceEngine,
+    visited: usize,
+    pending: usize,
+    children: usize,
+    depth: usize,
+    site: Option<&Span>,
+) -> Result<usize, String> {
+    let limits = trace.limits();
+    if visited
+        .checked_add(pending)
+        .and_then(|n| n.checked_add(children))
+        .is_none_or(|n| n > limits.max_value_nodes)
+    {
+        return Err(trace
+            .fail(ResourceTraceFailure::ValueNodeLimit, site.cloned())
+            .to_string());
+    }
+    if children == 0 {
+        return Ok(depth);
+    }
+    let next_depth = depth
+        .checked_add(1)
+        .filter(|d| *d <= limits.max_value_depth)
+        .ok_or_else(|| {
+            trace
+                .fail(ResourceTraceFailure::ValueDepthLimit, site.cloned())
+                .to_string()
+        })?;
+    Ok(next_depth)
 }
 fn trace_push<T>(values: &mut Vec<T>, value: T, max: usize) -> Result<(), ResourceTraceFailure> {
     if values.len() >= max {
