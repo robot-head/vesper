@@ -1,10 +1,11 @@
 //! Bounded direct-child supervision shared by probes, compilation and replay.
 //! No child reads stdin. The watcher enforces the absolute child deadline even
 //! while the consumer is inspecting an inventory or hashing import artifacts.
-//! Shutdown grace triggers a direct-child kill and measures actual reap/join
-//! completion. Portable std OS wait/read/join calls are not hard-interruptible;
-//! an observed grace overrun fails rather than being advertised as bounded.
-//! This does not claim cancellation of arbitrary independently spawned descendants.
+//! Shutdown grace triggers a direct-child kill. Pipe threads are joined only
+//! after is_finished: an unfinished reader is detached on an explicit failed
+//! cleanup path, never counted as joined. Safe std cannot cancel an inherited
+//! pipe held by an arbitrary descendant or interrupt a stalled OS wait syscall.
+//! This is direct-child supervision, not a descendant-tree cleanup guarantee.
 use super::{Digest, Error, ErrorKind, Limits};
 use std::{
     collections::VecDeque,
@@ -313,6 +314,25 @@ struct Exit {
     status: Option<ExitStatus>,
     at: Instant,
 }
+
+fn join_pipe(handle: Option<JoinHandle<()>>, until: Instant) -> bool {
+    let Some(handle) = handle else {
+        return false;
+    };
+    loop {
+        if handle.is_finished() {
+            return handle.join().is_ok();
+        }
+        let now = Instant::now();
+        if now >= until {
+            // The direct child has already been reaped and its queue cancelled.
+            // A descendant-held OS pipe cannot be interrupted using safe std.
+            // Dropping this unfinished handle is explicit failed cleanup.
+            return false;
+        }
+        thread::sleep((until - now).min(Duration::from_millis(2)));
+    }
+}
 #[derive(Default)]
 struct Cleanup {
     child_reaped: bool,
@@ -585,8 +605,8 @@ impl Session {
         // Reap FIRST, cancel the queue SECOND, join pipe threads LAST. Closing
         // wakes a producer blocked on a full four-frame queue.
         self.queue.close();
-        let stdout_joined = self.reader.take().is_some_and(|h| h.join().is_ok());
-        let stderr_joined = self.drainer.take().is_some_and(|h| h.join().is_ok());
+        let stdout_joined = join_pipe(self.reader.take(), until);
+        let stderr_joined = join_pipe(self.drainer.take(), until);
         self.closed = true;
         #[cfg(test)]
         let queue = lock(&self.queue.state);
@@ -661,11 +681,14 @@ fn run(
     {
         failure = Some(error(ErrorKind::Crash, "child wait or pipe thread failed"));
     }
-    if failure.is_none() && cleanup.deadline_exceeded {
-        failure = Some(error(
-            ErrorKind::Timeout,
-            "child cleanup exceeded shutdown grace",
-        ));
+    if cleanup.deadline_exceeded {
+        let detail = match &failure {
+            Some(previous) => {
+                format!("child cleanup exceeded shutdown grace; prior error: {previous}")
+            }
+            None => "child cleanup exceeded shutdown grace".into(),
+        };
+        failure = Some(Error::new(ErrorKind::Timeout, detail));
     }
     let exit = lock(&session.exit);
     if failure.is_none() && exit.as_ref().is_some_and(|e| e.at > session.until) {
