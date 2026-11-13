@@ -1,0 +1,14 @@
+[package]
+name = "vesper-resonance"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Resonance (design §32): transitive realtime confinement, delay-compensated DSP graphs, wait-free SPSC retirement and realtime kernels"
+publish = false
+
+[dependencies]
+cranelift-codegen = { version = "0.125", features = ["arm64", "x86"] }
+# Mature wait-free SPSC ring (no locks, no allocation after construction).
+rtrb = "=0.4.1"
+
+[dev-dependencies]
+cranelift-frontend = "0.125"

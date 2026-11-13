@@ -133,6 +133,9 @@ pub enum Action {
     XdpSplitShortHeader { nic: String },
     /// `wait_rx(timeout_ns: u64) -> u64`: RX ring occupancy, 0 on timeout.
     XdpWaitRx { nic: String },
+    /// `on_ack(bytes: ByteSlice) -> Result[AckSummary, u32]`: retire the
+    /// parked leases a harvested ACK datagram covers.
+    XdpOnAck { nic: String },
 }
 impl Action {
     pub fn is_model(&self) -> bool {
@@ -157,6 +160,7 @@ impl Action {
             Self::XdpPark { nic } => (WarpOp::Park, nic),
             Self::XdpSplitShortHeader { nic } => (WarpOp::SplitShortHeader, nic),
             Self::XdpWaitRx { nic } => (WarpOp::WaitRx, nic),
+            Self::XdpOnAck { nic } => (WarpOp::OnAck, nic),
             _ => return None,
         })
     }
@@ -553,7 +557,7 @@ pub(crate) fn validate(world: &World, scenario: Scenario) -> Result<Plan, Scenar
     // never be passed to another's operations.
     let mut role_owner: BTreeMap<&String, &String> = BTreeMap::new();
     for ((nic, role), ty) in &warp_roles {
-        if *role == "header" {
+        if *role == "header" || *role == "ack" {
             continue;
         }
         if let Some(other) = role_owner.insert(ty, nic)
@@ -818,6 +822,18 @@ fn header_type(world: &World, ty: &Type) -> Result<String, String> {
     }
 }
 
+fn ack_summary_type(world: &World, ty: &Type) -> Result<String, String> {
+    let fields = [("largest_acked", "u64"), ("retired", "u64")];
+    if has_fields(struct_fields(world, ty, false), &fields) {
+        Ok(type_name(ty))
+    } else {
+        Err(format!(
+            "{} is not a copy ACK summary struct {{ largest_acked: u64, retired: u64 }}",
+            type_name(ty)
+        ))
+    }
+}
+
 /// Check an `xdp_*` binding against the §35.2 shape and return the source
 /// type it fixes for each NIC role (`rx_frame`, `tx_frame`, `lease`, `view`,
 /// `header`).
@@ -888,6 +904,18 @@ pub(crate) fn warp_signature(
                 _ => return Err("split_short_header must return Result[<header>, u32]".into()),
             };
             vec![("view", view_type(world, &view.1)?), ("header", header)]
+        }
+        (WarpOp::OnAck, [view]) => {
+            shape(view.0 == Pass::In)?;
+            let summary = match result {
+                Type::Named(n, args)
+                    if n == "Result" && args.len() == 2 && type_name(&args[1]) == "u32" =>
+                {
+                    ack_summary_type(world, &args[0])?
+                }
+                _ => return Err("on_ack must return Result[<ACK summary>, u32]".into()),
+            };
+            vec![("view", view_type(world, &view.1)?), ("ack", summary)]
         }
         (WarpOp::WaitRx, [timeout]) => {
             shape(scalar(timeout, "u64") && type_name(result) == "u64")?;
