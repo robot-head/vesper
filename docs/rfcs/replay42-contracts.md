@@ -8,18 +8,20 @@ the coordinator publishes this contract before those writers begin.
 
 ## Ownership and exclusions
 
-| Lane, child claim assigned before writing | Exclusive future writes |
+| Claim/lane | Exclusive future writes |
 |---|---|
-| Coordinator #239 | this contract, narrow `src/optimize.rs` replay registration, integration report, narrow `BUILD.bazel` timeout entry |
-| Static model | new `lean/RewriteWitness.lean`, model report |
-| Structured exporter | new `src/optimize/replay.rs`, new `tests/replay42_core.rs`, exporter report |
-| Independent kernel/audit acceptance | new `tests/replay42_kernel.rs`, acceptance report |
+| #239 coordinator | this contract, narrow `src/optimize.rs` witness_lean registration, integration report, narrow `BUILD.bazel` timeout entry, narrow model-CI script addition |
+| #240 static model | new `lean/RewriteWitness.lean`, model report |
+| #242 structured exporter | new `src/optimize/witness_lean.rs`, new `tests/replay42_export.rs`, export report |
+| #241 independent kernel/audit acceptance | new `tests/replay42_kernel.rs`, acceptance report |
 
-Reports are `docs/rfcs/replay42-{model,exporter,acceptance,integration}-report.md`.
+Reports are `docs/rfcs/replay42-{model,export,acceptance,integration}-report.md`.
 No Cargo/dependency, core/numeric/AST library, CLI/main/lib, native, IR/ir_opt,
-formatter, allocator, existing fixture or unrelated workflow edits. Exporter
+formatter, allocator, existing fixture or unrelated workflow edits. The sole
+script exception is coordinator-owned `scripts/ci/check-lean-models.sh`, adding
+only RewriteWitness to its existing explicit model list. Exporter
 does not modify the existing Rust checker/producer APIs. The coordinator alone
-adds `pub mod replay` under optimize after coherent source exists. No push/PR/
+adds `pub mod witness_lean` under optimize after coherent source exists. No push/PR/
 merge is delegated. Compile/test leases are assigned explicitly; no author may
 claim an execution performed by another lane or an unexecuted check.
 
@@ -30,9 +32,9 @@ platforms enabled. Actual measurements may justify a published narrow change to
 `eternal` (3600s); no macOS exclusion is inherited from old audit tests. Bazel's
 enforcement is not a promise that every worst-case Lean workload finishes in
 that time. Root resources already glob the new Lean file; Cargo and the Bazel
-metadata watcher discover the new test. The explicit general model-CI script
-is not extended by this scope: acceptance kernel-checks the model directly, and
-no general-model-script coverage is claimed without separately authorized work.
+metadata watcher discover the new test. The coordinator's narrowly reserved
+model-CI script addition is separate from the acceptance lane's direct static
+model compilation; script coverage is claimed only after actual execution.
 
 ## Trust boundary
 
@@ -59,7 +61,7 @@ silently trust a different same-named module found through ambient LEAN_PATH.
 
 ## Public Rust API
 
-All names below are under `vesper::optimize::replay`. Declarations specify exact
+All names below are under `vesper::optimize::witness_lean`. Declarations specify exact
 Rust signatures/types; implementation bodies follow only after publication.
 
 ```rust
@@ -381,7 +383,8 @@ carry u64 byte lengths. Hash incrementally under the export work budget.
 
 certificate_blake3 hashes domain bytes `vesper.replay.certificate/1` plus zero,
 then schema/arithmetic u16, term/proof u64 lengths, input/output/conclusion u32,
-then every term/proof in order. Kind tags u8/u32/u64/i64 are 0/1/2/3; IntOp
+then every term/proof in order. Each term starts with its kind tag, then its
+node tag and payload. Kind tags u8/u32/u64/i64 are 0/1/2/3; IntOp
 add/sub/mul are 0/1/2. Term tags Const/InputVar/Checked/Wrapping are 0/1/2/3,
 followed by i128 value, u32 variable, or op u8 and two u32 children respectively.
 Proofs carry from/to u32, then Reason tags Refl/Rule/Congruence/Symmetry/
@@ -391,11 +394,13 @@ proof-ID fields in declaration order. Vec capacity is resource accounting,
 not semantic digest input.
 
 binding_blake3 hashes domain bytes `vesper.replay.binding/1` plus zero, then
-two bounded preorder AST occurrence transcripts, source then candidate. Each
-starts with its u64 Expr occurrence count. Each admitted value occurrence
+schema/arithmetic u16 versions, then two bounded preorder AST occurrence
+transcripts: role tag0 source, then role tag1 candidate. Each role tag precedes
+its u64 Expr occurrence count. Each admitted value occurrence
 carries a tag (Const0, Name1, CheckedAdd2/Sub3/Mul4, WrappingAdd5/Sub6/Mul7),
 span start/end as checked u64, and the actual TypeMap lookup encoding:
-closed-kind tags1..4 or tag5+i128 for contextual IntLiteral metadata. Const then
+closed-kind tags1..4 (u8/u32/u64/i64 respectively) or tag5+i128 for contextual
+IntLiteral metadata. Const then
 carries its actual i128 value; Name carries actual UTF-8 bytes with u64 length.
 Binary children follow left then right. Wrapping nodes additionally carry
 their original callee Name bytes, span start/end u64 and lookup tag0 (absent),
@@ -412,6 +417,11 @@ consumer cannot turn unchanged manifest bytes into approval of modified data.
 The independently hashed RenderedLean source and actual compile/audit object
 inventory remain separate observations. Kernel replay has no expected-Rust-AST
 argument and therefore cannot itself establish the binding digest's meaning.
+Only these actual looked-up metadata entries are encoded: unrelated TypeMap
+entries, map iteration order, Debug output and platform-native integer layouts
+are never hash inputs. Precharge the bounded transcript/model/certificate/source
+byte counts and traversal work before each hashing pass. Source and candidate
+roles and their exact span associations are retained explicitly.
 
 ## Exact model audit roots and independent acceptance
 
@@ -425,10 +435,10 @@ reachable from one successful example.
 
 Use pinned Lean4.24.0. Existing proof-audit CLI is sufficient; no CLI/main/auditor
 edit is authorized. Tests use the existing Cargo binary path discovery and may
-configure VESPER_LEAN under the existing explicit-toolchain convention: an
-explicit missing/wrong compiler fails; unavailable default tooling is reported
-honestly rather than counted as kernel success. Actual completion requires a
-coordinator execution with the pinned compiler available.
+configure VESPER_LEAN, or use lean on PATH when it is unset. A missing compiler
+or any version other than Lean4.24.0 is a hard test failure, including absent
+default tooling; there is no skip path. Actual completion requires coordinator
+execution with the pinned compiler available.
 
 The independent test lane uses real public prepare_rewrite results, rechecks
 candidate/certificate with the independent Rust verifier, inspects structural
@@ -453,6 +463,11 @@ standard axioms. Positive policy explicitly allows exactly sorted
 not necessarily both. No Classical.choice, sorryAx or new project axiom is
 allowed. Model proofs avoid known Std helper paths whose closure introduces
 Classical.choice, and the actual complete catalog audit decides acceptance.
+Known forbidden-shortcut traps include BitVec.toInt_le, BitVec.le_toInt,
+BitVec.ofInt_toInt, BitVec.mul_one and BitVec.one_mul in pinned Std. Constructive
+range/literal roundtrip proofs and own mul-one identities use unsigned natural
+bounds, explicit case splits and toNat injectivity/modular arithmetic instead;
+ordinary broad simp must not silently reintroduce those choice dependencies.
 
 Use the existing auditor JSON correctly: success has schema1/status audited,
 accepted true, kernel_replayed true, cache_eligible false and module
