@@ -217,24 +217,26 @@ impl<'d, 'a> NdjsonCursor<'d, 'a> {
     pub fn read_event(&mut self, limits: ProjectionLimits)
         -> Result<EventEnvelope<'d, 'a>, ndjson::Error>;
 }
-pub fn project_into(
-    cursor: &mut NdjsonCursor<'_, '_>,
-    columns: EventColumns<'_, '_, '_>,
+pub fn project_into<'out, 'd, 'a>(
+    cursor: &mut NdjsonCursor<'d, 'a>,
+    columns: EventColumns<'out, 'd, 'a>,
     limits: ProjectionLimits,
 ) -> Result<usize, ndjson::Error>;
 ```
 
-The function's batch/input lifetimes must match the cursor and column Node
-lifetimes; use explicit named generics in implementation. EventEnvelope may be
-Copy/Clone/Debug. ProjectionLimits defaults{1024,32Mi}, HARD{16384,512Mi}, with
+The batch/input lifetimes match the cursor and column Node lifetimes.
+EventEnvelope may be Copy/Clone/Debug. ProjectionLimits defaults{1024,32Mi},
+HARD{16384,512Mi}, with
 positive validate() and InvalidLimits on bad settings. Validate configuration
 before examining records. max_rows bounds the number projected in one call.
 
 Each record must be an object with required decoded keys id/topic/raw_meta.
 Unknown fields are allowed after complete JSON validation. id uses existing exact
 as_u64 semantics (1e0/1.0 are not integer IDs); topic uses string(); raw_meta may
-be any validated JSON value. Missing fields report MissingField in fixed order
-Id, Topic, RawMeta. Type/range errors use Json(existing kind) at the actual value.
+be any validated JSON value. Check required presence in fixed order Id, Topic,
+RawMeta before value conversion; missing fields report MissingField. Then convert
+id, then validate topic type. Type/range errors use Json(existing kind) at the
+actual value.
 Escaped-equivalent keys match; decoded duplicates were already rejected globally.
 
 Scan fields ONCE per schema pass. Before each key's comparisons charge
@@ -261,6 +263,8 @@ Fill only the first returned count of each initialized slice, preserve every
 suffix element, then commit the cursor to its prevalidated end. Every returned
 Err preserves ALL columns and cursor. Empty remaining input returns0 after
 configuration validation. Mismatched slice lengths are allowed if each fits.
+Remaining count above max_rows returns RecordLimit; insufficient column capacity
+returns OutputTooSmall. Validate count before capacity and rows in source order.
 
 ## Actual validation and honest scope
 
