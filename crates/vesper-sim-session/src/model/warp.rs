@@ -1,6 +1,6 @@
 //! The Vesper Warp simulation model (scenario version 3): source-level
-//! `XdpNic` frames over [`umem`](super::umem) and adversarial WAN links over
-//! [`link`](super::link).
+//! `XdpNic` frames on the Warp software NIC ([`umem`](super::umem), backed by
+//! `vesper-warp-umem`) and adversarial WAN links over [`link`](super::link).
 //!
 //! A NIC belongs to one process. Its **ingress** link carries datagrams from
 //! scenario flows to the NIC's RX ring; its **egress** link carries the
@@ -9,12 +9,27 @@
 //! header), packet number and source address are recorded. A NAT rebinding
 //! event changes a flow's source address mid-flow.
 //!
-//! A submitted reply enters the egress link at its launch time
-//! (`max(edt, now)`), so egress queueing follows launch order. Each parked
-//! lease gets an ACK timer per delivered copy of its reply (egress arrival
-//! plus `ack_return_ns`) and a PTO timer at launch plus `pto_ns`. A
-//! delivered copy counts against `max_in_flight` until its ACK fires. Whichever fires first returns the frame to the fill ring; the
-//! other is recorded as a stale timer. Retransmission is not modelled.
+//! A submitted reply waits in the EDT launch queue and is posted to the NIC's
+//! TX ring at its launch time (`max(edt, now)`), where it enters the egress
+//! link, so egress queueing follows launch order. Each parked lease gets a
+//! PTO timer at launch plus `pto_ns`. ACKs come back one of two ways:
+//! - **timer ACK path** (no `ack_path`): an ACK timer per delivered copy of
+//!   the reply, at its egress arrival plus `ack_return_ns`; the model retires
+//!   the lease. ACKs cannot be lost or aggregated on this path.
+//! - **datagram ACK path** (`ack_path`): the flow's peer records every reply
+//!   it receives and aggregates them (an ACK after `ack_every` ack-eliciting
+//!   packets or `max_ack_delay_ns` after the first unacknowledged one). Each
+//!   ACK frame carries the peer's most recent `max_ranges` ranges and crosses
+//!   the `ack_path.link` back to the NIC as a real datagram, where it can be
+//!   lost, duplicated, reordered or tail-dropped, and lands in the RX ring
+//!   like any other datagram. Leases retire only when source harvests the ACK
+//!   and calls `on_ack` (or by PTO); a lost ACK is covered by a later one
+//!   carrying the same ranges, or the PTO fires.
+//!
+//! A delivered egress copy counts against `max_in_flight` until its ACK timer
+//! fires (timer path) or the peer receives it (datagram path). Whichever of
+//! ACK and PTO comes first returns the frame to the fill ring; later ones are
+//! recorded as stale timers. Retransmission is not modelled.
 //!
 //! Every choice is a [`WarpEvent`] in the model trace and is checked on
 //! replay before it takes effect. UMEM conservation is checked after every
@@ -22,8 +37,8 @@
 use super::{
     link::{Fate, Link, LinkSpec, SplitMix64, Transmission, name_seed},
     umem::{
-        self, Accounting, Datagram, FrameDesc, HostBug, LeaseDesc, RxDrop, Umem, UmemError,
-        ViewDesc,
+        self, Accounting, Datagram, FrameDesc, HostBug, LeaseDesc, RxDrop, SharedUmem, UmemError,
+        UmemParams, ViewDesc,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -35,7 +50,10 @@ pub const MAX_LINKS: usize = 8;
 pub const MAX_FLOWS: usize = 16;
 pub const MAX_WARP_EVENTS: usize = 256;
 pub const MAX_FRAMES: u32 = 4096;
-pub const MAX_FRAME_BYTES: u32 = 65_536;
+/// The software NIC's largest chunk (`vesper_warp_umem::MAX_FRAME_SIZE`).
+pub const MAX_FRAME_BYTES: u32 = vesper_warp_umem::MAX_FRAME_SIZE;
+pub const MAX_ACK_RANGES: u32 = 64;
+pub const MAX_ACK_EVERY: u32 = 1024;
 pub const MAX_FLOW_PACKETS: u64 = 1 << 20;
 pub const MAX_IN_FLIGHT: u64 = 1 << 16;
 
@@ -71,8 +89,26 @@ pub struct NicSpec {
     pub rx_ring: u32,
     pub ingress: String,
     pub egress: String,
+    /// Timer ACK path only: egress arrival to ACK.
     pub ack_return_ns: u64,
     pub pto_ns: u64,
+    /// The datagram ACK path; absent means the timer ACK path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_path: Option<AckPathSpec>,
+}
+
+/// Peers acknowledge replies with ACK datagrams over a lossy link.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AckPathSpec {
+    /// The link ACK datagrams cross from the peer to this NIC.
+    pub link: String,
+    /// ACK after this many ack-eliciting packets (RFC 9000 §13.2.2 uses 2).
+    pub ack_every: u32,
+    /// Or this long after the first unacknowledged one.
+    pub max_ack_delay_ns: u64,
+    /// Ranges per ACK frame, most recent first.
+    pub max_ranges: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -122,8 +158,11 @@ pub enum PacketKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LeaseTimer {
+    /// The timer ACK path.
     Ack,
     Pto,
+    /// Source harvested an ACK datagram and called `on_ack`.
+    SourceAck,
 }
 
 /// One Warp model transition or choice.
@@ -190,11 +229,39 @@ pub enum WarpEvent {
         pto_at_ns: u64,
         at_ns: u64,
     },
-    /// The reply entered the egress link; one ACK per delivered copy.
+    /// The reply was posted to the TX ring, transmitted and completed, and
+    /// entered the egress link; one timer ACK per delivered copy, or (on the
+    /// datagram ACK path) one peer arrival per delivered copy.
     Launched {
         nic: String,
         lease: u64,
         ack_at_ns: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        peer_at_ns: Vec<u64>,
+        at_ns: u64,
+    },
+    /// A copy of a reply reached the flow's peer.
+    PeerReceived {
+        flow: String,
+        pkt_num: u64,
+        at_ns: u64,
+    },
+    /// The peer sent an ACK datagram for these inclusive ranges.
+    AckSent {
+        flow: String,
+        packet: u64,
+        pkt_num: u64,
+        ranges: Vec<(u64, u64)>,
+        len: u32,
+        at_ns: u64,
+    },
+    /// Source passed a harvested datagram to `on_ack`.
+    AckObserved {
+        nic: String,
+        task: String,
+        chunk: u32,
+        /// `Err` code when it was not a valid ACK.
+        result: Result<(u64, u64), u32>,
         at_ns: u64,
     },
     Parked {
@@ -271,6 +338,16 @@ pub(crate) enum WarpTimer {
         nic: String,
         request: u64,
     },
+    /// A delivered reply copy reaches its flow's peer (datagram ACK path).
+    PeerRecv {
+        flow: usize,
+        pkt_num: u64,
+    },
+    /// The peer's `max_ack_delay` expires.
+    AckDelay {
+        flow: usize,
+        generation: u64,
+    },
 }
 impl WarpTimer {
     pub fn describe(&self) -> String {
@@ -281,6 +358,10 @@ impl WarpTimer {
             Self::Launch { nic, lease } => format!("warp:{nic}:launch#{lease}"),
             Self::Lease { nic, lease, timer } => format!("warp:{nic}:{timer:?}#{lease}"),
             Self::WaitTimeout { nic, request } => format!("warp:{nic}:wait#{request}"),
+            Self::PeerRecv { flow, pkt_num } => format!("warp:flow#{flow}:peer#{pkt_num}"),
+            Self::AckDelay { flow, generation } => {
+                format!("warp:flow#{flow}:ack_delay#{generation}")
+            }
         }
     }
 }
@@ -296,6 +377,7 @@ pub enum WarpOp {
     Park,
     SplitShortHeader,
     WaitRx,
+    OnAck,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -329,13 +411,28 @@ pub(crate) struct OpResult {
 
 #[derive(Debug, Clone)]
 pub(crate) struct NicState {
-    pub umem: Umem,
+    /// Shared by every copy of the model state; see [`SharedUmem`].
+    pub umem: SharedUmem,
     pub process: usize,
     pub ingress: String,
     pub egress: String,
     pub ack_return_ns: u64,
     pub pto_ns: u64,
+    pub ack_path: Option<AckPathSpec>,
     pub waiters: VecDeque<u64>,
+}
+/// A flow's peer on the datagram ACK path.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PeerState {
+    /// Received reply packet numbers as inclusive ranges, largest first.
+    pub ranges: Vec<(u64, u64)>,
+    /// Ack-eliciting packets since the last ACK.
+    pub unacked: u32,
+    /// When the oldest unacknowledged one arrived.
+    pub first_unacked_ns: u64,
+    /// The `max_ack_delay` timer generation, when armed.
+    pub armed: Option<u64>,
+    pub generation: u64,
 }
 #[derive(Debug, Clone)]
 pub(crate) struct FlowState {
@@ -348,6 +445,7 @@ pub(crate) struct WarpState {
     pub nics: BTreeMap<String, NicState>,
     pub links: BTreeMap<String, Link>,
     pub flows: Vec<FlowState>,
+    pub peers: Vec<PeerState>,
     /// Ingress datagrams in flight, with their NIC.
     pub in_flight: BTreeMap<u64, (String, Datagram)>,
     pub next_packet: u64,
@@ -362,6 +460,23 @@ pub struct NicSnapshot {
     pub accounting: Accounting,
     pub leases: u64,
     pub waiting: Vec<u64>,
+    /// Counters of the software NIC and its driver.
+    pub softnic: SoftNicCounters,
+}
+
+/// What the `vesper-warp-umem` device and driver counted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SoftNicCounters {
+    pub rx_delivered: u64,
+    pub rx_dropped_no_buffer: u64,
+    pub rx_dropped_ring_full: u64,
+    pub tx_consumed: u64,
+    pub completions_posted: u64,
+    pub harvested: u64,
+    pub tx_submitted: u64,
+    pub completions: u64,
+    pub retired: u64,
+    pub leaks_detected: u64,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WarpSnapshot {
@@ -373,6 +488,16 @@ pub struct WarpSnapshot {
 
 fn fail<T>(message: impl Into<String>) -> Result<T, String> {
     Err(message.into())
+}
+
+/// A typed UMEM error: misuse by source, a budget, or (when the driver
+/// refuses a call the adapter validated) a conservation failure.
+fn umem_error(nic: &str, e: UmemError) -> WarpError {
+    match e {
+        UmemError::LeaseLimit { .. } => WarpError::Budget(format!("{nic}: {e:?}")),
+        UmemError::Driver(_) => WarpError::Conservation(format!("{nic}: {e:?}")),
+        e => WarpError::Misuse(format!("{nic}: {e:?}")),
+    }
 }
 
 /// Check the Warp section. `crashing` names processes with crash faults.
@@ -441,27 +566,58 @@ pub(crate) fn validate(
         }
         if crashing.contains(&nic.process) {
             return fail(format!(
-                "umem-v1 does not model a crash of NIC-owning process {}",
+                "umem-softnic-v1 does not model a crash of NIC-owning process {}",
                 nic.process
             ));
         }
-        if nic.frames == 0
-            || nic.frames > MAX_FRAMES
-            || nic.frame_bytes == 0
-            || nic.frame_bytes > MAX_FRAME_BYTES
-            || nic.headroom >= nic.frame_bytes
-            || nic.rx_ring == 0
-            || nic.rx_ring > nic.frames
-            || nic.pto_ns == 0
-        {
+        if nic.frames == 0 || nic.frames > MAX_FRAMES || nic.pto_ns == 0 {
             return fail(format!(
-                "NIC {}: frames 1..={MAX_FRAMES}, frame bytes 1..={MAX_FRAME_BYTES}, headroom < frame bytes, rx ring 1..=frames, pto > 0",
+                "NIC {}: frames 1..={MAX_FRAMES}, pto > 0",
                 nic.name
             ));
         }
+        params(nic, l.max_leases)
+            .validate()
+            .map_err(|e| format!("NIC {}: {e}", nic.name))?;
         for link in [&nic.ingress, &nic.egress] {
             if !links.contains(link.as_str()) {
                 return fail(format!("NIC {} names unknown link {link}", nic.name));
+            }
+        }
+        if let Some(ack) = &nic.ack_path {
+            if !links.contains(ack.link.as_str()) {
+                return fail(format!(
+                    "NIC {} names unknown ACK link {}",
+                    nic.name, ack.link
+                ));
+            }
+            if ack.ack_every == 0
+                || ack.ack_every > MAX_ACK_EVERY
+                || ack.max_ack_delay_ns == 0
+                || ack.max_ranges == 0
+                || ack.max_ranges > MAX_ACK_RANGES
+            {
+                return fail(format!(
+                    "NIC {}: ack_every 1..={MAX_ACK_EVERY}, max_ack_delay_ns > 0, max_ranges 1..={MAX_ACK_RANGES}",
+                    nic.name
+                ));
+            }
+            if ack_datagram_len(ack.max_ranges) > nic.frame_bytes - nic.headroom {
+                return fail(format!(
+                    "NIC {}: an ACK datagram with {} ranges must fit a frame after the headroom",
+                    nic.name, ack.max_ranges
+                ));
+            }
+        }
+    }
+    for nic in spec.nics.iter().filter(|n| n.ack_path.is_some()) {
+        let mut cids = BTreeSet::new();
+        for flow in spec.flows.iter().filter(|f| f.nic == nic.name) {
+            if !cids.insert(flow.cid) {
+                return fail(format!(
+                    "NIC {}: flows on a datagram ACK path need distinct connection IDs",
+                    nic.name
+                ));
             }
         }
     }
@@ -534,6 +690,43 @@ pub(crate) fn validate(
     Ok(())
 }
 
+fn params(nic: &NicSpec, max_leases: u64) -> UmemParams {
+    UmemParams {
+        frames: nic.frames,
+        frame_bytes: nic.frame_bytes,
+        headroom: nic.headroom,
+        rx_ring: nic.rx_ring,
+        max_leases,
+    }
+}
+
+/// Bytes of an ACK datagram carrying `ranges` ranges.
+pub fn ack_datagram_len(ranges: u32) -> u32 {
+    umem::SHORT_HEADER_BYTES
+        + umem::ACK_FRAME_FIXED_BYTES
+        + umem::ACK_RANGE_BYTES * ranges.saturating_sub(1)
+}
+
+/// Add `pn` to inclusive ranges kept largest first, merging neighbours, and
+/// keep at most `max` ranges (the oldest are forgotten).
+fn record_pn(ranges: &mut Vec<(u64, u64)>, pn: u64, max: usize) {
+    if ranges.iter().any(|(lo, hi)| (*lo..=*hi).contains(&pn)) {
+        return;
+    }
+    ranges.push((pn, pn));
+    ranges.sort_by_key(|r| std::cmp::Reverse(r.1));
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(ranges.len());
+    for (lo, hi) in ranges.drain(..) {
+        match out.last_mut() {
+            // Packet numbers are below 2^62, so `hi + 1` cannot overflow.
+            Some(last) if hi + 1 >= last.0 => last.0 = last.0.min(lo),
+            _ => out.push((lo, hi)),
+        }
+    }
+    out.truncate(max);
+    *ranges = out;
+}
+
 impl WarpState {
     pub fn new(spec: &WarpSpec, process_index: &BTreeMap<String, usize>, seed: u64) -> Self {
         Self {
@@ -544,18 +737,13 @@ impl WarpState {
                     (
                         n.name.clone(),
                         NicState {
-                            umem: Umem::new(
-                                n.frames,
-                                n.frame_bytes,
-                                n.headroom,
-                                n.rx_ring,
-                                spec.limits.max_leases,
-                            ),
+                            umem: SharedUmem::new(params(n, spec.limits.max_leases)),
                             process: process_index[&n.process],
                             ingress: n.ingress.clone(),
                             egress: n.egress.clone(),
                             ack_return_ns: n.ack_return_ns,
                             pto_ns: n.pto_ns,
+                            ack_path: n.ack_path.clone(),
                             waiters: VecDeque::new(),
                         },
                     )
@@ -575,6 +763,7 @@ impl WarpState {
                     next_pn: f.first_pn,
                 })
                 .collect(),
+            peers: vec![PeerState::default(); spec.flows.len()],
             in_flight: BTreeMap::new(),
             next_packet: 1,
             max_in_flight: spec.limits.max_in_flight,
@@ -586,6 +775,27 @@ impl WarpState {
         for nic in self.nics.values_mut() {
             nic.umem.set_bug(bug);
         }
+    }
+
+    /// The step that changed the shared NICs is committed.
+    pub fn commit(&self) {
+        for nic in self.nics.values() {
+            nic.umem.commit();
+        }
+    }
+    /// The step failed: undo its NIC calls (see [`SharedUmem`]).
+    pub fn rollback(&self) {
+        for nic in self.nics.values() {
+            nic.umem.rollback();
+        }
+    }
+    /// `task` finished holding frames: drop their owners (the audit then
+    /// reports the leak) and return the conservation error.
+    pub fn leak_task(&self, task: &str) -> Result<(), WarpError> {
+        for nic in self.nics.values() {
+            nic.umem.leak_task(task);
+        }
+        self.check_conservation()
     }
 
     /// Initial timers: the first burst of every flow and every timed event.
@@ -615,9 +825,24 @@ impl WarpState {
                         name.clone(),
                         NicSnapshot {
                             process: process_names[n.process].clone(),
-                            accounting: n.umem.check_conservation().unwrap_or_default(),
-                            leases: n.umem.leases().len() as u64,
+                            accounting: n.umem.accounting(),
+                            leases: n.umem.lease_count() as u64,
                             waiting: n.waiters.iter().copied().collect(),
+                            softnic: n.umem.with(|u| {
+                                let (nic, drv) = (u.nic_stats(), u.driver_stats());
+                                SoftNicCounters {
+                                    rx_delivered: nic.rx_delivered,
+                                    rx_dropped_no_buffer: nic.rx_dropped_no_buffer,
+                                    rx_dropped_ring_full: nic.rx_dropped_ring_full,
+                                    tx_consumed: nic.tx_consumed,
+                                    completions_posted: nic.completions_posted,
+                                    harvested: drv.rx_harvested,
+                                    tx_submitted: drv.tx_submitted,
+                                    completions: drv.completions,
+                                    retired: drv.retired,
+                                    leaks_detected: drv.leaks_detected,
+                                }
+                            }),
                         },
                     )
                 })
@@ -685,6 +910,95 @@ impl WarpState {
         Ok(out)
     }
 
+    /// Admit the delivered transmissions of an ingress datagram: each copy
+    /// is in flight until it arrives at `nic`. Checked against the budget
+    /// before anything is retained.
+    fn admit(
+        &mut self,
+        nic: &str,
+        datagram: Datagram,
+        sent: Vec<(u64, Transmission)>,
+        effects: &mut Vec<WarpEffect>,
+    ) -> Result<(), WarpError> {
+        for (id, t) in sent {
+            if let Fate::Delivered { arrive_at_ns, .. } = t.fate {
+                if self.in_flight.len() as u64 + self.egress_in_flight >= self.max_in_flight {
+                    return Err(WarpError::Budget(format!(
+                        "more than {} datagrams in flight",
+                        self.max_in_flight
+                    )));
+                }
+                let copy = Datagram {
+                    id,
+                    ..datagram.clone()
+                };
+                self.in_flight.insert(id, (nic.into(), copy));
+                effects.push(WarpEffect::Spawn(
+                    WarpTimer::Arrive { packet: id },
+                    arrive_at_ns,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The peer of `flow` sends an ACK datagram for its recorded ranges over
+    /// the NIC's ACK link. The ACK uses the flow's packet-number space.
+    fn send_ack(
+        &mut self,
+        spec: &WarpSpec,
+        flow: usize,
+        now_ns: u64,
+        events: &mut Vec<WarpEvent>,
+        effects: &mut Vec<WarpEffect>,
+    ) -> Result<(), WarpError> {
+        let f = &spec.flows[flow];
+        let link = self.nics[&f.nic]
+            .ack_path
+            .as_ref()
+            .expect("ACKs imply an ACK path")
+            .link
+            .clone();
+        let peer = &mut self.peers[flow];
+        peer.unacked = 0;
+        peer.armed = None;
+        let ranges = peer.ranges.clone();
+        let delay = now_ns.saturating_sub(peer.first_unacked_ns);
+        let state = &mut self.flows[flow];
+        let pkt_num = state.next_pn;
+        if pkt_num > umem::MAX_PACKET_NUMBER {
+            return Err(WarpError::Budget(format!(
+                "flow {}: packet numbers exhausted",
+                f.name
+            )));
+        }
+        state.next_pn += 1;
+        let src = state.src;
+        let mut head = umem::short_header(0x43, f.cid, pkt_num);
+        head.extend(umem::ack_frame_bytes(&ranges, delay));
+        let len = head.len() as u32;
+        let packet = self.next_packet;
+        self.next_packet += 1;
+        events.push(WarpEvent::AckSent {
+            flow: f.name.clone(),
+            packet,
+            pkt_num,
+            ranges,
+            len,
+            at_ns: now_ns,
+        });
+        let sent = self.send_on_link(&link, packet, now_ns, now_ns, len, events)?;
+        let datagram = Datagram {
+            id: packet,
+            src_addr: src.0,
+            src_port: src.1,
+            len,
+            head_hex: umem::hex(&head),
+            flow: Some(flow as u32),
+        };
+        self.admit(&f.nic, datagram, sent, effects)
+    }
+
     /// A Warp timer fired.
     pub fn fire(
         &mut self,
@@ -740,32 +1054,17 @@ impl WarpState {
                         at_ns: now_ns,
                     });
                     let ingress = self.nics[&f.nic].ingress.clone();
-                    for (id, t) in
-                        self.send_on_link(&ingress, packet, now_ns, now_ns, len, &mut events)?
-                    {
-                        if let Fate::Delivered { arrive_at_ns, .. } = t.fate {
-                            if self.in_flight.len() as u64 + self.egress_in_flight
-                                >= self.max_in_flight
-                            {
-                                return Err(WarpError::Budget(format!(
-                                    "more than {} datagrams in flight",
-                                    self.max_in_flight
-                                )));
-                            }
-                            let datagram = Datagram {
-                                id,
-                                src_addr: src.0,
-                                src_port: src.1,
-                                len,
-                                head_hex: umem::hex(&head),
-                            };
-                            self.in_flight.insert(id, (f.nic.clone(), datagram));
-                            effects.push(WarpEffect::Spawn(
-                                WarpTimer::Arrive { packet: id },
-                                arrive_at_ns,
-                            ));
-                        }
-                    }
+                    let sent =
+                        self.send_on_link(&ingress, packet, now_ns, now_ns, len, &mut events)?;
+                    let datagram = Datagram {
+                        id: packet,
+                        src_addr: src.0,
+                        src_port: src.1,
+                        len,
+                        head_hex: umem::hex(&head),
+                        flow: Some(*flow as u32),
+                    };
+                    self.admit(&f.nic, datagram, sent, &mut effects)?;
                 }
                 if burst + 1 < f.bursts {
                     let next = f.start_ns + (burst + 1) * f.burst_interval_ns;
@@ -784,7 +1083,11 @@ impl WarpState {
                     .remove(packet)
                     .expect("arrival timers name in-flight datagrams");
                 let state = self.nics.get_mut(&nic).expect("validated NIC");
-                match state.umem.arrive(datagram) {
+                match state
+                    .umem
+                    .arrive(datagram)
+                    .map_err(|e| umem_error(&nic, e))?
+                {
                     Ok(chunk) => {
                         events.push(WarpEvent::RxArrived {
                             nic: nic.clone(),
@@ -830,52 +1133,121 @@ impl WarpState {
             WarpTimer::Launch { nic, lease } => {
                 let state = &self.nics[nic];
                 let (egress, ack_return) = (state.egress.clone(), state.ack_return_ns);
+                let datagram_acks = state.ack_path.is_some();
                 let l = state
                     .umem
-                    .leases()
-                    .get(lease)
+                    .lease(*lease)
                     .expect("a lease launches before its PTO");
-                let (tx_len, parked) = (l.tx_len, l.state == umem::LeaseState::Parked);
+                let parked = l.state == umem::LeaseState::Parked;
                 let packet = self.next_packet;
                 self.next_packet += 1;
                 let sent =
-                    self.send_on_link(&egress, packet, now_ns, now_ns, tx_len, &mut events)?;
-                let mut ack_at_ns = vec![];
-                for (_, t) in sent {
-                    if let Fate::Delivered { arrive_at_ns, .. } = t.fate {
-                        ack_at_ns.push(arrive_at_ns.checked_add(ack_return).ok_or_else(|| {
-                            WarpError::Budget(format!("{nic}: ACK time overflows"))
-                        })?);
-                    }
-                }
+                    self.send_on_link(&egress, packet, now_ns, now_ns, l.tx_len, &mut events)?;
+                let arrivals: Vec<u64> = sent
+                    .iter()
+                    .filter_map(|(_, t)| match t.fate {
+                        Fate::Delivered { arrive_at_ns, .. } => Some(arrive_at_ns),
+                        _ => None,
+                    })
+                    .collect();
                 let outstanding = self.in_flight.len() as u64 + self.egress_in_flight;
-                if outstanding + ack_at_ns.len() as u64 > self.max_in_flight {
+                if outstanding + arrivals.len() as u64 > self.max_in_flight {
                     return Err(WarpError::Budget(format!(
                         "more than {} datagrams in flight",
                         self.max_in_flight
                     )));
                 }
-                self.egress_in_flight += ack_at_ns.len() as u64;
-                if parked {
-                    for at in &ack_at_ns {
+                self.egress_in_flight += arrivals.len() as u64;
+                let (ack_at_ns, peer_at_ns) = if datagram_acks {
+                    let flow = l.flow.expect("every datagram comes from a flow") as usize;
+                    for at in &arrivals {
                         effects.push(WarpEffect::Spawn(
-                            WarpTimer::Lease {
-                                nic: nic.clone(),
-                                lease: *lease,
-                                timer: LeaseTimer::Ack,
+                            WarpTimer::PeerRecv {
+                                flow,
+                                pkt_num: l.pkt_num_full,
                             },
                             *at,
                         ));
                     }
-                }
-                let state = self.nics.get_mut(nic).expect("validated NIC");
-                state.umem.launch(*lease, ack_at_ns.clone());
+                    (vec![], arrivals)
+                } else {
+                    let mut acks = vec![];
+                    for at in arrivals {
+                        acks.push(at.checked_add(ack_return).ok_or_else(|| {
+                            WarpError::Budget(format!("{nic}: ACK time overflows"))
+                        })?);
+                    }
+                    if parked {
+                        for at in &acks {
+                            effects.push(WarpEffect::Spawn(
+                                WarpTimer::Lease {
+                                    nic: nic.clone(),
+                                    lease: *lease,
+                                    timer: LeaseTimer::Ack,
+                                },
+                                *at,
+                            ));
+                        }
+                    }
+                    (acks, vec![])
+                };
+                let state = &self.nics[nic];
+                state
+                    .umem
+                    .launch(*lease, ack_at_ns.clone())
+                    .map_err(|e| umem_error(nic, e))?;
                 events.push(WarpEvent::Launched {
                     nic: nic.clone(),
                     lease: *lease,
                     ack_at_ns,
+                    peer_at_ns,
                     at_ns: now_ns,
                 });
+            }
+            WarpTimer::PeerRecv { flow, pkt_num } => {
+                // This copy reached the peer: it no longer counts as in flight.
+                self.egress_in_flight = self
+                    .egress_in_flight
+                    .checked_sub(1)
+                    .expect("each delivered egress copy has one peer arrival");
+                let f = &spec.flows[*flow];
+                let ack = self.nics[&f.nic]
+                    .ack_path
+                    .clone()
+                    .expect("peer timers imply an ACK path");
+                let peer = &mut self.peers[*flow];
+                record_pn(&mut peer.ranges, *pkt_num, ack.max_ranges as usize);
+                if peer.unacked == 0 {
+                    peer.first_unacked_ns = now_ns;
+                }
+                peer.unacked += 1;
+                events.push(WarpEvent::PeerReceived {
+                    flow: f.name.clone(),
+                    pkt_num: *pkt_num,
+                    at_ns: now_ns,
+                });
+                if peer.unacked >= ack.ack_every {
+                    self.send_ack(spec, *flow, now_ns, &mut events, &mut effects)?;
+                } else if peer.armed.is_none() {
+                    peer.generation += 1;
+                    peer.armed = Some(peer.generation);
+                    let at = now_ns.checked_add(ack.max_ack_delay_ns).ok_or_else(|| {
+                        WarpError::Budget(format!("{}: ACK delay overflows", f.name))
+                    })?;
+                    effects.push(WarpEffect::Spawn(
+                        WarpTimer::AckDelay {
+                            flow: *flow,
+                            generation: peer.generation,
+                        },
+                        at,
+                    ));
+                }
+            }
+            WarpTimer::AckDelay { flow, generation } => {
+                let peer = &self.peers[*flow];
+                if peer.armed == Some(*generation) && peer.unacked > 0 {
+                    self.send_ack(spec, *flow, now_ns, &mut events, &mut effects)?;
+                }
             }
             WarpTimer::Lease { nic, lease, timer } => {
                 if *timer == LeaseTimer::Ack {
@@ -886,7 +1258,7 @@ impl WarpState {
                         .expect("each delivered egress copy has one ACK timer");
                 }
                 let state = self.nics.get_mut(nic).expect("validated NIC");
-                match state.umem.retire(*lease) {
+                match state.umem.retire(*lease).map_err(|e| umem_error(nic, e))? {
                     Some(l) => events.push(WarpEvent::Retired {
                         nic: nic.clone(),
                         lease: *lease,
@@ -940,10 +1312,7 @@ impl WarpState {
         now_ns: u64,
         request: u64,
     ) -> Result<OpResult, WarpError> {
-        let misuse = |e: UmemError| match e {
-            UmemError::LeaseLimit { .. } => WarpError::Budget(format!("{nic}: {e:?}")),
-            e => WarpError::Misuse(format!("{nic}: {e:?}")),
-        };
+        let misuse = |e: UmemError| umem_error(nic, e);
         let arg = |i: usize| -> Result<Json, WarpError> {
             args.get(i)
                 .cloned()
@@ -963,9 +1332,9 @@ impl WarpState {
         let mut park = None;
         let response = {
             let state = self.nics.get_mut(nic).expect("validated NIC");
-            let umem = &mut state.umem;
+            let umem = &state.umem;
             match op {
-                WarpOp::Harvest => match umem.harvest(task) {
+                WarpOp::Harvest => match umem.harvest(task).map_err(misuse)? {
                     None => Some(json!("None")),
                     Some((frame, datagram)) => {
                         events.push(WarpEvent::Harvested {
@@ -1018,33 +1387,45 @@ impl WarpState {
                 WarpOp::Park => {
                     let desc: LeaseDesc = serde_json::from_value(arg(0)?)
                         .map_err(|e| WarpError::Misuse(format!("{nic}: lease: {e}")))?;
-                    let lease = umem.park(task, desc).map_err(misuse)?;
-                    let l = &umem.leases()[&lease];
-                    let launched_acks: &[u64] = if l.launched { &l.ack_at_ns } else { &[] };
-                    for at in launched_acks {
-                        effects.push(WarpEffect::Spawn(
-                            WarpTimer::Lease {
-                                nic: nic.into(),
-                                lease,
-                                timer: LeaseTimer::Ack,
-                            },
-                            (*at).max(now_ns),
-                        ));
-                    }
-                    effects.push(WarpEffect::Spawn(
-                        WarpTimer::Lease {
-                            nic: nic.into(),
-                            lease,
-                            timer: LeaseTimer::Pto,
-                        },
-                        l.pto_at_ns.max(now_ns),
-                    ));
+                    let (lease, retired) = umem.park(task, desc).map_err(misuse)?;
                     events.push(WarpEvent::Parked {
                         nic: nic.into(),
                         task: task.into(),
                         lease,
                         at_ns: now_ns,
                     });
+                    match retired {
+                        // A source-observed ACK already covered it.
+                        Some(chunk) => events.push(WarpEvent::Retired {
+                            nic: nic.into(),
+                            lease,
+                            chunk,
+                            by: LeaseTimer::SourceAck,
+                            at_ns: now_ns,
+                        }),
+                        None => {
+                            let l = umem.lease(lease).expect("parked lease");
+                            let launched_acks: &[u64] = if l.launched { &l.ack_at_ns } else { &[] };
+                            for at in launched_acks {
+                                effects.push(WarpEffect::Spawn(
+                                    WarpTimer::Lease {
+                                        nic: nic.into(),
+                                        lease,
+                                        timer: LeaseTimer::Ack,
+                                    },
+                                    (*at).max(now_ns),
+                                ));
+                            }
+                            effects.push(WarpEffect::Spawn(
+                                WarpTimer::Lease {
+                                    nic: nic.into(),
+                                    lease,
+                                    timer: LeaseTimer::Pto,
+                                },
+                                l.pto_at_ns.max(now_ns),
+                            ));
+                        }
+                    }
                     Some(Json::Null)
                 }
                 WarpOp::WaitRx => {
@@ -1074,6 +1455,41 @@ impl WarpState {
                         None
                     }
                 }
+                WarpOp::OnAck => {
+                    let view: ViewDesc = serde_json::from_value(arg(0)?)
+                        .map_err(|e| WarpError::Misuse(format!("{nic}: view: {e}")))?;
+                    match umem.on_ack(task, view).map_err(misuse)? {
+                        Ok((summary, _, retired)) => {
+                            events.push(WarpEvent::AckObserved {
+                                nic: nic.into(),
+                                task: task.into(),
+                                chunk: view.chunk_idx,
+                                result: Ok((summary.largest_acked, summary.retired)),
+                                at_ns: now_ns,
+                            });
+                            for l in retired {
+                                events.push(WarpEvent::Retired {
+                                    nic: nic.into(),
+                                    lease: l.id,
+                                    chunk: l.chunk,
+                                    by: LeaseTimer::SourceAck,
+                                    at_ns: now_ns,
+                                });
+                            }
+                            Some(json!({ "Ok": summary }))
+                        }
+                        Err(code) => {
+                            events.push(WarpEvent::AckObserved {
+                                nic: nic.into(),
+                                task: task.into(),
+                                chunk: view.chunk_idx,
+                                result: Err(code),
+                                at_ns: now_ns,
+                            });
+                            Some(json!({ "Err": code }))
+                        }
+                    }
+                }
                 WarpOp::Submit => None,
             }
         };
@@ -1091,7 +1507,7 @@ impl WarpState {
             let pto_at_ns = launch_ns
                 .checked_add(pto)
                 .ok_or_else(|| WarpError::Budget(format!("{nic}: PTO time overflows")))?;
-            let state = self.nics.get_mut(nic).expect("validated NIC");
+            let state = &self.nics[nic];
             let (lease, desc) = state
                 .umem
                 .submit(task, frame, pkt_num_full, edt_ns, pto_at_ns)
