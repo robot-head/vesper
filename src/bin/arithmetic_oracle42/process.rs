@@ -15,6 +15,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MODEL: &str = include_str!("../../../lean/RewriteWitness.lean");
 const DRIVER: &str = include_str!("../../../lean/ArithmeticOracle.lean");
+#[cfg(test)]
 const MARKER: &[u8] = b"oracle42-transport-marker";
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 fn err(kind: FailureKind, message: impl Into<String>) -> HarnessError {
@@ -106,8 +107,8 @@ impl Drop for TempRoot {
 }
 
 enum Event {
-    Frame(Result<Option<Vec<u8>>, HarnessError>),
-    Written(Result<(), HarnessError>),
+    Frame(Instant, Result<Option<Vec<u8>>, HarnessError>),
+    Written(Instant, Result<(), HarnessError>),
 }
 #[derive(Default)]
 struct StderrState {
@@ -173,7 +174,11 @@ impl Session {
                 if let Ok(Some(bytes)) = &event {
                     reader_peak.fetch_max(bytes.len(), Ordering::Relaxed);
                 }
-                if read_events.send(Event::Frame(event)).is_err() || terminal {
+                if read_events
+                    .send(Event::Frame(Instant::now(), event))
+                    .is_err()
+                    || terminal
+                {
                     break;
                 }
             },
@@ -194,14 +199,14 @@ impl Session {
                         Err(e) => break Err(e.into()),
                     }
                 };
-                let _ = read_events.send(Event::Frame(result));
+                let _ = read_events.send(Event::Frame(Instant::now(), result));
             }
         });
         let writer = thread::spawn(move || {
             while let Ok(bytes) = write_rx.recv() {
                 let answer = protocol::write_frame(&mut stdin, &bytes, FRAME_CAP);
                 let terminal = answer.is_err();
-                if events.send(Event::Written(answer)).is_err() || terminal {
+                if events.send(Event::Written(Instant::now(), answer)).is_err() || terminal {
                     break;
                 }
             }
@@ -252,21 +257,26 @@ impl Session {
         Ok(())
     }
     fn event(&mut self, until: Instant) -> Result<Event, HarnessError> {
+        let check = |event: Event| {
+            let at = match &event {
+                Event::Frame(at, _) | Event::Written(at, _) => *at,
+            };
+            if at > until {
+                Err(err(FailureKind::Timeout, "child completed after deadline"))
+            } else {
+                Ok(event)
+            }
+        };
         loop {
             self.stderr_fault()?;
-            let now = Instant::now();
-            if now >= until {
-                return Err(err(FailureKind::Timeout, "child response deadline"));
-            }
-            match self
+            let rx = self
                 .rx
                 .as_ref()
-                .ok_or_else(|| err(FailureKind::Io, "closed child receiver"))?
-                .recv_timeout((until - now).min(Duration::from_millis(10)))
-            {
-                Ok(event) => return Ok(event),
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                .ok_or_else(|| err(FailureKind::Io, "closed child receiver"))?;
+            // A timely event remains timely while another slot is being serviced.
+            match rx.try_recv() {
+                Ok(event) => return check(event),
+                Err(mpsc::TryRecvError::Disconnected) => {
                     let status = self.child.try_wait()?;
                     return Err(err(
                         if status.is_some_and(|s| !s.success()) {
@@ -277,6 +287,16 @@ impl Session {
                         "child output ended",
                     ));
                 }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+            let now = Instant::now();
+            if now >= until {
+                return Err(err(FailureKind::Timeout, "child response deadline"));
+            }
+            match rx.recv_timeout((until - now).min(Duration::from_millis(10))) {
+                Ok(event) => return check(event),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => continue,
             }
         }
     }
@@ -290,17 +310,22 @@ impl Session {
     fn receive(&mut self, until: Instant) -> Result<Option<Vec<u8>>, HarnessError> {
         loop {
             match self.event(until)? {
-                Event::Frame(value) => return value,
-                Event::Written(value) => value?,
+                Event::Frame(_, value) => return value,
+                Event::Written(_, value) => value?,
             }
         }
     }
-    fn exchange_sent(&mut self, until: Instant) -> Result<Vec<u8>, HarnessError> {
+    fn exchange_sent_observed(
+        &mut self,
+        until: Instant,
+        mut on_written: impl FnMut(),
+        mut on_frame: impl FnMut(&[u8]),
+    ) -> Result<Vec<u8>, HarnessError> {
         let mut answer = None;
         let mut written = false;
         while answer.is_none() || !written {
             match self.event(until)? {
-                Event::Written(value) => {
+                Event::Written(_, value) => {
                     value?;
                     if written {
                         return Err(err(
@@ -309,10 +334,12 @@ impl Session {
                         ));
                     }
                     written = true;
+                    on_written();
                 }
-                Event::Frame(value) => {
+                Event::Frame(_, value) => {
                     let bytes = value?
                         .ok_or_else(|| err(FailureKind::Crash, "child closed during request"))?;
+                    on_frame(&bytes);
                     if answer.replace(bytes).is_some() {
                         return Err(err(FailureKind::Protocol, "extra child response"));
                     }
@@ -320,6 +347,9 @@ impl Session {
             }
         }
         Ok(answer.expect("response present after loop"))
+    }
+    fn exchange_sent(&mut self, until: Instant) -> Result<Vec<u8>, HarnessError> {
+        self.exchange_sent_observed(until, || {}, |_| {})
     }
     fn exchange(&mut self, bytes: Vec<u8>, until: Instant) -> Result<Vec<u8>, HarnessError> {
         self.send(bytes)?;
@@ -569,28 +599,34 @@ impl Engine {
             config.limits.lean_fuel,
             config.limits.request_bytes,
         )?;
-        protocol::hash_frame(&mut self.requests, &request);
-        if shrink {
-            report.shrink_calls.lean_requests += 1;
+        self.lean.send(request.clone())?;
+        let requests = &mut self.requests;
+        let responses = &mut self.responses;
+        let (request_count, response_count) = if shrink {
+            (
+                &mut report.shrink_calls.lean_requests,
+                &mut report.shrink_calls.lean_responses,
+            )
         } else {
-            report.lean_requests += 1;
-        }
-        let response = match self
-            .lean
-            .exchange(request.clone(), deadline(config.limits.request_timeout_ms))
-        {
-            Ok(b) => b,
-            Err(e) => {
+            (&mut report.lean_requests, &mut report.lean_responses)
+        };
+        let response = match self.lean.exchange_sent_observed(
+            deadline(config.limits.request_timeout_ms),
+            || {
+                protocol::hash_frame(requests, &request);
+                *request_count += 1;
+            },
+            |bytes| {
+                protocol::hash_frame(responses, bytes);
+                *response_count += 1;
+            },
+        ) {
+            Ok(bytes) => bytes,
+            Err(error) => {
                 self.healthy = false;
-                return Err(e);
+                return Err(error);
             }
         };
-        protocol::hash_frame(&mut self.responses, &response);
-        if shrink {
-            report.shrink_calls.lean_responses += 1;
-        } else {
-            report.lean_responses += 1;
-        }
         let answer = match protocol::decode_answer(self.wire_seq, &response) {
             Ok(a) => a,
             Err(e) => {
@@ -986,6 +1022,20 @@ fn drive(
         }
         report.max_in_flight = report.max_in_flight.max(batch.len() as u16);
         for pending in batch {
+            if report
+                .first_failed_case
+                .is_some_and(|id| pending.case.id > id)
+            {
+                // The lower failure is settled: do not wait on higher JIT work.
+                report.cancelled_cases += 1;
+                report.interrupted_worker_cases += 1;
+                if let Some(mut worker) = engine.workers[pending.slot].take() {
+                    let _ = worker
+                        .session
+                        .cleanup(config.limits.shutdown_timeout_ms, true);
+                }
+                continue;
+            }
             // Always settle lower IDs before selecting the first failure.
             let result =
                 engine.receive_worker(pending.slot, pending.case.id, pending.until, config, report);
