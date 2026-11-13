@@ -3,6 +3,7 @@
 //! renders deterministic escaped local documents. It never authorizes a proof
 //! badge, compiler correctness claim or all-path ownership conclusion.
 #![forbid(unsafe_code)]
+pub mod links;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -353,6 +354,8 @@ pub struct Document {
     pub graph: TypestateGraph,
     pub reachability: Vec<StateReachability>,
     pub limitations: Vec<String>,
+    #[serde(default)]
+    pub intra_doc_links: links::LinkReport,
 }
 pub fn type_identity(ty: &Type) -> Result<String, String> {
     let mut unsupported = vec![];
@@ -644,6 +647,22 @@ impl Document {
                 }
             }
         }
+        let link_limits = links::LinkLimits {
+            max_source_bytes: limits.max_source_bytes,
+            ..Default::default()
+        };
+        let targets = if self.intra_doc_links.status == links::LinkStatus::NotAnalyzed {
+            vec![]
+        } else {
+            links::document_targets(self, link_limits).map_err(|e| e.to_string())?
+        };
+        links::validate_report(&self.intra_doc_links, &targets, link_limits)
+            .map_err(|e| e.to_string())?;
+        if self.intra_doc_links.status != links::LinkStatus::NotAnalyzed
+            && self.intra_doc_links.source_bytes != self.source_bytes
+        {
+            return Err("intra-doc source byte association mismatch".into());
+        }
         self.reachability = self.graph.reachability(&self.functions, limits)?;
         Ok(())
     }
@@ -652,8 +671,167 @@ impl Document {
         to_json(self, limits.max_output_bytes)
     }
     pub fn html(&self, limits: Limits) -> Result<Vec<u8>, String> {
-        render_html(self, limits)
+        render_document_html(self, self, limits)
     }
+}
+/// Render typed documentation links after validating their finite declaration
+/// inventory and exact retained comment bytes. Public DTOs are not proof or
+/// checked-source evidence; the compiler facade supplies that source boundary.
+pub fn render_document_html(
+    document: &Document,
+    report: &impl Serialize,
+    limits: Limits,
+) -> Result<Vec<u8>, String> {
+    limits.validate()?;
+    let link_limits = links::LinkLimits {
+        max_source_bytes: limits.max_source_bytes,
+        ..Default::default()
+    };
+    if document.intra_doc_links.status == links::LinkStatus::NotAnalyzed {
+        links::validate_report(&document.intra_doc_links, &[], link_limits)
+            .map_err(|e| e.to_string())?;
+        return render_html(report, limits);
+    }
+    if document.intra_doc_links.status != links::LinkStatus::Resolved
+        || document.source_bytes != document.intra_doc_links.source_bytes
+    {
+        return Err("rejected or mismatched intra-doc metadata".into());
+    }
+    let targets = links::document_targets(document, link_limits).map_err(|e| e.to_string())?;
+    links::validate_report(&document.intra_doc_links, &targets, link_limits)
+        .map_err(|e| e.to_string())?;
+    links::render_preflight(document, &targets, link_limits).map_err(|e| e.to_string())?;
+    if document.doc_comments.len() > 4096 {
+        return Err("documentation comment count exceeded".into());
+    }
+    let mut previous_end = 0;
+    let mut total_bytes = 0usize;
+    for comment in &document.doc_comments {
+        total_bytes = total_bytes
+            .checked_add(comment.text.len())
+            .ok_or("comment byte overflow")?;
+        let prefix = comment
+            .span
+            .end
+            .checked_sub(comment.span.start)
+            .and_then(|n| n.checked_sub(comment.text.len()))
+            .ok_or("invalid comment span")?;
+        if comment.span.start < previous_end
+            || comment.span.end > document.source_bytes
+            || !matches!(prefix, 3 | 4)
+            || total_bytes > limits.max_source_bytes
+            || !matches!(comment.kind.as_str(), "item" | "module")
+        {
+            return Err("invalid retained documentation comment".into());
+        }
+        previous_end = comment.span.end;
+    }
+    let mut comment_index = 0usize;
+    for reference in &document.intra_doc_links.references {
+        while document
+            .doc_comments
+            .get(comment_index)
+            .is_some_and(|c| c.span.end <= reference.span.start)
+        {
+            comment_index += 1;
+        }
+        let comment = document
+            .doc_comments
+            .get(comment_index)
+            .ok_or("link has no retained comment")?;
+        let start = comment.span.end - comment.text.len();
+        let a = reference
+            .span
+            .start
+            .checked_sub(start)
+            .ok_or("link outside retained comment")?;
+        let b = reference
+            .span
+            .end
+            .checked_sub(start)
+            .ok_or("link outside retained comment")?;
+        let raw = comment
+            .text
+            .get(a..b)
+            .ok_or("link range is not retained UTF8 text")?;
+        if raw.as_bytes().first() != Some(&b'[')
+            || raw.as_bytes().last() != Some(&b']')
+            || raw.get(1..raw.len() - 1) != Some(reference.display.as_str())
+        {
+            return Err("link display differs from retained source bytes".into());
+        }
+    }
+    let legacy = render_html(report, limits)?;
+    let suffix = b"</html>\n";
+    let prefix = legacy
+        .strip_suffix(suffix)
+        .ok_or("invalid static renderer boundary")?;
+    let mut output = Bounded {
+        bytes: Vec::new(),
+        limit: limits.max_output_bytes,
+    };
+    output
+        .write_all(prefix)
+        .map_err(|_| "output byte budget exceeded")?;
+    output
+        .write_all(b"<section><h2>Local declarations</h2><ul>")
+        .map_err(|_| "output byte budget exceeded")?;
+    for target in &targets {
+        output
+            .write_all(b"<li id=\"")
+            .map_err(|_| "output byte budget exceeded")?;
+        escape_html(
+            &mut output,
+            links::anchor_id(target.kind, &target.path).as_bytes(),
+        )?;
+        output
+            .write_all(b"\">")
+            .map_err(|_| "output byte budget exceeded")?;
+        escape_html(&mut output, target.path.as_bytes())?;
+        output
+            .write_all(b"</li>")
+            .map_err(|_| "output byte budget exceeded")?;
+    }
+    output
+        .write_all(b"</ul></section><section><h2>Linked source documentation</h2>")
+        .map_err(|_| "output byte budget exceeded")?;
+    let mut references = document.intra_doc_links.references.iter().peekable();
+    for comment in &document.doc_comments {
+        output
+            .write_all(b"<pre>")
+            .map_err(|_| "output byte budget exceeded")?;
+        let start = comment.span.end - comment.text.len();
+        let mut at = 0;
+        while references
+            .peek()
+            .is_some_and(|r| r.span.start < comment.span.end)
+        {
+            let reference = references.next().unwrap();
+            let a = reference.span.start - start;
+            let b = reference.span.end - start;
+            escape_html(&mut output, &comment.text.as_bytes()[at..a])?;
+            output
+                .write_all(b"<a href=\"#")
+                .map_err(|_| "output byte budget exceeded")?;
+            escape_html(&mut output, reference.anchor.as_bytes())?;
+            output
+                .write_all(b"\">")
+                .map_err(|_| "output byte budget exceeded")?;
+            escape_html(&mut output, &comment.text.as_bytes()[a..b])?;
+            output
+                .write_all(b"</a>")
+                .map_err(|_| "output byte budget exceeded")?;
+            at = b;
+        }
+        escape_html(&mut output, &comment.text.as_bytes()[at..])?;
+        output
+            .write_all(b"</pre>")
+            .map_err(|_| "output byte budget exceeded")?;
+    }
+    output
+        .write_all(b"</section></html>\n")
+        .map_err(|_| "output byte budget exceeded")?;
+    Ok(output.bytes)
 }
 pub fn render_html(value: &impl Serialize, limits: Limits) -> Result<Vec<u8>, String> {
     limits.validate()?;

@@ -68,3 +68,4 @@ actions:
       - run: "scripts/test-macro-preview.sh"
       - run: "scripts/test-source-macro-parameters.sh"
       - run: "scripts/test-source-macro-tuples.sh"
+      - run: "scripts/test-doc-links.sh"

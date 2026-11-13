@@ -1,0 +1,2 @@
+/// Unsupported [Self::commit] must not guess an implicit receiver.
+fn main() -> i64 { 42 }

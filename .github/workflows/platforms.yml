@@ -91,6 +91,7 @@ jobs:
           scripts/test-macro-preview.sh
           scripts/test-source-macro-parameters.sh
           scripts/test-source-macro-tuples.sh
+          scripts/test-doc-links.sh
 
   # Cargo, not Bazel: the hermetic toolchain links MSVC binaries through
   # clang-cl, whose argument syntax rustc's MSVC linker flavor does not speak
@@ -138,3 +139,5 @@ jobs:
         run: python scripts/check-source-macro-parameters.py --binary target/debug/vesper.exe
       - name: Run tuple macro acceptance against the actual Cargo executable
         run: python scripts/check-source-macro-tuples.py --binary target/debug/vesper.exe
+      - name: Run intra-doc link acceptance against the actual Cargo executable
+        run: python scripts/check-doc-links.py --binary target/debug/vesper.exe

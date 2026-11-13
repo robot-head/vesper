@@ -1,0 +1,3 @@
+/// No generic instantiation for [Box[u64]].
+copy struct Box[T] { value: T }
+fn main() -> i64 { 42 }
