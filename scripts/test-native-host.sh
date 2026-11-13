@@ -3,13 +3,15 @@
 # check its exit status. On Apple silicon this exercises the AArch64 native
 # ABI on real hardware; on x86_64 Linux it covers the host backend end to end.
 set -eu
+cd "$(dirname "$0")/.."
+. scripts/bazel-lib.sh
 artifacts=$(mktemp -d)
 trap 'rm -rf "$artifacts"' EXIT HUP INT TERM
-cargo build -p vesper --locked
+vesper="$(bazel_executable //:bin/vesper)"
 for case in fibonacci:55 transaction:42 projections:42 counter:3 fail:42 closures:42 resumptions:42 checked_math:42; do
     source=${case%:*}
     expected=${case#*:}
-    target/debug/vesper build "examples/$source.ves" -o "$artifacts/$source"
+    "$vesper" build "examples/$source.ves" -o "$artifacts/$source"
     actual=0
     "$artifacts/$source" || actual=$?
     if [ "$actual" != "$expected" ]; then

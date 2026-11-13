@@ -41,7 +41,13 @@ const ENGINE_PREFIXES: &[&str] = &[
 
 fn main() {
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
-    let crates = manifest.parent().map(Path::to_path_buf);
+    // Cargo builds in place, so the sibling crates sit next to this one.
+    // Bazel stages them elsewhere and names their directory instead.
+    println!("cargo:rerun-if-env-changed=VLB_CRATES_DIR");
+    let crates = match env::var_os("VLB_CRATES_DIR") {
+        Some(dir) => Some(PathBuf::from(dir)),
+        None => manifest.parent().map(Path::to_path_buf),
+    };
 
     let builder = tree_digest(&manifest, &["Cargo.toml", "build.rs", "src"], "builder-src");
     let (sandbox, cas) = match &crates {
@@ -102,7 +108,8 @@ fn tree_digest(root: &Path, parts: &[&str], context: &str) -> Option<String> {
 }
 
 fn collect(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
-    let meta = fs::symlink_metadata(path)?;
+    // Follows symlinks: Bazel stages build-script inputs as symlinks.
+    let meta = fs::metadata(path)?;
     if meta.is_dir() {
         for entry in fs::read_dir(path)? {
             collect(&entry?.path(), out)?;
@@ -127,7 +134,14 @@ fn collect(path: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
 /// Cargo used. The lockfile must also list this package; otherwise (for
 /// example a `CARGO_TARGET_DIR` outside the workspace) the resolution is
 /// unknown and the fingerprint fails closed.
+///
+/// A build system that lays out `OUT_DIR` differently (Bazel) names the
+/// lockfile in `VLB_CARGO_LOCK` instead.
 fn active_lock() -> Option<PathBuf> {
+    println!("cargo:rerun-if-env-changed=VLB_CARGO_LOCK");
+    if let Some(lock) = env::var_os("VLB_CARGO_LOCK") {
+        return Some(PathBuf::from(lock));
+    }
     let out = PathBuf::from(env::var_os("OUT_DIR")?);
     let build = out
         .ancestors()

@@ -1,0 +1,100 @@
+name: Macro and partial-buffer formatting
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/vesper-fmt/**'
+      - 'crates/vesper-doc/**'
+      - 'crates/vesper-syntax/**'
+      - 'crates/vesper-core/**'
+      - 'crates/vesper-span/**'
+      - 'crates/vesper-diagnostics/**'
+      - 'crates/vesper-lsp/**'
+      - 'crates/vesper-forge/**'
+      - 'src/**'
+      - 'tests/stylus_cli.rs'
+      - 'tests/fmt_cli.rs'
+      - 'tests/lsp_actions.rs'
+      - 'tests/lsp_cli.rs'
+      - 'tests/recovery_cli.rs'
+      - 'tests/fixtures/stylus/**'
+      - 'scripts/check-stylus.py'
+      - 'scripts/test-stylus.sh'
+      - '.github/workflows/stylus.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/vesper-fmt/**'
+      - 'crates/vesper-doc/**'
+      - 'crates/vesper-syntax/**'
+      - 'crates/vesper-core/**'
+      - 'crates/vesper-span/**'
+      - 'crates/vesper-diagnostics/**'
+      - 'crates/vesper-lsp/**'
+      - 'crates/vesper-forge/**'
+      - 'src/**'
+      - 'tests/stylus_cli.rs'
+      - 'tests/fmt_cli.rs'
+      - 'tests/lsp_actions.rs'
+      - 'tests/lsp_cli.rs'
+      - 'tests/recovery_cli.rs'
+      - 'tests/fixtures/stylus/**'
+      - 'scripts/check-stylus.py'
+      - 'scripts/test-stylus.sh'
+      - '.github/workflows/stylus.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stylus-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 1
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  native-stylus:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Assert default CLI does not require the Wasmtime engine
+        run: >-
+          cargo tree --locked -p vesper --edges normal --prefix none |
+          python -c 'import sys; names={line.split()[0] for line in sys.stdin if line.strip()}; assert not names.intersection({"wasmtime", "wasmtime-wasi", "vesper-loom-sandbox"})'
+      - name: Test actual formatter with macro and complete-function recovery sources
+        run: cargo test --locked -p vesper-fmt --all-targets
+      - name: Test actual CLI, current editor actions and original-buffer recovery
+        run: >-
+          cargo test --locked -p vesper --lib --test stylus_cli --test fmt_cli
+          --test lsp_actions --test lsp_cli --test recovery_cli --test forge_cli
+      - name: Check strict formatter and source integration Clippy
+        run: cargo clippy --locked -p vesper -p vesper-fmt --all-targets -- -D warnings
+      - name: Execute actual formatting and stdio acceptance
+        run: scripts/test-stylus.sh

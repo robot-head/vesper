@@ -1,8 +1,9 @@
 //! RFC 9000 §19 frames: zero-copy parse and encode for the supported subset.
 //!
-//! Supported: PADDING, PING, ACK (with ranges and ECN counts), CRYPTO, STREAM
-//! (all OFF/LEN/FIN variants), MAX_DATA, MAX_STREAM_DATA, CONNECTION_CLOSE
-//! (both variants) and HANDSHAKE_DONE. Data-carrying frames borrow their bytes
+//! Supported: PADDING, PING, ACK (with ranges and ECN counts), RESET_STREAM,
+//! STOP_SENDING, CRYPTO, STREAM (all OFF/LEN/FIN variants), MAX_DATA,
+//! MAX_STREAM_DATA, MAX_STREAMS, DATA_BLOCKED, STREAM_DATA_BLOCKED,
+//! STREAMS_BLOCKED, CONNECTION_CLOSE (both variants) and HANDSHAKE_DONE. Data-carrying frames borrow their bytes
 //! from the payload. Other RFC 9000 frame types are
 //! [`FrameError::Unsupported`]; unregistered types are
 //! [`FrameError::UnknownType`]; frames not permitted in the packet type
@@ -15,6 +16,8 @@ const PADDING: u64 = 0x00;
 const PING: u64 = 0x01;
 const ACK: u64 = 0x02;
 const ACK_ECN: u64 = 0x03;
+const RESET_STREAM: u64 = 0x04;
+const STOP_SENDING: u64 = 0x05;
 const CRYPTO: u64 = 0x06;
 const STREAM: u64 = 0x08;
 const STREAM_OFF: u64 = 0x04;
@@ -22,6 +25,16 @@ const STREAM_LEN: u64 = 0x02;
 const STREAM_FIN: u64 = 0x01;
 const MAX_DATA: u64 = 0x10;
 const MAX_STREAM_DATA: u64 = 0x11;
+const MAX_STREAMS_BIDI: u64 = 0x12;
+const MAX_STREAMS_UNI: u64 = 0x13;
+const DATA_BLOCKED: u64 = 0x14;
+const STREAM_DATA_BLOCKED: u64 = 0x15;
+const STREAMS_BLOCKED_BIDI: u64 = 0x16;
+const STREAMS_BLOCKED_UNI: u64 = 0x17;
+
+/// Largest stream count a MAX_STREAMS or STREAMS_BLOCKED frame may carry
+/// (RFC 9000 §19.11: a stream ID must stay below 2^62).
+pub const MAX_STREAM_COUNT: u64 = 1 << 60;
 const CLOSE_TRANSPORT: u64 = 0x1c;
 const CLOSE_APPLICATION: u64 = 0x1d;
 const HANDSHAKE_DONE: u64 = 0x1e;
@@ -247,6 +260,29 @@ pub enum Frame<'a> {
         stream_id: u64,
         max: u64,
     },
+    ResetStream {
+        stream_id: u64,
+        error_code: u64,
+        final_size: u64,
+    },
+    StopSending {
+        stream_id: u64,
+        error_code: u64,
+    },
+    /// MAX_STREAMS: `uni` selects 0x13, else 0x12 (bidirectional).
+    MaxStreams {
+        uni: bool,
+        max: u64,
+    },
+    DataBlocked(u64),
+    StreamDataBlocked {
+        stream_id: u64,
+        limit: u64,
+    },
+    StreamsBlocked {
+        uni: bool,
+        limit: u64,
+    },
     ConnectionClose(ConnectionClose<'a>),
     HandshakeDone,
 }
@@ -280,6 +316,24 @@ impl Frame<'_> {
             }
             Self::MaxData(_) => MAX_DATA,
             Self::MaxStreamData { .. } => MAX_STREAM_DATA,
+            Self::ResetStream { .. } => RESET_STREAM,
+            Self::StopSending { .. } => STOP_SENDING,
+            Self::MaxStreams { uni, .. } => {
+                if *uni {
+                    MAX_STREAMS_UNI
+                } else {
+                    MAX_STREAMS_BIDI
+                }
+            }
+            Self::DataBlocked(_) => DATA_BLOCKED,
+            Self::StreamDataBlocked { .. } => STREAM_DATA_BLOCKED,
+            Self::StreamsBlocked { uni, .. } => {
+                if *uni {
+                    STREAMS_BLOCKED_UNI
+                } else {
+                    STREAMS_BLOCKED_BIDI
+                }
+            }
             Self::ConnectionClose(c) => {
                 if c.frame_type.is_some() {
                     CLOSE_TRANSPORT
@@ -351,6 +405,33 @@ impl Frame<'_> {
                 w.varint(*stream_id)?;
                 w.varint(*max)?;
             }
+            Self::ResetStream {
+                stream_id,
+                error_code,
+                final_size,
+            } => {
+                w.varint(*stream_id)?;
+                w.varint(*error_code)?;
+                w.varint(*final_size)?;
+            }
+            Self::StopSending {
+                stream_id,
+                error_code,
+            } => {
+                w.varint(*stream_id)?;
+                w.varint(*error_code)?;
+            }
+            Self::MaxStreams { max: n, .. } | Self::StreamsBlocked { limit: n, .. } => {
+                if *n > MAX_STREAM_COUNT {
+                    return Err(VarIntError::BadLength(0));
+                }
+                w.varint(*n)?;
+            }
+            Self::DataBlocked(limit) => w.varint(*limit)?,
+            Self::StreamDataBlocked { stream_id, limit } => {
+                w.varint(*stream_id)?;
+                w.varint(*limit)?;
+            }
             Self::ConnectionClose(c) => {
                 w.varint(c.error_code)?;
                 if let Some(ty) = c.frame_type {
@@ -362,6 +443,60 @@ impl Frame<'_> {
         }
         Ok(())
     }
+}
+
+/// Writes the header of a STREAM frame (type with LEN, and OFF when the
+/// offset is non-zero) whose `len` data bytes the caller copies right
+/// after it; returns the header length. Lets data come from a ring buffer
+/// in two pieces.
+pub fn encode_stream_header(
+    out: &mut [u8],
+    stream_id: u64,
+    offset: u64,
+    len: usize,
+    fin: bool,
+) -> Result<usize, FrameError> {
+    check_end(offset, len).ok_or(FrameError::Encode)?;
+    let ty = STREAM
+        | STREAM_LEN
+        | if offset != 0 { STREAM_OFF } else { 0 }
+        | if fin { STREAM_FIN } else { 0 };
+    let mut w = Writer::new(out);
+    let res: Result<(), VarIntError> = (|| {
+        w.varint(ty)?;
+        w.varint(stream_id)?;
+        if offset != 0 {
+            w.varint(offset)?;
+        }
+        w.varint(len as u64)
+    })();
+    res.map_err(|_| FrameError::Encode)?;
+    Ok(w.position())
+}
+
+/// Like [`encode_stream_header`] for a CRYPTO frame.
+pub fn encode_crypto_header(out: &mut [u8], offset: u64, len: usize) -> Result<usize, FrameError> {
+    check_end(offset, len).ok_or(FrameError::Encode)?;
+    let mut w = Writer::new(out);
+    let res: Result<(), VarIntError> = (|| {
+        w.varint(CRYPTO)?;
+        w.varint(offset)?;
+        w.varint(len as u64)
+    })();
+    res.map_err(|_| FrameError::Encode)?;
+    Ok(w.position())
+}
+
+/// Bytes a STREAM frame header from [`encode_stream_header`] takes.
+pub fn stream_header_len(stream_id: u64, offset: u64, len: usize) -> usize {
+    let vl = |v: u64| varint::encoded_len(v).unwrap_or(8);
+    1 + vl(stream_id) + if offset != 0 { vl(offset) } else { 0 } + vl(len as u64)
+}
+
+/// Bytes a CRYPTO frame header from [`encode_crypto_header`] takes.
+pub fn crypto_header_len(offset: u64, len: usize) -> usize {
+    let vl = |v: u64| varint::encoded_len(v).unwrap_or(8);
+    1 + vl(offset) + vl(len as u64)
 }
 
 fn check_end(offset: u64, len: usize) -> Option<u64> {
@@ -377,7 +512,11 @@ pub const fn allowed(frame_type: u64, packet_type: PacketType) -> bool {
         PADDING | PING => true,
         ACK | ACK_ECN | CRYPTO => !matches!(packet_type, ZeroRtt),
         CLOSE_TRANSPORT => true,
-        0x08..=0x0f | MAX_DATA | MAX_STREAM_DATA | CLOSE_APPLICATION => {
+        RESET_STREAM
+        | STOP_SENDING
+        | 0x08..=0x0f
+        | MAX_DATA..=STREAMS_BLOCKED_UNI
+        | CLOSE_APPLICATION => {
             matches!(packet_type, ZeroRtt | OneRtt)
         }
         HANDSHAKE_DONE => matches!(packet_type, OneRtt),
@@ -386,7 +525,7 @@ pub const fn allowed(frame_type: u64, packet_type: PacketType) -> bool {
 }
 
 const fn is_registered_unsupported(frame_type: u64) -> bool {
-    matches!(frame_type, 0x04 | 0x05 | 0x07 | 0x12..=0x1b)
+    matches!(frame_type, 0x07 | 0x18..=0x1b)
 }
 
 /// Parses one frame from the front of `buf`; returns it and its length.
@@ -501,6 +640,34 @@ fn parse_one<'a>(r: &mut Reader<'a>, packet_type: PacketType) -> Result<Frame<'a
         MAX_STREAM_DATA => Frame::MaxStreamData {
             stream_id: vi(r, truncated)?,
             max: vi(r, truncated)?,
+        },
+        RESET_STREAM => Frame::ResetStream {
+            stream_id: vi(r, truncated)?,
+            error_code: vi(r, truncated)?,
+            final_size: vi(r, truncated)?,
+        },
+        STOP_SENDING => Frame::StopSending {
+            stream_id: vi(r, truncated)?,
+            error_code: vi(r, truncated)?,
+        },
+        MAX_STREAMS_BIDI | MAX_STREAMS_UNI | STREAMS_BLOCKED_BIDI | STREAMS_BLOCKED_UNI => {
+            let n = vi(r, truncated)?;
+            // RFC 9000 §19.11 and §19.14: a count above 2^60 is a
+            // FRAME_ENCODING_ERROR.
+            if n > MAX_STREAM_COUNT {
+                return Err(malformed);
+            }
+            let uni = ty & 1 == 1;
+            if ty <= MAX_STREAMS_UNI {
+                Frame::MaxStreams { uni, max: n }
+            } else {
+                Frame::StreamsBlocked { uni, limit: n }
+            }
+        }
+        DATA_BLOCKED => Frame::DataBlocked(vi(r, truncated)?),
+        STREAM_DATA_BLOCKED => Frame::StreamDataBlocked {
+            stream_id: vi(r, truncated)?,
+            limit: vi(r, truncated)?,
         },
         CLOSE_TRANSPORT | CLOSE_APPLICATION => {
             let error_code = vi(r, truncated)?;

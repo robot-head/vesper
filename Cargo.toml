@@ -56,6 +56,8 @@ members = [
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
     "crates/vesper-vault",
+    "crates/vesper-warp-tls",
+    "crates/vesper-nexus",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -113,6 +115,8 @@ default-members = [
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
     "crates/vesper-vault",
+    "crates/vesper-warp-tls",
+    "crates/vesper-nexus",
     "experiments/native-pulse",
 ]
 
@@ -146,6 +150,7 @@ rand_core = "0.10"
 region = "3.0.2"
 shake = "0.1"
 x25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize", "static_secrets", "precomputed-tables"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
 
 [package]
 default-run = "vesper"
@@ -156,6 +161,7 @@ edition = "2024"
 [dependencies]
 blake3 = "1.8"
 vesper-core = { path = "crates/vesper-core" }
+vesper-forge = { path = "crates/vesper-forge", default-features = false }
 vesper-simd = { path = "crates/vesper-simd" }
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }

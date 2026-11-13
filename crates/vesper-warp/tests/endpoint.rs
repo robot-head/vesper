@@ -3,13 +3,17 @@
 mod support;
 
 use support::*;
-use vesper_warp::endpoint::{CidLookup, Discard, DropReason, Echo, EndpointConfig, RxOutcome};
+use vesper_warp::endpoint::{
+    CidLookup, Discard, DropReason, Echo, EndpointConfig, RxOutcome, StreamMode,
+};
 use vesper_warp_crypto::CryptoError;
 use vesper_warp_umem::XdpNic;
 
 fn config() -> EndpointConfig {
     EndpointConfig {
         initial_rtt_ns: 20 * MS,
+        // The wave-four raw path: the Responder sees STREAM frames.
+        stream_mode: StreamMode::Raw,
         ..EndpointConfig::default()
     }
 }
