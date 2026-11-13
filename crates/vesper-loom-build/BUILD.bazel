@@ -1,0 +1,19 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    # build.rs fingerprints the sibling sandbox and CAS crates and the
+    # workspace lockfile. rules_rust replaces ${pwd} with the execution root.
+    build_script_data = [
+        "//:Cargo.lock",
+        "//crates/vesper-loom-cas:files",
+        "//crates/vesper-loom-sandbox:files",
+    ],
+    build_script_env = {
+        "VLB_CARGO_LOCK": "$(execpath //:Cargo.lock)",
+        "VLB_CRATES_DIR": "$${pwd}/crates",
+    },
+    # The runner rejects symlinked inputs, and runfiles are symlinks.
+    copy_test_cwd = ["test/cli"],
+    extra_compile_data = ["//crates/vesper-loom-sandbox:files"],
+    extra_test_data = ["//crates/vesper-loom-sandbox:files"],
+)

@@ -23,14 +23,31 @@ not terminal cells/graphemes. Indivisible tokens and comment payloads are never
 reflowed and may exceed 100 columns. Groups reserve following punctuation/brace
 space; member chains have empty flat-mode break points.
 
-Invalid or incomplete buffers return errors; there is no best-effort rewrite of
-unparsed code. The current source parser has no general macro-invocation or
-quotation grammar. Identifier-`!` candidates and `quote`/`quasiquote`/
-`syntax_quote` tokens conservatively return `OpaqueMacro`. This preserves the
-*entire original input* (including observable payload trivia), rather than
-formatting inside or around an unsupported macro. These spellings may also reject
-ordinary identifiers; this is an explicit conservative boundary, not macro
-expansion or grammar support.
+`format_source` supports the fixed, nonrecursive expression-macro profile accepted
+by the actual `vesper-syntax::macro_source` parser. It validates the complete
+macro module before using recovery CST token locations for formatting. Formatted
+output must pass the same profile again. The formatter never expands or executes
+macros. Unknown invocations, other categories, repetitions, derives and nested
+invocations remain errors. Bare `quote`/`quasiquote`/`syntax_quote` names retain
+their conservative opaque boundary unless a complete supported macro module is
+recognized. Comment and string spelling are conserved exactly.
+
+Default source formatting still rejects invalid or incomplete buffers. The
+separate `format_recovery_source(&str, Limits)` API offers syntax-only formatting
+of independently complete top-level functions in a damaged buffer. It constructs
+sealed recovery syntax, reparses eligible complete items, and formats only those
+declaration spans. Every opaque/damaged gap and all bytes outside those spans
+remain exact. Global lexical uncertainty rejects. There is no manufactured
+checked program, semantic repair or diagnostics suppression.
+
+The recovery result has private fields and getters for output, changed status,
+original source hash, sorted disjoint byte edits and the number of safely
+formatted declarations (including already canonical ones). All passes share a
+cumulative work budget: parsing, fragment formatting, edit/output storage,
+token/comment conservation, recovery-inventory comparison and a second complete
+idempotence pass. Each replacement omits the formatter-added terminal LF so
+outside whitespace cannot grow between passes. Valid large inputs can be refused
+by conservative bounds.
 
 The public `Document`/`Doc` algebra has nil, text/comment, hard/soft lines, nest,
 concat and group. Opaque Doc IDs are origin-bound and reference only previously
@@ -52,8 +69,10 @@ and output bytes; they are not measured CPU instructions or an RSS limit.
 Existing lexer/parser internal allocations are not converted into fallible arena
 APIs. There is no OOM/crash-recovery guarantee or zero-allocation claim.
 
-`src/fmt_commands.rs` provides `vesper fmt FILE [--check] [--json]` once the
-coordinator adds root routing. Check mode never writes and reports noncanonical
+`src/fmt_commands.rs` provides `vesper fmt FILE [--recovery] [--check] [--json]`.
+The explicit recovery flag selects the complete-declaration mode. JSON retains
+schema_version1, adds mode source/recovery, and includes the edit count in recovery
+mode. Check mode never writes and reports noncanonical
 source with nonzero exit. Regular UTF-8 input is bounded to 256 KiB; final
 symlinks/nonregular files are rejected. Success stages output with exclusive
 creation beside the destination, preserves file permissions, syncs the staging
@@ -67,6 +86,14 @@ there is no process-crash or arbitrary OS-failure cleanup guarantee.
 This is not crash-durable directory fsync, metadata/xattr/ownership preservation,
 or a filesystem compare-and-swap against an uncoordinated concurrent writer
 between the final check and rename. Callers must coordinate concurrent edits.
+
+Editor formatting first tries ordinary/recognized-macro formatting and falls
+back only for syntax/opaque errors. It reserves two 64 Mi work-unit stages from
+one finite operation allowance; resource or conservation failures never retry
+with a fresh budget. A recovery fallback offers only current-source UTF16 edits
+for complete declarations, with syntax-only provenance. With no safe complete
+declarations, formatting remains unavailable. No edit is automatically applied,
+and no URI is treated as a filesystem path.
 
 Run the independent example with:
 
