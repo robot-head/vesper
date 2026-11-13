@@ -141,8 +141,8 @@ bounded stream-event queue, which drops events when full.
 
 All on this host (rustc 1.97.0, debug build, Linux x86_64).
 
-* `cargo test -p vesper-prism-h3 --locked`: 48 tests pass (14 unit,
-  22 `h3_mem`, 2 `qpack_qifs`, 3 `qpack_rfc`, 5 `robustness`, 2
+* `cargo test -p vesper-prism-h3 --locked`: 49 tests pass (14 unit,
+  22 `h3_mem`, 2 `qpack_qifs`, 3 `qpack_rfc`, 5 `robustness`, 3
   `warp_prism`). Seven `h3_mem` tests come from the PR review: FIN behind a
   QPACK-blocked section (server and client), `Responder::reset` refusing
   a responder from another connection, critical streams waiting for
@@ -250,14 +250,19 @@ crate directory, so the default Bazel test data suffices.
   so are server push (never enabled), HTTP Datagrams (RFC 9297), priorities
   (RFC 9218) and 0-RTT. Interim 1xx responses are skipped by the client and
   cannot be sent by the server.
-* **No application CONNECTION_CLOSE in Warp.** `WarpTransport::close`
-  records the HTTP/3 error code (`PeerStreams::closed_with`) and frees the
-  connection with `WarpEndpoint::close_connection`; the peer only sees an
-  idle timeout. Sending the code needs an additive Warp API (lane 5 owns
-  `vesper-warp`).
-* **Warp drops packets carrying NEW_CONNECTION_ID** (seen in the quinn
-  interop run). quinn retransmits and the exchange completes, but every such
-  packet is lost to Warp. A Warp change, outside this lane.
+* **Connection close codes (resolved after #294).** Warp lane 5 added
+  `WarpEndpoint::close(conn, code, now)`, and `WarpTransport::close` now
+  uses it: an HTTP/3 connection error reaches the peer as an application
+  CONNECTION_CLOSE carrying the RFC 9114 code
+  (`warp_prism::http3_connection_errors_reach_the_peer_as_close_codes`).
+  The same PR makes Warp process NEW_CONNECTION_ID, which it dropped in the
+  quinn interop run above. Re-run on `main` after #294: the three GETs
+  pass and Warp no longer drops any of quinn's packets.
+* **Test clock.** Since #294 Warp applies the peer's idle timeout. The
+  `warp_prism` harness skips ahead to the next timer when both sides are
+  quiet, and now caps each skip at 100 ms, so a quiet connection no longer
+  jumps past its 30 s idle deadline (this broke both `warp_prism` tests on
+  `main` once #294 merged).
 * **Reading STOP_SENDING.** The `Transport` trait has no STOP_SENDING event;
   the server learns of it when a write on that stream fails, which is when
   it matters (`Event::ResponseAbandoned`).
