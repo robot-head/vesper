@@ -1341,7 +1341,7 @@ fn invalid_payloads(driver: &StaticDriver, tool: &Toolchain) {
             }
             5 => {
                 request[7] = json!([]);
-                (serde_json::to_vec(&request).unwrap(), &["shape"])
+                (serde_json::to_vec(&request).unwrap(), &["profile_limit"])
             }
             6 => {
                 request[7] = json!([[0, "-0"]]);
