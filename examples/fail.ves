@@ -1,12 +1,18 @@
 // Division by zero is a RuntimeError; i64::MIN / -1 is an ArithOverflow.
 // Each failure selects the innermost handler of its own Fail instance.
 fn checked_div(a: i64, b: i64) -> Result[i64, i64] eff [Fail[ArithOverflow]] {
-    if b == 0 { Err(42) } else { Ok(a / b) }
+    if b == 0 {
+        Err(42)
+    } else {
+        Ok(a / b)
+    }
 }
 
 fn main() -> i64 {
     handle Fail[ArithOverflow] in {
-        handle Fail[i64] in { checked_div(1, 0)? } with {
+        handle Fail[i64] in {
+            checked_div(1, 0)?
+        } with {
             return value => value,
             raise(error, resume) => error,
         }

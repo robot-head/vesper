@@ -3,48 +3,139 @@
 // receive step hands every datagram of a known connection to
 // `AckPath::on_ack`, which retires the parked leases an ACK frame covers
 // (on the software NIC); ACK-only datagrams are recycled, never answered.
-copy struct AckSummary { largest_acked: u64, retired: u64 }
-linear effect AckPath { fn on_ack(bytes: ByteSlice) -> Result[AckSummary, u32]; }
-
-copy enum AckKind { AIdle, AReplied, AAcked, AMalformed, AUnknownCid }
-copy struct AckStepped { conns: Conns, kind: AckKind, retired: u64, largest: u64, cid: u64 }
-copy struct AckStats { replied: u64, acks: u64, retired: u64, malformed: u64, unknown_cid: u64, waits: u64, largest_acked_a: u64, largest_acked_b: u64, error: bool }
-
-fn seen(conn: Conn, full_pn: u64, hdr: QuicShortHdr) -> Conn {
-    Conn { cid: conn.cid, largest_rx_pn: max_u64(conn.largest_rx_pn, full_pn), next_tx_pn: conn.next_tx_pn, next_edt_ns: conn.next_edt_ns, pacing_ns: conn.pacing_ns, peer_addr: hdr.peer_addr, peer_port: hdr.peer_port }
+copy struct AckSummary {
+    largest_acked: u64,
+    retired: u64
+}
+linear effect AckPath {
+    fn on_ack(bytes: ByteSlice) -> Result[AckSummary, u32];
 }
 
-fn poll_and_step_acked(conns: Conns, now_ns: u64) -> Result[AckStepped, QuicError] eff [XdpNic, Wire, AckPath, Fail[QuicError]] {
+copy enum AckKind {
+    AIdle,
+    AReplied,
+    AAcked,
+    AMalformed,
+    AUnknownCid
+}
+copy struct AckStepped {
+    conns: Conns,
+    kind: AckKind,
+    retired: u64,
+    largest: u64,
+    cid: u64
+}
+copy struct AckStats {
+    replied: u64,
+    acks: u64,
+    retired: u64,
+    malformed: u64,
+    unknown_cid: u64,
+    waits: u64,
+    largest_acked_a: u64,
+    largest_acked_b: u64,
+    error: bool
+}
+
+fn seen(conn: Conn, full_pn: u64, hdr: QuicShortHdr) -> Conn {
+    Conn {
+        cid: conn.cid,
+        largest_rx_pn: max_u64(conn.largest_rx_pn, full_pn),
+        next_tx_pn: conn.next_tx_pn,
+        next_edt_ns: conn.next_edt_ns,
+        pacing_ns: conn.pacing_ns,
+        peer_addr: hdr.peer_addr,
+        peer_port: hdr.peer_port
+    }
+}
+
+fn poll_and_step_acked(conns: Conns, now_ns: u64)
+    -> Result[AckStepped, QuicError] eff [XdpNic, Wire, AckPath, Fail[QuicError]] {
     let headroom = pn_space_left(conns)?;
     match XdpNic::harvest_rx_single() {
-        None => Ok(AckStepped { conns: conns, kind: AIdle, retired: 0, largest: 0, cid: 0 }),
+        None => Ok(
+            AckStepped {
+                conns: conns,
+                kind: AIdle,
+                retired: 0,
+                largest: 0,
+                cid: 0
+            }
+        ),
         Some(rx_frame) => {
             let view = XdpNic::view_frame_bytes(rx_frame);
             match Wire::split_short_header(view) {
                 Err(code) => {
                     XdpNic::recycle_to_fill_ring(rx_frame);
-                    Ok(AckStepped { conns: conns, kind: AMalformed, retired: 0, largest: 0, cid: 0 })
+                    Ok(
+                        AckStepped {
+                            conns: conns,
+                            kind: AMalformed,
+                            retired: 0,
+                            largest: 0,
+                            cid: 0
+                        }
+                    )
                 },
                 Ok(hdr) => match lookup_cid(conns, hdr.dcid) {
                     None => {
                         XdpNic::recycle_to_fill_ring(rx_frame);
-                        Ok(AckStepped { conns: conns, kind: AUnknownCid, retired: 0, largest: 0, cid: 0 })
+                        Ok(
+                            AckStepped {
+                                conns: conns,
+                                kind: AUnknownCid,
+                                retired: 0,
+                                largest: 0,
+                                cid: 0
+                            }
+                        )
                     },
                     Some(conn) => {
-                        let full_pn = decode_packet_number_rfc9000(conn.largest_rx_pn, hdr.pkt_num_trunc);
+                        let full_pn = decode_packet_number_rfc9000(
+                            conn.largest_rx_pn,
+                            hdr.pkt_num_trunc
+                        );
                         let updated = seen(conn, full_pn, hdr);
                         match AckPath::on_ack(view) {
                             Ok(summary) => {
                                 XdpNic::recycle_to_fill_ring(rx_frame);
-                                Ok(AckStepped { conns: store(conns, updated), kind: AAcked, retired: summary.retired, largest: summary.largest_acked, cid: conn.cid })
+                                Ok(
+                                    AckStepped {
+                                        conns: store(conns, updated),
+                                        kind: AAcked,
+                                        retired: summary.retired,
+                                        largest: summary.largest_acked,
+                                        cid: conn.cid
+                                    }
+                                )
                             },
                             Err(code) => {
                                 let edt = advance_edt(conn.next_edt_ns, now_ns, conn.pacing_ns);
                                 let tx_frame = XdpNic::turn_around_tx_in_place(rx_frame, 64);
-                                let inflight = XdpNic::submit_paced_tx(tx_frame, conn.next_tx_pn, edt);
+                                let inflight = XdpNic::submit_paced_tx(
+                                    tx_frame,
+                                    conn.next_tx_pn,
+                                    edt
+                                );
                                 XdpNic::park_for_ack_or_pto(inflight);
-                                let replied = Conn { cid: updated.cid, largest_rx_pn: updated.largest_rx_pn, next_tx_pn: wrapping_add(conn.next_tx_pn, 1), next_edt_ns: edt, pacing_ns: conn.pacing_ns, peer_addr: updated.peer_addr, peer_port: updated.peer_port };
-                                Ok(AckStepped { conns: store(conns, replied), kind: AReplied, retired: 0, largest: 0, cid: conn.cid })
+                                let replied = Conn {
+                                    cid: updated.cid,
+                                    largest_rx_pn: updated.largest_rx_pn,
+                                    next_tx_pn: wrapping_add(conn.next_tx_pn, 1),
+                                    next_edt_ns: edt,
+                                    pacing_ns: conn.pacing_ns,
+                                    peer_addr: updated.peer_addr,
+                                    peer_port: updated.peer_port
+                                };
+                                Ok(
+                                    AckStepped {
+                                        conns: store(conns, replied),
+                                        kind: AReplied,
+                                        retired: 0,
+                                        largest: 0,
+                                        cid: conn.cid
+                                    }
+                                )
                             },
                         }
                     },
@@ -57,49 +148,160 @@ fn poll_and_step_acked(conns: Conns, now_ns: u64) -> Result[AckStepped, QuicErro
 fn count_acked(s: AckStats, st: AckStepped, a_cid: u64) -> AckStats {
     match st.kind {
         AIdle => s,
-        AReplied => AckStats { replied: wrapping_add(s.replied, 1), acks: s.acks, retired: s.retired, malformed: s.malformed, unknown_cid: s.unknown_cid, waits: s.waits, largest_acked_a: s.largest_acked_a, largest_acked_b: s.largest_acked_b, error: s.error },
-        AAcked => {
-            let la = if st.cid == a_cid { max_u64(s.largest_acked_a, st.largest) } else { s.largest_acked_a };
-            let lb = if st.cid == a_cid { s.largest_acked_b } else { max_u64(s.largest_acked_b, st.largest) };
-            AckStats { replied: s.replied, acks: wrapping_add(s.acks, 1), retired: wrapping_add(s.retired, st.retired), malformed: s.malformed, unknown_cid: s.unknown_cid, waits: s.waits, largest_acked_a: la, largest_acked_b: lb, error: s.error }
+        AReplied => AckStats {
+            replied: wrapping_add(s.replied, 1),
+            acks: s.acks,
+            retired: s.retired,
+            malformed: s.malformed,
+            unknown_cid: s.unknown_cid,
+            waits: s.waits,
+            largest_acked_a: s.largest_acked_a,
+            largest_acked_b: s.largest_acked_b,
+            error: s.error
         },
-        AMalformed => AckStats { replied: s.replied, acks: s.acks, retired: s.retired, malformed: wrapping_add(s.malformed, 1), unknown_cid: s.unknown_cid, waits: s.waits, largest_acked_a: s.largest_acked_a, largest_acked_b: s.largest_acked_b, error: s.error },
-        AUnknownCid => AckStats { replied: s.replied, acks: s.acks, retired: s.retired, malformed: s.malformed, unknown_cid: wrapping_add(s.unknown_cid, 1), waits: s.waits, largest_acked_a: s.largest_acked_a, largest_acked_b: s.largest_acked_b, error: s.error },
+        AAcked => {
+            let la = if st.cid == a_cid {
+                max_u64(s.largest_acked_a, st.largest)
+            } else {
+                s.largest_acked_a
+            };
+            let lb = if st.cid == a_cid {
+                s.largest_acked_b
+            } else {
+                max_u64(s.largest_acked_b, st.largest)
+            };
+            AckStats {
+                replied: s.replied,
+                acks: wrapping_add(s.acks, 1),
+                retired: wrapping_add(s.retired, st.retired),
+                malformed: s.malformed,
+                unknown_cid: s.unknown_cid,
+                waits: s.waits,
+                largest_acked_a: la,
+                largest_acked_b: lb,
+                error: s.error
+            }
+        },
+        AMalformed => AckStats {
+            replied: s.replied,
+            acks: s.acks,
+            retired: s.retired,
+            malformed: wrapping_add(s.malformed, 1),
+            unknown_cid: s.unknown_cid,
+            waits: s.waits,
+            largest_acked_a: s.largest_acked_a,
+            largest_acked_b: s.largest_acked_b,
+            error: s.error
+        },
+        AUnknownCid => AckStats {
+            replied: s.replied,
+            acks: s.acks,
+            retired: s.retired,
+            malformed: s.malformed,
+            unknown_cid: wrapping_add(s.unknown_cid, 1),
+            waits: s.waits,
+            largest_acked_a: s.largest_acked_a,
+            largest_acked_b: s.largest_acked_b,
+            error: s.error
+        },
     }
 }
 fn waited_acked(s: AckStats) -> AckStats {
-    AckStats { replied: s.replied, acks: s.acks, retired: s.retired, malformed: s.malformed, unknown_cid: s.unknown_cid, waits: wrapping_add(s.waits, 1), largest_acked_a: s.largest_acked_a, largest_acked_b: s.largest_acked_b, error: s.error }
+    AckStats {
+        replied: s.replied,
+        acks: s.acks,
+        retired: s.retired,
+        malformed: s.malformed,
+        unknown_cid: s.unknown_cid,
+        waits: wrapping_add(s.waits, 1),
+        largest_acked_a: s.largest_acked_a,
+        largest_acked_b: s.largest_acked_b,
+        error: s.error
+    }
 }
 fn failed_acked(s: AckStats) -> AckStats {
-    AckStats { replied: s.replied, acks: s.acks, retired: s.retired, malformed: s.malformed, unknown_cid: s.unknown_cid, waits: s.waits, largest_acked_a: s.largest_acked_a, largest_acked_b: s.largest_acked_b, error: true }
+    AckStats {
+        replied: s.replied,
+        acks: s.acks,
+        retired: s.retired,
+        malformed: s.malformed,
+        unknown_cid: s.unknown_cid,
+        waits: s.waits,
+        largest_acked_a: s.largest_acked_a,
+        largest_acked_b: s.largest_acked_b,
+        error: true
+    }
 }
 
-copy struct AckDrained { conns: Conns, stats: AckStats, failed: bool }
+copy struct AckDrained {
+    conns: Conns,
+    stats: AckStats,
+    failed: bool
+}
 
-fn drain_acked(budget: u64, conns: Conns, stats: AckStats) -> AckDrained eff [XdpNic, Wire, AckPath, Clock] {
-    if budget == 0 { AckDrained { conns: conns, stats: stats, failed: false } } else {
+fn drain_acked(budget: u64, conns: Conns, stats: AckStats)
+    -> AckDrained eff [XdpNic, Wire, AckPath, Clock] {
+    if budget == 0 {
+        AckDrained {
+            conns: conns,
+            stats: stats,
+            failed: false
+        }
+    } else {
         let now = Clock::now();
-        let stepped = handle Fail[QuicError] in { poll_and_step_acked(conns, now) } with {
+        let stepped = handle Fail[QuicError] in {
+            poll_and_step_acked(conns, now)
+        } with {
             return value => value,
             raise(error, resume) => Err(error),
         };
         match stepped {
-            Err(e) => AckDrained { conns: conns, stats: stats, failed: true },
+            Err(e) => AckDrained {
+                conns: conns,
+                stats: stats,
+                failed: true
+            },
             Ok(s) => match s.kind {
-                AIdle => AckDrained { conns: s.conns, stats: stats, failed: false },
-                AReplied => drain_acked(wrapping_sub(budget, 1), s.conns, count_acked(stats, s, conns.a.cid)),
-                AAcked => drain_acked(wrapping_sub(budget, 1), s.conns, count_acked(stats, s, conns.a.cid)),
-                AMalformed => drain_acked(wrapping_sub(budget, 1), s.conns, count_acked(stats, s, conns.a.cid)),
-                AUnknownCid => drain_acked(wrapping_sub(budget, 1), s.conns, count_acked(stats, s, conns.a.cid)),
+                AIdle => AckDrained {
+                    conns: s.conns,
+                    stats: stats,
+                    failed: false
+                },
+                AReplied => drain_acked(
+                    wrapping_sub(budget, 1),
+                    s.conns,
+                    count_acked(stats, s, conns.a.cid)
+                ),
+                AAcked => drain_acked(
+                    wrapping_sub(budget, 1),
+                    s.conns,
+                    count_acked(stats, s, conns.a.cid)
+                ),
+                AMalformed => drain_acked(
+                    wrapping_sub(budget, 1),
+                    s.conns,
+                    count_acked(stats, s, conns.a.cid)
+                ),
+                AUnknownCid => drain_acked(
+                    wrapping_sub(budget, 1),
+                    s.conns,
+                    count_acked(stats, s, conns.a.cid)
+                ),
             },
         }
     }
 }
 
-fn serve_acked(rounds: u64, idle_timeout_ns: u64, conns: Conns, stats: AckStats) -> AckStats eff [XdpNic, Wire, AckPath, RxWait, Clock] {
+fn serve_acked(rounds: u64, idle_timeout_ns: u64, conns: Conns, stats: AckStats)
+    -> AckStats eff [XdpNic, Wire, AckPath, RxWait, Clock] {
     let d = drain_acked(64, conns, stats);
-    if d.failed { failed_acked(d.stats) }
-    else if rounds == 0 { d.stats }
-    else if RxWait::wait_rx(idle_timeout_ns) == 0 { d.stats }
-    else { serve_acked(wrapping_sub(rounds, 1), idle_timeout_ns, d.conns, waited_acked(d.stats)) }
+    if d.failed {
+        failed_acked(d.stats)
+    } else if rounds == 0 {
+        d.stats
+    } else if RxWait::wait_rx(idle_timeout_ns) == 0 {
+        d.stats
+    } else {
+        serve_acked(wrapping_sub(rounds, 1), idle_timeout_ns, d.conns, waited_acked(d.stats))
+    }
 }
