@@ -171,11 +171,18 @@ depth32 and work8Mi by default; their hard limits are16384,4MiB,4MiB,64,64Mi.
 Applicable grammar byte/frame/count/depth/work/visit limits still apply. A codec
 that decodes directly to values does not allocate a capture vector: the old
 capture-storage budget governs actual captures, while semantic storage uses the
-codec metadata cap. These are logical payload/work guards, without allocator,
+codec metadata cap. `max_output_bytes` constrains `encoded_len`/`encode_into`,
+not decoder input, which retains the grammar's declared input/frame caps.
+Borrowed-value decoding and plan/scratch/copy encoding pay different work and
+storage costs. A successful operation does not guarantee that the reverse
+operation fits the same budgets; enlarged grammar inputs can exceed even the
+codec's hard output cap. These are logical payload/work guards, without allocator,
 latency or RSS guarantees. Caller-owned rules/values are outside those allocations.
 
-Canonical round trips and byte uniqueness are scoped to one validated grammar
-and this exact profile. This is not a general PEG/source `@wire_grammar` compiler,
+Canonical round trips and byte uniqueness concern successful operations with
+sufficient compatible directional budgets, one validated grammar and this exact
+profile. They do not promise unconditional same-budget total round trips. This
+is not a general PEG/source `@wire_grammar` compiler,
 secret constant-time codec, source linearity proof, cryptographic authenticity
 check or proof that Rust refines a formal model. Actual independent tests cover
 tagged framed batches and exhaustive short numeric/count streams; no formal

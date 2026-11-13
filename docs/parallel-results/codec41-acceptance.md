@@ -53,6 +53,17 @@ that a development namespace implements the feature or that future source
 follow-ups have already passed. Root performs final integrated validation after
 merging the owned lanes and any review fixes.
 
+Published resource clarification bae6fc4 changes no API or limits:
+max_output_bytes constrains serialization/measurement only; decode retains the
+grammar's input/frame caps. Work/storage admission is directional because
+borrowing values differs from planning, scratch allocation and final copying.
+The successful round trips above have sufficient compatible budgets; they do
+not establish unconditional same-budget total round trips or that every input
+admitted by an enlarged grammar can fit the codec's hard output cap. The corpus
+retains its canonical-byte and complete transactional-output assertions. A
+final-source rerun will be recorded after the coordinator supplies the reviewed
+follow-up implementation.
+
 No Lean model or conditional/echo theorem was added. Source macros, recursive PEG,
 SIMD, constant-time/cryptographic/source-linearity and Rust-refinement proof,
 timing/RSS and other-platform execution remain outside this lane's evidence.
