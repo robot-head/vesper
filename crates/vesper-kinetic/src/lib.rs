@@ -19,6 +19,7 @@
 pub mod coloring;
 pub mod crmath;
 pub mod detfloat;
+pub mod gjk;
 pub mod lbvh;
 pub mod morton;
 pub mod rollback;
