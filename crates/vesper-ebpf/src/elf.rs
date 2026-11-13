@@ -51,6 +51,9 @@ impl std::error::Error for ElfError {}
 pub fn section_name(t: ProgramType) -> &'static str {
     match t {
         ProgramType::Xdp => "xdp",
+        ProgramType::SchedCls => "classifier",
+        ProgramType::Tracepoint => "tracepoint",
+        ProgramType::Kprobe => "kprobe",
     }
 }
 
@@ -521,5 +524,9 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
         map_relocs,
         functions,
         license,
+        attach: String::new(),
+        kfuncs: Vec::new(),
+        core_relos: Vec::new(),
+        lines: Vec::new(),
     })
 }

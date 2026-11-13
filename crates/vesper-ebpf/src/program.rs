@@ -14,6 +14,8 @@ pub enum MapKind {
     PerCpuArray,
     LruHash,
     RingBuf,
+    /// `BPF_MAP_TYPE_PROG_ARRAY`: the target table of `bpf_tail_call`.
+    ProgArray,
 }
 
 impl MapKind {
@@ -25,6 +27,7 @@ impl MapKind {
             MapKind::PerCpuArray => 6,
             MapKind::LruHash => 9,
             MapKind::RingBuf => 27,
+            MapKind::ProgArray => 3,
         }
     }
 
@@ -36,12 +39,13 @@ impl MapKind {
             6 => MapKind::PerCpuArray,
             9 => MapKind::LruHash,
             27 => MapKind::RingBuf,
+            3 => MapKind::ProgArray,
             _ => return None,
         })
     }
 
     pub fn is_array(self) -> bool {
-        matches!(self, MapKind::Array | MapKind::PerCpuArray)
+        matches!(self, MapKind::Array | MapKind::PerCpuArray | MapKind::ProgArray)
     }
 }
 
@@ -79,6 +83,12 @@ impl MapDef {
         Self::new(name, MapKind::RingBuf, 0, 0, bytes)
     }
 
+    /// A program array of `slots` tail-call targets (4-byte keys and
+    /// values, the values being program fds written by the loader).
+    pub fn prog_array(name: &str, slots: u32) -> Self {
+        Self::new(name, MapKind::ProgArray, 4, 4, slots)
+    }
+
     /// Kernel `map_alloc_check` rules for the supported kinds.
     pub fn validate(&self) -> Result<(), String> {
         if self.name.is_empty() || self.name.len() > 15 || !self.name.is_ascii() {
@@ -104,6 +114,9 @@ impl MapDef {
                 if k.is_array() && self.key_size != 4 {
                     return Err("array maps have 4-byte keys".into());
                 }
+                if k == MapKind::ProgArray && self.value_size != 4 {
+                    return Err("program arrays have 4-byte values".into());
+                }
                 if self.key_size == 0 || self.key_size > 512 {
                     return Err("key size must be 1..=512".into());
                 }
@@ -119,15 +132,78 @@ impl MapDef {
 /// Program types this crate verifies.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ProgramType {
+    /// `BPF_PROG_TYPE_XDP`: context `struct xdp_md`.
     Xdp,
+    /// `BPF_PROG_TYPE_SCHED_CLS` (tc classifier): context `struct __sk_buff`.
+    SchedCls,
+    /// `BPF_PROG_TYPE_TRACEPOINT`: context is the read-only tracepoint
+    /// record (at most `PERF_MAX_TRACE_SIZE` bytes).
+    Tracepoint,
+    /// `BPF_PROG_TYPE_KPROBE`: context is the read-only `struct pt_regs`
+    /// of the target architecture.
+    Kprobe,
 }
 
 impl ProgramType {
+    pub const ALL: [ProgramType; 4] = [
+        ProgramType::Xdp,
+        ProgramType::SchedCls,
+        ProgramType::Tracepoint,
+        ProgramType::Kprobe,
+    ];
+
     pub fn kernel_type(self) -> u32 {
         match self {
             ProgramType::Xdp => 6,
+            ProgramType::SchedCls => 3,
+            ProgramType::Tracepoint => 5,
+            ProgramType::Kprobe => 2,
         }
     }
+
+    pub fn from_kernel_type(t: u32) -> Option<ProgramType> {
+        ProgramType::ALL
+            .into_iter()
+            .find(|p| p.kernel_type() == t)
+    }
+
+    /// Whether the program reads and writes packet bytes directly
+    /// (`data`/`data_end` in its context).
+    pub fn has_packet(self) -> bool {
+        matches!(self, ProgramType::Xdp | ProgramType::SchedCls)
+    }
+
+    /// Whether `BPF_PROG_TEST_RUN` can execute the program type.
+    pub fn test_runnable(self) -> bool {
+        self.has_packet()
+    }
+
+    /// Tracing programs (kprobe, tracepoint) run in process context with
+    /// the tracing helper set.
+    pub fn is_tracing(self) -> bool {
+        matches!(self, ProgramType::Tracepoint | ProgramType::Kprobe)
+    }
+}
+
+/// A kernel function (kfunc) call site: `CALL` with `src = 2` whose
+/// immediate is the BTF id of `name` in the target kernel's BTF, written
+/// by the loader ([`crate::kernel::resolve_kfuncs`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KfuncRef {
+    pub slot: usize,
+    pub name: String,
+}
+
+/// One `.BTF.ext` line-info record: source position of the instruction at
+/// `slot`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineInfo {
+    pub slot: usize,
+    pub file: String,
+    /// The source line's text (the kernel prints it in verifier logs).
+    pub text: String,
+    pub line: u32,
+    pub col: u32,
 }
 
 /// An assembled program with its maps, before map-fd relocation.
@@ -143,6 +219,16 @@ pub struct Program {
     /// Entry slots of BPF-to-BPF subprograms (named for ELF symbols).
     pub functions: Vec<(String, usize)>,
     pub license: String,
+    /// Attach target appended to the ELF section name, e.g.
+    /// `syscalls/sys_enter_openat` for `tracepoint/syscalls/sys_enter_openat`
+    /// or `do_unlinkat` for `kprobe/do_unlinkat`. Empty: no target.
+    pub attach: String,
+    /// kfunc call sites, resolved to BTF ids at load time.
+    pub kfuncs: Vec<KfuncRef>,
+    /// BTF CO-RE relocations (`.BTF.ext` core_relo records).
+    pub core_relos: Vec<crate::core::CoreRelo>,
+    /// Source line info (`.BTF.ext` line_info records), sorted by slot.
+    pub lines: Vec<LineInfo>,
 }
 
 impl Program {
@@ -184,6 +270,8 @@ impl std::error::Error for AsmError {}
 enum Fixup {
     Jump(Label),
     Call(Label),
+    /// `LD_IMM64` with `BPF_PSEUDO_FUNC` (a callback address).
+    Func(Label),
 }
 
 /// Two-pass assembler with labels, map references and local calls.
@@ -195,6 +283,9 @@ pub struct Asm {
     maps: Vec<MapDef>,
     map_relocs: Vec<(usize, usize)>,
     functions: Vec<(String, Label)>,
+    kfuncs: Vec<KfuncRef>,
+    core_relos: Vec<crate::core::CoreRelo>,
+    lines: Vec<LineInfo>,
 }
 
 impl Asm {
@@ -352,6 +443,63 @@ impl Asm {
         self.insn(Insn::Call(CallTarget::Local(0)))
     }
 
+    /// `dst = &callback` (`LD_IMM64` with `BPF_PSEUDO_FUNC`), the callback
+    /// argument of `bpf_loop`; the callback also becomes a subprogram.
+    pub fn ld_func(&mut self, dst: Reg, callback: Label) -> &mut Self {
+        let at = self.slots.len();
+        self.fixups.push((at, Fixup::Func(callback)));
+        self.insn(Insn::LdImm64 {
+            dst,
+            imm: Imm64::Pseudo {
+                src: crate::insn::pseudo::FUNC,
+                imm_lo: 0,
+                imm_hi: 0,
+            },
+        })
+    }
+
+    /// Call kernel function `name` (a kfunc); the BTF id is written at
+    /// load time.
+    pub fn call_kfunc(&mut self, name: &str) -> &mut Self {
+        self.kfuncs.push(KfuncRef {
+            slot: self.slots.len(),
+            name: name.to_owned(),
+        });
+        self.insn(Insn::Call(CallTarget::Kfunc(0)))
+    }
+
+    /// `dst = <CO-RE value>`: the local value of `spec`, relocated for the
+    /// target kernel by the loader (or by [`crate::core::apply`]).
+    pub fn core(
+        &mut self,
+        dst: Reg,
+        spec: crate::core::CoreSpec,
+    ) -> Result<&mut Self, crate::core::CoreError> {
+        let v = spec.local_value()?;
+        let slot = self.slots.len();
+        match i32::try_from(v) {
+            Ok(i) => self.mov64(dst, i),
+            Err(_) => self.ld_imm64(dst, v),
+        };
+        self.core_relos.push(crate::core::CoreRelo { slot, spec });
+        Ok(self)
+    }
+
+    /// Record a source position for the next instruction (`.BTF.ext`
+    /// line info).
+    pub fn line(&mut self, file: &str, line: u32, col: u32, text: &str) -> &mut Self {
+        let slot = self.slots.len();
+        self.lines.retain(|l| l.slot != slot);
+        self.lines.push(LineInfo {
+            slot,
+            file: file.to_owned(),
+            text: text.to_owned(),
+            line,
+            col,
+        });
+        self
+    }
+
     /// Name a subprogram entry for ELF symbols.
     pub fn function(&mut self, name: &str, entry: Label) {
         self.functions.push((name.to_owned(), entry));
@@ -416,7 +564,7 @@ impl Asm {
         for &(at, fix) in &self.fixups {
             let (l, is_call) = match fix {
                 Fixup::Jump(l) => (l, false),
-                Fixup::Call(l) => (l, true),
+                Fixup::Call(l) | Fixup::Func(l) => (l, true),
             };
             let target = resolve(&self.labels, l)? as i64;
             let rel = target - (at as i64 + 1);
@@ -441,6 +589,14 @@ impl Asm {
             map_relocs: self.map_relocs,
             functions,
             license: "Dual MIT/GPL".to_owned(),
+            attach: String::new(),
+            kfuncs: self.kfuncs,
+            core_relos: self.core_relos,
+            lines: {
+                let mut l = self.lines;
+                l.sort_by_key(|l| l.slot);
+                l
+            },
         })
     }
 }
