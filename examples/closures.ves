@@ -1,13 +1,13 @@
 // Closures that use checked arithmetic carry Fail[ArithOverflow] in their type.
-fn offset(sink amount: i64) -> fn@copy(i64) -> i64 eff [Fail[ArithOverflow]] {
-    |value| value + amount
+fn offset(sink amount: i64) -> fn @copy (i64) -> i64 eff [Fail[ArithOverflow]] {
+    | value | value + amount
 }
 
 fn compose(
-    sink first: fn@copy(i64) -> i64 eff [Fail[ArithOverflow]],
-    sink second: fn@copy(i64) -> i64 eff [Fail[ArithOverflow]],
-) -> fn@copy(i64) -> i64 eff [Fail[ArithOverflow]] {
-    |value| first(second(value))
+    sink first: fn @copy (i64) -> i64 eff [Fail[ArithOverflow]],
+    sink second: fn @copy (i64) -> i64 eff [Fail[ArithOverflow]],
+) -> fn @copy (i64) -> i64 eff [Fail[ArithOverflow]] {
+    | value | first(second(value))
 }
 
 fn main() -> i64 {

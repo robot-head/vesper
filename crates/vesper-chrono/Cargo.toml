@@ -1,0 +1,12 @@
+[package]
+name = "vesper-chrono"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Chrono flight recording, reverse watchpoints, obligation lineage and replay bundles (design section 31)"
+publish = false
+
+[dependencies]
+blake3 = "1.8"
+serde_json = { workspace = true }
+vesper-ffi = { path = "../vesper-ffi" }
+vesper-simpulse = { path = "../vesper-simpulse" }

@@ -1,6 +1,10 @@
-linear struct WriteTxn { id: u64 }
+linear struct WriteTxn {
+    id: u64
+}
 
 fn main() {
-    let tx = WriteTxn { id: 1 };
+    let tx = WriteTxn {
+        id: 1
+    };
     // E0302: tx has not been consumed at scope exit.
 }

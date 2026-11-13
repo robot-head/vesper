@@ -1,5 +1,20 @@
-fn next(inout value: i64) -> i64 { value = wrapping_add(value, 1); value }
-fn score(in value: (i64, i64)) -> i64 { let (a, b) = value; wrapping_add(wrapping_mul(a, 40), b) }
-macro make($value: expr) -> expr { quote { (next($value), next($value)) } }
-fn forward(inout value: i64) -> (i64, i64) { make!(value) }
-fn main() -> i64 { let value = 0; score(forward(value)) }
+fn next(inout value: i64) -> i64 {
+    value = wrapping_add(value, 1);
+    value
+}
+fn score(in value: (i64, i64)) -> i64 {
+    let (a, b) = value;
+    wrapping_add(wrapping_mul(a, 40), b)
+}
+macro make($value: expr) -> expr {
+    quote {
+        (next($value), next($value))
+    }
+}
+fn forward(inout value: i64) -> (i64, i64) {
+    make!(value)
+}
+fn main() -> i64 {
+    let value = 0;
+    score(forward(value))
+}

@@ -1,0 +1,15 @@
+[package]
+name = "vesper-kinetic"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Kinetic (design section 36): DetFloat auditing over Cranelift IR, Morton codes, deterministic constraint colouring, AoSoA XPBD and rollback rings"
+publish = false
+
+[dependencies]
+blake3 = "1.8"
+cranelift-codegen = "0.125"
+sha2 = { workspace = true }
+
+[dev-dependencies]
+cranelift-frontend = "0.125"
+target-lexicon = "0.13"

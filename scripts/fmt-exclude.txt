@@ -1,0 +1,21 @@
+# Tracked .ves files that `scripts/check-fmt.py` does not require to be
+# canonically formatted. Every entry needs a reason; the check fails if an
+# entry no longer exists. One repository-relative path per line.
+
+# Tests require this input to be noncanonical (`fmt --check` must exit 1).
+tests/fixtures/stylus/macro.ves
+# forge_cli asserts the original text `fn helper() -> i64 { 42 }`.
+tests/fixtures/source_macros/global_helper.ves
+# Doc-navigation tests look up exact source substrings.
+tests/fixtures/doc_navigation/local.ves
+tests/fixtures/doc_navigation/exclusions.ves
+tests/fixtures/doc_navigation/collisions.ves
+# vesper-sim-session's warp tests rewrite exact one-line declarations.
+crates/vesper-sim-session/fixtures/warp.ves
+
+# Deliberately invalid or outside the supported macro profile.
+tests/fixtures/stylus/opaque.ves
+tests/fixtures/stylus/recovery.ves
+tests/fixtures/macro_preview/malformed.ves
+tests/fixtures/source_macro_parameters/duplicate_names.ves
+tests/fixtures/source_macro_parameters/projected.ves
