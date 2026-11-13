@@ -3,7 +3,8 @@
 //! The emitted relocatable object follows the layout libbpf and aya load:
 //!
 //! * one executable section per program, named after its program type
-//!   (`xdp`), holding the instructions with `LD_IMM64` map immediates set
+//!   (`xdp`, `tc`, `tracepoint/<category>/<event>`, `kprobe/<function>`),
+//!   holding the instructions with `LD_IMM64` map immediates set
 //!   to zero and an `R_BPF_64_64` relocation (in `.relxdp`) to the map's
 //!   symbol for each;
 //! * `license` with the NUL-terminated license string;
@@ -51,10 +52,41 @@ impl std::error::Error for ElfError {}
 pub fn section_name(t: ProgramType) -> &'static str {
     match t {
         ProgramType::Xdp => "xdp",
-        ProgramType::SchedCls => "classifier",
+        ProgramType::SchedCls => "tc",
         ProgramType::Tracepoint => "tracepoint",
         ProgramType::Kprobe => "kprobe",
     }
+}
+
+/// The program section of `prog`: the type's name, then `/` and the
+/// attach target when there is one (`kprobe/do_unlinkat`,
+/// `tracepoint/syscalls/sys_enter_openat`).
+pub fn program_section(prog: &Program) -> String {
+    if prog.attach.is_empty() {
+        section_name(prog.prog_type).to_owned()
+    } else {
+        format!("{}/{}", section_name(prog.prog_type), prog.attach)
+    }
+}
+
+/// Program type and attach target of a program section name (libbpf
+/// names, including the `classifier` and `tp` aliases).
+pub fn parse_section(name: &str) -> Option<(ProgramType, String)> {
+    let (head, attach) = match name.split_once('/') {
+        Some((h, a)) => (h, a.to_owned()),
+        None => (name, String::new()),
+    };
+    let t = match head {
+        "xdp" => ProgramType::Xdp,
+        "tc" | "classifier" => ProgramType::SchedCls,
+        "tracepoint" | "tp" => ProgramType::Tracepoint,
+        "kprobe" => ProgramType::Kprobe,
+        _ => return None,
+    };
+    if t == ProgramType::Xdp && !attach.is_empty() {
+        return None;
+    }
+    Some((t, attach))
 }
 
 // ---------------------------------------------------------------- BTF ---
@@ -331,7 +363,7 @@ pub fn write_object(prog: &Program) -> Result<Vec<u8>, ElfError> {
     let mut obj = Object::new(BinaryFormat::Elf, Architecture::Bpf, Endianness::Little);
     let text = obj.add_section(
         Vec::new(),
-        section_name(prog.prog_type).as_bytes().to_vec(),
+        program_section(prog).into_bytes(),
         SectionKind::Text,
     );
     // map immediates are zero in the object; the relocation names the map
@@ -437,7 +469,23 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
         return Err(ElfError::Malformed("not a BPF object".into()));
     }
     let sec = |n: &str| file.section_by_name(n);
-    let text = sec("xdp").ok_or_else(|| ElfError::Malformed("no xdp section".into()))?;
+    let mut found = None;
+    for s in file.sections() {
+        if s.kind() != SectionKind::Text {
+            continue;
+        }
+        let n = s.name().map_err(|e| ElfError::Read(e.to_string()))?;
+        if let Some(t) = parse_section(n) {
+            if found.is_some() {
+                return Err(ElfError::Malformed(
+                    "more than one program section".into(),
+                ));
+            }
+            found = Some((s, t));
+        }
+    }
+    let (text, (prog_type, attach)) =
+        found.ok_or_else(|| ElfError::Malformed("no program section".into()))?;
     let code = text.data().map_err(|e| ElfError::Read(e.to_string()))?;
     let mut insns = slots_from_bytes(code).map_err(|e| ElfError::Malformed(e.to_string()))?;
     let license = match sec("license") {
@@ -518,13 +566,13 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
     functions.sort_by_key(|(_, e)| *e);
     Ok(Program {
         name,
-        prog_type: ProgramType::Xdp,
+        prog_type,
         insns,
         maps,
         map_relocs,
         functions,
         license,
-        attach: String::new(),
+        attach,
         kfuncs: Vec::new(),
         core_relos: Vec::new(),
         lines: Vec::new(),
