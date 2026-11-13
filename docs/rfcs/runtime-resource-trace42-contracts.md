@@ -75,7 +75,12 @@ optional span). ResourceConsume borrows actual type/constructor and contains the
 actual carrier identity and pattern site. Its batch is fully prepaid.
 
 `Runtime::observe_resources(config)` returns the read-only observer and refuses
-reconfiguration of an already observed Runtime. run begins a fresh epoch and
+reconfiguration of an already observed Runtime. It revalidates the selected
+declarations against its actual World before attaching: a config created for
+another World does not authorize same-named affine/nonempty/generic/enum types.
+Failed attachment leaves the ordinary Runtime unobserved. Config fields remain
+private and validate_world reuses the bounded selected-name profile, not a World
+clone or an address as authority. run begins a fresh epoch and
 validates actual entry values before executing. Bounded iterative traversal
 rejects missing, foreign, previous-run, dead, duplicate and wrong-kind tracked
 carriers. External callable/closure/continuation boundary inputs may be explicitly
