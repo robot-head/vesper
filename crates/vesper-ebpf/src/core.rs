@@ -575,7 +575,8 @@ pub fn patch(
                     expected,
                 });
             }
-            i.imm = i32::try_from(value)
+            // a negative target value arrives sign-extended to u64
+            i.imm = i32::try_from(value as i64)
                 .or_else(|_| u32::try_from(value).map(|v| v as i32))
                 .map_err(|_| bad("value does not fit a 32-bit immediate"))?;
         }

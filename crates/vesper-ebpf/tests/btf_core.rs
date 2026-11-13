@@ -303,3 +303,21 @@ fn kernel_applies_our_core_records_and_takes_our_line_info() {
         }
     }
 }
+
+#[test]
+fn core_writes_negative_enumerators() {
+    let mut b = BtfBuilder::new();
+    b.enumeration("vesper_sign", 4, &[("NEG", -1), ("POS", 1)]);
+    let target = Btf::parse(&b.finish()).unwrap();
+    let mut a = Asm::new();
+    let local = LocalType::enumeration("vesper_sign", 4, &[("NEG", 1)]);
+    a.core(
+        Reg::R0,
+        CoreSpec::enumval(CoreKind::EnumvalValue, local, "NEG").unwrap(),
+    )
+    .unwrap();
+    a.exit();
+    let p = a.finish("neg", ProgramType::Kprobe).unwrap();
+    let r = apply(&p, &target).unwrap();
+    assert_eq!(r.insns[0].imm, -1);
+}

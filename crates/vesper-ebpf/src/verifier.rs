@@ -313,6 +313,10 @@ struct State {
     next_id: u32,
     /// `bpf_preempt_disable` nesting depth.
     preempt: u32,
+    /// Set by a `bpf_loop` callback (re-)entry, cleared by the first
+    /// instruction: only such an arrival at the callback's entry is a new
+    /// iteration; a back-edge inside the callback to its entry is not.
+    cb_entry: bool,
 }
 
 impl State {
@@ -878,6 +882,7 @@ impl<'a> Verifier<'a> {
             pkt_ranges: Vec::new(),
             next_id: 0,
             preempt: 0,
+            cb_entry: false,
         }
     }
 
@@ -920,7 +925,10 @@ impl<'a> Verifier<'a> {
                     // in-progress first entry covers: the iterations from
                     // here are a subset of what that entry explores (the
                     // kernel bounds the iteration count at run time).
-                    if self.callback_entry[pc] && path.state.cur().callback.is_some() {
+                    if self.callback_entry[pc]
+                        && path.state.cb_entry
+                        && path.state.cur().callback.is_some()
+                    {
                         return Ok(true);
                     }
                     if !state_includes(&path.state, &rec.state) {
@@ -961,6 +969,7 @@ impl<'a> Verifier<'a> {
                     self.finish_path(path.parent);
                     break;
                 }
+                path.state.cb_entry = false;
                 self.processed += 1;
                 if self.processed > self.policy.max_insns_processed {
                     return Err(err(
@@ -2192,6 +2201,7 @@ impl<'a> Verifier<'a> {
         f.regs[2] = cb.arg;
         f.callback = Some(cb);
         st.frames.push(f);
+        st.cb_entry = true;
         Ok(())
     }
 

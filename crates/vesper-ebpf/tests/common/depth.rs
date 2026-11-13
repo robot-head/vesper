@@ -432,6 +432,47 @@ pub fn cases() -> Vec<Case> {
         );
     }
     {
+        // nr_loops = 1 << 32: the kernel's inlined bpf_loop compares all
+        // 64 bits and returns -E2BIG (the helper's prototype says u32)
+        let mut a = Asm::new();
+        let cb = a.label();
+        a.ld_imm64(Reg::R1, 1 << 32);
+        a.ld_func(Reg::R2, cb);
+        a.mov64(Reg::R3, 0);
+        a.mov64(Reg::R4, 0);
+        a.call(h::LOOP);
+        a.alu64(AluOp::And, Reg::R0, 3);
+        a.exit();
+        a.bind(cb).unwrap();
+        ret(&mut a, 1);
+        add(
+            "accept/bpf_loop_upper_bits",
+            None,
+            Kernel::Accepts,
+            fin(a, Xdp),
+        );
+    }
+    {
+        // bpf_loop bounds the number of callback calls, not the work in
+        // one call: a callback spinning on its own entry is unbounded
+        let mut a = Asm::new();
+        let cb = a.label();
+        a.mov64(Reg::R1, 1);
+        a.ld_func(Reg::R2, cb);
+        a.mov64(Reg::R3, 0);
+        a.mov64(Reg::R4, 0);
+        a.call(h::LOOP);
+        ret(&mut a, 2);
+        a.bind(cb).unwrap();
+        a.ja_raw(-1);
+        add(
+            "reject/bpf_loop_callback_spins",
+            Some("loop.unbounded"),
+            Kernel::Rejects,
+            fin(a, Xdp),
+        );
+    }
+    {
         let mut a = Asm::new();
         a.mov64(Reg::R1, 4);
         a.mov64(Reg::R2, 0);

@@ -770,6 +770,10 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                 continue;
             }
             Insn::Call(CallTarget::Helper(h::LOOP)) => {
+                // The kernel inlines bpf_loop (flags 0) and compares the
+                // whole 64-bit r1 against BPF_MAX_LOOPS: 1 << 32 gives
+                // -E2BIG there, not zero iterations (checked by
+                // `accept/bpf_loop_upper_bits` against Linux 6.18).
                 let n = get!(Reg::R1).v;
                 let cb = get!(Reg::R2);
                 let arg = get!(Reg::R3);
