@@ -40,7 +40,8 @@ fn demonstration() -> Result<()> {
     let bytes = b"immutable source bytes\n";
     let blob = source.put_blob(Domain::Source, bytes)?;
     let mut tree = Tree::new(Domain::Source);
-    tree.insert_file("hello.txt", blob.id, blob.size, false)?;
+    tree.insert_file("hello.txt", blob.id, blob.size, false)
+        .map_err(vesper_loom_cas::CasError::InvalidTree)?;
     let root = source.put_tree(&tree)?.id;
     let pack = export_pack(&source, root, TransferLimits::default())?;
     let destination = scratch.path().join("destination");

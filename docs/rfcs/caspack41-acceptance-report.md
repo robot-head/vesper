@@ -28,11 +28,42 @@ an actual pack file; a distinct importer receives that file's bytes through stdi
 and materializes verified objects. The helper entrypoint is not an additional
 semantic case when run without its explicit worker environment.
 
-Initial status: Rustfmt and diff checks pass. Actual compilation/runtime remains
-pending the real export
-and import implementations plus their public reexports. The shared scaffold alone
-does not implement transfer and is not cited as runtime success. Source commits
-will be imported only as dependency copies, kept distinct from this lane's work.
+## Actual Linux execution
+
+Runtime validation used the actual exporter45f34b4, exporter reexportbae12a9,
+importer5b88772 and importer reexport6cd513f. Their dependency-only copies in this
+worktree areba53d9e,7ae6020,10d5830,c16817d; these are not acceptance-owned changes
+and must not be reimported as owned work. Initial owned commits aref8ae5fa and
+837dde3. The shared scaffold alone is not cited as implemented transfer.
+
+With exclusive `/tmp/caspack41-acceptance-target`, one Cargo job, debug0 and
+incremental0:
+
+- `cargo test --locked -p vesper-loom-cas --test transfer_acceptance` passes all
+  15entries, zero failures/ignores. This includes the explicit child-process
+  entrypoint; without its worker environment it is not an additional semantic
+  case. All canonical/malformed/resource/snapshot/depth/size/concurrency/repair
+  assertions execute against the actual implementation.
+- `cargo test --locked -p vesper-loom-cas --all-targets` passes61tests across
+  four result suites:12library/shared tests,34existing Store tests and15new
+  acceptance entries, plus the zero-test example harness. Export/import lanes'
+  separate new test files are not imported here; root validates those together.
+- `cargo run --locked -p vesper-loom-cas --example transfer` executes its actual
+  disposable round trip and verifies/materializes a229byte pack containing two
+  immutable source objects, with explicit content-identity-only output.
+- The built actual example was separately exercised with a242byte artifact
+  closure through export-to-file/import-from-file and a direct OS stdout/stdin
+  pipe between separate exporter/importer processes. Both resulting stores
+  reexport identical bytes and pass actual API readback/materialization. A small
+  temporary Rust fixture helper links the already-built CAS library only to seed
+  and inspect those stores; no production, Cargo or dependency file changes.
+- Strict all-target Clippy, Rustfmt and diff checks pass. One example-only error
+  conversion was corrected to the existing CasError::InvalidTree wrapper;
+  no production behavior, test expectation or resource cap was changed.
+
+These results are actual local Linux evidence for the listed dependency heads.
+They do not claim that later source follow-ups, hosted CI or another platform
+have already passed. Root performs final combined source/review validation.
 
 No network/build/program/certificate verification is performed, and no timing,
 RSS, filesystem-wide rollback, permanent-integrity, hosted/platform or trust
