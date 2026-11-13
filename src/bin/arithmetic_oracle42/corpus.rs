@@ -4,6 +4,7 @@ use super::{
     Suite,
 };
 use std::fmt::Write;
+use std::sync::OnceLock;
 use vesper::ast::{self, Expr, ExprKind, Item, Literal, Pass, PatternKind, Statement, Type};
 
 const MAX_NODES: usize = 63;
@@ -77,25 +78,27 @@ fn variable(scope: Scope, slot: u16) -> String {
     )
 }
 
-fn boundary_table(kind: Kind) -> Result<Vec<i128>, HarnessError> {
+fn boundary_table(kind: Kind) -> &'static [i128; 256] {
+    static TABLES: [OnceLock<[i128; 256]>; 4] = [const { OnceLock::new() }; 4];
+    TABLES[kind_tag(kind) as usize].get_or_init(|| make_boundary_table(kind))
+}
+fn make_boundary_table(kind: Kind) -> [i128; 256] {
     let (min, max) = bounds(kind);
-    let mut values = Vec::new();
-    values.try_reserve_exact(256).map_err(|_| allocation())?;
+    let mut values = [0; 256];
+    let mut len = 0;
     for value in [0, 1, min, max, min + 1, max - 1, -1, -2, 2, 3]
         .into_iter()
         .chain(0..=255)
     {
-        if value >= min && value <= max && !values.contains(&value) {
-            values.push(value);
-            if values.len() == 256 {
+        if value >= min && value <= max && !values[..len].contains(&value) {
+            values[len] = value;
+            len += 1;
+            if len == 256 {
                 break;
             }
         }
     }
-    if values.len() != 256 {
-        return Err(error("boundary table cardinality"));
-    }
-    Ok(values)
+    values
 }
 fn binary(a: Node, b: Node, op: Op, wrapping: bool) -> Code {
     vec![
@@ -183,7 +186,7 @@ pub fn case_at(suite: Suite, seed: u64, id: u64) -> Result<Case, HarnessError> {
         }
         _ => q,
     };
-    let table = boundary_table(kind)?;
+    let table = boundary_table(kind);
     let (min, max) = bounds(kind);
     let mut p = Program {
         kind,
@@ -241,11 +244,11 @@ pub fn case_at(suite: Suite, seed: u64, id: u64) -> Result<Case, HarnessError> {
             let count = (tape.next() % 4) as usize;
             for i in 0..count {
                 let mut code = Vec::with_capacity(15);
-                tape.tree(15, 1, i, &table, &mut code);
+                tape.tree(15, 1, i, table, &mut code);
                 p.locals.push(code);
             }
             let mut code = Vec::with_capacity(15);
-            tape.tree(15, 1, count, &table, &mut code);
+            tape.tree(15, 1, count, table, &mut code);
             code
         }
     };
