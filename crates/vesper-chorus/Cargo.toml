@@ -2,8 +2,14 @@
 name = "vesper-chorus"
 version = "0.1.0"
 edition = "2024"
-description = "Vesper Chorus: choreographies, endpoint projection, linear session channels, simulated quorum replication and a software RDMA model (design section 25)"
+description = "Vesper Chorus: choreographies, endpoint projection, linear session channels (in memory and over Warp QUIC streams), simulated quorum replication and a software RDMA model (design section 25)"
 publish = false
 
 [dependencies]
 vesper-simpulse = { path = "../vesper-simpulse" }
+# Wave six lane 17 (issue #259): session channels over Warp QUIC streams on
+# the software NIC. Read-only use of the Warp crates.
+vesper-warp = { path = "../vesper-warp" }
+vesper-warp-crypto = { path = "../vesper-warp-crypto" }
+vesper-warp-shard = { path = "../vesper-warp-shard" }
+vesper-warp-umem = { path = "../vesper-warp-umem" }

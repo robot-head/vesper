@@ -34,6 +34,21 @@ println!("{}", cx.tape.to_text()); // save as a regression tape
 - `run_fibers` explores schedules of step-machine fibers on the real
   `vesper-simpulse` simulator; `replay_fibers` re-validates a SimPulse
   journal.
+- `SimFiber` step machines may also sleep on SimPulse timers, submit I/O
+  SimPulse completes after a virtual delay, or park on external I/O whose
+  delivery the explorer schedules. `explore_random` draws each scheduling
+  decision (step, deliver, fire timer) from the choice tape, so a planted
+  reply-after-timeout race is fuzzed and shrunk like any other bug;
+  `replay_schedule` re-validates the SimPulse journal.
+- `explore_exhaustive` enumerates every schedule; `explore_dpor` explores at
+  least one per Mazurkiewicz trace (persistent-set DPOR with sleep sets over
+  declared step footprints). Tests check both find the same outcomes.
+- `VirtualArena`: a 64 KiB `vesper-alloc` region reset after every
+  execution, with `ArbitraryIn` generators that draw straight into it and a
+  reusable source; warmed-up executions do not allocate (counted).
+
+DPOR's reduction is only as sound as the declared footprints (an access
+outside one is a typed error) and is validated differentially, not proved.
 
 Not here: Cranelift instrumentation of Vesper source, the `vesper fuzz` CLI,
 MPK differential shadowing (lane 11 / integration), and the source-level

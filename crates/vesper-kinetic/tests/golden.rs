@@ -6,7 +6,8 @@
 
 mod common;
 
-use vesper_kinetic::hash_world;
+use vesper_alloc::Region;
+use vesper_kinetic::{BroadphaseMode, ContactMaterial, SolverMode, World, hash_world};
 
 const TICKS: u64 = 600;
 const GOLDEN_SHA256_TICK_1: &str =
@@ -48,4 +49,75 @@ fn fixed_scene_matches_committed_golden_hash() {
     assert_eq!(sha, GOLDEN_SHA256_FINAL, "SHA-256 after {TICKS} ticks");
     assert_eq!(b3, GOLDEN_BLAKE3_FINAL, "BLAKE3 after {TICKS} ticks");
     assert_eq!(world.header().world_state_blake3, hashes.blake3);
+}
+
+/// Run `ticks` ticks of `world`, stepping through a region arena when
+/// `arena` is set; returns (tick-1 SHA-256, final SHA-256, final BLAKE3).
+fn run(mut world: World, ticks: u64, arena: bool) -> (String, String, String) {
+    let mut region = arena.then(|| Region::new(world.step_arena_config()).unwrap());
+    let mut first = String::new();
+    for tick in 1..=ticks {
+        match region.as_mut() {
+            Some(r) => world.step_in(r).expect("step_in"),
+            None => world.step().expect("step"),
+        };
+        if tick == 1 {
+            first = common::hex(&hash_world(world.tick(), world.bodies()).sha256);
+        }
+    }
+    let h = hash_world(world.tick(), world.bodies());
+    (first, common::hex(&h.sha256), common::hex(&h.blake3))
+}
+
+/// The 16-lane batched solver, the LBVH broadphase and the region-arena
+/// step reproduce the scalar golden bits exactly, in every combination.
+#[test]
+fn batched_solver_lbvh_and_arena_match_the_scalar_golden_hash() {
+    for solver in [SolverMode::Scalar, SolverMode::Batched16] {
+        for broadphase in [BroadphaseMode::MortonCells, BroadphaseMode::Lbvh] {
+            for arena in [false, true] {
+                let mut world = common::scene();
+                world.set_solver_mode(solver);
+                world.set_broadphase(broadphase);
+                let (first, sha, b3) = run(world, TICKS, arena);
+                let what = format!("{solver:?} {broadphase:?} arena={arena}");
+                assert_eq!(first, GOLDEN_SHA256_TICK_1, "{what}");
+                assert_eq!(sha, GOLDEN_SHA256_FINAL, "{what}");
+                assert_eq!(b3, GOLDEN_BLAKE3_FINAL, "{what}");
+            }
+        }
+    }
+}
+
+const GOLDEN_FRICTION_SHA256: &str =
+    "d9c065c8b8e798da74a4bb566108d1ad0d3656ce7e7610e2b6e0bb5674928d5d";
+
+/// With friction and restitution on, scalar and batched projection still
+/// agree bit for bit, and the result is pinned across architectures.
+#[test]
+fn friction_and_restitution_scene_is_bit_identical_across_solvers() {
+    let material = ContactMaterial {
+        static_friction: 0.6,
+        dynamic_friction: 0.4,
+        restitution: 0.5,
+    };
+    let mut hashes = Vec::new();
+    for solver in [SolverMode::Scalar, SolverMode::Batched16] {
+        for broadphase in [BroadphaseMode::MortonCells, BroadphaseMode::Lbvh] {
+            let mut world = common::scene();
+            world.set_contact_material(material).unwrap();
+            world.set_solver_mode(solver);
+            world.set_broadphase(broadphase);
+            hashes.push(run(world, 300, broadphase == BroadphaseMode::Lbvh).1);
+        }
+    }
+    eprintln!(
+        "arch={} friction sha256={}",
+        std::env::consts::ARCH,
+        hashes[0]
+    );
+    assert!(hashes.iter().all(|h| *h == hashes[0]), "{hashes:?}");
+    assert_eq!(hashes[0], GOLDEN_FRICTION_SHA256);
+    // Friction changes the outcome (it is not silently ignored).
+    assert_ne!(hashes[0], run(common::scene(), 300, false).1);
 }

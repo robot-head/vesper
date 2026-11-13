@@ -1,0 +1,27 @@
+// A DetFloat-typed parameter accepts a closure that declares DetFloat and a
+// named DetFloat function; a nested closure inherits the enclosing body's
+// capabilities.
+fn apply(sink f: fn(f64) -> f64 eff [DetFloat], x: f64) -> f64 eff [DetFloat] {
+    f(x)
+}
+
+fn triple(x: f64) -> f64 eff [DetFloat] {
+    x * 3.0
+}
+
+fn twice_then_triple(x: f64) -> f64 eff [DetFloat] {
+    let double = | y: f64 | -> f64 {
+        y * 2.0
+    };
+    apply(triple, double(x))
+}
+
+fn main() -> f64 {
+    let a = apply(
+        | x: f64 | -> f64 eff [DetFloat] {
+            x - 0.5
+        },
+        1.0
+    );
+    a + twice_then_triple(1.0)
+}

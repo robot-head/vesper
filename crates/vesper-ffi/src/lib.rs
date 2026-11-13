@@ -6,8 +6,12 @@
 //! Layout compilation rejects implicit internal and tail padding. Successful
 //! view construction performs only length/alignment checks and allocates no
 //! memory; padding canonicality is a separate explicit validation operation.
-#![forbid(unsafe_code)]
+//!
+//! `unsafe` is denied crate-wide. The one exception is the gated, commented
+//! `isolation::hw` module (Linux x86_64 PKU, Linux AArch64 POE).
+#![deny(unsafe_code)]
 
+pub mod isolation;
 pub mod sys;
 
 use std::{collections::BTreeMap, fmt};

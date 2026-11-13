@@ -1,0 +1,23 @@
+[package]
+name = "h3-interop"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# Not a member of the Vesper workspace: its quinn/h3/tokio dependencies stay
+# out of the main lockfile and CI. Run it by hand (see README.md).
+[workspace]
+
+[dependencies]
+vesper-prism = { path = "../../vesper-prism" }
+vesper-prism-h3 = { path = ".." }
+vesper-warp = { path = "../../vesper-warp" }
+vesper-warp-shard = { path = "../../vesper-warp-shard" }
+vesper-warp-umem = { path = "../../vesper-warp-umem" }
+quinn = { version = "=0.11.9", default-features = false, features = ["runtime-tokio", "rustls-aws-lc-rs"] }
+h3 = "=0.0.8"
+h3-quinn = "=0.0.10"
+tokio = { version = "1", features = ["rt", "macros", "time", "net"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
+http = "1"
+bytes = "1"

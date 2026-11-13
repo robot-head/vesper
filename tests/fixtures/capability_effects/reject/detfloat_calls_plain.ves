@@ -1,0 +1,12 @@
+// expect: E0700
+fn scale(x: f64) -> f64 {
+    x * 3.0
+}
+
+fn step(x: f64) -> f64 eff [DetFloat] {
+    scale(x)
+}
+
+fn main() -> f64 {
+    step(1.0)
+}

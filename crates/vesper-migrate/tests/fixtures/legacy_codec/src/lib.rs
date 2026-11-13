@@ -63,6 +63,33 @@ pub unsafe extern "C" fn legacy_parse_batch_header_into(
     }
 }
 
+/// Reference out-parameter: lifted to `nocapture inout crc: u32`.
+#[unsafe(no_mangle)]
+pub extern "C" fn legacy_bump_crc(crc: &mut u32, byte: u8) {
+    *crc = crc.rotate_left(5) ^ u32::from(byte);
+}
+
+/// Struct out-parameter through an annotated raw pointer.
+/// vesper-migrate: stats out
+///
+/// # Safety
+/// `stats` must be valid for writes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn legacy_reset_stats(stats: *mut DecoderStats) {
+    unsafe { *stats = DecoderStats::default() }
+}
+
+/// Refused (AliasingPointers): `a` and `b` may name the same `u32`.
+/// vesper-migrate: a inout
+/// vesper-migrate: b inout
+///
+/// # Safety
+/// Both pointers must be valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn legacy_swap(a: *mut u32, b: *mut u32) {
+    unsafe { std::ptr::swap(a, b) }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn legacy_header_len() -> usize {
     HEADER_LEN

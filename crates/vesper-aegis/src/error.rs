@@ -76,6 +76,46 @@ pub enum AttestError {
     RegisterReplayMismatch {
         register: &'static str,
     },
+    /// A certificate in the path is listed on a CRL, or a TCB level / QE
+    /// level the evidence matches is marked `Revoked`.
+    Revoked {
+        what: &'static str,
+    },
+    /// Collateral needed for the check was not supplied (or a CRL does not
+    /// cover a certificate whose revocation status must be known).
+    MissingCollateral {
+        what: &'static str,
+    },
+    /// Collateral (CRL, TCB info, QE identity) is outside its validity
+    /// window at the verification time.
+    CollateralExpired {
+        what: &'static str,
+    },
+    /// A certificate in the path is past its `notAfter`.
+    CertificateExpired,
+    /// A certificate in the path is before its `notBefore`.
+    CertificateNotYetValid,
+    /// A CRL is malformed.
+    Crl(String),
+    /// Vendor collateral (TCB info, QE identity JSON, certificate
+    /// extensions) is malformed, ambiguous or of an unsupported version.
+    Collateral {
+        what: &'static str,
+        reason: String,
+    },
+    /// The evidence does not match its collateral (FMSPC, PCE ID, QE
+    /// identity, TDX module identity, VCEK chip ID or TCB).
+    CollateralMismatch {
+        what: &'static str,
+    },
+    /// No TCB level in the collateral matches the evidence.
+    TcbLevelNotFound {
+        what: &'static str,
+    },
+    /// A pinned vendor certificate does not have its recorded SHA-256.
+    PinnedRootDigestMismatch {
+        name: &'static str,
+    },
 }
 
 impl From<ParseError> for AttestError {
@@ -116,6 +156,9 @@ pub enum AegisVerifyError {
         gpa_page_4k: u64,
     },
     UnalignedOrZeroGpaRange,
+    /// The vendor TCB status is not one the relying party accepts
+    /// (`Revoked` never is).
+    TcbStatusNotAccepted(crate::intel::TcbStatus),
 }
 
 /// Errors from the confidential-VM runtime surface (page acceptance and
@@ -162,6 +205,9 @@ pub enum TeeError {
         reported: u64,
         max_step: u64,
     },
+    /// The operation needs TEE hardware this host does not have (no TDX,
+    /// SEV-SNP or CCA guest interface is present or implemented).
+    HardwareUnavailable { what: &'static str },
     /// Host reported more bytes transferred than were requested.
     HostByteCountExceedsRequest { reported: u64, requested: u64 },
 }

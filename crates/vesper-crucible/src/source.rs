@@ -19,6 +19,10 @@ pub enum Invalid {
     EmptyChoice,
     /// A range with `lo > hi` was requested.
     EmptyRange,
+    /// A generated value did not fit the execution's bounded arena
+    /// ([`crate::VirtualArena`]); over-budget inputs are discarded, never
+    /// silently truncated.
+    ArenaExhausted,
 }
 
 impl fmt::Display for Invalid {
@@ -28,6 +32,7 @@ impl fmt::Display for Invalid {
             Self::Rejected => "generated value rejected by assume",
             Self::EmptyChoice => "choice among zero alternatives",
             Self::EmptyRange => "empty integer range",
+            Self::ArenaExhausted => "generated value exceeds the execution arena",
         })
     }
 }
@@ -37,7 +42,7 @@ impl std::error::Error for Invalid {}
 /// A property failure. `kind` identifies the bug: the shrinker only accepts
 /// candidates that fail with the same kind, so shrinking cannot slip from one
 /// bug to a different one. `detail` is free text for the report.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Failure {
     pub kind: String,
     pub detail: String,
@@ -183,6 +188,15 @@ pub struct Probe {
 }
 
 impl Probe {
+    /// Forget everything recorded, keeping allocated capacity where the
+    /// containers allow it (a reused source starts every execution clean).
+    pub(crate) fn clear(&mut self) {
+        self.edges.clear();
+        self.cmp_outcomes.clear();
+        self.closeness.clear();
+        self.cmps.clear();
+    }
+
     /// Record one hit of coverage edge `id`.
     pub fn edge(&mut self, id: u32) {
         let hits = self.edges.entry(id).or_insert(0);
@@ -365,6 +379,32 @@ impl Source {
         }
     }
 
+    /// Re-arm this source for a strict replay of `tape`, reusing its buffers:
+    /// once their capacity covers a run, re-arming does not allocate.
+    pub(crate) fn rearm_strict(&mut self, tape: &[u64]) {
+        self.rearm(tape, Extend::Strict, MAX_TAPE_LEN);
+    }
+
+    /// Re-arm for `prefix` followed by pseudo-random choices from `seed`.
+    pub(crate) fn rearm_random(&mut self, prefix: &[u64], seed: u64, max_draws: usize) {
+        self.rearm(prefix, Extend::Random(SplitMix64(seed)), max_draws);
+    }
+
+    fn rearm(&mut self, prefix: &[u64], extend: Extend, max_draws: usize) {
+        self.prefix.clear();
+        self.prefix.extend_from_slice(prefix);
+        self.extend = extend;
+        self.realized.clear();
+        self.kinds.clear();
+        self.max_draws = max_draws.min(MAX_TAPE_LEN);
+        self.probe.clear();
+    }
+
+    /// The choices consumed so far, without copying them into a tape.
+    pub fn realized_values(&self) -> &[u64] {
+        &self.realized
+    }
+
     fn raw(&mut self, kind: DrawKind, generation: Gen) -> Result<u64, Invalid> {
         let pos = self.realized.len();
         if pos >= self.max_draws {
@@ -455,7 +495,12 @@ impl Source {
     /// the collection ends at a `0` flag, so deleting a `(1, element...)` span
     /// from the tape removes exactly one element: the shrinker shortens
     /// collections without a type-specific shrinker.
-    fn more(&mut self, len: usize, max_len: usize, average: usize) -> Result<bool, Invalid> {
+    pub(crate) fn more(
+        &mut self,
+        len: usize,
+        max_len: usize,
+        average: usize,
+    ) -> Result<bool, Invalid> {
         if len >= max_len {
             return Ok(false);
         }

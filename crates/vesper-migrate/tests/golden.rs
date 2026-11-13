@@ -4,7 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use vesper_ffi::sys::{AbiType, LinkMode, ParameterType, Scalar, Target};
+use vesper_ffi::sys::{
+    AbiType, LinkMode, ParameterType, Pointee, PointerAccess, PointerLayout, Scalar, Target,
+};
 use vesper_migrate::{Limits, Migration, Mode, RefusalReason, c, rust, synth};
 
 fn fixture(rel: &str) -> PathBuf {
@@ -160,11 +162,11 @@ fn c_front_end_lifts_typedefs_arrays_constness_and_layouts() {
     for expected in [
         ("struct padded_record", RefusalReason::WireLayout),
         ("union legacy_word", RefusalReason::Union),
-        (
-            "fn legacy_parse_batch_header",
-            RefusalReason::PointerParameter,
-        ),
-        ("fn legacy_fill", RefusalReason::Aggregate),
+        ("fn legacy_swap", RefusalReason::AliasingPointers),
+        ("fn legacy_sum4", RefusalReason::ArrayWithoutLength),
+        ("fn legacy_set_name", RefusalReason::ArrayWithoutLength),
+        ("fn legacy_attach", RefusalReason::OpaquePointer),
+        ("fn legacy_pack", RefusalReason::PointerParameter),
         ("fn legacy_offset", RefusalReason::PlatformDependentWidth),
         ("fn legacy_ratio", RefusalReason::Floating),
         ("fn legacy_log", RefusalReason::Variadic),
@@ -249,7 +251,8 @@ fn rust_front_end_lifts_modes_and_field_tree_footprints() {
         m.function("parse_batch_header").unwrap().result,
         "Result[i64, ParseError]"
     );
-    // Only annotated, unmangled extern "C" functions with slice pointers reach the spec.
+    // Only unmangled extern "C" functions whose pointers are annotated (or
+    // are references) reach the spec.
     let spec = synth::sys_spec(&m, &options(Target::LinuxX86_64)).unwrap();
     let names: Vec<_> = spec
         .descriptor
@@ -257,11 +260,14 @@ fn rust_front_end_lifts_modes_and_field_tree_footprints() {
         .iter()
         .map(|f| f.symbol().to_string())
         .collect();
-    assert_eq!(names.len(), 3, "{names:?}");
+    assert_eq!(names.len(), 6, "{names:?}");
     for n in [
+        "legacy_bump_crc",
         "legacy_classify",
         "legacy_header_len",
+        "legacy_parse_batch_header",
         "legacy_parse_batch_header_into",
+        "legacy_reset_stats",
     ] {
         assert!(names.iter().any(|x| x == n), "{n} missing from {names:?}");
     }
@@ -281,10 +287,7 @@ fn rust_front_end_lifts_modes_and_field_tree_footprints() {
         ("fn checksum", RefusalReason::Generic),
         ("fn on_record", RefusalReason::FunctionPointer),
         ("fn parse_batch_header: vsys", RefusalReason::NotCAbi),
-        (
-            "fn legacy_parse_batch_header: vsys",
-            RefusalReason::PointerParameter,
-        ),
+        ("fn legacy_swap: vsys", RefusalReason::AliasingPointers),
     ] {
         assert!(
             reasons.contains(&(expected.0.to_string(), expected.1)),
@@ -313,4 +316,62 @@ fn single_file_analysis_refuses_out_of_line_modules() {
     // The shim's own signature is still lifted; items of unread modules are not.
     assert!(m.function("legacy_parse_batch_header").is_some());
     assert!(m.function("parse_batch_header").is_none());
+}
+
+#[test]
+fn single_out_pointers_lift_to_the_design_signature() {
+    // §29.3: the Rust shim lifts to exactly the design's sys-spec entry.
+    let m = rust_migration();
+    let spec = synth::sys_spec(&m, &options(Target::LinuxX86_64)).unwrap();
+    assert!(spec.text.contains(
+        "fn legacy_parse_batch_header(nocapture in raw_bytes: CSlice[u8], nocapture inout out_crc: u32, nocapture inout out_count: i32) -> ForeignVal[i32];"
+    ));
+    let f = spec
+        .descriptor
+        .function("legacy_parse_batch_header")
+        .unwrap();
+    assert_eq!(
+        f.abi().parameters,
+        vec![
+            AbiType::Pointer,
+            AbiType::Integer(Scalar::Usize),
+            AbiType::Pointer,
+            AbiType::Pointer
+        ]
+    );
+    assert_eq!(
+        f.parameters()[1].ty().pointer_layout(),
+        Some(PointerLayout {
+            size: 4,
+            alignment: 4,
+            access: PointerAccess::Inout,
+            nullable: false
+        })
+    );
+    let reset = spec.descriptor.function("legacy_reset_stats").unwrap();
+    let ParameterType::Pointer {
+        pointee: Pointee::Struct(w),
+        access: PointerAccess::Out,
+        nullable: false,
+    } = reset.parameters()[0].ty()
+    else {
+        panic!("{:?}", reset.parameters()[0].ty())
+    };
+    assert_eq!((w.name(), w.layout().size()), ("DecoderStats", 16));
+    // The C header's struct out-pointer carries its nested wire structs.
+    let c = c_migration();
+    let spec = synth::sys_spec(&c, &options(Target::LinuxAarch64)).unwrap();
+    let fill = spec.descriptor.function("legacy_fill").unwrap();
+    assert_eq!(
+        fill.parameters()[0].ty().pointer_layout(),
+        Some(PointerLayout {
+            size: 32,
+            alignment: 8,
+            access: PointerAccess::Inout,
+            nullable: false
+        })
+    );
+    assert_eq!(spec.descriptor.wire_structs().len(), 2);
+    let read = spec.descriptor.function("legacy_read_header").unwrap();
+    assert_eq!(read.parameters()[1].ty().pointer_layout().unwrap().size, 24);
 }

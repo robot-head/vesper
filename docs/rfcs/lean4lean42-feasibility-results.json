@@ -1,0 +1,19 @@
+{
+  "patch_sha256": "17d11684630a4c7d7aa0981235449313df0e9ec34980041d4c55e201fda4b555",
+  "records": [
+    {
+      "module": "RewriteWitness",
+      "exit_code": 0,
+      "wall_seconds": 173.966,
+      "stdout": "RewriteWitness:thmDecl Std.Tactic.BVDecide.BVExpr.bitblast.goCache_Inv_of_Inv._mutual: lean4lean took 1024\nchecked 84702 declarations\n",
+      "stderr": ""
+    },
+    {
+      "module": "ArithmeticOracle",
+      "exit_code": 0,
+      "wall_seconds": 172.626,
+      "stdout": "checked 86270 declarations\n",
+      "stderr": ""
+    }
+  ]
+}
