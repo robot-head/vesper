@@ -1346,7 +1346,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         // Our connection IDs the peer retired: forget them, issue more.
         let retired = std::mem::replace(&mut c.retired_rx, [None; MAX_ACTIVE_CIDS]);
         let mut gone = [None; MAX_ACTIVE_CIDS];
+        let mut seq0_retired = false;
         for (i, seq) in retired.into_iter().flatten().enumerate() {
+            if seq == 0 {
+                // The handshake ID stays routable in the connection table
+                // (its tile is keyed by it) until the connection ends.
+                seq0_retired = true;
+                continue;
+            }
             for l in &mut c.cids.local {
                 if let Some(e) = l
                     && e.seq == seq
@@ -1358,6 +1365,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             }
         }
         let mut any_retired = false;
+        if seq0_retired {
+            self.stats.cids_retired += 1;
+        }
         for cid in gone.into_iter().flatten() {
             self.alt_cids.retain(|(id, h)| !(*h == slot && *id == cid));
             self.stats.cids_retired += 1;
@@ -1856,6 +1866,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return false;
         }
         buf[..bytes.len()].copy_from_slice(bytes);
+        // Keys installed before this point did not open it.
+        self.keys_changed = false;
         self.buffered.push_back((buf, bytes.len(), self.rx_from));
         self.stats.datagrams_buffered += 1;
         true
@@ -3910,12 +3922,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     dcid[..d.len()].copy_from_slice(d);
                     Ok(Some((h, dcid, d.len())))
                 }
-                Ok(ParsedPacket::Protected(h))
-                    if matches!(h.packet_type, PacketType::Initial | PacketType::Handshake) =>
-                {
-                    Ok(None)
-                }
-                Ok(_) => Err(DropReason::NotOneRtt),
+                // Long headers (Initial, 0-RTT, Handshake, Retry, Version
+                // Negotiation, other versions) take the copying path.
+                Ok(_) | Err(HeaderError::UnsupportedVersion(_)) => Ok(None),
                 Err(e) => Err(DropReason::Header(e)),
             },
         };
