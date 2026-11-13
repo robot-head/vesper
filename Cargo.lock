@@ -376,6 +376,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aya-obj"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c76b9c75d9cdc155ff8f6a06d61e873f67bf47be8cfa92a3b5aaea43f4b4077"
+dependencies = [
+ "bytes",
+ "log",
+ "object 0.39.1",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2625,6 +2637,15 @@ dependencies = [
 
 [[package]]
 name = "object"
+version = "0.39.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e5a6c098c7a3b6547378093f5cc30bc54fd361ce711e05293a5cc589562739b"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
+name = "object"
 version = "0.40.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
@@ -4182,6 +4203,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-ebpf"
+version = "0.1.0"
+dependencies = [
+ "aya-obj",
+ "libc",
+ "object 0.37.3",
+]
+
+[[package]]
 name = "vesper-ffi"
 version = "0.1.0"
 dependencies = [
@@ -4253,6 +4283,17 @@ version = "0.1.0"
 [[package]]
 name = "vesper-ignis"
 version = "0.1.0"
+
+[[package]]
+name = "vesper-kinetic"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "cranelift-codegen 0.125.4",
+ "cranelift-frontend 0.125.4",
+ "sha2",
+ "target-lexicon",
+]
 
 [[package]]
 name = "vesper-lean-syntax"
