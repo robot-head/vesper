@@ -27,6 +27,7 @@ fn bounded_shapes_parameters_helpers_and_destructuring_reach_actual_checker() {
         "fn f(in c:bool)->(i64,i64){match c{true=>(1,2),false=>(3,4)}}",
         "fn update(inout p:(i64,i64)){} fn f()->(i64,i64){let p=(1,42);update(inout p);update(inout p);p}",
         "copy struct Boxed{value:(i64,i64)} fn f(in p:Boxed)->((i64,i64),){(p.value,)}",
+        "copy enum Mark{Ready} fn f()->(Mark,){(Mark::Ready,)}",
     ] {
         accepted(source);
     }
@@ -150,12 +151,10 @@ fn unresolved_calls_higher_order_and_generic_projection_refuse_explicitly() {
         "copy struct P{} impl P{fn pair(in self)->(i64,i64){(1,2)}}",
         "fn helper()->i64{1} fn helper()->(i64,i64){(1,2)} fn f(){(helper(),)}",
     ] {
+        let result = check_source(source, Default::default());
         assert!(
-            matches!(
-                check_source(source, Default::default()),
-                Err(AnalysisFailure::Unsupported { .. })
-            ),
-            "{source}"
+            matches!(result, Err(AnalysisFailure::Unsupported { .. })),
+            "{source}: {result:?}"
         );
     }
 }
@@ -187,4 +186,106 @@ fn bounded_function_values_include_parameters_results_and_effect_arguments() {
     )
     .unwrap_err();
     assert!(matches!(failure, AnalysisFailure::Resource { .. }));
+}
+
+#[test]
+fn duplicate_nominal_and_field_inventories_refuse_before_checker() {
+    let wide = format!("({})", ["i64"; 12].join(","));
+    for declarations in [
+        format!("copy struct Boxed{{value:i64}} copy struct Boxed{{value:{wide}}}"),
+        format!("copy struct Boxed{{value:i64,value:{wide}}}"),
+        "copy struct Option{}".to_owned(),
+    ] {
+        let source =
+            format!("{declarations} fn f(in b:Boxed){{let x=b.value;let x=(x,x);let x=(x,x);}}");
+        let failure = check_source(
+            &source,
+            AnalysisLimits {
+                max_type_nodes: 64,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(failure, AnalysisFailure::Unsupported { ref reason }
+            if reason.contains("before checking")),
+            "{failure:?}"
+        );
+    }
+}
+
+#[test]
+fn malformed_nominal_contexts_never_clone_wide_expected_types_in_checker() {
+    let wide = format!("({})", ["i64"; 20].join(","));
+    for (declaration, result, body) in [
+        (
+            "copy struct Empty{}",
+            "Empty",
+            "if true{if true{Empty}else{Empty}}else{if true{Empty}else{Empty}}",
+        ),
+        ("", "i64", "1"),
+        ("", "f64", "1.0+2.0"),
+        ("", "String", "\"text\""),
+    ] {
+        let source =
+            format!("{declaration} fn trigger(){{(0,);}} fn f()->{result}[{wide}]{{{body}}}");
+        let parsed = parser::parse(&source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let failure = check_source(
+            &source,
+            AnalysisLimits {
+                max_type_nodes: 64,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(failure, AnalysisFailure::Unsupported { ref reason }
+            if reason.contains("before checking")),
+            "{failure:?}"
+        );
+    }
+    for source in [
+        "copy enum Capsule[T]{Empty} fn f(){let x=Capsule::Extra::Empty;(x,x)}",
+        "fn f(){let x=Option::Extra::None;(x,x)}",
+    ] {
+        assert!(matches!(
+            check_source(source, Default::default()),
+            Err(AnalysisFailure::Parse { .. })
+        ));
+    }
+    // String payload length never changes the actual scalar String type.
+    accepted(&format!("fn f()->(String,){{(\"{}\",)}}", "λ".repeat(1000)));
+}
+
+#[test]
+fn short_circuit_rhs_prepays_environment_copies_even_when_dead() {
+    let wide = format!("({})", ["i64"; 12].join(","));
+    let limits = AnalysisLimits {
+        max_metadata_bytes: 20_000,
+        ..Default::default()
+    };
+    for operator in ["&&", "||"] {
+        let mut expression = "true".to_owned();
+        for _ in 0..6 {
+            expression = format!("false {operator} ({expression})");
+        }
+        let source = format!("fn trigger(){{(0,);}} fn f(in unused:{wide})->bool{{{expression}}}");
+        let failure = check_source(&source, limits).unwrap_err();
+        assert!(
+            matches!(failure, AnalysisFailure::Resource { ref reason }
+            if reason.contains("before checking")),
+            "{failure:?}"
+        );
+        check_source(
+            &format!("fn trigger(){{(0,);}} fn f()->bool{{{expression}}}"),
+            limits,
+        )
+        .unwrap();
+    }
+    check_source(
+        &format!("fn trigger(){{(0,);}} fn f(in unused:{wide})->bool{{true}}"),
+        limits,
+    )
+    .unwrap();
 }

@@ -55,7 +55,7 @@ pub(super) fn guard(items: &[&Item], limits: AnalysisLimits) -> Result<(), Strin
         },
         fields_safe: true,
     };
-    for item in items {
+    for (index, item) in items.iter().enumerate() {
         a.step()?;
         // Pact substitutes Self/associated types into generated methods before
         // checking. Implicit inherent self types are also replaced by collect.
@@ -76,6 +76,7 @@ pub(super) fn guard(items: &[&Item], limits: AnalysisLimits) -> Result<(), Strin
             _ => (),
         }
         if let Item::Adt(adt) = item {
+            a.adt_inventory(adt, index)?;
             if !adt.generics.is_empty() {
                 continue;
             }
@@ -160,13 +161,70 @@ impl<'a> Admission<'a> {
             bytes: a.bytes.checked_add(b.bytes).ok_or(BUDGET)?,
         })
     }
+    fn adt_inventory(&mut self, adt: &Adt, index: usize) -> Result<(), String> {
+        // World::collect keeps the last ADT of a name, including malformed
+        // declarations. Never resolve a projection using an earlier header.
+        if matches!(
+            adt.name.as_str(),
+            "Option" | "Result" | "RuntimeError" | "ArithOverflow" | "Unit" | "Never" | "String"
+        ) {
+            return Err(UNCERTAIN.into());
+        }
+        for item in &self.items[..index] {
+            self.step()?;
+            if matches!(item, Item::Adt(other) if other.name == adt.name) {
+                return Err(UNCERTAIN.into());
+            }
+        }
+        for (i, variant) in adt.variants.iter().enumerate() {
+            for earlier in &adt.variants[..i] {
+                self.step()?;
+                if earlier.name == variant.name {
+                    return Err(UNCERTAIN.into());
+                }
+            }
+            for (j, field) in variant.fields.iter().enumerate() {
+                for earlier in &variant.fields[..j] {
+                    self.step()?;
+                    if earlier.name == field.name {
+                        return Err(UNCERTAIN.into());
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    fn nominal_arity(&mut self, name: &str, arity: usize) -> Result<(), String> {
+        // A nullary constructor can clone its complete expected nominal type
+        // even after the checker diagnoses malformed type-argument arity.
+        // Refuse those contexts before interpreting any expression as a leaf.
+        let mut expected = match name {
+            "Option" => Some(1),
+            "Result" => Some(2),
+            _ => None,
+        };
+        for item in self.items {
+            self.step()?;
+            if let Item::Adt(adt) = item
+                && adt.name == name
+            {
+                expected = Some(adt.generics.len());
+            }
+        }
+        if expected.is_some_and(|expected| expected != arity) || (expected.is_none() && arity != 0)
+        {
+            return Err(UNCERTAIN.into());
+        }
+        Ok(())
+    }
     fn ty(&mut self, t: &'a Type) -> Result<Value<'a>, String> {
         self.step()?;
         let mut v = self.leaf();
         v.exact = Some(t);
         match t {
             Type::Named(_, ts) | Type::Tuple(ts) => {
-                if let Type::Named(name, _) = t {
+                if let Type::Named(name, args) = t {
+                    self.nominal_arity(name, args.len())?;
                     v.bound.bytes = 128usize.checked_add(name.len()).ok_or(BUDGET)?;
                 }
                 v.projection_safe = !matches!(t, Type::Named(_, ts) if !ts.is_empty());
@@ -336,16 +394,22 @@ impl<'a> Admission<'a> {
         Ok(found)
     }
     fn constructor(&mut self, name: &str) -> Result<bool, String> {
+        let short = name.rsplit("::").next().ok_or(UNCERTAIN)?;
+        if (matches!(short, "Some" | "None") && (name == short || name.starts_with("Option::")))
+            || (matches!(short, "Ok" | "Err") && (name == short || name.starts_with("Result::")))
+        {
+            return Err(UNCERTAIN.into());
+        }
         for item in self.items {
             self.step()?;
             if let Item::Adt(a) = item {
                 for variant in &a.variants {
                     self.step()?;
-                    if name == a.name
-                        || name == variant.name
-                        || name
-                            .split_once("::")
-                            .is_some_and(|(n, v)| n == a.name && v == variant.name)
+                    if short == variant.name
+                        && (!name.contains("::")
+                            || name
+                                .strip_prefix(&a.name)
+                                .is_some_and(|suffix| suffix.starts_with("::")))
                     {
                         if !a.generics.is_empty() {
                             return Err(UNCERTAIN.into());
@@ -445,6 +509,7 @@ impl<'a> Admission<'a> {
                 } else if let Some(f) = self.known(n)? {
                     self.function_value(f)?
                 } else {
+                    self.constructor(n)?;
                     v
                 };
             }
@@ -507,6 +572,13 @@ impl<'a> Admission<'a> {
                 } else {
                     None
                 };
+                if local.is_none()
+                    && let Some(name) = name
+                {
+                    // The core gives constructors priority over functions,
+                    // even on ambiguous or unusually qualified spellings.
+                    self.constructor(name)?;
+                }
                 let function = if let Some(local) = local {
                     local.function
                 } else if let Some(n) = name {
@@ -559,11 +631,19 @@ impl<'a> Admission<'a> {
             ExprKind::Unary(_, e) => {
                 v = self.expr(e)?;
             }
-            ExprKind::Binary(_, a, b) => {
+            ExprKind::Binary(op, a, b) => {
                 let a = self.expr(a)?;
+                // The checker retains before/after environment clones for
+                // short-circuit RHS checking, including statically dead RHSs.
+                let snapshot = if matches!(op.as_str(), "&&" | "||") {
+                    self.snapshot(2)?
+                } else {
+                    self.snapshot_bytes
+                };
                 let b = self.expr(b)?;
                 v.bound = self.maximum(a.bound, b.bound)?;
                 v.projection_safe = a.projection_safe && b.projection_safe;
+                self.snapshot_bytes = snapshot;
             }
             ExprKind::Assign(_, a, b) => {
                 self.expr(a)?;

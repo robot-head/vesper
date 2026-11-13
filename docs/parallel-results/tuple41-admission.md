@@ -53,3 +53,31 @@ incremental0):
   recovery tests pass.
 - Final strict targeted Clippy, `cargo fmt --all -- --check` and
   `git diff --check` pass. No checks were bypassed or limits raised.
+
+
+Independent review follow-up (2026-11-13):
+
+- Reject duplicate ADT names and builtin ADT overrides before resolving fields.
+  Reject duplicate variant/field inventories as well. The real World retains
+  the last ADT declaration; its field lookup uses the first matching field.
+  No earlier source declaration can now supply a smaller projection envelope.
+- Validate nominal type-argument arity before expression admission. This closes
+  the nullary-constructor path that clones its entire expected nominal type even
+  after malformed-arity diagnostics. Malformed integer/float/String type argument
+  contexts also refuse. Actual integer literal inference returns `kind.ty()`;
+  string/bool literal inference returns a fixed scalar type. A long UTF-8 string
+  tuple remains accepted through the real checker.
+- Prepay two environment snapshots during short-circuit RHS traversal for both
+  `&&` and `||`, including dead RHSs. Small metadata tests isolate this cost:
+  both the same boolean expression without the wide parameter and the same wide
+  parameter without nested short-circuiting remain accepted under that limit.
+- Constructor matching now follows actual nominal prefix/final-segment matching
+  and checks constructor values before assuming a scalar envelope. The current
+  parser separately rejects multiple `::` segments; this is recorded as a parse
+  boundary, not claimed as an additional reachable checker bug. Actual ordinary
+  `Mark::Ready` tuple construction remains accepted.
+
+Final follow-up validation: all 12 admission integration tests, all 11 actual
+lowering/authority tuple tests and all 8 recovery tests pass. Strict targeted
+Clippy, all 5 existing frontend unit tests, workspace formatting and diff checks
+pass. No core checker or limits changed.
