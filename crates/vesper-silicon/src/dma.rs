@@ -590,7 +590,7 @@ pub struct NonCoherentCache {
 
 impl NonCoherentCache {
     pub fn new(base: u64, size: usize, block: u32) -> Result<Self, DmaError> {
-        if block == 0 || !block.is_power_of_two() || base % u64::from(block) != 0 {
+        if block == 0 || !block.is_power_of_two() || !base.is_multiple_of(u64::from(block)) {
             return Err(DmaError::BadLineSize(block));
         }
         base.checked_add(size as u64)

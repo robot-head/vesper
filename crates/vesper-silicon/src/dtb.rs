@@ -274,12 +274,12 @@ impl DeviceTree {
             }
             Ok(&blob[off..end])
         };
-        if off_struct % 4 != 0 {
+        if !off_struct.is_multiple_of(4) {
             return Err(DtbError::Misaligned {
                 what: "structure block",
             });
         }
-        if off_rsv % 8 != 0 {
+        if !off_rsv.is_multiple_of(8) {
             return Err(DtbError::Misaligned {
                 what: "memory reservation block",
             });

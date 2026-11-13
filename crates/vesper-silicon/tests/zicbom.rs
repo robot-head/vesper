@@ -293,11 +293,11 @@ fn randomized_transfers_keep_cpu_and_device_views_consistent() {
                     let start = dma.barriers().len();
                     let x = dma.submit_rx(0, StaticDmaBuf::<256>::new(at)).unwrap();
                     cache.execute_all(&dma.barriers()[start..]).unwrap();
-                    if rng(&mut seed) % 2 == 0 {
+                    if rng(&mut seed).is_multiple_of(2) {
                         cache.evict_all();
                     }
                     cache.device_write(at, &data).unwrap();
-                    if rng(&mut seed) % 2 == 0 {
+                    if rng(&mut seed).is_multiple_of(2) {
                         cache.evict_all();
                     }
                     dma.device_complete(0, 256, None).unwrap();
