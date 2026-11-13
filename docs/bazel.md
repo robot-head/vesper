@@ -82,6 +82,9 @@ Edit the crate's `BUILD.bazel` (see existing ones for examples):
 - `test_tags`: extra tags per test, for example `no-remote-exec`.
 - `test_target_compatible_with`: platform constraints for one test, for
   example to skip `//:test/proof_audit_cli` on macOS, where it is too slow.
+- `test_timeouts`: a Bazel timeout per target, for example `"long"` (900s)
+  for `//:test/format_proof_cli`, whose real Lean audits run serially. Unlisted
+  tests keep their size's default; this setting does not skip any test.
 
 ### How tests see their environment
 
