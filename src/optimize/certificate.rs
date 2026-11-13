@@ -1086,3 +1086,317 @@ pub(super) fn propose_rewrite(
         budget,
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::witness::verify_with_budget;
+    use super::*;
+    use crate::ast::{ExprKind, Item, Literal};
+
+    fn fixture(program: &str) -> (Expr, TypeMap) {
+        let parsed = crate::parser::parse(program);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = crate::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        let function = parsed
+            .module
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                Item::Function(function) => Some(function),
+                _ => None,
+            })
+            .expect("fixture function");
+        let body = function.body.expect("function body");
+        let expression = match body.kind {
+            ExprKind::Block { statements, tail } => {
+                assert!(statements.is_empty());
+                *tail.expect("fixture tail")
+            }
+            _ => body,
+        };
+        (expression, checked.expression_types)
+    }
+
+    fn proposal(source: &Expr, types: &TypeMap) -> RewriteProposal {
+        let outcome =
+            propose_rewrite(source, types, WitnessLimits::default()).expect("bounded producer");
+        let RewriteOutcome::Candidate(mut proposal) = outcome else {
+            panic!("expected genuine produced candidate");
+        };
+        verify_with_budget(
+            source,
+            &proposal.candidate,
+            types,
+            &proposal.certificate,
+            &mut proposal.budget,
+        )
+        .expect("independent gate with remaining producer budget");
+        proposal
+    }
+
+    fn has_rule(proposal: &RewriteProposal, expected: u16) -> bool {
+        proposal.certificate.proofs.iter().any(|proof| {
+            matches!(proof.reason,
+            Reason::Rule { rule, .. } if rule == expected)
+        })
+    }
+
+    #[test]
+    fn actual_runner_identity_is_gated_by_its_recorded_rule() {
+        let (source, types) = fixture("fn f(x: u64) -> u64 eff [Fail[ArithOverflow]] { x + 0 }");
+        let produced = proposal(&source, &types);
+        assert!(matches!(&produced.candidate.kind, ExprKind::Name(name) if name == "x"));
+        assert!(has_rule(&produced, 1));
+    }
+
+    #[test]
+    fn all_six_original_folds_have_explicit_prefix_rules() {
+        for (body, rule, value, effect) in [
+            ("4 + 5", 19, 9, " eff [Fail[ArithOverflow]]"),
+            ("4 - 3", 20, 1, " eff [Fail[ArithOverflow]]"),
+            ("3 * 5", 21, 15, " eff [Fail[ArithOverflow]]"),
+            ("wrapping_add(250, 9)", 22, 3, ""),
+            ("wrapping_sub(0, 1)", 23, 255, ""),
+            ("wrapping_mul(16, 16)", 24, 0, ""),
+        ] {
+            let (source, types) = fixture(&format!("fn f() -> u8{effect} {{ {body} }}"));
+            let produced = proposal(&source, &types);
+            assert!(has_rule(&produced, rule));
+            assert!(
+                matches!(produced.candidate.kind, ExprKind::Literal(Literal::Int(n)) if n == value)
+            );
+        }
+    }
+
+    #[test]
+    fn high_u64_fold_only_and_eliminated_high_constants_are_witnessed() {
+        for (body, expected) in [
+            (
+                "wrapping_add(9223372036854775807, 2)",
+                9223372036854775809i128,
+            ),
+            (
+                "wrapping_sub(18446744073709551615, 18446744073709551615)",
+                0,
+            ),
+        ] {
+            let (source, types) = fixture(&format!("fn f() -> u64 {{ {body} }}"));
+            let produced = proposal(&source, &types);
+            assert!(
+                matches!(produced.candidate.kind, ExprKind::Literal(Literal::Int(n)) if n == expected)
+            );
+        }
+    }
+
+    #[test]
+    fn checked_overflow_and_resource_refusal_leave_the_complete_input_alone() {
+        let (source, types) = fixture("fn f() -> u8 eff [Fail[ArithOverflow]] { 255 + 1 }");
+        let before = source.clone();
+        assert!(matches!(
+            propose_rewrite(&source, &types, WitnessLimits::default()).unwrap(),
+            RewriteOutcome::Unchanged
+        ));
+        let limits = WitnessLimits {
+            max_work: 1,
+            ..WitnessLimits::default()
+        };
+        assert!(matches!(
+            propose_rewrite(&source, &types, limits),
+            Err(WitnessError::Limit)
+        ));
+        assert_eq!(source, before);
+        let (source, types) = fixture("fn f() -> u64 { wrapping_add(wrapping_add(1, 2), 3) }");
+        let limits = WitnessLimits {
+            max_proofs: 1,
+            ..WitnessLimits::default()
+        };
+        assert!(matches!(
+            propose_rewrite(&source, &types, limits),
+            Err(WitnessError::Limit)
+        ));
+    }
+
+    #[test]
+    fn prior_identity_and_congruence_support_guarded_erasure() {
+        let (source, types) =
+            fixture("fn f(x: u8) -> u8 eff [Fail[ArithOverflow]] { (x + 0) * 0 }");
+        let produced = proposal(&source, &types);
+        assert!(has_rule(&produced, 1));
+        assert!(has_rule(&produced, 6));
+        assert!(
+            produced
+                .certificate
+                .proofs
+                .iter()
+                .any(|proof| matches!(proof.reason, Reason::Congruence { .. }))
+        );
+        assert!(matches!(
+            produced.candidate.kind,
+            ExprKind::Literal(Literal::Int(0))
+        ));
+    }
+
+    #[test]
+    fn rebuilt_wrapping_call_keeps_the_real_original_callee() {
+        let (source, types) =
+            fixture("fn f(x: u64, y: u64) -> u64 { wrapping_mul(wrapping_add(x, 0), y) }");
+        let ExprKind::Call {
+            callee: original, ..
+        } = &source.kind
+        else {
+            panic!("source call");
+        };
+        let produced = proposal(&source, &types);
+        let ExprKind::Call { callee, .. } = &produced.candidate.kind else {
+            panic!("candidate call");
+        };
+        assert_eq!(callee, original);
+        assert_eq!(produced.candidate.span, source.span);
+        assert!(has_rule(&produced, 9));
+    }
+
+    #[test]
+    fn a_guarded_capture_cannot_treat_unproven_class_membership_as_totality() {
+        let mut budget = WitnessBudget::new(WitnessLimits::default()).unwrap();
+        let mut builder = Builder::new(IntegerKind::U8, WitnessLimits::default());
+        let x = builder.intern(TermNode::InputVar(0), &mut budget).unwrap();
+        let y = builder.intern(TermNode::InputVar(1), &mut budget).unwrap();
+        let sum = builder
+            .intern(
+                TermNode::Checked {
+                    op: IntOp::Add,
+                    children: [x, y],
+                },
+                &mut budget,
+            )
+            .unwrap();
+        let zero = builder.intern(TermNode::Const(0), &mut budget).unwrap();
+        let initial = builder
+            .intern(
+                TermNode::Checked {
+                    op: IntOp::Mul,
+                    children: [sum, zero],
+                },
+                &mut budget,
+            )
+            .unwrap();
+        // This is exactly the unsupported claim a class-leaf oracle would
+        // supply. No actual equality from the erased sum to a leaf exists.
+        let record = Record {
+            rule: 6,
+            bindings: [Id::from(0); 3],
+            len: 1,
+        };
+        assert!(matches!(
+            explain_records(&mut builder, &[sum], &[record], initial, zero, &mut budget),
+            Err(WitnessError::InvalidEquality)
+        ));
+        assert_ne!(
+            builder.root(initial, &mut budget).unwrap(),
+            builder.root(zero, &mut budget).unwrap()
+        );
+    }
+
+    #[test]
+    fn actual_search_match_cap_refuses_instead_of_allocating_an_unbounded_list() {
+        let mut nodes = vec![Math::Num(0)];
+        let mut root = None;
+        for index in 0..MATCHES {
+            let input = Id::from(nodes.len());
+            nodes.push(Math::Input(index as u32));
+            let term = Id::from(nodes.len());
+            nodes.push(Math::Add([input, Id::from(0)]));
+            root = Some(match root {
+                None => term,
+                Some(previous) => {
+                    let combined = Id::from(nodes.len());
+                    nodes.push(Math::WAdd([previous, term]));
+                    combined
+                }
+            });
+        }
+        assert_eq!(root, Some(Id::from(nodes.len() - 1)));
+        let expression = RecExpr::from(nodes);
+        let budget = WitnessBudget::new(WitnessLimits::HARD).unwrap();
+        assert!(matches!(
+            run_graph(&expression, budget),
+            Err(WitnessError::Limit)
+        ));
+    }
+
+    #[test]
+    fn capture_and_raw_node_caps_refuse_before_the_real_applier_runs() {
+        for record_full in [true, false] {
+            let mut graph = Graph::default();
+            let x = graph.add(Math::Input(0));
+            let zero = graph.add(Math::Num(0));
+            let original = graph.add(Math::Add([x, zero]));
+            if !record_full {
+                while graph.nodes().len() <= RAW_NODES - APPLICATION_NODES {
+                    graph.add(Math::Input(graph.nodes().len() as u32));
+                }
+            }
+            let variables = [
+                "?x".parse().unwrap(),
+                "?y".parse().unwrap(),
+                "?z".parse().unwrap(),
+            ];
+            let mut substitution = Subst::default();
+            substitution.insert(variables[0], x);
+            let records = if record_full {
+                vec![
+                    Record {
+                        rule: 1,
+                        bindings: [x; 3],
+                        len: 1
+                    };
+                    RECORDS
+                ]
+            } else {
+                Vec::new()
+            };
+            let capture = Arc::new(Mutex::new(Capture {
+                budget: Some(WitnessBudget::new(WitnessLimits::default()).unwrap()),
+                records,
+                error: None,
+            }));
+            let actual = rules();
+            let applier = RecordingApplier {
+                inner: actual[0].applier.clone(),
+                rule: 1,
+                variables,
+                capture: capture.clone(),
+            };
+            let before = graph.nodes().len();
+            assert!(
+                applier
+                    .apply_one(&mut graph, original, &substitution, None, "add-zero".into())
+                    .is_empty()
+            );
+            assert_eq!(capture.lock().unwrap().error, Some(WitnessError::Limit));
+            assert_eq!(graph.nodes().len(), before);
+            assert_ne!(graph.find(original), graph.find(x));
+        }
+    }
+
+    #[test]
+    fn initial_term_and_depth_refusals_never_turn_into_barrier_retries() {
+        let (source, types) = fixture("fn f(x: u64) -> u64 eff [Fail[ArithOverflow]] { x + 0 }");
+        for limits in [
+            WitnessLimits {
+                max_terms: 1,
+                ..WitnessLimits::default()
+            },
+            WitnessLimits {
+                max_depth: 1,
+                ..WitnessLimits::default()
+            },
+        ] {
+            assert!(matches!(
+                propose_rewrite(&source, &types, limits),
+                Err(WitnessError::Limit)
+            ));
+        }
+    }
+}
