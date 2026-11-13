@@ -1,0 +1,69 @@
+// Integration B Crucible fixtures for `vesper fuzz` and `vesper verify --refute`.
+
+// Overflows when a + b exceeds 255 (planted failure).
+fn midpoint(a: u8, b: u8) -> u8 eff [Fail[ArithOverflow]] {
+    (a + b) / 2
+}
+
+// The overflow-free replacement.
+fn midpoint_safe(a: u8, b: u8) -> u8 eff [Fail[ArithOverflow]] {
+    if a < b {
+        a + (b - a) / 2
+    } else {
+        b + (a - b) / 2
+    }
+}
+
+// A replacement that disagrees with `midpoint_safe` only when a == b == 200.
+fn midpoint_drift(a: u8, b: u8) -> u8 eff [Fail[ArithOverflow]] {
+    if a == 200 {
+        if b == 200 {
+            0
+        } else {
+            midpoint_safe(a, b)
+        }
+    } else {
+        midpoint_safe(a, b)
+    }
+}
+
+// Holds everywhere.
+fn min_is_at_most_a(a: u8, b: u8) -> bool {
+    let m = if a < b {
+        a
+    } else {
+        b
+    };
+    m <= a
+}
+
+// False only for one magic value.
+fn not_magic(key: u64, enabled: bool) -> bool {
+    if enabled {
+        key != 4660
+    } else {
+        true
+    }
+}
+
+fn positive(x: i64) -> bool {
+    x > 0
+}
+
+// True wherever it evaluates; large inputs overflow instead.
+fn square_is_nonnegative(x: i64) -> bool eff [Fail[ArithOverflow]] {
+    x * x >= 0
+}
+
+// Effect-free, inside the native batch subset.
+fn clamp(x: i64, hi: i64) -> i64 {
+    if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+fn takes_tuple(pair: (i64, i64)) -> i64 {
+    0
+}

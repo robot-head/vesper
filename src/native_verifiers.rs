@@ -1,0 +1,689 @@
+//! Stage-5 verifier hooks over the Cranelift functions `src/native.rs` emits
+//! (integration B, issue #136).
+//!
+//! The hook point is [`crate::native::object_with_observer`]: it hands every
+//! emitted function to a callback as a [`crate::native::EmittedFunction`]
+//! (the finalized IR, cloned before machine-code generation, named
+//! `u0:<func_id>`), and with no observer it is exactly
+//! `object_with_options`, so programs compile to identical code when no
+//! verifier flag is given. This module runs the wave-five backend verifiers
+//! on that set:
+//!
+//! | flag | verifier | crate |
+//! | --- | --- | --- |
+//! | `const-time` | constant-time SSA taint | `vesper_vault::verify_constant_time` |
+//! | `stack` | worst-case stack depth, shared report | `vesper_silicon::stack` via [`crate::stack_bound`] |
+//! | `realtime` | transitive realtime confinement | `vesper_resonance::{clif, confine}` |
+//! | `detfloat` | deterministic floating point | `vesper_kinetic::detfloat::audit` |
+//!
+//! Annotations the source language cannot express yet (secret parameters,
+//! stack budgets, realtime roots, allowed float calls) come from a JSON
+//! policy file ([`NativeVerifierPolicy`], schema
+//! `vesper.native-verifiers/1`). Lane 24 later derives the same policies from
+//! source capability effects; it should build a [`NativeVerifierPolicy`] and
+//! call [`verify_emitted`], leaving the hook point unchanged.
+//!
+//! Findings name source functions (instance keys) and carry the source span
+//! of the function. Instruction-level source spans are not available: the
+//! backend does not attach source locations to Cranelift instructions.
+use crate::{check::World, native::EmittedFunction, stack_bound};
+use serde::Deserialize;
+use std::collections::{BTreeMap, BTreeSet};
+
+pub const POLICY_SCHEMA: &str = "vesper.native-verifiers/1";
+
+/// One backend verifier.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NativeVerifier {
+    ConstTime,
+    Stack,
+    Realtime,
+    DetFloat,
+}
+
+impl NativeVerifier {
+    pub const ALL: [NativeVerifier; 4] = [
+        NativeVerifier::ConstTime,
+        NativeVerifier::Stack,
+        NativeVerifier::Realtime,
+        NativeVerifier::DetFloat,
+    ];
+    /// Name used in `--verify=<list>` and in findings.
+    pub fn name(self) -> &'static str {
+        match self {
+            NativeVerifier::ConstTime => "const-time",
+            NativeVerifier::Stack => "stack",
+            NativeVerifier::Realtime => "realtime",
+            NativeVerifier::DetFloat => "detfloat",
+        }
+    }
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|v| v.name() == name)
+    }
+    /// The single-verifier flag (`--verify-const-time`, ...).
+    pub fn from_flag(flag: &str) -> Option<Self> {
+        flag.strip_prefix("--verify-").and_then(Self::from_name)
+    }
+}
+
+/// Parse `const-time,stack` (or `all`). Empty or unknown entries are errors.
+pub fn parse_verifier_list(list: &str) -> Result<BTreeSet<NativeVerifier>, String> {
+    let mut out = BTreeSet::new();
+    for item in list.split(',') {
+        let item = item.trim();
+        if item == "all" {
+            out.extend(NativeVerifier::ALL);
+        } else if let Some(v) = NativeVerifier::from_name(item) {
+            out.insert(v);
+        } else {
+            return Err(format!(
+                "unknown verifier '{item}'; expected const-time, stack, realtime, detfloat or all"
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Constant-time policy of one source function.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConstTimeEntry {
+    /// Secret parameters by source name. Scalars passed by value are secret
+    /// values; `inout` scalars and aggregates are pointers to secret memory.
+    #[serde(default)]
+    pub secret: Vec<String>,
+    /// Callees (source functions or imported symbols) whose results are
+    /// declassified.
+    #[serde(default)]
+    pub declassify: Vec<String>,
+    /// Callees trusted to be constant time.
+    #[serde(default)]
+    pub constant_time_callees: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct StackSection {
+    /// `x86_64` or `aarch64`; defaults to the `--target` triple or the host.
+    #[serde(default)]
+    pub arch: Option<String>,
+    /// Root function -> `@stack_limit(bytes)` budget.
+    #[serde(default)]
+    pub roots: BTreeMap<String, u32>,
+    /// Imported symbol (or `libcall:<Name>`) -> declared worst-case bytes.
+    #[serde(default)]
+    pub external_bounds: BTreeMap<String, u32>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RealtimeSymbol {
+    #[serde(default)]
+    pub effects: Vec<String>,
+    #[serde(default)]
+    pub frame_bytes: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RealtimeSection {
+    /// Root function -> optional stack budget in bytes.
+    #[serde(default)]
+    pub roots: BTreeMap<String, Option<u64>>,
+    /// Effects roots may reach; defaults to Resonance's realtime set.
+    #[serde(default)]
+    pub allowed_effects: Option<Vec<String>>,
+    /// Imported symbols and their effects. An import that is not listed is
+    /// an unknown callee, which the verifier rejects when reachable.
+    #[serde(default)]
+    pub symbols: BTreeMap<String, RealtimeSymbol>,
+    /// Declared direct effects of source functions.
+    #[serde(default)]
+    pub effects: BTreeMap<String, Vec<String>>,
+    /// Attested total loop bounds of source functions.
+    #[serde(default)]
+    pub loop_bounds: BTreeMap<String, u64>,
+    #[serde(default = "default_true")]
+    pub reject_unbounded_loops: bool,
+    #[serde(default)]
+    pub max_loop_iterations: Option<u64>,
+}
+
+impl Default for RealtimeSection {
+    fn default() -> Self {
+        Self {
+            roots: BTreeMap::new(),
+            allowed_effects: None,
+            symbols: BTreeMap::new(),
+            effects: BTreeMap::new(),
+            loop_bounds: BTreeMap::new(),
+            reject_unbounded_loops: true,
+            max_loop_iterations: None,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct DetFloatSection {
+    /// Source functions to audit; every emitted function when absent.
+    #[serde(default)]
+    pub functions: Option<Vec<String>>,
+    #[serde(default)]
+    pub allow_fma: bool,
+    /// Callees with floats in their signature that are allowed (for
+    /// example a correctly rounded `sin`).
+    #[serde(default)]
+    pub allowed_float_calls: Vec<String>,
+    /// `pairwise` (default) or `sequential`.
+    #[serde(default)]
+    pub reduction_order: Option<String>,
+}
+
+/// Policy file contents. Every section is optional; a verifier whose
+/// section names nothing to check reports that, rather than passing
+/// silently.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct NativeVerifierPolicy {
+    pub schema: String,
+    #[serde(default)]
+    pub const_time: BTreeMap<String, ConstTimeEntry>,
+    #[serde(default)]
+    pub stack: StackSection,
+    #[serde(default)]
+    pub realtime: RealtimeSection,
+    #[serde(default)]
+    pub det_float: DetFloatSection,
+}
+
+impl NativeVerifierPolicy {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        let policy: Self =
+            serde_json::from_str(text).map_err(|e| format!("verifier policy: {e}"))?;
+        if policy.schema != POLICY_SCHEMA {
+            return Err(format!(
+                "verifier policy: schema must be \"{POLICY_SCHEMA}\", found \"{}\"",
+                policy.schema
+            ));
+        }
+        Ok(policy)
+    }
+}
+
+/// A finding mapped back to source.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeFinding {
+    pub verifier: NativeVerifier,
+    /// Source function (instance key) the finding is about.
+    pub function: String,
+    /// Cranelift instruction index, when the verifier reports one.
+    pub inst: Option<u32>,
+    pub rule: String,
+    pub message: String,
+    /// Byte span of the source function, when it is a source function.
+    pub span: Option<(usize, usize)>,
+}
+
+/// Result of [`verify_emitted`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeVerifierReport {
+    pub verifiers: BTreeSet<NativeVerifier>,
+    pub functions: usize,
+    pub findings: Vec<NativeFinding>,
+    /// The shared stack-bound report when `stack` ran.
+    pub stack: Option<stack_bound::StackBoundReport>,
+    /// Notes such as "no const_time entries: nothing to check".
+    pub notes: Vec<String>,
+}
+
+impl NativeVerifierReport {
+    pub fn accepted(&self) -> bool {
+        self.findings.is_empty()
+    }
+}
+
+/// Compile `entry` like `vesper emit --emit object` and collect the emitted
+/// functions. Returns the object bytes, CLIF text and the functions.
+pub fn emit_and_collect(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+) -> Result<(Vec<u8>, String, Vec<EmittedFunction>), String> {
+    let mut functions = Vec::new();
+    let mut observer = |f: EmittedFunction| functions.push(f);
+    let (bytes, clif) =
+        crate::native::object_with_observer(world, entry, target, optimize, Some(&mut observer))?;
+    Ok((bytes, clif, functions))
+}
+
+/// Names of the functions in the emitted set, both directions.
+struct Names {
+    /// func_id -> name (instance key for defined functions, symbol for imports).
+    by_id: BTreeMap<u32, String>,
+    /// name -> func_id.
+    by_name: BTreeMap<String, u32>,
+    defined: BTreeSet<u32>,
+}
+
+impl Names {
+    fn new(functions: &[EmittedFunction]) -> Self {
+        let mut by_id = BTreeMap::new();
+        let mut defined = BTreeSet::new();
+        for f in functions {
+            by_id.insert(f.func_id, f.key.clone());
+            defined.insert(f.func_id);
+        }
+        for f in functions {
+            for (id, symbol) in &f.callees {
+                by_id.entry(*id).or_insert_with(|| symbol.clone());
+            }
+        }
+        // The entry keeps its source name as its symbol; other defined
+        // functions are also reachable by their symbol.
+        let mut by_name: BTreeMap<String, u32> =
+            by_id.iter().map(|(id, n)| (n.clone(), *id)).collect();
+        for f in functions {
+            by_name.entry(f.symbol.clone()).or_insert(f.func_id);
+        }
+        Self {
+            by_id,
+            by_name,
+            defined,
+        }
+    }
+    fn user(&self, name: &str) -> Option<String> {
+        self.by_name.get(name).map(|id| format!("u0:{id}"))
+    }
+    /// Map a verifier's function name (`u0:N`, a key, or a symbol) to a key.
+    fn source(&self, name: &str) -> String {
+        name.strip_prefix("u0:")
+            .and_then(|i| i.parse::<u32>().ok())
+            .and_then(|i| self.by_id.get(&i))
+            .cloned()
+            .unwrap_or_else(|| name.to_string())
+    }
+}
+
+fn resolve_list(names: &Names, list: &[String], what: &str) -> Result<Vec<String>, String> {
+    list.iter()
+        .map(|n| {
+            names
+                .user(n)
+                .ok_or_else(|| format!("verifier policy: {what} names unknown function '{n}'"))
+        })
+        .collect()
+}
+
+fn arch_of(policy: &StackSection, target: Option<&str>) -> Result<vesper_silicon::Arch, String> {
+    let name = match (&policy.arch, target) {
+        (Some(arch), _) => arch.clone(),
+        (None, Some(triple)) => triple.split('-').next().unwrap_or_default().to_string(),
+        (None, None) => std::env::consts::ARCH.to_string(),
+    };
+    match name.as_str() {
+        "x86_64" => Ok(vesper_silicon::Arch::X86_64),
+        "aarch64" | "arm64" => Ok(vesper_silicon::Arch::Aarch64),
+        other => Err(format!(
+            "stack verifier supports x86_64 and aarch64, not '{other}'"
+        )),
+    }
+}
+
+fn effect(name: &str) -> vesper_resonance::confine::Effect {
+    use vesper_resonance::confine::Effect as E;
+    match name {
+        "Realtime" => E::Realtime,
+        "ConstDenorm" => E::ConstDenorm,
+        "RtBus" => E::RtBus,
+        "Isa" => E::Isa,
+        "Mmio" => E::Mmio,
+        "WaitFreeAtomic" => E::WaitFreeAtomic,
+        "Alloc" => E::Alloc,
+        "Dealloc" => E::Dealloc,
+        "BlockingLock" => E::BlockingLock,
+        "BlockingSyscall" => E::BlockingSyscall,
+        "Async" => E::Async,
+        "Net" => E::Net,
+        "Storage" => E::Storage,
+        "Unwind" => E::Unwind,
+        "Ffi" => E::Ffi,
+        other => E::Other(other.to_string()),
+    }
+}
+
+/// Run `verifiers` over the emitted functions.
+pub fn verify_emitted(
+    world: &World,
+    functions: &[EmittedFunction],
+    target: Option<&str>,
+    verifiers: &BTreeSet<NativeVerifier>,
+    policy: &NativeVerifierPolicy,
+) -> Result<NativeVerifierReport, String> {
+    let names = Names::new(functions);
+    let mut report = NativeVerifierReport {
+        verifiers: verifiers.clone(),
+        functions: functions.len(),
+        findings: Vec::new(),
+        stack: None,
+        notes: Vec::new(),
+    };
+    let span_of = |key: &str| world.functions.get(key).map(|f| (f.span.start, f.span.end));
+    let push = |report: &mut NativeVerifierReport,
+                verifier: NativeVerifier,
+                function: &str,
+                inst: Option<u32>,
+                rule: &str,
+                message: String| {
+        let function = names.source(function);
+        let span = span_of(&function);
+        report.findings.push(NativeFinding {
+            verifier,
+            function,
+            inst,
+            rule: rule.to_string(),
+            message,
+            span,
+        });
+    };
+    let by_key: BTreeMap<&str, &EmittedFunction> =
+        functions.iter().map(|f| (f.key.as_str(), f)).collect();
+
+    if verifiers.contains(&NativeVerifier::ConstTime) {
+        if policy.const_time.is_empty() {
+            report.notes.push(
+                "const-time: the policy has no const_time entries; nothing was checked".into(),
+            );
+        }
+        for (name, entry) in &policy.const_time {
+            let emitted = by_key.get(name.as_str()).ok_or_else(|| {
+                format!("verifier policy: const_time names '{name}', which was not emitted")
+            })?;
+            let source = world
+                .functions
+                .get(name)
+                .ok_or_else(|| format!("verifier policy: '{name}' is not a source function"))?;
+            if !source.generics.is_empty() {
+                return Err(format!(
+                    "verifier policy: const_time on generic function '{name}' is not supported"
+                ));
+            }
+            let sret = usize::from(crate::layout::Layout::of(world, &source.result)?.aggregate());
+            let mut ct = vesper_vault::CtPolicy::default();
+            for secret in &entry.secret {
+                let (index, param) = source
+                    .params
+                    .iter()
+                    .enumerate()
+                    .find(|(_, p)| p.name == *secret)
+                    .ok_or_else(|| {
+                        format!("verifier policy: '{name}' has no parameter '{secret}'")
+                    })?;
+                let pointer = param.pass == crate::ast::Pass::Inout
+                    || crate::layout::Layout::of(world, &param.ty)?.aggregate();
+                if pointer {
+                    ct.secret_pointer_params.push(index + sret);
+                } else {
+                    ct.secret_params.push(index + sret);
+                }
+            }
+            ct.declassify
+                .extend(resolve_list(&names, &entry.declassify, "declassify")?);
+            ct.constant_time_callees.extend(resolve_list(
+                &names,
+                &entry.constant_time_callees,
+                "constant_time_callees",
+            )?);
+            for f in vesper_vault::verify_constant_time(&emitted.function, &ct) {
+                push(
+                    &mut report,
+                    NativeVerifier::ConstTime,
+                    &f.function,
+                    f.inst,
+                    f.rule,
+                    f.message,
+                );
+            }
+        }
+    }
+
+    if verifiers.contains(&NativeVerifier::Stack) {
+        let arch = arch_of(&policy.stack, target)?;
+        if policy.stack.roots.is_empty() {
+            report
+                .notes
+                .push("stack: the policy has no stack roots; only recursion and unbounded calls are reported".into());
+        }
+        let program = vesper_silicon::stack::Program::compile(
+            arch,
+            functions.iter().map(|f| f.function.clone()).collect(),
+        )
+        .map_err(|e| format!("stack verifier: {e}"))?;
+        let mut graph = stack_bound::StackGraph::from(program.graph());
+        for f in &mut graph.functions {
+            f.name = names.source(&f.name);
+        }
+        for e in &mut graph.external {
+            e.symbol = names.source(&e.symbol);
+        }
+        for root in policy.stack.roots.keys() {
+            if !by_key.contains_key(root.as_str()) {
+                return Err(format!(
+                    "verifier policy: stack root '{root}' was not emitted"
+                ));
+            }
+        }
+        let bound = stack_bound::stack_bound_report(
+            &graph,
+            &stack_bound::StackBoundPolicy {
+                roots: policy
+                    .stack
+                    .roots
+                    .iter()
+                    .map(|(function, budget)| stack_bound::StackBudget {
+                        function: function.clone(),
+                        budget_bytes: *budget,
+                    })
+                    .collect(),
+                external_bounds: policy.stack.external_bounds.clone(),
+                indirect_targets: BTreeMap::new(),
+            },
+        )?;
+        for f in &bound.findings {
+            push(
+                &mut report,
+                NativeVerifier::Stack,
+                &f.function,
+                f.inst,
+                &f.rule,
+                f.message.clone(),
+            );
+        }
+        report.stack = Some(bound);
+    }
+
+    if verifiers.contains(&NativeVerifier::Realtime) {
+        use vesper_resonance::{
+            clif::{SymbolEffects, SymbolInfo, call_graph_from_clif},
+            confine::{RealtimePolicy, RealtimeRoot, verify_realtime},
+        };
+        if policy.realtime.roots.is_empty() {
+            report
+                .notes
+                .push("realtime: the policy has no realtime roots; nothing was checked".into());
+        }
+        let mut table = SymbolEffects::default();
+        for (id, name) in &names.by_id {
+            table.user_names.insert((0, *id), name.clone());
+        }
+        for (symbol, info) in &policy.realtime.symbols {
+            if names
+                .by_name
+                .get(symbol)
+                .is_some_and(|id| names.defined.contains(id))
+            {
+                return Err(format!(
+                    "verifier policy: realtime symbol '{symbol}' is a source function; use realtime.effects"
+                ));
+            }
+            table.symbols.insert(
+                symbol.clone(),
+                SymbolInfo {
+                    effects: info.effects.iter().map(|e| effect(e)).collect(),
+                    frame_bytes: info.frame_bytes,
+                },
+            );
+        }
+        for (function, effects) in &policy.realtime.effects {
+            table.defined_effects.insert(
+                function.clone(),
+                effects.iter().map(|e| effect(e)).collect(),
+            );
+        }
+        table.loop_bounds = policy.realtime.loop_bounds.clone();
+        let input: Vec<(String, cranelift_codegen::ir::Function)> = functions
+            .iter()
+            .map(|f| (f.key.clone(), f.function.clone()))
+            .collect();
+        let graph =
+            call_graph_from_clif(&input, &table).map_err(|e| format!("realtime verifier: {e}"))?;
+        let mut roots = Vec::new();
+        for (root, budget) in &policy.realtime.roots {
+            let function = graph.by_name(root).ok_or_else(|| {
+                format!("verifier policy: realtime root '{root}' was not emitted")
+            })?;
+            roots.push(RealtimeRoot {
+                function,
+                stack_budget_bytes: *budget,
+            });
+        }
+        let mut rt = RealtimePolicy::new(roots);
+        if let Some(allowed) = &policy.realtime.allowed_effects {
+            rt.allowed_effects = allowed.iter().map(|e| effect(e)).collect();
+        }
+        rt.reject_unbounded_loops = policy.realtime.reject_unbounded_loops;
+        rt.max_loop_iterations = policy.realtime.max_loop_iterations;
+        for f in verify_realtime(&graph, &rt).map_err(|e| format!("realtime verifier: {e}"))? {
+            push(
+                &mut report,
+                NativeVerifier::Realtime,
+                &f.function,
+                f.inst,
+                f.rule,
+                f.message,
+            );
+        }
+    }
+
+    if verifiers.contains(&NativeVerifier::DetFloat) {
+        let mut det = vesper_kinetic::DetFloatPolicy {
+            allow_fma: policy.det_float.allow_fma,
+            allowed_float_calls: policy.det_float.allowed_float_calls.clone(),
+            user_names: names
+                .by_id
+                .iter()
+                .map(|(id, n)| ((0, *id), n.clone()))
+                .collect(),
+            ..Default::default()
+        };
+        det.reduction_order = match policy.det_float.reduction_order.as_deref() {
+            None | Some("pairwise") => vesper_kinetic::ReductionOrder::PairwiseTree,
+            Some("sequential") => vesper_kinetic::ReductionOrder::Sequential,
+            Some(other) => {
+                return Err(format!(
+                    "verifier policy: det_float.reduction_order must be pairwise or sequential, not '{other}'"
+                ));
+            }
+        };
+        let selected: Vec<&EmittedFunction> = match &policy.det_float.functions {
+            None => functions.iter().collect(),
+            Some(list) => list
+                .iter()
+                .map(|n| {
+                    by_key.get(n.as_str()).copied().ok_or_else(|| {
+                        format!("verifier policy: det_float names '{n}', which was not emitted")
+                    })
+                })
+                .collect::<Result<_, _>>()?,
+        };
+        // Calls between audited emitted functions are checked at the callee.
+        for f in &selected {
+            det.allowed_float_calls.push(f.key.clone());
+        }
+        for f in selected {
+            let findings = vesper_kinetic::audit(&f.function, &det)
+                .map_err(|e| format!("detfloat verifier on '{}': {e}", f.key))?;
+            for finding in findings {
+                push(
+                    &mut report,
+                    NativeVerifier::DetFloat,
+                    &f.key,
+                    finding.inst,
+                    finding.rule,
+                    finding.message,
+                );
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Compile and verify in one call.
+pub fn verify_native(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    verifiers: &BTreeSet<NativeVerifier>,
+    policy: &NativeVerifierPolicy,
+) -> Result<(Vec<u8>, String, NativeVerifierReport), String> {
+    let (bytes, clif, functions) = emit_and_collect(world, entry, target, optimize)?;
+    let report = verify_emitted(world, &functions, target, verifiers, policy)?;
+    Ok((bytes, clif, report))
+}
+
+/// Render findings with `file:line:col` locations.
+pub fn render(report: &NativeVerifierReport, file: &str, source: &str) -> String {
+    let mut out = String::new();
+    for note in &report.notes {
+        out.push_str(&format!("note: {note}\n"));
+    }
+    if let Some(stack) = &report.stack {
+        out.push_str(&stack_bound::render(stack));
+    }
+    for f in &report.findings {
+        let location = f.span.map_or_else(String::new, |(start, end)| {
+            // Function spans include leading comments; point at the item.
+            let mut start = start.min(source.len());
+            let end = end.min(source.len()).max(start);
+            while let Some(rest) = source.get(start..end) {
+                let trimmed = rest.trim_start();
+                let skipped = rest.len() - trimmed.len();
+                if trimmed.starts_with("//") {
+                    start += skipped + trimmed.find('\n').map_or(trimmed.len(), |n| n + 1);
+                } else {
+                    start += skipped;
+                    break;
+                }
+            }
+            let before = &source[..start];
+            let line = before.matches('\n').count() + 1;
+            let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
+            format!("{file}:{line}:{column}: ")
+        });
+        let inst = f.inst.map_or_else(String::new, |i| format!(" (inst {i})"));
+        out.push_str(&format!(
+            "{location}error[{}/{}]: {}{inst}: {}\n",
+            f.verifier.name(),
+            f.rule,
+            f.function,
+            f.message
+        ));
+    }
+    out
+}
