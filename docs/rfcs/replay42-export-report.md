@@ -96,8 +96,10 @@ also passed. These are coordinator executions, not source-lane executions.
 Separately, the earlier full root-package baseline at `94b704f` passed 884 tests
 across 74 targets with zero failures/ignored, including the pre-metric kernel
 matrix (105.72s). That baseline precedes the structural-metric fix; its count
-is not combined with the final focused run. Final all-target strict Clippy was
-still pending when this report was updated. Read-only semantic review by the
+is not combined with the final focused run. Final package all-target strict
+Clippy passed on `ed70d8d` in 19.82s, recorded in
+`/tmp/replay42-root-final-clippy.log`; final formatting/diff checks also passed.
+Read-only semantic review by the
 model owner found no mapping defect across the 24 cases, kinds or proof arguments;
 the coordinator reviewed the subsequent structural-counter fix as correct.
 
