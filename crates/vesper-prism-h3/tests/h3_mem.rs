@@ -280,7 +280,8 @@ fn a_dropped_responder_is_detected_and_reset() {
     let r = p.request();
     let sent = r
         .responder
-        .reset(&mut p.server, &mut p.s, Code::REQUEST_REJECTED);
+        .reset(&mut p.server, &mut p.s, Code::REQUEST_REJECTED)
+        .unwrap();
     assert_eq!(sent.reset, Some(Code::REQUEST_REJECTED));
     assert_eq!(
         p.response(),
@@ -843,4 +844,289 @@ fn backpressured_transport_still_delivers() {
         }
     }
     panic!("no response");
+}
+
+#[test]
+fn fin_behind_a_blocked_section_waits_for_the_frames_after_it() {
+    // HEADERS that block on the encoder stream, then DATA and FIN in the
+    // same read: the frame boundary is checked only once DATA is processed.
+    let (mut srv, mut c, mut s) = raw();
+    raw_control(&mut c);
+    for _ in 0..2 {
+        srv.poll(&mut s);
+    }
+    let mut enc = Encoder::new(EncoderConfig::default());
+    enc.apply_peer_settings(4096, 16);
+    let list: Vec<Field> = [
+        (":method", "POST"),
+        (":scheme", "https"),
+        (":authority", "a.test"),
+        (":path", "/upload"),
+        ("content-length", "5"),
+        ("x-custom", "value-1"),
+    ]
+    .iter()
+    .map(|(n, v)| Field::new(*n, *v))
+    .collect();
+    let id = c.raw_open(false);
+    let block = enc.encode(id, &list);
+    assert_ne!(block[0], 0, "references the dynamic table");
+    let mut w = Vec::new();
+    frame::write_frame(&mut w, frame::HEADERS, &block);
+    frame::write_frame(&mut w, frame::DATA, b"hello");
+    c.write(id, &w).unwrap();
+    c.finish(id).unwrap();
+    for _ in 0..3 {
+        srv.poll(&mut s);
+    }
+    assert!(srv.error().is_none(), "{:?}", srv.error());
+    assert!(srv.poll_event().is_none(), "blocked");
+    let es = c.raw_open(true);
+    let mut w = vec![frame::STREAM_QPACK_ENCODER as u8];
+    w.extend(enc.take_encoder_stream());
+    c.write(es, &w).unwrap();
+    for _ in 0..3 {
+        srv.poll(&mut s);
+    }
+    assert!(srv.error().is_none(), "{:?}", srv.error());
+    let Some(Event::Request(r)) = srv.poll_event() else {
+        panic!("unblocked request")
+    };
+    assert_eq!(r.body, b"hello");
+    let _ = r.responder.reset(&mut srv, &mut s, Code::NO_ERROR).unwrap();
+}
+
+#[test]
+fn client_fin_behind_a_blocked_response_waits_for_its_data() {
+    let (mut client, mut c, mut s, _) = raw_server();
+    let id = client.send_request(&mut c, &get("/")).unwrap();
+    for _ in 0..3 {
+        client.poll(&mut c);
+    }
+    // A response that blocks on the dynamic table, with DATA and FIN
+    // behind it in the same read.
+    let mut enc = Encoder::new(EncoderConfig::default());
+    enc.apply_peer_settings(4096, 16);
+    let list = [
+        Field::new(":status", "200"),
+        Field::new("content-length", "2"),
+        Field::new("x-custom", "value-1"),
+    ];
+    let block = enc.encode(id, &list);
+    assert_ne!(block[0], 0, "references the dynamic table");
+    let mut w = Vec::new();
+    frame::write_frame(&mut w, frame::HEADERS, &block);
+    frame::write_frame(&mut w, frame::DATA, b"ok");
+    s.write(id, &w).unwrap();
+    s.finish(id).unwrap();
+    for _ in 0..3 {
+        client.poll(&mut c);
+    }
+    assert!(client.error().is_none(), "{:?}", client.error());
+    assert!(client.poll_event().is_none(), "blocked");
+    let es = s.raw_open(true);
+    let mut w = vec![frame::STREAM_QPACK_ENCODER as u8];
+    w.extend(enc.take_encoder_stream());
+    s.write(es, &w).unwrap();
+    for _ in 0..3 {
+        client.poll(&mut c);
+    }
+    assert!(client.error().is_none(), "{:?}", client.error());
+    let Some(ClientEvent::Response(resp)) = client.poll_event() else {
+        panic!("unblocked response")
+    };
+    assert_eq!(resp.body, b"ok");
+}
+
+#[test]
+fn reset_refuses_a_foreign_responder() {
+    let mut a = Pair::new();
+    let mut b = Pair::new();
+    let ida = a.client.send_request(&mut a.c, &get("/a")).unwrap();
+    let idb = b.client.send_request(&mut b.c, &get("/b")).unwrap();
+    assert_eq!(ida, idb, "stream ids repeat across connections");
+    let ra = a.request();
+    let rb = b.request();
+    // Resetting `a`'s responder through `b` touches neither request.
+    let Err((responder, SendError::Foreign)) =
+        ra.responder.reset(&mut b.server, &mut b.s, Code::NO_ERROR)
+    else {
+        panic!("foreign reset accepted")
+    };
+    assert!(b.s.peer_reset(idb).is_none());
+    assert!(b.c.peer_reset(idb).is_none());
+    let ok = Response {
+        status: 200,
+        fields: vec![],
+        body: b"b".to_vec(),
+    };
+    let _ = rb.responder.respond(&mut b.server, &mut b.s, ok).unwrap();
+    assert!(matches!(b.response(), ClientEvent::Response(r) if r.body == b"b"));
+    // The original responder is still armed and answers its own request.
+    let ok = Response {
+        status: 200,
+        fields: vec![],
+        body: b"a".to_vec(),
+    };
+    let _ = responder.respond(&mut a.server, &mut a.s, ok).unwrap();
+    assert!(matches!(a.response(), ClientEvent::Response(r) if r.body == b"a"));
+    assert_eq!(a.server.stats().leaked_responders, 0);
+    assert_eq!(b.server.stats().leaked_responders, 0);
+}
+
+#[test]
+fn critical_streams_wait_for_stream_credit() {
+    let mut p = Pair::new();
+    p.c.uni_credit = Some(1);
+    p.s.uni_credit = Some(2);
+    p.step();
+    assert!(p.client.error().is_none(), "{:?}", p.client.error());
+    assert!(p.server.error().is_none(), "{:?}", p.server.error());
+    assert!(matches!(
+        p.client.send_request(&mut p.c, &get("/")),
+        Err(vesper_prism_h3::client::ClientError::NotReady)
+    ));
+    // The peer raises the limit: initialisation resumes where it stopped.
+    p.c.uni_credit = Some(2);
+    p.s.uni_credit = Some(1);
+    p.step();
+    let id = p.client.send_request(&mut p.c, &get("/")).unwrap();
+    let r = p.request();
+    assert_eq!(r.stream_id, id);
+    let ok = Response {
+        status: 200,
+        fields: vec![],
+        body: b"up".to_vec(),
+    };
+    let _ = r.responder.respond(&mut p.server, &mut p.s, ok).unwrap();
+    assert!(matches!(p.response(), ClientEvent::Response(r) if r.body == b"up"));
+    assert_eq!(p.c.uni_credit, Some(0));
+    assert_eq!(p.s.uni_credit, Some(0));
+}
+
+#[test]
+fn respond_reserves_the_whole_response_under_backpressure() {
+    let mut p = Pair::with(
+        H3Config::default(),
+        H3Config {
+            max_stream_buffer: 200,
+            ..H3Config::default()
+        },
+    );
+    let id = p.client.send_request(&mut p.c, &get("/")).unwrap();
+    let r = p.request();
+    p.s.write_limit = 1;
+    let big = Response {
+        status: 200,
+        fields: vec![],
+        body: vec![7; 190],
+    };
+    // Body fits on its own, HEADERS plus body do not: nothing is queued.
+    let Err((responder, SendError::BufferFull)) = r.responder.respond(&mut p.server, &mut p.s, big)
+    else {
+        panic!("over budget accepted")
+    };
+    p.s.write_limit = 0;
+    p.step();
+    assert!(p.client.poll_event().is_none(), "nothing was sent");
+    let small = Response {
+        status: 200,
+        fields: vec![],
+        body: vec![7; 40],
+    };
+    let _ = responder.respond(&mut p.server, &mut p.s, small).unwrap();
+    let ClientEvent::Response(resp) = p.response() else {
+        panic!("one well-formed response")
+    };
+    assert_eq!(resp.stream_id, id);
+    assert_eq!(resp.body, vec![7; 40]);
+}
+
+/// A client and a raw server with SETTINGS sent; returns the client, its
+/// transport, the server transport and the server's control stream.
+fn raw_server() -> (ClientConnection, Mem, Mem, u64) {
+    let (c, mut s) = pair();
+    let client = ClientConnection::new(H3Config::default());
+    let ctl = s.raw_open(true);
+    let mut w = Vec::new();
+    frame::put_varint(&mut w, frame::STREAM_CONTROL);
+    Settings::default().encode(&mut w);
+    s.write(ctl, &w).unwrap();
+    (client, c, s, ctl)
+}
+
+#[test]
+fn not_modified_keeps_the_representation_length() {
+    let (mut client, mut c, mut s, _) = raw_server();
+    let id = client.send_request(&mut c, &get("/cached")).unwrap();
+    client.poll(&mut c);
+    s.write(
+        id,
+        &headers(&[(":status", "304"), ("content-length", "100")]),
+    )
+    .unwrap();
+    s.finish(id).unwrap();
+    for _ in 0..3 {
+        client.poll(&mut c);
+    }
+    let Some(ClientEvent::Response(resp)) = client.poll_event() else {
+        panic!("304 delivered")
+    };
+    assert_eq!(resp.head.status, 304);
+    assert!(resp.body.is_empty());
+    // A 304 that does carry content is malformed.
+    let id = client.send_request(&mut c, &get("/cached")).unwrap();
+    client.poll(&mut c);
+    let mut w = headers(&[(":status", "304"), ("content-length", "1")]);
+    frame::write_frame(&mut w, frame::DATA, b"x");
+    s.write(id, &w).unwrap();
+    s.finish(id).unwrap();
+    for _ in 0..3 {
+        client.poll(&mut c);
+    }
+    assert_eq!(
+        client.poll_event(),
+        Some(ClientEvent::Failed {
+            stream_id: id,
+            code: Code::MESSAGE_ERROR
+        })
+    );
+}
+
+#[test]
+fn each_lower_goaway_rejects_newly_excluded_requests() {
+    let (mut client, mut c, mut s, ctl) = raw_server();
+    let first = client.send_request(&mut c, &get("/1")).unwrap();
+    let second = client.send_request(&mut c, &get("/2")).unwrap();
+    client.poll(&mut c);
+    let mut w = Vec::new();
+    frame::write_varint_frame(&mut w, frame::GOAWAY, (1 << 62) - 4);
+    s.write(ctl, &w).unwrap();
+    client.poll(&mut c);
+    assert_eq!(
+        client.poll_event(),
+        Some(ClientEvent::GoAway((1 << 62) - 4))
+    );
+    assert!(client.poll_event().is_none());
+    // The final cutoff excludes the second request only.
+    let mut w = Vec::new();
+    frame::write_varint_frame(&mut w, frame::GOAWAY, second);
+    s.write(ctl, &w).unwrap();
+    client.poll(&mut c);
+    assert_eq!(client.poll_event(), Some(ClientEvent::GoAway(second)));
+    assert_eq!(
+        client.poll_event(),
+        Some(ClientEvent::Failed {
+            stream_id: second,
+            code: Code::REQUEST_REJECTED
+        })
+    );
+    // The same cutoff again changes nothing.
+    let mut w = Vec::new();
+    frame::write_varint_frame(&mut w, frame::GOAWAY, second);
+    s.write(ctl, &w).unwrap();
+    client.poll(&mut c);
+    assert!(client.poll_event().is_none());
+    assert!(client.error().is_none());
+    assert!(first < second);
 }

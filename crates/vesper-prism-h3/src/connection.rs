@@ -161,6 +161,8 @@ pub(crate) struct Core {
     pub(crate) encoder: Encoder,
     pub(crate) decoder: Decoder,
     local: Option<Local>,
+    /// Critical streams opened so far while stream credit is short.
+    opening: Vec<u64>,
     pub(crate) peer_settings: Option<Settings>,
     peer_control: Option<u64>,
     peer_encoder: Option<u64>,
@@ -190,6 +192,7 @@ impl Core {
                 max_blocked_bytes: cfg.max_blocked_bytes,
             }),
             local: None,
+            opening: Vec::new(),
             peer_settings: None,
             peer_control: None,
             peer_encoder: None,
@@ -218,13 +221,17 @@ impl Core {
         if self.local.is_some() {
             return Ok(true);
         }
-        let control = match t.open_uni() {
-            Ok(id) => id,
-            Err(TransportError::NotReady) => return Ok(false),
-            Err(e) => return Err(ConnectionError::Transport(e)),
-        };
-        let encoder = t.open_uni().map_err(ConnectionError::Transport)?;
-        let decoder = t.open_uni().map_err(ConnectionError::Transport)?;
+        // Out of stream credit is not an error: the streams opened so far
+        // are kept and the rest are opened on a later poll.
+        while self.opening.len() < 3 {
+            match t.open_uni() {
+                Ok(id) => self.opening.push(id),
+                Err(TransportError::NotReady) => return Ok(false),
+                Err(e) => return Err(ConnectionError::Transport(e)),
+            }
+        }
+        let (control, encoder, decoder) = (self.opening[0], self.opening[1], self.opening[2]);
+        self.opening.clear();
         self.local = Some(Local {
             control,
             encoder,
@@ -569,16 +576,22 @@ impl<S> Responder<S> {
     }
 
     /// Abandons the response: RESET_STREAM (and STOP_SENDING) with `code`.
+    /// Works after the stream is gone; refused only with
+    /// [`SendError::Foreign`] when `conn` is not the connection the
+    /// request came from, in which case the responder comes back armed.
     pub fn reset<T: Transport>(
         self,
         conn: &mut ServerConnection,
         t: &mut T,
         code: Code,
-    ) -> ResponseSent {
+    ) -> Result<ResponseSent, (Self, SendError)> {
+        if self.conn != conn.id {
+            return Err((self, SendError::Foreign));
+        }
         conn.reset_request(t, self.stream_id, code);
         let mut sent = self.discharge();
         sent.reset = Some(code);
-        sent
+        Ok(sent)
     }
 }
 
@@ -650,7 +663,7 @@ impl Responder<HeadersPending> {
         if let Err(e) = conn.check_responder(self.conn, self.stream_id) {
             return Err((self, e));
         }
-        match conn.send_response_headers(t, self.stream_id, status, fields, content_length) {
+        match conn.send_response_headers(t, self.stream_id, status, fields, content_length, 0) {
             Ok(()) => Ok(self.transition()),
             Err(e) => Err((self, e)),
         }
@@ -1127,6 +1140,11 @@ impl ServerConnection {
             return Ok(());
         };
         rs.fin = true;
+        // A blocked section holds frames behind it in the reader; the
+        // frame boundary is checked once they are processed on unblock.
+        if matches!(rs.phase, Phase::Blocked { .. }) {
+            return Ok(());
+        }
         if rs.reader.finish().is_err() {
             return Err(ConnectionError::Frame {
                 stream_id: id,
@@ -1262,6 +1280,7 @@ impl ServerConnection {
         status: u16,
         fields: Vec<Field>,
         content_length: Option<u64>,
+        reserve: usize,
     ) -> Result<(), SendError> {
         if !(200..=599).contains(&status) {
             return Err(SendError::InvalidResponse(MessageError::InvalidStatus));
@@ -1293,15 +1312,21 @@ impl ServerConnection {
                 MessageError::ContentLengthMismatch,
             ));
         }
+        // Checked before encoding: an encoded section is registered with the
+        // QPACK encoder (it pins dynamic entries until acknowledged), so it
+        // must not be discarded. `reserve` is room the caller needs after
+        // the HEADERS frame, so a whole response is refused up front.
+        let budget = self
+            .core
+            .cfg
+            .max_stream_buffer
+            .saturating_sub(self.core.queued(id));
+        if headers_frame_bound(&list).saturating_add(reserve) > budget {
+            return Err(SendError::BufferFull);
+        }
         let block = self.core.encoder.encode(id, &list);
         let mut out = Vec::with_capacity(block.len() + 8);
         frame::write_frame(&mut out, frame::HEADERS, &block);
-        if out.len()
-            > self.core.cfg.max_stream_buffer
-                - self.core.queued(id).min(self.core.cfg.max_stream_buffer)
-        {
-            return Err(SendError::BufferFull);
-        }
         self.core.queue(id, &out);
         let rs = self.requests.get_mut(&id).expect("checked");
         rs.reply = Reply::Headers {
@@ -1329,20 +1354,14 @@ impl ServerConnection {
                 MessageError::ContentLengthMismatch,
             ));
         }
-        let budget = self
-            .core
-            .cfg
-            .max_stream_buffer
-            .saturating_sub(self.core.queued(id));
-        if wire_body + 9 > budget {
-            return Err(SendError::BufferFull);
-        }
+        let reserve = if wire_body > 0 { wire_body + 9 } else { 0 };
         self.send_response_headers(
             t,
             id,
             response.status,
             response.fields,
             Some(response.body.len() as u64),
+            reserve,
         )?;
         if wire_body > 0 {
             self.send_response_data(t, id, &response.body)?;
@@ -1444,4 +1463,15 @@ impl ServerConnection {
             rs.fin = true;
         }
     }
+}
+
+/// An upper bound on the HEADERS frame the QPACK encoder produces for
+/// `fields`: every representation is at most a literal name and value
+/// (one prefix byte, two varint lengths of at most 10 bytes, raw bytes;
+/// Huffman is used only when shorter), behind a section prefix of two
+/// integers and a frame header of type and 8-byte length.
+fn headers_frame_bound(fields: &[Field]) -> usize {
+    fields.iter().fold(20 + 9, |n, f| {
+        n.saturating_add(21 + f.name.len() + f.value.len())
+    })
 }

@@ -141,9 +141,15 @@ bounded stream-event queue, which drops events when full.
 
 All on this host (rustc 1.97.0, debug build, Linux x86_64).
 
-* `cargo test -p vesper-prism-h3 --locked`: 41 tests pass (14 unit,
-  15 `h3_mem`, 2 `qpack_qifs`, 3 `qpack_rfc`, 5 `robustness`, 2
-  `warp_prism`).
+* `cargo test -p vesper-prism-h3 --locked`: 48 tests pass (14 unit,
+  22 `h3_mem`, 2 `qpack_qifs`, 3 `qpack_rfc`, 5 `robustness`, 2
+  `warp_prism`). Seven `h3_mem` tests come from the PR review: FIN behind a
+  QPACK-blocked section (server and client), `Responder::reset` refusing
+  a responder from another connection, critical streams waiting for
+  stream credit, `respond` reserving HEADERS plus body before it encodes
+  anything, 304 keeping the representation's `content-length`, and a
+  lower second GOAWAY rejecting the requests it newly excludes. Each one
+  fails with its fix reverted.
 * **RFC 9204 Appendix B** (`tests/qpack_rfc.rs`): every exchange (B.1–B.5)
   replayed byte for byte against the decoder, including the encoder stream
   fed one byte at a time, the blocked section of B.2, the Section

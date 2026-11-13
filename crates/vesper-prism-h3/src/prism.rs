@@ -13,7 +13,7 @@ use vesper_prism::service::{Dispatch, ParsedRequest, Service, method_not_allowed
 use vesper_prism::target::TargetLimits;
 use vesper_prism::{Header, Request as PrismRequest, RequestHead as PrismHead};
 
-use crate::connection::{Event, Request, Response, ResponseSent, SendError, ServerConnection};
+use crate::connection::{Event, Request, Response, ResponseSent, ServerConnection};
 use crate::error::Code;
 use crate::message::RequestHead;
 use crate::qpack::Field;
@@ -157,13 +157,15 @@ pub fn serve<T, X: Transport>(
                 let (response, close) = from_prism(reply);
                 let sent: ResponseSent = match responder.respond(conn, t, response) {
                     Ok(sent) => sent,
-                    Err((responder, SendError::InvalidResponse(_))) => {
-                        report.reset += 1;
-                        responder.reset(conn, t, Code::INTERNAL_ERROR)
-                    }
                     Err((responder, _)) => {
                         report.reset += 1;
-                        responder.reset(conn, t, Code::INTERNAL_ERROR)
+                        match responder.reset(conn, t, Code::INTERNAL_ERROR) {
+                            Ok(sent) => sent,
+                            // The responder came from `conn`, so this is
+                            // unreachable; dropping it still resets the
+                            // stream on its own connection.
+                            Err(_) => continue,
+                        }
                     }
                 };
                 if sent.reset.is_none() {

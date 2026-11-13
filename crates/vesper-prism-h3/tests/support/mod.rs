@@ -35,6 +35,8 @@ pub struct Mem {
     side: usize,
     /// Max bytes accepted per write call (0 = unlimited).
     pub write_limit: usize,
+    /// Unidirectional streams this side may still open (None = unlimited).
+    pub uni_credit: Option<usize>,
 }
 
 pub fn pair() -> (Mem, Mem) {
@@ -44,11 +46,13 @@ pub fn pair() -> (Mem, Mem) {
             shared: shared.clone(),
             side: 0,
             write_limit: 0,
+            uni_credit: None,
         },
         Mem {
             shared,
             side: 1,
             write_limit: 0,
+            uni_credit: None,
         },
     )
 }
@@ -97,6 +101,11 @@ impl Mem {
 
 impl Transport for Mem {
     fn open_uni(&mut self) -> Result<u64, TransportError> {
+        match &mut self.uni_credit {
+            Some(0) => return Err(TransportError::NotReady),
+            Some(n) => *n -= 1,
+            None => {}
+        }
         Ok(self.open(true))
     }
     fn open_bidi(&mut self) -> Result<u64, TransportError> {

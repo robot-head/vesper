@@ -101,11 +101,21 @@ struct ResponseStream {
     fin: bool,
 }
 
+impl ResponseStream {
+    /// 204 and 304 responses never carry content (RFC 9110 §15.3.5, §15.4.5).
+    fn bodyless(&self) -> bool {
+        self.head
+            .as_ref()
+            .is_some_and(|h| matches!(h.status, 204 | 304))
+    }
+}
+
 pub struct ClientConnection {
     core: Core,
     streams: BTreeMap<u64, ResponseStream>,
     ready: VecDeque<ClientEvent>,
-    goaway_seen: bool,
+    /// The lowest GOAWAY cutoff already acted on.
+    goaway_seen: Option<u64>,
 }
 
 impl ClientConnection {
@@ -114,7 +124,7 @@ impl ClientConnection {
             core: Core::new(cfg),
             streams: BTreeMap::new(),
             ready: VecDeque::new(),
-            goaway_seen: false,
+            goaway_seen: None,
         }
     }
 
@@ -215,8 +225,12 @@ impl ClientConnection {
             }
         }
         self.core.read_uni(t, false)?;
-        if let (Some(g), false) = (self.core.goaway_received, self.goaway_seen) {
-            self.goaway_seen = true;
+        // A server may lower its cutoff in later GOAWAY frames; each
+        // decrease rejects the requests it newly excludes.
+        if let Some(g) = self.core.goaway_received
+            && self.goaway_seen.is_none_or(|prev| g < prev)
+        {
+            self.goaway_seen = Some(g);
             self.ready.push_back(ClientEvent::GoAway(g));
             // Requests at or above the ID were not processed (§5.2).
             let gone: Vec<u64> = self.streams.range(g..).map(|(id, _)| *id).collect();
@@ -314,7 +328,7 @@ impl ClientConnection {
                 (Frame::Headers(b), Phase::Headers) => self.section(t, id, &b, false)?,
                 (Frame::Headers(b), Phase::Body) => self.section(t, id, &b, true)?,
                 (Frame::Data(d), Phase::Body) => {
-                    if rs.head_request && !d.is_empty() {
+                    if !d.is_empty() && (rs.head_request || rs.bodyless()) {
                         self.malformed(t, id, Code::MESSAGE_ERROR);
                         return Ok(());
                     }
@@ -434,6 +448,11 @@ impl ClientConnection {
             return Ok(());
         };
         rs.fin = true;
+        // A blocked section holds frames behind it in the reader; the
+        // frame boundary is checked once they are processed on unblock.
+        if matches!(rs.phase, Phase::Blocked { .. }) {
+            return Ok(());
+        }
         if rs.reader.finish().is_err() {
             return Err(ConnectionError::Frame {
                 stream_id: id,
@@ -449,7 +468,10 @@ impl ClientConnection {
             Phase::Body | Phase::Trailers => {
                 let rs = self.streams.remove(&id).expect("present");
                 let head = rs.head.expect("final response");
+                // A HEAD or 304 content-length describes the representation,
+                // not a body (RFC 9110 §8.6).
                 if !rs.head_request
+                    && head.status != 304
                     && head
                         .content_length
                         .is_some_and(|cl| cl != rs.body.len() as u64)
