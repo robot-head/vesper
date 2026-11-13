@@ -87,6 +87,7 @@ jobs:
           scripts/test-recovery.sh
           scripts/test-source-tooling.sh
           scripts/test-source-macros.sh
+          scripts/test-format-proof.sh
 
   # Cargo, not Bazel: the hermetic toolchain links MSVC binaries through
   # clang-cl, whose argument syntax rustc's MSVC linker flavor does not speak
@@ -121,3 +122,10 @@ jobs:
         env:
           VESPER_LEAN: lean
       - run: scripts/ci/check-lean-models.sh
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Run proof acceptance against the actual Cargo executable
+        run: >-
+          python scripts/check-format-proof.py --binary target/debug/vesper.exe
+          --lean "$(elan which lean)"

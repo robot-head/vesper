@@ -6,8 +6,13 @@
 #![forbid(unsafe_code)]
 mod doc;
 mod macro_source;
+mod proof_lean;
+pub mod proof_model;
+mod proof_source;
 pub mod recovery;
 pub use doc::{DEFAULT_LINE_WIDTH, Doc, DocId, Document};
+pub use proof_model::{DocumentModel, ProofError, ProofLimits};
+pub use proof_source::{FormatVerification, format_for_verification};
 pub use recovery::{RecoveryEdit, RecoveryFormatResult, format_recovery_source};
 use vesper_syntax::{
     lexer::{self, Token, TokenKind as K},
@@ -185,7 +190,17 @@ fn guarded_lex(
     )?;
     Ok(tokens)
 }
-fn once(source: &str, limits: Limits, work: &mut Work) -> Result<(String, bool), Error> {
+pub(crate) struct ModelCapture<'a> {
+    pub(crate) limits: ProofLimits,
+    pub(crate) model: &'a mut Option<DocumentModel>,
+    pub(crate) error: &'a mut Option<ProofError>,
+}
+fn once(
+    source: &str,
+    limits: Limits,
+    work: &mut Work,
+    capture: Option<ModelCapture<'_>>,
+) -> Result<(String, bool), Error> {
     let (tokens, macros) = match guarded_lex(source, limits, work, false) {
         Ok(tokens) => (tokens, false),
         Err(Error::OpaqueMacro) => (guarded_lex(source, limits, work, true)?, true),
@@ -248,6 +263,17 @@ fn once(source: &str, limits: Limits, work: &mut Work) -> Result<(String, bool),
     let output = document.render(root)?;
     work.charge(document.work_used())?;
     work.charge(output.len())?;
+    if let Some(capture) = capture {
+        match document.proof_model(root, capture.limits) {
+            Ok(model) => *capture.model = Some(model),
+            Err(error) => {
+                *capture.error = Some(error);
+                // The verification adapter returns the precise projection
+                // error. Ordinary formatting never enters this capture path.
+                return Err(Error::Conservation);
+            }
+        }
+    }
     Ok((output, macros))
 }
 /// Width is a 100 Unicode-scalar ribbon with four-space nesting. Indivisible
@@ -261,10 +287,18 @@ pub(crate) fn format_with_work(
     limits: Limits,
     work: &mut Work,
 ) -> Result<FormatResult, Error> {
+    format_with_capture(source, limits, work, None)
+}
+pub(crate) fn format_with_capture(
+    source: &str,
+    limits: Limits,
+    work: &mut Work,
+    capture: Option<ModelCapture<'_>>,
+) -> Result<FormatResult, Error> {
     if source.len() > limits.max_input_bytes {
         return Err(Error::InputLimit);
     }
-    let (output, macros) = once(source, limits, work)?;
+    let (output, macros) = once(source, limits, work, capture)?;
     let original = guarded_lex(source, limits, work, macros)?;
     let rewritten = guarded_lex(&output, limits, work, macros)?;
     let a = pieces(source, &original);
@@ -276,7 +310,7 @@ pub(crate) fn format_with_work(
     {
         return Err(Error::Conservation);
     }
-    let (second, second_macros) = once(&output, limits, work)?;
+    let (second, second_macros) = once(&output, limits, work, None)?;
     if second != output || macros != second_macros {
         return Err(Error::NotIdempotent);
     }
