@@ -1166,7 +1166,7 @@ fn producer_matrix(base: &Fixture) {
         ),
         (
             "callee-origin",
-            "fn f(π:u64,y:u64)->u64 eff [Fail[ArithOverflow]]{wrapping_add(π+0,y)}",
+            "// retained source é🦀\nfn f(x:u64,y:u64)->u64 eff [Fail[ArithOverflow]]{wrapping_add(x+0,y)}",
         ),
     ] {
         let fixture = base.case(label);
