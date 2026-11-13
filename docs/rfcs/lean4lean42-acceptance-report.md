@@ -21,6 +21,13 @@ constructor/recursor comparison counts, exact unsafe/partial skips and zero
 pending/remaining work. Historical 86k observations are not golden totals.
 Source, receipt, pin/control, compiler/build/control-import and stream digests
 remain distinct. Both separate audit statuses must remain not_run.
+The report's lean_release is compared with the receipt's exact pinned
+`leanprover/lean4:v4.24.0` field; the machine handshake's `4.24.0` version
+spelling is distinct. After all positive report and artifact assertions pass,
+the test logs one bounded `LEAN4LEAN42_REPORT` line containing that actual
+parsed CLI report, permitting durable evidence extraction without repeating
+either mathematical replay. No report is fabricated from counters or emitted
+as a substitute for successful execution.
 
 All 94 registry entries are compared in pinned order by ID, category,
 expectation and actual result/reason, with an independently computed typed

@@ -331,7 +331,8 @@ fn genuine_positive(
     assert!(report["process_spawns"].as_u64().unwrap() >= 7);
     let tools = &report["tools"];
     assert_eq!(tools["profile"], "vesper.lean4lean42/1");
-    assert_eq!(tools["lean_release"], "4.24.0");
+    assert_eq!(tools["lean_release"], receipt["lean_release"]);
+    assert_eq!(receipt["lean_release"], "leanprover/lean4:v4.24.0");
     assert_eq!(
         tools["lean_commit"],
         "797c613eb9b6d4ec95db23e3e00af9ac6657f24b"
@@ -441,6 +442,10 @@ fn genuine_positive(
         b"preserve"
     );
     inspect_artifacts(&artifacts.0, &report);
+    let encoded =
+        serde_json::to_string(&report).expect("serialize the actual successful CLI report");
+    assert!(encoded.len() <= Limits::default().report_bytes);
+    println!("LEAN4LEAN42_REPORT {encoded}");
     report
 }
 
