@@ -4324,6 +4324,7 @@ dependencies = [
  "vesper-warp-crypto",
  "vesper-warp-shard",
  "vesper-warp-tcp",
+ "vesper-warp-tls",
  "vesper-warp-umem",
  "vesper-warp-wheel",
 ]

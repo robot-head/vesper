@@ -44,10 +44,31 @@
 //! STREAM frames go to the [`Responder`] and [`WarpEndpoint::send_stream`]
 //! sends unreliable raw frames.
 //!
-//! What this is not: there is no TLS handshake (connections are opened
-//! with application traffic secrets and the peer's stream transport
-//! parameters supplied by the caller), no connection migration, and no
-//! hardware EDT, RSS or crypto offload. With [`SoftNic`](vesper_warp_umem::SoftNic) the
+//! Handshake (wave five, issue #135): [`WarpEndpoint::connect`] (client)
+//! and [`WarpEndpoint::listen`] (server) open connections with lane 12's
+//! TLS 1.3 handshake instead of caller-supplied secrets. Initial and
+//! Handshake packets use long headers with their own packet-number
+//! spaces, keys, ACKs, loss detection and PTO probes in the connection's
+//! RFC 9002 recovery; their CRYPTO data travels through lane 13's
+//! per-space CRYPTO buffers, so lost handshake bytes are retransmitted as
+//! ranges. Keys are installed and discarded per space (RFC 9001 §4.9),
+//! the server enforces the 3× anti-amplification limit until the client's
+//! address is validated (RFC 9000 §8.1), client Initials are padded to
+//! 1200 bytes, the negotiated transport parameters replace the stream
+//! layer's defaults, the server sends HANDSHAKE_DONE (retransmitted until
+//! acknowledged), and key updates wait for confirmation. Long-header
+//! packets are copied out of the UMEM frame and answered from fresh
+//! frames: the zero-copy turn-around is the 1-RTT data path only.
+//! [`WarpEndpoint::open_connection`] still opens a connection from
+//! caller-supplied 1-RTT keys.
+//!
+//! What this is not: no Retry, 0-RTT, Version Negotiation, stateless
+//! reset or NEW_TOKEN; a short-header packet coalesced after long-header
+//! packets in one received datagram is dropped (ours never coalesce);
+//! Initial and Handshake packets are recovered but not fed to BBRv3
+//! (whose snapshots are keyed by application packet number) and not
+//! paced; no connection migration; and no hardware EDT, RSS or crypto
+//! offload. With [`SoftNic`](vesper_warp_umem::SoftNic) the
 //! "NIC" is lane 3's deterministic model; with lane 3's gated AF_XDP
 //! backend it is a real socket, which this crate's tests do not exercise.
 
@@ -56,6 +77,7 @@ use std::fmt;
 use vesper_warp_bbr::BbrConfig;
 use vesper_warp_crypto::{CryptoError, OneRttKeys, TAG_LEN, Unprotected};
 use vesper_warp_shard::{ConnState, ConnTable, ConnectionId, SlotHandle, TableConfig};
+use vesper_warp_tls::{Event as TlsEvent, QuicTls, ServerCids, Space, TransportParameters};
 use vesper_warp_umem::{
     DescError, InFlightQuicPkt, RxHarvested, TxStaged, UmemError, UmemFrame, XdpNic, Xsk,
     XskBackend,
@@ -67,7 +89,14 @@ use vesper_warp_wheel::{
 use crate::ack::{AckError, Ecn, ReceivedPackets};
 use crate::cc::{CcError, QuicBbr};
 use crate::frame::{Frame, FrameError, StreamFrame, scan_payload};
-use crate::header::{HeaderError, HeaderParser, ParsedPacket};
+use crate::handshake::{
+    ClientSetup, ConnectionEvent, HandshakePhase, Hs, Listener, MIN_INITIAL_DATAGRAM,
+    MIN_ORIGINAL_DCID, NO_CREDIT, TlsError, peer_params, pn_space,
+};
+use crate::header::{
+    HeaderError, HeaderParser, LongHeader, LongPacketType, ParsedPacket, ProtectedHeader,
+    write_long,
+};
 use crate::packet_number::{PnLen, TruncatedPn, encoded_len};
 use crate::recovery::{
     self, CongestionEvent, HandshakeStatus, LossRecovery, RecoveryConfig, RecoveryError,
@@ -90,8 +119,14 @@ pub const MAX_CONNECTIONS: u32 = 1 << (62 - LEASE_PN_BITS);
 
 /// Largest short header: first byte, 20-byte DCID, 4-byte packet number.
 const MAX_SHORT_HEADER: usize = 1 + 20 + 4;
-/// ACK ranges kept per connection.
-const ACK_RANGES: usize = 32;
+/// Largest long header we write: first byte, version, two 20-byte CIDs
+/// with their lengths, an empty token's length, a 2-byte Length and a
+/// 4-byte packet number.
+const MAX_LONG_HEADER: usize = 1 + 4 + 1 + 20 + 1 + 20 + 1 + 2 + 4;
+/// ACK ranges kept per connection and space.
+pub(crate) const ACK_RANGES: usize = 32;
+/// CONNECTION_CLOSE frame type for transport errors.
+const CLOSE_FRAME_CRYPTO: u64 = 0x06;
 
 /// Which §35.3 CID lookup to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -192,9 +227,23 @@ impl Default for EndpointConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DropReason {
     Header(HeaderError),
-    /// A long-header, Retry or Version Negotiation packet: there is no
-    /// handshake here, only established 1-RTT connections.
+    /// A Retry, Version Negotiation or 0-RTT packet (not supported), or a
+    /// long-header packet for a connection opened without a handshake.
     NotOneRtt,
+    /// The keys for the packet's space are not installed (yet, or any
+    /// more).
+    KeysUnavailable,
+    /// A client Initial in a datagram shorter than 1200 bytes, or with a
+    /// Destination Connection ID shorter than 8 (RFC 9000 §14.1, §7.2).
+    BadInitial,
+    /// No listener, the connection table or the handshake refused a new
+    /// connection.
+    AcceptRefused,
+    /// TLS rejected the handshake; the connection is closed with this
+    /// QUIC error code.
+    Handshake(u64),
+    /// A short-header packet after long-header packets in one datagram.
+    CoalescedOneRtt,
     UnknownCid,
     /// Header-protection removal, packet-number reconstruction or AEAD
     /// open failed; the buffer was restored.
@@ -217,6 +266,9 @@ pub enum DropReason {
 pub enum ConnectionError {
     /// We detected a peer violation and sent CONNECTION_CLOSE with it.
     Local(TransportError),
+    /// The handshake failed (TLS alert, transport parameters, protocol
+    /// violation); CONNECTION_CLOSE carried this code.
+    Handshake { error_code: u64 },
     /// The peer sent CONNECTION_CLOSE.
     Peer {
         error_code: u64,
@@ -275,6 +327,16 @@ pub enum WarpError {
     StreamMode,
     /// The connection was closed.
     ConnectionClosed(ConnectionError),
+    /// The TLS driver refused a setup.
+    Tls(TlsError),
+    /// The operation needs the handshake to have progressed further
+    /// (peer transport parameters, 1-RTT keys or confirmation).
+    Handshaking,
+    /// The keys for this packet's space are not installed.
+    KeysUnavailable,
+    /// The server may not send more before the client's address is
+    /// validated (RFC 9000 §8.1).
+    AmplificationLimited,
 }
 
 impl fmt::Display for WarpError {
@@ -298,7 +360,8 @@ warp_from!(
     Frame(FrameError),
     Recovery(RecoveryError),
     Cc(CcError),
-    Stream(StreamError)
+    Stream(StreamError),
+    Tls(TlsError)
 );
 
 /// The application side: what to send back for received stream data.
@@ -429,6 +492,17 @@ pub struct EndpointStats {
     pub rx_dropped_closed: u64,
     /// Queued packets abandoned because their connection closed first.
     pub tx_suppressed_closed: u64,
+    /// Initial and Handshake packets sent and processed.
+    pub handshake_packets_sent: u64,
+    pub handshake_packets_received: u64,
+    /// Connections a server accepted.
+    pub accepted: u64,
+    /// Handshakes that failed and closed their connection.
+    pub handshake_failures: u64,
+    /// Sends a server held back at the anti-amplification limit.
+    pub amplification_blocked: u64,
+    /// Connection events dropped because the queue was full.
+    pub connection_events_dropped: u64,
 }
 
 /// A connection's non-tile state. The tile (lane 6) holds the hot scalars:
@@ -436,7 +510,13 @@ pub struct EndpointStats {
 /// flight, next EDT, idle deadline and the peer CID.
 struct Conn {
     handle: SlotHandle,
-    keys: OneRttKeys,
+    /// 1-RTT keys: supplied by the caller, or installed by the handshake.
+    keys: Option<OneRttKeys>,
+    /// The TLS handshake and long-header spaces; `None` for a connection
+    /// opened with caller-supplied keys.
+    hs: Option<Box<Hs>>,
+    /// The peer's ack_delay_exponent, for decoding its ACK frames.
+    peer_ack_exponent: u8,
     recovery: LossRecovery,
     received: ReceivedPackets<ACK_RANGES>,
     cc: QuicBbr,
@@ -487,9 +567,14 @@ pub struct ConnectionView<'a> {
     pub recovery: &'a LossRecovery,
     pub cc: &'a QuicBbr,
     pub received: &'a ReceivedPackets<ACK_RANGES>,
-    pub keys: &'a OneRttKeys,
+    /// `None` until the handshake installs 1-RTT keys.
+    pub keys: Option<&'a OneRttKeys>,
     pub streams: &'a StreamSet,
     pub error: Option<ConnectionError>,
+    pub phase: HandshakePhase,
+    /// The TLS driver (ALPN, peer certificates, key states), when the
+    /// connection was opened with a handshake.
+    pub tls: Option<&'a QuicTls>,
 }
 
 /// What [`WarpEndpoint::poll`] did.
@@ -526,6 +611,16 @@ pub struct WarpEndpoint<B: XskBackend, R: Responder, T: TxTap = ()> {
     app: R,
     tap: T,
     stats: EndpointStats,
+    /// Accepts client Initials (server endpoints).
+    listener: Option<Listener>,
+    /// Client-chosen Destination Connection IDs that route Initials to a
+    /// server connection until its Initial keys are discarded.
+    initial_dcids: Vec<(ConnectionId, SlotHandle)>,
+    conn_events: std::collections::VecDeque<ConnectionEvent>,
+    /// A received long-header datagram, copied out of its UMEM frame.
+    rx_copy: Box<[u8]>,
+    /// In-order CRYPTO bytes on their way to TLS.
+    tls_buf: Box<[u8]>,
 }
 
 fn lease_key(conn: SlotHandle, pn: u64) -> u64 {
@@ -569,6 +664,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let mut conns = Vec::with_capacity(config.max_connections as usize);
         conns.resize_with(config.max_connections as usize, || None);
         let buf = usize::from(config.max_datagram) + TAG_LEN;
+        // Long-header frames are built after a maximal header gap.
+        let scratch_len = buf + MAX_LONG_HEADER;
+        let rx_frame = xsk.config().frame_size as usize;
         let mut endpoint = Self {
             config,
             xsk,
@@ -580,12 +678,19 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             timers,
             deferred_acks: Vec::with_capacity(config.max_connections as usize),
             events: Vec::with_capacity(config.max_tracked_per_conn + 8),
-            scratch: vec![0u8; buf].into_boxed_slice(),
+            scratch: vec![0u8; scratch_len].into_boxed_slice(),
             app_out: vec![0u8; buf].into_boxed_slice(),
             record: PacketFrames::default(),
             app,
             tap,
             stats: EndpointStats::default(),
+            listener: None,
+            initial_dcids: Vec::with_capacity(config.max_connections as usize),
+            conn_events: std::collections::VecDeque::with_capacity(
+                4 * config.max_connections as usize,
+            ),
+            rx_copy: vec![0u8; rx_frame].into_boxed_slice(),
+            tls_buf: vec![0u8; config.streams.crypto_buffer as usize].into_boxed_slice(),
         };
         if config.tx_reserve >= endpoint.xsk.config().frame_count {
             return Err(WarpError::Config("tx_reserve leaves no receive frames"));
@@ -656,6 +761,32 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         peer: PeerParams,
         now_ns: u64,
     ) -> Result<SlotHandle, WarpError> {
+        let len = usize::from(self.config.cid_len);
+        if local_cid.len() != len || peer_cid.len() != len {
+            return Err(WarpError::Config("connection IDs must have cid_len bytes"));
+        }
+        self.insert_conn(
+            local_cid,
+            peer_cid,
+            Some(keys),
+            None,
+            peer,
+            ESTABLISHED,
+            now_ns,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_conn(
+        &mut self,
+        local_cid: &[u8],
+        peer_cid: &[u8],
+        keys: Option<OneRttKeys>,
+        hs: Option<Box<Hs>>,
+        peer: PeerParams,
+        status: HandshakeStatus,
+        now_ns: u64,
+    ) -> Result<SlotHandle, WarpError> {
         if peer.initial_max_streams_bidi > crate::frame::MAX_STREAM_COUNT
             || peer.initial_max_streams_uni > crate::frame::MAX_STREAM_COUNT
         {
@@ -663,8 +794,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
         let streams = StreamSet::new(self.config.role, self.config.streams, peer)
             .map_err(WarpError::Config)?;
-        let len = usize::from(self.config.cid_len);
-        if local_cid.len() != len || peer_cid.len() != len {
+        if local_cid.len() != usize::from(self.config.cid_len) {
             return Err(WarpError::Config("connection IDs must have cid_len bytes"));
         }
         let local = ConnectionId::from_slice(local_cid)
@@ -694,11 +824,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 initial_rtt_ns: self.config.initial_rtt_ns,
                 max_tracked_per_space: self.config.max_tracked_per_conn,
             },
-            ESTABLISHED,
+            status,
         );
         self.conns[handle.index() as usize] = Some(Conn {
             handle,
             keys,
+            hs,
+            peer_ack_exponent: self.config.ack_delay_exponent,
             recovery,
             received: ReceivedPackets::new(PnSpace::ApplicationData, self.config.max_ack_delay_ns),
             cc,
@@ -714,6 +846,1077 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         });
         self.write_tile(handle);
         Ok(handle)
+    }
+
+    // ----- handshake (issue #135) ---------------------------------------
+
+    /// Opens a client connection with a TLS 1.3 handshake (RFC 9001): we
+    /// receive on `local_cid` (`cid_len` bytes) and send the first Initial
+    /// to `original_dcid` (8 to 20 bytes, unpredictable per RFC 9000
+    /// §7.2). The ClientHello leaves at once; the connection carries
+    /// streams once [`ConnectionEvent::HandshakeComplete`] is reported.
+    pub fn connect(
+        &mut self,
+        setup: &ClientSetup,
+        server_name: &str,
+        local_cid: &[u8],
+        original_dcid: &[u8],
+        now_ns: u64,
+    ) -> Result<SlotHandle, WarpError> {
+        if self.config.role != Role::Client {
+            return Err(WarpError::Config("connect needs a client endpoint"));
+        }
+        self.check_handshake_config()?;
+        if original_dcid.len() < MIN_ORIGINAL_DCID || original_dcid.len() > 20 {
+            return Err(WarpError::Config(
+                "the original destination connection ID must have 8 to 20 bytes",
+            ));
+        }
+        let params = local_transport_params(&self.config, local_cid);
+        let tls = QuicTls::client(setup, server_name, &params, original_dcid)?;
+        let hs = self.new_hs(tls, local_cid);
+        let status = HandshakeStatus {
+            confirmed: false,
+            peer_completed_address_validation: false,
+            has_handshake_keys: false,
+            at_amplification_limit: false,
+        };
+        let slot = self.insert_conn(
+            local_cid,
+            original_dcid,
+            None,
+            Some(hs),
+            NO_CREDIT,
+            status,
+            now_ns,
+        )?;
+        if let Err(code) = self.apply_tls_events(slot, now_ns) {
+            return Err(WarpError::ConnectionClosed(ConnectionError::Handshake {
+                error_code: code,
+            }));
+        }
+        self.flush_handshake(slot, now_ns)?;
+        Ok(slot)
+    }
+
+    /// Makes a server endpoint accept connections: a client Initial for an
+    /// unknown connection ID starts a TLS handshake with `listener`'s
+    /// certificate, under a connection ID from its [`CidSource`](crate::handshake::CidSource).
+    /// New connections are reported as [`ConnectionEvent::Accepted`].
+    pub fn listen(&mut self, listener: Listener) -> Result<(), WarpError> {
+        if self.config.role != Role::Server {
+            return Err(WarpError::Config("listen needs a server endpoint"));
+        }
+        self.check_handshake_config()?;
+        self.listener = Some(listener);
+        Ok(())
+    }
+
+    /// The next connection event (accepted, handshake complete or
+    /// confirmed), oldest first.
+    pub fn poll_connection_event(&mut self) -> Option<ConnectionEvent> {
+        self.conn_events.pop_front()
+    }
+
+    /// Where a connection's handshake stands.
+    pub fn handshake_phase(&self, conn: SlotHandle) -> Option<HandshakePhase> {
+        let c = self.conn(conn).ok()?;
+        Some(
+            c.hs.as_ref()
+                .map_or(HandshakePhase::External, |h| h.phase()),
+        )
+    }
+
+    fn check_handshake_config(&self) -> Result<(), WarpError> {
+        if self.config.stream_mode != StreamMode::Reliable {
+            return Err(WarpError::StreamMode);
+        }
+        if usize::from(self.config.max_datagram) < MIN_INITIAL_DATAGRAM {
+            return Err(WarpError::Config(
+                "a handshake needs max_datagram of at least 1200 (RFC 9000 §14.1)",
+            ));
+        }
+        Ok(())
+    }
+
+    fn new_hs(&self, tls: QuicTls, local_cid: &[u8]) -> Box<Hs> {
+        Hs::new(
+            tls,
+            local_cid,
+            self.config.max_ack_delay_ns,
+            self.config.max_tracked_per_conn,
+            self.config.streams.crypto_buffer as usize,
+        )
+    }
+
+    fn push_conn_event(&mut self, ev: ConnectionEvent) {
+        if self.conn_events.len() < self.conn_events.capacity() {
+            self.conn_events.push_back(ev);
+        } else {
+            self.stats.connection_events_dropped += 1;
+        }
+    }
+
+    /// A server's new connection for a client Initial with an unknown
+    /// Destination Connection ID.
+    fn accept(
+        &mut self,
+        pkt: &[u8],
+        header: &ProtectedHeader,
+        datagram_len: usize,
+        now_ns: u64,
+    ) -> Result<SlotHandle, DropReason> {
+        if self.listener.is_none() {
+            return Err(DropReason::UnknownCid);
+        }
+        let odcid = header.dcid(pkt);
+        if datagram_len < MIN_INITIAL_DATAGRAM || odcid.len() < MIN_ORIGINAL_DCID {
+            return Err(DropReason::BadInitial);
+        }
+        if self.initial_dcids.len() >= self.initial_dcids.capacity() {
+            return Err(DropReason::AcceptRefused);
+        }
+        let n = usize::from(self.config.cid_len);
+        let mut local = [0u8; 20];
+        let listener = self.listener.as_mut().expect("checked");
+        let mut fresh = false;
+        for _ in 0..8 {
+            listener.cids.next_cid(&mut local[..n]);
+            if self.table.lookup(&local[..n]).ok().flatten().is_none() {
+                fresh = true;
+                break;
+            }
+        }
+        if !fresh {
+            return Err(DropReason::AcceptRefused);
+        }
+        let params = local_transport_params(&self.config, &local[..n]);
+        let cids = ServerCids {
+            original_dcid: odcid,
+            client_scid: header.scid(pkt),
+            retry_scid: None,
+        };
+        let tls = QuicTls::server(&listener.setup, &params, cids)
+            .map_err(|_| DropReason::AcceptRefused)?;
+        let hs = self.new_hs(tls, &local[..n]);
+        let status = HandshakeStatus {
+            confirmed: false,
+            // RFC 9002: a server assumes the peer validated its address.
+            peer_completed_address_validation: true,
+            has_handshake_keys: false,
+            at_amplification_limit: false,
+        };
+        let slot = self
+            .insert_conn(
+                &local[..n],
+                header.scid(pkt),
+                None,
+                Some(hs),
+                NO_CREDIT,
+                status,
+                now_ns,
+            )
+            .map_err(|_| DropReason::AcceptRefused)?;
+        let odcid = ConnectionId::from_slice(odcid).map_err(|_| DropReason::BadInitial)?;
+        self.initial_dcids.push((odcid, slot));
+        self.apply_tls_events(slot, now_ns)
+            .map_err(DropReason::Handshake)?;
+        Ok(slot)
+    }
+
+    /// A received datagram that starts with a long header: copied out of
+    /// its frame (which goes straight back to the fill ring), then every
+    /// coalesced Initial and Handshake packet in it is processed.
+    fn on_long_datagram(
+        &mut self,
+        frame: UmemFrame<RxHarvested>,
+        now_ns: u64,
+    ) -> Result<RxOutcome, WarpError> {
+        let mut buf = std::mem::take(&mut self.rx_copy);
+        let len = match self.xsk.view_frame_bytes(&frame) {
+            Ok(bytes) => {
+                let n = bytes.len().min(buf.len());
+                buf[..n].copy_from_slice(&bytes[..n]);
+                n
+            }
+            Err(e) => {
+                self.rx_copy = buf;
+                return self.drop_rx(frame, DropReason::Umem(e));
+            }
+        };
+        if let Err(refused) = self.xsk.recycle_to_fill_ring(frame) {
+            self.rx_copy = buf;
+            return Err(WarpError::Umem(refused.error));
+        }
+        let out = self.process_long_datagram(&mut buf[..len], now_ns);
+        self.rx_copy = buf;
+        out
+    }
+
+    fn count_drop(&mut self, reason: &DropReason) {
+        self.stats.rx_dropped += 1;
+        match reason {
+            DropReason::Crypto(_) => self.stats.rx_dropped_crypto += 1,
+            DropReason::UnknownCid => self.stats.rx_dropped_unknown_cid += 1,
+            DropReason::Closed => self.stats.rx_dropped_closed += 1,
+            _ => {}
+        }
+    }
+
+    fn process_long_datagram(
+        &mut self,
+        dgram: &mut [u8],
+        now_ns: u64,
+    ) -> Result<RxOutcome, WarpError> {
+        let total = dgram.len();
+        let mut off = 0;
+        let mut processed: Option<(SlotHandle, u64)> = None;
+        let mut dropped: Option<DropReason> = None;
+        let mut first = true;
+        while off < total {
+            let rest = &mut dgram[off..];
+            let header = match self.parser.parse(rest) {
+                Ok(ParsedPacket::Protected(h)) => h,
+                Ok(_) => {
+                    dropped.get_or_insert(DropReason::NotOneRtt);
+                    break;
+                }
+                Err(e) => {
+                    dropped.get_or_insert(DropReason::Header(e));
+                    break;
+                }
+            };
+            let end = header.packet_end;
+            match header.packet_type {
+                PacketType::OneRtt => {
+                    dropped.get_or_insert(DropReason::CoalescedOneRtt);
+                    break;
+                }
+                PacketType::ZeroRtt => {
+                    dropped.get_or_insert(DropReason::NotOneRtt);
+                }
+                PacketType::Initial | PacketType::Handshake => {
+                    let datagram = if first { total } else { 0 };
+                    match self.process_long_packet(&mut rest[..end], &header, datagram, now_ns) {
+                        Ok(v) => processed = Some(v),
+                        Err((slot, reason)) => {
+                            if let (Some(slot), DropReason::Transport(e)) = (slot, &reason) {
+                                self.stats.transport_errors += 1;
+                                if let Ok(c) = self.conn_mut(slot) {
+                                    c.error = Some(ConnectionError::Local(*e));
+                                }
+                                let _ =
+                                    self.send_close_code(slot, e.code.code(), e.frame_type, now_ns);
+                            }
+                            dropped.get_or_insert(reason);
+                        }
+                    }
+                }
+            }
+            first = false;
+            off += end;
+        }
+        if let Some(reason) = &dropped {
+            self.count_drop(reason);
+        }
+        let Some((slot, pn)) = processed else {
+            return Ok(RxOutcome::Dropped(dropped.unwrap_or(DropReason::NotOneRtt)));
+        };
+        self.stats.rx_processed += 1;
+        let live = self.conn(slot).is_ok_and(|c| c.error.is_none());
+        if live {
+            if let Ok(mut st) = self.table.get(slot) {
+                st.idle_deadline_ns = now_ns.saturating_add(self.config.idle_timeout_ns);
+                let _ = self.table.set(slot, &st);
+            }
+            if self.drive_tls(slot, now_ns).is_ok() {
+                self.flush_handshake(slot, now_ns)?;
+                if self.conn(slot).is_ok_and(|c| c.error.is_none()) {
+                    self.flush(slot, now_ns)?;
+                }
+            }
+        } else if self
+            .conn(slot)
+            .is_ok_and(|c| matches!(c.error, Some(ConnectionError::Peer { .. })))
+        {
+            self.stats.closes_received += 1;
+        }
+        self.write_tile(slot);
+        Ok(RxOutcome::Processed {
+            conn: slot,
+            pn,
+            replied: false,
+        })
+    }
+
+    /// One Initial or Handshake packet: route, open, frames. `datagram` is
+    /// the datagram's length for its first packet (amplification credit),
+    /// else 0. On error, names the connection when it was found.
+    fn process_long_packet(
+        &mut self,
+        pkt: &mut [u8],
+        header: &ProtectedHeader,
+        datagram: usize,
+        now_ns: u64,
+    ) -> Result<(SlotHandle, u64), (Option<SlotHandle>, DropReason)> {
+        let dcid = header.dcid(pkt);
+        let routed = self.lookup(dcid).or_else(|| {
+            self.initial_dcids
+                .iter()
+                .find(|(c, _)| c.as_bytes() == dcid)
+                .map(|(_, h)| *h)
+        });
+        let slot = match routed {
+            Some(slot) => slot,
+            None if header.packet_type == PacketType::Initial => {
+                let slot = self
+                    .accept(pkt, header, datagram, now_ns)
+                    .map_err(|r| (None, r))?;
+                // The connection is kept only if its first packet opens.
+                return match self.process_routed(slot, pkt, header, datagram, now_ns) {
+                    Ok(v) => {
+                        self.stats.accepted += 1;
+                        self.push_conn_event(ConnectionEvent::Accepted(slot));
+                        Ok(v)
+                    }
+                    Err((_, reason)) => {
+                        let _ = self.close_connection(slot, now_ns);
+                        Err((None, reason))
+                    }
+                };
+            }
+            None => return Err((None, DropReason::UnknownCid)),
+        };
+        self.process_routed(slot, pkt, header, datagram, now_ns)
+    }
+
+    fn process_routed(
+        &mut self,
+        slot: SlotHandle,
+        pkt: &mut [u8],
+        header: &ProtectedHeader,
+        datagram: usize,
+        now_ns: u64,
+    ) -> Result<(SlotHandle, u64), (Option<SlotHandle>, DropReason)> {
+        let fail = |r| (Some(slot), r);
+        let space = header.packet_type.space();
+        let idx = slot.index() as usize;
+        let Some(Some(conn)) = self.conns.get_mut(idx) else {
+            return Err(fail(DropReason::UnknownCid));
+        };
+        if let Some(error) = conn.error {
+            self.answer_while_closing(slot, error, now_ns);
+            return Err(fail(DropReason::Closed));
+        }
+        let Some(hs) = conn.hs.as_mut() else {
+            return Err(fail(DropReason::NotOneRtt));
+        };
+        if let Some(amp) = hs.amp.as_mut() {
+            amp.received += datagram as u64;
+        }
+        let client = !hs.is_server();
+        let ls = hs.long(space).expect("long-header space");
+        let Some(opener) = ls.opener.as_mut() else {
+            return Err(fail(DropReason::KeysUnavailable));
+        };
+        let largest = ls.received.largest();
+        let opened = opener
+            .open_packet(&mut pkt[..header.packet_end], header.pn_offset, |u| {
+                reconstruct(u, largest)
+            })
+            .map_err(|e| fail(DropReason::Crypto(e)))?;
+        let u = header
+            .packet_number_field(pkt)
+            .map_err(|e| fail(DropReason::Header(e)))?;
+        u.check_reserved_bits()
+            .map_err(|_| fail(DropReason::ReservedBits))?;
+        let pn = opened.packet_number;
+        ls.received
+            .check(pn)
+            .map_err(|e| fail(DropReason::Duplicate(e)))?;
+        self.stats.handshake_packets_received += 1;
+        // RFC 9000 §7.2: the client adopts the server's first Initial SCID
+        // as its Destination Connection ID.
+        if client && space == PnSpace::Initial {
+            let scid = header.scid(pkt);
+            if hs.tls.set_peer_initial_scid(scid).is_err() {
+                return Err(fail(DropReason::Handshake(0x0a)));
+            }
+            if !hs.peer_scid_known {
+                hs.peer_scid_known = true;
+                if let (Ok(mut st), Ok(cid)) =
+                    (self.table.get(slot), ConnectionId::from_slice(scid))
+                {
+                    st.peer_cid = cid;
+                    let _ = self.table.set(slot, &st);
+                }
+            }
+        }
+        let conn = self.conns[idx].as_mut().expect("live");
+        let payload = &pkt[opened.header_len..opened.header_len + opened.payload_len];
+        let exponent = conn.peer_ack_exponent;
+        self.events.clear();
+        let events = &mut self.events;
+        let mut failure: Option<DropReason> = None;
+        let mut peer_close = None;
+        let mut handshake_acked = false;
+        let Conn {
+            recovery, streams, ..
+        } = conn;
+        let info = scan_payload(payload, header.packet_type, |f| {
+            if failure.is_some() {
+                return;
+            }
+            match f {
+                Frame::Ack(ack) => {
+                    let delay = match recovery::ack_delay_ns(ack.ack_delay, exponent) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            failure = Some(DropReason::Recovery(e));
+                            return;
+                        }
+                    };
+                    match recovery.on_ack_received(space, ack, delay, now_ns, &mut |ev| {
+                        record_long_event(events, ev)
+                    }) {
+                        Ok(_) => handshake_acked |= space == PnSpace::Handshake,
+                        Err(e) => failure = Some(DropReason::Recovery(e)),
+                    }
+                }
+                Frame::Crypto { offset, data } => {
+                    if let Err(e) = streams.on_crypto_frame(space, *offset, data) {
+                        failure = Some(DropReason::Transport(e));
+                    }
+                }
+                Frame::ConnectionClose(c) => {
+                    peer_close = Some(ConnectionError::Peer {
+                        error_code: c.error_code,
+                        frame_type: c.frame_type,
+                    });
+                }
+                _ => {}
+            }
+        })
+        .map_err(|e| fail(DropReason::Frame(e)))?;
+        // Resolve what the ACKs settled before any error return.
+        self.resolve_long_events(slot, space);
+        if let Some(reason) = failure {
+            return Err(fail(reason));
+        }
+        let conn = self.conns[idx].as_mut().expect("live");
+        let hs = conn.hs.as_mut().expect("checked");
+        let ls = hs.long(space).expect("long-header space");
+        ls.received
+            .on_packet_received(pn, now_ns, info.ack_eliciting, Ecn::NotEct)
+            .map_err(|e| fail(DropReason::Duplicate(e)))?;
+        if handshake_acked && client {
+            hs.handshake_acked = true;
+        }
+        if !client && space == PnSpace::Handshake && !hs.handshake_received {
+            // RFC 9000 §8.1: a Handshake packet validates the address;
+            // RFC 9001 §4.9.1: the server discards Initial keys.
+            hs.handshake_received = true;
+            if let Some(amp) = hs.amp.as_mut() {
+                amp.validated = true;
+            }
+            let _ = hs.tls.on_handshake_packet_received();
+        }
+        if let Some(close) = peer_close {
+            conn.error = Some(close);
+        } else {
+            // Hand this packet's CRYPTO data to TLS now, so a Handshake
+            // packet coalesced after it can use the keys it yields. A TLS
+            // failure closes the connection; the packet itself was
+            // authentic.
+            let _ = self.drive_tls(slot, now_ns);
+        }
+        Ok((slot, pn))
+    }
+
+    /// Acknowledgements and losses in `self.events` for a long-header
+    /// space reach its CRYPTO send buffer.
+    fn resolve_long_events(&mut self, slot: SlotHandle, space: PnSpace) {
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            return;
+        };
+        let Some(hs) = c.hs.as_mut() else {
+            return;
+        };
+        let Some(ls) = hs.long(space) else {
+            return;
+        };
+        for ev in &self.events {
+            let (pn, acked) = match ev {
+                CongestionEvent::Acked { packet } => (packet.pn, true),
+                CongestionEvent::Lost { packet } => (packet.pn, false),
+                _ => continue,
+            };
+            if acked {
+                self.stats.packets_acked += 1;
+            } else {
+                self.stats.packets_lost += 1;
+            }
+            if let Some((off, len)) = ls.take(pn) {
+                let crypto = c.streams.crypto_mut(space);
+                if acked {
+                    crypto.on_ack(off, len as usize);
+                } else {
+                    crypto.on_lost(off, len as usize);
+                }
+            }
+        }
+    }
+
+    /// After a 1-RTT packet of a handshake connection: HANDSHAKE_DONE,
+    /// 1-RTT acknowledgement confirmation, and 1-RTT CRYPTO data (session
+    /// tickets) for TLS. On failure the connection is closed and the error
+    /// code returned.
+    fn after_one_rtt(&mut self, slot: SlotHandle, acked: bool, now_ns: u64) -> Result<(), u64> {
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            return Ok(());
+        };
+        let Some(hs) = c.hs.as_mut() else {
+            return Ok(());
+        };
+        let mut result = Ok(());
+        if hs.done_received {
+            hs.done_received = false;
+            result = hs.tls.on_handshake_done_received();
+        }
+        if result.is_ok() && acked && !hs.is_server() {
+            hs.tls.on_one_rtt_ack_received();
+        }
+        if let Err(e) = result {
+            return Err(self.fail_handshake(slot, e.quic_error_code(), now_ns));
+        }
+        self.drive_tls(slot, now_ns)
+    }
+
+    /// Hands newly in-order CRYPTO bytes of every space to TLS, then
+    /// applies TLS's events.
+    fn drive_tls(&mut self, slot: SlotHandle, now_ns: u64) -> Result<(), u64> {
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            return Ok(());
+        };
+        let Some(hs) = c.hs.as_mut() else {
+            return Ok(());
+        };
+        let mut failed = None;
+        'spaces: for space in Space::ALL {
+            if hs.tls.key_state(space) != vesper_warp_tls::KeyState::Installed {
+                continue;
+            }
+            loop {
+                let n = c
+                    .streams
+                    .crypto_mut(pn_space(space))
+                    .read(&mut self.tls_buf);
+                if n == 0 {
+                    break;
+                }
+                let off = hs.rx_offset[space.index()];
+                hs.rx_offset[space.index()] += n as u64;
+                if let Err(e) = hs.tls.on_crypto_frame(space, off, &self.tls_buf[..n]) {
+                    failed = Some(e.quic_error_code());
+                    break 'spaces;
+                }
+            }
+        }
+        if let Some(code) = failed {
+            return Err(self.fail_handshake(slot, code, now_ns));
+        }
+        self.apply_tls_events(slot, now_ns)
+    }
+
+    /// Applies the TLS driver's events: keys per space, CRYPTO output,
+    /// transport parameters, completion, HANDSHAKE_DONE, confirmation and
+    /// key discard.
+    fn apply_tls_events(&mut self, slot: SlotHandle, now_ns: u64) -> Result<(), u64> {
+        let idx = slot.index() as usize;
+        loop {
+            let Some(Some(c)) = self.conns.get_mut(idx) else {
+                return Ok(());
+            };
+            let Some(hs) = c.hs.as_mut() else {
+                return Ok(());
+            };
+            let Some(ev) = hs.tls.poll_event() else {
+                break;
+            };
+            match ev {
+                TlsEvent::KeysReady(k) => match k.space() {
+                    Space::Data => {
+                        let retire = c.recovery.rtt().pto_base_ns().saturating_mul(3);
+                        match k.into_one_rtt(retire) {
+                            Ok(keys) => c.keys = Some(keys),
+                            Err(e) => {
+                                return Err(self.fail_handshake(slot, e.quic_error_code(), now_ns));
+                            }
+                        }
+                    }
+                    sp => match k.into_sealer_opener() {
+                        Ok((sealer, opener)) => {
+                            let ls = hs.long(pn_space(sp)).expect("long space");
+                            ls.sealer = Some(sealer);
+                            ls.opener = Some(opener);
+                        }
+                        Err(e) => {
+                            return Err(self.fail_handshake(slot, e.quic_error_code(), now_ns));
+                        }
+                    },
+                },
+                TlsEvent::Crypto {
+                    space,
+                    offset,
+                    data,
+                } => {
+                    let i = space.index();
+                    debug_assert_eq!(offset, hs.tx_offset[i]);
+                    hs.tx_offset[i] += data.len() as u64;
+                    hs.pending[i].extend(data.iter());
+                }
+                TlsEvent::PeerTransportParameters(p) => {
+                    // RFC 9000 §18.2: TRANSPORT_PARAMETER_ERROR.
+                    if c.streams.set_peer_params(peer_params(&p)).is_err() {
+                        return Err(self.fail_handshake(slot, 0x08, now_ns));
+                    }
+                    // Values above 20 are rejected by lane 12's decoder.
+                    c.peer_ack_exponent = u8::try_from(p.ack_delay_exponent).unwrap_or(20);
+                    hs.peer_params_applied = true;
+                }
+                TlsEvent::HandshakeComplete => {
+                    self.push_conn_event(ConnectionEvent::HandshakeComplete(slot));
+                }
+                TlsEvent::SendHandshakeDone => c.streams.queue_handshake_done(),
+                TlsEvent::HandshakeConfirmed => {
+                    self.push_conn_event(ConnectionEvent::HandshakeConfirmed(slot));
+                }
+                TlsEvent::DiscardKeys(space) => {
+                    let pns = pn_space(space);
+                    if let Some(ls) = hs.long(pns) {
+                        ls.sealer = None;
+                        ls.opener = None;
+                        ls.sent.clear();
+                        ls.discarded = true;
+                    }
+                    if pns != PnSpace::ApplicationData {
+                        c.recovery.discard_space(pns, now_ns);
+                    }
+                    if space == Space::Initial {
+                        self.initial_dcids.retain(|(_, h)| *h != slot);
+                    }
+                }
+            }
+        }
+        self.move_pending(slot);
+        self.sync_handshake_status(slot, now_ns);
+        Ok(())
+    }
+
+    /// Moves TLS output into the CRYPTO send buffers as room allows.
+    fn move_pending(&mut self, slot: SlotHandle) {
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            return;
+        };
+        let Some(hs) = c.hs.as_mut() else {
+            return;
+        };
+        for space in Space::ALL {
+            let pending = &mut hs.pending[space.index()];
+            while !pending.is_empty() {
+                let (a, _) = pending.as_slices();
+                let want = a.len();
+                let n = c.streams.crypto_mut(pn_space(space)).write(a);
+                pending.drain(..n);
+                if n < want {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Keeps recovery's view of the handshake current (RFC 9002 A.2).
+    fn sync_handshake_status(&mut self, slot: SlotHandle, now_ns: u64) {
+        let max = u64::from(self.config.max_datagram);
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            return;
+        };
+        let Some(hs) = c.hs.as_ref() else {
+            return;
+        };
+        let confirmed = hs.tls.is_handshake_confirmed();
+        let status = HandshakeStatus {
+            confirmed,
+            peer_completed_address_validation: hs.is_server() || confirmed || hs.handshake_acked,
+            has_handshake_keys: hs.spaces[1].sealer.is_some() || hs.spaces[1].discarded,
+            at_amplification_limit: hs.amp.is_some_and(|a| !a.allows(max)),
+        };
+        c.recovery.set_handshake_status(status, now_ns);
+        self.sync_timer(slot);
+    }
+
+    /// The TLS handshake failed: close with its code in every space we
+    /// still have keys for.
+    fn fail_handshake(&mut self, slot: SlotHandle, code: u64, now_ns: u64) -> u64 {
+        self.stats.handshake_failures += 1;
+        if let Ok(c) = self.conn_mut(slot) {
+            if c.error.is_some() {
+                return code;
+            }
+            c.error = Some(ConnectionError::Handshake { error_code: code });
+        }
+        let _ = self.send_close_code(slot, code, CLOSE_FRAME_CRYPTO, now_ns);
+        code
+    }
+
+    /// Sends owed Initial/Handshake ACKs and pending CRYPTO data.
+    fn flush_handshake(&mut self, slot: SlotHandle, now_ns: u64) -> Result<u32, WarpError> {
+        let mut sent = 0;
+        if self.conn(slot)?.error.is_some() || self.conn(slot)?.hs.is_none() {
+            return Ok(sent);
+        }
+        self.move_pending(slot);
+        for space in [PnSpace::Initial, PnSpace::Handshake] {
+            for _ in 0..self.config.max_tracked_per_conn {
+                let c = self.conns[slot.index() as usize].as_mut().expect("live");
+                if c.error.is_some() {
+                    return Ok(sent);
+                }
+                let has_data = c.streams.crypto(space).has_data();
+                let Some(ls) = c.hs.as_mut().and_then(|h| h.long(space)) else {
+                    break;
+                };
+                if ls.sealer.is_none() {
+                    break;
+                }
+                let ack = ls.received.ack_deadline().is_some();
+                if !ack && !has_data {
+                    break;
+                }
+                match self.send_long(slot, space, LongKind::Normal, now_ns) {
+                    Ok(_) => sent += 1,
+                    Err(WarpError::AmplificationLimited) => return Ok(sent),
+                    Err(WarpError::Umem(_)) => return Ok(sent),
+                    Err(e) => return Err(e),
+                }
+                self.move_pending(slot);
+            }
+        }
+        Ok(sent)
+    }
+
+    /// An RFC 9002 PTO probe in a long-header space: every unacknowledged
+    /// CRYPTO range is queued again, and the probe carries it (or a PING).
+    fn send_long_probe(
+        &mut self,
+        slot: SlotHandle,
+        space: PnSpace,
+        now_ns: u64,
+    ) -> Result<(), WarpError> {
+        let c = self.conn_mut(slot)?;
+        let Conn { hs, streams, .. } = c;
+        let ls = hs
+            .as_mut()
+            .and_then(|h| h.long(space))
+            .ok_or(WarpError::KeysUnavailable)?;
+        for &(_, off, len) in &ls.sent {
+            streams.crypto_mut(space).on_lost(off, len as usize);
+        }
+        self.send_long(slot, space, LongKind::Probe, now_ns)?;
+        self.stats.probes_sent += 1;
+        Ok(())
+    }
+
+    /// Builds, seals and sends one Initial or Handshake packet in its own
+    /// datagram: an owed ACK, then CRYPTO data (lost ranges first), then
+    /// PING for a probe or CONNECTION_CLOSE for a close; ack-eliciting
+    /// Initials (all client Initials) are padded to 1200 bytes. Returns the
+    /// packet number.
+    fn send_long(
+        &mut self,
+        slot: SlotHandle,
+        space: PnSpace,
+        kind: LongKind,
+        now_ns: u64,
+    ) -> Result<u64, WarpError> {
+        let max = usize::from(self.config.max_datagram);
+        let exponent = self.config.ack_delay_exponent;
+        let tile = self
+            .table
+            .get(slot)
+            .map_err(|_| WarpError::StaleConnection)?;
+        let idx = slot.index() as usize;
+        let c = self.conns[idx].as_mut().ok_or(WarpError::StaleConnection)?;
+        let largest_acked = c.recovery.largest_acked(space);
+        let Conn { hs, streams, .. } = c;
+        let hs = hs.as_mut().ok_or(WarpError::KeysUnavailable)?;
+        if let Some(amp) = hs.amp
+            && !amp.allows(max as u64)
+        {
+            self.stats.amplification_blocked += 1;
+            return Err(WarpError::AmplificationLimited);
+        }
+        let client = !hs.is_server();
+        let mut scid = [0u8; 20];
+        let scid_len = hs.local_cid().len();
+        scid[..scid_len].copy_from_slice(hs.local_cid());
+        let ls = hs.long(space).ok_or(WarpError::KeysUnavailable)?;
+        let Some(sealer) = ls.sealer.as_ref() else {
+            return Err(WarpError::KeysUnavailable);
+        };
+        let pn = sealer.next_packet_number();
+
+        // Frames after a maximal header, moved once its length is known.
+        let scratch = &mut self.scratch;
+        let base = MAX_LONG_HEADER;
+        let limit = max.saturating_sub(TAG_LEN).min(scratch.len());
+        let mut at = base;
+        let mut has_ack = false;
+        let mut crypto = None;
+        let ack_eliciting = match kind {
+            LongKind::Close { code, frame_type } => {
+                at += Frame::ConnectionClose(crate::frame::ConnectionClose {
+                    error_code: code,
+                    frame_type: Some(frame_type),
+                    reason: b"",
+                })
+                .encode(&mut scratch[at..limit])?;
+                false
+            }
+            LongKind::Normal | LongKind::Probe => {
+                if let Some(ack) = ls
+                    .received
+                    .ack_frame(now_ns, exponent)
+                    .map_err(|_| WarpError::Config("bad ack_delay_exponent"))?
+                {
+                    at += Frame::Ack(ack).encode(&mut scratch[at..limit])?;
+                    has_ack = true;
+                }
+                // Room for a PING after the CRYPTO frame.
+                let room = limit.saturating_sub(1);
+                if room > at
+                    && let Some((n, off, len)) = streams
+                        .crypto_mut(space)
+                        .write_frame(&mut scratch[at..room])
+                {
+                    at += n;
+                    crypto = Some((off, len as u32));
+                }
+                if kind == LongKind::Probe && crypto.is_none() {
+                    at += Frame::Ping.encode(&mut scratch[at..limit])?;
+                }
+                crypto.is_some() || kind == LongKind::Probe
+            }
+        };
+        let frames_len = at - base;
+        if frames_len == 0 {
+            return Err(WarpError::Config("empty packet"));
+        }
+        // From here on a failure must give the CRYPTO range back.
+        let requeue = |streams: &mut StreamSet| {
+            if let Some((off, len)) = crypto {
+                streams.crypto_mut(space).on_lost(off, len as usize);
+            }
+        };
+        let ty = if space == PnSpace::Initial {
+            LongPacketType::Initial
+        } else {
+            LongPacketType::Handshake
+        };
+        let shortest = match encoded_len(pn, largest_acked) {
+            Ok(len) => len.bytes(),
+            Err(_) => {
+                requeue(streams);
+                return Err(WarpError::PacketNumbersExhausted);
+            }
+        };
+        let pad_initial = space == PnSpace::Initial && (client || ack_eliciting);
+        let dcid = tile.peer_cid;
+        let header = |payload_len: usize, pn_bytes: usize, out: &mut [u8]| {
+            write_long(
+                out,
+                &LongHeader {
+                    ty,
+                    dcid: dcid.as_bytes(),
+                    scid: &scid[..scid_len],
+                    token: &[],
+                    full_pn: pn,
+                    pn_len: PnLen::new(pn_bytes as u8).expect("1..=4 bytes"),
+                    payload_len,
+                },
+            )
+        };
+        let layout: Result<_, WarpError> = 'layout: {
+            // The header-protection sample needs pn_len + payload >= 4.
+            let mut pn_bytes = shortest.max(4usize.saturating_sub(frames_len));
+            let mut pad = 0;
+            if pad_initial {
+                pn_bytes = shortest;
+                let probe = match header(MIN_INITIAL_DATAGRAM, pn_bytes, &mut scratch[..base]) {
+                    Ok(p) => p,
+                    Err(e) => break 'layout Err(e.into()),
+                };
+                pad = MIN_INITIAL_DATAGRAM.saturating_sub(probe.header_len + frames_len + TAG_LEN);
+            }
+            if at + pad > scratch.len() {
+                break 'layout Err(WarpError::PacketTooLarge { len: at + pad });
+            }
+            scratch[at..at + pad].fill(0); // PADDING frames
+            let payload = frames_len + pad;
+            let written = match header(payload + TAG_LEN, pn_bytes, &mut scratch[..base]) {
+                Ok(w) => w,
+                Err(e) => break 'layout Err(e.into()),
+            };
+            scratch.copy_within(base..base + payload, written.header_len);
+            let plain_len = written.header_len + payload;
+            let total = plain_len + TAG_LEN;
+            if total > max {
+                break 'layout Err(WarpError::PacketTooLarge { len: total });
+            }
+            Ok((pad, payload, written, plain_len, total))
+        };
+        let (pad, payload, written, plain_len, total) = match layout {
+            Ok(l) => l,
+            Err(e) => {
+                requeue(streams);
+                return Err(e);
+            }
+        };
+        let mut frame = match self.xsk.alloc_tx(total as u16) {
+            Ok(f) => f,
+            Err(e) => {
+                requeue(streams);
+                return Err(WarpError::Umem(e));
+            }
+        };
+        let sealer = ls.sealer.as_mut().expect("checked");
+        let sealed = match sealer.ticket(pn) {
+            Err(e) => Err(WarpError::Crypto(e)),
+            Ok(ticket) => match self.xsk.tx_bytes_mut(&mut frame) {
+                Err(e) => {
+                    let _ = sealer.abandon(ticket);
+                    Err(WarpError::Umem(e))
+                }
+                Ok(bytes) => {
+                    bytes[..plain_len].copy_from_slice(&scratch[..plain_len]);
+                    match sealer.seal(ticket, bytes, written.pn_offset, payload) {
+                        Ok(_) => Ok(()),
+                        Err(err) => {
+                            let _ = sealer.abandon(err.ticket);
+                            Err(WarpError::Crypto(err.error))
+                        }
+                    }
+                }
+            },
+        };
+        if let Err(e) = sealed {
+            requeue(streams);
+            let _ = self.xsk.abandon_tx(frame);
+            return Err(e);
+        }
+        let in_flight = !matches!(kind, LongKind::Close { .. }) && (ack_eliciting || pad > 0);
+        let sent = recovery::SentPacket {
+            pn,
+            sent_ns: now_ns.max(self.conns[idx].as_ref().expect("live").last_sent_ns),
+            bytes: total as u32,
+            ack_eliciting,
+            in_flight,
+        };
+        let c = self.conns[idx].as_mut().expect("live");
+        if let Err(e) = c.recovery.on_packet_sent(space, sent) {
+            if let Some((off, len)) = crypto {
+                c.streams.crypto_mut(space).on_lost(off, len as usize);
+            }
+            let _ = self.xsk.abandon_tx(frame);
+            return Err(WarpError::Recovery(e));
+        }
+        c.last_sent_ns = sent.sent_ns;
+        let hs = c.hs.as_mut().expect("checked");
+        if let Some(amp) = hs.amp.as_mut() {
+            amp.sent += total as u64;
+        }
+        let ls = hs.long(space).expect("long space");
+        if has_ack {
+            ls.received.on_ack_sent();
+        }
+        if let Some((off, len)) = crypto {
+            ls.sent.push_back((pn, off, len));
+        }
+        // RFC 9001 §4.9.1: a client discards Initial keys once it sends
+        // its first Handshake packet.
+        let discard_initial = client && space == PnSpace::Handshake && !hs.handshake_sent;
+        if discard_initial {
+            hs.handshake_sent = true;
+            let _ = hs.tls.on_handshake_packet_sent();
+        }
+        self.stats.packets_sent += 1;
+        self.stats.handshake_packets_sent += 1;
+        if let Ok(bytes) = self.xsk.tx_bytes_mut(&mut frame) {
+            self.tap.on_transmit(slot, pn, now_ns, bytes);
+        }
+        // Not leased: lost CRYPTO data is resent from the CRYPTO buffer.
+        match self.xsk.submit_paced_tx(frame, pn, now_ns) {
+            Ok(pkt) => {
+                let _ = self.xsk.retire(pkt);
+            }
+            Err(refused) => {
+                self.stats.tx_abandoned += 1;
+                let _ = self.xsk.abandon_tx(refused.into_owner());
+            }
+        }
+        if discard_initial {
+            let _ = self.apply_tls_events(slot, now_ns);
+        }
+        self.sync_handshake_status(slot, now_ns);
+        Ok(pn)
+    }
+
+    /// CONNECTION_CLOSE with `code` in every space we hold send keys for
+    /// (Initial, Handshake, 1-RTT): the peer may not have the later ones
+    /// yet (RFC 9000 §10.2.3).
+    fn send_close_code(
+        &mut self,
+        slot: SlotHandle,
+        code: u64,
+        frame_type: u64,
+        now_ns: u64,
+    ) -> Result<(), WarpError> {
+        let mut any = false;
+        for space in [PnSpace::Initial, PnSpace::Handshake] {
+            let has = self
+                .conns
+                .get_mut(slot.index() as usize)
+                .and_then(Option::as_mut)
+                .and_then(|c| c.hs.as_mut())
+                .and_then(|h| h.long(space))
+                .is_some_and(|ls| ls.sealer.is_some());
+            if has
+                && self
+                    .send_long(slot, space, LongKind::Close { code, frame_type }, now_ns)
+                    .is_ok()
+            {
+                any = true;
+            }
+        }
+        if self.conn(slot)?.keys.is_some() {
+            let n = Frame::ConnectionClose(crate::frame::ConnectionClose {
+                error_code: code,
+                frame_type: Some(frame_type),
+                reason: b"",
+            })
+            .encode(&mut self.app_out)?;
+            if self
+                .send(slot, Source::Fresh, false, n, Kind::Close, now_ns)
+                .is_ok()
+            {
+                any = true;
+            }
+        }
+        if any {
+            self.stats.closes_sent += 1;
+            self.conn_mut(slot)?.close_sent_ns = Some(now_ns);
+        }
+        Ok(())
     }
 
     /// Closes a connection and frees its slot. Its parked leases are
@@ -736,6 +1939,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             }
         }
         self.conns[conn.index() as usize] = None;
+        self.initial_dcids.retain(|(_, h)| *h != conn);
         self.table
             .remove(conn)
             .map_err(|_| WarpError::StaleConnection)?;
@@ -753,9 +1957,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             recovery: &c.recovery,
             cc: &c.cc,
             received: &c.received,
-            keys: &c.keys,
+            keys: c.keys.as_ref(),
             streams: &c.streams,
             error: c.error,
+            phase: c
+                .hs
+                .as_ref()
+                .map_or(HandshakePhase::External, |h| h.phase()),
+            tls: c.hs.as_ref().map(|h| &h.tls),
         })
     }
 
@@ -775,6 +1984,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let c = self.conn_mut(conn)?;
         if let Some(e) = c.error {
             return Err(WarpError::ConnectionClosed(e));
+        }
+        if c.hs.as_ref().is_some_and(|h| !h.peer_params_applied) {
+            return Err(WarpError::Handshaking);
         }
         Ok(&mut c.streams)
     }
@@ -940,14 +2152,20 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     let mut dcid = [0u8; 20];
                     let d = h.dcid(bytes);
                     dcid[..d.len()].copy_from_slice(d);
-                    Ok((h, dcid, d.len()))
+                    Ok(Some((h, dcid, d.len())))
+                }
+                Ok(ParsedPacket::Protected(h))
+                    if matches!(h.packet_type, PacketType::Initial | PacketType::Handshake) =>
+                {
+                    Ok(None)
                 }
                 Ok(_) => Err(DropReason::NotOneRtt),
                 Err(e) => Err(DropReason::Header(e)),
             },
         };
         let (header, dcid, dcid_len) = match split {
-            Ok(v) => v,
+            Ok(Some(v)) => v,
+            Ok(None) => return self.on_long_datagram(frame, now_ns),
             Err(reason) => return self.drop_rx(frame, reason),
         };
 
@@ -963,15 +2181,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             // at most once per PTO; draining: stay silent.
             self.stats.rx_dropped_closed += 1;
             let out = self.drop_rx(frame, DropReason::Closed);
-            if let ConnectionError::Local(e) = error {
-                let c = self.conn(slot)?;
-                let gap = c.recovery.rtt().pto_base_ns();
-                if c.close_sent_ns
-                    .is_none_or(|t| now_ns >= t.saturating_add(gap))
-                {
-                    let _ = self.send_close(slot, e, now_ns);
-                }
-            }
+            self.answer_while_closing(slot, error, now_ns);
             return out;
         }
 
@@ -1012,11 +2222,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             opened_header_len..opened_header_len + payload_len,
             pn,
             now_ns,
-            self.config.ack_delay_exponent,
             self.config.stream_mode,
         );
         // Retire the leases recovery resolved (lanes 3, 4).
-        self.resolve_events(slot, None);
+        let acked_any = self
+            .events
+            .iter()
+            .any(|e| matches!(e, CongestionEvent::Acked { .. }));
+        self.resolve_events(slot, PnSpace::ApplicationData, None);
         let (ack_eliciting, app_len) = match scanned {
             Ok(v) => v,
             Err(DropReason::Transport(e)) => {
@@ -1033,6 +2246,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 return self.drop_rx(frame, reason);
             }
         };
+        if self.conn(slot)?.hs.is_some()
+            && self.conn(slot)?.error.is_none()
+            && let Err(code) = self.after_one_rtt(slot, acked_any, now_ns)
+        {
+            self.write_tile(slot);
+            return self.drop_rx(frame, DropReason::Handshake(code));
+        }
         if self.conn(slot)?.error.is_some() {
             // The peer closed the connection (draining): no reply.
             self.stats.closes_received += 1;
@@ -1169,7 +2389,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     /// connection's owed ACK (when `with_ack`) and the AEAD tag.
     fn frame_budget(&mut self, slot: SlotHandle, with_ack: bool, now_ns: u64) -> usize {
         let exponent = self.config.ack_delay_exponent;
-        let fixed = 1 + usize::from(self.config.cid_len) + 4 + TAG_LEN;
+        let peer_cid = self
+            .table
+            .get(slot)
+            .map_or(usize::from(self.config.cid_len), |t| {
+                t.peer_cid.as_bytes().len()
+            });
+        let fixed = 1 + peer_cid + 4 + TAG_LEN;
         let mut ack_len = 0;
         if with_ack
             && let Some(Some(c)) = self.conns.get(slot.index() as usize)
@@ -1209,6 +2435,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return Err(WarpError::ConnectionClosed(e));
         }
         let mut sent = 0;
+        if self.conn(conn)?.keys.is_none() {
+            // Handshaking: 1-RTT data waits for its keys.
+            return Ok(sent);
+        }
         // Bounded per call; congestion control normally stops it first.
         for _ in 0..self.config.max_tracked_per_conn {
             let c = self.conn(conn)?;
@@ -1259,24 +2489,51 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         Ok(())
     }
 
+    /// Sends pending handshake data and owed Initial/Handshake ACKs on
+    /// every connection that is handshaking.
+    fn flush_handshakes(&mut self, now_ns: u64) -> Result<(), WarpError> {
+        for i in 0..self.conns.len() {
+            let Some(c) = self.conns[i].as_ref() else {
+                continue;
+            };
+            if c.error.is_some() || c.hs.is_none() {
+                continue;
+            }
+            let h = c.handle;
+            self.flush_handshake(h, now_ns)?;
+        }
+        Ok(())
+    }
+
     /// Sends CONNECTION_CLOSE for a peer violation (not ack-eliciting, so
     /// never retransmitted; the closing state answers later packets).
+    /// Closing (RFC 9000 §10.2.1): a packet for a connection we closed is
+    /// answered with CONNECTION_CLOSE again, at most once per PTO.
+    /// Draining (the peer closed): stay silent.
+    fn answer_while_closing(&mut self, slot: SlotHandle, error: ConnectionError, now_ns: u64) {
+        let (code, frame_type) = match error {
+            ConnectionError::Local(e) => (e.code.code(), e.frame_type),
+            ConnectionError::Handshake { error_code } => (error_code, CLOSE_FRAME_CRYPTO),
+            ConnectionError::Peer { .. } => return,
+        };
+        let Ok(c) = self.conn(slot) else {
+            return;
+        };
+        let gap = c.recovery.rtt().pto_base_ns();
+        if c.close_sent_ns
+            .is_none_or(|t| now_ns >= t.saturating_add(gap))
+        {
+            let _ = self.send_close_code(slot, code, frame_type, now_ns);
+        }
+    }
+
     fn send_close(
         &mut self,
         slot: SlotHandle,
         e: TransportError,
         now_ns: u64,
     ) -> Result<(), WarpError> {
-        let n = Frame::ConnectionClose(crate::frame::ConnectionClose {
-            error_code: e.code.code(),
-            frame_type: Some(e.frame_type),
-            reason: b"",
-        })
-        .encode(&mut self.app_out)?;
-        self.send(slot, Source::Fresh, false, n, Kind::Close, now_ns)?;
-        self.stats.closes_sent += 1;
-        self.conn_mut(slot)?.close_sent_ns = Some(now_ns);
-        Ok(())
+        self.send_close_code(slot, e.code.code(), e.frame_type, now_ns)
     }
 
     /// Releases due launches, harvests completions, replenishes the fill
@@ -1318,6 +2575,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.sync_timer(slot);
         }
         self.flush_deferred_acks(now_ns)?;
+        self.flush_handshakes(now_ns)?;
         self.flush_all(now_ns)?;
         Ok(report)
     }
@@ -1452,11 +2710,31 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let closed = conn.error.is_some();
         self.stats.recovery_timeouts += 1;
         self.events.clear();
+        let space = match conn.recovery.timer().map(|t| t.kind) {
+            Some(recovery::TimerKind::Loss(sp) | recovery::TimerKind::Pto(sp)) => sp,
+            None => PnSpace::ApplicationData,
+        };
         let Conn { recovery, cc, .. } = conn;
         let events = &mut self.events;
-        let action = recovery.on_timeout(now_ns, &mut |ev| record_event(cc, events, ev, now_ns));
-        self.resolve_events(slot, fired);
-        if let TimeoutAction::SendProbe { packets, .. } = action
+        let action = if space == PnSpace::ApplicationData {
+            recovery.on_timeout(now_ns, &mut |ev| record_event(cc, events, ev, now_ns))
+        } else {
+            // Long-header packets are not in BBR's flight (see the module
+            // docs): their losses only reach the CRYPTO buffers.
+            recovery.on_timeout(now_ns, &mut |ev| record_long_event(events, ev))
+        };
+        self.resolve_events(slot, space, fired);
+        if let TimeoutAction::SendProbe { space, packets, .. } = action
+            && !closed
+            && space != PnSpace::ApplicationData
+        {
+            for _ in 0..packets {
+                if self.send_long_probe(slot, space, now_ns).is_err() {
+                    self.stats.probes_failed += 1;
+                    break;
+                }
+            }
+        } else if let TimeoutAction::SendProbe { packets, .. } = action
             && !closed
         {
             // A probe that cannot be built (no tx frame, recovery full) is
@@ -1476,7 +2754,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     /// Applies the acknowledgements and losses in `self.events` to leases,
     /// keys and the application. `fired` holds a lease already taken out
     /// of the wheel.
-    fn resolve_events(&mut self, slot: SlotHandle, mut fired: Option<&mut Option<Lease>>) {
+    fn resolve_events(
+        &mut self,
+        slot: SlotHandle,
+        space: PnSpace,
+        mut fired: Option<&mut Option<Lease>>,
+    ) {
+        if space != PnSpace::ApplicationData {
+            self.resolve_long_events(slot, space);
+            return;
+        }
         for i in 0..self.events.len() {
             let (pn, acked) = match self.events[i] {
                 CongestionEvent::Acked { packet } => (packet.pn, true),
@@ -1485,8 +2772,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             };
             if acked {
                 self.stats.packets_acked += 1;
-                if let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) {
-                    c.keys.on_packet_acked(pn);
+                if let Some(Some(c)) = self.conns.get_mut(slot.index() as usize)
+                    && let Some(keys) = c.keys.as_mut()
+                {
+                    keys.on_packet_acked(pn);
                 }
             } else {
                 self.stats.packets_lost += 1;
@@ -1524,6 +2813,17 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     /// to send, else a PING.
     fn send_probe(&mut self, slot: SlotHandle, now_ns: u64) -> Result<(), WarpError> {
         let ack = self.conn(slot)?.received.largest().is_some();
+        // A server's unacknowledged HANDSHAKE_DONE rides on every probe:
+        // until it arrives the client keeps probing in a space the server
+        // has discarded (RFC 9002 §6.2.4 prefers data in probes).
+        if let Ok(c) = self.conn_mut(slot)
+            && c.hs
+                .as_ref()
+                .is_some_and(|h| h.is_server() && h.tls.is_handshake_complete())
+            && !c.streams.handshake_done_acked()
+        {
+            c.streams.queue_handshake_done();
+        }
         if self.config.stream_mode == StreamMode::Reliable {
             let budget = self.frame_budget(slot, ack, now_ns);
             let c = self.conns[slot.index() as usize]
@@ -1600,16 +2900,22 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
             return;
         };
-        if c.keys.send_generation() != c.send_generation {
-            c.send_generation = c.keys.send_generation();
+        // RFC 9001 §6: no key update before the handshake is confirmed.
+        let confirmed = c.hs.as_ref().is_none_or(|h| h.tls.is_handshake_confirmed());
+        let Some(keys) = c.keys.as_mut() else {
+            return;
+        };
+        if keys.send_generation() != c.send_generation {
+            c.send_generation = keys.send_generation();
             c.sent_under_key = 0;
         }
         if c.sent_under_key >= self.config.key_update_interval
-            && c.keys.key_update_permitted()
-            && c.keys.initiate_key_update().is_ok()
+            && confirmed
+            && keys.key_update_permitted()
+            && keys.initiate_key_update().is_ok()
         {
             self.stats.key_updates += 1;
-            c.send_generation = c.keys.send_generation();
+            c.send_generation = keys.send_generation();
             c.sent_under_key = 0;
         }
     }
@@ -1618,9 +2924,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     pub fn initiate_key_update(&mut self, conn: SlotHandle) -> Result<(), WarpError> {
         self.conn(conn)?;
         let c = self.conns[conn.index() as usize].as_mut().expect("checked");
-        c.keys.initiate_key_update()?;
+        if c.hs
+            .as_ref()
+            .is_some_and(|h| !h.tls.is_handshake_confirmed())
+        {
+            return Err(WarpError::Handshaking);
+        }
+        let keys = c.keys.as_mut().ok_or(WarpError::KeysUnavailable)?;
+        keys.initiate_key_update()?;
         self.stats.key_updates += 1;
-        c.send_generation = c.keys.send_generation();
+        c.send_generation = keys.send_generation();
         c.sent_under_key = 0;
         Ok(())
     }
@@ -1670,11 +2983,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         // ACK-only packets in flight).
         let pn_bytes = shortest.max(4usize.saturating_sub(payload_len));
         let pn_len = PnLen::new(pn_bytes as u8).expect("1..=4 bytes");
-        let header_len = self.parser.write_short(
+        let header_len = self.parser.write_short_to_peer(
             &mut scratch[..MAX_SHORT_HEADER],
             tile.peer_cid.as_bytes(),
             false,
-            conn.keys.send_key_phase(),
+            conn.keys
+                .as_ref()
+                .ok_or(WarpError::KeysUnavailable)?
+                .send_key_phase(),
             pn,
             pn_len,
         )?;
@@ -1729,6 +3045,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             };
         let total = plain_len + TAG_LEN;
         let ack_eliciting = probe || (data_len > 0 && kind != Kind::Close);
+        if let Some(Some(c)) = self.conns.get(slot.index() as usize)
+            && let Some(amp) = c.hs.as_ref().and_then(|h| h.amp)
+            && !amp.allows(total as u64)
+        {
+            self.stats.amplification_blocked += 1;
+            return Err((rx, WarpError::AmplificationLimited));
+        }
 
         // The received frame turned around in place (same chunk and data
         // offset), or a fresh frame (lane 3).
@@ -1750,31 +3073,31 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let conn = self.conns[slot.index() as usize]
             .as_mut()
             .expect("live: checked by write_plaintext");
-        let sealed = match conn.keys.ticket(pn) {
-            Err(e) => Err(WarpError::Crypto(e)),
-            Ok(ticket) => match self.xsk.tx_bytes_mut(&mut frame) {
-                Err(e) => {
-                    let _ = conn.keys.abandon(ticket);
-                    Err(WarpError::Umem(e))
-                }
-                Ok(bytes) => {
-                    bytes[..plain_len].copy_from_slice(&self.scratch[..plain_len]);
-                    let pn_offset = 1 + usize::from(self.config.cid_len);
-                    match conn
-                        .keys
-                        .seal(ticket, bytes, pn_offset, plain_len - header_len)
-                    {
-                        Ok(n) => {
-                            debug_assert_eq!(n, total);
-                            conn.sent_under_key += 1;
-                            Ok(())
-                        }
-                        Err(err) => {
-                            let _ = conn.keys.abandon(err.ticket);
-                            Err(WarpError::Crypto(err.error))
+        let pn_offset = 1 + tile.peer_cid.as_bytes().len();
+        let sealed = match conn.keys.as_mut() {
+            None => Err(WarpError::KeysUnavailable),
+            Some(keys) => match keys.ticket(pn) {
+                Err(e) => Err(WarpError::Crypto(e)),
+                Ok(ticket) => match self.xsk.tx_bytes_mut(&mut frame) {
+                    Err(e) => {
+                        let _ = keys.abandon(ticket);
+                        Err(WarpError::Umem(e))
+                    }
+                    Ok(bytes) => {
+                        bytes[..plain_len].copy_from_slice(&self.scratch[..plain_len]);
+                        match keys.seal(ticket, bytes, pn_offset, plain_len - header_len) {
+                            Ok(n) => {
+                                debug_assert_eq!(n, total);
+                                conn.sent_under_key += 1;
+                                Ok(())
+                            }
+                            Err(err) => {
+                                let _ = keys.abandon(err.ticket);
+                                Err(WarpError::Crypto(err.error))
+                            }
                         }
                     }
-                }
+                },
             },
         };
         if let Err(e) = sealed {
@@ -1788,7 +3111,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         // the connection's queued packets: overtaking them would make the
         // peer acknowledge a higher packet number first, and the
         // packet-threshold rule would then declare the queued ones lost.
-        let edt_ns = if ack_eliciting {
+        let edt_ns = if probe {
+            // A PTO probe leaves now (RFC 9002 §6.2.4 sends probes even
+            // when the congestion window is full). Pacing it could push
+            // it past the launch horizon after loss has collapsed the
+            // pacing rate, and a refused probe backs the PTO off with
+            // nothing sent.
+            now_ns
+        } else if ack_eliciting {
             conn.cc.schedule_edt_ns(total as u32, now_ns)
         } else if kind == Kind::Close {
             // Closing: queued packets are suppressed, so CONNECTION_CLOSE
@@ -1828,6 +3158,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if let Err(e) = recorded {
             let _ = self.xsk.abandon_tx(frame);
             return Err((None, e));
+        }
+        if let Some(amp) = conn.hs.as_mut().and_then(|h| h.amp.as_mut()) {
+            amp.sent += total as u64;
         }
         self.write_tile(slot);
         self.stats.packets_sent += 1;
@@ -2011,6 +3344,14 @@ enum Kind {
     Close,
 }
 
+/// What a long-header packet is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LongKind {
+    Normal,
+    Probe,
+    Close { code: u64, frame_type: u64 },
+}
+
 /// Where a packet's frame comes from.
 enum Source {
     TurnAround(UmemFrame<RxHarvested>),
@@ -2036,6 +3377,8 @@ fn open_in_place<B: XskBackend>(
             }))?;
     let opened = conn
         .keys
+        .as_mut()
+        .ok_or(DropReason::KeysUnavailable)?
         .open_packet(packet, header.pn_offset, now_ns, |u| {
             reconstruct(u, largest_rx_pn)
         })
@@ -2066,9 +3409,9 @@ fn scan_in_place<B: XskBackend, R: Responder>(
     payload: std::ops::Range<usize>,
     pn: u64,
     now_ns: u64,
-    exponent: u8,
     mode: StreamMode,
 ) -> Result<(bool, usize), DropReason> {
+    let exponent = conn.peer_ack_exponent;
     let buf = xsk.rx_bytes_mut(frame).map_err(DropReason::Umem)?;
     let payload = &buf[payload];
     let mut app_len = 0usize;
@@ -2113,6 +3456,11 @@ fn scan_in_place<B: XskBackend, R: Responder>(
             {
                 if let Err(e) = conn.streams.on_frame(f) {
                     failure = Some(DropReason::Transport(e));
+                }
+            }
+            Frame::HandshakeDone => {
+                if let Some(hs) = conn.hs.as_mut() {
+                    hs.done_received = true;
                 }
             }
             _ => {}
@@ -2176,6 +3524,39 @@ fn record_event(
         if events.len() < events.capacity() {
             events.push(ev);
         }
+    }
+}
+
+/// A long-header space's recovery event: acknowledgements and losses are
+/// kept for the CRYPTO buffers; nothing reaches BBR.
+fn record_long_event(events: &mut Vec<CongestionEvent>, ev: CongestionEvent) {
+    if matches!(
+        ev,
+        CongestionEvent::Acked { .. } | CongestionEvent::Lost { .. }
+    ) && events.len() < events.capacity()
+    {
+        events.push(ev);
+    }
+}
+
+/// The transport parameters an endpoint advertises (RFC 9000 §18.2).
+fn local_transport_params(config: &EndpointConfig, local_cid: &[u8]) -> TransportParameters {
+    let w = u64::from(config.streams.stream_window);
+    TransportParameters {
+        initial_source_connection_id: vesper_warp_tls::ConnectionId::new(local_cid).ok(),
+        max_idle_timeout_ms: config.idle_timeout_ns / 1_000_000,
+        max_udp_payload_size: u64::from(config.max_datagram),
+        initial_max_data: config.streams.conn_window,
+        initial_max_stream_data_bidi_local: w,
+        initial_max_stream_data_bidi_remote: w,
+        initial_max_stream_data_uni: w,
+        initial_max_streams_bidi: config.streams.max_streams_bidi,
+        initial_max_streams_uni: config.streams.max_streams_uni,
+        ack_delay_exponent: u64::from(config.ack_delay_exponent),
+        max_ack_delay_ms: config.max_ack_delay_ns.div_ceil(1_000_000),
+        // No connection migration (see the module docs).
+        disable_active_migration: true,
+        ..TransportParameters::default()
     }
 }
 
