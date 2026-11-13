@@ -178,6 +178,17 @@ source walk in setup and reuse the same rules in the Rust sealer/runtime.
 Source-manifest hash domain is `vesper.lean4lean42.sources\0`, schema1 u16LE,
 count u32LE, then FileDigest fields in the same encoding as build outputs.
 
+The pinned Batteries tree contains exactly one tracked documentation alias:
+`docs/README.md`, Git mode120000, blob
+`32d46ee883b58d6a383eed06eb98f33aa6530ded`, with exact target text
+`../README.md`. Before source preflight, setup verifies that identity and the
+actual alias (or Windows' literal Git alias file), then materializes only this
+owned leaf as a regular file containing the pinned regular Batteries README.md
+bytes. The expected source manifest binds those materialized bytes. All other
+source aliases/reparse/nonregular inputs remain rejected; none are ignored.
+This explicit recipe normalization was published on #301 after clean assembly
+exposed the pinned alias, before dependent source edits.
+
 Source/patch/pin/control data are repository-owned compile-time inputs to the
 Rust binary; ordinary replay cannot silently select mutable replacement pins
 from an unrelated cwd. Runtime compares the actual tree against the embedded
