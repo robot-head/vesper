@@ -184,25 +184,30 @@ fn badge(item: &str, kind: &str, docs: &str, audits: &[ProofAudit]) -> Result<Ba
     }
     let mut any_axiom = false;
     for anchor in &anchors {
-        let found = audits.iter().find_map(|a| {
-            a.theorems
+        // Accepted, kernel-replayed evidence wins regardless of report order;
+        // a rejected report only explains an otherwise unverified anchor.
+        let lookup = |eligible: bool| {
+            audits
                 .iter()
-                .find(|t| t.name == *anchor)
-                .map(|t| (a, t))
-        });
-        let Some((audit, theorem)) = found else {
-            result.reason = format!("theorem {anchor} is not in any supplied proof audit");
+                .filter(|a| (a.accepted && a.kernel_replayed) == eligible)
+                .find_map(|a| {
+                    a.theorems
+                        .iter()
+                        .find(|t| t.name == *anchor)
+                        .map(|t| (a, t))
+                })
+        };
+        let Some((audit, theorem)) = lookup(true) else {
+            result.reason = match lookup(false) {
+                Some((audit, _)) => format!(
+                    "theorem {anchor} audit was rejected: axioms {:?} exceed its policy",
+                    audit.forbidden_axioms
+                ),
+                None => format!("theorem {anchor} is not in any supplied proof audit"),
+            };
             result.evidence.clear();
             return Ok(result);
         };
-        if !audit.accepted || !audit.kernel_replayed {
-            result.reason = format!(
-                "theorem {anchor} audit was rejected: axioms {:?} exceed its policy",
-                audit.forbidden_axioms
-            );
-            result.evidence.clear();
-            return Ok(result);
-        }
         any_axiom |= !theorem.axioms.is_empty();
         result.evidence.push(Evidence {
             theorem: theorem.name.clone(),

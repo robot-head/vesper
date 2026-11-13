@@ -77,6 +77,39 @@ fn wire_input_compiles_with_the_bridge_checker_and_flattens_nested_structs() {
 }
 
 #[test]
+fn oversized_layouts_omit_only_their_diagram() {
+    let mut symbols = Symbols::default();
+    let sym = symbols.intern("huge").unwrap();
+    let diagram = visual::LayoutDiagram {
+        name: "Huge".into(),
+        source: visual::LayoutSource::Native,
+        bytes: 65 * 64,
+        alignment: 8,
+        spans: vec![visual::WireFieldSpan {
+            byte_offset: 0,
+            byte_width: 65 * 64,
+            cache_line_idx: 0,
+            endian_tag: ENDIAN_NATIVE,
+            is_hot_tile_col: 0,
+            field_sym_id: sym,
+        }],
+    };
+    assert!(visual::layout_svg(&diagram, &symbols).is_err());
+    let visuals = visual::Visuals {
+        symbols,
+        layouts: vec![diagram],
+        ..Default::default()
+    };
+    let doc = document(&[]);
+    let html =
+        visual::render_codex_html(&doc, &doc, &visuals, &[], 0, vesper_doc::Limits::default())
+            .unwrap();
+    let html = String::from_utf8(html).unwrap();
+    assert!(html.contains("Diagram omitted: Huge: layout exceeds 64 cache lines"));
+    assert!(html.contains("<td>huge</td>"));
+}
+
+#[test]
 fn wire_input_rejects_implicit_padding_unknown_types_and_wrong_formats() {
     let padded = wire(r#"{"name":"a","type":"u8"},{"name":"b","type":"u32"}"#);
     let error = visual::compile_wire_input(&padded).unwrap_err();
@@ -207,9 +240,16 @@ fn badges_come_only_from_audit_reports() {
     rejected["forbidden_axioms"] = serde_json::json!(["propext"]);
     rejected["accepted"] = serde_json::json!(false);
     let rejected = badges::parse_audit(&rejected.to_string()).unwrap();
-    let b = &badges::badges(&doc, &[rejected]).unwrap()[0];
+    let b = &badges::badges(&doc, std::slice::from_ref(&rejected)).unwrap()[0];
     assert_eq!(b.level, BadgeLevel::Unverified);
     assert!(b.reason.contains("rejected"));
+    // Report order never lets a rejected audit mask accepted evidence.
+    for audits in [[rejected.clone(), audit.clone()], [audit.clone(), rejected]] {
+        assert_eq!(
+            badges::badges(&doc, &audits).unwrap()[0].level,
+            BadgeLevel::Proved
+        );
+    }
 }
 
 #[test]

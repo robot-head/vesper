@@ -646,7 +646,12 @@ pub fn render_codex_html(
             d.bytes,
             d.alignment
         ));
-        out.push_str(&layout_svg(d, &visuals.symbols)?);
+        // An oversized diagram is omitted with its reason; the record table
+        // and the rest of the document are still rendered.
+        match layout_svg(d, &visuals.symbols) {
+            Ok(svg) => out.push_str(&svg),
+            Err(reason) => out.push_str(&format!("<p>Diagram omitted: {}</p>", escape(&reason))),
+        }
         out.push_str("<table><tr><th>Field</th><th>Offset</th><th>Width</th><th>Line</th><th>Endian</th><th>Record</th></tr>");
         for s in &d.spans {
             let hex: String = s.to_bytes().iter().map(|b| format!("{b:02x}")).collect();
@@ -673,7 +678,10 @@ pub fn render_codex_html(
     if visuals.typestates.is_empty() {
         out.push_str("<p>No concrete linear typestates.</p>");
     } else {
-        out.push_str(&typestate_svg(visuals)?);
+        match typestate_svg(visuals) {
+            Ok(svg) => out.push_str(&svg),
+            Err(reason) => out.push_str(&format!("<p>Diagram omitted: {}</p>", escape(&reason))),
+        }
         out.push_str("<p>Edges show checked transitions; a terminal path is not an all-path discharge proof.</p>");
     }
     out.push_str("</section></html>\n");
