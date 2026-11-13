@@ -413,15 +413,18 @@ fn args_of(carriers: &[Carrier], tape: &ChoiceTape) -> Result<Vec<Value>, String
 
 /// Native JIT outcome of `name(args)` through a synthesized zero-argument
 /// wrapper compiled by the native batch backend.
+/// `tail` is the target's signature after its parameter list (`-> T`, or
+/// empty for an implicit `Unit`), taken from the source.
 fn native_outcome(
     source: &str,
     target: &Target,
+    tail: &str,
     args: &[Value],
 ) -> Result<Result<Value, String>, String> {
     let call = args.iter().map(literal).collect::<Vec<_>>().join(", ");
     let wrapped = format!(
-        "{source}\nfn __vesper_fuzz_case() -> {} {{\n    {}({call})\n}}\n",
-        target.result, target.name
+        "{source}\nfn __vesper_fuzz_case() {tail} {{\n    {}({call})\n}}\n",
+        target.name
     );
     let world = check_source(&wrapped)?;
     let mut batch = vesper::native::batch::NativeBatch::compile(
@@ -557,6 +560,7 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
         .ok_or("fuzz requires --target <fn>; see vesper fuzz --help")?;
     let loaded = load(&input)?;
     let target = target(&loaded.world, &name, "fuzz target")?;
+    let tail = signature_tail(&loaded.source, &loaded.world, &name)?;
     let shadow = match &differential {
         Some(shadow) => {
             let s = self::target(&loaded.world, shadow, "differential shadow")?;
@@ -586,7 +590,7 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
                 Carrier::Bool => Value::Bool(false),
             })
             .collect();
-        native_outcome(&loaded.source, &target, &zeros)
+        native_outcome(&loaded.source, &target, &tail, &zeros)
             .map_err(|e| format!("--native: '{name}' is outside the native batch subset: {e}"))?
             .map_err(|e| format!("--native: '{name}' failed natively on zero arguments: {e}"))?;
     }
@@ -626,7 +630,7 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
             return Err(PropError::fail(error_kind("evaluator", e), e.clone()));
         }
         if native {
-            let jit = native_outcome(source, &target, &args)
+            let jit = native_outcome(source, &target, &tail, &args)
                 .map_err(|e| PropError::fail("native-compile", e))?;
             if !same_outcome(&outcome, &jit) {
                 return Err(PropError::fail(
@@ -709,7 +713,9 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
         );
         if let Some(dir) = &corpus {
             fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
-            for tape in &r.corpus {
+            // The failing tape is saved too, so the next run replays it first.
+            let failing = r.counterexample.as_ref().map(|c| &c.tape);
+            for tape in r.corpus.iter().chain(failing) {
                 let digest = blake3::hash(tape.to_text().as_bytes()).to_hex();
                 let path = dir.join(format!("{}.tape", &digest[..16]));
                 fs::write(&path, tape.to_text()).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -733,7 +739,6 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
     println!("failure [{}]: {}", failure.kind, failure.detail);
     println!("tape: {}", tape_inline(&tape));
     if let Some(out) = &common.regressions {
-        let tail = signature_tail(&loaded.source, &loaded.world, &name)?;
         let body = format!("fn {{name}}() {tail} {{\n    {name}({call})\n}}\n");
         write_regressions(
             &loaded,
@@ -851,7 +856,10 @@ pub fn refute(args: Vec<String>) -> Result<(), String> {
             );
             println!("tape: {}", tape_inline(&counterexample.tape));
             if let Some(out) = &common.regressions {
-                let body = format!("fn {{name}}() -> bool {{\n    {name}({call})\n}}\n");
+                // Keep the contract's effect row: calling it needs it even
+                // where this input does not raise.
+                let tail = signature_tail(&loaded.source, &loaded.world, &name)?;
+                let body = format!("fn {{name}}() {tail} {{\n    {name}({call})\n}}\n");
                 write_regressions(
                     &loaded,
                     out,

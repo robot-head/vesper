@@ -104,9 +104,6 @@ pub struct ConstTimeEntry {
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct StackSection {
-    /// `x86_64` or `aarch64`; defaults to the `--target` triple or the host.
-    #[serde(default)]
-    pub arch: Option<String>,
     /// Root function -> `@stack_limit(bytes)` budget.
     #[serde(default)]
     pub roots: BTreeMap<String, u32>,
@@ -320,19 +317,104 @@ fn resolve_list(names: &Names, list: &[String], what: &str) -> Result<Vec<String
         .collect()
 }
 
-fn arch_of(policy: &StackSection, target: Option<&str>) -> Result<vesper_silicon::Arch, String> {
-    let name = match (&policy.arch, target) {
-        (Some(arch), _) => arch.clone(),
-        (None, Some(triple)) => triple.split('-').next().unwrap_or_default().to_string(),
-        (None, None) => std::env::consts::ARCH.to_string(),
+/// Compile every emitted function with exactly the ISA and flags object
+/// emission uses ([`crate::native::object_isa`]), measure each activation's
+/// stack bytes from the emitted prologue with Silicon's decoders, cross-check
+/// against Cranelift's frame layout, and build the contract call graph
+/// (direct calls by `u0:N` name, imports as external calls, libcalls from
+/// relocations). This measures the code `vesper build` emits, not a
+/// re-compilation under Silicon's own analysis flags.
+fn measure_emitted(
+    functions: &[EmittedFunction],
+    target: Option<&str>,
+) -> Result<vesper_silicon::stack::CallGraph, String> {
+    use cranelift_codegen::{
+        Context, FinalizedRelocTarget, control::ControlPlane, ir::ExternalName,
     };
-    match name.as_str() {
-        "x86_64" => Ok(vesper_silicon::Arch::X86_64),
-        "aarch64" | "arm64" => Ok(vesper_silicon::Arch::Aarch64),
-        other => Err(format!(
-            "stack verifier supports x86_64 and aarch64, not '{other}'"
-        )),
+    use vesper_silicon::stack::{CallGraph, CallSite, ExternalCall, FnId, FnNode, IndirectCall};
+    let isa = crate::native::object_isa(target)?;
+    let x86 = match isa.triple().architecture {
+        target_lexicon::Architecture::X86_64 => true,
+        target_lexicon::Architecture::Aarch64(_) => false,
+        other => {
+            return Err(format!(
+                "stack verifier supports x86_64 and aarch64, not {other}"
+            ));
+        }
+    };
+    let ids: BTreeMap<String, u32> = functions
+        .iter()
+        .enumerate()
+        .map(|(i, f)| (format!("u0:{}", f.func_id), i as u32))
+        .collect();
+    let mut graph = CallGraph::default();
+    let mut edges = BTreeSet::new();
+    for (i, f) in functions.iter().enumerate() {
+        let id = FnId(i as u32);
+        let name = format!("u0:{}", f.func_id);
+        let mut ctx = Context::for_function(f.function.clone());
+        let compiled = ctx
+            .compile(&*isa, &mut ControlPlane::default())
+            .map_err(|e| format!("stack verifier: compiling '{}': {:?}", f.key, e.inner))?;
+        let code = compiled.code_buffer();
+        let measured = if x86 {
+            vesper_silicon::prologue::measure_x86_64(code)
+        } else {
+            vesper_silicon::prologue::measure_aarch64(code)
+        };
+        let total = measured
+            .total()
+            .ok_or_else(|| format!("stack verifier: frame of '{}' overflows", f.key))?;
+        let minimum = compiled
+            .frame_size
+            .checked_add(measured.frame_record_bytes)
+            .and_then(|v| v.checked_add(measured.call_push_bytes))
+            .ok_or_else(|| format!("stack verifier: frame of '{}' overflows", f.key))?;
+        if total < minimum {
+            return Err(format!(
+                "stack verifier: measured {total} stack bytes for '{}' but its frame layout needs at least {minimum}",
+                f.key
+            ));
+        }
+        let mut libcalls = BTreeSet::new();
+        for reloc in compiled.buffer.relocs() {
+            if let FinalizedRelocTarget::ExternalName(ExternalName::LibCall(lc)) = &reloc.target {
+                libcalls.insert(format!("libcall:{lc}"));
+            }
+        }
+        graph.functions.push(FnNode {
+            id,
+            name,
+            frame_bytes: total,
+        });
+        for site in vesper_silicon::stack::call_sites(&f.function) {
+            match site {
+                CallSite::Direct { inst, symbol, .. } => match ids.get(&symbol) {
+                    Some(&callee) => {
+                        if edges.insert((i as u32, callee)) {
+                            graph.calls.push((id, FnId(callee)));
+                        }
+                    }
+                    None => graph.external_calls.push(ExternalCall {
+                        caller: id,
+                        symbol,
+                        inst: Some(inst),
+                    }),
+                },
+                CallSite::Indirect { inst, .. } => {
+                    graph.indirect_calls.push(IndirectCall { caller: id, inst })
+                }
+            }
+        }
+        for symbol in libcalls {
+            graph.external_calls.push(ExternalCall {
+                caller: id,
+                symbol,
+                inst: None,
+            });
+        }
     }
+    Ok(graph)
 }
 
 fn effect(name: &str) -> vesper_resonance::confine::Effect {
@@ -453,18 +535,13 @@ pub fn verify_emitted(
     }
 
     if verifiers.contains(&NativeVerifier::Stack) {
-        let arch = arch_of(&policy.stack, target)?;
         if policy.stack.roots.is_empty() {
             report
                 .notes
                 .push("stack: the policy has no stack roots; only recursion and unbounded calls are reported".into());
         }
-        let program = vesper_silicon::stack::Program::compile(
-            arch,
-            functions.iter().map(|f| f.function.clone()).collect(),
-        )
-        .map_err(|e| format!("stack verifier: {e}"))?;
-        let mut graph = stack_bound::StackGraph::from(program.graph());
+        let measured = measure_emitted(functions, target)?;
+        let mut graph = stack_bound::StackGraph::from(&measured);
         for f in &mut graph.functions {
             f.name = names.source(&f.name);
         }

@@ -190,6 +190,10 @@ fn native_fuzzing_compares_the_jit_with_the_evaluator() {
     let t = text(&o);
     assert!(o.status.success(), "{t}");
     assert!(t.contains("fuzz clamp: 60 execution(s)"), "{t}");
+    let o = vesper(&[
+        "fuzz", &file, "--target", "ignore", "--native", "--execs", "20",
+    ]);
+    assert!(o.status.success(), "{}", text(&o));
     let o = vesper(&["fuzz", &file, "--target", "midpoint", "--native"]);
     assert!(
         text(&o).contains("--native supports effect-free targets"),
@@ -217,6 +221,12 @@ fn corpus_tapes_are_saved_and_replayed_first() {
         "{}",
         text(&o)
     );
+    // A discovered failure is saved with the corpus and replayed first.
+    let found = temp.path("found");
+    let o = vesper(&["fuzz", &file, "--target", "midpoint", "--corpus", &found]);
+    assert!(!o.status.success());
+    let o = vesper(&["fuzz", &file, "--target", "midpoint", "--corpus", &found]);
+    assert!(text(&o).contains("counterexample (corpus "), "{}", text(&o));
     // A failing saved tape is reported (and shrunk) before any new search.
     let failing = temp.path("failing");
     fs::create_dir_all(&failing).unwrap();
@@ -292,6 +302,27 @@ fn refute_finds_a_magic_counterexample_and_materializes_it() {
     assert!(o.status.success(), "{}", text(&o));
     assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "false");
     assert!(vesper(&["fmt", "--check", &regressions]).status.success());
+    // An effectful contract keeps its effect row in the regression case.
+    let o = vesper(&[
+        "verify",
+        "--refute",
+        &file,
+        "--contract",
+        "small_square",
+        "--regressions",
+        &regressions,
+    ]);
+    let t = text(&o);
+    assert!(
+        t.contains("counterexample small_square(10) is false"),
+        "{t}"
+    );
+    let written = fs::read_to_string(&regressions).unwrap();
+    assert!(
+        written.contains("fn small_square_refuted_1() -> bool eff [Fail[ArithOverflow]] {"),
+        "{written}"
+    );
+    assert!(vesper(&["check", &regressions]).status.success());
 }
 
 #[test]

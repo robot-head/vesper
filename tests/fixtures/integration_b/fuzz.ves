@@ -64,6 +64,19 @@ fn clamp(x: i64, hi: i64) -> i64 {
     }
 }
 
+// Effectful contract that is false from x = 10 on (large inputs are guarded
+// so that the checked multiply never overflows).
+fn small_square(x: u32) -> bool eff [Fail[ArithOverflow]] {
+    if x > 1000 {
+        true
+    } else {
+        x * x < 100
+    }
+}
+
+// Implicit Unit result, inside the native batch subset.
+fn ignore(x: u64) {}
+
 fn takes_tuple(pair: (i64, i64)) -> i64 {
     0
 }

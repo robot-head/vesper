@@ -628,16 +628,11 @@ pub fn object_with_options(
 ) -> Result<(Vec<u8>, String), String> {
     object_with_observer(world, entry, target, optimize, None)
 }
-/// [`object_with_options`] that also hands every emitted Cranelift function
-/// to `observer` (the integration-B verifier hook). With `None` it is
-/// exactly `object_with_options`.
-pub fn object_with_observer(
-    world: &World,
-    entry: &str,
+/// The ISA (target and codegen flags) object emission compiles with. The
+/// stack verifier measures frames with exactly this ISA.
+pub fn object_isa(
     target: Option<&str>,
-    optimize: bool,
-    observer: Option<&mut dyn FnMut(EmittedFunction)>,
-) -> Result<(Vec<u8>, String), String> {
+) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
     let mut flags = settings::builder();
     flags.set("is_pic", "true").map_err(|e| e.to_string())?;
     let builder = if let Some(target) = target {
@@ -656,6 +651,19 @@ pub fn object_with_observer(
     let isa = builder
         .finish(settings::Flags::new(flags))
         .map_err(|e| e.to_string())?;
+    Ok(isa)
+}
+/// [`object_with_options`] that also hands every emitted Cranelift function
+/// to `observer` (the integration-B verifier hook). With `None` it is
+/// exactly `object_with_options`.
+pub fn object_with_observer(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+) -> Result<(Vec<u8>, String), String> {
+    let isa = object_isa(target)?;
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     let mut m = ObjectModule::new(builder);

@@ -66,8 +66,7 @@ flag next to this hook, not inside the observer (the observer only sees IR).
   `NativeVerifier::from_flag`.
 - `NativeVerifierPolicy` (JSON, schema `vesper.native-verifiers/1`, unknown
   fields rejected) with sections `const_time` (per function: `secret`
-  parameter names, `declassify`, `constant_time_callees`), `stack` (`arch`,
-  `roots` name → budget bytes, `external_bounds`), `realtime` (`roots` name →
+  parameter names, `declassify`, `constant_time_callees`), `stack` (`roots` name → budget bytes, `external_bounds`), `realtime` (`roots` name →
   optional stack budget, `allowed_effects`, `symbols` import → effects and
   frame bytes, `effects` per source function, `loop_bounds`,
   `reject_unbounded_loops`, `max_loop_iterations`), `det_float`
@@ -95,10 +94,14 @@ Per verifier:
 
 - **const-time**: `vesper_vault::verify_constant_time` on each function the
   policy names. Callee names are translated to Cranelift display names.
-- **stack**: `vesper_silicon::stack::Program::compile` re-compiles the emitted
-  IR for x86_64 or AArch64 (policy `arch`, else the `--target` architecture,
-  else the host), measures prologues and builds the call graph; the graph
-  goes through the shared report below. Imports such as `fmod` are external
+- **stack**: each emitted function is compiled with exactly the ISA and flags
+  object emission uses (`native::object_isa`, the `--target` triple or the
+  host), its activation is measured from the emitted prologue with Silicon's
+  decoders and cross-checked against Cranelift's frame layout, and the call
+  graph is built with Silicon's `call_sites` plus libcall relocations. This
+  measures the code `vesper build` emits rather than a re-compilation under
+  Silicon's analysis flags (`opt_level=speed`), which could under-report
+  frames. The graph goes through the shared report below. Imports such as `fmod` are external
   calls that need an `external_bounds` entry.
 - **realtime**: `vesper_resonance::clif::call_graph_from_clif` with names for
   every `u0:N` and the policy's symbol table, then `verify_realtime`. An
