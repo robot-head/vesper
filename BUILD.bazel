@@ -27,6 +27,8 @@ vesper_crate(
     # while allowing the complete target 900 seconds on slower macOS runners.
     test_timeouts = {
         "test/format_proof_cli": "long",
+        "test/oracle42_acceptance": "long",
+        "test/replay42_kernel": "long",
     },
 )
 # Narrow slices of the root package for members that read them.

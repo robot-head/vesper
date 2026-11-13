@@ -1,11 +1,21 @@
 //! Independent host planning/execution slice of design §28.
 //!
-//! No compiler integration, egglog, SIMD, device execution, zero-allocation or
-//! floating-point reassociation guarantee is implied. See [`shape`] and [`host`].
+//! [`shape`] and [`host`] hold the bounded dimension planner and the small
+//! FP32/Q4_0 graph executor. [`kv`] is the paged K/V pool, [`ops`],
+//! [`quant`] and [`attention`] the decoder kernels, and [`llama`] end-to-end
+//! greedy CPU inference for llama2.c-format decoder-only checkpoints.
+//!
+//! No compiler integration, egglog, SIMD, GPU/device execution or
+//! floating-point reassociation guarantee is implied. Fused kernels are written
+//! by hand (see [`ops::swiglu_matvec`] and [`attention::AttentionMode::Online`]).
 #![forbid(unsafe_code)]
 
+pub mod attention;
 pub mod host;
 pub mod kv;
+pub mod llama;
+pub mod ops;
+pub mod quant;
 pub mod shape;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -20,6 +30,10 @@ pub enum Error {
     MissingTensor(String),
     NonFinite,
     InvalidEpsilon,
+    /// Malformed checkpoint or tokenizer bytes.
+    Malformed(&'static str),
+    /// A K/V pool operation failed.
+    Kv(kv::KvError),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

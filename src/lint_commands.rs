@@ -6,13 +6,15 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 #[allow(unused_imports)]
+use vesper::tooling::doc::sources::{PackageSources, SourceLimits, discover};
+#[allow(unused_imports)]
 pub use vesper::tooling::lint::{
     ConfigProvenance, PolicyOutcome, PolicyReport, PreparedLint, ReportedFinding, SourceReport,
     prepare_source, prepare_source_with_policy,
 };
 use vesper_lint::policy::{Policy, PolicyLimits};
 const MAX_BYTES: usize = 262144;
-pub const HELP: &str = "Usage: vesper lint FILE [--json] [--fix] [--semver-safe] [--config PATH]\n\nCheck actual resolved effects and supported inout field accesses.\nUnused effects (L0102) may be removed only after complete candidate reparse/recheck.\nProjection narrowing (L0101) is diagnostic-only: caller/signature changes need review.\n--semver-safe requires --fix and validates exported supported interface compatibility.\nHandlers, closures, indirect/open-row/recursive calls remain conservative.\nInputs: regular UTF-8 files <=256 KiB; token/nesting/work budgets also apply.\n--config loads one explicit bounded Loom.toml policy; no adjacent/default discovery.\nAllow suppresses diagnostics and fixes; warn succeeds; remaining deny exits nonzero.\nFuture warn/allow lints are reported unavailable; future deny/plugins fail closed.\nNo arena escape, mode-relaxation, FIP, secret/Cancel or plugin-pack analysis.\n";
+pub const HELP: &str = "Usage: vesper lint [FILE|DIR] [--json] [--fix] [--semver-safe] [--config PATH]\n\nCheck actual resolved effects and supported inout field accesses.\nUnused effects (L0102) may be removed only after complete candidate reparse/recheck.\nProjection narrowing (L0101) is diagnostic-only: caller/signature changes need review.\nWith no path (or a directory), lint every .ves source of the package: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-*\nand nested-package directories are skipped, symlinks are not followed and any failed file fails.\n--semver-safe requires --fix and validates exported supported interface compatibility.\nHandlers, closures, indirect/open-row/recursive calls remain conservative.\nInputs: regular UTF-8 files <=256 KiB; token/nesting/work budgets also apply.\n--config loads one explicit bounded Loom.toml policy; no adjacent/default discovery.\nAllow suppresses diagnostics and fixes; warn succeeds; remaining deny exits nonzero.\nFuture warn/allow lints are reported unavailable; future deny/plugins fail closed.\nNo arena escape, mode-relaxation, FIP, secret/Cancel or plugin-pack analysis.\n";
 fn read_source(path: &Path) -> Result<(String, fs::Permissions), String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !metadata.is_file() {
@@ -170,95 +172,200 @@ fn replace_at(
     }
     temporary.publish(path)
 }
-pub fn run(args: Vec<String>) -> Result<(), String> {
-    let json = args.iter().any(|a| a == "--json");
-    let mut config_label: Option<String> = None;
-    let result = (|| {
-        let mut path = None;
-        let mut config = None;
-        let mut fix = false;
-        let mut semver_safe = false;
-        let mut args = args.into_iter();
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--help" | "-h" => {
-                    print!("{HELP}");
-                    return Ok(None);
+struct Options {
+    path: Option<PathBuf>,
+    fix: bool,
+    semver_safe: bool,
+    policy: Policy,
+    provenance: ConfigProvenance,
+    explicit_config: bool,
+}
+fn parse_options(
+    args: Vec<String>,
+    config_label: &mut Option<String>,
+) -> Result<Option<Options>, String> {
+    let mut path = None;
+    let mut config = None;
+    let mut fix = false;
+    let mut semver_safe = false;
+    let mut args = args.into_iter();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--help" | "-h" => {
+                print!("{HELP}");
+                return Ok(None);
+            }
+            "--json" => (),
+            "--fix" => fix = true,
+            "--semver-safe" => semver_safe = true,
+            "--config" => {
+                if config.is_some() {
+                    return Err("--config may be specified only once".into());
                 }
-                "--json" => (),
-                "--fix" => fix = true,
-                "--semver-safe" => semver_safe = true,
-                "--config" => {
-                    if config.is_some() {
-                        return Err("--config may be specified only once".into());
-                    }
-                    let value = args.next().ok_or("--config requires a path")?;
-                    if value.len() > 4096 {
-                        return Err("lint config path exceeds 4096 bytes".into());
-                    }
-                    if value.starts_with('-') {
-                        return Err("--config requires a path".into());
-                    }
-                    config_label = Some(value.clone());
-                    config = Some(PathBuf::from(value));
+                let value = args.next().ok_or("--config requires a path")?;
+                if value.len() > 4096 {
+                    return Err("lint config path exceeds 4096 bytes".into());
                 }
-                _ if arg.starts_with('-') => return Err(format!("unknown lint option '{arg}'")),
-                _ => {
-                    if path.replace(PathBuf::from(arg)).is_some() {
-                        return Err("lint accepts one source file".into());
-                    }
+                if value.starts_with('-') {
+                    return Err("--config requires a path".into());
+                }
+                *config_label = Some(value.clone());
+                config = Some(PathBuf::from(value));
+            }
+            _ if arg.starts_with('-') => return Err(format!("unknown lint option '{arg}'")),
+            _ => {
+                if path.replace(PathBuf::from(arg)).is_some() {
+                    return Err("lint accepts one source file or package directory".into());
                 }
             }
         }
-        let path = path.ok_or("lint requires a source file")?;
-        let (policy, provenance) = if let Some(config) = config {
-            load_policy(&config)?
-        } else {
-            (Policy::default(), ConfigProvenance::Default)
-        };
-        let (source, permissions) = read_source(&path)?;
-        let prepared = if config_label.is_none() {
-            prepare_source(&source, fix, semver_safe)?
-        } else {
-            prepare_source_with_policy(&source, fix, semver_safe, &policy, provenance)?
-        };
-        let output = serde_json::to_string_pretty(&prepared.report).map_err(|e| e.to_string())?;
-        if let Some(candidate) = prepared.candidate {
-            replace_source(&path, &source, &candidate, permissions)?;
+    }
+    let explicit_config = config.is_some();
+    let (policy, provenance) = if let Some(config) = config {
+        load_policy(&config)?
+    } else {
+        (Policy::default(), ConfigProvenance::Default)
+    };
+    Ok(Some(Options {
+        path,
+        fix,
+        semver_safe,
+        policy,
+        provenance,
+        explicit_config,
+    }))
+}
+fn lint_file(path: &Path, options: &Options) -> Result<(SourceReport, String), String> {
+    let (source, permissions) = read_source(path)?;
+    let prepared = if options.explicit_config {
+        prepare_source_with_policy(
+            &source,
+            options.fix,
+            options.semver_safe,
+            &options.policy,
+            options.provenance.clone(),
+        )?
+    } else {
+        prepare_source(&source, options.fix, options.semver_safe)?
+    };
+    let output = serde_json::to_string_pretty(&prepared.report).map_err(|e| e.to_string())?;
+    if let Some(candidate) = prepared.candidate {
+        replace_source(path, &source, &candidate, permissions)?;
+    }
+    Ok((prepared.report, output))
+}
+fn print_report(prefix: &str, report: &SourceReport) {
+    for finding in &report.diagnostics {
+        println!(
+            "{prefix}{:?} {} {}:{}..{}: {}",
+            finding.severity,
+            finding.finding.code,
+            finding.finding.function,
+            finding.finding.span.start,
+            finding.finding.span.end,
+            finding.finding.message
+        );
+    }
+    for rule in &report.policy.unavailable {
+        println!(
+            "{prefix}Unavailable lint {} ({:?}); not analyzed",
+            rule.lint.as_str(),
+            rule.severity
+        );
+    }
+    println!(
+        "{prefix}lint: {} diagnostic(s), {} conservative skip(s), changed={}, remaining deny={}",
+        report.diagnostics.len(),
+        report.skipped.len(),
+        report.changed,
+        report.outcome.remaining_denied
+    );
+}
+/// Package mode: no path, or a directory path. Every discovered source is
+/// linted; any denied or failed file fails the whole run, after all files.
+fn lint_package(package: &PackageSources, options: &Options, json: bool) -> Result<(), String> {
+    let mut files = Vec::new();
+    let mut denied = 0usize;
+    let mut failed = 0usize;
+    for file in &package.files {
+        let name = package.display(file);
+        match lint_file(file, options) {
+            Ok((report, _)) => {
+                if report.status == "denied" {
+                    denied += 1;
+                }
+                if !json {
+                    print_report(&format!("{name}: "), &report);
+                }
+                files.push(serde_json::json!({"path":name,"report":report}));
+            }
+            Err(error) => {
+                failed += 1;
+                if !json {
+                    println!("{name}: error: {error}");
+                }
+                files.push(serde_json::json!({"path":name,"error":error}));
+            }
         }
-        Ok(Some((prepared.report, output)))
-    })();
-    match result {
-        Ok(None) => Ok(()),
-        Ok(Some((report, output))) => {
+    }
+    let status = if failed > 0 {
+        "failed"
+    } else if denied > 0 {
+        "denied"
+    } else {
+        "passed"
+    };
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schema_version":1,
+                "status":status,
+                "root":package.root.display().to_string(),
+                "manifest":package.manifest.as_ref().map(|m| m.display().to_string()),
+                "files":files,
+            }))
+            .map_err(|e| e.to_string())?
+        );
+    } else {
+        println!(
+            "lint: {} file(s) under {}, {failed} failed, {denied} denied",
+            package.files.len(),
+            package.root.display()
+        );
+    }
+    match status {
+        "passed" => Ok(()),
+        "denied" => Err("lint policy denied remaining findings or unavailable analysis".into()),
+        _ => Err(format!("lint failed on {failed} source file(s)")),
+    }
+}
+pub fn run(args: Vec<String>) -> Result<(), String> {
+    let json = args.iter().any(|a| a == "--json");
+    let mut config_label: Option<String> = None;
+    let options = match parse_options(args, &mut config_label) {
+        Ok(Some(options)) => options,
+        Ok(None) => return Ok(()),
+        Err(error) => return invalid(json, error, config_label),
+    };
+    let package_start = match &options.path {
+        None => Some(PathBuf::from(".")),
+        Some(path) if fs::metadata(path).is_ok_and(|m| m.is_dir()) => Some(path.clone()),
+        Some(_) => None,
+    };
+    if let Some(start) = package_start {
+        return match discover(&start, SourceLimits::default()) {
+            Ok(package) => lint_package(&package, &options, json),
+            Err(error) => invalid(json, error, config_label),
+        };
+    }
+    let path = options.path.clone().expect("explicit file path");
+    match lint_file(&path, &options) {
+        Ok((report, output)) => {
             if json {
                 println!("{output}");
             } else {
-                for finding in &report.diagnostics {
-                    println!(
-                        "{:?} {} {}:{}..{}: {}",
-                        finding.severity,
-                        finding.finding.code,
-                        finding.finding.function,
-                        finding.finding.span.start,
-                        finding.finding.span.end,
-                        finding.finding.message
-                    );
-                }
-                for rule in &report.policy.unavailable {
-                    println!(
-                        "Unavailable lint {} ({:?}); not analyzed",
-                        rule.lint.as_str(),
-                        rule.severity
-                    );
-                }
-                println!(
-                    "lint: {} diagnostic(s), {} conservative skip(s), changed={}, remaining deny={}",
-                    report.diagnostics.len(),
-                    report.skipped.len(),
-                    report.changed,
-                    report.outcome.remaining_denied
-                );
+                print_report("", &report);
             }
             if report.status == "denied" {
                 Err("lint policy denied remaining findings or unavailable analysis".into())
@@ -266,16 +373,17 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 Ok(())
             }
         }
-        Err(error) => {
-            if json {
-                println!(
-                    "{}",
-                    serde_json::json!({"schema_version":1,"status":"invalid","error":error,"config":config_label})
-                );
-            }
-            Err(error)
-        }
+        Err(error) => invalid(json, error, config_label),
     }
+}
+fn invalid(json: bool, error: String, config_label: Option<String>) -> Result<(), String> {
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({"schema_version":1,"status":"invalid","error":error,"config":config_label})
+        );
+    }
+    Err(error)
 }
 
 #[cfg(test)]
