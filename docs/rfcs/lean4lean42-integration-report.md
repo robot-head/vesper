@@ -93,8 +93,19 @@ metadata synchronization pass. The preserved raw feasibility patch intentionally
 has significant single-space context lines; whitespace validation excludes that
 exact immutable data artifact and passes for all other changed paths.
 
-At this checkpoint final package regression and hosted platform checks remain
-pending. No unexecuted result is claimed.
+The static Lean model CI script passed against the selected real Lean4.24.
+The broader package run reached an existing Lens cancellation test and failed:
+its killed sleep descendant had PPID1/stateZ, while the assertion used kill -0
+as a live-process test. Lens runtime/test source is unchanged by this PR; #305
+tracks separate clean-main reproduction and a narrowly scoped acceptance fix.
+The regression run is not represented as passing. Hosted platform checks and
+completion of the remaining package regression remain pending.
+
+Source inspection also found that pinned Lake verifies a local package revision
+through Git on Windows. Explicit setup now adds only the selected Git directory
+to that build's controlled PATH and restores the prior environment before
+sealing; ordinary offline invocations are unchanged. Python compilation passes;
+actual Windows/macOS evidence remains pending hosted CI.
 
 ## Process and receipt limits
 
