@@ -493,4 +493,8 @@ fn secret_handler_state_reaches_the_return_clause() {
     let public = "copy struct Secret[T] { value: T } linear effect Ask { fn ask() -> u64; } \
                   fn fine(s: Secret[bool]) -> bool eff [ConstTime] { handle Ask state flag = true in { 0 } with { return (v, flag) => flag, ask(flag, k) => k(0, false), } }";
     assert!(codes(public).is_empty(), "{:?}", codes(public));
+    // A secret state does not taint an independent public result.
+    let independent = "copy struct Secret[T] { value: T } linear effect Ask { fn ask() -> u64; } \
+                       fn fine(s: Secret[bool]) -> u64 eff [ConstTime] { handle Ask state flag = s.value in { 0 } with { return (v, flag) => v, ask(flag, k) => k(0, false), } }";
+    assert!(codes(independent).is_empty(), "{:?}", codes(independent));
 }

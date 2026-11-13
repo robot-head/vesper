@@ -989,10 +989,27 @@ impl<'w> Walker<'w> {
         }
         // The return clause binds the body's value and, with state, the
         // final state: both carry their taint.
-        let ret_taint = b || (state.is_some() && state_taint);
+        let final_state = state.is_some() && state_taint;
         t |= self.with_scope(|w| {
-            for p in &ret.pats {
-                w.bind_pattern(p, ret_taint, None);
+            match (ret.pats.as_slice(), state.is_some()) {
+                // `return (value, state)`, written as two patterns or as one
+                // pair: each component keeps its own taint.
+                ([value, st], true) => {
+                    w.bind_pattern(value, b, None);
+                    w.bind_pattern(st, final_state, None);
+                }
+                ([p], true)
+                    if let PatternKind::Tuple(ps) = &p.kind
+                        && let [value, st] = ps.as_slice() =>
+                {
+                    w.bind_pattern(value, b, None);
+                    w.bind_pattern(st, final_state, None);
+                }
+                (pats, _) => {
+                    for p in pats {
+                        w.bind_pattern(p, b || final_state, None);
+                    }
+                }
             }
             w.expr(&ret.body)
         });
