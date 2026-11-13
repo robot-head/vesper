@@ -18,6 +18,9 @@ Owned source/test commits:
   consume already prepaid final-source hashing credit rather than double charge.
 * `ac17735`: nine public exporter tests, including actual parsed/checked input
   through the genuine producer, cumulative Rust gate and replay preparation.
+* `4636168`: count Name/Ident, Argument, namespace/module structural levels and
+  the import ModuleName node consistently; add an independent actual-AST walker
+  and exact-depth success/one-below refusal checks. There are now ten tests.
 
 ## Implemented boundary
 
@@ -49,7 +52,11 @@ Value wrapper keep U64 and I64 distinct despite equal widths.
 Before constructing the AST, the export plan bounds declarations, AST objects,
 depth, generated names, serialized bytes, logical metadata and work. It prepays
 cumulative printer subtree/copy costs across all declarations, output growth
-and final-source hashing. Consuming render makes exactly one central serializer
+and final-source hashing. Structural depth includes Name-to-Ident and Argument
+intermediaries as well as namespace/module levels; the import is counted as a
+ModuleName node. Vec/Box indirections and literal/string storage are payload
+accounted in bytes. Independent tests walk the public emitted AST and match
+the exact reported node count/depth. Consuming render makes exactly one central serializer
 call and checks actual output length against its structural bound. Original
 caller AST storage, physical allocation failure, allocator/RSS and external
 Lean runtime retain the contract's explicit limitations.
@@ -64,31 +71,44 @@ scope, not KernelAccepted or cache approval. The static model source and all
 
 ## Authored tests and actual coordinator evidence
 
-The nine exporter tests exercise structural namespace/definition/proof sharing,
+The ten exporter tests exercise structural namespace/definition/proof sharing,
 manifest counts, independently encoded certificate and binding hashes, model
 and rendered-byte hashes, Vec-capacity digest independence, irrelevant TypeMap
 entries, source-name isolation, malformed/incorrect-span refusal, every limit
 field, exact structural bounds versus one-below refusal, genuine producer
 exports including U64MAX squared, barriers/unchanged/refusal and all audit roots.
+The added independent structural walker also exercises genuine identities,
+signed-MIN folds and prior-totality proof applications.
 
 This authoring lane executed only rustfmt on owned Rust files and
 `git diff --check`, both passing. **No Cargo build/test, Clippy or Lean process
 was run by this lane**, respecting the coordinator-only build lease.
 
 The coordinator reported actual `cargo check --locked -p vesper --lib` success
-with the integrated module/model. At root head `94b704f` (source integration
-`36b567e`), actual `tests/replay42_export.rs` execution passed **9 tests, zero
-failures/ignored**, recorded in `/tmp/replay42-root-export.log`. Workspace
-format checking also passed. Read-only semantic review by the model owner
-found no mapping defect across the 24 cases, kind handling or proof arguments.
+with the integrated module/model. The final focused run at root head
+`ed70d8df037dac917f314bdf69c608d86d400ea5`, including `4636168`, passed
+**10 exporter tests** and the **one complete kernel acceptance target**, with
+zero failures/ignored in either target. Kernel acceptance took 105.61s. The
+actual log `/tmp/replay42-root-final-focused.log` records the independent AST
+node/depth walk and exact-limit tests passing. Final workspace format checking
+also passed. These are coordinator executions, not source-lane executions.
+
+Separately, the earlier full root-package baseline at `94b704f` passed 884 tests
+across 74 targets with zero failures/ignored, including the pre-metric kernel
+matrix (105.72s). That baseline precedes the structural-metric fix; its count
+is not combined with the final focused run. Final all-target strict Clippy was
+still pending when this report was updated. Read-only semantic review by the
+model owner found no mapping defect across the 24 cases, kinds or proof arguments;
+the coordinator reviewed the subsequent structural-counter fix as correct.
 
 Coordinator/acceptance execution has additionally compiled the four per-kind
 aggregate catalogs (96 mappings, all reasons and guard orientations) and actual
 producer fold/identity/guard/endpoint artifacts, with actual restricted axiom
-audits accepting the full 33 model roots plus final theorem. These observations
-are attributed to those lanes. The full hostile-artifact/policy matrix and
-broader final checks remain pending their final coordinator report at this
-checkpoint; fixture diagnostic-matcher corrections are not kernel acceptance.
+audits accepting the full 33 model roots plus final theorem. The final actual
+kernel target also passed its complete hostile-artifact and policy matrix.
+These observations are attributed to the coordinator/acceptance lanes, with
+their separate model-only claim. Earlier fixture diagnostic-matcher corrections
+are superseded by this complete executed target, not counted as additional tests.
 
 ## Scope
 
