@@ -199,8 +199,11 @@ charged; the certificate carries no name strings of its own.
 Bind the declared input term to every actual source occurrence, and the output
 term to every actual candidate occurrence, using iterative bounded traversal.
 Compare literal value, variable identity, checked/wrapping operator, arity and
-kind exactly; ignore nonsemantic expression spans except the origin policy
-below. No root hash, e-class membership, textual encoding or candidate-provided
+kind exactly. Candidate value-node spans are canonical: EVERY value occurrence
+must use the original source root span. Callee Name nodes are excluded from
+this value rule and instead retain their exact admitted original callee span.
+The current backends use span-indexed typing, so arbitrary child spans cannot
+be treated as nonsemantic even when their syntax is mathematically equal. No root hash, e-class membership, textual encoding or candidate-provided
 type map substitutes for these comparisons. All certificate terms and proofs,
 including unused records, undergo index/type/rule/resource validation.
 
@@ -211,9 +214,11 @@ argument conventions and empty generics. A candidate cannot introduce a
 wrapping operator absent from the source inventory. The safe builder may choose
 the first left-to-right template per operator; verification accepts any exact
 admitted same-op template. This prevents a mathematical equality from installing
-a shadowed AST call and avoids trusting synthetic empty callee spans. Candidate
-root span equals source root span. Other generated value-node spans may use the
-source root span, with the admitted common kind; they do not establish authority.
+a shadowed AST call and avoids trusting synthetic empty callee spans. Candidate root and every generated value-node span equal the source root span,
+whose actual checked TypeMap entry establishes the admitted common kind.
+The builder already uses this canonical policy. Public callers normalize their
+candidate value spans likewise; even a reflexive structural copy with distinct
+noncanonical child spans is outside this conservative candidate profile.
 
 The coordinator attempts a maximal admitted pure island before recursively
 rewriting its children. The input used for admission/witness verification is
@@ -346,6 +351,12 @@ instructions or OS time. Reserve fallibly before growing vectors; charge full
 requested replacement capacity cumulatively rather than only net growth.
 Count certificate representation and working structures in logical metadata
 accounting even when the certificate was already allocated by its caller.
+Accepted candidate representation includes actual retained String/Vec capacities:
+value/callee Expr footprints, names/operator String capacities, Call args capacity
+and even an empty generic-types Vec capacity. Charge iteratively during bounded
+matching in addition to expanded-shape preflight; expected term shape alone is
+not sufficient for a caller-provided candidate. Observed capacity metering is
+conservative and does not claim allocator/RSS accounting.
 
 Preflight candidate expanded AST size, depth and expanded name bytes bottom-up
 before constructing/cloning boxes, argument vectors, callee templates or strings.
