@@ -132,7 +132,7 @@ fn malformed_categories_headers_delimiters_and_contexts_are_explicit_errors() {
         "macro keep($x:expr)->expr{quote{let n=1;$x}}",
         "macro keep($x:expr)->expr{quote{{let $x=1;0}}}",
         "macro keep($x:expr)->expr{quote{$x,$x}}",
-        "macro keep($x:expr)->expr{quote{$x}} fn main(in x:u64){keep!(x)}",
+        "macro keep($x:expr)->expr{quote{$x}} fn main(in x.{field}:Pair){keep!(x)}",
         "macro keep($x:expr)->expr{quote{$x}} fn main[T](){keep!(1)}",
         "macro keep($x:expr)->expr{quote{$x}} fn main(){keep!(handle E in {0} with {})}",
         "macro keep($x:expr)->expr{quote{$x}} fn main(){keep!(1) 2}",

@@ -189,7 +189,7 @@ def run(binary, work):
         "macro keep($x:expr)->expr{quote{$x}} fn main()->i64{keep!(1,2)}",
         "macro bad($x:expr)->expr{quote{let $x=42;$x}} fn main()->i64{bad!(name)}",
         "macro bad($x:ty)->expr{quote{42}} fn main()->i64{bad!(i64)}",
-        "macro keep($x:expr)->expr{quote{$x}} fn main(in n:i64)->i64{keep!(n)}",
+        "copy struct Record { field:i64 } macro keep($x:expr)->expr{quote{$x}} fn main(in n.{field}:Record)->i64{keep!(42)}",
         "macro keep($x:expr)->expr{quote{$x}} fn main[T:mod copy]()->i64{keep!(42)}",
         "macro call($x:expr)->expr{quote{$x(2)}} fn main()->i64{call!(let a=1;a)}",
         '#[wasm_macro(component="file:///must-not-be-loaded.wasm")] macro x()->expr{quote{42}} fn main()->i64{x!()}',

@@ -5,7 +5,10 @@ use crate::{
     SessionId, TokenKind,
 };
 use std::{fmt, ops::Range, sync::Arc};
-use vesper_syntax::lexer::{self, Token, TokenKind as K};
+use vesper_syntax::{
+    lexer::{self, Token, TokenKind as K},
+    macro_source::{FunctionId, MacroSource},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TypedLimits {
@@ -170,6 +173,11 @@ pub enum ExprShape {
     Literal {
         token: usize,
     },
+    Tuple {
+        open: usize,
+        close: usize,
+        values: Vec<ExprShape>,
+    },
     Call {
         callee: Box<ExprShape>,
         open: usize,
@@ -311,8 +319,39 @@ pub struct ResolvedBody {
     fragment: ResolvedFragment,
     shape: ExprShape,
     provenance: Vec<TokenProvenance>,
+    function: Option<FunctionId>,
+    parameters: Vec<ResolvedParameter>,
+}
+/// Actual header binding retained by sealed whole-function resolution.
+/// No caller or guest can construct a parameter binding record.
+#[derive(Debug)]
+pub struct ResolvedParameter {
+    ordinal: usize,
+    name_span: Range<usize>,
+    token: usize,
+    binder: crate::BinderId,
+}
+impl ResolvedParameter {
+    pub fn ordinal(&self) -> usize {
+        self.ordinal
+    }
+    pub fn name_span(&self) -> &Range<usize> {
+        &self.name_span
+    }
+    pub fn token(&self) -> usize {
+        self.token
+    }
+    pub fn binder(&self) -> crate::BinderId {
+        self.binder
+    }
 }
 impl ResolvedBody {
+    pub fn function_id(&self) -> Option<FunctionId> {
+        self.function
+    }
+    pub fn parameters(&self) -> &[ResolvedParameter] {
+        &self.parameters
+    }
     pub fn into_fragment(self) -> ResolvedFragment {
         self.fragment
     }
@@ -396,6 +435,11 @@ enum Node {
     Ref(Vec<usize>),
     Lit(usize),
     Slot(u32),
+    Tuple {
+        open: usize,
+        close: usize,
+        values: Vec<Node>,
+    },
     Call {
         callee: Box<Node>,
         open: usize,
@@ -419,13 +463,14 @@ struct View<'a> {
     text: &'a str,
     slot: Option<u32>,
 }
-struct Parser<'a> {
+struct Parser<'a, 'b> {
     tokens: &'a [View<'a>],
     pos: usize,
     depth: usize,
     max: usize,
+    budget: &'b mut TypedBudget,
 }
-impl Parser<'_> {
+impl Parser<'_, '_> {
     fn text(&self) -> Option<&str> {
         self.tokens.get(self.pos).map(|t| t.text)
     }
@@ -481,12 +526,7 @@ impl Parser<'_> {
                     self.pos += 1;
                     Node::Lit(i)
                 }
-                Some(Some(TokenKind::Open(Delim::Paren))) => {
-                    self.pos += 1;
-                    let n = self.expr()?;
-                    self.expect(")")?;
-                    n
-                }
+                Some(Some(TokenKind::Open(Delim::Paren))) => self.paren()?,
                 Some(Some(TokenKind::Open(Delim::Brace))) => return self.block(),
                 _ => {
                     let mut path = vec![self.ident()?];
@@ -555,6 +595,66 @@ impl Parser<'_> {
             tail,
         })
     }
+    fn tuple_push(&mut self, values: &mut Vec<Node>, value: Node) -> Result<(), TypedError> {
+        if values.len() == values.capacity() {
+            let capacity = values
+                .capacity()
+                .max(1)
+                .checked_mul(2)
+                .ok_or(TypedError::Budget("metadata"))?;
+            // Reserve the tuple's parser/shape/lexical vectors and structural
+            // fences before allocating. Child subtrees retain their own costs.
+            let element_bytes = std::mem::size_of::<Node>()
+                + std::mem::size_of::<ExprShape>()
+                + std::mem::size_of::<crate::syntax::Term>()
+                + 4 * std::mem::size_of::<Sem>();
+            self.budget.metadata(
+                (capacity - values.capacity())
+                    .checked_mul(element_bytes)
+                    .ok_or(TypedError::Budget("metadata"))?,
+            )?;
+            self.budget.charge_work(
+                values
+                    .len()
+                    .checked_mul(std::mem::size_of::<Node>())
+                    .ok_or(TypedError::Budget("work"))?,
+            )?;
+            values
+                .try_reserve_exact(capacity - values.len())
+                .map_err(|_| TypedError::Budget("allocation"))?;
+        }
+        values.push(value);
+        Ok(())
+    }
+    fn paren(&mut self) -> Result<Node, TypedError> {
+        let open = self.expect("(")?;
+        if self.text() == Some(")") {
+            return Ok(Node::Tuple {
+                open,
+                close: self.expect(")")?,
+                values: Vec::new(),
+            });
+        }
+        let first = self.expr()?;
+        if !self.eat(",") {
+            self.expect(")")?;
+            return Ok(first); // Grouping never creates a tuple node.
+        }
+        let mut values = Vec::new();
+        self.tuple_push(&mut values, first)?;
+        while self.text() != Some(")") {
+            let value = self.expr()?;
+            self.tuple_push(&mut values, value)?;
+            if !self.eat(",") {
+                break;
+            }
+        }
+        Ok(Node::Tuple {
+            open,
+            close: self.expect(")")?,
+            values,
+        })
+    }
 }
 fn parse(tokens: &[View<'_>], budget: &mut TypedBudget) -> Result<Node, TypedError> {
     budget.parse(tokens.len())?;
@@ -563,6 +663,7 @@ fn parse(tokens: &[View<'_>], budget: &mut TypedBudget) -> Result<Node, TypedErr
         pos: 0,
         depth: 0,
         max: budget.limits.max_depth,
+        budget,
     };
     let n = p.expr()?;
     if p.pos != tokens.len() {
@@ -575,6 +676,15 @@ fn shape(node: Node) -> Result<ExprShape, TypedError> {
         Node::Ref(tokens) => ExprShape::Ref { tokens },
         Node::Lit(token) => ExprShape::Literal { token },
         Node::Slot(_) => return Err(TypedError::Slot),
+        Node::Tuple {
+            open,
+            close,
+            values,
+        } => ExprShape::Tuple {
+            open,
+            close,
+            values: values.into_iter().map(shape).collect::<Result<_, _>>()?,
+        },
         Node::Call {
             callee,
             open,
@@ -1088,6 +1198,14 @@ fn emit_shape(n: &ExprShape, host: &HygieneHost, tokens: &[HostToken], out: &mut
             out.push(Sem::Tag(3));
             out.push(Sem::Text(host.text(tokens[*token].text()).to_owned()));
         }
+        ExprShape::Tuple { values, .. } => {
+            out.push(Sem::Tag(13));
+            for value in values {
+                out.push(Sem::Tag(14));
+                emit_shape(value, host, tokens, out);
+            }
+            out.push(Sem::Tag(15));
+        }
         ExprShape::Call { callee, args, .. } => {
             out.push(Sem::Tag(4));
             emit_shape(callee, host, tokens, out);
@@ -1164,6 +1282,14 @@ fn canonical_template(
                 let input = inputs.get(*i as usize).ok_or(TypedError::Slot)?;
                 emit_shape(&input.shape, host, &input.tokens, out);
             }
+            Node::Tuple { values, .. } => {
+                out.push(Sem::Tag(13));
+                for value in values {
+                    out.push(Sem::Tag(14));
+                    emit(value, items, inputs, host, out)?;
+                }
+                out.push(Sem::Tag(15));
+            }
             Node::Call { callee, args, .. } => {
                 out.push(Sem::Tag(4));
                 emit(callee, items, inputs, host, out)?;
@@ -1224,6 +1350,12 @@ fn to_term(
             })
         }
         ExprShape::Literal { token } => Term::Lit(*token),
+        ExprShape::Tuple { values, .. } => Term::Block(
+            values
+                .iter()
+                .map(|value| to_term(value, host, all_tokens))
+                .collect::<Result<_, _>>()?,
+        ),
         ExprShape::Call {
             callee,
             open,
@@ -1268,10 +1400,110 @@ impl HygieneHost {
         &mut self,
         source: &ExprSource,
         body: Range<usize>,
-        mut replacements: Vec<(Range<usize>, ExpandedExpr)>,
+        replacements: Vec<(Range<usize>, ExpandedExpr)>,
+        budget: &mut TypedBudget,
+    ) -> Result<ResolvedBody, TypedError> {
+        self.resolve_expr_body_inner(source, body, replacements, None, budget)
+    }
+
+    /// Resolve parameters from an actual sealed source header under this host.
+    pub fn resolve_expr_function_body(
+        &mut self,
+        source: &ExprSource,
+        syntax: &MacroSource,
+        function: FunctionId,
+        replacements: Vec<(Range<usize>, ExpandedExpr)>,
         budget: &mut TypedBudget,
     ) -> Result<ResolvedBody, TypedError> {
         owner(&source.owner, self)?;
+        if source.session != self.session() {
+            return Err(TypedError::Foreign);
+        }
+        cap(
+            source.source.len(),
+            budget.limits.max_input_bytes,
+            "input bytes",
+        )?;
+        budget.charge_work(source.source.len())?;
+        if syntax.source() != source.source.as_ref() {
+            return Err(TypedError::SourceMismatch);
+        }
+        let parsed = syntax
+            .function(function)
+            .map_err(|_| TypedError::SourceMismatch)?;
+        let spans = syntax
+            .parameter_name_spans(function)
+            .map_err(|_| TypedError::Structural)?;
+        if !parsed.header.generics.is_empty()
+            || spans.len() != parsed.header.params.len()
+            || spans.len() > vesper_syntax::macro_source::Limits::HARD.max_parameters
+        {
+            return Err(TypedError::Unsupported);
+        }
+        cap(spans.len(), budget.limits.max_slots, "parameters")?;
+        // Bound name comparisons, duplicate scans and source-token lookups
+        // before observing header payloads or retaining parameter metadata.
+        budget.charge_work(
+            source
+                .source
+                .len()
+                .checked_mul(add(spans.len(), 1)?)
+                .ok_or(TypedError::Budget("work"))?,
+        )?;
+        if parsed
+            .header
+            .params
+            .iter()
+            .any(|p| !p.projections.is_empty())
+        {
+            return Err(TypedError::Unsupported);
+        }
+        for (ordinal, (span, parameter)) in spans.iter().zip(&parsed.header.params).enumerate() {
+            let index = source
+                .tokens
+                .partition_point(|token| token.span.start < span.start);
+            if span.start < parameter.span.start
+                || span.end > parameter.span.end
+                || span.start < parsed.header.span.start
+                || span.end > parsed.header.span.end
+                || source.source.get(span.clone()) != Some(parameter.name.as_str())
+                || source.tokens.get(index).is_none_or(|token| {
+                    !matches!(token.kind, K::Lower | K::SelfKw) || token.span != *span
+                })
+                || parsed.header.params[..ordinal]
+                    .iter()
+                    .any(|p| p.name == parameter.name)
+            {
+                return Err(TypedError::Structural);
+            }
+        }
+        self.resolve_expr_body_inner(
+            source,
+            parsed.body_span.clone(),
+            replacements,
+            Some((function, spans)),
+            budget,
+        )
+    }
+
+    fn resolve_expr_body_inner(
+        &mut self,
+        source: &ExprSource,
+        body: Range<usize>,
+        mut replacements: Vec<(Range<usize>, ExpandedExpr)>,
+        parameters: Option<(FunctionId, &[Range<usize>])>,
+        budget: &mut TypedBudget,
+    ) -> Result<ResolvedBody, TypedError> {
+        owner(&source.owner, self)?;
+        let parameter_spans = parameters.map_or(&[][..], |(_, spans)| spans);
+        let parameter_count = parameter_spans.len();
+        budget.metadata(
+            parameter_count
+                .checked_mul(
+                    std::mem::size_of::<ResolvedParameter>() + std::mem::size_of::<usize>(),
+                )
+                .ok_or(TypedError::Budget("metadata"))?,
+        )?;
         budget.metadata(
             source
                 .tokens
@@ -1328,6 +1560,11 @@ impl HygieneHost {
             bytes = add(bytes, t.span.len())?;
             scopes = add(scopes, 1)?;
         }
+        for span in parameter_spans {
+            n = add(n, 1)?;
+            bytes = add(bytes, span.len())?;
+            scopes = add(scopes, 1)?;
+        }
         check_cost(n, bytes, scopes, budget)?;
         let mut tokens = Vec::with_capacity(n);
         let mut provenance = Vec::with_capacity(n);
@@ -1360,11 +1597,33 @@ impl HygieneHost {
         }
         budget.parse(tokens.len())?;
         cap(term_height(&shape)?, budget.limits.max_depth, "depth")?;
-        resolution_work(self, &shape, &tokens, budget)?;
+        let mut parameter_tokens = Vec::with_capacity(parameter_count);
+        for span in parameter_spans {
+            parameter_tokens.push(tokens.len());
+            append_source(
+                self,
+                source,
+                span.clone(),
+                scope,
+                &mut tokens,
+                &mut provenance,
+            )?;
+        }
+        // Additional initial scope copies and parameter binding sets are
+        // charged before the resolver allocates any such sets or contexts.
+        let parameter_scope_entries = parameter_count
+            .checked_mul(add(tokens.len(), parameter_count)?)
+            .ok_or(TypedError::Budget("scope entries"))?;
+        budget.metadata(
+            parameter_scope_entries
+                .checked_mul(32)
+                .ok_or(TypedError::Budget("metadata"))?,
+        )?;
+        resolution_work(self, &shape, &tokens, parameter_count, budget)?;
         let term = to_term(&shape, self, &tokens)?;
         let scope_bound = tokens
             .len()
-            .checked_mul(budget.limits.max_depth + 2)
+            .checked_mul(add(add(budget.limits.max_depth, parameter_count)?, 2)?)
             .ok_or(TypedError::Budget("scope entries"))?;
         cap(
             add(budget.scopes_used, scope_bound)?,
@@ -1372,13 +1631,28 @@ impl HygieneHost {
             "scope entries",
         )?;
         budget.scopes_used = add(budget.scopes_used, scope_bound)?;
-        let fragment = self.resolve_preparsed(tokens, term)?;
+        let fragment = self.resolve_preparsed_with_parameters(tokens, term, &parameter_tokens)?;
         if fragment
             .operations
             .iter()
             .any(|o| matches!(o.kind, crate::OperationKind::IndirectCall))
         {
             return Err(TypedError::Unsupported);
+        }
+        let mut resolved_parameters = Vec::with_capacity(parameter_count);
+        for (ordinal, (&token, span)) in parameter_tokens.iter().zip(parameter_spans).enumerate() {
+            // Seeded parameters are the first actual resolver binder records.
+            let binder = fragment
+                .binders
+                .get(ordinal)
+                .filter(|binder| binder.token == token)
+                .ok_or(TypedError::Structural)?;
+            resolved_parameters.push(ResolvedParameter {
+                ordinal,
+                name_span: span.clone(),
+                token,
+                binder: binder.id,
+            });
         }
         Ok(ResolvedBody {
             owner: Arc::clone(&self.typed_owner),
@@ -1387,6 +1661,8 @@ impl HygieneHost {
             fragment,
             shape,
             provenance,
+            function: parameters.map(|(id, _)| id),
+            parameters: resolved_parameters,
         })
     }
 }
@@ -1485,6 +1761,11 @@ fn pre_resolve(
                     walk(host, module, package, a, items, locals, budget)?
                 }
             }
+            Node::Tuple { values, .. } => {
+                for value in values {
+                    walk(host, module, package, value, items, locals, budget)?;
+                }
+            }
             Node::Block {
                 statements, tail, ..
             } => {
@@ -1512,6 +1793,13 @@ fn pre_resolve(
 fn term_height(n: &ExprShape) -> Result<usize, TypedError> {
     Ok(match n {
         ExprShape::Ref { .. } | ExprShape::Literal { .. } => 1,
+        ExprShape::Tuple { values, .. } => {
+            let mut height = 0;
+            for value in values {
+                height = height.max(term_height(value)?);
+            }
+            add(height, 1)?
+        }
         ExprShape::Call { callee, args, .. } => {
             let mut h = term_height(callee)?;
             for a in args {
@@ -1542,6 +1830,7 @@ fn resolution_work(
     host: &HygieneHost,
     shape: &ExprShape,
     tokens: &[HostToken],
+    parameters: usize,
     budget: &mut TypedBudget,
 ) -> Result<(), TypedError> {
     let globals = host.globals.len();
@@ -1587,7 +1876,12 @@ fn resolution_work(
                     binders(a, out)
                 }
             }
-            _ => {}
+            ExprShape::Tuple { values, .. } => {
+                for value in values {
+                    binders(value, out);
+                }
+            }
+            ExprShape::Ref { .. } | ExprShape::Literal { .. } => {}
         }
     }
     let mut locals = Vec::new();
@@ -1602,12 +1896,32 @@ fn resolution_work(
         })
         .max()
         .unwrap_or(0);
-    let candidates = add(global_duplicates, local_duplicates)?.max(1);
+    // Parameter names are distinct, so at most one more same-name binding is
+    // a candidate. All parameter scans and added initial scope depth are paid.
+    budget.charge_work(
+        tokens
+            .len()
+            .checked_mul(parameters)
+            .ok_or(TypedError::Budget("work"))?,
+    )?;
+    let candidates = add(
+        add(global_duplicates, local_duplicates)?,
+        usize::from(parameters != 0),
+    )?
+    .max(1);
     let cost = tokens
         .len()
         .checked_mul(candidates)
         .and_then(|n| n.checked_mul(candidates))
-        .and_then(|n| n.checked_mul(budget.limits.max_depth + 2))
+        .and_then(|n| {
+            n.checked_mul(
+                budget
+                    .limits
+                    .max_depth
+                    .checked_add(parameters)?
+                    .checked_add(2)?,
+            )
+        })
         .ok_or(TypedError::Budget("work"))?;
     budget.charge_work(cost)
 }
