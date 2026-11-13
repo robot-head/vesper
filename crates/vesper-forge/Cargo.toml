@@ -11,6 +11,7 @@ default = ["sandbox-transport"]
 sandbox-transport = ["dep:vesper-loom-sandbox"]
 
 [dependencies]
+vesper-syntax = { path = "../vesper-syntax" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 vesper-loom-sandbox = { path = "../vesper-loom-sandbox", optional = true }
