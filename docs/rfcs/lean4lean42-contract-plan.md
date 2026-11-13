@@ -207,7 +207,7 @@ Use a four-byte little-endian length plus bounded JSON payload. Read exact
 header/payload loops, reject a length before allocation, require schema1 and an
 exact session/target echo, and reject unknown message forms. The profile/version
 handshake identifies pinned Lean, protocol, reviewed patch profile and mode.
-Rust chooses an unpredictable per-run token for association; it is an echo
+Rust chooses a fresh per-run token for association; it is an echo
 binding against accidental stale/mixed traffic, not authentication of a hostile
 host. A single request is outstanding; the strict tool processes one exact
 module per process. Run the two target processes sequentially, never tasks per
@@ -255,12 +255,14 @@ Require nonzero **target-owned** eligible coverage for each requested module,
 not merely nonzero imports. Require all 33 RewriteWitness audit roots to be
 present and eligible, and fixed ArithmeticOracle roots `checkExpr`,
 `checkProgram`, `evalSteps`, `processRequest` in namespace
-`Vesper.ArithmeticOracle` to have an explicitly reviewed covered/skipped status.
-Any partial root's actual compiled definition/helper split must be inventoried
-truthfully before choosing the final required list; do not invent coverage for
-an unsafe/partial entrypoint. The final frozen contract names exact required
-eligible declarations after inspecting the approved artifacts. A missing or
+`Vesper.ArithmeticOracle` to be present, eligible and covered. A missing or
 uncovered mandatory root fails even if the generic count matches a prior run.
+
+The coordinator's subsequent native-loader probe confirms all four named
+arithmetic roots are eligible definitions. Require their actual eligible
+coverage, with no skipped-root alternative. Require the33 model roots as well;
+when ArithmeticOracle imports RewriteWitness, check the33 imported model roots
+and its four target roots (37 total). RewriteWitness itself requires33.
 
 Terminal success includes expected/covered/unsafe/partial counts, zero
 unresolved work and the coverage-stream association. Require it exactly once,
@@ -365,3 +367,377 @@ hard, with no skip-as-pass. Coordinator-executed evidence should include:
 Freeze actual final tool identities and exact root/event formats only after the
 pending applicability review; this recommendation does not authorize writers
 to choose a weaker checker or silently discard an unresolved known defect.
+
+## Exact schema refinement for the coordinator's freeze
+
+This section supplies the exact proposed wire/report/receipt seam. It supersedes
+the tentative message/root/receipt details above, while the security and scope
+gates remain mandatory. Only final candidate patch hashes and the kernel
+writer's finite control inventory remain data to populate before release.
+The kernel component contract is `262b5e9`; keep its existing exclusive paths.
+Use separate `patches/replay.patch` and setup/driver files for subsequent lanes,
+rather than writing the kernel-owned patches or controls.
+
+The actual native-loader probe observed the following; these are feasibility
+measurements, **not expected successful counts**:
+
+| Target | All / eligible | Unsafe-only / partial-only / both | Ctor / recursor | Target-owned eligible | Modules |
+|---|---:|---:|---:|---:|---:|
+| RewriteWitness |87495 /86647|85 /763 /0|1178 /767|179|800|
+| ArithmeticOracle |89237 /88337|86 /814 /0|1252 /815|368|820|
+
+The maximum observed JSON-encoded name was294 bytes /20 components; aggregate
+JSON-encoded names were6,536,611 /6,649,344 bytes. Maximum observed inductive/quotient
+group size was4. Existing recommended name/count/storage limits cover these
+observations. Old CLI additions equal eligible minus constructors/recursors,
+but repeated idempotent quotient additions must disappear in the new driver;
+the corrected actual addition count need not equal the old count.
+
+### Exact tool arguments and common wire values
+
+The patched executable receives **exactly** four arguments:
+
+```text
+--vesper42 MODE TARGET TOKEN
+```
+
+MODE is canonical decimal0=inventory,1=fresh replay,2=controls,3=profile.
+TARGET is0=RewriteWitness,1=ArithmeticOracle; modes2/3 require TARGET=2
+(no target). Unknown/extra/duplicate/malformed arguments exit nonzero. This
+exclusive branch never invokes upstream flag partition/prefix discovery or
+parallel tasks. stdin must be closed by Rust; no request language is accepted.
+
+TOKEN is32 lowercase hexadecimal ASCII bytes. Rust may derive it from
+domain-separated BLAKE3(clock,PID,checked process-local counter), taking16 bytes.
+No cryptographic unpredictability/authentication claim is made and no new
+dependency is needed. The private pipe/process is the session boundary.
+
+Every stdout message is exactly one four-byte unsigned LE length plus UTF-8
+JSON array of that length. Only the array forms below are legal. All numeric
+controls/counters are exact nonnegative JSON integers fitting u64, with IDs
+additionally fitting u32; reject floats, exponents, signs, booleans-as-integers
+and out-of-range values. B below is JSON integer0/1. JSON strings support normal
+JSON escaping; accept only valid UTF-8. Pre-scan nesting<=8 before typed parsing.
+No arbitrary objects, additional elements or trailing payload bytes. Preserve
+short-read/short-write handling and enforce frame caps before allocation/write.
+
+Name is an array of1..128 components: `[0,UTF8_STRING]` or
+`[1,"CANONICAL_U64_DECIMAL"]`. The numeric string has1..20 ASCII digits,
+no leading zero except `"0"`, and checked u64 parsing. A string component is
+nonempty, <=1024 UTF-8 bytes; the whole Name's canonical typed binary encoding
+(defined below) is<=4096 bytes. The tool must also bound the actual JSON frame
+before writing. NAME_BYTES uses that binary encoding, avoiding dependence on
+differences between Lean and Rust JSON string escaping.
+Anonymous names are not constant/module names in this fixed profile. Use
+component identity, not pretty-printed dotted strings. The inventory has
+unique Names sorted by pinned `Lean.Name.cmp`; Rust checks identity and ordinal
+consistency without inventing another name comparator. Bounds apply before
+recursive name conversion; the fixed helper uses a bounded component walk.
+
+Form is0=axiom,1=definition,2=theorem,3=opaque,4=inductive,5=constructor,
+6=recursor,7=quotient primitive. Skip is0=eligible,1=unsafe-only,
+2=partial-only,3=both. Form and skip come from actual ConstantInfo, not a name
+prefix or source grep. Group IDs are sorted unique ordinals, maximum64 members.
+
+### Complete message array forms
+
+```text
+hello       [1,0,TOKEN,MODE,TARGET,"4.24.0","vesper.lean4lean42/1"]
+inventory   [1,1,MODULE_COUNT,FORMS_8,ELIGIBILITY_4,TARGET_ELIGIBILITY_4,NAME_BYTES]
+module      [1,2,MODULE_ID,Name,OLEAN_PATH]
+constant    [1,3,ID,Name,MODULE_ID,Form,Skip,OWNER_IDS]
+inventory_end [1,4]
+coverage    [1,5,EVENT_SEQ,ACTION,IDS]
+skipped     [1,6,ID,Skip]
+controls    [1,7,CONTROL_COUNT]
+control     [1,8,INDEX,ID,EXPECTED_ACCEPT,ACTUAL_ACCEPT,EXPECTED_REASON,ACTUAL_REASON,MATCHED]
+done        [1,9,TOKEN,MODE,TARGET,ADDITIONS,COVERED,CTOR_COMPARES,REC_COMPARES,
+             UNSAFE_ONLY,PARTIAL_ONLY,BOTH,TARGET_COVERED,REMAINING,PENDING,
+             CTOR_PENDING,REC_PENDING,CONTROLS,MATCHED_CONTROLS]
+error       [1,10,CATEGORY,DETAIL]
+```
+
+FORMS_8 and ELIGIBILITY_4 are exact arrays of8/4 u64 counters; sum(FORMS_8)
+equals sum(ELIGIBILITY_4). TARGET_ELIGIBILITY_4 uses the same mutually exclusive
+skip order for actual target-owned constants. NAME_BYTES sums canonical typed
+Name bytes for constant names (not module names). Rust additionally charges all
+module/path/name storage against inventory_bytes. MODULE_COUNT>0; all constant
+origins must name an actual inventory module. OLEAN_PATH is the resolved base
+artifact path from this tool's controlled search path, nonempty<=4096 UTF-8
+bytes, checked/canonicalized by Rust against its allowed roots.
+
+After hello, modes0/1 emit inventory, exactly MODULE_COUNT module frames with
+contiguous IDs0..M-1, then exactly sum(FORMS_8) constant frames with contiguous
+IDs0..N-1, then inventory_end. Recompute every header count, target ownership
+and name byte total from these actual records. Module Names and constant Names
+must each be unique. Mode0 then emits done with all work fields zero; its three
+skip fields repeat the inventory totals. Mode1 emits each noneligible skipped
+frame once in increasing ID order, then coverage events and done. All skipped
+records must match the inventory's exact nonzero Skip. Native inventory and
+replay each emit their own complete inventory; Rust compares decoded records
+and canonical transcript hashes before accepting any replay event. This needs
+no Lean implementation of BLAKE3 and does not trust a supplied digest.
+
+OWNER_IDS are empty for forms0..3; the complete mutual-inductive ID group for
+form4 (including itself); the single owning-inductive ID for form5; the complete
+owning mutual-inductive group for form6; and the four quotient IDs for form7.
+All referenced IDs must exist and have the expected forms. Groups are derived
+from actual inductive/constructor/recursor metadata, not inferred from names.
+Every form4 member has identical group IDs; a constructor's owner belongs to
+the group checked before comparison. Every form7 record has the same four IDs,
+whose exact Names must be Quot, Quot.mk, Quot.lift, Quot.ind.
+
+ACTION0=successful scalar addition (forms0..3, IDS length1);
+ACTION1=successful inductive-group addition (all form4, IDS exactly its group);
+ACTION2=first successful quotient initialization (all four form7 IDs);
+ACTION3=successful postponed constructor comparison (form5, IDS length1);
+ACTION4=successful postponed recursor comparison (form6, IDS length1).
+Emit only after the actual checking/comparison succeeds. EVENT_SEQ starts0
+and increments by1 without gaps. ACTION0/1/2 increment ADDITIONS by1 regardless
+of group size; every ID in an event increments COVERED by1. ACTION3/4 increment
+their comparison counter by1. IDs must be eligible, not previously covered;
+the owning inductive group must already have its ACTION1 event for ACTION3/4.
+Scalar declarations are reconstructed and checked normally; never count a
+successful environment lookup as an addition.
+
+For ACTION2 explicitly schedule Eq prerequisites, require quotient state not
+initialized, check all four names are absent in the fresh environment, and
+remove all four from remaining/pending so no later name triggers an idempotent
+addition. Call the actual checked quotient initializer once. Confirm the four
+generated ConstantInfos agree with the imported quotient metadata before
+emitting the four-ID event. A second quotient event or a claimed success from
+an already-initialized no-op is an error. Do not change the public kernel API's
+separately tested idempotent behavior.
+
+Before done in replay, COVERED=eligible, TARGET_COVERED=target eligible>0,
+CTOR_COMPARES and REC_COMPARES equal the eligible form5/form6 counts; all37/33
+required roots are covered, and REMAINING/PENDING/CTOR_PENDING/REC_PENDING are0.
+All skip counters equal inventory totals, every skipped frame was seen once,
+and CONTROLS/MATCHED_CONTROLS are0. Rust recomputes each counter from observed
+events and rejects any discrepancy. This applies to all eligible constants,
+not only required roots or target-owned declarations.
+
+Mode2 emits hello, controls, exactly CONTROL_COUNT control frames, then done.
+All non-control work/skip/pending fields are0; CONTROLS=MATCHED_CONTROLS must
+equal the pinned required case count. Mode3 emits hello then done with all
+counters0. No inventory/coverage/control message is allowed in another phase.
+Every successful mode then closes stdout and exits0; extra bytes, duplicate
+done, missing EOF or nonzero exit fail. No shutdown handshake is required.
+
+On failure, at most one error frame is emitted, then nonzero exit and EOF;
+never done. CATEGORY is exactly `checker`, `coverage`, `limit`, `import`,
+`controls`, `io` or `internal`. DETAIL<=4096 UTF-8 bytes. Only a real
+Lean4Lean.addDecl/checker error is classified checker; loader and protocol
+failures cannot discharge a logical rejection control. A child crashing without
+an error is still failure. Ordinary timing/progress text goes only to bounded
+stderr, never stdout.
+
+### Exact controls packaging and expected data
+
+Kernel-owned `controls/VesperControls.lean` is copied into
+`Lean4Lean/VesperControls.lean`, using the existing library target. No new
+package or Cargo dependency. Runtime namespace/API:
+
+```lean
+namespace Vesper.Lean4Lean42Controls
+structure ControlResult where
+  id : String
+  expectedAccept : Bool
+  actualAccept : Bool
+  expectedReason : String
+  actualReason : String
+  matched : Bool
+runControls (baseline : Lean.Kernel.Environment) : IO (Array ControlResult)
+```
+
+The fixed mode imports only the compiled umbrella and its actual dependencies
+with importAll, then passes env.toKernelEnv while inside the import callback.
+This is the explicit control fixture baseline, not an assertion that controls
+replay their imported closure freshly. Kernel-owned Check.lean calls the same
+runtime suite. No separate canned Boolean simulation or run_meta-only suite.
+
+Pinned known-fixes.json has schema1 and a top-level controls array. Each entry
+has exact fields id, source, expected_accept, expected_reason, kind; source is
+`tools/lean4lean42/controls/VesperControls.lean`, kind is `raw_declaration`,
+`checker_expr` or `condition`. Exact case IDs/reason data come from the kernel
+writer's reviewed manifest. Require1..256 cases, unique IDs<=128 printable
+ASCII bytes, reasons<=128 printable ASCII bytes, and source fixed as above.
+Every entry is required; there is no runtime skip/unexecuted control outcome.
+INDEX is the pinned manifest array index. Tool expected fields must equal that
+entry; Rust recomputes MATCHED from actual accept/reason and requires1. A tool's
+expectedAccept or matched=true alone is not authority. Fixture errors must not
+be confused with the intended negative reason. Keep per-kind control evidence
+so a condition check is not described as a raw declaration rejection.
+
+### BLAKE3 setup sealing without a Python dependency
+
+Refine setup CLI to require `--driver PATH` as well as the exact compiler/Lake/
+Git paths. This is an already-built genuine Rust binary; setup does not build
+Vesper or select an arbitrary positive replacement checker. The Python script
+uses only its standard library and subprocesses. After applying verified
+immutable source/dependency patches and building the named executable, it
+invokes exactly:
+
+```text
+DRIVER --seal-setup STAGING_DIRECTORY
+```
+
+This private mode is exclusive with ordinary run options. STAGING_DIRECTORY
+contains bounded setup-inputs.json (<=16 KiB) with schema1 and exact fields
+lean, lake, git, build_argv, build_exit, build_stdout, build_stderr. Tool paths
+are absolute canonical strings; build_argv is an array of<=32 strings, total
+<=8192 bytes, with the repository-pinned build recipe; build_exit must be0.
+Log paths are relative regular files under staging, <=64 KiB retained each;
+output-overflow flags, if needed, must be part of a separately reviewed recipe
+amendment rather than an ignored extra JSON field. Setup itself enforces the
+build deadline/output cap and records the observed result. Sealing does not
+claim logs cryptographically prove the earlier command ran.
+
+The Rust sealer validates strict schema, repository pins/known-fixes/control
+sources, exact patched source/dependency inventories and compiler profile,
+hashes the actual checker/compiler/build inputs with bounded reads, and runs
+the real profile and all required controls using production protocol/deadlines.
+It writes setup-receipt.json with create_new only after those gates pass, flushes
+it, and exits0 with that same bounded receipt JSON. Failure writes no receipt.
+Only then may setup atomically rename its sibling staging directory to the
+requested absent destination. Ordinary run neither fetches nor repairs setup.
+
+Exact receipt fields (serde names shown) are schema, profile, upstream_commit,
+batteries_commit, lean_release, lean_commit, pins_blake3, known_fixes_blake3,
+patches, source_manifest, source_manifest_blake3, compiler_path, sysroot,
+compiler_blake3, checker_relative_path, checker_blake3, driver_blake3,
+build_argv, build_exit, build_stdout_blake3, build_stderr_blake3, controls,
+controls_blake3. Patches is the repository-pinned ordered array of
+`{path,blake3}`. Source_manifest is an ordered array of
+`{path,bytes,blake3}` for the recipe's complete allowlisted source/dependency
+files, excluding generated build output/Git metadata; its exact file set is
+checked and source changes/additional build inputs fail. Relative paths use `/`,
+contain no empty/dot/dotdot/absolute component, and fit4096 UTF-8 bytes.
+Compiler/checker hashes are platform-specific observed bytes. Controls uses the
+ControlRecord type below. All digests serialize as exact32-byte JSON arrays.
+Patch order is toolchain.patch, kernel.patch, replay.patch, each under the
+repository-owned patches directory. Apply the fixed controls overlay before
+building. Receipt<=4 MiB; source files<=8192 and aggregate source<=256 MiB, streamed.
+Recompute rather than trust receipt digests at ordinary run entry and after use.
+
+### Exact report/failure structures
+
+Use the earlier Target/Status/Scope/Limits/Config/Error types. `Target` serializes
+`rewrite_witness`/`arithmetic_oracle`; every enum uses snake_case. Derive existing
+serde and Debug/Clone, Eq/PartialEq where fields permit. Public Option fields
+serialize null when not observed, not fabricated zero-success evidence.
+
+```rust
+pub type Digest = [u8; 32];
+pub struct FileDigest { pub path: String, pub bytes: u64, pub blake3: Digest }
+pub enum ControlKind { RawDeclaration, CheckerExpr, Condition }
+pub struct ControlRecord {
+    pub id: String, pub kind: ControlKind,
+    pub expected_accept: bool, pub actual_accept: bool,
+    pub expected_reason: String, pub actual_reason: String, pub matched: bool,
+}
+pub struct InventoryTotals {
+    pub modules: u64, pub forms: [u64; 8],
+    pub eligibility: [u64; 4], pub target_eligibility: [u64; 4],
+    pub encoded_name_bytes: u64,
+}
+pub struct Coverage {
+    pub additions: u64, pub covered: u64,
+    pub constructor_compares: u64, pub recursor_compares: u64,
+    pub skipped: [u64; 3], pub target_covered: u64,
+    pub required_roots: u64, pub required_roots_covered: u64,
+    pub remaining: u64, pub pending: u64,
+    pub constructor_pending: u64, pub recursor_pending: u64,
+}
+pub enum TargetStatus { NotRun, Compiled, Inventoried, Complete, Failed }
+pub enum AuditStatus { NotRun, Partial }
+pub struct TargetReport {
+    pub target: Target, pub status: TargetStatus,
+    pub source: Option<FileDigest>, pub model_artifacts: Vec<FileDigest>,
+    pub import_files: u64, pub import_bytes: u64,
+    pub import_manifest_blake3: Option<Digest>,
+    pub inventory: Option<InventoryTotals>, pub inventory_blake3: Option<Digest>,
+    pub coverage: Option<Coverage>, pub coverage_blake3: Option<Digest>,
+    pub native_compile_exit: Option<i32>, pub external_exit: Option<i32>,
+    pub compile_ms: u64, pub inventory_ms: u64, pub replay_ms: u64,
+    pub stdout_bytes: u64, pub stderr_bytes: u64,
+    pub stdout_blake3: Option<Digest>, pub stderr_blake3: Option<Digest>,
+}
+pub struct ToolInfo {
+    pub profile: String, pub upstream_commit: String,
+    pub batteries_commit: String, pub lean_release: String, pub lean_commit: String,
+    pub checker_blake3: Digest, pub compiler_blake3: Digest,
+    pub receipt_blake3: Digest, pub pins_blake3: Digest,
+    pub known_fixes_blake3: Digest, pub source_manifest_blake3: Digest,
+    pub os: String, pub arch: String,
+}
+pub struct Report {
+    pub schema: u16, pub status: Status, pub scope: Scope,
+    pub limits: Limits, pub tools: Option<ToolInfo>,
+    pub controls: Vec<ControlRecord>, pub controls_blake3: Option<Digest>,
+    pub targets: [TargetReport; 2],
+    pub axiom_audit: AuditStatus, pub implementation_proof_audit: AuditStatus,
+    pub process_spawns: u64, pub timeouts: u64, pub crashes: u64,
+    pub protocol_errors: u64, pub elapsed_ms: u64,
+    pub artifacts: Vec<FileDigest>,
+}
+pub struct Failure { pub error: Error, pub partial: Box<Report> }
+pub fn run(config: &Config) -> Result<Report, Failure>;
+```
+
+Report target order is fixed RewriteWitness then ArithmeticOracle. Model
+artifacts<=4 files per target; retained artifact inventory<=16 entries; combined
+ToolInfo strings<=4096 bytes. Report file paths are relative evidence labels,
+not commands or approval to open arbitrary files. No full closure/source list
+is embedded in the final report; use streamed manifests/digests. TargetStatus
+advances only after an observed successful phase; failed reports retain actual
+partial coverage, without claiming Complete. Axiom/proof audits are NotRun in
+this executable's initial profile, since those separate auditors are not run;
+the known partial implementation proofs remain documented limitations, not an
+invented completed audit result. External Complete does not mean those audits
+passed.
+
+Hash typed inventories with domain `vesper.lean4lean42.inventory\0`, schema1
+u16LE, target u8, module/constant counts u64LE, then records in ordinal order.
+Encode Name as component count u16LE, each component tag u8 and either UTF-8
+length u32LE+bytes or numeric u64LE. Module records contain ID u32LE+Name;
+constant records contain ID u32LE+Name+moduleID u32LE+form u8+skip u8+owner
+count u16LE+owner IDs u32LE. Hash resolved artifact manifests separately under
+`vesper.lean4lean42.imports\0` with module/part tags and exact file bytes digests;
+this separates deterministic name inventories from host-specific paths.
+Artifact part tags are0=base .olean,1=.olean.server,2=.olean.private,3=.ir.
+The pinned4.24 loader opportunistically reads server/private parts; Rust hashes
+base, server then private when server exists, and any present .ir conservatively
+as the resolved artifact envelope. Do not claim every optional .ir was executed.
+Reject a private sidecar without its server precursor in this fixed profile.
+
+Coverage hash domain is `vesper.lean4lean42.coverage\0`, schema1 u16LE+target u8,
+then each observed skip as tag6 u8+ID u32LE+skip u8, and each coverage event as
+tag5 u8+EVENT_SEQ u64LE+ACTION u8+ID count u16LE+IDs u32LE in wire order;
+controls domain is `vesper.lean4lean42.controls\0`, schema1 u16LE+count u32LE,
+then pinned index u32LE and all ControlRecord fields with UTF-8 lengths u32LE,
+boolean u8 and ControlKind u8 in declaration order. Raw per-process stdout and
+stderr digests additionally hash their exact bytes incrementally. These hashes
+are inspection associations, not proof certificates or executable attestation.
+
+### Streaming and cancellation rule
+
+Use a bounded stdout queue of at most4 complete frames, plus the reader's one
+current bounded frame. **Apply backpressure when full; transient queue fullness
+is not a protocol error.** Inventory hashing and artifact inspection can
+legitimately delay the consumer. Include those bounded queue buffers in logical
+metadata accounting. A blocking sender is permitted only with cancellation-safe
+cleanup: kill and reap the child, drop the queue receiver to wake blocked sends,
+then join stdout/stderr reader threads. Equivalent explicit cancellation is
+acceptable; joining while retaining a full receiver is not. Keep stderr draining
+concurrently and record overflow without growing retained buffers.
+
+Enforce the absolute process/phase deadline while consumption or import hashing
+is in progress. Capture a frame-completion Instant in the reader before enqueue,
+and observed exit time separately from later consumer work; a valid frame read
+before the deadline is not retroactively late merely because it waited in a
+bounded queue. Clean EOF, terminal and actual process exit are still required.
+Hashing uses bounded chunks and deadline checks; no promise is made to interrupt
+an arbitrarily stalled filesystem syscall. All decoded frames remain associated
+with the one isolated child and expected mode/target/token. No queue/fullness or
+deadline workaround may drop frames, skip inventory records or accept a prefix.
