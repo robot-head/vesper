@@ -23,11 +23,35 @@ invalid shapes/branch identities/arities, codec settings/limits and applicable
 grammar limits. All encoder errors retain complete caller output; every successful
 helper checks both prefix/suffix regions outside the written range.
 
-Status before implementation dependencies are imported: Rustfmt and diff checks
-pass. Actual compile/runtime acceptance is pending the real parser and codec
-implementations, whose owned commits are supplied by the coordinator. No stub or
-fake checker is used, and no runtime success is claimed from the development
-namespace alone. This report will be supplemented after actual execution.
+Actual validation used parser source1ec2df6 and codec sourceda7dc01 supplied by
+the coordinator. Their dependency-only copies in this worktree are5c17d3e and
+3e6e425; they are not acceptance-owned changes and must not be reimported as
+owned work. Initial acceptance-owned commit is9eb138e.
+
+With exclusive `/tmp/codec41-acceptance-target`, one Cargo job, debug0 and
+incremental0:
+
+- `cargo test --locked -p vesper-grammar --all-targets` passes78tests across
+  13suites, zero failures/ignores. This includes all13independent acceptance tests
+  and65existing leaf tests. It does not include other lanes' not-yet-imported
+  new parser/codec unit-test files.
+- The zero/one/two-byte numeric corpus accepts exactly16,384canonical inputs;
+  the independent counted-number corpus accepts129. Every accepted input
+  produces the independently expected semantic value and identical reencoding.
+- All2048generated u64batch values and payload/count/frame boundary cases pass,
+  as do actual nullable/DAG/depth/count/resource and complete output-preservation
+  failures. Borrowed blob views point into the validated actual payload.
+- `cargo run --locked -p vesper-grammar --example codec` passes all assertions and
+  prints `Canonical batch: 13 bytes, two logical records; changed value300 -> ac02`.
+  The changed-value serialization is independent of any decoded original bytes.
+- `cargo clippy --locked -p vesper-grammar --all-targets -- -D warnings`,
+  standalone Rustfmt and `git diff --check` pass. The environment's existing Rust
+  toolchain is used; no dependency, toolchain or build file was added.
+
+These are actual Linux runtime results for those dependency heads, not a claim
+that a development namespace implements the feature or that future source
+follow-ups have already passed. Root performs final integrated validation after
+merging the owned lanes and any review fixes.
 
 No Lean model or conditional/echo theorem was added. Source macros, recursive PEG,
 SIMD, constant-time/cryptographic/source-linearity and Rust-refinement proof,
