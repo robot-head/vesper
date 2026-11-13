@@ -347,6 +347,10 @@ fn decode(bytes: &[u8], cap: usize) -> Result<Value, Error> {
                 if i - start > 20 {
                     return Err(limit());
                 }
+                std::str::from_utf8(&bytes[start..i])
+                    .map_err(|_| invalid("numeric UTF8"))?
+                    .parse::<u64>()
+                    .map_err(|_| invalid("numeric control range"))?;
                 if i < bytes.len()
                     && !matches!(bytes[i], b',' | b']' | b' ' | b'\r' | b'\n' | b'\t')
                 {
