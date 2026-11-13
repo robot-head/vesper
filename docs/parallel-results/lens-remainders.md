@@ -74,9 +74,10 @@ rejection, or a resource limit. Diagnostics then stay exactly as before.
 - `textDocument/hover` adds an "outstanding linear obligations here" section
   to navigation's hover. It lists every owned linear binding that is visible
   and not yet consumed at the cursor, with type, origin line and discharging
-  calls. In a damaged buffer it answers from the repaired prefix.
-  Navigation's own answer and error precedence are kept when nothing is
-  outstanding.
+  calls. Navigation's own answer and error precedence are kept. In a damaged
+  or ill-typed buffer the hover is still navigation's -32003 refusal (the
+  existing recovery contract), and the repaired prefix's obligations are
+  carried in its `data.lens_obligations`.
 - `textDocument/inlayHint` labels each linear binding `linear: consumed on
   line N`, `linear: outstanding`, or `linear: poisoned by unfinished code`.
 
@@ -156,8 +157,8 @@ frames:
   `tx.commit()` the receiver is not live. No receiver and an unknown receiver
   both give an empty list.
 - `hover_and_inlay_hints_show_outstanding_obligations`: checked buffer with
-  per-position sets, inlay "consumed on line N", and the repaired-prefix hover
-  in a damaged buffer.
+  per-position sets, inlay "consumed on line N", and in a damaged buffer
+  the -32003 refusal carrying the repaired-prefix obligations.
 - `proof_lens_cancellation_answers_once_and_keeps_not_attempted` (unix): a
   stand-in Lean whose compile sleeps. The server answers code lenses while
   the job runs. Cancel gives one -32800, and a second cancel, the killed

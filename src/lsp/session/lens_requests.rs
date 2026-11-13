@@ -295,8 +295,8 @@ impl Session {
         Some(text)
     }
 
-    /// Append live obligations to the navigation hover, or answer with them
-    /// alone when checked navigation is unavailable.
+    /// Append live obligations to the navigation hover. When checked
+    /// navigation is unavailable, its error stands and carries them as data.
     pub(super) fn hover_with_obligations(
         &self,
         uri: &str,
@@ -325,11 +325,18 @@ impl Session {
                 }
                 Ok(Value::Object(hover))
             }
-            Ok(_)
-            | Err(ServerError {
-                code: ANALYSIS_UNAVAILABLE,
-                ..
-            }) => Ok(json!({"contents":{"kind":"plaintext","value":obligations}})),
+            Ok(_) => Ok(json!({"contents":{"kind":"plaintext","value":obligations}})),
+            // Damaged or ill-typed buffers keep navigation's typed refusal;
+            // the obligations ride along in its data for clients that look.
+            Err(mut error) if error.code == ANALYSIS_UNAVAILABLE => {
+                match error.data.as_mut() {
+                    Some(Value::Object(data)) => {
+                        data.insert("lens_obligations".into(), json!(obligations));
+                    }
+                    _ => error.data = Some(json!({"lens_obligations": obligations})),
+                }
+                Err(error)
+            }
             Err(error) => Err(error),
         }
     }

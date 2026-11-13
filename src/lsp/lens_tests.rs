@@ -454,12 +454,14 @@ fn hover_and_inlay_hints_show_outstanding_obligations() {
         "{response}"
     );
 
-    // In a damaged buffer the hover still answers from the repaired prefix.
+    // In a damaged buffer navigation's typed refusal stands, and it carries
+    // the repaired prefix's obligations as data.
     let text = with_main("    let tx = open_txn(1);\n    tx.\n");
     client.replace(uri, 2, &text);
     let (line, column) = position_of(&text, "tx.\n");
     let hover = client.at("textDocument/hover", uri, line, column);
-    let value = hover["result"]["contents"]["value"].as_str().unwrap();
+    assert_eq!(hover["error"]["code"], -32003, "{hover}");
+    let value = hover["error"]["data"]["lens_obligations"].as_str().unwrap();
     assert!(value.contains("(recovered_prefix)"), "{value}");
     assert!(value.contains("- tx: WriteTxn"), "{value}");
     client.close();
