@@ -68,23 +68,51 @@ slots or produce a trampoline. A later code generator must implement the
 specified target's complete C calling convention, including narrow integer
 extension rules. Function symbols are undecorated C names for the C toolchain.
 
-Declarations are either `enum Name: unsigned_scalar { Variant = value, ... }`
-or `fn symbol(parameters...) -> ForeignVal[return_type];`. Forward enum references
+Declarations are `enum Name: unsigned_scalar { Variant = value, ... }`,
+`wire struct Name { field: type, ... }` or
+`fn symbol(parameters...) -> ForeignVal[return_type];`. Forward enum references
 are allowed. Names and discriminants within an enum are unique; the nonempty
 set fits the explicitly specified `u8/u16/u32/u64` carrier. Duplicate function
 symbols, parameter names and enum declarations are rejected.
 
 Value parameters admit `u8/i8/u16/i16/u32/i32/u64/i64/usize`, `bool`, or a declared
-enum. Borrowed parameters are exactly `nocapture in name: CSlice[integer]` or
+enum. Borrowed slice parameters are exactly `nocapture in name: CSlice[integer]` or
 `nocapture inout name: CSlice[integer]`. Each slice expands in place to a C
 pointer followed by `size_t` **element count**, not byte count. Read-only slices
 use a const pointer; unique slices a mutable pointer. Neither is a by-value C
 slice struct. The declared C API must actually have this flattened signature;
 the library does not infer a real API's signature from a header.
 
+Borrowed single-element pointer parameters are
+`nocapture in|out|inout name: T` or `nocapture in|out|inout name: Option[T]`,
+where `T` is an integer scalar or a declared `wire struct`. Each is exactly one
+C pointer. `in` is a const pointee; `out` and `inout` are unique pointees the
+callee may write (`out` additionally declares that the callee writes before
+reading). Only `Option[T]` admits null. `ParameterType::pointer_layout()` gives
+the pointee's size, alignment, direction and nullability:
+
+```text
+wire struct Header { base_offset: i64be, crc: u32be, records: i32be }
+fn crc32_update(nocapture inout crc: u32, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+fn read_header(nocapture in raw: CSlice[u8], nocapture out hdr: Option[Header]) -> ForeignVal[i32];
+```
+
+Rejected with typed errors: an access keyword without `nocapture`;
+`nocapture` without an access keyword; `NullablePtr[...]` as a pointee
+(nullable single pointers must say `Option[T]`); `Ptr[...]`, `Option[Ptr[...]]`
+and other pointer-to-pointer forms; `out` slices; `bool` or enum pointees
+(foreign code may write any bit pattern); `Unit` and unknown pointees.
+
+`wire struct` fields are `u8/i8`, native `u16..i64` (natural alignment,
+little-endian on every accepted target), explicit `u16be/u32le/...` (byte
+aligned), `ByteArray[N]`, `ZeroPad[N]` (1 <= N <= 1 MiB) or another wire struct.
+Layouts compile through `vesper_ffi::Registry`: implicit padding, `usize`,
+`bool`, enums, recursion and unknown structs are errors, and a pointee is at
+most 1 MiB. At most 64 wire structs with 256 fields each are accepted.
+
 Every return explicitly uses `ForeignVal[T]`, where T is a supported scalar,
 `bool`, declared enum, `Unit` (C void), `Ptr[integer]`, or `NullablePtr[integer]`.
-Raw-pointer parameters, structs/unions, arrays by value, callbacks, floats,
+Capturing raw-pointer parameters, structs/unions by value, arrays by value, callbacks, floats,
 platform-dependent C `char/long`, variadics, opaque handles/finalizers, nullable
 handle options and nested pointer layouts are unsupported and rejected.
 
@@ -115,7 +143,9 @@ Drop and do not establish source-language linear exhaustion.
 `function.prepare_call(raw_arguments, owner)` validates argument shape/scalar
 bits, slice nullability, integer element alignment, checked byte lengths,
 `isize::MAX` byte bounds, address-range overflow, and overlapping ranges when
-either slice is mutable. Empty slices permit a null address; nonnull addresses
+either slice is mutable. `RawArgument::Pointer { address }` is checked for
+null (allowed only for `Option[T]`), pointee alignment, range overflow, and
+overlap with every other slice or pointer range when either side is written. Empty slices permit a null address; nonnull addresses
 still satisfy element alignment. Shared overlaps and adjacent unique ranges
 are allowed. Preparation returns flattened typed carriers plus owner, or the
 complete original arguments and owner on any error. These are numerical checks;
@@ -138,8 +168,11 @@ whole enum. Descriptor clones preserve that sharing.
 with schema, library alias, complete explicit target/convention/pointer contract,
 link mode/name/artifact digest, optional header/pkg-config metadata, every enum
 and variant, ordered parameters including access/nocapture/element types, and
-return-validity contracts. Enum/function declarations and enum variants sort
-by name; parameter order remains significant. Every byte field is prefixed by
+return-validity contracts, single-pointer direction/nullability/pointee, and,
+only when present, a trailing `wire-structs` section with every field.
+Enum/function/wire-struct declarations and enum variants sort
+by name; parameter order remains significant. Descriptors that use no wire
+structs keep the canonical bytes, and identities, of the earlier schema. Every byte field is prefixed by
 its little-endian u32 length; collection counts are framed little-endian u64
 fields, and optional strings have explicit some/none tags. Whitespace, comments,
 option order and declaration order do not affect identity. Parser budgets do
@@ -150,11 +183,12 @@ The identity is a descriptor content key. It is not a library provenance
 certificate, Loom capability, executable-code certificate or header verifier.
 This crate does not synthesize `Ffi[Lib]`, check package ceilings, implement
 source borrowing, load/link libraries, emit native calls, prove `nocapture`,
-force finalization, or provide MPK/PKRU/POE isolation.
+or force finalization. MPK/PKU and POE isolation domains live in the separate
+`isolation` module (see README.md); no `.vsys` call is lowered through them.
 
 The integration test compiles a tiny real C static library and a separate raw
 Rust C-ABI host using `cc`, `ar` and `rustc`. It executes scalar/signed returns,
-invalid bool/enum carriers, a pointer return and disjoint pointer+length byte
-copy. Runtime evidence is specifically Linux x86_64 GNU System V. Other target
+invalid bool/enum carriers, a pointer return, disjoint pointer+length byte
+copy, an `inout u32` single pointer and an `out` wire-struct pointer. Runtime evidence is specifically Linux x86_64 GNU System V. Other target
 descriptors have metadata validation tests; they are not platform execution
 evidence. Missing fixture toolchains/other hosts are explicitly reported.

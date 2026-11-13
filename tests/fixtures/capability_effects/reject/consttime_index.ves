@@ -1,0 +1,19 @@
+// expect: E0704
+copy struct Secret[T] {
+    value: T,
+}
+
+fn lookup(s: Secret[u64]) -> Secret[u64] eff [ConstTime, Fail[RuntimeError]] {
+    let Secret {
+        value
+    }
+    = s;
+    let table: (u64, u64, u64, u64) = (10, 20, 30, 40);
+    Secret {
+        value: table[value]
+    }
+}
+
+fn main() -> u64 {
+    0
+}
