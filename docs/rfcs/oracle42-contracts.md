@@ -1,8 +1,8 @@
 # Executable Lean arithmetic oracle (§42): draft contract
 
 Parent public claim #269 precedes this design. This is a review draft, not
-authorization for runtime writers. Child claim numbers are assigned by the
-coordinator before publication; source work begins only after the reviewed
+authorization for runtime writers. Child claims #272–#275 exist before any
+runtime writer starts; source work begins only after the reviewed
 contract is pushed and linked to all claims. Interface amendments precede
 dependent source changes.
 
@@ -11,10 +11,10 @@ dependent source changes.
 | Lane | Exclusive future writes |
 |---|---|
 | #269 coordinator | this contract; new thin `src/bin/arithmetic_oracle42.rs`; integration report; narrow specific oracle test timeout entries in `BUILD.bazel`; narrow explicit model-CI list addition |
-| Lean model/driver, child pending | new `lean/ArithmeticOracle.lean`; `docs/rfcs/oracle42-model-report.md` |
-| Corpus, child pending | new `src/bin/arithmetic_oracle42/corpus.rs`; `tests/oracle42_corpus.rs`; corpus report |
-| Runner, child pending | new `src/bin/arithmetic_oracle42/{mod,protocol,process,worker}.rs`; `tests/oracle42_runner.rs`; runner report |
-| Independent acceptance, child pending | new `tests/oracle42_acceptance.rs`; new `src/bin/arithmetic_oracle42/fault_peer.rs`; acceptance report |
+| #273 Lean model/driver | new `lean/ArithmeticOracle.lean`; `docs/rfcs/oracle42-model-report.md` |
+| #272 corpus | new `src/bin/arithmetic_oracle42/corpus.rs`; `tests/oracle42_corpus.rs`; corpus report |
+| #275 runner | new `src/bin/arithmetic_oracle42/{mod,protocol,process,worker}.rs`; `tests/oracle42_runner.rs`; runner report |
+| #274 independent acceptance | new `tests/oracle42_acceptance.rs`; new `src/bin/arithmetic_oracle42/fault_peer.rs`; acceptance report |
 
 Reports other than the model report are
 `docs/rfcs/oracle42-{corpus,runner,acceptance,integration}-report.md`.
@@ -204,6 +204,16 @@ Debug, Clone and existing serde Serialize/Deserialize (Copy only where shown;
 PathBuf uses its existing serde support). Eq/PartialEq derive where fields
 allow, including report/error data. Wire enums and FailureKind use snake_case
 serde names; no platform-specific Rust Debug formatting is a wire format.
+Every i128 value in private worker transport and structured artifacts is a
+canonical decimal JSON STRING, including Node::Int, Input.value and
+Outcome::Value. Use serde field/tuple-variant adapters or direct typed text
+parsing; never route these values through f64 or serde_json::Value::Number.
+Decoding accepts only strings of at most40 ASCII bytes, exact canonical signed
+decimal as defined for Lean, then checked i128 parsing; numeric JSON tokens,
+leading zeros, negative zero, exponent/fraction, or out-of-i128 values fail.
+This preserves parser-negative values beyond u64MAX (such as2^64 and2^64+1)
+exactly. DTOs remain typed i128 in Rust; canonical binary hash encoding remains
+i128LE as defined below. No new dependency is needed.
 All configurable values are positive and no greater than HARD except
 shrink_attempts, which may be zero (the default); jobs is 1..4.
 Fuel zero is reserved for explicit protocol failure probes, not a normal run
@@ -458,6 +468,15 @@ Thin coordinator CLI:
 `[--lean PATH] [--artifacts DIR] [--shrink-attempts 0..64]`.
 Defaults: suite128, seed0, jobs1, lean=`lean`, no artifacts, no shrink.
 CLI sets worker_exe=current_exe; tests set the genuine Cargo binary path.
+Cargo's CARGO_BIN_EXE value may be a bare executable name under Bazel, located
+on PATH rather than the working directory. Resolve a bare name by searching
+the inherited PATH in order, with Windows .exe handling when no extension is
+given; resolve a path containing directory components directly. Canonicalize
+the found actual executable only AFTER that lookup, then use the same resolved
+path for worker/fault-peer spawn and executable hashing. Do not canonicalize a
+bare name against cwd or substitute an unrelated PATH fallback after failure.
+Hash that resolved binary's actual bytes incrementally with a bounded read
+buffer (at most64KiB), recording worker_blake3; never load the binary wholesale.
 Private `--worker` is exclusive with public options. Unknown/duplicate/malformed
 options fail nonzero. Successful stdout is serialized RunReport JSON; failure
 stdout is serialized RunFailure JSON with exact top-level fields error,
@@ -634,6 +653,7 @@ pub struct RunReport {
     pub diagnostic_counts: [u64; 7],
     pub elapsed_ms: u64, pub phase_times: PhaseTimes, pub tools: ToolInfo,
     pub model_blake3: [u8; 32], pub driver_blake3: [u8; 32],
+    pub worker_blake3: [u8; 32],
     pub corpus_blake3: [u8; 32], pub requests_blake3: [u8; 32],
     pub responses_blake3: [u8; 32],
     pub first_failed_case: Option<u64>, pub artifacts: Vec<ArtifactInfo>,
