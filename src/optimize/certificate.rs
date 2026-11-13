@@ -25,6 +25,13 @@ const RULE_COUNT: usize = 18;
 // Every catalog RHS has at most two operator nodes. Include both pattern
 // instantiations and constants conservatively before entering the applier.
 const APPLICATION_NODES: usize = 8;
+const MINIMUM_COMPLETE: &str = "witness minimum root complete";
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Completion {
+    Searching,
+    MinimumRootComplete,
+}
 
 pub(super) struct RewriteProposal {
     pub(super) candidate: Expr,
@@ -546,6 +553,7 @@ struct Capture {
     records: Vec<Record>,
     error: Option<WitnessError>,
     node_capacity: usize,
+    completion: Completion,
 }
 impl Capture {
     fn nodes(&mut self, required: usize) -> Result<(), WitnessError> {
@@ -805,9 +813,48 @@ struct SearchResult {
     budget: WitnessBudget,
 }
 
+fn root_has_leaf(graph: &Graph, roots: &[Id], kind: IntegerKind, variables: usize) -> bool {
+    roots.first().is_some_and(|root| {
+        graph[*root].nodes.iter().any(|node| match node {
+            Math::Num(n) => kind.fits(*n as i128),
+            Math::Input(id) => (*id as usize) < variables,
+            _ => false,
+        })
+    })
+}
+
+fn normal_completion(
+    reason: &Option<StopReason>,
+    graph: &Graph,
+    roots: &[Id],
+    state: &Capture,
+    kind: IntegerKind,
+    variables: usize,
+) -> Result<(), WitnessError> {
+    // Resource failures are sticky, even if a minimal leaf already exists.
+    if let Some(error) = state.error {
+        return Err(error);
+    }
+    if graph.nodes().len() > RAW_NODES {
+        return Err(WitnessError::Limit);
+    }
+    if matches!(reason, Some(StopReason::Saturated)) {
+        return Ok(());
+    }
+    if state.completion == Completion::MinimumRootComplete
+        && matches!(reason, Some(StopReason::Other(marker)) if marker == MINIMUM_COMPLETE)
+        && root_has_leaf(graph, roots, kind, variables)
+    {
+        return Ok(());
+    }
+    Err(WitnessError::Limit)
+}
+
 fn run_graph(
     expression: &RecExpr<Math>,
     mut budget: WitnessBudget,
+    kind: IntegerKind,
+    variables: usize,
 ) -> Result<SearchResult, WitnessError> {
     // Static closed rule/iteration objects are small. Graph/extractor storage
     // grows through full-capacity credits before graph growth; each search
@@ -819,6 +866,7 @@ fn run_graph(
         records: Vec::new(),
         error: None,
         node_capacity: 0,
+        completion: Completion::Searching,
     };
     state.nodes(expression.as_ref().len().max(4))?;
     let capture = Arc::new(Mutex::new(state));
@@ -849,12 +897,17 @@ fn run_graph(
         .with_scheduler(BoundedScheduler {
             capture: capture.clone(),
         })
-        .with_hook(move |_| {
-            let state = hook_capture
+        .with_hook(move |runner| {
+            let mut state = hook_capture
                 .lock()
                 .map_err(|_| "witness capture poisoned".to_owned())?;
             if state.error.is_some() {
                 Err("witness budget refused".to_owned())
+            } else if root_has_leaf(&runner.egraph, &runner.roots, kind, variables) {
+                // This only terminates search at AstSize's global lower
+                // bound. The leaf's equivalence still needs captured proofs.
+                state.completion = Completion::MinimumRootComplete;
+                Err(MINIMUM_COMPLETE.to_owned())
             } else {
                 Ok(())
             }
@@ -862,14 +915,14 @@ fn run_graph(
         .with_expr(expression)
         .run(&actual);
     let mut state = capture.lock().map_err(|_| WitnessError::Limit)?;
-    if let Some(error) = state.error {
-        return Err(error);
-    }
-    if !matches!(runner.stop_reason, Some(StopReason::Saturated))
-        || runner.egraph.nodes().len() > RAW_NODES
-    {
-        return Err(WitnessError::Limit);
-    }
+    normal_completion(
+        &runner.stop_reason,
+        &runner.egraph,
+        &runner.roots,
+        &state,
+        kind,
+        variables,
+    )?;
     let mut budget = state.budget.take().ok_or(WitnessError::Limit)?;
     let records = std::mem::take(&mut state.records);
     drop(state);
@@ -1143,7 +1196,7 @@ pub(super) fn propose_rewrite(
                 best,
                 records,
                 budget: remaining,
-            } = run_graph(&expression, budget)?;
+            } = run_graph(&expression, budget, bound.kind(), variable_count)?;
             budget = remaining;
             let best_map =
                 translate_math(best.as_ref(), variable_count, &mut builder, &mut budget)?;
@@ -1237,6 +1290,68 @@ mod tests {
         let produced = proposal(&source, &types);
         assert!(matches!(&produced.candidate.kind, ExprKind::Name(name) if name == "x"));
         assert!(has_rule(&produced, 1));
+    }
+
+    #[test]
+    fn actual_minimal_root_completes_erasure_and_cancellation_in_all_four_kinds() {
+        for kind in ["u8", "u32", "u64", "i64"] {
+            let (source, types) = fixture(&format!(
+                "fn f(x: {kind}) -> {kind} {{ wrapping_mul(x, 0) }}"
+            ));
+            let produced = proposal(&source, &types);
+            assert!(has_rule(&produced, 17));
+            assert!(matches!(
+                produced.candidate.kind,
+                ExprKind::Literal(Literal::Int(0))
+            ));
+            let (source, types) = fixture(&format!(
+                "fn f(x: {kind}, y: {kind}) -> {kind} {{ wrapping_sub(wrapping_add(x, y), y) }}"
+            ));
+            let produced = proposal(&source, &types);
+            assert!(has_rule(&produced, 16));
+            assert!(matches!(produced.candidate.kind, ExprKind::Name(ref name) if name == "x"));
+        }
+    }
+
+    #[test]
+    fn minimum_completion_never_masks_resource_failure_or_accepts_arbitrary_stops() {
+        let mut graph = Graph::default();
+        let root = graph.add(Math::Num(0));
+        let mut state = Capture {
+            budget: Some(WitnessBudget::new(WitnessLimits::default()).unwrap()),
+            records: Vec::new(),
+            error: None,
+            node_capacity: 1,
+            completion: Completion::MinimumRootComplete,
+        };
+        let marker = Some(StopReason::Other(MINIMUM_COMPLETE.to_owned()));
+        assert_eq!(
+            normal_completion(&marker, &graph, &[root], &state, IntegerKind::I64, 0),
+            Ok(())
+        );
+        for reason in [
+            StopReason::IterationLimit(ITERATIONS),
+            StopReason::NodeLimit(RAW_NODES),
+            StopReason::TimeLimit(1.0),
+            StopReason::Other("unrelated hook".to_owned()),
+        ] {
+            assert_eq!(
+                normal_completion(&Some(reason), &graph, &[root], &state, IntegerKind::I64, 0),
+                Err(WitnessError::Limit)
+            );
+        }
+        state.completion = Completion::Searching;
+        assert_eq!(
+            normal_completion(&marker, &graph, &[root], &state, IntegerKind::I64, 0),
+            Err(WitnessError::Limit)
+        );
+        state.completion = Completion::MinimumRootComplete;
+        state.fail(WitnessError::Allocation);
+        state.fail(WitnessError::Limit);
+        assert_eq!(
+            normal_completion(&marker, &graph, &[root], &state, IntegerKind::I64, 0),
+            Err(WitnessError::Allocation)
+        );
     }
 
     #[test]
@@ -1433,6 +1548,7 @@ mod tests {
             records: Vec::new(),
             error: None,
             node_capacity: graph.nodes().len(),
+            completion: Completion::Searching,
         }));
         let mut scheduler = BoundedScheduler {
             capture: capture.clone(),
@@ -1479,6 +1595,7 @@ mod tests {
                 records,
                 error: None,
                 node_capacity: 0,
+                completion: Completion::Searching,
             }));
             let actual = rules();
             let applier = RecordingApplier {
