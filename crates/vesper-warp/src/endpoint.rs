@@ -664,6 +664,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let mut conns = Vec::with_capacity(config.max_connections as usize);
         conns.resize_with(config.max_connections as usize, || None);
         let buf = usize::from(config.max_datagram) + TAG_LEN;
+        // Long-header frames are built after a maximal header gap.
+        let scratch_len = buf + MAX_LONG_HEADER;
         let rx_frame = xsk.config().frame_size as usize;
         let mut endpoint = Self {
             config,
@@ -676,7 +678,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             timers,
             deferred_acks: Vec::with_capacity(config.max_connections as usize),
             events: Vec::with_capacity(config.max_tracked_per_conn + 8),
-            scratch: vec![0u8; buf].into_boxed_slice(),
+            scratch: vec![0u8; scratch_len].into_boxed_slice(),
             app_out: vec![0u8; buf].into_boxed_slice(),
             record: PacketFrames::default(),
             app,
@@ -1202,7 +1204,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let Some(Some(conn)) = self.conns.get_mut(idx) else {
             return Err(fail(DropReason::UnknownCid));
         };
-        if conn.error.is_some() {
+        if let Some(error) = conn.error {
+            self.answer_while_closing(slot, error, now_ns);
             return Err(fail(DropReason::Closed));
         }
         let Some(hs) = conn.hs.as_mut() else {
@@ -1320,9 +1323,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
         if let Some(close) = peer_close {
             conn.error = Some(close);
-        }
-        if self.apply_tls_events(slot, now_ns).is_err() {
-            return Err(fail(DropReason::Closed));
+        } else {
+            // Hand this packet's CRYPTO data to TLS now, so a Handshake
+            // packet coalesced after it can use the keys it yields. A TLS
+            // failure closes the connection; the packet itself was
+            // authentic.
+            let _ = self.drive_tls(slot, now_ns);
         }
         Ok((slot, pn))
     }
@@ -1706,14 +1712,24 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if frames_len == 0 {
             return Err(WarpError::Config("empty packet"));
         }
+        // From here on a failure must give the CRYPTO range back.
+        let requeue = |streams: &mut StreamSet| {
+            if let Some((off, len)) = crypto {
+                streams.crypto_mut(space).on_lost(off, len as usize);
+            }
+        };
         let ty = if space == PnSpace::Initial {
             LongPacketType::Initial
         } else {
             LongPacketType::Handshake
         };
-        let shortest = encoded_len(pn, largest_acked)
-            .map_err(|_| WarpError::PacketNumbersExhausted)?
-            .bytes();
+        let shortest = match encoded_len(pn, largest_acked) {
+            Ok(len) => len.bytes(),
+            Err(_) => {
+                requeue(streams);
+                return Err(WarpError::PacketNumbersExhausted);
+            }
+        };
         let pad_initial = space == PnSpace::Initial && (client || ack_eliciting);
         let dcid = tile.peer_cid;
         let header = |payload_len: usize, pn_bytes: usize, out: &mut [u8]| {
@@ -1730,30 +1746,40 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 },
             )
         };
-        // The header-protection sample needs pn_len + payload >= 4.
-        let mut pn_bytes = shortest.max(4usize.saturating_sub(frames_len));
-        let mut pad = 0;
-        if pad_initial {
-            pn_bytes = shortest;
-            let probe = header(MIN_INITIAL_DATAGRAM, pn_bytes, &mut scratch[..base])?;
-            pad = MIN_INITIAL_DATAGRAM.saturating_sub(probe.header_len + frames_len + TAG_LEN);
-        }
-        if at + pad > scratch.len() {
-            return Err(WarpError::PacketTooLarge { len: at + pad });
-        }
-        scratch[at..at + pad].fill(0); // PADDING frames
-        let payload = frames_len + pad;
-        let written = header(payload + TAG_LEN, pn_bytes, &mut scratch[..base])?;
-        scratch.copy_within(base..base + payload, written.header_len);
-        let plain_len = written.header_len + payload;
-        let total = plain_len + TAG_LEN;
-        if total > max {
-            return Err(WarpError::PacketTooLarge { len: total });
-        }
-
-        let requeue = |streams: &mut StreamSet| {
-            if let Some((off, len)) = crypto {
-                streams.crypto_mut(space).on_lost(off, len as usize);
+        let layout: Result<_, WarpError> = 'layout: {
+            // The header-protection sample needs pn_len + payload >= 4.
+            let mut pn_bytes = shortest.max(4usize.saturating_sub(frames_len));
+            let mut pad = 0;
+            if pad_initial {
+                pn_bytes = shortest;
+                let probe = match header(MIN_INITIAL_DATAGRAM, pn_bytes, &mut scratch[..base]) {
+                    Ok(p) => p,
+                    Err(e) => break 'layout Err(e.into()),
+                };
+                pad = MIN_INITIAL_DATAGRAM.saturating_sub(probe.header_len + frames_len + TAG_LEN);
+            }
+            if at + pad > scratch.len() {
+                break 'layout Err(WarpError::PacketTooLarge { len: at + pad });
+            }
+            scratch[at..at + pad].fill(0); // PADDING frames
+            let payload = frames_len + pad;
+            let written = match header(payload + TAG_LEN, pn_bytes, &mut scratch[..base]) {
+                Ok(w) => w,
+                Err(e) => break 'layout Err(e.into()),
+            };
+            scratch.copy_within(base..base + payload, written.header_len);
+            let plain_len = written.header_len + payload;
+            let total = plain_len + TAG_LEN;
+            if total > max {
+                break 'layout Err(WarpError::PacketTooLarge { len: total });
+            }
+            Ok((pad, payload, written, plain_len, total))
+        };
+        let (pad, payload, written, plain_len, total) = match layout {
+            Ok(l) => l,
+            Err(e) => {
+                requeue(streams);
+                return Err(e);
             }
         };
         let mut frame = match self.xsk.alloc_tx(total as u16) {
@@ -2155,15 +2181,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             // at most once per PTO; draining: stay silent.
             self.stats.rx_dropped_closed += 1;
             let out = self.drop_rx(frame, DropReason::Closed);
-            if let ConnectionError::Local(e) = error {
-                let c = self.conn(slot)?;
-                let gap = c.recovery.rtt().pto_base_ns();
-                if c.close_sent_ns
-                    .is_none_or(|t| now_ns >= t.saturating_add(gap))
-                {
-                    let _ = self.send_close(slot, e, now_ns);
-                }
-            }
+            self.answer_while_closing(slot, error, now_ns);
             return out;
         }
 
@@ -2489,6 +2507,26 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
 
     /// Sends CONNECTION_CLOSE for a peer violation (not ack-eliciting, so
     /// never retransmitted; the closing state answers later packets).
+    /// Closing (RFC 9000 §10.2.1): a packet for a connection we closed is
+    /// answered with CONNECTION_CLOSE again, at most once per PTO.
+    /// Draining (the peer closed): stay silent.
+    fn answer_while_closing(&mut self, slot: SlotHandle, error: ConnectionError, now_ns: u64) {
+        let (code, frame_type) = match error {
+            ConnectionError::Local(e) => (e.code.code(), e.frame_type),
+            ConnectionError::Handshake { error_code } => (error_code, CLOSE_FRAME_CRYPTO),
+            ConnectionError::Peer { .. } => return,
+        };
+        let Ok(c) = self.conn(slot) else {
+            return;
+        };
+        let gap = c.recovery.rtt().pto_base_ns();
+        if c.close_sent_ns
+            .is_none_or(|t| now_ns >= t.saturating_add(gap))
+        {
+            let _ = self.send_close_code(slot, code, frame_type, now_ns);
+        }
+    }
+
     fn send_close(
         &mut self,
         slot: SlotHandle,
@@ -2945,7 +2983,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         // ACK-only packets in flight).
         let pn_bytes = shortest.max(4usize.saturating_sub(payload_len));
         let pn_len = PnLen::new(pn_bytes as u8).expect("1..=4 bytes");
-        let header_len = self.parser.write_short(
+        let header_len = self.parser.write_short_to_peer(
             &mut scratch[..MAX_SHORT_HEADER],
             tile.peer_cid.as_bytes(),
             false,

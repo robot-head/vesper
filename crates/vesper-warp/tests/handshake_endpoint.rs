@@ -127,6 +127,8 @@ struct Net {
     /// Drop every datagram in this direction (0: to server, 1: to client).
     blackhole: [bool; 2],
     events: [Vec<ConnectionEvent>; 2],
+    /// Every datagram put on the wire, per direction, before loss.
+    sent: [Vec<Vec<u8>>; 2],
 }
 
 impl Net {
@@ -135,16 +137,35 @@ impl Net {
     }
 
     fn with_client(seed: u64, loss_ppm: u64, reorder_ppm: u64, setup: ClientSetup) -> Self {
-        let mut server = endpoint(config(Role::Server));
+        Self::with_cids(seed, loss_ppm, reorder_ppm, setup, &CLIENT_CID, 8)
+    }
+
+    /// Each side issues connection IDs of its own length: the client
+    /// `client_cid`, the server `server_cid_len` bytes.
+    fn with_cids(
+        seed: u64,
+        loss_ppm: u64,
+        reorder_ppm: u64,
+        setup: ClientSetup,
+        client_cid: &[u8],
+        server_cid_len: u8,
+    ) -> Self {
+        let mut server = endpoint(EndpointConfig {
+            cid_len: server_cid_len,
+            ..config(Role::Server)
+        });
         server
             .listen(Listener::with_cids(
                 server_setup(),
                 Box::new(CountingCids(0)),
             ))
             .unwrap();
-        let mut client = endpoint(config(Role::Client));
+        let mut client = endpoint(EndpointConfig {
+            cid_len: client_cid.len() as u8,
+            ..config(Role::Client)
+        });
         let c_conn = client
-            .connect(&setup, SERVER_NAME, &CLIENT_CID, &ODCID, 0)
+            .connect(&setup, SERVER_NAME, client_cid, &ODCID, 0)
             .unwrap();
         Self {
             client,
@@ -160,6 +181,7 @@ impl Net {
             dropped: 0,
             blackhole: [false; 2],
             events: [Vec::new(), Vec::new()],
+            sent: [Vec::new(), Vec::new()],
         }
     }
 
@@ -170,6 +192,9 @@ impl Net {
                 _ => std::mem::take(&mut self.server.tap_mut().out),
             };
             let mut batch = std::mem::take(&mut self.held[dir]);
+            if self.sent[dir].len() < 64 {
+                self.sent[dir].extend(out.iter().take(64).cloned());
+            }
             for d in out {
                 if self.blackhole[dir] || self.rng.below(1_000_000) < self.loss_ppm {
                     self.dropped += 1;
@@ -497,6 +522,135 @@ fn untrusted_certificate_closes_with_a_crypto_error() {
         net.client.open_stream(net.c_conn, false),
         Err(WarpError::ConnectionClosed(err))
     );
+}
+
+#[test]
+fn a_closed_handshake_answers_retransmissions_with_its_close() {
+    // The client rejects the server's certificate and closes; its
+    // CONNECTION_CLOSE is lost and the server's flight arrives again.
+    // RFC 9000 §10.2.1: the closing client answers with CONNECTION_CLOSE
+    // again, at most once per PTO.
+    let mut net = Net::with_client(5, 0, 0, client_setup_with(ROGUE_CA, ALPN));
+    for _ in 0..40 {
+        net.step();
+        if net.client.connection_error(net.c_conn).is_some() {
+            break;
+        }
+    }
+    let Some(ConnectionError::Handshake { error_code }) = net.client.connection_error(net.c_conn)
+    else {
+        panic!("{:?}", net.client.connection_error(net.c_conn));
+    };
+    assert_eq!(net.client.stats().closes_sent, 1);
+    // The close is lost.
+    net.client.tap_mut().out.clear();
+    let flight = net.sent[1].clone();
+    assert!(!flight.is_empty());
+    let replay = |net: &mut Net, now: u64| {
+        for d in &flight {
+            net.client.xsk_mut().backend_mut().deliver(d);
+        }
+        while net.client.poll_and_step_quic_rx_one(now).unwrap() != RxOutcome::Idle {}
+        net.client.xsk_mut().backend_mut().step();
+        net.client.poll(now).unwrap();
+    };
+    // Retransmissions within one PTO of the close: one answer only.
+    let t = net.now;
+    replay(&mut net, t);
+    replay(&mut net, t + MS);
+    assert_eq!(net.client.stats().closes_sent, 1, "inside one PTO");
+    let pto = net
+        .client
+        .connection(net.c_conn)
+        .unwrap()
+        .recovery
+        .rtt()
+        .pto_base_ns();
+    replay(&mut net, t + pto);
+    assert_eq!(net.client.stats().closes_sent, 2);
+    replay(&mut net, t + pto + MS);
+    assert_eq!(net.client.stats().closes_sent, 2, "inside one PTO");
+    // The repeated close reaches the server.
+    assert!(net.server.connection_error(net.s()).is_none());
+    net.now = t + pto + 2 * MS;
+    for _ in 0..4 {
+        net.step();
+    }
+    assert_eq!(
+        net.server.connection_error(net.s()),
+        Some(ConnectionError::Peer {
+            error_code,
+            frame_type: Some(0x06)
+        })
+    );
+}
+
+#[test]
+fn a_handshake_packet_coalesced_after_the_initial_is_processed() {
+    // RFC 9000 §12.2: the server's Initial and its first Handshake packet
+    // in one datagram. The Handshake keys come from the Initial's
+    // ServerHello, so TLS must run before the second packet is opened.
+    let mut net = Net::new(6, 0, 0);
+    net.blackhole[1] = true;
+    net.step();
+    net.step();
+    let flight = net.sent[1].clone();
+    assert!(flight.len() >= 2, "{} server datagrams", flight.len());
+    assert_eq!(flight[0][0] & 0xb0, 0x80, "an Initial first");
+    assert_eq!(flight[1][0] & 0xb0, 0xa0, "then a Handshake packet");
+    let mut coalesced = flight[0].clone();
+    coalesced.extend_from_slice(&flight[1]);
+    let before = net.client.stats().handshake_packets_received;
+    net.client.xsk_mut().backend_mut().deliver(&coalesced);
+    let now = net.now;
+    while net.client.poll_and_step_quic_rx_one(now).unwrap() != RxOutcome::Idle {}
+    let stats = net.client.stats();
+    assert_eq!(stats.handshake_packets_received - before, 2, "{stats:?}");
+    // The rest of the flight, then the handshake finishes.
+    for d in &flight[2..] {
+        net.client.xsk_mut().backend_mut().deliver(d);
+    }
+    net.blackhole[1] = false;
+    net.handshake(200);
+    assert_established(&net);
+}
+
+#[test]
+fn handshake_works_when_the_peers_connection_ids_differ_in_length() {
+    // A 4-byte client CID against a 12-byte server CID, the reverse, and a
+    // 1-byte client CID:
+    // short headers carry the peer's length, long headers both, and the
+    // frame budget follows the peer's CID.
+    for (seed, client_cid, server_len) in [
+        (21u64, &b"cli4"[..], 12u8),
+        (22, &b"client-cid-0x0012"[..], 4),
+        // A 1-byte client CID: the shortest Initial header, so the most
+        // padding behind the frames.
+        (23, &b"c"[..], 8),
+    ] {
+        let mut net = Net::with_cids(seed, 50_000, 50_000, client_setup(), client_cid, server_len);
+        net.handshake(4000);
+        let c = net.client.connection(net.c_conn).unwrap();
+        let s = net.server.connection(net.s()).unwrap();
+        let mut expect = vec![0x5eu8; usize::from(server_len)];
+        expect[0] = 1;
+        assert_eq!(c.tile.peer_cid.as_bytes(), &expect[..]);
+        assert_eq!(s.tile.peer_cid.as_bytes(), client_cid);
+        assert!(c.error.is_none() && s.error.is_none());
+        transfer(&mut net, seed, 40_000, 40_000, 20_000);
+        assert_eq!(
+            net.client.stats().rx_dropped_crypto,
+            0,
+            "{:?}",
+            net.client.stats()
+        );
+        assert_eq!(
+            net.server.stats().rx_dropped_crypto,
+            0,
+            "{:?}",
+            net.server.stats()
+        );
+    }
 }
 
 #[test]
