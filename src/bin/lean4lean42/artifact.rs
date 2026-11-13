@@ -385,86 +385,83 @@ fn source_skip(path: &str) -> bool {
         .iter()
         .any(|p| path == *p || path.strip_prefix(p).is_some_and(|s| s.starts_with('/')))
 }
-fn walk_files(
-    root: &Path,
-    dir: &Path,
-    files: &mut Vec<FileDigest>,
+struct FileScan<'a> {
+    root: &'a Path,
     max_files: usize,
     max_bytes: u64,
-    total: &mut u64,
-    entries: &mut u64,
     end: Instant,
     sources: bool,
-    depth: usize,
-) -> Result<(), Error> {
-    timely(end)?;
-    if depth > 64 {
-        return Err(limit("filesystem depth"));
-    }
-    if !regular_meta(dir)?.is_dir() {
-        return Err(identity("bound directory is not regular"));
-    }
-    for entry in fs::read_dir(dir)? {
-        timely(end)?;
-        *entries = checked(*entries, 1)?;
-        if *entries
-            > (max_files as u64)
-                .checked_mul(4)
-                .ok_or_else(|| limit("entry bound"))?
-        {
-            return Err(limit("filesystem entry count"));
+    files: Vec<FileDigest>,
+    bytes: u64,
+    entries: u64,
+}
+impl<'a> FileScan<'a> {
+    fn new(root: &'a Path, max_files: usize, max_bytes: u64, end: Instant, sources: bool) -> Self {
+        Self {
+            root,
+            max_files,
+            max_bytes,
+            end,
+            sources,
+            files: Vec::new(),
+            bytes: 0,
+            entries: 0,
         }
-        let path = entry?.path();
-        let name = label(root, &path)?;
-        if sources && source_skip(&name) {
-            continue;
+    }
+    fn walk(&mut self, dir: &Path, depth: usize) -> Result<(), Error> {
+        timely(self.end)?;
+        if depth > 64 {
+            return Err(limit("filesystem depth"));
         }
-        let m = regular_meta(&path)?;
-        if m.is_dir() {
-            walk_files(
-                root,
-                &path,
-                files,
-                max_files,
-                max_bytes,
-                total,
-                entries,
-                end,
-                sources,
-                depth + 1,
-            )?
-        } else if m.is_file() {
-            if files.len() >= max_files {
-                return Err(limit("file inventory count"));
+        if !regular_meta(dir)?.is_dir() {
+            return Err(identity("bound directory is not regular"));
+        }
+        for entry in fs::read_dir(dir)? {
+            timely(self.end)?;
+            self.entries = checked(self.entries, 1)?;
+            if self.entries
+                > (self.max_files as u64)
+                    .checked_mul(4)
+                    .ok_or_else(|| limit("entry bound"))?
+            {
+                return Err(limit("filesystem entry count"));
             }
-            let f = file_digest(root, &path, max_bytes.saturating_sub(*total), end)?;
-            *total = checked(*total, f.bytes)?;
-            reserve(files, 1)?;
-            files.push(f);
-        } else {
-            return Err(identity("nonregular file in bound tree"));
+            let path = entry?.path();
+            let name = label(self.root, &path)?;
+            if self.sources && source_skip(&name) {
+                continue;
+            }
+            let m = regular_meta(&path)?;
+            if m.is_dir() {
+                self.walk(&path, depth + 1)?
+            } else if m.is_file() {
+                if self.files.len() >= self.max_files {
+                    return Err(limit("file inventory count"));
+                }
+                let f = file_digest(
+                    self.root,
+                    &path,
+                    self.max_bytes.saturating_sub(self.bytes),
+                    self.end,
+                )?;
+                self.bytes = checked(self.bytes, f.bytes)?;
+                reserve(&mut self.files, 1)?;
+                self.files.push(f);
+            } else {
+                return Err(identity("nonregular file in bound tree"));
+            }
         }
+        Ok(())
     }
-    Ok(())
+    fn finish(mut self) -> Vec<FileDigest> {
+        self.files.sort_unstable_by(|a, b| a.path.cmp(&b.path));
+        self.files
+    }
 }
 fn sources(root: &Path, end: Instant) -> Result<Vec<FileDigest>, Error> {
-    let mut out = Vec::new();
-    let mut bytes = 0;
-    let mut entries = 0;
-    walk_files(
-        root,
-        root,
-        &mut out,
-        8192,
-        256 * MIB as u64,
-        &mut bytes,
-        &mut entries,
-        end,
-        true,
-        0,
-    )?;
-    out.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
+    let mut scan = FileScan::new(root, 8192, 256 * MIB as u64, end, true);
+    scan.walk(root, 0)?;
+    Ok(scan.finish())
 }
 pub fn verify_sources(root: &Path) -> Result<Digest, Error> {
     let i = inputs()?;
@@ -476,25 +473,17 @@ pub fn verify_sources(root: &Path) -> Result<Digest, Error> {
     Ok(i.pins.source_manifest_blake3)
 }
 fn build_outputs(root: &Path, limits: &Limits, end: Instant) -> Result<Vec<FileDigest>, Error> {
-    let mut out = Vec::new();
-    let mut bytes = 0;
-    let mut entries = 0;
+    let mut scan = FileScan::new(
+        root,
+        limits.build_output_files,
+        limits.build_output_bytes,
+        end,
+        false,
+    );
     for p in [".lake/build", ".lake/packages/batteries/.lake/build"] {
-        walk_files(
-            root,
-            &root.join(p),
-            &mut out,
-            limits.build_output_files,
-            limits.build_output_bytes,
-            &mut bytes,
-            &mut entries,
-            end,
-            false,
-            0,
-        )?
+        scan.walk(&root.join(p), 0)?
     }
-    out.sort_unstable_by(|a, b| a.path.cmp(&b.path));
-    Ok(out)
+    Ok(scan.finish())
 }
 pub fn read_receipt(root: &Path) -> Result<Receipt, Error> {
     bounded_json(
@@ -825,10 +814,10 @@ fn probe(
     c.arg(arg);
     let mut observer_error = None;
     let out = process::capture_observed(c, limits.inventory_timeout_ms, limits, 4096, |o| {
-        if let Some(r) = report {
-            if let Err(e) = observed(r, None, 0, o) {
-                observer_error = Some(e)
-            }
+        if let Some(r) = report
+            && let Err(e) = observed(r, None, 0, o)
+        {
+            observer_error = Some(e)
         }
     })?;
     if let Some(e) = observer_error {
@@ -966,67 +955,79 @@ fn roots(root: &Path, models: &Path, sysroot: &Path, controls: bool) -> Vec<Path
     }
     v
 }
-fn machine(
-    root: &Path,
-    models: &Path,
-    sysroot: &Path,
-    i: &Inputs,
-    mode: u8,
-    target: u8,
-    limits: &Limits,
-    expected: Option<&Inventory>,
-    mut report: Option<&mut Report>,
-    target_index: Option<usize>,
-) -> Result<(SessionResult, process::ProcessResult), Error> {
-    let token = fresh_token()?;
-    let mut parser_limits = limits.clone();
-    parser_limits.inventory_bytes = parser_limits
-        .inventory_bytes
-        .checked_sub(process::transport_bytes(limits)?)
-        .ok_or_else(|| limit("transport and inventory reservation"))?;
-    let mut m = Machine::new(mode, target, &token, &parser_limits, &i.controls, expected)?;
-    let mut c = command(
-        &tool_path(root, &i.pins),
-        models,
-        Some(sysroot),
-        &roots(root, models, sysroot, target == 2),
-    )?;
-    c.args(["--vesper42", &mode.to_string(), &target.to_string(), &token]);
-    let timeout = if mode == 1 {
-        limits.replay_timeout_ms
-    } else {
-        limits.inventory_timeout_ms
-    };
-    let mut observer_error = None;
-    let observation = process::framed_observed(
-        c,
-        timeout,
-        limits,
-        |bytes, _| m.feed(bytes),
-        |o| {
-            if let Some(r) = report.as_deref_mut() {
-                if let Err(e) = observed(r, target_index, if mode == 1 { 2 } else { 1 }, o) {
+struct MachineContext<'a> {
+    root: &'a Path,
+    models: &'a Path,
+    sysroot: &'a Path,
+    inputs: &'a Inputs,
+    limits: &'a Limits,
+}
+impl MachineContext<'_> {
+    fn run(
+        &self,
+        mode: u8,
+        target: u8,
+        expected: Option<&Inventory>,
+        mut report: Option<&mut Report>,
+        target_index: Option<usize>,
+    ) -> Result<(SessionResult, process::ProcessResult), Error> {
+        let Self {
+            root,
+            models,
+            sysroot,
+            inputs: i,
+            limits,
+        } = *self;
+        let token = fresh_token()?;
+        let mut parser_limits = limits.clone();
+        parser_limits.inventory_bytes = parser_limits
+            .inventory_bytes
+            .checked_sub(process::transport_bytes(limits)?)
+            .ok_or_else(|| limit("transport and inventory reservation"))?;
+        let mut m = Machine::new(mode, target, &token, &parser_limits, &i.controls, expected)?;
+        let mut c = command(
+            &tool_path(root, &i.pins),
+            models,
+            Some(sysroot),
+            &roots(root, models, sysroot, target == 2),
+        )?;
+        c.args(["--vesper42", &mode.to_string(), &target.to_string(), &token]);
+        let timeout = if mode == 1 {
+            limits.replay_timeout_ms
+        } else {
+            limits.inventory_timeout_ms
+        };
+        let mut observer_error = None;
+        let observation = process::framed_observed(
+            c,
+            timeout,
+            limits,
+            |bytes, _| m.feed(bytes),
+            |o| {
+                if let Some(r) = report.as_deref_mut()
+                    && let Err(e) = observed(r, target_index, if mode == 1 { 2 } else { 1 }, o)
+                {
                     observer_error = Some(e)
                 }
-            }
-        },
-    );
-    if let Some(index) = target_index {
-        if let Some(r) = report.as_deref_mut() {
+            },
+        );
+        if let Some(index) = target_index
+            && let Some(r) = report
+        {
             r.targets[index].coverage = m.progress();
         }
+        let observation = observation?;
+        if let Some(e) = observer_error {
+            return Err(e);
+        }
+        if observation.exit != 0 {
+            return Err(Error::new(
+                ErrorKind::ExternalRejection,
+                "external checker did not exit successfully",
+            ));
+        }
+        Ok((m.finish()?, observation))
     }
-    let observation = observation?;
-    if let Some(e) = observer_error {
-        return Err(e);
-    }
-    if observation.exit != 0 {
-        return Err(Error::new(
-            ErrorKind::ExternalRejection,
-            "external checker did not exit successfully",
-        ));
-    }
-    Ok((m.finish()?, observation))
 }
 struct ImportEnvelope {
     hash: Digest,
@@ -1102,7 +1103,7 @@ fn import_envelope(
             selected.push((3, ir));
         }
         h.update(&module.id.to_le_bytes());
-        module.name.hash(&mut h);
+        module.name.hash_into(&mut h);
         h.update(&[selected.len() as u8]);
         for (tag, path) in selected {
             if files >= limits.artifact_files as u64 {
@@ -1249,58 +1250,21 @@ pub fn seal(root: &Path) -> Result<Receipt, Error> {
     let initial_compiler = compiler_digest(&lean, &sysroot, end)?;
     let initial_checker = checker_digest(&root, &i.pins, end)?;
     let models = Workspace::new(None)?;
-    machine(
-        &root,
-        &models.path,
-        &sysroot,
-        &i,
-        3,
-        2,
-        &limits,
-        None,
-        None,
-        None,
-    )?;
-    let (baseline, _) = machine(
-        &root,
-        &models.path,
-        &sysroot,
-        &i,
-        0,
-        2,
-        &limits,
-        None,
-        None,
-        None,
-    )?;
+    let context = MachineContext {
+        root: &root,
+        models: &models.path,
+        sysroot: &sysroot,
+        inputs: &i,
+        limits: &limits,
+    };
+    context.run(3, 2, None, None, None)?;
+    let (baseline, _) = context.run(0, 2, None, None, None)?;
     let baseline = baseline
         .inventory
         .ok_or_else(|| identity("missing control inventory"))?;
     let imports = import_envelope(&baseline, &root, &models.path, &sysroot, true, &limits)?;
-    let (controls, _) = machine(
-        &root,
-        &models.path,
-        &sysroot,
-        &i,
-        2,
-        2,
-        &limits,
-        None,
-        None,
-        None,
-    )?;
-    let (repeated, _) = machine(
-        &root,
-        &models.path,
-        &sysroot,
-        &i,
-        0,
-        2,
-        &limits,
-        Some(&baseline),
-        None,
-        None,
-    )?;
+    let (controls, _) = context.run(2, 2, None, None, None)?;
+    let (repeated, _) = context.run(0, 2, Some(&baseline), None, None)?;
     if repeated.inventory_blake3 != Some(baseline.blake3) {
         return Err(identity("control inventory changed during controls"));
     }
@@ -1584,6 +1548,13 @@ pub fn execute(
         }
     }
     let models = Workspace::new(None)?;
+    let context = MachineContext {
+        root: &root,
+        models: &models.path,
+        sysroot: &sysroot,
+        inputs: &i,
+        limits: &config.limits,
+    };
     let result = (|| -> Result<(), Error> {
         let (actual, actual_root) = compiler(&lean, &models.path, &config.limits, Some(report))?;
         if actual != lean || actual_root != sysroot {
@@ -1608,31 +1579,9 @@ pub fn execute(
             os: std::env::consts::OS.into(),
             arch: std::env::consts::ARCH.into(),
         });
-        machine(
-            &root,
-            &models.path,
-            &sysroot,
-            &i,
-            3,
-            2,
-            &config.limits,
-            None,
-            Some(report),
-            None,
-        )?;
+        context.run(3, 2, None, Some(report), None)?;
         {
-            let (before, _) = machine(
-                &root,
-                &models.path,
-                &sysroot,
-                &i,
-                0,
-                2,
-                &config.limits,
-                None,
-                Some(report),
-                None,
-            )?;
+            let (before, _) = context.run(0, 2, None, Some(report), None)?;
             let before = before
                 .inventory
                 .ok_or_else(|| identity("missing native control baseline"))?;
@@ -1643,18 +1592,7 @@ pub fn execute(
             {
                 return Err(identity("control baseline does not match sealed inputs"));
             }
-            let (controls, _) = machine(
-                &root,
-                &models.path,
-                &sysroot,
-                &i,
-                2,
-                2,
-                &config.limits,
-                None,
-                Some(report),
-                None,
-            )?;
+            let (controls, _) = context.run(2, 2, None, Some(report), None)?;
             report.controls = controls.controls;
             report.controls_blake3 = controls.controls_blake3;
             if report.controls != r.controls || report.controls_blake3 != Some(r.controls_blake3) {
@@ -1663,18 +1601,7 @@ pub fn execute(
                     "actual controls differ from sealed candidate",
                 ));
             }
-            let (after, _) = machine(
-                &root,
-                &models.path,
-                &sysroot,
-                &i,
-                0,
-                2,
-                &config.limits,
-                Some(&before),
-                Some(report),
-                None,
-            )?;
+            let (after, _) = context.run(0, 2, Some(&before), Some(report), None)?;
             if after.inventory_blake3 != Some(before.blake3)
                 || import_envelope(&before, &root, &models.path, &sysroot, true, &config.limits)?
                     .hash
@@ -1744,18 +1671,7 @@ pub fn execute(
         }
         for index in 0..2 {
             let target = report.targets[index].target;
-            let (native, _) = match machine(
-                &root,
-                &models.path,
-                &sysroot,
-                &i,
-                0,
-                target.tag(),
-                &config.limits,
-                None,
-                Some(report),
-                Some(index),
-            ) {
+            let (native, _) = match context.run(0, target.tag(), None, Some(report), Some(index)) {
                 Ok(v) => v,
                 Err(e) => {
                     report.targets[index].status = TargetStatus::Failed;
@@ -1779,24 +1695,14 @@ pub fn execute(
             report.targets[index].import_files = before.files;
             report.targets[index].import_bytes = before.bytes;
             report.targets[index].import_manifest_blake3 = Some(before.hash);
-            let (replayed, _) = match machine(
-                &root,
-                &models.path,
-                &sysroot,
-                &i,
-                1,
-                target.tag(),
-                &config.limits,
-                Some(&native),
-                Some(report),
-                Some(index),
-            ) {
-                Ok(v) => v,
-                Err(e) => {
-                    report.targets[index].status = TargetStatus::Failed;
-                    return Err(e);
-                }
-            };
+            let (replayed, _) =
+                match context.run(1, target.tag(), Some(&native), Some(report), Some(index)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.targets[index].status = TargetStatus::Failed;
+                        return Err(e);
+                    }
+                };
             report.targets[index].coverage = replayed.coverage;
             report.targets[index].coverage_blake3 = replayed.coverage_blake3;
             if import_envelope(
@@ -1904,24 +1810,16 @@ mod tests {
             b"bounded evidence"
         );
         save_report(&config, Some(&dir), &report).unwrap();
-        let mut files = Vec::new();
-        let mut bytes = 0;
-        let mut entries = 0;
-        walk_files(
+        let mut scan = FileScan::new(
             &parent.path,
-            &dir,
-            &mut files,
             16,
             config.limits.artifact_bytes,
-            &mut bytes,
-            &mut entries,
             until(5000),
             false,
-            0,
-        )
-        .unwrap();
-        assert_eq!(files.len(), 2);
-        assert!(bytes <= config.limits.artifact_bytes);
+        );
+        scan.walk(&dir, 0).unwrap();
+        assert_eq!(scan.files.len(), 2);
+        assert!(scan.bytes <= config.limits.artifact_bytes);
         assert_eq!(report.status, Status::Failed); // This storage unit never supplies replay evidence.
     }
 
@@ -1939,25 +1837,11 @@ mod tests {
         for n in 0..5 {
             fs::create_dir(space.path.join(format!("empty{n}"))).unwrap();
         }
-        let mut files = Vec::new();
-        let mut bytes = 0;
-        let mut entries = 0;
-        let error = walk_files(
-            &space.path,
-            &space.path,
-            &mut files,
-            1,
-            1024,
-            &mut bytes,
-            &mut entries,
-            until(5000),
-            false,
-            0,
-        )
-        .unwrap_err();
+        let mut scan = FileScan::new(&space.path, 1, 1024, until(5000), false);
+        let error = scan.walk(&space.path, 0).unwrap_err();
         assert_eq!(error.kind, ErrorKind::OutputLimit);
-        assert!(files.is_empty());
-        assert_eq!(entries, 5);
+        assert!(scan.files.is_empty());
+        assert_eq!(scan.entries, 5);
     }
 
     #[cfg(unix)]

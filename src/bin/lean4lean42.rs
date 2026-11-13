@@ -36,7 +36,7 @@ fn arguments() -> Result<Vec<String>, Error> {
     Ok(args)
 }
 fn config(args: &[String]) -> Result<Config, Error> {
-    if args.len() % 2 != 0 {
+    if !args.len().is_multiple_of(2) {
         return Err(Error::new(
             ErrorKind::InvalidConfig,
             "options require values",
@@ -46,7 +46,7 @@ fn config(args: &[String]) -> Result<Config, Error> {
     let mut root = None;
     let mut lean = None;
     let mut artifacts = None;
-    for pair in args.chunks_exact(2) {
+    for pair in args.as_chunks::<2>().0 {
         if !seen.insert(pair[0].as_str()) || pair[1].is_empty() {
             return Err(Error::new(
                 ErrorKind::InvalidConfig,
