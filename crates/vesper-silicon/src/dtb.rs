@@ -535,12 +535,20 @@ impl DeviceTree {
         Ok(self.prop_strings(id, "compatible")?.unwrap_or_default())
     }
 
-    /// `status` is absent, `okay` or `ok`.
+    /// `status` is absent, `okay` or `ok` on the node and every ancestor (a
+    /// disabled bus disables its whole subtree).
     pub fn enabled(&self, id: usize) -> Result<bool, DtbError> {
-        Ok(matches!(
-            self.prop_str(id, "status")?.as_deref(),
-            None | Some("okay") | Some("ok")
-        ))
+        let mut cur = Some(id);
+        while let Some(n) = cur {
+            if !matches!(
+                self.prop_str(n, "status")?.as_deref(),
+                None | Some("okay") | Some("ok")
+            ) {
+                return Ok(false);
+            }
+            cur = self.nodes[n].parent;
+        }
+        Ok(true)
     }
 
     /// `#address-cells` / `#size-cells` that apply to `id`'s `reg` (the
@@ -600,18 +608,25 @@ impl DeviceTree {
         Ok(out)
     }
 
-    /// The node `interrupt-parent` designates for `id` (inherited from the
-    /// nearest ancestor that sets it).
+    /// The interrupt parent of `id`: its own `interrupt-parent`, else its
+    /// devicetree parent when that is an interrupt controller or nexus,
+    /// else the parent's inherited interrupt parent.
     pub fn interrupt_parent(&self, id: usize) -> Result<usize, DtbError> {
-        let mut cur = Some(id);
-        while let Some(n) = cur {
-            if let Some(ph) = self.prop_u32(n, "interrupt-parent")? {
+        let mut cur = id;
+        loop {
+            if let Some(ph) = self.prop_u32(cur, "interrupt-parent")? {
                 return self.by_phandle(ph).ok_or(DtbError::UnknownPhandle {
                     node: self.path(id),
                     phandle: ph,
                 });
             }
-            cur = self.nodes[n].parent;
+            let Some(p) = self.nodes[cur].parent else {
+                break;
+            };
+            if self.has_prop(p, "interrupt-controller") || self.has_prop(p, "interrupt-map") {
+                return Ok(p);
+            }
+            cur = p;
         }
         Err(DtbError::MissingInterruptParent {
             node: self.path(id),
@@ -1112,9 +1127,21 @@ impl Platform {
 }
 
 /// Whether a `riscv,isa` string (`rv64imafdc_zicbom_...`) names `ext`.
+/// A version suffix (`2`, `1p0`) after the extension name is accepted.
 pub fn isa_has_extension(isa: &str, ext: &str) -> bool {
     let isa = isa.to_ascii_lowercase();
-    isa.starts_with("rv") && isa.split('_').skip(1).any(|e| e == ext)
+    let versioned = |rest: &str| {
+        let mut parts = rest.splitn(2, 'p');
+        let major = parts.next().unwrap_or("");
+        let minor = parts.next();
+        let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+        digits(major) && minor.is_none_or(digits)
+    };
+    isa.starts_with("rv")
+        && isa
+            .split('_')
+            .skip(1)
+            .any(|e| e == ext || e.strip_prefix(ext).is_some_and(versioned))
 }
 
 fn resolve(

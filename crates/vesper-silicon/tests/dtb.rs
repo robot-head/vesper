@@ -15,6 +15,43 @@ use vesper_silicon::ledger::Ledger;
 const RV_VIRT: &[u8] = include_bytes!("../fixtures/dtb/qemu-riscv64-virt.dtb");
 const ARM_VIRT: &[u8] = include_bytes!("../fixtures/dtb/qemu-aarch64-virt-gicv3.dtb");
 const BOARD: &[u8] = include_bytes!("../fixtures/dtb/vesper-rv-board.dtb");
+const EDGES: &[u8] = include_bytes!("../fixtures/dtb/vesper-edge-cases.dtb");
+
+#[test]
+fn implicit_parents_disabled_buses_and_versioned_extensions() {
+    let p = Platform::from_dtb(EDGES).unwrap();
+    // A child of the PLIC without interrupt-parent uses the PLIC.
+    let gpio = p
+        .irq_lines
+        .iter()
+        .find(|l| l.device == "/plic@c000000/gpio@c100000")
+        .unwrap();
+    assert_eq!(
+        (gpio.controller.as_str(), gpio.number),
+        ("/plic@c000000", 5)
+    );
+    // Nothing under the disabled bus is extracted (its source 70 would be
+    // out of range, and its memory bank would be counted).
+    assert!(!p.irq_lines.iter().any(|l| l.device.starts_with("/offbus")));
+    assert_eq!(p.memory.len(), 1);
+    let ledger = Ledger::new();
+    let mut cpu = Cpu::new(p.arch, &ledger);
+    assert!(matches!(
+        p.install_isr(&mut cpu, "/offbus/dev@20000000", |_| {}),
+        Err(DtbError::NoInterrupt { .. })
+    ));
+    // "zicbom1p0" names Zicbom.
+    assert_eq!(
+        p.dma_coherence("/plic@c000000/gpio@c100000").unwrap(),
+        DmaCoherence::Zicbom { block_bytes: 64 }
+    );
+    use vesper_silicon::dtb::isa_has_extension;
+    assert!(isa_has_extension("rv64gc_zicbom2", "zicbom"));
+    assert!(isa_has_extension("rv64gc_zicbom", "zicbom"));
+    assert!(!isa_has_extension("rv64gc_zicbomx", "zicbom"));
+    assert!(!isa_has_extension("rv64gc_zicbom1p", "zicbom"));
+    assert!(!isa_has_extension("rv64gc_zicboz", "zicbom"));
+}
 
 #[test]
 fn qemu_riscv_virt_memory_harts_and_plic() {

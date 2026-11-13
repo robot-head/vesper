@@ -121,6 +121,17 @@ fn hazards_on_real_registers_in_traces() {
         },
     ];
     let f = check_ops(&m, "adc_drain", &ops);
+    // Any write to the read-only FIFO, even of zero, is flagged.
+    let w = check_ops(
+        &m,
+        "poke",
+        &[MmioOp::Write {
+            reg: "ADC.FIFO".into(),
+            value: 0,
+        }],
+    );
+    assert_eq!(w.len(), 1, "{w:?}");
+    assert_eq!(w[0].rule, vesper_silicon::hazard::RULE_WRITE_RO);
     let rules: Vec<_> = f.iter().map(|x| (x.inst, x.rule)).collect();
     assert_eq!(
         rules,

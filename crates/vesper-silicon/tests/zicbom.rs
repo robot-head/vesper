@@ -148,6 +148,24 @@ fn engine_from_the_devicetree_maintains_frames_with_zicbom() {
 }
 
 #[test]
+fn coherent_dma_does_not_enumerate_cache_lines() {
+    #[derive(Debug)]
+    struct Huge;
+    impl DmaBuffer for Huge {
+        fn dma_region(&self) -> (u64, u32) {
+            (0x4000_0000, u32::MAX)
+        }
+    }
+    let l = Ledger::new();
+    let mut dma =
+        DmaEngine::with_coherence(Arch::Aarch64, DmaCoherence::Coherent, 1, 1, 64, &l).unwrap();
+    let x = dma.submit_tx(0, Huge).unwrap();
+    assert_eq!(dma.barriers(), [BarrierInst::DsbSy]);
+    dma.device_complete(0, 0, None).unwrap();
+    let _ = dma.poll_complete(x).unwrap();
+}
+
+#[test]
 fn coherence_must_exist_on_the_architecture() {
     let l = Ledger::new();
     let z = DmaCoherence::Zicbom { block_bytes: 64 };

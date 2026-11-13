@@ -62,7 +62,7 @@ fn write_findings(r: &RegisterModel, value: u64, out: &mut Vec<(&'static str, St
             format!("value {value:#x} wider than {}-bit {}", r.size_bits, r.path),
         ));
     }
-    if r.class() == RegisterClass::ReadOnly {
+    if !r.fields.iter().any(|f| f.access.writable()) {
         out.push((
             RULE_WRITE_RO,
             format!("write to read-only register {}", r.path),
@@ -384,7 +384,7 @@ pub fn check_function(func: &Function, model: &DeviceModel, policy: &MmioPolicy)
                             (v as u64) & ((1u64 << acc.bits) - 1)
                         };
                         write_findings(r, v, &mut out);
-                    } else if r.class() == RegisterClass::ReadOnly {
+                    } else if !r.fields.iter().any(|f| f.access.writable()) {
                         out.push((
                             RULE_WRITE_RO,
                             format!("write to read-only register {}", r.path),

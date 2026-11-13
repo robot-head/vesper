@@ -415,12 +415,18 @@ impl DmaEngine {
             DmaCoherence::Zicbom { block_bytes } => zicbom_barriers(phase, phys, len, block_bytes),
             DmaCoherence::ArmNonCoherent => dma_barriers(self.arch, phase, phys, len, self.line),
             DmaCoherence::Coherent => {
-                let seq = dma_barriers(self.arch, phase, phys, len, self.line)?;
-                // Coherent Arm DMA needs ordering but no cache maintenance.
-                Ok(seq
-                    .into_iter()
-                    .filter(|b| !matches!(b, BarrierInst::DcCvac(_) | BarrierInst::DcIvac(_)))
-                    .collect())
+                // Ordering only: validate the region without enumerating
+                // cache lines.
+                if len == 0 {
+                    return Err(DmaError::EmptyBuffer);
+                }
+                phys.checked_add(u64::from(len))
+                    .ok_or(DmaError::RegionOverflow)?;
+                Ok(match self.arch {
+                    Arch::X86_64 => Vec::new(),
+                    Arch::Riscv64 => vec![BarrierInst::FenceIorwIorw],
+                    Arch::Aarch64 => vec![BarrierInst::DsbSy],
+                })
             }
         }
     }
