@@ -2,8 +2,10 @@
 
 Frozen parent #423 is `7e426817ab783b034847f6c4bd9c14de639dd117`.
 Claims #425–#428 precede source. All actual helper/vendor/provenance and
-parent proof, auditor/projector/profile, runtime/compiler, Cargo and CI
-sources stay unchanged. This packet concerns actual `Normalize.normalizeAux`
+parent proof, auditor/projector/profile, runtime/compiler, Cargo and workflow
+sources stay unchanged. The narrow #429 BUILD setting selects the existing
+regular-input launcher for these tests; validator bytes remain unchanged.
+This packet concerns actual `Normalize.normalizeAux`
 before the later `.subsumption` call.
 
 Ownership under `lean/Lean4LeanLevel42/`: #425 NEW `LevelSemantics.lean`;
