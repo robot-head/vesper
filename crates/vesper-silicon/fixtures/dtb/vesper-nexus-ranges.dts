@@ -1,0 +1,163 @@
+// Hand-written devicetree for the Silicon tests (describes no real board):
+// interrupt nexus nodes (a masked two-cell connector and a second-level
+// nexus behind it), nested non-identity `ranges`, a bus with 3 address
+// cells, a CLINT, `riscv,isa-extensions`, and dynamically placed
+// /reserved-memory regions. Compile with:
+//   dtc -I dts -O dtb -o vesper-nexus-ranges.dtb vesper-nexus-ranges.dts
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	compatible = "vesper,nexus-ranges";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "riscv";
+			riscv,isa-base = "rv64i";
+			riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "zicsr",
+					       "zifencei", "zicbom";
+			riscv,cbom-block-size = <64>;
+			intc0: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x10000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+
+		firmware@80000000 {
+			reg = <0x0 0x80000000 0x0 0x200000>;
+			no-map;
+		};
+
+		/* 16 MiB, 4 MiB aligned, inside the first 128 MiB. */
+		cma {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x0 0x1000000>;
+			alignment = <0x0 0x400000>;
+			alloc-ranges = <0x0 0x80000000 0x0 0x8000000>;
+		};
+
+		/* 1 MiB anywhere. */
+		vbuf {
+			size = <0x0 0x100000>;
+			no-map;
+		};
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		interrupt-parent = <&plic>;
+
+		plic: interrupt-controller@c000000 {
+			compatible = "sifive,plic-1.0.0";
+			reg = <0x0 0x0c000000 0x0 0x4000000>;
+			#address-cells = <0>;
+			#interrupt-cells = <1>;
+			interrupt-controller;
+			interrupts-extended = <&intc0 11>, <&intc0 9>;
+			riscv,ndev = <64>;
+		};
+
+		clint@2000000 {
+			compatible = "sifive,clint0";
+			reg = <0x0 0x02000000 0x0 0x10000>;
+			interrupts-extended = <&intc0 3>, <&intc0 7>;
+		};
+
+		/* A 32-bit peripheral bus at 0x4_0000_0000 with two windows. */
+		apb@400000000 {
+			compatible = "simple-bus";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0x0 0x4 0x0 0x100000>,
+				 <0x200000 0x4 0x10200000 0x10000>;
+
+			sub@10000 {
+				compatible = "simple-bus";
+				#address-cells = <1>;
+				#size-cells = <1>;
+				ranges = <0x0 0x10000 0x1000>;
+
+				timer@100 {
+					compatible = "vesper,timer";
+					reg = <0x100 0x10>;
+					interrupts = <20>;
+				};
+			};
+
+			uart@202000 {
+				compatible = "vesper,uart";
+				reg = <0x202000 0x100>;
+				interrupts = <21>;
+			};
+
+			/* Outside both windows. */
+			orphan@300000 {
+				compatible = "vesper,orphan";
+				reg = <0x300000 0x10>;
+			};
+
+			/* Board connector: line n with any flags goes to a PLIC
+			 * source, line 2 to the second-level nexus. */
+			connector: connector {
+				#address-cells = <0>;
+				#interrupt-cells = <2>;
+				interrupt-map-mask = <0xff 0x0>;
+				interrupt-map = <0 0 &plic 30>,
+						<1 0 &plic 31>,
+						<2 0 &level2 0>;
+			};
+		};
+	};
+
+	level2: nexus2 {
+		#address-cells = <0>;
+		#interrupt-cells = <1>;
+		interrupt-map = <0 &plic 40>;
+	};
+
+	button {
+		compatible = "vesper,button";
+		interrupt-parent = <&connector>;
+		interrupts = <1 8>;
+	};
+
+	sensor {
+		compatible = "vesper,sensor";
+		interrupts-extended = <&connector 2 3>;
+	};
+
+	/* A bus with 3 address cells (not PCI) translated to 0x50000000. */
+	wide {
+		compatible = "simple-bus";
+		#address-cells = <3>;
+		#size-cells = <1>;
+		ranges = <0x1 0x0 0x0 0x0 0x50000000 0x1000>;
+
+		dev@1,0,10 {
+			compatible = "vesper,wide";
+			reg = <0x1 0x0 0x10 0x20>;
+		};
+	};
+};
