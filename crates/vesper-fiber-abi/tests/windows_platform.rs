@@ -314,6 +314,30 @@ unsafe extern "C" fn teb_entry(ctx: *mut FiberContext, _arg: u64) -> u64 {
     exit::COMPLETE
 }
 
+/// The host thread's TEB stack fields after a switch back from a fiber.
+/// `StackBase`, `DeallocationStack` and the guarantee are exact. `StackLimit`
+/// is only required not to rise: the kernel lowers it by a page whenever the
+/// host stack grows into its guard page, which an unrelated call (a spawn's
+/// allocation, the test harness) can do between two reads.
+fn assert_host_teb(host: TebLimits, what: &str) {
+    let now = current_teb_limits();
+    assert_eq!(now.stack_base, host.stack_base, "{what}: StackBase");
+    assert_eq!(
+        now.deallocation_stack, host.deallocation_stack,
+        "{what}: DeallocationStack"
+    );
+    assert_eq!(
+        now.guaranteed_bytes, host.guaranteed_bytes,
+        "{what}: guaranteed bytes"
+    );
+    assert!(
+        now.stack_limit <= host.stack_limit && now.stack_limit > now.deallocation_stack,
+        "{what}: StackLimit {:#x} moved above {:#x} or out of the reservation",
+        now.stack_limit,
+        host.stack_limit
+    );
+}
+
 #[test]
 fn teb_stack_limits_are_owned_by_each_context() {
     let ev = evidence();
@@ -325,9 +349,9 @@ fn teb_stack_limits_are_owned_by_each_context() {
     let a = spawn(teb_entry, 0, &ev);
     let b = spawn(teb_entry, 0, &ev);
     let mut ka = parked(a.start());
-    assert_eq!(current_teb_limits(), host);
+    assert_host_teb(host, "after starting fiber A");
     let mut kb = parked(b.start());
-    assert_eq!(current_teb_limits(), host);
+    assert_host_teb(host, "after starting fiber B");
     let mut seen: Vec<TebLimits> = vec![];
     for _ in 0..2 {
         for k in [&mut ka, &mut kb] {
@@ -342,13 +366,9 @@ fn teb_stack_limits_are_owned_by_each_context() {
             assert_eq!(w(4), 1, "the stack header names the running fiber");
         }
         let next_a = resume(ka);
-        assert_eq!(
-            current_teb_limits(),
-            host,
-            "host TEB restored after a switch"
-        );
+        assert_host_teb(host, "host TEB restored after a switch");
         let next_b = resume(kb);
-        assert_eq!(current_teb_limits(), host);
+        assert_host_teb(host, "host TEB restored after resuming fiber B");
         match (next_a, next_b) {
             (Outcome::Parked(x), Outcome::Parked(y)) => {
                 // Second round: the data written before the second park.
