@@ -76,9 +76,14 @@ set fits the explicitly specified `u8/u16/u32/u64` carrier. Duplicate function
 symbols, parameter names and enum declarations are rejected.
 
 Value parameters admit `u8/i8/u16/i16/u32/i32/u64/i64/usize`, `bool`, or a declared
-enum. Borrowed slice parameters are exactly `nocapture in name: CSlice[integer]` or
-`nocapture inout name: CSlice[integer]`. Each slice expands in place to a C
-pointer followed by `size_t` **element count**, not byte count. Read-only slices
+enum. Borrowed slice parameters are `nocapture in|inout name: CSlice[E]` or
+`nocapture in|inout name: Option[CSlice[E]]`, where `E` is an integer scalar
+or a declared `wire struct`. Each slice expands in place to a C pointer
+followed by `size_t` **element count**, not byte count; the C stride is the
+element's wire size. A non-`Option` slice is non-null even when empty; an
+`Option` slice admits exactly `(NULL, 0)` as `None` (a null pointer with a
+nonzero length is `NullSliceWithLength`). `ParameterType::slice_layout()`
+gives element size, alignment, direction and nullability. Read-only slices
 use a const pointer; unique slices a mutable pointer. Neither is a by-value C
 slice struct. The declared C API must actually have this flattened signature;
 the library does not infer a real API's signature from a header.
@@ -101,7 +106,34 @@ Rejected with typed errors: an access keyword without `nocapture`;
 `nocapture` without an access keyword; `NullablePtr[...]` as a pointee
 (nullable single pointers must say `Option[T]`); `Ptr[...]`, `Option[Ptr[...]]`
 and other pointer-to-pointer forms; `out` slices; `bool` or enum pointees
-(foreign code may write any bit pattern); `Unit` and unknown pointees.
+(foreign code may write any bit pattern); `Unit` and unknown pointees; slice
+elements that are `Option`, `Ptr`, `bool`, enums, `Unit`, unknown or nested
+slices; `out` slices, with or without `Option`.
+
+### Layout checks against the C header
+
+`WireStructDescriptor::c_layout_probe(c_type, include)` renders a C11 program
+that prints `sizeof`, `_Alignof`, and `offsetof`/`sizeof` of every field
+(nested fields by `outer.inner` path) of the C type as the header declares it.
+The caller compiles and runs it with the target C compiler;
+`check_c_layout(output)` returns every mismatch: `Size`, `Alignment` (C needs
+a stronger alignment than the wire layout checks for, as with byte-aligned
+explicit-endian fields), `FieldOffset`, `FieldSize`, `MissingField`, or
+`Malformed` for output that is not the probe's.
+
+### Per-assumption boundary checks
+
+`FunctionDescriptor::assumptions()` lists every assumption of a signature with
+when it can be checked (`BeforeCall`, `AfterReturn`, `WithGuard`,
+`Unverifiable`). `check_arguments(args)` reports each before-call assumption of
+each argument separately (`ValidBits`, `NonNull`, `Aligned`, `InBounds`,
+`Disjoint`) without stopping at the first violation; `prepare_call` fails with
+the first of them. `check_boundary(args, return_bits, guards)` adds the
+after-return checks: return validity; `NoCaptureViaReturn` (a returned pointer
+inside a borrowed range is `ReturnAliasesBorrow`); `SingleElement` and
+`WithinLength`, checked only when the caller supplies a `GuardObservation` of
+the bytes just past the borrow before and after the call
+(`GuardOverwritten`); and `NoRetention`, which is always `Unchecked`.
 
 `wire struct` fields are `u8/i8`, native `u16..i64` (natural alignment,
 little-endian on every accepted target), explicit `u16be/u32le/...` (byte
@@ -145,8 +177,9 @@ bits, slice nullability, integer element alignment, checked byte lengths,
 `isize::MAX` byte bounds, address-range overflow, and overlapping ranges when
 either slice is mutable. `RawArgument::Pointer { address }` is checked for
 null (allowed only for `Option[T]`), pointee alignment, range overflow, and
-overlap with every other slice or pointer range when either side is written. Empty slices permit a null address; nonnull addresses
-still satisfy element alignment. Shared overlaps and adjacent unique ranges
+overlap with every other slice or pointer range when either side is written.
+Only `Option` slices permit a null address, and only with length zero;
+non-null addresses of empty slices still satisfy element alignment. Shared overlaps and adjacent unique ranges
 are allowed. Preparation returns flattened typed carriers plus owner, or the
 complete original arguments and owner on any error. These are numerical checks;
 the unsafe embedding remains responsible for actual live allocations, their
@@ -168,7 +201,9 @@ whole enum. Descriptor clones preserve that sharing.
 with schema, library alias, complete explicit target/convention/pointer contract,
 link mode/name/artifact digest, optional header/pkg-config metadata, every enum
 and variant, ordered parameters including access/nocapture/element types, and
-return-validity contracts, single-pointer direction/nullability/pointee, and,
+return-validity contracts, single-pointer direction/nullability/pointee,
+slice nullability and wire-struct elements (as a separate `nocapture-slice/2`
+tag, so integer non-null slices keep their earlier bytes), and,
 only when present, a trailing `wire-structs` section with every field.
 Enum/function/wire-struct declarations and enum variants sort
 by name; parameter order remains significant. Descriptors that use no wire
@@ -189,6 +224,11 @@ or force finalization. MPK/PKU and POE isolation domains live in the separate
 The integration test compiles a tiny real C static library and a separate raw
 Rust C-ABI host using `cc`, `ar` and `rustc`. It executes scalar/signed returns,
 invalid bool/enum carriers, a pointer return, disjoint pointer+length byte
-copy, an `inout u32` single pointer and an `out` wire-struct pointer. Runtime evidence is specifically Linux x86_64 GNU System V. Other target
+copy, an `inout u32` single pointer and an `out` wire-struct pointer. Runtime evidence is specifically Linux x86_64 GNU System V.
+A second fixture (`tests/sys_vsys_rest_c.rs`) compiles a C library and a C
+host on any Linux/Darwin 64-bit host with `cc`: wire-struct `in`/`inout`
+slices, `Option` slices and pointers called with `NULL`, guard-detected
+single-element and slice-length overruns, a returned pointer into a borrowed
+slice, and layout probes of the same header. Other target
 descriptors have metadata validation tests; they are not platform execution
 evidence. Missing fixture toolchains/other hosts are explicitly reported.

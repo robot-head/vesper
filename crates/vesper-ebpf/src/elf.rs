@@ -681,7 +681,7 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
     }
     functions.sort_by_key(|(_, e)| *e);
     kfuncs.sort_by_key(|k| k.slot);
-    Ok(Program {
+    let mut prog = Program {
         name,
         prog_type,
         insns,
@@ -693,5 +693,9 @@ pub fn read_object(bytes: &[u8]) -> Result<Program, ElfError> {
         kfuncs,
         core_relos: ext.core_relos,
         lines: ext.lines,
-    })
+    };
+    // TYPE_ID_* immediates name types of the object's BTF; renumber them
+    // for the BTF this crate emits for the program
+    crate::btf_ext::assign_local_ids(&mut prog).map_err(|e| ElfError::Malformed(e.0))?;
+    Ok(prog)
 }

@@ -97,7 +97,8 @@ fn c_type_refusals() {
     // A single scalar out-pointer now lifts (see single_pointer_lifting).
     assert!(m.function("f3").is_some_and(|f| f.sys.is_ok()));
     assert_eq!(reason(&m, "fn f4"), RefusalReason::OpaquePointer);
-    assert_eq!(reason(&m, "fn f5"), RefusalReason::Aggregate);
+    // A slice of a struct with no wire layout (here: undefined).
+    assert_eq!(reason(&m, "fn f5"), RefusalReason::PointerParameter);
     assert_eq!(reason(&m, "fn f6"), RefusalReason::UnsupportedType);
     assert_eq!(reason(&m, "fn f8"), RefusalReason::InteriorMutability);
     assert!(m.function("f7").is_some());
@@ -134,7 +135,7 @@ fn reserved_parameter_names_are_renamed_safely() {
     let spec = synth::sys_spec(&m, &opts()).unwrap();
     assert!(
         spec.text
-            .contains("fn f(in_: u32, nocapture in fn_: CSlice[u8]) -> ForeignVal[u32];"),
+            .contains("fn f(in_: u32, nocapture in fn_: Option[CSlice[u8]]) -> ForeignVal[u32];"),
         "{}",
         spec.text
     );
@@ -487,7 +488,7 @@ fn c_single_pointers_lift_and_unsafe_shapes_stay_refused() {
     let m = header(
         "struct pair { uint32_t lo; uint32_t hi; };
          struct gap { uint8_t a; uint32_t b; };
-         int32_t out_scalar(uint32_t *out_crc, int32_t *out_count);
+         int32_t out_scalar(uint32_t *out_crc, int32_t *out_count) __attribute__((nonnull));
          int32_t in_scalar(const uint64_t *key);
          int32_t out_struct(const uint8_t *src, size_t len, struct pair *out);
          void swap(uint32_t *a, uint32_t *b);
@@ -500,7 +501,8 @@ fn c_single_pointers_lift_and_unsafe_shapes_stay_refused() {
          void opaque(void *ctx);
          void nested(uint32_t **out);
          void padded(struct gap *g);
-         void structs(struct pair *p, size_t n);",
+         void structs(struct pair *p, size_t n);
+         void gaps(const struct gap *g, size_t n);",
     );
     let sys = |name: &str| {
         let f = m
@@ -553,13 +555,30 @@ fn c_single_pointers_lift_and_unsafe_shapes_stay_refused() {
         ("fn opaque", RefusalReason::OpaquePointer),
         ("fn nested", RefusalReason::OpaquePointer),
         ("fn padded", RefusalReason::PointerParameter),
-        ("fn structs", RefusalReason::Aggregate),
+        ("fn gaps", RefusalReason::PointerParameter),
     ] {
         assert_eq!(reason(&m, item), why, "{item}");
         assert!(m.function(&item[3..]).is_none(), "{item} must not lift");
     }
+    // A struct pointer followed by a size_t is a slice of wire structs; not
+    // declared nonnull, so `Option`.
+    assert_eq!(
+        sys("structs").params,
+        vec![(
+            "p".to_string(),
+            SysParam::ElementSlice {
+                element: SysPointee::Struct("pair".into()),
+                access: vesper_migrate::Access::Inout,
+                nullable: true
+            }
+        )]
+    );
     let spec = synth::sys_spec(&m, &opts()).unwrap();
     assert!(spec.text.contains("wire struct pair { lo: u32, hi: u32 }"));
+    assert!(
+        spec.text
+            .contains("fn structs(nocapture inout p: Option[CSlice[pair]]) -> ForeignVal[Unit];")
+    );
     assert!(!spec.text.contains("wire struct gap"));
     assert!(spec.text.contains(
         "fn out_scalar(nocapture inout out_crc: u32, nocapture inout out_count: i32) -> ForeignVal[i32];"

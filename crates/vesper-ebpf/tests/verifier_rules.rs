@@ -61,6 +61,8 @@ fn every_rule_is_covered() {
         "prog.unsupported_type",
         "call.graph",
         "internal.no_successor",
+        // ends a widened exploration only; the exact one reports instead
+        "loop.widened_precise",
     ] {
         assert!(rules.remove(internal), "{internal} no longer exists");
     }
