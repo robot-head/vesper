@@ -452,6 +452,7 @@ fn define_instances_observed<M: Module>(
     mut instrument: Option<Instrument<'_>>,
 ) -> Result<String, String> {
     let mut clif = String::new();
+    let denorm = crate::capability_effects::const_denorm_spans(world);
     for (key, (name, generic_vars)) in instances {
         let f = concrete(world, name, generic_vars)?;
         let mut ctx = m.make_context();
@@ -525,6 +526,7 @@ fn define_instances_observed<M: Module>(
                     )
                 }),
                 session: None,
+                denorm: &denorm,
             };
             if fail_record.is_some() {
                 for (index, effect) in f.effects.instances.iter().enumerate() {
@@ -925,8 +927,29 @@ struct Codegen<'a, 'b, M: Module> {
     /// Present only while compiling a suspending session entry: external
     /// operations park instead of resolving to a lexical handler.
     session: Option<session::SessionCodegen>,
+    /// Spans of `eff [ConstDenorm]` code, whose float operations flush
+    /// subnormal operands and results to zero.
+    denorm: &'b [crate::ast::Span],
 }
 impl<M: Module> Codegen<'_, '_, M> {
+    /// Whether float operations at `span` run under `eff [ConstDenorm]`.
+    fn flushes(&self, span: &crate::ast::Span) -> bool {
+        crate::capability_effects::flushes_subnormals(self.denorm, span)
+    }
+    /// Software flush-to-zero of an `f64` value when `flush` holds: a
+    /// subnormal (magnitude below `f64::MIN_POSITIVE`) becomes a zero of the
+    /// same sign. Other values pass through.
+    fn flush(&mut self, flush: bool, v: ir::Value) -> ir::Value {
+        if !flush || self.b.func.dfg.value_type(v) != types::F64 {
+            return v;
+        }
+        let magnitude = self.b.ins().fabs(v);
+        let smallest = self.b.ins().f64const(f64::MIN_POSITIVE);
+        let tiny = self.b.ins().fcmp(FloatCC::LessThan, magnitude, smallest);
+        let zero = self.b.ins().f64const(0.0);
+        let signed_zero = self.b.ins().fcopysign(zero, v);
+        self.b.ins().select(tiny, signed_zero, v)
+    }
     fn info(&self, value: ir::Value) -> NativeInfo {
         self.infos
             .get(&value)
@@ -2452,6 +2475,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let kind = crate::numeric::IntegerKind::from_type(&self.ty(v));
                 let v = self.expr(v)?;
                 let float = self.b.func.dfg.value_type(v) == types::F64;
+                let flush = float && self.flushes(&e.span);
+                let v = self.flush(flush, v);
                 if op == "-"
                     && let Some(kind) = kind
                     && self
@@ -2469,7 +2494,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
                 match (op.as_str(), float) {
                     ("-", false) => self.b.ins().ineg(v),
-                    ("-", true) => self.b.ins().fneg(v),
+                    ("-", true) => {
+                        let r = self.b.ins().fneg(v);
+                        self.flush(flush, r)
+                    }
                     ("!", false) => {
                         let b = self.b.ins().icmp_imm(IntCC::Equal, v, 0);
                         self.b.ins().uextend(types::I64, b)
@@ -2534,7 +2562,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let v = self.bitwise(op, kind, av, bv)?;
                         Ok(self.coerce(v, Some(&ty)))
                     } else {
-                        self.binary(op, av, bv, unsigned)
+                        let flush = self.flushes(&e.span);
+                        let av = self.flush(flush, av);
+                        let bv = self.flush(flush, bv);
+                        let r = self.binary(op, av, bv, unsigned)?;
+                        Ok(self.flush(flush, r))
                     }?
                 }
             }
@@ -2564,7 +2596,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let v = if let Some(kind) = checked {
                             self.checked_arithmetic(&op[..1], kind, old, value)?
                         } else {
-                            self.binary(&op[..1], old, value, unsigned)?
+                            let flush = self.flushes(&e.span);
+                            let old = self.flush(flush, old);
+                            let value = self.flush(flush, value);
+                            let r = self.binary(&op[..1], old, value, unsigned)?;
+                            self.flush(flush, r)
                         };
                         self.coerce(v, Some(&ty))
                     };
@@ -2588,7 +2624,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         if let Some(kind) = checked {
                             self.checked_arithmetic(&op[..1], kind, old, value)?
                         } else {
-                            self.binary(&op[..1], old, value, unsigned)?
+                            let flush = self.flushes(&e.span);
+                            let old = self.flush(flush, old);
+                            let value = self.flush(flush, value);
+                            let r = self.binary(&op[..1], old, value, unsigned)?;
+                            self.flush(flush, r)
                         }
                     };
                     self.store(ptr, value, &ty)?;

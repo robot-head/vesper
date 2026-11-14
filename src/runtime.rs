@@ -199,20 +199,25 @@ enum Frame {
         site: Span,
     },
     Coerce(Type, Env),
-    Unary(String, Env),
+    /// The operator, whether it flushes subnormals (ConstDenorm code), and
+    /// the evidence environment.
+    Unary(String, bool, Env),
     BinaryLeft {
         op: String,
+        flush: bool,
         right: Expr,
         env: Env,
     },
     BinaryRight {
         op: String,
+        flush: bool,
         left: Value,
         evidence: Env,
     },
     Assign {
         slot: Slot,
         op: String,
+        flush: bool,
         evidence: Env,
     },
     Field(String),
@@ -343,6 +348,9 @@ pub struct Runtime<'a> {
     call_site: Option<(usize, usize)>,
     resource_trace: Option<Box<ResourceTraceEngine>>,
     resource_fuel_exhausted: bool,
+    /// Spans of `eff [ConstDenorm]` code, whose float operations flush
+    /// subnormal operands and results to zero.
+    denorm: Vec<Span>,
 }
 impl<'a> Runtime<'a> {
     pub fn new(world: &'a World) -> Self {
@@ -358,6 +366,7 @@ impl<'a> Runtime<'a> {
             call_site: None,
             resource_trace: None,
             resource_fuel_exhausted: false,
+            denorm: crate::capability_effects::const_denorm_spans(world),
         }
     }
     /// Observe selected empty linear data carriers without changing evaluation
@@ -959,6 +968,7 @@ impl<'a> Runtime<'a> {
         } else {
             None
         };
+        let flush = crate::capability_effects::flushes_subnormals(&self.denorm, &instruction.span);
         let result = match instruction.op {
             Op::Constant(l) => match l {
                 Literal::Int(n) => {
@@ -1010,7 +1020,7 @@ impl<'a> Runtime<'a> {
                 let value = if op == "=" {
                     value
                 } else {
-                    match binary(&op[..1], slot.get()?, value) {
+                    match binary_at(flush, &op[..1], slot.get()?, value) {
                         Err(Fault::Raise(failure)) => {
                             return self.primitive_failure(
                                 state,
@@ -1025,7 +1035,7 @@ impl<'a> Runtime<'a> {
                 slot.set(value)?;
                 Value::Tuple(vec![])
             }
-            Op::Unary(op, v) => match unary(&op, get(v)?) {
+            Op::Unary(op, v) => match unary_at(flush, &op, get(v)?) {
                 Err(Fault::Raise(failure)) => {
                     return self.primitive_failure(
                         state,
@@ -1036,7 +1046,7 @@ impl<'a> Runtime<'a> {
                 }
                 result => result?,
             },
-            Op::Binary(op, a, b) => match binary(&op, get(a)?, get(b)?) {
+            Op::Binary(op, a, b) => match binary_at(flush, &op, get(a)?, get(b)?) {
                 Err(Fault::Raise(failure)) => {
                     return self.primitive_failure(
                         state,
@@ -1303,13 +1313,21 @@ impl<'a> Runtime<'a> {
                             self.block(statements, tail, env)?
                         }
                         ExprKind::Unary(op, v) => {
+                            let flush = crate::capability_effects::flushes_subnormals(
+                                &self.denorm,
+                                &operation_site,
+                            );
                             self.stack
-                                .push(Frame::Unary(op, evidence_environment(&env)));
+                                .push(Frame::Unary(op, flush, evidence_environment(&env)));
                             Control::Eval(*v, env)
                         }
                         ExprKind::Binary(op, left, right) => {
                             self.stack.push(Frame::BinaryLeft {
                                 op,
+                                flush: crate::capability_effects::flushes_subnormals(
+                                    &self.denorm,
+                                    &operation_site,
+                                ),
                                 right: *right,
                                 env: env.clone(),
                             });
@@ -1320,6 +1338,10 @@ impl<'a> Runtime<'a> {
                             self.stack.push(Frame::Assign {
                                 slot,
                                 op,
+                                flush: crate::capability_effects::flushes_subnormals(
+                                    &self.denorm,
+                                    &operation_site,
+                                ),
                                 evidence: evidence_environment(&env),
                             });
                             Control::Eval(*right, env)
@@ -1571,13 +1593,18 @@ impl<'a> Runtime<'a> {
                             self.qualify_value(value, &ty, &env, false),
                             &ty,
                         )),
-                        Frame::Unary(op, evidence) => match unary(&op, value) {
+                        Frame::Unary(op, flush, evidence) => match unary_at(flush, &op, value) {
                             Err(Fault::Raise(failure)) => {
                                 self.raise_primitive(&evidence, failure)?
                             }
                             result => Control::Return(result?),
                         },
-                        Frame::BinaryLeft { op, right, env } => {
+                        Frame::BinaryLeft {
+                            op,
+                            flush,
+                            right,
+                            env,
+                        } => {
                             if (op == "&&" && matches!(value, Value::Bool(false)))
                                 || (op == "||" && matches!(value, Value::Bool(true)))
                             {
@@ -1585,24 +1612,34 @@ impl<'a> Runtime<'a> {
                             } else {
                                 self.stack.push(Frame::BinaryRight {
                                     op,
+                                    flush,
                                     left: value,
                                     evidence: evidence_environment(&env),
                                 });
                                 Control::Eval(right, env)
                             }
                         }
-                        Frame::BinaryRight { op, left, evidence } => match binary(&op, left, value)
-                        {
+                        Frame::BinaryRight {
+                            op,
+                            flush,
+                            left,
+                            evidence,
+                        } => match binary_at(flush, &op, left, value) {
                             Err(Fault::Raise(failure)) => {
                                 self.raise_primitive(&evidence, failure)?
                             }
                             result => Control::Return(result?),
                         },
-                        Frame::Assign { slot, op, evidence } => {
+                        Frame::Assign {
+                            slot,
+                            op,
+                            flush,
+                            evidence,
+                        } => {
                             let value = if op == "=" {
                                 Ok(value)
                             } else {
-                                binary(&op[..1], slot.get()?, value)
+                                binary_at(flush, &op[..1], slot.get()?, value)
                             };
                             match value {
                                 Err(Fault::Raise(failure)) => {
@@ -2421,6 +2458,22 @@ fn integer_value(kind: crate::numeric::IntegerKind, n: i128) -> Value {
     } else {
         Value::Int(n as i64)
     }
+}
+/// Software flush-to-zero for `eff [ConstDenorm]` code: a subnormal float
+/// becomes a zero of the same sign.
+fn flush_value(flush: bool, v: Value) -> Value {
+    match v {
+        Value::Float(x) if flush => Value::Float(crate::capability_effects::flush_subnormal(x)),
+        v => v,
+    }
+}
+/// [`unary`], flushing subnormal operands and results when `flush` holds.
+fn unary_at(flush: bool, op: &str, v: Value) -> Result<Value, Fault> {
+    unary(op, flush_value(flush, v)).map(|v| flush_value(flush, v))
+}
+/// [`binary`], flushing subnormal operands and results when `flush` holds.
+fn binary_at(flush: bool, op: &str, a: Value, b: Value) -> Result<Value, Fault> {
+    binary(op, flush_value(flush, a), flush_value(flush, b)).map(|v| flush_value(flush, v))
 }
 fn unary(op: &str, v: Value) -> Result<Value, Fault> {
     Ok(match (op, v) {
