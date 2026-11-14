@@ -7,7 +7,17 @@ use vesper_aether::devices::block::*;
 use vesper_aether::devices::mmio::*;
 use vesper_aether::devices::net::*;
 use vesper_aether::devices::vsock::*;
+use vesper_aether::devices::queue::{
+    RingFormat, VIRTIO_F_EVENT_IDX, VIRTIO_F_IN_ORDER, VIRTIO_F_INDIRECT_DESC,
+    VIRTIO_F_NOTIFICATION_DATA,
+};
 use vesper_aether::virtio::QueueError;
+
+/// The block features a writable disk offers.
+const BLOCK_FEATURES: u64 = VIRTIO_BLK_F_BLK_SIZE
+    | VIRTIO_BLK_F_FLUSH
+    | VIRTIO_BLK_F_DISCARD
+    | VIRTIO_BLK_F_WRITE_ZEROES;
 
 const BASE: u64 = VIRTIO_F_VERSION_1 | VIRTIO_F_RING_PACKED;
 
@@ -51,13 +61,16 @@ fn register_file_identifies_a_version_2_device() {
     w32(&mut t, &mut m, reg::DEVICE_FEATURES_SEL, 1);
     let hi = r32(&mut t, reg::DEVICE_FEATURES);
     assert_eq!(
-        hi & 0b101,
-        0b101,
-        "VERSION_1 (32) and RING_PACKED (34) offered"
+        u64::from(hi) << 32,
+        VIRTIO_F_VERSION_1 | VIRTIO_F_RING_PACKED | VIRTIO_F_IN_ORDER | VIRTIO_F_NOTIFICATION_DATA,
+        "VERSION_1 (32), RING_PACKED (34), IN_ORDER (35), NOTIFICATION_DATA (38) offered"
     );
     w32(&mut t, &mut m, reg::DEVICE_FEATURES_SEL, 0);
     let lo = r32(&mut t, reg::DEVICE_FEATURES);
-    assert_eq!(u64::from(lo), VIRTIO_BLK_F_BLK_SIZE | VIRTIO_BLK_F_FLUSH);
+    assert_eq!(
+        u64::from(lo),
+        BLOCK_FEATURES | VIRTIO_F_INDIRECT_DESC | VIRTIO_F_EVENT_IDX
+    );
     w32(&mut t, &mut m, reg::DEVICE_FEATURES_SEL, 2);
     assert_eq!(r32(&mut t, reg::DEVICE_FEATURES), 0);
     // Queue 0 exists; queue 1 reports QueueNumMax 0.
@@ -117,7 +130,7 @@ fn register_access_rules_are_typed_errors() {
     ));
     let mut b8 = [0u8; 8];
     assert!(matches!(
-        t.read(reg::CONFIG + 32, &mut b8),
+        t.read(reg::CONFIG + 56, &mut b8),
         Err(MmioError::ConfigOutOfRange { .. })
     ));
     assert_eq!(
@@ -135,9 +148,14 @@ fn register_access_rules_are_typed_errors() {
 fn feature_negotiation_follows_section_3_1() {
     let mut m = ram();
     let q = DriverQueue::new(0, 0x1000, 8);
-    // A driver that does not accept RING_PACKED sees FEATURES_OK cleared.
+    // A driver that does not accept RING_PACKED gets split rings.
     let mut t = MmioTransport::new(BlockDevice::new(disk(8), false, "d").unwrap(), 1);
-    let st = init(&mut t, &mut m, VIRTIO_F_VERSION_1, &[&q]);
+    let split = DriverQueue::split(0, 0x1000, 8);
+    let st = init(&mut t, &mut m, VIRTIO_F_VERSION_1, &[&split]);
+    assert_eq!(st & status::DRIVER_OK, status::DRIVER_OK);
+    assert_eq!(t.ring_format(), RingFormat::Split);
+    // Accepting a feature the device did not offer sees FEATURES_OK cleared.
+    let st = init(&mut t, &mut m, VIRTIO_F_VERSION_1 | (1 << 40), &[&q]);
     assert_eq!(st & status::FEATURES_OK, 0);
     assert_eq!(t.stats().rejected_feature_sets, 1);
     assert_eq!(
@@ -148,7 +166,7 @@ fn feature_negotiation_follows_section_3_1() {
         ),
         Err(MmioError::DriverOkWithoutFeaturesOk)
     );
-    // Accepting a feature the device did not offer is refused too.
+    // So is a device feature it did not offer (RO on a writable disk).
     let st = init(&mut t, &mut m, BASE | VIRTIO_BLK_F_RO, &[&q]);
     assert_eq!(st & status::FEATURES_OK, 0);
     // Legacy-only (no VERSION_1) is refused.
@@ -181,6 +199,14 @@ fn feature_negotiation_follows_section_3_1() {
 fn queue_registers_are_validated() {
     let mut m = ram();
     let mut t = MmioTransport::new(BlockDevice::new(disk(8), false, "d").unwrap(), 1);
+    w32(&mut t, &mut m, reg::QUEUE_SEL, 0);
+    w32(&mut t, &mut m, reg::QUEUE_NUM, 8);
+    // The ring format is only known after FEATURES_OK.
+    assert_eq!(
+        t.write(&mut m, reg::QUEUE_READY, &1u32.to_le_bytes()),
+        Err(MmioError::QueueReadyBeforeFeaturesOk)
+    );
+    assert_eq!(init(&mut t, &mut m, BASE, &[]) & status::DRIVER_OK, status::DRIVER_OK);
     w32(&mut t, &mut m, reg::QUEUE_SEL, 0);
     assert!(matches!(
         t.write(&mut m, reg::QUEUE_NUM, &257u32.to_le_bytes()),
