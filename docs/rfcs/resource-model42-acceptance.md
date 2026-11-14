@@ -76,3 +76,18 @@ Three additional fixed assertions are now authored for actual move identity, lat
 The writer subsequently added the fourth generated privacy control, `TypeInfo.mk`, in owned `f879cc2`. An explicitly granted focused `cargo clippy -p vesper --locked --test resource_model42 -- -D warnings` passed in 36.95s at that source; log `/tmp/resource-model42-acceptance-clippy.log`. `cargo fmt --all -- --check` also passed with empty `/tmp/resource-model42-acceptance-fmt.log`. Neither command executed the kernel target or started Lean. That Cargo lease was released promptly.
 
 The final harness now additionally requires actual compiled checker-soundness, step/prefix/safety, conditional copy-exhaustion and metric-completeness roots, plus the separate `step_refusal_witness`/`runMachine_refusal_witness` and event-site roots from `ede8c75`. It does not mistake `Full_progress` for a measured-refusal proof. Every fixed source module must be transitively imported by the acceptance artifact, preventing orphan definitions from escaping replay. Public theorem inventory respects real namespaces and fails closed on unsupported declaration layouts. These final gate/read-bound changes are awaiting the full target compile/run and final lint refresh; they are not covered by the earlier lint timing.
+
+## First complete target: genuine policy rejection
+
+Before the first complete run, the writer compared all 12 fixed Lean source files byte for byte with coordinator integration `211628ae57126e86c54d32a07400f08481ebaf4e`: unchanged Full, production aggregate, and all ten folder modules including acceptance. They matched. The actual run used owned/source head `49f7cc619cb8280ec6d2218b44dc10f72f014fbc`, the same one-job/debug-zero/incremental-off shared Cargo environment, real pinned Lean, and `cargo test -p vesper --locked --test resource_model42 -- --nocapture` under an exclusive Cargo plus one-Lean lease.
+
+Rust compilation passed in 1.31s. Fresh isolated compilation passed for all 12 modules, including **all 78** named acceptance assertions (6.00s for the acceptance module). The first real audit partition then failed with actual structured `audit_failed` JSON:
+
+```text
+unsupported unsafe or partial artifact declaration:
+Vesper.ResourceModel42.instReprRuntimeContext.repr._unsafe_rec
+```
+
+This is a genuine model artifact-policy failure from recursive derived `Repr`, not a fixture expectation error, forbidden-axiom false positive, or reason to weaken the auditor. The actual run exited 101; zero target tests passed, one failed, none ignored. Target time was 49.92s and the independent outer wrapper measured 51.294s. Logs: `/tmp/resource-model42-acceptance-full.log` and `/tmp/resource-model42-acceptance-full-timing.json`.
+
+No positive audit partition or later privacy/policy/missing/corrupt control completed in that run. The lease was released immediately and the coordinator assigned removal/replacement of unsafe derived debug helpers to the actual source owners. Successful compilation is recorded separately from the failed artifact audit. A fresh complete run after that source correction, plus final focused lint, remains pending.
