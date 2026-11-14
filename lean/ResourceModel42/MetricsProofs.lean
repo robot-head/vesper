@@ -423,4 +423,145 @@ theorem measureExpr_error {l e reason} (h : RuntimeExpr.measure l e = .error rea
   rw [h] at spec
   exact spec
 
+/-- A substitution can refuse its actual incoming value before inspecting the
+body, including when that value will be unused. -/
+theorem preflightSubst_ok {l k v e result}
+    (h : RuntimeExpr.preflightSubst l k v e = .ok result) :
+    result = exprMetrics (e.subst k v) ∧ Within l result := by
+  unfold RuntimeExpr.preflightSubst at h
+  cases hv : RuntimeValue.measure l v with
+  | error reason => simp [hv,bind,Except.bind] at h
+  | ok stats =>
+    obtain ⟨rfl,_⟩ := measureValue_ok hv
+    have spec := measureExpr_spec l l.runtimeDepth [(k,v)] e
+    simp only [metricsPlan,List.map_cons,List.map_nil] at spec
+    simp only [hv,bind,Except.bind] at h
+    rw [h] at spec
+    exact spec
+
+theorem preflightSubst_error {l k v e reason}
+    (h : RuntimeExpr.preflightSubst l k v e = .error reason) :
+    ValueExceeds l v reason ∨ ExprExceeds l (e.subst k v) reason := by
+  unfold RuntimeExpr.preflightSubst at h
+  cases hv : RuntimeValue.measure l v with
+  | error r =>
+    simp only [hv,bind,Except.bind,Except.error.injEq] at h
+    subst reason
+    exact .inl (measureValue_error hv)
+  | ok stats =>
+    obtain ⟨rfl,_⟩ := measureValue_ok hv
+    have spec := measureExpr_spec l l.runtimeDepth [(k,v)] e
+    simp only [metricsPlan,List.map_cons,List.map_nil] at spec
+    simp only [hv,bind,Except.bind] at h
+    rw [h] at spec
+    exact .inr spec
+
+theorem preflightUnpack_ok {l left right body intermediate result}
+    (h : RuntimeExpr.preflightUnpack l left right body = .ok (intermediate,result)) :
+    intermediate = exprMetrics (body.subst 0 right) ∧ Within l intermediate ∧
+    result = exprMetrics ((body.subst 0 right).subst 0 left) ∧ Within l result := by
+  unfold RuntimeExpr.preflightUnpack at h
+  cases hr : RuntimeValue.measure l right with
+  | error reason => simp [hr,bind,Except.bind] at h
+  | ok sr =>
+    obtain ⟨rfl,_⟩ := measureValue_ok hr
+    cases hl : RuntimeValue.measure l left with
+    | error reason => simp [hr,hl,bind,Except.bind] at h
+    | ok sl =>
+      obtain ⟨rfl,_⟩ := measureValue_ok hl
+      have mid := measureExpr_spec l l.runtimeDepth [(0,right)] body
+      have final := measureExpr_spec l l.runtimeDepth [(0,right),(0,left)] body
+      simp only [metricsPlan,List.map_cons,List.map_nil] at mid final
+      cases hm : measureExpr l l.runtimeDepth [(0,valueMetrics right)] body with
+      | error reason => simp [hr,hl,hm,bind,Except.bind] at h
+      | ok sm =>
+        rw [hm] at mid
+        cases hf : measureExpr l l.runtimeDepth [(0,valueMetrics right),(0,valueMetrics left)] body with
+        | error reason => simp [hr,hl,hm,hf,bind,Except.bind] at h
+        | ok sf =>
+          rw [hf] at final
+          simp [hr,hl,hm,hf,bind,Except.bind,pure,Except.pure] at h
+          obtain ⟨rfl,rfl⟩ := h
+          exact ⟨mid.1,mid.2,final.1,final.2⟩
+
+theorem preflightUnpack_error {l left right body reason}
+    (h : RuntimeExpr.preflightUnpack l left right body = .error reason) :
+    ValueExceeds l right reason ∨ ValueExceeds l left reason ∨
+    ExprExceeds l (body.subst 0 right) reason ∨
+    ExprExceeds l ((body.subst 0 right).subst 0 left) reason := by
+  unfold RuntimeExpr.preflightUnpack at h
+  cases hr : RuntimeValue.measure l right with
+  | error r =>
+    simp only [hr,bind,Except.bind,Except.error.injEq] at h
+    subst reason
+    exact .inl (measureValue_error hr)
+  | ok sr =>
+    obtain ⟨rfl,_⟩ := measureValue_ok hr
+    cases hl : RuntimeValue.measure l left with
+    | error r =>
+      simp only [hr,hl,bind,Except.bind,Except.error.injEq] at h
+      subst reason
+      exact .inr (.inl (measureValue_error hl))
+    | ok sl =>
+      obtain ⟨rfl,_⟩ := measureValue_ok hl
+      have mid := measureExpr_spec l l.runtimeDepth [(0,right)] body
+      have final := measureExpr_spec l l.runtimeDepth [(0,right),(0,left)] body
+      simp only [metricsPlan,List.map_cons,List.map_nil] at mid final
+      cases hm : measureExpr l l.runtimeDepth [(0,valueMetrics right)] body with
+      | error r =>
+        rw [hm] at mid
+        simp only [hr,hl,hm,bind,Except.bind,Except.error.injEq] at h
+        subst reason
+        exact .inr (.inr (.inl mid))
+      | ok sm =>
+        cases hf : measureExpr l l.runtimeDepth [(0,valueMetrics right),(0,valueMetrics left)] body with
+        | error r =>
+          rw [hf] at final
+          simp only [hr,hl,hm,hf,bind,Except.bind,Except.error.injEq] at h
+          subst reason
+          exact .inr (.inr (.inr final))
+        | ok sf => simp [hr,hl,hm,hf,bind,Except.bind,pure,Except.pure] at h
+
+theorem configured_over_at {l e reason} (h : ExprExceeds l e reason) (fuel : Nat) :
+    ExprOverAt l fuel (exprMetrics e) reason := by
+  cases reason <;> simp_all [ExprExceeds,ExprOverAt] <;> omega
+
+theorem measureExpr_at (l : Limits) (e : RuntimeExpr) (fuel : Nat) :
+    StatsResult l fuel (exprMetrics e) (RuntimeExpr.measure l e) := by
+  cases hm : RuntimeExpr.measure l e with
+  | error reason => exact configured_over_at (measureExpr_error hm) fuel
+  | ok result => exact measureExpr_ok hm
+
+theorem measurePlug_spec (l : Limits) (fuel : Nat) (context : RuntimeContext) (hole : RuntimeExpr) :
+    StatsResult l fuel (exprMetrics (context.plug hole))
+      (measurePlug l fuel context (exprMetrics hole)) := by
+  induction fuel generalizing context with
+  | zero =>
+    change min 0 l.runtimeDepth < (exprMetrics (context.plug hole)).depth
+    simpa using expr_depth_positive (context.plug hole)
+  | succ fuel ih =>
+    cases context with
+    | hole => exact checkStats_spec l (fuel+1) _
+    | letC inner body =>
+      simp only [measurePlug,RuntimeContext.plug,exprMetrics]
+      apply stats_bind (ih inner) (fun _ h => binary_left_over h)
+      apply stats_bind (measureExpr_at l body fuel) (fun _ h => binary_right_over h)
+      exact checkStats_spec l (fuel+1) _
+
+theorem preflightPlug_ok {l context hole result}
+    (h : RuntimeContext.preflightPlug l context (exprMetrics hole) = .ok result) :
+    result = exprMetrics (context.plug hole) ∧ Within l result := by
+  have spec := measurePlug_spec l l.runtimeDepth context hole
+  rw [RuntimeContext.preflightPlug] at h
+  rw [h] at spec
+  exact spec
+
+theorem preflightPlug_error {l context hole reason}
+    (h : RuntimeContext.preflightPlug l context (exprMetrics hole) = .error reason) :
+    ExprExceeds l (context.plug hole) reason := by
+  have spec := measurePlug_spec l l.runtimeDepth context hole
+  rw [RuntimeContext.preflightPlug] at h
+  rw [h] at spec
+  exact spec
+
 end Vesper.ResourceModel42.MetricsProofs
