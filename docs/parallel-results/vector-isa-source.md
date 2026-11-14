@@ -135,7 +135,20 @@ the 128-bit path.
 
 ## Checks
 
-Recorded at the PR head; see "Checks run" below.
+- `cargo test --locked --test vector --test vector_kernel`: 18 passed (x86_64
+  host with AVX2 and AVX-512, so all three profiles ran their vector branch;
+  128/256/512-bit differential tests take 6, 9 and 13 s in a debug build).
+- `cargo +1.100.0 clippy --locked -p vesper -p vesper-syntax --all-targets -- -D warnings`: clean.
+- `cargo fmt --all -- --check`: clean; `vesper fmt` canonicalized the fixture.
+- Existing objects unchanged: `vesper emit --emit object` and `--emit clif`
+  for all 8 `examples/*.ves` on `x86_64-unknown-linux-gnu` and
+  `aarch64-unknown-linux-gnu` are byte-identical between `main` (`283c811`)
+  and this branch (32 of 32 artifacts). `programs_without_vectors_emit_no_vector_code`
+  also checks that their IR and CLIF contain no vector operation or type.
+- The full `cargo test --workspace --locked` run did not finish locally (the
+  session's disk allowance ran out while linking test binaries); the four
+  required CI jobs run the whole workspace, and the macOS job runs the
+  differential tests natively on AArch64.
 
 ## Decisions
 
