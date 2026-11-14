@@ -681,15 +681,16 @@ fn missing_declaration_is_caught_by_synchronization_validation() {
         eprintln!("skipped: synchronization validation not loaded");
         return;
     }
-    // The dispatch writes `out` but its pass does not declare it, so the
-    // planner (correctly, for the declared graph) emits no barrier after the
-    // fill. The validation layer must report the hazard: this proves the
-    // layer is active, so the clean runs above are meaningful.
+    // The dispatch writes `out` right after the fill, but its pass does not
+    // declare the buffer, so the planner (correctly, for the declared graph)
+    // emits no barrier between them: a write-after-write in one command
+    // buffer. The validation layer must report it, which proves the layer is
+    // active, so the clean runs above are meaningful.
+    const STORE: &str = "@group(0) @binding(0) var<storage, read_write> d: array<u32>;\n\
+        @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n\
+        d[id.x] = id.x;\n}";
     let mut g = RenderGraph::new();
     let direct = g.add_queue(QueueKind::Direct);
-    let color = g
-        .add_texture(TextureDesc::simple("color", Layout::Undefined))
-        .unwrap();
     let out = g
         .add_buffer(BufferDesc {
             name: "out".into(),
@@ -704,54 +705,27 @@ fn missing_declaration_is_caught_by_synchronization_validation() {
             Sync::COPY,
         ))
         .unwrap();
-    let draw = g
-        .add_pass(PassDesc::new("draw", direct).texture(
-            color,
-            SubresourceRange::ALL,
-            Access::RENDER_TARGET,
-            Sync::RENDER_TARGET,
-            Layout::RenderTarget,
-        ))
-        .unwrap();
-    let sample = g
-        .add_pass(PassDesc::new("invert", direct).texture(
-            color,
-            SubresourceRange::ALL,
-            Access::SHADER_RESOURCE,
-            Sync::COMPUTE_SHADING,
-            Layout::ShaderResource,
-        ))
-        .unwrap();
+    let write = g.add_pass(PassDesc::new("undeclared", direct)).unwrap();
     let rt = runtime(&device, &[QueueKind::Direct]);
-    let p = pipelines(&device);
+    let cs = compile_wgsl(STORE, Stage::Compute, "main").unwrap();
     let mut r = FrameResources::new();
-    r.bind_texture(
-        color,
-        device.create_texture(TextureInfo::new(W, H)).unwrap(),
-    )
-    .unwrap();
     r.bind_buffer(out, device.create_buffer(BYTES).unwrap())
         .unwrap();
-    let triangle = r.add_pipeline(p.triangle).unwrap();
-    let invert = r.add_pipeline(p.invert).unwrap();
+    let store = r
+        .add_pipeline(
+            device
+                .create_compute_pipeline(&cs, &[BindingKind::StorageBuffer])
+                .unwrap(),
+        )
+        .unwrap();
     r.set_pass(fill, PassWork::FillBuffer { dst: out, value: 7 })
         .unwrap();
     r.set_pass(
-        draw,
-        PassWork::Draw {
-            pipeline: triangle,
-            target: color,
-            clear: Some(CLEAR),
-            vertices: 3,
-        },
-    )
-    .unwrap();
-    r.set_pass(
-        sample,
+        write,
         PassWork::Dispatch {
-            pipeline: invert,
-            bindings: vec![Bind::SampledTexture(color), Bind::StorageBuffer(out)],
-            groups: [W / 8, H / 8, 1],
+            pipeline: store,
+            bindings: vec![Bind::StorageBuffer(out)],
+            groups: [(W * H) / 64, 1, 1],
         },
     )
     .unwrap();

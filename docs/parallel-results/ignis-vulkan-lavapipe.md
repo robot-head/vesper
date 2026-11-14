@@ -109,11 +109,16 @@ that the validation layer reported no error.
 - `subresource_barriers_are_accepted_by_validation`: a 2-mip texture with
   per-mip barriers (mip 0 render target → shader resource, mip 1 copy dest →
   shader resource); tracked layouts and compute output checked.
-- `missing_declaration_is_caught_by_synchronization_validation`: a dispatch
-  writes a buffer its pass does not declare; the layer must report a
-  `SYNC-HAZARD` error. This shows the layer is active, so the clean runs mean
-  something. (It also shows the backend trusts the graph's declarations for
-  buffers: it cannot see which bytes a shader touches.)
+- `missing_declaration_is_caught_by_synchronization_validation`: a fill and
+  then a dispatch that writes the same buffer, with the dispatch's pass not
+  declaring it, so no barrier separates the two writes in one command buffer;
+  the layer must report a hazard error. This shows the layer is active, so the
+  clean runs mean something. (It also shows the backend trusts the graph's
+  declarations for buffers: it cannot see which bytes a shader touches.) An
+  earlier version put a layout-changing image barrier (widened to
+  `ALL_COMMANDS`) between the writes; validation layers 1.3.275 flagged that
+  case but 1.4.341 on ubuntu-latest did not, so the test now has no barrier at
+  all between the writes.
 - `lost_device_is_a_typed_error_and_pending_owners_stay_held`: after
   `Device::inject_device_lost`, polls report `DeviceLost`, object creation fails
   with `DeviceLost`, and shutdown is `Incomplete` with the frame pending.
@@ -139,7 +144,10 @@ unavailable.
 
 ## Checks run (cloud host, Ubuntu 24.04)
 
-Device: `llvmpipe (LLVM 20.1.2, 256 bits)`, driver `Mesa 25.2.8-0ubuntu0.24.04.4`,
+CI (`ubuntu-latest`, now Ubuntu 26.04): Mesa 26.0.8 lavapipe, device API
+1.4.335, `vulkan-validationlayers 1.4.341.0-1`.
+
+Local device: `llvmpipe (LLVM 20.1.2, 256 bits)`, driver `Mesa 25.2.8-0ubuntu0.24.04.4`,
 device API 1.4.318, conformance 1.3.1.1; `vulkan-validationlayers 1.3.275.0-1`.
 
 ```sh
