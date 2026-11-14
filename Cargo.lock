@@ -4636,6 +4636,7 @@ dependencies = [
  "egglog",
  "getrandom 0.4.3",
  "libc",
+ "object 0.37.3",
  "petgraph",
  "salsa",
  "serde",
