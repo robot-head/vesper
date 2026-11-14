@@ -1,7 +1,7 @@
 //! Fixed-capacity connection table over AoSoA tiles.
 
 use crate::cid::{CID_WORDS, ConnectionId, MAX_CID_LEN};
-use crate::error::{ConfigError, InsertError, LookupError, SetError, StaleHandle};
+use crate::error::{ConfigError, InsertError, LookupError, RekeyError, SetError, StaleHandle};
 use crate::index::CidIndex;
 use crate::simd::{IsaPath, Kernels, LANES};
 use crate::tile::{ColdTile, HotTile, KeyTile, TILE_BYTES};
@@ -447,6 +447,46 @@ impl<S: BuildHasher> ConnTable<S> {
             .map_err(|pn| SetError::PacketNumberRange { pn })?;
         self.write_state(t, l, state);
         Ok(())
+    }
+
+    /// Replaces a connection's local CID, keeping its slot, handle and
+    /// state; returns the old CID. A QUIC endpoint uses this when the peer
+    /// retires the connection ID the slot is keyed by (RFC 9000 §5.1.2):
+    /// the retired ID stops routing and a live one takes its place. Never
+    /// allocates. Rekeying to the current CID is a no-op.
+    pub fn rekey(
+        &mut self,
+        h: SlotHandle,
+        new_cid: &ConnectionId,
+    ) -> Result<ConnectionId, RekeyError> {
+        let (t, l) = self.check(h).map_err(|_| RekeyError::Stale)?;
+        if new_cid.len() != usize::from(self.cid_len) {
+            return Err(RekeyError::CidLength {
+                expected: self.cid_len,
+                got: new_cid.len(),
+            });
+        }
+        let old = self.local_cid_at(t, l);
+        if old == *new_cid {
+            return Ok(old);
+        }
+        let key = new_cid.words();
+        let new_hash = self.index.hash(new_cid.as_bytes());
+        if self
+            .index
+            .find(new_hash, |s| self.lane_matches(s, &key))
+            .is_some()
+        {
+            return Err(RekeyError::DuplicateCid);
+        }
+        let old_hash = self.index.hash(old.as_bytes());
+        let removed = self.index.remove(old_hash, h.index);
+        debug_assert!(removed, "index out of sync with tiles");
+        for (w, &word) in key.iter().enumerate() {
+            self.keys[t].cid_words[w][l] = word;
+        }
+        self.index.insert(new_hash, h.index);
+        Ok(old)
     }
 
     /// Removes a connection; its handle and all copies become stale.

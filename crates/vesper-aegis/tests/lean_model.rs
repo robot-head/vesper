@@ -1,4 +1,5 @@
-//! Lean model checks for `lean/AegisToctou.lean`.
+//! Lean model checks for `lean/AegisToctou.lean` and
+//! `lean/AegisCollateral.lean`.
 //!
 //! The static audit always runs. With `VESPER_LEAN` set (as in CI), the
 //! model is compiled (which kernel-checks every proof and prints the axiom
@@ -166,5 +167,111 @@ fn lean_model_matches_rust_policy() {
         }
     }
     assert_eq!(audited, AUDITED_THEOREMS);
+    assert!(!stdout.contains("sorryAx"));
+}
+
+// ------------------------------------------- lean/AegisCollateral.lean --
+
+const COLLATERAL_MODEL_ID: &str = "vesper.aegis.tcb-evaluation-model/1";
+const COLLATERAL_AUDITED_THEOREMS: usize = 12;
+
+fn collateral_file() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lean/AegisCollateral.lean")
+}
+
+#[test]
+fn collateral_model_source_audit() {
+    let source = std::fs::read_to_string(collateral_file()).expect("read model");
+    assert!(source.contains(&format!(
+        "def modelId : String := \"{COLLATERAL_MODEL_ID}\""
+    )));
+    assert_eq!(
+        source.matches("\n#print axioms ").count(),
+        COLLATERAL_AUDITED_THEOREMS
+    );
+    for theorem in [
+        "theorem converge_monotone",
+        "theorem find_monotone",
+        "theorem evaluate_monotone",
+        "theorem evaluate_revoked_qe",
+        "theorem evaluate_revoked_module",
+        "theorem evaluate_module_first",
+        "theorem evaluate_platform_before_qe",
+        "theorem rollback_rejected",
+    ] {
+        assert!(source.contains(theorem), "missing {theorem}");
+    }
+    let code = strip_lean_comments(&source);
+    for forbidden in [
+        "sorry",
+        "admit",
+        "native_decide",
+        "axiom ",
+        "partial ",
+        "unsafe ",
+    ] {
+        assert!(!code.contains(forbidden), "model contains {forbidden:?}");
+    }
+}
+
+/// `TcbStatus::converge` on every (platform, QE/module) pair, platform
+/// first, in the model's order.
+fn rust_converge_table() -> Vec<&'static str> {
+    use vesper_aegis::intel::TcbStatus::*;
+    let platform = [
+        UpToDate,
+        SWHardeningNeeded,
+        ConfigurationNeeded,
+        ConfigurationAndSWHardeningNeeded,
+        OutOfDate,
+        OutOfDateConfigurationNeeded,
+        Revoked,
+    ];
+    let isv = [UpToDate, OutOfDate, Revoked];
+    platform
+        .iter()
+        .flat_map(|p| isv.iter().map(move |o| p.converge(*o).as_str()))
+        .collect()
+}
+
+#[test]
+fn collateral_model_matches_rust_converge() {
+    let Ok(lean) = std::env::var("VESPER_LEAN") else {
+        eprintln!("VESPER_LEAN unset; collateral model compile and differential skipped");
+        return;
+    };
+    let out = Command::new(lean)
+        .arg(collateral_file())
+        .output()
+        .expect("run lean");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "lean failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(stdout.contains(&format!("AEGIS-COLLATERAL-MODEL {COLLATERAL_MODEL_ID}")));
+    let line = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("AEGIS-CONVERGE "))
+        .expect("converge fixture line");
+    let lean_table: Vec<&str> = line.split(',').collect();
+    assert_eq!(lean_table, rust_converge_table());
+    let mut audited = 0;
+    for l in stdout.lines() {
+        if l.contains("does not depend on any axioms") {
+            audited += 1;
+        } else if l.contains("depends on axioms") {
+            audited += 1;
+            let axioms = l.split('[').nth(1).unwrap_or("").trim_end_matches(']');
+            for ax in axioms.split(',').map(str::trim).filter(|a| !a.is_empty()) {
+                assert!(
+                    STANDARD_AXIOMS.contains(&ax),
+                    "non-standard axiom {ax} in {l}"
+                );
+            }
+        }
+    }
+    assert_eq!(audited, COLLATERAL_AUDITED_THEOREMS);
     assert!(!stdout.contains("sorryAx"));
 }

@@ -65,6 +65,10 @@ pub struct UffdStats {
     pub zeroed: u64,
     /// Faults whose page another fault had already resolved (`EEXIST`).
     pub raced: u64,
+    /// Pages mapped in place from a shared memfd (`UFFDIO_CONTINUE`).
+    pub continued: u64,
+    /// Pages resolved ahead of any fault by a hot-set prefetch.
+    pub prefetched: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +109,15 @@ pub struct GuestRun {
     pub plan: VerifiedKvmSlotPlan,
 }
 
+/// Result of the gated PVH boot run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PvhGuestRun {
+    /// Bytes the guest wrote to the test port, in order.
+    pub port_bytes: Vec<u8>,
+    pub exits: u32,
+    pub plan: VerifiedKvmSlotPlan,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KvmError {
     Unavailable(Unavailable),
@@ -127,7 +140,7 @@ impl From<PlanError> for KvmError {
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64"),
-    any(feature = "uffd", feature = "kvm")
+    any(feature = "uffd", feature = "kvm", feature = "seccomp")
 ))]
 pub use crate::linux_host::*;
 
@@ -230,6 +243,44 @@ mod no_kvm {
     pub fn run_port_write_guest(_value: u8) -> Result<GuestRun, KvmError> {
         Err(KvmError::Unavailable(reason()))
     }
+    pub fn run_pvh_guest() -> Result<PvhGuestRun, KvmError> {
+        Err(KvmError::Unavailable(reason()))
+    }
 }
 #[cfg(not(all(target_os = "linux", target_arch = "x86_64", feature = "kvm")))]
 pub use no_kvm::*;
+
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    feature = "seccomp"
+)))]
+mod no_seccomp {
+    use super::Unavailable;
+    use crate::seccomp::SockFilter;
+
+    /// A system call for probing an installed filter.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum SeccompProbe {
+        Getpid,
+        Socket,
+        Ioctl(u32),
+    }
+    pub fn install_seccomp(_program: &[SockFilter]) -> Result<(), Unavailable> {
+        Err(if cfg!(target_os = "linux") {
+            Unavailable::FeatureDisabled("seccomp")
+        } else {
+            Unavailable::UnsupportedPlatform
+        })
+    }
+    /// Always `-ENOSYS` (38) here.
+    pub fn seccomp_probe(_probe: SeccompProbe) -> i64 {
+        -38
+    }
+}
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    feature = "seccomp"
+)))]
+pub use no_seccomp::*;

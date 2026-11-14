@@ -81,6 +81,8 @@ enum CType {
     Pointer {
         pointee: Box<CType>,
         pointee_const: bool,
+        /// Clang `_Nonnull` / `_Nullable` on this pointer, if written.
+        nullability: Nullability,
     },
     Array {
         elem: Box<CType>,
@@ -88,6 +90,83 @@ enum CType {
         elem_const: bool,
     },
     Refused(RefusalReason, String),
+}
+
+/// Nullability a header states for one pointer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Nullability {
+    /// Nothing written: C pointers may be null, so lifted as `Option`.
+    Unspecified,
+    /// `_Nonnull`, or listed by `__attribute__((nonnull))`.
+    Nonnull,
+    /// `_Nullable`.
+    Nullable,
+}
+
+/// Pointer parameters named non-null by GNU `__attribute__((nonnull))` on a
+/// function: every pointer (no arguments) or 1-based parameter indices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum NonnullAttr {
+    None,
+    All,
+    Indices(BTreeSet<usize>),
+}
+
+/// Collect `nonnull(...)` and `returns_nonnull` from attribute lists.
+fn function_attributes<'a>(
+    lists: impl IntoIterator<Item = &'a [lang_c::span::Node<lang_c::ast::Extension>]>,
+    consts: &BTreeMap<String, i128>,
+) -> Result<(NonnullAttr, bool), String> {
+    let mut nonnull = NonnullAttr::None;
+    let mut returns_nonnull = false;
+    for list in lists {
+        for ext in list {
+            let lang_c::ast::Extension::Attribute(a) = &ext.node else {
+                continue;
+            };
+            match a.name.node.as_str() {
+                "nonnull" | "__nonnull__" => {
+                    if a.arguments.is_empty() {
+                        nonnull = NonnullAttr::All;
+                        continue;
+                    }
+                    let mut set = match std::mem::replace(&mut nonnull, NonnullAttr::None) {
+                        NonnullAttr::Indices(set) => set,
+                        NonnullAttr::All => {
+                            nonnull = NonnullAttr::All;
+                            continue;
+                        }
+                        NonnullAttr::None => BTreeSet::new(),
+                    };
+                    for arg in &a.arguments {
+                        let i = eval(&arg.node, consts)
+                            .and_then(|v| usize::try_from(v).ok())
+                            .filter(|v| *v >= 1)
+                            .ok_or("`nonnull` arguments must be 1-based parameter indices")?;
+                        set.insert(i);
+                    }
+                    nonnull = NonnullAttr::Indices(set);
+                }
+                "returns_nonnull" | "__returns_nonnull__" => returns_nonnull = true,
+                _ => {}
+            }
+        }
+    }
+    Ok((nonnull, returns_nonnull))
+}
+
+fn nullability(quals: &[lang_c::span::Node<PointerQualifier>]) -> Nullability {
+    let mut n = Nullability::Unspecified;
+    for q in quals {
+        if let PointerQualifier::TypeQualifier(t) = &q.node {
+            match t.node {
+                TypeQualifier::Nonnull => n = Nullability::Nonnull,
+                TypeQualifier::Nullable => n = Nullability::Nullable,
+                _ => {}
+            }
+        }
+    }
+    n
 }
 
 impl CType {
@@ -674,6 +753,7 @@ impl Ctx {
                     let t = CType::Pointer {
                         pointee: Box::new(ty),
                         pointee_const: cur_const,
+                        nullability: nullability(quals),
                     };
                     cur_const = quals.iter().any(|q| matches!(&q.node, PointerQualifier::TypeQualifier(t) if t.node == TypeQualifier::Const));
                     t
@@ -785,9 +865,41 @@ fn lift_function(
     params: Vec<(String, CType)>,
     decayed: &[bool],
     ret: CType,
+    (nonnull_attr, returns_nonnull): &(NonnullAttr, bool),
 ) -> Result<LiftedFunction, Refusal> {
     let item = format!("fn {name}");
     let refuse = |reason, detail: String| Refusal::new(&item, reason, detail);
+    // Resolve each pointer parameter's nullability from its qualifier and the
+    // function's `nonnull` attribute. GCC rejects attribute indices that are
+    // out of range or name a non-pointer; so does this lifter.
+    if let NonnullAttr::Indices(set) = nonnull_attr {
+        for i in set {
+            if !matches!(params.get(i - 1), Some((_, CType::Pointer { .. }))) {
+                return Err(refuse(
+                    RefusalReason::BadAnnotation,
+                    format!("`nonnull({i})` does not name a pointer parameter"),
+                ));
+            }
+        }
+    }
+    let mut nonnull = vec![false; params.len()];
+    for (i, (pname, ty)) in params.iter().enumerate() {
+        let CType::Pointer { nullability, .. } = ty else {
+            continue;
+        };
+        let by_attr = match nonnull_attr {
+            NonnullAttr::None => false,
+            NonnullAttr::All => true,
+            NonnullAttr::Indices(set) => set.contains(&(i + 1)),
+        };
+        if by_attr && *nullability == Nullability::Nullable {
+            return Err(refuse(
+                RefusalReason::BadAnnotation,
+                format!("parameter `{pname}` is `_Nullable` but listed by `nonnull`"),
+            ));
+        }
+        nonnull[i] = by_attr || *nullability == Nullability::Nonnull;
+    }
     let mut sys = vec![];
     let mut lifted = vec![];
     let mut assumptions = vec![];
@@ -809,19 +921,12 @@ fn lift_function(
             CType::Pointer {
                 pointee,
                 pointee_const,
+                ..
             } => {
                 let next_is_len =
                     matches!(params.get(i + 1), Some((_, CType::Scalar(Scalar::Usize))));
-                let single = match &**pointee {
+                let element = match &**pointee {
                     CType::Scalar(e) => SysPointee::Scalar(*e),
-                    CType::Struct(n) if next_is_len => {
-                        return Err(refuse(
-                            RefusalReason::Aggregate,
-                            format!(
-                                "parameter `{pname}` points to struct `{n}` and is followed by a size_t: arrays of structs are not modelled by .vsys"
-                            ),
-                        ));
-                    }
                     CType::Struct(n) => SysPointee::Struct(n.clone()),
                     CType::Refused(r, d) => {
                         return Err(refuse(*r, format!("parameter `{pname}`: {d}")));
@@ -833,29 +938,33 @@ fn lift_function(
                         ));
                     }
                 };
-                if let (SysPointee::Scalar(e), true) = (&single, next_is_len) {
-                    let e = *e;
-                    let access = if *pointee_const {
-                        Access::In
-                    } else {
-                        Access::Inout
-                    };
+                let nonnull = nonnull[i];
+                let shared = *pointee_const;
+                let null_note = if nonnull {
+                    "non-null as the header declares (`nonnull`/`_Nonnull`)"
+                } else {
+                    "nullable (`Option`) because the header does not declare it `nonnull`"
+                };
+                if next_is_len {
+                    let access = if shared { Access::In } else { Access::Inout };
                     let len_name = &params[i + 1].0;
                     assumptions.push(format!(
-                        "`{pname}` + `{len_name}` lifted to a nocapture {} slice: a C header cannot show that the callee does not retain the pointer",
-                        if *pointee_const { "shared" } else { "unique" }
+                        "`{pname}` + `{len_name}` lifted to a nocapture {} slice of `{}`, {null_note}; a C header cannot show that the callee does not retain the pointer",
+                        if shared { "shared" } else { "unique" },
+                        element.name()
                     ));
-                    sys.push((pname.clone(), SysParam::Slice { element: e, access }));
+                    let slice_ty = format!("CSlice[{}]", element.name());
                     lifted.push(LiftedParam {
-                        name: pname,
-                        mode: if *pointee_const {
-                            Mode::In
-                        } else {
-                            Mode::Inout
-                        },
+                        name: pname.clone(),
+                        mode: if shared { Mode::In } else { Mode::Inout },
                         footprint: None,
-                        ty: format!("CSlice[{}]", e.name()),
+                        ty: if nonnull {
+                            slice_ty
+                        } else {
+                            format!("Option[{slice_ty}]")
+                        },
                     });
+                    sys.push((pname, SysParam::slice(element, access, !nonnull)));
                     i += 2;
                     continue;
                 }
@@ -867,7 +976,7 @@ fn lift_function(
                         ),
                     ));
                 }
-                if matches!(single, SysPointee::Scalar(Scalar::U8 | Scalar::I8)) {
+                if matches!(element, SysPointee::Scalar(Scalar::U8 | Scalar::I8)) {
                     return Err(refuse(
                         RefusalReason::ArrayWithoutLength,
                         format!(
@@ -875,32 +984,32 @@ fn lift_function(
                         ),
                     ));
                 }
-                let access = if *pointee_const {
+                let access = if shared {
                     PointerAccess::In
                 } else {
                     PointerAccess::Inout
                 };
                 assumptions.push(format!(
-                    "`{pname}` lifted to a non-null nocapture {} pointer to one `{}`: a C header cannot show non-null, single-element or non-retention",
+                    "`{pname}` lifted to a nocapture {} pointer to one `{}`, {null_note}; a C header cannot show single-element or non-retention",
                     access.keyword(),
-                    single.name()
+                    element.name()
                 ));
                 lifted.push(LiftedParam {
                     name: pname.clone(),
-                    mode: if *pointee_const {
-                        Mode::In
-                    } else {
-                        Mode::Inout
-                    },
+                    mode: if shared { Mode::In } else { Mode::Inout },
                     footprint: None,
-                    ty: single.name().to_owned(),
+                    ty: if nonnull {
+                        element.name().to_owned()
+                    } else {
+                        format!("Option[{}]", element.name())
+                    },
                 });
                 sys.push((
                     pname,
                     SysParam::Pointer {
-                        pointee: single,
+                        pointee: element,
                         access,
-                        nullable: false,
+                        nullable: !nonnull,
                     },
                 ));
             }
@@ -935,14 +1044,25 @@ fn lift_function(
     let (result, sys_result) = match ret {
         CType::Void => ("ForeignVal[Unit]".to_string(), SysValue::Unit),
         CType::Scalar(s) => (format!("ForeignVal[{}]", s.name()), SysValue::Scalar(s)),
-        CType::Pointer { pointee, .. } => match *pointee {
-            CType::Scalar(e) => (
-                format!("ForeignVal[NullablePtr[{}]]", e.name()),
-                SysValue::Address {
-                    pointee: e,
-                    nullable: true,
-                },
-            ),
+        CType::Pointer {
+            pointee,
+            nullability,
+            ..
+        } => match *pointee {
+            CType::Scalar(e) => {
+                let nonnull = *returns_nonnull || nullability == Nullability::Nonnull;
+                (
+                    format!(
+                        "ForeignVal[{}[{}]]",
+                        if nonnull { "Ptr" } else { "NullablePtr" },
+                        e.name()
+                    ),
+                    SysValue::Address {
+                        pointee: e,
+                        nullable: !nonnull,
+                    },
+                )
+            }
             _ => {
                 return Err(refuse(
                     RefusalReason::OpaquePointer,
@@ -1014,7 +1134,9 @@ pub fn analyze_header(
     full.push('\n');
     full.push_str(&text);
     let config = Config {
-        flavor: Flavor::StdC11,
+        // Clang C11 accepts GNU `__attribute__` and the `_Nonnull` /
+        // `_Nullable` qualifiers, which state pointer nullability.
+        flavor: Flavor::ClangC11,
         ..Config::default()
     };
     let parsed = parse_preprocessed(&config, full).map_err(|e| {
@@ -1187,16 +1309,27 @@ pub fn analyze_header(
             for (index, p) in fd.node.parameters.iter().enumerate() {
                 let mut pc = false;
                 let mut pt = vec![];
+                // `P _Nonnull p` with a pointer typedef `P`: the qualifier is
+                // a declaration specifier and applies to the typedef's pointer.
+                let mut spec_null = Nullability::Unspecified;
                 for s in &p.node.specifiers {
                     match &s.node {
                         DeclarationSpecifier::TypeSpecifier(t) => pt.push(&t.node),
-                        DeclarationSpecifier::TypeQualifier(q) => {
-                            pc |= q.node == TypeQualifier::Const
-                        }
+                        DeclarationSpecifier::TypeQualifier(q) => match q.node {
+                            TypeQualifier::Const => pc = true,
+                            TypeQualifier::Nonnull => spec_null = Nullability::Nonnull,
+                            TypeQualifier::Nullable => spec_null = Nullability::Nullable,
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }
-                let (pbase, pconst) = ctx.base_type(pt, pc, None)?;
+                let (mut pbase, pconst) = ctx.base_type(pt, pc, None)?;
+                if let CType::Pointer { nullability, .. } = &mut pbase
+                    && spec_null != Nullability::Unspecified
+                {
+                    *nullability = spec_null;
+                }
                 let (pname, mut pty) = match &p.node.declarator {
                     Some(decl) => ctx.declarator(&decl.node, pbase, pconst),
                     None => (None, pbase),
@@ -1215,6 +1348,7 @@ pub fn analyze_header(
                     pty = CType::Pointer {
                         pointee: elem,
                         pointee_const: elem_const,
+                        nullability: Nullability::Unspecified,
                     };
                 }
                 decayed.push(is_array);
@@ -1236,7 +1370,22 @@ pub fn analyze_header(
                     format!("function `{name}` repeats parameter `{dup}`"),
                 ));
             }
-            match lift_function(&name, params, &decayed, ret) {
+            let extension_lists = specifiers
+                .iter()
+                .filter_map(|s| match &s.node {
+                    DeclarationSpecifier::Extension(e) => Some(e.as_slice()),
+                    _ => None,
+                })
+                .chain(std::iter::once(d.extensions.as_slice()));
+            let attrs = match function_attributes(extension_lists, &ctx.constants) {
+                Ok(a) => a,
+                Err(why) => {
+                    ctx.refusals
+                        .push(Refusal::new(item, RefusalReason::BadAnnotation, why));
+                    continue;
+                }
+            };
+            match lift_function(&name, params, &decayed, ret, &attrs) {
                 Ok(f) => ctx.functions.push(f),
                 Err(r) => ctx.refusals.push(r),
             }
