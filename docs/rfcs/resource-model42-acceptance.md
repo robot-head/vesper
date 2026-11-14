@@ -1,5 +1,7 @@
 # Executable resource model: independent acceptance (#322)
 
+Final independent integration passed on Linux at source `94c0e4753a8ac6a9d9a4f8187698449e17e82cb5`: all 78 computed semantic assertions compiled, all 284 manual theorem roots plus the one preserved proof-variant alias passed the unchanged standard-three axiom policy, and every hostile/control case completed. The audited artifact is a separately bound logical projection; the original executable artifacts are not relabeled as passing the raw-artifact audit. Exact results and earlier genuine failures are recorded below.
+
 ## Scope and initial design checkpoint
 
 This lane owns only `lean/ResourceModel42/Acceptance.lean`, `tests/resource_model42.rs`, and this report. The published contract is `ddf5d6c`, frozen against main `30de7fef8be040a890e34f26370ee15b1429642e` and specification snapshot `8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d`, with subsequent coordinator clarifications. The initial design commits `c27e30e`/`84b8e23` contained only this report and claimed no code or execution. Source authoring began only after the coherent compiled syntax checkpoint `d51a21b` was published and authorized.
@@ -135,3 +137,46 @@ The acceptance follow-up requires the exact alias report and every raw occurrenc
 The owned control follow-up `bdbfce6` imports the fixture lane's six new fixed source files from `3a80b0b`. It requires the observed canonical/alternate module associations and one alias for each pair. The clean pair requests both canonical and alias roots. The hostile pair first requires its genuinely clean canonical root to pass with no axioms, then requests canonical plus every alias and requires exact rejection of `ResourceSnapshotAliasAxiom.forbidden` on the alternate proof. The alternate helper is not requested independently, so that failure cannot hide a missing alias-root request.
 
 Under a build/lint-only coordinator lease, actual `cargo test -p vesper --locked --test resource_model42 --no-run` passed at `bdbfce6792f523b973a7cb9dad9136b251659678` in 1.37s outer time (Cargo 1.30s), focused strict Clippy passed in 0.58s, and `cargo fmt --all -- --check` passed in 3.734s. Logs are `/tmp/resource-kernel42-acceptance-alias-{build,clippy,fmt}.log`, with exact commands/results in `/tmp/resource-kernel42-acceptance-alias-checks.json`. The lease was released immediately; these commands did not execute the target or Lean. The new alias tool and controls still require the complete actual runtime matrix.
+
+## Final independent integration: executed kernel and hostile-control matrix
+
+Public issue #380 separately authorized replacing the existing replay implementation's private-name-sensitive frontend staging with checked `Kernel.Environment.addDeclCore` replay, retaining exact `ConstantInfo` and regenerated constructor/recursor comparisons. This fixes a replay implementation bug without relaxing default unsafe/partial rejection or the axiom policy. The Rust CLI, options and report schema were unchanged. The projector uses the same checked replay block. The producer's intermediate private-name PANIC was not accepted as success and was not an independently completed acceptance run.
+
+The writer imported the final auditor checkpoints `920b6ac`/`7cb63f1`, snapshot checkpoints `db6a433`/`50fd041`, fixed private-name fixtures `c3a6c1a`/`9a4c27e`, and independently authored private regression `0f3ca2d` as dependency copies. The coordinator-approved already-merged main `c025b9a` was merged cleanly before execution. At actual compiled source head `94c0e4753a8ac6a9d9a4f8187698449e17e82cb5`, all **33** fixed Lean/compiler/test inputs matched integration `40c97c6` byte for byte; both checked replay blocks were also byte-identical. Exact paths, lengths and SHA-256 values: `/tmp/resource-kernel42-acceptance-final-source-preflight.json`.
+
+Under an exclusive Cargo plus one-Lean lease, the writer ran these actual commands sequentially with the established single-job/shared-target/debug-zero/incremental-off environment, real pinned Lean 4.24, and the explicit worktree lock path:
+
+| Actual command target (`cargo test -p vesper --locked --test TARGET -- --nocapture`) | Result | Target time | Independent outer time |
+| --- | --- | --- | --- |
+| `proof_audit_cli` | 6 passed, 0 failed/ignored | 89.25s | 118.912s, including 29.40s rebuilt CLI/test compilation |
+| `proof_audit_private` | 1 passed, 0 failed/ignored | 13.61s | 14.480s |
+| `resource_model42` | 1 passed, 0 failed/ignored | 412.15s | 413.286s |
+
+The first target retained every existing forged-object, unsafe/partial, missing/non-theorem, `sorryAx`, initializer and transitive-axiom-policy assertion. The new private-name target freshly compiled the actual colliding private-name modules, independently observed their distinct full names, and verified real replay together. It also compared the actual rebuilt CLI's reported auditor hash with the exact checked-in `Audit.lean` bytes, excluding a stale embedded auditor binary.
+
+The model target freshly compiled all 12 original modules and all 78 computed semantic assertions. It verified exactly 24 regular original source/object files in the restricted fresh legacy profile, with no symlinked package inputs or sidecars. The actual logical snapshot reported:
+
+| Measured inventory | Count |
+| --- | ---: |
+| Unique original constants | 3,839 |
+| Raw original occurrences | 3,853 |
+| Repeated original names | 14 |
+| Exact retained canonical constants | 3,791 |
+| Narrowly matched implementation-helper omissions | 48 |
+| Separately preserved alternate proofs | 1 |
+| Output constants actually replayed | 3,792 |
+| Checked logical expression nodes | 1,313,466 |
+| Manual theorem roots / added alias roots | 284 / 1 |
+| Strict audit partitions | 3 (128, 128, 29) |
+
+The sole alias is `ResourceKernelProofAliases.realization_0`, preserving the ErasureProofs raw occurrence at module-local index 76 of `Vesper.ResourceModel42.RuntimeExpr.asValue.eq_3`; the imported canonical originates in MetricsProofs. Its original singleton group, type, levels and proof association were recorded. All 285 requested roots passed actual strict replay and the sorted allowlist `Classical.choice`, `Quot.sound`, `propext`; every partition checked all 3,792 output constants and the exact requested-root union. Every positive report required `accepted = true`, `kernel_replayed = true`, and `cache_eligible = false`, with unchanged original/projected hashes and exact inventories.
+
+The standalone projected object measured 21,858,464 bytes, BLAKE3 `511f9481e7bcefad5bb2adbf1940072a086f791dc00eb7a09f45d8cb55c8aed6`. Actual snapshot source BLAKE3 was `bd2a748c9886b06e5419cf5aa01711dc46d8d3da916d9e184b543afaa7c27eb2`. The bounded `RESOURCE_MODEL42_KERNEL_BINDING` line contains the complete actual snapshot report, all original/projected file hashes, and root/partition counts. Its independently extracted JSON is `/tmp/resource-kernel42-acceptance-final-binding.json`, with a concise `/tmp/resource-kernel42-acceptance-final-summary.json`. These hashes bind observed artifacts and source; they do not prove native execution equivalence or grant reusable proof status.
+
+All subsequent controls actually completed: missing/corrupt original objects refused export without a success marker; all four AST-built private-wrapper constructor probes failed elaboration; the AST-built `sorryAx` theorem compiled against the projection and failed policy; missing/corrupt audited projections failed the actual auditor; raw total-recursion artifacts remained rejected while their exact logical projection passed; safe user-owned helper spelling survived without omission; explicit unsafe, opaque partial facade and deceptive unsafe helper all refused for their real causes; and the projected project axiom failed policy. The clean variant pair passed canonical-plus-alias audit. The hostile pair's genuinely clean canonical passed alone with no axioms, while adding its reported alternate alias failed exactly `ResourceSnapshotAliasAxiom.forbidden`, with `kernel_replayed = true`. No alternate helper was independently requested to conceal an omitted alias-root request.
+
+The actual model log contains **29** Lean compilation attempts (25 successful source compilations plus four deliberate privacy refusals), **11** snapshot attempts (six successful projections and five deliberate refusals), **13** strict auditor calls, and two tool-identity probes. Requests/processes were serial within the model target and bounded by the unchanged per-process watchdogs and 900-second whole-target budget. No source or assertion repair was needed in this final run. The measured 412.15s exceeds Bazel's default medium 300-second timeout; the coordinator was notified to arrange the separately owned long/900-second test metadata. This lane made no BUILD/CI changes and ran no Bazel, macOS or Windows acceptance command.
+
+After execution, focused strict Clippy over all three targets passed in 8.198s, and `cargo fmt --all -- --check` passed in 4.165s. Exact command/timing records: `/tmp/resource-kernel42-acceptance-final-checks.json` and `/tmp/resource-kernel42-acceptance-final-lint-checks.json`. Logs use `/tmp/resource-kernel42-acceptance-final-{proof_audit_cli,proof_audit_private,resource_model42,clippy,fmt}.log`. The writer released the Cargo/Lean lease immediately after these checks. These are writer-executed observations, distinct from the source owners' preliminary compilation/control results and the coordinator's later broader regression/CI evidence.
+
+The delivered scope is the finite ANF logical resource model and independently audited projection. Returned owners retain live residuals; exhaustion remains conditional on a copy result. This work supplies no source adapter, native/backend observation equivalence, large resource/ChoiceTape campaign, resource-model Lean4Lean profile, full Rust-checker refinement, or full specification §42 completion. The two raw-artifact failures and the narrow duplicate-proof failure above remain genuine evidence history.
