@@ -9,7 +9,7 @@ actions:
     container_image: "ubuntu-24.04"
     resource_requests:
       cpu: 8
-      memory: 19GB
+      memory: 22GB
       disk: 60GB
     timeout: 90m
     triggers:
@@ -28,7 +28,7 @@ actions:
           export VESPER_LEAN="$(cat .ci-lean-path)"
           export VESPER_LEAN4LEAN42_ROOT="$(mktemp -d /tmp/vesper-lean4lean42-ci.XXXXXX)/checker"
           BAZEL_FLAGS="--config=ci --config=rbe_build" scripts/ci/prepare-lean4lean42.sh "$VESPER_LEAN4LEAN42_ROOT"
-          bazel test --config=ci --config=rbe_build //...
+          bazel test --config=ci --config=rbe_build --local_test_jobs=2 //...
       - run: "scripts/ci/check-lean-models.sh"
 
   - name: "Native and acceptance scripts"
