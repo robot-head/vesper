@@ -2,7 +2,7 @@
 name = "vesper-aether"
 version = "0.1.0"
 edition = "2024"
-description = "Bounded host memory-layout and verified CAS snapshot-page planning, KVM slot plans, snapshot forks and userfaultfd lazy restore"
+description = "Bounded host memory-layout and verified CAS snapshot-page planning, KVM slot plans, snapshot forks, userfaultfd lazy restore, VirtIO MMIO devices, PVH boot and a VMM seccomp profile"
 publish = false
 
 [features]
@@ -11,6 +11,8 @@ default = []
 uffd = []
 # Real Linux KVM guest execution (the same gated module, Linux x86_64).
 kvm = ["dep:kvm-ioctls", "dep:kvm-bindings"]
+# Installing the VMM seccomp-bpf profile (the same gated module, Linux).
+seccomp = []
 
 [dependencies]
 blake3 = "1.8"
@@ -28,4 +30,4 @@ kvm-ioctls = { version = "=0.25.1", optional = true }
 # kernel, device or privileges refuse.
 [dev-dependencies]
 tempfile = "3"
-vesper-aether = { path = ".", features = ["uffd", "kvm"] }
+vesper-aether = { path = ".", features = ["uffd", "kvm", "seccomp"] }

@@ -51,7 +51,7 @@ pub struct Body {
 
 /// A fixed-length sequence of bodies stored as tiles
 /// (`TiledSeq[RigidBodyTile]`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct TiledBodies {
     pub(crate) tiles: Vec<RigidBodyTile>,
     len: usize,

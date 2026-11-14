@@ -1,6 +1,8 @@
 //! A Raft-style replicated log over typed sessions on lossy Warp links
 //! (wave six lane 17 acceptance).
 
+mod common;
+
 use vesper_chorus::raft::log_matching_violation;
 use vesper_chorus::replog::{ReplogConfig, run_replicated_log};
 use vesper_chorus::warpnet::WarpNetConfig;
@@ -24,7 +26,7 @@ fn replicated_log_converges_over_lossy_partitioned_warp_links() {
     let mut dropped = 0;
     let mut retransmitted = 0;
     for (seed, nodes) in [(1, 5), (2, 5), (3, 3), (4, 7), (5, 5), (6, 3)] {
-        let r = run_replicated_log(&cfg(seed, nodes)).unwrap();
+        let r = run_replicated_log(&cfg(seed, nodes), &common::pki()).unwrap();
         assert_eq!(r.violation, None, "seed {seed}");
         // Every log equals the final leader's, and all of it is committed.
         let first = &r.logs[0];
@@ -72,20 +74,20 @@ fn replicated_log_converges_over_lossy_partitioned_warp_links() {
 
 #[test]
 fn replicated_log_is_deterministic_per_seed() {
-    let a = run_replicated_log(&cfg(42, 5)).unwrap();
-    let b = run_replicated_log(&cfg(42, 5)).unwrap();
+    let a = run_replicated_log(&cfg(42, 5), &common::pki()).unwrap();
+    let b = run_replicated_log(&cfg(42, 5), &common::pki()).unwrap();
     assert_eq!(a.digest, b.digest);
     assert_eq!(a.stats, b.stats);
     assert_eq!(a.net, b.net);
-    let c = run_replicated_log(&cfg(43, 5)).unwrap();
+    let c = run_replicated_log(&cfg(43, 5), &common::pki()).unwrap();
     assert_ne!(a.digest, c.digest);
 }
 
 #[test]
 fn replicated_log_rejects_bad_configuration() {
-    assert!(run_replicated_log(&cfg(1, 2)).is_err());
-    assert!(run_replicated_log(&cfg(1, 8)).is_err());
+    assert!(run_replicated_log(&cfg(1, 2), &common::pki()).is_err());
+    assert!(run_replicated_log(&cfg(1, 8), &common::pki()).is_err());
     let mut c = cfg(1, 3);
     c.max_batch = 0;
-    assert!(run_replicated_log(&c).is_err());
+    assert!(run_replicated_log(&c, &common::pki()).is_err());
 }

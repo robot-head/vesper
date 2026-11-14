@@ -1,5 +1,6 @@
 //! Copy-on-write snapshot fork and per-clone nonce reseeding (§37.3).
 use std::collections::HashSet;
+use vesper_aether::entropy::CloneEntropy;
 use vesper_aether::fork::*;
 use vesper_aether::page_source::PageSource;
 use vesper_aether::{Error, PAGE_BYTES};
@@ -83,8 +84,12 @@ fn clones_share_pages_until_written() {
     );
     assert_eq!(a.write(usize::MAX, &[0]), Err(ForkError::OutOfRange));
     assert_eq!(a.private_page_count(), before);
-    let ra = ta.reseed_after_fork(&root, &mut a).unwrap();
-    let rb = tb.reseed_after_fork(&root, &mut b).unwrap();
+    let ra = ta
+        .reseed_after_fork(&root, &mut a, CloneEntropy::gather().unwrap())
+        .unwrap();
+    let rb = tb
+        .reseed_after_fork(&root, &mut b, CloneEntropy::gather().unwrap())
+        .unwrap();
     ra.fresh_sealer.retire();
     rb.fresh_sealer.retire();
 }
@@ -100,7 +105,9 @@ fn reseeding_writes_generation_and_derives_distinct_keys() {
     assert_eq!(clone.fill(0).unwrap_err(), Error::NotReseeded);
     let generation = ticket.generation();
     assert_ne!(generation, parent);
-    let epoch = ticket.reseed_after_fork(&root, &mut clone).unwrap();
+    let epoch = ticket
+        .reseed_after_fork(&root, &mut clone, CloneEntropy::gather().unwrap())
+        .unwrap();
     assert!(clone.is_reseeded());
     assert_eq!(epoch.fork_epoch_id, generation.lo);
     assert_eq!(
@@ -116,7 +123,9 @@ fn reseeding_writes_generation_and_derives_distinct_keys() {
     assert_eq!(clone.private_page_count(), 1);
     assert!(!clone.is_shared(GENID.page));
     let (mut other, other_ticket) = image.fork(&mut auth).unwrap();
-    let other_epoch = other_ticket.reseed_after_fork(&root, &mut other).unwrap();
+    let other_epoch = other_ticket
+        .reseed_after_fork(&root, &mut other, CloneEntropy::gather().unwrap())
+        .unwrap();
     assert_ne!(
         epoch.fresh_sealer.key_id(),
         other_epoch.fresh_sealer.key_id()
@@ -146,7 +155,10 @@ fn nonces_are_unique_across_clones_and_generations() {
         let mut clones = Vec::new();
         for _ in 0..32 {
             let (mut c, t) = image.fork(&mut auth).unwrap();
-            let mut fresh = t.reseed_after_fork(&root, &mut c).unwrap().fresh_sealer;
+            let mut fresh = t
+                .reseed_after_fork(&root, &mut c, CloneEntropy::gather().unwrap())
+                .unwrap()
+                .fresh_sealer;
             for _ in 0..16 {
                 assert!(seen.insert(fresh.next_nonce().unwrap()));
                 emitted += 1;
@@ -181,12 +193,18 @@ fn tickets_bind_to_their_clone_and_epochs_run_out() {
         auth.boot_sealer(&root).unwrap_err(),
         ForkError::EpochExhausted
     );
-    let refused = *tb.reseed_after_fork(&root, &mut a).unwrap_err();
+    let refused = *tb
+        .reseed_after_fork(&root, &mut a, CloneEntropy::gather().unwrap())
+        .unwrap_err();
     assert_eq!(refused.0, ForkError::TicketMismatch);
     assert!(!a.is_reseeded());
     let tb = refused.1;
-    let sa = ta.reseed_after_fork(&root, &mut a).unwrap();
-    let sb = tb.reseed_after_fork(&root, &mut b).unwrap();
+    let sa = ta
+        .reseed_after_fork(&root, &mut a, CloneEntropy::gather().unwrap())
+        .unwrap();
+    let sb = tb
+        .reseed_after_fork(&root, &mut b, CloneEntropy::gather().unwrap())
+        .unwrap();
     sa.fresh_sealer.retire();
     sb.fresh_sealer.retire();
 }
