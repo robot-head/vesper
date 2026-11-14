@@ -1,4 +1,4 @@
-//! Shared runner for the three fixed audited proof packets.
+//! Shared runner for the four fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -16,6 +16,7 @@ pub enum Packet {
     Foundations,
     Construction,
     Order,
+    Map,
 }
 
 struct PacketSpec {
@@ -116,6 +117,36 @@ const ORDER_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.orderedInsert_unsorted_key_witness",
 ];
 
+const MAP_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.mapValue_empty",
+    "Vesper.Lean4LeanLevel42.nodeValue_le_mapValue",
+    "Vesper.Lean4LeanLevel42.mapValue_le",
+    "Vesper.Lean4LeanLevel42.mapValue_mono",
+    "Vesper.Lean4LeanLevel42.mapValue_insert",
+    "Vesper.Lean4LeanLevel42.mapValue_decompose",
+    "Vesper.Lean4LeanLevel42.mapWF_empty",
+    "Vesper.Lean4LeanLevel42.map_addNode_value",
+    "Vesper.Lean4LeanLevel42.map_addVar_value",
+    "Vesper.Lean4LeanLevel42.map_addConst_value",
+    "Vesper.Lean4LeanLevel42.map_addConst_value_of_covered",
+    "Vesper.Lean4LeanLevel42.map_addNode_WF",
+    "Vesper.Lean4LeanLevel42.map_addVar_WF",
+    "Vesper.Lean4LeanLevel42.map_addConst_WF",
+    "Vesper.Lean4LeanLevel42.missing_key_addVar_counterexample",
+    "Vesper.Lean4LeanLevel42.skipped_one_empty_counterexample",
+    "Vesper.Lean4LeanLevel42.skipped_one_zero_node_counterexample",
+    "Vesper.Lean4LeanLevel42.pathPrimed_empty",
+    "Vesper.Lean4LeanLevel42.pathPrimed_variable_bound",
+    "Vesper.Lean4LeanLevel42.pathPrimed_one_bound",
+    "Vesper.Lean4LeanLevel42.pathPrimed_addConst",
+    "Vesper.Lean4LeanLevel42.pathPrimed_addNode",
+    "Vesper.Lean4LeanLevel42.pathPrimed_addVar",
+    "Vesper.Lean4LeanLevel42.pathPrimed_extend",
+    "Vesper.Lean4LeanLevel42.map_addConst_value_of_primed",
+    "Vesper.Lean4LeanLevel42.pathPrimed_one_edge_counterexample",
+    "Vesper.Lean4LeanLevel42.pathPrimed_extend_example",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -172,6 +203,27 @@ impl Packet {
                 required: ORDER_REQUIRED,
                 scope: "audited_named_order_proofs",
                 marker: "LEAN4LEAN_ORDER42_EVIDENCE",
+            },
+            Self::Map => PacketSpec {
+                label: "lean4lean_map42",
+                module: "Lean4LeanMap42",
+                projected: "Lean4LeanMap42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.MapValue",
+                    "Lean4LeanLevel42.MapHelpers",
+                    "Lean4LeanLevel42.PathPriming",
+                    "Lean4LeanMap42",
+                ],
+                required: MAP_REQUIRED,
+                scope: "audited_named_map_construction_proofs",
+                marker: "LEAN4LEAN_MAP42_EVIDENCE",
             },
         }
     }
