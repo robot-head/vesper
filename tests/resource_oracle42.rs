@@ -888,20 +888,37 @@ fn hostile_peers_use_production_process_and_cannot_return_mathematical_evidence(
         let mut command = Command::new(&interpreter);
         command.arg(&peer).arg(kind);
         let limits = HarnessLimits {
-            // Allow interpreter startup for semantic faults; retain the short
-            // request clock for the intentional stall probe.
-            request_timeout_ms: if kind == "stall" { 300 } else { 2_000 },
+            // Semantic faults use the production request budget; only the
+            // intentional stall probe tests the short request clock.
+            request_timeout_ms: if kind == "stall" {
+                300
+            } else {
+                HarnessLimits::default().request_timeout_ms
+            },
             shutdown_timeout_ms: 300,
             stderr_bytes: 1024,
             ..HarnessLimits::default()
         };
+        // READY and each exchange have one request deadline. Retirement can
+        // spend one shutdown deadline, followed by one error-drop cleanup.
+        let semantic_duration_bound = Duration::from_millis(
+            (1 + requests.len() as u64) * limits.request_timeout_ms
+                + 2 * limits.shutdown_timeout_ms,
+        );
         let started = Instant::now();
         let error = process::test_transport_failure(command, &requests, limits);
         assert_eq!(error.kind, expected, "{kind}: {error:?}");
-        assert!(
-            started.elapsed() < Duration::from_secs(5),
-            "bounded cleanup for {kind}"
-        );
+        if kind == "stall" {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "bounded cleanup for {kind}"
+            );
+        } else {
+            assert!(
+                started.elapsed() < semantic_duration_bound,
+                "bounded protocol-fault phases for {kind}"
+            );
+        }
     }
     #[cfg(unix)]
     {
