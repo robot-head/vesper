@@ -1,0 +1,7 @@
+// expect: E0763
+// at: k
+// message: the pool stores [2, 4] steps, found [4, 2]
+fn f(inout seq: ActiveKvSeq[2, 4], k: Tensor[Bf16, [4, 2]])
+    -> Result[Unit, KvOomError] eff [KvCachePool[2, 4]] {
+    KvCachePool::append_kv_step(inout seq, k, k)
+}

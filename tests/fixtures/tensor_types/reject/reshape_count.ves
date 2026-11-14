@@ -1,0 +1,6 @@
+// expect: E0763
+// at: Tensor::reshape[[N, 3]](x)
+// message: [N, 2] has 2 * N elements but [N, 3] has 3 * N
+fn f[N: dim](x: Tensor[F32, [N, 2]]) -> Tensor[F32, [N, 3]] eff [Tensor] {
+    Tensor::reshape[[N, 3]](x)
+}
