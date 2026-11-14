@@ -1,0 +1,6 @@
+// expect: E0762
+// at: x: Tensor[F32, [1, 2, 3, 4, 5]]
+// message: exceeds the supported rank 4
+fn f(x: Tensor[F32, [1, 2, 3, 4, 5]]) -> u64 {
+    0
+}

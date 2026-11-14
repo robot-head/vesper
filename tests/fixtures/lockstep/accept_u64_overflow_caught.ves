@@ -1,0 +1,11 @@
+fn main() -> u64 {
+    handle Fail[ArithOverflow] in {
+        let a: u64 = 3;
+        let b: u64 = 4;
+        let c = a + b;
+        c - 10
+    } with {
+        return v => v,
+        raise(e, _) => 99,
+    }
+}

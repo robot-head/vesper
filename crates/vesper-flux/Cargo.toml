@@ -3,11 +3,12 @@ name = "vesper-flux"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
-description = "Bounded checked host DBSP circuits, owned frontier holds, durable CAS checkpoints and simulated multi-worker recovery"
+description = "Bounded checked host DBSP circuits, owned frontier holds, LSM-spine CAS checkpoints, a durable input log, an exactly-once Quarry sink and simulated multi-worker recovery and rescaling"
 
 [dependencies]
 blake3 = "1.8"
 vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-quarry = { path = "../vesper-quarry" }
 vesper-simpulse = { path = "../vesper-simpulse" }
 
 [dev-dependencies]

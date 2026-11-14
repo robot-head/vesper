@@ -1,5 +1,6 @@
-//! Durable incremental checkpoints in the loom CAS: round trips, incremental
-//! reuse, tamper/missing/substitution rejection and CDC offsets.
+//! Durable incremental checkpoints in the loom CAS: round trips, LSM spine
+//! appends and compaction, tamper/missing/substitution rejection and CDC
+//! offsets.
 use vesper_flux::*;
 use vesper_loom_cas::{Domain, ObjectId, Store};
 
@@ -118,11 +119,12 @@ fn incremental_checkpoints_write_only_changed_arrangements() {
     let same = ckpt.checkpoint(&e, &store, cp()).unwrap();
     assert_eq!((same.written, same.reused), (0, nodes));
     assert_ne!(same.manifest, first.manifest);
-    // Tick 1 changes only orders: customers' input integral is reused.
+    // Tick 1 changes only orders: customers' spine is reused; every changed
+    // spine gets a one-row batch, merged into its older batch (geometric).
     e.tick(&all[1]).unwrap();
     let second = ckpt.checkpoint(&e, &store, cp()).unwrap();
     assert!(second.reused >= 1, "{second:?}");
-    assert_eq!(second.written + second.reused, nodes);
+    assert!(second.written >= 1 && second.merged >= 1, "{second:?}");
     // The chain restores and records its parent.
     let mut r = circuit().executor();
     let restored = DurableCheckpointer::new()
@@ -139,9 +141,10 @@ fn incremental_checkpoints_write_only_changed_arrangements() {
     let again = ckpt2.checkpoint(&r2, &store, cp()).unwrap();
     assert_eq!((again.written, again.reused), (0, nodes));
     // A checkpointer used with a different executor history rewrites fully.
-    let other = circuit().executor();
+    let mut other = circuit().executor();
+    other.tick(&all[0]).unwrap();
     let full = ckpt2.checkpoint(&other, &store, cp()).unwrap();
-    assert_eq!((full.written, full.reused), (nodes, 0));
+    assert_eq!((full.written, full.reused, full.merged), (nodes, 0, 0));
     // Restoring rebinds the checkpointer to the restored manifest, so the
     // next checkpoint is again incremental relative to it.
     ckpt.restore(&mut e, &store, &first.manifest, cp()).unwrap();
@@ -156,7 +159,16 @@ fn incremental_checkpoints_write_only_changed_arrangements() {
     assert_eq!(r3.materialized(), e.materialized());
 }
 
-/// Checkpoint after two ticks; returns the manifest id and arrangement ids.
+/// Every node's single batch (all spines of a full write have one).
+fn single_batches(store: &Store, manifest: &ObjectId) -> Vec<ObjectId> {
+    let spines = DurableCheckpointer::new()
+        .restore(&mut circuit().executor(), store, manifest, cp())
+        .unwrap()
+        .spines;
+    assert!(spines.iter().all(|s| s.len() == 1), "{spines:?}");
+    spines.into_iter().flatten().collect()
+}
+/// Checkpoint after two ticks; returns the manifest id and batch ids.
 fn checkpointed(store: &Store) -> (Executor, DurableReport, Vec<ObjectId>) {
     let all = ticks();
     let mut e = circuit().executor();
@@ -165,10 +177,7 @@ fn checkpointed(store: &Store) -> (Executor, DurableReport, Vec<ObjectId>) {
     let report = DurableCheckpointer::new()
         .checkpoint(&e, store, cp())
         .unwrap();
-    let arrangements = DurableCheckpointer::new()
-        .restore(&mut circuit().executor(), store, &report.manifest, cp())
-        .unwrap()
-        .arrangements;
+    let arrangements = single_batches(store, &report.manifest);
     (e, report, arrangements)
 }
 /// A fresh executor at tick 1 whose state must survive every failed restore.
@@ -253,10 +262,7 @@ fn tampered_missing_and_substituted_objects_are_rejected_transactionally() {
     let old = DurableCheckpointer::new()
         .checkpoint(&older, &store, cp())
         .unwrap();
-    let old_arr = DurableCheckpointer::new()
-        .restore(&mut circuit().executor(), &store, &old.manifest, cp())
-        .unwrap()
-        .arrangements;
+    let old_arr = single_batches(&store, &old.manifest);
     let mut mixed = manifest_bytes.clone();
     for node in 0..arrangements.len() {
         if old_arr[node] != arrangements[node] {
@@ -386,10 +392,13 @@ fn reuse_never_crosses_stores_or_missing_objects() {
     assert_eq!(r.materialized(), e.materialized());
     // An arrangement deleted from the store behind the checkpointer's back is
     // rewritten instead of referenced.
-    let arrangements = DurableCheckpointer::new()
+    let arrangements: Vec<ObjectId> = DurableCheckpointer::new()
         .restore(&mut circuit().executor(), &b, &into_b.manifest, cp())
         .unwrap()
-        .arrangements;
+        .spines
+        .into_iter()
+        .flatten()
+        .collect();
     std::fs::remove_file(b.object_path(&arrangements[1])).unwrap();
     let again = ckpt.checkpoint(&e, &b, cp()).unwrap();
     assert_eq!(again.written, 1);
@@ -433,4 +442,136 @@ fn a_checkpoint_accepted_under_limits_restores_under_the_same_limits() {
         ),
         Err(Error::Limit("checkpoint state"))
     );
+}
+
+/// One large input integral with a small change per tick: every checkpoint
+/// writes O(change) rows, the spine stays within its level bound, merges
+/// elide cancelled rows, and every checkpoint restores to the live state.
+#[test]
+fn spine_appends_deltas_and_compacts_geometrically() {
+    let (_dir, store) = store();
+    let mut b = CircuitBuilder::new(l()).unwrap();
+    let x = b.input(2).unwrap();
+    let f = b
+        .filter(
+            x,
+            Predicate::AtLeast {
+                column: 1,
+                value: 0,
+            },
+        )
+        .unwrap();
+    let c = b.finish(f).unwrap();
+    let mut e = c.clone().executor();
+    let base: Vec<_> = (0..400).map(|i| (vec![i, i % 7], 1)).collect();
+    e.tick(&TickInput {
+        deltas: vec![ZSet::consolidate(2, &base, l()).unwrap()],
+    })
+    .unwrap();
+    let mut ckpt = DurableCheckpointer::new();
+    let first = ckpt.checkpoint(&e, &store, cp()).unwrap();
+    assert_eq!(first.rows_written, 800);
+    let mut merged = 0;
+    let mut max_levels = 0;
+    for t in 0..40i64 {
+        // Insert a row, and retract the row inserted two ticks ago.
+        let mut rows = vec![(vec![1000 + t, 1], 1)];
+        if t >= 2 {
+            rows.push((vec![1000 + t - 2, 1], -1));
+        }
+        e.tick(&TickInput {
+            deltas: vec![ZSet::consolidate(2, &rows, l()).unwrap()],
+        })
+        .unwrap();
+        let r = ckpt.checkpoint(&e, &store, cp()).unwrap();
+        merged += r.merged;
+        // Small batches are merged among themselves, never into the 400-row base.
+        assert!(r.rows_written < 100, "tick {t}: {r:?}");
+        let mut back = c.clone().executor();
+        let restored = DurableCheckpointer::new()
+            .restore(&mut back, &store, &r.manifest, cp())
+            .unwrap();
+        max_levels = max_levels.max(restored.spines.iter().map(Vec::len).max().unwrap());
+        assert_eq!(back.materialized(), e.materialized(), "tick {t}");
+        assert_eq!(back.ticks(), e.ticks());
+    }
+    assert!(merged > 10, "{merged}");
+    assert!((2..=MAX_SPINE_LEVELS).contains(&max_levels), "{max_levels}");
+}
+
+#[test]
+fn malformed_spines_are_rejected() {
+    let (_dir, store) = store();
+    let all = ticks();
+    let mut e = circuit().executor();
+    let mut ckpt = DurableCheckpointer::new();
+    e.tick(&all[0]).unwrap();
+    ckpt.checkpoint(&e, &store, cp()).unwrap();
+    e.tick(&all[2]).unwrap();
+    let report = ckpt.checkpoint(&e, &store, cp()).unwrap();
+    let bytes = store.read_blob(&report.manifest).unwrap();
+    let spines = DurableCheckpointer::new()
+        .restore(&mut circuit().executor(), &store, &report.manifest, cp())
+        .unwrap()
+        .spines;
+    let find = |bytes: &[u8], id: &ObjectId| {
+        bytes
+            .windows(32)
+            .position(|w| w == id.digest.as_bytes())
+            .unwrap()
+    };
+    // Naming one batch twice, and dropping a batch's range bound past the
+    // checkpoint's tick count, are typed errors.
+    let two: Vec<&ObjectId> = spines.iter().flatten().take(2).collect();
+    let mut dup = bytes.clone();
+    let at = find(&dup, two[1]);
+    dup[at..at + 32].copy_from_slice(two[0].digest.as_bytes());
+    let id = store.put_blob(Domain::Artifact, &dup).unwrap().id;
+    assert!(matches!(
+        DurableCheckpointer::new().restore(&mut victim(), &store, &id, cp()),
+        Err(Error::Checkpoint(_))
+    ));
+    let mut far = bytes.clone();
+    let at = find(&far, two[0]) + 32 + 8; // the batch's `hi`
+    far[at..at + 8].copy_from_slice(&99u64.to_le_bytes());
+    let id = store.put_blob(Domain::Artifact, &far).unwrap().id;
+    let mut v = victim();
+    assert_eq!(
+        DurableCheckpointer::new().restore(&mut v, &store, &id, cp()),
+        Err(Error::Checkpoint("spine ranges"))
+    );
+    assert_untouched(&v);
+}
+
+/// A retained base plus a delta can need more batch rows than the integral:
+/// the checkpoint folds that spine so it restores under the same limits.
+#[test]
+fn incremental_checkpoints_stay_within_the_batch_row_bound() {
+    let (_dir, store) = store();
+    let mut b = CircuitBuilder::new(l()).unwrap();
+    let x = b.input(2).unwrap();
+    let c = b.finish(x).unwrap();
+    let limits = CheckpointLimits {
+        max_total_rows: 100,
+        ..cp()
+    };
+    let mut e = c.clone().executor();
+    let base: Vec<_> = (0..100).map(|i| (vec![i, 0], 1)).collect();
+    e.tick(&TickInput {
+        deltas: vec![ZSet::consolidate(2, &base, l()).unwrap()],
+    })
+    .unwrap();
+    let mut ckpt = DurableCheckpointer::new();
+    ckpt.checkpoint(&e, &store, limits).unwrap();
+    e.tick(&TickInput {
+        deltas: vec![set(2, &[(&[0, 0], 1)])],
+    })
+    .unwrap();
+    let report = ckpt.checkpoint(&e, &store, limits).unwrap();
+    let mut back = c.clone().executor();
+    let restored = DurableCheckpointer::new()
+        .restore(&mut back, &store, &report.manifest, limits)
+        .unwrap();
+    assert_eq!(back.materialized(), e.materialized());
+    assert_eq!(restored.spines[0].len(), 1);
 }

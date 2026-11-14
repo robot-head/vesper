@@ -96,17 +96,36 @@ not a general untrusted Arrow validator or a Grammar (§38) implementation.
 (`opentelemetry.proto.experimental.arrow.v1`), written as `prost` derives with
 the upstream field numbers, so no `protoc` runs at build time.
 
-**Encoding.** `TraceEncoder::encode_spans(&[OtapSpan])` produces one
-`BatchArrowRecords` with a `SPANS` payload and, when any span has attributes, a
-`SPAN_ATTRS` payload. `MetricsEncoder::encode_histograms` produces
-`UNIVARIATE_METRICS` + `HISTOGRAM_DATA_POINTS` from `FastLogHistogram`s
-(explicit bounds = each Beacon bin's inclusive upper end as `f64`, exact below
-2^53; exemplars are not exported). Column names and types are a subset of the
-upstream Go schemas (`TracesSchema`, `StatusDT`, `AttrsSchema16`,
-`MetricsSchema`, `HistogramDataPointSchema`); a test checks every emitted
-column against a transcription of those tables. Ids are absolute, marked
-`encoding=plain` in field metadata (upstream defaults to delta encodings).
+**Encoding.** `TraceEncoder::encode(&[ResourceGroup<OtapSpan>])` produces one
+`BatchArrowRecords` with a `SPANS` payload plus, when non-empty,
+`RESOURCE_ATTRS`, `SCOPE_ATTRS`, `SPAN_ATTRS`, `SPAN_EVENTS`(+`_ATTRS`) and
+`SPAN_LINKS`(+`_ATTRS`). Spans carry resource and scope (name, version,
+schema URL, attributes, dropped counts), kind, W3C `trace_state` (validated by
+`TraceState::parse`), events, links and dropped attribute/event/link counts.
+`MetricsEncoder::encode` produces `UNIVARIATE_METRICS` +
+`HISTOGRAM_DATA_POINTS` (+`HISTOGRAM_DP_ATTRS`) from `FastLogHistogram`s with
+`sum`, `min` and `max` and per-point attributes; consecutive points with the
+same name and unit share one metric row. `LogsEncoder::encode` produces `LOGS`
+(+`LOG_ATTRS`) with severity, body (`AnyValue` struct), trace/span ids, flags
+and event name. `encode_spans`/`encode_histograms`/`encode_logs` wrap a flat
+slice in one default resource and scope. Explicit bounds are each Beacon bin's
+inclusive upper end as `f64`, exact below 2^53; exemplars are not exported.
+Column names and types follow the upstream Go schemas (`TracesSchema`,
+`EventsSchema`, `LinksSchema`, `AttrsSchema16/32`, `MetricsSchema`,
+`HistogramDataPointSchema`, `LogsSchema`); a test checks every emitted column
+against a transcription of those tables.
 
+* **Id encodings.** The upstream Go decoder ignores the `encoding` field
+  metadata and always applies transport encodings, so the default
+  `IdEncoding::Transport` emits them: delta `id` columns (main records,
+  `resource.id`, `scope.id`, events, links, data points), row-wise delta
+  `parent_id` for data points, and quasi-delta `parent_id` for attributes
+  (delta while key and value repeat), events (while the name repeats) and
+  links (while the trace id repeats). `IdEncoding::Plain` keeps absolute ids
+  marked `encoding=plain`; the decoder reads both.
+* **Splitting.** `encode_split` (and `*_split`) bisects the input until every
+  batch fits the row limit, the 16-bit attribute `parent_id` space and the
+  dictionary key widths, returning several batches in order.
 * **Stream ids.** Each payload type has one long-lived IPC stream named by its
   `schema_id` (`spans:0`, `span_attrs:1`, ...). Its first payload carries the
   schema message; later ones carry only new messages.
@@ -117,8 +136,9 @@ column against a transcription of those tables. Ids are absolute, marked
 * **Schema reset.** A stream restarts under a new `schema_id` (schema and full
   dictionaries again) when a dictionary would exceed its key width (256 for
   `u8` keys, 65,536 for `u16`) or `EncoderConfig::max_dictionary_entries`, on
-  `reset()`, and after any encoding error. A batch that alone overflows a
-  dictionary is `EncodeError::DictionaryOverflow`.
+  `reset()`, and after a non-capacity encoding error. Capacity errors
+  (`RowLimit`, `AttributeRowLimit`, `RelatedRowLimit`, `DictionaryOverflow`)
+  are checked before any state changes and leave the streams as they were.
 * Unsigned Beacon values that do not fit OTLP's signed columns (times above
   `i64::MAX`, counts above `i64::MAX`) are `EncodeError::ValueOutOfRange`.
 
@@ -135,14 +155,45 @@ state.
 
 **Transport.** `BatchTransport::exchange` sends a batch and returns its
 `BatchStatus`. `FramedTransport<S: Read + Write>` uses gRPC's length-prefixed
-message framing (flag byte, big-endian u32 length, protobuf) over any byte
-stream, and `OtapReceiver::serve` is the matching server. This is **not**
-HTTP/2 gRPC and does not talk to an OTel collector directly. `TraceExporter`
-and `MetricsExporter` reset their encoder after a failed send or a non-OK
-status; `TraceExporter::export_ring` removes ring records only after an OK
-status.
+message framing over any byte stream, and `OtapReceiver::serve` is the
+matching server. `TraceExporter` and `MetricsExporter` reset their encoder
+after a failed send or a non-OK status; `TraceExporter::export_ring` removes
+ring records only after an OK status.
 
-**PII redaction (§22.4).** `SpanAttributes::insert` accepts only
+## gRPC (`vesper_beacon_arrow::grpc`, feature `grpc`, on by default)
+
+HTTP/2 gRPC over `tonic` 0.14.9 (plaintext; no TLS, compression or auth),
+with hand-written service stubs under the upstream names:
+
+* **OTAP.** `ArrowTracesService/ArrowTraces`, `ArrowMetricsService/ArrowMetrics`
+  and `ArrowLogsService/ArrowLogs`, bidirectional `BatchArrowRecords` →
+  `BatchStatus`. `OtapStream` pipelines batches with at most `max_in_flight`
+  unacknowledged and waits for acknowledgements when the window is full
+  (back-pressure). `GrpcTransport` is a blocking `BatchTransport` for the
+  exporters; it reopens the stream after any failure or non-OK status.
+  `OtapService` + `serve_otap` decode each stream with its own decoder and
+  admit decoded batches into a bounded queue: `INVALID_ARGUMENT` for a batch
+  the decoder rejects, `RESOURCE_EXHAUSTED` (retryable) when the queue stays
+  full for `admission_timeout`.
+* **OTLP.** `otlp::{traces,metrics,logs}_request` build the collector export
+  requests from the same grouped data and exported attributes (`otlp::proto`
+  holds hand-written `prost` messages). `OtlpClient`/`BlockingOtlpClient`
+  call `TraceService/Export`, `MetricsService/Export` and `LogsService/Export`;
+  `OtlpService` + `serve_otlp` receive them with the same admission control.
+
+`tests/grpc.rs` runs all of this over 127.0.0.1 in CI. `tests/collector.rs`
+runs against a real OpenTelemetry Collector when `VESPER_OTELCOL` names an
+`otelcol-contrib` binary (it bundles the `otelarrow` receiver and exporter):
+Beacon OTAP and OTLP into the collector, and the collector's `otelarrow`
+exporter into Beacon's server. Without the variable it is skipped. Both
+directions passed against OpenTelemetry Collector Contrib 0.165.0. Beacon
+has no compression, so a collector exporting to Beacon needs
+`compression: none` and `arrow: {payload_compression: none}`. The server
+keeps each batch's HPACK `headers` raw and undecoded
+(`HeaderPolicy::KeepRaw`); the plain decoder rejects them by default.
+
+**PII redaction (§22.4).** `SpanAttributes::insert` (alias `Attributes`, used for resource, scope,
+event, link, data-point and log attributes and log bodies) accepts only
 `vesper_beacon::Telemetrable` values: scalars, `&'static str` vocabulary and
 `Redacted`. `Secret<T>`, `Pii<T>` and runtime strings are not `Telemetrable`
 (compile-fail doctests). `insert_pii(key, value, &PiiPolicy)` consumes a

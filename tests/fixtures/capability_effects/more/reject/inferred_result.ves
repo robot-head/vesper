@@ -1,0 +1,27 @@
+// expect: E0702
+// The result of a call with a secret argument stays secret in the caller,
+// whatever the callee's declared result type.
+copy struct Secret[T] {
+    value: T,
+}
+
+fn mix(a: u64) -> u64 eff [ConstTime] {
+    wrapping_add(a, 1)
+}
+
+fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    let m = mix(value);
+    if m == 0 {
+        s
+    } else {
+        s
+    }
+}
+
+fn main() -> u64 {
+    0
+}

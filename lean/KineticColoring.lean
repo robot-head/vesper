@@ -1,7 +1,7 @@
 /-!
 # Vesper Kinetic: greedy colouring disjointness and Morton interleaving
 
-Model identifier: `vesper.kinetic.coloring-morton-model/2`.
+Model identifier: `vesper.kinetic.coloring-morton-model/3`.
 
 This file models two pure algorithms of `crates/vesper-kinetic` over `Nat`:
 
@@ -16,6 +16,13 @@ This file models two pure algorithms of `crates/vesper-kinetic` over `Nat`:
   lowest free bit of the two bodies' colour masks, which is the same choice;
   the Rust test feeds the Rust visiting order to the executable model and
   compares colours.
+* `colorAllSets cs` is the same greedy colouring of constraints given as
+  lists of bodies of any length: the k-body batches of the solvers (ground
+  contacts touch one body, contacts and joints two, soft-body tetrahedral
+  volume constraints four). The Rust `MultiColorer::color` visits its
+  constraints in its sorted order and takes the lowest free bit of the
+  bodies' masks; the Rust test feeds that visiting order to the model and
+  compares colours.
 * `interleave n x y z` is the bit-by-bit Morton code over `n` bit positions
   (bit `3i` from `x`, `3i+1` from `y`, `3i+2` from `z`), and `deinterleaveX`,
   `deinterleaveY`, `deinterleaveZ` extract the axes again.
@@ -29,6 +36,12 @@ It proves, about these Lean definitions:
 * `colorAll_constraints`: colouring keeps the constraints, in order;
 * `same_color_constraints_disjoint_bodies`: the index form, for positions
   `i < j` of the coloured list;
+* `colorAllSets_pairwise_disjoint`, `colorAllSets_constraints` and
+  `same_color_sets_disjoint_bodies`: the same three facts for batches of any
+  arity (constraints of one colour touch pairwise disjoint body lists);
+* `colorAll_eq_colorAllSets`: colouring pairs gives the colours that
+  colouring their two-element body lists gives, so joints and contacts
+  coloured as two-body batches agree with the pair model;
 * `morton_deinterleave_interleave` and `morton_10bit_roundtrip` (§36.4
   Bit-Exact 10-Bit 3D Morton Interleaving): deinterleaving recovers each axis
   modulo `2^n`, hence exactly for 10-bit inputs; `morton_10bit_injective`:
@@ -56,7 +69,7 @@ not a refinement proof).
 
 namespace Vesper.KineticColoring
 
-def modelId : String := "vesper.kinetic.coloring-morton-model/2"
+def modelId : String := "vesper.kinetic.coloring-morton-model/3"
 def modelClaim : String :=
   "Lean model of greedy colouring and Morton codes; proofs cover the model, not Rust"
 
@@ -174,6 +187,131 @@ theorem same_color_constraints_disjoint_bodies (cs : List Constraint)
     Disjoint ((colorAll cs)[i]'(Nat.lt_trans hij hj)).1 ((colorAll cs)[j]'hj).1 :=
   (List.pairwise_iff_getElem.mp (colorAll_pairwise_disjoint cs) i j
     (Nat.lt_trans hij hj) hj hij) hcol
+
+/-! ## k-body constraint batches (joints, contacts, soft-body tetrahedra)
+
+A batch constraint is the list of bodies it touches: one body (a ground
+contact), two (a contact or a joint), or four (a tetrahedral volume
+constraint). The greedy colouring is the same choice over lists. -/
+
+/-- A constraint touching the bodies in the list. -/
+abbrev SetConstraint := List Nat
+
+/-- Two body lists share a body. -/
+def sharesSet (p q : SetConstraint) : Bool := p.any (fun x => q.contains x)
+
+/-- No body of `p` is a body of `q`. -/
+def DisjointSet (p q : SetConstraint) : Prop := ∀ x, x ∈ p → x ∉ q
+
+theorem disjointSet_of_not_sharesSet {p q : SetConstraint} (h : sharesSet p q = false) :
+    DisjointSet p q := by
+  intro x hx hq
+  have : sharesSet p q = true := by
+    unfold sharesSet
+    rw [List.any_eq_true]
+    exact ⟨x, hx, List.elem_iff.mpr hq⟩
+  rw [h] at this
+  exact Bool.false_ne_true this
+
+def usedBySet (acc : List (SetConstraint × Nat)) (k : SetConstraint) : List Nat :=
+  (acc.filter (fun x => sharesSet x.1 k)).map (·.2)
+
+def stepSet (acc : List (SetConstraint × Nat)) (k : SetConstraint) :
+    List (SetConstraint × Nat) :=
+  acc ++ [(k, firstFree (usedBySet acc k))]
+
+def colorAllSets (cs : List SetConstraint) : List (SetConstraint × Nat) :=
+  cs.foldl stepSet []
+
+def OkSet (x y : SetConstraint × Nat) : Prop := x.2 = y.2 → DisjointSet x.1 y.1
+
+theorem stepSet_pairwise (acc : List (SetConstraint × Nat)) (k : SetConstraint)
+    (h : acc.Pairwise OkSet) : (stepSet acc k).Pairwise OkSet := by
+  unfold stepSet
+  rw [List.pairwise_append]
+  refine ⟨h, List.pairwise_singleton _ _, ?_⟩
+  intro x hx y hy
+  simp only [List.mem_singleton] at hy
+  subst hy
+  intro hc
+  cases hs : sharesSet x.1 k with
+  | false => exact disjointSet_of_not_sharesSet hs
+  | true =>
+    exfalso
+    apply firstFree_not_mem (usedBySet acc k)
+    simp only [] at hc
+    rw [← hc]
+    unfold usedBySet
+    exact List.mem_map.mpr ⟨x, List.mem_filter.mpr ⟨hx, hs⟩, rfl⟩
+
+theorem foldl_stepSet_pairwise :
+    ∀ (cs : List SetConstraint) (acc : List (SetConstraint × Nat)),
+      acc.Pairwise OkSet → (cs.foldl stepSet acc).Pairwise OkSet
+  | [], _, h => h
+  | k :: cs, acc, h => foldl_stepSet_pairwise cs (stepSet acc k) (stepSet_pairwise acc k h)
+
+/-- Same colour implies disjoint body lists, for constraints of any arity. -/
+theorem colorAllSets_pairwise_disjoint (cs : List SetConstraint) :
+    (colorAllSets cs).Pairwise OkSet :=
+  foldl_stepSet_pairwise cs [] List.Pairwise.nil
+
+theorem foldl_stepSet_fst :
+    ∀ (cs : List SetConstraint) (acc : List (SetConstraint × Nat)),
+      (cs.foldl stepSet acc).map Prod.fst = acc.map Prod.fst ++ cs
+  | [], acc => by simp
+  | k :: cs, acc => by
+    rw [List.foldl_cons, foldl_stepSet_fst cs (stepSet acc k)]
+    simp [stepSet]
+
+theorem colorAllSets_constraints (cs : List SetConstraint) :
+    (colorAllSets cs).map Prod.fst = cs := by
+  simpa using foldl_stepSet_fst cs []
+
+/-- Index form for batches of any arity. -/
+theorem same_color_sets_disjoint_bodies (cs : List SetConstraint)
+    (i j : Nat) (hij : i < j) (hj : j < (colorAllSets cs).length)
+    (hcol : ((colorAllSets cs)[i]'(Nat.lt_trans hij hj)).2 = ((colorAllSets cs)[j]'hj).2) :
+    DisjointSet ((colorAllSets cs)[i]'(Nat.lt_trans hij hj)).1 ((colorAllSets cs)[j]'hj).1 :=
+  (List.pairwise_iff_getElem.mp (colorAllSets_pairwise_disjoint cs) i j
+    (Nat.lt_trans hij hj) hj hij) hcol
+
+/-- A pair constraint as a body list. -/
+def pairSet (p : Constraint) : SetConstraint := [p.1, p.2]
+
+theorem shares_eq_sharesSet (p q : Constraint) :
+    shares p q = sharesSet (pairSet p) (pairSet q) := by
+  simp only [shares, sharesSet, pairSet, List.any, List.contains, List.elem]
+  cases p.1 == q.1 <;> cases p.1 == q.2 <;> cases p.2 == q.1 <;> cases p.2 == q.2 <;> rfl
+
+theorem usedBy_eq_usedBySet :
+    ∀ (acc : List (Constraint × Nat)) (k : Constraint),
+      usedBy acc k = usedBySet (acc.map (fun x => (pairSet x.1, x.2))) (pairSet k)
+  | [], _ => rfl
+  | x :: acc, k => by
+    have ih := usedBy_eq_usedBySet acc k
+    unfold usedBy usedBySet at *
+    simp only [List.map_cons, List.filter_cons]
+    rw [← shares_eq_sharesSet]
+    split <;> simp [ih]
+
+theorem foldl_step_eq_stepSet :
+    ∀ (cs : List Constraint) (acc : List (Constraint × Nat)),
+      (cs.foldl step acc).map (fun x => (pairSet x.1, x.2)) =
+        (cs.map pairSet).foldl stepSet (acc.map (fun x => (pairSet x.1, x.2)))
+  | [], _ => rfl
+  | k :: cs, acc => by
+    simp only [List.foldl_cons, List.map_cons]
+    rw [foldl_step_eq_stepSet cs (step acc k)]
+    congr 1
+    simp [step, stepSet, usedBy_eq_usedBySet]
+
+/-- The pair colouring is the batch colouring of the pairs' body lists:
+joints and contacts coloured as two-body batches get the colours the
+original model gives them. -/
+theorem colorAll_eq_colorAllSets (cs : List Constraint) :
+    (colorAll cs).map (·.2) = (colorAllSets (cs.map pairSet)).map (·.2) := by
+  have h := congrArg (List.map Prod.snd) (foldl_step_eq_stepSet cs [])
+  simpa [colorAll, colorAllSets, List.map_map, Function.comp_def] using h
 
 /-! ## Morton interleaving -/
 
@@ -350,6 +488,10 @@ theorem augKey_injective {c1 c2 i1 i2 : Nat} (h1 : i1 < 4294967296) (h2 : i2 < 4
 #print axioms colorAll_pairwise_disjoint
 #print axioms colorAll_constraints
 #print axioms same_color_constraints_disjoint_bodies
+#print axioms colorAllSets_pairwise_disjoint
+#print axioms colorAllSets_constraints
+#print axioms same_color_sets_disjoint_bodies
+#print axioms colorAll_eq_colorAllSets
 #print axioms morton_deinterleave_interleave
 #print axioms morton_10bit_roundtrip
 #print axioms morton_10bit_injective

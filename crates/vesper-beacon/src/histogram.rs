@@ -18,13 +18,17 @@ impl BinRange {
         self.lower
     }
 }
-/// 7,944 bytes: two 496-element u64 arrays plus one u64 total (no heap).
+/// 7,984 bytes: two 496-element u64 arrays, one u64 total, an exact u128
+/// sum and the u64 minimum and maximum (no heap).
 /// Exemplar IDs are caller-supplied opaque nonzero span IDs, not context owners.
 #[derive(Debug)]
 pub struct FastLogHistogram {
     buckets: [u64; HISTOGRAM_BINS],
     exemplars: [Option<core::num::NonZeroU64>; HISTOGRAM_BINS],
     total_count: u64,
+    sum: u128,
+    min: u64,
+    max: u64,
 }
 impl Default for FastLogHistogram {
     fn default() -> Self {
@@ -32,6 +36,9 @@ impl Default for FastLogHistogram {
             buckets: [0; HISTOGRAM_BINS],
             exemplars: [None; HISTOGRAM_BINS],
             total_count: 0,
+            sum: 0,
+            min: u64::MAX,
+            max: 0,
         }
     }
 }
@@ -80,7 +87,31 @@ impl FastLogHistogram {
         self.buckets[index] = count;
         self.exemplars[index] = Some(span_id);
         self.total_count = total;
+        // At most u64::MAX observations of at most u64::MAX each: fits u128.
+        self.sum += u128::from(value);
+        self.min = self.min.min(value);
+        self.max = self.max.max(value);
         Ok(())
+    }
+    /// Exact sum of all recorded values.
+    pub const fn sum(&self) -> u128 {
+        self.sum
+    }
+    /// Smallest recorded value, if any.
+    pub const fn min(&self) -> Option<u64> {
+        if self.total_count == 0 {
+            None
+        } else {
+            Some(self.min)
+        }
+    }
+    /// Largest recorded value, if any.
+    pub const fn max(&self) -> Option<u64> {
+        if self.total_count == 0 {
+            None
+        } else {
+            Some(self.max)
+        }
     }
     pub const fn total_count(&self) -> u64 {
         self.total_count
@@ -98,7 +129,7 @@ mod tests {
     use super::*;
     #[test]
     fn all_ranges_partition_u64_and_bound_error() {
-        assert_eq!(FastLogHistogram::FOOTPRINT_BYTES, 7944);
+        assert_eq!(FastLogHistogram::FOOTPRINT_BYTES, 7984);
         let mut next = 0_u128;
         for i in 0..HISTOGRAM_BINS {
             let r = FastLogHistogram::bin_range(i).unwrap();
@@ -124,6 +155,10 @@ mod tests {
         let mut h = FastLogHistogram::default();
         h.record_with_exemplar(u64::MAX, id).unwrap();
         assert_eq!(h.exemplar(495), Some(id));
+        assert_eq!(
+            (h.sum(), h.min(), h.max()),
+            (u128::from(u64::MAX), Some(u64::MAX), Some(u64::MAX))
+        );
         h.total_count = u64::MAX;
         assert_eq!(
             h.record_with_exemplar(0, id),
@@ -139,5 +174,7 @@ mod tests {
         );
         assert_eq!(h.total_count(), 0);
         assert_eq!(h.exemplar(1), None);
+        // Failed records leave sum, min and max unchanged too.
+        assert_eq!(h.sum(), u128::from(u64::MAX));
     }
 }

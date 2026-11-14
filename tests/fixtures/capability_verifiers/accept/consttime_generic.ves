@@ -1,6 +1,6 @@
-// expect: const-time/capability.generic-unsupported
-// A generic ConstTime function is source-accepted, but the backend verifier
-// needs concrete parameter layouts, so the build rejects it explicitly.
+// A generic ConstTime function is checked by the backend verifier at each
+// emitted instance, with that instance's concrete parameter layouts (wave
+// seven, lane 23; wave six rejected it as capability.generic-unsupported).
 copy struct Secret[T] {
     value: T,
 }

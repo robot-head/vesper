@@ -28,7 +28,8 @@
 //!   scope, that completion (ECANCELED, a short read, or a full read that won
 //!   the race) recovers the file and buffer and resumes `Cancelled`. A task
 //!   created with [`NativeTask::new`] keeps the v1 behaviour: the completion
-//!   is delivered as I/O (ECANCELED resumes `Error(125)`).
+//!   is delivered as I/O (the driver's cancellation code, [`cancelled_code`],
+//!   resumes `Error(code)`: 125 on Linux, 89 on macOS, 995 on Windows).
 //! * If the cancellation edge parks again, the task stays scheduled (yield
 //!   or I/O) and is driven to its real exit; it is never reported complete
 //!   early.
@@ -53,7 +54,24 @@ pub const EFAULT: u64 = 14;
 pub const EINVAL: u64 = 22;
 pub const ENOSYS: u64 = 38;
 pub const EIO: u64 = 5;
+/// Linux `ECANCELED`. The code a host driver actually reports for a
+/// cancelled request is [`cancelled_code`] (89 on macOS, 995 =
+/// `ERROR_OPERATION_ABORTED` on Windows).
 pub const ECANCELED: i32 = 125;
+
+/// The OS error code this host's Pulse drivers complete a cancelled request
+/// with; an unscoped task resumes its error edge with it.
+pub fn cancelled_code() -> i32 {
+    vesper_pulse::driver::cancelled_error()
+        .raw_os_error()
+        .unwrap_or(ECANCELED)
+}
+
+/// A readable file that is always at end of file: `/dev/null` on Unix,
+/// `NUL` on Windows.
+pub fn null_file() -> io::Result<File> {
+    File::open(if cfg!(windows) { "NUL" } else { "/dev/null" })
+}
 /// Largest read a prototype task may request.
 pub const MAX_READ: u64 = 4096;
 
