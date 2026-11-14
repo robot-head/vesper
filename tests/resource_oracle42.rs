@@ -813,48 +813,18 @@ fn changed_executable_object_is_refused_before_any_model_response_or_evidence() 
     );
 }
 
-fn compile_negative_peer(root: &Path) -> PathBuf {
-    use std::{
-        process::{Command, Stdio},
-        thread,
-        time::{Duration, Instant},
-    };
-    let executable = root.join(format!(
-        "resource-oracle42-negative-peer{}",
-        std::env::consts::EXE_SUFFIX
-    ));
-    let source = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/resource_oracle42/fault_peer.rs");
-    let out = root.join("rustc.stdout");
-    let error = root.join("rustc.stderr");
-    let mut command = Command::new(std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()));
-    command
-        .arg("--edition=2024")
-        .arg(source)
-        .arg("-o")
-        .arg(&executable)
-        .stdout(Stdio::from(fs::File::create(&out).unwrap()))
-        .stderr(Stdio::from(fs::File::create(&error).unwrap()));
-    let mut child = command
-        .spawn()
-        .expect("required rustc for std-only negative transport fixture");
-    let started = Instant::now();
-    let status = loop {
-        if started.elapsed() > Duration::from_secs(30)
-            || fs::metadata(&out).unwrap().len() > 65_536
-            || fs::metadata(&error).unwrap().len() > 65_536
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            panic!("negative-peer rustc exceeded finite time/output bound");
+fn negative_peer() -> (std::ffi::OsString, PathBuf) {
+    let interpreter = std::env::var_os("PYTHON").unwrap_or_else(|| {
+        if cfg!(windows) {
+            "python".into()
+        } else {
+            "python3".into()
         }
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        thread::sleep(Duration::from_millis(10));
-    };
-    assert!(status.success(), "{}", fs::read_to_string(error).unwrap());
-    executable
+    });
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/resource_oracle42/fault_peer.py");
+    assert!(script.is_file(), "fixed negative transport fixture exists");
+    (interpreter, script)
 }
 
 #[test]
@@ -864,8 +834,7 @@ fn hostile_peers_use_production_process_and_cannot_return_mathematical_evidence(
         process::Command,
         time::{Duration, Instant},
     };
-    let directory = Directory::new();
-    let binary = compile_negative_peer(&directory.0);
+    let (interpreter, peer) = negative_peer();
     for (kind, expected, requests) in [
         ("wrong_ready", HarnessErrorKind::Protocol, vec![]),
         ("stdout_noise", HarnessErrorKind::Protocol, vec![]),
@@ -912,8 +881,8 @@ fn hostile_peers_use_production_process_and_cannot_return_mathematical_evidence(
         ("exit_failure", HarnessErrorKind::Crash, vec![]),
         ("no_bye", HarnessErrorKind::Protocol, vec![]),
     ] {
-        let mut command = Command::new(&binary);
-        command.arg(kind);
+        let mut command = Command::new(&interpreter);
+        command.arg(&peer).arg(kind);
         let limits = HarnessLimits {
             request_timeout_ms: 300,
             shutdown_timeout_ms: 300,
@@ -933,7 +902,7 @@ fn hostile_peers_use_production_process_and_cannot_return_mathematical_evidence(
         let script = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/resource_oracle42/bye_eof_stall.sh");
         let mut command = Command::new("sh");
-        command.arg(script).arg(&binary);
+        command.arg(script).arg(&interpreter).arg(&peer);
         let started = Instant::now();
         let cleanup_failures = process::cleanup_failures();
         let error = process::test_transport_failure(
@@ -973,8 +942,8 @@ fn hostile_peers_use_production_process_and_cannot_return_mathematical_evidence(
     assert_eq!(tree.len(), 2047);
     blocked.input_values = vec![tree; 64];
     assert!(protocol::encode_request(0, &blocked).unwrap().len() > 262_144);
-    let mut command = Command::new(binary);
-    command.arg("blocked_stdin");
+    let mut command = Command::new(interpreter);
+    command.arg(peer).arg("blocked_stdin");
     let error = process::test_transport_failure(
         command,
         &[blocked],
