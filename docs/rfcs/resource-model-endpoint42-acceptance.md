@@ -1,5 +1,12 @@
 # Finite resource-model endpoint acceptance (#482)
 
+This report records the initial endpoint checkpoint, which used a Rust
+negative-peer fixture. The current test-only peer uses the existing CI
+Python prerequisite and requires no runtime Rust compiler; see the
+[portability follow-up](resource-model-endpoint42-portability.md) for its
+reproduction, current fixture and fresh validation. Production Lean/model
+and protocol/supervisor sources are unchanged by that follow-up.
+
 Genuine integrated endpoint acceptance passed on
 `e048f411e1e33543387a806fd1ddb8c528dddf6f`: ten binary protocol tests and
 eighteen integration tests, with no failed or ignored tests. The integration

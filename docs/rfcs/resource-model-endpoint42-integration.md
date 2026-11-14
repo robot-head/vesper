@@ -53,6 +53,13 @@ runtime/compiler/native providers, Cargo files and workflows are unchanged.
 
 ## Validation status
 
+The [transport portability follow-up](resource-model-endpoint42-portability.md)
+replaces the initial Rust negative-peer fixture with a fixed Python peer.
+It removes an undeclared runtime Rust compiler dependency without changing
+the production endpoint, model or observation protocol. The original
+checkpoint below remains historical evidence; the follow-up records fresh
+tests and actual launcher controls with no `rustc` on PATH.
+
 Component reports preserve their genuine worker and production-supervisor
 probes, standalone codec checks, and exact source/artifact associations:
 [worker](resource-model-endpoint42-worker.md),
