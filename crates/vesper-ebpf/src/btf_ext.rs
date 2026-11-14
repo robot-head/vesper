@@ -96,12 +96,24 @@ impl Types<'_> {
                 members,
             } => {
                 let tys: Vec<u32> = members.iter().map(|m| self.local(&m.ty)).collect();
-                let ms: Vec<(&str, u32, u32)> = members
-                    .iter()
-                    .zip(&tys)
-                    .map(|(m, &t)| (m.name.as_str(), t, m.offset * 8))
-                    .collect();
-                self.b.structure(name, *union, *size, &ms)
+                if !*union && members.iter().any(|m| m.bitfield.is_some()) {
+                    let ms: Vec<(&str, u32, u32, u32)> = members
+                        .iter()
+                        .zip(&tys)
+                        .map(|(m, &t)| match m.bitfield {
+                            Some(bf) => (m.name.as_str(), t, bf.bit_offset, bf.bits),
+                            None => (m.name.as_str(), t, m.offset * 8, 0),
+                        })
+                        .collect();
+                    self.b.structure_bits(name, *size, &ms)
+                } else {
+                    let ms: Vec<(&str, u32, u32)> = members
+                        .iter()
+                        .zip(&tys)
+                        .map(|(m, &t)| (m.name.as_str(), t, m.offset * 8))
+                        .collect();
+                    self.b.structure(name, *union, *size, &ms)
+                }
             }
             LocalType::Enum { name, size, values } => {
                 let vs: Vec<(&str, i64)> = values.iter().map(|(n, v)| (n.as_str(), *v)).collect();
@@ -232,6 +244,17 @@ pub fn build(prog: &Program, section: &str) -> Result<ObjectBtf, BtfError> {
         line_records: lines,
         core_records: core,
     })
+}
+
+/// The object-BTF type id of each CO-RE relocation's root type, in
+/// [`Program::core_relos`] order: what `TYPE_ID_LOCAL` evaluates to and
+/// what a `TYPE_ID_*` instruction holds before relocation.
+pub fn local_root_ids(prog: &Program) -> Result<Vec<u32>, BtfError> {
+    Ok(build(prog, "xdp")?
+        .core_records
+        .iter()
+        .map(|r| r[1])
+        .collect())
 }
 
 /// What [`parse_ext`] reads back from `.BTF.ext` for one section.
@@ -397,13 +420,26 @@ fn local_depth(btf: &Btf, id: u32, depth: u32) -> Result<LocalType, BtfError> {
         } => {
             let mut ms = Vec::new();
             for m in members {
-                if m.bitfield_size != 0 || m.bit_offset % 8 != 0 {
-                    return Err(bad("bitfield member in a CO-RE local type"));
+                let bitfield = (m.bitfield_size != 0 || m.bit_offset % 8 != 0).then_some(
+                    crate::core::Bitfield {
+                        bit_offset: m.bit_offset,
+                        bits: if m.bitfield_size != 0 {
+                            m.bitfield_size
+                        } else {
+                            // a non-kind_flag member at a bit offset: the
+                            // whole underlying integer
+                            btf.size_of(m.ty).map_or(0, |s| s as u32 * 8)
+                        },
+                    },
+                );
+                if bitfield.is_some_and(|b| b.bits == 0 || b.bits > 64) {
+                    return Err(bad("bad bitfield member in a CO-RE local type"));
                 }
                 ms.push(LocalMember {
                     name: btf.name(m.name).to_owned(),
                     ty: local_depth(btf, m.ty, depth + 1)?,
                     offset: m.bit_offset / 8,
+                    bitfield,
                 });
             }
             LocalType::Struct {

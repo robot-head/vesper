@@ -177,14 +177,24 @@ fn vmlinux() -> Result<&'static crate::btf::Btf, LoadError> {
         .map_err(|e| LoadError::Invalid(e.clone()))
 }
 
+/// The host's module BTF, read once (empty when unreadable: modules are
+/// searched only for types vmlinux lacks).
+fn host_modules(vmlinux: &crate::btf::Btf) -> &'static [(String, crate::btf::Btf)] {
+    static MODS: std::sync::OnceLock<Vec<(String, crate::btf::Btf)>> = std::sync::OnceLock::new();
+    MODS.get_or_init(|| crate::btf::host_modules(vmlinux).unwrap_or_default())
+}
+
 /// What a loader does before `BPF_PROG_LOAD`: CO-RE relocations and kfunc
-/// BTF ids against the running kernel's BTF.
+/// BTF ids against the running kernel's BTF (vmlinux, then module BTF
+/// for root types vmlinux lacks, as libbpf searches).
 pub fn prepare(prog: &Program) -> Result<Program, LoadError> {
     if prog.core_relos.is_empty() && prog.kfuncs.is_empty() {
         return Ok(prog.clone());
     }
     let btf = vmlinux()?;
-    let p = crate::core::apply(prog, btf).map_err(|e| LoadError::Invalid(e.to_string()))?;
+    let modules: Vec<&crate::btf::Btf> = host_modules(btf).iter().map(|(_, m)| m).collect();
+    let p = crate::core::apply_with_modules(prog, btf, &modules)
+        .map_err(|e| LoadError::Invalid(e.to_string()))?;
     crate::btf::resolve_kfuncs(&p, btf).map_err(|e| LoadError::Invalid(e.to_string()))
 }
 
