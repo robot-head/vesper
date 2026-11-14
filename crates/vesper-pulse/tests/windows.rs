@@ -9,15 +9,20 @@ use std::{
     net::{TcpListener, TcpStream},
     os::windows::{
         fs::OpenOptionsExt,
-        io::{FromRawHandle, FromRawSocket, IntoRawHandle, IntoRawSocket, RawHandle, RawSocket},
+        io::{
+            AsRawHandle, FromRawHandle, FromRawSocket, IntoRawHandle, IntoRawSocket, OwnedHandle,
+            RawHandle, RawSocket,
+        },
     },
+    process::{Child, Command, Stdio},
     sync::mpsc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use vesper_pulse::driver::{CompletionDriver, Operation, Request, is_cancelled};
 use vesper_pulse::iocp::{IocpDriver, rebinds_reused_handles};
 use vesper_pulse::pool::{Pool, PoolConfig};
 use vesper_pulse::scheduler::{Event, Resume, Scheduler, Step};
+use windows_sys::Win32::System::IO::CreateIoCompletionPort;
 
 const FILE_FLAG_OVERLAPPED: u32 = 0x4000_0000;
 
@@ -268,6 +273,95 @@ fn read_once(d: &mut IocpDriver<u8>, f: File) -> io::Result<File> {
     }
 }
 
+const FOREIGN_CHILD_ENV: &str = "VESPER_PULSE_FOREIGN_IOCP_CHILD";
+const FOREIGN_CHILD_TEST: &str = "foreign_bound_handle_is_rejected_in_fresh_process";
+const FOREIGN_CHILD_SUCCESS: i32 = 73;
+
+fn foreign_binding_case() {
+    let _guard = watchdog("isolated foreign completion port");
+    let (path, file) = overlapped_temp("foreign");
+    let file_handle = file.as_raw_handle();
+    // SAFETY: file is live and overlapped; a null existing port creates a new
+    // native port and associates this file with it, without any Pulse binding.
+    let port = unsafe { CreateIoCompletionPort(file_handle, std::ptr::null_mut(), 0, 1) };
+    assert!(
+        !port.is_null(),
+        "create foreign completion port: {}",
+        io::Error::last_os_error()
+    );
+    // SAFETY: the successful call returned a fresh port owned by this fixture.
+    let foreign_port = unsafe { OwnedHandle::from_raw_handle(port) };
+    // This fresh child has never submitted anything through Pulse, so no
+    // numeric handle value can have a prior entry in its process-wide table.
+    let mut driver = IocpDriver::<u8>::new(4).unwrap();
+    let (error, rejected) = driver
+        .submit(request(file, Operation::Read, vec![0; 5], 0))
+        .expect_err("a never-tracked foreign binding must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+    assert_eq!(
+        error.to_string(),
+        "handle is bound to another completion port"
+    );
+    assert_eq!(rejected.file.as_raw_handle(), file_handle);
+    assert_eq!(rejected.buffer, vec![0; 5]);
+    assert_eq!(driver.pending(), 0);
+    drop(rejected);
+    drop(driver);
+    drop(foreign_port);
+    std::fs::remove_file(path).unwrap();
+}
+
+fn fail_foreign_child(child: &mut Child, reason: &str) -> ! {
+    let killed = child.kill();
+    let reaped = child.wait();
+    panic!("{reason}; kill: {killed:?}; reap: {reaped:?}");
+}
+
+#[test]
+fn foreign_bound_handle_is_rejected_in_fresh_process() {
+    if let Some(parent) = std::env::var_os(FOREIGN_CHILD_ENV) {
+        let parent: u32 = parent.to_str().unwrap().parse().unwrap();
+        assert_ne!(parent, std::process::id(), "fixture requires a fresh child");
+        foreign_binding_case();
+        // The private fixture has returned: its files, driver, port and
+        // watchdog token have been dropped before this success receipt.
+        std::process::exit(FOREIGN_CHILD_SUCCESS);
+    }
+
+    let _guard = watchdog("foreign completion port parent");
+    let started = Instant::now();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            FOREIGN_CHILD_TEST,
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env(FOREIGN_CHILD_ENV, std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("spawn required isolated foreign-binding fixture");
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // A stale --exact filter running zero tests exits zero,
+                // which is deliberately not this fixture's success receipt.
+                assert_eq!(status.code(), Some(FOREIGN_CHILD_SUCCESS), "{status}");
+                break;
+            }
+            Ok(None) if started.elapsed() < Duration::from_secs(30) => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Ok(None) => fail_foreign_child(&mut child, "foreign-binding child exceeded 30 s"),
+            Err(error) => {
+                fail_foreign_child(&mut child, &format!("poll foreign-binding child: {error}"))
+            }
+        }
+    }
+}
+
 #[test]
 fn reused_handle_values_never_route_packets_to_another_port() {
     let _guard = watchdog("handle reuse");
@@ -282,10 +376,6 @@ fn reused_handle_values_never_route_packets_to_another_port() {
     let (pb, b) = overlapped_temp("b");
     let reused = std::os::windows::io::AsRawHandle::as_raw_handle(&b) == a_value;
     let b = read_once(&mut d2, b).unwrap();
-    // A duplicate handle of b's file object is bound (to d2's port) under a
-    // value no Pulse driver bound: a foreign binding, a typed error.
-    let err = read_once(&mut d1, b.try_clone().unwrap()).unwrap_err();
-    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
     if rebinds_reused_handles() {
         // b's value is known to the table with nothing in flight: d1 rebinds
         // it to its own port, so the packet arrives at d1, not d2; and back.
