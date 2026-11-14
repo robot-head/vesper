@@ -3,6 +3,11 @@
     {
       "badge": "unverified",
       "effects": [],
+      "file": null,
+      "generics": [],
+      "href": null,
+      "kind": "function",
+      "model": null,
       "name": "begin",
       "params": [
         {
@@ -23,6 +28,7 @@
           }
         }
       ],
+      "path": "begin",
       "result": {
         "named": {
           "args": [],
@@ -30,11 +36,17 @@
         }
       },
       "result_mode": "Linear",
-      "signature": "fn begin(in broker.{index}: Broker) -> WriteTxn"
+      "signature": "fn begin(in broker.{index}: Broker) -> WriteTxn",
+      "trait_name": null
     },
     {
       "badge": "unverified",
       "effects": [],
+      "file": null,
+      "generics": [],
+      "href": null,
+      "kind": "function",
+      "model": null,
       "name": "checksum",
       "params": [
         {
@@ -51,6 +63,7 @@
           }
         }
       ],
+      "path": "checksum",
       "result": {
         "named": {
           "args": [],
@@ -58,13 +71,19 @@
         }
       },
       "result_mode": "Copy",
-      "signature": "fn checksum(in broker: Broker) -> u64"
+      "signature": "fn checksum(in broker: Broker) -> u64",
+      "trait_name": null
     },
     {
       "badge": "unverified",
       "effects": [
         "Storage"
       ],
+      "file": null,
+      "generics": [],
+      "href": null,
+      "kind": "function",
+      "model": null,
       "name": "commit",
       "params": [
         {
@@ -81,6 +100,7 @@
           }
         }
       ],
+      "path": "commit",
       "result": {
         "named": {
           "args": [],
@@ -88,11 +108,17 @@
         }
       },
       "result_mode": "Copy",
-      "signature": "fn commit(sink tx: WriteTxn) -> Receipt eff [Storage]"
+      "signature": "fn commit(sink tx: WriteTxn) -> Receipt eff [Storage]",
+      "trait_name": null
     },
     {
       "badge": "unverified",
       "effects": [],
+      "file": null,
+      "generics": [],
+      "href": null,
+      "kind": "function",
+      "model": null,
       "name": "config_of",
       "params": [
         {
@@ -113,6 +139,7 @@
           }
         }
       ],
+      "path": "config_of",
       "result": {
         "named": {
           "args": [],
@@ -120,11 +147,17 @@
         }
       },
       "result_mode": "Copy",
-      "signature": "fn config_of(in broker.{config}: Broker) -> u64"
+      "signature": "fn config_of(in broker.{config}: Broker) -> u64",
+      "trait_name": null
     },
     {
       "badge": "unverified",
       "effects": [],
+      "file": null,
+      "generics": [],
+      "href": null,
+      "kind": "function",
+      "model": null,
       "name": "drop_one",
       "params": [
         {
@@ -146,17 +179,62 @@
           }
         }
       ],
+      "path": "drop_one",
       "result": {
         "tuple": {
           "items": []
         }
       },
       "result_mode": "Copy",
-      "signature": "fn drop_one(inout broker.{metrics.dropped}: Broker) -> ()"
+      "signature": "fn drop_one(inout broker.{metrics.dropped}: Broker) -> ()",
+      "trait_name": null
     },
     {
       "badge": "unverified",
       "effects": [],
+      "file": null,
+      "generics": [
+        {
+          "bound": "Linear",
+          "name": "T"
+        }
+      ],
+      "href": null,
+      "kind": "function",
+      "model": null,
+      "name": "identity",
+      "params": [
+        {
+          "mode": "Linear",
+          "name": "x",
+          "pass": "Sink",
+          "selector": [],
+          "text": "T",
+          "ty": {
+            "var": {
+              "name": "T"
+            }
+          }
+        }
+      ],
+      "path": "identity",
+      "result": {
+        "var": {
+          "name": "T"
+        }
+      },
+      "result_mode": "Linear",
+      "signature": "fn identity[T](sink x: T) -> T",
+      "trait_name": null
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "file": null,
+      "generics": [],
+      "href": null,
+      "kind": "function",
+      "model": null,
       "name": "publish",
       "params": [
         {
@@ -194,21 +272,18 @@
           }
         }
       ],
+      "path": "publish",
       "result": {
         "tuple": {
           "items": []
         }
       },
       "result_mode": "Copy",
-      "signature": "fn publish(inout broker.{index, metrics.sent}: Broker, in config: u64) -> ()"
+      "signature": "fn publish(inout broker.{index, metrics.sent}: Broker, in config: u64) -> ()",
+      "trait_name": null
     }
   ],
   "format": "vesper-codex-search",
-  "unsupported": [
-    [
-      "identity",
-      "generic/row binders need instantiation"
-    ]
-  ],
-  "version": 1
+  "unsupported": [],
+  "version": 2
 }

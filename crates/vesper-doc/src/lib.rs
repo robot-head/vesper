@@ -4,9 +4,13 @@
 //! badge, compiler correctness claim or all-path ownership conclusion.
 #![forbid(unsafe_code)]
 pub mod badges;
+pub mod capabilities;
+pub mod footprints;
 pub mod heatmap;
 pub mod hoogle;
 pub mod links;
+pub mod modes;
+pub mod package;
 pub mod sim;
 pub mod visual;
 use serde::{Deserialize, Serialize};

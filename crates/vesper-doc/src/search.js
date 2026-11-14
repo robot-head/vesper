@@ -140,9 +140,24 @@ function patternText(p) {
   const a = p.tuple.items.map(patternText);
   return a.includes(null) ? null : "(" + a.join(", ") + ")";
 }
-// null: no match; true: matched without a wildcard; false: matched with one.
-function typeMatch(p, t) {
+function patternDisplay(p) {
+  if (p === "any") return "_";
+  if (p.named) {
+    if (p.named.args.length === 0) return p.named.name;
+    return p.named.name + "[" + p.named.args.map(patternDisplay).join(", ") + "]";
+  }
+  return "(" + p.tuple.items.map(patternDisplay).join(", ") + ")";
+}
+// null: no match; true: matched without a wildcard or type parameter.
+// binds: [[name, pattern]] in first-binding order.
+function typeMatch(p, t, binds) {
   if (p === "any") return false;
+  if (t.var !== undefined) {
+    const b = binds.find((x) => x[0] === t.var.name);
+    if (b === undefined) binds.push([t.var.name, p]);
+    else if (JSON.stringify(b[1]) !== JSON.stringify(p)) return null;
+    return false;
+  }
   let ps, ts;
   if (p.named && t.named && p.named.name === t.named.name && p.named.args.length === t.named.args.length) {
     ps = p.named.args; ts = t.named.args;
@@ -151,7 +166,7 @@ function typeMatch(p, t) {
   } else return null;
   let exact = true;
   for (let i = 0; i < ps.length; i++) {
-    const m = typeMatch(ps[i], ts[i]);
+    const m = typeMatch(ps[i], ts[i], binds);
     if (m === null) return null;
     exact = exact && m;
   }
@@ -167,15 +182,28 @@ function search(query, index) {
   const hits = [];
   for (const e of index.entries) {
     let exact;
+    const binds = [];
     if (query.name !== undefined) {
-      if (!e.name.toLowerCase().includes(query.name.toLowerCase())) continue;
+      if (!e.path.toLowerCase().includes(query.name.toLowerCase())) continue;
       exact = e.name === query.name;
     } else {
       const q = query.signature;
       if (q.params.length !== e.params.length) continue;
-      const r = typeMatch(q.result, e.result);
+      let ok = true;
+      exact = true;
+      for (let i = 0; i < q.params.length; i++) {
+        const p = q.params[i], f = e.params[i];
+        const m = typeMatch(p.ty, f.ty, binds);
+        if (m === null || (p.pass !== null && p.pass !== f.pass) ||
+            (p.mode !== null && RANK[p.mode] > RANK[f.mode]) ||
+            (p.selector !== null && !within(f.selector, p.selector))) { ok = false; break; }
+        exact = exact && m && p.pass !== null && p.mode === f.mode &&
+          sameSelector(p.selector === null ? [] : p.selector, f.selector);
+      }
+      if (!ok) continue;
+      const r = typeMatch(q.result, e.result, binds);
       if (r === null) continue;
-      exact = r;
+      exact = exact && r;
       if (q.resultMode !== null) {
         if (RANK[e.result_mode] > RANK[q.resultMode]) continue;
         exact = exact && e.result_mode === q.resultMode;
@@ -184,22 +212,18 @@ function search(query, index) {
         if (!e.effects.every((x) => q.ceiling.includes(x))) continue;
         exact = exact && sameSelector(e.effects, q.ceiling);
       } else exact = false;
-      let ok = true;
-      for (let i = 0; i < q.params.length; i++) {
-        const p = q.params[i], f = e.params[i];
-        const m = typeMatch(p.ty, f.ty);
-        if (m === null || (p.pass !== null && p.pass !== f.pass) ||
-            (p.mode !== null && RANK[p.mode] > RANK[f.mode]) ||
-            (p.selector !== null && !within(f.selector, p.selector))) { ok = false; break; }
-        exact = exact && m && p.pass !== null && p.mode === f.mode &&
-          sameSelector(p.selector === null ? [] : p.selector, f.selector);
-      }
-      if (!ok) continue;
+      exact = exact && e.generics.length === 0;
     }
     const score = (exact ? 10 : 0) + (e.badge === "proved" ? 5 : e.badge === "audited" ? 2 : 0);
-    hits.push({ name: e.name, signature: e.signature, score, exact, badge: e.badge });
+    const instantiation = [];
+    for (const g of e.generics) {
+      const b = binds.find((x) => x[0] === g.name);
+      if (b !== undefined) instantiation.push([b[0], patternDisplay(b[1])]);
+    }
+    hits.push({ name: e.name, path: e.path, kind: e.kind, href: e.href, signature: e.signature,
+      score, exact, badge: e.badge, instantiation });
   }
-  hits.sort((a, b) => b.score - a.score || cmp(a.name, b.name));
+  hits.sort((a, b) => b.score - a.score || cmp(a.path, b.path));
   return hits;
 }
 if (typeof module !== "undefined") module.exports = { parseQuery, search };
@@ -218,7 +242,7 @@ if (typeof document !== "undefined") {
     for (const h of hits) {
       const li = document.createElement("li");
       const a = document.createElement("a");
-      a.href = CODEX_HREF + "#item-" + encodeURIComponent(h.name);
+      a.href = h.href !== null ? h.href : CODEX_HREF + "#item-" + encodeURIComponent(h.name);
       const code = document.createElement("code");
       code.textContent = h.signature;
       a.append(code);
@@ -230,6 +254,9 @@ if (typeof document !== "undefined") {
         li.append(b);
       }
       if (h.exact) li.append(" (exact)");
+      if (h.instantiation.length > 0) {
+        li.append(" with " + h.instantiation.map((x) => x[0] + " = " + x[1]).join(", "));
+      }
       list.append(li);
     }
   };
