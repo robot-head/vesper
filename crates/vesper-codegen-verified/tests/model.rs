@@ -25,8 +25,11 @@ const THEOREMS: [&str; 8] = [
 /// The lock's `allowed_lean_axioms`; the model needs no `Classical.choice`.
 const ALLOWED_AXIOMS: [&str; 2] = ["propext", "Quot.sound"];
 
+/// Absolute, because Lean runs with `lean/` as its working directory while
+/// corpus paths are passed as arguments (Bazel's manifest dir is relative).
 fn repo() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    std::path::absolute(&dir).unwrap_or(dir)
 }
 
 fn strip_comments(source: &str) -> String {
