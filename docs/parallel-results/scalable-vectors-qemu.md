@@ -146,5 +146,11 @@ Results of the workspace runs are in the PR description.
   caller builds the index with `build_scalable`.
 * No Lean proof covers the SVE/RVV kernels; equivalence is differential
   testing against the scalar reference at the lengths listed.
+* The workflow is pinned to `ubuntu-24.04` (QEMU 8.2.2). Its first run on
+  `ubuntu-latest` (Ubuntu 26.04, QEMU 10.2.1) stopped the RVV `vvec` test
+  with SIGILL at start-up, before any test output. It was not reproduced or
+  diagnosed here, because the sandbox only has QEMU 8.2. Until it is
+  understood, treat RVV under QEMU 10 (and so possibly on newer
+  implementations) as unverified.
 * VLEN above 1024 (QEMU 8.2's limit) is untested; profiles reject vectors over
   2048 bits, while the kernels have no width limit.

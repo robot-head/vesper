@@ -39,7 +39,10 @@ env:
 jobs:
   qemu:
     name: ${{ matrix.name }}
-    runs-on: ubuntu-latest
+    # Pinned: this suite was validated with Ubuntu 24.04's QEMU 8.2.2. On
+    # ubuntu-26.04 (QEMU 10.2.1) the RVV run stopped with SIGILL at start-up;
+    # that is not yet diagnosed (see the lane report).
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     strategy:
       fail-fast: false
