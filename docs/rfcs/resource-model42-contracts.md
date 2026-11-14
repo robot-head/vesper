@@ -173,6 +173,38 @@ change; external #320/#321 ownership is respected. No full-harness generator,
 external Lean4Lean model-profile coverage, native observation, diagnostic
 agreement, 100000-program resource campaign or self-hosting is claimed.
 
+## Kernel artifact prerequisite (#358)
+
+Lean 4.24 emits partial native `_unsafe_rec` implementation auxiliaries for
+ordinary total definitions, including the unchanged Full calculus. The two
+initial complete runs compiled all 12 modules and 78 assertions but correctly
+failed the unchanged strict artifact audit. Removing unused Repr derivations
+did not resolve ordinary recursive compiler implementations.
+
+The separately claimed new `tools/resource-model42/KernelSnapshot.lean`
+constructs an explicitly logical proof artifact. Every canonical imported safe
+ConstantInfo remains unchanged. Explicit unsafe declarations, package opaque
+facades and unsafe logical dependencies are rejected. Only narrowly checked
+partial compiler auxiliaries are excluded and inventoried. The original
+executable artifacts remain separate; neither native-helper equivalence nor a
+raw-artifact audit pass is claimed. The strict auditor and CLI remain unchanged.
+
+Lean can store repeated realized equation theorems with identical types,
+universe parameters and groups but distinct proof bodies. Identical safe copies
+are recorded. Different proof bodies require a fresh explicitly mapped theorem
+alias preserving the actual raw type, universes and proof expression; only its
+name and singleton alias group change. Definitions or non-proof header changes
+are not admitted. Replay canonical declarations first, then kernel-check every
+alias, and verify the complete expanded export/reimport inventory. Every alias
+must join the original theorem roots in actual strict axiom-policy audits,
+partitioned at 128; typechecking alone cannot hide a forbidden alternate axiom.
+
+The acceptance profile freshly compiles legacy objects into private directories
+and rejects package sidecars/symlinks before projection. Original and projected
+artifact bytes, tool source and complete omission/occurrence/alias inventories
+are associated explicitly. Kernel replay proves the retained logical model; it
+does not certify compilation or the native implementations omitted from it.
+
 ## Exclusive writers
 
 - Syntax: NEW lean/ResourceModel42/Syntax.lean and syntax report.
