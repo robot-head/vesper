@@ -24,6 +24,9 @@ pub const FINGERPRINT_PREFIX: &str = "[REDACTED:hmac-sha256:";
 pub const RESERVED_KEY_PREFIX: &str = "vesper.";
 pub const MAX_KEY_BYTES: usize = 128;
 pub const MAX_ATTRIBUTES_PER_SPAN: usize = 64;
+/// Any attribute set: resources, scopes, events, links, data points and log
+/// records use the same bounded, PII-checked set as spans.
+pub type Attributes = SpanAttributes;
 
 /// HMAC key for fingerprinting. No `Debug`, `Clone` or accessor; it is not
 /// zeroized on drop.
@@ -44,6 +47,19 @@ pub enum PiiPolicy {
     /// declassification: the output depends on the value through the HMAC.
     /// Low-entropy values stay guessable by anyone holding the key.
     Fingerprint(FingerprintKey),
+}
+impl PiiPolicy {
+    /// Applies the policy and drops the sensitive owner. Only the marker or
+    /// the keyed fingerprint survives; this is the one place a sensitive
+    /// value becomes an exportable [`AttributeValue`].
+    pub fn apply(&self, value: impl Sensitive) -> AttributeValue {
+        let stored = match self {
+            PiiPolicy::Redact => AttributeValue::Redacted,
+            PiiPolicy::Fingerprint(key) => AttributeValue::Fingerprint(fingerprint(key, &value)),
+        };
+        drop(value);
+        stored
+    }
 }
 impl core::fmt::Debug for PiiPolicy {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -66,6 +82,10 @@ pub enum AttributeValue {
     Fingerprint([u8; 8]),
 }
 impl AttributeValue {
+    /// The stored form of a public value.
+    pub fn public(value: impl Telemetrable) -> Self {
+        Self::from_telemetry(value.telemetry_value())
+    }
     pub(crate) fn from_telemetry(value: TelemetryValue) -> Self {
         match value {
             TelemetryValue::Bool(b) => Self::Bool(b),
@@ -106,7 +126,8 @@ pub enum AttributeError {
     TooManyAttributes,
 }
 
-/// Bounded, ordered attribute set of one span.
+/// Bounded, ordered attribute set of one span, resource, scope, event, link,
+/// data point or log record.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SpanAttributes {
     entries: Vec<(&'static str, AttributeValue)>,
@@ -163,12 +184,19 @@ impl SpanAttributes {
         policy: &PiiPolicy,
     ) -> Result<&mut Self, AttributeError> {
         self.check(key)?;
-        let stored = match policy {
-            PiiPolicy::Redact => AttributeValue::Redacted,
-            PiiPolicy::Fingerprint(key) => AttributeValue::Fingerprint(fingerprint(key, &value)),
-        };
-        drop(value);
+        let stored = policy.apply(value);
         self.entries.push((key, stored));
+        Ok(self)
+    }
+    /// Adds a value that is already a stored form (public, redacted or a
+    /// fingerprint), such as the output of [`PiiPolicy::apply`].
+    pub fn insert_value(
+        &mut self,
+        key: &'static str,
+        value: AttributeValue,
+    ) -> Result<&mut Self, AttributeError> {
+        self.check(key)?;
+        self.entries.push((key, value));
         Ok(self)
     }
     pub(crate) fn push_reserved(&mut self, key: &'static str, value: AttributeValue) {
