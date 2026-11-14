@@ -4552,6 +4552,7 @@ dependencies = [
  "serde_json",
  "target-lexicon",
  "vesper-aegis",
+ "vesper-alloc",
  "vesper-beacon",
  "vesper-bench",
  "vesper-bench-pmu",
