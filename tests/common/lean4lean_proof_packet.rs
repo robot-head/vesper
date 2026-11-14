@@ -1,4 +1,4 @@
-//! Shared runner for the two fixed audited proof packets.
+//! Shared runner for the three fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -15,6 +15,7 @@ use std::{
 pub enum Packet {
     Foundations,
     Construction,
+    Order,
 }
 
 struct PacketSpec {
@@ -86,6 +87,35 @@ const CONSTRUCTION_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.numeric_name_repeated_unsorted",
 ];
 
+const ORDER_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.name_cmp_refl",
+    "Vesper.Lean4LeanLevel42.name_cmp_swap",
+    "Vesper.Lean4LeanLevel42.name_cmp_isLE_trans",
+    "Vesper.Lean4LeanLevel42.name_cmp_eq_iff",
+    "Vesper.Lean4LeanLevel42.name_cmp_lt_trans",
+    "Vesper.Lean4LeanLevel42.name_cmp_lt_irrefl",
+    "Vesper.Lean4LeanLevel42.nameCmpTrans",
+    "Vesper.Lean4LeanLevel42.nameCmpLawfulEq",
+    "Vesper.Lean4LeanLevel42.path_cmp_trans",
+    "Vesper.Lean4LeanLevel42.path_cmp_lawfulEq",
+    "Vesper.Lean4LeanLevel42.path_cmp_eq_iff",
+    "Vesper.Lean4LeanLevel42.name_cmp_numeric_witness",
+    "Vesper.Lean4LeanLevel42.name_cmp_string_witness",
+    "Vesper.Lean4LeanLevel42.name_cmp_prefix_witness",
+    "Vesper.Lean4LeanLevel42.path_cmp_prefix_witness",
+    "Vesper.Lean4LeanLevel42.keySorted_nodup",
+    "Vesper.Lean4LeanLevel42.orderedInsert_sorted",
+    "Vesper.Lean4LeanLevel42.orderedInsert_none_iff_mem",
+    "Vesper.Lean4LeanLevel42.orderedInsert_sorted_nodup",
+    "Vesper.Lean4LeanLevel42.addVar_sorted",
+    "Vesper.Lean4LeanLevel42.varsSorted_names_nodup",
+    "Vesper.Lean4LeanLevel42.addVar_sorted_names_nodup",
+    "Vesper.Lean4LeanLevel42.orderedInsert_numeric_sorted",
+    "Vesper.Lean4LeanLevel42.orderedInsert_numeric_duplicate",
+    "Vesper.Lean4LeanLevel42.addVar_numeric_sorted_merge",
+    "Vesper.Lean4LeanLevel42.orderedInsert_unsorted_key_witness",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -123,6 +153,25 @@ impl Packet {
                 required: CONSTRUCTION_REQUIRED,
                 scope: "audited_named_construction_proofs",
                 marker: "LEAN4LEAN_CONSTRUCTION42_EVIDENCE",
+            },
+            Self::Order => PacketSpec {
+                label: "lean4lean_order42",
+                module: "Lean4LeanOrder42",
+                projected: "Lean4LeanOrder42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.SortedKeys",
+                    "Lean4LeanOrder42",
+                ],
+                required: ORDER_REQUIRED,
+                scope: "audited_named_order_proofs",
+                marker: "LEAN4LEAN_ORDER42_EVIDENCE",
             },
         }
     }
