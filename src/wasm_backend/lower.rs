@@ -29,12 +29,17 @@ use crate::{
     numeric::IntegerKind,
 };
 use std::collections::{BTreeMap, BTreeSet};
+
 use wasm_encoder::{
     BlockType, Function, Handle, HeapType, Instruction as I, MemArg, RefType, ValType,
 };
 
 /// Temporary `inout` cells and the places they are copied back to.
 type Writebacks = Vec<(u32, crate::check::Place)>;
+
+/// A row label, the `$label:l` global it reads, and the evidence globals it
+/// sets for a call.
+type LabelBinding = (String, Option<u32>, Vec<u32>);
 
 // Handler frame layout (byte offsets).
 const F_DISPATCH: u64 = 0;
@@ -544,6 +549,46 @@ impl<'a> Lowerer<'a> {
             .func_type(&vec![ValType::I64; 1 + arity], &[ValType::I64])
     }
 
+    /// The label bindings of `callee`'s row: for each `eff [l: E]`, the
+    /// `$label:l` global and the evidence globals that take its handler
+    /// for the call (the evaluator binds the callee's evidence for the
+    /// entry to the caller's `$label:l`).
+    pub(crate) fn row_label_bindings(
+        &self,
+        callee: &str,
+        subst: &dyn Fn(&Type) -> Type,
+    ) -> Result<Vec<LabelBinding>, WasmError> {
+        let base = self
+            .plan
+            .instances
+            .get(callee)
+            .map_or(callee.to_owned(), |i| i.base.clone());
+        let vars = self.vars(callee);
+        let Some(f) = self.world.functions.get(&base) else {
+            return Ok(vec![]);
+        };
+        let mut out = vec![];
+        for e in &f.effects.instances {
+            let Some(label) = e.label.as_ref().filter(|l| !l.starts_with('$')) else {
+                continue;
+            };
+            let source = self.env.get(&format!("$label:{label}")).copied();
+            let args: Vec<Type> = e
+                .args
+                .iter()
+                .map(|t| subst(&substitute(t, &vars)))
+                .collect();
+            let mut targets = vec![format!("$effect:{}", e.name), format!("$label:{label}")];
+            targets.extend(crate::numeric::instance_key(&e.name, &args));
+            let globals = targets
+                .iter()
+                .filter_map(|t| self.env.get(t).copied())
+                .collect();
+            out.push((label.clone(), source, globals));
+        }
+        Ok(out)
+    }
+
     /// Table slot of `$tramp(c, args...)`, which calls `function` with the
     /// `captures` slots of the callable block `c` first. When `c` carries an
     /// evidence block, its non-zero frames replace the caller's evidence for
@@ -564,9 +609,14 @@ impl<'a> Lowerer<'a> {
         let ty = self.indirect_type(arity);
         let idx = self.b.declare_typed(&format!("$tramp<{function}>"), ty);
         let keys: Vec<u32> = self.env.values().copied().collect();
+        // A named function with a labelled row rebinds its labels from the
+        // evidence current at the call, after any evidence the callable
+        // carries.
+        let bindings = self.row_label_bindings(function, &|t| crate::numeric::default_type(t))?;
         let first = 1 + arity as u32;
         let (ev, caps, r, saved) = (first, first + 1, first + 2, first + 3);
-        let mut f = Function::new([(3 + keys.len() as u32, ValType::I64)]);
+        let tmp = saved + keys.len() as u32;
+        let mut f = Function::new([(3 + keys.len() as u32 + bindings.len() as u32, ValType::I64)]);
         let operands = |f: &mut Function| {
             for c in 0..captures {
                 f.instruction(&I::LocalGet(caps));
@@ -586,13 +636,23 @@ impl<'a> Lowerer<'a> {
         f.instruction(&I::I64Load(mem(C_EVIDENCE)));
         f.instruction(&I::LocalTee(ev));
         f.instruction(&I::I64Eqz);
-        f.instruction(&I::If(BlockType::Empty));
-        operands(&mut f);
-        f.instruction(&I::ReturnCall(target));
-        f.instruction(&I::End);
+        if bindings.is_empty() {
+            f.instruction(&I::If(BlockType::Empty));
+            operands(&mut f);
+            f.instruction(&I::ReturnCall(target));
+            f.instruction(&I::End);
+        } else {
+            f.instruction(&I::Drop);
+        }
         for (n, g) in keys.iter().enumerate() {
             f.instruction(&I::GlobalGet(*g));
             f.instruction(&I::LocalSet(saved + n as u32));
+        }
+        f.instruction(&I::LocalGet(ev));
+        f.instruction(&I::I64Const(0));
+        f.instruction(&I::I64Ne);
+        f.instruction(&I::If(BlockType::Empty));
+        for (n, g) in keys.iter().enumerate() {
             f.instruction(&I::LocalGet(ev));
             f.instruction(&I::I32WrapI64);
             f.instruction(&I::I64Load(mem(8 * n as u64)));
@@ -603,6 +663,20 @@ impl<'a> Lowerer<'a> {
             f.instruction(&I::LocalGet(r));
             f.instruction(&I::GlobalSet(*g));
             f.instruction(&I::End);
+        }
+        f.instruction(&I::End);
+        for (n, (label, source, _)) in bindings.iter().enumerate() {
+            let source = source.ok_or_else(|| {
+                WasmError::Invalid(format!("no handler installs label '{label}'"))
+            })?;
+            f.instruction(&I::GlobalGet(source));
+            f.instruction(&I::LocalSet(tmp + n as u32));
+        }
+        for (n, (_, _, targets)) in bindings.iter().enumerate() {
+            for g in targets {
+                f.instruction(&I::LocalGet(tmp + n as u32));
+                f.instruction(&I::GlobalSet(*g));
+            }
         }
         operands(&mut f);
         f.instruction(&I::Call(target));
@@ -3127,44 +3201,26 @@ impl<'l, 'a> Emit<'l, 'a> {
     /// for the entry to the caller's `$label:l`). Rebind those keys for
     /// the call and return the saved globals to restore after it.
     fn bind_row_labels(&mut self, callee: &str) -> Result<Vec<(u32, u32)>, WasmError> {
-        let base = self
-            .l
-            .plan
-            .instances
-            .get(callee)
-            .map_or(callee.to_owned(), |i| i.base.clone());
-        let vars = self.l.vars(callee);
-        let Some(f) = self.l.world.functions.get(&base) else {
-            return Ok(vec![]);
-        };
+        let vars = self.vars.clone();
+        let bindings = self.l.row_label_bindings(callee, &|t| {
+            crate::numeric::default_type(&substitute(t, &vars))
+        })?;
         let mut saved: Vec<(u32, u32)> = vec![];
         let mut sets = vec![];
-        for e in &f.effects.instances {
-            let Some(label) = e.label.as_ref().filter(|l| !l.starts_with('$')) else {
-                continue;
-            };
-            if !self.labels.contains(label) {
+        for (label, source, targets) in bindings {
+            if !self.labels.contains(&label) {
                 return Err(self.err(
                     Unsupported::LabelledEffectRow,
-                    format!("call to '{base}' needs label '{label}', which is not in scope"),
+                    format!("call to '{callee}' needs label '{label}', which is not in scope"),
                 ));
             }
-            let source = *self.l.env.get(&format!("$label:{label}")).ok_or_else(|| {
+            let source = source.ok_or_else(|| {
                 WasmError::Invalid(format!("no handler installs label '{label}'"))
             })?;
-            let args: Vec<Type> = e
-                .args
-                .iter()
-                .map(|t| self.subst(&substitute(t, &vars)))
-                .collect();
-            let mut targets = vec![format!("$effect:{}", e.name), format!("$label:{label}")];
-            targets.extend(crate::numeric::instance_key(&e.name, &args));
             let s = self.local();
             self.code.extend([I::GlobalGet(source), I::LocalSet(s)]);
-            for t in targets {
-                if let Some(g) = self.l.env.get(&t).copied() {
-                    sets.push((g, s));
-                }
+            for g in targets {
+                sets.push((g, s));
             }
         }
         for (g, s) in sets {
