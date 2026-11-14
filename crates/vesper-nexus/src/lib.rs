@@ -9,6 +9,11 @@
 //! * [`ring`]: `SharedPluginRing`, padding-free wire records in a Wasm memory
 //!   that guests read and transform in place, and the §30.3 two-tenant
 //!   broker stream filter.
+//! * [`tenant_ring`]: one ring, store and filter instance per tenant, for
+//!   mutually distrusting tenants.
+//! * [`pulse`]: a [`fuel::QuantumScheduler`] on SimPulse's seeded run queue.
+//! * [`wit_gen`]: `.wit` worlds to Vesper capability traits and Rust host
+//!   bindings.
 //! * [`wasmfx`]: the WasmFX (stack-switching) probe and one lowered effect
 //!   handler, available only where Wasmtime supports the proposal.
 //!
@@ -20,13 +25,19 @@
 pub mod fuel;
 pub mod guests;
 pub mod host;
+pub mod pulse;
 pub mod ring;
 pub mod table;
+pub mod tenant_ring;
 pub mod wasmfx;
+pub mod wit_gen;
 
 pub use fuel::{FuelAccountant, FuelError, QuantumScheduler, RoundRobin, SliceEvent, TenantUsage};
 pub use host::{
     Blob, CompiledComponent, DestroyReport, HOST_INTERFACE, NexusConfig, NexusEngine, PLUGIN_WIT,
     PluginError, PluginInstance, ScheduleError, ScheduledCall, ScheduledOutcome, ScheduledRun,
 };
+pub use pulse::{SimPulseFault, SimPulseScheduler};
 pub use table::{TenantId, WitBorrow, WitHandle, WitOwn, WitResourceTable, WitTableError};
+pub use tenant_ring::{TenantRingError, TenantRings};
+pub use wit_gen::{WitBindings, WitGenError};

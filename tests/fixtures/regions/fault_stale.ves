@@ -1,0 +1,10 @@
+// A box bound through a tuple pattern escapes the straight-line rewind
+// rule; reading it after the rewind is a run-time stale-handle fault.
+fn main() -> i64 {
+    region r(256) {
+        let m = r.checkpoint();
+        let (b, _) = (r.box(2), 0);
+        r.rewind(m);
+        r.get(b)
+    }
+}

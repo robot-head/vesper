@@ -5,15 +5,25 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 description = "Budgeted Apache Arrow IPC and OTel Arrow (OTAP) adapter for Beacon spans and histograms"
 
+[features]
+default = ["grpc"]
+# OTAP and OTLP over HTTP/2 gRPC (tonic). Without it the crate still encodes,
+# decodes and frames OTAP/OTLP messages.
+grpc = ["dep:tonic", "dep:tonic-prost", "dep:tokio"]
+
 [dependencies]
 vesper-beacon = { path = "../vesper-beacon" }
 arrow-array = "=56.2.0"
 arrow-buffer = "=56.2.1"
 arrow-schema = "=56.2.0"
 arrow-ipc = { version = "=56.2.0", default-features = false }
+arrow-select = "=56.2.0"
 prost = { version = "=0.14.6", default-features = false, features = ["derive", "std"] }
 hmac = "=0.12.1"
 sha2 = "=0.10.9"
+tonic = { version = "=0.14.9", optional = true, default-features = false, features = ["transport", "codegen", "router"] }
+tonic-prost = { version = "=0.14.9", optional = true }
+tokio = { version = "=1.54.1", optional = true, features = ["rt", "rt-multi-thread", "net", "sync", "time", "macros"] }
 
 [dev-dependencies]
 arrow2 = { version = "=0.18.0", default-features = false, features = ["io_ipc"] }

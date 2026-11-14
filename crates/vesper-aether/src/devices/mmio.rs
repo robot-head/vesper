@@ -1,5 +1,5 @@
-//! VirtIO 1.2 MMIO transport, version 2 (virtio-v1.2 §4.2.2), over packed
-//! virtqueues (§2.8).
+//! VirtIO 1.2 MMIO transport, version 2 (virtio-v1.2 §4.2.2), over split
+//! (§2.7) or packed (§2.8) virtqueues.
 //!
 //! The transport implements the register file a driver programs: magic,
 //! version, device and vendor ids, 64-bit feature negotiation through the
@@ -7,32 +7,35 @@
 //! interrupt status and acknowledge, the device status state machine,
 //! shared-memory selectors (no regions) and the configuration generation.
 //!
-//! Only packed rings are supported, so the device offers and requires
-//! `VIRTIO_F_VERSION_1` and `VIRTIO_F_RING_PACKED`; a driver that does not
-//! accept both sees `FEATURES_OK` cleared on read-back (§3.1.1). Event
-//! suppression structures are validated to lie in guest RAM but are not read:
-//! the device raises a used-buffer interrupt after every batch it completes,
-//! which the specification permits. `VIRTIO_F_NOTIFICATION_DATA`,
-//! `VIRTIO_F_RING_RESET`, `VIRTIO_F_IN_ORDER` and indirect descriptors are not
-//! offered.
-//!
-//! On notification the descriptor ring is copied out of guest memory once and
-//! chains are captured from that copy by [`PackedQueue`], so a racing guest
-//! cannot change a chain between validation and use (no double fetch). A
-//! malformed chain puts the device into `DEVICE_NEEDS_RESET` (§2.1.2) and
-//! raises a configuration interrupt; it is never processed.
+//! The device offers `VIRTIO_F_VERSION_1` (required: legacy drivers are
+//! refused at `FEATURES_OK`, §3.1.1) and, unless the embedder narrows them
+//! with [`MmioTransport::with_ring_features`], the ring features
+//! `RING_PACKED`, `INDIRECT_DESC`, `EVENT_IDX`, `IN_ORDER` and
+//! `NOTIFICATION_DATA`. A driver that accepts `RING_PACKED` gets packed
+//! queues, otherwise split queues. Rings run on the engine in
+//! [`super::queue`]: chains are captured with a single fetch of every
+//! descriptor, indirect table and available entry, used-buffer interrupts
+//! honour the driver's suppression (`avail.flags`, `used_event` or the packed
+//! driver event structure), `IN_ORDER` completions are batched, and with
+//! `NOTIFICATION_DATA` the `QueueNotify` value's next-available position
+//! bounds what a notification captures. A malformed chain puts the device
+//! into `DEVICE_NEEDS_RESET` (§2.1.2) and raises a configuration interrupt; it
+//! is never processed. `VIRTIO_F_RING_RESET` is not offered.
 //!
 //! This is a host model on ordinary bytes ([`GuestMemory`]). There is no
 //! memory ordering with a concurrently running guest, no ioeventfd/irqfd and no
 //! KVM wiring; it validates the modelled register and ring protocol only.
 #![forbid(unsafe_code)]
 
-use crate::guest_mem::{GuestMemory, MemError};
-use crate::virtio::{
-    DESCRIPTOR_BYTES, DescriptorLease, FLAG_USED, FLAG_WRITE, GuestAuthorization, PackedQueue,
-    QueueError, QueueLimits,
+use super::queue::{
+    AvailHint, CompleteError, RingFeatures, RingFormat, RingLayout, VIRTIO_F_EVENT_IDX,
+    VIRTIO_F_IN_ORDER, VIRTIO_F_INDIRECT_DESC, VIRTIO_F_NOTIFICATION_DATA, VirtQueue,
 };
+use crate::guest_mem::{GuestMemory, MemError};
+use crate::virtio::{QueueError, QueueLimits};
 use std::collections::VecDeque;
+
+pub use super::queue::Chain;
 
 pub const MMIO_MAGIC: u32 = 0x7472_6976;
 pub const MMIO_VERSION: u32 = 2;
@@ -87,12 +90,16 @@ pub mod status {
 
 pub const VIRTIO_F_VERSION_1: u64 = 1 << 32;
 pub const VIRTIO_F_RING_PACKED: u64 = 1 << 34;
+/// Every ring feature the transport implements (offered by default).
+pub const RING_FEATURES: u64 = VIRTIO_F_RING_PACKED
+    | VIRTIO_F_INDIRECT_DESC
+    | VIRTIO_F_EVENT_IDX
+    | VIRTIO_F_IN_ORDER
+    | VIRTIO_F_NOTIFICATION_DATA;
 /// InterruptStatus bit: the device used a buffer.
 pub const INT_USED_BUFFER: u32 = 1;
 /// InterruptStatus bit: the configuration (or `DEVICE_NEEDS_RESET`) changed.
 pub const INT_CONFIG_CHANGE: u32 = 2;
-/// Size of the packed-ring driver and device event suppression structures.
-const EVENT_SUPPRESSION_BYTES: u64 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MmioError {
@@ -124,8 +131,16 @@ pub enum MmioError {
     },
     /// Queue registers are only writable while the queue is not ready.
     QueueConfiguredWhileReady,
-    /// QueueReady=1 with descriptor, driver or device areas outside RAM.
+    /// QueueReady=1 with descriptor, driver or device areas outside RAM or
+    /// misaligned.
     RingNotInRam,
+    /// QueueReady=1 before `FEATURES_OK`: the ring format is not known yet.
+    QueueReadyBeforeFeaturesOk,
+    /// A `NOTIFICATION_DATA` value outside the ring, or bits above the queue
+    /// index without the feature.
+    InvalidNotification {
+        value: u32,
+    },
     /// Only a reset (status 0) may clear status bits.
     StatusRegression {
         from: u32,
@@ -191,7 +206,8 @@ impl From<MemError> for DeviceError {
 pub trait VirtioDevice {
     /// Virtio device id (§5): 1 net, 2 block, 19 vsock.
     fn device_type(&self) -> u32;
-    /// Device-specific feature bits (the transport adds VERSION_1 and RING_PACKED).
+    /// Device-specific feature bits (the transport adds VERSION_1 and the
+    /// ring features).
     fn device_features(&self) -> u64;
     /// Maximum size of each queue, by index.
     fn queue_max_sizes(&self) -> &[u16];
@@ -213,35 +229,12 @@ pub trait VirtioDevice {
     }
 }
 
-/// A captured chain with its driver-readable bytes copied out once.
-#[must_use = "complete the chain or hand it back with QueueIo::unpop"]
-#[derive(Debug)]
-pub struct Chain {
-    lease: DescriptorLease,
-    readable: Vec<u8>,
-}
-impl Chain {
-    /// The driver-readable part of the chain, concatenated.
-    pub fn readable(&self) -> &[u8] {
-        &self.readable
-    }
-    /// Total bytes of the device-writable part.
-    pub fn writable_len(&self) -> u64 {
-        self.lease.chain().writable_bytes()
-    }
-    pub fn buffer_id(&self) -> u16 {
-        self.lease.chain().buffer_id()
-    }
-}
-
 /// Queue access handed to [`VirtioDevice::process`].
 #[derive(Debug)]
 pub struct QueueIo<'a> {
-    queue: &'a mut PackedQueue,
+    queue: &'a mut VirtQueue,
     pending: &'a mut VecDeque<Chain>,
     memory: &'a mut GuestMemory,
-    desc_gpa: u64,
-    scratch: Vec<u8>,
     completed: usize,
 }
 impl QueueIo<'_> {
@@ -256,36 +249,44 @@ impl QueueIo<'_> {
     pub fn available(&self) -> usize {
         self.pending.len()
     }
+    /// The ring features this queue runs with.
+    pub fn ring_features(&self) -> RingFeatures {
+        self.queue.features()
+    }
     /// Writes `response` into the chain's device-writable buffers in order,
-    /// then publishes the used descriptor (id and length first, flags last).
+    /// then publishes the used entry. A response longer than the writable
+    /// part (or a chain completed out of order) hands the chain back.
     pub fn complete(&mut self, chain: Chain, response: &[u8]) -> Result<(), DeviceError> {
-        if response.len() as u64 > chain.writable_len() {
-            // Hand the chain back so that the queue stays consistent.
-            self.pending.push_front(chain);
-            return Err(DeviceError::Queue(QueueError::InvalidWrittenLength));
-        }
-        let written = u32::try_from(response.len()).map_err(|_| QueueError::Overflow)?;
+        let written = u32::try_from(response.len()).map_err(|_| QueueError::Overflow);
+        let check = written.and_then(|w| self.queue.check_completion(&chain, w).map(|()| w));
+        let written = match check {
+            Ok(w) => w,
+            Err(e) => {
+                // Hand the chain back so that the queue stays consistent.
+                self.pending.push_front(chain);
+                return Err(DeviceError::Queue(e));
+            }
+        };
         let mut rest = response;
-        for d in chain.lease.chain().descriptors() {
+        for b in chain.buffers() {
             if rest.is_empty() {
                 break;
             }
-            if d.descriptor.flags & FLAG_WRITE == 0 {
+            if !b.writable {
                 continue;
             }
-            let n = rest.len().min(d.descriptor.byte_len as usize);
-            self.memory.write(d.descriptor.guest_address, &rest[..n])?;
+            let n = rest.len().min(b.len as usize);
+            self.memory.write(b.gpa, &rest[..n])?;
             rest = &rest[n..];
         }
-        let record = self
-            .queue
-            .complete(&mut self.scratch, chain.lease, written)
-            .map_err(|e| DeviceError::Queue(e.error))?;
-        let at = self.desc_gpa + u64::from(record.cursor.index) * DESCRIPTOR_BYTES as u64;
-        let bytes = record.descriptor.encode();
-        debug_assert!(record.descriptor.flags & FLAG_USED == 0 || record.cursor.wrap);
-        self.memory.write(at, &bytes[..14])?;
-        self.memory.write(at + 14, &bytes[14..])?;
+        match self.queue.complete(self.memory, chain, written) {
+            Ok(()) => {}
+            Err(CompleteError::Rejected(e, chain)) => {
+                self.pending.push_front(chain);
+                return Err(DeviceError::Queue(e));
+            }
+            Err(CompleteError::Device(e)) => return Err(e),
+        }
         self.completed += 1;
         Ok(())
     }
@@ -293,7 +294,7 @@ impl QueueIo<'_> {
 
 #[derive(Debug)]
 struct ActiveQueue {
-    queue: PackedQueue,
+    queue: VirtQueue,
     pending: VecDeque<Chain>,
 }
 
@@ -329,6 +330,8 @@ pub struct TransportStats {
     pub chains_completed: u64,
     pub interrupts: u64,
     pub rejected_feature_sets: u64,
+    /// Passes that completed buffers but whose interrupt the driver suppressed.
+    pub interrupts_suppressed: u64,
 }
 
 /// One VirtIO MMIO device: the register file plus the device model.
@@ -337,6 +340,7 @@ pub struct MmioTransport<D: VirtioDevice> {
     device: D,
     vm_id: u64,
     limits: QueueLimits,
+    ring_features: u64,
     status: u32,
     device_features_sel: u32,
     driver_features_sel: u32,
@@ -354,6 +358,13 @@ impl<D: VirtioDevice> MmioTransport<D> {
     pub fn new(device: D, vm_id: u64) -> Self {
         Self::with_limits(device, vm_id, QueueLimits::default())
     }
+    /// Offers only the ring features in `ring_features` (a subset of
+    /// [`RING_FEATURES`]; other bits are ignored).
+    pub fn with_ring_features(device: D, vm_id: u64, ring_features: u64) -> Self {
+        let mut t = Self::new(device, vm_id);
+        t.ring_features = ring_features & RING_FEATURES;
+        t
+    }
     pub fn with_limits(device: D, vm_id: u64, limits: QueueLimits) -> Self {
         let queues = device
             .queue_max_sizes()
@@ -364,6 +375,7 @@ impl<D: VirtioDevice> MmioTransport<D> {
             device,
             vm_id,
             limits,
+            ring_features: RING_FEATURES,
             status: 0,
             device_features_sel: 0,
             driver_features_sel: 0,
@@ -390,11 +402,31 @@ impl<D: VirtioDevice> MmioTransport<D> {
     pub fn status(&self) -> u32 {
         self.status
     }
+    /// The VM this device belongs to.
+    pub fn vm_id(&self) -> u64 {
+        self.vm_id
+    }
     pub fn negotiated_features(&self) -> u64 {
         self.negotiated
     }
     pub fn offered_features(&self) -> u64 {
-        self.device.device_features() | VIRTIO_F_VERSION_1 | VIRTIO_F_RING_PACKED
+        self.device.device_features() | VIRTIO_F_VERSION_1 | self.ring_features
+    }
+    /// The ring format negotiated queues use.
+    pub fn ring_format(&self) -> RingFormat {
+        if self.negotiated & VIRTIO_F_RING_PACKED != 0 {
+            RingFormat::Packed
+        } else {
+            RingFormat::Split
+        }
+    }
+    /// Counters of queue `index`, once it is ready.
+    pub fn queue_stats(&self, index: u32) -> Option<super::queue::QueueStats> {
+        self.queues
+            .get(index as usize)?
+            .active
+            .as_ref()
+            .map(|a| a.queue.stats())
     }
     pub fn interrupt_pending(&self) -> bool {
         self.interrupt_status != 0
@@ -639,7 +671,7 @@ impl<D: VirtioDevice> MmioTransport<D> {
         let mut next = new | (old & status::DEVICE_NEEDS_RESET);
         if added & status::FEATURES_OK != 0 {
             let offered = self.offered_features();
-            let required = VIRTIO_F_VERSION_1 | VIRTIO_F_RING_PACKED;
+            let required = VIRTIO_F_VERSION_1;
             if self.driver_accepted_unknown
                 || self.driver_features & !offered != 0
                 || self.driver_features & required != required
@@ -664,7 +696,6 @@ impl<D: VirtioDevice> MmioTransport<D> {
 
     fn set_queue_ready(&mut self, memory: &GuestMemory, ready: bool) -> Result<(), MmioError> {
         let index = self.queue_sel;
-        let vm_id = self.vm_id;
         let limits = self.limits;
         let q = self
             .queues
@@ -684,18 +715,34 @@ impl<D: VirtioDevice> MmioTransport<D> {
                 max: q.max,
             });
         }
-        let ring_len = u64::from(q.num) * DESCRIPTOR_BYTES as u64;
-        if !q.desc.is_multiple_of(16)
-            || !q.driver.is_multiple_of(4)
-            || !q.device.is_multiple_of(4)
-            || !memory.contains(q.desc, ring_len)
-            || !memory.contains(q.driver, EVENT_SUPPRESSION_BYTES)
-            || !memory.contains(q.device, EVENT_SUPPRESSION_BYTES)
-        {
-            return Err(MmioError::RingNotInRam);
+        if self.status & status::FEATURES_OK == 0 {
+            return Err(MmioError::QueueReadyBeforeFeaturesOk);
         }
-        let auth = GuestAuthorization::for_guest_ram(vm_id, memory, limits)?;
-        let queue = PackedQueue::new(usize::from(q.num), &auth, limits)?;
+        let format = if self.negotiated & VIRTIO_F_RING_PACKED != 0 {
+            RingFormat::Packed
+        } else {
+            RingFormat::Split
+        };
+        let layout = RingLayout {
+            format,
+            size: q.num,
+            desc: q.desc,
+            driver: q.driver,
+            device: q.device,
+        };
+        let queue = VirtQueue::new(
+            layout,
+            RingFeatures::from_bits(self.negotiated),
+            limits,
+            memory,
+        )
+        .map_err(|e| match e {
+            QueueError::InvalidQueueSize => MmioError::InvalidQueueSize {
+                size: u32::from(q.num),
+                max: q.max,
+            },
+            _ => MmioError::RingNotInRam,
+        })?;
         q.active = Some(ActiveQueue {
             queue,
             pending: VecDeque::new(),
@@ -706,16 +753,36 @@ impl<D: VirtioDevice> MmioTransport<D> {
 
     fn notify(&mut self, memory: &mut GuestMemory, value: u32) -> Result<(), MmioError> {
         self.stats.notifications += 1;
-        self.run_queue(memory, value)
+        if self.negotiated & VIRTIO_F_NOTIFICATION_DATA == 0 {
+            return self.run_queue(memory, value, None);
+        }
+        // §2.9: vqn in bits 0..16, then next_idx (split) or next_off and
+        // next_wrap (packed).
+        let index = value & 0xffff;
+        let hint = self
+            .queues
+            .get(index as usize)
+            .and_then(|q| q.active.as_ref())
+            .map(|a| a.queue.hint_from_data((value >> 16) as u16));
+        match hint {
+            Some(Ok(h)) => self.run_queue(memory, index, Some(h)),
+            Some(Err(_)) => Err(MmioError::InvalidNotification { value }),
+            None => self.run_queue(memory, index, None),
+        }
     }
 
     /// Host-side poll: process queue `index` again (e.g. after the backend has
     /// data for a receive queue). Captures newly available chains first.
     pub fn poll(&mut self, memory: &mut GuestMemory, index: u32) -> Result<(), MmioError> {
-        self.run_queue(memory, index)
+        self.run_queue(memory, index, None)
     }
 
-    fn run_queue(&mut self, memory: &mut GuestMemory, index: u32) -> Result<(), MmioError> {
+    fn run_queue(
+        &mut self,
+        memory: &mut GuestMemory,
+        index: u32,
+        hint: Option<AvailHint>,
+    ) -> Result<(), MmioError> {
         if self.status & status::DEVICE_NEEDS_RESET != 0 {
             return Err(MmioError::DeviceNeedsReset);
         }
@@ -729,29 +796,18 @@ impl<D: VirtioDevice> MmioTransport<D> {
             .queues
             .get_mut(index as usize)
             .ok_or(MmioError::InvalidQueue { index })?;
-        let desc_gpa = q.desc;
-        let ring_len = usize::from(q.num) * DESCRIPTOR_BYTES;
         let Some(active) = q.active.as_mut() else {
             return Err(MmioError::QueueNotReady { index });
         };
-        // Single fetch: one copy of the ring per pass.
-        let mut ring = vec![0u8; ring_len];
-        memory.read(desc_gpa, &mut ring)?;
         let mut captured = 0u64;
         let mut failure = None;
         loop {
-            match active.queue.capture(&ring) {
-                Ok(lease) => {
-                    match gather(memory, &lease) {
-                        Ok(readable) => active.pending.push_back(Chain { lease, readable }),
-                        Err(e) => {
-                            failure = Some(MmioError::Memory(e));
-                            break;
-                        }
-                    }
+            match active.queue.capture(memory, hint) {
+                Ok(Some(chain)) => {
+                    active.pending.push_back(chain);
                     captured += 1;
                 }
-                Err(QueueError::NotAvailable | QueueError::Full) => break,
+                Ok(None) | Err(QueueError::Full) => break,
                 Err(e) => {
                     failure = Some(MmioError::Queue(e));
                     break;
@@ -767,28 +823,37 @@ impl<D: VirtioDevice> MmioTransport<D> {
             queue: &mut active.queue,
             pending: &mut active.pending,
             memory,
-            desc_gpa,
-            scratch: vec![0u8; ring_len],
             completed: 0,
         };
         let result = self.device.process(index as u16, &mut io);
         let completed = io.completed;
+        let flushed = active.queue.flush(memory);
         self.stats.chains_completed += completed as u64;
-        if completed > 0 {
-            self.raise(INT_USED_BUFFER);
+        match flushed {
+            Ok(true) => self.raise(INT_USED_BUFFER),
+            Ok(false) if completed > 0 => self.stats.interrupts_suppressed += 1,
+            Ok(false) => {}
+            Err(e) => {
+                self.needs_reset();
+                return Err(device_error(e));
+            }
         }
         self.check_config_change();
         match result {
             Ok(()) => Ok(()),
             Err(e) => {
                 self.needs_reset();
-                Err(match e {
-                    DeviceError::Queue(q) => MmioError::Queue(q),
-                    DeviceError::Memory(m) => MmioError::Memory(m),
-                    DeviceError::Protocol(_) => MmioError::DeviceNeedsReset,
-                })
+                Err(device_error(e))
             }
         }
+    }
+}
+
+fn device_error(e: DeviceError) -> MmioError {
+    match e {
+        DeviceError::Queue(q) => MmioError::Queue(q),
+        DeviceError::Memory(m) => MmioError::Memory(m),
+        DeviceError::Protocol(_) => MmioError::DeviceNeedsReset,
     }
 }
 
@@ -797,18 +862,4 @@ fn set_low(field: &mut u64, value: u32) {
 }
 fn set_high(field: &mut u64, value: u32) {
     *field = (*field & 0xffff_ffff) | (u64::from(value) << 32);
-}
-
-fn gather(memory: &GuestMemory, lease: &DescriptorLease) -> Result<Vec<u8>, MemError> {
-    let chain = lease.chain();
-    let mut out = Vec::with_capacity(chain.readable_bytes() as usize);
-    for d in chain.descriptors() {
-        if d.descriptor.flags & FLAG_WRITE != 0 {
-            continue;
-        }
-        let start = out.len();
-        out.resize(start + d.descriptor.byte_len as usize, 0);
-        memory.read(d.descriptor.guest_address, &mut out[start..])?;
-    }
-    Ok(out)
 }

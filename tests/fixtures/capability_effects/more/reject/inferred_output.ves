@@ -1,0 +1,28 @@
+// expect: E0702
+// An inout parameter the callee writes a secret into is secret in the
+// caller after the call.
+copy struct Secret[T] {
+    value: T,
+}
+
+fn store(inout out: u64, x: u64) -> Unit eff [ConstTime] {
+    out = x;
+}
+
+fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    let o: u64 = 0;
+    store(inout o, value);
+    if o == 0 {
+        s
+    } else {
+        s
+    }
+}
+
+fn main() -> u64 {
+    0
+}

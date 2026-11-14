@@ -1,0 +1,24 @@
+// expect: E0708
+// Resuming with a function value still checks it against the capabilities
+// the operation's result type requires.
+linear effect Pick {
+    fn pick() -> fn(f64) -> f64 eff [DetFloat];
+}
+
+fn run(x: f64) -> f64 {
+    handle Pick in {
+        let f = Pick::pick();
+        f(x)
+    } with {
+        return v => v,
+        pick(resume) => resume(
+            | y: f64 | -> f64 {
+                y * 2.0
+            }
+        ),
+    }
+}
+
+fn main() -> f64 {
+    run(1.0)
+}

@@ -221,6 +221,84 @@ theorem advance_wraps_iff (size idx count : Nat) :
   unfold advance
   split <;> simp_all
 
+/-! ## Used-buffer notification suppression (EVENT_IDX)
+
+`vring_need_event(event, new, old)` from virtio-v1.2 §2.7.10, on 16-bit
+indices modelled as naturals below 2^16 with explicit modular subtraction:
+it holds exactly when the driver's event index lies in the window
+`[old, new)` of used indices the device has just published. -/
+
+def sub16 (a b : Nat) : Nat := (a + 65536 - b) % 65536
+
+def needEvent (event new old : Nat) : Bool :=
+  decide (sub16 (sub16 new event) 1 < sub16 new old)
+
+theorem needEvent_iff_window (event new old : Nat)
+    (he : event < 65536) (hn : new < 65536) (ho : old < 65536) :
+    needEvent event new old = true ↔ sub16 event old < sub16 new old := by
+  unfold needEvent sub16
+  simp only [decide_eq_true_eq]
+  omega
+
+theorem needEvent_empty_window (event idx : Nat) (he : event < 65536) (hi : idx < 65536) :
+    needEvent event idx idx = false := by
+  unfold needEvent sub16
+  simp only [decide_eq_false_iff_not]
+  omega
+
+/-! ## IN_ORDER batches
+
+The device closes a batch of in-order completions at the first buffer that
+was not written to its full length, or at the last completion of the pass
+(`true` = fully written). Every completion lands in exactly one batch, and
+within a batch every buffer before the last (the ones the driver infers
+without a used entry of their own) was fully written. -/
+
+def closeBatches : List Bool → List Bool → List (List Bool)
+  | cur, [] => if cur.isEmpty then [] else [cur.reverse]
+  | cur, b :: rest =>
+      if b = false ∨ rest = [] then (b :: cur).reverse :: closeBatches [] rest
+      else closeBatches (b :: cur) rest
+
+theorem closeBatches_cover (cur xs : List Bool) :
+    ((closeBatches cur xs).map List.length).sum = cur.length + xs.length := by
+  induction xs generalizing cur with
+  | nil => cases cur <;> simp [closeBatches]
+  | cons b rest ih =>
+    simp only [closeBatches]
+    split
+    · simp [ih]; omega
+    · rw [ih]; simp; omega
+
+theorem closeBatches_skipped_full (cur xs : List Bool) (hcur : ∀ b ∈ cur, b = true) :
+    ∀ batch ∈ closeBatches cur xs, ∀ b ∈ batch.dropLast, b = true := by
+  induction xs generalizing cur with
+  | nil =>
+    intro batch hb x hx
+    cases cur with
+    | nil => simp [closeBatches] at hb
+    | cons c cs =>
+      simp [closeBatches] at hb
+      subst hb
+      rw [List.dropLast_concat] at hx
+      exact hcur x (List.mem_cons_of_mem c (List.mem_reverse.mp hx))
+  | cons b rest ih =>
+    intro batch hb x hx
+    simp only [closeBatches] at hb
+    split at hb
+    · rcases List.mem_cons.mp hb with h | h
+      · subst h
+        rw [List.reverse_cons, List.dropLast_concat] at hx
+        exact hcur x (List.mem_reverse.mp hx)
+      · exact ih [] (by simp) batch h x hx
+    · have hbt : b = true := by
+        cases b <;> simp_all
+      exact ih (b :: cur) (by
+        intro y hy
+        rcases List.mem_cons.mp hy with h | h
+        · subst h; exact hbt
+        · exact hcur y h) batch hb x hx
+
 #print axioms checked_interval_sound
 #print axioms checked_endpoint_exact
 #print axioms separated_no_common_address
@@ -242,4 +320,8 @@ theorem advance_wraps_iff (size idx count : Nat) :
 #print axioms chunks_cover
 #print axioms advance_in_range
 #print axioms advance_wraps_iff
+#print axioms needEvent_iff_window
+#print axioms needEvent_empty_window
+#print axioms closeBatches_cover
+#print axioms closeBatches_skipped_full
 end Vesper.AetherMemory

@@ -1,0 +1,10 @@
+// expect: E0764
+// at: zeros()
+// message: cannot infer dimension 'N' of 'zeros'
+fn zeros[N: dim]() -> Tensor[F32, [N]] eff [Tensor] {
+    Tensor::fill[[N]](0.0)
+}
+fn main() -> u64 eff [Tensor] {
+    let z = zeros();
+    0
+}

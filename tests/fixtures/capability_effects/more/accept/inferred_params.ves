@@ -1,0 +1,48 @@
+// Secret-parameter inference: helpers with public parameter types are
+// checked with the secrets their ConstTime callers pass, and their results
+// stay secret in the caller.
+copy struct Secret[T] {
+    value: T,
+}
+
+fn mix(a: u64, b: u64) -> u64 eff [ConstTime] {
+    wrapping_add(wrapping_mul(a, 31), b)
+}
+
+fn twice(x: u64) -> u64 eff [ConstTime] {
+    mix(x, x)
+}
+
+fn accumulate(inout acc: u64, x: u64) -> Unit eff [ConstTime] {
+    acc = wrapping_add(acc, twice(x));
+}
+
+fn digest(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    let acc: u64 = 7;
+    accumulate(inout acc, value);
+    Secret {
+        value: acc
+    }
+}
+
+fn declassify(s: Secret[u64]) -> u64 eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    value
+}
+
+fn main() -> u64 {
+    declassify(
+        digest(
+            Secret {
+                value: 2
+            }
+        )
+    )
+}
