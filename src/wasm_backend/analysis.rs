@@ -424,13 +424,6 @@ fn handler(
             )));
         };
         let sig = &decl.ops[op];
-        if sig.params.iter().any(|p| p.pass == Pass::Inout) {
-            return Err(WasmError::unsupported(
-                Unsupported::InoutEffectArgument,
-                site,
-                format!("{}::{} takes an inout argument", effect.name, sig.name),
-            ));
-        }
         let function = nested_name("handler_clause", &clause.body.span);
         let ir = program.functions.get(&function).ok_or_else(|| {
             WasmError::Invalid(format!("handler clause {function} was not lowered"))
@@ -445,6 +438,28 @@ fn handler(
         let caps = captures(crate::check::clause_free_names(clause), aliases, outer);
         check_prefix(program, &function, &caps)?;
         let mode = clause_mode(ir, resume.as_deref(), &function)?;
+        // An `inout` operation argument is a cell copied back when the
+        // operation returns: only a clause that resumes in tail position
+        // makes all its writes before that.
+        for (i, p) in sig.params.iter().enumerate() {
+            if p.pass != Pass::Inout {
+                continue;
+            }
+            let bound = matches!(
+                clause.pats.get(i).map(|p| &p.kind),
+                Some(PatternKind::Bind(_) | PatternKind::Wild)
+            );
+            if mode != HandlerMode::Tail || !bound {
+                return Err(WasmError::unsupported(
+                    Unsupported::InoutEffectArgument,
+                    site,
+                    format!(
+                        "{}::{} takes an inout argument; only a clause that binds it by name and resumes in tail position is supported",
+                        effect.name, sig.name
+                    ),
+                ));
+            }
+        }
         if mode == HandlerMode::StackSwitching && !stack_switching {
             return Err(WasmError::unsupported(
                 Unsupported::NonTailResumptiveHandler,

@@ -2088,14 +2088,21 @@ impl<'l, 'a> Emit<'l, 'a> {
                 } else if let Some((effect, op)) = callee.split_once("::")
                     && self.l.world.effects.contains_key(effect)
                 {
-                    let mut vals = vec![];
-                    for a in args {
-                        if a.pass == Pass::Inout {
-                            return Err(self.err(Unsupported::InoutEffectArgument, callee.clone()));
-                        }
-                        vals.push(self.value(a.value)?);
-                    }
-                    let r = self.perform(effect, op, types, capability.as_deref(), &vals)?;
+                    // `inout` arguments are cells, copied back when the
+                    // operation returns (analysis only admits them for
+                    // tail-resumptive clauses, which write before resuming).
+                    let params: Vec<(Pass, Type)> = self.l.world.effects[effect]
+                        .ops
+                        .iter()
+                        .find(|o| o.name == *op)
+                        .map(|o| o.params.iter().map(|p| (p.pass, Type::Infer)).collect())
+                        .unwrap_or_default();
+                    let (vals, cells) = self.call_args(args, &params)?;
+                    let types: Vec<Type> = types.iter().map(|t| self.subst(t)).collect();
+                    let r =
+                        self.perform_unchecked(effect, op, &types, capability.as_deref(), &vals)?;
+                    self.writeback(cells)?;
+                    self.abort_check();
                     self.values.insert(inst.dest, r);
                 } else {
                     return Err(
@@ -2402,20 +2409,94 @@ impl<'l, 'a> Emit<'l, 'a> {
     ) -> Result<(), WasmError> {
         let params = self.params_of(callee);
         let (vals, cells) = self.call_args(args, &params)?;
+        let saved = self.bind_row_labels(callee)?;
         for v in &vals {
             self.get(*v);
         }
         let d = self.dest(dest);
         self.code
             .extend([I::Call(self.l.funcs[callee]), I::LocalSet(d)]);
+        for (g, x) in saved {
+            self.code.extend([I::LocalGet(x), I::GlobalSet(g)]);
+        }
         self.writeback(cells)?;
         self.abort_check();
         Ok(())
     }
 
+    /// A callee whose row names a label (`eff [l: E]`) sees the caller's
+    /// `l` handler as its `E` (the evaluator binds the callee's evidence
+    /// for the entry to the caller's `$label:l`). Rebind those keys for
+    /// the call and return the saved globals to restore after it.
+    fn bind_row_labels(&mut self, callee: &str) -> Result<Vec<(u32, u32)>, WasmError> {
+        let base = self
+            .l
+            .plan
+            .instances
+            .get(callee)
+            .map_or(callee.to_owned(), |i| i.base.clone());
+        let vars = self.l.vars(callee);
+        let Some(f) = self.l.world.functions.get(&base) else {
+            return Ok(vec![]);
+        };
+        let mut saved: Vec<(u32, u32)> = vec![];
+        let mut sets = vec![];
+        for e in &f.effects.instances {
+            let Some(label) = e.label.as_ref().filter(|l| !l.starts_with('$')) else {
+                continue;
+            };
+            if !self.labels.contains(label) {
+                return Err(self.err(
+                    Unsupported::LabelledEffectRow,
+                    format!("call to '{base}' needs label '{label}', which is not in scope"),
+                ));
+            }
+            let source = *self.l.env.get(&format!("$label:{label}")).ok_or_else(|| {
+                WasmError::Invalid(format!("no handler installs label '{label}'"))
+            })?;
+            let args: Vec<Type> = e
+                .args
+                .iter()
+                .map(|t| self.subst(&substitute(t, &vars)))
+                .collect();
+            let mut targets = vec![format!("$effect:{}", e.name), format!("$label:{label}")];
+            targets.extend(crate::numeric::instance_key(&e.name, &args));
+            let s = self.local();
+            self.code.extend([I::GlobalGet(source), I::LocalSet(s)]);
+            for t in targets {
+                if let Some(g) = self.l.env.get(&t).copied() {
+                    sets.push((g, s));
+                }
+            }
+        }
+        for (g, s) in sets {
+            if !saved.iter().any(|(x, _)| *x == g) {
+                let old = self.local();
+                self.code.extend([I::GlobalGet(g), I::LocalSet(old)]);
+                saved.push((g, old));
+            }
+            self.code.extend([I::LocalGet(s), I::GlobalSet(g)]);
+        }
+        Ok(saved)
+    }
+
+    /// Perform an operation and propagate an abort.
+    fn perform(
+        &mut self,
+        effect: &str,
+        op: &str,
+        instance: &[Type],
+        label: Option<&str>,
+        args: &[u32],
+    ) -> Result<u32, WasmError> {
+        let d = self.perform_unchecked(effect, op, instance, label, args)?;
+        self.abort_check();
+        Ok(d)
+    }
+
     /// Select the innermost frame for an operation: the exact instance key
     /// if installed, else the effect name (or the label).
-    fn perform(
+    fn perform_unchecked(
         &mut self,
         effect: &str,
         op: &str,
@@ -2498,7 +2579,6 @@ impl<'l, 'a> Emit<'l, 'a> {
             },
             I::LocalSet(d),
         ]);
-        self.abort_check();
         Ok(d)
     }
 

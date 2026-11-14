@@ -648,18 +648,32 @@ fn generic_functions_are_monomorphized() {
     );
 }
 
+#[test]
+fn labelled_rows_and_inout_operation_arguments() {
+    for source in [
+        "linear effect Ask { fn ask() -> i64; } fn get(b: bool) -> i64 eff [outer: Ask] { if b { outer.ask() } else { wrapping_add(outer.ask(), 1) } } fn main() -> i64 { handle outer: Ask in { get(true) } with { return x => x, ask(k) => k(40), } }",
+        // The labelled row selects the outer handler past an inner one, and
+        // the callee's unlabelled operation resolves to the same handler.
+        "linear effect Ask { fn ask() -> i64; } fn get() -> i64 eff [outer: Ask] { wrapping_add(wrapping_mul(outer.ask(), 100), Ask::ask()) } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { wrapping_add(get(), inner.ask()) } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(40), } }",
+        // Labels pass through nested labelled callees and closures.
+        "linear effect Ask { fn ask() -> i64; } fn leaf() -> i64 eff [a: Ask] { a.ask() } fn mid() -> i64 eff [a: Ask] { let f = || eff [a: Ask] a.ask(); wrapping_add(leaf(), f()) } fn main() -> i64 { handle a: Ask in { handle b: Ask in { mid() } with { return x => x, ask(k) => k(1000), } } with { return x => x, ask(k) => k(21), } }",
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
+        "copy struct P { a: i64, b: i64 } linear effect Inc { fn inc(inout x: i64); } fn main() -> P { let p = P { a: 1, b: 10 }; handle Inc in { Inc::inc(inout p.b); Inc::inc(inout p.b); p } with { return n => n, inc(n, k) => { n = wrapping_mul(n, 3); k(()) }, } }",
+        "linear effect Swap { fn swap(inout x: i64, sink v: i64) -> i64; } fn go() -> i64 eff [Swap] { let x = 1; let old = Swap::swap(inout x, 5); wrapping_add(wrapping_mul(x, 10), old) } fn main() -> i64 { handle Swap in { go() } with { return n => n, swap(x, v, k) => { let old = x; x = v; k(old) }, } }",
+    ] {
+        differential(source);
+    }
+    // An aborting clause would write the cell after it was copied back.
+    unsupported(
+        "effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = 1; 7 }, } }",
+        Unsupported::InoutEffectArgument,
+    );
+}
+
 // ---- rejections --------------------------------------------------------------
 
 #[test]
 fn unsupported_constructs_are_typed_errors() {
-    unsupported(
-        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
-        Unsupported::InoutEffectArgument,
-    );
-    unsupported(
-        "linear effect Ask { fn ask() -> i64; } fn get(b: bool) -> i64 eff [outer: Ask] { if b { outer.ask() } else { wrapping_add(outer.ask(), 1) } } fn main() -> i64 { handle outer: Ask in { get(true) } with { return x => x, ask(k) => k(40), } }",
-        Unsupported::LabelledEffectRow,
-    );
 }
 
 #[test]
