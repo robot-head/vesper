@@ -104,7 +104,15 @@ impl Runtime<'_> {
                 self.regions.commit(id, index).map_err(fault)?;
                 Value::Tuple(vec![])
             }
-            "used" => Value::UInt(self.regions.used(id).map_err(fault)?, 64),
+            // Reported in the native backend's word units, so `used()`
+            // agrees across backends (see the capacity scaling above).
+            "used" => Value::UInt(
+                self.regions
+                    .used(id)
+                    .map_err(fault)?
+                    .div_ceil(std::mem::size_of::<Value>().div_ceil(8) as u64),
+                64,
+            ),
             _ => return Err(format!("unknown region operation '{op}'")),
         };
         Ok(Control::Return(value))

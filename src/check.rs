@@ -3131,10 +3131,15 @@ impl Checker<'_> {
                 span.clone(),
             );
         }
+        let result = &self.region_annotation(result);
+        let param_types = params
+            .iter()
+            .map(|p| self.region_annotation(&p.ty))
+            .collect::<Vec<_>>();
         self.valid_type(result, &self.generics.clone(), span.clone());
-        for p in params {
-            self.valid_type(&p.ty, &self.generics.clone(), p.span.clone());
-            if unresolved(&p.ty) {
+        for (p, ty) in params.iter().zip(&param_types) {
+            self.valid_type(ty, &self.generics.clone(), p.span.clone());
+            if unresolved(ty) {
                 self.error(
                     "E0102",
                     "closure parameters need a type annotation when no expected type is available",
@@ -3144,7 +3149,7 @@ impl Checker<'_> {
             captured.bindings.insert(
                 p.name.clone(),
                 Binding {
-                    ty: p.ty.clone(),
+                    ty: ty.clone(),
                     pass: p.pass,
                     projections: p.projections.clone(),
                     moved: vec![],
@@ -3184,7 +3189,11 @@ impl Checker<'_> {
         self.expect_type(result, &actual, body.span.clone());
         self.exhaust(&captured, captured.bindings.keys().cloned().collect(), span);
         Type::Function {
-            params: params.iter().map(|p| (p.pass, p.ty.clone())).collect(),
+            params: params
+                .iter()
+                .zip(param_types)
+                .map(|(p, ty)| (p.pass, ty))
+                .collect(),
             result: Box::new(if *result == Type::Infer {
                 crate::numeric::default_type(&actual)
             } else {

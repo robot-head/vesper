@@ -860,6 +860,8 @@ struct Handler {
     capabilities: BTreeMap<String, String>,
     effect: Effect,
     state: Option<Variable>,
+    /// The open region of a region block (its runtime region id).
+    region: Option<Variable>,
     ops: Vec<Clause>,
     captured: BTreeMap<String, Variable>,
     captured_types: BTreeMap<String, Type>,
@@ -2864,13 +2866,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.capabilities
                         .insert(format!("$label:{label}"), identity.clone());
                 }
-                let region = self.region_enter(&effect, ret, &identity)?;
+                let region = self.region_enter(&effect, ret)?;
                 self.handlers.push(Handler {
                     identity,
                     capabilities: outer_caps.clone(),
                     output_type: output_type.clone(),
                     effect,
                     state,
+                    region,
                     state_type: state_type.clone(),
                     ops: ops.clone(),
                     captured: capture_variables.clone(),

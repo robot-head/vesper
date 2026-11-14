@@ -13,13 +13,10 @@
 //! abort left open, so faults never become reads of reclaimed memory.
 use super::store::{RegionFault, Regions};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
 
 #[derive(Default)]
 struct Native {
     regions: Regions<i64>,
-    /// Open activations of each static region block, innermost last.
-    active: BTreeMap<i64, Vec<u64>>,
     next: u64,
     fault: Option<RegionFault>,
     /// Regions opened and closed by executions already finished.
@@ -64,84 +61,44 @@ pub fn symbols() -> [(&'static str, *const u8); 10] {
     ]
 }
 
-/// The innermost open activation of a static block.
-fn top(n: &Native, key: i64) -> Result<u64, RegionFault> {
-    n.active
-        .get(&key)
-        .and_then(|a| a.last())
-        .copied()
-        .ok_or(RegionFault::Inactive)
-}
-/// Opens a new activation of the block `key`, bounded by `capacity` bytes.
-pub extern "C" fn vesper_region_open(key: i64, capacity: u64) -> u64 {
+/// Opens a new region bounded by `capacity` bytes and returns its id.
+pub extern "C" fn vesper_region_open(capacity: u64) -> u64 {
     with(|n| {
         n.next = n.next.checked_add(1).ok_or(RegionFault::Inactive)?;
         let capacity = usize::try_from(capacity)
             .map_err(|_| RegionFault::Config("capacity exceeds the address space".into()))?;
         let id = n.next;
         n.regions.open(id, capacity)?;
-        n.active.entry(key).or_default().push(id);
         Ok(id)
     })
 }
-/// Closes the innermost activation of the block `key`.
-pub extern "C" fn vesper_region_close(key: i64) -> u64 {
-    with(|n| {
-        let id = n
-            .active
-            .get_mut(&key)
-            .and_then(Vec::pop)
-            .ok_or(RegionFault::Inactive)?;
-        n.regions.close(id).map(|()| 0)
-    })
+/// Closes the region `id`.
+pub extern "C" fn vesper_region_close(id: u64) -> u64 {
+    with(|n| n.regions.close(id).map(|()| 0))
 }
-pub extern "C" fn vesper_region_box(key: i64, word: i64) -> u64 {
-    with(|n| {
-        let id = top(n, key)?;
-        n.regions.alloc(id, word, false)
-    })
+pub extern "C" fn vesper_region_box(id: u64, word: i64) -> u64 {
+    with(|n| n.regions.alloc(id, word, false))
 }
-pub extern "C" fn vesper_region_get(key: i64, handle: u64) -> i64 {
-    with(|n| {
-        let id = top(n, key)?;
-        n.regions.get(id, handle).copied()
-    })
+pub extern "C" fn vesper_region_get(id: u64, handle: u64) -> i64 {
+    with(|n| n.regions.get(id, handle).copied())
 }
-pub extern "C" fn vesper_region_set(key: i64, handle: u64, word: i64) -> u64 {
-    with(|n| {
-        let id = top(n, key)?;
-        n.regions.set(id, handle, word).map(|()| 0)
-    })
+pub extern "C" fn vesper_region_set(id: u64, handle: u64, word: i64) -> u64 {
+    with(|n| n.regions.set(id, handle, word).map(|()| 0))
 }
-pub extern "C" fn vesper_region_take(key: i64, handle: u64) -> i64 {
-    with(|n| {
-        let id = top(n, key)?;
-        n.regions.take(id, handle)
-    })
+pub extern "C" fn vesper_region_take(id: u64, handle: u64) -> i64 {
+    with(|n| n.regions.take(id, handle))
 }
-pub extern "C" fn vesper_region_checkpoint(key: i64) -> u64 {
-    with(|n| {
-        let id = top(n, key)?;
-        n.regions.checkpoint(id)
-    })
+pub extern "C" fn vesper_region_checkpoint(id: u64) -> u64 {
+    with(|n| n.regions.checkpoint(id))
 }
-pub extern "C" fn vesper_region_rewind(key: i64, mark: u64) -> u64 {
-    with(|n| {
-        let id = top(n, key)?;
-        n.regions.rewind(id, mark).map(|()| 0)
-    })
+pub extern "C" fn vesper_region_rewind(id: u64, mark: u64) -> u64 {
+    with(|n| n.regions.rewind(id, mark).map(|()| 0))
 }
-pub extern "C" fn vesper_region_commit(key: i64, mark: u64) -> u64 {
-    with(|n| {
-        let id = top(n, key)?;
-        n.regions.commit(id, mark).map(|()| 0)
-    })
+pub extern "C" fn vesper_region_commit(id: u64, mark: u64) -> u64 {
+    with(|n| n.regions.commit(id, mark).map(|()| 0))
 }
-pub extern "C" fn vesper_region_used(key: i64) -> u64 {
-    with(|n| {
-        let id = top(n, key)?;
-        n.regions.used(id)
-    })
+pub extern "C" fn vesper_region_used(id: u64) -> u64 {
+    with(|n| n.regions.used(id))
 }
 
 /// Counters of the calling thread's native regions: `(opened, closed by

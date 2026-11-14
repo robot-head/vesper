@@ -1,31 +1,18 @@
 //! Native lowering of region blocks through runtime calls. A child module of
 //! `native.rs`, so it emits code with the backend's own builder.
 //!
-//! A block is keyed by its handler identity. On
-//! entry the code calls `vesper_region_open(key, capacity)`, which pushes a
-//! fresh [`vesper_alloc::Region`] on that key's activation stack; every
-//! operation calls `vesper_region_<op>(key, ...)` on the innermost
-//! activation, and the normal exit calls `vesper_region_close(key)`. An
-//! abort that leaves the block early leaves its region to
+//! On entry a block calls `vesper_region_open(capacity)`, which opens a fresh
+//! [`vesper_alloc::Region`] and returns its run-time id; the id is kept in a
+//! variable of the block's handler, every operation passes it to
+//! `vesper_region_<op>(id, ...)`, and the normal exit calls
+//! `vesper_region_close(id)`. Operations therefore always reach the exact
+//! activation that lexically encloses them, also after an abort out of an
+//! inner block. A region an abort leaves open is closed by
 //! [`crate::regions::native_runtime::finish`], which the JIT driver calls
-//! after the entry returns. Payloads are single machine words; `f64` payloads
-//! travel as their bit patterns.
+//! after the entry returns. Payloads are single machine words; `f64`
+//! payloads travel as their bit patterns.
 use super::*;
 use crate::regions::{self, REGION_EFFECT};
-
-/// Static key of a region block: a hash of its handler identity. Within one
-/// compiled function identities are unique, and region evidence never leaves
-/// the function it was created in except by inlining (effectful callees are
-/// specialized into their caller), so the innermost live activation of a key
-/// is the block an operation names.
-fn block_key(identity: &str) -> i64 {
-    // FNV-1a.
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in identity.bytes() {
-        h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
-    }
-    h as i64
-}
 
 impl<M: Module> Codegen<'_, '_, M> {
     fn region_call(&mut self, name: &str, args: &[ir::Value]) -> Result<ir::Value, String> {
@@ -54,28 +41,27 @@ impl<M: Module> Codegen<'_, '_, M> {
         &mut self,
         effect: &Effect,
         ret: &Clause,
-        identity: &str,
-    ) -> Result<Option<i64>, String> {
+    ) -> Result<Option<Variable>, String> {
         let Some(capacity) = regions::block_capacity(effect, ret) else {
             return Ok(None);
         };
-        let key = block_key(identity);
-        let k = self.b.ins().iconst(types::I64, key);
         let c = self.b.ins().iconst(
             types::I64,
             i64::try_from(capacity).map_err(|e| e.to_string())?,
         );
-        self.region_call("vesper_region_open", &[k, c])?;
-        Ok(Some(key))
+        let id = self.region_call("vesper_region_open", &[c])?;
+        let var = self.b.declare_var(types::I64);
+        self.b.def_var(var, id);
+        Ok(Some(var))
     }
 
     /// Normal exit of a region block.
-    pub(super) fn region_exit(&mut self, key: Option<i64>) -> Result<(), String> {
-        if let Some(key) = key
+    pub(super) fn region_exit(&mut self, region: Option<Variable>) -> Result<(), String> {
+        if let Some(var) = region
             && self.b.current_block().is_some()
         {
-            let k = self.b.ins().iconst(types::I64, key);
-            self.region_call("vesper_region_close", &[k])?;
+            let id = self.b.use_var(var);
+            self.region_call("vesper_region_close", &[id])?;
         }
         Ok(())
     }
@@ -93,16 +79,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             .get(&format!("$label:{label}"))
             .ok_or("native region operation lacks scoped evidence")?
             .clone();
-        if !self
+        let region = self
             .handlers
             .iter()
-            .any(|h| h.identity == identity && h.effect.name == REGION_EFFECT)
-        {
-            return Err(
-                "native region operation does not resolve to an enclosing region block".into(),
-            );
-        }
-        let key = block_key(&identity);
+            .rev()
+            .find(|h| h.identity == identity && h.effect.name == REGION_EFFECT)
+            .and_then(|h| h.region)
+            .ok_or("native region operation does not resolve to an enclosing region block")?;
         let payload_of = |this: &Self, e: &Expr| -> Result<Type, String> {
             let t = this.ty(e);
             regions::box_parts(&t)
@@ -121,8 +104,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 value
             })
         };
-        let k = self.b.ins().iconst(types::I64, key);
-        let mut values = vec![k];
+        let id = self.b.use_var(region);
+        let mut values = vec![id];
         let (name, result) = match op {
             "box" => {
                 let ty = self.ty(&args[0].expr);

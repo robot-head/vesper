@@ -599,8 +599,18 @@ fn rewind_flow(
                     if let Some(label) = ty.and_then(watermark_label) {
                         marks.insert(name.clone(), (label.to_owned(), vec![]));
                     } else if let Some((label, _)) = ty.and_then(box_parts) {
+                        // An alias of an existing box dies with it; any other
+                        // box-typed value may be a fresh allocation.
+                        let alias = match &value.kind {
+                            ExprKind::Name(source) => Some(source),
+                            _ => None,
+                        };
                         for (region, boxes) in marks.values_mut() {
-                            if region == label {
+                            let fresh = match alias {
+                                Some(source) => boxes.contains(source),
+                                None => region == label,
+                            };
+                            if fresh {
                                 boxes.push(name.clone());
                             }
                         }

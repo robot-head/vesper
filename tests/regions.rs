@@ -407,3 +407,72 @@ fn the_built_in_region_effect_is_reserved() {
     rejects("fn main() -> i64 { region r { r.frob(1); 0 } }", "E0790");
     rejects("fn main() -> i64 { region r { r.box(1, 2); 0 } }", "E0790");
 }
+
+// ----- review follow-ups ------------------------------------------------------
+
+#[test]
+fn an_abort_out_of_an_inner_activation_does_not_misdirect_the_outer_one() {
+    // The inner activation of the same block aborts; the outer one must still
+    // read its own box afterwards.
+    let source = "fn f(n: i64) -> i64 eff [Fail[i64]] {
+    region r {
+        let a = r.box(n);
+        let inner = if n == 0 { Fail::raise(9) } else { handle Fail[i64] in { f(wrapping_sub(n, 1)) } with { return x => x, raise(e, k) => e, } };
+        wrapping_add(inner, r.get(a))
+    }
+}
+fn main() -> i64 { handle Fail[i64] in { f(1) } with { return x => x, raise(e, k) => e, } }";
+    assert_eq!(both_allowing_aborts(source), "10");
+}
+
+/// Like [`both`], for programs whose aborts leave regions to the drivers.
+fn both_allowing_aborts(source: &str) -> String {
+    let world = accepted(source);
+    let evaluated = Runtime::new(&world)
+        .run("main", vec![])
+        .unwrap()
+        .to_string();
+    let jit = native::jit(&world, "main").unwrap().to_string();
+    assert_eq!(evaluated, jit, "evaluator and native JIT agree");
+    let (_, _, open) = regions::native_runtime::counts();
+    assert_eq!(open, 0);
+    evaluated
+}
+
+#[test]
+fn an_alias_of_a_box_from_before_the_checkpoint_survives_rewind() {
+    assert_eq!(
+        both(
+            "fn main() -> i64 { region r { let a = r.box(7); let m = r.checkpoint(); let b = a; r.rewind(m); r.get(b) } }"
+        ),
+        "7"
+    );
+}
+
+#[test]
+fn an_alias_of_a_box_from_after_the_checkpoint_dies_with_it() {
+    rejects(
+        "fn main() -> i64 { region r { let m = r.checkpoint(); let a = r.box(7); let b = a; r.rewind(m); r.get(b) } }",
+        "E0796",
+    );
+}
+
+#[test]
+fn closure_annotations_name_source_regions() {
+    assert_eq!(
+        both(
+            "fn main() -> i64 { region r { let a = r.box(5); let read = |b: RegionBox[r, i64]| r.get(b); read(a) } }"
+        ),
+        "5"
+    );
+}
+
+#[test]
+fn used_bytes_agree_across_backends() {
+    assert_eq!(
+        both(
+            "fn main() -> u64 { region r { let a = r.box(1); let n = r.used(); let _ = r.get(a); n } }"
+        ),
+        "8"
+    );
+}

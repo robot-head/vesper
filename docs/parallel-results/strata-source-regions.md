@@ -78,16 +78,19 @@ memory with `alloc_value`; handles are `(region, index)` pairs checked by the
 allocator's region identity and serial, so a stale or foreign handle is a
 runtime error, never a read of reclaimed memory. The evaluator's byte bound is
 scaled by `size_of::<Value>() / 8` so a block holds as many word payloads as
-on the native backend. A region left by an abort is finalized when the
+on the native backend, and `used()` is reported in the same word units, so
+both backends return the same count. A region left by an abort is finalized when the
 `Runtime` is dropped.
 
 ### Native (`src/regions/native.rs`, `src/regions/native_runtime.rs`)
 
-Region blocks lower to runtime calls: `vesper_region_open(key, capacity)` on
-entry, `vesper_region_close(key)` on the normal exit, and one
-`vesper_region_<op>(key, ...)` call per operation. The key is a hash of the
-block's handler identity; the runtime keeps a stack of activations per key, so
-recursion through a block gets one region per activation. Payloads are machine
+Region blocks lower to runtime calls: `vesper_region_open(capacity)` on
+entry returns a fresh run-time region id, which the block keeps in a variable
+of its handler; every operation passes that id to `vesper_region_<op>(id,
+...)`, and the normal exit calls `vesper_region_close(id)`. Because the id is
+lexical evidence rather than a lookup by block, recursion gets one region per
+activation and an abort out of an inner activation of the same block cannot
+redirect the outer activation's operations. Payloads are machine
 words (integers, `bool`, `Unit`, `f64` as bit patterns) held in a per-thread
 table of `vesper_alloc::Region<i64>`; no `unsafe` code is involved. A failing
 call records a typed fault; the JIT driver calls `native_runtime::finish()`
@@ -121,7 +124,7 @@ All additive; each is explained here and kept small.
 
 Commands run on the branch (Linux x86_64, local Rust 1.97 and 1.100):
 
-* `cargo test --test regions` — 28 passed: positive programs run on the
+* `cargo test --test regions` — 33 passed: positive programs run on the
   evaluator and the JIT with equal results (allocation, functions taking and
   returning boxes, copy aliasing with `set`, rewind reclaiming bytes, commit,
   nested regions with `f64` and `bool` payloads, one region per recursive
@@ -154,7 +157,8 @@ Commands run on the branch (Linux x86_64, local Rust 1.97 and 1.100):
 * **Rewind rule.** The linear-payload rule (E0795) is conservative: any live
   linear box of the region blocks a rewind, also one allocated before the
   watermark. The use-after-rewind rule (E0796) is a straight-line analysis of
-  one block; other paths are caught at run time by the allocator's stale-handle
+  one block: a box bound after the checkpoint dies at the rewind, and so does
+  a `let` alias of such a box, while an alias of an earlier box survives; other paths are caught at run time by the allocator's stale-handle
   check.
 * **Error codes** E0790-E0798 are new and unused elsewhere.
 
@@ -168,8 +172,8 @@ Commands run on the branch (Linux x86_64, local Rust 1.97 and 1.100):
   rejected because no region runtime library is linked into executables yet.
 * Native region evidence follows the backend's current scheme (effectful
   callees are specialized into their caller, which is limited to 64 inline
-  frames); the planned capability-passing ABI (lane 23) will need a region
-  argument instead of the per-identity key.
+  frames); the planned capability-passing ABI (lane 23) will pass the region id
+  as an argument instead of through the inlined handler variable.
 * The evaluator allocates every payload with `alloc_value`; linear payloads are
   not registered as linear obligations in the host region (the checker rules
   them out statically).
