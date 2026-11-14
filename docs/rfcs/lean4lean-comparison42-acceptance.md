@@ -105,3 +105,11 @@ The implementation's proof-audit status remains unchanged. Genuine
 post-extension Foundations, Construction, Order, Map, Normalize,
 Normalization and Comparison matrices, strict targeted Clippy, repository
 formatting, Bazel and final source associations remain coordinator work.
+
+Coordinator execution update: the genuine Comparison matrix subsequently
+passed on current-main integration
+`788a17a9226e6257e3614905e6c5d62651e3bbd7`. Its actual replay/audit evidence
+and the unfinished seven-matrix status are recorded in
+[the integration checkpoint](lean4lean-comparison42-integration.md). The
+historical lane checks above remain unchanged; final completion is reported
+separately by the coordinator.
