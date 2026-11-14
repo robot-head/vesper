@@ -257,6 +257,9 @@ struct Model {
     resources: Vec<ResourceDef>,
     imports: Vec<ImportIface>,
     exports: Vec<ExportIface>,
+    /// Mode of each named type, computed once (a type's fields are always
+    /// registered before it, so one pass in index order suffices).
+    modes: Vec<Mode>,
 }
 
 struct Builder<'a> {
@@ -481,12 +484,14 @@ impl<'a> Builder<'a> {
             _ => unreachable!("named() is only called for records, enums and variants"),
         };
         if let Shape::Record(fields) = &shape
-            && fields.iter().any(|(_, t)| matches!(t, Ty::Borrow(_)))
+            && fields.iter().any(|(_, t)| contains_borrow(t))
         {
             return Err(unsupported(&item, "a borrow handle stored in a record"));
         }
         if let Shape::Variant(cases) = &shape
-            && cases.iter().any(|(_, t)| matches!(t, Some(Ty::Borrow(_))))
+            && cases
+                .iter()
+                .any(|(_, t)| t.as_ref().is_some_and(contains_borrow))
         {
             return Err(unsupported(&item, "a borrow handle stored in a variant"));
         }
@@ -803,7 +808,50 @@ impl Model {
             b.claim(&upper, origin)?;
         }
 
-        Ok(Model {
+        // Operation names must be unique within each effect and trait, and
+        // the flattened Rust export fields must be unique too.
+        for imp in &imports {
+            let mut ops: BTreeMap<String, String> = BTreeMap::new();
+            let named = imp
+                .funcs
+                .iter()
+                .map(|f| (f.op.clone(), format!("function `{}`", f.wit)))
+                .chain(imp.resources.iter().map(|&r| {
+                    let wit = &b.resources[r].wit;
+                    (
+                        format!("{}_drop", snake(wit)),
+                        format!("destructor of `{wit}`"),
+                    )
+                }));
+            for (op, origin) in named {
+                if let Some(first) = ops.insert(op.clone(), origin.clone()) {
+                    return Err(WitGenError::NameCollision {
+                        name: op,
+                        first,
+                        second: origin,
+                    });
+                }
+            }
+        }
+        let mut fields: BTreeMap<String, String> = BTreeMap::new();
+        for exp in &exports {
+            for f in &exp.funcs {
+                let field = match exp.scope {
+                    None => rust_ident(&f.op),
+                    Some(s) => format!("{}_{}", b.scopes[s].module, f.op),
+                };
+                let origin = format!("export `{}`", f.wit);
+                if let Some(first) = fields.insert(field.clone(), origin.clone()) {
+                    return Err(WitGenError::NameCollision {
+                        name: field,
+                        first,
+                        second: origin,
+                    });
+                }
+            }
+        }
+
+        let mut model = Model {
             world_name,
             world_upper,
             world_docs: docs(&world.docs),
@@ -812,7 +860,13 @@ impl Model {
             resources: b.resources,
             imports,
             exports,
-        })
+            modes: Vec::new(),
+        };
+        for i in 0..model.types.len() {
+            let m = model.compute_type_mode(i);
+            model.modes.push(m);
+        }
+        Ok(model)
     }
 
     fn mode(&self, t: &Ty) -> Mode {
@@ -832,6 +886,10 @@ impl Model {
     }
 
     fn type_mode(&self, i: usize) -> Mode {
+        self.modes[i]
+    }
+
+    fn compute_type_mode(&self, i: usize) -> Mode {
         match &self.types[i].shape {
             Shape::Enum(_) => Mode::Copy,
             Shape::Record(fs) => fs
@@ -1106,7 +1164,13 @@ impl Model {
                 self.rs_path(self.types[*i].scope, at, &upper_camel(&self.types[*i].wit))
             }
             Ty::Own(r) | Ty::Borrow(r) => format!(
-                "Resource<{}>",
+                "{}<{}>",
+                // Only interface modules import `Resource`.
+                if at.is_some() {
+                    "Resource"
+                } else {
+                    "wasmtime::component::Resource"
+                },
                 self.rs_path(
                     self.resources[*r].scope,
                     at,
@@ -1481,21 +1545,24 @@ impl Model {
             for f in &exp.funcs {
                 let params = self.rs_params_root(f);
                 let _ = writeln!(out, "    /// WIT export `{}`.", self.export_label(exp, f));
-                let _ = writeln!(
-                    out,
-                    "    pub {}: wasmtime::component::TypedFunc<{}, {}>,",
-                    self.export_field(exp, f),
-                    tuple_text(&params.iter().map(String::as_str).collect::<Vec<_>>()),
-                    tuple_text(
-                        &f.result
-                            .iter()
-                            .map(|t| self.rs_ty(t, None))
-                            .collect::<Vec<_>>()
-                            .iter()
-                            .map(String::as_str)
-                            .collect::<Vec<_>>()
-                    ),
-                );
+                let field = self.export_field(exp, f);
+                let p = tuple_text(&params.iter().map(String::as_str).collect::<Vec<_>>());
+                let results: Vec<String> = f.result.iter().map(|t| self.rs_ty(t, None)).collect();
+                let r = tuple_text(&results.iter().map(String::as_str).collect::<Vec<_>>());
+                // rustfmt: one line; else break after the colon; else one
+                // generic argument per line.
+                let ty = format!("wasmtime::component::TypedFunc<{p}, {r}>,");
+                let one = format!("    pub {field}: {ty}");
+                if one.chars().count() <= 100 {
+                    let _ = writeln!(out, "{one}");
+                } else if 8 + ty.chars().count() <= 100 {
+                    let _ = writeln!(out, "    pub {field}:\n        {ty}");
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "    pub {field}: wasmtime::component::TypedFunc<\n        {p},\n        {r},\n    >,"
+                    );
+                }
             }
         }
         out.push_str("}\n\nimpl Exports {\n");

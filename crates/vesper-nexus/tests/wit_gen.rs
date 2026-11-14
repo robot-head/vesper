@@ -10,6 +10,7 @@ use vesper_nexus::wit_gen::{MAX_WIT_BYTES, WitGenError, generate};
 use vesper_nexus::{NexusConfig, NexusEngine, PLUGIN_WIT, PluginError, TenantId, WitHandle};
 
 const KV_WIT: &str = include_str!("wit/kv.wit");
+const HANDLES_WIT: &str = include_str!("wit/handles.wit");
 
 fn golden(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -47,6 +48,23 @@ fn kv_world_matches_golden() {
     assert_eq!(b.world, "vesper:kv/plugin-kv@0.2.0");
     check_golden("kv.ves", &b.vesper);
     check_golden("kv_bindings.rs", &b.rust);
+}
+
+/// Exports that pass imported resources; the bindings are compiled below.
+#[test]
+fn handles_world_matches_golden() {
+    let b = generate(HANDLES_WIT, None).unwrap();
+    check_golden("handles.ves", &b.vesper);
+    check_golden("handles_bindings.rs", &b.rust);
+    assert!(b.vesper.contains("linear struct Pair"));
+    assert!(
+        b.vesper
+            .contains("fn swap(in self, sink b: Blob) -> Blob eff [Host];")
+    );
+    assert!(
+        b.vesper
+            .contains("fn inspect(in self, in b: Blob) -> u32 eff [Host];")
+    );
 }
 
 #[test]
@@ -131,6 +149,24 @@ mod plugin_bindings {
 #[allow(dead_code)]
 mod kv_bindings {
     include!("golden/kv_bindings.rs");
+}
+
+#[allow(dead_code)]
+mod handles_bindings {
+    include!("golden/handles_bindings.rs");
+}
+
+/// The root-level export signatures name the resource type by full path.
+#[allow(dead_code)]
+fn handles_exports_have_resource_types(e: &handles_bindings::Exports) {
+    let _: &wasmtime::component::TypedFunc<
+        (Resource<handles_bindings::host::Blob>,),
+        (Resource<handles_bindings::host::Blob>,),
+    > = &e.swap;
+    let _: &wasmtime::component::TypedFunc<
+        (handles_bindings::host::Pair,),
+        (Option<Resource<handles_bindings::host::Blob>>,),
+    > = &e.unpack;
 }
 
 use plugin_bindings::host;
@@ -519,6 +555,18 @@ fn unsupported_constructs_are_typed_errors() {
         "a borrow handle stored in a record"
     );
     assert_eq!(
+        unsupported(&world(
+            "resource r;\nrecord h { x: option<borrow<r>> }\nf: func(v: h);"
+        )),
+        "a borrow handle stored in a record"
+    );
+    assert_eq!(
+        unsupported(&world(
+            "resource r;\nvariant v { a(tuple<u32, borrow<r>>), b }\nf: func(v: v);"
+        )),
+        "a borrow handle stored in a variant"
+    );
+    assert_eq!(
         unsupported("package a:b;\ninterface e { resource r; }\nworld w { export e; }\n"),
         "a guest-exported resource"
     );
@@ -564,6 +612,25 @@ fn colliding_generated_names_are_rejected() {
         generate(wit, None),
         Err(WitGenError::NameCollision { name, .. }) if name == "Thing"
     ));
+    // A constructor and a function that both lower to `blob_new`, and a
+    // function shadowing the synthesized destructor.
+    for body in [
+        "resource blob { constructor(); }\nblob-new: func();",
+        "resource blob;\nblob-drop: func();",
+    ] {
+        let wit = format!("package a:b;\ninterface i {{\n{body}\n}}\nworld w {{ import i; }}\n");
+        assert!(
+            matches!(&generate(&wit, None), Err(WitGenError::NameCollision { name, .. }) if name.starts_with("blob_")),
+            "{body}"
+        );
+    }
+    // Two exports whose flattened Rust fields coincide.
+    let wit = "package a:b;\ninterface t { f: func(); }\n\
+               world w { export t-f: func(); export t; }\n";
+    assert!(matches!(
+        generate(wit, None),
+        Err(WitGenError::NameCollision { name, .. }) if name == "t_f"
+    ));
     // An interface named like the world-level import effect.
     let wit = "package a:b;\ninterface w-imports { f: func(); }\n\
                world w { import w-imports; import g: func(); }\n";
@@ -589,6 +656,25 @@ fn keywords_are_escaped_in_both_outputs() {
     assert!(b.rust.contains("pub sink: u32,"));
     let parsed = vesper_syntax::parser::parse(&b.vesper);
     assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+}
+
+/// Mode computation is linear in the number of types: a chain of records
+/// in which each holds two of the previous one would take 2^n steps if
+/// modes were recomputed per use.
+#[test]
+fn deeply_shared_record_chains_generate_quickly() {
+    let mut body = String::from("record r0 { a: u32, b: string }\n");
+    for i in 1..64 {
+        body.push_str(&format!("record r{i} {{ a: r{p}, b: r{p} }}\n", p = i - 1));
+    }
+    body.push_str("f: func(x: r63);\n");
+    let wit = format!("package a:b;\ninterface i {{\n{body}}}\nworld w {{ import i; }}\n");
+    let start = std::time::Instant::now();
+    let b = generate(&wit, None).unwrap();
+    assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    // `string` makes every record in the chain affine.
+    assert!(b.vesper.contains("\nstruct R63 {"));
+    assert!(b.vesper.contains("fn f(sink x: R63);"));
 }
 
 /// Mutated WIT never panics the generator: every input is `Ok` or a typed

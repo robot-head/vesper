@@ -16,7 +16,7 @@ only change is the `vesper-nexus` dependency list.
 
 | Assignment item | Delivered | Evidence |
 | --- | --- | --- |
-| 1. `.wit` → Vesper capability traits + Rust host bindings | `wit_gen::generate(source, world)` returns `WitBindings { world, vesper, rust }` | `tests/wit_gen.rs`, 14 tests |
+| 1. `.wit` → Vesper capability traits + Rust host bindings | `wit_gen::generate(source, world)` returns `WitBindings { world, vesper, rust }` | `tests/wit_gen.rs`, 16 tests |
 | 2. Preemption driven by SimPulse's run queue | `pulse::SimPulseScheduler`, a `QuantumScheduler` on `vesper_simpulse::Simulator` | `tests/pulse.rs`, 6 tests |
 | 3. One ring per tenant | `tenant_ring::TenantRings`: per-tenant `Store`, ring memory and filter instance | `tests/tenant_ring.rs`, 10 tests; zero-alloc steady state in `tests/ring.rs` |
 
@@ -66,8 +66,10 @@ trailing `_`, with the original WIT name kept in `#[component(name = ..)]`.
 Tests (`tests/wit_gen.rs`):
 
 * Goldens for `PLUGIN_WIT` (`tests/golden/plugin.ves`,
-  `plugin_bindings.rs`) and a second world exercising the rest of the
-  subset (`tests/wit/kv.wit` → `kv.ves`, `kv_bindings.rs`). `VESPER_BLESS=1`
+  `plugin_bindings.rs`), a second world exercising the rest of the
+  subset (`tests/wit/kv.wit` → `kv.ves`, `kv_bindings.rs`) and a third
+  whose exports take and return imported resources (`tests/wit/handles.wit`
+  → `handles.ves`, `handles_bindings.rs`, compiled with type assertions). `VESPER_BLESS=1`
   rewrites them. Output is deterministic across runs.
 * The generated Vesper parses with `vesper-syntax` with no diagnostics, is
   already canonical under `vesper-fmt` (CI's `vesper fmt --check` covers the
@@ -94,7 +96,7 @@ Tests (`tests/wit_gen.rs`):
 
 `vesper check` on the goldens (the root CLI, run by hand, not from the
 crate's tests since library crates may not depend on the root package):
-`kv.ves` checks. `plugin.ves` fails with one `E0101 unknown type 'i32'`,
+`kv.ves` and `handles.ves` check. `plugin.ves` fails with one `E0101 unknown type 'i32'`,
 because `peek-raw` returns `s32` and the current checker knows only `u8`,
 `u32`, `u64`, `i64`, `f64`, `bool`, `String` among scalars. The generator
 keeps the exact width rather than widening; this is a checker gap.
@@ -152,6 +154,20 @@ Tests (`tests/tenant_ring.rs`):
   global allocator in `tests/ring.rs`, thread-scoped; measured in the same
   test as the shared broker so the two never overlap). Debug build.
 
+## Review fixes (Codex review of 75e8d1c)
+
+* Borrows nested inside record fields or variant payloads
+  (`option<borrow<r>>`, `tuple<u32, borrow<r>>`) are `Unsupported`, like a
+  direct borrow field; previously the record was emitted as `copy`.
+* Named-type modes are computed once per type, in registration order, so a
+  chain of records each holding two of the previous one is linear, not
+  exponential (64-deep chain tested).
+* Root-level export signatures name `wasmtime::component::Resource` by full
+  path, since only interface modules import it (handles golden).
+* Operation names are checked for collisions within each effect (including
+  the synthesized `res_drop` and constructor `res_new`), and flattened Rust
+  export fields across exports, as `NameCollision`.
+
 ## Public API (all additive)
 
 `vesper_nexus::wit_gen::{generate, WitBindings, WitGenError, MAX_WIT_BYTES}`,
@@ -204,11 +220,11 @@ Recorded on x86_64 Linux with rustc/cargo 1.97.0 (and 1.100.0 for clippy):
 ```sh
 cargo fmt --all -- --check                                   # ok (1.97 and 1.100)
 rustfmt --edition 2024 --check crates/vesper-nexus/tests/golden/*.rs   # ok
-cargo test -p vesper-nexus --locked                          # 67 passed
+cargo test -p vesper-nexus --locked                          # 69 passed
 cargo +1.100.0 clippy -p vesper-nexus --locked --all-targets -- -D warnings   # ok
 cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings       # see PR
 cargo test --workspace --locked                              # see PR
 python3 tools/bazel/sync_build_files.py --check              # ok
 vesper fmt --check crates/vesper-nexus/tests/golden/*.ves    # unchanged
-vesper check crates/vesper-nexus/tests/golden/kv.ves         # checked
+vesper check crates/vesper-nexus/tests/golden/{kv,handles}.ves  # checked
 ```
