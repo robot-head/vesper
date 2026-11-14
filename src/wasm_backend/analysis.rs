@@ -754,7 +754,7 @@ pub(crate) fn operands(op: &Op) -> Vec<ValueId> {
         Op::Constant(_) | Op::Unit | Op::Read { .. } | Op::Closure { .. } => vec![],
         Op::Bind { value, .. } | Op::Write { value, .. } | Op::Unary(_, value) => vec![*value],
         Op::Binary(_, a, b) | Op::Index(a, b) => vec![*a, *b],
-        Op::Tuple(vs) => vs.clone(),
+        Op::Tuple(vs) | Op::Vector { args: vs, .. } => vs.clone(),
         Op::Data(_, fs) => fs.iter().map(|(_, v)| *v).collect(),
         Op::Project(v, _) | Op::Try(v) => vec![*v],
         Op::Call { args, .. } => args.iter().map(|a| a.value).collect(),
