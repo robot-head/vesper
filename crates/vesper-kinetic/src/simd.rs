@@ -232,8 +232,8 @@ fn pair_portable(i: &PairLanes, inv_h2: f32, o: &mut PairSolved) {
         let inv_len = if len == 0.0 { 1.0 } else { det::div(1.0, len) };
         let sa = det::mul(i.wa[l], d_lambda);
         let sb = det::mul(i.wb[l], d_lambda);
-        for k in 0..3 {
-            let n = det::mul(d[k], inv_len);
+        for (k, component) in d.into_iter().enumerate() {
+            let n = det::mul(component, inv_len);
             o.normal[k][l] = n;
             o.na[k][l] = det::add(i.pa[k][l], det::mul(sa, n));
             o.nb[k][l] = det::sub(i.pb[k][l], det::mul(sb, n));
