@@ -49,6 +49,7 @@ pub mod pvh;
 pub mod seccomp;
 pub mod slot_plan;
 pub mod virtio;
+pub mod vmm_thread;
 
 use std::fmt;
 use std::io::{self, Read};
