@@ -275,4 +275,55 @@ theorem channel_replay_reaches_barrier {S I O : Type} (step : S → I → S × O
 #print axioms rescale_preserves_global
 #print axioms exchange_places_rows
 #print axioms channel_replay_reaches_barrier
+
+/-!
+## Live rescaling and the Kafka output fence (wave eight)
+
+Models only: `restrict` and `zsum` as above, lists of records as lists. These
+are not theorems about the Rust migration messages, SimPulse, rskafka or a
+Kafka broker.
+-/
+
+/-- In-band migration: a new worker that sums the parts every old worker
+sends it (each old worker's rows the new routing gives it) holds exactly
+the new routing's share of the global state. -/
+theorem migration_assembles_owner {α W : Type} [DecidableEq W] (r : α → W) (j : W)
+    (old : List (α → Int)) (a : α) :
+    zsum (old.map (restrict r j)) a = restrict r j (zsum old) a := by
+  induction old with
+  | nil => simp [zsum, restrict]
+  | cons f fs ih =>
+    show restrict r j f a + zsum (fs.map (restrict r j)) a = restrict r j (zsum (f :: fs)) a
+    rw [ih]
+    by_cases h : r a = j
+    · simp [restrict, h, zsum]
+    · simp [restrict, h]
+
+/-- Live rescaling loses and duplicates nothing: the states the new workers
+assemble from migrated parts sum to the old global state. -/
+theorem migration_preserves_global {α W : Type} [DecidableEq W] (old : List (α → Int))
+    (r : α → W) (ws : List W) (nodup : ws.Nodup) (total : ∀ a, r a ∈ ws) (a : α) :
+    zsum (ws.map fun j => zsum (old.map (restrict r j))) a = zsum old a := by
+  have : (ws.map fun j => zsum (old.map (restrict r j))) =
+      ws.map fun j => restrict r j (zsum old) := by
+    apply List.map_congr_left
+    intro j _
+    funext x
+    exact migration_assembles_owner r j old x
+  rw [this]
+  exact restrict_parts_sum r ws nodup total (zsum old) a
+
+/-- Output fence: if a partition holds any prefix of the committed record
+sequence (a crash or an ambiguous produce left it there), publishing the
+records after that prefix makes the partition exactly the sequence. -/
+theorem fenced_publish_exactly_once {R : Type} (committed : List R) (n : Nat) :
+    committed.take n ++ committed.drop (committed.take n).length = committed := by
+  by_cases h : n ≤ committed.length
+  · rw [List.length_take, Nat.min_eq_left h, List.take_append_drop]
+  · have : committed.length ≤ n := by omega
+    rw [List.take_of_length_le this, List.drop_length, List.append_nil]
+
+#print axioms migration_assembles_owner
+#print axioms migration_preserves_global
+#print axioms fenced_publish_exactly_once
 end Vesper.FluxDbsp

@@ -525,7 +525,7 @@ impl EpochIndex {
                 .ok_or(Error::Storage("corrupt kafka index"))?,
         };
         let mut out = Vec::with_capacity(self.count);
-        for i in 0..self.count {
+        for (i, &(po, pl)) in previous.iter().enumerate().take(self.count) {
             let at = 8 + 16 * i;
             let o = i64::from_le_bytes(body[at..at + 8].try_into().map_err(|_| Error::Overflow)?);
             let l = u64::from_le_bytes(
@@ -533,7 +533,7 @@ impl EpochIndex {
                     .try_into()
                     .map_err(|_| Error::Overflow)?,
             );
-            if o < previous[i].0 || l < previous[i].1 {
+            if o < po || l < pl {
                 return Err(Error::Storage("corrupt kafka index"));
             }
             out.push((o, l));

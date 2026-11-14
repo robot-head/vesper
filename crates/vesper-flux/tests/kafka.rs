@@ -215,7 +215,9 @@ fn circuit() -> Circuit {
     b.finish(out).unwrap()
 }
 /// Per epoch, per input: the (row, weight) changes.
-fn changes(epochs: usize) -> Vec<[Vec<(Vec<i64>, i64)>; 3]> {
+/// One workload step: the (row, weight) changes of each input.
+type Step = [Vec<(Vec<i64>, i64)>; 3];
+fn changes(epochs: usize) -> Vec<Step> {
     (0..epochs as i64)
         .map(|e| {
             let orders: Vec<_> = (0..6)
@@ -237,7 +239,7 @@ fn changes(epochs: usize) -> Vec<[Vec<(Vec<i64>, i64)>; 3]> {
         })
         .collect()
 }
-fn reference(changes: &[[Vec<(Vec<i64>, i64)>; 3]]) -> Vec<ZSet> {
+fn reference(changes: &[Step]) -> Vec<ZSet> {
     let mut e = circuit().executor();
     changes
         .iter()
@@ -313,7 +315,7 @@ impl Producer {
         &mut self,
         conn: &KafkaConnection,
         t: &Topics,
-        changes: &[Vec<(Vec<i64>, i64)>; 3],
+        changes: &Step,
         duplicate: bool,
     ) -> u64 {
         let mut batches: BTreeMap<usize, Vec<Vec<u8>>> = BTreeMap::new();
@@ -426,7 +428,7 @@ fn config(workers: usize, rescales: &[(u64, usize)]) -> ClusterConfig {
 /// The single-executor outputs of the epochs the source cut, checked to
 /// integrate to the workload's reference (an epoch may group several
 /// workload steps when records were produced ahead of the poll).
-fn from_source(source: &KafkaSource, changes: &[[Vec<(Vec<i64>, i64)>; 3]]) -> Vec<ZSet> {
+fn from_source(source: &KafkaSource, changes: &[Step]) -> Vec<ZSet> {
     let mut e = circuit().executor();
     let out: Vec<ZSet> = (0..source.epochs())
         .map(|i| e.tick(&source.read(i).unwrap()).unwrap())
@@ -570,7 +572,7 @@ fn flux_crash_and_restart_against_a_real_broker() {
         }
         let mut cfg = config(3, &schedule);
         // Two of three incarnations die after a bounded number of steps.
-        if attempt % 3 != 0 {
+        if !attempt.is_multiple_of(3) {
             cfg.max_steps = 60 + 23 * attempt;
         }
         let faults = match attempt % 3 {
@@ -616,7 +618,7 @@ fn broker_crash_and_restart() {
     let changes = changes(10);
     let job = Job::new();
     let mut producer = Producer::new();
-    let (mut source, mut sink, store) = job.open(&broker, &t, 2);
+    let (mut source, sink, store) = job.open(&broker, &t, 2);
     {
         let conn = broker.connect();
         for c in &changes[..3] {
