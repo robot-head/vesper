@@ -4145,6 +4145,7 @@ dependencies = [
  "cranelift-object",
  "egg",
  "egglog",
+ "find-msvc-tools",
  "getrandom 0.4.3",
  "libc",
  "petgraph",
