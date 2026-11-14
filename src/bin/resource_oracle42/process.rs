@@ -785,6 +785,12 @@ impl Transport {
             return Err(failure(HarnessErrorKind::Io, "transport already closed"));
         }
         self.close_input();
+        // Graceful exit and forced cleanup share one deadline. Reserve half
+        // the remaining budget for killing, polling/reaping, and pipe joins;
+        // waiting until the hard deadline to send the kill leaves no time to
+        // perform that hygiene.
+        let now = Instant::now();
+        let kill_at = now + deadline.saturating_duration_since(now) / 2;
         if force {
             let _ = self.child.kill();
         }
@@ -793,12 +799,16 @@ impl Transport {
             if let Some(status) = self.child.try_wait()? {
                 break Some(status);
             }
-            if Instant::now() >= deadline {
+            let now = Instant::now();
+            if !killed && now >= kill_at {
                 let _ = self.child.kill();
                 killed = true;
-                break self.child.try_wait()?;
+                continue;
             }
-            thread::sleep(Duration::from_millis(2));
+            if now >= deadline {
+                break None;
+            }
+            thread::sleep((deadline - now).min(Duration::from_millis(2)));
         };
         self.rx.take();
         let mut joined = true;
