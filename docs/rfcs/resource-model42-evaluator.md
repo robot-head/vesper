@@ -1,8 +1,9 @@
 # Finite resource evaluator design (#322)
 
 This lane owns only new `lean/ResourceModel42/Evaluator.lean` and this report.
-The frozen contract is `ddf5d6c`, read from the coordinator's integration
-worktree. This checkpoint is a design report: no evaluator source, Lean build,
+The frozen contract is `ddf5d6c`, clarified by `0399d20`, read from the
+coordinator's integration worktree. This checkpoint is a design report: no
+evaluator source, Lean build,
 Cargo execution or semantic validation is claimed. Exact declarations await
 the syntax writer's first coherent API checkpoint.
 
@@ -24,6 +25,7 @@ checker success through its frozen readonly accessors.
 
 Initialization closes inputs using pure nested value lets with input zero
 innermost. These ordinary `Full.Head.letV` reductions consume global fuel.
+The wrappers count toward whole-expression nodes and depth.
 Structural pair values are already values: recognizing a pair of closed value
 atoms must erase to the identical Full expression rather than inventing an
 extra operational transition.
@@ -80,9 +82,21 @@ Measured resource refusals are separate from runtime invariant failures and
 from language semantics; this fragment has no abort/effects/arithmetic. A
 refusal leaves the expression, ledger and successful action prefix unchanged.
 No cleanup consumes are appended. A smaller independent dynamic value cap must
-be checked before materializing the affected value, preserving earlier genuine
-mints when it refuses. The exact exposed guard metadata and helper names will
-follow the coordinated syntax/evaluator API.
+be checked against every closed value island stored in the complete term,
+including unselected branches. This is conservative memory admission, not
+evaluation of those branches. Initial island admission precedes terminal/fuel
+checks. A transition checks newly closed islands in its prospective substituted
+term before materializing or committing them. No late completion guard or extra
+pair transition enforces this cap.
+
+The lower-value-cap control after a genuine mint must use pair operands that are
+variables and become closed through later copy-value substitution. A closed
+literal pair already stored in the initial term is subject to initial admission
+and cannot supply that later-failure evidence. Every refusal identifies an
+actually exceeded configured bound, including when a zero cap deliberately
+refuses the first resource operation. No arbitrary resource-refusal fallback
+may hide an executable transition. The exact exposed guard metadata and helper
+names will follow the coordinated syntax/evaluator API.
 
 ## Proof interface and release gates
 
@@ -102,9 +116,19 @@ theorem is hidden from the complete audit catalog. The planned bridge requires:
   a value, a genuine transition, fuel exhaustion or a specifically measured
   resource refusal. Success soundness alone would allow an always-refusing
   implementation and does not satisfy this gate.
+- Progress under a let initializer uses typing for its resource subcontext plus
+  inclusion in the actual whole ledger. Its frame may own additional live
+  resources, so induction must not assume the initializer alone is typed by
+  the entire ledger. Source-site metadata is validated before execution and
+  preserved through substitution; erased Full typing alone cannot establish
+  additional runtime site or cache checks.
 - Preservation/progress classification follows actual checked-program typing
   and the bridge. Copy-result exhaustion/exact-once consequences are conditional
   on the existing Full theorem's hypotheses, not asserted for returned owners.
+
+Only named theorem roots are submitted to the existing theorem-only auditor.
+Computable definitions enter dependency closure through the actual soundness
+and execution theorems; that association alone is not a semantic property.
 
 These establish a finite logical model only. They do not bind a Vesper source
 adapter, native/runtime observation stream, compiler refinement, general source
