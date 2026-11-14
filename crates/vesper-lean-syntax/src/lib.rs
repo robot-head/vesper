@@ -363,12 +363,154 @@ impl Term {
     }
 }
 
+/// Every name a term mentions, in any position (heads, arguments, binder
+/// types, patterns' constructor names excluded). Local binders are not
+/// removed, so callers compare against names they know to be global.
+impl Term {
+    pub fn references(&self) -> std::collections::BTreeSet<Name> {
+        let mut out = std::collections::BTreeSet::new();
+        self.collect_references(&mut out);
+        out
+    }
+    fn collect_references(&self, out: &mut std::collections::BTreeSet<Name>) {
+        fn binders(bs: &[Binder], out: &mut std::collections::BTreeSet<Name>) {
+            for b in bs {
+                b.ty.collect_references(out);
+            }
+        }
+        fn statements(ss: &[DoStatement], out: &mut std::collections::BTreeSet<Name>) {
+            for s in ss {
+                match s {
+                    DoStatement::Let { binding, .. } => {
+                        if let Some(t) = &binding.ty {
+                            t.collect_references(out);
+                        }
+                        binding.value.collect_references(out);
+                    }
+                    DoStatement::Bind { action, .. } => action.collect_references(out),
+                    DoStatement::Assign { value, .. } => value.collect_references(out),
+                    DoStatement::Expr(t) => t.collect_references(out),
+                    DoStatement::BindTyped { ty, action, .. } => {
+                        ty.collect_references(out);
+                        action.collect_references(out);
+                    }
+                    DoStatement::LetInstance { ty, value, .. } => {
+                        ty.collect_references(out);
+                        value.collect_references(out);
+                    }
+                    DoStatement::If { condition, yes, no } => {
+                        condition.collect_references(out);
+                        statements(yes, out);
+                        if let Some(no) = no {
+                            statements(no, out);
+                        }
+                    }
+                    DoStatement::Match { scrutinee, arms } => {
+                        scrutinee.collect_references(out);
+                        for (_, body) in arms {
+                            statements(body, out);
+                        }
+                    }
+                }
+            }
+        }
+        match self {
+            Term::Infer
+            | Term::Sort(_)
+            | Term::Nat(_)
+            | Term::Bool(_)
+            | Term::String(_)
+            | Term::Char(_)
+            | Term::Rfl
+            | Term::ByDecide => {}
+            Term::Ref(n) => {
+                out.insert(n.clone());
+            }
+            Term::App {
+                function,
+                arguments,
+            } => {
+                function.collect_references(out);
+                for a in arguments {
+                    match a {
+                        Argument::Positional(t) | Argument::Named { value: t, .. } => {
+                            t.collect_references(out)
+                        }
+                    }
+                }
+            }
+            Term::Lambda { binders: bs, body } | Term::Forall { binders: bs, body } => {
+                binders(bs, out);
+                body.collect_references(out);
+            }
+            Term::Arrow(a, b) => {
+                a.collect_references(out);
+                b.collect_references(out);
+            }
+            Term::ProductType(ts) | Term::Tuple(ts) | Term::List(ts) => {
+                for t in ts {
+                    t.collect_references(out);
+                }
+            }
+            Term::Let { binding, body } => {
+                if let Some(t) = &binding.ty {
+                    t.collect_references(out);
+                }
+                binding.value.collect_references(out);
+                body.collect_references(out);
+            }
+            Term::If { condition, yes, no } => {
+                condition.collect_references(out);
+                yes.collect_references(out);
+                no.collect_references(out);
+            }
+            Term::Match { scrutinee, arms } => {
+                scrutinee.collect_references(out);
+                for arm in arms {
+                    arm.body.collect_references(out);
+                }
+            }
+            Term::Project { base, .. } => base.collect_references(out),
+            Term::Ascribe { value, ty } => {
+                value.collect_references(out);
+                ty.collect_references(out);
+            }
+            Term::Unary { value, .. } => value.collect_references(out),
+            Term::Binary { left, right, .. } => {
+                left.collect_references(out);
+                right.collect_references(out);
+            }
+            Term::Record { fields } => {
+                for (_, t) in fields {
+                    t.collect_references(out);
+                }
+            }
+            Term::Update { base, fields } => {
+                base.collect_references(out);
+                for (_, t) in fields {
+                    t.collect_references(out);
+                }
+            }
+            Term::Do {
+                statements: ss,
+                result,
+            } => {
+                statements(ss, out);
+                result.collect_references(out);
+            }
+            Term::Eliminate { value } => value.collect_references(out),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DefinitionKind {
     Def,
     NoncomputableDef,
     PartialDef,
     Abbrev,
+    /// `@[simp] def`: unfolded by `simp` without being named.
+    SimpDef,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Definition {
@@ -923,6 +1065,7 @@ impl Printer {
                     DefinitionKind::NoncomputableDef => "noncomputable def",
                     DefinitionKind::PartialDef => "partial def",
                     DefinitionKind::Abbrev => "abbrev",
+                    DefinitionKind::SimpDef => "@[simp] def",
                 },
                 Self::name(&value.name),
                 Self::binders(&value.binders)?,

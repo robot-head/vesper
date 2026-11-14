@@ -1285,3 +1285,40 @@ fn scalar_literal_patterns_and_abbreviations_compile() {
         }),
     ]));
 }
+
+#[test]
+fn references_and_simp_definitions() {
+    let body = Term::Do {
+        statements: vec![DoStatement::Bind {
+            pattern: Pattern::Bind(id("x")),
+            action: app("step", vec![n(1)]),
+        }],
+        result: Box::new(Term::Match {
+            scrutinee: Box::new(r("x")),
+            arms: vec![MatchArm {
+                pattern: Pattern::Wildcard,
+                body: app("Pure.pure", vec![app("finish", vec![r("x")])]),
+            }],
+        }),
+    };
+    let refs = body.references();
+    for expected in ["step", "finish", "x", "Pure.pure"] {
+        assert!(refs.contains(&name(expected)), "{expected}");
+    }
+    assert!(!refs.contains(&name("Nat")));
+    lean(module(vec![
+        Declaration::Definition(Definition {
+            name: name("twice"),
+            binders: vec![b("k", r("Nat"))],
+            result: r("Nat"),
+            body: Term::binary(BinaryOp::Add, r("k"), r("k")),
+            kind: DefinitionKind::SimpDef,
+        }),
+        Declaration::Theorem {
+            name: name("twice_two"),
+            binders: vec![],
+            proposition: eq(app("twice", vec![n(2)]), n(4)),
+            proof: Term::ByDecide,
+        },
+    ]));
+}
