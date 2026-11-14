@@ -4,15 +4,17 @@ use super::*;
 use crate::{
     lsp::{
         lens::{Binding, Unavailable, View},
-        proof_lens,
+        proof_lens, proof_model,
     },
     tooling::frontend::AnalysisLimits,
 };
-use vesper_lsp::lens::{CompletionTier, ProofStatus};
+use std::time::{Duration, Instant};
+use vesper_lsp::lens::{CancelToken, CompletionTier, Debouncer, ProofStatus, TimerAction};
 
 pub(crate) const PROOF_COMMAND: &str = "vesper.proofAudit";
 
-/// Server-side Lens configuration. Clients cannot choose executables.
+/// Server-side Lens configuration. Clients cannot choose executables or
+/// directories; they may only switch debounced background runs on or off.
 #[derive(Clone, Debug)]
 pub struct LensConfig {
     /// Lean launcher (`VESPER_LEAN`, else `lean` on PATH).
@@ -22,7 +24,51 @@ pub struct LensConfig {
     pub auditor: Option<std::path::PathBuf>,
     /// Seconds allowed for each Lean process (1 to 300).
     pub proof_timeout: u64,
+    /// Private `.olean` cache reused across runs (`VESPER_LENS_CACHE`, else
+    /// `$XDG_CACHE_HOME/vesper/lens-proofs` or `~/.cache/vesper/lens-proofs`).
+    /// `None` compiles every run from scratch.
+    pub cache: Option<std::path::PathBuf>,
+    /// Debounce for background proof runs after an edit
+    /// (`VESPER_LENS_BACKGROUND_MS`). `None` leaves them off unless the
+    /// client asks for them in `initializationOptions`.
+    pub background: Option<Duration>,
+    /// Analysis budgets for Lens's own views (repaired prefixes, obligation
+    /// facts). They are raised above the editor profile so larger buffers get
+    /// Lens views; the editor profile that guards diagnostics, navigation and
+    /// code actions is unchanged.
+    pub limits: AnalysisLimits,
 }
+/// The spec's Layer 5 idle time before a background proof run (§21.3).
+/// Obligations of each kind one background run covers.
+const BACKGROUND_BATCH: usize = 64;
+pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Lens's own analysis profile: the editor profile with larger node and
+/// type budgets (still inside the frontend's hard caps).
+pub fn lens_limits() -> AnalysisLimits {
+    AnalysisLimits {
+        max_ast_nodes: 8192,
+        max_type_nodes: 16_384,
+        max_depth: 64,
+        max_diagnostics: 256,
+        max_diagnostic_bytes: 262_144,
+        max_metadata_bytes: 2_097_152,
+        ..AnalysisLimits::default()
+    }
+}
+
+fn default_cache() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("VESPER_LENS_CACHE") {
+        return (!dir.is_empty()).then(|| dir.into());
+    }
+    let base = std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::Path::new(&home).join(".cache"))
+        })?;
+    Some(base.join("vesper").join("lens-proofs"))
+}
+
 impl Default for LensConfig {
     fn default() -> Self {
         let auditor = std::env::current_exe()
@@ -32,8 +78,25 @@ impl Default for LensConfig {
             lean: std::env::var("VESPER_LEAN").unwrap_or_else(|_| "lean".into()),
             auditor,
             proof_timeout: 60,
+            cache: default_cache(),
+            background: std::env::var("VESPER_LENS_BACKGROUND_MS")
+                .ok()
+                .and_then(|ms| ms.parse::<u64>().ok())
+                .map(Duration::from_millis),
+            limits: lens_limits(),
         }
     }
+}
+
+/// What a fired debounce timer asks the server to do.
+pub(crate) enum TimerOutcome {
+    Rearm(Duration),
+    Start {
+        generation: u64,
+        job: Box<proof_lens::Job>,
+        token: CancelToken,
+    },
+    Idle,
 }
 
 pub(crate) enum CommandOutcome {
@@ -105,15 +168,21 @@ impl Session {
         let view = match analysis.checked_arc() {
             Ok(snapshot) => View::checked(snapshot),
             Err(AnalysisFailure::Parse { .. }) => match self.recovery_snapshot(uri) {
-                Ok((syntax, _, _)) => View::recovered(syntax, AnalysisLimits::default()),
+                Ok((syntax, _, _)) => View::recovered(syntax, self.lens_config.limits),
                 Err(error) => return Err(error),
             },
-            Err(AnalysisFailure::Semantic { .. }) => {
-                View::semantic(document.text(), AnalysisLimits::default())
+            // Semantic errors, and buffers over the editor profile's budgets,
+            // get a view under Lens's own (raised) profile.
+            Err(AnalysisFailure::Semantic { .. } | AnalysisFailure::Resource { .. }) => {
+                View::semantic(document.text(), self.lens_config.limits)
             }
-            Err(_) => Err(Unavailable::Resource),
+            Err(_) => Err(Unavailable::Guard),
         }
         .map(Arc::new);
+        if view.as_ref().err() == Some(&Unavailable::Cancelled) {
+            // Never cache a traversal the client abandoned.
+            return Err(ServerError::new(-32800, "Request cancelled"));
+        }
         self.lens_views
             .borrow_mut()
             .insert(uri.to_owned(), (hash, view.clone()));
@@ -188,7 +257,9 @@ impl Session {
             json!({"status":"available","scope":view.scope(),"poisoned":poisoned,
                 "absorbed_scope_exit_diagnostics":view.absorbed(),
                 "regions":view.regions().iter().map(|r| json!({"function":r.name,
-                    "span":byte_range(&r.span),"cut":r.cut})).collect::<Vec<_>>()}),
+                    "kind":r.kind.as_str(),"depth":r.depth,
+                    "span":byte_range(&r.span),"scope":byte_range(&r.scope),
+                    "cut":r.cut})).collect::<Vec<_>>()}),
         )
     }
 
@@ -387,6 +458,49 @@ impl Session {
         Ok(Value::Array(hints))
     }
 
+    fn toolchain(&self) -> proof_lens::Toolchain {
+        proof_lens::Toolchain {
+            launcher: self.lens_config.lean.clone(),
+            auditor: self.lens_config.auditor.clone(),
+            timeout: self.lens_config.proof_timeout,
+            cache: self.lens_config.cache.clone(),
+        }
+    }
+
+    /// Semantic models of every function of the checked source, cached by
+    /// exact source hash.
+    fn models(
+        &self,
+        uri: &str,
+        snapshot: &CheckedSource,
+    ) -> Arc<BTreeMap<String, Result<proof_model::Model, String>>> {
+        let hash = snapshot.source_hash();
+        if let Some((cached, models)) = self.lens_models.borrow().get(uri)
+            && *cached == hash
+        {
+            return models.clone();
+        }
+        let models = Arc::new(proof_model::all(snapshot.checked()));
+        if crate::lsp::request_cancelled() {
+            // An interrupted build holds "cancelled" errors; never keep it.
+            return models;
+        }
+        self.lens_models
+            .borrow_mut()
+            .insert(uri.to_owned(), (hash, models.clone()));
+        models
+    }
+
+    fn semantic_status(&self, model: &Result<proof_model::Model, String>) -> ProofStatus {
+        match model {
+            Ok(model) => self.model_proofs.status(model.key, &model.function),
+            Err(reason) => ProofStatus::Failed {
+                stage: "model".into(),
+                reason: reason.clone(),
+            },
+        }
+    }
+
     pub(super) fn code_lenses(
         &self,
         params: &serde_json::Map<String, Value>,
@@ -411,6 +525,7 @@ impl Session {
                 all
             }
         };
+        let models = self.models(uri, &snapshot);
         let hash = snapshot.source_hash();
         let mut lenses = Vec::new();
         for (name, span) in functions.iter().take(256) {
@@ -421,6 +536,9 @@ impl Session {
                     "Lean: proved (extraction kernel-checked, no axioms)".to_owned()
                 }
                 ProofStatus::Failed { stage, .. } => format!("Lean: failed at {stage} (rerun)"),
+                ProofStatus::Checked { .. } | ProofStatus::Refuted { .. } => {
+                    format!("Lean: {}", status.as_str())
+                }
             };
             let at = document
                 .index()
@@ -432,7 +550,52 @@ impl Session {
                 "command": {"title": title, "command": PROOF_COMMAND,
                     "arguments": [{"uri": uri, "version": document.version(), "function": name}]},
                 "data": {"vesper": {"status": status.as_str(), "function": name,
-                    "scope": "lean_extraction_axiom_free"}}
+                    "scope": proof_lens::EXTRACTION_SCOPE}}
+            }));
+            let Some(model) = models.get(name) else {
+                continue;
+            };
+            let status = self.semantic_status(model);
+            let title = match (&status, model) {
+                (_, Err(reason)) => format!(
+                    "Lean model: unavailable ({})",
+                    reason.chars().take(80).collect::<String>()
+                ),
+                (ProofStatus::NotAttempted, _) => {
+                    "Lean model: not attempted (check arithmetic faults)".to_owned()
+                }
+                (ProofStatus::Proved { .. }, _) => {
+                    "Lean model: no arithmetic fault (proved, kernel-replayed)".to_owned()
+                }
+                (ProofStatus::Checked { .. }, _) => {
+                    "Lean model: no counterexample (bv_decide, not kernel-replayed)".to_owned()
+                }
+                (ProofStatus::Refuted { counterexample }, _) => {
+                    format!("Lean model: arithmetic fault when {counterexample}")
+                }
+                (ProofStatus::Failed { stage, .. }, _) => {
+                    format!("Lean model: failed at {stage} (rerun)")
+                }
+            };
+            let mut data = json!({"status": status.as_str(), "function": name,
+                "scope": proof_lens::SEMANTIC_SCOPE});
+            match (&status, model) {
+                (_, Err(reason)) => {
+                    data["status"] = json!("unavailable");
+                    data["reason"] = json!(reason);
+                }
+                (ProofStatus::Refuted { counterexample }, Ok(model)) => {
+                    data["counterexample"] = json!(counterexample);
+                    data["model_blake3"] = json!(proof_model::hex(&model.key));
+                }
+                (_, Ok(model)) => data["model_blake3"] = json!(proof_model::hex(&model.key)),
+            }
+            lenses.push(json!({
+                "range": {"start": position, "end": position},
+                "command": {"title": title, "command": PROOF_COMMAND,
+                    "arguments": [{"uri": uri, "version": document.version(), "function": name,
+                        "obligation": "semantic"}]},
+                "data": {"vesper": data}
             }));
         }
         Ok(Value::Array(lenses))
@@ -454,11 +617,28 @@ impl Session {
             .filter(|args| args.len() == 1)
             .ok_or_else(|| ServerError::params("vesper.proofAudit takes one argument object"))?;
         let argument = object(arguments.first())?;
+        if argument
+            .keys()
+            .any(|k| !matches!(k.as_str(), "uri" | "version" | "function" | "obligation"))
+        {
+            return Err(ServerError::params("unknown vesper.proofAudit argument"));
+        }
         let uri = string(field(argument, "uri")?, "uri")?;
         let function = string(field(argument, "function")?, "function")?;
         if function.len() > 1024 {
             return Err(ServerError::params("function name is too long"));
         }
+        let semantic = match argument.get("obligation").map(|v| string(v, "obligation")) {
+            None => false,
+            Some(Ok("extraction")) => false,
+            Some(Ok("semantic")) => true,
+            Some(Ok(_)) => {
+                return Err(ServerError::params(
+                    "obligation must be \"extraction\" or \"semantic\"",
+                ));
+            }
+            Some(Err(error)) => return Err(error),
+        };
         let document = self.document(uri)?;
         if let Some(expected) = argument.get("version").map(version).transpose()?
             && expected != document.version()
@@ -466,19 +646,44 @@ impl Session {
             return Err(ServerError::new(-32801, "Document version has changed"));
         }
         let snapshot = self.snapshot(uri)?;
+        let fail = |stage: &str, reason: String| ProofStatus::Failed {
+            stage: stage.into(),
+            reason,
+        };
+        if semantic {
+            let models = self.models(uri, &snapshot);
+            let model = match models.get(function) {
+                Some(Ok(model)) => model.clone(),
+                Some(Err(reason)) => {
+                    let status = fail("model", reason.clone());
+                    return Ok(CommandOutcome::Done(semantic_value(
+                        function, None, &status,
+                    )));
+                }
+                None => {
+                    let status = fail("model", format!("function '{function}' is not checked"));
+                    return Ok(CommandOutcome::Done(semantic_value(
+                        function, None, &status,
+                    )));
+                }
+            };
+            let mut job = proof_lens::prepare(&snapshot, &[], vec![model], &self.toolchain())
+                .map_err(ServerError::internal)?;
+            job.requested = Some((function.to_owned(), true));
+            return Ok(CommandOutcome::Run(job));
+        }
         match proof_lens::prepare(
             &snapshot,
-            function,
-            &self.lens_config.lean,
-            self.lens_config.auditor.as_deref(),
-            self.lens_config.proof_timeout,
+            &[function.to_owned()],
+            Vec::new(),
+            &self.toolchain(),
         ) {
-            Ok(job) => Ok(CommandOutcome::Run(job)),
+            Ok(mut job) => {
+                job.requested = Some((function.to_owned(), false));
+                Ok(CommandOutcome::Run(job))
+            }
             Err(reason) => {
-                let status = ProofStatus::Failed {
-                    stage: "extract".into(),
-                    reason,
-                };
+                let status = fail("extract", reason);
                 let value = proof_value(snapshot.source_hash(), function, &status);
                 self.proofs.record(snapshot.source_hash(), function, status);
                 Ok(CommandOutcome::Done(value))
@@ -486,25 +691,272 @@ impl Session {
         }
     }
 
+    fn record(&mut self, job: &proof_lens::Job, outcome: &proof_lens::Outcome) {
+        for (function, status) in &outcome.extraction {
+            self.proofs.record(job.source, function, status.clone());
+        }
+        for (function, key, status) in &outcome.semantic {
+            // Toolchain or I/O failures say nothing about the model.
+            if matches!(status, ProofStatus::Failed { stage, .. } if stage != "prove" && stage != "kernel")
+            {
+                continue;
+            }
+            self.model_proofs.record(*key, function, status.clone());
+        }
+    }
+
     /// Record a finished proof job and render its command result.
-    pub(crate) fn finish_proof(&mut self, job: &proof_lens::Job, status: ProofStatus) -> Value {
-        let value = proof_value(job.source, &job.function, &status);
-        self.proofs.record(job.source, &job.function, status);
+    pub(crate) fn finish_proof(
+        &mut self,
+        job: &proof_lens::Job,
+        outcome: proof_lens::Outcome,
+    ) -> Value {
+        self.record(job, &outcome);
+        let Some((function, semantic)) = &job.requested else {
+            return json!(null);
+        };
+        let mut value = if *semantic {
+            let found = outcome
+                .semantic
+                .iter()
+                .find(|(f, _, _)| f == function)
+                .map(|(_, key, status)| (key, status.clone()));
+            let (key, status) = match found {
+                Some((key, status)) => (Some(key), status),
+                None => (None, ProofStatus::NotAttempted),
+            };
+            semantic_value(function, key, &status)
+        } else {
+            let status = outcome
+                .extraction
+                .iter()
+                .find(|(f, _)| f == function)
+                .map(|(_, status)| status.clone())
+                .unwrap_or(ProofStatus::NotAttempted);
+            proof_value(job.source, function, &status)
+        };
+        value["olean_reused"] = json!(outcome.reused);
+        value["olean_compiled"] = json!(outcome.compiled);
+        value["elapsed_ms"] = json!(outcome.elapsed.as_millis() as u64);
         value
+    }
+
+    /// Read the client's background-run choice and refresh support.
+    pub(super) fn configure_background(&mut self, initialize: &serde_json::Map<String, Value>) {
+        self.code_lens_refresh = initialize
+            .get("capabilities")
+            .and_then(|c| c.pointer("/workspace/codeLens/refreshSupport"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let options = initialize
+            .get("initializationOptions")
+            .and_then(|o| o.get("vesperLens"));
+        let requested = options
+            .and_then(|o| o.get("backgroundProofs"))
+            .and_then(Value::as_bool);
+        let debounce = options
+            .and_then(|o| o.get("debounceMs"))
+            .and_then(Value::as_u64)
+            .filter(|ms| *ms <= 60_000)
+            .map(Duration::from_millis);
+        let delay = match (requested, self.lens_config.background) {
+            (Some(false), _) => None,
+            (Some(true), configured) => Some(debounce.or(configured).unwrap_or(DEFAULT_DEBOUNCE)),
+            (None, configured) => configured.map(|d| debounce.unwrap_or(d)),
+        };
+        // Background runs need the auditor; without it they stay off.
+        self.background = delay
+            .filter(|_| self.lens_config.auditor.is_some())
+            .and_then(|delay| Debouncer::new(delay, 256).ok());
+    }
+
+    /// An accepted edit restarts the debounce for `uri`.
+    pub(super) fn touch_background(&mut self, uri: &str) {
+        if let Some(background) = &mut self.background
+            && let TimerAction::Arm(delay) = background.touch(uri, Instant::now())
+        {
+            self.timers.push((uri.to_owned(), delay));
+        }
+    }
+    pub(super) fn forget_background(&mut self, uri: &str) {
+        if let Some(background) = &mut self.background {
+            background.forget(uri);
+        }
+    }
+    pub(crate) fn stop_background(&mut self) {
+        if let Some(background) = &mut self.background {
+            background.cancel_all();
+        }
+    }
+    pub(crate) fn take_timers(&mut self) -> Vec<(String, Duration)> {
+        std::mem::take(&mut self.timers)
+    }
+
+    /// A debounce timer fired: start a background run of every obligation
+    /// that has no outcome for the current source yet.
+    pub(crate) fn timer_fired(&mut self, uri: &str) -> TimerOutcome {
+        let Some(background) = &mut self.background else {
+            return TimerOutcome::Idle;
+        };
+        let generation = match background.timer(uri, Instant::now()) {
+            TimerAction::Arm(delay) => return TimerOutcome::Rearm(delay),
+            TimerAction::Idle => return TimerOutcome::Idle,
+            TimerAction::Fire { generation } => generation,
+        };
+        let Ok(snapshot) = self.snapshot(uri) else {
+            return TimerOutcome::Idle;
+        };
+        let (mut extraction, mut models) = self.unattempted(uri, &snapshot);
+        extraction.truncate(BACKGROUND_BATCH);
+        models.truncate(BACKGROUND_BATCH);
+        let Ok(job) = proof_lens::prepare(&snapshot, &extraction, models, &self.toolchain()) else {
+            return TimerOutcome::Idle;
+        };
+        if job.is_empty() {
+            return TimerOutcome::Idle;
+        }
+        let token = CancelToken::new();
+        if let Some(background) = &mut self.background {
+            background.started(uri, generation, token.clone());
+        }
+        TimerOutcome::Start {
+            generation,
+            job: Box::new(job),
+            token,
+        }
+    }
+
+    /// Obligations of the current source that have no outcome yet:
+    /// extraction function names and semantic models, in source order.
+    fn unattempted(
+        &self,
+        uri: &str,
+        snapshot: &CheckedSource,
+    ) -> (Vec<String>, Vec<proof_model::Model>) {
+        let hash = snapshot.source_hash();
+        let extraction = proof_lens::candidates(snapshot)
+            .map(|(_, functions)| functions)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| self.proofs.status(hash, name) == ProofStatus::NotAttempted)
+            .collect();
+        let models = self
+            .models(uri, snapshot)
+            .values()
+            .filter_map(|m| m.as_ref().ok())
+            .filter(|m| self.model_proofs.status(m.key, &m.function) == ProofStatus::NotAttempted)
+            .cloned()
+            .collect();
+        (extraction, models)
+    }
+
+    /// After a batch, arm another run while the unchanged source still has
+    /// obligations without an outcome. A run that left one of its own
+    /// obligations without an outcome (a toolchain failure) does not
+    /// continue, so a broken toolchain cannot loop.
+    fn continue_background(&mut self, uri: &str, job: &proof_lens::Job) {
+        let Ok(snapshot) = self.snapshot(uri) else {
+            return;
+        };
+        let (extraction, models) = self.unattempted(uri, &snapshot);
+        if extraction.is_empty() && models.is_empty() {
+            return;
+        }
+        let ran = job.extraction_functions();
+        let stuck = extraction.iter().any(|f| ran.contains(f))
+            || models.iter().any(|m| {
+                job.models
+                    .iter()
+                    .any(|j| j.key == m.key && j.function == m.function)
+            });
+        if !stuck {
+            self.touch_background(uri);
+        }
+    }
+
+    /// Record a finished background run and tell the client.
+    pub(crate) fn finish_background(
+        &mut self,
+        uri: &str,
+        generation: u64,
+        job: &proof_lens::Job,
+        outcome: proof_lens::Outcome,
+    ) -> Vec<Envelope> {
+        if let Some(background) = &mut self.background {
+            background.finished(uri, generation);
+        }
+        self.record(job, &outcome);
+        let Ok(document) = self.document(uri) else {
+            return Vec::new();
+        };
+        if *blake3::hash(document.text().as_bytes()).as_bytes() != job.source {
+            return Vec::new();
+        }
+        let mut results: Vec<Value> = outcome
+            .extraction
+            .iter()
+            .map(|(f, status)| {
+                let mut v = proof_value(job.source, f, status);
+                v["obligation"] = json!("extraction");
+                v
+            })
+            .collect();
+        results.extend(outcome.semantic.iter().map(|(f, key, status)| {
+            let mut v = semantic_value(f, Some(key), status);
+            v["obligation"] = json!("semantic");
+            v
+        }));
+        let mut messages = vec![notification(
+            "vesper/proofStatus",
+            json!({"uri": uri, "version": document.version(), "generation": generation,
+                "source_blake3": blake3::Hash::from_bytes(job.source).to_hex().as_str(),
+                "results": results, "olean_reused": outcome.reused,
+                "olean_compiled": outcome.compiled,
+                "elapsed_ms": outcome.elapsed.as_millis() as u64}),
+        )];
+        self.continue_background(uri, job);
+        if self.code_lens_refresh {
+            self.refreshes += 1;
+            messages.push(Envelope::Request {
+                id: vesper_lsp::Id::String(format!("vesper-lens-refresh-{}", self.refreshes)),
+                method: "workspace/codeLens/refresh".into(),
+                params: None,
+            });
+        }
+        messages
     }
 }
 
-fn proof_value(source: [u8; 32], function: &str, status: &ProofStatus) -> Value {
-    let mut value = json!({"function": function, "status": status.as_str(),
-        "scope": "lean_extraction_axiom_free",
-        "source_blake3": blake3::Hash::from_bytes(source).to_hex().as_str()});
+fn status_fields(value: &mut Value, status: &ProofStatus) {
     match status {
-        ProofStatus::Proved { detail } => value["detail"] = json!(detail),
+        ProofStatus::Proved { detail } | ProofStatus::Checked { detail } => {
+            value["detail"] = json!(detail)
+        }
+        ProofStatus::Refuted { counterexample } => value["counterexample"] = json!(counterexample),
         ProofStatus::Failed { stage, reason } => {
             value["stage"] = json!(stage);
             value["reason"] = json!(reason);
         }
         ProofStatus::NotAttempted => {}
     }
+}
+
+fn proof_value(source: [u8; 32], function: &str, status: &ProofStatus) -> Value {
+    let mut value = json!({"function": function, "status": status.as_str(),
+        "scope": proof_lens::EXTRACTION_SCOPE,
+        "source_blake3": blake3::Hash::from_bytes(source).to_hex().as_str()});
+    status_fields(&mut value, status);
+    value
+}
+
+fn semantic_value(function: &str, key: Option<&[u8; 32]>, status: &ProofStatus) -> Value {
+    let mut value = json!({"function": function, "status": status.as_str(),
+        "scope": proof_lens::SEMANTIC_SCOPE,
+        "theorem": "no arithmetic fault (Fail[ArithOverflow], DivisionByZero) for any input in range, under vesper.arith.checked/1, about Lens's scalar model of the source function"});
+    if let Some(key) = key {
+        value["model_blake3"] = json!(proof_model::hex(key));
+    }
+    status_fields(&mut value, status);
     value
 }

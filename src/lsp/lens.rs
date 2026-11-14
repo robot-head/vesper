@@ -33,6 +33,8 @@ pub(crate) enum Unavailable {
     RepairUnparsed,
     Resource,
     Guard,
+    /// The request that asked for the view was cancelled.
+    Cancelled,
 }
 impl Unavailable {
     pub(crate) fn as_str(self) -> &'static str {
@@ -43,18 +45,48 @@ impl Unavailable {
             Self::RepairUnparsed => "repaired_prefix_does_not_parse",
             Self::Resource => "lens_resource_limit",
             Self::Guard => "editor_guard_rejected",
+            Self::Cancelled => "request_cancelled",
         }
     }
 }
 
-/// A syntax-damaged function and the cut its repaired prefix ends at.
+/// What a repaired region stands for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RegionKind {
+    /// Unfinished statements in a function or method body: the body is cut
+    /// at the last complete statement of the innermost block that can be
+    /// closed, and linear bindings live there are poisoned.
+    Body,
+    /// An unfinished parameter list or signature: the header is cut at its
+    /// last complete parameter and the complete body is kept. Nothing is
+    /// poisoned; the function's scope-exit checks are simply not published.
+    Header,
+    /// An unfinished struct, enum or effect: cut at its last complete member.
+    Member,
+}
+impl RegionKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Body => "body",
+            Self::Header => "header",
+            Self::Member => "member",
+        }
+    }
+}
+
+/// A syntax-damaged declaration and the cut its repaired view ends at.
 #[derive(Clone, Debug)]
 pub(crate) struct Region {
     pub name: String,
+    pub kind: RegionKind,
     /// Original declaration span.
     pub span: Span,
-    /// Byte offset where the repaired prefix ends (the inserted `}`).
+    /// Original offsets that belong to the damaged function or member.
+    pub scope: Span,
+    /// Byte offset where the repaired text is cut (the inserted closers).
     pub cut: usize,
+    /// Nesting depth of the block the cut closes (0 = the body itself).
+    pub depth: usize,
     /// The unfinished code: from the first token after the cut through the
     /// first syntax damage.
     pub damage: Span,
@@ -62,7 +94,11 @@ pub(crate) struct Region {
 
 enum Basis {
     Checked(Arc<CheckedSource>),
-    Repaired { checked: Box<Checked> },
+    /// `clean`: the Lens profile checked the text without errors.
+    Repaired {
+        checked: Box<Checked>,
+        clean: bool,
+    },
 }
 
 /// Source facts used for presentation. Offsets are original-source offsets.
@@ -132,104 +168,12 @@ impl View {
         })
     }
 
-    /// Build a repaired-prefix view for syntax-damaged original source.
+    /// Build a repaired view for syntax-damaged original source.
     pub(crate) fn recovered(
         syntax: &RecoverySyntax,
         limits: AnalysisLimits,
     ) -> Result<Self, Unavailable> {
-        let source = syntax.source();
-        let lexed = lexer::lex_with_limits(
-            source,
-            lexer::LexLimits {
-                max_source_bytes: limits.max_source_bytes,
-                max_tokens: 16_384,
-                max_diagnostics: limits.max_diagnostics,
-            },
-        )
-        .map_err(|_| Unavailable::Resource)?;
-        if lexed.limit.is_some() {
-            return Err(Unavailable::Resource);
-        }
-        let tokens: Vec<_> = lexed
-            .tokens
-            .iter()
-            .filter(|t| {
-                !matches!(
-                    t.kind,
-                    K::Whitespace | K::Comment | K::BlockComment | K::Eof
-                )
-            })
-            .collect();
-        let mut bytes = source.as_bytes().to_vec();
-        let mut regions = Vec::new();
-        let declarations = syntax.declarations();
-        for (index, d) in declarations.iter().enumerate() {
-            if d.status == S::Complete {
-                continue;
-            }
-            if d.status == S::Opaque {
-                return Err(Unavailable::OpaqueDeclaration);
-            }
-            if d.kind != D::Function {
-                return Err(Unavailable::DamagedContext);
-            }
-            let damage = syntax
-                .sites()
-                .iter()
-                .filter(|site| site.owner == Some(index))
-                .map(|site| site.span.clone())
-                .chain(
-                    syntax
-                        .diagnostics()
-                        .iter()
-                        .filter(|diag| {
-                            d.span.start <= diag.span.start && diag.span.start < d.span.end
-                        })
-                        .map(|diag| diag.span.clone()),
-                )
-                .min_by_key(|span| span.start)
-                .unwrap_or(d.span.end..d.span.end);
-            let (Some(body), Some(name)) = (&d.body_span, &d.name_span) else {
-                return Err(Unavailable::DamagedHeader);
-            };
-            if damage.start <= body.start || source.as_bytes().get(body.start) != Some(&b'{') {
-                return Err(Unavailable::DamagedHeader);
-            }
-            let cut = statement_cut(&tokens, body.start, damage.start);
-            if cut >= d.span.end {
-                return Err(Unavailable::RepairUnparsed);
-            }
-            for byte in &mut bytes[cut..d.span.end] {
-                if *byte != b'\n' && *byte != b'\r' {
-                    *byte = b' ';
-                }
-            }
-            let unfinished = cut
-                + source[cut..]
-                    .find(|c: char| !c.is_whitespace())
-                    .unwrap_or(0);
-            let damage = if unfinished < damage.end {
-                unfinished..damage.end
-            } else {
-                damage
-            };
-            bytes[cut] = b'}';
-            regions.push(Region {
-                name: source[name.clone()].to_owned(),
-                span: d.span.clone(),
-                cut,
-                damage,
-            });
-        }
-        // Sites outside a damaged function cannot be repaired by a function cut.
-        if syntax.sites().iter().any(|site| {
-            site.owner
-                .and_then(|i| declarations.get(i))
-                .is_none_or(|d| d.kind != D::Function || d.status == S::Complete)
-        }) {
-            return Err(Unavailable::DamagedContext);
-        }
-        let repaired = String::from_utf8(bytes).map_err(|_| Unavailable::RepairUnparsed)?;
+        let (repaired, regions) = repair(syntax, limits)?;
         Self::from_text(&repaired, regions, limits)
     }
 
@@ -246,12 +190,13 @@ impl View {
     ) -> Result<Self, Unavailable> {
         // The normal editor guards run first. A semantic failure is expected:
         // the truncated prefix leaves its linear bindings unconsumed.
-        match frontend::check_source(text, limits) {
-            Ok(_) | Err(AnalysisFailure::Semantic { .. }) => {}
+        let clean = match frontend::check_source(text, limits) {
+            Ok(_) => true,
+            Err(AnalysisFailure::Semantic { .. }) => false,
             Err(AnalysisFailure::Parse { .. }) => return Err(Unavailable::RepairUnparsed),
             Err(AnalysisFailure::Resource { .. }) => return Err(Unavailable::Resource),
             Err(_) => return Err(Unavailable::Guard),
-        }
+        };
         let parsed = parser::parse_with_limits(
             text,
             parser::ParseLimits {
@@ -279,6 +224,7 @@ impl View {
         Ok(Self {
             basis: Basis::Repaired {
                 checked: Box::new(checked),
+                clean,
             },
             regions,
             functions,
@@ -300,6 +246,7 @@ impl View {
     pub(crate) fn scope(&self) -> &'static str {
         match (&self.basis, self.regions.is_empty()) {
             (Basis::Checked(_), _) => "checked",
+            (Basis::Repaired { clean: true, .. }, true) => "lens_profile_checked",
             (Basis::Repaired { .. }, true) => "semantic_error_partial",
             (Basis::Repaired { .. }, false) => "recovered_prefix",
         }
@@ -314,15 +261,10 @@ impl View {
     /// The function containing `at` and the offset obligations are read at.
     /// Inside a damaged function, positions after the cut read the prefix end.
     fn function_at(&self, at: usize) -> Option<(&FunctionFacts, usize)> {
-        if let Some(region) = self
-            .regions
-            .iter()
-            .find(|region| region.span.start <= at && at <= region.span.end)
-        {
-            let facts = self
-                .functions
-                .iter()
-                .find(|f| region.span.start <= f.span.start && f.span.start < region.span.end)?;
+        if let Some(region) = self.regions.iter().find(|region| {
+            region.kind == RegionKind::Body && region.scope.start <= at && at <= region.scope.end
+        }) {
+            let facts = self.region_function(region)?;
             return Some((facts, at.min(region.cut)));
         }
         self.functions
@@ -348,14 +290,22 @@ impl View {
         live(function, at)
     }
 
-    /// Live linear bindings at each damaged function's cut: the poisoned set.
+    /// The (innermost) function whose repaired body holds the region's cut.
+    fn region_function(&self, region: &Region) -> Option<&FunctionFacts> {
+        self.functions
+            .iter()
+            .filter(|f| f.span.start <= region.cut && region.cut <= f.span.end)
+            .filter(|f| region.scope.start <= f.span.start)
+            .min_by_key(|f| f.span.len())
+    }
+
+    /// Live linear bindings at each damaged body's cut: the poisoned set.
     pub(crate) fn poisoned(&self) -> Vec<(&Region, Vec<&Binding>)> {
         self.regions
             .iter()
+            .filter(|region| region.kind == RegionKind::Body)
             .filter_map(|region| {
-                let function = self.functions.iter().find(|f| {
-                    region.span.start <= f.span.start && f.span.start < region.span.end
-                })?;
+                let function = self.region_function(region)?;
                 Some((region, live(function, region.cut)))
             })
             .collect()
@@ -462,38 +412,474 @@ pub(crate) fn signature(f: &Function) -> String {
     text
 }
 
-/// The end of the last complete top-level statement of the body that starts
-/// before `damage`, or just after the opening brace.
-fn statement_cut(tokens: &[&lexer::Token], body: usize, damage: usize) -> usize {
-    let mut cut = body + 1;
-    let mut depth = 0usize;
+/// An open delimiter at the damage, with the end of the last complete
+/// element (statement, arm, field, parameter) directly inside it.
+#[derive(Clone, Copy, Debug)]
+struct Open {
+    kind: K,
+    cut: usize,
+    /// A `let` at this level is not yet terminated by `;`.
+    in_let: bool,
+}
+
+/// Closers for `levels` (outermost first), innermost first. A level whose
+/// parent block is inside an unterminated `let` gets the `;` it needs.
+fn closers(levels: &[Open]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (i, open) in levels.iter().enumerate().rev() {
+        out.push(closer(open.kind));
+        if i > 0 && levels[i - 1].kind == K::LBrace && levels[i - 1].in_let {
+            out.push(b';');
+        }
+    }
+    out
+}
+
+fn closer(kind: K) -> u8 {
+    match kind {
+        K::LParen => b')',
+        K::LBracket => b']',
+        _ => b'}',
+    }
+}
+
+/// Tokens that start a statement or an arm after a closing brace.
+fn starts_element(kind: K) -> bool {
+    matches!(
+        kind,
+        K::Let | K::Lower | K::Upper | K::SelfKw | K::If | K::Match | K::Handle | K::Return
+    )
+}
+
+/// The delimiters open at `damage`, scanning the declaration from `from`.
+fn open_at(tokens: &[&lexer::Token], from: usize, damage: usize) -> Vec<Open> {
+    let mut stack: Vec<Open> = Vec::new();
     let mut iter = tokens
         .iter()
-        .skip_while(|t| t.span.start < body)
+        .skip_while(|t| t.span.start < from)
         .take_while(|t| t.span.start < damage)
         .peekable();
     while let Some(token) = iter.next() {
         match token.kind {
-            K::LBrace | K::LParen | K::LBracket => depth += 1,
-            K::RBrace | K::RParen | K::RBracket => {
-                depth = depth.saturating_sub(1);
-                // A block statement such as `if c { .. }` ends at its brace
-                // unless an `else` or a continuation follows.
-                if depth == 1
-                    && token.kind == K::RBrace
-                    && iter.peek().is_some_and(|next| {
-                        matches!(next.kind, K::Let | K::Lower | K::Upper)
-                            && next.span.start < damage
-                    })
-                {
-                    cut = token.span.end;
+            K::LBrace | K::LParen | K::LBracket => stack.push(Open {
+                kind: token.kind,
+                cut: token.span.end,
+                in_let: false,
+            }),
+            K::Let => {
+                if let Some(top) = stack.last_mut() {
+                    top.in_let = true;
                 }
             }
-            K::Semi if depth == 1 => cut = token.span.end,
+            K::RBrace | K::RParen | K::RBracket => {
+                let closed = stack.pop();
+                // A block such as `if c { .. }` ends its statement at the
+                // brace unless an `else` or another continuation follows.
+                if closed.is_some_and(|o| o.kind == K::LBrace)
+                    && let Some(parent) = stack.last_mut()
+                    && parent.kind == K::LBrace
+                    && iter
+                        .peek()
+                        .is_some_and(|next| starts_element(next.kind) && next.span.start < damage)
+                {
+                    parent.cut = token.span.end;
+                }
+            }
+            K::Semi | K::Comma => {
+                if let Some(top) = stack.last_mut() {
+                    top.cut = token.span.end;
+                    if token.kind == K::Semi {
+                        top.in_let = false;
+                    }
+                }
+            }
             _ => {}
         }
     }
-    cut
+    stack
+}
+
+/// One candidate repair of one damaged declaration, in original offsets.
+#[derive(Clone, Debug)]
+struct Patch {
+    /// Bytes from here up to `blank_end` become spaces (newlines kept).
+    cut: usize,
+    blank_end: usize,
+    /// Written over the first non-newline bytes at the cut.
+    closers: Vec<u8>,
+    kind: RegionKind,
+    depth: usize,
+    /// For header repairs: keep these bytes (the body) unblanked.
+    keep_from: Option<usize>,
+}
+
+fn apply(bytes: &mut [u8], patch: &Patch) -> bool {
+    let end = patch.keep_from.unwrap_or(patch.blank_end).min(bytes.len());
+    if patch.cut > end {
+        return false;
+    }
+    for byte in &mut bytes[patch.cut..end] {
+        if *byte != b'\n' && *byte != b'\r' {
+            *byte = b' ';
+        }
+    }
+    let mut at = patch.cut;
+    for &c in &patch.closers {
+        while at < end && matches!(bytes[at], b'\n' | b'\r') {
+            at += 1;
+        }
+        if at >= end {
+            return false;
+        }
+        bytes[at] = c;
+        at += 1;
+    }
+    true
+}
+
+fn blank(bytes: &mut [u8], span: &Span) {
+    let end = span.end.min(bytes.len());
+    for byte in &mut bytes[span.start..end] {
+        if *byte != b'\n' && *byte != b'\r' {
+            *byte = b' ';
+        }
+    }
+}
+
+/// Candidate patches for one damaged declaration, most specific first.
+fn candidates(
+    tokens: &[&lexer::Token],
+    kind: D,
+    span: &Span,
+    damage: usize,
+) -> Vec<(Patch, Span, Option<usize>)> {
+    let stack = open_at(tokens, span.start, damage);
+    let mut out = Vec::new();
+    let tokens_in = || {
+        tokens
+            .iter()
+            .filter(move |t| span.start <= t.span.start && t.span.end <= span.end)
+    };
+    // The `fn` keyword of the damaged function: the declaration itself, or
+    // the last method header before the damage inside an impl.
+    let fn_start = tokens_in()
+        .filter(|t| t.kind == K::Fn && t.span.start < damage)
+        .map(|t| t.span.start)
+        .next_back();
+    let next_fn = tokens_in()
+        .find(|t| t.kind == K::Fn && t.span.start >= damage)
+        .map(|t| t.span.start);
+    let member = matches!(kind, D::Struct | D::Enum | D::Effect);
+    // The method (or function) body is the first brace after its `fn` at
+    // the method's own level.
+    let base = usize::from(kind == D::Impl);
+    let body_level = stack
+        .iter()
+        .enumerate()
+        .skip(base)
+        .find(|(_, o)| o.kind == K::LBrace)
+        .map(|(i, _)| i);
+    let scope_from = if member {
+        span.start
+    } else {
+        fn_start.unwrap_or(span.start)
+    };
+    match (member, body_level) {
+        // Statement repair at each enclosing block, innermost first.
+        (false, Some(body)) => {
+            for level in (body..stack.len()).rev() {
+                if stack[level].kind != K::LBrace {
+                    continue;
+                }
+                let cut = stack[level].cut;
+                // Inside an impl, first keep the later methods.
+                if kind == D::Impl
+                    && let Some(next) = next_fn
+                {
+                    out.push((
+                        Patch {
+                            cut,
+                            blank_end: next,
+                            closers: closers(&stack[base..=level]),
+                            kind: RegionKind::Body,
+                            depth: level - body,
+                            keep_from: None,
+                        },
+                        scope_from..next,
+                        fn_start,
+                    ));
+                }
+                out.push((
+                    Patch {
+                        cut,
+                        blank_end: span.end,
+                        closers: closers(&stack[..=level]),
+                        kind: RegionKind::Body,
+                        depth: level - body,
+                        keep_from: None,
+                    },
+                    scope_from..span.end,
+                    fn_start,
+                ));
+            }
+        }
+        // Header repair: close the parameter list at its last complete
+        // parameter (or drop a damaged signature tail) and keep the body.
+        (false, None) => {
+            let Some(fn_start) = fn_start else {
+                return out;
+            };
+            let limit = next_fn.unwrap_or(span.end);
+            // The first `{` after the damage at the method's own level starts
+            // the complete body that is kept.
+            let body = tokens_in()
+                .find(|t| t.kind == K::LBrace && t.span.start >= damage && t.span.start < limit)
+                .map(|t| t.span.start);
+            let Some(body) = body else {
+                return out;
+            };
+            let params = stack.iter().skip(base).find(|o| o.kind == K::LParen);
+            let header_cut = match params {
+                Some(open) => Some((open.cut, vec![b')'])),
+                None => tokens_in()
+                    .filter(|t| {
+                        t.kind == K::RParen && t.span.start >= fn_start && t.span.end <= damage
+                    })
+                    .map(|t| (t.span.end, Vec::new()))
+                    .next_back(),
+            };
+            if let Some((cut, closers)) = header_cut {
+                out.push((
+                    Patch {
+                        cut,
+                        blank_end: body,
+                        closers,
+                        kind: RegionKind::Header,
+                        depth: 0,
+                        keep_from: Some(body),
+                    },
+                    fn_start..limit,
+                    Some(fn_start),
+                ));
+            }
+        }
+        // Member repair: close the struct, enum or effect at its last
+        // complete member.
+        (true, _) => {
+            if let Some(level) = stack.iter().position(|o| o.kind == K::LBrace) {
+                out.push((
+                    Patch {
+                        cut: stack[level].cut,
+                        blank_end: span.end,
+                        closers: closers(&stack[..=level]),
+                        kind: RegionKind::Member,
+                        depth: stack.len() - 1 - level,
+                        keep_from: None,
+                    },
+                    span.clone(),
+                    None,
+                ));
+            }
+        }
+    }
+    out
+}
+
+fn parses(text: &str, limits: AnalysisLimits) -> bool {
+    parser::parse_with_limits(
+        text,
+        parser::ParseLimits {
+            max_source_bytes: limits.max_source_bytes,
+            max_tokens: 65_536,
+            max_diagnostics: 1,
+            max_depth: limits.max_depth,
+        },
+    )
+    .is_ok_and(|parsed| parsed.diagnostics.is_empty())
+}
+
+/// Repair every damaged declaration of `syntax`, keeping byte offsets.
+fn repair(
+    syntax: &RecoverySyntax,
+    limits: AnalysisLimits,
+) -> Result<(String, Vec<Region>), Unavailable> {
+    let source = syntax.source();
+    let lexed = lexer::lex_with_limits(
+        source,
+        lexer::LexLimits {
+            max_source_bytes: limits.max_source_bytes,
+            max_tokens: 65_536,
+            max_diagnostics: limits.max_diagnostics,
+        },
+    )
+    .map_err(|_| Unavailable::Resource)?;
+    if lexed.limit.is_some() {
+        return Err(Unavailable::Resource);
+    }
+    let tokens: Vec<_> = lexed
+        .tokens
+        .iter()
+        .filter(|t| {
+            !matches!(
+                t.kind,
+                K::Whitespace | K::Comment | K::BlockComment | K::Eof
+            )
+        })
+        .collect();
+    let declarations = syntax.declarations();
+    // Sites outside every damaged declaration cannot be repaired by a cut.
+    if syntax.sites().iter().any(|site| {
+        site.owner
+            .and_then(|i| declarations.get(i))
+            .is_none_or(|d| d.status == S::Complete)
+    }) {
+        return Err(Unavailable::DamagedContext);
+    }
+    let damaged: Vec<_> = declarations
+        .iter()
+        .enumerate()
+        .filter(|(_, d)| d.status != S::Complete)
+        .collect();
+    if damaged.len() > 16 {
+        return Err(Unavailable::Resource);
+    }
+    let mut base = source.as_bytes().to_vec();
+    for (_, d) in &damaged {
+        // An opaque function or impl (for example a broken parameter list)
+        // may still have a header repair; every repair is parse-validated.
+        if d.status == S::Opaque && !matches!(d.kind, D::Function | D::Impl) {
+            return Err(Unavailable::OpaqueDeclaration);
+        }
+        if !matches!(
+            d.kind,
+            D::Function | D::Impl | D::Struct | D::Enum | D::Effect
+        ) {
+            return Err(Unavailable::DamagedContext);
+        }
+        blank(&mut base, &d.span);
+    }
+    let mut chosen = Vec::new();
+    let mut parses_left = 64usize;
+    for (index, d) in damaged {
+        if crate::lsp::request_cancelled() {
+            return Err(Unavailable::Cancelled);
+        }
+        let damage = syntax
+            .sites()
+            .iter()
+            .filter(|site| site.owner == Some(index))
+            .map(|site| site.span.clone())
+            .chain(
+                syntax
+                    .diagnostics()
+                    .iter()
+                    .filter(|diag| d.span.start <= diag.span.start && diag.span.start < d.span.end)
+                    .map(|diag| diag.span.clone()),
+            )
+            .min_by_key(|span| span.start)
+            .unwrap_or(d.span.end..d.span.end);
+        let options = candidates(&tokens, d.kind, &d.span, damage.start);
+        if options.is_empty() {
+            return Err(match d.kind {
+                D::Function | D::Impl => Unavailable::DamagedHeader,
+                _ => Unavailable::DamagedContext,
+            });
+        }
+        let mut accepted = None;
+        for (patch, scope, fn_start) in options {
+            if parses_left == 0 {
+                return Err(Unavailable::Resource);
+            }
+            parses_left -= 1;
+            // Validate this repair alone: the declaration's original bytes
+            // with the patch, every other damaged declaration blanked.
+            let mut trial = base.clone();
+            trial[d.span.clone()].copy_from_slice(&source.as_bytes()[d.span.clone()]);
+            if !apply(&mut trial, &patch) {
+                continue;
+            }
+            if let Ok(text) = std::str::from_utf8(&trial)
+                && parses(text, limits)
+            {
+                accepted = Some((patch, scope, fn_start));
+                break;
+            }
+        }
+        let Some((patch, scope, fn_start)) = accepted else {
+            return Err(Unavailable::RepairUnparsed);
+        };
+        let name = match (d.kind, fn_start) {
+            (D::Impl, Some(start)) => {
+                let method = tokens
+                    .iter()
+                    .find(|t| t.span.start > start && t.kind == K::Lower)
+                    .map(|t| &source[t.span.clone()])
+                    .unwrap_or("?");
+                let owner = d
+                    .name_span
+                    .as_ref()
+                    .map(|n| &source[n.clone()])
+                    .or_else(|| {
+                        tokens
+                            .iter()
+                            .find(|t| t.span.start > d.span.start && t.kind == K::Upper)
+                            .map(|t| &source[t.span.clone()])
+                    })
+                    .unwrap_or("?");
+                format!("{owner}::{method}")
+            }
+            _ => d
+                .name_span
+                .as_ref()
+                .map(|n| source[n.clone()].to_owned())
+                .unwrap_or_default(),
+        };
+        let cut = patch.cut;
+        let unfinished = cut
+            + source[cut..]
+                .find(|c: char| !c.is_whitespace())
+                .unwrap_or(0);
+        let damage = if unfinished < damage.end {
+            unfinished..damage.end
+        } else {
+            damage
+        };
+        chosen.push((
+            patch.clone(),
+            Region {
+                name,
+                kind: patch.kind,
+                span: d.span.clone(),
+                scope,
+                cut: if patch.kind == RegionKind::Header {
+                    d.span.end
+                } else {
+                    cut
+                },
+                depth: patch.depth,
+                damage,
+            },
+        ));
+    }
+    let mut bytes = source.as_bytes().to_vec();
+    for (patch, _) in &chosen {
+        if !apply(&mut bytes, patch) {
+            return Err(Unavailable::RepairUnparsed);
+        }
+    }
+    let repaired = String::from_utf8(bytes).map_err(|_| Unavailable::RepairUnparsed)?;
+    Ok((repaired, chosen.into_iter().map(|(_, r)| r).collect()))
+}
+
+fn mentions(ty: &Type, name: &str) -> bool {
+    match ty {
+        Type::Named(n, args) => n == name || args.iter().any(|a| mentions(a, name)),
+        Type::Tuple(items) => items.iter().any(|t| mentions(t, name)),
+        Type::Function { params, result, .. } => {
+            params.iter().any(|(_, t)| mentions(t, name)) || mentions(result, name)
+        }
+        _ => false,
+    }
 }
 
 struct Walker<'a> {
@@ -562,7 +948,49 @@ impl Walker<'_> {
         if self.work > MAX_WORK || self.bindings.len() > MAX_BINDINGS {
             return Err(Unavailable::Resource);
         }
+        // Long traversals stop as soon as their request is cancelled.
+        if self.work.is_multiple_of(256) && crate::lsp::request_cancelled() {
+            return Err(Unavailable::Cancelled);
+        }
         Ok(())
+    }
+    /// Field types of constructor `name` for a scrutinee of type `ty`, with
+    /// the ADT's type parameters substituted when `ty` names its arguments.
+    fn constructor_fields(&self, name: &str, ty: &Type) -> Vec<(String, Type)> {
+        let Some((adt, variant)) = self.world.constructor(name) else {
+            return Vec::new();
+        };
+        let params: Vec<&str> = adt
+            .generics
+            .iter()
+            .filter(|g| !g.row)
+            .map(|g| g.name.as_str())
+            .collect();
+        let vars: BTreeMap<String, Type> = match ty {
+            Type::Named(n, args) if *n == adt.name && args.len() == params.len() => params
+                .iter()
+                .map(|p| (*p).to_owned())
+                .zip(args.iter().cloned())
+                .collect(),
+            _ => BTreeMap::new(),
+        };
+        variant
+            .fields
+            .iter()
+            .map(|f| {
+                let ty = if vars.is_empty() && !params.is_empty() {
+                    // Unknown type arguments: never guess a mode for them.
+                    if params.iter().any(|p| mentions(&f.ty, p)) {
+                        Type::Infer
+                    } else {
+                        f.ty.clone()
+                    }
+                } else {
+                    substitute(&f.ty, &vars)
+                };
+                (f.name.clone(), ty)
+            })
+            .collect()
     }
     fn bind(
         &mut self,
@@ -629,9 +1057,28 @@ impl Walker<'_> {
                 }
                 Ok(())
             }
-            PatternKind::Constructor { fields, .. } => {
-                for (_, p) in fields {
-                    self.pattern(p, Type::Infer, scope)?;
+            // Destructured fields and match-arm payloads are owned by the
+            // pattern: a linear field becomes an obligation of its binding.
+            PatternKind::Constructor {
+                name,
+                fields,
+                named,
+            } => {
+                let types = self.constructor_fields(name, &ty);
+                for (i, (field, p)) in fields.iter().enumerate() {
+                    let ty = if *named {
+                        types.iter().find(|(n, _)| n == field)
+                    } else {
+                        field
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|i| types.get(i))
+                            .or_else(|| types.iter().find(|(n, _)| n == field))
+                            .or_else(|| types.get(i))
+                    }
+                    .map(|(_, ty)| ty.clone())
+                    .unwrap_or(Type::Infer);
+                    self.pattern(p, ty, scope)?;
                 }
                 Ok(())
             }
@@ -782,9 +1229,10 @@ impl Walker<'_> {
             }
             ExprKind::Match { value, arms } => {
                 self.expr(value, true)?;
+                let scrutinee = self.ty_of(value);
                 for (pat, body) in arms {
                     self.scopes.push(Vec::new());
-                    self.pattern(pat, Type::Infer, &body.span)?;
+                    self.pattern(pat, scrutinee.clone(), &body.span)?;
                     self.branch(body, &e.span, consume)?;
                     self.scopes.pop();
                 }
