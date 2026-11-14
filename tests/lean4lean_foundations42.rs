@@ -298,6 +298,12 @@ fn provenance(sources: &BTreeMap<String, FixedSource>) -> Value {
                 .replace('\\', "/")
         );
         assert_eq!(entry["vendored_path"], expected);
+        assert_eq!(
+            entry["source_path"],
+            module_path(module, "lean")
+                .to_string_lossy()
+                .replace('\\', "/")
+        );
         let actual = read(&expected);
         assert_eq!(actual, sources[module].text.as_bytes());
         assert!(matches_record(&actual, entry));
@@ -311,13 +317,13 @@ fn provenance(sources: &BTreeMap<String, FixedSource>) -> Value {
         assert_eq!(pinned["blake3"], entry["blake3"]);
         assert_eq!(entry["sha256"].as_str().unwrap().len(), 64);
     }
-    for field in ["kernel_patch", "license"] {
+    for (field, expected_path) in [
+        ("kernel_patch", "tools/lean4lean42/patches/kernel.patch"),
+        ("license", "tools/lean4lean-foundations42/upstream/LICENSE"),
+    ] {
         let entry = &p[field];
         let path = entry["path"].as_str().unwrap();
-        assert!(
-            path == "tools/lean4lean42/patches/kernel.patch"
-                || path == "tools/lean4lean-foundations42/upstream/LICENSE"
-        );
+        assert_eq!(path, expected_path);
         let actual = read(path);
         assert!(matches_record(&actual, entry));
     }
