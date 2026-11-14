@@ -16,6 +16,8 @@ use crate::{Adt, FunctionDoc, Limits, Pass, Selector, Type, TypeDoc, visual::esc
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// (item, reason) pairs.
+type Reasons = Vec<(String, String)>;
 const MAX_DEPTH: usize = 8;
 const MAX_LEAVES: usize = 256;
 const MAX_ROWS: usize = 512;
@@ -96,10 +98,7 @@ fn product(adt: &Adt) -> Option<&vesper_core::ast::Variant> {
 
 /// Expand the FieldTree leaves of a nongeneric struct through nested
 /// nongeneric documented structs.
-fn leaves(
-    root: &Adt,
-    adts: &BTreeMap<&str, &Adt>,
-) -> Result<(Vec<Vec<String>>, Vec<(String, String)>), String> {
+fn leaves(root: &Adt, adts: &BTreeMap<&str, &Adt>) -> Result<(Vec<Vec<String>>, Reasons), String> {
     let mut out = Vec::new();
     let mut opaque = Vec::new();
     let mut stack = vec![root.name.clone()];

@@ -138,6 +138,7 @@ pub fn default_store() -> Result<PathBuf, String> {
 }
 
 /// A certificate found in the store, with its verified bytes.
+#[derive(Debug)]
 pub struct Found {
     pub link: CertificateLink,
     pub bytes: Option<Vec<u8>>,
