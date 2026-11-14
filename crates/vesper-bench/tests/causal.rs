@@ -1,18 +1,21 @@
 //! Causal profiling on a synthetic program with a known bottleneck.
 //!
 //! Two threads do one round of work each, then meet at a barrier; the round
-//! ends with a progress point. Thread "slow" works 8 ms per round and thread
-//! "fast" 3 ms (wall-clock waits that yield, so the program behaves the same on
-//! a single-CPU host), so a round lasts max(8, 3) ms. Truly speeding "slow" up by s
-//! gives a round of max(8(1-s), 3) ms: 50% predicts 50%, 100% predicts
-//! 1 - 3/8 = 62.5%. Speeding "fast" up changes nothing.
+//! ends with a progress point. Thread "slow" works 40 ms per round and thread
+//! "fast" 15 ms (wall-clock waits that yield, so the program behaves the same
+//! on a single-CPU host), so a round lasts max(40, 15) ms. Truly speeding
+//! "slow" up by s gives a round of max(40(1-s), 15) ms: 50% predicts 50%,
+//! 100% predicts 1 - 15/40 = 62.5%. Speeding "fast" up changes nothing.
 //!
 //! Those figures hold only when the round has no other cost. Any per-round
 //! time outside both regions is not sped up and dilutes the prediction, as it
-//! should in a causal profile. `std::sync::Barrier` parks on a condition
-//! variable, and on macOS CI the wakeup took several milliseconds per round
-//! (the measured curve fit 6 to 12 ms of fixed cost: 2777 bp at 50% and
-//! 2443 bp at 100%), so the rounds meet at a yielding spin barrier instead.
+//! should in a causal profile. On macOS CI each round carried about 6 ms of
+//! such cost (late returns from `yield_now` and barrier wakeups: rounds meant
+//! to last 8 ms took about 15 ms, and the curve read 2271 bp at 50% and
+//! 2211 bp at 100%). Rounds are therefore long enough that a fixed cost of
+//! up to 10 ms still leaves the predictions inside the bounds below
+//! (1 - 30/50 = 40% and 1 - 25/50 = 50%), and the barrier spins briefly
+//! before it yields so that a release on another core is seen at once.
 use std::{
     convert::Infallible,
     sync::{
@@ -58,14 +61,23 @@ impl SpinBarrier {
             self.generation.fetch_add(1, Ordering::AcqRel);
             return;
         }
+        let mut spins = 0u32;
         while self.generation.load(Ordering::Acquire) == generation {
-            thread::yield_now();
+            // Spin first: on a multi-core host the release lands within
+            // microseconds. Then yield, so a single-CPU host still lets the
+            // last arrival run.
+            if spins < 10_000 {
+                spins += 1;
+                std::hint::spin_loop();
+            } else {
+                thread::yield_now();
+            }
         }
     }
 }
 
 fn program(p: &CausalProfiler) -> Result<(), Infallible> {
-    const ROUNDS: usize = 12;
+    const ROUNDS: usize = 6;
     let barrier = Arc::new(SpinBarrier::new(2));
     let slow = p.region("slow").unwrap();
     let fast = p.region("fast").unwrap();
@@ -83,8 +95,8 @@ fn program(p: &CausalProfiler) -> Result<(), Infallible> {
             }
         })
     };
-    let a = worker(slow, Duration::from_millis(8), true);
-    let b = worker(fast, Duration::from_millis(3), false);
+    let a = worker(slow, Duration::from_millis(40), true);
+    let b = worker(fast, Duration::from_millis(15), false);
     a.join().unwrap();
     b.join().unwrap();
     Ok(())
@@ -99,7 +111,11 @@ fn causal_profile_finds_the_known_bottleneck() {
         progress_point: "round",
     };
     let report = profile(&profiler, &config, program).unwrap();
-    assert_eq!(report.baseline.progress, 12);
+    assert_eq!(report.baseline.progress, 6);
+    eprintln!(
+        "baseline round {} us",
+        report.baseline.effective_ns / report.baseline.progress / 1000
+    );
     let bp = |region: &str, pct: u32| {
         report
             .curve(region)
