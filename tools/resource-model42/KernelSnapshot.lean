@@ -220,13 +220,23 @@ def constantReferences (info : ConstantInfo) (work : Nat) : IO (NameSet × Nat) 
 
 /-- All retained package declarations are roots, not only requested theorems.
 The complete logical dependency closure, including toolchain nodes, is checked. -/
-def checkLogicalClosure (original : Environment) (retained : Std.HashMap Name ConstantInfo) : IO Nat := do
+def checkLogicalClosure (original : Environment) (retained : Std.HashMap Name ConstantInfo)
+    (alternates : Array ConstantInfo := #[]) : IO Nat := do
   let mut queued : NameSet := {}
   let mut pending : Array Name := #[]
   for (name,_) in retained.toList do
     queued := queued.insert name
     pending := pending.push name
   let mut work := 0
+  for alternate in alternates do
+    if alternate.isUnsafe || alternate.isPartial then fail "unsafe alternate declaration"
+    let (references,nextWork) ← constantReferences alternate work
+    work := nextWork
+    for dependency in references do
+      if queued.contains dependency then continue
+      if pending.size ≥ maxConstants then fail "logical dependency count limit"
+      queued := queued.insert dependency
+      pending := pending.push dependency
   for index in [:maxConstants] do
     if index ≥ pending.size then return work
     let name := pending[index]!
@@ -265,6 +275,26 @@ def verifyEnvironment (expected : Std.HashMap Name ConstantInfo) (base actual : 
       pure (count+1)
   unless count == expected.size do fail "logical inventory count mismatch"
 
+structure RawOccurrence where
+  info : ConstantInfo
+  moduleName : Name
+  index : Nat
+
+def sameTheoremHeader (left right : ConstantInfo) : Bool :=
+  match left,right with
+  | .thmInfo a,.thmInfo b => a.toConstantVal == b.toConstantVal && a.all == b.all
+  | _,_ => false
+
+def checkTheoremGroup (value : TheoremVal) : IO Unit := do
+  unless !value.all.isEmpty && value.all.contains value.name && value.all.length ≤ maxPackageConstants do
+    fail "malformed alternate theorem group"
+  let mut seen : NameSet := {}
+  for name in value.all do
+    checkConstantName name
+    if seen.contains name then fail "duplicate alternate theorem group member"
+    seen := seen.insert name
+
+
 def snapshot (request : Request) : IO Json := do
   let actualPrefix ← IO.FS.realPath (← getBuildDir)
   unless actualPrefix == request.toolchainPrefix do fail "toolchain prefix does not match running Lean"
@@ -301,53 +331,67 @@ def snapshot (request : Request) : IO Json := do
   let mut raw : Std.HashMap Name ConstantInfo := {}
   let mut owners : Std.HashMap Name Name := {}
   let mut duplicates : Array Json := #[]
-  let mut occurrences := 0
+  let mut rawOccurrences : Array RawOccurrence := #[]
   for name in original.header.moduleNames, data in original.header.moduleData do
     if packages.contains name then
       unless data.constNames == data.constants.map ConstantInfo.name do
         fail "original redundant constant-name inventory mismatch"
-      for info in data.constants do
-        if occurrences ≥ maxPackageConstants * 2 then fail "original occurrence count limit"
-        occurrences := occurrences + 1
+      for index in [:data.constants.size] do
+        let info := data.constants[index]!
+        if rawOccurrences.size ≥ maxPackageConstants * 2 then fail "original occurrence count limit"
         checkConstantName info.name
         if base.contains info.name then fail s!"package shadows trusted declaration: {info.name}"
+        if info.isUnsafe then fail s!"explicit unsafe declaration: {info.name}"
+        rawOccurrences := rawOccurrences.push ⟨info,name,index⟩
         if let some previous := raw[info.name]? then
-          -- Imported equation theorems can be realized independently in more
-          -- than one module. Only identical safe theorem copies coalesce.
-          unless (previous matches .thmInfo _) && (info matches .thmInfo _) &&
-              !previous.isUnsafe && !info.isUnsafe && !previous.isPartial && !info.isPartial &&
-              sameInfo previous info do
-            match previous, info with
-            | .thmInfo a, .thmInfo b =>
-              fail s!"conflicting theorem duplicate: {info.name}; type_equal={a.type == b.type}; levels_equal={a.levelParams == b.levelParams}; group_equal={a.all == b.all}; value_equal={a.value == b.value}"
-            | _, _ => fail s!"non-theorem duplicate: {info.name}"
+          unless sameTheoremHeader previous info && !previous.isUnsafe && !info.isUnsafe &&
+              !previous.isPartial && !info.isPartial do
+            fail s!"non-theorem or changed theorem header duplicate: {info.name}"
           if duplicates.size ≥ maxPackageConstants then fail "duplicate occurrence count limit"
           let some firstModule := owners[info.name]? | fail "duplicate has no first module association"
           duplicates := duplicates.push <| Json.mkObj [
             ("name",toJson info.name.toString),("first_module",toJson firstModule.toString),
             ("repeated_module",toJson name.toString),
-            ("reason",toJson "identical_safe_theorem_realization")]
+            ("reason",toJson (if sameInfo previous info then "identical_safe_theorem_realization"
+              else "safe_theorem_proof_variant"))]
           continue
         if raw.size ≥ maxPackageConstants then fail "package constant limit"
         raw := raw.insert info.name info
         owners := owners.insert info.name name
+  -- The canonical logical world is exactly the ORIGINAL imported environment,
+  -- not whichever physical theorem realization we happened to encounter first.
+  let mut canonical : Std.HashMap Name ConstantInfo := {}
+  for (name,first) in raw.toList do
+    let some info := original.find? name | fail "original import omitted raw declaration"
+    unless sameInfo first info || sameTheoremHeader first info do
+      fail "canonical original/import ConstantInfo header mismatch"
+    canonical := canonical.insert name info
+  let mut canonicalOwners : Std.HashMap Name Name := {}
+  for occurrence in rawOccurrences do
+    let some info := canonical[occurrence.info.name]? | fail "unassociated raw occurrence"
+    unless sameInfo occurrence.info info || sameTheoremHeader occurrence.info info do
+      fail "raw occurrence changed canonical theorem header"
+    if sameInfo occurrence.info info && !canonicalOwners.contains info.name then
+      canonicalOwners := canonicalOwners.insert info.name occurrence.moduleName
+  unless canonicalOwners.size == canonical.size do
+    fail "canonical ConstantInfo does not match an actual raw occurrence"
   let rawCount ← original.constants.foldM (init := 0) fun count name info => do
     if let some trustedInfo := base.find? name then
       unless sameInfo trustedInfo info do fail "trusted declaration changed in original import"
       pure count
     else
-      let some expected := raw[name]? | fail "original import has unassociated package declaration"
-      unless sameInfo expected info do fail "original module/import ConstantInfo mismatch"
+      let some expected := canonical[name]? | fail "original import has unassociated package declaration"
+      unless sameInfo expected info do fail "original canonical ConstantInfo mismatch"
       if count ≥ maxPackageConstants then fail "package constant limit"
       pure (count+1)
-  unless rawCount == raw.size do fail "original raw/import inventories differ"
-  unless occurrences == raw.size + duplicates.size do fail "original occurrence partition mismatch"
+  unless rawCount == canonical.size do fail "original raw/import inventories differ"
+  unless rawOccurrences.size == canonical.size + duplicates.size do fail "original occurrence partition mismatch"
   let mut retained : Std.HashMap Name ConstantInfo := {}
   let mut omitted : Array Json := #[]
-  for (name,info) in raw.toList.toArray.qsort (fun a b => Name.lt a.1 b.1) do
+  for (name,info) in canonical.toList.toArray.qsort (fun a b => Name.lt a.1 b.1) do
     if info.isUnsafe then fail s!"explicit unsafe declaration: {name}"
     if info.isPartial then
-      let parent ← matchedPartial raw owners info
+      let parent ← matchedPartial canonical owners info
       let some owner := owners[name]? | fail "missing original module association"
       omitted := omitted.push <| Json.mkObj [
         ("name",toJson name.toString),("parent",toJson parent.toString),
@@ -355,11 +399,63 @@ def snapshot (request : Request) : IO Json := do
     else
       if info matches .opaqueInfo _ then fail s!"unsupported package opaque declaration: {name}"
       retained := retained.insert name info
-  unless raw.size == retained.size + omitted.size do fail "partition count mismatch"
-  let work ← checkLogicalClosure original retained
+  unless canonical.size == retained.size + omitted.size do fail "partition count mismatch"
+  let mut alternates : Array ConstantInfo := #[]
+  for occurrence in rawOccurrences do
+    if let some info := retained[occurrence.info.name]? then
+      unless sameInfo occurrence.info info do
+        unless sameTheoremHeader occurrence.info info do fail "alternate is not a safe theorem header copy"
+        if alternates.size ≥ maxPackageConstants then fail "alternate proof count limit"
+        alternates := alternates.push occurrence.info
+  let work ← checkLogicalClosure original retained alternates
+  -- Prove the entire unchanged canonical world before checking any alias.
   let replayed ← Environment.replay retained base
   verifyEnvironment retained base replayed
-  let constants := retained.toList.toArray.qsort (fun a b => Name.lt a.1 b.1) |>.map Prod.snd
+  let mut exported := retained
+  let mut checkedAliases := replayed
+  let mut proofAliases : Array Json := #[]
+  let mut occurrenceReports : Array Json := #[]
+  for occurrence in rawOccurrences do
+    let name := occurrence.info.name
+    let mut alias : Option String := none
+    let mut disposition := "omitted_auxiliary"
+    if let some canonicalInfo := retained[name]? then
+      if sameInfo occurrence.info canonicalInfo then
+        disposition := "retained_canonical_info"
+      else
+        let .thmInfo value := occurrence.info | fail "alternate is not a theorem"
+        unless sameTheoremHeader occurrence.info canonicalInfo do fail "alternate theorem header mismatch"
+        checkTheoremGroup value
+        if exported.size ≥ maxPackageConstants then fail "expanded output constant limit"
+        let aliasName := Name.str (Name.mkSimple "ResourceKernelProofAliases")
+          ("realization_" ++ toString proofAliases.size)
+        if original.contains aliasName || base.contains aliasName || exported.contains aliasName then
+          fail "synthetic proof alias name collision"
+        -- Only the declaration label/group changes. Its type, universe names
+        -- and actual raw proof body are copied exactly, never rewritten.
+        let aliasValue : TheoremVal := {value with name := aliasName, all := [aliasName]}
+        unless aliasValue.type == value.type && aliasValue.levelParams == value.levelParams &&
+            aliasValue.value == value.value do fail "alternate proof body association changed"
+        match checkedAliases.addDeclCore 0 (.thmDecl aliasValue) (cancelTk? := none) with
+        | .error _ => fail s!"kernel rejected alternate proof alias: {aliasName}"
+        | .ok checked => checkedAliases := checked
+        exported := exported.insert aliasName (.thmInfo aliasValue)
+        let some canonicalModule := canonicalOwners[name]? | fail "canonical theorem lacks raw occurrence"
+        proofAliases := proofAliases.push <| Json.mkObj [
+          ("name",toJson aliasName.toString),("original_name",toJson name.toString),
+          ("source_module",toJson occurrence.moduleName.toString),
+          ("canonical_module",toJson canonicalModule.toString),
+          ("source_occurrence",toJson occurrence.index),
+          ("original_group",toJson (value.all.map Name.toString)),
+          ("reason",toJson "checked_safe_theorem_variant")]
+        alias := some aliasName.toString
+        disposition := "proof_alias"
+    occurrenceReports := occurrenceReports.push <| Json.mkObj [
+      ("name",toJson name.toString),("module",toJson occurrence.moduleName.toString),
+      ("index",toJson occurrence.index),("disposition",toJson disposition),("alias",toJson alias)]
+  unless proofAliases.size == alternates.size do fail "alternate proof mapping count mismatch"
+  verifyEnvironment exported base checkedAliases
+  let constants := exported.toList.toArray.qsort (fun a b => Name.lt a.1 b.1) |>.map Prod.snd
   let data : ModuleData := {
     isModule := false
     imports := trustedNames.map fun name => {module := name}
@@ -384,13 +480,13 @@ def snapshot (request : Request) : IO Json := do
     unless data.constNames == data.constants.map ConstantInfo.name do
       fail "projection redundant constant-name inventory mismatch"
     unless data.imports.map Import.module == trustedNames do fail "projection import inventory changed"
-    unless data.constants.size == retained.size do fail "projection raw constant count mismatch"
+    unless data.constants.size == exported.size do fail "projection raw constant count mismatch"
     for info in data.constants do
-      let some expected := retained[info.name]? | fail "projection contains unexpected constant"
+      let some expected := exported[info.name]? | fail "projection contains unexpected constant"
       unless sameInfo expected info do fail "projection raw ConstantInfo changed"
     projectedCount := projectedCount+1
   unless projectedCount == 1 do fail "projection module participation mismatch"
-  verifyEnvironment retained base reimported
+  verifyEnvironment exported base reimported
   pure <| Json.mkObj [
     ("schema_version",toJson (1 : Nat)),("scope",toJson "kernel_logical_projection"),
     ("original_module",toJson request.moduleName.toString),
@@ -398,9 +494,13 @@ def snapshot (request : Request) : IO Json := do
     ("projection_path",toJson (← IO.FS.realPath output).toString),
     ("original_modules",toJson (originalModules.map moduleJson)),
     ("trusted_modules",toJson (trustedModules.map moduleJson)),
-    ("original_constants",toJson raw.size),("retained_constants",toJson retained.size),
-    ("original_constant_occurrences",toJson occurrences),
+    ("original_constants",toJson canonical.size),("retained_constants",toJson retained.size),
+    ("original_constant_occurrences",toJson rawOccurrences.size),
     ("duplicate_constants",toJson duplicates.size),("duplicates",Json.arr duplicates),
+    ("occurrences",Json.arr occurrenceReports),
+    ("alias_scope",toJson "synthetic_theorem_proof_variants"),
+    ("proof_alias_count",toJson proofAliases.size),("proof_aliases",Json.arr proofAliases),
+    ("output_constants",toJson exported.size),
     ("omitted_constants",toJson omitted.size),("omitted",Json.arr omitted),
     ("logical_expression_nodes",toJson work),
     ("exact_inventory",toJson true),("constant_info_equal",toJson true),
