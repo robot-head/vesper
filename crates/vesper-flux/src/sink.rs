@@ -139,6 +139,10 @@ pub struct SinkRecovery {
 
 const RECORD_TAG: u8 = 1;
 const OUTPUT_TAG: u8 = 2;
+/// One per committed epoch, carrying the delta's width, so an empty delta
+/// round-trips and every committed epoch stays visible.
+const EPOCH_TAG: u8 = 3;
+const EPOCH_BYTES: usize = 1 + 8 + 4;
 const RECORD_VERSION: u16 = 1;
 const RECORD_BYTES: usize = 1 + 2 + 32 + 8 + 4 + 32;
 /// Commits between Quarry checkpoints (which truncate the log).
@@ -210,6 +214,30 @@ fn encode_output(epoch: u64, row: &Row, weight: i64) -> Result<Vec<u8>, Error> {
         b.extend_from_slice(&c.to_le_bytes());
     }
     Ok(b)
+}
+fn encode_epoch(epoch: u64, width: usize) -> Result<Vec<u8>, Error> {
+    let mut b = Vec::with_capacity(EPOCH_BYTES);
+    b.push(EPOCH_TAG);
+    b.extend_from_slice(&epoch.to_le_bytes());
+    b.extend_from_slice(
+        &u32::try_from(width)
+            .map_err(|_| Error::Overflow)?
+            .to_le_bytes(),
+    );
+    Ok(b)
+}
+fn decode_epoch(b: &[u8], limits: Limits) -> Result<(u64, usize), Error> {
+    let bad = || Error::Storage("sink epoch");
+    if b.len() != EPOCH_BYTES || b[0] != EPOCH_TAG {
+        return Err(bad());
+    }
+    let epoch = u64::from_le_bytes(b[1..9].try_into().map_err(|_| bad())?);
+    let width = usize::try_from(u32::from_le_bytes(b[9..13].try_into().map_err(|_| bad())?))
+        .map_err(|_| Error::Overflow)?;
+    if width > limits.max_columns {
+        return Err(bad());
+    }
+    Ok((epoch, width))
 }
 fn decode_output(b: &[u8], limits: Limits) -> Result<(u64, Row, i64), Error> {
     let bad = || Error::Storage("sink output");
@@ -287,6 +315,8 @@ impl<D: CrashMedium> QuarrySink<D> {
         let mut record = None;
         let mut outputs = 0usize;
         let mut max_epoch = None;
+        let mut widths = BTreeMap::new();
+        let mut row_widths = Vec::new();
         for (id, bytes) in &rows {
             match bytes.first() {
                 Some(&RECORD_TAG) => {
@@ -295,9 +325,17 @@ impl<D: CrashMedium> QuarrySink<D> {
                     }
                 }
                 Some(&OUTPUT_TAG) => {
-                    let (epoch, _, _) = decode_output(bytes, limits)?;
+                    let (epoch, row, _) = decode_output(bytes, limits)?;
                     max_epoch = max_epoch.max(Some(epoch));
+                    row_widths.push((epoch, row.len()));
                     outputs += 1;
+                }
+                Some(&EPOCH_TAG) => {
+                    let (epoch, width) = decode_epoch(bytes, limits)?;
+                    if widths.insert(epoch, width).is_some() {
+                        return Err(Error::Storage("sink epoch named twice"));
+                    }
+                    max_epoch = max_epoch.max(Some(epoch));
                 }
                 _ => return Err(Error::Storage("sink record tag")),
             }
@@ -308,6 +346,11 @@ impl<D: CrashMedium> QuarrySink<D> {
                 return Err(Error::Storage("sink output after its record"));
             }
             _ => {}
+        }
+        for (epoch, width) in row_widths {
+            if widths.get(&epoch) != Some(&width) {
+                return Err(Error::Storage("sink output width"));
+            }
         }
         self.record = record;
         Ok(outputs)
@@ -328,6 +371,8 @@ impl<D: CrashMedium> QuarrySink<D> {
         outputs: &[(u64, ZSet)],
     ) -> Result<RecordId, Error> {
         for (epoch, delta) in outputs {
+            db.insert(txn, &encode_epoch(*epoch, delta.width)?)
+                .map_err(dberr)?;
             for (row, weight) in delta.entries() {
                 db.insert(txn, &encode_output(*epoch, row, weight)?)
                     .map_err(dberr)?;
@@ -387,18 +432,22 @@ impl<D: CrashMedium> CommitSink for QuarrySink<D> {
     fn outputs(&mut self) -> Result<Vec<(u64, ZSet)>, Error> {
         let limits = self.limits;
         let rows = self.db()?.scan().map_err(dberr)?;
-        let mut by_epoch: BTreeMap<u64, Vec<(Row, i64)>> = BTreeMap::new();
-        let mut width = None;
+        let mut by_epoch: BTreeMap<u64, (usize, Vec<(Row, i64)>)> = BTreeMap::new();
+        for (_, bytes) in &rows {
+            if bytes.first() == Some(&EPOCH_TAG) {
+                let (epoch, width) = decode_epoch(bytes, limits)?;
+                by_epoch.entry(epoch).or_default().0 = width;
+            }
+        }
         for (_, bytes) in &rows {
             if bytes.first() == Some(&OUTPUT_TAG) {
                 let (epoch, row, weight) = decode_output(bytes, limits)?;
-                if *width.get_or_insert(row.len()) != row.len() {
-                    return Err(Error::Storage("sink output width"));
+                match by_epoch.get_mut(&epoch) {
+                    Some((width, rows)) if *width == row.len() => rows.push((row, weight)),
+                    _ => return Err(Error::Storage("sink output width")),
                 }
-                by_epoch.entry(epoch).or_default().push((row, weight));
             }
         }
-        let width = width.unwrap_or(0);
         let unbounded = Limits {
             max_input_entries: usize::MAX,
             max_rows: usize::MAX,
@@ -407,7 +456,7 @@ impl<D: CrashMedium> CommitSink for QuarrySink<D> {
         };
         by_epoch
             .into_iter()
-            .map(|(e, rows)| Ok((e, ZSet::consolidate(width, &rows, unbounded)?)))
+            .map(|(e, (width, rows))| Ok((e, ZSet::consolidate(width, &rows, unbounded)?)))
             .collect()
     }
 }

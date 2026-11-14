@@ -93,6 +93,18 @@ fn input_log_round_trips_and_cuts_torn_appends() {
         InputLog::open(&path, LogLimits::default()).unwrap_err(),
         Error::Storage("corrupt log")
     );
+    // Reopening under a smaller frame limit refuses the log and keeps every
+    // durable byte (an oversized length never authorizes truncation).
+    std::fs::write(&path, &full).unwrap();
+    let strict = LogLimits {
+        max_frame_bytes: 16,
+        ..LogLimits::default()
+    };
+    assert_eq!(
+        InputLog::open(&path, strict).unwrap_err(),
+        Error::Limit("log frame bytes")
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), full);
     // A corrupted header is rejected; so is a missing file.
     let mut bad = full.clone();
     bad[13] ^= 1;
@@ -309,4 +321,23 @@ fn cluster_over_a_quarry_sink_survives_faults_at_many_steps() {
             assert_eq!(committed, expected, "{fault:?}");
         }
     }
+}
+
+#[test]
+fn quarry_sink_keeps_empty_epoch_deltas() {
+    let mut dev = SimDevice::new();
+    let committed = vec![
+        (0, set(&[])),
+        (1, set(&[(&[1, 2], 1)])),
+        (2, ZSet::empty(3, l()).unwrap()),
+    ];
+    {
+        let (mut sink, _) = QuarrySink::open(&mut dev, DbLimits::default(), l()).unwrap();
+        sink.commit(&record(2, 1), &committed).unwrap();
+        assert_eq!(sink.outputs().unwrap(), committed);
+    }
+    let dev = dev.crash(CrashChoice::LoseUnsynced);
+    let (mut sink, rec) = QuarrySink::open(dev, DbLimits::default(), l()).unwrap();
+    assert_eq!(rec.output_rows, 1);
+    assert_eq!(sink.outputs().unwrap(), committed);
 }

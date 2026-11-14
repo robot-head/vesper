@@ -169,9 +169,16 @@ fn a_finished_run_is_a_no_op_and_stale_sinks_are_rejected() {
     let inputs = workload(4);
     let mut sink = MemorySink::new();
     let cfg = ClusterConfig::new(2, vec![0, 0, 0]);
-    run_cluster_with(&circuit(), &inputs, &mut sink, &store, &cfg, &[]).unwrap();
+    let first = run_cluster_with(&circuit(), &inputs, &mut sink, &store, &cfg, &[]).unwrap();
+    assert!(!first.materialized.is_empty());
     let again = run_cluster_with(&circuit(), &inputs, &mut sink, &store, &cfg, &[]).unwrap();
     assert!(again.outputs.is_empty() && again.steps == 0);
+    // The no-op still reports the committed view, also across a rescale.
+    assert_eq!(again.materialized, first.materialized);
+    let wider = ClusterConfig::new(3, vec![0, 0, 0]);
+    let rescaled = run_cluster_with(&circuit(), &inputs, &mut sink, &store, &wider, &[]).unwrap();
+    assert!(rescaled.rescale.is_some() && rescaled.steps == 0);
+    assert_eq!(rescaled.materialized, first.materialized);
     // A sink that is ahead of its source, or belongs to another circuit.
     assert_eq!(
         run_cluster_with(
@@ -196,4 +203,69 @@ fn a_finished_run_is_a_no_op_and_stale_sinks_are_rejected() {
         run_cluster_with(&other, &inputs, &mut sink, &store, &cfg, &[]).unwrap_err(),
         Error::Checkpoint("sink belongs to another circuit")
     );
+}
+
+#[test]
+fn rescale_gathers_inputs_larger_than_one_worker_may_hold() {
+    // 48 input rows overall, at most 40 per worker: the global input integral
+    // exceeds the per-worker row limit, every destination partition fits.
+    let lim = Limits {
+        max_rows: 40,
+        max_input_entries: 40,
+        ..Limits::default()
+    };
+    let mut b = CircuitBuilder::new(lim).unwrap();
+    let x = b.input(2).unwrap();
+    let f = b
+        .filter(
+            x,
+            Predicate::AtLeast {
+                column: 1,
+                value: 1000,
+            },
+        )
+        .unwrap();
+    let c = b.finish(f).unwrap();
+    let inputs: Vec<TickInput> = (0..6i64)
+        .map(|e| TickInput {
+            deltas: vec![
+                ZSet::consolidate(
+                    2,
+                    &(0..8).map(|i| (vec![e * 8 + i, i], 1)).collect::<Vec<_>>(),
+                    lim,
+                )
+                .unwrap(),
+            ],
+        })
+        .collect();
+    let (_dir, store) = store();
+    let mut sink = MemorySink::new();
+    run_cluster_with(
+        &c,
+        &inputs[..3].to_vec(),
+        &mut sink,
+        &store,
+        &ClusterConfig::new(2, vec![0]),
+        &[],
+    )
+    .unwrap();
+    run_cluster_with(
+        &c,
+        &inputs,
+        &mut sink,
+        &store,
+        &ClusterConfig::new(2, vec![0]),
+        &[],
+    )
+    .unwrap();
+    let run = run_cluster_with(
+        &c,
+        &inputs,
+        &mut sink,
+        &store,
+        &ClusterConfig::new(3, vec![0]),
+        &[],
+    )
+    .unwrap();
+    assert!(run.rescale.is_some() && run.materialized.is_empty());
 }

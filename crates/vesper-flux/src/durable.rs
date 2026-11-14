@@ -533,8 +533,50 @@ impl DurableCheckpointer {
                     spine.push(m);
                 }
             }
-            reused += spine.iter().filter(|b| p.spines[node].contains(b)).count();
             spines.push(spine);
+        }
+        // Restore bounds every referenced batch, not just the integrals: a
+        // retained base plus deltas can exceed what the integrals need. Fold
+        // the spines that cost the most extra rows into one full batch each
+        // until the manifest parses under the same limits.
+        let cells = |s: &[BatchRef], w: usize| s.iter().map(|b| b.rows.saturating_mul(w)).sum();
+        loop {
+            let (mut rows, mut cell_total) = (0usize, 0usize);
+            let mut worst: Option<(usize, usize)> = None;
+            for (node, (spine, set)) in spines.iter().zip(&exec.prior).enumerate() {
+                let r: usize = spine.iter().map(|b| b.rows).sum();
+                rows = rows.saturating_add(r);
+                cell_total = cell_total.saturating_add(cells(spine, set.width));
+                let oversized = spine.iter().any(|b| b.rows > c.limits.max_rows);
+                let extra = if oversized {
+                    usize::MAX
+                } else {
+                    r - r.min(set.len())
+                };
+                if spine.len() > 1 && extra > 0 && worst.is_none_or(|(_, e)| extra > e) {
+                    worst = Some((node, extra));
+                }
+            }
+            let over = rows > limits.max_total_rows || cell_total > limits.max_total_cells;
+            let Some((node, _)) = worst.filter(|(_, e)| over || *e == usize::MAX) else {
+                break;
+            };
+            let set = &exec.prior[node];
+            let mut spine = Vec::new();
+            if !set.is_empty() {
+                let (b, size) = put_batch(store, &fingerprint, node, 0, ticks, set, limits)?;
+                bytes = bytes.checked_add(size).ok_or(Error::Overflow)?;
+                rows_written += set.len();
+                written += 1;
+                spine.push(b);
+            }
+            merged += 1;
+            spines[node] = spine;
+        }
+        if let Some(p) = reuse {
+            for (node, spine) in spines.iter().enumerate() {
+                reused += spine.iter().filter(|b| p.spines[node].contains(b)).count();
+            }
         }
         // Reserve the restore parse work, so a successful checkpoint is
         // restorable under the same limits (as the in-memory image does).

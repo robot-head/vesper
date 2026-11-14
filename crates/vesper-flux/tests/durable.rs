@@ -542,3 +542,36 @@ fn malformed_spines_are_rejected() {
     );
     assert_untouched(&v);
 }
+
+/// A retained base plus a delta can need more batch rows than the integral:
+/// the checkpoint folds that spine so it restores under the same limits.
+#[test]
+fn incremental_checkpoints_stay_within_the_batch_row_bound() {
+    let (_dir, store) = store();
+    let mut b = CircuitBuilder::new(l()).unwrap();
+    let x = b.input(2).unwrap();
+    let c = b.finish(x).unwrap();
+    let limits = CheckpointLimits {
+        max_total_rows: 100,
+        ..cp()
+    };
+    let mut e = c.clone().executor();
+    let base: Vec<_> = (0..100).map(|i| (vec![i, 0], 1)).collect();
+    e.tick(&TickInput {
+        deltas: vec![ZSet::consolidate(2, &base, l()).unwrap()],
+    })
+    .unwrap();
+    let mut ckpt = DurableCheckpointer::new();
+    ckpt.checkpoint(&e, &store, limits).unwrap();
+    e.tick(&TickInput {
+        deltas: vec![set(2, &[(&[0, 0], 1)])],
+    })
+    .unwrap();
+    let report = ckpt.checkpoint(&e, &store, limits).unwrap();
+    let mut back = c.clone().executor();
+    let restored = DurableCheckpointer::new()
+        .restore(&mut back, &store, &report.manifest, limits)
+        .unwrap();
+    assert_eq!(back.materialized(), e.materialized());
+    assert_eq!(restored.spines[0].len(), 1);
+}

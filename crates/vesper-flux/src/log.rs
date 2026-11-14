@@ -261,12 +261,11 @@ impl InputLog {
         let payload_len = u32::from_le_bytes(l);
         let total = 4 + u64::from(payload_len) + SUM as u64;
         if payload_len as usize > self.limits.max_frame_bytes {
-            // Only a torn length field at the very end can be oversized.
-            return if len - at <= total {
-                Ok(Scan::Torn)
-            } else {
-                Err(Error::Storage("corrupt log"))
-            };
+            // A length field is written whole before its payload, so a torn
+            // append keeps a genuine length. An oversized one is a frame
+            // written under larger limits, or corruption: neither may be
+            // truncated away.
+            return Err(Error::Limit("log frame bytes"));
         }
         if len - at < total {
             return Ok(Scan::Torn);

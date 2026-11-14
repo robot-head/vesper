@@ -1956,10 +1956,15 @@ pub fn run_cluster_with(
         }
     }
     let empty_run = |state: State<'_>, rescale| -> Result<ClusterRun, Error> {
+        // Nothing left to run: the view is what the sink already committed.
+        let mut materialized = ZSet::empty(width, circuit.limits)?;
+        for (_, out) in state.sink.outputs()? {
+            materialized = materialized.plus(&out, circuit.limits)?;
+        }
         Ok(ClusterRun {
             start_epoch: start,
             outputs: Vec::new(),
-            materialized: ZSet::empty(width, circuit.limits)?,
+            materialized,
             steps: 0,
             messages: 0,
             recoveries: Vec::new(),
@@ -2111,27 +2116,31 @@ fn rescale_from(
         state.sweep_fps.push(old_plan.fingerprint);
     }
     let lim = circuit.limits;
+    // Gathered (global) sets are bounded by the whole checkpoint's row
+    // budget, not one worker's; `Executor::from_state` enforces the
+    // per-worker limits again after redistribution.
+    let eval = Limits {
+        max_rows: lim.max_rows.max(limits.max_total_rows),
+        max_input_entries: lim.max_input_entries.max(limits.max_total_rows),
+        ..lim
+    };
     // Global input integrals: the disjoint union of every old worker's.
     let mut inputs: Vec<ZSet> = circuit
         .inputs
         .iter()
-        .map(|w| ZSet::empty(*w, lim))
+        .map(|w| ZSet::empty(*w, eval))
         .collect::<Result<_, _>>()?;
     for w in 0..global.workers {
         let (exec, _) = state.restore_executor(&old_plan, global, w)?;
         for (node, set) in exec.integrals().iter().enumerate() {
             if let Op::Input(slot) = old_plan.circuit.nodes[node].op {
-                inputs[slot] = inputs[slot].plus(set, lim)?;
+                inputs[slot] = inputs[slot].plus(set, eval)?;
             }
         }
     }
     let n = state.cfg.workers;
     let plan = &state.plan;
     let mut budget = limits.budget(&plan.circuit);
-    let eval = Limits {
-        max_rows: lim.max_rows.max(limits.max_total_rows),
-        ..lim
-    };
     let mut locals: Vec<Vec<ZSet>> = vec![Vec::new(); n];
     for node in &plan.circuit.nodes {
         match &node.op {
