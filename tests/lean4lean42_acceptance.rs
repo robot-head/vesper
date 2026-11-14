@@ -360,6 +360,13 @@ fn genuine_positive(
         digest(&tools["known_fixes_blake3"]),
         *blake3::hash(include_bytes!("../tools/lean4lean42/known-fixes.json")).as_bytes()
     );
+    assert_eq!(
+        digest(&tools["resource_bundle_blake3"]),
+        *blake3::hash(include_bytes!(
+            "../tools/lean4lean42/resource-source-manifest.json"
+        ))
+        .as_bytes()
+    );
     validate_controls(&report, expected);
     let targets = report["targets"].as_array().unwrap();
     assert_eq!(targets.len(), 3);
@@ -530,6 +537,67 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
         );
         assert_eq!(hash_file(&path), digest(&file["blake3"]));
     }
+    let association = &report["targets"][2]["resource"];
+    let bundle: Value = serde_json::from_slice(include_bytes!(
+        "../tools/lean4lean42/resource-source-manifest.json"
+    ))
+    .unwrap();
+    assert_eq!(bundle["schema"], 1);
+    assert_eq!(
+        bundle["domain"],
+        "vesper.lean4lean42.resource-source-bundle/1"
+    );
+    for source in bundle["files"].as_array().unwrap() {
+        let source_path = source["path"].as_str().unwrap();
+        let retained = if let Some(relative) = source_path.strip_prefix("lean/") {
+            format!("resource/sources/{relative}")
+        } else if source_path == "tools/resource-model42/KernelSnapshot.lean" {
+            "resource/projector/KernelSnapshot.lean".to_owned()
+        } else {
+            assert_eq!(
+                source_path,
+                "docs/rfcs/resource-model42-source-manifest.json"
+            );
+            "resource/historical-source-manifest.json".to_owned()
+        };
+        let observed = files
+            .iter()
+            .find(|file| file["path"] == retained)
+            .expect("every frozen resource source remains retained and hashed");
+        assert_eq!(observed["bytes"], source["bytes"]);
+        assert_eq!(observed["blake3"], source["blake3"]);
+    }
+    for field in ["snapshot_tool", "request", "producer_report", "projection"] {
+        let association_file = &association[field];
+        let relative = association_file["path"].as_str().unwrap();
+        let matches = files
+            .iter()
+            .filter(|file| {
+                file["path"] == relative || file["path"] == format!("resource/{relative}")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "actual retained resource association {field}"
+        );
+        assert_eq!(matches[0]["bytes"], association_file["bytes"]);
+        assert_eq!(matches[0]["blake3"], association_file["blake3"]);
+    }
+    assert_eq!(
+        digest(&association["snapshot_tool"]["blake3"]),
+        *blake3::hash(include_bytes!(
+            "../tools/resource-model42/KernelSnapshot.lean"
+        ))
+        .as_bytes()
+    );
+    assert_eq!(
+        digest(&association["source_manifest_blake3"]),
+        *blake3::hash(include_bytes!(
+            "../docs/rfcs/resource-model42-source-manifest.json"
+        ))
+        .as_bytes()
+    );
 }
 
 fn transport_faults(binary: &Path) {
@@ -1320,7 +1388,7 @@ fn binding_refusals(root: &Path, receipt: &Value) {
         no_replay(&failure);
         fs::remove_file(path).unwrap();
     }
-    for which in 0..4 {
+    for which in 0..6 {
         let mut altered = receipt.clone();
         match which {
             0 => altered["unrecognized_acceptance_field"] = json!(true),
@@ -1337,6 +1405,11 @@ fn binding_refusals(root: &Path, receipt: &Value) {
                 altered["build_output_manifest_blake3"][0] =
                     json!(altered["build_output_manifest_blake3"][0].as_u64().unwrap() ^ 1)
             }
+            4 => {
+                altered["resource_bundle_blake3"][0] =
+                    json!(altered["resource_bundle_blake3"][0].as_u64().unwrap() ^ 1)
+            }
+            5 => altered["schema"] = json!(1),
             _ => unreachable!(),
         }
         replace_json(&copy.0.join("setup-receipt.json"), &altered);
@@ -1362,6 +1435,221 @@ fn binding_refusals(root: &Path, receipt: &Value) {
         before,
         "genuine prepared root was not modified"
     );
+}
+
+fn resource_binding_and_inventory_refusals(root: &Path, receipt: &Value, positive: &Value) {
+    use driver::protocol::Component;
+    let config = configuration(root, receipt);
+    let prepared = driver::artifact::prepare_resource(&config).expect(
+        "genuine fixed source compilation and projection, never a caller-created descriptor",
+    );
+    prepared.revalidate(&config.limits).unwrap();
+    let association = serde_json::to_value(prepared.association()).unwrap();
+    assert_eq!(
+        association["resource_bundle_blake3"],
+        receipt["resource_bundle_blake3"]
+    );
+    assert_eq!(
+        association["projection"]["blake3"],
+        positive["targets"][2]["resource"]["projection"]["blake3"]
+    );
+    let inventory = driver::artifact::resource_inventory(&config, &prepared)
+        .expect("actual production native-inventory route on the newly prepared projection");
+    prepared.validate_inventory(&inventory).unwrap();
+    let owned_module = inventory
+        .modules
+        .iter()
+        .find(|module| module.name.is(&["ResourceModel42Kernel"]))
+        .expect("actual projected module")
+        .id;
+    let aliases = prepared.aliases();
+    let catalog = prepared.catalog();
+    assert!(!aliases.is_empty());
+    assert_eq!(
+        catalog.len(),
+        284,
+        "fixed source theorem catalog includes all 78 semantic assertions"
+    );
+    let alias_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant.name.resource_display().ok().as_deref() == Some(aliases[0].as_str())
+        })
+        .expect("real separately preserved alternate proof");
+    let api_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant
+                    .name
+                    .is(&["Vesper", "ResourceModel42", "evalSteps"])
+        })
+        .expect("actual evaluator API definition");
+    let ordinary_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant.form == 1
+                && !constant
+                    .name
+                    .is(&["Vesper", "ResourceModel42", "evalSteps"])
+        })
+        .expect("ordinary retained declaration, beyond requested theorem roots");
+    let number_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant
+                    .name
+                    .components
+                    .iter()
+                    .any(|component| matches!(component, Component::Number(_)))
+        })
+        .expect("actual private/generated name with numeric component");
+    let module_index = inventory
+        .modules
+        .iter()
+        .position(|module| module.id == owned_module)
+        .unwrap();
+    for which in 0..9 {
+        let mut changed = inventory.clone();
+        match which {
+            0 => changed.constants[alias_index]
+                .name
+                .components
+                .push(Component::String("AcceptanceMissingAlias".into())),
+            1 => changed.constants[ordinary_index]
+                .name
+                .components
+                .push(Component::String("AcceptanceUnexpectedDeclaration".into())),
+            2 => changed.constants[alias_index].form = 1,
+            3 => changed.constants[api_index].form = 2,
+            4 => changed.constants[alias_index].skip = 1,
+            5 => {
+                changed.constants[ordinary_index].name = changed.constants[alias_index].name.clone()
+            }
+            6 => changed.modules[module_index].path.push_str(".substituted"),
+            7 => changed.target = 0,
+            8 => {
+                changed.constants[alias_index].module_id = inventory
+                    .modules
+                    .iter()
+                    .find(|module| module.id != owned_module)
+                    .unwrap()
+                    .id
+            }
+            _ => unreachable!(),
+        }
+        let error = prepared
+            .validate_inventory(&changed)
+            .expect_err("actual descriptor rejects altered native association");
+        assert_eq!(
+            error.kind,
+            ErrorKind::ToolIdentity,
+            "mutation {which}: {error}"
+        );
+        assert!(!error.detail.is_empty());
+    }
+    for unsupported in ["0", "a.b", "_@bad", "λ"] {
+        let mut changed = inventory.clone();
+        changed.constants[ordinary_index]
+            .name
+            .components
+            .push(Component::String(unsupported.into()));
+        let error = prepared.validate_inventory(&changed).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Coverage);
+        assert_eq!(error.detail, "unsupported resource-owned name component");
+    }
+    let mut number_as_string = inventory.clone();
+    let component = number_as_string.constants[number_index]
+        .name
+        .components
+        .iter_mut()
+        .find(|component| matches!(component, Component::Number(_)))
+        .unwrap();
+    let Component::Number(number) = component else {
+        unreachable!()
+    };
+    *component = Component::String(number.to_string());
+    let error = prepared.validate_inventory(&number_as_string).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Coverage);
+    assert_eq!(error.detail, "unsupported resource-owned name component");
+    // All mutations above operate on actual observed carrier metadata. They
+    // are refusal evidence; none produces a successful external replay report.
+    prepared.validate_inventory(&inventory).unwrap();
+
+    for path in [
+        prepared.source_path(),
+        prepared.projection_path(),
+        prepared.request_path(),
+        prepared.report_path(),
+        prepared.root().join("originals/MetatheoryFull.olean"),
+        prepared.root().join("projector/KernelSnapshot.lean"),
+    ] {
+        let backup = Directory::new();
+        let original = backup.0.join("actual-bound-bytes");
+        fs::copy(&path, &original).unwrap();
+        replace_from(&original, &path, b"\n");
+        let error = prepared
+            .revalidate(&config.limits)
+            .expect_err("changed source/object/request/report cannot remain bound");
+        assert_eq!(error.kind, ErrorKind::ToolIdentity);
+        replace_from(&original, &path, &[]);
+        prepared.revalidate(&config.limits).unwrap();
+    }
+    let report_path = prepared.report_path();
+    let bytes = fs::read(&report_path).unwrap();
+    assert!(bytes.len() <= 16 * 1024 * 1024);
+    let original: Value = serde_json::from_slice(&bytes).unwrap();
+    for which in 0..3 {
+        let mut altered = original.clone();
+        match which {
+            0 => {
+                altered["proof_aliases"][0]["name"] =
+                    json!("ResourceKernelProofAliases.substituted")
+            }
+            1 => altered["omitted"][0]["parent"] = json!("AcceptanceUnrelatedParent"),
+            2 => altered["occurrences"][0]["module"] = json!("AcceptanceWrongOrigin"),
+            _ => unreachable!(),
+        }
+        replace_json(&report_path, &altered);
+        let error = prepared
+            .revalidate(&config.limits)
+            .expect_err("well-shaped changed producer mappings cannot be rebound");
+        assert_eq!(error.kind, ErrorKind::ToolIdentity);
+        let backup = Directory::new();
+        let file = backup.0.join("producer-report.json");
+        fs::write(&file, &bytes).unwrap();
+        replace_from(&file, &report_path, &[]);
+    }
+    for path in [
+        prepared.projection_path(),
+        prepared.root().join("originals/MetatheoryFull.olean"),
+    ] {
+        let backup = Directory::new();
+        let file = backup.0.join("actual-object");
+        fs::copy(&path, &file).unwrap();
+        fs::remove_file(&path).unwrap();
+        let error = prepared
+            .revalidate(&config.limits)
+            .expect_err("missing bound original/projection cannot remain accepted");
+        assert_eq!(error.kind, ErrorKind::ToolIdentity);
+        replace_from(&file, &path, &[]);
+    }
+    let sidecar = prepared.projection_path().with_extension("olean.private");
+    fs::write(&sidecar, b"unbound projected sidecar").unwrap();
+    let error = prepared
+        .revalidate(&config.limits)
+        .expect_err("unbound sidecar cannot hide behind base-object confinement");
+    assert_eq!(error.kind, ErrorKind::ToolIdentity);
+    fs::remove_file(sidecar).unwrap();
+    prepared.revalidate(&config.limits).unwrap();
+    prepared.validate_inventory(&inventory).unwrap();
 }
 
 #[test]
@@ -1392,7 +1680,8 @@ fn genuine_three_model_replay_and_independent_refusal_matrix() {
     resource_route_and_skip_refusals(&limits, &expected);
     control_and_shape_refusals(&limits, &expected);
     preflight_refusals(&executable, &root, &receipt);
-    genuine_positive(&executable, &root, &receipt, &expected);
+    let positive = genuine_positive(&executable, &root, &receipt, &expected);
+    resource_binding_and_inventory_refusals(&root, &receipt, &positive);
     binding_refusals(&root, &receipt);
     eprintln!(
         "lean4lean42 complete serial acceptance wall time {:.2}s",
