@@ -2,6 +2,9 @@
 use crate::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[path = "regions/check.rs"]
+mod region_rules;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct World {
     pub adts: BTreeMap<String, Adt>,
@@ -25,8 +28,12 @@ impl World {
     pub fn collect(module: &Module) -> (Self, Vec<Diagnostic>) {
         let mut w = Self::default();
         let mut errors = vec![];
-        let builtins = crate::parser::parse(&format!("copy enum Option[T] {{ None, Some(T) }} copy enum Result[T, E] {{ Ok(T), Err(E) }} copy enum RuntimeError {{ DivisionByZero, IndexOutOfBounds }} {} effect Fail[E] {{ fn raise(sink error: E) -> Never; }}", crate::numeric::OVERFLOW_DECLARATION)).module;
-        for item in builtins.items.iter().chain(module.items.iter()) {
+        let mut builtins = crate::parser::parse(&format!("copy enum Option[T] {{ None, Some(T) }} copy enum Result[T, E] {{ Ok(T), Err(E) }} copy enum RuntimeError {{ DivisionByZero, IndexOutOfBounds }} {} effect Fail[E] {{ fn raise(sink error: E) -> Never; }}", crate::numeric::OVERFLOW_DECLARATION)).module;
+        if crate::regions::needs_prelude(module) {
+            builtins.items.extend(crate::regions::prelude());
+        }
+        let builtin_count = builtins.items.len();
+        for (index, item) in builtins.items.iter().chain(module.items.iter()).enumerate() {
             match item {
                 Item::Adt(a) => {
                     if matches!(a.name.as_str(), "Unit" | "Never" | "String") {
@@ -45,6 +52,21 @@ impl World {
                     }
                 }
                 Item::Effect(e) => {
+                    if index >= builtin_count
+                        && e.name == crate::regions::REGION_EFFECT
+                        && builtin_count > 0
+                        && crate::regions::needs_prelude(module)
+                    {
+                        errors.push(
+                            Diagnostic::new(
+                                "E0797",
+                                "'Region' is the built-in Strata region effect",
+                                e.span.clone(),
+                            )
+                            .with_help("open a lexical region with `region r { ... }`"),
+                        );
+                        continue;
+                    }
                     if crate::capability_effects::is_capability_effect(&e.name) {
                         errors.push(crate::capability_effects::reserved_declaration(
                             &e.name,
@@ -103,6 +125,23 @@ impl World {
                 }
             }
         }
+        if crate::regions::active(&w) {
+            // Region labels in signatures name the function's own capabilities.
+            for f in w.functions.values_mut() {
+                let labels = f
+                    .effects
+                    .instances
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, e)| e.name == crate::regions::REGION_EFFECT)
+                    .filter_map(|(i, e)| Some((e.label.clone()?, function_capability(&f.name, i))))
+                    .collect();
+                for p in &mut f.params {
+                    p.ty = crate::regions::normalize(&p.ty, &labels);
+                }
+                f.result = crate::regions::normalize(&f.result, &labels);
+            }
+        }
         (w, errors)
     }
     pub fn constructor(&self, name: &str) -> Option<(&Adt, &Variant)> {
@@ -143,6 +182,12 @@ impl World {
                     }
                     if n == "String" {
                         return Mode::Affine;
+                    }
+                    // RegionBox[r, T] has the mode of T (§15.2).
+                    if n == crate::regions::BOX_TYPE {
+                        return args
+                            .get(1)
+                            .map_or(Mode::Linear, |t| visit(w, t, bounds, seen));
                     }
                     let Some(a) = w.adts.get(n) else {
                         return Mode::Linear;
@@ -402,6 +447,9 @@ pub(crate) fn check_core(
         diagnostics.extend(crate::capability_effects::check_world(&world));
     }
     if diagnostics.is_empty() && traits.is_none() {
+        diagnostics.extend(crate::regions::check_world(&world));
+    }
+    if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::ir_check::validate(
             &world,
             &crate::ir::lower_world(&world),
@@ -524,6 +572,18 @@ impl Checker<'_> {
         }
     }
     fn valid_type(&mut self, t: &Type, g: &[Generic], span: Span) {
+        if crate::regions::active(self.world)
+            && let Some(errors) = crate::regions::validate_type(t, span.clone())
+        {
+            self.diagnostics.extend(errors);
+            // The capability argument is checked by `validate_type` itself.
+            if let Type::Named(_, args) = t {
+                for a in args.iter().skip(1) {
+                    self.valid_type(a, g, span.clone());
+                }
+            }
+            return;
+        }
         match t {
             Type::Named(n, args) => {
                 let expected = self
@@ -822,6 +882,10 @@ impl Checker<'_> {
     }
     fn expect_type(&mut self, expected: &Type, actual: &Type, span: Span) {
         if !compatible(expected, actual) {
+            if let Some(d) = crate::regions::mismatch(expected, actual, span.clone()) {
+                self.diagnostics.push(d);
+                return;
+            }
             self.error(
                 "E0200",
                 format!("expected {expected}, found {actual}"),
@@ -1107,6 +1171,7 @@ impl Checker<'_> {
                     }
                     match s {
                         Statement::Let { pat, ty, value } => {
+                            let ty = &self.region_annotation(ty);
                             self.valid_type(ty, &self.generics.clone(), value.span.clone());
                             let actual = self.expr_expected(value, env, Usage::Own, ty);
                             self.expect_type(ty, &actual, value.span.clone());
@@ -1694,6 +1759,21 @@ impl Checker<'_> {
             if let Some(f) = self.world.functions.get(name) {
                 return self.apply(f, types, args, None, env, span, expected);
             }
+            if name
+                .split_once("::")
+                .is_some_and(|(e, _)| e == crate::regions::REGION_EFFECT)
+                && crate::regions::active(self.world)
+            {
+                self.error(
+                    "E0790",
+                    "region operations are called through their capability, as in `r.box(value)`",
+                    span,
+                );
+                for a in args {
+                    self.expr(&a.expr, env, Usage::Own);
+                }
+                return Type::Infer;
+            }
             if let Some((eff, op)) = name.split_once("::")
                 && let Some(decl) = self.world.effects.get(eff)
                 && let Some(f) = decl.ops.iter().find(|f| f.name == op)
@@ -1753,6 +1833,12 @@ impl Checker<'_> {
             }
         }
         if let ExprKind::Field(base, method) = &callee.kind {
+            if let ExprKind::Name(label) = &base.kind
+                && !env.bindings.contains_key(label)
+                && let Some(effect) = self.region_capability(label)
+            {
+                return self.region_op(&effect, method, args, env, span, expected);
+            }
             if let ExprKind::Name(label) = &base.kind
                 && !env.bindings.contains_key(label)
                 && let Some(effect) = self
@@ -2338,15 +2424,19 @@ impl Checker<'_> {
             let target = substitute(&param.ty, vars);
             let typed_target = bind_signature_capabilities(&target, f);
             let mut allowed_caps = bound_capabilities(&typed_target);
+            // Region arguments of parameter types (`RegionBox[r, T]`) name the
+            // callee's capabilities; they are instantiated like its row.
+            let mut region_labels = BTreeMap::new();
             // Function-row binders are instantiated to the caller's evidence.
             for (index, effect) in f.effects.instances.iter().enumerate() {
                 allowed_caps.remove(&function_capability(&f.name, index));
-                if let Some(effect) = self.resolve_effect(effect)
-                    && let Some(label) = effect.label
-                {
-                    allowed_caps.insert(label);
+                let resolved = self.resolve_effect(effect).and_then(|e| e.label);
+                if let Some(label) = &resolved {
+                    allowed_caps.insert(label.clone());
                 }
+                region_labels.insert(function_capability(&f.name, index), resolved);
             }
+            let target = rename_capabilities(&target, &region_labels);
             if !bound_capabilities(&actual).is_subset(&allowed_caps) {
                 self.error("E0403","this parameter would erase a captured lexical capability; preserve it with an effect row or generic value type",expr.span.clone());
             }
@@ -3132,6 +3222,9 @@ impl Checker<'_> {
                 .push(crate::capability_effects::handler_rejected(effect, span));
             return Type::Infer;
         }
+        let Ok(region) = self.region_block(effect, ret, span.clone()) else {
+            return Type::Infer;
+        };
         let Some(decl) = self.world.effects.get(&effect.name) else {
             self.error("E0400", "unknown handled effect", span);
             return Type::Infer;
@@ -3181,11 +3274,26 @@ impl Checker<'_> {
         self.caps.pop();
         self.cap_aliases = aliases;
         if contains_capability(&body_type, &cap) {
-            self.error(
-                "E0403",
-                "lexical effect capability escapes its handler",
-                span.clone(),
-            );
+            if region.is_some() {
+                self.diagnostics.push(
+                    Diagnostic::new(
+                        "E0791",
+                        format!(
+                            "a reference into region '{}' escapes its block as {}",
+                            effect.label.as_deref().unwrap_or("r"),
+                            crate::regions::display(&body_type)
+                        ),
+                        span.clone(),
+                    )
+                    .with_help("[T-RegionScope] requires r not to occur in the block's result type; copy the payload out with get or take"),
+                );
+            } else {
+                self.error(
+                    "E0403",
+                    "lexical effect capability escapes its handler",
+                    span.clone(),
+                );
+            }
         }
         let mut clause_env = Env::default();
         let mut free = clause_free_names(ret);
@@ -3306,7 +3414,7 @@ impl Checker<'_> {
                 op.body.span.clone(),
             );
         }
-        for op in &decl.ops {
+        for op in decl.ops.iter().filter(|_| region.is_none()) {
             if !seen.contains(&op.name) {
                 self.error(
                     "E0405",
@@ -3365,6 +3473,8 @@ pub fn compatible(a: &Type, b: &Type) -> bool {
         (Type::Named(n, _), Type::Tuple(t)) | (Type::Tuple(t), Type::Named(n, _)) => {
             n == "Unit" && t.is_empty()
         }
+        // Capability arguments of region types (`RegionBox[r, T]`).
+        (Type::Row(a), Type::Row(b)) => a == b,
         (
             Type::Function {
                 params: a,
@@ -3894,6 +4004,20 @@ fn rename_capabilities(t: &Type, labels: &BTreeMap<String, Option<String>>) -> T
             ts.iter().map(|t| rename_capabilities(t, labels)).collect(),
         ),
         Type::Tuple(ts) => Type::Tuple(ts.iter().map(|t| rename_capabilities(t, labels)).collect()),
+        Type::Row(effects) => {
+            let mut effects = effects.clone();
+            for e in &mut effects.instances {
+                if let Some(label) = e.label.as_ref().and_then(|l| labels.get(l)) {
+                    e.label = label.clone();
+                }
+                e.args = e
+                    .args
+                    .iter()
+                    .map(|t| rename_capabilities(t, labels))
+                    .collect();
+            }
+            Type::Row(effects)
+        }
         Type::Function {
             params,
             result,
