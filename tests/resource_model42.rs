@@ -171,12 +171,19 @@ struct FixedSource {
 }
 
 fn read_source(path: &Path) -> FixedSource {
+    let metadata = fs::metadata(path).unwrap();
     assert!(
-        fs::metadata(path).unwrap().is_file(),
+        metadata.is_file(),
         "regular fixed source: {}",
         path.display()
     );
-    let bytes = fs::read(path).unwrap();
+    assert!(metadata.len() <= SOURCE_CAP as u64, "bounded fixed source");
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .unwrap()
+        .take((SOURCE_CAP + 1) as u64)
+        .read_to_end(&mut bytes)
+        .unwrap();
     assert!(bytes.len() <= SOURCE_CAP, "bounded fixed source");
     let text = String::from_utf8(bytes).unwrap();
     let imports = text
@@ -225,6 +232,22 @@ fn fixed_sources() -> BTreeMap<String, FixedSource> {
 }
 
 fn compile_order(sources: &BTreeMap<String, FixedSource>) -> Vec<String> {
+    let mut imported = BTreeSet::new();
+    let mut pending = vec![MODULE.to_owned()];
+    while let Some(module) = pending.pop() {
+        if imported.insert(module.clone()) {
+            for dependency in &sources[&module].imports {
+                if sources.contains_key(dependency) {
+                    pending.push(dependency.clone());
+                }
+            }
+        }
+    }
+    assert_eq!(
+        imported,
+        sources.keys().cloned().collect(),
+        "every fixed model definition must enter the replayed artifact closure"
+    );
     let mut remaining: BTreeSet<_> = sources.keys().cloned().collect();
     let mut done = BTreeSet::new();
     let mut order = Vec::new();
@@ -372,7 +395,7 @@ fn theorem_catalog(sources: &BTreeMap<String, FixedSource>) -> Vec<String> {
                     assert!(
                         !declaration
                             .split_whitespace()
-                            .any(|token| token == "theorem"),
+                            .any(|token| matches!(token, "theorem" | "lemma")),
                         "unsupported theorem command layout in {module}: {line}"
                     );
                 }
@@ -384,6 +407,29 @@ fn theorem_catalog(sources: &BTreeMap<String, FixedSource>) -> Vec<String> {
         "TypeInfo.pair_ty",
         "TypeInfo.ofTy_ty",
         "CheckedProgram.check_ok",
+        "CheckerProofs.checkedProgram_declared_sound",
+        "EvaluatorProofs.step_sound",
+        "EvaluatorProofs.runMachine_steps",
+        "EvaluatorProofs.step_refusal_witness",
+        "EvaluatorProofs.runMachine_refusal_witness",
+        "EvaluatorProofs.step_event_site",
+        "Proofs.invocation_initial_WT",
+        "Proofs.evalSteps_prefix",
+        "Proofs.evalSteps_completed_value",
+        "Proofs.evalSteps_noInvariant",
+        "Proofs.evalSteps_Full_progress",
+        "Proofs.evalSteps_completed_copy_residual",
+        "Proofs.evalSteps_completed_copy_exact_once",
+        "Proofs.evalSteps_public_trace_exact_once",
+        "MetricsProofs.preflightSubst_error",
+        "MetricsProofs.preflightUnpack_error",
+        "MetricsProofs.preflightPlug_error",
+        "MetricsProofs.preflightInputs_error",
+        "MetricsProofs.measureExpr_complete",
+        "MetricsProofs.preflightSubst_complete",
+        "MetricsProofs.preflightUnpack_complete",
+        "MetricsProofs.preflightPlug_complete",
+        "MetricsProofs.preflightInputs_complete",
         "Acceptance.mint_consume_takes_three_full_steps",
         "Acceptance.dynamic_growth_checks_before_substitution_or_ledger_commit",
     ] {
