@@ -1,0 +1,23 @@
+// expect: E0700
+// An RtBus operation clause runs inside the realtime callback that performed
+// it, so it obeys the realtime rules: here it calls a non-realtime function.
+linear effect RtBus {
+    fn poll_param_events(max_events: u32) -> u32;
+}
+
+fn slow(n: u32) -> u32 {
+    n
+}
+
+fn callback() -> u32 eff [Realtime, RtBus] {
+    RtBus::poll_param_events(8)
+}
+
+fn main() -> u32 {
+    handle RtBus in {
+        callback()
+    } with {
+        return value => value,
+        poll_param_events(max_events, resume) => resume(slow(max_events)),
+    }
+}

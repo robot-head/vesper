@@ -13,6 +13,12 @@ use std::ptr::NonNull;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+mod sharded;
+pub use sharded::{
+    MAX_SHARDS, REMOTE_FREE_BATCH, Shard, ShardBlock, ShardedCloseError, ShardedSlab,
+    ShardedSlabConfig, ShardedSlabId, ShardedSlabStats, dropped_shard_blocks,
+};
+
 /// Default slab reservation; there is no hugepage, DMA or MPK registration.
 pub const SLAB_BYTES: usize = 64 * 1024;
 /// Forty-eight explicit classes, in bytes. Requests also obey their alignment.
@@ -79,18 +85,37 @@ impl SlabKey {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SlabError {
     InvalidConfig(&'static str),
-    InvalidAlignment { align: usize },
-    UnsupportedLayout { size: usize, align: usize },
+    InvalidAlignment {
+        align: usize,
+    },
+    UnsupportedLayout {
+        size: usize,
+        align: usize,
+    },
     SizeOverflow,
-    CapacityExceeded { max_slabs: usize },
-    LiveLimit { limit: usize },
+    CapacityExceeded {
+        max_slabs: usize,
+    },
+    LiveLimit {
+        limit: usize,
+    },
     OutOfMemory,
     ExhaustedIdentities,
     ExhaustedGenerations,
-    Foreign { expected: SlabId, found: SlabId },
+    Foreign {
+        expected: SlabId,
+        found: SlabId,
+    },
+    /// A [`ShardBlock`] presented to a different [`ShardedSlab`] (heap ids).
+    ForeignHeap {
+        expected: u64,
+        found: u64,
+    },
     Stale,
     Busy,
-    LiveBlocks { count: usize },
+    LiveBlocks {
+        count: usize,
+    },
 }
 impl fmt::Display for SlabError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -187,7 +212,7 @@ fn allocate_id(counter: &AtomicU64) -> Result<SlabId, SlabError> {
 fn fresh_id() -> Result<SlabId, SlabError> {
     allocate_id(&NEXT_POOL)
 }
-fn class_for(size: usize, align: usize) -> Result<usize, SlabError> {
+pub(crate) fn class_for(size: usize, align: usize) -> Result<usize, SlabError> {
     if !align.is_power_of_two() {
         return Err(SlabError::InvalidAlignment { align });
     }

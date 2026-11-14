@@ -9,16 +9,15 @@
 //! [`ArenaDelta`] serialises just those shards as an incremental snapshot
 //! epoch that [`ArenaDelta::apply`] replays onto the previous state.
 //!
-//! **Write tracking.** Writes are tracked at this API ([`ShardArena::write`],
-//! [`ShardArena::shard_mut`]), exactly at shard granularity, not by trapping
-//! stores in the MMU. The design's kernel mechanisms (userfaultfd
-//! write-protect on Linux, `mprotect` with a fault handler, Mach `vm_copy`
-//! on macOS, `MEM_RESET` / write-watch tracking on Windows) all need
-//! `unsafe` code (ioctls on raw mappings, signal or vectored-exception
-//! handlers) that this crate may not contain, so none is used; code that
-//! writes through raw pointers into an arena shard is not tracked.
-//! [`probe_write_tracking`] reports what the host would permit, exercising
-//! the Linux soft-dirty bit (which needs no unsafe code) for real.
+//! **Write tracking.** Writes to a `ShardArena` are tracked at this API
+//! ([`ShardArena::write`], [`ShardArena::shard_mut`]), exactly at shard
+//! granularity, not by trapping stores in the MMU. For memory written
+//! through raw pointers use [`crate::tracked_arena::TrackedArena`], whose
+//! writes the kernel records (`mprotect` faults on Linux and macOS, write
+//! watches on Windows, implemented in `vesper_fiber_abi::write_watch`) and
+//! whose deltas use this module's [`ArenaDelta`] format.
+//! [`probe_write_tracking`] reports each mechanism on the host, exercising
+//! the one `TrackedArena` uses and the Linux soft-dirty bit for real.
 
 use std::fmt;
 use std::rc::Rc;
@@ -498,8 +497,7 @@ pub struct TrackingProbe {
     pub host_permits: Option<bool>,
     /// Whether the probe exercised the mechanism itself.
     pub exercised: bool,
-    /// Always false: this crate tracks writes at its API (see the module
-    /// docs).
+    /// Whether `TrackedArena` uses it on this host.
     pub used: bool,
     pub detail: String,
 }
@@ -510,13 +508,18 @@ pub struct TrackingProbe {
 /// back. (Clearing soft-dirty bits is process-wide; nothing else in Vesper
 /// uses them.)
 pub fn probe_write_tracking() -> Vec<TrackingProbe> {
-    let mut out = vec![TrackingProbe {
+    #[cfg(any(target_os = "linux", target_os = "macos", windows))]
+    let host = host_tracking();
+    #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+    let host = TrackingProbe {
         mechanism: WriteTracking::MprotectFaults,
         host_permits: None,
         exercised: false,
         used: false,
-        detail: "needs a SIGSEGV / vectored exception handler and raw mprotect calls, which are unsafe code outside this crate's capture module".into(),
-    }];
+        detail: "no write-tracking backend for this OS".into(),
+    };
+    #[allow(unused_mut)]
+    let mut out = vec![host];
     #[cfg(target_os = "linux")]
     {
         out.push(linux::userfaultfd());
@@ -528,17 +531,51 @@ pub fn probe_write_tracking() -> Vec<TrackingProbe> {
         host_permits: Some(true),
         exercised: false,
         used: false,
-        detail: "vm_copy is available on macOS but needs unsafe Mach calls; not used".into(),
-    });
-    #[cfg(windows)]
-    out.push(TrackingProbe {
-        mechanism: WriteTracking::WindowsWriteWatch,
-        host_permits: Some(true),
-        exercised: false,
-        used: false,
-        detail: "MEM_WRITE_WATCH / GetWriteWatch need unsafe VirtualAlloc calls; not used".into(),
+        detail: "vm_copy is available on macOS; TrackedArena copies dirty pages found by mprotect faults instead".into(),
     });
     out
+}
+
+/// Exercise the mechanism [`crate::tracked_arena::TrackedArena`] uses: arm
+/// a one-page region, store through a raw pointer, and check the page is
+/// reported dirty.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+fn host_tracking() -> TrackingProbe {
+    use vesper_fiber_abi::write_watch::{Mechanism, TrackedRegion};
+    let mechanism = match Mechanism::HOST {
+        Mechanism::MprotectFaults => WriteTracking::MprotectFaults,
+        Mechanism::WindowsWriteWatch => WriteTracking::WindowsWriteWatch,
+    };
+    let result = (|| -> std::io::Result<Vec<usize>> {
+        let mut region = TrackedRegion::new(1)?;
+        region.arm()?;
+        region.write(0, &[1])?;
+        region.take_dirty()
+    })();
+    let (host_permits, detail) = match result {
+        Ok(dirty) if dirty == [0] => (
+            Some(true),
+            format!(
+                "{}: a store to an armed page was recorded",
+                Mechanism::HOST.name()
+            ),
+        ),
+        Ok(dirty) => (
+            Some(false),
+            format!(
+                "{}: expected page 0 dirty, got {dirty:?}",
+                Mechanism::HOST.name()
+            ),
+        ),
+        Err(e) => (Some(false), format!("{}: {e}", Mechanism::HOST.name())),
+    };
+    TrackingProbe {
+        mechanism,
+        used: host_permits == Some(true),
+        host_permits,
+        exercised: true,
+        detail,
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -571,7 +608,7 @@ mod linux {
             exercised: false,
             used: false,
             detail: format!(
-                "unprivileged_userfaultfd={unprivileged:?}, CAP_SYS_PTRACE={ptrace:?}, /dev/userfaultfd openable={device}; registering a range and UFFDIO_WRITEPROTECT need unsafe ioctls on raw mappings, so it is not used"
+                "unprivileged_userfaultfd={unprivileged:?}, CAP_SYS_PTRACE={ptrace:?}, /dev/userfaultfd openable={device}; not used: TrackedArena uses mprotect faults, which need no privilege; CI runners usually lack CAP_SYS_PTRACE"
             ),
         }
     }
@@ -629,7 +666,7 @@ mod linux {
             exercised: true,
             used: false,
             detail: format!(
-                "{detail}; soft-dirty bits are process-wide and need pagemap scans, so the arena tracks writes itself"
+                "{detail}; soft-dirty bits are process-wide and need pagemap scans, so TrackedArena uses mprotect faults instead"
             ),
         }
     }

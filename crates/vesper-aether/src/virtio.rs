@@ -81,6 +81,25 @@ pub enum QueueError {
     CompletionOrder,
     InvalidWrittenLength,
     IdentityExhausted,
+    /// An indirect descriptor without `VIRTIO_F_INDIRECT_DESC` negotiated.
+    IndirectNotNegotiated,
+    /// An indirect descriptor that is not alone in its chain (it also has
+    /// `NEXT`, or follows another descriptor).
+    IndirectPlacement,
+    /// An indirect table entry that is itself indirect (§2.7.5.3.1, §2.8.19).
+    IndirectNested,
+    /// An indirect table whose length is zero or not a multiple of 16.
+    IndirectTableLength,
+    /// The split available index moved more than the queue size ahead.
+    AvailOverrun,
+    /// A split descriptor's `next` is outside the table.
+    InvalidNext,
+    /// A split chain revisits a descriptor or is longer than the table.
+    ChainLoop,
+    /// A split descriptor already belongs to an in-flight chain.
+    DescriptorInUse,
+    /// A `NOTIFICATION_DATA` value names a position outside the ring.
+    InvalidNotification,
 }
 impl fmt::Display for QueueError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

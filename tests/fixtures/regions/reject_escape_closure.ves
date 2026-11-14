@@ -1,0 +1,8 @@
+// A closure that captures the region capability cannot leave the block.
+fn main() -> i64 {
+    let f = region r {
+        let b = r.box(41);
+        || r.get(b)
+    };
+    0
+}

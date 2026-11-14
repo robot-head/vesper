@@ -649,6 +649,7 @@ impl PreparedQuery {
                 rows: 0,
                 bytes: 0,
                 scratch: join::Scratch::default(),
+                orders: Vec::new(),
             };
             let rel = run.rel(&self.plan)?;
             run.project(&rel, sink)?;
@@ -705,6 +706,35 @@ impl PreparedQuery {
             sink(&projected, &sel)?;
         }
         Ok(work)
+    }
+
+    /// The input orders the vectorized executor chooses for each chain of
+    /// three or more inner joins (table names in execution order). Runs the
+    /// plan's joins (not the projection) to measure input sizes.
+    pub fn vectorized_join_orders(
+        &self,
+        catalog: &HermeticCatalog,
+        data: &DataSet,
+        params: &BTreeMap<String, Value>,
+        engine: &VectorEngine,
+    ) -> Result<Vec<Vec<String>>> {
+        self.check_call(catalog, data, params)?;
+        if !join::has_join(&self.plan) {
+            return Ok(Vec::new());
+        }
+        let mut run = join::Run {
+            query: self,
+            data,
+            params,
+            engine,
+            work: 0,
+            rows: 0,
+            bytes: 0,
+            scratch: join::Scratch::default(),
+            orders: Vec::new(),
+        };
+        run.rel(&self.plan)?;
+        Ok(run.orders)
     }
 
     /// Vectorized execution of a single-table plan. Rows, order and column

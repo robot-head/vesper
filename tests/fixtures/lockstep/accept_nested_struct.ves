@@ -1,0 +1,16 @@
+copy struct Q {
+    a: i64
+}
+copy struct P {
+    q: Q,
+    b: bool
+}
+fn main() -> i64 {
+    let p = P {
+        q: Q {
+            a: 5
+        },
+        b: false
+    };
+    p.q.a
+}

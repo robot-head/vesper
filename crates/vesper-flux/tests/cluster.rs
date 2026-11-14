@@ -239,20 +239,21 @@ fn single_epoch_and_empty_inputs() {
 }
 
 #[test]
-fn non_co_partitioned_joins_and_bad_configs_are_rejected() {
+fn joins_off_the_partition_key_are_reshuffled_and_bad_configs_rejected() {
     let (_dir, store) = store();
-    let inputs = workload(0, 2);
-    // Orders partitioned by amount: the join on customer id is not local.
-    let err = run_cluster(
-        &circuit(),
-        &inputs,
-        &ClusterConfig::new(2, vec![1, 0]),
-        &[],
-        &store,
-    )
-    .unwrap_err();
-    assert_eq!(err, Error::Partition("join key is not the partition key"));
-    // A map that drops the key column loses partitioning for a later join.
+    let inputs = workload(0, 5);
+    let expected = reference(&inputs);
+    // Orders partitioned by amount: the join on customer id re-shuffles them.
+    let cfg = ClusterConfig {
+        seed: 3,
+        ..ClusterConfig::new(3, vec![1, 0])
+    };
+    assert_eq!(cfg.exchanges(&circuit()), Ok(1));
+    let run = run_cluster(&circuit(), &inputs, &cfg, &[], &store).unwrap();
+    check(&run, &expected, "reshuffled orders");
+    assert_eq!(run.exchanges, 1);
+    // A map that drops the key column loses partitioning: a later join
+    // re-shuffles the mapped side.
     let mut b = CircuitBuilder::new(l()).unwrap();
     let x = b.input(2).unwrap();
     let y = b.input(2).unwrap();
@@ -261,10 +262,7 @@ fn non_co_partitioned_joins_and_bad_configs_are_rejected() {
         .unwrap();
     let j = b.equijoin(swapped, y, 0, 0).unwrap();
     let c = b.finish(j).unwrap();
-    assert_eq!(
-        ClusterConfig::new(2, vec![0, 0]).validate(&c),
-        Err(Error::Partition("join key is not the partition key"))
-    );
+    assert_eq!(ClusterConfig::new(2, vec![0, 0]).exchanges(&c), Ok(1));
     // A column-preserving reorder keeps it.
     let mut b = CircuitBuilder::new(l()).unwrap();
     let x = b.input(2).unwrap();
@@ -272,7 +270,7 @@ fn non_co_partitioned_joins_and_bad_configs_are_rejected() {
     let swapped = b.map(x, vec![Field::Column(1), Field::Column(0)]).unwrap();
     let j = b.equijoin(swapped, y, 1, 0).unwrap();
     let c = b.finish(j).unwrap();
-    assert_eq!(ClusterConfig::new(3, vec![0, 0]).validate(&c), Ok(()));
+    assert_eq!(ClusterConfig::new(3, vec![0, 0]).exchanges(&c), Ok(0));
     for bad in [
         ClusterConfig::new(0, vec![0, 0]),
         ClusterConfig::new(65, vec![0, 0]),
