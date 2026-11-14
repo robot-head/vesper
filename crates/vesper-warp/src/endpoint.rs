@@ -329,6 +329,10 @@ pub enum DropReason {
     StatelessReset,
     /// Held until the keys to open it are installed (RFC 9001 §5.7).
     Buffered,
+    /// Client: a 1-RTT packet from an address that is not the server's
+    /// (its original or preferred address, or one being probed); RFC 9000
+    /// §9 has the client discard it.
+    UnknownServerAddress,
 }
 
 /// Why a connection was closed.
@@ -525,6 +529,23 @@ pub trait TxTap {
         self.on_transmit(conn, pn, edt_ns, datagram);
     }
 
+    /// [`TxTap::on_transmit_to`] with the local address the datagram leaves
+    /// from (wave seven): `None` for the connection's original address,
+    /// else a server's preferred address (RFC 9000 §9.6). Defaults to
+    /// `on_transmit_to`.
+    fn on_transmit_via(
+        &mut self,
+        conn: SlotHandle,
+        pn: u64,
+        edt_ns: u64,
+        datagram: &[u8],
+        from: Option<PeerAddr>,
+        to: Option<PeerAddr>,
+    ) {
+        let _ = from;
+        self.on_transmit_to(conn, pn, edt_ns, datagram, to);
+    }
+
     /// A datagram sent without a connection: Retry, Version Negotiation or
     /// a stateless reset, to the source of the datagram that caused it.
     /// Defaults to ignoring it.
@@ -699,8 +720,9 @@ struct Conn {
     max_datagram: u16,
     path: Path,
     probe: Option<PathProbe>,
-    /// A PATH_CHALLENGE to answer and where it came from.
-    challenge_rx: Option<([u8; 8], Option<PeerAddr>)>,
+    /// A PATH_CHALLENGE to answer, where it came from and which local
+    /// address it reached.
+    challenge_rx: Option<([u8; 8], Option<PeerAddr>, Option<PeerAddr>)>,
     path_response_rx: Option<[u8; 8]>,
     cids: Cids,
     /// Our sequence numbers the peer retired in the packet being processed.
@@ -726,6 +748,12 @@ struct Conn {
     /// A packet was received and no ack-eliciting packet sent since: the
     /// next one restarts the idle timer (RFC 9000 §10.1).
     idle_restart_armed: bool,
+    /// Client: the server's preferred address to probe after confirmation
+    /// (from its transport parameters).
+    preferred_remote: Option<PeerAddr>,
+    /// Client: the server address the connection started on; packets from
+    /// it stay accepted while the server moves (RFC 9000 §9.6.2).
+    original_remote: Option<PeerAddr>,
 }
 
 /// A packet waiting for its earliest departure time.
@@ -746,6 +774,8 @@ struct Staged {
     close: bool,
     /// Destination (the connection's path unless probing another).
     to: Option<PeerAddr>,
+    /// Local source address (`None`: the path's original one).
+    from: Option<PeerAddr>,
 }
 
 /// A parked in-flight packet (§35.2 `park_for_ack_or_pto`).
@@ -850,6 +880,14 @@ pub struct WarpEndpoint<B: XskBackend, R: Responder, T: TxTap = ()> {
     /// Destination of the next packet built, when not the connection's
     /// path (path validation).
     next_to: Option<Option<PeerAddr>>,
+    // Wave seven (issue #330).
+    /// The local address harvested datagrams arrived at, set by the caller.
+    rx_to: Option<PeerAddr>,
+    /// Local address of the next packet built, when not the path's.
+    next_from: Option<Option<PeerAddr>>,
+    /// Destination connection ID of the next packet built, when not the
+    /// active one (a preferred-address probe).
+    next_dcid: Option<ConnectionId>,
 }
 
 fn lease_key(conn: SlotHandle, pn: u64) -> u64 {
@@ -946,6 +984,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             stateless_buf: vec![0u8; usize::from(config.max_datagram).max(MIN_INITIAL_DATAGRAM)]
                 .into_boxed_slice(),
             next_to: None,
+            rx_to: None,
+            next_from: None,
+            next_dcid: None,
         };
         if config.lifecycle.active_connection_id_limit < 2
             || usize::from(config.lifecycle.active_connection_id_limit) > MAX_ACTIVE_CIDS
@@ -1134,6 +1175,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             non_probing_rx: false,
             peer_disables_migration: false,
             idle_restart_armed: false,
+            preferred_remote: None,
+            original_remote: self.rx_from,
         });
         self.closed[handle.index() as usize] = None;
         self.write_tile(handle);
@@ -1147,6 +1190,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     /// `None` (the default) disables path tracking and migration.
     pub fn set_rx_source(&mut self, from: Option<PeerAddr>) {
         self.rx_from = from;
+    }
+
+    /// The local address the datagrams harvested from now on arrived at
+    /// (wave seven). A server needs it to notice clients moving to its
+    /// `preferred_address`; `None` (the default) is the original address.
+    pub fn set_rx_destination(&mut self, to: Option<PeerAddr>) {
+        self.rx_to = to;
     }
 
     /// Replaces the address-validation token key, so that several
@@ -1328,6 +1378,92 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
     }
 
+    /// A path probe succeeded: a server whose probe left from its
+    /// preferred address now sends from there (RFC 9000 §9.6.2); a client
+    /// that probed the server's preferred address moves there with the
+    /// preferred address's connection ID (§9.6.1).
+    fn on_probe_validated(&mut self, slot: SlotHandle, probe: PathProbe, now_ns: u64) {
+        let server = self.config.role == Role::Server;
+        let Ok(c) = self.conn_mut(slot) else {
+            return;
+        };
+        if server {
+            if probe.local.is_some() && probe.local != c.path.local && probe.addr == c.path.remote {
+                c.path.local = probe.local;
+                self.stats.preferred_address_migrations += 1;
+                self.push_conn_event(ConnectionEvent::MovedToPreferredAddress(slot));
+            }
+            return;
+        }
+        if !probe.preferred {
+            return;
+        }
+        let rebinding = crate::lifecycle::port_only_change(c.path.remote, probe.addr);
+        c.path = Path {
+            remote: probe.addr,
+            local: None,
+            validated: true,
+            ..Path::default()
+        };
+        if let Some(seq) = probe.dcid_seq {
+            self.switch_peer_cid_to(slot, seq);
+        }
+        // §9.4: a new path starts from the initial congestion state.
+        if !rebinding {
+            let _ = self.reset_cc(slot, now_ns);
+        }
+        self.stats.preferred_address_migrations += 1;
+        self.stats.migrations += 1;
+        self.push_conn_event(ConnectionEvent::MovedToPreferredAddress(slot));
+    }
+
+    /// Client: after the handshake is confirmed, probes the server's
+    /// preferred address with the connection ID of sequence 1 from its
+    /// transport parameters, still sending everything else on the original
+    /// path (RFC 9000 §9.6.1). `disable_active_migration` does not forbid
+    /// this (§18.2).
+    fn start_preferred_probe(&mut self, slot: SlotHandle, now_ns: u64) {
+        if self.config.role != Role::Client || !self.config.lifecycle.follow_preferred_address {
+            return;
+        }
+        let Ok(c) = self.conn(slot) else {
+            return;
+        };
+        let Some(addr) = c.preferred_remote else {
+            return;
+        };
+        if c.error.is_some() || c.cids.peer_cid(1).is_none() || c.path.remote == Some(addr) {
+            return;
+        }
+        let back = c.path.remote;
+        self.start_probe_from(slot, Some(addr), Some(back), None, Some(1), true, now_ns);
+    }
+
+    /// Sends to the peer connection ID `seq` from now on and retires the
+    /// current one (RFC 9000 §5.1.2).
+    fn switch_peer_cid_to(&mut self, slot: SlotHandle, seq: u64) -> bool {
+        let Ok(c) = self.conn_mut(slot) else {
+            return false;
+        };
+        if c.cids.active_peer_seq == seq {
+            return true;
+        }
+        let Some(next) = c.cids.peer_cid(seq).copied() else {
+            return false;
+        };
+        let old = c.cids.active_peer_seq;
+        c.cids.active_peer_seq = seq;
+        if c.cids.peer_cid(old).is_some() {
+            c.cids.remove_peer(old);
+            c.streams.queue_retire_connection_id(old);
+        }
+        if let Ok(mut st) = self.table.get(slot) {
+            st.peer_cid = next.cid;
+            let _ = self.table.set(slot, &st);
+        }
+        true
+    }
+
     /// The peer retired the connection ID the connection table is keyed
     /// by: key the table by one of the connection's live IDs instead, so
     /// the retired one no longer routes (RFC 9000 §5.1.2). Without a live
@@ -1371,6 +1507,23 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         fallback: Option<Option<PeerAddr>>,
         now_ns: u64,
     ) {
+        self.start_probe_from(slot, addr, fallback, None, None, false, now_ns);
+    }
+
+    /// [`Self::start_probe`] from local address `local` (server: its
+    /// preferred address) and to peer connection ID `dcid_seq` (client: the
+    /// preferred address's), for a `preferred` address probe.
+    #[allow(clippy::too_many_arguments)]
+    fn start_probe_from(
+        &mut self,
+        slot: SlotHandle,
+        addr: Option<PeerAddr>,
+        fallback: Option<Option<PeerAddr>>,
+        local: Option<PeerAddr>,
+        dcid_seq: Option<u64>,
+        preferred: bool,
+        now_ns: u64,
+    ) {
         let initial_pto = 3 * self.config.initial_rtt_ns;
         let Ok(c) = self.conn_mut(slot) else {
             return;
@@ -1386,6 +1539,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             deadline_ns: now_ns.saturating_add(pto.saturating_mul(3)),
             fallback,
             sent_ns: now_ns,
+            local,
+            dcid_seq,
+            preferred,
         });
         self.send_challenge(slot, now_ns);
         self.sync_life(slot, now_ns);
@@ -1395,16 +1551,23 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let Some(probe) = self.conn(slot).ok().and_then(|c| c.probe) else {
             return;
         };
-        if self
-            .send_path_frame(
-                slot,
-                Frame::PathChallenge(probe.challenge),
-                probe.addr,
-                true,
-                now_ns,
-            )
-            .is_ok()
-        {
+        self.next_from = probe.local.map(Some);
+        self.next_dcid = probe.dcid_seq.and_then(|seq| {
+            self.conn(slot)
+                .ok()
+                .and_then(|c| c.cids.peer_cid(seq))
+                .map(|p| p.cid)
+        });
+        let sent = self.send_path_frame(
+            slot,
+            Frame::PathChallenge(probe.challenge),
+            probe.addr,
+            true,
+            now_ns,
+        );
+        self.next_from = None;
+        self.next_dcid = None;
+        if sent.is_ok() {
             self.stats.path_challenges_sent += 1;
         }
         if let Ok(c) = self.conn_mut(slot)
@@ -1427,7 +1590,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if self.conn(slot)?.keys.is_none() {
             return Err(WarpError::KeysUnavailable);
         }
-        let mut n = frame.encode(&mut self.app_out)?;
+        let unpadded = frame.encode(&mut self.app_out)?;
+        let mut n = unpadded;
         if pad {
             let budget = self.frame_budget(slot, false, now_ns);
             if budget > n {
@@ -1435,9 +1599,21 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 n = budget;
             }
         }
+        let (from, dcid) = (self.next_from, self.next_dcid);
         self.next_to = Some(to);
         // A probe: ack-eliciting, not paced, outside the congestion window.
-        let out = self.send(slot, Source::Fresh, false, n, Kind::Probe, now_ns);
+        let mut out = self.send(slot, Source::Fresh, false, n, Kind::Probe, now_ns);
+        if n > unpadded && matches!(out, Err(WarpError::AmplificationLimited)) {
+            // RFC 9000 §8.2.1: padded to 1200 bytes "unless the
+            // anti-amplification limit for the path does not permit" it,
+            // e.g. after a NAT rebinding seen in a small packet. The refused
+            // attempt changed nothing (it fails before a frame or a packet
+            // number is taken).
+            self.next_to = Some(to);
+            self.next_from = from;
+            self.next_dcid = dcid;
+            out = self.send(slot, Source::Fresh, false, unpadded, Kind::Probe, now_ns);
+        }
         self.next_to = None;
         out
     }
@@ -1521,6 +1697,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let token = c.token_rx.take();
         let response = c.path_response_rx.take();
         let challenge = c.challenge_rx.take();
+        let to_local = self.rx_to;
         let non_probing = c.non_probing_rx;
         let largest = c.received.largest() == Some(pn);
         let confirmed = c.hs.as_ref().is_none_or(|h| h.tls.is_handshake_confirmed());
@@ -1541,6 +1718,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 }
                 self.stats.paths_validated += 1;
                 self.push_conn_event(ConnectionEvent::PathValidated(slot));
+                self.on_probe_validated(slot, probe, now_ns);
             }
         }
         // RFC 9000 §9.3: the server follows a client that sends its
@@ -1561,6 +1739,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 let rebinding = crate::lifecycle::port_only_change(old.remote, from);
                 c.path = Path {
                     remote: from,
+                    local: old.local,
                     validated: false,
                     received: datagram_len as u64,
                     sent: 0,
@@ -1581,13 +1760,35 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         {
             c.path.received += datagram_len as u64;
         }
-        if let Some((data, to)) = challenge {
+        // RFC 9000 §9.6.2: a non-probing packet at our preferred address
+        // starts validating the path from there; we keep sending from the
+        // original address until it is validated.
+        if server
+            && let Some(local) = to_local
+            && self
+                .config
+                .lifecycle
+                .preferred_address
+                .is_some_and(|p| p.contains(local))
+            && let Some(c) = self.conns[slot.index() as usize].as_ref()
+            && c.path.local != Some(local)
+            && confirmed
+            && non_probing
+            && largest
+            && c.probe.is_none_or(|p| p.local != Some(local))
+        {
+            let remote = c.path.remote;
+            self.start_probe_from(slot, remote, None, Some(local), None, false, now_ns);
+        }
+        if let Some((data, to, at)) = challenge {
             // Padded unless that would exceed 3× what the path sent us.
             let pad = datagram_len >= MIN_INITIAL_DATAGRAM / 3;
-            if self
-                .send_path_frame(slot, Frame::PathResponse(data), to, pad, now_ns)
-                .is_ok()
-            {
+            // On the path the challenge came in on (RFC 9000 §8.2.2): from
+            // the local address it reached.
+            self.next_from = server.then_some(at);
+            let sent = self.send_path_frame(slot, Frame::PathResponse(data), to, pad, now_ns);
+            self.next_from = None;
+            if sent.is_ok() {
                 self.stats.path_responses_sent += 1;
             }
         }
@@ -1768,6 +1969,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     // RFC 9000 §9.3.2: back to the last validated path.
                     c.path = Path {
                         remote: back,
+                        local: c.path.local,
                         validated: true,
                         ..Path::default()
                     };
@@ -2464,7 +2666,30 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             .lifecycle
             .stateless_reset
             .then(|| self.reset_key.token(&local[..n]));
-        let params = local_transport_params(&self.config, &local[..n], reset);
+        let mut params = local_transport_params(&self.config, &local[..n], reset);
+        // RFC 9000 §9.6: the preferred address carries a connection ID of
+        // sequence 1 with its reset token.
+        let mut preferred_cid = None;
+        if let Some(pa) = self.config.lifecycle.preferred_address
+            && self.alt_cids.len() < self.alt_cids.capacity()
+        {
+            let mut cid = [0u8; 20];
+            for _ in 0..8 {
+                let listener = self.listener.as_mut().expect("checked");
+                listener.cids.next_cid(&mut cid[..n]);
+                if cid[..n] != local[..n] && self.lookup(&cid[..n]).is_none() {
+                    preferred_cid = ConnectionId::from_slice(&cid[..n]).ok();
+                    break;
+                }
+            }
+            if let Some(id) = preferred_cid
+                && let Ok(tls_cid) = vesper_warp_tls::ConnectionId::new(id.as_bytes())
+            {
+                params.preferred_address = Some(pa.encode(tls_cid, self.reset_key.token(id.as_bytes())));
+            } else {
+                preferred_cid = None;
+            }
+        }
         let listener = self.listener.as_mut().expect("checked");
         let original = retry_odcid.as_ref().map(|(o, l)| &o[..usize::from(*l)]);
         let cids = ServerCids {
@@ -2496,6 +2721,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 now_ns,
             )
             .map_err(|_| DropReason::AcceptRefused)?;
+        if let Some(id) = preferred_cid
+            && let Some(Some(c)) = self.conns.get_mut(slot.index() as usize)
+        {
+            c.cids.local[0] = Some(LocalCid { seq: 1, cid: id });
+            c.cids.next_local_seq = 2;
+            self.alt_cids.push((id, slot));
+            self.stats.cids_issued += 1;
+        }
         let odcid = ConnectionId::from_slice(odcid).map_err(|_| DropReason::BadInitial)?;
         self.initial_dcids.push((odcid, slot));
         self.apply_tls_events(slot, now_ns)
@@ -3117,6 +3350,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     self.push_conn_event(ConnectionEvent::HandshakeConfirmed(slot));
                     self.issue_cids(slot);
                     self.issue_new_token(slot, now_ns);
+                    self.start_preferred_probe(slot, now_ns);
                 }
                 TlsEvent::DiscardKeys(space) => {
                     let pns = pn_space(space);
@@ -3646,6 +3880,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         };
         c.last_edt_ns = c.last_edt_ns.max(edt_ns);
         let to = c.path.remote;
+        let from = c.path.local;
         let staged = Staged {
             conn: slot,
             frame,
@@ -3657,6 +3892,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             carried: true,
             close,
             to,
+            from,
         };
         self.launch_or_queue(staged, now_ns);
     }
@@ -4311,6 +4547,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         RxContext {
             ty,
             from: self.rx_from,
+            to: self.rx_to,
             cid_limit: usize::from(self.config.lifecycle.active_connection_id_limit),
             server: self.config.role == Role::Server,
         }
@@ -4328,6 +4565,29 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 .find(|(c, _)| c.as_bytes() == dcid)
                 .map(|(_, h)| *h)
         })
+    }
+
+    /// Client: did the datagram being processed come from an address the
+    /// server never used? A server does not migrate except to its preferred
+    /// address (RFC 9000 §9, §9.6), so such packets are discarded. Without
+    /// addresses nothing is checked.
+    fn unknown_server_address(&self, slot: SlotHandle) -> bool {
+        if self.config.role != Role::Client {
+            return false;
+        }
+        let (Some(from), Ok(c)) = (self.rx_from, self.conn(slot)) else {
+            return false;
+        };
+        if c.path.remote.is_none() {
+            return false;
+        }
+        let known = [
+            c.path.remote,
+            c.original_remote,
+            c.preferred_remote,
+            c.probe.and_then(|p| p.addr),
+        ];
+        !known.contains(&Some(from))
     }
 
     /// Returns a received frame to the fill ring and reports the drop.
@@ -4412,6 +4672,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             let out = self.drop_rx(frame, DropReason::Closed);
             self.answer_while_closing(slot, error, now_ns);
             return out;
+        }
+        if self.unknown_server_address(slot) {
+            self.stats.unknown_server_address_drops += 1;
+            return self.drop_rx(frame, DropReason::UnknownServerAddress);
         }
 
         // 3-5. Header-protection removal (lane 5), full PN decode from the
@@ -5306,10 +5570,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             Source::TurnAround(rx) => Some(rx),
             Source::Fresh => None,
         };
-        let tile = match self.table.get(slot) {
+        let mut tile = match self.table.get(slot) {
             Ok(tile) => tile,
             Err(_) => return Err((rx, WarpError::StaleConnection)),
         };
+        if let Some(dcid) = self.next_dcid.take() {
+            // A probe to another peer connection ID (RFC 9000 §9.6.1).
+            tile.peer_cid = dcid;
+        }
         let pn = tile.next_tx_pn;
         if pn >= MAX_SEND_PN {
             return Err((rx, WarpError::PacketNumbersExhausted));
@@ -5477,6 +5745,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 .as_ref()
                 .and_then(|c| c.path.remote),
         };
+        let from = match self.next_from.take() {
+            Some(from) => from,
+            None => self.conns[slot.index() as usize]
+                .as_ref()
+                .and_then(|c| c.path.local),
+        };
         Ok(Staged {
             conn: slot,
             frame,
@@ -5487,6 +5761,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             carried: data_len > 0,
             close: kind == Kind::Close,
             to,
+            from,
         })
     }
 
@@ -5542,6 +5817,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             tapped,
             close,
             to,
+            from,
             ..
         } = staged;
         // Closing or draining (RFC 9000 §10.2): nothing but CONNECTION_CLOSE
@@ -5558,7 +5834,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return;
         }
         if !tapped && let Ok(bytes) = self.xsk.tx_bytes_mut(&mut frame) {
-            self.tap.on_transmit_to(conn, pn, edt_ns, bytes, to);
+            self.tap.on_transmit_via(conn, pn, edt_ns, bytes, from, to);
         }
         match self.xsk.submit_paced_tx(frame, pn, edt_ns) {
             Ok(pkt) if park => {
@@ -5582,6 +5858,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     carried: true,
                     close,
                     to,
+                    from,
                 };
                 let at = retry.edt_ns;
                 if let Err(refused) = self.launch.submit(now_ns, at, retry) {
@@ -5758,6 +6035,8 @@ struct RxContext {
     ty: PacketType,
     /// Where the datagram came from.
     from: Option<PeerAddr>,
+    /// The local address it arrived at (wave seven).
+    to: Option<PeerAddr>,
     /// Our `active_connection_id_limit`.
     cid_limit: usize,
     server: bool,
@@ -5873,7 +6152,7 @@ fn scan_bytes<R: Responder>(
                     *slot = Some(*seq);
                 }
             }
-            Frame::PathChallenge(data) => conn.challenge_rx = Some((*data, rx.from)),
+            Frame::PathChallenge(data) => conn.challenge_rx = Some((*data, rx.from, rx.to)),
             Frame::PathResponse(data) => conn.path_response_rx = Some(*data),
             _ => {}
         }
@@ -6070,6 +6349,22 @@ fn apply_lifecycle_params(
     let ours = u64::from(config.lifecycle.active_connection_id_limit);
     c.cids.issue_limit = ours.min(p.active_connection_id_limit.max(2));
     c.peer_disables_migration = p.disable_active_migration;
+    if config.role == Role::Client
+        && let Some(pa) = &p.preferred_address
+        && let Ok(cid) = ConnectionId::from_slice(pa.connection_id.as_bytes())
+    {
+        // RFC 9000 §5.1.1: the preferred address's connection ID has
+        // sequence number 1.
+        let entry = PeerCid {
+            seq: 1,
+            cid,
+            token: Some(pa.stateless_reset_token),
+        };
+        let limit = usize::from(config.lifecycle.active_connection_id_limit);
+        if c.cids.add_peer(entry, limit).is_ok() {
+            c.preferred_remote = crate::lifecycle::choose_preferred(pa, c.path.remote);
+        }
+    }
     if c.cids.peer_cid(0).is_none() {
         // Sequence 0 is the connection ID the peer's packets came from.
         let peer = c.cids.peer.iter_mut().find(|s| s.is_none());

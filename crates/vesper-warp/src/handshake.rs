@@ -120,6 +120,10 @@ pub enum ConnectionEvent {
     /// Server: the peer moved to a new address (RFC 9000 §9.3); its
     /// validation is in progress.
     PeerMigrated(vesper_warp_shard::SlotHandle),
+    /// The connection moved to the server's preferred address (RFC 9000
+    /// §9.6) after validating it: a client now sends there, a server now
+    /// sends from there (wave seven).
+    MovedToPreferredAddress(vesper_warp_shard::SlotHandle),
     /// The connection is gone and its slot was freed: after the closing or
     /// draining period, on idle timeout, on a stateless reset or a
     /// Version Negotiation failure. The handle is stale from now on.
