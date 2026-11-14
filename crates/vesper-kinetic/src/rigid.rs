@@ -145,6 +145,11 @@ pub fn box_inv_inertia(inv_mass: f32, h: V3) -> V3 {
 /// Inverse inertia of a solid capsule (cylinder of height `2·half_height`
 /// plus two hemispheres, uniform density) about its axes (y is the axis).
 pub fn capsule_inv_inertia(inv_mass: f32, half_height: f32, radius: f32) -> V3 {
+    if inv_mass == 0.0 {
+        // A static body: zero inverse inertia, like the sphere and box
+        // helpers.
+        return [0.0; 3];
+    }
     let (r, hgt) = (f64::from(radius), 2.0 * f64::from(half_height));
     let m = 1.0 / f64::from(inv_mass);
     // Volume shares (π cancels).
@@ -328,6 +333,7 @@ pub struct RigidWorld {
     prev_vel: Vec<(V3, V3)>,
     integrated: Vec<(V3, Q)>,
     manifolds: Vec<ContactManifold>,
+    saved_manifolds: Vec<ContactManifold>,
     constraint_bodies: Vec<ConstraintBodies>,
     colorer: Colorer,
     boxes: Vec<Aabb>,
@@ -823,6 +829,7 @@ impl RigidWorld {
             prev_vel: vec![([0.0; 3], [0.0; 3]); n],
             integrated: vec![([0.0; 3], [0.0, 0.0, 0.0, 1.0]); n],
             manifolds: Vec::with_capacity(config.max_manifolds),
+            saved_manifolds: Vec::with_capacity(config.max_manifolds),
             constraint_bodies: Vec::with_capacity(config.max_manifolds),
             colorer: Colorer::new(n, config.max_manifolds),
             boxes: Vec::with_capacity(n),
@@ -991,6 +998,21 @@ impl RigidWorld {
     /// [`RigidWorld::hash`]'s stream). On error the world is unchanged.
     pub fn step(&mut self) -> Result<KineticSnapshotWireHdr, RigidError> {
         let next_tick = self.tick.checked_add(1).ok_or(RigidError::TickOverflow)?;
+        // Keep the last step's contacts so that every error path can put
+        // them back (the buffer has `max_manifolds` capacity: no
+        // allocation).
+        self.saved_manifolds.clear();
+        self.saved_manifolds.extend_from_slice(&self.manifolds);
+        let layers = self.layers;
+        let result = self.step_inner(next_tick);
+        if result.is_err() {
+            std::mem::swap(&mut self.manifolds, &mut self.saved_manifolds);
+            self.layers = layers;
+        }
+        result
+    }
+
+    fn step_inner(&mut self, next_tick: u64) -> Result<KineticSnapshotWireHdr, RigidError> {
         self.collide()?;
         self.constraint_bodies.clear();
         for m in &self.manifolds {
@@ -1104,7 +1126,6 @@ impl RigidWorld {
 
     fn push_manifold(&mut self, m: ContactManifold) -> Result<(), RigidError> {
         if self.manifolds.len() == self.config.max_manifolds {
-            self.manifolds.clear();
             return Err(RigidError::ManifoldOverflow {
                 capacity: self.config.max_manifolds,
             });

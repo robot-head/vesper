@@ -491,6 +491,31 @@ fn malformed_worlds_are_typed_errors() {
     assert_eq!(w.step(), Err(RigidError::ManifoldOverflow { capacity: 1 }));
     assert_eq!(w.hash(), before, "a failed step changes nothing");
     assert!(w.apply_velocity_change(5, [1.0; 3], [0.0; 3]).is_err());
+
+    // After successful steps, an overflowing step keeps the last step's
+    // contacts and header: one box rests, a second falls onto the ground.
+    let resting_and_falling = [cube_body([0.0, 0.5, 0.0], 0), cube_body([3.0, 0.8, 0.0], 0)];
+    let mut w = RigidWorld::new(cfg, &resting_and_falling, &ok).unwrap();
+    let mut overflowed = false;
+    for _ in 0..120 {
+        let (manifolds, header) = (w.manifolds().to_vec(), w.header());
+        match w.step() {
+            Ok(_) => {}
+            Err(e) => {
+                assert_eq!(e, RigidError::ManifoldOverflow { capacity: 1 });
+                assert_eq!(w.manifolds(), &manifolds[..]);
+                assert_eq!(w.header(), header);
+                overflowed = true;
+                break;
+            }
+        }
+    }
+    assert!(overflowed, "the falling box never touched down");
+
+    // Static bodies get zero inverse inertia from every helper.
+    assert_eq!(capsule_inv_inertia(0.0, 0.5, 0.25), [0.0; 3]);
+    assert_eq!(sphere_inv_inertia(0.0, 0.5), [0.0; 3]);
+    assert_eq!(box_inv_inertia(0.0, [0.5; 3]), [0.0; 3]);
 }
 
 /// A mixed scene: a box stack, a tumbling box, rolling and bouncing balls,
