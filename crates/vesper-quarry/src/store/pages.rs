@@ -65,6 +65,13 @@ pub(crate) fn kind(b: &[u8]) -> u8 {
 pub(crate) fn level(b: &[u8]) -> u8 {
     b[25]
 }
+/// Right sibling of a leaf (0: none). Internal nodes keep the field zero.
+pub(crate) fn sibling(b: &[u8]) -> u64 {
+    u64::from(rd32(b, 28))
+}
+pub(crate) fn set_sibling(b: &mut [u8], id: u64) {
+    wr32(b, 28, id as u32);
+}
 pub(crate) fn count(b: &[u8]) -> usize {
     rd16(b, 20) as usize
 }
@@ -140,7 +147,9 @@ pub(crate) struct Meta {
     pub tables: BTreeMap<String, TableMeta>,
 }
 const META_MAGIC: &[u8; 8] = b"QRYSTORE";
-const META_FORMAT: u32 = 1;
+/// Format 2 adds leaf right-sibling links and secondary indexes; format 1
+/// stores (no links) are rejected.
+const META_FORMAT: u32 = 2;
 
 pub(crate) fn type_tag(t: ScalarType) -> u8 {
     match t {
@@ -435,6 +444,11 @@ pub(crate) fn internal_build(b: &mut [u8], id: u64, lvl: u8, children: &[u64], k
     }
     set_count(b, keys.len());
 }
+/// Replaces separator `i` (the caller keeps the key order).
+pub(crate) fn internal_set_key(b: &mut [u8], i: usize, key: Key) {
+    debug_assert!(i < count(b));
+    key.write(b, KEY_OFF + 16 * i);
+}
 pub(crate) fn internal_parts(b: &[u8]) -> (Vec<u64>, Vec<Key>) {
     let n = count(b);
     (
@@ -721,8 +735,12 @@ pub(crate) fn leaf_decode(b: &[u8]) -> StoreResult<(LeafLayout, Vec<Entry>)> {
     let lay = layout_of(b)?;
     let n = count(b);
     let heap = heap_start(b);
-    if heap < lay.end || heap > PAGE_SIZE || rd32(b, 28) != 0 {
+    if heap < lay.end || heap > PAGE_SIZE {
         return Err(corrupt("leaf heap offset"));
+    }
+    let sib = sibling(b);
+    if sib != 0 && (sib <= FSM_PAGE || sib == page_id(b)) {
+        return Err(corrupt("leaf right sibling"));
     }
     let mut seen = vec![false; lay.c];
     for pos in 0..n {
@@ -872,6 +890,7 @@ fn clear_slot(b: &mut [u8], lay: &LeafLayout, s: usize) {
 }
 /// Builds a leaf holding `entries` (sorted). Chooses a physical capacity
 /// with some free slots when room allows. `false` when they do not fit.
+/// A leaf keeps its right-sibling link; any other page starts without one.
 pub(crate) fn leaf_build(
     b: &mut [u8],
     id: u64,
@@ -893,7 +912,9 @@ pub(crate) fn leaf_build(
     if lay.end + var > PAGE_SIZE {
         return false;
     }
+    let sib = if kind(b) == KIND_LEAF { sibling(b) } else { 0 };
     format(b, id, KIND_LEAF, 0);
+    set_sibling(b, sib);
     wr16(b, 32, types.len() as u16);
     for (i, &t) in types.iter().enumerate() {
         b[34 + i] = type_tag(t);
