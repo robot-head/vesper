@@ -132,16 +132,27 @@ def checkConstantName (name : Name) : IO Unit := do
 
 /-- This is an exclusion shape check, never evidence of native implementation
 provenance or runtime equivalence. Explicit unsafe declarations never qualify. -/
-def matchedPartial (all : Std.HashMap Name ConstantInfo) (info : ConstantInfo) : IO Name := do
+def matchedPartial (all : Std.HashMap Name ConstantInfo) (owners : Std.HashMap Name Name)
+    (info : ConstantInfo) : IO Name := do
   let .defnInfo auxiliary := info | fail "partial declaration is not a definition"
   unless auxiliary.safety == .partial do fail "omitted declaration is not partial"
   let .str parent "_unsafe_rec" := auxiliary.name | fail "unmatched partial declaration name"
   let some (.defnInfo owner) := all[parent]? | fail "partial auxiliary lacks safe definition owner"
   unless owner.safety == .safe do fail "partial auxiliary owner is not safe"
+  let some ownerModule := owners[parent]? | fail "partial owner has no module association"
+  unless owners[auxiliary.name]? == some ownerModule do fail "partial auxiliary crosses module ownership"
+  unless !owner.all.isEmpty && owner.all.contains parent && owner.all.length ≤ maxPackageConstants do
+    fail "partial owner has malformed mutual group"
   unless auxiliary.type == owner.type && auxiliary.levelParams == owner.levelParams &&
       auxiliary.all == owner.all.map (fun name => .str name "_unsafe_rec") &&
       auxiliary.hints == .opaque do fail "partial auxiliary metadata mismatch"
+  let mut group : NameSet := {}
   for member in owner.all do
+    if group.contains member then fail "duplicate partial owner mutual group member"
+    group := group.insert member
+    unless owners[member]? == some ownerModule &&
+        owners[Name.str member "_unsafe_rec"]? == some ownerModule do
+      fail "partial mutual group crosses module ownership"
     let some (.defnInfo memberOwner) := all[member]? | fail "missing safe mutual owner"
     let some (.defnInfo memberAux) := all[Name.str member "_unsafe_rec"]? |
       fail "missing partial mutual auxiliary"
@@ -314,7 +325,7 @@ def snapshot (request : Request) : IO Json := do
   for (name,info) in raw.toList.toArray.qsort (fun a b => Name.lt a.1 b.1) do
     if info.isUnsafe then fail s!"explicit unsafe declaration: {name}"
     if info.isPartial then
-      let parent ← matchedPartial raw info
+      let parent ← matchedPartial raw owners info
       let some owner := owners[name]? | fail "missing original module association"
       omitted := omitted.push <| Json.mkObj [
         ("name",toJson name.toString),("parent",toJson parent.toString),
@@ -359,7 +370,7 @@ def snapshot (request : Request) : IO Json := do
   unless projectedCount == 1 do fail "projection module participation mismatch"
   verifyEnvironment retained base reimported
   pure <| Json.mkObj [
-    ("schema_version",toJson (1 : Nat)),
+    ("schema_version",toJson (1 : Nat)),("scope",toJson "kernel_logical_projection"),
     ("original_module",toJson request.moduleName.toString),
     ("projection_module",toJson request.outputModule.toString),
     ("projection_path",toJson (← IO.FS.realPath output).toString),
