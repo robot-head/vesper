@@ -1,0 +1,12 @@
+// expect: E0700
+fn log_value(x: f64) -> f64 {
+    x
+}
+
+fn process(x: f64) -> f64 eff [Realtime] {
+    log_value(x)
+}
+
+fn main() -> f64 {
+    process(1.0)
+}

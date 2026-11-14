@@ -1,0 +1,3 @@
+fn helper() -> i64 { 42 }
+macro invoke_helper() -> expr { quote { helper() } }
+fn main() -> i64 { let helper = 0; invoke_helper!() }

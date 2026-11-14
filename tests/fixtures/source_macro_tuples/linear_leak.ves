@@ -1,0 +1,15 @@
+linear struct Tx {}
+fn make() -> Tx {
+    Tx {}
+}
+macro pair() -> expr {
+    quote {
+        (42, ())
+    }
+}
+fn forward(sink value: (Tx, Tx)) -> (i64, ()) {
+    pair!()
+}
+fn main() {
+    let value = forward((make(), make()));
+}

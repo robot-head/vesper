@@ -54,6 +54,7 @@ impl Layout {
                 ty.name(),
                 "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "Unit" | "Never"
             )
+            || crate::regions::is_handle_type(ty)
             || *ty == Type::unit()
         {
             return Ok(Self {
@@ -245,6 +246,7 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
                     ty: ty.name().into(),
                     constructor: ty.name().into(),
                     fields: values,
+                    resource_identity: None,
                 }
             })
         }
@@ -263,6 +265,7 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
                 ty: ty.name().into(),
                 constructor: v.name.clone(),
                 fields,
+                resource_identity: None,
             })
         }
     }

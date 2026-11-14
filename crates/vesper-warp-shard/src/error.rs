@@ -60,6 +60,23 @@ pub enum SetError {
     },
 }
 
+/// Rejected [`crate::ConnTable::rekey`]. The table is unchanged after any
+/// error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RekeyError {
+    /// Stale handle.
+    Stale,
+    /// Another live connection already uses the new local CID.
+    DuplicateCid,
+    /// The new CID length differs from the table's configured length.
+    CidLength {
+        /// Configured length.
+        expected: u8,
+        /// Supplied length.
+        got: usize,
+    },
+}
+
 /// Rejected CID lookup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LookupError {
@@ -126,6 +143,7 @@ display_via_debug!(
     InsertError,
     StaleHandle,
     SetError,
+    RekeyError,
     LookupError,
     BatchError
 );

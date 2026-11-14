@@ -1,5 +1,14 @@
-//! Checked documentation fences with finite native execution. No SimPulse,
-//! ambient IO, source arena or hard-timeout/sandbox claim is made.
+//! Checked documentation fences with finite native execution, and hermetic
+//! `sim(...)` fences on the reference evaluator under a seeded SimPulse kernel
+//! (§40.2). No ambient IO, source arena or hard-timeout/sandbox claim is made.
+//!
+//! Positive non-simulated examples of one file are merged into one checked
+//! module and compiled into ONE shared Cranelift JIT module. When the native
+//! batch subset (finite scalar direct calls) does not cover an example, that
+//! example alone runs on the reference evaluator instead, and its report says
+//! which engine ran and why it fell back. Coverage is decided by compiling a
+//! probe module per example; probe modules are never executed and are
+//! counted separately from the shared module.
 use crate::{
     ast::Diagnostic,
     check,
@@ -8,6 +17,7 @@ use crate::{
     parser,
 };
 use serde::Serialize;
+use vesper_doc::sim::{self, SimHost, SimLimits, SimOutcome, SimSpec};
 
 #[derive(Clone, Copy, Debug)]
 pub struct DocTestLimits {
@@ -93,6 +103,34 @@ pub struct ExampleReport {
     pub result: Option<String>,
     pub message: String,
     pub diagnostics: Vec<LocatedDiagnostic>,
+    /// Present for `sim(...)` fences that reached execution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub simulation: Option<SimulationReport>,
+    /// Which engine executed the example; absent when nothing ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<Engine>,
+    /// Why the native batch did not cover an evaluator-run example.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Engine {
+    /// The shared Cranelift JIT module of this file.
+    Jit,
+    /// The reference evaluator (the native subset does not cover it).
+    Evaluator,
+    /// The reference evaluator under a seeded SimPulse kernel.
+    SimpulseEvaluator,
+}
+/// A simulated doctest ran twice: a recording run and a replay of its
+/// SimPulse journal. Both must succeed with identical results and traces.
+#[derive(Debug, Serialize)]
+pub struct SimulationReport {
+    pub spec: SimSpec,
+    pub runs: usize,
+    pub replayed: bool,
+    pub outcome: SimOutcome,
 }
 #[derive(Debug, Serialize)]
 pub struct BatchReport {
@@ -120,7 +158,13 @@ pub struct DocTestReport {
     pub passed: bool,
     pub base_diagnostics: Vec<LocatedDiagnostic>,
     pub examples: Vec<ExampleReport>,
+    /// Statistics of the one shared JIT module, when any example ran in it.
     pub batch: Option<BatchReport>,
+    /// Never-executed single-entry modules compiled to decide coverage after
+    /// the whole set did not compile as one module (0 when it did).
+    pub coverage_probes: usize,
+    pub jit_examples: usize,
+    pub evaluator_examples: usize,
 }
 struct Line {
     text: String,
@@ -131,6 +175,7 @@ struct Example {
     offset: usize,
     expected: Option<String>,
     entry: Option<String>,
+    sim: Option<SimSpec>,
 }
 fn location(source: &str, offset: usize) -> (usize, usize) {
     let offset = offset.min(source.len());
@@ -240,10 +285,37 @@ fn fence(text: &str) -> Option<(char, usize, &str)> {
     let count = text.chars().take_while(|c| *c == first).count();
     (count >= 3).then_some((first, count, text[count..].trim()))
 }
-fn attributes(info: &str) -> Result<(Option<String>, Option<String>), String> {
+/// Split fence info on commas outside parentheses.
+fn attribute_parts(info: &str) -> Result<Vec<&str>, String> {
+    let mut parts = Vec::new();
+    let (mut depth, mut start) = (0usize, 0usize);
+    for (i, c) in info.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or("unbalanced doctest fence attribute")?
+            }
+            ',' if depth == 0 => {
+                parts.push(info[start..i].trim());
+                start = i + 1;
+            }
+            _ => (),
+        }
+    }
+    if depth != 0 {
+        return Err("unbalanced doctest fence attribute".into());
+    }
+    parts.push(info[start..].trim());
+    Ok(parts)
+}
+type Attributes = (Option<String>, Option<String>, Option<SimSpec>);
+fn attributes(info: &str) -> Result<Attributes, String> {
     let mut expected = None;
     let mut entry = None;
-    for part in info.split(',').skip(1).map(str::trim) {
+    let mut simulated = None;
+    for part in attribute_parts(info)?.into_iter().skip(1) {
         if let Some(code) = part
             .strip_prefix("compile_fail(")
             .and_then(|s| s.strip_suffix(')'))
@@ -266,6 +338,11 @@ fn attributes(info: &str) -> Result<(Option<String>, Option<String>), String> {
                 return Err("invalid doctest entry".into());
             }
             entry = Some(name.to_string());
+        } else if let Some(inner) = part.strip_prefix("sim(").and_then(|s| s.strip_suffix(')')) {
+            if simulated.is_some() {
+                return Err("duplicate sim doctest attribute".into());
+            }
+            simulated = Some(SimSpec::parse(inner).map_err(|e| e.to_string())?);
         } else {
             return Err(format!(
                 "unsupported Vesper doctest fence attribute '{part}'"
@@ -275,7 +352,10 @@ fn attributes(info: &str) -> Result<(Option<String>, Option<String>), String> {
     if expected.is_some() && entry.is_some() {
         return Err("compile_fail doctest cannot request execution entry".into());
     }
-    Ok((expected, entry))
+    if expected.is_some() && simulated.is_some() {
+        return Err("compile_fail doctest cannot request simulated execution".into());
+    }
+    Ok((expected, entry, simulated))
 }
 fn extract(source: &str, limits: DocTestLimits) -> Result<Vec<Example>, String> {
     let (tokens, _) = lexer::lex(source);
@@ -334,12 +414,13 @@ fn extract(source: &str, limits: DocTestLimits) -> Result<Vec<Example>, String> 
                     return Err("unsupported Vesper doctest fence metadata (use comma-separated attributes)".into());
                 }
                 let example = if language == "vesper" {
-                    let (expected, entry) = attributes(info)?;
+                    let (expected, entry, sim) = attributes(info)?;
                     Some(Example {
                         lines: Vec::new(),
                         offset: line.offset,
                         expected,
                         entry,
+                        sim,
                     })
                 } else {
                     None
@@ -414,8 +495,13 @@ fn generate(
         Some(e.entry.clone().unwrap_or_else(|| wrapper.to_string()))
     };
     if !declaration {
+        // A simulated body fence may use exactly the devices it declared.
+        let row = e.sim.as_ref().map_or(String::new(), |spec| {
+            let names: Vec<_> = spec.devices.iter().map(|d| d.effect()).collect();
+            format!(" eff [{}]", names.join(", "))
+        });
         source.push_str(&format!(
-            "fn {}() {{\n",
+            "fn {}(){row} {{\n",
             entry.as_deref().unwrap_or(wrapper)
         ));
     }
@@ -720,6 +806,134 @@ fn checked(
     let diagnostics = checked.diagnostics.clone();
     Ok((checked, diagnostics))
 }
+/// Every effect of the entry must be a declared simulated device whose source
+/// declaration matches the Codex operation contract exactly.
+fn sim_contract(world: &check::World, entry: &str, spec: &SimSpec) -> Result<(), String> {
+    use crate::ast::Type;
+    let function = world
+        .functions
+        .get(entry)
+        .ok_or("missing simulated entry")?;
+    if function.effects.tail.is_some() {
+        return Err("simulated entry requires a closed effect row".into());
+    }
+    let u64_type = |t: &Type| matches!(t, Type::Named(n, a) if n == "u64" && a.is_empty());
+    for instance in &function.effects.instances {
+        let device = sim::Device::from_effect(&instance.name)
+            .filter(|d| spec.devices.contains(d))
+            .ok_or_else(|| {
+                format!(
+                    "effect {} is not a simulated device declared by this doctest",
+                    instance.name
+                )
+            })?;
+        let declaration = &world.effects[&instance.name];
+        if !declaration.linear || !declaration.generics.is_empty() || !instance.args.is_empty() {
+            return Err(format!(
+                "simulated device {} must be a non-generic linear effect",
+                instance.name
+            ));
+        }
+        for op in &declaration.ops {
+            let arity = sim::operation_arity(device, &op.name).ok_or_else(|| {
+                format!(
+                    "{}::{} is not a simulated operation",
+                    instance.name, op.name
+                )
+            })?;
+            if op.params.len() != arity
+                || !op
+                    .params
+                    .iter()
+                    .all(|p| u64_type(&p.ty) && p.pass == crate::ast::Pass::In)
+                || !u64_type(&op.result)
+                || !op.effects.instances.is_empty()
+                || op.effects.tail.is_some()
+            {
+                return Err(format!(
+                    "{}::{} must take {arity} u64 argument(s) and return u64",
+                    instance.name, op.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+fn simulate_once(
+    world: &check::World,
+    entry: &str,
+    mut host: SimHost,
+) -> Result<(String, SimOutcome), String> {
+    use crate::runtime::{Execution, Runtime, Value};
+    let mut runtime = Runtime::new(world);
+    runtime.fuel = 1_000_000;
+    let mut state = runtime.begin_external(entry, vec![])?;
+    loop {
+        match state {
+            Execution::Complete(value) => {
+                return Ok((value.to_string(), host.finish().map_err(|e| e.to_string())?));
+            }
+            Execution::Suspended(suspension) => {
+                let request = suspension.request();
+                let arguments = request
+                    .arguments
+                    .iter()
+                    .map(|v| match v {
+                        Value::UInt(n, 64) => Ok(*n),
+                        _ => Err("simulated operations take u64 arguments".to_string()),
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                let effect = request.effect.name.clone();
+                let operation = request.operation.clone();
+                let value = host
+                    .call(&effect, &operation, &arguments)
+                    .map_err(|e| e.to_string())?;
+                state = suspension.resume(Value::UInt(value, 64))?;
+            }
+        }
+    }
+}
+/// Record one run, then replay it against its own SimPulse journal.
+fn simulate(
+    world: &check::World,
+    entry: &str,
+    spec: &SimSpec,
+    limits: DocTestLimits,
+) -> Result<(String, SimulationReport), String> {
+    sim_contract(world, entry, spec)?;
+    let host_limits = SimLimits::default();
+    let host = SimHost::new(spec.clone(), host_limits).map_err(|e| e.to_string())?;
+    let (value, outcome) = simulate_once(world, entry, host)?;
+    let runs = limits.runs_per_example.max(2);
+    for _ in 1..runs {
+        let replay = SimHost::replay(spec.clone(), host_limits, outcome.journal.clone())
+            .map_err(|e| e.to_string())?;
+        let (again, replayed) = simulate_once(world, entry, replay)?;
+        if again != value || replayed != outcome {
+            return Err("replayed simulation diverged from the recording".into());
+        }
+    }
+    Ok((
+        value,
+        SimulationReport {
+            spec: spec.clone(),
+            runs,
+            replayed: true,
+            outcome,
+        },
+    ))
+}
+/// Whether `source` holds at least one Vesper doc-comment fence. Package runs
+/// use this to skip files without examples before any checking; malformed
+/// fences are still errors.
+pub fn has_examples(source: &str, limits: DocTestLimits) -> Result<bool, String> {
+    limits.validate()?;
+    if source.len() > limits.max_source_bytes {
+        return Err("doctest source byte limit".into());
+    }
+    preflight(source, limits)?;
+    Ok(!extract(source, limits)?.is_empty())
+}
 /// Body fences are Unit blocks. Declaration fences use explicit `entry=name`
 /// or `main` by default; positive declaration names must be unique in the merged
 /// package. Unsupported syntax/execution is an explicit failure, never a skip.
@@ -738,6 +952,9 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
             .collect(),
         examples: Vec::new(),
         batch: None,
+        coverage_probes: 0,
+        jit_examples: 0,
+        evaluator_examples: 0,
     };
     if !base_errors.is_empty() {
         return Ok(report);
@@ -815,6 +1032,9 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
             result: None,
             message: String::new(),
             diagnostics,
+            simulation: None,
+            engine: None,
+            fallback_reason: None,
         };
         if let Some(expected) = &example.expected {
             result.passed =
@@ -824,6 +1044,19 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
             result.message = "positive example failed full checking".into();
         } else if !own_entry {
             result.message = "positive entry must be defined by this snippet, not inherited from the base package".into();
+        } else if let Some(spec) = &example.sim {
+            let entry = generated.entry.as_deref().expect("positive entry");
+            match simulate(&snippet_checked.world, entry, spec, limits) {
+                Ok((value, simulation)) => {
+                    result.passed = true;
+                    result.result = Some(value);
+                    result.message =
+                        "simulated twice under SimPulse; journal replay matched".into();
+                    result.simulation = Some(simulation);
+                    result.engine = Some(Engine::SimpulseEvaluator);
+                }
+                Err(error) => result.message = format!("simulated execution failed: {error}"),
+            }
         } else {
             let code = &generated.source[generated.snippet_start..];
             let size = merged
@@ -842,7 +1075,7 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
                 generated.entry.expect("positive entry"),
                 fragment_start..merged.len(),
             ));
-            result.message = "checked; awaiting shared native execution".into();
+            result.message = "checked; awaiting execution".into();
         }
         report.examples.push(result);
     }
@@ -867,45 +1100,108 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
                 );
             }
         } else {
-            let entries: Vec<_> = runnable.iter().map(|(_, n, _)| n.as_str()).collect();
-            match NativeBatch::compile(&checked.world, &entries, limits.batch) {
-                Err(error) => {
-                    for (index, _, _) in &runnable {
-                        report.examples[*index].message =
-                            format!("unsupported native execution: {error}");
-                    }
-                }
-                Ok(mut batch) => {
-                    for (index, entry, _) in &runnable {
-                        let mut first = None;
-                        let mut failed = None;
-                        for _ in 0..limits.runs_per_example {
-                            match batch.run(entry) {
-                                Ok(value) => {
-                                    let value = value.to_string();
-                                    if first.as_ref().is_some_and(|x| x != &value) {
-                                        failed = Some("repeated native results differ".into());
-                                        break;
-                                    }
-                                    first = Some(value);
-                                }
-                                Err(error) => {
-                                    failed = Some(error);
-                                    break;
-                                }
-                            }
-                        }
-                        let result = &mut report.examples[*index];
-                        result.passed = failed.is_none();
-                        result.result = first;
-                        result.message = failed
-                            .unwrap_or_else(|| "executed repeatedly in shared JIT module".into());
-                    }
-                    report.batch = Some(batch.stats().into());
-                }
-            }
+            execute(&checked.world, &runnable, limits, &mut report)?;
         }
     }
     report.passed = report.examples.iter().all(|e| e.passed);
     Ok(report)
+}
+
+/// Repeat `run` and require identical results.
+fn repeated(
+    runs: usize,
+    mut run: impl FnMut() -> Result<crate::runtime::Value, String>,
+) -> (Option<String>, Option<String>) {
+    let mut first: Option<String> = None;
+    for _ in 0..runs {
+        match run() {
+            Ok(value) => {
+                let value = value.to_string();
+                if first.as_ref().is_some_and(|x| *x != value) {
+                    return (first, Some("repeated results differ".into()));
+                }
+                first = Some(value);
+            }
+            Err(error) => return (first, Some(error)),
+        }
+    }
+    (first, None)
+}
+
+/// Run every merged positive entry: the natively covered ones in one shared
+/// JIT module, the rest on the reference evaluator.
+fn execute(
+    world: &check::World,
+    runnable: &[(usize, String, std::ops::Range<usize>)],
+    limits: DocTestLimits,
+    report: &mut DocTestReport,
+) -> Result<(), String> {
+    let all: Vec<&str> = runnable.iter().map(|(_, n, _)| n.as_str()).collect();
+    let mut fallback: std::collections::BTreeMap<&str, String> = Default::default();
+    let batch = match NativeBatch::compile(world, &all, limits.batch) {
+        Ok(batch) => Some(batch),
+        Err(_) => {
+            let mut covered = Vec::new();
+            for entry in &all {
+                report.coverage_probes += 1;
+                match NativeBatch::compile(world, &[entry], limits.batch) {
+                    Ok(_probe) => covered.push(*entry),
+                    Err(error) => {
+                        fallback.insert(entry, error);
+                    }
+                }
+            }
+            if covered.is_empty() {
+                None
+            } else {
+                match NativeBatch::compile(world, &covered, limits.batch) {
+                    Ok(batch) => Some(batch),
+                    Err(error) => {
+                        // Individually covered entries that do not compile
+                        // together (e.g. a shared budget) all fall back.
+                        for entry in covered {
+                            fallback.insert(entry, format!("shared module: {error}"));
+                        }
+                        None
+                    }
+                }
+            }
+        }
+    };
+    let mut batch = batch;
+    let mut evaluator = None;
+    for (index, entry, _) in runnable {
+        let result = &mut report.examples[*index];
+        if let Some(reason) = fallback.get(entry.as_str()) {
+            let runtime = evaluator.get_or_insert_with(|| crate::runtime::Runtime::new(world));
+            let (value, failed) = repeated(limits.runs_per_example, || {
+                runtime.fuel = 1_000_000;
+                runtime.run(entry, vec![])
+            });
+            result.passed = failed.is_none();
+            result.result = value;
+            result.engine = Some(Engine::Evaluator);
+            result.fallback_reason = Some(reason.clone());
+            result.message = match failed {
+                Some(error) => format!("evaluator execution failed: {error}"),
+                None => format!(
+                    "executed repeatedly on the reference evaluator (not covered by the native subset: {reason})"
+                ),
+            };
+            report.evaluator_examples += 1;
+        } else {
+            let batch = batch.as_mut().ok_or("missing shared JIT module")?;
+            let (value, failed) = repeated(limits.runs_per_example, || batch.run(entry));
+            result.passed = failed.is_none();
+            result.result = value;
+            result.engine = Some(Engine::Jit);
+            result.message = match failed {
+                Some(error) => format!("native execution failed: {error}"),
+                None => "executed repeatedly in shared JIT module".into(),
+            };
+            report.jit_examples += 1;
+        }
+    }
+    report.batch = batch.map(|b| b.stats().into());
+    Ok(())
 }

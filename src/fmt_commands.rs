@@ -5,9 +5,9 @@ use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
-use vesper_fmt::{Limits, format_source};
+use vesper_fmt::{FormatResult, Limits, format_recovery_source, format_source};
 const MAX_BYTES: u64 = 256 * 1024;
-const HELP: &str = "Usage: vesper fmt FILE [--check] [--json]\n\nFormat the currently supported Vesper grammar with a canonical 100-column ribbon.\nCheck mode never writes and exits nonzero when formatting is needed.\nInputs are bounded to 256 KiB regular UTF-8 files without final symlinks.\nInvalid/incomplete syntax, opaque macro payloads and resource failures leave input unchanged.\nToken/string/comment bytes are preserved; indivisible leaves may exceed 100 columns.\n";
+const HELP: &str = "Usage: vesper fmt [PATH...] [--recovery] [--check] [--json]\n\nWith no PATH the current directory is formatted. Directories are walked for .ves files in sorted\norder without following symlinks, skipping hidden, target/ and bazel-* directories.\nFormat supported Vesper source and expression macros with a canonical 100-column ribbon.\nRecovery mode formats only complete functions and preserves damaged or opaque source bytes.\nCheck mode never writes and exits nonzero when formatting is needed.\nInputs are bounded to 256 KiB regular UTF-8 files without final symlinks.\nDefault mode rejects invalid/incomplete source; failures always leave input unchanged.\nToken/string/comment bytes are preserved; indivisible leaves may exceed 100 columns.\n";
 struct Input {
     text: String,
     metadata: fs::Metadata,
@@ -141,9 +141,94 @@ fn replace_at_stage(
     stage.cleanup = false;
     Ok(())
 }
-fn execute(args: Vec<String>) -> Result<(serde_json::Value, bool), String> {
-    let mut path = None;
+/// Upper bound on directory entries visited by one workspace run.
+const MAX_WALK_ENTRIES: usize = 200_000;
+/// Directory names a workspace walk never enters (build output and VCS state).
+fn skipped_dir(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy();
+    name.starts_with('.') || name == "target" || name.starts_with("bazel-")
+}
+/// Collects `.ves` files below `root` in sorted order. Symlinks are never
+/// followed, hidden/`target`/`bazel-*` directories are skipped.
+fn walk(root: &Path, files: &mut Vec<PathBuf>, visited: &mut usize) -> Result<(), String> {
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        let mut entries = Vec::new();
+        for entry in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+            let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
+            *visited += 1;
+            if *visited > MAX_WALK_ENTRIES {
+                return Err(format!(
+                    "fmt visited more than {MAX_WALK_ENTRIES} directory entries; pass narrower paths"
+                ));
+            }
+            entries.push(entry);
+        }
+        entries.sort_by_key(|e| e.file_name());
+        let mut subdirs = Vec::new();
+        for entry in entries {
+            let kind = entry.file_type().map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if kind.is_dir() {
+                if !skipped_dir(&entry.file_name()) {
+                    subdirs.push(path);
+                }
+            } else if kind.is_file() && path.extension().is_some_and(|x| x == "ves") {
+                files.push(path);
+            }
+        }
+        pending.extend(subdirs.into_iter().rev());
+    }
+    Ok(())
+}
+fn format_file(path: &Path, check: bool, recovery: bool) -> Result<serde_json::Value, String> {
+    let input = open_input(path)?;
+    let (result, edits) = if recovery {
+        let partial = format_recovery_source(&input.text, Limits::default())
+            .map_err(|e| format!("cannot format recovery source: {e}"))?;
+        let count = partial.edits().len();
+        (
+            FormatResult {
+                changed: partial.changed(),
+                output: partial.into_output(),
+            },
+            Some(count),
+        )
+    } else {
+        (
+            format_source(&input.text, Limits::default())
+                .map_err(|e| format!("cannot format source: {e}"))?,
+            None,
+        )
+    };
+    let status = if check && result.changed {
+        "needs_format"
+    } else if result.changed {
+        "formatted"
+    } else {
+        "unchanged"
+    };
+    let mut report = serde_json::json!({"schema_version":1,"status":status,"changed":result.changed,"check":check,"input_bytes":input.text.len(),"output_bytes":result.output.len(),"width":100,"mode":if recovery {"recovery"} else {"source"}});
+    if let Some(count) = edits {
+        report["edits"] = count.into();
+    }
+    if result.changed && !check {
+        replace(path, &input, &result.output)?;
+    }
+    Ok(report)
+}
+/// Outcome of one invocation: the JSON report, whether `--check` found
+/// noncanonical files, and a per-file error summary for workspace runs.
+struct Outcome {
+    report: serde_json::Value,
+    needs_format: bool,
+    failed: usize,
+    lines: Vec<String>,
+}
+fn execute(args: Vec<String>) -> Result<Outcome, String> {
+    let mut paths = Vec::new();
     let mut check = false;
+    let mut recovery = false;
     let mut positional = false;
     for arg in args {
         if !positional {
@@ -153,6 +238,10 @@ fn execute(args: Vec<String>) -> Result<(serde_json::Value, bool), String> {
                     continue;
                 }
                 "--json" => continue,
+                "--recovery" => {
+                    recovery = true;
+                    continue;
+                }
                 "--" => {
                     positional = true;
                     continue;
@@ -161,26 +250,82 @@ fn execute(args: Vec<String>) -> Result<(serde_json::Value, bool), String> {
                 _ => {}
             }
         }
-        if path.replace(PathBuf::from(arg)).is_some() {
-            return Err("fmt accepts one file".into());
+        paths.push(PathBuf::from(arg));
+    }
+    // One explicit non-directory path keeps the single-file report schema.
+    if let [path] = paths.as_slice()
+        && !fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+    {
+        let report = format_file(path, check, recovery)?;
+        let needs_format = report["status"] == "needs_format";
+        let line = format!("fmt: {}", report["status"].as_str().unwrap_or("unknown"));
+        return Ok(Outcome {
+            report,
+            needs_format,
+            failed: 0,
+            lines: vec![line],
+        });
+    }
+    if paths.is_empty() {
+        paths.push(PathBuf::from("."));
+    }
+    let mut files = Vec::new();
+    let mut visited = 0;
+    for path in &paths {
+        if fs::symlink_metadata(path).is_ok_and(|m| m.is_dir()) {
+            walk(path, &mut files, &mut visited)?;
+        } else {
+            files.push(path.clone());
         }
     }
-    let path = path.ok_or("fmt requires a file; see fmt --help")?;
-    let input = open_input(&path)?;
-    let result = format_source(&input.text, Limits::default())
-        .map_err(|e| format!("cannot format source: {e}"))?;
-    let status = if check && result.changed {
+    let (mut changed, mut needs, mut failed) = (0usize, 0usize, 0usize);
+    let mut reports = Vec::new();
+    let mut lines = Vec::new();
+    for file in &files {
+        let shown = file.display().to_string();
+        let mut entry = match format_file(file, check, recovery) {
+            Ok(report) => report,
+            Err(error) => serde_json::json!({"status":"error","error":error}),
+        };
+        match entry["status"].as_str() {
+            Some("needs_format") => needs += 1,
+            Some("formatted") => changed += 1,
+            Some("error") => failed += 1,
+            _ => {}
+        }
+        let status = entry["status"].as_str().unwrap_or("unknown").to_owned();
+        if status != "unchanged" {
+            match entry["error"].as_str() {
+                Some(error) => lines.push(format!("fmt: error {shown}: {error}")),
+                None => lines.push(format!("fmt: {status} {shown}")),
+            }
+        }
+        if let Some(object) = entry.as_object_mut() {
+            object.remove("schema_version");
+            object.insert("path".into(), shown.into());
+        }
+        reports.push(entry);
+    }
+    let status = if failed > 0 {
+        "error"
+    } else if needs > 0 {
         "needs_format"
-    } else if result.changed {
+    } else if changed > 0 {
         "formatted"
     } else {
         "unchanged"
     };
-    let report = serde_json::json!({"schema_version":1,"status":status,"changed":result.changed,"check":check,"input_bytes":input.text.len(),"output_bytes":result.output.len(),"width":100});
-    if result.changed && !check {
-        replace(&path, &input, &result.output)?;
-    }
-    Ok((report, check && result.changed))
+    lines.push(format!(
+        "fmt: {status} ({} files, {changed} formatted, {needs} need formatting, {failed} errors)",
+        files.len()
+    ));
+    let report = serde_json::json!({"schema_version":1,"status":status,"check":check,"width":100,"mode":if recovery {"recovery"} else {"source"},"file_count":files.len(),"formatted":changed,"needs_format":needs,"errors":failed,"files":reports});
+    Ok(Outcome {
+        report,
+        needs_format: needs > 0,
+        failed,
+        lines,
+    })
 }
 pub fn run(args: Vec<String>) -> Result<(), String> {
     if args
@@ -196,13 +341,17 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         .take_while(|a| a.as_str() != "--")
         .any(|a| a == "--json");
     match execute(args) {
-        Ok((report, needs_format)) => {
+        Ok(outcome) => {
             if json {
-                println!("{report}");
+                println!("{}", outcome.report);
             } else {
-                println!("fmt: {}", report["status"].as_str().unwrap_or("unknown"));
+                for line in &outcome.lines {
+                    println!("{line}");
+                }
             }
-            if needs_format {
+            if outcome.failed > 0 {
+                Err(format!("{} file(s) could not be formatted", outcome.failed))
+            } else if outcome.needs_format {
                 Err("source is not canonically formatted".into())
             } else {
                 Ok(())
@@ -264,24 +413,81 @@ mod tests {
         let directory = fixture();
         let path = directory.join("input.ves");
         fs::write(&path, "fn main(){1}").unwrap();
-        let (check, needs) = execute(vec![
+        let outcome = execute(vec![
             path.to_string_lossy().into_owned(),
             "--check".into(),
             "--json".into(),
         ])
         .unwrap();
-        assert!(needs);
-        assert_eq!(check["status"], "needs_format");
+        assert!(outcome.needs_format);
+        assert_eq!(outcome.report["status"], "needs_format");
         assert_eq!(fs::read_to_string(&path).unwrap(), "fn main(){1}");
-        let (written, needs) = execute(vec![path.to_string_lossy().into_owned()]).unwrap();
-        assert!(!needs);
-        assert_eq!(written["status"], "formatted");
-        assert_eq!(written["width"], 100);
-        let (check, needs) =
-            execute(vec![path.to_string_lossy().into_owned(), "--check".into()]).unwrap();
-        assert!(!needs);
+        let written = execute(vec![path.to_string_lossy().into_owned()]).unwrap();
+        assert!(!written.needs_format);
+        assert_eq!(written.report["status"], "formatted");
+        assert_eq!(written.report["width"], 100);
+        let outcome = execute(vec![path.to_string_lossy().into_owned(), "--check".into()]).unwrap();
+        let check = outcome.report;
+        assert!(!outcome.needs_format);
         assert_eq!(check["status"], "unchanged");
         assert_eq!(check["changed"], false);
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn directories_are_walked_in_order_and_skip_hidden_target_and_symlinks() {
+        let directory = fixture();
+        fs::create_dir_all(directory.join("src/nested")).unwrap();
+        fs::create_dir_all(directory.join("target")).unwrap();
+        fs::create_dir_all(directory.join(".git")).unwrap();
+        fs::write(directory.join("src/b.ves"), "fn main(){1}").unwrap();
+        fs::write(
+            directory.join("src/nested/a.ves"),
+            "fn main() {\n    1\n}\n",
+        )
+        .unwrap();
+        fs::write(directory.join("src/notes.txt"), "fn main(){1}").unwrap();
+        fs::write(directory.join("target/out.ves"), "fn main(){1}").unwrap();
+        fs::write(directory.join(".git/x.ves"), "fn main(){1}").unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(directory.join("src"), directory.join("linked")).unwrap();
+        let root = directory.to_string_lossy().into_owned();
+        let check = execute(vec![root.clone(), "--check".into()]).unwrap();
+        assert!(check.needs_format);
+        assert_eq!(check.report["file_count"], 2);
+        assert_eq!(check.report["needs_format"], 1);
+        let files = check.report["files"].as_array().unwrap();
+        assert!(files[0]["path"].as_str().unwrap().ends_with("b.ves"));
+        assert!(files[1]["path"].as_str().unwrap().ends_with("a.ves"));
+        assert_eq!(
+            fs::read_to_string(directory.join("src/b.ves")).unwrap(),
+            "fn main(){1}"
+        );
+        let written = execute(vec![root.clone()]).unwrap();
+        assert_eq!(written.report["formatted"], 1);
+        assert_eq!(
+            fs::read_to_string(directory.join("target/out.ves")).unwrap(),
+            "fn main(){1}"
+        );
+        let clean = execute(vec![root, "--check".into()]).unwrap();
+        assert!(!clean.needs_format);
+        assert_eq!(clean.report["status"], "unchanged");
+        fs::remove_dir_all(directory).unwrap();
+    }
+    #[test]
+    fn one_bad_file_is_reported_without_hiding_the_others() {
+        let directory = fixture();
+        fs::write(directory.join("a.ves"), "fn main( {").unwrap();
+        fs::write(directory.join("b.ves"), "fn main(){1}").unwrap();
+        let outcome = execute(vec![
+            directory.to_string_lossy().into_owned(),
+            "--check".into(),
+        ])
+        .unwrap();
+        assert_eq!(outcome.failed, 1);
+        assert!(outcome.needs_format);
+        assert_eq!(outcome.report["status"], "error");
+        assert_eq!(outcome.report["files"][0]["status"], "error");
+        assert_eq!(outcome.report["files"][1]["status"], "needs_format");
         fs::remove_dir_all(directory).unwrap();
     }
     #[test]

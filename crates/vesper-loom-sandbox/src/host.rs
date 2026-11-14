@@ -166,6 +166,48 @@ impl SandboxHost {
         Ok(Self { engine, linker })
     }
 
+    fn start_validated(
+        &self,
+        config: &StepConfig,
+        layout: crate::policy::ValidatedLayout,
+    ) -> Result<RunContext, SandboxError> {
+        let limits = &config.limits;
+        let stdout = MemoryOutputPipe::new(limits.max_stdio_bytes);
+        let stderr = MemoryOutputPipe::new(limits.max_stdio_bytes);
+        let mut b = WasiCtxBuilder::new();
+        b.stdin(ClosedInputStream)
+            .stdout(stdout.clone())
+            .stderr(stderr.clone())
+            .allow_tcp(false)
+            .allow_udp(false)
+            .allow_ip_name_lookup(false)
+            .socket_addr_check(|_, _| Box::pin(async { false }));
+        apply_determinism(&mut b, &config.determinism);
+        for (host, guest) in &layout.inputs {
+            b.preopened_dir(host, guest, FsPerms::ReadOnly)
+                .map_err(host_err)?;
+        }
+        b.preopened_dir(&layout.output_dir, OUTPUT_GUEST_PATH, FsPerms::ReadWrite)
+            .map_err(host_err)?;
+
+        let state = StepState {
+            ctx: b.build(),
+            table: ResourceTable::new(),
+            limiter: Limiter::new(limits),
+            fs: FsNormalizer::new(config.determinism.wall_clock_ns),
+        };
+        let mut store = Store::new(&self.engine, state);
+        store.limiter(|s| &mut s.limiter);
+        store.set_fuel(limits.fuel).map_err(host_err)?;
+
+        Ok(RunContext {
+            store,
+            stdout,
+            stderr,
+            layout,
+        })
+    }
+
     /// Classifies and compiles a component. Core modules are rejected before
     /// compilation.
     pub fn compile(&self, bytes: &[u8]) -> Result<StepComponent, SandboxError> {
@@ -211,33 +253,12 @@ impl SandboxHost {
                 violation,
             })?;
 
-        let stdout = MemoryOutputPipe::new(limits.max_stdio_bytes);
-        let stderr = MemoryOutputPipe::new(limits.max_stdio_bytes);
-        let mut b = WasiCtxBuilder::new();
-        b.stdin(ClosedInputStream)
-            .stdout(stdout.clone())
-            .stderr(stderr.clone())
-            .allow_tcp(false)
-            .allow_udp(false)
-            .allow_ip_name_lookup(false)
-            .socket_addr_check(|_, _| Box::pin(async { false }));
-        apply_determinism(&mut b, &config.determinism);
-        for (host, guest) in &layout.inputs {
-            b.preopened_dir(host, guest, FsPerms::ReadOnly)
-                .map_err(host_err)?;
-        }
-        b.preopened_dir(&layout.output_dir, OUTPUT_GUEST_PATH, FsPerms::ReadWrite)
-            .map_err(host_err)?;
-
-        let state = StepState {
-            ctx: b.build(),
-            table: ResourceTable::new(),
-            limiter: Limiter::new(limits),
-            fs: FsNormalizer::new(config.determinism.wall_clock_ns),
-        };
-        let mut store = Store::new(&self.engine, state);
-        store.limiter(|s| &mut s.limiter);
-        store.set_fuel(limits.fuel).map_err(host_err)?;
+        let RunContext {
+            mut store,
+            stdout,
+            stderr,
+            layout,
+        } = self.start_validated(config, layout)?;
 
         let wit_inv = to_wit_invocation(invocation);
         let call = async {
@@ -262,35 +283,7 @@ impl SandboxHost {
         let fuel_left = store.get_fuel().unwrap_or(0);
         let fuel_consumed = limits.fuel - fuel_left;
         let limiter = &store.data().limiter;
-        let result = match outcome {
-            Err(_) => {
-                return Err(SandboxError::WallClockTimeout {
-                    limit: limits.wall_clock_backstop,
-                });
-            }
-            Ok(Err(Failure::Link(e))) => {
-                // Instantiation runs guest start code, which is metered too.
-                if let Some(Trap::OutOfFuel) = e.downcast_ref::<Trap>() {
-                    return Err(SandboxError::FuelExhausted { limit: limits.fuel });
-                }
-                if let Some(err) = limiter.denial() {
-                    return Err(err);
-                }
-                return Err(SandboxError::Link {
-                    message: format!("{e:#}"),
-                });
-            }
-            Ok(Err(Failure::Protocol(guest))) => {
-                return Err(SandboxError::ProtocolMismatch {
-                    host: PROTOCOL_VERSION,
-                    guest,
-                });
-            }
-            Ok(Err(Failure::Run(e))) => {
-                return Err(classify_trap(&e, limits, limiter));
-            }
-            Ok(Ok(r)) => r,
-        };
+        let result = complete_call(outcome, limits, limiter)?;
 
         let (failed, packed) = match result {
             Ok(p) => (false, p),
@@ -324,6 +317,50 @@ impl SandboxHost {
         })
     }
 }
+
+struct RunContext {
+    store: Store<StepState>,
+    stdout: MemoryOutputPipe,
+    stderr: MemoryOutputPipe,
+    layout: crate::policy::ValidatedLayout,
+}
+fn complete_call<T>(
+    outcome: Result<Result<T, Failure>, tokio::time::error::Elapsed>,
+    limits: &ResourceLimits,
+    limiter: &Limiter,
+) -> Result<T, SandboxError> {
+    Ok(match outcome {
+        Err(_) => {
+            return Err(SandboxError::WallClockTimeout {
+                limit: limits.wall_clock_backstop,
+            });
+        }
+        Ok(Err(Failure::Link(e))) => {
+            // Instantiation runs guest start code, which is metered too.
+            if let Some(Trap::OutOfFuel) = e.downcast_ref::<Trap>() {
+                return Err(SandboxError::FuelExhausted { limit: limits.fuel });
+            }
+            if let Some(err) = limiter.denial() {
+                return Err(err);
+            }
+            return Err(SandboxError::Link {
+                message: format!("{e:#}"),
+            });
+        }
+        Ok(Err(Failure::Protocol(guest))) => {
+            return Err(SandboxError::ProtocolMismatch {
+                host: PROTOCOL_VERSION,
+                guest,
+            });
+        }
+        Ok(Err(Failure::Run(e))) => {
+            return Err(classify_trap(&e, limits, limiter));
+        }
+        Ok(Ok(r)) => r,
+    })
+}
+#[path = "quote_host.rs"]
+pub mod quote_runtime;
 
 enum Failure {
     Link(wasmtime::Error),

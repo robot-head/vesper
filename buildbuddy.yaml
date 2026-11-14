@@ -1,0 +1,80 @@
+# CI on BuildBuddy Workflows (https://www.buildbuddy.io/docs/workflows-config).
+# Each action is one GitHub check. Every build and test runs through Bazel
+# (docs/bazel.md): compile actions execute on BuildBuddy's remote executors
+# (--config=rbe_build), tests run inside the workflow VM, which has Lean and
+# QEMU. BuildBuddy adds the API key, build event upload and ROLE=CI itself.
+
+actions:
+  - name: "Test all targets"
+    container_image: "ubuntu-24.04"
+    resource_requests:
+      cpu: 8
+      memory: 16GB
+      disk: 60GB
+    timeout: 90m
+    triggers:
+      push:
+        branches:
+          - "main"
+      pull_request:
+        branches:
+          - "*"
+    steps:
+      - run: "python3 tools/bazel/sync_build_files.py --check"
+      - run: "scripts/ci/install-lean.sh"
+      # Builds everything and runs every test, including the per-package
+      # `clippy` (warnings are errors) and `rustfmt` checks.
+      - run: |
+          export VESPER_LEAN="$(cat .ci-lean-path)"
+          export VESPER_LEAN4LEAN42_ROOT="$(mktemp -d /tmp/vesper-lean4lean42-ci.XXXXXX)/checker"
+          BAZEL_FLAGS="--config=ci --config=rbe_build" scripts/ci/prepare-lean4lean42.sh "$VESPER_LEAN4LEAN42_ROOT"
+          bazel test --config=ci --config=rbe_build //...
+      - run: "scripts/ci/check-lean-models.sh"
+
+  - name: "Native and acceptance scripts"
+    container_image: "ubuntu-24.04"
+    resource_requests:
+      cpu: 8
+      memory: 16GB
+      disk: 60GB
+    timeout: 60m
+    triggers:
+      push:
+        branches:
+          - "main"
+      pull_request:
+        branches:
+          - "*"
+    env:
+      BAZEL_FLAGS: "--config=ci --config=rbe_build"
+      # Written by the prebuild step below; scripts/bazel-lib.sh reads it.
+      VESPER_BAZEL_EXECUTABLES: ".ci-bazel-executables"
+    steps:
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y python-is-python3 qemu-user binutils-aarch64-linux-gnu
+      - run: "scripts/ci/install-lean.sh"
+      # One Bazel build for every executable the scripts run, instead of a
+      # build and a cquery per executable.
+      - run: "scripts/ci/prebuild-acceptance.sh .ci-bazel-executables"
+      - run: |
+          python scripts/check-specification-snapshot.py
+          python -m unittest discover -s scripts/tests -p test_specification_snapshot.py
+      - run: "scripts/test-aarch64.sh"
+      - run: "scripts/test-simd-aarch64.sh"
+      - run: "scripts/test-native-host.sh"
+      - run: "scripts/test-canonical-protocols.sh"
+      - run: "scripts/test-diagnostics.sh"
+      # Every tracked .ves file must be `vesper fmt` canonical (scripts/fmt-exclude.txt).
+      - run: "scripts/test-fmt.sh"
+      - run: "scripts/test-editor.sh"
+      - run: "scripts/test-expansion-foundations.sh"
+      - run: "scripts/test-recovery.sh"
+      - run: "scripts/test-source-tooling.sh"
+      - run: "scripts/test-source-macros.sh"
+      - run: |
+          VESPER_LEAN="$(cat .ci-lean-path)" scripts/test-format-proof.sh
+      - run: "scripts/test-macro-preview.sh"
+      - run: "scripts/test-source-macro-parameters.sh"
+      - run: "scripts/test-source-macro-tuples.sh"
+      - run: "scripts/test-doc-links.sh"

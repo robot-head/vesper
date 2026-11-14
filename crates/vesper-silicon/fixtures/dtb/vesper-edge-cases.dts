@@ -1,0 +1,72 @@
+// Hand-written devicetree edge cases for the Silicon tests (no real board):
+// a device that is a child of its interrupt controller (implicit interrupt
+// parent), a disabled bus whose child names a source the PLIC does not have,
+// and a versioned Zicbom extension in riscv,isa. Compile with:
+//   dtc -I dts -O dtb -o vesper-edge-cases.dtb vesper-edge-cases.dts
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	compatible = "vesper,edge-cases";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "riscv";
+			riscv,isa = "rv64imafdc_zicbom1p0_zicsr2p0";
+			riscv,cbom-block-size = <64>;
+			intc0: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x100000>;
+	};
+
+	plic@c000000 {
+		compatible = "riscv,plic0";
+		reg = <0x0 0x0c000000 0x0 0x4000000>;
+		#address-cells = <2>;
+		#size-cells = <2>;
+		#interrupt-cells = <1>;
+		interrupt-controller;
+		interrupts-extended = <&intc0 9>;
+		riscv,ndev = <32>;
+
+		gpio@c100000 {
+			compatible = "vesper,child-of-plic";
+			reg = <0x0 0x0c100000 0x0 0x100>;
+			interrupts = <5>;
+			dma-noncoherent;
+		};
+	};
+
+	offbus {
+		#address-cells = <2>;
+		#size-cells = <2>;
+		compatible = "simple-bus";
+		status = "disabled";
+		interrupt-parent = <&intc0>;
+
+		dev@20000000 {
+			compatible = "vesper,under-disabled-bus";
+			reg = <0x0 0x20000000 0x0 0x100>;
+			interrupts = <70>;
+		};
+
+		memory@90000000 {
+			device_type = "memory";
+			reg = <0x0 0x90000000 0x0 0x100000>;
+		};
+	};
+};

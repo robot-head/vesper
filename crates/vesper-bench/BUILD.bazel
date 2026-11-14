@@ -1,0 +1,7 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    # The causal-profiling test measures wall-clock speedups of spinning
+    # threads; sharing the CPU with other test actions distorts it.
+    test_tags = {"test/causal": ["exclusive"]},
+)

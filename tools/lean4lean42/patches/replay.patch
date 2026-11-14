@@ -1,0 +1,1018 @@
+diff --git a/Main.lean b/Main.lean
+index e23b981..684952b 100644
+--- a/Main.lean
++++ b/Main.lean
+@@ -2,365 +2,661 @@
+ Copyright (c) 2023 Scott Morrison. All rights reserved.
+ Released under Apache 2.0 license as described in the file LICENSE.
+ Authors: Scott Morrison
++
++Vesper's fixed machine adapter retains the upstream declaration replay algorithm,
++with exact bounded inventory and successful-check coverage. It does not assert
++that the unfinished upstream implementation proofs have been completed.
+ -/
+ import Lean.CoreM
+ import Lean.Util.FoldConsts
+-import Lean4Lean.Environment
+-import Lake.Load.Manifest
+-
+-namespace Lean
+-
+-def HashMap.keyNameSet (m : Std.HashMap Name α) : NameSet :=
+-  m.fold (fun s n _ => s.insert n) {}
+-
+-namespace Environment
+-
+-def importsOf (env : Environment) (n : Name) : Array Import :=
+-  if n = env.header.mainModule then
+-    env.header.imports
+-  else match env.getModuleIdx? n with
+-    | .some idx => env.header.moduleData[idx.toNat]!.imports
+-    | .none => #[]
+-
+-end Environment
+-
+-/-- Like `Expr.getUsedConstants`, but produce a `NameSet`. -/
+-def Expr.getUsedConstants' (e : Expr) : NameSet :=
+-  e.foldConsts {} fun c cs => cs.insert c
+-
+-namespace ConstantInfo
+-
+-/-- Return all names appearing in the type or value of a `ConstantInfo`. -/
+-def getUsedConstants (c : ConstantInfo) : NameSet :=
+-  c.type.getUsedConstants' ++ match c.value? with
+-  | some v => v.getUsedConstants'
+-  | none => match c with
+-    | .inductInfo val => .ofList val.ctors
+-    | .opaqueInfo val => val.value.getUsedConstants'
+-    | .ctorInfo val => ({} : NameSet).insert val.name
+-    | .recInfo val => .ofList val.all
+-    | _ => {}
+-
+-end ConstantInfo
+-
+-end Lean
++import Lean.Data.Json
++import Lean4Lean.VesperControls
+
++namespace Vesper.Lean4Lean42Machine
+ open Lean hiding Environment Exception
+-open Kernel
+-
+-structure Context where
+-  newConstants : Std.HashMap Name ConstantInfo
+-  verbose := false
+-  compare := false
+-
+-structure State where
+-  env : Environment
+-  remaining : NameSet := {}
+-  pending : NameSet := {}
+-  postponedConstructors : NameSet := {}
+-  postponedRecursors : NameSet := {}
+-  numAdded : Nat := 0
+-
+-abbrev M := ReaderT Context <| StateRefT State IO
+-
+-/-- Check if a `Name` still needs processing. If so, move it from `remaining` to `pending`. -/
+-def isTodo (name : Name) : M Bool := do
+-  let r := (← get).remaining
+-  if r.contains name then
+-    modify fun s => { s with remaining := s.remaining.erase name, pending := s.pending.insert name }
+-    return true
+-  else
+-    return false
+-
+-def Lean.Kernel.Exception.mapEnvM [Monad m]
+-    (ex : Exception) (f : Environment → m Environment) : m Exception := do
+-  match ex with
+-  | unknownConstant env c => return .unknownConstant (← f env) c
+-  | alreadyDeclared env c => return .alreadyDeclared (← f env) c
+-  | declTypeMismatch env d t => return .declTypeMismatch env d t
+-  | declHasMVars env c e => return declHasMVars (← f env) c e
+-  | declHasFVars env c e => return declHasFVars (← f env) c e
+-  | funExpected env lctx e => return funExpected (← f env) lctx e
+-  | typeExpected env lctx e => return typeExpected (← f env) lctx e
+-  | letTypeMismatch  env lctx n t1 t2 => return letTypeMismatch (← f env) lctx n t1 t2
+-  | exprTypeMismatch env lctx e t => return exprTypeMismatch (← f env) lctx e t
+-  | appTypeMismatch  env lctx e fn arg => return appTypeMismatch (← f env) lctx e fn arg
+-  | invalidProj env lctx e => return invalidProj (← f env) lctx e
+-  | thmTypeIsNotProp env c t => return thmTypeIsNotProp (← f env) c t
+-  | other _
+-  | deterministicTimeout
+-  | excessiveMemory
+-  | deepRecursion
+-  | interrupted => return ex
+-
+-/-- Use the current `Environment` to throw a `Kernel.Exception`. -/
+-def throwKernelException (ex : Exception) : M α := do
+-  let options := pp.match.set (pp.rawOnError.set {} true) false
+-  -- Note: because the environment we are using has no extension state,
+-  -- we cannot safely use it with lean functions like the pretty printer.
+-  -- Here we instead create a fresh environment, which is good enough to get
+-  -- basic pretty printing working.
+-  let env ← mkEmptyEnvironment
+-  let ex ← ex.mapEnvM fun _ => return env.toKernelEnv
+-  Prod.fst <$> (Lean.Core.CoreM.toIO · { fileName := "", options, fileMap := default } { env }) do
+-    Lean.throwKernelException ex
+-
+-def Lean.Declaration.name : Declaration → String
+-  | .axiomDecl d => s!"axiomDecl {d.name}"
+-  | .defnDecl d => s!"defnDecl {d.name}"
+-  | .thmDecl d => s!"thmDecl {d.name}"
+-  | .opaqueDecl d => s!"opaqueDecl {d.name}"
+-  | .quotDecl => s!"quotDecl"
+-  | .mutualDefnDecl d => s!"mutualDefnDecl {d.map (·.name)}"
+-  | .inductDecl _ _ d _ => s!"inductDecl {d.map (·.name)}"
+-
+-/-- Add a declaration, possibly throwing a `KernelException`. -/
+-def addDecl (d : Declaration) : M Unit := do
+-  if (← read).verbose then
+-    println! "adding {d.name}"
+-  let t1 ← IO.monoMsNow
+-  match Lean4Lean.addDecl (← get).env d true with
+-  | .ok env =>
+-    let t2 ← IO.monoMsNow
+-    if t2 - t1 > 1000 then
+-      if (← read).compare then
+-        let t3 ← match (← get).env.addDecl {} d with
+-        | .ok _ => IO.monoMsNow
+-        | .error ex => _root_.throwKernelException ex
+-        if (t2 - t1) > 2 * (t3 - t2) then
+-          println!
+-            "{(← get).env.header.mainModule}:{d.name}: lean took {t3 - t2}, lean4lean took {t2 - t1}"
+-        else
+-          println! "{(← get).env.header.mainModule}:{d.name}: lean4lean took {t2 - t1}"
+-      else
+-        println! "{(← get).env.header.mainModule}:{d.name}: lean4lean took {t2 - t1}"
+-    modify fun s => { s with env, numAdded := s.numAdded + 1 }
+-  | .error ex =>
+-    throwKernelException ex
+-
+-deriving instance BEq for ConstantVal
+-deriving instance BEq for ConstructorVal
+-deriving instance BEq for RecursorRule
+-deriving instance BEq for RecursorVal
++open Lean4Lean
++
++structure Failure where
++  category : String
++  detail : String
++abbrev MachineM := ExceptT Failure IO
++
++private def fail (category detail : String) : MachineM α := throw ⟨category, detail⟩
++private def limit (detail : String) : MachineM α := fail "limit" detail
++private def coverageError (detail : String) : MachineM α := fail "coverage" detail
++private def jn (n : Nat) : Json := toJson n
++private def jb (b : Bool) : Json := jn (if b then 1 else 0)
++private def frame (tag : Nat) (rest : Array Json := #[]) : Json := .arr (#[jn 1, jn tag] ++ rest)
++private def natArray (a : Array Nat) : Json := .arr (a.map jn)
++private def hardConstants : Nat := 524288
++private def hardNameBytes : Nat := 33554432
++private def hardInventoryBytes : Nat := 134217728
++private def hardStdout : Nat := 67108864
++
++structure Output where
++  handle : IO.FS.Stream
++  bytes : IO.Ref Nat
++
++def send (out : Output) (message : Json) : MachineM Unit := do
++  let payload := message.compress.toUTF8
++  let n := payload.size
++  if n == 0 || n > 65536 then limit "outgoing frame limit"
++  let used ← out.bytes.get
++  if used + n + 4 > hardStdout then limit "stdout limit"
++  let header : ByteArray := ⟨#[UInt8.ofNat n, UInt8.ofNat (n / 256),
++    UInt8.ofNat (n / 65536), UInt8.ofNat (n / 16777216)]⟩
++  let result ← (try
++    -- FS.Stream.write writes the full buffer or raises an IO error.
++    out.handle.write header
++    out.handle.write payload
++    out.handle.flush
++    out.bytes.set (used + n + 4)
++    pure true
++  catch _ => pure false : IO Bool)
++  if !result then fail "io" "writing framed output failed"
++
++
++/-- Bounded component walk before recursive comparison/JSON conversion. -/
++def encodeName (name : Name) : Except Failure (Json × Nat) := do
++  let mut current := name
++  let mut components : Array Json := #[]
++  let mut bytes := 2
++  let mut complete := false
++  for _ in [:129] do
++    match current with
++    | .anonymous => complete := true; break
++    | .str parent text =>
++      if components.size >= 128 || text.isEmpty || text.utf8ByteSize > 1024 then
++        throw ⟨"limit", "name component limit"⟩
++      bytes := bytes + 5 + text.utf8ByteSize
++      if bytes > 4096 then throw ⟨"limit", "encoded name limit"⟩
++      components := components.push (.arr #[jn 0, .str text])
++      current := parent
++    | .num parent number =>
++      if components.size >= 128 || number > 18446744073709551615 then
++        throw ⟨"limit", "numeric name component limit"⟩
++      bytes := bytes + 9
++      if bytes > 4096 then throw ⟨"limit", "encoded name limit"⟩
++      components := components.push (.arr #[jn 1, .str (toString number)])
++      current := parent
++  if !complete || components.isEmpty then throw ⟨"limit", "empty or deep name"⟩
++  pure (.arr components.reverse, bytes)
++
++private def encoded (name : Name) : MachineM (Json × Nat) :=
++  match encodeName name with | .ok x => pure x | .error e => throw e
++
++private def formOf : ConstantInfo → Nat
++  | .axiomInfo _ => 0 | .defnInfo _ => 1 | .thmInfo _ => 2 | .opaqueInfo _ => 3
++  | .inductInfo _ => 4 | .ctorInfo _ => 5 | .recInfo _ => 6 | .quotInfo _ => 7
++private def skipOf (ci : ConstantInfo) : Nat :=
++  (if ci.isUnsafe then 1 else 0) + (if ci.isPartial then 2 else 0)
++private def quotientNames : Array Name := #[``Quot, ``Quot.mk, ``Quot.lift, ``Quot.ind]
++private def quotientKind : QuotKind → Nat
++  | .type => 0 | .ctor => 1 | .lift => 2 | .ind => 3
++private def quotientMatches (a b : QuotVal) : Bool :=
++  a.toConstantVal == b.toConstantVal && quotientKind a.kind == quotientKind b.kind
++
++def targetName : Nat → Name
++  | 0 => `RewriteWitness | 1 => `ArithmeticOracle
++  | 2 => `Lean4Lean.VesperControls | 3 => `ResourceModel42Kernel
++  | _ => .anonymous
++private def rwRoot (s : String) : Name := .str (.str (.str .anonymous "Vesper") "RewriteWitness") s
++private def arRoot (s : String) : Name := .str (.str (.str .anonymous "Vesper") "ArithmeticOracle") s
++private def controlRoot : Name := `Vesper.Lean4Lean42Controls.runControls
++private def witnessRoots : Array Name := (#[
++  "r01_add_zero", "r02_zero_add", "r03_sub_zero", "r04_mul_one", "r05_one_mul",
++  "r06_mul_zero", "r07_zero_mul", "r08_self_sub", "r09_wadd_zero", "r10_wsub_zero",
++  "r11_wmul_one", "r12_wadd_comm", "r13_wmul_comm", "r14_wadd_assoc", "r15_wmul_assoc",
++  "r16_wadd_cancel", "r17_wmul_zero", "r18_wself_sub", "r19_checked_add_constants",
++  "r20_checked_sub_constants", "r21_checked_mul_constants", "r22_wrapping_add_constants",
++  "r23_wrapping_sub_constants", "r24_wrapping_mul_constants", "value_fits", "literal_exact",
++  "value_toInt_injective", "literal_roundtrip", "total_const", "total_var", "total_of_eq",
++  "congr_checked", "congr_wrapping"] : Array String).map rwRoot
++private def arithmeticRoots : Array Name :=
++  (#["checkExpr", "checkProgram", "evalSteps", "processRequest"] : Array String).map arRoot
++
++structure ModuleRecord where
++  name : Name
++  path : String
++  deriving Inhabited
++structure Entry where
++  name : Name
++  info : ConstantInfo
++  moduleId : Nat
++  form : Nat
++  skip : Nat
++  owners : Array Nat := #[]
++  deriving Inhabited
++structure Inventory where
++  target : Nat
++  modules : Array ModuleRecord
++  entries : Array Entry
++  index : Std.HashMap Name Nat
++  forms : Array Nat
++  eligibility : Array Nat
++  targetEligibility : Array Nat
++  nameBytes : Nat
++  required : Array Nat
++
++private def ownerGroup (index : Std.HashMap Name Nat) (names : List Name) : MachineM (Array Nat) := do
++  if names.isEmpty || names.length > 64 then coverageError "invalid metadata owner group size"
++  let mut ids : Array Nat := #[]
++  for name in names do
++    let some id := index[name]? | coverageError "metadata owner missing from inventory"
++    ids := ids.push id
++  ids := ids.qsort (· < ·)
++  for i in [1:ids.size] do
++    if ids[i-1]! == ids[i]! then coverageError "duplicate metadata owner"
++  pure ids
++
++/-- Native loaded data are bounded before constructing the retained index. -/
++def buildInventory (env : Lean.Environment) (target : Nat) : MachineM Inventory := do
++  let constants := env.constants
++  let count := constants.fold (fun n _ _ => n + 1) 0
++  if count == 0 || count > hardConstants then limit "constant inventory count"
++  if env.header.modules.isEmpty || env.header.modules.size > 8192 then limit "module inventory count"
++  let moduleNames := env.header.moduleNames
++  let mut moduleBytes := 0
++  for name in moduleNames do
++    let (_, n) ← encoded name
++    moduleBytes := moduleBytes + n
++  let sortedModules := moduleNames.qsort (fun a b => Name.cmp a b == .lt)
++  let mut modules : Array ModuleRecord := #[]
++  let mut moduleIndex : Std.HashMap Name Nat := {}
++  for name in sortedModules do
++    if moduleIndex.contains name then coverageError "duplicate module name"
++    let resolved ← findOLean name
++    let path := resolved.toString
++    if path.isEmpty || path.utf8ByteSize > 4096 then limit "resolved module path limit"
++    moduleBytes := moduleBytes + path.utf8ByteSize + 64
++    if moduleBytes + count * 256 > hardInventoryBytes then limit "retained inventory metadata"
++    moduleIndex := moduleIndex.insert name modules.size
++    modules := modules.push ⟨name, path⟩
++  let mut entries : Array Entry := #[]
++  let mut nameBytes := 0
++  let mut forms := Array.replicate 8 0
++  let mut eligibility := Array.replicate 4 0
++  let mut targetEligibility := Array.replicate 4 0
++  for (name, ci) in constants do
++    let (_, n) ← encoded name
++    nameBytes := nameBytes + n
++    if nameBytes > hardNameBytes || nameBytes + moduleBytes + count * 256 > hardInventoryBytes then
++      limit "aggregate inventory names or metadata"
++    if ci.name != name then coverageError "constant map key mismatch"
++    let some originalModule := env.getModuleIdxFor? name | coverageError "constant origin missing"
++    let some original := env.header.modules[originalModule.toNat]? |
++      coverageError "constant origin outside module array"
++    let some moduleId := moduleIndex[original.module]? | coverageError "origin module absent"
++    let form := formOf ci
++    let skip := skipOf ci
++    forms := forms.modify form (· + 1)
++    eligibility := eligibility.modify skip (· + 1)
++    if original.module == targetName target then
++      targetEligibility := targetEligibility.modify skip (· + 1)
++    entries := entries.push ⟨name, ci, moduleId, form, skip, #[]⟩
++  entries := entries.qsort (fun a b => Name.cmp a.name b.name == .lt)
++  let mut index : Std.HashMap Name Nat := {}
++  for i in [:entries.size] do
++    let e := entries[i]!
++    if index.contains e.name then coverageError "duplicate constant name"
++    index := index.insert e.name i
++  let quotientIds ← ownerGroup index quotientNames.toList
++  let mut ownerBytes := 0
++  for i in [:entries.size] do
++    let entry := entries[i]!
++    let owners ← match entry.info with
++      | .inductInfo info => ownerGroup index info.all
++      | .ctorInfo info => ownerGroup index [info.induct]
++      | .recInfo info => ownerGroup index info.all
++      | .quotInfo info => do
++        let some nameIndex := quotientNames.findIdx? (· == info.name) |
++          coverageError "unexpected quotient name"
++        if quotientKind info.kind != nameIndex then coverageError "quotient kind/name mismatch"
++        pure quotientIds
++      | _ => pure #[]
++    ownerBytes := ownerBytes + owners.size * 4 + 2
++    if nameBytes + moduleBytes + count * 256 + ownerBytes > hardInventoryBytes then
++      limit "owner inventory metadata"
++    entries := entries.set! i {entry with owners}
++  for i in [:entries.size] do
++    let entry := entries[i]!
++    if entry.form == 4 || entry.form == 6 then
++      for owner in entry.owners do
++        let some e := entries[owner]? | coverageError "owner outside inventory"
++        if e.form != 4 || e.skip != entry.skip || e.owners != entry.owners ||
++            e.moduleId != entry.moduleId then
++          coverageError "inconsistent mutual owner metadata"
++      if entry.form == 4 && !entry.owners.contains i then coverageError "inductive omits itself"
++    else if entry.form == 5 then
++      let some owner := entry.owners[0]? | coverageError "constructor owner missing"
++      let some e := entries[owner]? | coverageError "constructor owner outside inventory"
++      if e.form != 4 || e.skip != entry.skip || e.moduleId != entry.moduleId then
++        coverageError "invalid constructor owner"
++    else if entry.form == 7 then
++      if entry.skip != 0 || entry.owners != quotientIds then coverageError "invalid quotient group"
++      for owner in quotientIds do
++        let some e := entries[owner]? | coverageError "quotient ID missing"
++        if e.form != 7 || e.moduleId != entry.moduleId then coverageError "quotient group form or origin"
++  if target == 3 then
++    for e in entries do
++      if modules[e.moduleId]!.name == targetName target && e.skip != 0 then
++        coverageError "resource projection contains skipped declarations"
++  let mut required := if target == 3 then Array.mkEmpty targetEligibility[0]! else #[]
++  if target == 3 then
++    for i in [:entries.size] do
++      let e := entries[i]!
++      if modules[e.moduleId]!.name == targetName target then
++        required := required.push i
++  else
++    let roots := if target == 2 then #[controlRoot]
++      else if target == 0 then witnessRoots else witnessRoots ++ arithmeticRoots
++    for root in roots do
++      let some id := index[root]? | coverageError "required root absent"
++      let e := entries[id]!
++      let expectedModule := if target == 2 then targetName 2
++        else if witnessRoots.contains root then targetName 0 else targetName 1
++      if e.skip != 0 || modules[e.moduleId]!.name != expectedModule then
++        coverageError "required root origin or eligibility"
++      if (witnessRoots.contains root && e.form != 2) ||
++          (!witnessRoots.contains root && e.form != 1) then coverageError "required root form"
++      required := required.push id
++  if targetEligibility[0]! == 0 then coverageError "no target-owned eligible constants"
++  pure ⟨target, modules, entries, index, forms, eligibility, targetEligibility, nameBytes, required⟩
++
++def emitInventory (out : Output) (inv : Inventory) : MachineM Unit := do
++  send out (frame 1 #[jn inv.modules.size, natArray inv.forms, natArray inv.eligibility,
++    natArray inv.targetEligibility, jn inv.nameBytes])
++  for i in [:inv.modules.size] do
++    let m := inv.modules[i]!
++    let (name, _) ← encoded m.name
++    send out (frame 2 #[jn i, name, .str m.path])
++  for i in [:inv.entries.size] do
++    let e := inv.entries[i]!
++    let (name, _) ← encoded e.name
++    send out (frame 3 #[jn i, name, jn e.moduleId, jn e.form, jn e.skip, natArray e.owners])
++  send out (frame 4)
++
++structure ReplayContext where
++  inventory : Inventory
++  output : Output
++structure ReplayState where
++  env : Lean.Kernel.Environment
++  remaining : Array Bool
++  pending : Array Bool
++  covered : Array Bool
++  ctorPending : Array Bool
++  recPending : Array Bool
++  remainingCount : Nat
++  pendingCount : Nat := 0
++  ctorPendingCount : Nat := 0
++  recPendingCount : Nat := 0
++  additions : Nat := 0
++  coveredCount : Nat := 0
++  ctorCompares : Nat := 0
++  recCompares : Nat := 0
++  targetCovered : Nat := 0
++  eventSeq : Nat := 0
++abbrev ReplayM := ReaderT ReplayContext (StateRefT ReplayState MachineM)
++
++private def entryAt (id : Nat) : ReplayM Entry := do
++  let some e := (← read).inventory.entries[id]? | coverageError "unknown inventory ordinal"
++  pure e
++private def lookupId (name : Name) : ReplayM Nat := do
++  let some id := (← read).inventory.index[name]? | coverageError "dependency absent from inventory"
++  pure id
++private def clearWork (ids : Array Nat) : ReplayM Unit := do
++  for id in ids do
++    let _ ← entryAt id
++    let s ← get
++    let r := s.remaining[id]!
++    let p := s.pending[id]!
++    if (r && s.remainingCount == 0) || (p && s.pendingCount == 0) then
++      coverageError "work counter underflow"
++    modify fun s => {s with
++      remaining := s.remaining.set! id false
++      pending := s.pending.set! id false
++      remainingCount := s.remainingCount - (if r then 1 else 0)
++      pendingCount := s.pendingCount - (if p then 1 else 0)}
++
++private def recordCoverage (action : Nat) (ids : Array Nat) : ReplayM Unit := do
++  if ids.isEmpty || ids.size > 64 then coverageError "coverage group size"
++  for i in [1:ids.size] do
++    if ids[i-1]! >= ids[i]! then coverageError "coverage group order"
++  let inv := (← read).inventory
++  for id in ids do
++    let e ← entryAt id
++    if e.skip != 0 || (← get).covered[id]! then coverageError "ineligible or duplicate coverage"
++    match action with
++    | 0 => if e.form > 3 || ids.size != 1 then coverageError "scalar coverage form"
++    | 1 => if e.form != 4 || e.owners != ids then coverageError "inductive coverage group"
++    | 2 => if e.form != 7 || e.owners != ids || ids.size != 4 then coverageError "quotient coverage group"
++    | 3 | 4 =>
++      if ids.size != 1 || e.form != (if action == 3 then 5 else 6) then
++        coverageError "postponed coverage form"
++      for owner in e.owners do
++        if !(← get).covered[owner]! then coverageError "postponed owner not covered"
++    | _ => coverageError "unknown coverage action"
++  let sequence := (← get).eventSeq
++  for id in ids do
++    let e := inv.entries[id]!
++    let target := inv.modules[e.moduleId]!.name == targetName inv.target
++    modify fun s => {s with
++      covered := s.covered.set! id true
++      coveredCount := s.coveredCount + 1
++      targetCovered := s.targetCovered + (if target then 1 else 0)}
++  modify fun s => {s with
++    eventSeq := s.eventSeq + 1
++    additions := s.additions + (if action <= 2 then 1 else 0)
++    ctorCompares := s.ctorCompares + (if action == 3 then 1 else 0)
++    recCompares := s.recCompares + (if action == 4 then 1 else 0)}
++  send (← read).output (frame 5 #[jn sequence, jn action, natArray ids])
++
++private def checkerDetail : Lean.Kernel.Exception → String
++  | .unknownConstant _ name => "unknown constant: " ++ name.toString
++  | .alreadyDeclared _ name => "already declared: " ++ name.toString
++  | .declTypeMismatch .. => "declaration type mismatch"
++  | .declHasMVars .. => "declaration has metavariables"
++  | .declHasFVars .. => "declaration has free variables"
++  | .funExpected .. => "function expected"
++  | .typeExpected .. => "type expected"
++  | .letTypeMismatch .. => "let type mismatch"
++  | .exprTypeMismatch .. => "expression type mismatch"
++  | .appTypeMismatch .. => "application type mismatch"
++  | .invalidProj .. => "invalid projection"
++  | .thmTypeIsNotProp .. => "theorem type is not Prop"
++  | .other detail => detail
++  | .deterministicTimeout => "deterministic timeout"
++  | .excessiveMemory => "excessive memory"
++  | .deepRecursion => "deep recursion"
++  | .interrupted => "interrupted"
++
++private def checkedAddition (decl : Declaration) : ReplayM Unit := do
++  match Lean4Lean.addDecl (← get).env decl true with
++  | .error error => fail "checker" (checkerDetail error)
++  | .ok env => modify fun s => {s with env}
++
++-- Collect only exact names; each AST's underlying fold uses Lean's shared-node
++-- traversal. A dependency cannot grow the set beyond the bounded inventory.
++private def dependencies (ci : ConstantInfo) : ReplayM (Array Nat) := do
++  let inv := (← read).inventory
++  let addName (name : Name) (state : Except Failure (Std.HashSet Nat)) := do
++    let set ← state
++    let some id := inv.index[name]? | throw ⟨"coverage", "unknown declaration dependency"⟩
++    pure (set.insert id)
++  let mut names := ci.type.foldConsts (.ok {}) addName
++  if let some value := ci.value? (allowOpaque := true) then
++    names := value.foldConsts names addName
++  else match ci with
++    | .inductInfo info => for name in info.ctors do names := addName name names
++    | .ctorInfo info => names := addName info.name names
++    | .recInfo info => for name in info.all do names := addName name names
++    | _ => pure ()
++  match names with
++  | .error e => throw e
++  | .ok set => pure (set.toArray.qsort (· < ·))
+
+ mutual
+-/--
+-Check if a `Name` still needs to be processed (i.e. is in `remaining`).
+-
+-If so, recursively replay any constants it refers to,
+-to ensure we add declarations in the right order.
+-
+-The construct the `Declaration` from its stored `ConstantInfo`,
+-and add it to the environment.
+--/
+-partial def replayConstant (name : Name) : M Unit := do
+-  if ← isTodo name then
+-    let some ci := (← read).newConstants[name]? | unreachable!
+-    replayConstants ci.getUsedConstants
+-    -- Check that this name is still pending: a mutual block may have taken care of it.
+-    if (← get).pending.contains name then
+-      match ci with
+-      | .defnInfo   info =>
+-        addDecl (Declaration.defnDecl   info)
+-      | .thmInfo    info =>
+-        addDecl (Declaration.thmDecl    info)
+-      | .axiomInfo  info =>
+-        addDecl (Declaration.axiomDecl  info)
+-      | .opaqueInfo info =>
+-        addDecl (Declaration.opaqueDecl info)
++partial def replayId (id : Nat) : ReplayM Unit := do
++  let ci ← entryAt id
++  if !(← get).remaining[id]! then return
++  if ci.skip != 0 then coverageError "attempt to replay a skipped constant"
++  if (← get).remainingCount == 0 then coverageError "remaining counter underflow"
++  modify fun s => {s with
++    remaining := s.remaining.set! id false
++    pending := s.pending.set! id true
++    remainingCount := s.remainingCount - 1
++    pendingCount := s.pendingCount + 1}
++  match ci.info with
++  | .quotInfo _ =>
++    -- A quotient group is initialized once, after its explicit Eq prerequisite.
++    replayId (← lookupId ``Eq)
++    if (← get).env.quotInit then coverageError "second quotient initialization"
++    let group := ci.owners
++    for qid in group do
++      let q ← entryAt qid
++      if (← get).env.constants.contains q.name then coverageError "occupied quotient name"
++    clearWork group
++    checkedAddition .quotDecl
++    for qid in group do
++      let q ← entryAt qid
++      let some (.quotInfo original) := some q.info | coverageError "quotient inventory form"
++      let some (.quotInfo generated) := (← get).env.find? q.name |
++        coverageError "generated quotient metadata missing"
++      if !quotientMatches generated original then coverageError "quotient metadata mismatch"
++    recordCoverage 2 group
++  | _ =>
++    for dep in (← dependencies ci.info) do replayId dep
++    -- A different mutually-inductive member may already have added this group.
++    if (← get).pending[id]! then
++      match ci.info with
++      | .axiomInfo info => checkedAddition (.axiomDecl info); recordCoverage 0 #[id]
++      | .defnInfo info => checkedAddition (.defnDecl info); recordCoverage 0 #[id]
++      | .thmInfo info => checkedAddition (.thmDecl info); recordCoverage 0 #[id]
++      | .opaqueInfo info => checkedAddition (.opaqueDecl info); recordCoverage 0 #[id]
+       | .inductInfo info =>
+-        let lparams := info.levelParams
+-        let nparams := info.numParams
+-        let all ← info.all.mapM fun n => do pure <| (← read).newConstants[n]!
+-        for o in all do
+-          -- There is exactly one awkward special case here:
+-          -- `String` is a primitive type, which depends on `Char.ofNat` to exist
+-          -- because the kernel treats the existence of the `String` type as license
+-          -- to use string literals, which use `Char.ofNat` internally. However
+-          -- this definition is not transitively reachable from the declaration of `String`.
+-          if o.name == ``String then replayConstant ``Char.ofNat
+-          modify fun s =>
+-            { s with remaining := s.remaining.erase o.name, pending := s.pending.erase o.name }
+-        let ctorInfo ← all.mapM fun ci => do
+-          pure (ci, ← ci.inductiveVal!.ctors.mapM fun n => do
+-            pure (← read).newConstants[n]!)
+-        -- Make sure we are really finished with the constructors.
+-        for (_, ctors) in ctorInfo do
+-          for ctor in ctors do
+-            replayConstants ctor.getUsedConstants
+-        let types : List InductiveType := ctorInfo.map fun ⟨ci, ctors⟩ =>
+-          { name := ci.name
+-            type := ci.type
+-            ctors := ctors.map fun ci => { name := ci.name, type := ci.type } }
+-        addDecl (Declaration.inductDecl lparams nparams types false)
+-      -- We postpone checking constructors,
+-      -- and at the end make sure they are identical
+-      -- to the constructors generated when we replay the inductives.
+-      | .ctorInfo info =>
+-        modify fun s => { s with postponedConstructors := s.postponedConstructors.insert info.name }
+-      -- Similarly we postpone checking recursors.
+-      | .recInfo info =>
+-        modify fun s => { s with postponedRecursors := s.postponedRecursors.insert info.name }
+-      | .quotInfo _ =>
+-        addDecl (Declaration.quotDecl)
+-      modify fun s => { s with pending := s.pending.erase name }
+-
+-/-- Replay a set of constants one at a time. -/
+-partial def replayConstants (names : NameSet) : M Unit := do
+-  for n in names do replayConstant n
+-
++        let group := ci.owners
++        -- Kernel string-literal support requires this checked declaration even
++        -- though it is not a dependency of String's stored constructor type.
++        for memberName in info.all do
++          if memberName == ``String then replayId (← lookupId ``Char.ofNat)
++        clearWork group
++        let mut types : List InductiveType := []
++        -- Wire groups use sorted ordinals; declaration construction preserves
++        -- the original mutual order, which generated recursor metadata records.
++        for memberName in info.all do
++          let e ← entryAt (← lookupId memberName)
++          let some (.inductInfo i) := some e.info | coverageError "inductive group form"
++          if i.all != info.all || i.levelParams != info.levelParams ||
++              i.numParams != info.numParams || i.isUnsafe then
++            coverageError "mixed inductive group headers or eligibility"
++          let mut ctors : List Constructor := []
++          for name in i.ctors do
++            let cid ← lookupId name
++            let c ← entryAt cid
++            let some (.ctorInfo constructor) := some c.info | coverageError "constructor group form"
++            if constructor.induct != i.name || c.skip != 0 then coverageError "constructor ownership"
++            for dep in (← dependencies c.info) do replayId dep
++            ctors := ctors.concat {name := constructor.name, type := constructor.type}
++          types := types.concat {name := i.name, type := i.type, ctors}
++        checkedAddition (.inductDecl info.levelParams info.numParams types false)
++        recordCoverage 1 group
++      | .ctorInfo _ =>
++        if (← get).ctorPending[id]! then coverageError "duplicate postponed constructor"
++        modify fun s => {s with
++          ctorPending := s.ctorPending.set! id true
++          ctorPendingCount := s.ctorPendingCount + 1}
++      | .recInfo _ =>
++        if (← get).recPending[id]! then coverageError "duplicate postponed recursor"
++        modify fun s => {s with
++          recPending := s.recPending.set! id true
++          recPendingCount := s.recPendingCount + 1}
++      | .quotInfo _ => coverageError "unexpected quotient branch"
++    clearWork #[id]
+ end
+
+-/--
+-Check that all postponed constructors are identical to those generated
+-when we replayed the inductives.
+--/
+-def checkPostponedConstructors : M Unit := do
+-  for ctor in (← get).postponedConstructors do
+-    match (← get).env.constants.find? ctor, (← read).newConstants[ctor]? with
+-    | some (.ctorInfo info), some (.ctorInfo info') =>
+-      if ! (info == info') then throw <| IO.userError s!"Invalid constructor {ctor}"
+-    | _, _ => throw <| IO.userError s!"No such constructor {ctor}"
+-
+-/--
+-Check that all postponed recursors are identical to those generated
+-when we replayed the inductives.
+--/
+-def checkPostponedRecursors : M Unit := do
+-  for ctor in (← get).postponedRecursors do
+-    match (← get).env.constants.find? ctor, (← read).newConstants[ctor]? with
+-    | some (.recInfo info), some (.recInfo info') =>
+-      if ! (info == info') then throw <| IO.userError s!"Invalid recursor {ctor}"
+-    | _, _ => throw <| IO.userError s!"No such recursor {ctor}"
+-
+-/--
+-Check that at the end of (any) file, the quotient module is initialized by the end.
+-(It will already be initialized at the beginning, unless this is the very first file,
+-`Init.Core`, which is responsible for initializing it.)
+-This is needed because it is an assumption in `finalizeImport`.
+--/
+-def checkQuotInit : M Unit := do
+-  unless (← get).env.quotInit do
+-    throw <| IO.userError s!"initial import (Init.Core) didn't initialize quotient module"
+-
+-/-- "Replay" some constants into an `Environment`, sending them to the kernel for checking. -/
+-def replay (ctx : Context) (env : Environment) (decl : Option Name := none) :
+-    IO (Nat × Environment) := do
+-  let mut remaining : NameSet := ∅
+-  for (n, ci) in ctx.newConstants.toList do
+-    -- We skip unsafe constants, and also partial constants.
+-    -- Later we may want to handle partial constants.
+-    if !ci.isUnsafe && !ci.isPartial then
+-      remaining := remaining.insert n
+-  let (_, s) ← StateRefT'.run (s := { env, remaining }) do
+-    ReaderT.run (r := ctx) do
+-      match decl with
+-      | some d => replayConstant d
+-      | none =>
+-        for n in remaining do
+-          replayConstant n
+-      checkPostponedConstructors
+-      checkPostponedRecursors
+-      checkQuotInit
+-  return (s.numAdded, s.env)
+-
+-open private ImportedModule.mk from Lean.Environment in
+-unsafe def replayFromImports (module : Name) (verbose := false) (compare := false) : IO Nat := do
+-  let mFile ← findOLean module
+-  unless (← mFile.pathExists) do
+-    throw <| IO.userError s!"object file '{mFile}' of module {module} does not exist"
+-  let (mod, region) ← readModuleData mFile
+-  let (_, s) ← (importModulesCore mod.imports).run
+-  let env ← match Kernel.Environment.finalizeImport s mod.imports module 0 with
+-    | .ok env => pure env
+-    | .error e => throw <| .userError <| ← (e.toMessageData {}).toString
+-  let mut newConstants := {}
+-  for name in mod.constNames, ci in mod.constants do
+-    newConstants := newConstants.insert name ci
+-  let (n, env') ← replay { newConstants, verbose, compare } env
+-  (Environment.ofKernelEnv env').freeRegions
+-  region.free
+-  pure n
+-
+-unsafe def replayFromFresh (module : Name)
+-    (verbose := false) (compare := false) (decl : Option Name := none) : IO Nat := do
+-  Lean.withImportModules #[] {} (trustLevel := 0) fun env => do
+-    let ctx := { newConstants := env.constants.map₁, verbose, compare }
+-    Prod.fst <$> replay ctx (.empty module) decl
+-
+-/-- Read the name of the main module from the `lake-manifest`. -/
+--- This has been copied from `ImportGraph.getCurrentModule` in the
+--- https://github.com/leanprover-community/import-graph repository.
+-def getCurrentModule : IO Name := do
+-  match (← Lake.Manifest.load? ⟨"lake-manifest.json"⟩) with
+-  | none =>
+-    -- TODO: should this be caught?
+-    pure .anonymous
+-  | some manifest =>
+-    -- TODO: This assumes that the `package` and the default `lean_lib`
+-    -- have the same name up to capitalisation.
+-    -- Would be better to read the `.defaultTargets` from the
+-    -- `← getRootPackage` from `Lake`, but I can't make that work with the monads involved.
+-    return manifest.name.capitalize
+-
+-/--
+-Run as e.g. `lake exe lean4lean` to check everything in the current project.
+-or e.g. `lake exe lean4lean Mathlib.Data.Nat` to check everything with module name
+-starting with `Mathlib.Data.Nat`.
+-
+-This will replay all the new declarations from the target file into the `Environment`
+-as it was at the beginning of the file, using the kernel to check them.
+-
+-You can also use `lake exe lean4lean --fresh Mathlib.Data.Nat.Basic` to replay all the constants
+-(both imported and defined in that file) into a fresh environment,
+-but this can only be used on a single file.
+--/
+-unsafe def main (args : List String) : IO UInt32 := do
+-  initSearchPath (← findSysroot)
+-  let (flags, args) := args.partition fun s => s.startsWith "-"
+-  let verbose := "-v" ∈ flags || "--verbose" ∈ flags
+-  let fresh : Bool := "--fresh" ∈ flags
+-  let compare : Bool := "--compare" ∈ flags
+-  let targets ← do
+-    match args with
+-    | [] => pure [← getCurrentModule]
+-    | args => args.mapM fun arg => do
+-      let mod := arg.toName
+-      if mod.isAnonymous then
+-        throw <| IO.userError s!"Could not resolve module: {arg}"
+-      else
+-        pure mod
+-  let mut targetModules := []
+-  let sp ← searchPathRef.get
+-  for target in targets do
+-    let mut found := false
+-    for path in (← SearchPath.findAllWithExt sp "olean") do
+-      if let some m := (← searchModuleNameOfFileName path sp) then
+-        if target.isPrefixOf m then
+-          targetModules := targetModules.insert m
+-          found := true
+-    if not found then
+-      throw <| IO.userError s!"Could not find any oleans for: {target}"
+-  let mut n := 0
+-  if fresh then
+-    if targetModules.length != 1 then
+-      throw <| IO.userError s!"--fresh flag is only valid when specifying a single module:\n\
+-        {targetModules}"
+-    for m in targetModules do
+-      if verbose then IO.println s!"replaying {m} with --fresh"
+-      n := n + (← replayFromFresh m verbose compare)
+-  else
+-    let mut tasks := #[]
+-    for m in targetModules do
+-      tasks := tasks.push (m, ← IO.asTask (replayFromImports m verbose compare))
+-    let mut err := false
+-    for (m, t) in tasks do
+-      if verbose then IO.println s!"replaying {m}"
+-      match t.get with
+-      | .error e =>
+-        IO.eprintln s!"lean4lean found a problem in {m}:\n{e.toString}"
+-        err := true
+-      | .ok n' => n := n + n'
+-    if err then return 1
+-  println! "checked {n} declarations"
+-  return 0
++private def comparePostponed : ReplayM Unit := do
++  let inv := (← read).inventory
++  for id in [:inv.entries.size] do
++    let e := inv.entries[id]!
++    if (← get).ctorPending[id]! then
++      let some (.ctorInfo original) := some e.info | coverageError "postponed constructor form"
++      let some (.ctorInfo generated) := (← get).env.find? e.name |
++        coverageError "postponed constructor missing"
++      if !Lean4Lean42Controls.constructorMetadataMatches generated original then
++        coverageError "constructor metadata mismatch"
++      recordCoverage 3 #[id]
++      modify fun s => {s with
++        ctorPending := s.ctorPending.set! id false
++        ctorPendingCount := s.ctorPendingCount - 1}
++    if (← get).recPending[id]! then
++      let some (.recInfo original) := some e.info | coverageError "postponed recursor form"
++      let some (.recInfo generated) := (← get).env.find? e.name |
++        coverageError "postponed recursor missing"
++      if !Lean4Lean42Controls.recursorMetadataMatches generated original then
++        coverageError "recursor metadata mismatch"
++      recordCoverage 4 #[id]
++      modify fun s => {s with
++        recPending := s.recPending.set! id false
++        recPendingCount := s.recPendingCount - 1}
++
++private def checkComplete : ReplayM Unit := do
++  let inv := (← read).inventory
++  let s ← get
++  if s.remainingCount != 0 || s.pendingCount != 0 || s.ctorPendingCount != 0 ||
++      s.recPendingCount != 0 then coverageError "unresolved replay work"
++  if s.coveredCount != inv.eligibility[0]! || s.targetCovered != inv.targetEligibility[0]! then
++    coverageError "incomplete eligible coverage"
++  let mut ctorExpected := 0
++  let mut recExpected := 0
++  for id in [:inv.entries.size] do
++    let e := inv.entries[id]!
++    if s.remaining[id]! || s.pending[id]! || s.ctorPending[id]! || s.recPending[id]! then
++      coverageError "nonempty replay work bitset"
++    if s.covered[id]! != (e.skip == 0) then coverageError "coverage eligibility bitset mismatch"
++    if e.skip == 0 && e.form == 5 then ctorExpected := ctorExpected + 1
++    if e.skip == 0 && e.form == 6 then recExpected := recExpected + 1
++  if s.ctorCompares != ctorExpected || s.recCompares != recExpected then
++    coverageError "incomplete postponed comparisons"
++  for id in inv.required do
++    if !s.covered[id]! then coverageError "required root uncovered"
++
++private def runReplay (out : Output) (inv : Inventory) : MachineM ReplayState := do
++  for id in [:inv.entries.size] do
++    let e := inv.entries[id]!
++    if e.skip != 0 then send out (frame 6 #[jn id, jn e.skip])
++  let flags := Array.replicate inv.entries.size false
++  let initial : ReplayState := {
++    env := Lean.Kernel.Environment.empty (targetName inv.target)
++    remaining := inv.entries.map (fun e => e.skip == 0)
++    pending := flags, covered := flags, ctorPending := flags, recPending := flags
++    remainingCount := inv.eligibility[0]! }
++  let (_, s) ← StateRefT'.run (s := initial) do
++    ReaderT.run (r := {inventory := inv, output := out}) do
++      for id in [:inv.entries.size] do replayId id
++      comparePostponed
++      checkComplete
++  pure s
++
++structure Arguments where
++  mode : Nat
++  target : Nat
++  token : String
++
++private def validToken (token : String) : Bool :=
++  if token.utf8ByteSize != 32 then false else
++    token.toList.all fun c => ('0' <= c && c <= '9') || ('a' <= c && c <= 'f')
++
++def parseArguments : List String → Except Failure Arguments
++  | ["--vesper42", mode, target, token] => do
++    let mode ← match mode with
++      | "0" => pure 0 | "1" => pure 1 | "2" => pure 2 | "3" => pure 3
++      | _ => throw ⟨"io", "invalid machine mode"⟩
++    let target ← match target with
++      | "0" => pure 0 | "1" => pure 1 | "2" => pure 2 | "3" => pure 3
++      | _ => throw ⟨"io", "invalid machine target"⟩
++    if !validToken token then throw ⟨"io", "invalid machine token"⟩
++    if (mode == 1 && target == 2) || (mode >= 2 && target != 2) then
++      throw ⟨"io", "invalid mode/target pair"⟩
++    pure ⟨mode, target, token⟩
++  | _ => .error ⟨"io", "expected exactly --vesper42 MODE TARGET TOKEN"⟩
++
++private def done (out : Output) (args : Arguments)
++    (additions covered ctorCompares recCompares unsafeOnly partialOnly both targetCovered
++      remaining pending ctorPending recPending controls matchedControls : Nat := 0) : MachineM Unit :=
++  send out (frame 9 #[.str args.token, jn args.mode, jn args.target,
++    jn additions, jn covered, jn ctorCompares, jn recCompares,
++    jn unsafeOnly, jn partialOnly, jn both, jn targetCovered,
++    jn remaining, jn pending, jn ctorPending, jn recPending,
++    jn controls, jn matchedControls])
++
++private def printableBounded (s : String) : Bool :=
++  if s.isEmpty || s.utf8ByteSize > 128 then false
++  else s.toList.all fun c => c.toNat >= 32 && c.toNat <= 126
++
++private def checkControls (out : Output) (args : Arguments) (env : Lean.Environment) : MachineM Unit := do
++  let count := env.constants.fold (fun n _ _ => n + 1) 0
++  if count == 0 || count > hardConstants then limit "control baseline constant count"
++  let some ci := env.find? controlRoot | coverageError "control root absent"
++  let some origin := env.getModuleIdxFor? controlRoot | coverageError "control root origin absent"
++  let some module := env.header.modules[origin.toNat]? | coverageError "control root origin index"
++  if module.module != targetName 2 || skipOf ci != 0 || formOf ci != 1 then
++    coverageError "control root binding mismatch"
++  let rows ← Lean4Lean42Controls.runControls env.toKernelEnv
++  if rows.isEmpty || rows.size > 256 then limit "control count"
++  send out (frame 7 #[jn rows.size])
++  let mut seen : Std.HashSet String := {}
++  let mut matched := 0
++  for i in [:rows.size] do
++    let some r := rows[i]? | fail "controls" "control index out of bounds"
++    if !printableBounded r.id || !printableBounded r.expectedReason || !printableBounded r.actualReason then
++      limit "control ID or reason limit"
++    if seen.contains r.id then fail "controls" "duplicate control ID"
++    seen := seen.insert r.id
++    let actualMatched := r.expectedAccept == r.actualAccept && r.expectedReason == r.actualReason
++    if r.matched != actualMatched then fail "controls" "incorrect returned control match"
++    send out (frame 8 #[jn i, .str r.id, jb r.expectedAccept, jb r.actualAccept,
++      .str r.expectedReason, .str r.actualReason, jb actualMatched])
++    if actualMatched then matched := matched + 1
++  if matched != rows.size then fail "controls" "fixed control refusal or mismatch"
++  done out args (controls := rows.size) (matchedControls := matched)
++
++private def cutDetail (s : String) : String := Id.run do
++  if s.utf8ByteSize <= 4096 then return s
++  let bytes := s.toUTF8
++  let mut n := 4096
++  for _ in [:4] do
++    if let some beginning := String.fromUTF8? (bytes.extract 0 n) then return beginning
++    n := n - 1
++  return "diagnostic exceeded limit"
++
++private unsafe def withClosure (target : Nat) (action : Lean.Environment → MachineM Unit) : MachineM Unit :=
++  ExceptT.mk do
++    try
++      Lean.withImportModules #[{module := targetName target, importAll := true}] {}
++        (trustLevel := 0) fun env => (action env).run
++    catch _ => pure (.error ⟨"import", "native target import failed"⟩)
++
++private unsafe def machine (out : Output) (args : Arguments) : MachineM Unit := do
++  if Lean.versionString != "4.24.0" then fail "internal" "unsupported Lean version"
++  send out (frame 0 #[.str args.token, jn args.mode, jn args.target,
++    .str "4.24.0", .str "vesper.lean4lean42/2"])
++  let input ← IO.getStdin
++  let unexpected ← input.read 1
++  if !unexpected.isEmpty then fail "io" "machine mode accepts no stdin language"
++  if args.mode == 3 then done out args
++  else if args.mode == 2 then withClosure 2 (checkControls out args)
++  else withClosure args.target fun env => do
++    let inv ← buildInventory env args.target
++    emitInventory out inv
++    if args.mode == 0 then
++      done out args (unsafeOnly := inv.eligibility[1]!)
++        (partialOnly := inv.eligibility[2]!) (both := inv.eligibility[3]!)
++    else
++      let s ← runReplay out inv
++      done out args (additions := s.additions) (covered := s.coveredCount)
++        (ctorCompares := s.ctorCompares) (recCompares := s.recCompares)
++        (unsafeOnly := inv.eligibility[1]!) (partialOnly := inv.eligibility[2]!)
++        (both := inv.eligibility[3]!) (targetCovered := s.targetCovered)
++        (remaining := s.remainingCount) (pending := s.pendingCount)
++        (ctorPending := s.ctorPendingCount) (recPending := s.recPendingCount)
++
++unsafe def run (argv : List String) : IO UInt32 := do
++  let handle ← IO.getStdout
++  let bytes ← IO.mkRef 0
++  let out : Output := ⟨handle, bytes⟩
++  let result ← try
++    match parseArguments argv with
++    | .error e => pure (.error e)
++    | .ok args =>
++      initSearchPath (← findSysroot)
++      (machine out args).run
++  catch _ => pure (.error ⟨"io", "machine IO failure"⟩)
++  match result with
++  | .ok _ => pure 0
++  | .error error =>
++    let _ ← (send out (frame 10 #[.str error.category, .str (cutDetail error.detail)])).run
++    pure 1
++
++end Vesper.Lean4Lean42Machine
++
++unsafe def main (args : List String) : IO UInt32 := Vesper.Lean4Lean42Machine.run args

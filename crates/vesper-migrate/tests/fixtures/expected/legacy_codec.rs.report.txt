@@ -1,0 +1,49 @@
+vesper.migrate/1 report for Rust crate `legacy_codec`
+
+functions lifted: 13
+  DecoderStats::into_parts [vesper only]
+  DecoderStats::observe [vesper only]
+  DecoderStats::reset [vesper only]
+  DecoderStats::summary [vesper only]
+  legacy_bump_crc [vsys]
+  legacy_classify [vsys]
+  legacy_header_len [vsys]
+  legacy_parse_batch_header [vsys]
+    assumed: `raw_bytes` + `raw_len` form a nocapture slice (from annotation)
+    assumed: `out_crc` is a non-null nocapture inout element (from annotation)
+    assumed: `out_count` is a non-null nocapture inout element (from annotation)
+  legacy_parse_batch_header_into [vsys]
+    assumed: `raw_bytes` + `raw_len` form a nocapture slice (from annotation)
+    assumed: `out` + `out_len` form a nocapture slice (from annotation)
+  legacy_reset_stats [vsys]
+    assumed: `stats` is a non-null nocapture out element (from annotation)
+  legacy_swap [vesper only]
+    assumed: `a` is a non-null nocapture inout element (from annotation)
+    assumed: `b` is a non-null nocapture inout element (from annotation)
+  parse_batch_header [vesper only]
+  record_bytes_hint [vesper only]
+
+wire layouts: 1
+  DecoderStats: 16 bytes, align 8
+
+refusals: 18
+  const HEADER_LEN (UnsupportedItem): constants are not part of a migrated signature
+  const MAX_BATCH (UnsupportedItem): constants are not part of a migrated signature
+  fn DecoderStats::into_parts: vsys (NotCAbi): methods are not C-ABI symbols
+  fn DecoderStats::observe: vsys (NotCAbi): methods are not C-ABI symbols
+  fn DecoderStats::reset: vsys (NotCAbi): methods are not C-ABI symbols
+  fn DecoderStats::summary: vsys (NotCAbi): methods are not C-ABI symbols
+  fn bump (InteriorMutability): parameter `shared`: uses `SharedHits`, which was refused: field `hits`: `Cell` permits mutation through a shared reference
+  fn checksum (Generic): type and const generics are not lifted
+  fn cursor_peek (BorrowingType): parameter `cursor`: `Cursor` carries a lifetime, so it stores borrows
+  fn first_byte (ReturnedBorrow): returns a borrow; Vesper signatures are lifetime-free
+  fn legacy_swap: vsys (AliasingPointers): `a` and `b` point to the same type and one is written; a signature cannot show they are distinct objects
+  fn on_record (FunctionPointer): parameter `callback`: function pointers are unsupported
+  fn parse_batch_header: vsys (NotCAbi): not `extern "C"`; a C-ABI shim is needed before a .vsys entry exists
+  fn raw_peek (RawPointerWithoutAnnotation): parameter `p` is a raw pointer; add `/// vesper-migrate: p in|inout [len <param>]`
+  fn record_bytes_hint: vsys (NotCAbi): not `extern "C"`; a C-ABI shim is needed before a .vsys entry exists
+  fn rewind (SelfReferentialLifetime): parameter `window`: `&'a` borrows a referent that is itself parameterized by `'a`
+  struct Cursor (BorrowingType): struct has lifetime parameters, so it stores borrows
+  struct SharedHits (InteriorMutability): field `hits`: `Cell` permits mutation through a shared reference
+
+limits: finite differential shadowing is not an equivalence proof; MPK/PKRU isolation was not exercised.

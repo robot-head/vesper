@@ -1,0 +1,17 @@
+effect Log {
+    fn event();
+}
+fn leaf() eff [Log] {
+    Log::event();
+}
+fn middle() eff [Log] {
+    leaf();
+}
+macro leaky() -> expr {
+    quote {
+        middle()
+    }
+}
+fn main() eff [Log] {
+    leaky!()
+}

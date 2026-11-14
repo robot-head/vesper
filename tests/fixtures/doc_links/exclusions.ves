@@ -1,0 +1,20 @@
+//! Only [present] is a reference here.
+//! `ordinary [NoInline]` and ``two ` delimiters [NoDouble]``.
+//! \[NoEscape] and ![NoImage](evil.png) and [NoUrl](https://example.invalid).
+//! [NoReference][id]
+//! [id]: https://example.invalid
+//! [T-CallProj] is prose; <script>alert("x")</script> & "quoted" stay escaped.
+//! ```vesper
+//! [NoFence]
+//! ```
+//! ~~~~text
+//! [NoTilde]
+//! ~~~~
+//// [NoFourSlash]
+// [NoOrdinary]
+fn text() -> String {
+    "/// [NoString]"
+}
+fn present() -> i64 {
+    42
+}

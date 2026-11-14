@@ -1,0 +1,53 @@
+vesper.migrate/1 report for C header `legacy_codec.h`
+
+functions lifted: 12
+  legacy_parse_batch_header [vsys]
+    assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice of `u8`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
+    assumed: `out_crc` lifted to a nocapture inout pointer to one `u32`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show single-element or non-retention
+    assumed: `out_count` lifted to a nocapture inout pointer to one `i32`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show single-element or non-retention
+  legacy_parse_batch_header_into [vsys]
+    assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice of `u8`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
+    assumed: `out` + `out_len` lifted to a nocapture unique slice of `u32`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
+  legacy_crc32c [vsys]
+    assumed: `data` + `len` lifted to a nocapture shared slice of `u8`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show that the callee does not retain the pointer
+  legacy_encode [vsys]
+    assumed: `src` + `src_len` lifted to a nocapture shared slice of `u8`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show that the callee does not retain the pointer
+    assumed: `dst` + `dst_len` lifted to a nocapture unique slice of `u8`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show that the callee does not retain the pointer
+  legacy_status [vsys]
+  legacy_version [vsys]
+  legacy_reset [vsys]
+  legacy_crc_table [vsys]
+  legacy_read_header [vsys]
+    assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice of `u8`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
+    assumed: `out_hdr` lifted to a nocapture inout pointer to one `batch_header`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show single-element or non-retention
+  legacy_fill [vsys]
+    assumed: `stats` lifted to a nocapture inout pointer to one `decoder_stats`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show single-element or non-retention
+  legacy_sum_headers [vsys]
+    assumed: `headers` + `count` lifted to a nocapture shared slice of `batch_header`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
+  legacy_stamp_headers [vsys]
+    assumed: `headers` + `count` lifted to a nocapture unique slice of `batch_header`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show that the callee does not retain the pointer
+
+wire layouts: 2
+  batch_header: 24 bytes, align 8
+  decoder_stats: 32 bytes, align 8
+
+refusals: 17
+  enum codec_status (ImplementationDefinedCarrier): a C enum's ABI carrier is implementation-defined; pass it through a fixed-width typedef
+  fn legacy_attach (OpaquePointer): parameter `context` has an opaque, void or nested pointee
+  fn legacy_flush (UnsupportedItem): `()` or K&R parameters declare no prototype in C; write `(void)`
+  fn legacy_inline_helper (UnsupportedItem): static functions have no linkable symbol
+  fn legacy_last_status (ImplementationDefinedCarrier): returns a C `_Bool`/enum
+  fn legacy_log (Variadic): variadic functions have no fixed ABI signature
+  fn legacy_offset (PlatformDependentWidth): return type: `long` is 32-bit on Windows and 64-bit on LP64 targets; use a fixed-width integer
+  fn legacy_pack (PointerParameter): parameter `record` points to struct `padded_record` (one element or a slice), which has no checked wire layout
+  fn legacy_pack_all (PointerParameter): parameter `records` points to struct `padded_record` (one element or a slice), which has no checked wire layout
+  fn legacy_ratio (Floating): return type: floating point carrier
+  fn legacy_register (FunctionPointer): parameter `callback`: function pointers and callbacks are unsupported
+  fn legacy_set_name (ArrayWithoutLength): byte pointer `name` has no size_t length: a buffer or string of unknown extent, not one element
+  fn legacy_sum4 (ArrayWithoutLength): array parameter `values` is not followed by a size_t length; its extent is unknown
+  fn legacy_swap (AliasingPointers): `a` and `b` point to the same type and one is written; a signature cannot show they are distinct objects
+  global legacy_global_counter (UnsupportedItem): global variables are not part of a Bridge sys-spec
+  struct padded_record (WireLayout): wire layout padded_record.value: offset 1 requires alignment 4; add explicit ZeroPad[3]
+  union legacy_word (Union): unions overlay fields and have no FieldTree or wire layout
+
+limits: finite differential shadowing is not an equivalence proof; MPK/PKRU isolation was not exercised.

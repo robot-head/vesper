@@ -1,0 +1,58 @@
+name: Aura GTK 4 under Xvfb
+# crates/vesper-aura-gtk links the system GTK 4, which hermetic Bazel and the
+# macOS/Windows lanes do not have, so its GTK code is behind the crate's `gtk`
+# feature (off in every other build). This workflow installs GTK 4 from the
+# Ubuntu archive and runs the crate's real-widget tests headless under Xvfb.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/vesper-aura-gtk/**'
+      - 'crates/vesper-aura/**'
+      - '.github/workflows/aura-gtk.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/vesper-aura-gtk/**'
+      - 'crates/vesper-aura/**'
+      - '.github/workflows/aura-gtk.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+concurrency:
+  group: aura-gtk-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gtk4-xvfb:
+    name: Aura GTK 4 (Xvfb)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+      # Xvfb has no GPU; render with Cairo instead of probing GL/Vulkan.
+      GSK_RENDERER: cairo
+      GDK_BACKEND: x11
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK 4 and Xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev xvfb xauth dbus-x11
+          pkg-config --modversion gtk4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo fmt -p vesper-aura-gtk -- --check
+      - run: cargo clippy -p vesper-aura-gtk --features gtk --locked --all-targets -- -D warnings
+      - name: Test against GTK 4 under Xvfb
+        run: xvfb-run -a --server-args="-screen 0 1280x800x24" cargo test -p vesper-aura-gtk --features gtk --locked

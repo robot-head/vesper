@@ -102,7 +102,15 @@ fn encode(world: &check::World, ty: &vesper::ast::Type, value: &Value, out: &mut
     match value {
         Value::UInt(n, _) => out.extend_from_slice(&n.to_le_bytes()),
         Value::Int(n) => out.extend_from_slice(&n.to_le_bytes()),
-        Value::Data { fields, .. } => {
+        Value::Data {
+            fields,
+            resource_identity,
+            ..
+        } => {
+            assert!(
+                resource_identity.is_none(),
+                "tracked identity cannot cross an uninstrumented native buffer"
+            );
             let layout = Layout::of(world, ty).unwrap();
             let LayoutKind::Product(fs) = &layout.kind else {
                 panic!("not a word buffer")
@@ -137,6 +145,7 @@ fn oracle(source: &str, script: &[Answer]) -> String {
                     ty: ty.into(),
                     constructor: constructor.into(),
                     fields: field.into_iter().map(|v| ("0".to_string(), v)).collect(),
+                    resource_identity: None,
                 };
                 // `IoFailed` carries u64 codes, `TickFailed` u32 codes.
                 let error_bits = if operation == "read" { 64 } else { 32 };

@@ -1,0 +1,9 @@
+// actual fixed Expr source, without expansion
+macro keep($value: expr) -> expr {
+    quote {
+        /* retained */ $value
+    }
+}
+fn main() -> i64 {
+    keep!(42)
+}

@@ -1,0 +1,79 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+exports_files([
+    "Cargo.lock",
+    "Cargo.toml",
+])
+
+# The root package also owns docs/, examples/, lean/, scripts/ and tools/
+# (directories without their own BUILD.bazel), which the CLI and its tests read.
+vesper_crate(
+    extra_compile_data = ["//crates/vesper-doc:files"],
+    extra_test_data = [
+        "//crates/vesper-doc:files",
+        "//crates/vesper-grammar:files",
+        "//crates/vesper-loom-trust:files",
+    ],
+    # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
+    # "Linux-only suites" in docs/ci-platforms.md.
+    test_target_compatible_with = {
+        # Fresh replay of both complete model import closures through the
+        # external Lean4Lean checker: about 15 minutes on macOS runners, and
+        # the reason that lane needed the 6-minute checker setup at all.
+        "test/lean4lean42_acceptance": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Six tests run serially, each kernel-replaying Lean's Std; on macOS
+        # runners the target needs well over 15 minutes.
+        "test/proof_audit_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Serial Lean kernel replays, 135-390 s each on macOS. They keep
+        # running on Windows (Cargo), which exercises their cfg(windows)
+        # process and executable-path code; macOS shares Linux's Unix paths.
+        "test/format_proof_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        "test/oracle42_acceptance": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        "test/replay42_kernel": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Full logical-model replay exceeds 300 s on the Linux executor.
+        # Linux and Windows retain every semantic/audit/control assertion;
+        # proof_audit_private still exercises portability on macOS too.
+        "test/resource_model42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+    },
+    # Actual formatter witnesses replay Lean serially; keep every case enabled
+    # while allowing the complete target 900 seconds on slower macOS runners.
+    test_timeouts = {
+        "test/format_proof_cli": "long",
+        # Fresh replay covers both complete model import closures.
+        "test/lean4lean42_acceptance": "eternal",
+        "test/oracle42_acceptance": "long",
+        "test/replay42_kernel": "long",
+        # Fresh model compilation, 285 theorem roots and actual negative controls.
+        "test/resource_model42": "long",
+    },
+)
+# Narrow slices of the root package for members that read them.
+filegroup(
+    name = "examples",
+    srcs = glob(["examples/**"]),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "lean",
+    srcs = glob(["lean/**"]),
+    visibility = ["//visibility:public"],
+)

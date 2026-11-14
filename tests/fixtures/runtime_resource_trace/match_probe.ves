@@ -1,0 +1,9 @@
+linear struct Ticket {}
+
+fn probe() -> i64 {
+    let pair = (Ticket {}, false);
+    match pair {
+        (Ticket {}, true) => 1,
+        (Ticket {}, false) => 42,
+    }
+}

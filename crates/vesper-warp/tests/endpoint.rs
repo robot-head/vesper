@@ -3,13 +3,17 @@
 mod support;
 
 use support::*;
-use vesper_warp::endpoint::{CidLookup, Discard, DropReason, Echo, EndpointConfig, RxOutcome};
+use vesper_warp::endpoint::{
+    CidLookup, Discard, DropReason, Echo, EndpointConfig, RxOutcome, StreamMode,
+};
 use vesper_warp_crypto::CryptoError;
 use vesper_warp_umem::XdpNic;
 
 fn config() -> EndpointConfig {
     EndpointConfig {
         initial_rtt_ns: 20 * MS,
+        // The wave-four raw path: the Responder sees STREAM frames.
+        stream_mode: StreamMode::Raw,
         ..EndpointConfig::default()
     }
 }
@@ -244,6 +248,7 @@ fn bad_packets_are_dropped_and_their_frames_recycled() {
         .connection(p.s_conn)
         .unwrap()
         .keys
+        .unwrap()
         .authentication_failures();
     assert_eq!(opener_failures, 1);
     assert_umem_clean(&mut p.server);

@@ -2,7 +2,8 @@
 //!
 //! `vesper_direct_fibers` is set where a context switch, pinned stack and
 //! floating-point environment implementation exists: Linux x86_64/AArch64
-//! (System V / AAPCS64, ELF) and macOS AArch64 (Apple arm64 ABI, Mach-O).
+//! (System V / AAPCS64, ELF), macOS AArch64 (Apple arm64 ABI, Mach-O) and
+//! Windows x86_64 (Microsoft x64 convention, COFF).
 //! The Pulse scheduler adapter stays Linux-only and is gated separately;
 //! this flag says nothing about io_uring or scheduler portability.
 fn main() {
@@ -11,7 +12,7 @@ fn main() {
     let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
     let supported = matches!(
         (os.as_str(), arch.as_str()),
-        ("linux", "x86_64") | ("linux", "aarch64") | ("macos", "aarch64")
+        ("linux", "x86_64") | ("linux", "aarch64") | ("macos", "aarch64") | ("windows", "x86_64")
     );
     if supported {
         println!("cargo::rustc-cfg=vesper_direct_fibers");

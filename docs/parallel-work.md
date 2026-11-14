@@ -3,6 +3,14 @@
 Base checkpoint: `c5328d0`. Integration branch: `main` (the `work` branch was merged in PR #9). Remote: https://github.com/robot-head/vesper.
 The expanded design lives in [specification.txt](specification.txt); the implemented core baseline is [core-specification-baseline.txt](core-specification-baseline.txt).
 
+## Seventh wave: compiler targets and the remaining library depth
+
+The [seventh-wave prompt index](agent-prompts/wave-seven/README.md) runs thirty-three lanes under the [wave-seven contracts](rfcs/wave-seven-contracts.md). Claim issues are #324–#353 (lane *n* is issue 323+*n*): lanes 1–22 finish the gaps the wave-six reports recorded in existing crates (Beacon gRPC and collector interop, portable Pulse drivers, fiber stack images and Chrono checkpoints, Aegis samples, Kinetic, Bridge, Warp, Prism WebTransport, JSON, Lens, Quarry, Flux, Aether, Codex docs, metatheory, Chorus, eBPF, Silicon, Crucible, Tensor, Resonance, Nexus); lanes 23–30 work in the compiler (native spans, fuel and ABI; Windows executables; Wasm, eBPF and freestanding targets; source Vector, Strata regions and capability effects); lanes 31–33 (#355–#357) run Aura GTK 4, Ignis Vulkan and GPU compute on software stand-ins (Xvfb, Mesa lavapipe), as the owner chose. Merges that touch the root manifests or a shared compiler file are serialized. The [section status review](rfcs/wave-seven-review.md) lists what is left, including hardware-only work that waits on the owner. Other agents hold §16.4 macros and §42 (#322, PR #323).
+
+## Sixth wave: depth in every started section
+
+The [sixth-wave prompt index](agent-prompts/wave-six/README.md) runs integration B (#136, CLI and compiler hooks for the wave-five crates) and twenty-four lanes under the [wave-six contracts](rfcs/wave-six-contracts.md). Claim issues are #243–#266: lanes 1–22 add depth to existing crates (Bridge pointers and MPK, Chrono traces and checkpoints, Kinetic, Aegis vendor samples, Warp lifecycle, HTTP/3, SIMD JSON, Lens, Beacon, Quarry and Flux durability, Aether UFFD, Metronome, Codex docs, source capability effects, metatheory, Chorus, eBPF, Silicon, Crucible, Tensor inference, Windows fibers); lanes 23 and 24 follow integration B. The [section status review](rfcs/wave-six-review.md) lists what is left for later. Other agents hold §42 (#230–#242, PR #238).
+
 ## Fifth wave: every unstarted section and the Warp gaps
 
 The [fifth-wave prompt index](agent-prompts/wave-five/README.md) splits the ten design sections that had no code at `af03122` (§23 Vault, §25 Chorus, §26 Silicon, §27 eBPF, §29 Crucible and migrate, §30 Nexus, §31 Chrono, §32 Resonance, §33 Aegis, §36 Kinetic) and the three gaps left by the Warp integration (TLS handshake, stream retransmission, source simulation on the software NIC) into fourteen concurrent lanes under the [wave-five contracts](rfcs/wave-five-contracts.md). Claim issues are #121–#134; integration steps are #135 (Warp handshake) and #136 (CLI and compiler hooks). The [section status review](rfcs/wave-five-review.md) lists what remains in the sections that already have code. Other agents hold §16.4 macros (#103–#110) and §39 formatting (#111–#120); wave five does not touch those paths.
@@ -130,10 +138,13 @@ The integration checkpoint registers every delivered library plus the native exp
 
 ## Acceptance commands
 
+CI builds and tests with Bazel ([bazel.md](bazel.md)). A new workspace member
+needs a `BUILD.bazel`: run `python3 tools/bazel/sync_build_files.py` after
+registering it. Files read from outside the crate directory must be declared
+in that file (`extra_compile_data`, `extra_test_data`).
+
 ```sh
-cargo fmt --all -- --check
-VESPER_LEAN=lean cargo test --workspace --locked
-cargo clippy --workspace --locked --all-targets -- -D warnings
+VESPER_LEAN=$(elan which lean) bazel test //...   # tests, Clippy and rustfmt
 lean lean/Foundations.lean
 lean lean/RuntimeFrames.lean
 lean lean/SpecificationCounterexample.lean

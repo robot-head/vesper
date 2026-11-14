@@ -1,0 +1,14 @@
+fn increment(in value: u64) -> u64 eff [Fail[ArithOverflow]] {
+    wrapping_add(value, 1)
+}
+macro bump() -> expr {
+    quote {
+        increment(41)
+    }
+}
+fn forward(in ignored: u64) -> u64 eff [Fail[ArithOverflow]] {
+    bump!()
+}
+fn main() -> u64 eff [Fail[ArithOverflow]] {
+    forward(0)
+}

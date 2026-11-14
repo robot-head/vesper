@@ -1,0 +1,12 @@
+macro keep($x: expr) -> expr {
+    quote {
+        $x
+    }
+}
+fn forward(in value: i64) -> i64 {
+    let value = keep!(value);
+    value
+}
+fn main() -> i64 {
+    forward(42)
+}

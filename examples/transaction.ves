@@ -1,14 +1,26 @@
-linear struct WriteTxn { wal_slot: u64 }
+linear struct WriteTxn {
+    wal_slot: u64
+}
 
 impl WriteTxn {
     fn commit(sink self) -> u64 {
-        let WriteTxn { wal_slot } = self;
+        let WriteTxn {
+            wal_slot
+        }
+        = self;
         wal_slot
     }
-    fn abort(sink self) { let WriteTxn { wal_slot } = self; }
+    fn abort(sink self) {
+        let WriteTxn {
+            wal_slot
+        }
+        = self;
+    }
 }
 
 fn main() -> u64 {
-    let tx = WriteTxn { wal_slot: 42 };
+    let tx = WriteTxn {
+        wal_slot: 42
+    };
     tx.commit()
 }

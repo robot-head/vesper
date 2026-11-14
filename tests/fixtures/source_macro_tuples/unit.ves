@@ -1,0 +1,11 @@
+fn score(in value: ()) -> i64 {
+    42
+}
+macro make() -> expr {
+    quote {
+        ()
+    }
+}
+fn main() -> i64 {
+    score(make!())
+}

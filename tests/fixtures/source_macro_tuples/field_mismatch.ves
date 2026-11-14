@@ -1,0 +1,11 @@
+macro make() -> expr {
+    quote {
+        (42, "wrong")
+    }
+}
+fn forward() -> (i64, i64) {
+    make!()
+}
+fn main() -> i64 {
+    42
+}

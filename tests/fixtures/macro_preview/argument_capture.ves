@@ -1,0 +1,12 @@
+macro keep($x: expr) -> expr {
+    quote {
+        {
+            let tmp = 0;
+            $x
+        }
+    }
+}
+fn main() -> i64 {
+    let tmp = 42;
+    keep!(tmp)
+}

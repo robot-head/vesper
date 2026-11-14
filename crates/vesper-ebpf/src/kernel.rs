@@ -17,11 +17,12 @@ use std::fmt;
 
 const BPF_MAP_CREATE: libc::c_long = 0;
 const BPF_MAP_LOOKUP_ELEM: libc::c_long = 1;
+const BPF_MAP_UPDATE_ELEM: libc::c_long = 2;
 const BPF_PROG_LOAD: libc::c_long = 5;
 const BPF_PROG_TEST_RUN: libc::c_long = 10;
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
 const BPF_BTF_LOAD: libc::c_long = 18;
-const ATTR_SIZE: usize = 128;
+const ATTR_SIZE: usize = 144;
 const LOG_SIZE: usize = 1 << 22;
 
 /// An owned kernel file descriptor (map or program).
@@ -161,23 +162,141 @@ pub fn relocate(prog: &Program, fds: &[i32]) -> Result<Vec<RawInsn>, LoadError> 
     Ok(insns)
 }
 
-/// Create the program's maps and load it as an XDP program.
+/// Create the program's maps, apply CO-RE relocations and kfunc ids
+/// ([`prepare`]) and load the program.
 pub fn load(prog: &Program) -> Result<Loaded, LoadError> {
     probe()?;
     load_unprobed(prog)
 }
 
-fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
-    let mut maps = Vec::new();
-    for def in &prog.maps {
-        maps.push(create_map(def)?);
+/// The host kernel's parsed BTF, read once.
+fn vmlinux() -> Result<&'static crate::btf::Btf, LoadError> {
+    static BTF: std::sync::OnceLock<Result<crate::btf::Btf, String>> = std::sync::OnceLock::new();
+    BTF.get_or_init(|| crate::btf::host_vmlinux().map_err(|e| e.to_string()))
+        .as_ref()
+        .map_err(|e| LoadError::Invalid(e.clone()))
+}
+
+/// The host's module BTF, read once (empty when unreadable: modules are
+/// searched only for types vmlinux lacks).
+fn host_modules(vmlinux: &crate::btf::Btf) -> &'static [(String, crate::btf::Btf)] {
+    static MODS: std::sync::OnceLock<Vec<(String, crate::btf::Btf)>> = std::sync::OnceLock::new();
+    MODS.get_or_init(|| crate::btf::host_modules(vmlinux).unwrap_or_default())
+}
+
+/// What a loader does before `BPF_PROG_LOAD`: CO-RE relocations and kfunc
+/// BTF ids against the running kernel's BTF (vmlinux, then module BTF
+/// for root types vmlinux lacks, as libbpf searches).
+pub fn prepare(prog: &Program) -> Result<Program, LoadError> {
+    if prog.core_relos.is_empty() && prog.kfuncs.is_empty() {
+        return Ok(prog.clone());
     }
-    let fds: Vec<i32> = maps.iter().map(Fd::raw).collect();
+    let btf = vmlinux()?;
+    let modules: Vec<&crate::btf::Btf> = host_modules(btf).iter().map(|(_, m)| m).collect();
+    let p = crate::core::apply_with_modules(prog, btf, &modules)
+        .map_err(|e| LoadError::Invalid(e.to_string()))?;
+    crate::btf::resolve_kfuncs(&p, btf).map_err(|e| LoadError::Invalid(e.to_string()))
+}
+
+/// Load `prog` with its program BTF, func info, line info and CO-RE
+/// relocation records (`BPF_PROG_LOAD` `core_relos`): the kernel applies
+/// the CO-RE relocations itself, against its own BTF. kfunc ids are still
+/// resolved here, as a loader does.
+pub fn load_with_ext(prog: &Program) -> Result<Loaded, LoadError> {
+    probe()?;
+    load_inner(prog, true, None)
+}
+
+fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
+    load_inner(prog, false, None)
+}
+
+/// Load `prog` referencing existing maps: `maps[i]` is the descriptor for
+/// `prog.maps[i]` (as a loader shares maps between a tail-call owner and
+/// its targets). The returned [`Loaded::maps`] is empty.
+pub fn load_using(prog: &Program, maps: &[&Fd]) -> Result<Loaded, LoadError> {
+    probe()?;
+    if maps.len() != prog.maps.len() {
+        return Err(LoadError::Invalid(format!(
+            "{} map descriptors for {} maps",
+            maps.len(),
+            prog.maps.len()
+        )));
+    }
+    let fds: Vec<i32> = maps.iter().map(|f| f.raw()).collect();
+    load_inner(prog, false, Some(&fds))
+}
+
+/// `BPF_MAP_UPDATE_ELEM` with `BPF_ANY` (for a program array, `value` is
+/// the target program's descriptor as a native-endian `u32`).
+pub fn update(map: &Fd, key: &[u8], value: &[u8]) -> Result<(), LoadError> {
+    let mut a = [0u8; ATTR_SIZE];
+    put_u32(&mut a, 0, map.raw() as u32);
+    put_u64(&mut a, 8, key.as_ptr() as u64);
+    put_u64(&mut a, 16, value.as_ptr() as u64);
+    match bpf(BPF_MAP_UPDATE_ELEM, &mut a) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(LoadError::Invalid(format!("map update failed: errno {e}"))),
+    }
+}
+
+fn load_inner(
+    prog: &Program,
+    kernel_ext: bool,
+    existing: Option<&[i32]>,
+) -> Result<Loaded, LoadError> {
+    let prepared = if kernel_ext {
+        if prog.kfuncs.is_empty() {
+            prog.clone()
+        } else {
+            crate::btf::resolve_kfuncs(prog, vmlinux()?)
+                .map_err(|e| LoadError::Invalid(e.to_string()))?
+        }
+    } else {
+        prepare(prog)?
+    };
+    let prog = &prepared;
+    let mut maps = Vec::new();
+    let fds: Vec<i32> = match existing {
+        Some(f) => f.to_vec(),
+        None => {
+            for def in &prog.maps {
+                maps.push(create_map(def)?);
+            }
+            maps.iter().map(Fd::raw).collect()
+        }
+    };
     let insns = relocate(prog, &fds)?;
     let bytes = crate::insn::slots_to_bytes(&insns);
     let mut license = prog.license.clone().into_bytes();
     license.push(0);
     let insn_cnt = u32::try_from(insns.len()).map_err(|_| LoadError::Invalid("too long".into()))?;
+    // Programs that pass callbacks need program BTF with func_info.
+    let has_callbacks = insns
+        .iter()
+        .any(|i| i.code == 0x18 && i.src == pseudo::FUNC);
+    let (mut func_info, mut line_info, mut core_relos) = (Vec::new(), Vec::new(), Vec::new());
+    let btf_fd = if has_callbacks || kernel_ext {
+        let mut p = prog.clone();
+        // kfunc ids are already in the instructions: no extern types
+        p.kfuncs.clear();
+        let ob =
+            crate::btf_ext::build(&p, "prog").map_err(|e| LoadError::Invalid(e.to_string()))?;
+        func_info = crate::btf::FuncInfo::bytes(&ob.func_info);
+        for r in &ob.line_records {
+            for w in [r[0] / 8, r[1], r[2], r[3]] {
+                line_info.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        for r in &ob.core_records {
+            for w in r {
+                core_relos.extend_from_slice(&w.to_le_bytes());
+            }
+        }
+        Some(load_btf(&ob.btf)?)
+    } else {
+        None
+    };
     let name: String = prog
         .name
         .chars()
@@ -199,6 +318,22 @@ fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
             put_u64(&mut a, 32, log.as_mut_ptr() as u64);
         }
         put_name(&mut a, 48, &name)?;
+        if let Some(fd) = &btf_fd {
+            put_u32(&mut a, 72, fd.raw() as u32);
+            put_u32(&mut a, 76, crate::btf::FuncInfo::REC_SIZE);
+            put_u64(&mut a, 80, func_info.as_ptr() as u64);
+            put_u32(&mut a, 88, (func_info.len() / 8) as u32);
+            if !line_info.is_empty() {
+                put_u32(&mut a, 92, 16);
+                put_u64(&mut a, 96, line_info.as_ptr() as u64);
+                put_u32(&mut a, 104, (line_info.len() / 16) as u32);
+            }
+            if !core_relos.is_empty() {
+                put_u32(&mut a, 116, (core_relos.len() / 16) as u32);
+                put_u64(&mut a, 128, core_relos.as_ptr() as u64);
+                put_u32(&mut a, 136, 16);
+            }
+        }
         Ok(bpf(BPF_PROG_LOAD, &mut a))
     };
     match attempt(None)? {
@@ -249,12 +384,24 @@ pub fn probe() -> Result<(), LoadError> {
 pub struct TestRun {
     pub retval: u32,
     pub packet: Vec<u8>,
+    /// `ctx_out` (the `struct __sk_buff` the kernel copies back for tc
+    /// programs); empty when no context was passed.
+    pub ctx: Vec<u8>,
 }
 
 /// Run a loaded XDP program once over `packet` in the kernel
 /// (`BPF_PROG_TEST_RUN`), on the calling CPU.
 pub fn test_run(prog: &Fd, packet: &[u8]) -> Result<TestRun, LoadError> {
+    test_run_ctx(prog, packet, None)
+}
+
+/// [`test_run`] with a context: for tc programs `ctx_in` is a `struct
+/// __sk_buff` (the kernel accepts only `mark`, `priority`,
+/// `ingress_ifindex`, `ifindex`, `cb[]` and a few timestamp and GSO
+/// fields non-zero) and the context the program leaves is returned.
+pub fn test_run_ctx(prog: &Fd, packet: &[u8], ctx_in: Option<&[u8]>) -> Result<TestRun, LoadError> {
     let mut out = vec![0u8; packet.len() + 512];
+    let mut ctx_out = vec![0u8; ctx_in.map_or(0, <[u8]>::len)];
     let mut a = [0u8; ATTR_SIZE];
     put_u32(&mut a, 0, prog.raw() as u32);
     put_u32(&mut a, 8, packet.len() as u32);
@@ -262,14 +409,23 @@ pub fn test_run(prog: &Fd, packet: &[u8]) -> Result<TestRun, LoadError> {
     put_u64(&mut a, 16, packet.as_ptr() as u64);
     put_u64(&mut a, 24, out.as_mut_ptr() as u64);
     put_u32(&mut a, 32, 1);
+    if let Some(c) = ctx_in {
+        put_u32(&mut a, 40, c.len() as u32);
+        put_u32(&mut a, 44, ctx_out.len() as u32);
+        put_u64(&mut a, 48, c.as_ptr() as u64);
+        put_u64(&mut a, 56, ctx_out.as_mut_ptr() as u64);
+    }
     match bpf(BPF_PROG_TEST_RUN, &mut a) {
         Ok(_) => {
             let retval = u32::from_ne_bytes(a[4..8].try_into().expect("4 bytes"));
             let n = u32::from_ne_bytes(a[12..16].try_into().expect("4 bytes")) as usize;
             out.truncate(n.min(out.len()));
+            let cn = u32::from_ne_bytes(a[44..48].try_into().expect("4 bytes")) as usize;
+            ctx_out.truncate(cn.min(ctx_out.len()));
             Ok(TestRun {
                 retval,
                 packet: out,
+                ctx: ctx_out,
             })
         }
         Err(e) if unavailable(e) => Err(LoadError::Unavailable { errno: e }),

@@ -1,0 +1,12 @@
+[package]
+name = "vesper-crucible"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Crucible (design §29): choice-tape property testing, comparison-guided fuzzing, SimPulse schedule exploration and termination-checked shrinking"
+publish = false
+
+[dependencies]
+vesper-alloc = { path = "../vesper-alloc" }
+vesper-simpulse = { path = "../vesper-simpulse" }
+
+[dev-dependencies]

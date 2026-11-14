@@ -1,0 +1,15 @@
+fn score(in value: (i64, i64)) -> i64 {
+    let (a, b) = value;
+    wrapping_add(a, b)
+}
+macro make() -> expr {
+    quote {
+        (
+            20,
+            22,
+        )
+    }
+}
+fn main() -> i64 {
+    score(make!())
+}

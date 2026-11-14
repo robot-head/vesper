@@ -2,11 +2,17 @@ use super::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationError {
-    Width { bits: u8 },
+    Width {
+        bits: u8,
+    },
     InvalidBool,
-    InvalidEnum { name: String },
+    InvalidEnum {
+        name: String,
+    },
     NullAddress,
-    MisalignedAddress { alignment: u8 },
+    MisalignedAddress {
+        alignment: u8,
+    },
     NonzeroVoid,
     ForeignErrorCode(u64),
     ErrorCodeBudget,
@@ -14,7 +20,30 @@ pub enum ValidationError {
     ArgumentKind,
     SliceRangeOverflow,
     SliceTooLarge,
-    OverlappingSlices { other: usize },
+    OverlappingSlices {
+        other: usize,
+    },
+    /// A single-element pointer that is not declared `Option[T]` was null.
+    NullPointer,
+    /// A single-element pointer's address is not aligned for its pointee.
+    MisalignedPointer {
+        alignment: usize,
+    },
+    /// The pointee range `[address, address + size)` wraps the address space.
+    PointerRangeOverflow,
+    /// An `Option[CSlice[T]]` was null with a nonzero length. `None` is
+    /// exactly `(NULL, 0)`.
+    NullSliceWithLength,
+    /// The returned pointer lies inside the range borrowed by `argument`:
+    /// the callee handed back an address derived from a `nocapture` borrow.
+    ReturnAliasesBorrow {
+        argument: usize,
+    },
+    /// Guard bytes just past a borrowed range changed across the call: the
+    /// callee wrote beyond one element (pointer) or beyond the length (slice).
+    GuardOverwritten {
+        first_changed: usize,
+    },
 }
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -155,7 +184,7 @@ fn address(bits: u64, pointee: Scalar, nullable: bool) -> Result<CheckedAddress,
         nullable,
     })
 }
-fn validate(contract: &ValueType, bits: u64) -> Result<ValidatedValue, ValidationError> {
+pub(super) fn validate(contract: &ValueType, bits: u64) -> Result<ValidatedValue, ValidationError> {
     Ok(match contract {
         ValueType::Unit => {
             if bits != 0 {
@@ -193,6 +222,9 @@ pub enum RawArgument {
     /// Element count, not byte count. Numeric checks do not prove an allocation
     /// exists; the unsafe caller remains responsible for valid borrowed memory.
     Slice { address: u64, length: u64 },
+    /// Address of exactly one pointee (`0` only for a declared `Option[T]`).
+    /// Like slices, this is a numeric check only.
+    Pointer { address: u64 },
 }
 #[must_use = "failed preparation retains arguments and their owner"]
 #[derive(Debug)]
@@ -266,6 +298,9 @@ impl FunctionDescriptor {
                     raw.push((AbiType::Pointer, address));
                     raw.push((AbiType::Integer(Scalar::Usize), length));
                 }
+                (ParameterType::Pointer { .. }, RawArgument::Pointer { address }) => {
+                    raw.push((AbiType::Pointer, address));
+                }
                 _ => unreachable!("arguments validated before allocation"),
             }
         }
@@ -278,51 +313,15 @@ impl FunctionDescriptor {
         &self,
         args: &[RawArgument],
     ) -> Result<(), (Option<usize>, ValidationError)> {
-        if args.len() != self.parameters.len() {
-            return Err((None, ValidationError::ArgumentCount));
+        match self.check_arguments(args).into_first_violation() {
+            None => Ok(()),
+            Some((position, error)) => Err((
+                match position {
+                    super::Position::Argument(i) => Some(i),
+                    _ => None,
+                },
+                error,
+            )),
         }
-        // At most the configured parameter cap (hard limit 32) ranges.
-        let mut ranges: Vec<(usize, u64, u64, Access)> = vec![];
-        for (i, (p, a)) in self.parameters.iter().zip(args).enumerate() {
-            match (&p.ty, a) {
-                (ParameterType::Value(t), RawArgument::Bits(bits)) => {
-                    validate(t, *bits).map_err(|e| (Some(i), e))?;
-                }
-                (
-                    ParameterType::Slice { element, access },
-                    RawArgument::Slice {
-                        address: base,
-                        length,
-                    },
-                ) => {
-                    address(*base, *element, *length == 0).map_err(|e| (Some(i), e))?;
-                    let bytes = length
-                        .checked_mul((element.bits() / 8) as u64)
-                        .ok_or((Some(i), ValidationError::SliceRangeOverflow))?;
-                    if bytes > i64::MAX as u64 {
-                        return Err((Some(i), ValidationError::SliceTooLarge));
-                    }
-                    if bytes > 0 {
-                        let last = base
-                            .checked_add(bytes - 1)
-                            .ok_or((Some(i), ValidationError::SliceRangeOverflow))?;
-                        for (other, first, end, other_access) in &ranges {
-                            if *base <= *end
-                                && *first <= last
-                                && (*access == Access::Inout || *other_access == Access::Inout)
-                            {
-                                return Err((
-                                    Some(i),
-                                    ValidationError::OverlappingSlices { other: *other },
-                                ));
-                            }
-                        }
-                        ranges.push((i, *base, last, *access));
-                    }
-                }
-                _ => return Err((Some(i), ValidationError::ArgumentKind)),
-            }
-        }
-        Ok(())
     }
 }

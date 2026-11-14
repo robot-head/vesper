@@ -433,7 +433,7 @@ impl Store {
             .and_then(|()| fsutil::make_readonly(&file))
             .map_err(|e| CasError::io("flush staging file", &staged.path, e))?;
         drop(file);
-        let newly_stored = self.publish_object(staged, &id)?;
+        let newly_stored = self.publish_object(staged, &id, size)?;
         Ok(Ingested {
             id,
             size,
@@ -441,7 +441,7 @@ impl Store {
         })
     }
 
-    fn publish_object(&self, mut staged: StagedFile, id: &ObjectId) -> Result<bool> {
+    fn publish_object(&self, mut staged: StagedFile, id: &ObjectId, size: u64) -> Result<bool> {
         let dest = self.object_path(id);
         let parent = dest.parent().expect("object paths have a parent");
         fs::create_dir_all(parent).map_err(|e| CasError::io("create shard", parent, e))?;
@@ -454,13 +454,13 @@ impl Store {
                     fsutil::sync_dir(parent).map_err(|e| CasError::io("sync shard", parent, e))?;
                     return Ok(true);
                 }
-                Publish::Exists => match self.check_existing_object(id, &dest)? {
+                Publish::Exists => match self.check_existing_object(id, &dest, size)? {
                     // Identical verified contents: deduplicate. The staged
                     // copy is removed by the guard.
                     Existing::Valid => return Ok(false),
                     Existing::Invalid => self.repair(&dest, &object_lock_name(id), || {
                         Ok(matches!(
-                            self.check_existing_object(id, &dest)?,
+                            self.check_existing_object(id, &dest, size)?,
                             Existing::Invalid
                         ))
                     })?,
@@ -471,15 +471,47 @@ impl Store {
         Err(CasError::PublishContention(*id))
     }
 
-    fn check_existing_object(&self, id: &ObjectId, path: &Path) -> Result<Existing> {
-        match self.verify_at(id, path) {
-            Ok(_) => Ok(Existing::Valid),
-            Err(CasError::NotFound(_)) => Ok(Existing::Gone),
-            Err(CasError::Corrupt { .. }) | Err(CasError::UnsafeStoreLayout { .. }) => {
-                Ok(Existing::Invalid)
-            }
-            Err(e) => Err(e),
+    fn check_existing_object(&self, id: &ObjectId, path: &Path, size: u64) -> Result<Existing> {
+        let mut file = match self.open_object_at(id, path) {
+            Ok(file) => file,
+            Err(CasError::NotFound(_)) => return Ok(Existing::Gone),
+            Err(CasError::UnsafeStoreLayout { .. }) => return Ok(Existing::Invalid),
+            Err(error) => return Err(error),
+        };
+        if file
+            .metadata()
+            .map_err(|error| CasError::io("inspect occupied object", path, error))?
+            .len()
+            != size
+        {
+            return Ok(Existing::Invalid);
         }
+        let mut hasher = ObjectHasher::new(id.domain, id.kind);
+        let mut buf = [0u8; BUF];
+        loop {
+            // Include one probe byte after the staged length, without allowing
+            // a growing occupied file to impose an unbounded verification read.
+            let remaining = size - hasher.len();
+            let request = if remaining >= BUF as u64 {
+                BUF
+            } else {
+                remaining as usize + 1
+            };
+            let n = read_retry(&mut file, &mut buf[..request])
+                .map_err(|error| CasError::io("read occupied object", path, error))?;
+            if n == 0 {
+                break;
+            }
+            if n as u64 > remaining {
+                return Ok(Existing::Invalid);
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(if hasher.len() == size && hasher.finish() == *id {
+            Existing::Valid
+        } else {
+            Existing::Invalid
+        })
     }
 
     /// Move a failed object or record out of the addressable namespace.
@@ -599,6 +631,75 @@ impl Store {
                 id: *id,
                 actual,
                 path,
+            });
+        }
+        Ok(bytes)
+    }
+
+    /// Private pack exporter read: bounded storage and hashing use the exact
+    /// same nofollow-open regular file, never a verified path reopened later.
+    pub(crate) fn read_verified_bounded(
+        &self,
+        id: &ObjectId,
+        max_bytes: usize,
+        budget: &mut crate::transfer::Budget,
+    ) -> std::result::Result<Vec<u8>, crate::transfer::TransferError> {
+        use crate::transfer::{TransferError, add, mul};
+
+        let path_bytes = add(self.root.as_os_str().len(), 256, "object path")?;
+        let scratch = add(
+            BUF,
+            mul(path_bytes, 16, "object scratch")?,
+            "object scratch",
+        )?;
+        budget.metadata(scratch)?;
+        budget.work(scratch)?;
+        let path = self.object_path(id);
+        let mut file = self.open_object_at(id, &path)?;
+        let length = usize::try_from(
+            file.metadata()
+                .map_err(|error| CasError::io("inspect transfer object", &path, error))?
+                .len(),
+        )
+        .map_err(|_| TransferError::Limit("object bytes"))?;
+        if length > max_bytes {
+            return Err(TransferError::Limit("object bytes"));
+        }
+        let mut bytes = Vec::new();
+        budget.reserve_payload(&mut bytes, length)?;
+        let mut hasher = ObjectHasher::new(id.domain, id.kind);
+        let mut buf = [0u8; BUF];
+        loop {
+            let remaining = length - bytes.len();
+            let request = if remaining >= BUF { BUF } else { remaining + 1 };
+            budget.work(add(mul(request, 3, "object work")?, 1, "object work")?)?;
+            let n = match file.read(&mut buf[..request]) {
+                Ok(n) => n,
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(CasError::io("read transfer object", &path, error).into()),
+            };
+            if n == 0 {
+                break;
+            }
+            if n > remaining {
+                return Err(TransferError::InvalidPack(
+                    "source object grew while reading",
+                ));
+            }
+            // The exact initial length was fallibly reserved before reading.
+            bytes.extend_from_slice(&buf[..n]);
+            hasher.update(&buf[..n]);
+        }
+        if bytes.len() != length {
+            return Err(TransferError::InvalidPack(
+                "source object shrank while reading",
+            ));
+        }
+        let actual = hasher.finish();
+        if actual != *id {
+            return Err(TransferError::DigestMismatch {
+                expected: *id,
+                actual,
             });
         }
         Ok(bytes)

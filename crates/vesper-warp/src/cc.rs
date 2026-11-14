@@ -21,7 +21,7 @@ use std::fmt;
 use vesper_warp_bbr::{self as bbr, BbrConfig, BbrError, Bbrv3, PacketDeliveryState};
 use vesper_warp_tcp::cc as tcp;
 
-use crate::recovery;
+use crate::{PnSpace, recovery};
 
 /// Lane 1 → lane 2 conversion of a sent packet.
 pub const fn bbr_sent(p: recovery::SentPacket) -> bbr::SentPacket {
@@ -90,6 +90,8 @@ impl From<BbrError> for CcError {
 #[derive(Debug, Clone, Copy)]
 struct Snapshot {
     pn: u64,
+    sent_ns: u64,
+    bytes: u32,
     state: Option<PacketDeliveryState>,
 }
 
@@ -116,7 +118,13 @@ impl Snapshots {
         }
     }
 
-    fn push(&mut self, pn: u64, state: PacketDeliveryState) -> Result<(), CcError> {
+    fn push(
+        &mut self,
+        pn: u64,
+        sent_ns: u64,
+        bytes: u32,
+        state: PacketDeliveryState,
+    ) -> Result<(), CcError> {
         self.pop_tombstones();
         if self.entries.len() >= self.capacity {
             return Err(CcError::TooManyInFlight {
@@ -126,6 +134,8 @@ impl Snapshots {
         debug_assert!(self.entries.back().is_none_or(|b| b.pn < pn));
         self.entries.push_back(Snapshot {
             pn,
+            sent_ns,
+            bytes,
             state: Some(state),
         });
         Ok(())
@@ -147,6 +157,9 @@ impl Snapshots {
     }
 }
 
+/// Default [`QuicBbr::with_max_lead_ns`]: one second.
+pub const DEFAULT_MAX_LEAD_NS: u64 = 1_000_000_000;
+
 /// BBRv3 driven by lane 1's [`recovery::LossRecovery`] events.
 ///
 /// Per ACK frame: [`QuicBbr::begin_ack`], every event the recovery sink
@@ -155,11 +168,21 @@ impl Snapshots {
 /// and losses before acknowledgements, so BBR sees `EcnCe` before the same
 /// ACK's rate sample, as lane 2 requires. Timeout-driven losses go straight
 /// through [`QuicBbr::on_event`].
+///
+/// Wave six (issue #247): Initial and Handshake packets are in BBR's flight
+/// too, with their own snapshot buffers (their packet numbers overlap the
+/// application space's): use the `*_in` methods with their space.
 #[derive(Debug, Clone)]
 pub struct QuicBbr {
     bbr: Bbrv3,
-    snapshots: Snapshots,
+    /// Application-data, Initial and Handshake snapshots (by `PnSpace`).
+    spaces: [Snapshots; 3],
     acked: Vec<bbr::Delivered>,
+    /// Longest lead BBR's EDT schedule may have over the clock before the
+    /// adapter paces from the clock instead (see [`QuicBbr::schedule_edt_ns`]).
+    max_lead_ns: u64,
+    /// The adapter's own schedule while BBR's is too far ahead.
+    local_edt_ns: Option<u64>,
 }
 
 impl QuicBbr {
@@ -168,9 +191,34 @@ impl QuicBbr {
     pub fn new(config: BbrConfig, now_ns: u64, capacity: usize) -> Result<Self, CcError> {
         Ok(Self {
             bbr: Bbrv3::new(config, now_ns)?,
-            snapshots: Snapshots::new(capacity),
+            spaces: [
+                Snapshots::new(capacity),
+                Snapshots::new(capacity),
+                Snapshots::new(capacity),
+            ],
             acked: Vec::with_capacity(capacity),
+            max_lead_ns: DEFAULT_MAX_LEAD_NS,
+            local_edt_ns: None,
         })
+    }
+
+    /// Sets the largest lead of BBR's pacing schedule over the clock (the
+    /// endpoint uses its launch-queue horizon).
+    #[must_use]
+    pub fn with_max_lead_ns(mut self, ns: u64) -> Self {
+        self.max_lead_ns = ns;
+        self
+    }
+
+    /// The earliest departure for the next packet: BBR's, or the adapter's
+    /// own schedule while BBR's is stale.
+    pub fn next_edt_ns(&self, now_ns: u64) -> u64 {
+        let bbr = self.bbr.next_edt_ns();
+        if bbr > now_ns.saturating_add(self.max_lead_ns) {
+            self.local_edt_ns.unwrap_or(now_ns)
+        } else {
+            bbr
+        }
     }
 
     /// The controller.
@@ -178,9 +226,18 @@ impl QuicBbr {
         &self.bbr
     }
 
-    /// Packets whose snapshot is still held.
+    /// Packets whose snapshot is still held (every space).
     pub fn snapshots_held(&self) -> usize {
-        self.snapshots.len()
+        self.spaces.iter().map(Snapshots::len).sum()
+    }
+
+    fn snaps(&mut self, space: PnSpace) -> &mut Snapshots {
+        // Index 0 is the application space, so the original API keeps it.
+        &mut self.spaces[match space {
+            PnSpace::ApplicationData => 0,
+            PnSpace::Initial => 1,
+            PnSpace::Handshake => 2,
+        }]
     }
 
     /// Contract outputs.
@@ -191,7 +248,26 @@ impl QuicBbr {
         self.bbr.pacing_rate_bytes_per_sec()
     }
     /// §35.3 `advance_bbrv3_edt`: departure time for `bytes` sent at `now_ns`.
+    ///
+    /// Wave six (the seed-246 stall in `docs/parallel-results/warp-lifecycle.md`):
+    /// a packet scheduled while BBR's pacing rate has collapsed (a tiny
+    /// bandwidth sample under heavy loss) can push BBR's schedule tens of
+    /// seconds ahead. Nothing then fits the launch horizon, nothing is in
+    /// flight, no ACK brings a new sample, and the connection stalls until
+    /// the clock catches up. While BBR's schedule leads the clock by more
+    /// than `max_lead_ns`, the adapter paces from the clock at BBR's
+    /// current rate instead, so packets keep flowing and BBR keeps getting
+    /// samples.
     pub fn schedule_edt_ns(&mut self, bytes: u32, now_ns: u64) -> u64 {
+        if self.bbr.next_edt_ns() > now_ns.saturating_add(self.max_lead_ns) {
+            let delay = bbr::pacing_delay_ns(bytes, self.bbr.pacing_rate_bytes_per_sec());
+            let (launch, next) = bbr::edt_step(self.local_edt_ns.unwrap_or(now_ns), now_ns, delay);
+            // The adapter's schedule is itself held within `max_lead_ns`,
+            // so a rate that collapses further cannot stall it the same way.
+            self.local_edt_ns = Some(next.min(now_ns.saturating_add(self.max_lead_ns)));
+            return launch;
+        }
+        self.local_edt_ns = None;
         self.bbr.schedule_edt_ns(bytes, now_ns)
     }
     /// The send guard (`bytes_in_flight < cwnd`).
@@ -207,11 +283,23 @@ impl QuicBbr {
         packet: recovery::SentPacket,
         probe: bool,
     ) -> Result<(), CcError> {
-        if packet.in_flight && self.snapshots.entries.len() >= self.snapshots.capacity {
-            self.snapshots.pop_tombstones();
-            if self.snapshots.entries.len() >= self.snapshots.capacity {
+        self.on_packet_sent_in(PnSpace::ApplicationData, now_ns, packet, probe)
+    }
+
+    /// [`QuicBbr::on_packet_sent`] for a packet of `space`.
+    pub fn on_packet_sent_in(
+        &mut self,
+        space: PnSpace,
+        now_ns: u64,
+        packet: recovery::SentPacket,
+        probe: bool,
+    ) -> Result<(), CcError> {
+        let snaps = self.snaps(space);
+        if packet.in_flight && snaps.entries.len() >= snaps.capacity {
+            snaps.pop_tombstones();
+            if snaps.entries.len() >= snaps.capacity {
                 return Err(CcError::TooManyInFlight {
-                    capacity: self.snapshots.capacity,
+                    capacity: snaps.capacity,
                 });
             }
         }
@@ -222,9 +310,46 @@ impl QuicBbr {
             self.bbr.on_packet_sent(now_ns, sent)?
         };
         if packet.in_flight {
-            self.snapshots.push(packet.pn, state)?;
+            self.snaps(space)
+                .push(packet.pn, packet.sent_ns, packet.bytes, state)?;
         }
         Ok(())
+    }
+
+    /// Keys for `space` were discarded (RFC 9002 §6.4): its packets leave
+    /// BBR's flight. BBRv3 (lane 2) has no input for "removed without
+    /// acknowledgement or loss", so they are delivered as one batch with
+    /// no RTT sample; a discarded space holds at most a few packets.
+    /// Returns how many were released.
+    pub fn discard_space(&mut self, space: PnSpace, now_ns: u64) -> Result<usize, CcError> {
+        self.acked.clear();
+        let cap = self.acked.capacity();
+        let mut batch = std::mem::take(&mut self.acked);
+        for s in self.snaps(space).entries.drain(..) {
+            if let Some(state) = s.state
+                && batch.len() < cap
+            {
+                batch.push(bbr::Delivered {
+                    packet: bbr::AckedPacket {
+                        pn: s.pn,
+                        sent_ns: s.sent_ns.min(now_ns),
+                        bytes: s.bytes,
+                    },
+                    state,
+                    previously_lost: false,
+                });
+            }
+        }
+        let n = batch.len();
+        let result = if n == 0 {
+            Ok(())
+        } else {
+            self.bbr.on_ack(now_ns, &batch, None)
+        };
+        batch.clear();
+        self.acked = batch;
+        result?;
+        Ok(n)
     }
 
     /// Starts a new ACK batch.
@@ -239,10 +364,20 @@ impl QuicBbr {
         now_ns: u64,
         event: recovery::CongestionEvent,
     ) -> Result<(), CcError> {
+        self.on_event_in(PnSpace::ApplicationData, now_ns, event)
+    }
+
+    /// [`QuicBbr::on_event`] for an event of `space`.
+    pub fn on_event_in(
+        &mut self,
+        space: PnSpace,
+        now_ns: u64,
+        event: recovery::CongestionEvent,
+    ) -> Result<(), CcError> {
         use recovery::CongestionEvent as E;
         match event {
             E::Acked { packet } => {
-                let Some(state) = self.snapshots.take(packet.pn) else {
+                let Some(state) = self.snaps(space).take(packet.pn) else {
                     return Ok(());
                 };
                 if self.acked.len() == self.acked.capacity() {
@@ -253,7 +388,11 @@ impl QuicBbr {
                 self.acked.push(bbr::Delivered {
                     packet: bbr::AckedPacket {
                         pn: packet.pn,
-                        sent_ns: packet.sent_ns,
+                        // A probe leaves at once but is stamped no earlier
+                        // than the last paced packet (recovery needs
+                        // monotone send times), so its ACK can arrive
+                        // "before" its stamp.
+                        sent_ns: packet.sent_ns.min(now_ns),
                         bytes: packet.bytes,
                     },
                     state,
@@ -263,7 +402,7 @@ impl QuicBbr {
                 Ok(())
             }
             E::Lost { packet } => {
-                let Some(state) = self.snapshots.take(packet.pn) else {
+                let Some(state) = self.snaps(space).take(packet.pn) else {
                     return Ok(());
                 };
                 self.bbr.on_packet_lost(

@@ -1,0 +1,21 @@
+fn score(in value: (i64, i64)) -> i64 {
+    let (a, _) = value;
+    a
+}
+macro make() -> expr {
+    quote {
+        (
+            {
+                let n = 42;
+                n
+            },
+            0
+        )
+    }
+}
+fn forward(in n: i64) -> (i64, i64) {
+    make!()
+}
+fn main() -> i64 {
+    score(forward(0))
+}

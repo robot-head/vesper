@@ -3,6 +3,8 @@
 #![allow(dead_code)]
 
 pub mod corpus;
+pub mod depth;
+pub mod kfuncs;
 
 use vesper_ebpf::helpers as h;
 use vesper_ebpf::insn::{AluOp, AtomicOp, Endian, JmpOp, Reg, Size};
@@ -416,6 +418,27 @@ pub fn random_packet(rng: &mut Rng) -> Vec<u8> {
         p[12] = 0x08;
         p[13] = 0x00;
         p[23] = 6;
+    }
+    p
+}
+
+/// The same random program as another program type: `data`/`data_end`
+/// loads (`ldx w, [r6 + 0/4]`) move to the type's context layout
+/// (`__sk_buff` offsets 76/80 for tc; for tracing types the loads become
+/// plain scalar reads at valid offsets, so packet accesses turn into
+/// scalar dereferences both verifiers reject).
+pub fn retarget(prog: &Program, t: ProgramType) -> Program {
+    let mut p = prog.clone();
+    p.prog_type = t;
+    for i in &mut p.insns {
+        if i.code == 0x61 && i.src == 6 && (i.off == 0 || i.off == 4) {
+            i.off = match t {
+                ProgramType::Xdp => i.off,
+                ProgramType::SchedCls => 76 + i.off,
+                ProgramType::Tracepoint => 8 + i.off,
+                ProgramType::Kprobe => i.off,
+            };
+        }
     }
     p
 }

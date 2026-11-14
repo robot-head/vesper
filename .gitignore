@@ -1,3 +1,11 @@
 /target
 __pycache__/
 *.pyc
+# Bazel
+/bazel-*
+/user.bazelrc
+# Not committed: rules_rs records Cargo.lock facts here, and concurrent lanes
+# change Cargo.lock constantly. Bazel regenerates it locally.
+/MODULE.bazel.lock
+/.ci-lean-path
+/.ci-bazel-executables

@@ -1,0 +1,1080 @@
+{
+  "schema": 1,
+  "role": "review_evidence_not_success_receipt",
+  "upstream_base": "4faf51403bc4cb35cf6666d91fc9c938ae46d3aa",
+  "lean_toolchain": "leanprover/lean4:v4.24.0",
+  "batteries_commit": "8da40b72fece29b7d3fe3d768bac4c8910ce9bee",
+  "controls": [
+    {
+      "id": "closure.fvar.theorem",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_fvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "closure.mvar.theorem",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_mvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "closure.fvar.definition",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_fvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "closure.mvar.definition",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_mvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "closure.fvar.opaque",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_fvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "closure.mvar.opaque",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_mvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "closure.closed.theorem",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "closure.closed.definition",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "closure.closed.opaque",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "nested.valid.parameter",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "nested.valid.stored-constructor-type",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "nested.valid.stored-recursor-type",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "nested.discarded.bad-argument",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "application_type_mismatch",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "nested.discarded.double-projection",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "invalid_projection",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "nested.original.fvar",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_fvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "nested.original.mvar",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_mvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "nested.reserved.actual-auxiliary",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "reserved_nested_name",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "nested.reserved.projection-name",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "reserved_nested_name",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "prop.normalized.constructor",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "prop.normalized.no-large-elimination",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "prop.normalized.not-k-target",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "prop.normalized.reject-bool-projection",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "invalid_projection",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "mutual.unequal-universe-headers",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "mutual_universe_headers",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "mutual.duplicate-name-overwrite",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "mutual_duplicate_name",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "mutual.valid-distinct",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "projection.valid.type",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "projection.valid.nat",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "projection.valid.whnf",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "projection.valid.value",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "projection.large-index.stuck",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "projection.large-index.no-truncation",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "projection.large-index.type-rejection",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "invalid_projection",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "projection.wrong-structure-name",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "invalid_projection",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "mutual.valid-shared-universe",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "inductive.original-type.fvar",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_fvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "inductive.original-type.mvar",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_mvar",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "nested.valid-list-auxiliary",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "prop.eta.fixture",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "prop.eta.check",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "prop.eta.no-proof-expansion",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "projection.eta.data-check",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "projection.eta.data-expansion",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "universe.valid-imax-bound-datatype",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "universe.valid-two-fields",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "universe.undersized-rejected",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "constructor_universe",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.eq-bootstrap",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.collision-setup.Quot",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.collision-rejected.Quot",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "already_declared",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.collision-setup.Quot.mk",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.collision-rejected.Quot.mk",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "already_declared",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.collision-setup.Quot.lift",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.collision-rejected.Quot.lift",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "already_declared",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.collision-setup.Quot.ind",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.collision-rejected.Quot.ind",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "already_declared",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.clean-initialization",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.idempotent-initialization",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "quot.idempotent-state",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "primitive.genuine.Nat.add",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.changed-equation.Nat.add",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "primitive_equation",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.genuine.Nat.mod",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.changed-equation.Nat.mod",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "primitive_equation",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.genuine.Nat.div",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.changed-equation.Nat.div",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "primitive_equation",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.genuine.Nat.gcd",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.changed-equation.Nat.gcd",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "primitive_equation",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.genuine.Nat.bitwise",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.changed-equation.Nat.bitwise",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "primitive_equation",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.partial.recognizer-call",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "primitive.partial.not-recognized",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "primitive.partial.not-admitted",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "reserved_primitive_name",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.malformed-type",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_type_mismatch",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.malformed-body",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "declaration_type_mismatch",
+      "kind": "raw_declaration"
+    },
+    {
+      "id": "primitive.malformed-reflection-evidence",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "application_type_mismatch",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "level.constant-order.valid",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "level.constant-order.invalid",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "level.per-sublevel-order",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "level.subsumption-drained-key",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "level.canonical-scaffolding",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "level.canonical-scaffolding-equivalence",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "level.bounded-generation-count",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "level.bounded-interpretation",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "level.bounded-canonicity",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "level.bounded-order-interpretation",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "reduction.erased-local.check",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "reduction.erased-local.value",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "fuel.shallow-positive",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "accepted",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "fuel.shallow-type",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "condition_true",
+      "kind": "condition"
+    },
+    {
+      "id": "fuel.deep-refusal",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "deep_recursion",
+      "kind": "checker_expr"
+    },
+    {
+      "id": "metadata.constructor.exact",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "metadata_equal",
+      "kind": "condition"
+    },
+    {
+      "id": "metadata.constructor.changed-type",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "constructor_metadata_mismatch",
+      "kind": "condition"
+    },
+    {
+      "id": "metadata.recursor.exact",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "metadata_equal",
+      "kind": "condition"
+    },
+    {
+      "id": "metadata.recursor.changed-rule-rhs",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "recursor_metadata_mismatch",
+      "kind": "condition"
+    },
+    {
+      "id": "metadata.recursor.changed-rule-constructor",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": false,
+      "expected_reason": "recursor_metadata_mismatch",
+      "kind": "condition"
+    },
+    {
+      "id": "suite.complete",
+      "source": "tools/lean4lean42/controls/VesperControls.lean",
+      "expected_accept": true,
+      "expected_reason": "completed",
+      "kind": "condition"
+    }
+  ],
+  "fixes": [
+    {
+      "id": "declaration-value-closure",
+      "upstream_commits": [
+        "779c51fdea49c57c60f8039703605faae126b17f"
+      ],
+      "disposition": "applied three value guards before inference; cache-primed FVar, MVar and closed controls",
+      "changed_files": [
+        "Lean4Lean/Environment.lean"
+      ],
+      "control_ids": [
+        "closure.fvar.theorem",
+        "closure.mvar.theorem",
+        "closure.fvar.definition",
+        "closure.mvar.definition",
+        "closure.fvar.opaque",
+        "closure.mvar.opaque",
+        "closure.closed.theorem",
+        "closure.closed.definition",
+        "closure.closed.opaque"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "private-main-module-access",
+      "upstream_commits": [
+        "4faf51403bc4cb35cf6666d91fc9c938ae46d3aa"
+      ],
+      "disposition": "4.24 adaptation: explicitly open private mainModule? alias and apply it without field notation",
+      "changed_files": [
+        "Lean4Lean/Environment/Basic.lean"
+      ],
+      "control_ids": [],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "primitive-reflection-prerequisites",
+      "upstream_commits": [
+        "d7a52a83bea3e93968672b89ba88af4372b08f23"
+      ],
+      "disposition": "applied Church-encoded reflection removing quote-only And projection prerequisites",
+      "changed_files": [
+        "Lean4Lean/Primitive.lean"
+      ],
+      "control_ids": [
+        "primitive.genuine.Nat.add",
+        "primitive.genuine.Nat.mod",
+        "primitive.genuine.Nat.div",
+        "primitive.genuine.Nat.gcd",
+        "primitive.genuine.Nat.bitwise"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "nested-discarded-parameters",
+      "upstream_commits": [
+        "d7e70a5f09d514db2a2b3a052f3a9d2dde153da6"
+      ],
+      "disposition": "coupled open-context storage, abstract-on-restoration and final discarded-application checking",
+      "changed_files": [
+        "Lean4Lean/Inductive/Add.lean"
+      ],
+      "control_ids": [
+        "nested.valid.parameter",
+        "nested.valid.stored-constructor-type",
+        "nested.valid.stored-recursor-type",
+        "nested.discarded.bad-argument",
+        "nested.discarded.double-projection"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "original-closure-and-reserved-auxiliary",
+      "upstream_commits": [
+        "5518bf83860bab48e8d53f1f447cdd6c50c30c3f"
+      ],
+      "disposition": "original type/constructor closure before rewriting and actual generated auxiliary name/projection scan",
+      "changed_files": [
+        "Lean4Lean/Inductive/Add.lean"
+      ],
+      "control_ids": [
+        "nested.valid.parameter",
+        "nested.valid.stored-constructor-type",
+        "nested.valid.stored-recursor-type",
+        "nested.original.fvar",
+        "nested.original.mvar",
+        "nested.reserved.actual-auxiliary",
+        "nested.reserved.projection-name",
+        "inductive.original-type.fvar",
+        "inductive.original-type.mvar"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "normalized-prop-and-elimination",
+      "upstream_commits": [
+        "997e2985e513793c3dcc2e5ffead983f6b7d1cba",
+        "5518bf83860bab48e8d53f1f447cdd6c50c30c3f"
+      ],
+      "disposition": "coordinated isAlwaysZero/isNeverZero recognition, receiver/eta restriction, recursor and K-target classification",
+      "changed_files": [
+        "Lean4Lean/TypeChecker.lean",
+        "Lean4Lean/Inductive/Add.lean",
+        "Lean4Lean/Inductive/Reduce.lean"
+      ],
+      "control_ids": [
+        "prop.normalized.constructor",
+        "prop.normalized.no-large-elimination",
+        "prop.normalized.not-k-target",
+        "prop.normalized.reject-bool-projection",
+        "prop.eta.fixture",
+        "prop.eta.check",
+        "prop.eta.no-proof-expansion",
+        "projection.eta.data-check",
+        "projection.eta.data-expansion"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "mutual-block-headers-and-names",
+      "upstream_commits": [
+        "5518bf83860bab48e8d53f1f447cdd6c50c30c3f"
+      ],
+      "disposition": "equal universe lists and unique names before insertion",
+      "changed_files": [
+        "Lean4Lean/Environment.lean"
+      ],
+      "control_ids": [
+        "mutual.unequal-universe-headers",
+        "mutual.duplicate-name-overwrite",
+        "mutual.valid-distinct",
+        "mutual.valid-shared-universe"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "quotient-fresh-names",
+      "upstream_commits": [
+        "5518bf83860bab48e8d53f1f447cdd6c50c30c3f"
+      ],
+      "disposition": "all four names checked before first initialization; genuine Eq bootstrap, four collisions and idempotence",
+      "changed_files": [
+        "Lean4Lean/Quot.lean"
+      ],
+      "control_ids": [
+        "quot.eq-bootstrap",
+        "quot.collision-setup.Quot",
+        "quot.collision-rejected.Quot",
+        "quot.collision-setup.Quot.mk",
+        "quot.collision-rejected.Quot.mk",
+        "quot.collision-setup.Quot.lift",
+        "quot.collision-rejected.Quot.lift",
+        "quot.collision-setup.Quot.ind",
+        "quot.collision-rejected.Quot.ind",
+        "quot.clean-initialization",
+        "quot.idempotent-initialization",
+        "quot.idempotent-state"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "primitive-safety-and-recognition-order",
+      "upstream_commits": [
+        "cbb70bc3500060f22098c838f92e56bd363834e6",
+        "80d3dbef8b8130e49cedbdc4a22fdf0217222ee3"
+      ],
+      "disposition": "reject non-safe primitive recognition; type/close body before recognizer without insertion; type reflection arguments together instead of full later recursion recognizer rewrite",
+      "changed_files": [
+        "Lean4Lean/Environment.lean",
+        "Lean4Lean/Primitive.lean"
+      ],
+      "control_ids": [
+        "primitive.genuine.Nat.add",
+        "primitive.changed-equation.Nat.add",
+        "primitive.genuine.Nat.mod",
+        "primitive.changed-equation.Nat.mod",
+        "primitive.genuine.Nat.div",
+        "primitive.changed-equation.Nat.div",
+        "primitive.genuine.Nat.gcd",
+        "primitive.changed-equation.Nat.gcd",
+        "primitive.genuine.Nat.bitwise",
+        "primitive.changed-equation.Nat.bitwise",
+        "primitive.partial.recognizer-call",
+        "primitive.partial.not-recognized",
+        "primitive.partial.not-admitted",
+        "primitive.malformed-type",
+        "primitive.malformed-body",
+        "primitive.malformed-reflection-evidence"
+      ],
+      "remaining_obligations": [
+        "Upstream whole-implementation verification remains incomplete; old proof libraries are unported/unbuilt."
+      ],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "level-order-and-canonical-normalization",
+      "upstream_commits": [
+        "bc9a736be9c318209992e91ef6a218864b817dcf",
+        "4172c0fadafa54a8cb39787843f262883bb20e5b",
+        "f37aeabb8cc0f0bfd9aca9744167a608235f3a6a"
+      ],
+      "disposition": "port canonical custom level algorithm through exact4172 source, retain isEquivList prime API; no native/Std level replacement",
+      "changed_files": [
+        "Lean4Lean/Level.lean"
+      ],
+      "control_ids": [
+        "universe.valid-imax-bound-datatype",
+        "universe.valid-two-fields",
+        "universe.undersized-rejected",
+        "level.constant-order.valid",
+        "level.constant-order.invalid",
+        "level.per-sublevel-order",
+        "level.subsumption-drained-key",
+        "level.canonical-scaffolding",
+        "level.canonical-scaffolding-equivalence",
+        "level.bounded-generation-count",
+        "level.bounded-interpretation",
+        "level.bounded-canonicity",
+        "level.bounded-order-interpretation"
+      ],
+      "remaining_obligations": [
+        "Bounded semantic grid is runtime evidence, not a proof of global normalization soundness/completeness; old Verify.Level is not ported."
+      ],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "erased-local-reduction",
+      "upstream_commits": [
+        "d41b63770d0dbb385630a735aa6a22464b3861e6"
+      ],
+      "disposition": "remove obsolete hasFVar fast-reduction filter, preserving actual argument whnf checks; compatibility correction rather than a claimed False exploit",
+      "changed_files": [
+        "Lean4Lean/TypeChecker.lean"
+      ],
+      "control_ids": [
+        "reduction.erased-local.check",
+        "reduction.erased-local.value"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "projection-name-and-large-index",
+      "upstream_commits": [
+        "5518bf83860bab48e8d53f1f447cdd6c50c30c3f"
+      ],
+      "disposition": "retain checked inferProj name invariant and Nat indices; no redundant reduction-time name guard added",
+      "changed_files": [],
+      "control_ids": [
+        "projection.valid.type",
+        "projection.valid.nat",
+        "projection.valid.whnf",
+        "projection.valid.value",
+        "projection.large-index.stuck",
+        "projection.large-index.no-truncation",
+        "projection.large-index.type-rejection",
+        "projection.wrong-structure-name"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "restoration-rechecks-and-k-target-phase",
+      "upstream_commits": [
+        "5518bf83860bab48e8d53f1f447cdd6c50c30c3f",
+        "4b60e53d1531ec785494a3d765f3a1cc0afd07bd"
+      ],
+      "disposition": "retain existing restoration structure and K phase; actual restored constructor/recursor types and flags checked by controls; shared structural helpers now exercise genuine generated metadata with changed ctor type, rule RHS and rule constructor name",
+      "changed_files": [],
+      "control_ids": [
+        "nested.valid.stored-constructor-type",
+        "nested.valid.stored-recursor-type",
+        "prop.normalized.constructor",
+        "prop.normalized.no-large-elimination",
+        "prop.normalized.not-k-target",
+        "prop.normalized.reject-bool-projection",
+        "metadata.constructor.exact",
+        "metadata.constructor.changed-type",
+        "metadata.recursor.exact",
+        "metadata.recursor.changed-rule-rhs",
+        "metadata.recursor.changed-rule-constructor"
+      ],
+      "remaining_obligations": [
+        "The separate Main replay path must call these same helpers at actual postponed comparisons and be exercised in assembled replay. No complete eliminator proof is claimed."
+      ],
+      "execution_refs": [
+        "focused-runtime-controls",
+        "shared-metadata-runtime-controls"
+      ]
+    },
+    {
+      "id": "later-domain-metadata-and-level-native-paths",
+      "upstream_commits": [
+        "67f63b0c818920dfaed2ad07ccff187a6a8fe1e3",
+        "29d9243a1a885f58074a5b67d964ca71cd2075c5"
+      ],
+      "disposition": "not transplanted: .olean path retains existing defeq metadata behavior; custom level operations remain selected; no text exporter or newer native API",
+      "changed_files": [],
+      "control_ids": [
+        "primitive.genuine.Nat.add",
+        "primitive.genuine.Nat.mod",
+        "primitive.genuine.Nat.div",
+        "primitive.genuine.Nat.gcd",
+        "primitive.genuine.Nat.bitwise",
+        "level.constant-order.valid",
+        "level.constant-order.invalid",
+        "level.per-sublevel-order",
+        "level.subsumption-drained-key",
+        "level.canonical-scaffolding",
+        "level.canonical-scaffolding-equivalence",
+        "level.bounded-generation-count",
+        "level.bounded-interpretation",
+        "level.bounded-canonicity",
+        "level.bounded-order-interpretation"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    },
+    {
+      "id": "fixed-fuel-refusal",
+      "upstream_commits": [
+        "8865b155abbf68d3a827fb3568bf6839780163c2"
+      ],
+      "disposition": "retain existing fixed1000 Methods fuel; shallow typing accepted and deep normalization refused, without newer configurable fuel API",
+      "changed_files": [],
+      "control_ids": [
+        "fuel.shallow-positive",
+        "fuel.shallow-type",
+        "fuel.deep-refusal"
+      ],
+      "remaining_obligations": [],
+      "execution_refs": [
+        "focused-runtime-controls"
+      ]
+    }
+  ],
+  "source_sha256": {
+    "tools/lean4lean42/patches/kernel.patch": "f244667d85e91656feb91ab0e4d36238efdad0aaebbf901a5e2ed342336cc388",
+    "tools/lean4lean42/patches/toolchain.patch": "720457143a4b66be681fce1b0a1386188ca0be1aa04a185b9150dc6022691f50",
+    "tools/lean4lean42/controls/VesperControls.lean": "0fba2d74c324bbdbf0e4fd1f4cefb9c01a74ba2272b77dcf8e923a81eec0851b",
+    "tools/lean4lean42/controls/Check.lean": "f7196163385d161f1a4e392a9b9b760196d76f6bc260415ade3068a582c38789"
+  },
+  "executions": [
+    {
+      "id": "focused-runtime-controls",
+      "command": "/home/agent/.local/share/vesper-lean/bin/lake env lean --run /workspace/vesper-worktrees/lean4lean42-kernel/tools/lean4lean42/controls/Check.lean",
+      "cwd": "/tmp/vesper-lean4lean42-kernel-worker",
+      "exit_code": 0,
+      "control_count": 89,
+      "log_path": "/tmp/lean4lean42-runtime-controls.log",
+      "log_sha256": "bb342145ea56d42043555565f0e9371b8afdaafccd475f12c78168c7b5c7d574",
+      "build_command": "/home/agent/.local/share/vesper-lean/bin/lake build Lean4Lean.VesperControls",
+      "build_exit_code": 0,
+      "build_log_path": "/tmp/lean4lean42-control-build.log",
+      "build_log_sha256": "fe6fd28d52441ccaa2c7963445cf5b69d19e2eb5145f59038d6f708b7b86caef",
+      "controls_source_sha256": "3a197b3fa68e105a9b5fc20e2776aac0b37baec0c7ad25d0f443f6235cf3b05d"
+    },
+    {
+      "id": "shared-metadata-runtime-controls",
+      "command": "LEAN_NUM_THREADS=1 /home/agent/.local/share/vesper-lean/bin/lake env lean --run /workspace/vesper-worktrees/lean4lean42-replay/tools/lean4lean42/controls/Check.lean",
+      "cwd": "/tmp/vesper-lean4lean42-replay-worker",
+      "exit_code": 0,
+      "control_count": 94,
+      "log_path": "/tmp/lean4lean42-metadata-controls.log",
+      "log_sha256": "522f5da96c1bd6229bc94cc2063e95d09067e8f59ff6049a9f6bafe1ade0d80d",
+      "controls_source_sha256": "0fba2d74c324bbdbf0e4fd1f4cefb9c01a74ba2272b77dcf8e923a81eec0851b",
+      "build_command": "LEAN_NUM_THREADS=1 /home/agent/.local/share/vesper-lean/bin/lake build Lean4Lean.VesperControls",
+      "build_exit_code": 0,
+      "build_log_path": "/tmp/lean4lean42-metadata-control-build.log",
+      "build_log_sha256": "c529cc554e8f55dc9977da1164666746f50d3c5c93ace7a2dd8d9e602ad1a6a5"
+    }
+  ],
+  "unexecuted": [
+    "complete assembled RewriteWitness fresh replay",
+    "complete assembled ArithmeticOracle fresh replay",
+    "assembled replay constructor/recursor metadata-mutation rejection controls",
+    "upstream Theory/Verify proof builds and transitive proof-root audits",
+    "full checker/translator/compiler refinement"
+  ]
+}

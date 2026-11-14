@@ -6,6 +6,13 @@ description = "Sans-IO QUIC packet core (RFC 9000 headers, frames, packet number
 publish = false
 
 [dependencies]
+# Wave six (issue #247): address-validation tokens (AES-256-GCM), stateless
+# reset tokens (HMAC-SHA-256) and constant-time comparisons.
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
 vesper-ffi = { path = "../vesper-ffi" }
 # Wave-four integration (issue #45): the end-to-end §35.3 path wires every
 # Warp lane together here. No lane crate depends back on this one.
@@ -13,5 +20,14 @@ vesper-warp-bbr = { path = "../vesper-warp-bbr" }
 vesper-warp-crypto = { path = "../vesper-warp-crypto" }
 vesper-warp-shard = { path = "../vesper-warp-shard" }
 vesper-warp-tcp = { path = "../vesper-warp-tcp" }
+# Wave-five integration A (issue #135): the TLS 1.3 handshake.
+vesper-warp-tls = { path = "../vesper-warp-tls" }
 vesper-warp-umem = { path = "../vesper-warp-umem" }
 vesper-warp-wheel = { path = "../vesper-warp-wheel" }
+
+[dev-dependencies]
+# Wave six (issue #247): interop against an independent QUIC stack, in
+# tests only. Pinned exactly; aws-lc-rs, the provider the workspace's
+# rustls already uses.
+bytes = "=1.12.1"
+quinn-proto = { version = "=0.11.13", default-features = false, features = ["rustls-aws-lc-rs"] }

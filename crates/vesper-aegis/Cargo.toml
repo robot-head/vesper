@@ -1,0 +1,24 @@
+[package]
+name = "vesper-aegis"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Aegis confidential-computing guest libraries: TDX/SEV-SNP/CCA attestation, RA-TLS policy, GPA acceptance and single-fetch host values (design section 33)"
+publish = false
+
+[dependencies]
+coset = "0.3"
+ring = "0.17.14"
+rustls-pki-types = { version = "1.16", features = ["std"] }
+webpki = { package = "rustls-webpki", version = "0.103.16", default-features = false, features = ["std", "ring"] }
+spki = { version = "0.7.3", default-features = false }
+chacha20poly1305 = { workspace = true }
+subtle = { workspace = true }
+zeroize = { workspace = true }
+vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-vault = { path = "../vesper-vault" }
+serde = { workspace = true }
+serde_json = { workspace = true, features = ["raw_value"] }
+x509-parser = "=0.18.1"
+
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }

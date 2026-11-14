@@ -425,15 +425,10 @@ pub fn corpus() -> Vec<Case> {
             fin(a),
         );
     }
-    reject!(
-        "reject/kfunc",
-        "call.kfunc_unsupported",
-        Kernel::Rejects,
-        |a| {
-            a.raw(RawInsn::new(0x85, 0, 2, 0, 1));
-            ret(&mut a, 2);
-        }
-    );
+    reject!("reject/kfunc", "call.kfunc_unknown", Kernel::Rejects, |a| {
+        a.raw(RawInsn::new(0x85, 0, 2, 0, 1));
+        ret(&mut a, 2);
+    });
     {
         let mut a = Asm::new();
         let f = a.label();
@@ -920,5 +915,7 @@ pub fn corpus() -> Vec<Case> {
             fin(a),
         );
     }
+    v.extend(super::depth::cases());
+    v.extend(super::kfuncs::cases());
     v
 }

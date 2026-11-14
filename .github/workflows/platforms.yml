@@ -1,0 +1,163 @@
+name: Platforms
+# Linux CI runs on BuildBuddy Workflows (buildbuddy.yaml). BuildBuddy's hosted
+# workflows are Linux-only, so the macOS and Windows lanes stay on GitHub
+# runners. Every build and test runs through Bazel (docs/bazel.md), using
+# BuildBuddy's remote cache when the BUILDBUDDY_API_KEY secret is set.
+# Run on pushes to main, on pull requests, and on merge queue groups. A push
+# trigger on every branch would start a second, duplicate run for each commit
+# pushed to a PR branch. The merge queue only advances once the required
+# checks report on its temporary gh-readonly-queue/main/* branch, so
+# `merge_group` must stay here for as long as the queue is enabled on main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+
+# PR runs share one group per PR (refs/pull/N/merge), so a newer push cancels
+# the older run. Pushes to main share one group without cancelling: the run in
+# progress finishes, and a newer push replaces any run still waiting. A burst
+# of merges therefore tests the first and the last commit instead of holding
+# one scarce macOS runner per merge (they are the CI bottleneck), and every
+# commit on main is still covered by the PR run that merged it. Merge queue
+# groups keep their own group keyed by run id, because a queued group must
+# report its required checks; the queue cancels groups it drops by itself.
+concurrency:
+  group: platforms-${{ github.event_name == 'pull_request' && github.ref || github.event_name == 'push' && 'main' || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Per-platform lanes build and test every workspace member on the host OS.
+  # Platform-specific code is gated with cfg in the crates themselves (for
+  # example, Pulse's io_uring driver is Linux-only), so these lanes check that
+  # the portable surface really is portable. Long, platform-neutral Lean
+  # replays run on Linux (BuildBuddy) only; see "Linux-only suites" in
+  # docs/ci-platforms.md.
+  platform:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS (AArch64)
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # Keep sources byte-identical to Linux so snapshot and span tests agree.
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/bazel
+        with:
+          buildbuddy-api-key: ${{ secrets.BUILDBUDDY_API_KEY }}
+          cache-name: bazel-${{ runner.os }}
+      - name: Install Lean toolchain manager (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o "$RUNNER_TEMP/elan-init.sh"
+          sh "$RUNNER_TEMP/elan-init.sh" -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - name: Install Lean toolchain manager (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          curl.exe -O --location https://raw.githubusercontent.com/leanprover/elan/master/elan-init.ps1
+          ./elan-init.ps1 -NoPrompt $true -DefaultToolchain none
+          Remove-Item elan-init.ps1
+          "$env:USERPROFILE\.elan\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Resolve the pinned Lean binary for tests
+        run: |
+          lean --version
+          echo "VESPER_LEAN=$(elan which lean)" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      # No external Lean4Lean checker here: its only user,
+      # //:test/lean4lean42_acceptance, runs on Linux only (BUILD.bazel).
+      # `short` lists every test with its time, to keep the slow ones visible.
+      - run: bazel test --test_summary=short //...
+      - run: scripts/ci/check-lean-models.sh
+      # One Bazel invocation for every executable the scripts below run,
+      # instead of a build and a cquery (~20 s here) per executable.
+      - name: Prebuild the acceptance executables
+        run: |
+          scripts/ci/prebuild-acceptance.sh "$RUNNER_TEMP/bazel-executables"
+          echo "VESPER_BAZEL_EXECUTABLES=$RUNNER_TEMP/bazel-executables" >> "$GITHUB_ENV"
+      # On Apple silicon the host is real AArch64 hardware, so native code
+      # runs here rather than under QEMU. The native executable driver does
+      # not yet support linking with MSVC.
+      - name: Validate host native executables
+        if: runner.os != 'Windows'
+        run: scripts/test-native-host.sh
+      # test-format-proof.sh (a serial Lean witness replay, over three
+      # minutes here) runs on Linux and against the Windows Cargo binary.
+      - name: Run the acceptance scripts
+        run: |
+          scripts/test-canonical-protocols.sh
+          scripts/test-diagnostics.sh
+          scripts/test-editor.sh
+          scripts/test-expansion-foundations.sh
+          scripts/test-recovery.sh
+          scripts/test-source-tooling.sh
+          scripts/test-source-macros.sh
+          scripts/test-macro-preview.sh
+          scripts/test-source-macro-parameters.sh
+          scripts/test-source-macro-tuples.sh
+          scripts/test-doc-links.sh
+
+  # Cargo, not Bazel: the hermetic toolchain links MSVC binaries through
+  # clang-cl, whose argument syntax rustc's MSVC linker flavor does not speak
+  # (rules_rs 0.2.4, llvm 0.8.26). See docs/bazel.md.
+  windows:
+    name: Windows (x86_64 MSVC)
+    runs-on: windows-latest
+    env:
+      CARGO_BUILD_JOBS: 2
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - run: git config --global core.autocrlf false
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      # Only main saves the cache; PRs restore it. Each save took about two
+      # minutes, and PR caches pushed main's out of the 10 GB repository limit.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install Lean toolchain manager
+        shell: pwsh
+        run: |
+          curl.exe -O --location https://raw.githubusercontent.com/leanprover/elan/master/elan-init.ps1
+          ./elan-init.ps1 -NoPrompt $true -DefaultToolchain none
+          Remove-Item elan-init.ps1
+          "$env:USERPROFILE\.elan\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - run: lean --version
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      # No external Lean4Lean checker: tests/lean4lean42_acceptance.rs, its
+      # only user, is ignored on Windows and runs on Linux.
+      - run: cargo clippy --workspace --locked --all-targets -- -D warnings
+      - run: cargo test --workspace --locked
+        env:
+          VESPER_LEAN: lean
+      - run: scripts/ci/check-lean-models.sh
+      - name: Run proof acceptance against the actual Cargo executable
+        run: >-
+          python scripts/check-format-proof.py --binary target/debug/vesper.exe
+          --lean "$(elan which lean)"
+      - name: Run current-source preview acceptance against the actual Cargo executable
+        run: python scripts/check-macro-preview.py --binary target/debug/vesper.exe
+      - name: Run parameter macro acceptance against the actual Cargo executable
+        run: python scripts/check-source-macro-parameters.py --binary target/debug/vesper.exe
+      - name: Run tuple macro acceptance against the actual Cargo executable
+        run: python scripts/check-source-macro-tuples.py --binary target/debug/vesper.exe
+      - name: Run intra-doc link acceptance against the actual Cargo executable
+        run: python scripts/check-doc-links.py --binary target/debug/vesper.exe

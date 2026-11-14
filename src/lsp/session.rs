@@ -1,5 +1,6 @@
 //! In-memory bounded editor lifecycle. URIs are labels, never filesystem paths.
-use super::{actions, navigation, search};
+use super::{actions, macro_preview, navigation, search};
+mod lens_requests;
 use crate::{
     database::{self, Database, RecoveryFile, SourceFile, SyntaxSnapshot},
     tooling::{
@@ -7,9 +8,11 @@ use crate::{
         lint::ConfigProvenance,
     },
 };
+pub use lens_requests::LensConfig;
+pub(crate) use lens_requests::{CommandOutcome, TimerOutcome};
 use salsa::Setter;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::Arc};
+use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 use vesper_lint::policy::Policy;
 use vesper_lsp::{ContentChange, DocumentStore, Envelope, Position, Range, StoreLimits};
 use vesper_syntax::{
@@ -79,7 +82,32 @@ pub(crate) struct Session {
     code_actions_supported: bool,
     diagnostic_related: bool,
     diagnostic_help_data: bool,
+    lens_views: RefCell<LensViews>,
+    proofs: vesper_lsp::lens::ProofLedger,
+    /// Semantic proof outcomes keyed by exact model identity, so a function
+    /// whose model did not change keeps its outcome across edits.
+    model_proofs: vesper_lsp::lens::ProofLedger,
+    lens_models: RefCell<LensModels>,
+    lens_config: LensConfig,
+    background: Option<vesper_lsp::lens::Debouncer>,
+    timers: Vec<(String, std::time::Duration)>,
+    code_lens_refresh: bool,
+    refreshes: u64,
 }
+type LensModels = BTreeMap<
+    String,
+    (
+        [u8; 32],
+        Arc<BTreeMap<String, Result<super::proof_model::Model, String>>>,
+    ),
+>;
+type LensViews = BTreeMap<
+    String,
+    (
+        [u8; 32],
+        Result<Arc<super::lens::View>, super::lens::Unavailable>,
+    ),
+>;
 impl Session {
     pub(crate) fn new() -> Result<Self, String> {
         Ok(Self {
@@ -94,7 +122,21 @@ impl Session {
             code_actions_supported: false,
             diagnostic_related: false,
             diagnostic_help_data: false,
+            lens_views: RefCell::new(BTreeMap::new()),
+            proofs: vesper_lsp::lens::ProofLedger::new(1024).map_err(|e| e.to_string())?,
+            model_proofs: vesper_lsp::lens::ProofLedger::new(4096).map_err(|e| e.to_string())?,
+            lens_models: RefCell::new(BTreeMap::new()),
+            lens_config: LensConfig::default(),
+            background: None,
+            timers: Vec::new(),
+            code_lens_refresh: false,
+            refreshes: 0,
         })
+    }
+    pub(crate) fn with_config(config: LensConfig) -> Result<Self, String> {
+        let mut session = Self::new()?;
+        session.set_lens_config(config);
+        Ok(session)
     }
     fn running(&self) -> Result<(), ServerError> {
         match self.state {
@@ -147,6 +189,7 @@ impl Session {
                             .pointer("/textDocument/codeAction/codeActionLiteralSupport")
                             .is_some_and(Value::is_object)
                 });
+            self.configure_background(initialize);
             let code_actions = if self.code_actions_supported {
                 json!({"codeActionKinds":["quickfix","source.fixAll.vesper"],"resolveProvider":false})
             } else {
@@ -160,7 +203,22 @@ impl Session {
                 "documentSymbolProvider":true,"workspaceSymbolProvider":true,
                 "documentFormattingProvider":true,
                 "codeActionProvider":code_actions,
-                "experimental":{"vesperRecoveryStatus":{"scope":"syntax_only","version":1}}
+                "completionProvider":{"triggerCharacters":["."],"resolveProvider":false},
+                "inlayHintProvider":true,
+                "codeLensProvider":{"resolveProvider":false},
+                "executeCommandProvider":{"commands":[lens_requests::PROOF_COMMAND]},
+                "experimental":{
+                    "vesperLens":{"version":1,"poisonedRecovery":"VESPER_POISONED_RECOVERY",
+                        "completion":"obligation_ranked_members",
+                        "proofLenses":[super::proof_lens::EXTRACTION_SCOPE,
+                            super::proof_lens::SEMANTIC_SCOPE],
+                        "backgroundProofs":self.background.as_ref()
+                            .map(|b| json!({"debounceMs": b.delay().as_millis() as u64}))
+                            .unwrap_or(Value::Null),
+                        "asyncCancellation":"all_requests"},
+                    "vesperRecoveryStatus":{"scope":"syntax_only","version":1},
+                    "vesperMacroPreview":{"version":1,"tier":1,"scope":"expanded_source_only"}
+                }
             },"serverInfo":{"name":"vesper","version":env!("CARGO_PKG_VERSION")}}));
         }
         self.running()?;
@@ -181,26 +239,44 @@ impl Session {
                 | "workspace/symbol"
                 | "vesper/signatureSearch"
                 | "vesper/recoveryStatus"
+                | "vesper/macroPreview"
                 | "textDocument/formatting"
                 | "textDocument/codeAction"
+                | "textDocument/completion"
+                | "textDocument/inlayHint"
+                | "textDocument/codeLens"
         ) {
             return Err(ServerError::new(-32601, "Method not found"));
         }
         let params = object(params.as_ref())?;
         match method {
+            "vesper/macroPreview" => self.macro_preview(params),
             "vesper/recoveryStatus" => self.recovery_status(document_uri(params)?),
-            "textDocument/hover" | "textDocument/definition" => {
+            "textDocument/completion" => self.completion(params),
+            "textDocument/inlayHint" => self.inlay_hints(params),
+            "textDocument/codeLens" => self.code_lenses(params),
+            "textDocument/hover" => {
+                let uri = document_uri(params)?;
+                let at = position(field(params, "position")?)?;
+                let base = self.snapshot(uri).and_then(|snapshot| {
+                    navigation::hover(
+                        &snapshot,
+                        self.document(uri)?.index(),
+                        at,
+                        navigation::Limits::default(),
+                    )
+                    .map(|value| value.unwrap_or(Value::Null))
+                    .map_err(nav_error)
+                });
+                self.hover_with_obligations(uri, at, base)
+            }
+            "textDocument/definition" => {
                 let uri = document_uri(params)?;
                 let at = position(field(params, "position")?)?;
                 let snapshot = self.snapshot(uri)?;
                 let document = self.document(uri)?;
                 let limits = navigation::Limits::default();
-                let result = if method == "textDocument/hover" {
-                    navigation::hover(&snapshot, document.index(), at, limits)
-                } else {
-                    navigation::definition(uri, &snapshot, document.index(), at, limits)
-                };
-                result
+                navigation::definition(uri, &snapshot, document.index(), at, limits)
                     .map(|value| value.unwrap_or(Value::Null))
                     .map_err(nav_error)
             }
@@ -308,6 +384,7 @@ impl Session {
                     .open(uri, version, text)
                     .map_err(|e| ServerError::params(e.to_string()))?;
                 self.accepted(uri);
+                self.touch_background(uri);
                 vec![self.diagnostics(uri)?]
             }
             "textDocument/didChange" => {
@@ -345,6 +422,7 @@ impl Session {
                     .change(uri, version, &changes)
                     .map_err(|e| ServerError::params(e.to_string()))?;
                 self.accepted(uri);
+                self.touch_background(uri);
                 vec![self.diagnostics(uri)?]
             }
             "textDocument/didClose" => {
@@ -353,6 +431,7 @@ impl Session {
                 self.documents
                     .close(uri)
                     .map_err(|e| ServerError::params(e.to_string()))?;
+                self.forget_background(uri);
                 self.reset_database();
                 vec![notification(
                     "textDocument/publishDiagnostics",
@@ -370,6 +449,45 @@ impl Session {
         self.documents
             .get(uri)
             .ok_or_else(|| ServerError::params("document URI is not open"))
+    }
+    fn macro_preview(&self, params: &serde_json::Map<String, Value>) -> Result<Value, ServerError> {
+        if params.len() != 1 || !params.contains_key("textDocument") {
+            return Err(ServerError::params("macro preview takes only textDocument"));
+        }
+        let text_document = object(Some(field(params, "textDocument")?))?;
+        if text_document
+            .keys()
+            .any(|key| key != "uri" && key != "version")
+        {
+            return Err(ServerError::params("unknown macro preview document field"));
+        }
+        let uri = string(field(text_document, "uri")?, "uri")?;
+        let expected = text_document.get("version").map(version).transpose()?;
+        let current = self.document(uri)?;
+        if expected.is_some_and(|expected| expected != current.version()) {
+            return Err(ServerError::new(-32801, "Document version has changed"));
+        }
+        let unavailable = || ServerError {
+            code: ANALYSIS_UNAVAILABLE,
+            message: "Macro preview is unavailable".into(),
+            data: Some(json!({"status":"preview_unavailable","scope":"expanded_source_only"})),
+        };
+        let limits = macro_preview::Limits::default();
+        // Bound the exact mirror comparison before traversing either source.
+        // URI labels never cause filesystem access or execution.
+        if current.text().len() > limits.max_source_bytes || uri.len() > limits.max_uri_bytes {
+            return Err(unavailable());
+        }
+        let file = *self.files.get(uri).ok_or_else(unavailable)?;
+        if file.text(&self.db) != current.text() {
+            return Err(unavailable());
+        }
+        let snapshot = database::macro_preview::preview(&self.db, file);
+        let document =
+            macro_preview::Document::new(uri, current.version(), current.text(), snapshot)
+                .map_err(|_| unavailable())?;
+        // This result never replaces guarded_analysis or changes diagnostics.
+        macro_preview::render(&document, limits).map_err(|_| unavailable())
     }
     fn snapshot(&self, uri: &str) -> Result<Arc<CheckedSource>, ServerError> {
         let document = self.document(uri)?;
@@ -414,7 +532,11 @@ impl Session {
             .get(uri)
             .expect("accepted transaction retained document");
         if let Some(file) = self.files.get(uri) {
-            file.set_text(&mut self.db).to(document.text().to_owned());
+            // The store already bounded both texts. Preserve the actual input
+            // and its memoized results for byte-identical version-only changes.
+            if file.text(&self.db) != document.text() {
+                file.set_text(&mut self.db).to(document.text().to_owned());
+            }
         } else {
             self.files.insert(
                 uri.to_owned(),
@@ -448,6 +570,10 @@ impl Session {
         // survive in the mirror, including IDs of still-open documents.
         self.files.clear();
         self.recovery.clear();
+        // Cached Lens views hold whole checker states; keep only open buffers
+        // reachable, and rebuild them lazily from the new database.
+        self.lens_views.borrow_mut().clear();
+        self.lens_models.borrow_mut().clear();
         self.db = Database::default();
         for document in self.documents.iter() {
             self.files.insert(
@@ -522,10 +648,16 @@ impl Session {
             .ok_or_else(|| ServerError::internal("source mirror missing"))?;
         let analysis = database::guarded_analysis(&self.db, file);
         let mut recovery = None;
+        let mut lens_metadata = None;
         let (mut diagnostics, status, kind) = match analysis.checked() {
             Ok(_) => (Vec::new(), "checked", None),
             Err(failure @ AnalysisFailure::Parse { .. }) => match self.recovery_payload(uri) {
-                Ok((payload, metadata)) => {
+                Ok((mut payload, mut metadata)) => {
+                    // PoisonedRecovery: one notice per live linear binding of
+                    // each damaged function, never a cascade of leak errors.
+                    let (poison, lens) = self.poison_payload(uri);
+                    payload.0.extend(poison);
+                    metadata["lens"] = lens;
                     recovery = Some(metadata);
                     payload
                 }
@@ -536,7 +668,14 @@ impl Session {
                     diagnostic_payload(uri, document.index(), failure)?
                 }
             },
-            Err(failure) => diagnostic_payload(uri, document.index(), failure)?,
+            Err(failure) => {
+                // Over the editor budgets, Lens still builds its own view
+                // under its raised profile; its facts stay presentation only.
+                if matches!(failure, AnalysisFailure::Resource { .. }) {
+                    lens_metadata = Some(self.poison_payload(uri).1);
+                }
+                diagnostic_payload(uri, document.index(), failure)?
+            }
         };
         // Validation covers every supplied span before optional presentation
         // fields are filtered for the client's publication capabilities.
@@ -558,6 +697,9 @@ impl Session {
             "source_blake3":hash_text(analysis.source_identity().blake3())});
         if let Some(recovery) = recovery {
             metadata["recovery"] = recovery;
+        }
+        if let Some(lens) = lens_metadata {
+            metadata["lens"] = lens;
         }
         Ok(notification(
             "textDocument/publishDiagnostics",
@@ -1022,6 +1164,81 @@ mod tests {
             "effect_ceiling":{"instances":[],"tail":null}})
     }
     #[test]
+    fn macro_preview_rejects_client_authority_and_stale_versions_before_compilation() {
+        let mut session = running(false);
+        open(&mut session, "untitled:preview", "fn main() -> i64 { 42 }");
+        for params in [
+            json!({"textDocument":{"uri":"untitled:preview"},"policy":{}}),
+            json!({"textDocument":{"uri":"untitled:preview","approved":true}}),
+            json!({"textDocument":{"uri":"untitled:preview","source":"forged"}}),
+            json!({"textDocument":{"uri":"untitled:preview","version":null}}),
+            json!({"textDocument":{"uri":"untitled:preview","version":2147483648_i64}}),
+        ] {
+            assert_eq!(
+                session
+                    .request("vesper/macroPreview", Some(params))
+                    .unwrap_err()
+                    .code,
+                -32602
+            );
+        }
+        let stale = session
+            .request(
+                "vesper/macroPreview",
+                Some(json!({
+                    "textDocument":{"uri":"untitled:preview","version":0}
+                })),
+            )
+            .unwrap_err();
+        assert_eq!(stale.code, -32801);
+    }
+
+    #[test]
+    fn macro_preview_never_uses_a_stale_source_mirror() {
+        let mut session = running(false);
+        let uri = "untitled:preview";
+        open(&mut session, uri, "fn main() -> i64 { 42 }");
+        let file = session.files[uri];
+        file.set_text(&mut session.db)
+            .to("fn main() -> i64 { 7 }".into());
+        let error = session
+            .request(
+                "vesper/macroPreview",
+                Some(json!({"textDocument":{"uri":uri}})),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ANALYSIS_UNAVAILABLE);
+        assert_eq!(error.data.unwrap()["status"], "preview_unavailable");
+        assert_eq!(
+            session.document(uri).unwrap().text(),
+            "fn main() -> i64 { 42 }"
+        );
+    }
+    #[test]
+    fn macro_preview_noop_reuses_actual_artifact_with_current_document_version() {
+        let mut session = running(false);
+        let uri = "untitled:macro";
+        let source = include_str!("../../tests/fixtures/source_macros/keep.ves");
+        open(&mut session, uri, source);
+        let before = database::macro_preview::preview(&session.db, session.files[uri])
+            .outcome()
+            .unwrap();
+        change(&mut session, uri, 2, source);
+        let after = database::macro_preview::preview(&session.db, session.files[uri])
+            .outcome()
+            .unwrap();
+        assert!(Arc::ptr_eq(&before, &after));
+        let result = session
+            .request(
+                "vesper/macroPreview",
+                Some(json!({"textDocument":{"uri":uri,"version":2}})),
+            )
+            .unwrap();
+        assert_eq!(result["version"], 2);
+        assert_eq!(result["status"], "expanded_checked");
+        assert_eq!(result["expanded_source"], after.expanded_source());
+    }
+    #[test]
     fn code_actions_require_negotiated_literal_and_versioned_edit_support() {
         for capabilities in [
             json!({}),
@@ -1052,13 +1269,17 @@ mod tests {
         );
         let result = session.request("initialize", Some(json!({}))).unwrap();
         assert_eq!(result["capabilities"]["positionEncoding"], "utf-16");
-        for unsupported in [
-            "completionProvider",
-            "executeCommandProvider",
-            "codeLensProvider",
-        ] {
-            assert!(result["capabilities"].get(unsupported).is_none());
-        }
+        // Lens providers are advertised; proof commands are server-named only.
+        assert_eq!(
+            result["capabilities"]["executeCommandProvider"]["commands"],
+            json!(["vesper.proofAudit"])
+        );
+        assert_eq!(
+            result["capabilities"]["completionProvider"]["triggerCharacters"],
+            json!(["."])
+        );
+        assert!(result["capabilities"]["codeLensProvider"].is_object());
+        assert!(result["capabilities"].get("renameProvider").is_none());
         assert_eq!(
             session
                 .request("initialize", Some(json!({})))
@@ -1228,7 +1449,7 @@ mod tests {
     #[test]
     fn unsupported_and_invalid_spans_publish_explicit_unavailable_warnings() {
         let mut session = running(true);
-        let unavailable = open(&mut session, "opaque:a", "fn main(){let x=0;let x=(x,x);}");
+        let unavailable = open(&mut session, "opaque:a", "fn main(){let x=Some(0);}");
         assert_eq!(unavailable["vesper"]["status"], "analysis_unavailable");
         assert_eq!(unavailable["diagnostics"][0]["severity"], 2);
         assert_eq!(

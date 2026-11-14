@@ -1,0 +1,4 @@
+//! Unknown [missing] must not acquire a guessed local anchor.
+fn main() -> i64 {
+    42
+}

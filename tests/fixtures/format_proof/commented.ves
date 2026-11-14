@@ -1,0 +1,6 @@
+// preserved comment 😀 " \\ Vesper.StylusGenerated
+fn main() -> i64 {
+    /* line and comment stay in order */ let x = 42;
+    // final 🦀
+    x
+}

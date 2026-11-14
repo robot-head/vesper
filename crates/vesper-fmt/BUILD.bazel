@@ -1,0 +1,5 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    extra_compile_data = ["//:examples", "//:lean"],
+)

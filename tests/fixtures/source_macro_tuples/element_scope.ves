@@ -1,0 +1,21 @@
+fn helper() -> i64 {
+    42
+}
+fn score(in value: (i64, i64)) -> i64 {
+    let (_, n) = value;
+    n
+}
+macro make() -> expr {
+    quote {
+        (
+            {
+                let helper = 0;
+                helper
+            },
+            helper()
+        )
+    }
+}
+fn main() -> i64 {
+    score(make!())
+}

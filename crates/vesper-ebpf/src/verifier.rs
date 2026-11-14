@@ -1,8 +1,8 @@
 //! The §27.5 pre-flight abstract verifier.
 //!
 //! It models the parts of Linux `kernel/bpf/verifier.c` that decide whether
-//! the programs this crate emits are safe, for privileged (`CAP_BPF`) XDP
-//! programs:
+//! the programs this crate emits are safe, for privileged (`CAP_BPF`) XDP,
+//! tc (`sched_cls`), tracepoint and kprobe programs:
 //!
 //! * a CFG pass: decodable instructions, in-range jumps that stay inside
 //!   their subprogram and never land in the second slot of `LD_IMM64`, no
@@ -18,6 +18,20 @@
 //!   must be released on every path before the program exits;
 //! * path exploration with state pruning against fully explored states
 //!   and rejection of loops that revisit an in-progress state unchanged.
+//! * per-type context layouts and helper sets; tail calls through program
+//!   arrays; `bpf_loop` callbacks, explored once per iteration until their
+//!   entry state repeats; the generic kfuncs (`bpf_preempt_*`,
+//!   `bpf_rcu_read_*` and `bpf_local_irq_*` regions that must be closed
+//!   in order before exit or a call that leaves the program, and the
+//!   open-coded `bpf_iter_num_*` iterator in its stack slot);
+//! * loop widening as the kernel's `widen_imprecise_scalars`: at a
+//!   bounded back edge (an active iterator or a `bpf_loop` callback) a
+//!   scalar that changed is widened to unknown; a widened value that later
+//!   decides a branch, a pointer offset or a helper argument aborts the
+//!   pass (`loop.widened_precise`) and the program is explored again
+//!   without widening, as the kernel's precision tracking would;
+//! * scalar ids: a 64-bit `mov` links two scalar registers, and a bound
+//!   learnt for one by a comparison applies to both.
 //!
 //! The direction that matters is soundness: a program this verifier accepts
 //! must be one the kernel accepts and one that cannot fault. Where the
@@ -47,6 +61,46 @@ const STACK_SLOTS: usize = (BPF_MAX_STACK_BYTES / 8) as usize;
 
 /// `sizeof(struct xdp_md)`.
 pub const XDP_MD_SIZE: i32 = 24;
+/// `sizeof(struct __sk_buff)`.
+pub const SK_BUFF_SIZE: i32 = 192;
+/// `PERF_MAX_TRACE_SIZE`: the largest tracepoint record.
+pub const PERF_MAX_TRACE_SIZE: i32 = 2048;
+/// `sizeof(bpf_user_pt_regs_t)` on the host architecture (the kprobe
+/// context); 0 where this crate does not know the layout, so every kprobe
+/// context access is rejected there.
+pub const PT_REGS_SIZE: i32 = if cfg!(target_arch = "x86_64") {
+    168
+} else if cfg!(target_arch = "aarch64") {
+    272
+} else {
+    0
+};
+/// `struct __sk_buff` offsets of `data` and `data_end`.
+pub const SKB_DATA: i32 = 76;
+pub const SKB_DATA_END: i32 = 80;
+/// `struct __sk_buff` fields a tc program may read (all `u32`; narrower
+/// loads are rejected here although the kernel allows some).
+pub(crate) const SKB_READ: &[i32] = &[
+    0,  // len
+    4,  // pkt_type
+    8,  // mark
+    12, // queue_mapping
+    16, // protocol
+    24, // vlan_tci
+    28, // vlan_proto
+    32, // priority
+    36, // ingress_ifindex
+    40, // ifindex
+    44, // tc_index
+    48, 52, 56, 60, 64, // cb[0..5]
+    68, // hash
+    72, // tc_classid
+];
+/// Fields a tc program may write (`tc_cls_act_is_valid_access`, minus
+/// `queue_mapping` and `tstamp`).
+pub(crate) const SKB_WRITE: &[i32] = &[8, 32, 44, 48, 52, 56, 60, 64, 72];
+/// `bpf_loop`'s callback must return 0 (continue) or 1 (stop).
+const LOOP_CALLBACK_MAX_RET: u64 = 1;
 
 /// Tunable limits (the kernel's are fixed; tests lower them).
 #[derive(Clone, Debug)]
@@ -55,6 +109,9 @@ pub struct VerifierPolicy {
     pub max_insns_processed: u64,
     /// Explored states kept per instruction for pruning.
     pub max_states_per_insn: usize,
+    /// Widen loop states (see [`verify`]); off, loops converge only when
+    /// a state repeats exactly.
+    pub widen_loops: bool,
 }
 
 impl Default for VerifierPolicy {
@@ -62,6 +119,7 @@ impl Default for VerifierPolicy {
         Self {
             max_insns_processed: 1_000_000,
             max_states_per_insn: 64,
+            widen_loops: true,
         }
     }
 }
@@ -108,6 +166,9 @@ pub struct VerifyReport {
     /// Worst-case total stack over the call graph (kernel rounding).
     pub worst_stack: u32,
     pub call_graph: CallGraph,
+    /// Loop states widened (`bpf_loop` callback re-entries and
+    /// `bpf_iter_num_next` revisits whose scalars changed).
+    pub widenings: u64,
 }
 
 fn err(insn: usize, rule: &'static str, message: impl Into<String>) -> VerifyError {
@@ -123,8 +184,13 @@ fn err(insn: usize, rule: &'static str, message: impl Into<String>) -> VerifyErr
 pub enum RegType {
     NotInit,
     Scalar(Scalar),
-    /// `PTR_TO_CTX` (`struct xdp_md *`), offset always zero.
+    /// `PTR_TO_CTX` (the program type's context), offset always zero.
     Ctx,
+    /// `PTR_TO_FUNC`: address of the subprogram starting at `entry`
+    /// (`LD_IMM64` with `BPF_PSEUDO_FUNC`), a `bpf_loop` callback.
+    Func {
+        entry: u32,
+    },
     /// `PTR_TO_PACKET`: `data + var + off`. Pointers that share `id` share
     /// `var`; the accessible range of an id lives in the state.
     Packet {
@@ -165,6 +231,15 @@ pub enum RegType {
         id: u32,
         ref_id: u32,
     },
+    /// `PTR_TO_MEM | MEM_RDONLY` of `size` bytes: the `int *` that
+    /// `bpf_iter_num_next` returns on its non-NULL path.
+    RdonlyMem {
+        size: u32,
+        off: i32,
+        /// The iterator (its [`Slot::Iter`] id) whose state it points
+        /// into: destroying the iterator invalidates the pointer.
+        iter: u32,
+    },
     /// `PTR_TO_SOCKET` holding acquired reference `ref_id`.
     Socket {
         ref_id: u32,
@@ -185,6 +260,7 @@ impl RegType {
             RegType::NotInit => "not initialized",
             RegType::Scalar(_) => "scalar",
             RegType::Ctx => "ctx",
+            RegType::Func { .. } => "func",
             RegType::Packet { .. } => "pkt",
             RegType::PacketEnd => "pkt_end",
             RegType::Stack { .. } => "fp",
@@ -193,6 +269,7 @@ impl RegType {
             RegType::MapValueOrNull { .. } => "map_value_or_null",
             RegType::Mem { .. } => "ringbuf_mem",
             RegType::MemOrNull { .. } => "ringbuf_mem_or_null",
+            RegType::RdonlyMem { .. } => "rdonly_mem",
             RegType::Socket { .. } => "sock",
             RegType::SocketOrNull { .. } => "sock_or_null",
         }
@@ -215,6 +292,20 @@ enum Slot {
     Bytes(u8),
     /// An 8-byte aligned register spill.
     Spill(RegType),
+    /// A `struct bpf_iter_num` (8 bytes) set up by `bpf_iter_num_new`;
+    /// `drained` once `bpf_iter_num_next` returned NULL on this path.
+    /// `depth` counts the non-NULL `next` calls on this path; it is not
+    /// part of state inclusion, only of infinite-loop detection (the
+    /// kernel's `iter.depth`).
+    Iter { id: u32, drained: bool, depth: u32 },
+    /// The flag word of a `bpf_local_irq_save`.
+    Irq { id: u32 },
+}
+
+impl Slot {
+    fn is_kfunc_object(&self) -> bool {
+        matches!(self, Slot::Iter { .. } | Slot::Irq { .. })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -223,6 +314,27 @@ struct Frame {
     stack: Vec<Slot>,
     subprog: usize,
     return_pc: Option<usize>,
+    /// Set when the frame is a `bpf_loop` callback invocation.
+    callback: Option<Callback>,
+    /// Scalar ids (index = register): registers with the same non-zero id
+    /// hold the same value (copied by `mov`), so a bound learnt for one
+    /// holds for all. Any write gives the register id 0.
+    links: [u32; 11],
+    /// Widening taint (bit = register, or 8-byte stack slot): the value
+    /// derives from a scalar widened at a loop head. The kernel widens
+    /// only scalars it never needed precisely; a tainted value reaching a
+    /// use the kernel tracks precisely ends the widened exploration (see
+    /// [`verify`]). Not part of state inclusion.
+    wide_regs: u16,
+    wide_slots: u64,
+}
+
+/// A `bpf_loop` callback frame: the call site and the context argument
+/// (`r3` of the call), passed again on every iteration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct Callback {
+    call_pc: usize,
+    arg: RegType,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -246,6 +358,17 @@ struct State {
     /// Accessible bytes per packet-pointer id.
     pkt_ranges: Vec<(u32, u32)>,
     next_id: u32,
+    /// `bpf_preempt_disable` nesting depth.
+    preempt: u32,
+    /// Inside `bpf_rcu_read_lock` (non-sleepable programs cannot nest it).
+    rcu: bool,
+    /// Ids of the live `bpf_local_irq_save` flags, oldest first: they must
+    /// be restored in reverse order.
+    irq: Vec<u32>,
+    /// Set by a `bpf_loop` callback (re-)entry, cleared by the first
+    /// instruction: only such an arrival at the callback's entry is a new
+    /// iteration; a back-edge inside the callback to its entry is not.
+    cb_entry: bool,
 }
 
 impl State {
@@ -262,7 +385,55 @@ impl State {
     }
 
     fn set(&mut self, r: Reg, v: RegType) {
-        self.cur_mut().regs[r.index()] = v;
+        let f = self.cur_mut();
+        f.regs[r.index()] = v;
+        f.links[r.index()] = 0;
+        f.wide_regs &= !(1 << r.index());
+    }
+
+    fn tainted(&self, r: Reg) -> bool {
+        self.cur().wide_regs & (1 << r.index()) != 0
+    }
+
+    fn set_taint(&mut self, r: Reg, t: bool) {
+        let f = self.cur_mut();
+        if t {
+            f.wide_regs |= 1 << r.index();
+        } else {
+            f.wide_regs &= !(1 << r.index());
+        }
+    }
+
+    /// `dst = src` for a scalar: both registers share a link id.
+    fn copy_linked(&mut self, dst: Reg, src: Reg) {
+        let mut id = self.cur().links[src.index()];
+        if id == 0 {
+            id = self.fresh_id();
+        }
+        let f = self.cur_mut();
+        f.regs[dst.index()] = f.regs[src.index()];
+        f.links[src.index()] = id;
+        f.links[dst.index()] = id;
+        let t = f.wide_regs & (1 << src.index()) != 0;
+        self.set_taint(dst, t);
+    }
+
+    /// Narrow `r` to `v` and every register linked to it as well.
+    fn set_narrowed(&mut self, r: Reg, v: Scalar) {
+        let f = self.cur_mut();
+        let id = f.links[r.index()];
+        f.regs[r.index()] = RegType::Scalar(v);
+        if id != 0 {
+            for i in 0..11 {
+                if f.links[i] == id
+                    && let RegType::Scalar(old) = f.regs[i]
+                {
+                    // `old` and `v` describe the same value; keep `v` when
+                    // the intersection is not representable
+                    f.regs[i] = RegType::Scalar(Scalar::meet(old, v).unwrap_or(v));
+                }
+            }
+        }
     }
 
     fn fresh_id(&mut self) -> u32 {
@@ -317,6 +488,10 @@ fn new_frame(subprog: usize, return_pc: Option<usize>, frame_no: u8) -> Frame {
         stack: vec![Slot::Bytes(0); STACK_SLOTS],
         subprog,
         return_pc,
+        callback: None,
+        links: [0; 11],
+        wide_regs: 0,
+        wide_slots: 0,
     }
 }
 
@@ -350,6 +525,7 @@ fn reg_includes(old: &RegType, cur: &RegType, so: &State, sc: &State, ids: &mut 
         (NotInit, _) => true,
         (Scalar(o), Scalar(c)) => o.includes(&c),
         (Ctx, Ctx) | (PacketEnd, PacketEnd) => true,
+        (Func { entry: a }, Func { entry: b }) => a == b,
         (
             Packet {
                 id: io,
@@ -410,6 +586,18 @@ fn reg_includes(old: &RegType, cur: &RegType, so: &State, sc: &State, ids: &mut 
             },
         ) => zo == zc && ids.check(io, ic) && ids.check(ro, rc),
         (Socket { ref_id: ro }, Socket { ref_id: rc }) => ids.check(ro, rc),
+        (
+            RdonlyMem {
+                size: zo,
+                off: oo,
+                iter: io,
+            },
+            RdonlyMem {
+                size: zc,
+                off: oc,
+                iter: ic,
+            },
+        ) => zo == zc && oo == oc && ids.check(io, ic),
         (SocketOrNull { id: io, ref_id: ro }, SocketOrNull { id: ic, ref_id: rc }) => {
             ids.check(io, ic) && ids.check(ro, rc)
         }
@@ -419,7 +607,12 @@ fn reg_includes(old: &RegType, cur: &RegType, so: &State, sc: &State, ids: &mut 
 
 /// `cur` ⊆ `old`: every behaviour of `cur` was covered by exploring `old`.
 fn state_includes(old: &State, cur: &State) -> bool {
-    if old.frames.len() != cur.frames.len() || old.refs.len() != cur.refs.len() {
+    if old.frames.len() != cur.frames.len()
+        || old.refs.len() != cur.refs.len()
+        || old.preempt != cur.preempt
+        || old.rcu != cur.rcu
+        || old.irq.len() != cur.irq.len()
+    {
         return false;
     }
     // Id 0 is `ctx->data` itself: a later load from the context yields it
@@ -433,6 +626,24 @@ fn state_includes(old: &State, cur: &State) -> bool {
         if fo.subprog != fc.subprog || fo.return_pc != fc.return_pc {
             return false;
         }
+        match (&fo.callback, &fc.callback) {
+            (None, None) => {}
+            (Some(a), Some(b))
+                if a.call_pc == b.call_pc && reg_includes(&a.arg, &b.arg, old, cur, &mut ids) => {}
+            _ => return false,
+        }
+        // registers linked in `old` were narrowed together on its
+        // continuation; that is only valid for `cur` if they are linked
+        // in `cur` as well (`check_ids`)
+        for i in 0..11 {
+            for j in i + 1..11 {
+                let lo = fo.links[i] != 0 && fo.links[i] == fo.links[j];
+                let lc = fc.links[i] != 0 && fc.links[i] == fc.links[j];
+                if lo && !lc {
+                    return false;
+                }
+            }
+        }
         for (ro, rc) in fo.regs.iter().zip(&fc.regs) {
             if !reg_includes(ro, rc, old, cur, &mut ids) {
                 return false;
@@ -440,6 +651,18 @@ fn state_includes(old: &State, cur: &State) -> bool {
         }
         for (so, sc) in fo.stack.iter().zip(&fc.stack) {
             let ok = match (so, sc) {
+                // iterators and irq flags must match exactly: the
+                // explored continuation used (or destroyed) exactly these
+                (
+                    Slot::Iter {
+                        id: a, drained: da, ..
+                    },
+                    Slot::Iter {
+                        id: b, drained: db, ..
+                    },
+                ) => da == db && ids.check(*a, *b),
+                (Slot::Irq { id: a }, Slot::Irq { id: b }) => ids.check(*a, *b),
+                (o, c) if o.is_kfunc_object() || c.is_kfunc_object() => false,
                 (Slot::Bytes(0), _) => true,
                 (Slot::Bytes(mo), Slot::Bytes(mc)) => mo & !mc == 0,
                 (Slot::Bytes(_), Slot::Spill(RegType::Scalar(_))) => true,
@@ -449,6 +672,12 @@ fn state_includes(old: &State, cur: &State) -> bool {
             if !ok {
                 return false;
             }
+        }
+    }
+    // irq flags are restored in order: the same order on both sides
+    for (a, b) in old.irq.iter().zip(&cur.irq) {
+        if ids.fwd.get(a) != Some(b) {
+            return false;
         }
     }
     // Every live reference of the explored state must correspond to a live
@@ -463,6 +692,55 @@ fn state_includes(old: &State, cur: &State) -> bool {
         }
     }
     true
+}
+
+/// Whether some iterator present in both states advanced between them
+/// (`iter_active_depths_differ`).
+fn iter_depths_differ(old: &State, cur: &State) -> bool {
+    old.frames.iter().zip(&cur.frames).any(|(fo, fc)| {
+        fo.stack.iter().zip(&fc.stack).any(|(a, b)| {
+            matches!((a, b), (Slot::Iter { depth: x, .. }, Slot::Iter { depth: y, .. }) if x != y)
+        })
+    })
+}
+
+/// The widening step of a loop head: every scalar register or spilled
+/// scalar of `cur` that differs from the same location in `prev` (the
+/// previous visit) becomes unknown, and loses its links. Returns whether
+/// anything changed. The result includes `cur`, so exploring it instead is
+/// sound.
+fn widen_scalars(prev: &State, cur: &mut State) -> bool {
+    if prev.frames.len() != cur.frames.len() {
+        return false;
+    }
+    let mut changed = false;
+    for (fp, fc) in prev.frames.iter().zip(cur.frames.iter_mut()) {
+        if fp.subprog != fc.subprog {
+            return changed;
+        }
+        for i in 0..11 {
+            if let (RegType::Scalar(a), RegType::Scalar(b)) = (fp.regs[i], fc.regs[i])
+                && a != b
+                && b != Scalar::UNKNOWN
+            {
+                fc.regs[i] = RegType::Scalar(Scalar::UNKNOWN);
+                fc.links[i] = 0;
+                fc.wide_regs |= 1 << i;
+                changed = true;
+            }
+        }
+        for (k, (sp, sc)) in fp.stack.iter().zip(fc.stack.iter_mut()).enumerate() {
+            if let (Slot::Spill(RegType::Scalar(a)), Slot::Spill(RegType::Scalar(b))) = (sp, &*sc)
+                && a != b
+                && *b != Scalar::UNKNOWN
+            {
+                *sc = Slot::Spill(RegType::Scalar(Scalar::UNKNOWN));
+                fc.wide_slots |= 1 << k;
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -491,8 +769,39 @@ enum Step {
 }
 
 /// Run the verifier on `prog`.
+///
+/// Loops through `bpf_loop` callbacks and `bpf_iter_num` iterators are
+/// first explored with widening: when a callback is re-entered, or an
+/// iterator's `next` revisited, with scalars that differ from the
+/// in-progress previous visit, those scalars become unknown, so the loop
+/// state converges (the kernel's `widen_imprecise_scalars`). The kernel
+/// widens only scalars that never needed precision; this verifier does not
+/// track precision, so when the widened exploration fails it explores
+/// again without widening and accepts if either succeeds (both are sound
+/// over-approximations). A rejection reports the exact exploration's
+/// reason unless that one only ran out of budget.
 pub fn verify(prog: &Program, policy: &VerifierPolicy) -> Result<VerifyReport, VerifyError> {
-    Verifier::new(prog, policy)?.run()
+    if !policy.widen_loops {
+        return Verifier::new(prog, policy)?.run();
+    }
+    let mut wide = Verifier::new(prog, policy)?;
+    wide.widen = true;
+    let first = wide.run();
+    if first.is_ok() || wide.widenings == 0 {
+        return first;
+    }
+    match Verifier::new(prog, policy)?.run() {
+        Ok(r) => Ok(r),
+        Err(e)
+            if e.rule == "complexity.limit"
+                && first
+                    .as_ref()
+                    .is_err_and(|f| f.rule != "loop.widened_precise") =>
+        {
+            first
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Run the verifier and return contract-shaped findings (empty = accepted).
@@ -513,7 +822,16 @@ struct Verifier<'a> {
     policy: &'a VerifierPolicy,
     insns: Vec<Option<Insn>>,
     subprogs: Vec<Subprog>,
+    /// Entry slots of `bpf_loop` callbacks (targets of `BPF_PSEUDO_FUNC`).
+    callback_entry: Vec<bool>,
+    /// (slot of the `LD_IMM64 BPF_PSEUDO_FUNC`, callback entry).
+    func_refs: Vec<(usize, usize)>,
     prune_point: Vec<bool>,
+    /// Slots of `bpf_iter_num_next` calls.
+    iter_next: Vec<bool>,
+    /// Widen loop states (see [`verify`]).
+    widen: bool,
+    widenings: u64,
     explored: HashMap<usize, Vec<usize>>,
     records: Vec<Record>,
     stack_depth: Vec<u32>,
@@ -524,11 +842,12 @@ struct Verifier<'a> {
 
 impl<'a> Verifier<'a> {
     fn new(prog: &'a Program, policy: &'a VerifierPolicy) -> Result<Self, VerifyError> {
-        if prog.prog_type != ProgramType::Xdp {
+        if prog.prog_type == ProgramType::Kprobe && PT_REGS_SIZE == 0 {
             return Err(VerifyError {
                 insn: None,
                 rule: "prog.unsupported_type",
-                message: "only XDP programs are supported".into(),
+                message: "kprobe programs: the pt_regs layout of this architecture is unknown"
+                    .into(),
             });
         }
         for m in &prog.maps {
@@ -570,6 +889,11 @@ impl<'a> Verifier<'a> {
             prog,
             policy,
             prune_point: vec![false; insns.len()],
+            iter_next: vec![false; insns.len()],
+            widen: false,
+            widenings: 0,
+            callback_entry: vec![false; insns.len()],
+            func_refs: Vec::new(),
             insns,
             subprogs: Vec::new(),
             explored: HashMap::new(),
@@ -580,6 +904,12 @@ impl<'a> Verifier<'a> {
             pruned: 0,
         };
         v.check_cfg()?;
+        for k in &prog.kfuncs {
+            if k.name == "bpf_iter_num_next" && k.slot < v.insns.len() {
+                v.iter_next[k.slot] = true;
+                v.prune_point[k.slot] = true;
+            }
+        }
         Ok(v)
     }
 
@@ -614,9 +944,40 @@ impl<'a> Verifier<'a> {
         let n = self.insns.len();
         let mut starts = vec![0usize];
         for pc in 0..n {
-            if let Some(Insn::Call(CallTarget::Local(off))) = self.insns[pc] {
-                let t = self.target(pc, off as i64)?;
-                starts.push(t);
+            match self.insns[pc] {
+                Some(Insn::Call(CallTarget::Local(off))) => {
+                    let t = self.target(pc, off as i64)?;
+                    starts.push(t);
+                }
+                Some(Insn::LdImm64 {
+                    imm:
+                        Imm64::Pseudo {
+                            src: crate::insn::pseudo::FUNC,
+                            imm_lo,
+                            imm_hi,
+                        },
+                    ..
+                }) => {
+                    if imm_hi != 0 {
+                        return Err(err(
+                            pc,
+                            "ld_imm64.bad_func",
+                            "BPF_PSEUDO_FUNC with a non-zero upper immediate",
+                        ));
+                    }
+                    let t = self.target(pc, imm_lo as i64)?;
+                    if t == 0 {
+                        return Err(err(
+                            pc,
+                            "ld_imm64.bad_func",
+                            "the main program cannot be a callback",
+                        ));
+                    }
+                    self.callback_entry[t] = true;
+                    self.func_refs.push((pc, t));
+                    starts.push(t);
+                }
+                _ => {}
             }
         }
         starts.sort_unstable();
@@ -716,6 +1077,10 @@ impl<'a> Verifier<'a> {
             refs: Vec::new(),
             pkt_ranges: Vec::new(),
             next_id: 0,
+            preempt: 0,
+            rcu: false,
+            irq: Vec::new(),
+            cb_entry: false,
         }
     }
 
@@ -741,9 +1106,45 @@ impl<'a> Verifier<'a> {
         }
     }
 
+    /// Whether `st`, at a loop head (callback entry or `bpf_iter_num_next`
+    /// call), is an iteration whose count the kernel bounds at run time.
+    fn bounded_iteration(&self, pc: usize, old: &State, st: &State) -> bool {
+        if self.callback_entry[pc] && st.cb_entry && st.cur().callback.is_some() {
+            return true;
+        }
+        if !self.iter_next[pc] {
+            return false;
+        }
+        // only an active iterator: next() of a drained one is NULL every
+        // time, so looping on it is a real infinite loop
+        match st.cur().regs[1] {
+            RegType::Stack { frame, off }
+                if frame as usize + 1 == st.frames.len()
+                    && off % 8 == 0
+                    && (-(BPF_MAX_STACK_BYTES as i32)..0).contains(&off) =>
+            {
+                let at = ((off + BPF_MAX_STACK_BYTES as i32) / 8) as usize;
+                // and the same iterator instance that the earlier visit
+                // used: one destroyed and created again restarts its count,
+                // so the revisit is not progress
+                match (st.cur().stack[at], old.cur().stack.get(at)) {
+                    (
+                        Slot::Iter {
+                            id, drained: false, ..
+                        },
+                        Some(Slot::Iter { id: old_id, .. }),
+                    ) => id == *old_id,
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Returns `true` when the path is pruned.
     fn checkpoint(&mut self, path: &mut Path) -> Result<bool, VerifyError> {
         let pc = path.pc;
+        let mut widen_from = None;
         if let Some(list) = self.explored.get(&pc) {
             for &rid in list {
                 let rec = &self.records[rid];
@@ -753,13 +1154,49 @@ impl<'a> Verifier<'a> {
                     }
                 } else if self.is_ancestor(rid, path.parent)
                     && state_includes(&rec.state, &path.state)
-                    && state_includes(&path.state, &rec.state)
                 {
+                    // A `bpf_loop` callback re-entered (or an active
+                    // iterator's next() revisited) with a state its own
+                    // in-progress earlier visit covers: the iterations from
+                    // here are a subset of what that visit explores (the
+                    // kernel bounds the iteration count at run time).
+                    if self.bounded_iteration(pc, &rec.state, &path.state) {
+                        return Ok(true);
+                    }
+                    // the same state again, but an iterator advanced in
+                    // between: a bounded loop, not an infinite one
+                    if !state_includes(&path.state, &rec.state)
+                        || iter_depths_differ(&rec.state, &path.state)
+                    {
+                        continue;
+                    }
                     return Err(err(
                         pc,
                         "loop.unbounded",
                         "infinite loop detected: back-edge reaches an identical state",
                     ));
+                } else if self.widen
+                    && rec.branches > 0
+                    && self.is_ancestor(rid, path.parent)
+                    && self.bounded_iteration(pc, &rec.state, &path.state)
+                {
+                    widen_from = Some(rid);
+                }
+            }
+        }
+        if let Some(rid) = widen_from
+            && widen_scalars(&self.records[rid].state, &mut path.state)
+        {
+            self.widenings += 1;
+            if let Some(list) = self.explored.get(&pc) {
+                for &rid in list {
+                    let rec = &self.records[rid];
+                    if rec.branches > 0
+                        && self.is_ancestor(rid, path.parent)
+                        && state_includes(&rec.state, &path.state)
+                    {
+                        return Ok(true);
+                    }
                 }
             }
         }
@@ -777,7 +1214,7 @@ impl<'a> Verifier<'a> {
         Ok(false)
     }
 
-    fn run(mut self) -> Result<VerifyReport, VerifyError> {
+    fn run(&mut self) -> Result<VerifyReport, VerifyError> {
         let mut work = vec![Path {
             pc: 0,
             state: self.initial_state(),
@@ -790,6 +1227,7 @@ impl<'a> Verifier<'a> {
                     self.finish_path(path.parent);
                     break;
                 }
+                path.state.cb_entry = false;
                 self.processed += 1;
                 if self.processed > self.policy.max_insns_processed {
                     return Err(err(
@@ -851,6 +1289,12 @@ impl<'a> Verifier<'a> {
                 graph.calls.push((FnId(from as u32), FnId(to as u32)));
             }
         }
+        // a callback runs on top of the frame that passes it to bpf_loop
+        for &(at, entry) in &self.func_refs {
+            let from = self.subprog_of(at);
+            let to = self.subprog_of(entry);
+            graph.calls.push((FnId(from as u32), FnId(to as u32)));
+        }
         let worst = check_stack(&graph, FnId(0), BPF_MAX_STACK_BYTES, MAX_CALL_FRAMES).map_err(
             |e| match e {
                 StackError::Exceeded { bytes, path } => VerifyError {
@@ -890,6 +1334,7 @@ impl<'a> Verifier<'a> {
                 .collect(),
             worst_stack: worst,
             call_graph: graph,
+            widenings: self.widenings,
         })
     }
 
@@ -947,6 +1392,23 @@ impl<'a> Verifier<'a> {
                 self.cond(pc, st, wide, op, dst, src, target, next)
             }
             Insn::Call(CallTarget::Helper(id)) => {
+                if !h::allowed(self.prog.prog_type, id) {
+                    return Err(match h::name(id) {
+                        Some(n) => err(
+                            pc,
+                            "call.helper_not_allowed",
+                            format!("{n} is not allowed in {:?} programs", self.prog.prog_type),
+                        ),
+                        None => err(
+                            pc,
+                            "call.unknown_helper",
+                            format!("helper {id} is not supported"),
+                        ),
+                    });
+                }
+                if id == h::LOOP {
+                    return self.bpf_loop(pc, st, next);
+                }
                 self.helper(pc, st, id)?;
                 Ok(Step::Next(next))
             }
@@ -966,14 +1428,11 @@ impl<'a> Verifier<'a> {
                 let frame_no = st.frames.len() as u8;
                 let mut f = new_frame(sp, Some(next), frame_no);
                 f.regs[1..=5].copy_from_slice(&st.cur().regs[1..=5]);
+                f.wide_regs = st.cur().wide_regs & 0b11_1110;
                 st.frames.push(f);
                 Ok(Step::Jump(t))
             }
-            Insn::Call(CallTarget::Kfunc(id)) => Err(err(
-                pc,
-                "call.kfunc_unsupported",
-                format!("kfunc call {id} is not supported"),
-            )),
+            Insn::Call(CallTarget::Kfunc(_)) => self.kfunc(pc, st, next),
             Insn::Exit => self.exit(pc, st),
             Insn::LdImm64 { dst, imm } => {
                 self.write_check(pc, dst)?;
@@ -985,6 +1444,13 @@ impl<'a> Verifier<'a> {
                         }
                         RegType::MapPtr { map: i as u32 }
                     }
+                    Imm64::Pseudo {
+                        src: crate::insn::pseudo::FUNC,
+                        imm_lo,
+                        ..
+                    } => RegType::Func {
+                        entry: (pc as i64 + 1 + imm_lo as i64) as u32,
+                    },
                     Imm64::Pseudo { src, .. } => {
                         return Err(err(
                             pc,
@@ -1031,6 +1497,11 @@ impl<'a> Verifier<'a> {
                     }
                 }
                 st.set(dst, v);
+                if let RegType::Stack { frame, off: so } = p {
+                    let at = (so as i64 + off as i64 + BPF_MAX_STACK_BYTES as i64) as usize / 8;
+                    let t = st.frames[frame as usize].wide_slots & (1 << at) != 0;
+                    st.set_taint(dst, t);
+                }
                 Ok(Step::Next(next))
             }
             Insn::St {
@@ -1040,8 +1511,16 @@ impl<'a> Verifier<'a> {
                 imm,
             } => {
                 let p = self.read(pc, st, dst)?;
+                if matches!(p, RegType::Ctx) && self.prog.prog_type == ProgramType::SchedCls {
+                    return Err(err(
+                        pc,
+                        "mem.ctx_st_imm",
+                        "BPF_ST stores into the context are not allowed",
+                    ));
+                }
                 let v = RegType::Scalar(Scalar::konst(imm as i64 as u64));
                 self.store(pc, st, p, off, size, v)?;
+                self.taint_slot(st, p, off, size, false);
                 Ok(Step::Next(next))
             }
             Insn::Stx {
@@ -1053,6 +1532,8 @@ impl<'a> Verifier<'a> {
                 let p = self.read(pc, st, dst)?;
                 let v = self.read(pc, st, src)?;
                 self.store(pc, st, p, off, size, v)?;
+                let t = st.tainted(src);
+                self.taint_slot(st, p, off, size, t);
                 Ok(Step::Next(next))
             }
             Insn::Atomic {
@@ -1068,8 +1549,22 @@ impl<'a> Verifier<'a> {
             Insn::LdLegacy { .. } => Err(err(
                 pc,
                 "insn.unsupported",
-                "BPF_LD_ABS/BPF_LD_IND are not allowed in XDP programs",
+                "BPF_LD_ABS/BPF_LD_IND are not supported",
             )),
+        }
+    }
+
+    /// The taint of a stack slot after a store of `size` bytes: a full
+    /// store replaces it, a partial one adds to it.
+    fn taint_slot(&self, st: &mut State, p: RegType, off: i16, size: Size, t: bool) {
+        if let RegType::Stack { frame, off: so } = p {
+            let at = (so as i64 + off as i64 + BPF_MAX_STACK_BYTES as i64) as usize / 8;
+            let f = &mut st.frames[frame as usize];
+            if t {
+                f.wide_slots |= 1 << at;
+            } else if size == Size::DW {
+                f.wide_slots &= !(1 << at);
+            }
         }
     }
 
@@ -1100,6 +1595,39 @@ impl<'a> Verifier<'a> {
         dst: Reg,
         src: Operand,
     ) -> Result<(), VerifyError> {
+        let ts = matches!(src, Operand::Reg(r) if st.tainted(r));
+        let t = match op {
+            AluOp::Mov | AluOp::MovSx(_) => ts,
+            _ => ts || st.tainted(dst),
+        };
+        if t && matches!(op, AluOp::Add | AluOp::Sub)
+            && wide
+            && (st.cur().regs[dst.index()].is_pointer()
+                || matches!(src, Operand::Reg(r) if st.cur().regs[r.index()].is_pointer()))
+        {
+            // pointer arithmetic: the kernel marks the scalar precise
+            return Err(err(
+                pc,
+                "loop.widened_precise",
+                "a widened loop scalar is used as a pointer offset",
+            ));
+        }
+        self.alu_inner(pc, st, wide, op, dst, src)?;
+        if t && matches!(st.cur().regs[dst.index()], RegType::Scalar(_)) {
+            st.set_taint(dst, true);
+        }
+        Ok(())
+    }
+
+    fn alu_inner(
+        &mut self,
+        pc: usize,
+        st: &mut State,
+        wide: bool,
+        op: AluOp,
+        dst: Reg,
+        src: Operand,
+    ) -> Result<(), VerifyError> {
         self.write_check(pc, dst)?;
         let bits = if wide { 64 } else { 32 };
         let finish = |s: Scalar| {
@@ -1121,7 +1649,12 @@ impl<'a> Verifier<'a> {
                         ));
                     }
                 };
-                st.set(dst, v);
+                match src {
+                    Operand::Reg(r) if wide && r != dst && matches!(v, RegType::Scalar(_)) => {
+                        st.copy_linked(dst, r);
+                    }
+                    _ => st.set(dst, v),
+                }
                 return Ok(());
             }
             AluOp::MovSx(from) => {
@@ -1348,6 +1881,9 @@ impl<'a> Verifier<'a> {
     ) -> Result<Target, VerifyError> {
         let n = size.bytes() as i64;
         match p {
+            RegType::Ctx if self.prog.prog_type != ProgramType::Xdp => {
+                self.ctx_access(pc, off as i32, size, write)
+            }
             RegType::Ctx => {
                 if write {
                     return Err(err(pc, "mem.ctx_write", "cannot write into xdp_md"));
@@ -1362,7 +1898,8 @@ impl<'a> Verifier<'a> {
                 }
                 let field = o & !3;
                 match field {
-                    0 | 4 if size == Size::W => Ok(Target::CtxPtr(field)),
+                    0 if size == Size::W => Ok(Target::CtxData),
+                    4 if size == Size::W => Ok(Target::CtxDataEnd),
                     // `__is_valid_xdp_access`: every field is a full u32
                     12 | 16 if size == Size::W => Ok(Target::Scalar(size)),
                     _ => Err(err(
@@ -1441,6 +1978,22 @@ impl<'a> Verifier<'a> {
                 }
                 Ok(Target::Scalar(size))
             }
+            RegType::RdonlyMem {
+                size: msz, off: mo, ..
+            } => {
+                if write {
+                    return Err(err(pc, "mem.rdonly_write", "write into read-only memory"));
+                }
+                let lo = mo as i64 + off as i64;
+                if lo < 0 || lo + n > msz as i64 {
+                    return Err(err(
+                        pc,
+                        "mem.rdonly_out_of_bounds",
+                        format!("invalid access to {msz}-byte read-only memory, off={lo} size={n}"),
+                    ));
+                }
+                Ok(Target::Scalar(size))
+            }
             RegType::MapValueOrNull { .. }
             | RegType::MemOrNull { .. }
             | RegType::SocketOrNull { .. } => Err(err(
@@ -1471,12 +2024,12 @@ impl<'a> Verifier<'a> {
         size: Size,
     ) -> Result<RegType, VerifyError> {
         match self.access(pc, st, p, off, size, false)? {
-            Target::CtxPtr(0) => Ok(RegType::Packet {
+            Target::CtxData => Ok(RegType::Packet {
                 id: 0,
                 off: 0,
                 var: Scalar::konst(0),
             }),
-            Target::CtxPtr(_) => Ok(RegType::PacketEnd),
+            Target::CtxDataEnd => Ok(RegType::PacketEnd),
             Target::Scalar(sz) => Ok(RegType::Scalar(Scalar::unknown_bits(sz.bytes() * 8))),
             Target::Stack { frame, at } => {
                 let slot = st.frames[frame as usize].stack[at / 8];
@@ -1491,6 +2044,11 @@ impl<'a> Verifier<'a> {
                         pc,
                         "mem.pointer_partial_fill",
                         "partial read of a spilled pointer",
+                    )),
+                    Slot::Iter { .. } | Slot::Irq { .. } => Err(err(
+                        pc,
+                        "mem.kfunc_object",
+                        "direct read of an iterator or irq flag on the stack",
                     )),
                     Slot::Bytes(mask) => {
                         let need = byte_mask(first, n);
@@ -1524,6 +2082,13 @@ impl<'a> Verifier<'a> {
             Target::Stack { frame, at } => {
                 let n = size.bytes() as usize;
                 let slot = &mut st.frames[frame as usize].stack[at / 8];
+                if slot.is_kfunc_object() {
+                    return Err(err(
+                        pc,
+                        "mem.kfunc_object",
+                        "overwriting an iterator or irq flag on the stack",
+                    ));
+                }
                 if n == 8 {
                     *slot = Slot::Spill(v);
                 } else {
@@ -1535,8 +2100,8 @@ impl<'a> Verifier<'a> {
                         ));
                     }
                     let mask = match *slot {
-                        Slot::Spill(_) => 0xff,
                         Slot::Bytes(m) => m,
+                        _ => 0xff,
                     };
                     *slot = Slot::Bytes(mask | byte_mask(at % 8, n));
                 }
@@ -1552,7 +2117,9 @@ impl<'a> Verifier<'a> {
                 }
                 Ok(())
             }
-            Target::CtxPtr(_) => unreachable!("ctx writes rejected in access"),
+            Target::CtxData | Target::CtxDataEnd => {
+                unreachable!("ctx pointer fields are read only in access")
+            }
         }
     }
 
@@ -1629,7 +2196,7 @@ impl<'a> Verifier<'a> {
             // the spill (if any) is now an unknown value
             let slot = &mut st.frames[frame as usize].stack[at / 8];
             if let Slot::Spill(_) = slot {
-                *slot = Slot::Bytes(0xff);
+                *slot = Slot::Bytes(0);
             }
         }
         let fetched = RegType::Scalar(if size == Size::W {
@@ -1680,7 +2247,7 @@ impl<'a> Verifier<'a> {
                     let at = (b + BPF_MAX_STACK_BYTES as i64) as usize;
                     let ok = match fr.stack[at / 8] {
                         Slot::Spill(RegType::Scalar(_)) => true,
-                        Slot::Spill(_) => false,
+                        Slot::Spill(_) | Slot::Iter { .. } | Slot::Irq { .. } => false,
                         Slot::Bytes(m) => m & (1 << (at % 8)) != 0,
                     };
                     if !ok {
@@ -1693,7 +2260,10 @@ impl<'a> Verifier<'a> {
                 }
                 Ok(())
             }
-            RegType::Packet { .. } | RegType::MapValue { .. } | RegType::Mem { .. } => {
+            RegType::Packet { .. }
+            | RegType::MapValue { .. }
+            | RegType::Mem { .. }
+            | RegType::RdonlyMem { .. } => {
                 // check the first and last byte with the ordinary rules
                 let n = n as i64;
                 let last =
@@ -1745,6 +2315,13 @@ impl<'a> Verifier<'a> {
     }
 
     fn const_arg(&self, pc: usize, st: &State, i: usize) -> Result<u64, VerifyError> {
+        if st.cur().wide_regs & (1 << i) != 0 {
+            return Err(err(
+                pc,
+                "loop.widened_precise",
+                "a widened loop scalar is used as a constant helper argument",
+            ));
+        }
         self.scalar_arg(pc, st, i)?.as_const().ok_or_else(|| {
             err(
                 pc,
@@ -1771,6 +2348,472 @@ impl<'a> Verifier<'a> {
         Ok(())
     }
 
+    /// Context access for the non-XDP program types.
+    fn ctx_access(
+        &self,
+        pc: usize,
+        o: i32,
+        size: Size,
+        write: bool,
+    ) -> Result<Target, VerifyError> {
+        let n = size.bytes() as i32;
+        let t = self.prog.prog_type;
+        let bad = |why: &str| {
+            err(
+                pc,
+                "mem.ctx_invalid_access",
+                format!("invalid {t:?} context access off={o} size={n}: {why}"),
+            )
+        };
+        if o < 0 || o % n != 0 {
+            return Err(bad("negative or misaligned"));
+        }
+        match t {
+            ProgramType::SchedCls => {
+                if o >= SK_BUFF_SIZE || size != Size::W {
+                    return Err(bad("only u32 fields of __sk_buff are supported"));
+                }
+                if write {
+                    if !SKB_WRITE.contains(&o) {
+                        return Err(err(
+                            pc,
+                            "mem.ctx_write",
+                            format!("__sk_buff field at {o} is not writable"),
+                        ));
+                    }
+                    return Ok(Target::Scalar(size));
+                }
+                match o {
+                    SKB_DATA => Ok(Target::CtxData),
+                    SKB_DATA_END => Ok(Target::CtxDataEnd),
+                    _ if SKB_READ.contains(&o) => Ok(Target::Scalar(size)),
+                    _ => Err(bad("field not supported")),
+                }
+            }
+            ProgramType::Tracepoint | ProgramType::Kprobe => {
+                if write {
+                    return Err(err(
+                        pc,
+                        "mem.ctx_write",
+                        format!("the {t:?} context is read only"),
+                    ));
+                }
+                // `tp_prog_is_valid_access` / `kprobe_prog_is_valid_access`
+                let (lo, hi) = if t == ProgramType::Tracepoint {
+                    // the first 8 bytes are the common fields
+                    (8, PERF_MAX_TRACE_SIZE)
+                } else {
+                    (0, PT_REGS_SIZE)
+                };
+                if o < lo || o + n > hi {
+                    return Err(bad("outside the record"));
+                }
+                Ok(Target::Scalar(size))
+            }
+            ProgramType::Xdp => unreachable!("xdp_md is handled by access"),
+        }
+    }
+
+    /// Bytes `[p, p + n)` are written by a helper (`ARG_PTR_TO_UNINIT_MEM`).
+    fn check_mem_write(
+        &mut self,
+        pc: usize,
+        st: &mut State,
+        p: RegType,
+        n: u32,
+        what: &str,
+    ) -> Result<(), VerifyError> {
+        if n == 0 {
+            return Err(err(
+                pc,
+                "call.arg_type",
+                format!("{what}: zero-sized memory"),
+            ));
+        }
+        match p {
+            RegType::Stack { frame, off } => {
+                let lo = off as i64;
+                let hi = lo + n as i64;
+                if lo < -(BPF_MAX_STACK_BYTES as i64) || hi > 0 {
+                    return Err(err(
+                        pc,
+                        "mem.stack_out_of_bounds",
+                        format!("{what}: invalid indirect stack access off={lo} size={n}"),
+                    ));
+                }
+                let sp = st.frames[frame as usize].subprog;
+                self.stack_depth[sp] = self.stack_depth[sp].max((-lo) as u32);
+                let fr = &mut st.frames[frame as usize];
+                for b in lo..hi {
+                    let at = (b + BPF_MAX_STACK_BYTES as i64) as usize;
+                    let slot = &mut fr.stack[at / 8];
+                    let mask = match *slot {
+                        // an overwritten spill becomes unknown bytes
+                        Slot::Spill(_) => 0xff,
+                        Slot::Bytes(m) => m | (1 << (at % 8)),
+                        Slot::Iter { .. } | Slot::Irq { .. } => {
+                            return Err(err(
+                                pc,
+                                "mem.kfunc_object",
+                                format!("{what}: overwriting an iterator or irq flag"),
+                            ));
+                        }
+                    };
+                    *slot = Slot::Bytes(mask);
+                }
+                Ok(())
+            }
+            RegType::MapValue { .. } | RegType::Mem { .. } => {
+                let last =
+                    i16::try_from(n - 1).map_err(|_| err(pc, "call.arg_type", "size too large"))?;
+                self.access(pc, st, p, 0, Size::B, true)?;
+                self.access(pc, st, p, last, Size::B, true)?;
+                Ok(())
+            }
+            other => Err(err(
+                pc,
+                "call.arg_type",
+                format!(
+                    "{what}: expected pointer to writable memory, got {}",
+                    other.name()
+                ),
+            )),
+        }
+    }
+
+    /// `bpf_loop(nr_loops, callback, callback_ctx, flags)`: the callback is
+    /// explored as a call from this site, and again from its own exit
+    /// (another iteration) until its entry state repeats; the path where
+    /// it never runs (`nr_loops == 0`) is explored too.
+    fn bpf_loop(&mut self, pc: usize, st: &mut State, next: usize) -> Result<Step, VerifyError> {
+        self.scalar_arg(pc, st, 1)?;
+        let entry = match self.arg(pc, st, 2)? {
+            RegType::Func { entry } => entry as usize,
+            other => {
+                return Err(err(
+                    pc,
+                    "call.arg_type",
+                    format!(
+                        "r2: expected a callback (BPF_PSEUDO_FUNC), got {}",
+                        other.name()
+                    ),
+                ));
+            }
+        };
+        let arg = match self.arg(pc, st, 3)? {
+            s @ RegType::Stack { .. } => s,
+            RegType::Scalar(z) if z.as_const() == Some(0) => RegType::Scalar(z),
+            other => {
+                return Err(err(
+                    pc,
+                    "call.arg_type",
+                    format!("r3: expected a stack pointer or NULL, got {}", other.name()),
+                ));
+            }
+        };
+        if self.const_arg(pc, st, 4)? != 0 {
+            return Err(err(pc, "call.arg_type", "bpf_loop flags must be 0"));
+        }
+        if st.preempt > 0 {
+            return Err(err(
+                pc,
+                "kfunc.preempt_region",
+                "bpf_loop inside a bpf_preempt_disable region is not supported",
+            ));
+        }
+        if let Some(why) = Self::kfunc_region(st, st.frames.len()) {
+            return Err(err(
+                pc,
+                "kfunc.region",
+                format!("bpf_loop inside a {why} is not supported"),
+            ));
+        }
+        let mut skip = st.clone();
+        skip.cur_mut().regs[1..=5].fill(RegType::NotInit);
+        skip.cur_mut().links[1..=5].fill(0);
+        skip.set(Reg::R0, RegType::Scalar(Scalar::UNKNOWN));
+        self.enter_callback(pc, st, entry, next, Callback { call_pc: pc, arg })?;
+        Ok(Step::Fork {
+            taken: (next, skip),
+            fall: entry,
+        })
+    }
+
+    fn enter_callback(
+        &self,
+        pc: usize,
+        st: &mut State,
+        entry: usize,
+        ret_pc: usize,
+        cb: Callback,
+    ) -> Result<(), VerifyError> {
+        if st.frames.len() >= MAX_CALL_FRAMES {
+            return Err(err(
+                pc,
+                "call.depth",
+                "the call stack of 8 frames is too deep",
+            ));
+        }
+        let sp = self.subprog_of(entry);
+        if st.frames.iter().any(|f| f.subprog == sp) {
+            return Err(err(pc, "call.recursion", "recursive callback"));
+        }
+        let frame_no = st.frames.len() as u8;
+        let mut f = new_frame(sp, Some(ret_pc), frame_no);
+        // r1: the iteration index, r2: the context argument
+        f.regs[1] = RegType::Scalar(Scalar::UNKNOWN);
+        f.regs[2] = cb.arg;
+        f.callback = Some(cb);
+        st.frames.push(f);
+        st.cb_entry = true;
+        Ok(())
+    }
+
+    /// A kfunc call (`CALL` with `src = 2`), named by [`Program::kfuncs`].
+    fn kfunc(&mut self, pc: usize, st: &mut State, next: usize) -> Result<Step, VerifyError> {
+        let Some(k) = self.prog.kfuncs.iter().find(|k| k.slot == pc) else {
+            return Err(err(
+                pc,
+                "call.kfunc_unknown",
+                "kfunc call without a name (Program::kfuncs)",
+            ));
+        };
+        if !h::gpl_compatible(&self.prog.license) {
+            return Err(err(
+                pc,
+                "kfunc.license",
+                "kernel functions need a GPL-compatible license",
+            ));
+        }
+        let mut ret = RegType::NotInit;
+        match k.name.as_str() {
+            "bpf_preempt_disable" => {
+                st.preempt = st.preempt.checked_add(1).ok_or_else(|| {
+                    err(
+                        pc,
+                        "kfunc.unbalanced",
+                        "bpf_preempt_disable nesting overflow",
+                    )
+                })?;
+            }
+            "bpf_preempt_enable" => {
+                if st.preempt == 0 {
+                    return Err(err(
+                        pc,
+                        "kfunc.unbalanced",
+                        "unmatched attempt to enable preemption (bpf_preempt_enable without bpf_preempt_disable)",
+                    ));
+                }
+                st.preempt -= 1;
+            }
+            "bpf_rcu_read_lock" => {
+                if st.rcu {
+                    return Err(err(
+                        pc,
+                        "kfunc.rcu_nested",
+                        "nested rcu read lock (kernel function bpf_rcu_read_lock)",
+                    ));
+                }
+                st.rcu = true;
+            }
+            "bpf_rcu_read_unlock" => {
+                if !st.rcu {
+                    return Err(err(
+                        pc,
+                        "kfunc.unbalanced",
+                        "unmatched rcu read unlock (kernel function bpf_rcu_read_unlock)",
+                    ));
+                }
+                st.rcu = false;
+            }
+            "bpf_local_irq_save" => {
+                let (frame, at) = self.kfunc_slot(pc, st, "bpf_local_irq_save")?;
+                let id = st.fresh_id();
+                st.frames[frame].stack[at] = Slot::Irq { id };
+                st.irq.push(id);
+            }
+            "bpf_local_irq_restore" => {
+                let (frame, at) = self.kfunc_slot(pc, st, "bpf_local_irq_restore")?;
+                let Slot::Irq { id } = st.frames[frame].stack[at] else {
+                    return Err(err(
+                        pc,
+                        "kfunc.arg_type",
+                        "expected an irq flag saved by bpf_local_irq_save",
+                    ));
+                };
+                if st.irq.last() != Some(&id) {
+                    return Err(err(
+                        pc,
+                        "kfunc.irq_order",
+                        "cannot restore irq state out of order",
+                    ));
+                }
+                st.irq.pop();
+                st.frames[frame].stack[at] = Slot::Bytes(0);
+            }
+            "bpf_iter_num_new" => {
+                let (frame, at) = self.kfunc_slot(pc, st, "bpf_iter_num_new")?;
+                self.scalar_arg(pc, st, 2)?;
+                self.scalar_arg(pc, st, 3)?;
+                let id = st.fresh_id();
+                st.frames[frame].stack[at] = Slot::Iter {
+                    id,
+                    drained: false,
+                    depth: 0,
+                };
+                // 0, -EINVAL or -E2BIG; the iterator is usable either way
+                ret = RegType::Scalar(Scalar::UNKNOWN);
+            }
+            "bpf_iter_num_next" => {
+                let (frame, at) = self.kfunc_slot(pc, st, "bpf_iter_num_next")?;
+                let Slot::Iter { id, drained, depth } = st.frames[frame].stack[at] else {
+                    return Err(err(
+                        pc,
+                        "kfunc.arg_type",
+                        "expected an initialized iter_num as arg #0",
+                    ));
+                };
+                // NULL and the iterator drained, or (while active) the
+                // current value; a drained iterator stays drained
+                let mut done = st.clone();
+                done.frames[frame].stack[at] = Slot::Iter {
+                    id,
+                    drained: true,
+                    depth,
+                };
+                self.clobber_call(&mut done, RegType::Scalar(Scalar::konst(0)));
+                if drained {
+                    *st = done;
+                    return Ok(Step::Next(next));
+                }
+                st.frames[frame].stack[at] = Slot::Iter {
+                    id,
+                    drained: false,
+                    depth: depth.saturating_add(1),
+                };
+                self.clobber_call(
+                    st,
+                    RegType::RdonlyMem {
+                        size: 4,
+                        off: 0,
+                        iter: id,
+                    },
+                );
+                return Ok(Step::Fork {
+                    taken: (next, done),
+                    fall: next,
+                });
+            }
+            "bpf_iter_num_destroy" => {
+                let (frame, at) = self.kfunc_slot(pc, st, "bpf_iter_num_destroy")?;
+                let Slot::Iter { id, .. } = st.frames[frame].stack[at] else {
+                    return Err(err(
+                        pc,
+                        "kfunc.arg_type",
+                        "expected an initialized iter_num as arg #0",
+                    ));
+                };
+                st.frames[frame].stack[at] = Slot::Bytes(0);
+                // pointers into the destroyed iterator's state die with it
+                let dead =
+                    |r: &RegType| matches!(r, RegType::RdonlyMem { iter, .. } if *iter == id);
+                for f in &mut st.frames {
+                    for (i, r) in f.regs.iter_mut().enumerate() {
+                        if dead(r) {
+                            *r = RegType::NotInit;
+                            f.links[i] = 0;
+                        }
+                    }
+                    for slot in &mut f.stack {
+                        if matches!(slot, Slot::Spill(r) if dead(r)) {
+                            *slot = Slot::Bytes(0);
+                        }
+                    }
+                }
+            }
+            other => {
+                return Err(err(
+                    pc,
+                    "call.kfunc_unsupported",
+                    format!("kfunc {other} is not supported"),
+                ));
+            }
+        }
+        self.clobber_call(st, ret);
+        Ok(Step::Next(next))
+    }
+
+    /// r1-r5 are clobbered by a call, r0 is its result.
+    fn clobber_call(&self, st: &mut State, r0: RegType) {
+        st.cur_mut().regs[1..=5].fill(RegType::NotInit);
+        st.cur_mut().links[1..=5].fill(0);
+        st.set(Reg::R0, r0);
+    }
+
+    /// r1 of an iterator or irq-flag kfunc: an 8-byte aligned slot of the
+    /// current frame's stack. Returns (frame, slot index). A new object may
+    /// replace plain data but not a live iterator or flag.
+    fn kfunc_slot(
+        &mut self,
+        pc: usize,
+        st: &State,
+        what: &str,
+    ) -> Result<(usize, usize), VerifyError> {
+        let RegType::Stack { frame, off } = self.arg(pc, st, 1)? else {
+            return Err(err(
+                pc,
+                "kfunc.arg_type",
+                format!("{what}: arg #0 must be a pointer to the stack"),
+            ));
+        };
+        if frame as usize + 1 != st.frames.len()
+            || off % 8 != 0
+            || off < -(BPF_MAX_STACK_BYTES as i32)
+            || off > -8
+        {
+            return Err(err(
+                pc,
+                "kfunc.arg_type",
+                format!(
+                    "{what}: arg #0 must be an aligned 8-byte slot of the current frame, got fp{off}"
+                ),
+            ));
+        }
+        let sp = st.frames[frame as usize].subprog;
+        self.stack_depth[sp] = self.stack_depth[sp].max((-off) as u32);
+        let at = ((off + BPF_MAX_STACK_BYTES as i32) / 8) as usize;
+        let creates = matches!(what, "bpf_local_irq_save" | "bpf_iter_num_new");
+        if creates && st.frames[frame as usize].stack[at].is_kfunc_object() {
+            return Err(err(
+                pc,
+                "kfunc.slot_in_use",
+                format!("{what}: the slot already holds a live iterator or irq flag"),
+            ));
+        }
+        Ok((frame as usize, at))
+    }
+
+    /// Why `st` cannot leave the program or the current function here, if
+    /// it cannot: a held kfunc region or a live kfunc object on the stack
+    /// of frames `from..`.
+    fn kfunc_region(st: &State, from: usize) -> Option<&'static str> {
+        if st.preempt > 0 {
+            return Some("bpf_preempt_disable-ed region");
+        }
+        if st.rcu {
+            return Some("bpf_rcu_read_lock-ed region");
+        }
+        let live =
+            |pred: fn(&Slot) -> bool| st.frames[from..].iter().any(|f| f.stack.iter().any(pred));
+        if !st.irq.is_empty() || live(|s| matches!(s, Slot::Irq { .. })) {
+            return Some("bpf_local_irq_save-ed region");
+        }
+        if live(|s| matches!(s, Slot::Iter { .. })) {
+            return Some("live bpf_iter_num (not destroyed)");
+        }
+        None
+    }
+
     fn helper(&mut self, pc: usize, st: &mut State, id: i32) -> Result<(), VerifyError> {
         let ret = match id {
             h::MAP_LOOKUP_ELEM | h::MAP_UPDATE_ELEM | h::MAP_DELETE_ELEM => {
@@ -1781,6 +2824,16 @@ impl<'a> Verifier<'a> {
                         pc,
                         "call.arg_type",
                         format!("helper {id} cannot be used with ringbuf map {}", def.name),
+                    ));
+                }
+                if def.kind == MapKind::ProgArray {
+                    return Err(err(
+                        pc,
+                        "call.arg_type",
+                        format!(
+                            "program array {} is only usable with bpf_tail_call",
+                            def.name
+                        ),
                     ));
                 }
                 let key = self.arg(pc, st, 2)?;
@@ -1808,7 +2861,65 @@ impl<'a> Verifier<'a> {
                     }
                 }
             }
-            h::KTIME_GET_NS => RegType::Scalar(Scalar::UNKNOWN),
+            h::KTIME_GET_NS | h::GET_CURRENT_PID_TGID | h::GET_CURRENT_UID_GID => {
+                RegType::Scalar(Scalar::UNKNOWN)
+            }
+            h::GET_CURRENT_COMM => {
+                let size = self.const_arg(pc, st, 2)?;
+                let size32 = u32::try_from(size)
+                    .map_err(|_| err(pc, "call.arg_type", "comm buffer size too large"))?;
+                let buf = self.arg(pc, st, 1)?;
+                self.check_mem_write(pc, st, buf, size32, "comm buffer")?;
+                RegType::Scalar(Scalar::UNKNOWN)
+            }
+            h::TAIL_CALL => {
+                if !matches!(self.arg(pc, st, 1)?, RegType::Ctx) {
+                    return Err(err(pc, "call.arg_type", "r1 must be the context"));
+                }
+                let map = self.map_arg(pc, st, 2)?;
+                if self.prog.maps[map as usize].kind != MapKind::ProgArray {
+                    return Err(err(
+                        pc,
+                        "call.arg_type",
+                        "bpf_tail_call needs a program array",
+                    ));
+                }
+                self.scalar_arg(pc, st, 3)?;
+                if let Some(r) = st.refs.first() {
+                    return Err(err(
+                        pc,
+                        "call.tail_call_ref",
+                        format!(
+                            "tail_call would lead to reference leak (id={} acquired at insn {})",
+                            r.id, r.acquired_at
+                        ),
+                    ));
+                }
+                if st.preempt > 0 {
+                    return Err(err(
+                        pc,
+                        "kfunc.preempt_region",
+                        "tail_call cannot be used inside a bpf_preempt_disable region",
+                    ));
+                }
+                if let Some(why) = Self::kfunc_region(st, 0) {
+                    return Err(err(
+                        pc,
+                        "kfunc.region",
+                        format!("tail_call cannot be used with a {why}"),
+                    ));
+                }
+                if self.subprogs.len() > 1 {
+                    return Err(err(
+                        pc,
+                        "call.tail_call_subprogs",
+                        "tail calls in programs with subprograms or callbacks are not supported",
+                    ));
+                }
+                // on success control never returns; on failure execution
+                // continues with r0 unreadable (RET_VOID)
+                RegType::NotInit
+            }
             h::GET_PRANDOM_U32 | h::GET_SMP_PROCESSOR_ID => {
                 RegType::Scalar(Scalar::unknown_bits(32))
             }
@@ -1958,6 +3069,7 @@ impl<'a> Verifier<'a> {
             }
         };
         st.cur_mut().regs[1..=5].fill(RegType::NotInit);
+        st.cur_mut().links[1..=5].fill(0);
         // void helpers (ringbuf submit/discard) leave r0 unreadable, as the
         // kernel's RET_VOID does
         st.set(Reg::R0, ret);
@@ -1985,7 +3097,35 @@ impl<'a> Verifier<'a> {
                     ),
                 ));
             }
+            if st.preempt > 0 {
+                return Err(err(
+                    pc,
+                    "kfunc.preempt_region",
+                    "BPF_EXIT instruction in main prog cannot be used inside bpf_preempt_disable-ed region",
+                ));
+            }
+            if let Some(why) = Self::kfunc_region(st, 0) {
+                return Err(err(
+                    pc,
+                    "kfunc.region",
+                    format!("BPF_EXIT instruction in main prog cannot be used with a {why}"),
+                ));
+            }
             return Ok(Step::Done);
+        }
+        if st.preempt > 0 {
+            return Err(err(
+                pc,
+                "kfunc.preempt_region",
+                "returning from a subprogram inside a bpf_preempt_disable region is not supported",
+            ));
+        }
+        if let Some(why) = Self::kfunc_region(st, depth) {
+            return Err(err(
+                pc,
+                "kfunc.region",
+                format!("returning from a subprogram with a {why} is not supported"),
+            ));
         }
         if let Some(r) = st.refs.iter().find(|r| r.frame as usize == depth) {
             return Err(err(
@@ -2023,9 +3163,49 @@ impl<'a> Verifier<'a> {
         }
         let callee = st.frames.pop().expect("callee frame");
         let ret_pc = callee.return_pc.expect("callee has a return pc");
+        if let Some(cb) = callee.callback {
+            if callee.wide_regs & 1 != 0 {
+                return Err(err(
+                    pc,
+                    "loop.widened_precise",
+                    "a widened loop scalar is a callback's return value",
+                ));
+            }
+            match r0 {
+                RegType::Scalar(s) if s.umax <= LOOP_CALLBACK_MAX_RET => {}
+                other => {
+                    return Err(err(
+                        pc,
+                        "exit.callback_ret",
+                        format!(
+                            "bpf_loop callback must return 0 or 1, R0 is {}",
+                            match other {
+                                RegType::Scalar(s) => format!("in [{}, {}]", s.umin, s.umax),
+                                p => p.name().to_owned(),
+                            }
+                        ),
+                    ));
+                }
+            }
+            // another iteration, or back to the caller with r0 = the
+            // iteration count
+            let mut again = st.clone();
+            let entry = self.subprogs[callee.subprog].start;
+            self.enter_callback(pc, &mut again, entry, ret_pc, cb)?;
+            let caller = st.cur_mut();
+            caller.regs[0] = RegType::Scalar(Scalar::UNKNOWN);
+            caller.regs[1..=5].fill(RegType::NotInit);
+            caller.links[0..=5].fill(0);
+            return Ok(Step::Fork {
+                taken: (entry, again),
+                fall: ret_pc,
+            });
+        }
         let caller = st.cur_mut();
         caller.regs[0] = r0;
         caller.regs[1..=5].fill(RegType::NotInit);
+        caller.links[0..=5].fill(0);
+        caller.wide_regs = (caller.wide_regs & !0b11_1111) | (callee.wide_regs & 1);
         Ok(Step::Jump(ret_pc))
     }
 
@@ -2047,25 +3227,35 @@ impl<'a> Verifier<'a> {
             Operand::Reg(r) => Some(r),
             Operand::Imm(_) => None,
         };
+        let tainted = st.tainted(dst) || src_reg.is_some_and(|r| st.tainted(r));
         let (taken, fallen): (Option<State>, Option<State>) = match (a, b) {
             (RegType::Scalar(x), RegType::Scalar(y)) => {
                 let mut t = None;
                 let mut f = None;
                 if let Some((x1, y1)) = refine_jmp(op, wide, x, y, true) {
                     let mut s = st.clone();
-                    s.set(dst, RegType::Scalar(x1));
+                    s.set_narrowed(dst, x1);
                     if let Some(r) = src_reg {
-                        s.set(r, RegType::Scalar(y1));
+                        s.set_narrowed(r, y1);
                     }
                     t = Some(s);
                 }
                 if let Some((x1, y1)) = refine_jmp(op, wide, x, y, false) {
                     let mut s = st.clone();
-                    s.set(dst, RegType::Scalar(x1));
+                    s.set_narrowed(dst, x1);
                     if let Some(r) = src_reg {
-                        s.set(r, RegType::Scalar(y1));
+                        s.set_narrowed(r, y1);
                     }
                     f = Some(s);
+                }
+                // a decided branch makes the kernel mark both operands
+                // precise (`is_branch_taken`)
+                if tainted && (t.is_none() || f.is_none()) {
+                    return Err(err(
+                        pc,
+                        "loop.widened_precise",
+                        "a widened loop scalar decides a branch",
+                    ));
                 }
                 (t, f)
             }
@@ -2089,6 +3279,18 @@ impl<'a> Verifier<'a> {
                     (Some(null), Some(nonnull))
                 } else {
                     (Some(nonnull), Some(null))
+                }
+            }
+            // a pointer known to be non-NULL compared with 0: the branch
+            // is decided (`is_branch_taken`)
+            (RegType::RdonlyMem { .. }, RegType::Scalar(z))
+            | (RegType::Scalar(z), RegType::RdonlyMem { .. })
+                if wide && z.as_const() == Some(0) && matches!(op, JmpOp::Eq | JmpOp::Ne) =>
+            {
+                if op == JmpOp::Eq {
+                    (None, Some(st.clone()))
+                } else {
+                    (Some(st.clone()), None)
                 }
             }
             (RegType::Packet { id, off, var }, RegType::PacketEnd)
@@ -2169,7 +3371,8 @@ impl<'a> Verifier<'a> {
 }
 
 enum Target {
-    CtxPtr(i32),
+    CtxData,
+    CtxDataEnd,
     Scalar(Size),
     Stack { frame: u8, at: usize },
 }

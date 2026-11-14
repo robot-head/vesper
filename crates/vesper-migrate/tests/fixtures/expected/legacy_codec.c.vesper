@@ -1,0 +1,39 @@
+// vesper.migrate/1: Vesper declarations lifted by vesper migrate from C header `legacy_codec.h`.
+// Modes summarize signatures and body field accesses; they are not a check of Vesper typing rules.
+
+@wire_layout(native)
+struct batch_header {
+    base_offset: i64,
+    batch_length: i32,
+    leader_epoch: i32,
+    magic: u8,
+    reserved: [u8; 3],
+    crc: u32,
+}
+
+@wire_layout(native)
+struct decoder_stats {
+    last_crc: u32,
+    record_count: i32,
+    last: batch_header,
+}
+
+struct padded_record {
+    tag: u8,
+    value: u32,
+}
+
+enum codec_status { CODEC_OK = 0, CODEC_SHORT = 1, CODEC_BAD_MAGIC = 2, CODEC_LAST = 3 }
+
+extern fn legacy_parse_batch_header(in raw_bytes: CSlice[u8], inout out_crc: u32, inout out_count: i32) -> ForeignVal[i32];
+extern fn legacy_parse_batch_header_into(in raw_bytes: CSlice[u8], inout out: CSlice[u32]) -> ForeignVal[i32];
+extern fn legacy_crc32c(in data: Option[CSlice[u8]], seed: u32) -> ForeignVal[u32];
+extern fn legacy_encode(in src: Option[CSlice[u8]], inout dst: Option[CSlice[u8]]) -> ForeignVal[usize];
+extern fn legacy_status() -> ForeignVal[u32];
+extern fn legacy_version() -> ForeignVal[u32];
+extern fn legacy_reset() -> ForeignVal[Unit];
+extern fn legacy_crc_table() -> ForeignVal[NullablePtr[u32]];
+extern fn legacy_read_header(in raw_bytes: CSlice[u8], inout out_hdr: batch_header) -> ForeignVal[i32];
+extern fn legacy_fill(inout stats: Option[decoder_stats]) -> ForeignVal[i32];
+extern fn legacy_sum_headers(in headers: CSlice[batch_header]) -> ForeignVal[i64];
+extern fn legacy_stamp_headers(inout headers: Option[CSlice[batch_header]], crc: u32) -> ForeignVal[Unit];

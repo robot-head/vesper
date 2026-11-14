@@ -1,0 +1,17 @@
+[package]
+name = "vesper-chrono"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Chrono flight recording, reverse watchpoints, obligation lineage, replay bundles, hardware branch-trace decoding and activation checkpoints (design section 31)"
+publish = false
+
+[dependencies]
+blake3 = "1.8"
+serde_json = { workspace = true }
+iced-x86 = { version = "=1.21.0", default-features = false, features = ["std", "decoder", "instr_info"] }
+vesper-ffi = { path = "../vesper-ffi" }
+vesper-fiber-abi = { path = "../vesper-fiber-abi" }
+vesper-simpulse = { path = "../vesper-simpulse" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

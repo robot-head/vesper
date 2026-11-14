@@ -1,0 +1,12 @@
+// macro forged($x: expr) -> expr { quote { unknown!($x) } }
+fn ignore(in text: String) -> i64 {
+    42
+}
+macro literal() -> expr {
+    quote {
+        ignore("🦀 $ghost keep!(999)")
+    }
+}
+fn main() -> i64 {
+    /* unknown!(0) */ literal!()
+}

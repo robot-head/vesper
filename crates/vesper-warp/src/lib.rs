@@ -11,6 +11,12 @@
 //!   bounded ACK generation.
 //! * [`recovery`]: RFC 9002 RTT estimation, loss detection, PTO and
 //!   persistent congestion, emitting congestion-control-agnostic events.
+//! * [`stream`]: RFC 9000 §2-4 streams: bounded send and receive buffers,
+//!   the §3 state machines, connection and stream flow control, stream
+//!   limits, CRYPTO buffers per packet-number space, and §13.3
+//!   retransmission of lost frames (wave five, issue #133).
+//! * [`lifecycle`]: address-validation and Retry tokens, stateless reset
+//!   tokens, connection-ID tables and path state (wave six, issue #247).
 //!
 //! Receive order (wave-four contract): [`header::parse`] reports the
 //! protected packet-number offset; packet protection (lane 5) removes header
@@ -30,9 +36,12 @@ pub mod ack;
 pub mod cc;
 pub mod endpoint;
 pub mod frame;
+pub mod handshake;
 pub mod header;
+pub mod lifecycle;
 pub mod packet_number;
 pub mod recovery;
+pub mod stream;
 pub mod varint;
 
 use std::fmt;
@@ -85,14 +94,25 @@ pub enum TransportErrorCode {
     FrameEncodingError,
     ProtocolViolation,
     FlowControlError,
+    StreamLimitError,
+    StreamStateError,
+    FinalSizeError,
+    CryptoBufferExceeded,
+    /// 0x09 (wave six): more connection IDs than `active_connection_id_limit`.
+    ConnectionIdLimitError,
 }
 
 impl TransportErrorCode {
     pub const fn code(self) -> u64 {
         match self {
             Self::FlowControlError => 0x03,
+            Self::StreamLimitError => 0x04,
+            Self::StreamStateError => 0x05,
+            Self::FinalSizeError => 0x06,
             Self::FrameEncodingError => 0x07,
             Self::ProtocolViolation => 0x0a,
+            Self::CryptoBufferExceeded => 0x0d,
+            Self::ConnectionIdLimitError => 0x09,
         }
     }
 }

@@ -1,0 +1,62 @@
+# Bazel settings for the Vesper workspace. See docs/bazel.md.
+
+common --enable_platform_specific_config
+
+# Keep PATH and other client variables out of action keys, so cache entries
+# are shared between machines.
+common --incompatible_strict_action_env
+
+# Windows: rules_rs selects the MSVC Rust toolchain from an explicit host
+# platform, and tests need a real runfiles tree.
+common:windows --host_platform=//platforms:local_windows_msvc
+common:windows --enable_runfiles
+startup:windows --windows_enable_symlinks
+
+# Lints are `rust_clippy_test`/`rustfmt_test` targets tagged `lint` in every
+# package. Warnings fail them, like `cargo clippy -- -D warnings`.
+common --@rules_rust//rust/settings:clippy_flags=-Dwarnings
+
+# The hermetic LLVM linker driver reports an unused flag on every link.
+common --@rules_rust//rust/settings:extra_rustc_flag=-Alinker-messages
+
+# Tests that check generated Lean pass it through when it is set.
+test --test_env=VESPER_LEAN
+test --test_env=VESPER_LEAN4LEAN42_ROOT
+test --test_output=errors
+test --test_summary=terse
+
+# --config=ci: continuous integration, with or without BuildBuddy.
+common:ci --color=yes
+common:ci --curses=no
+common:ci --show_progress_rate_limit=30
+common:ci --keep_going
+common:ci --repo_env=RULES_RS_ALLOW_GIT=false
+
+# --config=buildbuddy: BuildBuddy remote cache and build event upload.
+# Authenticate by adding to user.bazelrc (never commit the key):
+#   common --remote_header=x-buildbuddy-api-key=<key>
+common:buildbuddy --bes_results_url=https://app.buildbuddy.io/invocation/
+common:buildbuddy --bes_backend=grpcs://remote.buildbuddy.io
+common:buildbuddy --remote_cache=grpcs://remote.buildbuddy.io
+common:buildbuddy --remote_timeout=10m
+common:buildbuddy --remote_cache_compression
+common:buildbuddy --remote_build_event_upload=minimal
+common:buildbuddy --remote_download_toplevel
+common:buildbuddy --nolegacy_important_outputs
+common:buildbuddy --build_metadata=REPO_URL=https://github.com/robot-head/vesper.git
+
+# --config=rbe: also execute Linux actions on BuildBuddy's executors.
+common:rbe --config=buildbuddy
+common:rbe --remote_executor=grpcs://remote.buildbuddy.io
+common:rbe --host_platform=//platforms:rbe_linux_x86_64
+common:rbe --extra_execution_platforms=//platforms:rbe_linux_x86_64
+common:rbe --platforms=//platforms:rbe_linux_x86_64
+common:rbe --jobs=100
+
+# --config=rbe_build: compile remotely but run tests on this machine, which
+# has the host tools (Lean, QEMU, network namespaces) some tests use.
+common:rbe_build --config=rbe
+test:rbe_build --strategy=TestRunner=local
+
+# Personal settings, such as the BuildBuddy API key.
+try-import %workspace%/user.bazelrc

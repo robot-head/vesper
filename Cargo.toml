@@ -55,8 +55,20 @@ members = [
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
+    "crates/vesper-chorus",
+    "crates/vesper-aegis",
+    "crates/vesper-resonance",
     "crates/vesper-warp-tls",
+    "crates/vesper-silicon",
     "crates/vesper-ebpf",
+    "crates/vesper-chrono",
+    "crates/vesper-migrate",
+    "crates/vesper-crucible",
+    "crates/vesper-nexus",
+    "crates/vesper-vault",
+    "crates/vesper-kinetic",
+    "crates/vesper-prism-h3",
+    "crates/vesper-aura-gtk",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -113,8 +125,20 @@ default-members = [
     "crates/vesper-warp-wheel",
     "crates/vesper-warp-crypto",
     "crates/vesper-warp-tcp",
+    "crates/vesper-chorus",
+    "crates/vesper-aegis",
+    "crates/vesper-resonance",
     "crates/vesper-warp-tls",
+    "crates/vesper-silicon",
     "crates/vesper-ebpf",
+    "crates/vesper-chrono",
+    "crates/vesper-migrate",
+    "crates/vesper-crucible",
+    "crates/vesper-nexus",
+    "crates/vesper-vault",
+    "crates/vesper-kinetic",
+    "crates/vesper-prism-h3",
+    "crates/vesper-aura-gtk",
     "experiments/native-pulse",
 ]
 
@@ -140,6 +164,15 @@ sha2 = "0.10.9"
 subtle = "2.6.1"
 zeroize = { version = "1.9.1", features = ["zeroize_derive"] }
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws_lc_rs"] }
+cranelift-codegen = { version = "0.125", features = ["arm64"] }
+cranelift-frontend = "0.125"
+getrandom = "0.4"
+libc = "0.2"
+ml-kem = { version = "=0.3.4", default-features = false, features = ["zeroize"] }
+rand_core = "0.10"
+region = "3.0.2"
+shake = "0.1"
+x25519-dalek = { version = "=3.0.0", default-features = false, features = ["zeroize", "static_secrets", "precomputed-tables"] }
 
 [package]
 default-run = "vesper"
@@ -150,6 +183,7 @@ edition = "2024"
 [dependencies]
 blake3 = "1.8"
 vesper-core = { path = "crates/vesper-core" }
+vesper-forge = { path = "crates/vesper-forge", default-features = false }
 vesper-simd = { path = "crates/vesper-simd" }
 vesper-lean-syntax = { path = "crates/vesper-lean-syntax" }
 vesper-syntax = { path = "crates/vesper-syntax" }
@@ -175,6 +209,19 @@ vesper-loom-audit = { path = "crates/vesper-loom-audit" }
 vesper-loom-cas = { path = "crates/vesper-loom-cas" }
 vesper-pact = { path = "crates/vesper-pact" }
 vesper-pact-binding = { path = "crates/vesper-pact-binding" }
+# Integration B (#136): wave-five verifiers and tools wired into the CLI.
+vesper-aegis = { path = "crates/vesper-aegis" }
+vesper-chrono = { path = "crates/vesper-chrono" }
+vesper-crucible = { path = "crates/vesper-crucible" }
+vesper-ebpf = { path = "crates/vesper-ebpf" }
+vesper-kinetic = { path = "crates/vesper-kinetic" }
+vesper-ffi = { path = "crates/vesper-ffi" }
+vesper-migrate = { path = "crates/vesper-migrate" }
+vesper-resonance = { path = "crates/vesper-resonance" }
+vesper-silicon = { path = "crates/vesper-silicon" }
+vesper-vault = { path = "crates/vesper-vault" }
+# Source Strata regions (wave seven lane 29) run on the host region allocator.
+vesper-alloc = { path = "crates/vesper-alloc" }
 ariadne = "0.5"
 petgraph = "0.8"
 egg = "0.10"
@@ -189,8 +236,17 @@ target-lexicon = "0.13"
 serde = { workspace = true }
 serde_json = { workspace = true }
 salsa = "0.24"
+# Wasm target (wave-seven lane 25): the versions Wasmtime 50 already pulls in.
+wasm-encoder = "=0.261.0"
+wit-component = "=0.261.0"
+wit-parser = "=0.261.0"
+
+[dev-dependencies]
+vesper-nexus = { path = "crates/vesper-nexus" }
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 
 [target.'cfg(unix)'.dependencies]
+getrandom = "0.4"
 libc = "0.2"
 
 [profile.release]

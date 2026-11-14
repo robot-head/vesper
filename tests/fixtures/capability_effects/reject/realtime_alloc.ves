@@ -1,0 +1,17 @@
+// expect: E0720
+effect Alloc {
+    fn grow(bytes: u64) -> u64;
+}
+
+fn process(x: u64) -> u64 eff [Realtime, Alloc] {
+    Alloc::grow(x)
+}
+
+fn main() -> u64 {
+    handle Alloc in {
+        process(8)
+    } with {
+        return value => value,
+        grow(bytes, resume) => resume(bytes),
+    }
+}

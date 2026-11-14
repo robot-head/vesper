@@ -1,0 +1,23 @@
+linear struct Tx {}
+fn make() -> Tx {
+    Tx {}
+}
+fn consume(sink tx: Tx) {
+    let Tx {}
+    = tx;
+}
+macro twice($x: expr) -> expr {
+    quote {
+        {
+            consume($x);
+            consume($x)
+        }
+    }
+}
+fn forward(sink value: Tx) {
+    twice!(value)
+}
+fn main() {
+    let tx = make();
+    forward(tx)
+}

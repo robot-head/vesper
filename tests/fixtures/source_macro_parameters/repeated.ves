@@ -1,0 +1,11 @@
+macro twice($x: expr) -> expr {
+    quote {
+        wrapping_add($x, $x)
+    }
+}
+fn forward(in /* header λ 🦀 */ value: i64) -> i64 {
+    twice!(value)
+}
+fn main() -> i64 {
+    forward(21)
+}

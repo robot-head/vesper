@@ -3,6 +3,16 @@
 use crate::{ast::*, check::World};
 use std::{cell::RefCell, collections::BTreeMap, fmt, rc::Rc};
 
+#[path = "regions/eval.rs"]
+mod regions;
+pub mod resource_trace;
+#[cfg(test)]
+mod resource_trace_acceptance;
+use resource_trace::{
+    ResourceConsume, ResourceIdentity, ResourceTraceCompletion, ResourceTraceConfig,
+    ResourceTraceEngine, ResourceTraceError, ResourceTraceFailure, ResourceTraceObserver,
+};
+
 type Env = BTreeMap<String, Slot>;
 #[derive(Clone)]
 struct Slot {
@@ -17,7 +27,10 @@ impl Slot {
         }
     }
     fn get(&self) -> Result<Value, String> {
-        let cell = self.cell.borrow();
+        let cell = self
+            .cell
+            .try_borrow()
+            .map_err(|_| "runtime value is mutably borrowed")?;
         let mut v = &*cell;
         for f in &self.path {
             v = match v {
@@ -33,7 +46,10 @@ impl Slot {
         Ok(v.clone())
     }
     fn set(&self, value: Value) -> Result<(), String> {
-        let mut cell = self.cell.borrow_mut();
+        let mut cell = self
+            .cell
+            .try_borrow_mut()
+            .map_err(|_| "runtime value is already borrowed")?;
         let mut v = &mut *cell;
         for f in &self.path {
             v = match v {
@@ -60,6 +76,7 @@ pub enum Value {
         ty: String,
         constructor: String,
         fields: BTreeMap<String, Value>,
+        resource_identity: Option<ResourceIdentity>,
     },
     Function(String),
     Constructor(String),
@@ -181,6 +198,7 @@ enum Frame {
         rest: Vec<(String, Expr)>,
         field: String,
         env: Env,
+        site: Span,
     },
     Coerce(Type, Env),
     Unary(String, Env),
@@ -325,6 +343,10 @@ pub struct Runtime<'a> {
     /// The checked call site of the function being invoked, used to
     /// instantiate generic effect arguments for typed instance selection.
     call_site: Option<(usize, usize)>,
+    resource_trace: Option<Box<ResourceTraceEngine>>,
+    resource_fuel_exhausted: bool,
+    /// Open source region blocks (`region r { ... }`, design §15).
+    regions: Box<crate::regions::store::Regions<Value>>,
 }
 impl<'a> Runtime<'a> {
     pub fn new(world: &'a World) -> Self {
@@ -338,9 +360,450 @@ impl<'a> Runtime<'a> {
             optimized: false,
             external: BTreeMap::new(),
             call_site: None,
+            resource_trace: None,
+            resource_fuel_exhausted: false,
+            regions: Default::default(),
         }
     }
+    /// Observe selected empty linear data carriers without changing evaluation
+    /// or optimizer selection. Every public run starts a new observation epoch.
+    pub fn observe_resources(
+        &mut self,
+        config: ResourceTraceConfig,
+    ) -> Result<ResourceTraceObserver, ResourceTraceError> {
+        if self.resource_trace.is_some() {
+            return Err(ResourceTraceError::new(
+                ResourceTraceFailure::Reconfigured,
+                None,
+            ));
+        }
+        config.validate_world(self.world)?;
+        let engine = ResourceTraceEngine::new(config)?;
+        let observer = engine.observer();
+        self.resource_trace = Some(Box::new(engine));
+        Ok(observer)
+    }
+    fn construct_data(
+        &mut self,
+        ty: String,
+        constructor: String,
+        fields: BTreeMap<String, Value>,
+        site: Option<Span>,
+    ) -> Result<Value, String> {
+        let resource_identity = if let Some(trace) = &mut self.resource_trace {
+            if trace.is_selected(&ty) {
+                let site = site.ok_or_else(|| {
+                    trace
+                        .fail(ResourceTraceFailure::MissingSite, None)
+                        .to_string()
+                })?;
+                trace
+                    .mint(&ty, &constructor, fields.len(), site)
+                    .map_err(|e| e.to_string())?
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        Ok(Value::Data {
+            ty,
+            constructor,
+            fields,
+            resource_identity,
+        })
+    }
+    fn bind_owned_pattern(
+        &mut self,
+        pattern: &Pattern,
+        value: &Value,
+        env: &mut Env,
+    ) -> Result<bool, String> {
+        // Existing matching may tentatively bind a prefix. Stage those bindings
+        // locally: no terminal event or caller binding commits on a failed match.
+        let mut bindings = Env::new();
+        if !bind_pattern(pattern, value, &mut bindings) {
+            return Ok(false);
+        }
+        self.consume_owned_patterns(&[(pattern, value)])?;
+        env.extend(bindings);
+        Ok(true)
+    }
+    fn consume_owned_patterns(&mut self, roots: &[(&Pattern, &Value)]) -> Result<(), String> {
+        if let Some(trace) = &mut self.resource_trace {
+            let limits = trace.limits();
+            let mut pending = Vec::new();
+            if !roots.is_empty() && limits.max_value_depth == 0 {
+                return Err(trace
+                    .fail(ResourceTraceFailure::ValueDepthLimit, None)
+                    .to_string());
+            }
+            for &(pattern, value) in roots.iter().rev() {
+                trace_push(
+                    &mut pending,
+                    (pattern, value, 1usize),
+                    limits.max_value_nodes,
+                )
+                .map_err(|reason| trace.fail(reason, Some(pattern.span.clone())).to_string())?;
+            }
+            let mut consumes = Vec::new();
+            let mut nodes = 0usize;
+            while let Some((pattern, value, depth)) = pending.pop() {
+                nodes = nodes.checked_add(1).ok_or_else(|| {
+                    trace
+                        .fail(
+                            ResourceTraceFailure::ValueNodeLimit,
+                            Some(pattern.span.clone()),
+                        )
+                        .to_string()
+                })?;
+                if nodes > limits.max_value_nodes {
+                    return Err(trace
+                        .fail(
+                            ResourceTraceFailure::ValueNodeLimit,
+                            Some(pattern.span.clone()),
+                        )
+                        .to_string());
+                }
+                if depth > limits.max_value_depth {
+                    return Err(trace
+                        .fail(
+                            ResourceTraceFailure::ValueDepthLimit,
+                            Some(pattern.span.clone()),
+                        )
+                        .to_string());
+                }
+                match (&pattern.kind, value) {
+                    (PatternKind::Tuple(patterns), Value::Tuple(values)) => {
+                        let next_depth = trace_child_depth(
+                            trace,
+                            nodes,
+                            pending.len(),
+                            patterns.len(),
+                            depth,
+                            Some(&pattern.span),
+                        )?;
+                        for (p, v) in patterns.iter().zip(values).rev() {
+                            trace_push(&mut pending, (p, v, next_depth), limits.max_value_nodes)
+                                .map_err(|reason| {
+                                    trace.fail(reason, Some(p.span.clone())).to_string()
+                                })?;
+                        }
+                    }
+                    (
+                        PatternKind::Constructor {
+                            name,
+                            fields: patterns,
+                            ..
+                        },
+                        Value::Data {
+                            ty,
+                            constructor,
+                            fields,
+                            resource_identity,
+                        },
+                    ) => {
+                        let expected = self
+                            .world
+                            .constructor(name)
+                            .map(|(adt, _)| adt.name.as_str());
+                        if (trace.is_selected(ty)
+                            || expected.is_some_and(|ty| trace.is_selected(ty)))
+                            && expected != Some(ty.as_str())
+                        {
+                            return Err(trace
+                                .fail(ResourceTraceFailure::WrongKind, Some(pattern.span.clone()))
+                                .to_string());
+                        }
+                        if trace.is_selected(ty) {
+                            if consumes.len() >= limits.max_events {
+                                return Err(trace
+                                    .fail(
+                                        ResourceTraceFailure::EventLimit,
+                                        Some(pattern.span.clone()),
+                                    )
+                                    .to_string());
+                            }
+                            trace_push(
+                                &mut consumes,
+                                ResourceConsume {
+                                    ty,
+                                    constructor,
+                                    field_count: fields.len(),
+                                    identity: *resource_identity,
+                                    site: pattern.span.clone(),
+                                },
+                                limits.max_events,
+                            )
+                            .map_err(|reason| {
+                                trace.fail(reason, Some(pattern.span.clone())).to_string()
+                            })?;
+                        } else {
+                            let next_depth = trace_child_depth(
+                                trace,
+                                nodes,
+                                pending.len(),
+                                patterns.len(),
+                                depth,
+                                Some(&pattern.span),
+                            )?;
+                            for (name, p) in patterns.iter().rev() {
+                                let v = fields.get(name).ok_or_else(|| {
+                                    trace
+                                        .fail(
+                                            ResourceTraceFailure::MalformedCarrier,
+                                            Some(p.span.clone()),
+                                        )
+                                        .to_string()
+                                })?;
+                                trace_push(
+                                    &mut pending,
+                                    (p, v, next_depth),
+                                    limits.max_value_nodes,
+                                )
+                                .map_err(|reason| {
+                                    trace.fail(reason, Some(p.span.clone())).to_string()
+                                })?;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            trace.consume_batch(&consumes).map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+    // A deliberately closed public boundary profile. Borrow actual checked
+    // field types and actual values; no substitution, type cloning, or carrier
+    // coercion can repair malformed host inputs or outputs.
+    fn validate_resource_boundary(
+        &mut self,
+        entry: &str,
+        values: &[Value],
+        result: bool,
+    ) -> Result<(), String> {
+        let Some(trace) = &mut self.resource_trace else {
+            return Ok(());
+        };
+        let function = self.world.functions.get(entry).ok_or_else(|| {
+            trace
+                .fail(ResourceTraceFailure::UnsupportedValue, None)
+                .to_string()
+        })?;
+        if !function.generics.is_empty()
+            || values.len() != if result { 1 } else { function.params.len() }
+        {
+            return Err(trace
+                .fail(ResourceTraceFailure::UnsupportedValue, None)
+                .to_string());
+        }
+        let limits = trace.limits();
+        let mut pending = Vec::new();
+        if !values.is_empty() && limits.max_value_depth == 0 {
+            return Err(trace
+                .fail(ResourceTraceFailure::ValueDepthLimit, None)
+                .to_string());
+        }
+        if result {
+            let ty = self
+                .world
+                .function_results
+                .get(entry)
+                .unwrap_or(&function.result);
+            trace_push(
+                &mut pending,
+                (ty, &values[0], 1usize),
+                limits.max_value_nodes,
+            )
+            .map_err(|reason| trace.fail(reason, None).to_string())?;
+        } else {
+            for (param, value) in function.params.iter().zip(values).rev() {
+                trace_push(
+                    &mut pending,
+                    (&param.ty, value, 1usize),
+                    limits.max_value_nodes,
+                )
+                .map_err(|reason| trace.fail(reason, None).to_string())?;
+            }
+        }
+        let mut nodes = 0usize;
+        while let Some((ty, value, depth)) = pending.pop() {
+            nodes = nodes.checked_add(1).ok_or_else(|| {
+                trace
+                    .fail(ResourceTraceFailure::ValueNodeLimit, None)
+                    .to_string()
+            })?;
+            if nodes > limits.max_value_nodes {
+                return Err(trace
+                    .fail(ResourceTraceFailure::ValueNodeLimit, None)
+                    .to_string());
+            }
+            if depth > limits.max_value_depth {
+                return Err(trace
+                    .fail(ResourceTraceFailure::ValueDepthLimit, None)
+                    .to_string());
+            }
+            match ty {
+                Type::Tuple(types) => {
+                    let Value::Tuple(values) = value else {
+                        return Err(trace
+                            .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
+                            .to_string());
+                    };
+                    if types.len() != values.len() {
+                        return Err(trace
+                            .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
+                            .to_string());
+                    }
+                    let next_depth =
+                        trace_child_depth(trace, nodes, pending.len(), types.len(), depth, None)?;
+                    for (ty, value) in types.iter().zip(values).rev() {
+                        trace_push(
+                            &mut pending,
+                            (ty, value, next_depth),
+                            limits.max_value_nodes,
+                        )
+                        .map_err(|reason| trace.fail(reason, None).to_string())?;
+                    }
+                }
+                Type::Named(name, args) if args.is_empty() => {
+                    let scalar = match name.as_str() {
+                        "i64" => Some(matches!(value, Value::Int(_))),
+                        "u8" => Some(matches!(value, Value::UInt(n, 8) if *n <= u8::MAX as u64)),
+                        "u32" => Some(matches!(value, Value::UInt(n, 32) if *n <= u32::MAX as u64)),
+                        "u64" => Some(matches!(value, Value::UInt(_, 64))),
+                        "f64" => Some(matches!(value, Value::Float(_))),
+                        "bool" => Some(matches!(value, Value::Bool(_))),
+                        "String" => Some(matches!(value, Value::String(_))),
+                        "Unit" => Some(matches!(value, Value::Tuple(values) if values.is_empty())),
+                        _ => None,
+                    };
+                    if let Some(valid) = scalar {
+                        if !valid {
+                            return Err(trace
+                                .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
+                                .to_string());
+                        }
+                        continue;
+                    }
+                    let adt = self
+                        .world
+                        .adts
+                        .get(name)
+                        .filter(|adt| adt.generics.is_empty())
+                        .ok_or_else(|| {
+                            trace
+                                .fail(ResourceTraceFailure::UnsupportedValue, None)
+                                .to_string()
+                        })?;
+                    let Value::Data {
+                        ty: actual,
+                        constructor,
+                        fields,
+                        ..
+                    } = value
+                    else {
+                        return Err(trace
+                            .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
+                            .to_string());
+                    };
+                    if actual != name {
+                        return Err(trace
+                            .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
+                            .to_string());
+                    }
+                    let variant = adt
+                        .variants
+                        .iter()
+                        .find(|variant| variant.name == *constructor)
+                        .ok_or_else(|| {
+                            trace
+                                .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
+                                .to_string()
+                        })?;
+                    if fields.len() != variant.fields.len() {
+                        return Err(trace
+                            .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
+                            .to_string());
+                    }
+                    let next_depth = trace_child_depth(
+                        trace,
+                        nodes,
+                        pending.len(),
+                        variant.fields.len(),
+                        depth,
+                        None,
+                    )?;
+                    for field in variant.fields.iter().rev() {
+                        let value = fields.get(&field.name).ok_or_else(|| {
+                            trace
+                                .fail(ResourceTraceFailure::BoundaryTypeMismatch, None)
+                                .to_string()
+                        })?;
+                        trace_push(
+                            &mut pending,
+                            (&field.ty, value, next_depth),
+                            limits.max_value_nodes,
+                        )
+                        .map_err(|reason| trace.fail(reason, None).to_string())?;
+                    }
+                }
+                _ => {
+                    return Err(trace
+                        .fail(ResourceTraceFailure::UnsupportedValue, None)
+                        .to_string());
+                }
+            }
+        }
+        Ok(())
+    }
     pub fn run(&mut self, entry: &str, args: Vec<Value>) -> Result<Value, String> {
+        self.resource_fuel_exhausted = false;
+        if let Some(trace) = &mut self.resource_trace {
+            trace.begin_run().map_err(|e| e.to_string())?;
+            trace.validate_values(&args).map_err(|e| e.to_string())?;
+        }
+        let mut result = match self.validate_resource_boundary(entry, &args, false) {
+            Ok(()) => self.run_execution(entry, args),
+            Err(error) => Err(error),
+        };
+        if let Ok(value) = &result
+            && let Some(trace) = &mut self.resource_trace
+            && let Err(e) = trace.validate_values(std::slice::from_ref(value))
+        {
+            result = Err(e.to_string());
+        }
+        if let Ok(value) = &result
+            && let Err(error) =
+                self.validate_resource_boundary(entry, std::slice::from_ref(value), true)
+        {
+            result = Err(error);
+        }
+        if let Some(trace) = &mut self.resource_trace {
+            let completion = if self.resource_fuel_exhausted {
+                ResourceTraceCompletion::FuelExhausted
+            } else if result.is_ok() {
+                ResourceTraceCompletion::Completed
+            } else {
+                ResourceTraceCompletion::RuntimeError
+            };
+            if let Err(error) = trace.finish(completion) {
+                let mut message = format!("resource trace finalization failed: {error}");
+                if let Err(original) = &result {
+                    message.push_str("; original runtime error: ");
+                    let mut end = original.len().min(4096usize.saturating_sub(message.len()));
+                    while !original.is_char_boundary(end) {
+                        end -= 1;
+                    }
+                    message.push_str(&original[..end]);
+                }
+                return Err(message);
+            }
+        }
+        result
+    }
+    fn run_execution(&mut self, entry: &str, args: Vec<Value>) -> Result<Value, String> {
         self.stack.clear();
         self.external.clear();
         if self.optimize && !self.optimized {
@@ -363,6 +826,12 @@ impl<'a> Runtime<'a> {
         entry: &str,
         args: Vec<Value>,
     ) -> Result<Execution<'a>, String> {
+        if let Some(trace) = &mut self.resource_trace {
+            trace.begin_run().map_err(|e| e.to_string())?;
+            return Err(trace
+                .fail(ResourceTraceFailure::UnsupportedExternal, None)
+                .to_string());
+        }
         self.stack.clear();
         self.external.clear();
         if self.optimize && !self.optimized {
@@ -527,7 +996,7 @@ impl<'a> Runtime<'a> {
             }
             Op::Bind { pattern, value } => {
                 let value = get(value)?;
-                if !bind_pattern(&pattern, &value, &mut state.env) {
+                if !self.bind_owned_pattern(&pattern, &value, &mut state.env)? {
                     return Err("IR binding pattern mismatch".into());
                 }
                 Value::Tuple(vec![])
@@ -591,14 +1060,13 @@ impl<'a> Runtime<'a> {
                     .world
                     .constructor(&name)
                     .ok_or("unknown IR constructor")?;
-                Value::Data {
-                    ty: a.name.clone(),
-                    constructor: v.name.clone(),
-                    fields: fields
-                        .into_iter()
-                        .map(|(n, v)| Ok((n, get(v)?)))
-                        .collect::<Result<_, String>>()?,
-                }
+                let ty = a.name.clone();
+                let constructor = v.name.clone();
+                let fields = fields
+                    .into_iter()
+                    .map(|(n, v)| Ok((n, get(v)?)))
+                    .collect::<Result<_, String>>()?;
+                self.construct_data(ty, constructor, fields, Some(instruction.span.clone()))?
             }
             Op::Project(base, field) => match get(base)? {
                 Value::Data { mut fields, .. } => {
@@ -768,6 +1236,7 @@ impl<'a> Runtime<'a> {
     fn drive(&mut self, mut control: Control) -> Result<Outcome, String> {
         loop {
             if self.fuel == 0 {
+                self.resource_fuel_exhausted = true;
                 return Err("execution fuel exhausted".into());
             }
             self.fuel -= 1;
@@ -775,6 +1244,7 @@ impl<'a> Runtime<'a> {
                 Control::External(request) => return Ok(Outcome::Suspended(request)),
                 Control::Ir(state) => self.ir_step(*state)?,
                 Control::Eval(e, env) => {
+                    let operation_site = e.span.clone();
                     if let Some(ty) = self.world.types.get(&(e.span.start, e.span.end)) {
                         self.stack
                             .push(Frame::Coerce(ty.clone(), evidence_environment(&env)));
@@ -799,11 +1269,14 @@ impl<'a> Runtime<'a> {
                                 Value::Function(n)
                             } else if let Some((a, v)) = self.world.constructor(&n) {
                                 if v.fields.is_empty() {
-                                    Value::Data {
-                                        ty: a.name.clone(),
-                                        constructor: v.name.clone(),
-                                        fields: BTreeMap::new(),
-                                    }
+                                    let ty = a.name.clone();
+                                    let constructor = v.name.clone();
+                                    self.construct_data(
+                                        ty,
+                                        constructor,
+                                        BTreeMap::new(),
+                                        Some(operation_site),
+                                    )?
                                 } else {
                                     Value::Constructor(n)
                                 }
@@ -826,9 +1299,10 @@ impl<'a> Runtime<'a> {
                                 .map(|(i, e)| (i.to_string(), e))
                                 .collect(),
                             env,
+                            operation_site,
                         )?,
                         ExprKind::Struct { name, fields } => {
-                            self.aggregate(Some(name), fields, env)?
+                            self.aggregate(Some(name), fields, env, operation_site)?
                         }
                         ExprKind::Block { statements, tail } => {
                             self.block(statements, tail, env)?
@@ -1081,7 +1555,7 @@ impl<'a> Runtime<'a> {
                             bind,
                         } => {
                             if let Some(p) = bind
-                                && !bind_pattern(&p, &value, &mut env)
+                                && !self.bind_owned_pattern(&p, &value, &mut env)?
                             {
                                 return Err("let pattern did not match".into());
                             }
@@ -1093,9 +1567,10 @@ impl<'a> Runtime<'a> {
                             rest,
                             field,
                             env,
+                            site,
                         } => {
                             done.push((field, value));
-                            self.aggregate_next(name, done, rest, env)?
+                            self.aggregate_next(name, done, rest, env, site)?
                         }
                         Frame::Coerce(ty, env) => Control::Return(coerce_value(
                             self.qualify_value(value, &ty, &env, false),
@@ -1185,7 +1660,7 @@ impl<'a> Runtime<'a> {
                             let mut selected = None;
                             for (p, body) in arms {
                                 let mut local = env.clone();
-                                if bind_pattern(&p, &value, &mut local) {
+                                if self.bind_owned_pattern(&p, &value, &mut local)? {
                                     selected = Some(Control::Eval(body, local));
                                     break;
                                 }
@@ -1233,13 +1708,14 @@ impl<'a> Runtime<'a> {
                             self.lowered_control("handler_body", body, env)
                         }
                         Frame::Handler(h) => {
+                            self.region_end(&h)?;
                             let mut env = h.env.clone();
                             let v = if let Some(state) = h.state {
                                 Value::Tuple(vec![value, state])
                             } else {
                                 value
                             };
-                            if !bind_pattern(&h.ret.pats[0], &v, &mut env) {
+                            if !self.bind_owned_pattern(&h.ret.pats[0], &v, &mut env)? {
                                 return Err("handler return pattern mismatch".into());
                             }
                             self.lowered_control("handler_clause", h.ret.body, env)
@@ -1302,8 +1778,9 @@ impl<'a> Runtime<'a> {
         name: Option<String>,
         fields: Vec<(String, Expr)>,
         env: Env,
+        site: Span,
     ) -> Result<Control, String> {
-        self.aggregate_next(name, vec![], fields, env)
+        self.aggregate_next(name, vec![], fields, env, site)
     }
     fn aggregate_next(
         &mut self,
@@ -1311,15 +1788,14 @@ impl<'a> Runtime<'a> {
         done: Vec<(String, Value)>,
         mut rest: Vec<(String, Expr)>,
         env: Env,
+        site: Span,
     ) -> Result<Control, String> {
         if rest.is_empty() {
             let v = if let Some(name) = name {
                 let (a, v) = self.world.constructor(&name).ok_or("unknown constructor")?;
-                Value::Data {
-                    ty: a.name.clone(),
-                    constructor: v.name.clone(),
-                    fields: done.into_iter().collect(),
-                }
+                let ty = a.name.clone();
+                let constructor = v.name.clone();
+                self.construct_data(ty, constructor, done.into_iter().collect(), Some(site))?
             } else {
                 Value::Tuple(done.into_iter().map(|(_, v)| v).collect())
             };
@@ -1332,6 +1808,7 @@ impl<'a> Runtime<'a> {
             rest,
             field,
             env: env.clone(),
+            site,
         });
         Ok(Control::Eval(expr, env))
     }
@@ -1448,15 +1925,19 @@ impl<'a> Runtime<'a> {
             }
             Value::Constructor(name) => {
                 let (a, v) = self.world.constructor(&name).ok_or("unknown constructor")?;
-                Ok(Control::Return(Value::Data {
-                    ty: a.name.clone(),
-                    constructor: v.name.clone(),
-                    fields: args
-                        .into_iter()
-                        .enumerate()
-                        .map(|(i, v)| (i.to_string(), v))
-                        .collect(),
-                }))
+                let ty = a.name.clone();
+                let constructor = v.name.clone();
+                let fields = args
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, v)| (i.to_string(), v))
+                    .collect();
+                Ok(Control::Return(self.construct_data(
+                    ty,
+                    constructor,
+                    fields,
+                    None,
+                )?))
             }
             Value::Closure(c) => {
                 if args.len() != c.params.len() {
@@ -1501,7 +1982,8 @@ impl<'a> Runtime<'a> {
             } => self.perform(&effect, label.as_deref(), &op, args, refs, target),
             Value::Continuation(k) => {
                 let mut k = k
-                    .borrow_mut()
+                    .try_borrow_mut()
+                    .map_err(|_| "continuation is already borrowed")?
                     .take()
                     .ok_or("one-shot continuation was resumed twice")?;
                 let expected = if k.handler.state.is_some() { 2 } else { 1 };
@@ -1532,6 +2014,7 @@ impl<'a> Runtime<'a> {
                     ty: name,
                     constructor,
                     mut fields,
+                    resource_identity,
                 },
                 Type::Named(n, args),
             ) => {
@@ -1557,6 +2040,7 @@ impl<'a> Runtime<'a> {
                     ty: name,
                     constructor,
                     fields,
+                    resource_identity,
                 }
             }
             (value, Type::Function { effects, .. }) => {
@@ -1678,6 +2162,7 @@ impl<'a> Runtime<'a> {
                 ty: ty.into(),
                 constructor: constructor.into(),
                 fields: BTreeMap::new(),
+                resource_identity: None,
             }],
             vec![None],
             target,
@@ -1692,6 +2177,9 @@ impl<'a> Runtime<'a> {
         refs: Vec<Option<Slot>>,
         target: Option<u64>,
     ) -> Result<Control, String> {
+        if effect == crate::regions::REGION_EFFECT && crate::regions::active(self.world) {
+            return self.region_perform(op, args, target);
+        }
         let index = self.stack.iter().rposition(|f| matches!(f, Frame::Handler(h) if h.effect.name == effect && target.map(|id|h.id == id).unwrap_or_else(|| label.is_none() || h.effect.label.as_deref() == label)));
         let Some(index) = index else {
             if let Some(effect) = target.and_then(|id| self.external.get(&id)).cloned() {
@@ -1716,11 +2204,15 @@ impl<'a> Runtime<'a> {
             .ok_or("handler lacks operation")?;
         let mut env = snapshot_environment(&h.env)?;
         let argument_count = args.len();
-        let signature = self.world.effects[effect]
+        let passes = self.world.effects[effect]
             .ops
             .iter()
             .find(|f| f.name == op)
-            .ok_or("unknown effect operation")?;
+            .ok_or("unknown effect operation")?
+            .params
+            .iter()
+            .map(|p| p.pass)
+            .collect::<Vec<_>>();
         let mut values = args;
         if let Some(state) = &h.state {
             values.push(state.clone());
@@ -1731,24 +2223,82 @@ impl<'a> Runtime<'a> {
         if values.len() != clause.pats.len() {
             return Err("operation handler pattern arity mismatch".into());
         }
-        for (i, (p, v)) in clause.pats.iter().zip(values).enumerate() {
-            let borrowed = i < argument_count && signature.params[i].pass != Pass::Sink;
+        let mut bindings = Env::new();
+        let mut owned = Vec::new();
+        for (i, (p, v)) in clause.pats.iter().zip(&values).enumerate() {
+            let borrowed = i < argument_count && passes[i] != Pass::Sink;
             let bound = if borrowed {
                 let slot = refs
                     .get(i)
                     .cloned()
                     .flatten()
-                    .unwrap_or_else(|| Slot::new(v));
-                bind_pattern_slot(p, &slot, &mut env)?
+                    .unwrap_or_else(|| Slot::new(v.clone()));
+                bind_pattern_slot(p, &slot, &mut bindings)?
             } else {
-                bind_pattern(p, &v, &mut env)
+                if let Some(trace) = &mut self.resource_trace {
+                    trace_push(&mut owned, (p, v), trace.limits().max_value_nodes)
+                        .map_err(|reason| trace.fail(reason, Some(p.span.clone())).to_string())?;
+                }
+                bind_pattern(p, v, &mut bindings)
             };
             if !bound {
                 return Err("operation handler pattern mismatch".into());
             }
         }
+        self.consume_owned_patterns(&owned)?;
+        env.extend(bindings);
         Ok(self.lowered_control("handler_clause", clause.body, env))
     }
+}
+// Prepay every scheduled visit and depth before growing a traversal stack.
+fn trace_child_depth(
+    trace: &mut ResourceTraceEngine,
+    visited: usize,
+    pending: usize,
+    children: usize,
+    depth: usize,
+    site: Option<&Span>,
+) -> Result<usize, String> {
+    let limits = trace.limits();
+    if visited
+        .checked_add(pending)
+        .and_then(|n| n.checked_add(children))
+        .is_none_or(|n| n > limits.max_value_nodes)
+    {
+        return Err(trace
+            .fail(ResourceTraceFailure::ValueNodeLimit, site.cloned())
+            .to_string());
+    }
+    if children == 0 {
+        return Ok(depth);
+    }
+    let next_depth = depth
+        .checked_add(1)
+        .filter(|d| *d <= limits.max_value_depth)
+        .ok_or_else(|| {
+            trace
+                .fail(ResourceTraceFailure::ValueDepthLimit, site.cloned())
+                .to_string()
+        })?;
+    Ok(next_depth)
+}
+fn trace_push<T>(values: &mut Vec<T>, value: T, max: usize) -> Result<(), ResourceTraceFailure> {
+    if values.len() >= max {
+        return Err(ResourceTraceFailure::ValueNodeLimit);
+    }
+    if values.len() == values.capacity() {
+        let capacity = values
+            .capacity()
+            .checked_mul(2)
+            .unwrap_or(max)
+            .max(1)
+            .min(max);
+        values
+            .try_reserve_exact(capacity - values.len())
+            .map_err(|_| ResourceTraceFailure::Allocation)?;
+    }
+    values.push(value);
+    Ok(())
 }
 fn place_slot(e: &Expr, env: &Env) -> Result<Slot, String> {
     match &e.kind {

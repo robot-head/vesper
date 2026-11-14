@@ -1,0 +1,24 @@
+fn score(
+    in value: (
+        i64,
+    )
+) -> i64 {
+    let (
+        n,
+    ) = value;
+    n
+}
+macro keep($value: expr) -> expr {
+    quote {
+        ($value)
+    }
+}
+fn main() -> i64 {
+    score(
+        keep!(
+            (
+                42,
+            )
+        )
+    )
+}

@@ -4,6 +4,10 @@ mod cdc;
 mod checkpoint;
 pub use cdc::{CdcHeader, CdcPolicy, Ingested, SourceBinding, WeightPolicy};
 pub use checkpoint::CheckpointLimits;
+pub use checkpoint::durable::{DurableCheckpointer, DurableReport, DurableRestore};
+#[path = "cluster.rs"]
+mod cluster;
+pub use cluster::{ClusterConfig, ClusterRun, CommittedCheckpoint, Recovery, run_cluster};
 
 use crate::{
     Budget, Error, Limits, Row, ZSet, identity,
@@ -332,11 +336,14 @@ impl Circuit {
                 rows: Default::default(),
             })
             .collect();
+        let versions = vec![0; self.nodes.len()];
         Executor {
             circuit: self,
             prior,
             ticks: 0,
             source: None,
+            lineage: fresh_lineage(),
+            versions,
         }
     }
 }
@@ -351,8 +358,22 @@ pub struct Executor {
     prior: Vec<ZSet>,
     ticks: u64,
     source: Option<cdc::SourceState>,
+    /// Process-local identity of this state history; replaced on every restore,
+    /// so an incremental checkpointer never trusts change counters across them.
+    /// 0 (identity exhausted) disables incremental reuse.
+    lineage: u64,
+    /// Per-original-node change counters: bumped when a tick's delta for that
+    /// node's integral is nonzero. Durable checkpoints rewrite only changed nodes.
+    versions: Vec<u64>,
+}
+fn fresh_lineage() -> u64 {
+    identity().unwrap_or(0)
 }
 impl Executor {
+    /// The circuit this executor runs.
+    pub fn circuit(&self) -> &Circuit {
+        &self.circuit
+    }
     pub fn ticks(&self) -> u64 {
         self.ticks
     }
@@ -387,6 +408,12 @@ impl Executor {
             };
             values.push(value);
         }
+        let mut versions = self.versions.clone();
+        for (id, version) in versions.iter_mut().enumerate() {
+            if !values[c.delta[id]].is_empty() {
+                *version = version.checked_add(1).ok_or(Error::Overflow)?;
+            }
+        }
         let mut next = Vec::new();
         for (id, prior) in self.prior.iter().enumerate() {
             next.push(union(
@@ -402,6 +429,7 @@ impl Executor {
         }
         self.prior = next;
         self.ticks = next_tick;
+        self.versions = versions;
         Ok(out)
     }
 }
