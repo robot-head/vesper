@@ -96,7 +96,7 @@ fn uses_defs(world: &World, op: &Op) -> (BTreeSet<Local>, BTreeSet<Local>) {
         Op::Binary(_, a, b) | Op::Index(a, b) => {
             uses.extend([Local::Value(*a), Local::Value(*b)]);
         }
-        Op::Tuple(vs) => {
+        Op::Tuple(vs) | Op::Vector { args: vs, .. } => {
             uses.extend(vs.iter().map(|v| Local::Value(*v)));
         }
         Op::Data(_, fs) => {
