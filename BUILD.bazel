@@ -8,6 +8,10 @@ exports_files([
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
 # (directories without their own BUILD.bazel), which the CLI and its tests read.
 vesper_crate(
+    copy_test_cwd = [
+        "test/lean4lean_foundations42",
+        "test/lean4lean_construction42",
+    ],
     extra_compile_data = ["//crates/vesper-doc:files"],
     extra_test_data = [
         "//crates/vesper-doc:files",
