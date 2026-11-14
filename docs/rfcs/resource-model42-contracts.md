@@ -184,6 +184,9 @@ agreement, 100000-program resource campaign or self-hosting is claimed.
   and evaluator report; imports Evaluator, ErasureProofs and LedgerProofs.
 - Ledger proof assistance: NEW lean/ResourceModel42/LedgerProofs.lean and
   ledger report; imports Evaluator, never the reverse.
+- Metric proof assistance: NEW lean/ResourceModel42/MetricsProofs.lean and
+  metrics report; relates the actual preflight algorithms to independent
+  logical sizes and genuine over-bound refusals.
 - Proofs: NEW lean/ResourceModel42/ErasureProofs.lean,
   lean/ResourceModel42/Proofs.lean and proof report. ErasureProofs imports
   Syntax only; the main proof module combines the independent static,
