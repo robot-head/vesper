@@ -73,7 +73,12 @@ const SYNC_TABLE: &[(Sync, S2)] = &[
     ),
     (Sync::RENDER_TARGET, S2::COLOR_ATTACHMENT_OUTPUT),
     (Sync::COMPUTE_SHADING, S2::COMPUTE_SHADER),
-    (Sync::COPY, S2::COPY),
+    // `vkCmdFillBuffer`/`vkCmdClearColorImage` run in the CLEAR stage, which
+    // D3D12 counts as copy work.
+    (
+        Sync::COPY,
+        S2::from_raw(S2::COPY.as_raw() | S2::CLEAR.as_raw()),
+    ),
     (Sync::RESOLVE, S2::RESOLVE),
     (Sync::EXECUTE_INDIRECT, S2::DRAW_INDIRECT),
     (
@@ -358,6 +363,8 @@ mod tests {
             assert_ne!(stages(*d3d).unwrap(), S2::NONE, "{d3d}");
         }
         assert_eq!(stages(Sync::NONE).unwrap(), S2::NONE);
+        // Buffer fills execute in the CLEAR stage.
+        assert!(stages(Sync::COPY).unwrap().contains(S2::CLEAR));
         for rt in [
             Sync::RAYTRACING,
             Sync::BUILD_RAYTRACING_ACCELERATION_STRUCTURE,

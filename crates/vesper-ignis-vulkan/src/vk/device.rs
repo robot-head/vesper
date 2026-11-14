@@ -160,6 +160,9 @@ pub(crate) struct Inner {
     pub limits: vk::PhysicalDeviceLimits,
     info: DeviceInfo,
     lost: AtomicBool,
+    /// Serializes host access to the shared `VkQueue`s (external
+    /// synchronization), across every backend built on this device.
+    pub submit_lock: Mutex<()>,
 }
 
 impl Drop for Inner {
@@ -191,6 +194,15 @@ impl Inner {
     }
     pub fn is_lost(&self) -> bool {
         self.lost.load(Ordering::Acquire)
+    }
+    /// Fails before a Vulkan call is made once the device is lost, so that
+    /// no object is created and then discarded.
+    pub fn ensure_live(&self, call: &'static str) -> Result<(), VulkanError> {
+        if self.is_lost() {
+            Err(VulkanError::DeviceLost { call })
+        } else {
+            Ok(())
+        }
     }
     pub fn family(&self, kind: QueueKind) -> Family {
         match kind {
@@ -493,6 +505,7 @@ impl Device {
                 limits: props.0.limits,
                 info,
                 lost: AtomicBool::new(false),
+                submit_lock: Mutex::new(()),
             }),
         })
     }
@@ -544,6 +557,7 @@ impl Device {
     /// A host-visible, coherent, persistently mapped buffer usable as a
     /// storage buffer and copy source/destination. Contents start zeroed.
     pub fn create_buffer(&self, size: u64) -> Result<GpuBuffer, VulkanError> {
+        self.inner.ensure_live("vkCreateBuffer")?;
         if size == 0 || size > (1 << 30) {
             return Err(VulkanError::InvalidDesc("buffer size must be in 1..=1 GiB"));
         }
@@ -618,6 +632,7 @@ impl Device {
     /// A 2D RGBA8 texture usable as a color attachment, sampled image,
     /// storage image and copy source/destination, starting in `UNDEFINED`.
     pub fn create_texture(&self, desc: TextureInfo) -> Result<GpuTexture, VulkanError> {
+        self.inner.ensure_live("vkCreateImage")?;
         let max = self.inner.limits.max_image_dimension2_d.min(16_384);
         if desc.width == 0 || desc.height == 0 || desc.width > max || desc.height > max {
             return Err(VulkanError::InvalidDesc("texture extent"));
@@ -742,6 +757,7 @@ impl Device {
         }
         check_layout(vertex, &[])?;
         check_layout(fragment, &[])?;
+        self.inner.ensure_live("vkCreateGraphicsPipelines")?;
         let d = &self.inner.device;
         let mut objects = PipelineObjects::new(self.inner.clone());
         objects.layout = self.inner.check("vkCreatePipelineLayout", unsafe {
@@ -819,6 +835,7 @@ impl Device {
             return Err(VulkanError::Limit("bindings"));
         }
         check_layout(compute, bindings)?;
+        self.inner.ensure_live("vkCreateComputePipelines")?;
         let d = &self.inner.device;
         let mut objects = PipelineObjects::new(self.inner.clone());
         let layout_bindings: Vec<_> = bindings
@@ -869,6 +886,7 @@ impl Device {
         &self,
         kind: QueueKind,
     ) -> Result<CommandAllocator, VulkanError> {
+        self.inner.ensure_live("vkCreateCommandPool")?;
         let family = self.inner.family(kind).index;
         let info = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::TRANSIENT)
@@ -880,6 +898,7 @@ impl Device {
         Ok(CommandAllocator {
             inner: ManuallyDrop::new(self.inner.clone()),
             pool,
+            buffers: RefCell::new(Vec::new()),
             family,
             kind,
             live: true,
@@ -1281,6 +1300,8 @@ impl Drop for Pipeline {
 pub struct CommandAllocator {
     pub(crate) inner: ManuallyDrop<Arc<Inner>>,
     pub(crate) pool: vk::CommandPool,
+    /// Command buffers allocated from the pool, reused after each reset.
+    pub(crate) buffers: RefCell<Vec<vk::CommandBuffer>>,
     pub(crate) family: u32,
     kind: QueueKind,
     live: bool,

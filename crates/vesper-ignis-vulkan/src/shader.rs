@@ -169,7 +169,12 @@ fn reflect(module: &naga::Module) -> Result<Vec<Option<BindingKind>>, ShaderErro
                 naga::TypeInner::Image {
                     dim: naga::ImageDimension::D2,
                     arrayed: false,
-                    class: naga::ImageClass::Sampled { multi: false, .. },
+                    // RGBA8_UNORM views need a float sampled type.
+                    class:
+                        naga::ImageClass::Sampled {
+                            kind: naga::ScalarKind::Float,
+                            multi: false,
+                        },
                 },
             ) => BindingKind::SampledTexture,
             (
@@ -273,6 +278,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
         assert!(compile_wgsl(invalid, Stage::Compute, "main").is_err());
         let group1 = "@group(1) @binding(0) var<storage, read_write> d: array<u32>;\n\
                       @compute @workgroup_size(1) fn main() { d[0] = 1u; }";
+        let int_texture = "@group(0) @binding(0) var t: texture_2d<u32>;\n\
+                      @compute @workgroup_size(1) fn main() { _ = textureLoad(t, vec2<i32>(0), 0); }";
+        assert_eq!(
+            compile_wgsl(int_texture, Stage::Compute, "main").unwrap_err(),
+            ShaderError::UnsupportedResource { binding: 0 }
+        );
         assert_eq!(
             compile_wgsl(group1, Stage::Compute, "main").unwrap_err(),
             ShaderError::UnsupportedGroup {

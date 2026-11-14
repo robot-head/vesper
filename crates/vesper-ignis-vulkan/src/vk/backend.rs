@@ -245,6 +245,7 @@ impl VulkanBackend {
         if queues.is_empty() || queues.len() > 64 {
             return Err(VulkanError::Limit("timelines"));
         }
+        device.inner.ensure_live("vkCreateSemaphore")?;
         let inner = device.inner.clone();
         let mut backend = VulkanBackend {
             inner: ManuallyDrop::new(inner.clone()),
@@ -733,8 +734,14 @@ impl VulkanBackend {
                             )
                         }
                         (Bind::StorageBuffer(b), BindingKind::StorageBuffer) => {
+                            let buf = find_buffer(r, *b)?;
+                            if buf.size() > u64::from(limits.max_storage_buffer_range) {
+                                return Err(VulkanError::OutOfBounds(
+                                    "storage buffer exceeds maxStorageBufferRange",
+                                ));
+                            }
                             Write::Buffer(vk::DescriptorBufferInfo {
-                                buffer: find_buffer(r, *b)?.buffer,
+                                buffer: buf.buffer,
                                 offset: 0,
                                 range: vk::WHOLE_SIZE,
                             })
@@ -1035,19 +1042,33 @@ impl VulkanBackend {
             if list.is_empty() {
                 continue;
             }
-            let info = vk::CommandBufferAllocateInfo::default()
-                .command_pool(pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(list.len() as u32);
-            // SAFETY: valid pool.
-            let cbs = self
-                .inner
-                .check("vkAllocateCommandBuffers", unsafe {
-                    d.allocate_command_buffers(&info)
-                })
-                .map_err(|e| (0, e))?;
-            for (slot, cb) in list.iter().zip(cbs) {
-                buffers[*slot] = cb;
+            let alloc = owners
+                .allocators
+                .iter()
+                .find(|a| a.timeline() == stream.timeline)
+                .expect("checked in prepare")
+                .value();
+            // Reuse the pool's reset command buffers; allocate only the rest.
+            let mut cached = alloc.buffers.borrow_mut();
+            if cached.len() < list.len() {
+                if list.len() > 4096 {
+                    return Err((0, VulkanError::Limit("command buffers per stream")));
+                }
+                let info = vk::CommandBufferAllocateInfo::default()
+                    .command_pool(pool)
+                    .level(vk::CommandBufferLevel::PRIMARY)
+                    .command_buffer_count((list.len() - cached.len()) as u32);
+                // SAFETY: valid pool.
+                let more = self
+                    .inner
+                    .check("vkAllocateCommandBuffers", unsafe {
+                        d.allocate_command_buffers(&info)
+                    })
+                    .map_err(|e| (0, e))?;
+                cached.extend(more);
+            }
+            for (slot, cb) in list.iter().zip(cached.iter()) {
+                buffers[*slot] = *cb;
             }
         }
         for (b, cb) in batches.iter().zip(&buffers) {
@@ -1071,10 +1092,18 @@ impl VulkanBackend {
                         .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
                 })
                 .collect();
-            let signal_infos: Vec<_> = batch
-                .segment
-                .signals
-                .iter()
+            // Signal operations within one batch are unordered, so a timeline
+            // is signalled once, with the batch's highest value for it; every
+            // original point is still reported by `poll`.
+            let mut highest: BTreeMap<usize, FencePoint> = BTreeMap::new();
+            for s in &batch.segment.signals {
+                let e = highest.entry(s.timeline.index()).or_insert(*s);
+                if s.value > e.value {
+                    *e = *s;
+                }
+            }
+            let signal_infos: Vec<_> = highest
+                .values()
                 .map(|s| {
                     vk::SemaphoreSubmitInfo::default()
                         .semaphore(self.timelines[s.timeline.index()].semaphore)
@@ -1092,8 +1121,15 @@ impl VulkanBackend {
                 .command_buffer_infos(&cb_infos)
                 .signal_semaphore_infos(&signal_infos);
             // SAFETY: all handles are live and owned by in-flight owners;
-            // queue access is serialized by `&mut self`.
-            let r = unsafe { d.queue_submit2(queue, &[submit], vk::Fence::null()) };
+            // host access to the queue is serialized by the device lock.
+            let r = {
+                let _guard = self
+                    .inner
+                    .submit_lock
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                unsafe { d.queue_submit2(queue, &[submit], vk::Fence::null()) }
+            };
             self.inner.check("vkQueueSubmit2", r).map_err(|e| (n, e))?;
             for s in &batch.segment.signals {
                 self.timelines[s.timeline.index()].submitted = s.value;
