@@ -1837,12 +1837,12 @@ pub fn execute(
         }
         Ok(())
     })();
-    if let Some(expected) = resource_publication_files {
-        if resource_files(&models.path.join("resource"), &config.limits)? != expected {
-            return Err(identity(
-                "private resource evidence changed before publication",
-            ));
-        }
+    if let Some(expected) = resource_publication_files
+        && resource_files(&models.path.join("resource"), &config.limits)? != expected
+    {
+        return Err(identity(
+            "private resource evidence changed before publication",
+        ));
     }
     if config.artifacts.is_some() {
         create_file(&models.path.join("setup-receipt.json"), &receipt_bytes)?;
@@ -2040,7 +2040,7 @@ fn prepare_resource_with(
         .arg(workspace.path.join("request.json"));
     let mut observer_error = None;
     let result = process::capture_observed(c, limits.compile_timeout_ms, limits, 16 * MIB, |o| {
-        if let Some(r) = report.as_deref_mut() {
+        if let Some(r) = report {
             let previous = r.targets[2].compile_ms;
             if let Err(e) = observed(r, Some(2), 0, o) {
                 observer_error = Some(e);
