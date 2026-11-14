@@ -66,7 +66,7 @@ committed):
 | --- | --- |
 | `cargo fmt --all -- --check` | clean |
 | `cargo test --locked --test wasm_backend --test wasm_backend_cli` | 28 + 3 passed |
-| `cargo test --workspace --locked --no-fail-fast` | @TESTS@ |
+| `cargo test --workspace --locked --no-fail-fast` | 4496 passed, 7 ignored, 22 failed in 8 suites outside this lane, all environmental here: no `lean` on PATH or `VESPER_LEAN4LEAN42_ROOT` (lean4lean42, oracle42, proof_audit_private, replay42, resource_model42) and `vesper-loom-build` reporting `UnknownFingerprint { missing: ["engine_dependencies"] }` in this container; none touch the Wasm backend, and CI runs them with its own setup |
 | `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` | clean |
 
 ## Remaining gaps
