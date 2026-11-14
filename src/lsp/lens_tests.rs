@@ -54,6 +54,13 @@ struct Client {
 }
 impl Client {
     fn start(config: LensConfig) -> Self {
+        Self::start_with(
+            config,
+            json!({"capabilities":{
+            "textDocument":{"publishDiagnostics":{"relatedInformation":true}}}}),
+        )
+    }
+    fn start_with(config: LensConfig, initialize: Value) -> Self {
         let (to_server, server_in) = mpsc::channel();
         let (server_out, from_server) = mpsc::channel();
         let server = thread::spawn(move || {
@@ -74,11 +81,7 @@ impl Client {
             server: Some(server),
             next_id: 100,
         };
-        let id = client.request(
-            "initialize",
-            json!({"capabilities":{
-            "textDocument":{"publishDiagnostics":{"relatedInformation":true}}}}),
-        );
+        let id = client.request("initialize", initialize);
         let init = client.response(id);
         assert!(init["result"]["capabilities"]["completionProvider"].is_object());
         assert_eq!(init["result"]["capabilities"]["inlayHintProvider"], true);
@@ -543,12 +546,17 @@ mod fake_lean {
                 "#!/bin/sh\ncase \"$1\" in\n--print-prefix) echo '{}' ;;\n--version) echo 'Lean (version 4.24.0, fake)' ;;\n*) {compile} ;;\nesac\n",
                 dir.display()
             );
-            let report = if accept {
-                r#"{"accepted":true,"kernel_replayed":true,"forbidden_axioms":[],"checked_constants":3}"#
+            // Echo one theorem record per `--theorem`, with no axioms when
+            // accepting and `sorryAx` when rejecting.
+            let (accepted, axioms) = if accept {
+                ("true", "[]")
             } else {
-                r#"{"accepted":false,"kernel_replayed":true,"forbidden_axioms":["sorryAx"],"checked_constants":3}"#
+                ("false", "[\\\"sorryAx\\\"]")
             };
-            let auditor = format!("#!/bin/sh\necho '{report}'\n");
+            let auditor = format!(
+                "#!/bin/sh\necho \"$@\" >> '{dir}/audits'\nlist=''\nwhile [ $# -gt 0 ]; do\n  if [ \"$1\" = --theorem ]; then list=\"$list{{\\\"name\\\":\\\"$2\\\",\\\"axioms\\\":{axioms}}},\"; shift; fi\n  shift\ndone\nlist=${{list%,}}\necho \"{{\\\"accepted\\\":{accepted},\\\"kernel_replayed\\\":true,\\\"forbidden_axioms\\\":[],\\\"checked_constants\\\":3,\\\"theorems\\\":[$list]}}\"\n",
+                dir = dir.display()
+            );
             for (path, text) in [(dir.join("bin/lean"), lean), (dir.join("auditor"), auditor)] {
                 fs::write(&path, text).unwrap();
                 fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -560,6 +568,9 @@ mod fake_lean {
                 lean: self.dir.join("bin/lean").display().to_string(),
                 auditor: Some(self.dir.join("auditor")),
                 proof_timeout: 60,
+                cache: None,
+                background: None,
+                ..LensConfig::default()
             }
         }
     }
@@ -841,6 +852,9 @@ fn proof_lens_with_real_lean_and_auditor() {
         lean,
         auditor: Some(auditor.into()),
         proof_timeout: 120,
+        cache: None,
+        background: None,
+        ..LensConfig::default()
     });
     let uri = "untitled:real.ves";
     client.open(uri, PROVABLE);
@@ -849,4 +863,516 @@ fn proof_lens_with_real_lean_and_auditor() {
     assert_eq!(response["result"]["status"], "proved", "{response}");
     assert_eq!(lens_status(&mut client, uri, "double").0, "proved");
     client.close();
+}
+
+// ---------------------------------------------------------------------------
+// Wave seven: deeper recovery, pattern obligations, semantic proof lenses,
+// background runs and cancellation of every request.
+
+fn lens_meta(published: &Value) -> &Value {
+    &published["vesper"]["recovery"]["lens"]
+}
+
+fn poisoned(published: &Value) -> Vec<String> {
+    published["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|d| d["code"] == "VESPER_POISONED_RECOVERY")
+        .map(|d| d["data"]["binding"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn inlay(client: &mut Client, uri: &str) -> Vec<(String, String)> {
+    let id = client.request(
+        "textDocument/inlayHint",
+        json!({"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},
+            "end":{"line":400,"character":0}}}),
+    );
+    let response = client.response(id);
+    response["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{response}"))
+        .iter()
+        .map(|h| {
+            (
+                h["data"]["vesper"]["binding"].as_str().unwrap().to_owned(),
+                h["label"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect()
+}
+
+fn completion_labels(client: &mut Client, uri: &str, text: &str, needle: &str) -> Vec<String> {
+    let (line, column) = position_of(text, needle);
+    let response = client.at(
+        "textDocument/completion",
+        uri,
+        line,
+        column + needle.trim_end().len() as u32,
+    );
+    response["result"]["items"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{response}"))
+        .iter()
+        .map(|i| i["label"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn nested_statement_damage_cuts_at_the_innermost_block() {
+    let mut client = Client::start(LensConfig::default());
+    let uri = "untitled:nested.ves";
+    // The damage is two blocks deep; the bindings of both blocks before it
+    // stay in the repaired view.
+    let text = with_main(
+        "    let tx = open_txn(1);\n    if true {\n        let inner = open_txn(2);\n        let n = inner.slot();\n        inner.\n    }\n    tx.commit()\n",
+    );
+    let published = client.open(uri, &text);
+    let lens = lens_meta(&published);
+    assert_eq!(lens["scope"], "recovered_prefix", "{published}");
+    assert_eq!(lens["regions"][0]["kind"], "body", "{lens}");
+    assert_eq!(lens["regions"][0]["depth"], 1, "{lens}");
+    assert_eq!(poisoned(&published), ["tx", "inner"], "{published}");
+    assert!(
+        !codes(&published)
+            .iter()
+            .any(|c| c == "E0302" || c == "E0402")
+    );
+    // The inner receiver completes with its consuming calls first.
+    let labels = completion_labels(&mut client, uri, &text, "inner.\n");
+    assert_eq!(labels[..2], ["abort", "commit"], "{labels:?}");
+
+    // A statement already complete inside the nested block is kept: the
+    // consumption there is seen and does not poison.
+    let text = with_main(
+        "    let tx = open_txn(1);\n    if true {\n        let inner = open_txn(2);\n        inner.abort();\n        let x = \n    }\n    tx.commit()\n",
+    );
+    let published = client.replace(uri, 2, &text);
+    assert_eq!(poisoned(&published), ["tx"], "{published}");
+    client.close();
+}
+
+const LEDGER: &str = "linear struct Ledger {
+    slot: u64
+}
+
+impl Ledger {
+    fn close(sink self) -> u64 {
+        let other = open_txn(3);
+        self.
+    }
+    fn peek(self) -> u64 {
+        self.slot
+    }
+    fn settle(sink self) -> u64 {
+        let Ledger {
+            slot
+        }
+        = self;
+        slot
+    }
+}
+";
+
+#[test]
+fn impl_method_damage_gets_a_repaired_view_that_keeps_later_methods() {
+    let mut client = Client::start(LensConfig::default());
+    let uri = "untitled:impl.ves";
+    let text = format!("{PREFIX}\n{LEDGER}\nfn main() -> u64 {{\n    7\n}}\n");
+    let published = client.open(uri, &text);
+    let lens = lens_meta(&published);
+    assert_eq!(lens["status"], "available", "{published}");
+    assert_eq!(lens["regions"][0]["function"], "Ledger::close", "{lens}");
+    assert_eq!(lens["regions"][0]["kind"], "body", "{lens}");
+    let mut names = poisoned(&published);
+    names.sort();
+    assert_eq!(names, ["other", "self"], "{published}");
+    // `settle`, after the damaged method, is still a known consuming call.
+    let labels = completion_labels(&mut client, uri, &text, "self.\n");
+    assert_eq!(labels, ["close", "settle", "peek"], "{labels:?}");
+    client.close();
+}
+
+#[test]
+fn struct_effect_and_header_damage_keep_the_rest_of_the_file() {
+    let mut client = Client::start(LensConfig::default());
+    let uri = "untitled:members.ves";
+    let body = "fn work() -> u64 {\n    let tx = open_txn(1);\n    let n = tx.slot();\n    tx.commit()\n}\n";
+    for (version, (damaged, kind)) in [
+        ("struct Point {\n    x: u64,\n    y: \n}\n", "member"),
+        (
+            "effect Audit {\n    fn record(slot: u64) -> Unit;\n    fn \n}\n",
+            "member",
+        ),
+        (
+            "fn helper(a: u64, b: ) -> u64 {\n    let tx = open_txn(a);\n    tx.commit()\n}\n",
+            "header",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let text = format!("{PREFIX}\n{damaged}\n{body}");
+        let version = version as i32 + 1;
+        let published = if version == 1 {
+            client.open(uri, &text)
+        } else {
+            client.replace(uri, version, &text)
+        };
+        let lens = lens_meta(&published);
+        assert_eq!(lens["status"], "available", "{damaged}: {published}");
+        assert_eq!(lens["regions"][0]["kind"], kind, "{lens}");
+        // Nothing is poisoned by a member or header repair.
+        assert!(poisoned(&published).is_empty(), "{published}");
+        // The complete function keeps its obligation facts.
+        let hints = inlay(&mut client, uri);
+        let (commit_line, _) = position_of(&text, "    tx.commit()\n}\n\0".trim_end_matches('\0'));
+        assert!(
+            hints
+                .iter()
+                .any(|(binding, label)| binding == "tx"
+                    && label.starts_with("linear: consumed on line")),
+            "{damaged}: {hints:?} {commit_line}"
+        );
+    }
+    client.close();
+}
+
+#[test]
+fn pattern_bound_linear_values_are_tracked_as_obligations() {
+    let mut client = Client::start(LensConfig::default());
+    let uri = "untitled:patterns.ves";
+    let types = "linear struct Pair {\n    left: WriteTxn,\n    right: WriteTxn\n}\n\nlinear enum Maybe {\n    Some(WriteTxn),\n    Nothing\n}\n";
+    let main = "fn main() -> u64 {\n    let pair = Pair {\n        left: open_txn(1),\n        right: open_txn(2)\n    };\n    let Pair {\n        left,\n        right\n    }\n    = pair;\n    let a = left.commit();\n    let m = Maybe::Some(right);\n    let b = match m {\n        Maybe::Some(t) => t.commit(),\n        Maybe::Nothing => 0,\n    };\n    wrapping_add(a, b)\n}\n";
+    let text = format!("{PREFIX}\n{types}\n{main}");
+    let published = client.open(uri, &text);
+    assert_eq!(published["vesper"]["status"], "checked", "{published}");
+    let hints = inlay(&mut client, uri);
+    let line_of = |needle: &str| position_of(&text, needle).0 + 1;
+    for (binding, needle) in [
+        ("left", "left.commit()"),
+        ("right", "Maybe::Some(right)"),
+        ("t", "=> t.commit()"),
+    ] {
+        let expected = format!("linear: consumed on line {}", line_of(needle));
+        assert!(
+            hints.iter().any(|(b, l)| b == binding && *l == expected),
+            "{binding}: {hints:?}"
+        );
+    }
+    // Between the destructuring and its use, `right` is outstanding.
+    let (line, column) = position_of(&text, "let a = left");
+    let hover = client.at("textDocument/hover", uri, line, column);
+    let value = hover["result"]["contents"]["value"].as_str().unwrap_or("");
+    assert!(value.contains("- right: WriteTxn"), "{hover}");
+    assert!(value.contains("- left: WriteTxn"), "{hover}");
+
+    // Unfinished code inside a match arm poisons the arm's binding.
+    let damaged = text.replace(
+        "Maybe::Some(t) => t.commit(),",
+        "Maybe::Some(t) => {\n            t.\n        }",
+    );
+    let published = client.replace(uri, 2, &damaged);
+    assert!(
+        poisoned(&published).contains(&"t".to_owned()),
+        "{published}"
+    );
+    client.close();
+}
+
+#[test]
+fn cancellation_answers_queued_and_running_requests_at_once() {
+    let mut client = Client::start(LensConfig::default());
+    let uri = "untitled:cancel.ves";
+    let text = with_main("    let tx = open_txn(1);\n    tx.commit()\n");
+    client.open(uri, &text);
+    // A long request runs; a hover is queued behind it.
+    let long = client.request("vesper/testBlock", json!({}));
+    let (line, column) = position_of(&text, "tx.commit()");
+    let queued = client.request(
+        "textDocument/hover",
+        json!({"textDocument":{"uri":uri},"position":{"line":line,"character":column}}),
+    );
+    let started = std::time::Instant::now();
+    client.notify("$/cancelRequest", json!({"id": queued}));
+    let response = client.response(queued);
+    assert_eq!(response["error"]["code"], -32800, "{response}");
+    client.notify("$/cancelRequest", json!({"id": long}));
+    let response = client.response(long);
+    assert_eq!(response["error"]["code"], -32800, "{response}");
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "cancellation waited for the long request"
+    );
+    // Neither request answers again, and the server keeps serving.
+    let hover = client.at("textDocument/hover", uri, line, column);
+    assert!(hover["result"].is_object(), "{hover}");
+    while let Some(message) = client.next_within(Duration::from_millis(300)) {
+        assert!(
+            message.get("id") != Some(&json!(long)) && message.get("id") != Some(&json!(queued)),
+            "{message}"
+        );
+    }
+    client.close();
+}
+
+const SCALARS: &str = "fn inc(x: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if x < 100 {
+        x + 1
+    } else {
+        0
+    }
+}
+
+fn add(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow]] {
+    a + b
+}
+
+fn main() -> i64 eff [Fail[ArithOverflow]] {
+    add(inc(3), 4)
+}
+";
+
+fn semantic_lens(client: &mut Client, uri: &str, function: &str) -> Value {
+    let id = client.request("textDocument/codeLens", json!({"textDocument":{"uri":uri}}));
+    let response = client.response(id);
+    response["result"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|l| {
+            l["data"]["vesper"]["function"] == function
+                && l["data"]["vesper"]["scope"] == "lean_model_arith_fault_free"
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("no semantic lens for {function}: {response}"))
+}
+
+fn semantic_args(uri: &str, version: i32, function: &str) -> Value {
+    json!({"command":"vesper.proofAudit","arguments":[{"uri":uri,"version":version,
+        "function":function,"obligation":"semantic"}]})
+}
+
+#[cfg(unix)]
+#[test]
+fn semantic_lenses_follow_the_model_identity() {
+    let toolchain = fake_lean::Toolchain::new("semantic", false, true);
+    let mut client = Client::start(toolchain.config());
+    let uri = "untitled:semantic.ves";
+    client.open(uri, SCALARS);
+    let lens = semantic_lens(&mut client, uri, "inc");
+    assert_eq!(lens["data"]["vesper"]["status"], "not_attempted", "{lens}");
+    assert_eq!(lens["command"]["arguments"][0]["obligation"], "semantic");
+    let id = client.request("workspace/executeCommand", semantic_args(uri, 1, "inc"));
+    let response = client.response(id);
+    assert_eq!(response["result"]["status"], "proved", "{response}");
+    assert_eq!(response["result"]["scope"], "lean_model_arith_fault_free");
+    assert!(response["result"]["model_blake3"].is_string());
+    let lens = semantic_lens(&mut client, uri, "inc");
+    assert_eq!(lens["data"]["vesper"]["status"], "proved", "{lens}");
+    // Editing another function keeps `inc`'s model and so its outcome; the
+    // extraction obligation is per source and resets.
+    client.replace(uri, 2, &SCALARS.replace("add(inc(3), 4)", "add(inc(5), 4)"));
+    let lens = semantic_lens(&mut client, uri, "inc");
+    assert_eq!(lens["data"]["vesper"]["status"], "proved", "{lens}");
+    assert_eq!(lens_status(&mut client, uri, "inc").0, "not_attempted");
+    // Editing `inc` itself changes its model.
+    client.replace(uri, 3, &SCALARS.replace("x < 100", "x < 101"));
+    let lens = semantic_lens(&mut client, uri, "inc");
+    assert_eq!(lens["data"]["vesper"]["status"], "not_attempted", "{lens}");
+    // Functions outside the scalar model say why, and the command reports it.
+    let text = format!("{SCALARS}\n{PREFIX}");
+    client.replace(uri, 4, &text);
+    let lens = semantic_lens(&mut client, uri, "open_txn");
+    assert_eq!(lens["data"]["vesper"]["status"], "unavailable", "{lens}");
+    assert!(
+        lens["data"]["vesper"]["reason"]
+            .as_str()
+            .unwrap()
+            .contains("outside the scalar model"),
+        "{lens}"
+    );
+    let id = client.request(
+        "workspace/executeCommand",
+        semantic_args(uri, 4, "open_txn"),
+    );
+    let response = client.response(id);
+    assert_eq!(response["result"]["status"], "failed", "{response}");
+    assert_eq!(response["result"]["stage"], "model");
+    let id = client.request(
+        "workspace/executeCommand",
+        json!({"command":"vesper.proofAudit","arguments":[{"uri":uri,"function":"inc",
+            "obligation":"everything"}]}),
+    );
+    assert_eq!(client.response(id)["error"]["code"], -32602);
+    client.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn background_runs_are_debounced_and_publish_status() {
+    let toolchain = fake_lean::Toolchain::new("background", false, true);
+    let mut config = toolchain.config();
+    config.background = Some(Duration::from_millis(300));
+    let mut client = Client::start_with(
+        config,
+        json!({"capabilities":{"workspace":{"codeLens":{"refreshSupport":true}}}}),
+    );
+    let uri = "untitled:background.ves";
+    client.open(uri, SCALARS);
+    // A burst of edits inside the debounce window gives one run, for the
+    // last version only.
+    for version in 2..=5 {
+        client.replace(
+            uri,
+            version,
+            &SCALARS.replace("inc(3)", &format!("inc({version})")),
+        );
+    }
+    let mut status = None;
+    let mut refresh = false;
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while std::time::Instant::now() < deadline && (status.is_none() || !refresh) {
+        let Some(message) = client.next_within(Duration::from_secs(5)) else {
+            break;
+        };
+        if message["method"] == "vesper/proofStatus" {
+            assert!(status.is_none(), "a second background run: {message}");
+            status = Some(message["params"].clone());
+        }
+        if message["method"] == "workspace/codeLens/refresh" {
+            refresh = true;
+            // The server's own request needs no meaningful answer.
+            client.send(json!({"jsonrpc":"2.0","id":message["id"],"result":null}));
+        }
+    }
+    let status = status.expect("background proof status");
+    assert!(refresh, "code lens refresh was not requested");
+    assert_eq!(status["version"], 5, "{status}");
+    let results = status["results"].as_array().unwrap();
+    for obligation in ["extraction", "semantic"] {
+        assert!(
+            results
+                .iter()
+                .any(|r| r["obligation"] == obligation && r["status"] == "proved"),
+            "{obligation}: {status}"
+        );
+    }
+    // One audit for the whole run.
+    let audits = std::fs::read_to_string(toolchain.dir.join("audits")).unwrap();
+    assert_eq!(audits.lines().count(), 1, "{audits}");
+    assert_eq!(lens_status(&mut client, uri, "inc").0, "proved");
+    let lens = semantic_lens(&mut client, uri, "add");
+    assert_eq!(lens["data"]["vesper"]["status"], "proved", "{lens}");
+    // Nothing more runs while the buffer is unchanged.
+    assert!(
+        client
+            .next_within(Duration::from_millis(800))
+            .is_none_or(|m| m["method"] != "vesper/proofStatus")
+    );
+    client.close();
+}
+
+#[cfg(unix)]
+#[test]
+fn an_edit_cancels_the_running_background_job() {
+    let toolchain = fake_lean::Toolchain::with_compile(
+        "background-cancel",
+        "/bin/sleep 30 & echo $! >> '$DIR/children'; wait",
+        true,
+    );
+    let mut config = toolchain.config();
+    config.background = Some(Duration::from_millis(50));
+    let mut client = Client::start(config);
+    let uri = "untitled:background-cancel.ves";
+    client.open(uri, SCALARS);
+    let marker = toolchain.dir.join("children");
+    let started = std::time::Instant::now();
+    let first = loop {
+        if let Ok(text) = std::fs::read_to_string(&marker)
+            && let Some(pid) = text
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse::<u32>().ok())
+        {
+            break pid;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(30),
+            "no background run"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+    client.replace(uri, 2, &SCALARS.replace("inc(3)", "inc(9)"));
+    let started = std::time::Instant::now();
+    while process_alive(first).unwrap() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the stale background job survived the edit"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+    client.close();
+}
+
+/// Real Lean 4.24.0: semantic theorems proved by omega and replayed by the
+/// kernel, a bv_decide counterexample, and `.olean` reuse across servers.
+#[test]
+fn semantic_proof_lenses_with_real_lean() {
+    let (Ok(lean), Ok(auditor)) = (
+        std::env::var("VESPER_LEAN"),
+        std::env::var("VESPER_LENS_AUDITOR"),
+    ) else {
+        eprintln!("VESPER_LEAN or VESPER_LENS_AUDITOR unset; real semantic lens skipped");
+        return;
+    };
+    let cache = std::env::temp_dir().join(format!("vesper-lens-cache-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cache);
+    let config = LensConfig {
+        lean,
+        auditor: Some(auditor.into()),
+        proof_timeout: 120,
+        cache: Some(cache.clone()),
+        background: None,
+        ..LensConfig::default()
+    };
+    let uri = "untitled:real-semantic.ves";
+    let mut compiled_first = 0;
+    for round in 0..2 {
+        let mut client = Client::start(config.clone());
+        client.open(uri, SCALARS);
+        let id = client.request("workspace/executeCommand", semantic_args(uri, 1, "inc"));
+        let response = client.response(id);
+        assert_eq!(response["result"]["status"], "proved", "{response}");
+        let detail = response["result"]["detail"].as_str().unwrap();
+        assert!(detail.contains("replayed by the kernel"), "{detail}");
+        if round == 0 {
+            compiled_first = response["result"]["olean_compiled"].as_u64().unwrap();
+            assert!(compiled_first >= 1, "{response}");
+        } else {
+            // A new server reuses the cached `.olean` and still replays it.
+            assert_eq!(response["result"]["olean_compiled"], 0, "{response}");
+            assert!(response["result"]["olean_reused"].as_u64().unwrap() >= 1);
+        }
+        let id = client.request("workspace/executeCommand", semantic_args(uri, 1, "add"));
+        let response = client.response(id);
+        assert_eq!(response["result"]["status"], "refuted", "{response}");
+        let counterexample = response["result"]["counterexample"].as_str().unwrap();
+        assert!(counterexample.contains("a = ") && counterexample.contains("b = "));
+        let lens = semantic_lens(&mut client, uri, "add");
+        assert!(
+            lens["command"]["title"]
+                .as_str()
+                .unwrap()
+                .starts_with("Lean model: arithmetic fault when a = "),
+            "{lens}"
+        );
+        let id = client.request("workspace/executeCommand", audit_args(uri, "inc"));
+        let response = client.response(id);
+        assert_eq!(response["result"]["status"], "proved", "{response}");
+        client.close();
+    }
+    assert!(compiled_first >= 1);
+    let _ = std::fs::remove_dir_all(&cache);
 }
