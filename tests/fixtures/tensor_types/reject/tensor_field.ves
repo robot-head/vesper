@@ -1,0 +1,6 @@
+// expect: E0768
+// at: x.id
+// message: cannot read a field of one
+fn f(x: Tensor[F32, [4]]) -> u64 {
+    x.id
+}

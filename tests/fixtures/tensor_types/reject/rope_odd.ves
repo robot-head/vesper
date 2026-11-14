@@ -1,0 +1,6 @@
+// expect: E0765
+// at: Tensor::rope(x, 0)
+// message: RoPE head width: 5 must be even
+fn f(x: Tensor[F32, [2, 5]]) -> Tensor[F32, [2, 5]] eff [Tensor] {
+    Tensor::rope(x, 0)
+}

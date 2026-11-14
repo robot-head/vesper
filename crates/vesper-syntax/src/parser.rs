@@ -74,6 +74,11 @@ pub const REGION_EFFECT: &str = "Region";
 /// Return-clause binder of a region block. A block with an explicit capacity
 /// (`region r(4096) { ... }`) binds `$region:4096`.
 pub const REGION_MARKER: &str = "$region";
+/// Type name of a tensor shape literal `[d, ...]` (§28.2). No identifier can
+/// spell it, so it never names a declared type.
+pub const SHAPE_TYPE: &str = "[]";
+/// Type name of a dimension product `a * b` inside a shape literal.
+pub const DIM_PRODUCT: &str = "*";
 /// Largest explicit region capacity in bytes accepted by the parser (1 GiB).
 pub const MAX_REGION_CAPACITY: u64 = 1 << 30;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -558,6 +563,10 @@ impl Parser<'_> {
             if self.eat(K::Colon) {
                 if row {
                     self.expect(K::Eff);
+                } else if self.at_word(0, "dim") {
+                    // `N: dim` (§28.2): a tensor dimension parameter. Its kind
+                    // is recovered from use by `vesper::tensor_types`.
+                    self.bump();
                 } else if self.at(K::Upper) {
                     let start = self.start();
                     let trait_ref = self.trait_ref();
@@ -624,7 +633,14 @@ impl Parser<'_> {
         if self.at_word(0, "model") {
             return Some(Item::Conformance(self.model_decl(start, public)));
         }
-        let mode = self.mode().unwrap_or_default();
+        // `wire struct` (§13.2, §28.2): a padding-free byte layout. It is a
+        // copy struct in the AST; `vesper::tensor_types` checks its layout.
+        let mode = if self.at_word(0, "wire") && self.nth(1) == K::Struct {
+            self.bump();
+            Mode::Copy
+        } else {
+            self.mode().unwrap_or_default()
+        };
         match self.kind() {
             K::Struct => {
                 self.bump();
@@ -984,6 +1000,19 @@ impl Parser<'_> {
             }
             self.expect(K::RParen);
             Type::Tuple(args)
+        } else if self.eat(K::LBracket) {
+            // A tensor shape `[M, N * K, 128]` (§28.2), encoded as the
+            // unspellable `[]` type over its dimensions (see SHAPE_TYPE).
+            let mut dims = vec![];
+            while !self.at(K::RBracket) && !self.at(K::Eof) {
+                let before = self.pos;
+                dims.push(self.dimension());
+                if !self.eat(K::Comma) || self.pos == before {
+                    break;
+                }
+            }
+            self.expect(K::RBracket);
+            Type::Named(SHAPE_TYPE.into(), dims)
         } else if self.eat(K::Lt) {
             // `<T as Trait[args]>::Assoc`
             let self_ty = self.ty();
@@ -1012,6 +1041,26 @@ impl Parser<'_> {
         };
         self.builder.finish_node();
         result
+    }
+    /// One dimension of a shape: a product of decimal literals and dimension
+    /// names, left associative (`QHeads * HeadDim`).
+    fn dimension(&mut self) -> Type {
+        let mut dim = self.dimension_factor();
+        while self.eat(K::Star) {
+            let right = self.dimension_factor();
+            dim = Type::Named(DIM_PRODUCT.into(), vec![dim, right]);
+        }
+        dim
+    }
+    fn dimension_factor(&mut self) -> Type {
+        if self.at(K::Int) {
+            self.builder.start_node(TYPE);
+            let digits = self.bump();
+            self.builder.finish_node();
+            Type::Named(digits, vec![])
+        } else {
+            self.ty()
+        }
     }
     fn trait_ref(&mut self) -> TraitRef {
         let start = self.start();
@@ -1815,13 +1864,18 @@ impl Parser<'_> {
                         self.row_names.contains(text)
                             && !matches!(&e.kind,ExprKind::Name(n) if self.bound_values.contains(n))
                     };
-                    let generic = named_row || scoped_row || self.nth(1) == K::Upper || {
-                        let i = self.index(1);
-                        matches!(
-                            &self.source[self.tokens[i].span.clone()],
-                            "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "fn"
-                        )
-                    };
+                    // `Tensor::reshape[[M, N]](x)`: no index expression starts with `[`.
+                    let generic = named_row
+                        || scoped_row
+                        || self.nth(1) == K::Upper
+                        || self.nth(1) == K::LBracket
+                        || {
+                            let i = self.index(1);
+                            matches!(
+                                &self.source[self.tokens[i].span.clone()],
+                                "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "fn"
+                            )
+                        };
                     if generic {
                         let types = self.type_args();
                         self.expect(K::LParen);
