@@ -289,7 +289,83 @@ impl PreparedResource {
     pub(super) fn sysroot(&self) -> &Path {
         &self.sysroot
     }
+    /// Checked live allocation envelope. A BTree node is conservatively prepaid
+    /// as 1 KiB per entry plus one root node; stored string buffers are additional.
+    pub(super) fn retained_bytes(&self) -> Result<usize, Error> {
+        fn add(total: &mut usize, n: usize) -> Result<(), Error> {
+            *total = total
+                .checked_add(n)
+                .ok_or_else(|| cap("resource retained metadata overflow"))?;
+            Ok(())
+        }
+        fn entries(n: usize, size: usize) -> Result<usize, Error> {
+            n.checked_mul(size)
+                .ok_or_else(|| cap("resource retained collection overflow"))
+        }
+        fn strings(total: &mut usize, values: &Vec<String>) -> Result<(), Error> {
+            add(total, entries(values.capacity(), size_of::<String>())?)?;
+            for value in values {
+                add(total, value.capacity())?;
+            }
+            Ok(())
+        }
+        let mut total = size_of::<Self>();
+        for bytes in [
+            self.workspace.path.capacity(),
+            self.sysroot.capacity(),
+            self.tool_root.capacity(),
+            self.receipt.capacity(),
+            self.association.scope.capacity(),
+            self.association.module.capacity(),
+        ] {
+            add(&mut total, bytes)?;
+        }
+        add(
+            &mut total,
+            entries(self.files.capacity(), size_of::<FileDigest>())?,
+        )?;
+        for file in &self.files {
+            add(&mut total, file.path.capacity())?;
+        }
+        for file in [
+            &self.association.snapshot_tool,
+            &self.association.request,
+            &self.association.producer_report,
+            &self.association.projection,
+        ] {
+            add(&mut total, file.path.capacity())?;
+        }
+        for values in [
+            &self.aliases,
+            &self.alias_originals,
+            &self.omission_parents,
+            &self.catalog,
+        ] {
+            strings(&mut total, values)?;
+        }
+        for n in [self.expected.len(), self.origins.len()] {
+            add(
+                &mut total,
+                entries(
+                    n.checked_add(1)
+                        .ok_or_else(|| cap("resource tree root overflow"))?,
+                    1024,
+                )?,
+            )?;
+        }
+        for name in &self.expected {
+            add(&mut total, name.capacity())?;
+        }
+        for (name, module) in &self.origins {
+            add(&mut total, name.capacity())?;
+            add(&mut total, module.capacity())?;
+        }
+        Ok(total)
+    }
     pub fn revalidate(&self, limits: &Limits) -> Result<(), Error> {
+        if self.retained_bytes()? > limits.inventory_bytes {
+            return Err(cap("resource retained metadata cap"));
+        }
         if verify_bundle()? != self.association.resource_bundle_blake3
             || artifact::resource_files(self.root(), limits)? != self.files
         {

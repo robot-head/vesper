@@ -42,7 +42,12 @@ manifest and historical manifest. Unknown files, unexpected directories,
 package sidecars, symlinks/reparse points, changed source bytes and changed
 file sets are refused. All file hashing is streamed and finite. Producer JSON
 has a sixteen-MiB capture ceiling, bounded depth and a conservative parsing/map
-reservation against the configured inventory budget. Counts are independently
+reservation against the configured inventory budget, including the simultaneously
+retained captured stdout/stderr capacities. The live descriptor is also charged
+against every subsequent model session alongside transport and the protocol
+parser's borrowed native inventory. Its checked allowance includes struct and
+Vec capacities, all retained string/path/receipt buffers, and 1 KiB per BTree
+entry plus one root node for each collection. Counts are independently
 checked; the observed 3,792 output declarations are not an acceptance golden.
 
 Production calls descriptor revalidation before and after native inventory and
@@ -73,7 +78,8 @@ information disabled and incremental compilation disabled. Log:
 
 Follow-up `f29eacd` preserves private evidence on refusal and adds a read-only
 owned-name accessor. It passed rustfmt and `git diff --check`; its combined
-compiler, strict Clippy and independent acceptance checks remain coordinator
+compiler, strict Clippy and independent acceptance checks, including the later
+shared descriptor/capture reservation refinement, remain coordinator
 work at this checkpoint. No Lean compiler, kernel snapshot, external replay or
 new genuine setup was executed by this source lane. Coordinator pilot evidence
 is documented separately and is not substituted for execution of this code.

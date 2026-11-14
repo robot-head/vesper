@@ -973,6 +973,7 @@ struct MachineContext<'a> {
     sysroot: &'a Path,
     inputs: &'a Inputs,
     limits: &'a Limits,
+    reserved_bytes: usize,
 }
 impl MachineContext<'_> {
     fn run(
@@ -989,13 +990,15 @@ impl MachineContext<'_> {
             sysroot,
             inputs: i,
             limits,
+            reserved_bytes,
         } = *self;
         let token = fresh_token()?;
         let mut parser_limits = limits.clone();
         parser_limits.inventory_bytes = parser_limits
             .inventory_bytes
             .checked_sub(process::transport_bytes(limits)?)
-            .ok_or_else(|| limit("transport and inventory reservation"))?;
+            .and_then(|n| n.checked_sub(reserved_bytes))
+            .ok_or_else(|| limit("transport, descriptor and inventory reservation"))?;
         let mut m = Machine::new(mode, target, &token, &parser_limits, &i.controls, expected)?;
         let mut c = command(
             &tool_path(root, &i.pins),
@@ -1272,6 +1275,7 @@ pub fn seal(root: &Path) -> Result<Receipt, Error> {
         sysroot: &sysroot,
         inputs: &i,
         limits: &limits,
+        reserved_bytes: 0,
     };
     context.run(3, 2, None, None, None)?;
     let (baseline, _) = context.run(0, 2, None, None, None)?;
@@ -1579,6 +1583,7 @@ pub fn execute(
         sysroot: &sysroot,
         inputs: &i,
         limits: &config.limits,
+        reserved_bytes: 0,
     };
     let mut resource_publication_files = None;
     let result = (|| -> Result<(), Error> {
@@ -1750,14 +1755,16 @@ pub fn execute(
         report.targets[2].status = TargetStatus::Compiled;
         for index in 0..3 {
             let target = report.targets[index].target;
-            let resource_context = MachineContext {
-                models: &prepared.projection_root(),
-                ..context
-            };
-            let target_context = if index == 2 {
-                &resource_context
+            let model_root = if index == 2 {
+                prepared.projection_root()
             } else {
-                &context
+                models.path.clone()
+            };
+            // The descriptor remains live for all model sessions in this loop.
+            let target_context = MachineContext {
+                models: &model_root,
+                reserved_bytes: prepared.retained_bytes()?,
+                ..context
             };
             if index == 2 {
                 prepared.revalidate(&config.limits)?;
@@ -1777,11 +1784,7 @@ pub fn execute(
                 prepared.validate_inventory(&native)?;
                 prepared.revalidate(&config.limits)?;
             }
-            let model_root = if index == 2 {
-                prepared.projection_root()
-            } else {
-                models.path.clone()
-            };
+
             let before =
                 import_envelope(&native, &root, &model_root, &sysroot, false, &config.limits)?;
             report.targets[index].status = TargetStatus::Inventoried;
@@ -1939,6 +1942,7 @@ pub fn resource_inventory(
         sysroot: &sysroot,
         inputs: &i,
         limits: &config.limits,
+        reserved_bytes: prepared.retained_bytes()?,
     };
     let (result, _) = context.run(0, 3, None, None, None)?;
     let inventory = result
@@ -2069,6 +2073,8 @@ fn prepare_resource_with(
         .len()
         .checked_mul(32)
         .and_then(|n| n.checked_add(2 * MIB))
+        .and_then(|n| n.checked_add(result.stdout.capacity()))
+        .and_then(|n| n.checked_add(result.process.stderr.capacity()))
         .is_none_or(|n| n > limits.inventory_bytes)
     {
         return Err(limit("resource producer metadata envelope"));
