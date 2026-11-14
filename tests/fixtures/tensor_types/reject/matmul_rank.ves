@@ -1,0 +1,6 @@
+// expect: E0763
+// at: Tensor::matmul(x, w)
+// message: expected ranks 2 and 2
+fn f(x: Tensor[F32, [2, 3]], w: Tensor[F32, [3]]) -> Tensor[F32, [2]] eff [Tensor] {
+    Tensor::matmul(x, w)
+}

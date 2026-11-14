@@ -101,7 +101,10 @@ runners.
   `scope_reports_and_restores_hardware_mode` output.
 - ML-KEM-768 matched the published accumulated digest for 100 iterations in
   every test run and for 10000 iterations in a release run
-  (`VAULT_MLKEM_ACCUMULATED=10000`).
+  (`VAULT_MLKEM_ACCUMULATED=10000`). Since #486 this runs through Vault's
+  own entry points once per available backend (libcrux portable and AVX2 on
+  the x86_64 container; portable and NEON on the AArch64 macOS runner), and
+  separately through RustCrypto `ml-kem` as an independent reference.
 
 No timing numbers are claimed.
 
@@ -157,6 +160,42 @@ declassification.
 - The expansion-37 review said no cryptography was claimed for §23; this lane
   implements it with mature crates (RustCrypto `aes-gcm`, `chacha20poly1305`,
   `ml-kem` 0.3.4; `x25519-dalek` 3.0.0). No primitive is hand-rolled.
+  #486 later moved ML-KEM-768 to `libcrux-ml-kem` (below).
+
+## Vector NTT for ML-KEM-768 (#486)
+
+The design's `eff [Isa[P]]` polynomial NTT was left out of wave eight
+because it would have meant hand-rolling a primitive. The owner chose to
+build it on vetted libraries, so Vault now delegates ML-KEM-768 to Cryspen
+`libcrux-ml-kem` 0.0.11 (no `std`, `alloc` or `rand`), whose portable, AVX2
+and NEON backends are formally verified with hax and F* (panic freedom,
+functional correctness against FIPS 203, secret independence) and which
+ships in NSS. Vault implements none of the arithmetic.
+
+- `KemIsa` (`Portable`, `Avx2`, `Neon`) is the ISA witness. `detect()` picks
+  the fastest backend the CPU supports (`is_x86_feature_detected!("avx2")`,
+  `is_aarch64_feature_detected!("neon")`); `HybridClientSecret::generate_on`,
+  `from_seeds_for_testing_on`, `server_encapsulate_on` and
+  `server_encapsulate_for_testing_on` pin one, and the client secret keeps
+  its backend for decapsulation (`HybridClientSecret::isa`). A backend the
+  CPU lacks, or one not compiled for the architecture, is refused with
+  `KemError::IsaUnavailable` rather than run, and caller seeds are still
+  wiped.
+- The `simd256` feature is enabled only on `x86_64` and `simd128` only on
+  `aarch64` (each compiles against that architecture's intrinsics). Vault
+  still has no `unsafe`; the intrinsics calls are inside libcrux.
+- The expanded 2400-byte decapsulation key is wiped on drop (`WipedKey`);
+  libcrux types do not zeroize themselves.
+- Server-side FIPS 203 encapsulation-key validation is now an explicit
+  `validate_public_key` call on the selected backend, since libcrux's
+  `encapsulate` does not validate.
+- Tests: the accumulated vectors on every available backend, byte-for-byte
+  agreement of every backend with RustCrypto `ml-kem` (now a
+  dev-dependency), hybrid exchanges across every client/server backend pair,
+  and the refusal path. The crate checks and passes clippy for
+  `aarch64-unknown-linux-gnu`, `aarch64-apple-darwin` and
+  `x86_64-pc-windows-msvc`.
+- No timing numbers are claimed.
 
 ## Root patch
 
@@ -185,8 +224,11 @@ Cranelift entries.
   schedule is rebuilt on the stack per call and zeroized on drop by the
   RustCrypto types; those stack frames are not in locked memory.
 - Secret scalars rely on `core::hint::black_box`, not a guarantee from LLVM.
-- ML-KEM uses the crate's portable arithmetic, not Vesper Vector NTT
-  kernels. The draft-ietf-tls-ecdhe-mlkem text publishes no hybrid test
+- The ML-KEM vector kernels are libcrux's Rust intrinsics, selected at run
+  time; they are not lowered from Vesper source `Vector` code, and the
+  source `eff [Isa[P]]` effect does not yet type-check calls into them.
+  Stack copies made inside libcrux (seed, intermediate polynomials) are not
+  wiped by Vault. The draft-ietf-tls-ecdhe-mlkem text publishes no hybrid test
   vectors; the components are checked against RFC 7748 and the C2SP/Go
   accumulated ML-KEM-768 vectors, and the hybrid against round-trip,
   combiner-layout and tamper tests.

@@ -1,0 +1,22 @@
+// A linear KV page lease: written until full, then returned to the pool.
+fn fill_page[KV: dim, D: dim](inout page: KvPageLease[KV, D], k: Tensor[Bf16, [KV, D]], n: u64)
+    -> u64 eff [KvCachePool[KV, D]] {
+    if n == 0 {
+        KvCachePool::page_tokens(page)
+    } else {
+        match KvCachePool::write_page(inout page, k, k) {
+            Ok(_) => fill_page(inout page, k, wrapping_sub(n, 1)),
+            Err(_) => KvCachePool::page_tokens(page)
+        }
+    }
+}
+fn pages(k: Tensor[F32, [2, 4]], writes: u64) -> u64 eff [Tensor, KvCachePool[2, 4]] {
+    match KvCachePool::lease_page() {
+        Ok(page) => {
+            let written = fill_page(inout page, Tensor::to_bf16(k), writes);
+            KvCachePool::release_page(page);
+            written
+        },
+        Err(_) => 0
+    }
+}

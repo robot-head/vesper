@@ -4,10 +4,21 @@ mod cdc;
 mod checkpoint;
 pub use cdc::{CdcHeader, CdcPolicy, Ingested, SourceBinding, WeightPolicy};
 pub use checkpoint::CheckpointLimits;
-pub use checkpoint::durable::{DurableCheckpointer, DurableReport, DurableRestore};
+pub use checkpoint::durable::{
+    DurableCheckpointer, DurableReport, DurableRestore, MAX_SPINE_LEVELS,
+};
 #[path = "cluster.rs"]
 mod cluster;
-pub use cluster::{ClusterConfig, ClusterRun, CommittedCheckpoint, Recovery, run_cluster};
+pub use cluster::{
+    CheckpointMode, CheckpointPhase, ClusterConfig, ClusterRun, CommittedCheckpoint, EpochSource,
+    Fault, FaultKind, GcReport, Recovery, Rescale, run_cluster, run_cluster_with,
+};
+#[path = "log.rs"]
+mod log;
+pub use log::{InputLog, LogLimits, LogRecovery};
+#[path = "sink.rs"]
+mod sink;
+pub use sink::{CommitRecord, CommitSink, CrashMedium, MemorySink, QuarrySink, SinkRecovery};
 
 use crate::{
     Budget, Error, Limits, Row, ZSet, identity,
@@ -54,6 +65,13 @@ enum Op {
         b: usize,
         ka: usize,
         kb: usize,
+    },
+    /// Re-partition by `key`. The identity on one executor; in a cluster the
+    /// delta is shuffled so that every row lives on `route(row[key])`.
+    /// Inserted only by the cluster planner, never by [`CircuitBuilder`].
+    Exchange {
+        a: usize,
+        key: usize,
     },
 }
 #[derive(Clone, Debug)]
@@ -174,74 +192,12 @@ impl CircuitBuilder {
     }
     pub fn finish(&self, output: NodeId) -> Result<Circuit, Error> {
         self.get(output)?;
-        let mut diff = Vec::new();
-        let mut delta = Vec::new();
-        for node in &self.nodes {
-            let id = match &node.op {
-                Op::Input(slot) => emit(&mut diff, DOp::Delta(*slot), self.limits)?,
-                Op::Filter(a, p) => emit(
-                    &mut diff,
-                    DOp::Apply(Op::Filter(delta[*a], p.clone())),
-                    self.limits,
-                )?,
-                Op::Map(a, f) => emit(
-                    &mut diff,
-                    DOp::Apply(Op::Map(delta[*a], f.clone())),
-                    self.limits,
-                )?,
-                Op::Union(a, b) => emit(
-                    &mut diff,
-                    DOp::Apply(Op::Union(delta[*a], delta[*b])),
-                    self.limits,
-                )?,
-                Op::Join { a, b, ka, kb } => {
-                    // D(join) = join(dA,prevB) + join(prevA,dB) + join(dA,dB).
-                    // References share dA/dB even in deeply nested/shared joins.
-                    let pa = emit(&mut diff, DOp::Previous(*a), self.limits)?;
-                    let pb = emit(&mut diff, DOp::Previous(*b), self.limits)?;
-                    let t1 = emit(
-                        &mut diff,
-                        DOp::Apply(Op::Join {
-                            a: delta[*a],
-                            b: pb,
-                            ka: *ka,
-                            kb: *kb,
-                        }),
-                        self.limits,
-                    )?;
-                    let t2 = emit(
-                        &mut diff,
-                        DOp::Apply(Op::Join {
-                            a: pa,
-                            b: delta[*b],
-                            ka: *ka,
-                            kb: *kb,
-                        }),
-                        self.limits,
-                    )?;
-                    let t3 = emit(
-                        &mut diff,
-                        DOp::Apply(Op::Join {
-                            a: delta[*a],
-                            b: delta[*b],
-                            ka: *ka,
-                            kb: *kb,
-                        }),
-                        self.limits,
-                    )?;
-                    emit(&mut diff, DOp::Sum3(t1, t2, t3), self.limits)?
-                }
-            };
-            delta.push(id);
-        }
-        Ok(Circuit {
-            nodes: self.nodes.clone(),
-            inputs: self.inputs.clone(),
-            output: output.index,
-            limits: self.limits,
-            diff,
-            delta,
-        })
+        Circuit::assemble(
+            self.nodes.clone(),
+            self.inputs.clone(),
+            output.index,
+            self.limits,
+        )
     }
 }
 #[derive(Clone, Debug)]
@@ -262,7 +218,7 @@ fn emit(diff: &mut Vec<DNode>, op: DOp, limits: Limits) -> Result<usize, Error> 
     }
     let parent_depth = match &op {
         DOp::Delta(_) | DOp::Previous(_) => 0,
-        DOp::Apply(Op::Filter(a, _) | Op::Map(a, _)) => diff[*a].depth,
+        DOp::Apply(Op::Filter(a, _) | Op::Map(a, _) | Op::Exchange { a, .. }) => diff[*a].depth,
         DOp::Apply(Op::Union(a, b) | Op::Join { a, b, .. }) => diff[*a].depth.max(diff[*b].depth),
         DOp::Sum3(a, b, c) => diff[*a].depth.max(diff[*b].depth).max(diff[*c].depth),
         DOp::Apply(Op::Input(_)) => return Err(Error::InvalidNode),
@@ -285,6 +241,231 @@ pub struct Circuit {
     delta: Vec<usize>,
 }
 impl Circuit {
+    /// Differentiate an append-only node list (shared by the builder and the
+    /// cluster planner).
+    fn assemble(
+        nodes: Vec<Node>,
+        inputs: Vec<usize>,
+        output: usize,
+        limits: Limits,
+    ) -> Result<Self, Error> {
+        let mut diff = Vec::new();
+        let mut delta: Vec<usize> = Vec::new();
+        for node in &nodes {
+            let id = match &node.op {
+                Op::Input(slot) => emit(&mut diff, DOp::Delta(*slot), limits)?,
+                Op::Filter(a, p) => emit(
+                    &mut diff,
+                    DOp::Apply(Op::Filter(delta[*a], p.clone())),
+                    limits,
+                )?,
+                Op::Map(a, f) => {
+                    emit(&mut diff, DOp::Apply(Op::Map(delta[*a], f.clone())), limits)?
+                }
+                Op::Union(a, b) => emit(
+                    &mut diff,
+                    DOp::Apply(Op::Union(delta[*a], delta[*b])),
+                    limits,
+                )?,
+                // D(exchange) = exchange(D): it is linear.
+                Op::Exchange { a, key } => emit(
+                    &mut diff,
+                    DOp::Apply(Op::Exchange {
+                        a: delta[*a],
+                        key: *key,
+                    }),
+                    limits,
+                )?,
+                Op::Join { a, b, ka, kb } => {
+                    // D(join) = join(dA,prevB) + join(prevA,dB) + join(dA,dB).
+                    // References share dA/dB even in deeply nested/shared joins.
+                    let pa = emit(&mut diff, DOp::Previous(*a), limits)?;
+                    let pb = emit(&mut diff, DOp::Previous(*b), limits)?;
+                    let t1 = emit(
+                        &mut diff,
+                        DOp::Apply(Op::Join {
+                            a: delta[*a],
+                            b: pb,
+                            ka: *ka,
+                            kb: *kb,
+                        }),
+                        limits,
+                    )?;
+                    let t2 = emit(
+                        &mut diff,
+                        DOp::Apply(Op::Join {
+                            a: pa,
+                            b: delta[*b],
+                            ka: *ka,
+                            kb: *kb,
+                        }),
+                        limits,
+                    )?;
+                    let t3 = emit(
+                        &mut diff,
+                        DOp::Apply(Op::Join {
+                            a: delta[*a],
+                            b: delta[*b],
+                            ka: *ka,
+                            kb: *kb,
+                        }),
+                        limits,
+                    )?;
+                    emit(&mut diff, DOp::Sum3(t1, t2, t3), limits)?
+                }
+            };
+            delta.push(id);
+        }
+        Ok(Circuit {
+            nodes,
+            inputs,
+            output,
+            limits,
+            diff,
+            delta,
+        })
+    }
+
+    /// Plan this circuit for a cluster partitioned by `cols` (one key column
+    /// per input): propagate partition keys and insert an [`Op::Exchange`]
+    /// before every join input whose key is not its join key. Returns the
+    /// planned circuit and every planned node's partition key (`None` when
+    /// rows are not placed by any column).
+    pub(crate) fn plan(&self, cols: &[usize]) -> Result<(Circuit, Vec<Option<usize>>), Error> {
+        if cols.len() != self.inputs.len() {
+            return Err(Error::Partition("partition column count"));
+        }
+        for (col, width) in cols.iter().zip(&self.inputs) {
+            if col >= width {
+                return Err(Error::Partition("partition column out of range"));
+            }
+        }
+        let mut nodes: Vec<Node> = Vec::with_capacity(self.nodes.len());
+        let mut keys: Vec<Option<usize>> = Vec::with_capacity(self.nodes.len());
+        let mut map: Vec<usize> = Vec::with_capacity(self.nodes.len());
+        let limits = self.limits;
+        fn push(
+            nodes: &mut Vec<Node>,
+            keys: &mut Vec<Option<usize>>,
+            limits: Limits,
+            op: Op,
+            width: usize,
+            key: Option<usize>,
+        ) -> Result<usize, Error> {
+            if nodes.len() >= limits.max_nodes {
+                return Err(Error::Limit("nodes"));
+            }
+            let depth = match &op {
+                Op::Input(_) => 0,
+                Op::Filter(a, _) | Op::Map(a, _) | Op::Exchange { a, .. } => nodes[*a].depth,
+                Op::Union(a, b) | Op::Join { a, b, .. } => nodes[*a].depth.max(nodes[*b].depth),
+            }
+            .checked_add(1)
+            .ok_or(Error::Overflow)?;
+            if depth > limits.max_depth {
+                return Err(Error::Limit("depth"));
+            }
+            nodes.push(Node { op, width, depth });
+            keys.push(key);
+            Ok(nodes.len() - 1)
+        }
+        for n in &self.nodes {
+            let id = match &n.op {
+                Op::Input(slot) => push(
+                    &mut nodes,
+                    &mut keys,
+                    limits,
+                    Op::Input(*slot),
+                    n.width,
+                    Some(cols[*slot]),
+                )?,
+                Op::Filter(a, p) => {
+                    let key = keys[map[*a]];
+                    push(
+                        &mut nodes,
+                        &mut keys,
+                        limits,
+                        Op::Filter(map[*a], p.clone()),
+                        n.width,
+                        key,
+                    )?
+                }
+                Op::Map(a, fields) => {
+                    let key = keys[map[*a]].and_then(|k| {
+                        fields
+                            .iter()
+                            .position(|f| matches!(f, Field::Column(c) if *c == k))
+                    });
+                    push(
+                        &mut nodes,
+                        &mut keys,
+                        limits,
+                        Op::Map(map[*a], fields.clone()),
+                        n.width,
+                        key,
+                    )?
+                }
+                Op::Union(a, b) => {
+                    let (a, b) = (map[*a], map[*b]);
+                    let key = keys[a].filter(|k| keys[b] == Some(*k));
+                    push(&mut nodes, &mut keys, limits, Op::Union(a, b), n.width, key)?
+                }
+                Op::Exchange { .. } => return Err(Error::InvalidNode),
+                Op::Join { a, b, ka, kb } => {
+                    let mut side = |side: usize, k: usize| -> Result<usize, Error> {
+                        if keys[side] == Some(k) {
+                            return Ok(side);
+                        }
+                        let width = nodes[side].width;
+                        push(
+                            &mut nodes,
+                            &mut keys,
+                            limits,
+                            Op::Exchange { a: side, key: k },
+                            width,
+                            Some(k),
+                        )
+                    };
+                    let a = side(map[*a], *ka)?;
+                    let b = side(map[*b], *kb)?;
+                    push(
+                        &mut nodes,
+                        &mut keys,
+                        limits,
+                        Op::Join {
+                            a,
+                            b,
+                            ka: *ka,
+                            kb: *kb,
+                        },
+                        n.width,
+                        Some(*ka),
+                    )?
+                }
+            };
+            map.push(id);
+        }
+        let planned = Circuit::assemble(nodes, self.inputs.clone(), map[self.output], limits)?;
+        Ok((planned, keys))
+    }
+
+    /// Differentiated index and row width of every exchange.
+    pub(crate) fn exchange_widths(&self) -> std::collections::BTreeMap<usize, usize> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| matches!(n.op, Op::Exchange { .. }))
+            .map(|(i, n)| (self.delta[i], n.width))
+            .collect()
+    }
+    /// Exchange nodes inserted by [`Circuit::plan`].
+    pub(crate) fn exchange_count(&self) -> usize {
+        self.nodes
+            .iter()
+            .filter(|n| matches!(n.op, Op::Exchange { .. }))
+            .count()
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -389,25 +570,78 @@ impl Executor {
         self.tick_inner(input)
     }
     fn tick_inner(&mut self, input: &TickInput) -> Result<ZSet, Error> {
+        let mut staged = self.stage(input)?;
+        if self.run_stage(&mut staged, false)?.is_some() {
+            return Err(Error::InvalidNode);
+        }
+        self.finish_stage(staged)
+    }
+    /// Begin a tick whose exchanges may be served by a cluster shuffle.
+    pub(crate) fn stage(&self, input: &TickInput) -> Result<Staged, Error> {
         let c = &self.circuit;
         c.validate_inputs(&input.deltas)?;
         let next_tick = self.ticks.checked_add(1).ok_or(Error::Overflow)?;
-        let mut budget = Budget::new(c.limits);
-        let mut values = Vec::new();
-        for node in &c.diff {
-            budget.charge(1)?;
+        Ok(Staged {
+            deltas: input.deltas.clone(),
+            values: Vec::with_capacity(c.diff.len()),
+            budget: Budget::new(c.limits),
+            next_tick,
+        })
+    }
+    /// Evaluate differentiated nodes in order. With `remote`, stop before an
+    /// exchange and return `(node, key)`: the caller scatters
+    /// `staged.local(node)` by `key` and calls [`Executor::provide`] with
+    /// the gathered delta. Without it, an exchange is the identity.
+    pub(crate) fn run_stage(
+        &self,
+        st: &mut Staged,
+        remote: bool,
+    ) -> Result<Option<(usize, usize)>, Error> {
+        let c = &self.circuit;
+        while st.values.len() < c.diff.len() {
+            let node = &c.diff[st.values.len()];
+            st.budget.charge(1)?;
             let value = match &node.op {
-                DOp::Delta(slot) => copy(&input.deltas[*slot], c.limits, &mut budget)?,
-                DOp::Previous(node) => copy(&self.prior[*node], c.limits, &mut budget)?,
-                DOp::Apply(op) => apply(op, &values, c.limits, &mut budget)?,
+                DOp::Delta(slot) => copy(&st.deltas[*slot], c.limits, &mut st.budget)?,
+                DOp::Previous(node) => copy(&self.prior[*node], c.limits, &mut st.budget)?,
+                DOp::Apply(Op::Exchange { a, key }) if remote => {
+                    return Ok(Some((*a, *key)));
+                }
+                DOp::Apply(op) => apply(op, &st.values, c.limits, &mut st.budget)?,
                 DOp::Sum3(a, b, d) => union(
-                    &[&values[*a], &values[*b], &values[*d]],
+                    &[&st.values[*a], &st.values[*b], &st.values[*d]],
                     c.limits,
-                    &mut budget,
+                    &mut st.budget,
                 )?,
             };
-            values.push(value);
+            st.values.push(value);
         }
+        Ok(None)
+    }
+    /// Supply the gathered value of the exchange `run_stage` stopped at.
+    pub(crate) fn provide(&self, st: &mut Staged, gathered: ZSet) -> Result<(), Error> {
+        let c = &self.circuit;
+        let node = c.diff.get(st.values.len()).ok_or(Error::InvalidNode)?;
+        let DOp::Apply(Op::Exchange { a, .. }) = node.op else {
+            return Err(Error::InvalidNode);
+        };
+        if gathered.width != st.values[a].width {
+            return Err(Error::Schema);
+        }
+        if gathered.len() > c.limits.max_rows {
+            return Err(Error::Limit("rows"));
+        }
+        st.budget.charge(gathered.len())?;
+        st.values.push(gathered);
+        Ok(())
+    }
+    pub(crate) fn finish_stage(&mut self, mut st: Staged) -> Result<ZSet, Error> {
+        let c = &self.circuit;
+        if st.values.len() != c.diff.len() {
+            return Err(Error::InvalidNode);
+        }
+        let values = &st.values;
+        let budget = &mut st.budget;
         let mut versions = self.versions.clone();
         for (id, version) in versions.iter_mut().enumerate() {
             if !values[c.delta[id]].is_empty() {
@@ -416,21 +650,58 @@ impl Executor {
         }
         let mut next = Vec::new();
         for (id, prior) in self.prior.iter().enumerate() {
-            next.push(union(
-                &[prior, &values[c.delta[id]]],
-                c.limits,
-                &mut budget,
-            )?);
+            next.push(union(&[prior, &values[c.delta[id]]], c.limits, budget)?);
         }
-        let out = c.check_output(copy(&values[c.delta[c.output]], c.limits, &mut budget)?)?;
+        let out = c.check_output(copy(&values[c.delta[c.output]], c.limits, budget)?)?;
         // Bound the materialized output too, before any state mutation.
         if next[c.output].len() > c.limits.max_output {
             return Err(Error::Limit("output"));
         }
         self.prior = next;
-        self.ticks = next_tick;
+        self.ticks = st.next_tick;
         self.versions = versions;
         Ok(out)
+    }
+    /// Build an executor from integrals computed elsewhere (cluster
+    /// rescaling). The state is revalidated as a checkpoint would be.
+    pub(crate) fn from_state(
+        circuit: Circuit,
+        prior: Vec<ZSet>,
+        ticks: u64,
+        limits: CheckpointLimits,
+    ) -> Result<Self, Error> {
+        let mut budget = limits.budget(&circuit);
+        checkpoint::validate_state(&circuit, &prior, ticks, None, limits, &mut budget)?;
+        let versions = vec![0; prior.len()];
+        Ok(Executor {
+            circuit,
+            prior,
+            ticks,
+            source: None,
+            lineage: fresh_lineage(),
+            versions,
+        })
+    }
+    /// Integrals of every original node, in node order.
+    pub(crate) fn integrals(&self) -> &[ZSet] {
+        &self.prior
+    }
+}
+/// A tick in progress (see [`Executor::run_stage`]).
+pub(crate) struct Staged {
+    deltas: Vec<ZSet>,
+    values: Vec<ZSet>,
+    budget: Budget,
+    next_tick: u64,
+}
+impl Staged {
+    /// Value of an already evaluated differentiated node.
+    pub(crate) fn local(&self, node: usize) -> Result<&ZSet, Error> {
+        self.values.get(node).ok_or(Error::InvalidNode)
+    }
+    /// Index of the next differentiated node to evaluate.
+    pub(crate) fn position(&self) -> usize {
+        self.values.len()
     }
 }
 fn copy(set: &ZSet, limits: Limits, budget: &mut Budget) -> Result<ZSet, Error> {
@@ -440,6 +711,7 @@ fn apply(op: &Op, values: &[ZSet], limits: Limits, budget: &mut Budget) -> Resul
     match op {
         Op::Input(_) => Err(Error::InvalidNode),
         Op::Union(a, b) => union(&[&values[*a], &values[*b]], limits, budget),
+        Op::Exchange { a, .. } => copy(&values[*a], limits, budget),
         Op::Filter(a, p) => {
             let mut out = Accumulator::new(values[*a].width, limits)?;
             for (row, w) in values[*a].entries() {

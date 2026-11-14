@@ -15,6 +15,10 @@ pub enum StoreErrorKind {
     /// transaction, or a version newer than this transaction's snapshot was
     /// committed (first committer wins). The transaction stays usable.
     Conflict,
+    /// Serializable isolation: committing (or having read) would complete a
+    /// dangerous structure of rw-antidependencies (a pivot with an incoming
+    /// and an outgoing edge), so the transaction is aborted. Retry it.
+    Serialization,
     /// The table or row does not exist in this transaction's view.
     NotFound,
     /// A configured or hard limit was exceeded.

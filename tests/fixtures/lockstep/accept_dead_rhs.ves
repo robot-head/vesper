@@ -1,0 +1,3 @@
+fn main() -> bool {
+    false && 1 / 0 == 1
+}

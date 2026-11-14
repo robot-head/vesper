@@ -1,0 +1,18 @@
+copy struct Pair {
+    x: i64,
+    y: i64
+}
+
+fn update(inout p.{x}: Pair, inout q.{y}: Pair) {
+    p.x = wrapping_add(p.x, 1);
+    q.y = wrapping_add(q.y, 2);
+}
+
+fn main() -> (i64, i64) {
+    let p = Pair {
+        x: 20,
+        y: 19
+    };
+    update(inout p, inout p);
+    (p.x, p.y)
+}

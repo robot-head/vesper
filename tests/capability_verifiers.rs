@@ -197,18 +197,33 @@ fn source_accepted_programs_rejected_by_the_backend_report_source_locations() {
                 .lines()
                 .find(|l| l.contains(&format!("error[{rule}]")))
                 .unwrap_or_else(|| panic!("{} on {target}: no {rule}:\n{err}", file.display()));
-            // `file:line:col: error[...]: <function>...`: the location is the
-            // source function's item, after its leading comments.
+            // `file:line:col: error[...]: <function>...`: a finding about an
+            // instruction points at the source the instruction was lowered
+            // from, inside the function (wave seven, lane 23); others point
+            // at the source function's item, after its leading comments.
             let function = line
                 .split("]: ")
                 .nth(1)
                 .and_then(|r| r.split([':', ' ']).next())
                 .unwrap();
-            let location = format!("{}:{}:1: ", file.display(), fn_line(&source, function));
-            assert!(
-                line.starts_with(&location),
-                "{line} does not start with {location}"
-            );
+            let item = fn_line(&source, function);
+            if line.contains(" (inst ") {
+                let prefix = format!("{}:", file.display());
+                let rest = line
+                    .strip_prefix(&prefix)
+                    .unwrap_or_else(|| panic!("{line}"));
+                let at: usize = rest.split(':').next().unwrap().parse().unwrap();
+                assert!(
+                    at > item,
+                    "{line} does not point inside {function} (line {item})"
+                );
+            } else {
+                let location = format!("{}:{item}:1: ", file.display());
+                assert!(
+                    line.starts_with(&location),
+                    "{line} does not start with {location}"
+                );
+            }
         }
     }
 }
@@ -375,17 +390,11 @@ fn derived_policies_name_the_source_facts() {
         },
     )
     .unwrap();
-    // `apply` takes a function value, so it is specialized into its callers;
-    // that is reported, not silently skipped.
-    assert!(
-        derived
-            .notes
-            .iter()
-            .any(|n| n.contains("'apply' is specialized")),
-        "{:?}",
-        derived.notes
-    );
+    // `apply` takes a function value; where the argument is the top-level
+    // function `triple` it gets an instance of its own, which is audited
+    // (wave seven, lane 23).
     let det = derived.policy.det_float.functions.unwrap();
+    assert!(det.contains(&"apply$fn[f=triple]".to_string()), "{det:?}");
     assert!(det.contains(&"triple".to_string()) && det.contains(&"twice_then_triple".to_string()));
     assert!(!derived.policy.det_float.allow_fma);
 }

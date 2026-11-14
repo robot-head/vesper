@@ -1,6 +1,6 @@
 # Wave five lane 4: Vesper eBPF pre-flight verifier and XDP programs
 
-Design coverage: §27.1 items 2, 3 and 5, §27.2 wire structs, §27.3 XDP
+Design coverage: §27.1 items 1, 2, 3 and 5, §27.2 wire structs, §27.3 XDP
 SYN-flood mitigator and user-space ring consumer, §27.4 firewall proof,
 §27.5 pre-flight abstract verifier. Issue #124.
 
@@ -20,12 +20,13 @@ New crate `crates/vesper-ebpf` (depends only on `object` and, on Linux,
 | --- | --- |
 | `insn` | Decoder/encoder for every ALU/ALU64 op (incl. ISA v4 `sdiv`/`smod`/`movsx`, `bswap`), JMP/JMP32 incl. `gotol`, LDX/ST/STX incl. `memsx`, every `BPF_ATOMIC` op, `LD_IMM64` with `BPF_PSEUDO_MAP_FD`, helper/BPF-to-BPF/kfunc calls, `EXIT`. Malformed slots are `DecodeError`s; `disassemble` for diagnostics. |
 | `program` | `Asm` two-pass assembler (labels, map references, local calls), `Program`, `MapDef`/`MapKind` (hash, array, per-CPU hash/array, LRU hash, ringbuf) with the kernel's map size rules. |
+| `builder` | `BpfBuilder`, linear `BpfRingSlot`/`BpfSocketRef`, explicit terminal calls, leak audit and checked finalization (item 3 follow-up below). |
 | `scalar` | Tristate numbers (after `kernel/bpf/tnum.c`) reduced with unsigned and signed 64-bit intervals. |
 | `verifier` | The §27.5 abstract interpreter; `verify` returns `VerifyReport` or a `VerifyError { insn, rule, message }`; `findings` returns the contract's `Vec<VerifierFinding>`. |
 | `callgraph` | Contract-shaped `CallGraph { functions: Vec<FnNode>, calls: Vec<(FnId, FnId)> }` with `FnId(u32)`, per-function frame bytes, indirect edges rejected; worst-case stack over all call paths. |
 | `interp` | Concrete XDP interpreter with provenance on every value: any access outside the region a pointer came from, uninitialised read, use after release or reference still held at exit is an `InterpError`. Kernel ring-buffer byte layout and `RingBufReader`. |
 | `elf` | BPF ELF writer and reader (`object` 0.37.3): `xdp`, `.relxdp` (`R_BPF_64_64`), `license`, BTF-defined `.maps` and a minimal `.BTF`. |
-| `mitigator` | The §27.3 program, built with `Asm`, plus `reference_decision`. |
+| `mitigator` | The §27.3 program, with an `Asm` packet/counter prefix, a linear ring reservation and checked `BpfBuilder` finalization, plus `reference_decision`. |
 | `wire` | `EthIpv4TcpWire` (54 bytes), `SynDropAlertWire` (16 bytes), `XdpAction`. |
 | `kernel` (Linux, the only `unsafe` module) | Raw `bpf(2)`: map create, program load (log collected on rejection), `BPF_PROG_TEST_RUN`, map lookup, `BPF_BTF_LOAD`, ring buffer `mmap`, CPU pinning. `probe()` reports `Unavailable` when the host refuses. |
 
@@ -119,19 +120,104 @@ kernel rejection.
   ring records wrap the end of the data area, and the producer stays at
   most `size - 1` bytes ahead of the consumer.
 
-## Item 3 (linear `BpfRingSlot`/`BpfSocketRef` builders): not delivered
+## Item 3 follow-up: linear ringbuf/socket builders
 
-The previous thread's attempt to write this module was stopped by an
-automated safety filter, and the project owner then said to skip the
-builder and finish the rest. When the owner later asked for it again, this
-lane's attempt was stopped by the same filter, so it is still not
-delivered. The
-mitigator is assembled with `Asm`, and the release obligation is enforced
-on the emitted bytecode by the verifier's `ref.leak` rule (rejection
-corpus: `reject/ringbuf_leak`, `reject/socket_leak`; random programs that
-forget a release are rejected with `ref.leak`). This is not a Rust-typed
-linear API and not an implementation of the Vesper source typing rules
-(Theorem 2, [T-Let]).
+Branch `codex/ebpf-linear-builders`, based on PR #163 head
+`7a2a73ac3c0fc300cfb146d98bd4d7812506cc50`. The claim comment on #124
+records the builder-only scope; #163 explicitly excluded this item.
+The follow-up adds no dependencies, root patch, unsafe code or Lean changes.
+The other sections of this report retain the parent PR's evidence.
+
+`BpfBuilder` owns its assembler and returns a `Program` only through
+`finish`, which resolves assembly and runs the existing verifier with its
+default policy. `from_asm` adopts an existing prefix; `emit(Insn)` permits
+low-level instructions without exposing an unchecked program or the
+underlying assembler. Even manually acquired references or jumps around
+a typed release are checked on every bytecode path, including `ref.leak`.
+
+`reserve_ringbuf` and `sk_lookup_tcp` emit the helper and a null guard.
+The returned host handle describes the non-null emission scope: a null
+runtime result skips that scope and continues after its terminal call (or
+its complete branch). The caller supplies a scratch pointer register;
+r6..r9 preserve it across helper calls. TCP lookup accepts exact IPv4 or
+IPv6 tuple bytes in network order and an explicit aligned stack scratch
+range, and uses the current network namespace.
+
+Both handles are non-Clone, non-Copy, `#[must_use]` and borrow the builder.
+A ring slot is consumed by `submit` or `discard`, with a typed notification
+flag; a socket is consumed by `release`. `branch` consumes its input and
+requires separate handles for both emitted arms, including nested branches.
+Dropping a handle counts a leak without emitting a release; `mem::forget`
+still leaves an outstanding obligation. `LinearAudit` exposes both counts,
+and finalization refuses outstanding obligations even if a dropped arm was
+unreachable. Ring field writes validate size, bounds and alignment before
+emission and retain the owner on error. Terminal operations are infallible.
+
+The mitigator now uses the ring slot and checked finalization. Its public
+`build` error changes from `AsmError` to `BuildError`, so verification
+failures can be reported without disguising them as assembly failures.
+The packet/counter logic and the parent PR's IHL-aware reads are preserved.
+
+Tests in `tests/builders.rs` cover submission/discard branches, nested arms,
+repeated acquisitions, helper clobbers, a full ring/null reservation,
+IPv4 socket hits and misses in the interpreter, IPv6 verification, dropped
+and forgotten handles, a leaked branch arm, interrupted branch emission,
+invalid arguments, and failed writes followed by discard. Raw jumps that
+skip either typed terminal call must fail with exactly `ref.leak`; raw
+double releases also fail verification. Two `compile_fail,E0382` doctests
+show that a consumed ring slot or socket cannot be released again.
+
+This is host-side Rust library discipline, not Vesper source linear typing.
+There is one active typed handle per borrowed builder scope; multiple
+simultaneously held references and socket field access are outside this API.
+Arbitrary low-level assembly remains available through `Asm` and must be
+verified by its caller. A returned public `Program` can still be edited by
+its owner, who must reverify after edits.
+
+### Follow-up validation
+
+The executor itself returns `EPERM` for `bpf()`. Actual kernel validation
+runs in an unprivileged QEMU TCG VM (QEMU 10.0.13, Debian Linux
+6.12.107+deb13-amd64, 512 MiB, one vCPU). These are real Linux
+`BPF_PROG_LOAD` / `BPF_PROG_TEST_RUN` syscalls inside the VM.
+The builder test sets `VESPER_EBPF_REQUIRE_KERNEL=1`, so an unavailable
+probe is a failure. It loads a ring program and IPv4/IPv6 socket programs,
+runs each ten times, and separately acquires and releases an actual TCP
+listener. The migrated mitigator's existing kernel test compares 200 packet
+runs, counters and mmap ring alerts with the interpreter.
+
+Reproduction on any Linux host with BPF privileges:
+
+```sh
+cargo test -p vesper-ebpf --locked
+VESPER_EBPF_REQUIRE_KERNEL=1 cargo test -p vesper-ebpf --locked --test builders -- --nocapture
+cargo test -p vesper-ebpf --locked --test mitigator -- --nocapture
+```
+
+For the VM, build the same test binaries with
+`cargo test -p vesper-ebpf --locked --target x86_64-unknown-linux-musl --test builders --test mitigator --no-run`.
+A BusyBox initramfs mounts proc/sysfs/devtmpfs, brings loopback up, and runs
+the binaries as root with the environment flag above. The official Debian
+trixie netboot kernel is booted using
+`qemu-system-x86_64 -machine accel=tcg -m 512 -smp 1 -nodefaults -nographic -serial stdio -no-reboot -kernel linux -initrd initrd.gz -append 'console=ttyS0 rdinit=/init panic=-1 quiet'`.
+
+Final follow-up checks (Rust 1.100.0):
+
+- `cargo fmt --all -- --check`: pass.
+- `cargo clippy --workspace --locked --all-targets -- -D warnings`: pass.
+- `cargo test --workspace --locked`: pass, 2,318 tests across 307 suites,
+  zero failures or ignored tests.
+- `cargo test -p vesper-ebpf --locked`: pass, 44 tests/doctests,
+  including both double-release compile failures. Host kernel checks report
+  unavailable; `VESPER_LEAN` is unset (Lean was not rerun in this follow-up).
+- The musl builder and mitigator test binaries in the VM: all 10 and 7 tests
+  pass respectively, no skips; the kernel loads all builder variants and
+  the mitigator, performs 31 builder test runs (including the real listener)
+  and 200 mitigator comparisons.
+
+Rust builds used `CARGO_BUILD_JOBS=2`, `CARGO_PROFILE_DEV_DEBUG=0`,
+`CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_INCREMENTAL=0`, and isolated
+`CARGO_TARGET_DIR` directories for this checkout's host and VM builds.
 
 ## The mitigator (§27.3)
 
@@ -154,7 +240,7 @@ new source cannot be inserted and passes (fail open); counts are never
 reset by the program. Wire structs match their stated sizes (54 and 16
 bytes), so no layout correction was needed.
 
-## Kernel evidence (this cloud host: Linux 6.18, root, `CAP_BPF`)
+## Parent PR kernel evidence (Linux 6.18, root, `CAP_BPF`)
 
 - The kernel verifier accepts the mitigator; `BPF_PROG_TEST_RUN` over 200
   fixture packets agrees with the interpreter on every return value and
@@ -209,6 +295,7 @@ packets including IPv4 options and malformed IHL, threshold 2) with the real pro
 
 | File | What |
 | --- | --- |
+| `builders.rs` | linear ownership, path obligations, raw instruction rejection, real kernel loads and TCP listener release (follow-up above) |
 | `codec.rs` | every instruction family round-trips; 500k random slot sequences: every decodable one re-encodes to the same bytes, none panic |
 | `scalar_soundness.rs` | ALU transfer functions, truncation/extension and branch refinement contain every concrete result (800k random cases) |
 | `verifier_rules.rs` | accepted corpus programs; one rejection per rule with the exact rule id; contract-shaped findings |
@@ -219,7 +306,7 @@ packets including IPv4 options and malformed IHL, threshold 2) with the real pro
 | `kernel_diff.rs` | the two kernel differentials above |
 | `lean_model.rs` | Lean source audit, compile, axiom report, fixture agreement |
 
-Commands run (all passed):
+Parent PR commands run (all passed):
 
 ```
 cargo fmt --all -- --check
@@ -239,7 +326,6 @@ regenerated (adds `aya-obj` 0.3.0 and its dependencies for tests). No
 
 ## Remaining gaps
 
-- Item 3 builders (see above).
 - No compiler eBPF backend from Vesper source, no `@xdp_prog` lowering, no
   `vesper ebpf check` CLI (integration B, #136), no merge with the lane-3
   Cranelift stack analyzer (integration B).
