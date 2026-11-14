@@ -1,0 +1,13 @@
+[package]
+name = "vesper-gpu-compute"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper GPU compute (design sections 28 and 36): a small Vulkan compute runtime with naga-compiled WGSL kernels for Tensor inference and the Kinetic broadphase, validated on Mesa lavapipe"
+publish = false
+
+[dependencies]
+bytemuck = "=1.25.2"
+ash = { version = "=0.38.0", default-features = false, features = ["loaded", "std"] }
+naga = { version = "=30.0.2", default-features = false, features = ["wgsl-in", "spv-out"] }
+vesper-kinetic = { path = "../vesper-kinetic" }
+vesper-tensor = { path = "../vesper-tensor" }

@@ -271,6 +271,10 @@ impl TdReportBody {
 }
 
 impl QeReportBody {
+    pub(crate) fn parse_from(r: &mut Reader<'_>) -> Result<Self, ParseError> {
+        Self::parse(r)
+    }
+
     fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
         let cpu_svn = r.array("qe_report.cpu_svn")?;
         let misc_select = r.u32("qe_report.misc_select")?;

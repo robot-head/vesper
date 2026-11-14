@@ -1,9 +1,13 @@
 //! A bounded implementation of specification §14's delimiter-count/XOR example.
 //!
 //! This library builds real Baseline128 machine code; it does not integrate source
-//! `eff [Isa[P]]` typing, vector saturation, scalable vectors, or formal proofs.
+//! `eff [Isa[P]]` typing, vector saturation, or formal proofs.
 //! Full 16-byte chunks use SIMD and the remainder uses checked scalar loads.
 //! Native code is local to the creating thread. No performance claim is made.
+//!
+//! [`vvec`] adds §14.3's length-agnostic strip-mined predication (`VVec`,
+//! `VMask`) with a portable scalar profile and hand-written SVE and RVV 1.0
+//! backends; the Cranelift JIT and object paths above stay Baseline128-only.
 
 use cranelift_codegen::ir::{AbiParam, InstBuilder, MemFlags, condcodes::IntCC, types};
 use cranelift_codegen::isa::{self, OwnedTargetIsa};
@@ -496,6 +500,8 @@ impl ObjectArtifact {
         &self.clif
     }
 }
+
+pub mod vvec;
 
 #[cfg(test)]
 mod tests;

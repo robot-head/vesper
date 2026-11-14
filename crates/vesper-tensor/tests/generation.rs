@@ -141,10 +141,9 @@ impl Reference {
         let c = model.config();
         let hd = c.head_dim();
         let group = c.heads / c.kv_heads;
-        let mut x: Vec<f64> = model.embedding()[token * c.dim..(token + 1) * c.dim]
-            .iter()
-            .map(|v| f64::from(*v))
-            .collect();
+        let mut row = vec![0.0f32; c.dim];
+        model.embedding().dequantize_row(token, &mut row).unwrap();
+        let mut x: Vec<f64> = row.iter().map(|v| f64::from(*v)).collect();
         for (l, layer) in model.layers().iter().enumerate() {
             let xb = norm(&x, &layer.rms_attention);
             let mut q = rows(&layer.wq, &xb);

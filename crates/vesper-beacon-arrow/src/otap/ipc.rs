@@ -10,7 +10,8 @@
 //! * schema: little-endian, at most [`MAX_FIELDS`] fields nested at most
 //!   [`MAX_DEPTH`] deep, and only the types Beacon's OTAP schemas use
 //!   (bool, int, float, utf8, binary, fixed-size binary, timestamp,
-//!   duration, list, struct, dictionaries of utf8 with integer keys);
+//!   duration, list, struct, and dictionaries with integer keys over utf8,
+//!   binary, int, float, fixed-size binary, timestamp or duration values);
 //! * record and dictionary batches: exactly the node and buffer counts the
 //!   schema implies, every buffer 8-byte aligned and within the body, sane
 //!   node lengths, validity bitmaps long enough for their nodes.
@@ -166,8 +167,20 @@ fn field_shape(
         None => value_shape(field, depth, dicts, fields),
         Some(dictionary) => {
             let key_width = check_int(dictionary.indexType())?;
-            if field.type_type() != Type::Utf8 {
-                return Err(bad("only utf8 dictionaries are supported"));
+            // Upstream producers dictionary-encode strings, binaries,
+            // integers, ids and durations; nested dictionary values are not
+            // supported.
+            if !matches!(
+                field.type_type(),
+                Type::Utf8
+                    | Type::Binary
+                    | Type::Int
+                    | Type::FloatingPoint
+                    | Type::FixedSizeBinary
+                    | Type::Timestamp
+                    | Type::Duration
+            ) {
+                return Err(bad("unsupported dictionary value type"));
             }
             let values = value_shape(field, depth, dicts, fields)?;
             if dicts.insert(dictionary.id(), values).is_some() {

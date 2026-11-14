@@ -128,6 +128,13 @@ impl NativeBatch {
             .set("use_colocated_libcalls", "false")
             .map_err(|e| e.to_string())?;
         flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+        // DetFloat programs promise bit-identical floats across x86-64 and
+        // AArch64, as in object emission and the JIT (lane 23, #346).
+        if super::needs_nan_canonicalization(world) {
+            flags
+                .set("enable_nan_canonicalization", "true")
+                .map_err(|e| e.to_string())?;
+        }
         let isa = cranelift_native::builder()
             .map_err(str::to_string)?
             .finish(settings::Flags::new(flags))
@@ -382,7 +389,14 @@ fn preflight_ir(
                 "native batch rejects ambient/foreign import {name}"
             ));
         }
-        if !f.generics.is_empty() || !f.effects.instances.is_empty() || f.effects.tail.is_some() {
+        // Capability effects (ConstTime, Realtime, DetFloat) have no
+        // operations; such functions compile like pure ones (lane 23).
+        if !f.generics.is_empty()
+            || !f.effects.instances.iter().all(|e| {
+                crate::capability_effects::is_capability_effect(&e.name) && e.args.is_empty()
+            })
+            || f.effects.tail.is_some()
+        {
             return Err(format!(
                 "native batch requires pure ordinary monomorphic function {name}"
             ));
@@ -443,7 +457,8 @@ fn preflight_ir(
                     | Op::Data(_, _)
                     | Op::Project(_, _)
                     | Op::Index(_, _)
-                    | Op::Try(_) => {
+                    | Op::Try(_)
+                    | Op::Vector { .. } => {
                         return Err(
                             "native batch unsupported aggregate/indirect/handler operation".into(),
                         );

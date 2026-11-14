@@ -23,10 +23,14 @@ use std::sync::{Arc, Mutex};
 use crate::error::Code;
 use crate::frame::{self, Frame, FrameError, FrameReader, Settings};
 use crate::message::{self, MessageError, RequestHead};
+use crate::priority::{self, Priority};
 use crate::qpack::{
     Decoded, Decoder, DecoderConfig, Encoder, EncoderConfig, Field, FieldSection, QpackError,
 };
-use crate::transport::{Transport, TransportError, is_server_initiated, is_uni};
+use crate::session::{
+    DatagramPath, SessionError, SessionEvent, SessionKind, SessionStats, Sessions,
+};
+use crate::transport::{ReadOutcome, Transport, TransportError, is_server_initiated, is_uni};
 
 /// Connection limits and the SETTINGS we advertise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +53,30 @@ pub struct H3Config {
     pub max_blocked_bytes: usize,
     /// Unsent bytes queued per stream before writes are refused.
     pub max_stream_buffer: usize,
+    /// Deliver request heads as soon as their HEADERS arrive
+    /// ([`Event::StreamingRequest`]) and let the application pull the body
+    /// ([`ServerConnection::read_body`]); otherwise bodies are delivered
+    /// whole ([`Event::Request`]).
+    pub streaming_request_bodies: bool,
+    /// Body bytes held per streaming request before the connection stops
+    /// reading that stream (QUIC flow control then holds the peer back).
+    pub stream_body_window: usize,
+    /// Request bytes held by the connection across all streams (bodies
+    /// being assembled, streaming buffers and frame buffers). When it is
+    /// reached no request stream is read; if every held byte belongs to
+    /// whole bodies that cannot complete, the newest such request is reset
+    /// with H3_EXCESSIVE_LOAD so the others can.
+    pub max_connection_buffer: usize,
+    /// Bytes an incremental response may write before the next incremental
+    /// response of the same urgency gets a turn (RFC 9218 §10).
+    pub incremental_quantum: usize,
+    /// When false (the default), a less urgent (or later non-incremental)
+    /// response gets no bytes in a flush in which the transport accepted
+    /// bytes of a more urgent one that still has more queued; a response
+    /// the transport took nothing from (flow control) holds nobody back.
+    /// When true, less urgent responses always fill what the transport
+    /// still takes.
+    pub work_conserving: bool,
 }
 
 impl Default for H3Config {
@@ -58,6 +86,8 @@ impl Default for H3Config {
                 qpack_max_table_capacity: 4096,
                 qpack_blocked_streams: 16,
                 max_field_section_size: Some(16 * 1024),
+                no_rfc7540_priorities: true,
+                ..Settings::default()
             },
             encoder: EncoderConfig::default(),
             max_frame_payload: 32 * 1024,
@@ -66,7 +96,24 @@ impl Default for H3Config {
             max_peer_uni_streams: 8,
             max_blocked_bytes: 64 * 1024,
             max_stream_buffer: 2 * 1024 * 1024,
+            streaming_request_bodies: false,
+            stream_body_window: 64 * 1024,
+            max_connection_buffer: 4 * 1024 * 1024,
+            incremental_quantum: 16 * 1024,
+            work_conserving: false,
         }
+    }
+}
+
+impl H3Config {
+    /// Offers extended CONNECT, HTTP Datagrams and WebTransport with up to
+    /// `max_sessions` sessions at once. SETTINGS_H3_DATAGRAM is sent only
+    /// if the transport has QUIC DATAGRAM frames.
+    pub fn with_webtransport(mut self, max_sessions: u64) -> Self {
+        self.settings.enable_connect_protocol = true;
+        self.settings.h3_datagram = true;
+        self.settings.webtransport_max_sessions = Some(max_sessions.max(1));
+        self
     }
 }
 
@@ -101,6 +148,8 @@ pub enum ConnectionError {
     BadStreamId(u64),
     /// The transport refused a write on a critical stream.
     Transport(TransportError),
+    /// A malformed HTTP Datagram, or one we never offered (RFC 9297).
+    Datagram,
 }
 
 impl ConnectionError {
@@ -114,6 +163,7 @@ impl ConnectionError {
             Self::ClosedCriticalStream { .. } => Code::CLOSED_CRITICAL_STREAM,
             Self::BadGoaway(_) | Self::BadPushId(_) | Self::BadStreamId(_) => Code::ID_ERROR,
             Self::Transport(_) => Code::INTERNAL_ERROR,
+            Self::Datagram => Code::DATAGRAM_ERROR,
         }
     }
 }
@@ -130,6 +180,11 @@ pub struct ConnectionStats {
     pub unknown_streams: u64,
     pub blocked_sections: u64,
     pub leaked_responders: u64,
+    /// Requests reset because the connection buffer was exhausted by whole
+    /// bodies that could not complete.
+    pub budget_resets: u64,
+    pub priority_updates: u64,
+    pub interim_responses: u64,
 }
 
 enum Uni {
@@ -158,6 +213,26 @@ struct Local {
 /// What both roles share.
 pub(crate) struct Core {
     pub(crate) cfg: H3Config,
+    /// The SETTINGS we sent (H3_DATAGRAM cleared if the transport has no
+    /// QUIC datagrams).
+    pub(crate) sent_settings: Settings,
+    pub(crate) server: bool,
+    /// The server's next expected request stream ID (session IDs below it
+    /// that are not sessions are gone).
+    pub(crate) next_peer_bidi: u64,
+    /// Server: request streams whose HEADERS have not been parsed yet, so
+    /// whether they are sessions is not known (bounded by
+    /// `max_concurrent_requests`).
+    pub(crate) unparsed: std::collections::BTreeSet<u64>,
+    pub(crate) sessions: Sessions,
+    /// RFC 9218 priorities of request streams (server: of responses).
+    pub(crate) priorities: BTreeMap<u64, Priority>,
+    /// Streams whose priority came from PRIORITY_UPDATE (it wins over the
+    /// header).
+    pub(crate) priority_updated: std::collections::BTreeSet<u64>,
+    /// The priority last hinted to the transport, per stream.
+    hinted: BTreeMap<u64, Priority>,
+    rr: usize,
     pub(crate) encoder: Encoder,
     pub(crate) decoder: Decoder,
     local: Option<Local>,
@@ -180,10 +255,19 @@ pub(crate) struct Core {
 }
 
 impl Core {
-    pub(crate) fn new(cfg: H3Config) -> Self {
+    pub(crate) fn new(cfg: H3Config, server: bool) -> Self {
         let s = cfg.settings;
         Self {
             cfg,
+            sent_settings: s,
+            server,
+            next_peer_bidi: 0,
+            unparsed: Default::default(),
+            sessions: Sessions::default(),
+            priorities: BTreeMap::new(),
+            priority_updated: Default::default(),
+            hinted: BTreeMap::new(),
+            rr: 0,
             encoder: Encoder::new(cfg.encoder),
             decoder: Decoder::new(DecoderConfig {
                 max_table_capacity: s.qpack_max_table_capacity,
@@ -237,9 +321,13 @@ impl Core {
             encoder,
             decoder,
         });
+        let mut sent = self.cfg.settings;
+        // RFC 9297 §2.1.1: H3_DATAGRAM needs QUIC DATAGRAM support.
+        sent.h3_datagram &= t.max_datagram_size().is_some();
+        self.sent_settings = sent;
         let mut c = Vec::new();
         frame::put_varint(&mut c, frame::STREAM_CONTROL);
-        self.cfg.settings.encode(&mut c);
+        sent.encode(&mut c);
         self.queue(control, &c);
         let mut e = Vec::new();
         frame::put_varint(&mut e, frame::STREAM_QPACK_ENCODER);
@@ -268,6 +356,17 @@ impl Core {
         self.out.remove(&stream_id);
     }
 
+    /// Queues a frame on our control stream (false before it is open).
+    pub(crate) fn queue_control(&mut self, bytes: &[u8]) -> bool {
+        match self.local {
+            Some(l) => {
+                self.queue(l.control, bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Sends GOAWAY on our control stream.
     pub(crate) fn send_goaway(&mut self, id: u64) {
         if let Some(l) = self.local {
@@ -278,8 +377,11 @@ impl Core {
     }
 
     /// Writes queued bytes; finishes streams whose queue drained.
+    ///
+    /// Our unidirectional streams go first (QPACK instructions before the
+    /// sections that use them), then request streams in RFC 9218 order
+    /// ([`priority::schedule`]).
     pub(crate) fn flush(&mut self, t: &mut impl Transport) {
-        // QPACK instructions first: field sections may depend on them.
         if let Some(l) = self.local {
             let enc = self.encoder.take_encoder_stream();
             if !enc.is_empty() {
@@ -290,48 +392,138 @@ impl Core {
                 self.queue(l.decoder, &dec);
             }
         }
-        let critical = self.local.map(|l| [l.control, l.encoder, l.decoder]);
-        let mut done = Vec::new();
+        let critical: Vec<u64> = self
+            .local
+            .map(|l| vec![l.control, l.encoder, l.decoder])
+            .unwrap_or_default();
         let mut failure = None;
-        // Our own unidirectional streams first, so QPACK instructions are
-        // handed to the transport before the sections that use them.
-        let mut ids: Vec<u64> = self.out.keys().copied().collect();
-        ids.sort_by_key(|id| (!is_uni(*id), *id));
+        let ids: Vec<u64> = self.out.keys().copied().collect();
+        let mut bidi = Vec::new();
         for id in ids {
-            let o = self.out.get_mut(&id).expect("listed");
-            while !o.buf.is_empty() {
-                let (a, _) = o.buf.as_slices();
-                match t.write(id, a) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        o.buf.drain(..n);
+            if is_uni(id) {
+                self.write_out(t, id, usize::MAX, &critical, &mut failure);
+            } else {
+                let p = self.priorities.get(&id).copied().unwrap_or_default();
+                // The transport's scheduler orders what it already holds.
+                if self.hinted.get(&id) != Some(&p) {
+                    t.set_priority(id, p.urgency, p.incremental);
+                    self.hinted.insert(id, p);
+                }
+                bidi.push((id, p));
+            }
+        }
+        self.rr = self.rr.wrapping_add(1);
+        let quantum = self.cfg.incremental_quantum.max(1);
+        for group in priority::schedule(&bidi, self.rr) {
+            let mut wrote = 0;
+            if let [id] = group[..] {
+                wrote = self.write_out(t, id, usize::MAX, &critical, &mut failure);
+            } else {
+                // Incremental responses take turns (§10).
+                loop {
+                    let mut progress = 0;
+                    for &id in &group {
+                        progress += self.write_out(t, id, quantum, &critical, &mut failure);
                     }
-                    Err(e) => {
-                        if critical.is_some_and(|c| c.contains(&id)) {
-                            failure = Some(ConnectionError::Transport(e));
-                        } else if let TransportError::Reset(code) = e {
-                            self.write_failures.push((id, code));
-                        }
-                        o.buf.clear();
-                        o.fin = false;
-                        done.push(id);
+                    wrote += progress;
+                    if progress == 0 {
                         break;
                     }
                 }
             }
-            if o.buf.is_empty() && o.fin {
-                let _ = t.finish(id);
-                done.push(id);
-            } else if o.buf.is_empty() && !critical.is_some_and(|c| c.contains(&id)) {
-                done.push(id);
+            // While the transport is taking this group's bytes and some
+            // remain, later groups wait, so the transport's own stream
+            // scheduling cannot undo the order. A group the transport took
+            // nothing from (flow control) does not hold the others back,
+            // and a work-conserving configuration never waits.
+            if !self.cfg.work_conserving && wrote > 0 && group.iter().any(|id| self.queued(*id) > 0)
+            {
+                break;
             }
         }
-        for id in done {
-            self.out.remove(&id);
+        let ids: Vec<u64> = self.out.keys().copied().collect();
+        for id in ids {
+            let o = self.out.get(&id).expect("listed");
+            if !o.buf.is_empty() {
+                continue;
+            }
+            if o.fin {
+                let _ = t.finish(id);
+                self.out.remove(&id);
+            } else if !critical.contains(&id) {
+                self.out.remove(&id);
+            }
         }
+        // Hints only matter while bytes are queued; a stream that queues
+        // again is hinted again.
+        let out = &self.out;
+        self.hinted.retain(|id, _| out.contains_key(id));
         if let Some(e) = failure {
             self.fail(t, e);
         }
+    }
+
+    /// Writes up to `limit` queued bytes of one stream; returns how many
+    /// were written. A failed write drops the queue (critical streams fail
+    /// the connection).
+    fn write_out(
+        &mut self,
+        t: &mut impl Transport,
+        id: u64,
+        limit: usize,
+        critical: &[u64],
+        failure: &mut Option<ConnectionError>,
+    ) -> usize {
+        let Some(o) = self.out.get_mut(&id) else {
+            return 0;
+        };
+        let mut written = 0;
+        while !o.buf.is_empty() && written < limit {
+            let (a, _) = o.buf.as_slices();
+            let a = &a[..a.len().min(limit - written)];
+            match t.write(id, a) {
+                Ok(0) => break,
+                Ok(n) => {
+                    o.buf.drain(..n);
+                    written += n;
+                }
+                Err(e) => {
+                    if critical.contains(&id) {
+                        *failure = Some(ConnectionError::Transport(e));
+                    } else if let TransportError::Reset(code) = e {
+                        self.write_failures.push((id, code));
+                    }
+                    self.out.remove(&id);
+                    break;
+                }
+            }
+        }
+        written
+    }
+
+    /// Sets a stream's priority from its `priority` field, unless a
+    /// PRIORITY_UPDATE already set it (§7.1: the frame wins).
+    pub(crate) fn header_priority(&mut self, id: u64, fields: &[Field]) {
+        if self.priority_updated.contains(&id) {
+            return;
+        }
+        // Repeated field lines are combined with commas (RFC 9110 §5.3).
+        let mut value = Vec::new();
+        for f in fields.iter().filter(|f| f.name == b"priority") {
+            if !value.is_empty() {
+                value.extend_from_slice(b", ");
+            }
+            value.extend_from_slice(&f.value);
+        }
+        if !value.is_empty() {
+            self.priorities.insert(id, Priority::parse(&value));
+        }
+    }
+
+    pub(crate) fn forget_priority(&mut self, id: u64) {
+        self.priorities.remove(&id);
+        self.priority_updated.remove(&id);
+        self.hinted.remove(&id);
     }
 
     /// Routes a newly accepted peer unidirectional stream.
@@ -366,6 +558,14 @@ impl Core {
                     };
                     if r.len > 0 {
                         self.uni_bytes(t, id, &buf[..r.len], server)?;
+                        if !self.uni.contains_key(&id) {
+                            // Handed to the session layer, which owns all
+                            // later reads (and this read's FIN).
+                            if r.fin {
+                                self.wt_peer_fin(id);
+                            }
+                            break;
+                        }
                     }
                     if r.fin {
                         self.uni_closed(id)?;
@@ -403,6 +603,17 @@ impl Core {
             let Some((ty, n)) = frame::stream_type(held) else {
                 return Ok(());
             };
+            if ty == frame::STREAM_WEBTRANSPORT
+                && self.sent_settings.webtransport_max_sessions.is_some()
+            {
+                let Ok((session, m)) = vesper_warp::varint::decode(&held[n..]) else {
+                    return Ok(());
+                };
+                let rest = held[n + m..].to_vec();
+                self.uni.remove(&id);
+                let gone = self.session_known_gone(session);
+                return self.incoming_wt_stream(t, id, session, false, rest, gone);
+            }
             let rest = held.split_off(n);
             let slot = match ty {
                 frame::STREAM_CONTROL => &mut self.peer_control,
@@ -471,6 +682,16 @@ impl Core {
         Ok(())
     }
 
+    /// A session ID that names no live or future session.
+    pub(crate) fn session_known_gone(&self, session: u64) -> bool {
+        if self.sessions.map.contains_key(&session) {
+            return false;
+        }
+        // A client knows every session it opened; a server knows the
+        // request streams the client opened so far.
+        !self.server || (session < self.next_peer_bidi && !self.unparsed.contains(&session))
+    }
+
     fn control_frame(&mut self, id: u64, f: Frame, server: bool) -> Result<(), ConnectionError> {
         let unexpected = |f: &Frame| ConnectionError::FrameUnexpected {
             stream_id: id,
@@ -503,6 +724,23 @@ impl Core {
                     return Err(ConnectionError::BadPushId(v));
                 }
                 self.max_push_id = Some(v);
+            }
+            Frame::PriorityUpdate(u) if server => {
+                // Push is never enabled, so no push ID is valid (§7.2).
+                if u.push {
+                    return Err(ConnectionError::BadPushId(u.element_id));
+                }
+                if is_uni(u.element_id) || is_server_initiated(u.element_id) {
+                    return Err(ConnectionError::BadStreamId(u.element_id));
+                }
+                self.stats.priority_updates += 1;
+                // Bounded: updates for streams not yet open are kept only
+                // while the table is small.
+                let bound = self.cfg.max_concurrent_requests * 2 + 16;
+                if self.priorities.contains_key(&u.element_id) || self.priorities.len() < bound {
+                    self.priorities.insert(u.element_id, u.priority);
+                    self.priority_updated.insert(u.element_id);
+                }
             }
             Frame::CancelPush(v) => {
                 // Push is never used: any ID past MAX_PUSH_ID is an error,
@@ -538,6 +776,12 @@ pub struct ResponseSent {
 }
 
 type LeakSink = Arc<Mutex<Vec<u64>>>;
+
+fn leaked(sink: &LeakSink, id: u64) {
+    if let Ok(mut v) = sink.lock() {
+        v.push(id);
+    }
+}
 
 /// The obligation to answer one request. Not `Clone`; every exit consumes
 /// it. Dropping it is detected (see the module documentation).
@@ -599,9 +843,7 @@ impl<S> Drop for Responder<S> {
     fn drop(&mut self) {
         if self.armed {
             // Never silently released: the connection resets the stream.
-            if let Ok(mut v) = self.sink.lock() {
-                v.push(self.stream_id);
-            }
+            leaked(&self.sink, self.stream_id);
         }
     }
 }
@@ -616,9 +858,15 @@ pub enum SendError {
     /// The stream was reset by the peer (STOP_SENDING) or the connection
     /// failed; the responder can only be [`Responder::reset`] now.
     StreamGone,
-    /// Status not in 200..=599 (informational responses are not
-    /// supported), or a pseudo/connection-specific field was supplied.
+    /// Status out of range for the step (final: 200..=599; interim:
+    /// 100..=199 except 101), or a pseudo/connection-specific field was
+    /// supplied.
     InvalidResponse(MessageError),
+    /// [`Responder::accept_session`] on a request that is not an extended
+    /// CONNECT.
+    NotExtendedConnect,
+    /// A session close reason over 1024 bytes or not UTF-8.
+    BadCloseReason,
 }
 
 /// An application response, as fields plus a whole body.
@@ -649,6 +897,20 @@ impl Responder<HeadersPending> {
         }
     }
 
+    /// Sends an interim (1xx) response: 100 Continue, 103 Early Hints and
+    /// so on (RFC 9110 §15.2). 101 is refused: HTTP/3 has no Upgrade
+    /// (RFC 9114 §4.5). The final response is still owed.
+    pub fn send_interim<T: Transport>(
+        &mut self,
+        conn: &mut ServerConnection,
+        t: &mut T,
+        status: u16,
+        fields: Vec<Field>,
+    ) -> Result<(), SendError> {
+        conn.check_responder(self.conn, self.stream_id)?;
+        conn.send_interim(t, self.stream_id, status, fields)
+    }
+
     /// Sends the response fields; the body follows with
     /// [`Responder::send_data`]. `content_length`, when given, is sent as
     /// the content-length field (and checked by [`Responder::finish`]).
@@ -667,6 +929,40 @@ impl Responder<HeadersPending> {
             Ok(()) => Ok(self.transition()),
             Err(e) => Err((self, e)),
         }
+    }
+
+    /// Accepts an extended CONNECT: sends 200 and establishes the session.
+    /// The request obligation becomes the [`Session`] obligation. To refuse
+    /// a session, answer with [`Responder::respond`] and a 4xx/5xx status.
+    pub fn accept_session<T: Transport>(
+        self,
+        conn: &mut ServerConnection,
+        t: &mut T,
+        fields: Vec<Field>,
+    ) -> Result<Session, (Self, SendError)> {
+        if let Err(e) = conn.check_responder(self.conn, self.stream_id) {
+            return Err((self, e));
+        }
+        if !conn
+            .requests
+            .get(&self.stream_id)
+            .is_some_and(|rs| rs.phase == Phase::Tunnel)
+        {
+            return Err((self, SendError::NotExtendedConnect));
+        }
+        if let Err(e) = conn.send_response_headers(t, self.stream_id, 200, fields, None, 0) {
+            return Err((self, e));
+        }
+        conn.core.establish_session(self.stream_id);
+        conn.forward_session_events();
+        let mut me = self;
+        me.armed = false;
+        Ok(Session {
+            id: me.stream_id,
+            conn: me.conn,
+            sink: me.sink.clone(),
+            armed: true,
+        })
     }
 }
 
@@ -700,6 +996,64 @@ impl Responder<StreamingBody> {
     }
 }
 
+/// An established extended CONNECT session (WebTransport or another
+/// protocol): the obligation that replaced the request's responder. Not
+/// `Clone`; its only exit is [`Session::close`]. Dropping it is detected:
+/// the connection resets the CONNECT stream with H3_INTERNAL_ERROR (which
+/// ends the session and resets its streams) and counts it in
+/// [`ConnectionStats::leaked_responders`].
+#[must_use = "a session must be closed"]
+#[derive(Debug)]
+pub struct Session {
+    id: u64,
+    conn: u64,
+    sink: LeakSink,
+    armed: bool,
+}
+
+impl Session {
+    /// The session ID: the CONNECT request's stream ID.
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Closes the session: a CLOSE_WEBTRANSPORT_SESSION capsule with
+    /// `code` and `reason` (WebTransport only), then FIN. The session's
+    /// streams are reset with WT_SESSION_GONE. Also the exit after the
+    /// peer closed the session ([`SessionEvent::Closed`]): then only our
+    /// FIN is sent. Refused (and handed back) for a reason over 1024 bytes
+    /// or not UTF-8, and for another connection.
+    pub fn close<T: Transport>(
+        mut self,
+        conn: &mut ServerConnection,
+        t: &mut T,
+        code: u32,
+        reason: &[u8],
+    ) -> Result<ResponseSent, (Self, SendError)> {
+        if self.conn != conn.id {
+            return Err((self, SendError::Foreign));
+        }
+        match conn.close_session(t, self.id, code, reason) {
+            Ok(reset) => {
+                self.armed = false;
+                Ok(ResponseSent {
+                    stream_id: self.id,
+                    reset,
+                })
+            }
+            Err(e) => Err((self, e)),
+        }
+    }
+}
+
+impl Drop for Session {
+    fn drop(&mut self) {
+        if self.armed {
+            leaked(&self.sink, self.id);
+        }
+    }
+}
+
 /// A complete request handed to the application.
 #[derive(Debug)]
 pub struct Request {
@@ -710,10 +1064,38 @@ pub struct Request {
     pub responder: Responder<HeadersPending>,
 }
 
+/// A request whose body is still arriving
+/// ([`H3Config::streaming_request_bodies`]): read it with
+/// [`ServerConnection::read_body`].
+#[derive(Debug)]
+pub struct StreamingRequest {
+    pub stream_id: u64,
+    pub head: RequestHead,
+    pub responder: Responder<HeadersPending>,
+}
+
+/// An extended CONNECT (RFC 9220): accept it with
+/// [`Responder::accept_session`] or refuse it with a response.
+#[derive(Debug)]
+pub struct ConnectRequest {
+    pub stream_id: u64,
+    pub head: RequestHead,
+    pub kind: SessionKind,
+    pub responder: Responder<HeadersPending>,
+}
+
 /// Something the server application should know.
 #[derive(Debug)]
 pub enum Event {
     Request(Box<Request>),
+    StreamingRequest(Box<StreamingRequest>),
+    /// Body bytes (or the end of the body) are ready for
+    /// [`ServerConnection::read_body`].
+    BodyReadable {
+        stream_id: u64,
+    },
+    Connect(Box<ConnectRequest>),
+    Session(SessionEvent),
     /// A request stream failed before a complete request: it was reset
     /// with `code` (malformed, too large, refused, or reset by the peer).
     RequestFailed {
@@ -730,6 +1112,15 @@ pub enum Event {
     GoAway(u64),
 }
 
+/// The result of [`ServerConnection::read_body`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BodyRead {
+    pub len: usize,
+    /// The whole body has been read; trailers, if any, are available from
+    /// [`ServerConnection::take_trailers`].
+    pub end: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Phase {
     /// Waiting for the request HEADERS.
@@ -741,8 +1132,19 @@ enum Phase {
     Body,
     /// Trailers received; only unknown frames may follow.
     Trailers,
-    /// Handed to the application.
+    /// Handed to the application whole.
     Delivered,
+    /// Handed to the application with its body still arriving.
+    Streaming,
+    /// An extended CONNECT handed to the application; DATA is capsules.
+    Tunnel,
+}
+
+impl Phase {
+    /// The application holds the responder (or session).
+    fn handed_out(self) -> bool {
+        matches!(self, Self::Delivered | Self::Streaming | Self::Tunnel)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -760,11 +1162,35 @@ struct RequestStream {
     reader: FrameReader,
     phase: Phase,
     head: Option<RequestHead>,
+    /// Whole mode: the body so far. Streaming mode: bytes not yet read by
+    /// the application.
     body: Vec<u8>,
+    /// Body bytes received in total (content-length checks).
+    body_total: u64,
     trailers: Vec<Field>,
     fin: bool,
     reply: Reply,
     head_request: bool,
+    /// Any frame was seen (WEBTRANSPORT_STREAM must come first).
+    framed: bool,
+    /// Streaming mode: the application pulls the body.
+    streaming: bool,
+    /// Trailers came (streaming mode): only unknown frames may follow.
+    trailers_seen: bool,
+    /// Streaming mode: FIN received and checked.
+    body_end: bool,
+    /// Streaming mode: a BodyReadable event is outstanding.
+    notified: bool,
+}
+
+impl RequestStream {
+    /// Request bytes the connection holds for this stream (budgeted).
+    fn held(&self) -> usize {
+        match self.phase {
+            Phase::Delivered | Phase::Tunnel => self.reader.buffered(),
+            _ => self.body.len() + self.reader.buffered(),
+        }
+    }
 }
 
 /// A server-side HTTP/3 connection.
@@ -779,6 +1205,8 @@ pub struct ServerConnection {
     /// The next client bidi stream ID we expect, for GOAWAY.
     next_request_id: u64,
     goaway_reported: Option<u64>,
+    /// A request stream could not be read for lack of connection budget.
+    budget_blocked: bool,
 }
 
 fn next_conn_id() -> u64 {
@@ -790,7 +1218,7 @@ fn next_conn_id() -> u64 {
 impl ServerConnection {
     pub fn new(cfg: H3Config) -> Self {
         Self {
-            core: Core::new(cfg),
+            core: Core::new(cfg, true),
             id: next_conn_id(),
             requests: BTreeMap::new(),
             ready: VecDeque::new(),
@@ -798,17 +1226,25 @@ impl ServerConnection {
             goaway_sent: None,
             next_request_id: 0,
             goaway_reported: None,
+            budget_blocked: false,
         }
     }
 
     pub fn stats(&self) -> ConnectionStats {
         self.core.stats
     }
+    pub fn session_stats(&self) -> SessionStats {
+        self.core.sessions.stats
+    }
     pub fn error(&self) -> Option<ConnectionError> {
         self.core.error
     }
     pub fn peer_settings(&self) -> Option<Settings> {
         self.core.peer_settings
+    }
+    /// The SETTINGS sent (after transport capability adjustments).
+    pub fn sent_settings(&self) -> Settings {
+        self.core.sent_settings
     }
     pub fn encoder(&self) -> &Encoder {
         &self.core.encoder
@@ -819,6 +1255,28 @@ impl ServerConnection {
     /// Request streams not yet finished (received or answered).
     pub fn open_requests(&self) -> usize {
         self.requests.len()
+    }
+    /// How many streams have a non-default priority recorded (a bound the
+    /// tests check: entries leave with their streams).
+    pub fn tracked_priorities(&self) -> usize {
+        self.core.priorities.len()
+    }
+    /// The RFC 9218 priority the scheduler uses for a request's response.
+    pub fn priority(&self, stream_id: u64) -> Priority {
+        self.core
+            .priorities
+            .get(&stream_id)
+            .copied()
+            .unwrap_or_default()
+    }
+    /// Request bytes the connection holds now, against
+    /// [`H3Config::max_connection_buffer`].
+    pub fn buffered_request_bytes(&self) -> usize {
+        self.requests.values().map(RequestStream::held).sum()
+    }
+    /// WebTransport streams open in any session.
+    pub fn webtransport_streams(&self) -> usize {
+        self.core.wt_streams()
     }
 
     /// Drives the connection: opens our streams, reads every stream,
@@ -837,12 +1295,17 @@ impl ServerConnection {
             {
                 rs.reply = Reply::Gone;
                 rs.fin = true;
+                if rs.phase == Phase::Tunnel {
+                    self.core
+                        .end_session(t, id, 0, Vec::new(), Some(code), true);
+                }
                 self.ready.push_back(Event::ResponseAbandoned {
                     stream_id: id,
                     code,
                 });
             }
         }
+        self.forward_session_events();
         self.retire();
     }
 
@@ -867,16 +1330,57 @@ impl ServerConnection {
         while let Some(r) = self.core.decoder.poll_unblocked() {
             self.unblocked(t, r)?;
         }
+        self.budget_blocked = false;
         let ids: Vec<u64> = self.requests.keys().copied().collect();
         for id in ids {
             self.read_request(t, id)?;
         }
+        if self.budget_blocked {
+            self.relieve_budget(t);
+        }
+        self.core.poll_datagrams(t)?;
         self.drain_leaks(t);
         Ok(())
     }
 
+    /// The connection buffer is exhausted. If nothing the application can
+    /// drain holds it (streaming bodies), whole bodies are deadlocked:
+    /// reset the newest one holding bytes.
+    fn relieve_budget<T: Transport>(&mut self, t: &mut T) {
+        if self.buffered_request_bytes() < self.core.cfg.max_connection_buffer {
+            return;
+        }
+        let streaming: usize = self
+            .requests
+            .values()
+            .filter(|rs| rs.phase == Phase::Streaming)
+            .map(RequestStream::held)
+            .sum();
+        if streaming > 0 {
+            return;
+        }
+        let victim = self
+            .requests
+            .iter()
+            .rev()
+            .find(|(_, rs)| !rs.phase.handed_out() && rs.held() > 0)
+            .map(|(id, _)| *id);
+        if let Some(id) = victim {
+            self.core.stats.budget_resets += 1;
+            self.malformed(t, id, Code::EXCESSIVE_LOAD);
+        }
+    }
+
+    /// Moves session events into the application's queue.
+    fn forward_session_events(&mut self) {
+        while let Some(e) = self.core.sessions.events.pop_front() {
+            self.ready.push_back(Event::Session(e));
+        }
+    }
+
     /// The next event.
     pub fn poll_event(&mut self) -> Option<Event> {
+        self.forward_session_events();
         self.ready.pop_front()
     }
 
@@ -896,32 +1400,71 @@ impl ServerConnection {
             return Err(ConnectionError::BadStreamId(id));
         }
         self.next_request_id = self.next_request_id.max(id + 4);
+        self.core.next_peer_bidi = self.next_request_id;
         if !goaway_allows(self.goaway_sent, id)
             || self.requests.len() >= self.core.cfg.max_concurrent_requests
         {
             t.reset(id, Code::REQUEST_REJECTED);
             t.stop_sending(id, Code::REQUEST_REJECTED);
             self.core.stats.rejected += 1;
+            self.core.drop_held_for(t, id);
             self.ready.push_back(Event::RequestFailed {
                 stream_id: id,
                 code: Code::REQUEST_REJECTED,
             });
             return Ok(());
         }
+        let max = self.core.cfg.max_frame_payload;
+        self.core.unparsed.insert(id);
         self.requests.insert(
             id,
             RequestStream {
-                reader: FrameReader::new(self.core.cfg.max_frame_payload),
+                reader: if self.core.sent_settings.webtransport_max_sessions.is_some() {
+                    FrameReader::with_webtransport(max)
+                } else {
+                    FrameReader::new(max)
+                },
                 phase: Phase::Headers,
                 head: None,
                 body: Vec::new(),
+                body_total: 0,
                 trailers: Vec::new(),
                 fin: false,
                 reply: Reply::None,
                 head_request: false,
+                framed: false,
+                streaming: false,
+                trailers_seen: false,
+                body_end: false,
+                notified: false,
             },
         );
         Ok(())
+    }
+
+    /// How many bytes stream `id` may read now: the scratch buffer, the
+    /// streaming window and the connection budget.
+    fn read_allowance(&self, id: u64, scratch: usize) -> usize {
+        let Some(rs) = self.requests.get(&id) else {
+            return 0;
+        };
+        // Capsules and trailers on handed-out streams are small and
+        // bounded by the readers; they never wait for the budget.
+        if matches!(rs.phase, Phase::Delivered | Phase::Tunnel) {
+            return scratch;
+        }
+        let cfg = &self.core.cfg;
+        let mut n = scratch.min(
+            cfg.max_connection_buffer
+                .saturating_sub(self.buffered_request_bytes()),
+        );
+        if rs.phase == Phase::Streaming {
+            // The window counts body bytes the application has not read.
+            // A partial frame in the reader (such as trailer HEADERS) is
+            // bounded by `max_frame_payload` instead, so it can complete.
+            n = n.min(cfg.stream_body_window.saturating_sub(rs.body.len()));
+        }
+        n
     }
 
     fn read_request<T: Transport>(&mut self, t: &mut T, id: u64) -> Result<(), ConnectionError> {
@@ -936,7 +1479,8 @@ impl ServerConnection {
                 if matches!(rs.phase, Phase::Blocked { .. }) || rs.fin {
                     return Ok(());
                 }
-                let r = match t.read(id, &mut buf) {
+                let allowance = self.read_allowance(id, buf.len());
+                let r = match t.read(id, &mut buf[..allowance]) {
                     Ok(r) => r,
                     Err(TransportError::Reset(code)) => {
                         self.peer_reset(t, id, code);
@@ -953,9 +1497,27 @@ impl ServerConnection {
                     let rs = self.requests.get_mut(&id).expect("present");
                     rs.reader.push(&buf[..r.len]);
                     self.request_frames(t, id)?;
+                    if !self.requests.contains_key(&id) {
+                        // A WebTransport stream now owned by the session
+                        // layer (or a request that was reset).
+                        if r.fin {
+                            self.core.wt_peer_fin(id);
+                        }
+                        return Ok(());
+                    }
                 }
                 if r.fin {
                     self.request_fin(t, id)?;
+                    return Ok(());
+                }
+                if allowance == 0 {
+                    if self
+                        .requests
+                        .get(&id)
+                        .is_some_and(|rs| rs.phase != Phase::Streaming)
+                    {
+                        self.budget_blocked = true;
+                    }
                     return Ok(());
                 }
                 if r.len == 0 {
@@ -995,24 +1557,64 @@ impl ServerConnection {
                     });
                 }
             };
+            let first = !rs.framed;
+            rs.framed = true;
             let phase = rs.phase;
             match (f, phase) {
+                (Frame::WebTransportStream(session), Phase::Headers)
+                    if first && self.core.sent_settings.webtransport_max_sessions.is_some() =>
+                {
+                    let mut rs = self.requests.remove(&id).expect("present");
+                    // Not a session: streams naming it are refused.
+                    self.core.drop_held_for(t, id);
+                    let rest = rs.reader.take_rest();
+                    let gone = self.core.session_known_gone(session);
+                    return self
+                        .core
+                        .incoming_wt_stream(t, id, session, true, rest, gone);
+                }
                 (Frame::Unknown(_), _) => self.core.stats.unknown_frames += 1,
                 (Frame::Headers(block), Phase::Headers) => self.section(t, id, &block, false)?,
-                (Frame::Headers(block), Phase::Body) => self.section(t, id, &block, true)?,
-                (Frame::Data(d), Phase::Body) => {
-                    if d.len() > self.core.cfg.max_body_bytes - rs.body.len() {
+                (f @ (Frame::Headers(_) | Frame::Data(_)), Phase::Streaming)
+                    if rs.trailers_seen =>
+                {
+                    return Err(ConnectionError::FrameUnexpected {
+                        stream_id: id,
+                        frame_type: f.frame_type(),
+                    });
+                }
+                (Frame::Headers(block), Phase::Body | Phase::Streaming) => {
+                    self.section(t, id, &block, true)?
+                }
+                (Frame::Data(d), Phase::Body | Phase::Streaming) => {
+                    let cfg = &self.core.cfg;
+                    if phase == Phase::Body
+                        && d.len() > cfg.max_body_bytes.saturating_sub(rs.body.len())
+                    {
                         self.malformed(t, id, Code::EXCESSIVE_LOAD);
                         return Ok(());
                     }
+                    rs.body_total += d.len() as u64;
                     rs.body.extend_from_slice(&d);
                     if let Some(cl) = rs.head.as_ref().and_then(|h| h.content_length)
-                        && rs.body.len() as u64 > cl
+                        && rs.body_total > cl
                     {
                         self.malformed(t, id, Code::MESSAGE_ERROR);
                         return Ok(());
                     }
+                    if phase == Phase::Streaming && !d.is_empty() && !rs.notified {
+                        rs.notified = true;
+                        self.ready.push_back(Event::BodyReadable { stream_id: id });
+                    }
                 }
+                (Frame::Data(d), Phase::Tunnel) => {
+                    if let Err(code) = self.core.session_data(t, id, &d) {
+                        self.malformed(t, id, code);
+                        return Ok(());
+                    }
+                }
+                // Trailers on a CONNECT stream carry nothing we use.
+                (Frame::Headers(_), Phase::Tunnel) => self.core.stats.unknown_frames += 1,
                 (f, Phase::Delivered) if matches!(f, Frame::Data(_) | Frame::Headers(_)) => {
                     // Bytes after the request ended (FIN) cannot occur;
                     // after delivery only via a protocol violation.
@@ -1069,10 +1671,12 @@ impl ServerConnection {
                 let Phase::Blocked { trailers } = rs.phase else {
                     return Ok(());
                 };
-                rs.phase = if trailers {
-                    Phase::Body
-                } else {
+                rs.phase = if !trailers {
                     Phase::Headers
+                } else if rs.streaming {
+                    Phase::Streaming
+                } else {
+                    Phase::Body
                 };
                 self.fields(t, id, s, trailers)?;
                 // Frames that arrived behind the blocked section.
@@ -1092,6 +1696,16 @@ impl ServerConnection {
         }
     }
 
+    fn new_responder(&self, id: u64) -> Responder<HeadersPending> {
+        Responder {
+            stream_id: id,
+            conn: self.id,
+            sink: self.leaks.clone(),
+            armed: true,
+            _state: PhantomData,
+        }
+    }
+
     fn fields<T: Transport>(
         &mut self,
         t: &mut T,
@@ -1108,31 +1722,97 @@ impl ServerConnection {
                 return Ok(());
             }
             rs.trailers = s.fields;
-            rs.phase = Phase::Trailers;
+            if rs.phase == Phase::Streaming {
+                // Only unknown frames may follow; FIN ends the body.
+                rs.trailers_seen = true;
+            } else {
+                rs.phase = Phase::Trailers;
+            }
             return Ok(());
         }
-        match message::parse_request(s.fields) {
-            Ok(head) => {
-                if head
-                    .content_length
-                    .is_some_and(|cl| cl > self.core.cfg.max_body_bytes as u64)
-                {
-                    self.malformed(t, id, Code::EXCESSIVE_LOAD);
-                    return Ok(());
-                }
-                rs.head = Some(head);
-                rs.phase = Phase::Body;
-                Ok(())
-            }
+        let head = match message::parse_request(s.fields) {
+            Ok(head) => head,
             Err(MessageError::UnsupportedConnect) => {
                 self.malformed(t, id, Code::REQUEST_REJECTED);
-                Ok(())
+                return Ok(());
             }
             Err(_) => {
                 self.malformed(t, id, Code::MESSAGE_ERROR);
-                Ok(())
+                return Ok(());
             }
+        };
+        self.core.header_priority(id, &head.fields);
+        if let Some(protocol) = &head.protocol {
+            // RFC 9220 §3: :protocol only after we enabled it.
+            if !self.core.sent_settings.enable_connect_protocol {
+                self.malformed(t, id, Code::MESSAGE_ERROR);
+                return Ok(());
+            }
+            let wt = protocol == "webtransport"
+                && self.core.sent_settings.webtransport_max_sessions.is_some();
+            if wt
+                && self.core.live_webtransport_sessions() as u64
+                    >= self
+                        .core
+                        .sent_settings
+                        .webtransport_max_sessions
+                        .unwrap_or(0)
+            {
+                self.malformed(t, id, Code::REQUEST_REJECTED);
+                return Ok(());
+            }
+            let kind = if wt {
+                SessionKind::WebTransport
+            } else {
+                SessionKind::Tunnel
+            };
+            self.core.add_session(id, kind);
+            self.core.unparsed.remove(&id);
+            let rs = self.requests.get_mut(&id).expect("present");
+            rs.phase = Phase::Tunnel;
+            self.core.stats.requests += 1;
+            let responder = self.new_responder(id);
+            self.ready
+                .push_back(Event::Connect(Box::new(ConnectRequest {
+                    stream_id: id,
+                    head,
+                    kind,
+                    responder,
+                })));
+            return Ok(());
         }
+        // Streams that named this request stream as their session.
+        self.core.drop_held_for(t, id);
+        if head
+            .content_length
+            .is_some_and(|cl| cl > self.core.cfg.max_body_bytes as u64)
+            && !self.core.cfg.streaming_request_bodies
+        {
+            self.malformed(t, id, Code::EXCESSIVE_LOAD);
+            return Ok(());
+        }
+        let rs = self.requests.get_mut(&id).expect("present");
+        rs.head_request = head.method == "HEAD";
+        if self.core.cfg.streaming_request_bodies {
+            rs.phase = Phase::Streaming;
+            rs.streaming = true;
+            rs.head = Some(RequestHead {
+                fields: Vec::new(),
+                ..head.clone()
+            });
+            self.core.stats.requests += 1;
+            let responder = self.new_responder(id);
+            self.ready
+                .push_back(Event::StreamingRequest(Box::new(StreamingRequest {
+                    stream_id: id,
+                    head,
+                    responder,
+                })));
+        } else {
+            rs.head = Some(head);
+            rs.phase = Phase::Body;
+        }
+        Ok(())
     }
 
     fn request_fin<T: Transport>(&mut self, t: &mut T, id: u64) -> Result<(), ConnectionError> {
@@ -1160,6 +1840,39 @@ impl ServerConnection {
                 Ok(())
             }
             Phase::Body | Phase::Trailers => self.deliver(t, id),
+            Phase::Streaming => {
+                if rs
+                    .head
+                    .as_ref()
+                    .and_then(|h| h.content_length)
+                    .is_some_and(|cl| cl != rs.body_total)
+                {
+                    self.malformed(t, id, Code::MESSAGE_ERROR);
+                    return Ok(());
+                }
+                rs.body_end = true;
+                if !rs.notified {
+                    rs.notified = true;
+                    self.ready.push_back(Event::BodyReadable { stream_id: id });
+                }
+                Ok(())
+            }
+            Phase::Tunnel => {
+                // FIN on the CONNECT stream ends the session (a capsule
+                // may have ended it already).
+                let capsules_ok = self
+                    .core
+                    .sessions
+                    .map
+                    .get(&id)
+                    .is_none_or(|s| s.capsules.finish().is_ok());
+                if !capsules_ok {
+                    self.malformed(t, id, Code::MESSAGE_ERROR);
+                    return Ok(());
+                }
+                self.core.end_session(t, id, 0, Vec::new(), None, true);
+                Ok(())
+            }
             Phase::Delivered => Ok(()),
         }
     }
@@ -1167,33 +1880,69 @@ impl ServerConnection {
     fn deliver<T: Transport>(&mut self, t: &mut T, id: u64) -> Result<(), ConnectionError> {
         let rs = self.requests.get_mut(&id).expect("present");
         let head = rs.head.take().expect("headers received");
-        if head
-            .content_length
-            .is_some_and(|cl| cl != rs.body.len() as u64)
-        {
+        if head.content_length.is_some_and(|cl| cl != rs.body_total) {
             rs.head = Some(head);
             self.malformed(t, id, Code::MESSAGE_ERROR);
             return Ok(());
         }
         rs.phase = Phase::Delivered;
-        rs.head_request = head.method == "HEAD";
         let body = std::mem::take(&mut rs.body);
         let trailers = std::mem::take(&mut rs.trailers);
         self.core.stats.requests += 1;
+        let responder = self.new_responder(id);
         self.ready.push_back(Event::Request(Box::new(Request {
             stream_id: id,
-            responder: Responder {
-                stream_id: id,
-                conn: self.id,
-                sink: self.leaks.clone(),
-                armed: true,
-                _state: PhantomData,
-            },
+            responder,
             head,
             body,
             trailers,
         })));
         Ok(())
+    }
+
+    /// Reads body bytes of a streaming request. Reading frees window and
+    /// budget, so the connection reads more from the stream at once.
+    /// `Err(StreamGone)` if the request failed or was reset (an event said
+    /// so) or is not a streaming request.
+    pub fn read_body<T: Transport>(
+        &mut self,
+        t: &mut T,
+        stream_id: u64,
+        out: &mut [u8],
+    ) -> Result<BodyRead, SendError> {
+        let rs = match self.requests.get_mut(&stream_id) {
+            Some(rs) if rs.phase == Phase::Streaming && rs.reply != Reply::Gone => rs,
+            _ => return Err(SendError::StreamGone),
+        };
+        let n = out.len().min(rs.body.len());
+        out[..n].copy_from_slice(&rs.body[..n]);
+        rs.body.drain(..n);
+        if rs.body.is_empty() {
+            rs.notified = false;
+        }
+        let end = rs.body_end && rs.body.is_empty();
+        if n > 0 && !rs.fin {
+            if let Err(e) = self.read_request(t, stream_id) {
+                self.core.fail(t, e);
+            }
+            // New data after this read gets a new event.
+            if let Some(rs) = self.requests.get_mut(&stream_id)
+                && rs.body.is_empty()
+                && !rs.body_end
+            {
+                rs.notified = false;
+            }
+            self.core.flush(t);
+        }
+        Ok(BodyRead { len: n, end })
+    }
+
+    /// The trailers of a streaming request, once its body ended.
+    pub fn take_trailers(&mut self, stream_id: u64) -> Vec<Field> {
+        self.requests
+            .get_mut(&stream_id)
+            .map(|rs| std::mem::take(&mut rs.trailers))
+            .unwrap_or_default()
     }
 
     /// A stream error: reset and stop the stream, cancel its QPACK state.
@@ -1204,12 +1953,17 @@ impl ServerConnection {
         t.reset(id, code);
         self.core.stats.resets_sent += 1;
         self.core.discard(id);
-        if let Some(rs) = self.requests.remove(&id)
-            && rs.phase == Phase::Delivered
-        {
-            // Cannot happen: delivered requests are no longer parsed.
-            debug_assert!(false, "malformed after delivery");
+        self.core.drop_held_for(t, id);
+        if let Some(rs) = self.requests.remove(&id) {
+            // Cannot happen: whole requests are not parsed after delivery.
+            debug_assert!(rs.phase != Phase::Delivered, "malformed after delivery");
+            if rs.phase == Phase::Tunnel {
+                self.core
+                    .end_session(t, id, 0, Vec::new(), Some(code.0), true);
+                self.core.forget_session(id);
+            }
         }
+        self.core.forget_priority(id);
         self.ready.push_back(Event::RequestFailed {
             stream_id: id,
             code,
@@ -1222,9 +1976,14 @@ impl ServerConnection {
         let Some(rs) = self.requests.get_mut(&id) else {
             return;
         };
-        if rs.phase == Phase::Delivered {
+        if rs.phase == Phase::Tunnel {
+            self.core
+                .end_session(t, id, 0, Vec::new(), Some(code), true);
+        }
+        if rs.phase.handed_out() {
             // The application holds the responder; let it finish (no-op).
             rs.fin = true;
+            rs.body.clear();
             if !matches!(rs.reply, Reply::Finished) {
                 rs.reply = Reply::Gone;
                 self.core.discard(id);
@@ -1236,6 +1995,8 @@ impl ServerConnection {
             }
         } else {
             self.requests.remove(&id);
+            self.core.forget_priority(id);
+            self.core.drop_held_for(t, id);
             t.reset(id, Code::REQUEST_CANCELLED);
             self.ready.push_back(Event::RequestFailed {
                 stream_id: id,
@@ -1258,9 +2019,20 @@ impl ServerConnection {
     /// Forgets request streams whose response is complete and flushed.
     fn retire(&mut self) {
         let core = &self.core;
+        let mut gone = Vec::new();
         self.requests.retain(|id, rs| {
-            !(rs.fin && matches!(rs.reply, Reply::Finished | Reply::Gone) && core.queued(*id) == 0)
+            let done = rs.fin
+                && matches!(rs.reply, Reply::Finished | Reply::Gone)
+                && core.queued(*id) == 0;
+            if done {
+                gone.push(*id);
+            }
+            !done
         });
+        for id in gone {
+            self.core.forget_session(id);
+            self.core.forget_priority(id);
+        }
     }
 
     fn check_responder(&self, conn: u64, id: u64) -> Result<(), SendError> {
@@ -1271,6 +2043,53 @@ impl ServerConnection {
             Some(rs) if rs.reply != Reply::Gone && self.core.error.is_none() => Ok(()),
             _ => Err(SendError::StreamGone),
         }
+    }
+
+    fn check_fields(fields: &[Field]) -> Result<(), SendError> {
+        for f in fields {
+            if f.name.first() == Some(&b':') {
+                return Err(SendError::InvalidResponse(
+                    MessageError::UnknownPseudoHeader,
+                ));
+            }
+            if f.name == b"content-length" {
+                return Err(SendError::InvalidResponse(
+                    MessageError::InvalidContentLength,
+                ));
+            }
+        }
+        message::check_trailers(fields).map_err(SendError::InvalidResponse)
+    }
+
+    fn send_interim<T: Transport>(
+        &mut self,
+        t: &mut T,
+        id: u64,
+        status: u16,
+        fields: Vec<Field>,
+    ) -> Result<(), SendError> {
+        if !(100..=199).contains(&status) || status == 101 {
+            return Err(SendError::InvalidResponse(MessageError::InvalidStatus));
+        }
+        Self::check_fields(&fields)?;
+        let mut list = Vec::with_capacity(fields.len() + 1);
+        list.push(Field::new(":status", status.to_string()));
+        list.extend(fields);
+        let budget = self
+            .core
+            .cfg
+            .max_stream_buffer
+            .saturating_sub(self.core.queued(id));
+        if headers_frame_bound(&list) > budget {
+            return Err(SendError::BufferFull);
+        }
+        let block = self.core.encoder.encode(id, &list);
+        let mut out = Vec::with_capacity(block.len() + 8);
+        frame::write_frame(&mut out, frame::HEADERS, &block);
+        self.core.queue(id, &out);
+        self.core.stats.interim_responses += 1;
+        self.core.flush(t);
+        Ok(())
     }
 
     fn send_response_headers<T: Transport>(
@@ -1287,19 +2106,7 @@ impl ServerConnection {
         }
         let mut list = Vec::with_capacity(fields.len() + 2);
         list.push(Field::new(":status", status.to_string()));
-        for f in &fields {
-            if f.name.first() == Some(&b':') {
-                return Err(SendError::InvalidResponse(
-                    MessageError::UnknownPseudoHeader,
-                ));
-            }
-            if f.name == b"content-length" {
-                return Err(SendError::InvalidResponse(
-                    MessageError::InvalidContentLength,
-                ));
-            }
-        }
-        message::check_trailers(&fields).map_err(SendError::InvalidResponse)?;
+        Self::check_fields(&fields)?;
         list.extend(fields);
         let bodyless = matches!(status, 204 | 304);
         if let Some(cl) = content_length
@@ -1442,10 +2249,61 @@ impl ServerConnection {
             self.core.queue(id, &out);
         }
         rs.reply = Reply::Finished;
+        let phase = rs.phase;
+        if !rs.fin && phase != Phase::Tunnel {
+            // Answered before the request ended: the rest of the body is
+            // not needed (RFC 9114 §4.1: STOP_SENDING with H3_NO_ERROR).
+            rs.fin = true;
+            rs.body.clear();
+            t.stop_sending(id, Code::NO_ERROR);
+            self.core.decoder.cancel_stream(id);
+        }
+        if phase == Phase::Tunnel {
+            // A refused extended CONNECT: the session never started.
+            self.core.end_session(t, id, 0, Vec::new(), None, false);
+            if !self.requests.get(&id).is_some_and(|rs| rs.fin) {
+                t.stop_sending(id, Code::NO_ERROR);
+                if let Some(rs) = self.requests.get_mut(&id) {
+                    rs.fin = true;
+                }
+            }
+        }
         self.core.queue_fin(id);
         self.core.stats.responses += 1;
         self.core.flush(t);
         Ok(())
+    }
+
+    fn close_session<T: Transport>(
+        &mut self,
+        t: &mut T,
+        id: u64,
+        code: u32,
+        reason: &[u8],
+    ) -> Result<Option<Code>, SendError> {
+        if reason.len() > crate::capsule::MAX_CLOSE_REASON || std::str::from_utf8(reason).is_err() {
+            return Err(SendError::BadCloseReason);
+        }
+        let live = self
+            .requests
+            .get(&id)
+            .is_some_and(|rs| rs.reply != Reply::Gone && rs.reply != Reply::Finished)
+            && self.core.error.is_none();
+        if !live {
+            // The stream is gone (reset by the peer, or the connection
+            // failed): nothing to send; the obligation is discharged.
+            self.core.end_session(t, id, 0, Vec::new(), None, false);
+            return Ok(Some(Code::REQUEST_CANCELLED));
+        }
+        self.core
+            .queue_session_close(id, code, reason)
+            .map_err(|_| SendError::BadCloseReason)?;
+        self.core.end_session(t, id, code, Vec::new(), None, false);
+        let rs = self.requests.get_mut(&id).expect("live");
+        rs.reply = Reply::Finished;
+        self.core.stats.responses += 1;
+        self.core.flush(t);
+        Ok(None)
     }
 
     fn reset_request<T: Transport>(&mut self, t: &mut T, id: u64, code: Code) {
@@ -1461,7 +2319,94 @@ impl ServerConnection {
             }
             rs.reply = Reply::Gone;
             rs.fin = true;
+            rs.body.clear();
+            if rs.phase == Phase::Tunnel {
+                self.core
+                    .end_session(t, id, 0, Vec::new(), Some(code.0), false);
+            }
         }
+    }
+
+    fn session_check(&self, s: &Session) -> Result<u64, SessionError> {
+        if s.conn != self.id {
+            return Err(SessionError::Foreign);
+        }
+        Ok(s.id)
+    }
+
+    /// Opens a WebTransport stream in `session`.
+    pub fn open_stream<T: Transport>(
+        &mut self,
+        t: &mut T,
+        session: &Session,
+        bidi: bool,
+    ) -> Result<u64, SessionError> {
+        let id = self.session_check(session)?;
+        self.core.open_wt_stream(t, id, bidi)
+    }
+
+    /// Sends an HTTP Datagram in `session`.
+    pub fn send_datagram<T: Transport>(
+        &mut self,
+        t: &mut T,
+        session: &Session,
+        payload: &[u8],
+    ) -> Result<DatagramPath, SessionError> {
+        let id = self.session_check(session)?;
+        self.core.send_session_datagram(t, id, payload)
+    }
+
+    /// Writes WebTransport stream data; returns how many bytes the
+    /// transport took (0 under flow control).
+    pub fn write_stream<T: Transport>(
+        &mut self,
+        t: &mut T,
+        stream_id: u64,
+        data: &[u8],
+    ) -> Result<usize, SessionError> {
+        self.core.wt_write(t, stream_id, data)
+    }
+
+    pub fn finish_stream<T: Transport>(
+        &mut self,
+        t: &mut T,
+        stream_id: u64,
+    ) -> Result<(), SessionError> {
+        self.core.wt_finish(t, stream_id)
+    }
+
+    pub fn read_stream<T: Transport>(
+        &mut self,
+        t: &mut T,
+        stream_id: u64,
+        out: &mut [u8],
+    ) -> Result<ReadOutcome, SessionError> {
+        self.core.wt_read(t, stream_id, out)
+    }
+
+    /// RESET_STREAM with WebTransport application error `code`.
+    pub fn reset_stream<T: Transport>(
+        &mut self,
+        t: &mut T,
+        stream_id: u64,
+        code: u32,
+    ) -> Result<(), SessionError> {
+        self.core.wt_reset(t, stream_id, code)
+    }
+
+    /// STOP_SENDING with WebTransport application error `code`.
+    pub fn stop_stream<T: Transport>(
+        &mut self,
+        t: &mut T,
+        stream_id: u64,
+        code: u32,
+    ) -> Result<(), SessionError> {
+        self.core.wt_stop_sending(t, stream_id, code)
+    }
+
+    /// The session a WebTransport stream belongs to.
+    pub fn stream_session(&self, stream_id: u64) -> Option<u64> {
+        self.core.wt_session_of(stream_id)
     }
 }
 

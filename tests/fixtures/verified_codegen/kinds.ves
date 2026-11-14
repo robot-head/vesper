@@ -1,0 +1,18 @@
+// Every integer kind, comparisons and bool logic.
+fn narrow(a: u8, b: u8) -> u8 eff [Fail[ArithOverflow]] {
+    a * b + 1
+}
+
+fn mid(a: u32, b: u32) -> u32 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    a + (b - a) / 2
+}
+
+fn signs(a: i64, b: i64) -> (i64, i64, bool, bool) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    (a / b, a % b, a < b, a >= b && b != 0)
+}
+
+fn main() -> (u8, u32, u64, (i64, i64, bool, bool)) eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let big: u64 = 18446744073709551615;
+    let w = wrapping_add(big, 2);
+    (narrow(15, 16), mid(4000000000, 4294967295), w, signs(-7, 2))
+}

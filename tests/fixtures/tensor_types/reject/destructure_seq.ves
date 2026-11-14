@@ -1,0 +1,10 @@
+// expect: E0768
+// at: ActiveKvSeq {
+// message: cannot destructure one
+fn f(s: ActiveKvSeq[2, 4]) -> u64 {
+    let ActiveKvSeq {
+        seq
+    }
+    = s;
+    seq
+}

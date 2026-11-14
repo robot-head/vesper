@@ -1,0 +1,48 @@
+package vesper:kv@0.2.0;
+
+/// Value types shared by the store and the guest.
+interface types {
+  enum level { low, high }
+  record entry {
+    key: u64,
+    value: u64,
+    level: level,
+    %type: u32,
+  }
+  variant fault {
+    missing(u64),
+    denied,
+    quota(u32),
+  }
+}
+
+/// A host key-value store with linear cursors.
+interface store {
+  use types.{entry, fault, level};
+
+  resource cursor {
+    constructor(start: u64);
+    /// The next entry, or none at the end.
+    next: func() -> option<entry>;
+    /// Consumes the cursor and returns one advanced by `n`.
+    skip: static func(c: cursor, n: u32) -> cursor;
+  }
+  get: func(key: u64) -> result<entry, fault>;
+  put: func(e: entry) -> result<_, fault>;
+  span: func(lo: u64, hi: u64) -> tuple<u64, u64>;
+  rename: func(old: string, new: string) -> bool;
+  floor: func(l: level) -> level;
+}
+
+interface tuning {
+  use types.{level};
+  set-level: func(l: level) -> level;
+}
+
+world plugin-kv {
+  use types.{fault};
+  import store;
+  import log: func(msg: string);
+  export run: func(seed: u64) -> result<u64, fault>;
+  export tuning;
+}

@@ -313,3 +313,102 @@ fn join_intermediate_bytes_are_bounded() {
         assert_eq!(got.rows, expect.rows, "{sql}");
     }
 }
+
+/// Chains of three and four inner joins are reordered by cost (smallest
+/// input first, connected inputs next) and still return the row executor's
+/// rows in its order, across batch sizes, residuals, NULL keys, a cross
+/// product component and an outer join kept as one input.
+#[test]
+fn reordered_inner_chains_match_the_row_executor() {
+    let c = catalog();
+    let none = BTreeMap::new();
+    let engines = [
+        VectorEngine::detect(),
+        VectorEngine::portable().with_batch(1).unwrap(),
+        VectorEngine::portable().with_batch(5).unwrap(),
+    ];
+    let mut compared = 0;
+    for seed in 0..4 {
+        // l is the largest input and written first; m (6 rows) is smallest.
+        let d = data(&c, 20 + seed, 30, 20);
+        for (sql, first) in [
+            (
+                "SELECT a.id, b.id AS bid, x.tag FROM l a JOIN r b ON a.k = b.k JOIN m x ON x.k = b.k",
+                "m",
+            ),
+            (
+                "SELECT a.id, b.id AS bid, x.k FROM l a JOIN r b ON a.k = b.k AND a.f <> b.f \
+                 JOIN m x ON x.k = a.k AND x.tag IS NOT NULL",
+                "m",
+            ),
+            (
+                "SELECT a.id, z.id AS zid, x.k FROM l a JOIN l z ON a.k = z.k AND a.id < z.id \
+                 JOIN m x ON x.k = z.k JOIN r b ON b.k = x.k WHERE b.b",
+                // Optimized, `b.b` filters r below m's size first.
+                "?",
+            ),
+            // No equality to m: a nested-loop step with a residual.
+            (
+                "SELECT a.id, b.id AS bid, x.k FROM l a JOIN r b ON a.k = b.k JOIN m x ON x.k < b.k",
+                "m",
+            ),
+            (
+                "SELECT a.id, b.id AS bid, x.k FROM l a JOIN r b ON a.s = b.s \
+                 JOIN (m x LEFT JOIN r y ON y.k = x.k) ON x.k = b.k",
+                "",
+            ),
+        ] {
+            let Ok(q) = c.prepare(sql, &[], Limits::default()) else {
+                // The parser may not accept a parenthesized join input.
+                assert!(first.is_empty(), "{sql}");
+                continue;
+            };
+            for q in [q.clone(), q.optimized()] {
+                let expect = q.execute(&c, &d, &none).unwrap();
+                for e in &engines {
+                    let got = q.execute_vectorized(&c, &d, &none, e).unwrap();
+                    assert_eq!(got.rows, expect.rows, "{sql} batch {}", e.batch());
+                    compared += 1;
+                }
+                let orders = q
+                    .vectorized_join_orders(&c, &d, &none, &engines[0])
+                    .unwrap();
+                if first == "?" {
+                    assert_eq!(orders.len(), 1, "{sql}");
+                } else if !first.is_empty() {
+                    assert_eq!(orders.len(), 1, "{sql}");
+                    assert_eq!(orders[0][0], first, "{sql}: {orders:?}");
+                }
+            }
+        }
+    }
+    assert!(compared >= 4 * 4 * 2 * 3, "{compared}");
+}
+
+/// The cost-based order puts the cross product last: joining the
+/// connected inputs first keeps intermediate results small.
+#[test]
+fn cost_based_order_prefers_connected_inputs() {
+    let c = catalog();
+    let d = data(&c, 31, 40, 40);
+    let none = BTreeMap::new();
+    let q = c
+        .prepare(
+            "SELECT a.id, b.id AS bid, x.k FROM m x JOIN l a ON a.id < 5 JOIN r b ON b.k = x.k",
+            &[],
+            Limits::default(),
+        )
+        .unwrap()
+        .optimized();
+    let e = VectorEngine::detect();
+    let orders = q.vectorized_join_orders(&c, &d, &none, &e).unwrap();
+    // x (6 rows) is smallest; b is connected to it by b.k = x.k, while a
+    // is connected to nothing (its ON conjunct is a filter), so the cross
+    // product with a comes last.
+    assert_eq!(orders, vec![vec!["m", "r", "l"]], "{orders:?}");
+    let expect = q.execute(&c, &d, &none).unwrap();
+    assert_eq!(
+        q.execute_vectorized(&c, &d, &none, &e).unwrap().rows,
+        expect.rows
+    );
+}

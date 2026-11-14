@@ -82,12 +82,96 @@ pub fn abandoned_fibers() -> u64 {
 /// running current-ABI context (generated code must then exit with
 /// [`exit::ABI_VIOLATION`]).
 ///
+/// The park entry has no frame of its own: it validates the context in
+/// [`park_prepare`] and then *tail-jumps* into the switch with the stack
+/// pointer it was called with. The saved switch frame's return address is
+/// therefore the call site in the parking code, and the frame below the
+/// switch frame is the parking function's own. That is what lets
+/// [`crate::unwind`] walk a parked stack with only the generated code's CFI.
+/// The resumer passes `&ctx.resume` as the switch argument, which the switch
+/// returns here.
+///
 /// # Safety
 /// `ctx` must be null or the context passed to the running generated entry.
 #[unsafe(no_mangle)]
+#[unsafe(naked)]
 pub unsafe extern "C" fn vesper_fiber_park(ctx: *mut FiberContext) -> *const ResumeSignal {
+    // SysV x86_64: rdi = ctx. The push realigns the stack for the call.
+    #[cfg(all(target_arch = "x86_64", not(windows)))]
+    std::arch::naked_asm!(
+        "push rdi",
+        "call {prepare}",
+        "pop rdi",
+        "test rax, rax",
+        "jz 2f",
+        "mov rsi, [rdi + {scheduler}]",
+        "lea rdi, [rdi + {saved}]",
+        "xor edx, edx",
+        "jmp {switch}",
+        "2:",
+        "xor eax, eax",
+        "ret",
+        prepare = sym park_prepare,
+        switch = sym vesper_fiber_switch,
+        saved = const crate::abi::offsets::CTX_SAVED_SP,
+        scheduler = const crate::abi::offsets::CTX_SCHEDULER_SP,
+    );
+    // Microsoft x64: rcx = ctx; 8 (push) + 32 (shadow space) keeps the call
+    // 16-byte aligned. The switch takes rcx, rdx, r8.
+    #[cfg(all(target_arch = "x86_64", windows))]
+    std::arch::naked_asm!(
+        "push rcx",
+        "sub rsp, 32",
+        "call {prepare}",
+        "add rsp, 32",
+        "pop rcx",
+        "test rax, rax",
+        "jz 2f",
+        "mov rdx, [rcx + {scheduler}]",
+        "lea rcx, [rcx + {saved}]",
+        "xor r8d, r8d",
+        "jmp {switch}",
+        "2:",
+        "xor eax, eax",
+        "ret",
+        prepare = sym park_prepare,
+        switch = sym vesper_fiber_switch,
+        saved = const crate::abi::offsets::CTX_SAVED_SP,
+        scheduler = const crate::abi::offsets::CTX_SCHEDULER_SP,
+    );
+    // AAPCS64 / Apple arm64: x0 = ctx, x30 = return address. The frame
+    // record is popped again before the jump, so the switch saves the
+    // caller's x29/x30.
+    #[cfg(target_arch = "aarch64")]
+    std::arch::naked_asm!(
+        "stp x29, x30, [sp, #-16]!",
+        "mov x29, sp",
+        "str x0, [sp, #-16]!",
+        "bl {prepare}",
+        "mov x9, x0",
+        "ldr x0, [sp], #16",
+        "ldp x29, x30, [sp], #16",
+        "cbz x9, 2f",
+        "ldr x1, [x0, #{scheduler}]",
+        "add x0, x0, #{saved}",
+        "mov x2, #0",
+        "b {switch}",
+        "2:",
+        "mov x0, #0",
+        "ret",
+        prepare = sym park_prepare,
+        switch = sym vesper_fiber_switch,
+        saved = const crate::abi::offsets::CTX_SAVED_SP,
+        scheduler = const crate::abi::offsets::CTX_SCHEDULER_SP,
+    );
+}
+
+/// The checks and state change of [`vesper_fiber_park`]: 1 if `ctx` is a
+/// running current-ABI context, now marked parked at its next generation,
+/// else 0 (nothing changed).
+unsafe extern "C" fn park_prepare(ctx: *mut FiberContext) -> u64 {
     if ctx.is_null() {
-        return std::ptr::null();
+        return 0;
     }
     // SAFETY: the caller passes its own live context; fields are accessed
     // through the raw pointer only.
@@ -96,16 +180,15 @@ pub unsafe extern "C" fn vesper_fiber_park(ctx: *mut FiberContext) -> *const Res
             || (*ctx).abi_version != ABI_VERSION
             || (*ctx).state != FiberState::Running as u32
         {
-            return std::ptr::null();
+            return 0;
         }
         let Some(generation) = next_generation((*ctx).generation) else {
-            return std::ptr::null();
+            return 0;
         };
         (*ctx).state = FiberState::Parked as u32;
         (*ctx).generation = generation;
-        vesper_fiber_switch(&raw mut (*ctx).saved_sp, (*ctx).scheduler_sp, 0);
-        &raw const (*ctx).resume
     }
+    1
 }
 
 unsafe extern "C" fn fiber_main(ctx: *mut FiberContext, _arg: u64) -> ! {
@@ -440,7 +523,13 @@ impl Fiber {
             // rejected above rather than wrapping and revalidating old tokens.
             (*c).generation = next_generation((*c).generation)
                 .expect("created or parked generation must have a successor");
-            vesper_fiber_switch(&raw mut (*c).scheduler_sp, (*c).saved_sp, 0);
+            // The argument is what a parked fiber's `vesper_fiber_park`
+            // returns (a fresh fiber's start trampoline ignores it).
+            vesper_fiber_switch(
+                &raw mut (*c).scheduler_sp,
+                (*c).saved_sp,
+                &raw const (*c).resume as u64,
+            );
         }
         // The fiber has run past every reload point that could observe a
         // retired allocation.
