@@ -120,6 +120,21 @@ fn claim_order_threshold_and_isr_shared_locks() {
     // Dropping the threshold delivers the waiting UART.
     intc.write32(PLIC + 0x20_0000, 0).unwrap();
     assert_eq!(seen.borrow()[5], (0, 10));
+    // The threshold gates notification, not claims: a driver that sets it
+    // to 7 can still poll the claim register for a priority-1 source.
+    intc.write32(PLIC + 4, 1).unwrap();
+    intc.write32(PLIC + 0x20_0000, 7).unwrap();
+    intc.set_line(1, true).unwrap();
+    assert_eq!(seen.borrow().len(), 6, "no notification");
+    assert_eq!(intc.read32(PLIC + 0x20_0004).unwrap(), 1, "but claimable");
+    intc.handle().set_line(1, false).unwrap();
+    intc.write32(PLIC + 0x20_0004, 1).unwrap();
+    intc.write32(PLIC + 0x20_0000, 0).unwrap();
+    // Priority 0 never interrupts and is never claimed.
+    intc.write32(PLIC + 4, 0).unwrap();
+    intc.set_line(1, true).unwrap();
+    assert_eq!(intc.read32(PLIC + 0x20_0004).unwrap(), 0);
+    intc.set_line(1, false).unwrap();
 
     // An ISR shares a counter with thread code through an IsrSpinLock: the
     // thread holds it under an IrqGuard while the device fires.
@@ -263,7 +278,7 @@ fn sifive_clint_timer_and_software_interrupts() {
     let ticks = Rc::new(RefCell::new(Vec::new()));
     let t2 = ticks.clone();
     intc.on_timer(0, move |ev| {
-        let now = ev.intc.mtime();
+        let now = ev.intc.mtime(ev.hart);
         t2.borrow_mut().push(now);
         let next = ev.intc.read64(cmp0).unwrap() + 100;
         ev.intc.write64(cmp0, next).unwrap();
@@ -497,4 +512,49 @@ fn random_register_traffic_never_panics() {
             }
         }
     }
+}
+
+#[test]
+fn separate_mtimer_blocks_keep_separate_counters() {
+    // Split the QEMU ACLINT MTIMER into two blocks with their own MTIME
+    // registers, one per hart (the ACLINT specification allows this).
+    let mut p = Platform::from_dtb(ACLINT).unwrap();
+    let i = p
+        .clints
+        .iter()
+        .position(|c| c.kind == vesper_silicon::dtb::ClintKind::AclintMtimer)
+        .unwrap();
+    let mut second = p.clints[i].clone();
+    p.clints[i].targets.truncate(1);
+    second.targets.remove(0);
+    second.regs[0].base = 0x300_bff8;
+    second.regs[0].size = 8;
+    second.regs[1].base = 0x300_4000;
+    second.regs[1].size = 8;
+    second.path.push_str("-split");
+    p.clints.push(second);
+    let mut intc = RiscvIntc::new(&p, Privilege::Machine, &Ledger::new()).unwrap();
+    let fired = Rc::new(RefCell::new(Vec::new()));
+    for h in [0, 1] {
+        let f = fired.clone();
+        let cmp = intc.local_addr(h, MTIP).unwrap();
+        intc.on_timer(h, move |ev| {
+            f.borrow_mut().push(ev.hart);
+            ev.intc.write64(cmp, u64::MAX).unwrap();
+        })
+        .unwrap();
+    }
+    assert_eq!(intc.local_addr(1, MTIP).unwrap(), 0x300_4000);
+    intc.write64(0x200_4000, 100).unwrap();
+    intc.write64(0x300_4000, 100).unwrap();
+    // Writing hart 0's MTIME leaves hart 1's counter alone.
+    intc.write64(0x200_bff8, 100).unwrap();
+    assert_eq!(*fired.borrow(), [0]);
+    assert_eq!(intc.read64(0x300_bff8).unwrap(), 0);
+    assert_eq!(intc.handle().mtime(1), 0);
+    // Advancing time advances both.
+    intc.advance_mtime(100);
+    assert_eq!(*fired.borrow(), [0, 1]);
+    assert_eq!(intc.handle().mtime(0), 200);
+    assert_eq!(intc.handle().mtime(1), 100);
 }

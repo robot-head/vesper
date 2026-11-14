@@ -19,7 +19,8 @@
 //! * the SiFive CLINT (MSIP at `4*k`, MTIMECMP at `0x4000 + 8*k`, MTIME at
 //!   `0xbff8`) and the ACLINT MSWI, SSWI and MTIMER devices (MTIMER `reg`
 //!   is MTIME then the MTIMECMP array, as QEMU emits it). MTIP is the level
-//!   `mtime >= mtimecmp`; MTIMECMP starts at `u64::MAX` (its reset value is
+//!   `mtime >= mtimecmp`, against the MTIME of the hart's own block (blocks
+//!   that name the same MTIME address share one counter); MTIMECMP starts at `u64::MAX` (its reset value is
 //!   unspecified);
 //! * the hart side: a cause is enabled (`mie`) once a handler is installed
 //!   for it; the controller's output levels are re-evaluated after every
@@ -225,20 +226,25 @@ impl Plic {
         self.src(src).is_ok_and(|s| self.pending[s])
     }
 
-    fn best(&self, ctx: usize) -> u32 {
+    /// The highest-priority pending source enabled for `ctx` (ties to the
+    /// lowest id) and its priority; priority 0 never qualifies.
+    fn best(&self, ctx: usize) -> (u32, u32) {
         let mut best = (0u32, 0u32);
         for s in 1..=self.ndev as usize {
             let p = self.priority[s];
-            if self.pending[s] && self.enable[ctx][s] && p > self.threshold[ctx] && p > best.1 {
+            if self.pending[s] && self.enable[ctx][s] && p > best.1 {
                 best = (s as u32, p);
             }
         }
-        best.0
+        best
     }
 
     /// The context's interrupt output (EIP).
     pub fn eip(&self, ctx: usize) -> bool {
-        ctx < self.contexts.len() && self.best(ctx) != 0
+        ctx < self.contexts.len() && {
+            let (src, p) = self.best(ctx);
+            src != 0 && p > self.threshold[ctx]
+        }
     }
 
     /// Claim: the best eligible source (0 if none), now in service.
@@ -246,7 +252,10 @@ impl Plic {
         if ctx >= self.contexts.len() {
             return 0;
         }
-        let s = self.best(ctx);
+        // The threshold gates notification only; a claim is not affected by
+        // it (PLIC specification, "Interrupt Claim Process"), so a driver
+        // that masks notifications with the threshold can still poll.
+        let (s, _) = self.best(ctx);
         if s != 0 {
             self.pending[s as usize] = false;
             self.in_service[s as usize] = true;
@@ -406,6 +415,16 @@ impl Block {
     fn has_timer(&self) -> bool {
         matches!(self.info.kind, ClintKind::Clint | ClintKind::AclintMtimer)
     }
+
+    /// Physical address of the MTIME register this block's MTIMECMPs
+    /// compare against. Blocks naming the same address share one counter.
+    fn mtime_addr(&self) -> Option<u64> {
+        match self.info.kind {
+            ClintKind::Clint => Some(self.info.regs[0].base + CLINT_MTIME),
+            ClintKind::AclintMtimer => Some(self.info.regs[0].base),
+            _ => None,
+        }
+    }
 }
 
 /// One delivered interrupt.
@@ -432,7 +451,8 @@ pub struct IntcStats {
 struct State {
     plic: Option<Plic>,
     blocks: Vec<Block>,
-    mtime: u64,
+    /// MTIME counters by physical address (one per distinct register).
+    mtimes: BTreeMap<u64, u64>,
     /// `(hart, cause)` raised on the Cpu and not yet finished.
     asserted: BTreeSet<(u32, u32)>,
     /// Causes with an installed handler (`mie`), per hart.
@@ -467,9 +487,10 @@ impl State {
                 .iter()
                 .any(|b| (0..b.sip.len()).any(|k| b.sip[k] && b.sw_target(k) == Some(want))),
             MTIP => self.blocks.iter().any(|b| {
+                let now = b.mtime_addr().map_or(0, |a| self.mtime_at(a));
                 b.has_timer()
                     && (0..b.mtimecmp.len())
-                        .any(|k| self.mtime >= b.mtimecmp[k] && b.timer_target(k) == Some(want))
+                        .any(|k| now >= b.mtimecmp[k] && b.timer_target(k) == Some(want))
             }),
             _ => false,
         }
@@ -482,8 +503,8 @@ impl State {
             return p.read32(addr);
         }
         let (b, r, off) = self.block_at(addr)?;
-        let mtime = self.mtime;
         let blk = &self.blocks[b];
+        let mtime = blk.mtime_addr().map_or(0, |a| self.mtime_at(a));
         let half = |v: u64, hi: bool| if hi { (v >> 32) as u32 } else { v as u32 };
         let unmapped = Err(IntcError::Unmapped { addr });
         match (blk.info.kind, r) {
@@ -542,6 +563,11 @@ impl State {
         };
         let unmapped = Err(IntcError::Unmapped { addr });
         let kind = self.blocks[b].info.kind;
+        let mut no_counter = 0u64;
+        let mtime: &mut u64 = match self.blocks[b].mtime_addr() {
+            Some(a) => self.mtimes.entry(a).or_insert(0),
+            None => &mut no_counter,
+        };
         let blk = &mut self.blocks[b];
         match (kind, r) {
             (ClintKind::Clint | ClintKind::AclintMswi, _)
@@ -553,8 +579,8 @@ impl State {
                 }
             }
             (ClintKind::Clint, _) if off >= CLINT_MTIME => match off - CLINT_MTIME {
-                0 => self.mtime = set_half(self.mtime, false),
-                4 => self.mtime = set_half(self.mtime, true),
+                0 => *mtime = set_half(*mtime, false),
+                4 => *mtime = set_half(*mtime, true),
                 _ => return unmapped,
             },
             (ClintKind::Clint, _) => {
@@ -570,8 +596,8 @@ impl State {
                 None => return unmapped,
             },
             (ClintKind::AclintMtimer, 0) => match off {
-                0 => self.mtime = set_half(self.mtime, false),
-                4 => self.mtime = set_half(self.mtime, true),
+                0 => *mtime = set_half(*mtime, false),
+                4 => *mtime = set_half(*mtime, true),
                 _ => return unmapped,
             },
             (ClintKind::AclintMtimer, _) => match blk.mtimecmp.get_mut((off / 8) as usize) {
@@ -581,6 +607,10 @@ impl State {
             (ClintKind::AclintMswi, _) => return unmapped,
         }
         Ok(())
+    }
+
+    fn mtime_at(&self, addr: u64) -> u64 {
+        self.mtimes.get(&addr).copied().unwrap_or(0)
     }
 
     /// The block, region index and offset holding `addr`.
@@ -650,8 +680,18 @@ impl IntcHandle {
             .set_level(src, high)
     }
 
-    pub fn mtime(&self) -> u64 {
-        self.state.borrow().mtime
+    /// The MTIME that `hart`'s timer compares against (0 if it has none).
+    pub fn mtime(&self, hart: u32) -> u64 {
+        let st = self.state.borrow();
+        let want = Some(HartTarget {
+            hart,
+            cause: Some(MTIP),
+        });
+        st.blocks
+            .iter()
+            .find(|b| (0..b.mtimecmp.len()).any(|k| b.timer_target(k) == want))
+            .and_then(Block::mtime_addr)
+            .map_or(0, |a| st.mtime_at(a))
     }
 
     /// Clears a pending SSIP (software writing `sip.SSIP = 0`).
@@ -707,7 +747,7 @@ impl RiscvIntc {
         let state = State {
             plic,
             blocks: platform.clints.iter().map(Block::new).collect(),
-            mtime: 0,
+            mtimes: BTreeMap::new(),
             asserted: BTreeSet::new(),
             mie: BTreeSet::new(),
             log: Vec::new(),
@@ -820,11 +860,18 @@ impl RiscvIntc {
         Ok(src)
     }
 
-    /// Advances MTIME by `ticks` (wrapping, as the counter does).
+    /// Advances every MTIME counter by `ticks` (wrapping, as the counters
+    /// do).
     pub fn advance_mtime(&mut self, ticks: u64) {
         {
             let mut st = self.handle.state.borrow_mut();
-            st.mtime = st.mtime.wrapping_add(ticks);
+            let addrs: Vec<u64> = st.blocks.iter().filter_map(Block::mtime_addr).collect();
+            for a in addrs {
+                st.mtimes.entry(a).or_insert(0);
+            }
+            for v in st.mtimes.values_mut() {
+                *v = v.wrapping_add(ticks);
+            }
         }
         self.sync();
     }

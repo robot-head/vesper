@@ -151,6 +151,9 @@ pub enum DmaError {
         inst: BarrierInst,
         mode: PrivMode,
     },
+    /// [`DmaEngine::set_zicbom_env`] while this many transfers are
+    /// outstanding.
+    TransfersInFlight(usize),
     /// `CBIE = 10` (reserved) in the named register.
     ReservedCbie {
         register: &'static str,
@@ -552,8 +555,17 @@ impl DmaEngine {
     /// sequence would trap there are refused with
     /// [`DmaError::CboIllegal`] / [`DmaError::ReservedCbie`] and hand the
     /// buffer back.
-    pub fn set_zicbom_env(&mut self, env: ZicbomEnv) {
+    ///
+    /// The environment is fixed while transfers are outstanding, because a
+    /// receive's completion sequence was validated against it at submit:
+    /// changing it then is [`DmaError::TransfersInFlight`].
+    pub fn set_zicbom_env(&mut self, env: ZicbomEnv) -> Result<(), DmaError> {
+        let n = self.in_flight();
+        if n != 0 && env != self.zicbom_env {
+            return Err(DmaError::TransfersInFlight(n));
+        }
         self.zicbom_env = env;
+        Ok(())
     }
 
     pub fn zicbom_env(&self) -> ZicbomEnv {

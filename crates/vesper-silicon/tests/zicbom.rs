@@ -456,7 +456,8 @@ fn engine_refuses_submissions_whose_cbo_would_trap() {
     let z = DmaCoherence::Zicbom { block_bytes: 64 };
     let mut dma = DmaEngine::with_coherence(Arch::Riscv64, z, 1, 2, 0, &ledger).unwrap();
     // S-mode driver without CBCFE: even a transmit's clean traps.
-    dma.set_zicbom_env(ZicbomEnv::supervisor(envcfg(Cbie::Invalidate, false)));
+    dma.set_zicbom_env(ZicbomEnv::supervisor(envcfg(Cbie::Invalidate, false)))
+        .unwrap();
     let (buf, e) = dma
         .submit_tx(0, StaticDmaBuf::<128>::new(BASE))
         .unwrap_err();
@@ -469,7 +470,8 @@ fn engine_refuses_submissions_whose_cbo_would_trap() {
     ));
     // CBCFE on, CBIE = 00: transmits work, receives are refused up front
     // because their completion would trap.
-    dma.set_zicbom_env(ZicbomEnv::supervisor(envcfg(Cbie::Illegal, true)));
+    dma.set_zicbom_env(ZicbomEnv::supervisor(envcfg(Cbie::Illegal, true)))
+        .unwrap();
     let (buf, e) = dma.submit_rx(0, buf).unwrap_err();
     assert!(matches!(
         e,
@@ -483,11 +485,24 @@ fn engine_refuses_submissions_whose_cbo_would_trap() {
     let (_, buf) = dma.poll_complete(tx).unwrap();
     // CBIE = 01 is accepted (the engine records the CBO.INVAL it issues;
     // the CPU executes it as a flush).
-    dma.set_zicbom_env(ZicbomEnv::supervisor(envcfg(Cbie::Flush, true)));
+    dma.set_zicbom_env(ZicbomEnv::supervisor(envcfg(Cbie::Flush, true)))
+        .unwrap();
     let rx = dma.submit_rx(0, buf).unwrap();
+    // While the receive is outstanding its completion sequence is pinned to
+    // the environment it was validated against.
+    assert_eq!(
+        dma.set_zicbom_env(ZicbomEnv::supervisor(0)),
+        Err(DmaError::TransfersInFlight(1))
+    );
     dma.device_complete(0, 128, None).unwrap();
+    assert_eq!(
+        dma.set_zicbom_env(ZicbomEnv::supervisor(0)),
+        Err(DmaError::TransfersInFlight(1)),
+        "completed but not yet polled"
+    );
     let _ = dma.poll_complete(rx).unwrap();
     assert!(dma.barriers().contains(&BarrierInst::CboInval(BASE)));
+    dma.set_zicbom_env(ZicbomEnv::supervisor(0)).unwrap();
     assert_eq!(ledger.total_leaked(), 0);
 }
 
@@ -503,7 +518,7 @@ fn randomized_transfers_stay_consistent_with_cbie_flush() {
         cache.set_zicbom_env(env);
         let z = DmaCoherence::Zicbom { block_bytes: 64 };
         let mut dma = DmaEngine::with_coherence(Arch::Riscv64, z, 1, 2, 0, &ledger).unwrap();
-        dma.set_zicbom_env(env);
+        dma.set_zicbom_env(env).unwrap();
         for _ in 0..150 {
             let at = BASE + (rng(&mut seed) % 4) * 256;
             match rng(&mut seed) % 3 {
