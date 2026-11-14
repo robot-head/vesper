@@ -5,8 +5,9 @@ import Lean.Replay
 /-! Export a kernel-only logical snapshot. The original logical ConstantInfo
 objects are preserved; this tool does not certify native code equivalence.
 The existing strict auditor must independently audit the resulting artifact.
-Package initializers, plugins, IR and environment extensions are never loaded
-or exported. This is not an OS sandbox. -/
+Package plugins and extension initializers are not executed. Lean import may
+deserialize IR/private/extension data; none of that data is exported into the
+logical snapshot. This is not an OS sandbox. -/
 open Lean
 namespace VesperResourceKernelSnapshot
 
@@ -299,14 +300,34 @@ def snapshot (request : Request) : IO Json := do
     trustedModules := trustedModules.push ⟨name,path⟩
   let mut raw : Std.HashMap Name ConstantInfo := {}
   let mut owners : Std.HashMap Name Name := {}
+  let mut duplicates : Array Json := #[]
+  let mut occurrences := 0
   for name in original.header.moduleNames, data in original.header.moduleData do
     if packages.contains name then
       unless data.constNames == data.constants.map ConstantInfo.name do
         fail "original redundant constant-name inventory mismatch"
       for info in data.constants do
+        if occurrences ≥ maxPackageConstants * 2 then fail "original occurrence count limit"
+        occurrences := occurrences + 1
         checkConstantName info.name
         if base.contains info.name then fail s!"package shadows trusted declaration: {info.name}"
-        if raw.contains info.name then fail "duplicate package declaration in module inventory"
+        if let some previous := raw[info.name]? then
+          -- Imported equation theorems can be realized independently in more
+          -- than one module. Only identical safe theorem copies coalesce.
+          unless (previous matches .thmInfo _) && (info matches .thmInfo _) &&
+              !previous.isUnsafe && !info.isUnsafe && !previous.isPartial && !info.isPartial &&
+              sameInfo previous info do
+            match previous, info with
+            | .thmInfo a, .thmInfo b =>
+              fail s!"conflicting theorem duplicate: {info.name}; type_equal={a.type == b.type}; levels_equal={a.levelParams == b.levelParams}; group_equal={a.all == b.all}; value_equal={a.value == b.value}"
+            | _, _ => fail s!"non-theorem duplicate: {info.name}"
+          if duplicates.size ≥ maxPackageConstants then fail "duplicate occurrence count limit"
+          let some firstModule := owners[info.name]? | fail "duplicate has no first module association"
+          duplicates := duplicates.push <| Json.mkObj [
+            ("name",toJson info.name.toString),("first_module",toJson firstModule.toString),
+            ("repeated_module",toJson name.toString),
+            ("reason",toJson "identical_safe_theorem_realization")]
+          continue
         if raw.size ≥ maxPackageConstants then fail "package constant limit"
         raw := raw.insert info.name info
         owners := owners.insert info.name name
@@ -320,6 +341,7 @@ def snapshot (request : Request) : IO Json := do
       if count ≥ maxPackageConstants then fail "package constant limit"
       pure (count+1)
   unless rawCount == raw.size do fail "original raw/import inventories differ"
+  unless occurrences == raw.size + duplicates.size do fail "original occurrence partition mismatch"
   let mut retained : Std.HashMap Name ConstantInfo := {}
   let mut omitted : Array Json := #[]
   for (name,info) in raw.toList.toArray.qsort (fun a b => Name.lt a.1 b.1) do
@@ -377,6 +399,8 @@ def snapshot (request : Request) : IO Json := do
     ("original_modules",toJson (originalModules.map moduleJson)),
     ("trusted_modules",toJson (trustedModules.map moduleJson)),
     ("original_constants",toJson raw.size),("retained_constants",toJson retained.size),
+    ("original_constant_occurrences",toJson occurrences),
+    ("duplicate_constants",toJson duplicates.size),("duplicates",Json.arr duplicates),
     ("omitted_constants",toJson omitted.size),("omitted",Json.arr omitted),
     ("logical_expression_nodes",toJson work),
     ("exact_inventory",toJson true),("constant_info_equal",toJson true),
