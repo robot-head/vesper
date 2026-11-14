@@ -226,6 +226,17 @@ Rust 1.100.0 for clippy, 1.97 for tests, isolated target directories.
 None. No new dependencies, no `Cargo.lock` change, and no edits outside the
 lane's paths.
 
+## Review fixes (Codex review on ee9071d)
+
+- **A fiber that had parked was still treated as running.** When it woke and
+  another fiber was chosen, that switch was charged as a preemption. So
+  `step(0) step(1) tick(0#0) step(0) step(1)` (both fibers sleep the same
+  time) was rejected at bound 0, in both bounded explorers. Now the fiber
+  that just stepped stays running only if it is still ready after its step.
+  Regression test: `a_fiber_that_parked_is_not_preempted_when_it_wakes`. It
+  fails before the fix and passes after. A 600-program bounded and caching
+  stress run agreed with exhaustive search afterwards.
+
 ## Decisions
 
 - **Sleep sets off under a bound, plus a continuation backtrack.** Both are

@@ -599,10 +599,6 @@ where
             } else {
                 BTreeSet::new()
             };
-            let running = match p {
-                Proc::Task(j) => Some(j),
-                _ => node.running,
-            };
             let preemptions = node.preemptions + u32::from(node.preempts(p));
             // Happens-before clock of the new event.
             let mut clock = node.proc_clocks.get(&p).cloned().unwrap_or_default();
@@ -634,6 +630,13 @@ where
                     proc_clocks.insert(q, clock.clone());
                 }
             }
+            // The fiber that just stepped stays "running" only if it yielded
+            // (is still ready); one that parked or finished can be switched
+            // away from for free, even after it wakes again.
+            let running = match p {
+                Proc::Task(j) => m.enabled().contains(&Proc::Task(j)).then_some(j),
+                _ => node.running,
+            };
             let mut child = new_node(&m, proc_clocks, running, preemptions);
             child.sleep0.clone_from(&child_sleep);
             child.sleep = child_sleep;

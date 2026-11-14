@@ -148,6 +148,22 @@ fn bounded_dpor_matches_bounded_exhaustive() {
 }
 
 #[test]
+fn a_fiber_that_parked_is_not_preempted_when_it_wakes() {
+    // Review regression: both fibers log, sleep the same time, log again.
+    // `step(0) step(1) tick(0#0) step(0) step(1)` has no preemption (each
+    // fiber parked), so bound 0 must keep its outcome.
+    let program = vec![
+        vec![Op::Update(0), Op::Sleep(10), Op::Update(0)],
+        vec![Op::Update(0), Op::Sleep(10), Op::Update(0)],
+    ];
+    let full = exhaustive(&program, &cfg(None)).unwrap();
+    let none = exhaustive(&program, &cfg(Some(0))).unwrap();
+    let dp = dpor(&program, &cfg(Some(0))).unwrap();
+    assert_eq!(outcomes(&none), outcomes(&full));
+    assert_eq!(outcomes(&dp), outcomes(&full));
+}
+
+#[test]
 fn the_bound_is_monotone_and_converges() {
     let (seeds, max_ops) = seeds();
     for seed in 0..seeds.min(60) {
