@@ -40,6 +40,9 @@ common:buildbuddy --bes_backend=grpcs://remote.buildbuddy.io
 common:buildbuddy --remote_cache=grpcs://remote.buildbuddy.io
 common:buildbuddy --remote_timeout=10m
 common:buildbuddy --remote_cache_compression
+common:buildbuddy --experimental_remote_cache_chunking
+common:buildbuddy --remote_grpc_log=bazel-remote-grpc.log
+common:buildbuddy --execution_log_compact_file=execution_log.binpb.zst
 common:buildbuddy --remote_build_event_upload=minimal
 common:buildbuddy --remote_download_toplevel
 common:buildbuddy --nolegacy_important_outputs

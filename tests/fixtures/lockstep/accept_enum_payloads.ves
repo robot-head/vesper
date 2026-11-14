@@ -1,0 +1,17 @@
+copy enum E {
+    A,
+    B(i64),
+    C(i64, bool)
+}
+fn main() -> i64 {
+    let e = C(4, true);
+    match e {
+        A => 1,
+        B(x) => x,
+        C(y, b) => if b {
+            y
+        } else {
+            0
+        },
+    }
+}

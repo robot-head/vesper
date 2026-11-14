@@ -1,0 +1,18 @@
+fn f(a: i64, b: i64) -> i64 {
+    wrapping_add(a, b)
+}
+fn main() -> i64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            let z = 0;
+            let m = 9223372036854775807;
+            f(1 / z, m + 1)
+        } with {
+            return v => v,
+            raise(e, _) => -1,
+        }
+    } with {
+        return v => v,
+        raise(e, _) => -2,
+    }
+}

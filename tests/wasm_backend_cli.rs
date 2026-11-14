@@ -65,13 +65,13 @@ fn build_writes_a_runnable_component() {
 
 #[test]
 fn unsupported_source_fails_with_a_typed_error() {
-    let out = temp("remainder.wasm");
+    let out = temp("unhandled.wasm");
     let status = vesper()
         .args([
             "build",
             "--target",
             "wasm32-wasip2",
-            "tests/fixtures/wasm_backend/remainder.ves",
+            "tests/fixtures/wasm_backend/unhandled.ves",
             "-o",
         ])
         .arg(&out)
@@ -79,7 +79,10 @@ fn unsupported_source_fails_with_a_typed_error() {
         .unwrap();
     assert!(!status.status.success());
     let stderr = String::from_utf8_lossy(&status.stderr);
-    assert!(stderr.contains("unsupported FloatRemainder"), "{stderr}");
+    assert!(
+        stderr.contains("entry: the entry must handle effect Net"),
+        "{stderr}"
+    );
     assert!(!out.exists());
 }
 

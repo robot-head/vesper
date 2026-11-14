@@ -1,0 +1,28 @@
+// expect: E0703
+// Inference follows call chains: the division two calls away from the
+// secret is reported.
+copy struct Secret[T] {
+    value: T,
+}
+
+fn ratio(a: u64, b: u64) -> u64 eff [ConstTime, Fail[RuntimeError]] {
+    a / b
+}
+
+fn scaled(x: u64) -> u64 eff [ConstTime, Fail[RuntimeError]] {
+    ratio(100, x)
+}
+
+fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime, Fail[RuntimeError]] {
+    let Secret {
+        value
+    }
+    = s;
+    Secret {
+        value: scaled(value)
+    }
+}
+
+fn main() -> u64 {
+    0
+}

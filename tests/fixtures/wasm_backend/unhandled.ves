@@ -1,0 +1,7 @@
+linear effect Net {
+    fn send(sink b: u8);
+}
+
+fn main() -> Unit eff [Net] {
+    Net::send(1);
+}
