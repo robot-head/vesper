@@ -5054,6 +5054,8 @@ name = "vesper-pulse"
 version = "0.1.0"
 dependencies = [
  "io-uring",
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
