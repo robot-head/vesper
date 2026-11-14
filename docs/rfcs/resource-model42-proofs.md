@@ -133,6 +133,14 @@ closed-atom, value-recognition and dynamic-ledger arguments are still needed.
 Capacity refusal and invocation/profile errors must remain distinct from
 semantic failure; this fragment has no language abort or arithmetic effect.
 
+The induction under let initializers needs a generalized resource premise:
+Full.HasType of the focused expression under some resource context R, together
+with inclusion of R in the actual ledger. The whole ledger also contains live
+resources owned by the enclosing let frame, so it need not type the initializer
+alone. Splitting R and propagating store inclusion follows the shape of
+Full.progress_gen. Whole-state WT is then a corollary, rather than an unsound
+assumption that the initializer can discard its enclosing frame's resources.
+
 ## Full-derived conclusions and limits
 
 From actual checked initialization and Full.Steps correspondence, derive
