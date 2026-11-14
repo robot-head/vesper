@@ -21,7 +21,17 @@
 //!   on RISC-V). A receive buffer that does not cover whole cache blocks is
 //!   rejected: invalidating a shared block would discard the CPU's writes to
 //!   the other bytes of that block ([`NonCoherentCache`] demonstrates it).
+//! * RISC-V without Zicbom on the StarFive JH7100
+//!   ([`DmaCoherence::SifiveCcache`]): the SiFive cache controller's
+//!   `FLUSH64` register, written with the physical address of every 64-byte
+//!   line (write back and invalidate), each write followed by `FENCE IORW,
+//!   IORW` and the whole preceded by one, at both points (Linux's
+//!   `ccache_flush_range`, which serves `wback`, `inv` and `wback_inv`).
 //! * x86_64: none; DMA is cache-coherent.
+//!
+//! Devices behind `dma-ranges` see memory at other bus addresses:
+//! [`DmaEngine::set_dma_windows`] makes the engine write the translated bus
+//! address into each descriptor and refuse buffers outside every window.
 //!
 //! [`NonCoherentCache`] is a software model of one write-back cache in front
 //! of memory that a bus master accesses directly. It executes the
@@ -33,6 +43,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::Arch;
+use crate::dtb::DmaWindow;
 use crate::frames::{PAGE_BYTES, PhysFrame4K};
 use crate::ledger::{Ledger, OwnerKind, Token};
 
@@ -157,6 +168,11 @@ pub enum DmaError {
     /// `CBIE = 10` (reserved) in the named register.
     ReservedCbie {
         register: &'static str,
+    },
+    /// The buffer lies outside every DMA window of the device.
+    NotDmaAddressable {
+        phys: u64,
+        len: u32,
     },
 }
 
@@ -304,6 +320,10 @@ pub enum DmaCoherence {
     /// Arm non-coherent DMA (`DC CVAC` / `DC IVAC`); the line size comes
     /// from `CTR_EL0`, which a devicetree does not state.
     ArmNonCoherent,
+    /// RISC-V non-coherent DMA without Zicbom, maintained through a SiFive
+    /// cache controller's `FLUSH64` register at `flush64` with
+    /// `line_bytes`-byte lines (the StarFive JH7100).
+    SifiveCcache { flush64: u64, line_bytes: u32 },
 }
 
 static NEXT_ENGINE: AtomicU64 = AtomicU64::new(1);
@@ -327,6 +347,10 @@ pub enum BarrierInst {
     /// Below M-mode, `xenvcfg.CBIE` may make it a flush or illegal
     /// ([`ZicbomEnv::effective`]).
     CboInval(u64),
+    /// A 64-bit store of the line address `line` to a SiFive cache
+    /// controller's `FLUSH64` register at `reg`: write the line back if
+    /// dirty, then invalidate it.
+    CcacheFlush64 { reg: u64, line: u64 },
 }
 
 impl std::fmt::Display for BarrierInst {
@@ -339,6 +363,7 @@ impl std::fmt::Display for BarrierInst {
             BarrierInst::CboClean(a) => write!(f, "cbo.clean ({a:#x})"),
             BarrierInst::CboFlush(a) => write!(f, "cbo.flush ({a:#x})"),
             BarrierInst::CboInval(a) => write!(f, "cbo.inval ({a:#x})"),
+            BarrierInst::CcacheFlush64 { reg, line } => write!(f, "sd {line:#x}, ({reg:#x})"),
         }
     }
 }
@@ -439,6 +464,39 @@ pub fn zicbom_barriers(
     })
 }
 
+/// Linux's `ccache_flush_range` for `[phys, phys + len)`: one fence, then a
+/// `FLUSH64` store per `line`-byte line, each followed by a fence. After a
+/// device write the range must cover whole lines, for the reason
+/// [`zicbom_barriers`] gives.
+pub fn ccache_barriers(
+    phase: DmaPhase,
+    phys: u64,
+    len: u32,
+    flush64: u64,
+    line: u32,
+) -> Result<Vec<BarrierInst>, DmaError> {
+    let ls = blocks(phys, len, line)?;
+    if phase == DmaPhase::AfterDeviceWrite {
+        let mask = u64::from(line) - 1;
+        if phys & mask != 0 || u64::from(len) & mask != 0 {
+            return Err(DmaError::PartialCacheBlock {
+                phys,
+                len,
+                block: line,
+            });
+        }
+    }
+    let mut out = vec![BarrierInst::FenceIorwIorw];
+    for l in ls {
+        out.push(BarrierInst::CcacheFlush64 {
+            reg: flush64,
+            line: l,
+        });
+        out.push(BarrierInst::FenceIorwIorw);
+    }
+    Ok(out)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     /// Device writes memory (receive).
@@ -496,6 +554,7 @@ pub struct DmaEngine {
     next_slot: u16,
     barriers: Vec<BarrierInst>,
     zicbom_env: ZicbomEnv,
+    windows: Option<Vec<DmaWindow>>,
     ledger: Ledger,
 }
 
@@ -528,6 +587,7 @@ impl DmaEngine {
     ) -> Result<Self, DmaError> {
         let line = match (arch, coherence) {
             (Arch::Riscv64, DmaCoherence::Zicbom { block_bytes }) => block_bytes,
+            (Arch::Riscv64, DmaCoherence::SifiveCcache { line_bytes, .. }) => line_bytes,
             (Arch::Aarch64, DmaCoherence::ArmNonCoherent) | (_, DmaCoherence::Coherent) => line,
             _ => return Err(DmaError::CoherenceMismatch { arch, coherence }),
         };
@@ -546,8 +606,37 @@ impl DmaEngine {
             next_slot: 0,
             barriers: Vec::new(),
             zicbom_env: ZicbomEnv::MACHINE,
+            windows: None,
             ledger: ledger.clone(),
         })
+    }
+
+    /// The device's DMA windows (from
+    /// [`crate::dtb::Platform::dma_windows`]): descriptors then carry the
+    /// bus address of the buffer, and a buffer outside every window is
+    /// refused with [`DmaError::NotDmaAddressable`]. Fixed while transfers
+    /// are outstanding.
+    pub fn set_dma_windows(&mut self, windows: Vec<DmaWindow>) -> Result<(), DmaError> {
+        let n = self.in_flight();
+        if n != 0 {
+            return Err(DmaError::TransfersInFlight(n));
+        }
+        self.windows = Some(windows);
+        Ok(())
+    }
+
+    /// The bus address the device uses for `[phys, phys + len)`.
+    pub fn bus_address(&self, phys: u64, len: u32) -> Result<u64, DmaError> {
+        let Some(ws) = &self.windows else {
+            return Ok(phys);
+        };
+        let end = phys
+            .checked_add(u64::from(len))
+            .ok_or(DmaError::RegionOverflow)?;
+        ws.iter()
+            .find(|w| phys >= w.cpu_addr && end <= w.cpu_addr.saturating_add(w.size))
+            .map(|w| w.dma_addr + (phys - w.cpu_addr))
+            .ok_or(DmaError::NotDmaAddressable { phys, len })
     }
 
     /// The privilege and `envcfg` state the driver issuing this engine's
@@ -589,6 +678,10 @@ impl DmaEngine {
     fn sequence(&self, phase: DmaPhase, phys: u64, len: u32) -> Result<Vec<BarrierInst>, DmaError> {
         match self.coherence {
             DmaCoherence::Zicbom { block_bytes } => zicbom_barriers(phase, phys, len, block_bytes),
+            DmaCoherence::SifiveCcache {
+                flush64,
+                line_bytes,
+            } => ccache_barriers(phase, phys, len, flush64, line_bytes),
             DmaCoherence::ArmNonCoherent => dma_barriers(self.arch, phase, phys, len, self.line),
             DmaCoherence::Coherent => {
                 // Ordering only: validate the region without enumerating
@@ -648,6 +741,10 @@ impl DmaEngine {
             Some(_) => return Err((buf, DmaError::ChannelBusy(channel))),
         }
         let (phys, len) = buf.dma_region();
+        let bus = match self.bus_address(phys, len) {
+            Ok(a) => a,
+            Err(e) => return Err((buf, e)),
+        };
         let seq = match self
             .sequence(DmaPhase::BeforeDevice, phys, len)
             .and_then(|s| self.check_env(&s).map(|()| s))
@@ -680,7 +777,7 @@ impl DmaEngine {
             Direction::ToDevice => 0,
         };
         self.ring[slot as usize] = SgDmaDescWire {
-            phys_addr: phys,
+            phys_addr: bus,
             byte_len: len,
             flags,
             next_idx: 0,
@@ -793,6 +890,11 @@ impl NonCoherentCache {
         })
     }
 
+    /// The line size.
+    pub fn block_bytes(&self) -> u32 {
+        self.block as u32
+    }
+
     /// The mode and `envcfg` state in which the CPU executes `CBO.*`
     /// (M-mode by default): see [`ZicbomEnv::effective`].
     pub fn set_zicbom_env(&mut self, env: ZicbomEnv) {
@@ -888,6 +990,12 @@ impl NonCoherentCache {
             BarrierInst::CboInval(a) | BarrierInst::DcIvac(a) => {
                 self.index(a)?;
                 self.lines.remove(&tag(a));
+            }
+            BarrierInst::CcacheFlush64 { line, .. } => {
+                // The controller flushes the line holding the address.
+                self.index(line)?;
+                self.writeback(tag(line));
+                self.lines.remove(&tag(line));
             }
             BarrierInst::DsbSy | BarrierInst::FenceIorwIorw => {}
         }
