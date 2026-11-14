@@ -15,7 +15,10 @@
 //!   PoisonedRecovery.
 //!
 //! Latency is the wall time from writing the `didChange` frame to reading the
-//! `publishDiagnostics` notification carrying that version. It includes pipe
+//! `publishDiagnostics` notification carrying that version. After every
+//! valid edit the client also times a whole-document `textDocument/inlayHint`
+//! request (`lens`), which builds the Lens view of the new text under Lens's
+//! own analysis profile. It includes pipe
 //! I/O and JSON framing on both sides; it is not a measurement of any single
 //! compiler layer. Nothing is reported that was not measured.
 use serde_json::{Value, json};
@@ -145,6 +148,9 @@ fn main() {
         let mut valid = Vec::new();
         let mut damaging = Vec::new();
         let mut damaged_status = String::new();
+        let mut lens = Vec::new();
+        let mut lens_scope = String::new();
+        let mut request_id = 1000;
         for _ in 0..iterations {
             for (insert, samples) in [(" ", &mut valid), ("let ", &mut damaging)] {
                 let at = json!({"line":line,"character":column});
@@ -165,6 +171,49 @@ fn main() {
                             && p["version"] == version)
                     });
                     samples.push(started.elapsed().as_secs_f64() * 1e3);
+                    if insert == " " {
+                        request_id += 1;
+                        let started = Instant::now();
+                        input
+                            .write_all(&frame(
+                                json!({"id":request_id,"method":"textDocument/inlayHint",
+                                "params":{"textDocument":{"uri":uri},"range":{
+                                    "start":{"line":0,"character":0},
+                                    "end":{"line":100000,"character":0}}}}),
+                            ))
+                            .unwrap();
+                        let answer = wait(&|m| {
+                            matches!(m, Envelope::Response { id: Some(Id::Integer(id)), .. }
+                                if *id == request_id)
+                        });
+                        lens.push(started.elapsed().as_secs_f64() * 1e3);
+                        if lens_scope.is_empty() {
+                            lens_scope = match answer {
+                                Envelope::Response {
+                                    payload:
+                                        vesper_lsp::ResponsePayload::Result(Value::Array(hints)),
+                                    ..
+                                } => format!(
+                                    "{} hints, scope {}",
+                                    hints.len(),
+                                    hints
+                                        .first()
+                                        .and_then(|h| h["data"]["vesper"]["scope"].as_str())
+                                        .unwrap_or("none")
+                                ),
+                                Envelope::Response {
+                                    payload: vesper_lsp::ResponsePayload::Error { data, .. },
+                                    ..
+                                } => format!(
+                                    "unavailable: {}",
+                                    data.as_ref()
+                                        .and_then(|d| d["reason"].as_str())
+                                        .unwrap_or("?")
+                                ),
+                                _ => "?".into(),
+                            };
+                        }
+                    }
                     if insert == "let "
                         && let Envelope::Notification {
                             params: Some(p), ..
@@ -193,6 +242,7 @@ fn main() {
         );
         println!("  {}", summary("valid", &mut valid));
         println!("  {}", summary("damaging", &mut damaging));
+        println!("  {} ({lens_scope})", summary("lens", &mut lens));
         input
             .write_all(&frame(json!({"method":"textDocument/didClose","params":{
                 "textDocument":{"uri":uri}}})))
