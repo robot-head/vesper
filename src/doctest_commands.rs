@@ -9,7 +9,7 @@ use vesper::{
 };
 
 const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]";
-const HELP: &str = "Usage: vesper test --doc [FILE|DIR] [--json]\n\nExtract actual Vesper doc-comment fences, fully check examples, and run supported finite scalar entries in one shared JIT module per file;\nexamples outside the native subset run on the reference evaluator instead, and each result names its engine.\nWith no path (or a directory), run every .ves source of the package that has doc examples: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-* and nested-package\ndirectories are skipped and symlinks are not followed. Files without examples are listed, not run; a package\nwith no examples at all fails.\ncompile_fail(E...) must match exact example diagnostics; base errors and unsupported execution never count as success.\n`vesper,sim(seed=N,clock,net,disk)` fences run on the reference evaluator under a seeded SimPulse kernel with\nsimulated clock, network and disk effects, twice: the second run replays the first run's journal.\nSource/check/module budgets apply; this is not an OS sandbox or a hard deadline.\n";
+const HELP: &str = "Usage: vesper test --doc [FILE|DIR] [--json]\n\nExtract actual Vesper doc-comment fences, fully check examples, and run supported finite scalar entries in one shared JIT module per file;\nexamples outside the native subset run on the reference evaluator instead, and each result names its engine.\nWith no path (or a directory), run every .ves source of the package that has doc examples: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-* and nested-package\ndirectories are skipped and symlinks are not followed. Files without examples are listed, not run; a package\nwith no examples at all fails. Each file's examples are checked against that file; the runnable examples of all\nfiles then share ONE package module and ONE JIT module when the files' top-level names are disjoint, otherwise\neach file runs in its own module and the report says why.\ncompile_fail(E...) must match exact example diagnostics; base errors and unsupported execution never count as success.\n`vesper,sim(seed=N,clock,net,disk)` fences run on the reference evaluator under a seeded SimPulse kernel with\nsimulated clock, network and disk effects, twice: the second run replays the first run's journal.\nSource/check/module budgets apply; this is not an OS sandbox or a hard deadline.\n";
 
 fn read_source(file: &Path, limits: DocTestLimits) -> Result<String, String> {
     let name = file.display();
@@ -121,8 +121,10 @@ fn run_file(file: &str, json: bool, limits: DocTestLimits) -> Result<(), String>
     }
 }
 
-/// Every discovered file is visited; the run fails after all files if any
-/// file failed, and fails if no file in the package has examples.
+/// Every discovered file is visited; files with examples run together in one
+/// package module (one shared JIT module) when their top-level names are
+/// disjoint, else each in its own module. The run fails after all files if
+/// any file failed, and fails if no file in the package has examples.
 fn run_package(start: &Path, json: bool, limits: DocTestLimits) -> Result<(), String> {
     let package = match discover(start, SourceLimits::default()) {
         Ok(package) => package,
@@ -133,37 +135,50 @@ fn run_package(start: &Path, json: bool, limits: DocTestLimits) -> Result<(), St
             return Err(error);
         }
     };
-    let mut files = Vec::new();
-    let (mut tested, mut failed, mut skipped) = (0usize, 0usize, 0usize);
+    // (display name, Some(source) with examples | None without, or the read error).
+    let mut entries: Vec<(String, Result<Option<String>, String>)> = Vec::new();
     for path in &package.files {
         let name = package.display(path);
-        let source = read_source(path, limits);
-        let has = source
-            .as_deref()
-            .map_err(Clone::clone)
-            .and_then(|s| doctest::has_examples(s, limits));
-        match (source, has) {
-            (Ok(_), Ok(false)) => {
+        let entry = read_source(path, limits).and_then(|source| {
+            doctest::has_examples(&source, limits).map(|has| has.then_some(source))
+        });
+        entries.push((name, entry));
+    }
+    let with_examples: Vec<(String, String)> = entries
+        .iter()
+        .filter_map(|(name, e)| match e {
+            Ok(Some(source)) => Some((name.clone(), source.clone())),
+            _ => None,
+        })
+        .collect();
+    let mut package_report = doctest::run_package(&with_examples, limits);
+    let mut files = Vec::new();
+    let (mut tested, mut failed, mut skipped) = (0usize, 0usize, 0usize);
+    let mut results = std::mem::take(&mut package_report.files).into_iter();
+    for (name, entry) in &entries {
+        match entry {
+            Ok(None) => {
                 skipped += 1;
                 if !json {
                     println!("{name}: no doc examples");
                 }
                 files.push(serde_json::json!({"file":name,"examples":false}));
             }
-            (Ok(source), Ok(true)) => {
+            Ok(Some(_)) => {
                 tested += 1;
-                match doctest::run(&source, limits) {
-                    Ok(report) => {
-                        if !report.passed {
-                            failed += 1;
-                        }
+                let result = results.next().ok_or("missing package doctest result")?;
+                if !result.passed {
+                    failed += 1;
+                }
+                match (&result.report, &result.error) {
+                    (Some(report), _) => {
                         if !json {
-                            print_report(&name, &report);
+                            print_report(name, report);
                         }
-                        files.push(serde_json::json!({"file":name,"examples":true,"passed":report.passed,"report":report}));
+                        files.push(serde_json::json!({"file":name,"examples":true,"passed":result.passed,"report":report}));
                     }
-                    Err(error) => {
-                        failed += 1;
+                    (None, error) => {
+                        let error = error.clone().unwrap_or_default();
                         if !json {
                             println!("{name}: FAIL: {error}");
                         }
@@ -171,7 +186,7 @@ fn run_package(start: &Path, json: bool, limits: DocTestLimits) -> Result<(), St
                     }
                 }
             }
-            (Err(error), _) | (Ok(_), Err(error)) => {
+            Err(error) => {
                 tested += 1;
                 failed += 1;
                 if !json {
@@ -199,10 +214,24 @@ fn run_package(start: &Path, json: bool, limits: DocTestLimits) -> Result<(), St
                 "manifest":package.manifest.as_ref().map(|m| m.display().to_string()),
                 "passed":error.is_none(),
                 "files":files,
+                "package_module":package_report.package_module,
+                "package_fallback":package_report.package_fallback,
+                "batch":package_report.batch,
+                "coverage_probes":package_report.coverage_probes,
+                "jit_examples":package_report.jit_examples,
+                "evaluator_examples":package_report.evaluator_examples,
                 "error":error,
             })
         );
     } else {
+        match (&package_report.batch, &package_report.package_fallback) {
+            (Some(batch), _) if package_report.package_module => println!(
+                "package module: {} entry point(s) in one shared JIT module ({} probe module(s))",
+                batch.entry_count, package_report.coverage_probes
+            ),
+            (_, Some(reason)) => println!("package module not used: {reason}; one module per file"),
+            _ => {}
+        }
         println!(
             "doctests: {tested} file(s) tested, {failed} failed, {skipped} without examples, under {}",
             package.root.display()

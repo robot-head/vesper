@@ -3,7 +3,9 @@
 //! (§40.2). No ambient IO, source arena or hard-timeout/sandbox claim is made.
 //!
 //! Positive non-simulated examples of one file are merged into one checked
-//! module and compiled into ONE shared Cranelift JIT module. When the native
+//! module and compiled into ONE shared Cranelift JIT module; a package run
+//! ([`run_package`]) merges the modules of every file into one package
+//! module and one shared JIT module. When the native
 //! batch subset (finite scalar direct calls) does not cover an example, that
 //! example alone runs on the reference evaluator instead, and its report says
 //! which engine ran and why it fell back. Coverage is decided by compiling a
@@ -934,10 +936,276 @@ pub fn has_examples(source: &str, limits: DocTestLimits) -> Result<bool, String>
     preflight(source, limits)?;
     Ok(!extract(source, limits)?.is_empty())
 }
+/// A file whose examples are checked and whose positive non-simulated
+/// examples are merged into `merged`, awaiting execution.
+struct Prepared {
+    report: DocTestReport,
+    merged: String,
+    /// (example index, entry, byte range of its fragment in `merged`).
+    runnable: Vec<(usize, String, std::ops::Range<usize>)>,
+    /// Bytes checked so far for this file (budgeted by `max_total_check_bytes`).
+    checked_bytes: usize,
+}
+
 /// Body fences are Unit blocks. Declaration fences use explicit `entry=name`
 /// or `main` by default; positive declaration names must be unique in the merged
 /// package. Unsupported syntax/execution is an explicit failure, never a skip.
 pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String> {
+    let mut prepared = prepare(source, limits)?;
+    finish_file(&mut prepared, limits)?;
+    Ok(prepared.report)
+}
+
+/// Check the file's merged module and run its examples in its own module.
+fn finish_file(p: &mut Prepared, limits: DocTestLimits) -> Result<(), String> {
+    if !p.runnable.is_empty() {
+        let (checked, errors) = checked(&p.merged, limits, &mut p.checked_bytes)?;
+        let valid_origins = p.runnable.iter().all(|(_, entry, range)| {
+            checked
+                .world
+                .functions
+                .get(entry)
+                .is_some_and(|f| f.span.start >= range.start && f.span.end <= range.end)
+        });
+        if !errors.is_empty() || !valid_origins {
+            for (index, _, _) in &p.runnable {
+                p.report.examples[*index].message = format!(
+                    "merged positive module check/provenance failed: {}",
+                    errors
+                        .iter()
+                        .map(|d| d.code.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                );
+            }
+        } else {
+            let runnable: Vec<Runnable<'_>> = p
+                .runnable
+                .iter()
+                .map(|(index, entry, _)| (0, *index, entry.as_str()))
+                .collect();
+            let outcome = execute(
+                &checked.world,
+                &runnable,
+                limits,
+                std::slice::from_mut(&mut p.report),
+            )?;
+            p.report.batch = outcome.batch;
+            p.report.coverage_probes = outcome.probes;
+        }
+    }
+    p.report.passed =
+        p.report.base_diagnostics.is_empty() && p.report.examples.iter().all(|e| e.passed);
+    Ok(())
+}
+
+/// One package file's result.
+#[derive(Debug, Serialize)]
+pub struct PackageFileReport {
+    pub file: String,
+    pub passed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<DocTestReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+/// Doctests of a whole package (§40.1 item 3): the positive non-simulated
+/// examples of every file are merged into ONE checked package module and
+/// compiled into ONE shared JIT module. Each file is first checked on its
+/// own (its examples see only that file's declarations, exactly as in a
+/// single-file run); the package module is the concatenation of those
+/// per-file merged modules, so it only checks when the files' top-level
+/// names are disjoint. When it does not check (or exceeds a budget), each
+/// file runs in its own module instead and `package_fallback` says why.
+#[derive(Debug, Serialize)]
+pub struct PackageDocTestReport {
+    pub passed: bool,
+    pub files: Vec<PackageFileReport>,
+    /// Whether the shared package module was used.
+    pub package_module: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_fallback: Option<String>,
+    /// Statistics of the shared package module.
+    pub batch: Option<BatchReport>,
+    pub coverage_probes: usize,
+    pub jit_examples: usize,
+    pub evaluator_examples: usize,
+}
+
+/// Run the doctests of `(display name, source)` files, which must all hold
+/// examples, in one package module where possible.
+pub fn run_package(files: &[(String, String)], limits: DocTestLimits) -> PackageDocTestReport {
+    let mut prepared: Vec<(String, Result<Prepared, String>)> = files
+        .iter()
+        .map(|(name, source)| (name.clone(), prepare(source, limits)))
+        .collect();
+    let mut report = PackageDocTestReport {
+        passed: false,
+        files: vec![],
+        package_module: false,
+        package_fallback: None,
+        batch: None,
+        coverage_probes: 0,
+        jit_examples: 0,
+        evaluator_examples: 0,
+    };
+    // The package module: every runnable file's merged module, in order.
+    let mut combined = String::new();
+    let mut parts: Vec<(usize, usize, String, std::ops::Range<usize>)> = Vec::new();
+    for (file, (_, p)) in prepared.iter().enumerate() {
+        if let Ok(p) = p
+            && !p.runnable.is_empty()
+        {
+            if !combined.is_empty() {
+                combined.push('\n');
+            }
+            let base = combined.len();
+            combined.push_str(&p.merged);
+            for (index, entry, range) in &p.runnable {
+                parts.push((
+                    file,
+                    *index,
+                    entry.clone(),
+                    base + range.start..base + range.end,
+                ));
+            }
+        }
+    }
+    let runnable_files = prepared
+        .iter()
+        .filter(|(_, p)| p.as_ref().is_ok_and(|p| !p.runnable.is_empty()))
+        .count();
+    let shared = if runnable_files == 0 {
+        Err("no file has a runnable example".to_string())
+    } else {
+        let mut checked_bytes = 0usize;
+        match checked(&combined, limits, &mut checked_bytes) {
+            Err(error) => Err(format!("package module budget: {error}")),
+            Ok((_, errors)) if !errors.is_empty() => Err(format!(
+                "package module check failed (top-level names must be disjoint across files): {}",
+                errors
+                    .iter()
+                    .map(|d| d.code.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(",")
+            )),
+            Ok((checked, _)) => {
+                let valid = parts.iter().all(|(_, _, entry, range)| {
+                    checked
+                        .world
+                        .functions
+                        .get(entry)
+                        .is_some_and(|f| f.span.start >= range.start && f.span.end <= range.end)
+                });
+                if valid {
+                    Ok(checked)
+                } else {
+                    Err(
+                        "package module entry provenance failed (an entry name is defined twice)"
+                            .into(),
+                    )
+                }
+            }
+        }
+    };
+    match shared {
+        Ok(checked) => {
+            // Execute into per-file reports, indexed by position in `prepared`.
+            let mut reports: Vec<DocTestReport> = Vec::new();
+            let mut slots = Vec::new();
+            for (_, p) in prepared.iter_mut() {
+                if let Ok(p) = p {
+                    slots.push(Some(reports.len()));
+                    reports.push(std::mem::replace(&mut p.report, empty_report()));
+                } else {
+                    slots.push(None);
+                }
+            }
+            let runnable: Vec<Runnable<'_>> = parts
+                .iter()
+                .map(|(file, index, entry, _)| {
+                    (slots[*file].expect("runnable file"), *index, entry.as_str())
+                })
+                .collect();
+            match execute(&checked.world, &runnable, limits, &mut reports) {
+                Ok(outcome) => {
+                    report.package_module = true;
+                    report.batch = outcome.batch;
+                    report.coverage_probes = outcome.probes;
+                }
+                Err(error) => report.package_fallback = Some(error),
+            }
+            let mut reports = reports.into_iter();
+            for (_, p) in prepared.iter_mut() {
+                if let Ok(p) = p {
+                    p.report = reports.next().expect("report slot");
+                    if !report.package_module {
+                        for (index, _, _) in &p.runnable {
+                            p.report.examples[*index].message =
+                                "package module execution failed".into();
+                        }
+                    }
+                    p.report.passed = p.report.base_diagnostics.is_empty()
+                        && p.report.examples.iter().all(|e| e.passed);
+                }
+            }
+        }
+        Err(reason) => {
+            if runnable_files > 0 {
+                report.package_fallback = Some(reason);
+            }
+            for (_, p) in prepared.iter_mut() {
+                if let Ok(p) = p
+                    && let Err(error) = finish_file(p, limits)
+                {
+                    for e in &mut p.report.examples {
+                        e.passed = false;
+                        e.message = error.clone();
+                    }
+                    p.report.passed = false;
+                }
+            }
+        }
+    }
+    for (file, p) in prepared {
+        match p {
+            Ok(p) => {
+                report.jit_examples += p.report.jit_examples;
+                report.evaluator_examples += p.report.evaluator_examples;
+                report.files.push(PackageFileReport {
+                    file,
+                    passed: p.report.passed,
+                    report: Some(p.report),
+                    error: None,
+                });
+            }
+            Err(error) => report.files.push(PackageFileReport {
+                file,
+                passed: false,
+                report: None,
+                error: Some(error),
+            }),
+        }
+    }
+    report.passed = !report.files.is_empty() && report.files.iter().all(|f| f.passed);
+    report
+}
+
+fn empty_report() -> DocTestReport {
+    DocTestReport {
+        passed: false,
+        base_diagnostics: vec![],
+        examples: vec![],
+        batch: None,
+        coverage_probes: 0,
+        jit_examples: 0,
+        evaluator_examples: 0,
+    }
+}
+
+fn prepare(source: &str, limits: DocTestLimits) -> Result<Prepared, String> {
     limits.validate()?;
     if source.len() > limits.max_source_bytes {
         return Err("doctest source byte limit".into());
@@ -957,7 +1225,12 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
         evaluator_examples: 0,
     };
     if !base_errors.is_empty() {
-        return Ok(report);
+        return Ok(Prepared {
+            report,
+            merged: String::new(),
+            runnable: vec![],
+            checked_bytes,
+        });
     }
     let examples = extract(source, limits)?;
     if examples.is_empty() {
@@ -1079,32 +1352,13 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
         }
         report.examples.push(result);
     }
-    if !runnable.is_empty() {
-        let (checked, errors) = checked(&merged, limits, &mut checked_bytes)?;
-        let valid_origins = runnable.iter().all(|(_, entry, range)| {
-            checked
-                .world
-                .functions
-                .get(entry)
-                .is_some_and(|f| f.span.start >= range.start && f.span.end <= range.end)
-        });
-        if !errors.is_empty() || !valid_origins {
-            for (index, _, _) in &runnable {
-                report.examples[*index].message = format!(
-                    "merged positive module check/provenance failed: {}",
-                    errors
-                        .iter()
-                        .map(|d| d.code.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                );
-            }
-        } else {
-            execute(&checked.world, &runnable, limits, &mut report)?;
-        }
-    }
-    report.passed = report.examples.iter().all(|e| e.passed);
-    Ok(report)
+    report.passed = report.base_diagnostics.is_empty() && report.examples.iter().all(|e| e.passed);
+    Ok(Prepared {
+        report,
+        merged,
+        runnable,
+        checked_bytes,
+    })
 }
 
 /// Repeat `run` and require identical results.
@@ -1128,22 +1382,30 @@ fn repeated(
     (first, None)
 }
 
+/// (report slot, example index, entry).
+type Runnable<'a> = (usize, usize, &'a str);
+struct Executed {
+    batch: Option<BatchReport>,
+    probes: usize,
+}
 /// Run every merged positive entry: the natively covered ones in one shared
-/// JIT module, the rest on the reference evaluator.
+/// JIT module, the rest on the reference evaluator. Results go to
+/// `reports[slot].examples[index]`.
 fn execute(
     world: &check::World,
-    runnable: &[(usize, String, std::ops::Range<usize>)],
+    runnable: &[Runnable<'_>],
     limits: DocTestLimits,
-    report: &mut DocTestReport,
-) -> Result<(), String> {
-    let all: Vec<&str> = runnable.iter().map(|(_, n, _)| n.as_str()).collect();
+    reports: &mut [DocTestReport],
+) -> Result<Executed, String> {
+    let mut probes = 0usize;
+    let all: Vec<&str> = runnable.iter().map(|(_, _, n)| *n).collect();
     let mut fallback: std::collections::BTreeMap<&str, String> = Default::default();
     let batch = match NativeBatch::compile(world, &all, limits.batch) {
         Ok(batch) => Some(batch),
         Err(_) => {
             let mut covered = Vec::new();
             for entry in &all {
-                report.coverage_probes += 1;
+                probes += 1;
                 match NativeBatch::compile(world, &[entry], limits.batch) {
                     Ok(_probe) => covered.push(*entry),
                     Err(error) => {
@@ -1170,9 +1432,10 @@ fn execute(
     };
     let mut batch = batch;
     let mut evaluator = None;
-    for (index, entry, _) in runnable {
+    for (slot, index, entry) in runnable {
+        let report = &mut reports[*slot];
         let result = &mut report.examples[*index];
-        if let Some(reason) = fallback.get(entry.as_str()) {
+        if let Some(reason) = fallback.get(entry) {
             let runtime = evaluator.get_or_insert_with(|| crate::runtime::Runtime::new(world));
             let (value, failed) = repeated(limits.runs_per_example, || {
                 runtime.fuel = 1_000_000;
@@ -1202,6 +1465,8 @@ fn execute(
             report.jit_examples += 1;
         }
     }
-    report.batch = batch.map(|b| b.stats().into());
-    Ok(())
+    Ok(Executed {
+        batch: batch.map(|b| b.stats().into()),
+        probes,
+    })
 }
