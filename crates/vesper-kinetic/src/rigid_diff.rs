@@ -120,7 +120,8 @@ pub struct RigidGradients {
     pub initial: Vec<DiffRigidState>,
     pub compliance: f64,
     /// Contact activations (contact-substeps that projected), by feature:
-    /// `[ground, face, segment pair]`.
+    /// `[ground, polytope (face, or a rounded body's edge or corner),
+    /// segment pair]`.
     pub activations: [usize; 3],
 }
 
@@ -330,6 +331,8 @@ struct Geometry {
     planes: Vec<([f64; 3], f64)>,
     /// Each plane's face polygon, ordered around its normal.
     faces: Vec<Vec<[f64; 3]>>,
+    /// Each polytope edge once, as local end points.
+    edges: Vec<([f64; 3], [f64; 3])>,
     /// A capsule or sphere (core is a point or segment).
     round: bool,
 }
@@ -454,6 +457,23 @@ fn clip<R: Real>(poly: &[V<R>], m: [f64; 3], e: f64) -> Vec<V<R>> {
     out
 }
 
+/// Every edge of the face polygons once, in first-seen order.
+fn polygon_edges(faces: &[Vec<[f64; 3]>]) -> Vec<([f64; 3], [f64; 3])> {
+    let mut out: Vec<([f64; 3], [f64; 3])> = Vec::new();
+    for f in faces {
+        for e in 0..f.len() {
+            let (p, q) = (f[e], f[(e + 1) % f.len()]);
+            if !out
+                .iter()
+                .any(|&(a, b)| (a == p && b == q) || (a == q && b == p))
+            {
+                out.push((p, q));
+            }
+        }
+    }
+    out
+}
+
 fn geometry(shape: &DiffShape) -> Geometry {
     match shape {
         DiffShape::Sphere { radius } => Geometry {
@@ -461,6 +481,7 @@ fn geometry(shape: &DiffShape) -> Geometry {
             radius: *radius,
             planes: Vec::new(),
             faces: Vec::new(),
+            edges: Vec::new(),
             round: true,
         },
         DiffShape::Capsule { a, b, radius } => Geometry {
@@ -468,6 +489,7 @@ fn geometry(shape: &DiffShape) -> Geometry {
             radius: *radius,
             planes: Vec::new(),
             faces: Vec::new(),
+            edges: Vec::new(),
             round: true,
         },
         DiffShape::Box { half_extents: h } => {
@@ -492,16 +514,19 @@ fn geometry(shape: &DiffShape) -> Geometry {
                 points,
                 radius: 0.0,
                 planes,
+                edges: polygon_edges(&faces),
                 faces,
                 round: false,
             }
         }
         DiffShape::Hull { vertices } => {
             let planes = hull_planes(vertices);
+            let faces = face_polygons(vertices, &planes);
             Geometry {
+                edges: polygon_edges(&faces),
                 points: vertices.clone(),
                 radius: 0.0,
-                faces: face_polygons(vertices, &planes),
+                faces,
                 planes,
                 round: false,
             }
@@ -535,6 +560,14 @@ enum Feature<R> {
     },
     /// Closest points of the core segments of round bodies `a` and `b`.
     Segments { a: usize, b: usize },
+    /// Closest points of round body `round`'s core and edge `edge` of
+    /// polytope `poly`: the rounded edge and corner contacts that face
+    /// clipping cannot see (the core lies outside every face's prism).
+    Edge {
+        round: usize,
+        poly: usize,
+        edge: usize,
+    },
 }
 
 struct Model<'s> {
@@ -838,6 +871,7 @@ impl<'s> Model<'s> {
                         break;
                     }
                 }
+                let mut found = false;
                 for c in clipped {
                     let s = dot64(nl, vv(c)) - d - r_inc;
                     if s >= margin {
@@ -846,6 +880,7 @@ impl<'s> Model<'s> {
                     // Back to the incident body's frame.
                     let w = vadd(bri.x, rotate(bri.q, c));
                     let local = rotate(conj(bii.q), vsub(w, bii.x));
+                    found = true;
                     push(
                         out,
                         Feature::Face {
@@ -855,6 +890,33 @@ impl<'s> Model<'s> {
                             local,
                         },
                     )?;
+                }
+                // A rounded body whose core is outside every face's prism
+                // touches an edge or a corner: take the nearest edge.
+                if !found && (gi.round || gj.round) {
+                    let (round, poly) = if gi.round { (i, j) } else { (j, i) };
+                    let (sr, sp) = (sc.bodies[round].shape, sc.bodies[poly].shape);
+                    let (br, bp) = (&bodies64[round], &bodies64[poly]);
+                    let last = self.geo[sr].points.len() - 1;
+                    let (c0, c1) = (
+                        self.world_point(br, sr, 0).0,
+                        self.world_point(br, sr, last).0,
+                    );
+                    let mut best: Option<(f64, usize)> = None;
+                    for (k, (p, q)) in self.geo[sp].edges.iter().enumerate() {
+                        let e0 = vadd(bp.x, rotate(bp.q, *p));
+                        let e1 = vadd(bp.x, rotate(bp.q, *q));
+                        let (pc, pe) = closest_segments(c0, c1, e0, e1);
+                        let dd = dot64(sub64(pc, pe), sub64(pc, pe));
+                        if best.is_none_or(|(b, _)| dd < b) {
+                            best = Some((dd, k));
+                        }
+                    }
+                    if let Some((dd, edge)) = best
+                        && dd.sqrt() - self.geo[sr].radius < margin
+                    {
+                        push(out, Feature::Edge { round, poly, edge })?;
+                    }
                 }
             }
         }
@@ -924,6 +986,29 @@ impl<'s> Model<'s> {
                 let arm_a = vsub(vsub(pa, vscale(n, ra)), bodies[a].x);
                 let arm_b = vsub(vadd(pb, vscale(n, rb)), bodies[b].x);
                 (c, n, arm_a, arm_b, a, Some(b))
+            }
+            Feature::Edge { round, poly, edge } => {
+                let (sr, sp) = (sc.bodies[round].shape, sc.bodies[poly].shape);
+                let last = self.geo[sr].points.len() - 1;
+                let c0 = self.world_point(&bodies[round], sr, 0).0;
+                let c1 = self.world_point(&bodies[round], sr, last).0;
+                let (p, q) = self.geo[sp].edges[edge];
+                let bp = &bodies[poly];
+                let e0 = vadd(bp.x, rotate(bp.q, vc(p)));
+                let e1 = vadd(bp.x, rotate(bp.q, vc(q)));
+                let (pc, pe) = closest_segments(c0, c1, e0, e1);
+                let d = vsub(pc, pe);
+                let len = vdot(d, d).sqrt();
+                let rad = R::c(self.geo[sr].radius);
+                let c = rad - len;
+                let n = if len.v() > 0.0 {
+                    vscale(d, R::c(1.0) / len)
+                } else {
+                    vc([0.0, 1.0, 0.0])
+                };
+                let arm_round = vsub(vsub(pc, vscale(n, rad)), bodies[round].x);
+                let arm_poly = vsub(pe, bp.x);
+                (c, n, arm_round, arm_poly, round, Some(poly))
             }
         }
     }
@@ -1006,7 +1091,7 @@ impl<'s> Model<'s> {
                     }
                     activations[match f {
                         Feature::Ground { .. } => 0,
-                        Feature::Face { .. } => 1,
+                        Feature::Face { .. } | Feature::Edge { .. } => 1,
                         Feature::Segments { .. } => 2,
                     }] += 1;
                     let dl = c / denom;

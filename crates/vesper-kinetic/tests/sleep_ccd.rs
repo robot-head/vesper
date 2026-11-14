@@ -2,7 +2,7 @@
 
 use vesper_kinetic::rigid::{
     CcdConfig, ColliderShape, GroundPlane, RigidBody, RigidCollider, RigidConfig, RigidError,
-    RigidMaterial, RigidWorld, SleepConfig, box_inv_inertia, sphere_inv_inertia,
+    RigidJoint, RigidMaterial, RigidWorld, SleepConfig, box_inv_inertia, sphere_inv_inertia,
 };
 
 fn material(mu: f32) -> RigidMaterial {
@@ -308,4 +308,29 @@ fn ccd_bullets_do_not_cross_a_thin_wall_or_the_ground() {
         })),
         Err(RigidError::InvalidConfig(_))
     ));
+}
+
+#[test]
+fn adding_a_joint_wakes_the_bodies_it_binds() {
+    let cfg = RigidConfig {
+        gravity: [0.0; 3],
+        ground: None,
+        ..RigidConfig::default()
+    };
+    let b = RigidBody::new([0.0; 3], 1.0, sphere_inv_inertia(1.0, 0.3), 0);
+    let mut w = RigidWorld::new(cfg, &[b], &[ball(0.3, material(0.5))]).unwrap();
+    w.set_sleeping(Some(SleepConfig::default())).unwrap();
+    for _ in 0..40 {
+        w.step().unwrap();
+    }
+    assert!(w.is_asleep(0));
+    // A rigid ball joint from the centre to a world point one unit away.
+    w.add_joint(RigidJoint::ball(0, None, [0.0; 3], [1.0, 0.0, 0.0]))
+        .unwrap();
+    assert!(!w.is_asleep(0));
+    for _ in 0..5 {
+        w.step().unwrap();
+    }
+    let p = w.body(0).unwrap().pos;
+    assert!((p[0] - 1.0).abs() < 1e-3, "pulled to the anchor: {p:?}");
 }

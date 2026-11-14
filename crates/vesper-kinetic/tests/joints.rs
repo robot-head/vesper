@@ -261,6 +261,49 @@ fn prismatic_slides_along_its_axis_and_stops_at_the_limit() {
     assert!(checked);
 }
 
+#[test]
+fn a_free_prismatic_pair_keeps_its_angular_momentum() {
+    // Two boxes joined at their centres along x, one moving sideways: the
+    // assembly must turn as a whole instead of losing angular momentum.
+    let h = [0.2f32; 3];
+    let cube = RigidCollider {
+        shape: ColliderShape::Box { half_extents: h },
+        material: RigidMaterial::default(),
+    };
+    let a = RigidBody::new([0.0, 0.0, 0.0], 1.0, box_inv_inertia(1.0, h), 0);
+    let mut b = RigidBody::new([1.0, 0.0, 0.0], 1.0, box_inv_inertia(1.0, h), 0);
+    b.vel = [0.0, 1.0, 0.0];
+    let cfg = RigidConfig {
+        gravity: [0.0; 3],
+        ..free_config(16)
+    };
+    let mut w = RigidWorld::new(cfg, &[a, b], &[cube]).unwrap();
+    w.add_joint(RigidJoint {
+        kind: JointKind::Prismatic {
+            axis_a: [1.0, 0.0, 0.0],
+            limits: None,
+        },
+        collide_connected: false,
+        ..RigidJoint::ball(0, Some(1), [0.0; 3], [0.0; 3])
+    })
+    .unwrap();
+    let l0 = w.angular_momentum();
+    assert!((l0[2] - 1.0).abs() < 1e-9);
+    for t in 1..=120 {
+        w.step().unwrap();
+        let l = w.angular_momentum();
+        assert!(
+            // Without the axial arm the first tick already lost half;
+            // what remains is the first-order velocity update's drift.
+            (l[2] - l0[2]).abs() < 0.03 && l[0].abs() < 1e-4 && l[1].abs() < 1e-4,
+            "tick {t}: angular momentum {l:?}"
+        );
+    }
+    // Rigidly turning: both bodies spin, and with the same rate.
+    let (sa, sb) = (w.body(0).unwrap().ang_vel, w.body(1).unwrap().ang_vel);
+    assert!(sa[2] > 0.1 && (sa[2] - sb[2]).abs() < 1e-3, "{sa:?} {sb:?}");
+}
+
 /// An articulated chain of `links` boxes joined by ball joints, hanging
 /// from the world and released horizontally.
 fn chain(links: usize, substeps: u32) -> RigidWorld {

@@ -212,6 +212,12 @@ impl RigidWorld {
             }
         }
         self.joints.push(st);
+        // A joint added at run time must act: wake what it binds, or a
+        // sleeping body would skip the new constraint indefinitely.
+        self.wake(joint.a as usize);
+        if let Some(b) = joint.b {
+            self.wake(b as usize);
+        }
         if !joint.collide_connected
             && let Some(b) = joint.b
         {
@@ -389,8 +395,19 @@ impl RigidWorld {
                 j.lambda_ang = lambda;
             }
         }
-        let (pa, ra, pb, rb) = self.joint_points(&j);
+        let (pa, mut ra, pb, rb) = self.joint_points(&j);
         let d = sub(pb, pa);
+        if let (JointKind::Prismatic { .. }, Some(_)) = (j.joint.kind, b) {
+            // Between two bodies both impulses act at b's anchor: a's arm
+            // then carries the axial separation, which is the Jacobian
+            // term of the slide axis turning with a. With a's arm ending
+            // at its own anchor the equal and opposite impulses would sit
+            // on different points of the axis and leak angular momentum.
+            // Against the world there is no momentum to keep, and the
+            // short arm keeps the slider from being spun against its
+            // orientation lock.
+            ra = add(ra, d);
+        }
         let delta = match j.joint.kind {
             JointKind::Prismatic { limits, .. } => {
                 let (_, qa) = self.pose(Some(a));

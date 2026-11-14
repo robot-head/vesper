@@ -264,6 +264,49 @@ fn colliding_capsules_and_box_on_box() {
 }
 
 #[test]
+fn rounded_bodies_touch_box_edges_and_corners() {
+    // A sphere over a box's edge and a capsule over its corner: the cores
+    // lie outside every face's prism, so the contact is the rounded edge.
+    let shapes = vec![
+        DiffShape::Box {
+            half_extents: [1.0; 3],
+        },
+        DiffShape::Sphere { radius: 0.5 },
+        DiffShape::Capsule {
+            a: [-0.3, 0.0, 0.0],
+            b: [0.3, 0.0, 0.0],
+            radius: 0.3,
+        },
+    ];
+    let mut s = scene(
+        vec![
+            fixed([0.0, 0.0, 0.0], 0),
+            body([1.2, 1.2, 0.0], 1, [10.0; 3]),
+        ],
+        shapes.clone(),
+        1,
+    );
+    s.ground = None;
+    s.gravity = [0.0; 3];
+    let out = simulate(&s).unwrap();
+    let p = out[1].pos;
+    let d = ((p[0] - 1.0).powi(2) + (p[1] - 1.0).powi(2)).sqrt();
+    // Pushed out along the edge normal (the diagonal), clear of the edge.
+    assert!(
+        d > 0.49 && p[0] > 1.2 && (p[0] - p[1]).abs() < 1e-9 && p[2] == 0.0,
+        "pushed off the edge: {p:?}"
+    );
+    check(&s, "sphere on a box edge", [false, true, false]);
+    let mut cap = body([1.25, 1.2, 1.2], 2, [6.0, 4.0, 5.0]);
+    cap.orientation = quat([0.0, 1.0, 1.0], 0.7);
+    cap.vel = [-0.3, -0.4, -0.2];
+    let mut s = scene(vec![fixed([0.0, 0.0, 0.0], 0), cap], shapes, 12);
+    s.ground = None;
+    s.gravity = [0.0; 3];
+    check(&s, "capsule on a box corner", [false, true, false]);
+}
+
+#[test]
 fn malformed_diff_scenes_are_typed_errors() {
     let base = scene(
         vec![body([0.0, 1.0, 0.0], 0, [1.0; 3])],

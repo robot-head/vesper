@@ -26,12 +26,16 @@ the world steps to the same bits as before, and the wave-seven rigid golden
     `fastmath::atan2f`, target from `sinf`/`cosf`, so it stays
     deterministic), then the anchors;
   - prismatic: relative-orientation lock, then the anchor offset
-    perpendicular to the axis and clamped to the limits along it;
+    perpendicular to the axis and clamped to the limits along it. Between
+    two bodies the positional impulses both act at b's anchor, so a's arm
+    carries the axial separation (the Jacobian term of the turning slide
+    axis) and a free pair keeps its angular momentum;
   - ball: the anchors.
 
   Joints are coloured together with the contact manifolds (they follow the
   manifolds in the constraint list), so a colour's joints and contacts touch
-  disjoint bodies. `joint_force(i)` reports `λ/h²`. Malformed joints give
+  disjoint bodies. Adding a joint wakes the bodies it binds.
+`joint_force(i)` reports `λ/h²`. Malformed joints give
   `RigidError::InvalidJoint`: unknown or repeated bodies, two static bodies,
   non-finite anchors, negative compliance, zero axes, bad limits.
 - **Gyroscopic term** (`rigid/gyro.rs`, `set_gyroscopic`): implicit
@@ -109,6 +113,10 @@ the world steps to the same bits as before, and the wave-seven rigid golden
     margin, so resting parallel faces do not switch reference. The incident
     face, or the capsule's segment, is clipped against the reference face's
     side planes (Sutherland–Hodgman).
+  - a sphere or capsule whose core lies outside every face's prism (over
+    an edge or a corner) gets a rounded edge contact instead: the closest
+    points of its core and the nearest polytope edge, recomputed every
+    substep;
   - capsule against capsule uses closest points of the segments,
     recomputed every substep.
 
@@ -148,10 +156,12 @@ the world steps to the same bits as before, and the wave-seven rigid golden
 | `joints::hinge_keeps_the_bob_in_its_plane` | out-of-plane kick of 1.5 m/s | z ≤ 2.0e-3 m, axis drift ≤ 4.5e-3 rad (ball joint: z > 0.2 m) |
 | `joints::hinge_limits_stop_the_swing` | limits ±0.3 rad with a swing that would reach ~1.1 rad | angles stay within [−0.29995, 0.29996]; orientation agrees with position to 2e-3 |
 | `joints::prismatic_slides_along_its_axis_and_stops_at_the_limit` | 45° slide | off-axis ≤ 1e-4 m, matches symplectic Euler, rests at the limit within 2e-3 |
+| `joints::a_free_prismatic_pair_keeps_its_angular_momentum` | two boxes 1 m apart, one moving sideways, no gravity, 2 s | \|ΔL_z\| < 0.03 (was −50% on the first tick before the arm fix); both bodies turn at the same rate |
 | `joints::articulated_chain_holds_together_and_does_not_gain_energy` | 10-link chain, 32 substeps, 4 s | worst joint gap 7.2e-4 m, energy never above the start |
 | `joints::gyroscopic_term_…` | intermediate-axis (Dzhanibekov) flip | flips; worst \|ΔL\|/\|L\| = 1.1e-2; energy −2.2%, never gains |
 | `sleep_ccd::a_resting_stack_falls_asleep_and_a_falling_ball_wakes_it` | 5-box stack plus a ball | asleep after 152 ticks, bit-frozen while asleep, the launched ball wakes the whole stack, which sleeps again; boxes within 1 cm |
 | `sleep_ccd::sleeping_matches_…` | sleeping changes nothing before sleep; deterministic; typed errors | equal |
+| `sleep_ccd::adding_a_joint_wakes_the_bodies_it_binds` | joint added to a sleeping body | wakes; pulled to the world anchor within 1e-3 m |
 | `sleep_ccd::ccd_hits_the_face_at_the_time_of_impact` | 187 m/s ball past a box corner | CCD normal (−1, 0, 0), speculative normal (−0.71, 0.71, 0); after impact CCD keeps vy = −144 m/s, speculative deflects to (−12, −12) |
 | `sleep_ccd::ccd_bullets_do_not_cross_a_thin_wall_or_the_ground` | four 600 m/s bullets against a 2 cm wall; spinning box at 150 m/s into the ground | no crossing |
 | `rigid_features::a_capsule_along_any_axis_…` | segment capsule vs the y capsule rotated onto the same axis | positions within 2e-3 m, two-point manifold |
@@ -159,7 +169,7 @@ the world steps to the same bits as before, and the wave-seven rigid golden
 | `soft::a_jelly_cube_lands_and_keeps_its_volume` | 4×4×4-cell jelly (320 tets), 3 s | volume error ≤ 2.0e-4, strain 8.6e-5, rests on the ground |
 | `soft::soft_solve_is_bit_identical_for_every_thread_count` | 1, 2, 3, 5 threads at threshold 1 | identical; pinned `5ac5aba4…` |
 | `soft::a_rope_hangs_straight_at_its_length` | 20-link rope | strain < 1% at the whip (≈2e-4 at rest), energy damped overall |
-| `diff_rigid::*` | box on the ground; tilted off-axis capsule on the ground and a box; hull on a box; capsule–capsule plus box-on-box | 82 derivatives against central differences (tolerance 1e-4 + 1e-3·rel); one is retaken at ε = 1e-7 because a resting contact switches within 1e-6 |
+| `diff_rigid::*` | box on the ground; tilted off-axis capsule on the ground and a box; hull on a box; capsule–capsule plus box-on-box; sphere on a box edge and capsule on a box corner | 110 derivatives against central differences (tolerance 1e-4 + 1e-3·rel); one is retaken at ε = 1e-7 because a resting contact switches within 1e-6 |
 | `lean_model` (with `VESPER_LEAN`) | compile, axiom report, Rust/model differential | pass, 19 audited theorems |
 
 The pre-existing golden hashes are unchanged: World `d0005b68…`,
