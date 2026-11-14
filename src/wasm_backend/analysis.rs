@@ -100,6 +100,8 @@ pub(crate) struct Plan {
     pub keys: BTreeSet<String>,
     /// Largest operation arity among the program's effects.
     pub max_arity: usize,
+    /// Host capabilities the entry declares (WASI imports).
+    pub host: Vec<super::host::HostCapability>,
 }
 
 pub(crate) fn handler_keys(effect: &Effect) -> Vec<String> {
@@ -222,8 +224,12 @@ pub(crate) fn plan(
             .max()
             .unwrap_or(0)
             .max(1),
+        host: super::host::capabilities(world, entry)?,
         ..Plan::default()
     };
+    for c in &p.host {
+        p.keys.insert(format!("$effect:{}", c.effect()));
+    }
     let root = Instance {
         base: entry.to_owned(),
         vars: Vars::new(),

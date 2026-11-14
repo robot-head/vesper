@@ -30,17 +30,20 @@
 //! entries without parameters ([`WasmWorld::Command`]); or the root function
 //! `run(scenario: u32, arg: u64) -> s64` of the Nexus plugin world
 //! ([`WasmWorld::NexusPlugin`], `vesper_nexus::PLUGIN_WIT`). It imports
-//! nothing.
+//! only the WASI interfaces of the host capabilities the entry declares
+//! (see [`HostCapability`]).
 use crate::{ast::Type, check::World};
 use std::fmt;
 
 mod analysis;
 mod component;
+mod host;
 mod layout;
 mod lower;
 mod module;
 
 pub use component::{ENTRY_INTERFACE, WASI_RUN};
+pub use host::{HostCapability, WASI_MONOTONIC_CLOCK, WASI_STDOUT, WASI_STREAMS};
 
 /// The target triple routed to this backend by `vesper build --target`.
 pub const TARGET: &str = "wasm32-wasip2";
@@ -225,6 +228,8 @@ pub struct WasmArtifact {
     pub result: Type,
     /// Whether the module uses the stack-switching proposal.
     pub stack_switching: bool,
+    /// Host capabilities the entry declares, imported from WASI.
+    pub imports: Vec<HostCapability>,
     pub handlers: Vec<HandlerLowering>,
     pub functions: usize,
 }
@@ -281,6 +286,7 @@ pub fn compile(
         params: f.params.iter().map(|p| p.ty.clone()).collect(),
         result: crate::numeric::default_type(&f.result),
         stack_switching: uses_fx,
+        imports: plan.host.clone(),
         handlers: plan
             .handlers
             .iter()

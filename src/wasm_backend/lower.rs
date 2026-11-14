@@ -18,6 +18,7 @@
 use super::{
     HandlerMode, Unsupported, WasmError,
     analysis::{Handler, Plan, Role},
+    host::HostCapability,
     layout::{self, Scalar, Shape},
     module::Builder,
 };
@@ -87,6 +88,10 @@ pub(crate) struct Lowerer<'a> {
     pub dispatch_ty: u32,
     pub fx: Option<FxTypes>,
     pub hfns: Vec<HandlerFns>,
+    /// Imported WASI functions by core import name.
+    host_imports: BTreeMap<&'static str, u32>,
+    /// Dispatch table slot of each host capability's frame.
+    pub host_slots: Vec<(HostCapability, u32)>,
     eq: BTreeMap<String, u32>,
     /// Table slot of the trampoline of each closure or function value.
     trampolines: BTreeMap<String, u32>,
@@ -127,6 +132,45 @@ impl<'a> Lowerer<'a> {
         max_instructions: usize,
     ) -> Result<Self, WasmError> {
         let mut b = Builder::default();
+        let mut host_imports = BTreeMap::new();
+        let imp = |b: &mut Builder,
+                   m: &mut BTreeMap<&'static str, u32>,
+                   key: &'static str,
+                   module: &str,
+                   params: &[ValType],
+                   results: &[ValType]| {
+            let i = b
+                .import(module, key, params, results)
+                .map_err(WasmError::Invalid)?;
+            m.insert(key, i);
+            Ok::<(), WasmError>(())
+        };
+        for c in &plan.host {
+            match c {
+                HostCapability::Stdout => {
+                    imp(&mut b, &mut host_imports, "get-stdout", super::host::WASI_STDOUT, &[], &[ValType::I32])?;
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "[method]output-stream.blocking-write-and-flush",
+                        super::host::WASI_STREAMS,
+                        &[ValType::I32; 4],
+                        &[],
+                    )?;
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "[resource-drop]output-stream",
+                        super::host::WASI_STREAMS,
+                        &[ValType::I32],
+                        &[],
+                    )?;
+                }
+                HostCapability::Clock => {
+                    imp(&mut b, &mut host_imports, "now", super::host::WASI_MONOTONIC_CLOCK, &[], &[ValType::I64])?;
+                }
+            }
+        }
         let heap = b.global(0);
         b.set_heap_global(heap);
         let abort = b.global(0);
@@ -164,6 +208,8 @@ impl<'a> Lowerer<'a> {
             dispatch_ty,
             fx,
             hfns: vec![],
+            host_imports,
+            host_slots: vec![],
             eq: BTreeMap::new(),
             trampolines: BTreeMap::new(),
             eq_pending: vec![],
@@ -234,6 +280,7 @@ impl<'a> Lowerer<'a> {
     }
 
     pub(crate) fn declare_all(&mut self) -> Result<(), WasmError> {
+        self.define_host()?;
         for name in &self.plan.functions {
             let params = self.signature(name);
             let idx = self.b.declare(name, &params, &[ValType::I64]);
@@ -325,6 +372,99 @@ impl<'a> Lowerer<'a> {
         while let Some((idx, ty)) = self.eq_pending.pop() {
             let body = self.eq_body(&ty)?;
             self.b.define(idx, body);
+        }
+        Ok(())
+    }
+
+    /// Dispatch functions for the host capabilities: `(frame, op, a0..)`
+    /// calls the WASI import.
+    fn define_host(&mut self) -> Result<(), WasmError> {
+        for c in self.plan.host.clone() {
+            let idx = self.b.declare(
+                &format!("$host:{}", c.effect()),
+                &vec![ValType::I64; 2 + self.arity],
+                &[ValType::I64],
+            );
+            let slot = self.b.table_slot(idx);
+            self.host_slots.push((c, slot));
+            let a0 = 2u32;
+            let first = 2 + self.arity as u32;
+            let (h, ptr, rem, n, ret) = (first, first + 1, first + 2, first + 3, first + 4);
+            let code = match c {
+                HostCapability::Stdout => {
+                    let write = self.host_imports["[method]output-stream.blocking-write-and-flush"];
+                    vec![
+                        I::Call(self.host_imports["get-stdout"]),
+                        I::I64ExtendI32U,
+                        I::LocalSet(h),
+                        I::LocalGet(a0),
+                        I::I64Const(8),
+                        I::I64Add,
+                        I::LocalSet(ptr),
+                        I::LocalGet(a0),
+                        I::I32WrapI64,
+                        I::I64Load(mem(0)),
+                        I::LocalSet(rem),
+                        I::I64Const(16),
+                        I::Call(self.alloc),
+                        I::LocalSet(ret),
+                        I::Block(BlockType::Empty),
+                        I::Loop(BlockType::Empty),
+                        I::LocalGet(rem),
+                        I::I64Eqz,
+                        I::BrIf(1),
+                        // At most 4096 bytes per blocking-write-and-flush.
+                        I::LocalGet(rem),
+                        I::I64Const(4096),
+                        I::LocalGet(rem),
+                        I::I64Const(4096),
+                        I::I64LtU,
+                        I::Select,
+                        I::LocalSet(n),
+                        I::LocalGet(h),
+                        I::I32WrapI64,
+                        I::LocalGet(ptr),
+                        I::I32WrapI64,
+                        I::LocalGet(n),
+                        I::I32WrapI64,
+                        I::LocalGet(ret),
+                        I::I32WrapI64,
+                        I::Call(write),
+                        I::LocalGet(ret),
+                        I::I32WrapI64,
+                        I::I32Load8U(MemArg {
+                            offset: 0,
+                            align: 0,
+                            memory_index: 0,
+                        }),
+                        I::If(BlockType::Empty),
+                        I::Unreachable,
+                        I::End,
+                        I::LocalGet(ptr),
+                        I::LocalGet(n),
+                        I::I64Add,
+                        I::LocalSet(ptr),
+                        I::LocalGet(rem),
+                        I::LocalGet(n),
+                        I::I64Sub,
+                        I::LocalSet(rem),
+                        I::Br(0),
+                        I::End,
+                        I::End,
+                        I::LocalGet(h),
+                        I::I32WrapI64,
+                        I::Call(self.host_imports["[resource-drop]output-stream"]),
+                        I::I64Const(0),
+                        I::End,
+                    ]
+                }
+                HostCapability::Clock => vec![I::Call(self.host_imports["now"]), I::End],
+            };
+            let mut f = Function::new([(5, ValType::I64)]);
+            for ins in &code {
+                f.instruction(ins);
+            }
+            self.b.define(idx, f);
         }
         Ok(())
     }

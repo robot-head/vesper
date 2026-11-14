@@ -16,8 +16,6 @@ use wasm_encoder::{BlockType, Function, Instruction as I, MemArg, ValType};
 pub(crate) const PACKAGE: &str = "vesper:program@0.1.0";
 pub const ENTRY_INTERFACE: &str = "vesper:program/entry@0.1.0";
 pub const WASI_RUN: &str = "wasi:cli/run@0.2.0";
-const WASI_CLI_WIT: &str =
-    "package wasi:cli@0.2.0;\n\ninterface run {\n  run: func() -> result;\n}\n";
 
 /// A WIT identifier (kebab-case, `%`-escaped) for a Vesper name.
 pub(crate) fn ident(name: &str) -> String {
@@ -431,6 +429,247 @@ fn core_scalar(s: Scalar) -> Option<ValType> {
     }
 }
 
+/// Flat core types of `ty` as a parameter (canonical ABI `flatten_type`).
+fn flatten(world: &crate::check::World, ty: &Type, out: &mut Vec<ValType>) -> Result<(), WasmError> {
+    match layout::shape(world, ty)? {
+        Shape::Scalar(s) => out.push(
+            core_scalar(s).ok_or_else(|| export_err(format!("{ty} has no flat parameter")))?,
+        ),
+        Shape::Str => out.extend([ValType::I32, ValType::I32]),
+        Shape::Tuple(ts) => {
+            for t in &ts {
+                flatten(world, t, out)?;
+            }
+        }
+        Shape::Struct { fields, .. } => {
+            for (_, t) in &fields {
+                flatten(world, t, out)?;
+            }
+        }
+        Shape::Enum { variants } => {
+            out.push(ValType::I32);
+            let mut joined: Vec<ValType> = vec![];
+            for v in &variants {
+                let mut case = vec![];
+                for (_, t) in &v.fields {
+                    flatten(world, t, &mut case)?;
+                }
+                for (i, t) in case.into_iter().enumerate() {
+                    match joined.get(i).copied() {
+                        None => joined.push(t),
+                        Some(j) if j == t => {}
+                        Some(_) => joined[i] = ValType::I64,
+                    }
+                }
+            }
+            out.extend(joined);
+        }
+        _ => return Err(export_err(format!("{ty} cannot be an entry parameter"))),
+    }
+    Ok(())
+}
+
+fn has_string(world: &crate::check::World, ty: &Type) -> bool {
+    match layout::shape(world, ty) {
+        Ok(Shape::Str) => true,
+        Ok(Shape::Tuple(ts)) => ts.iter().any(|t| has_string(world, t)),
+        Ok(Shape::Struct { fields, .. }) => fields.iter().any(|(_, t)| has_string(world, t)),
+        Ok(Shape::Enum { variants }) => variants
+            .iter()
+            .any(|v| v.fields.iter().any(|(_, t)| has_string(world, t))),
+        _ => false,
+    }
+}
+
+/// Build the uniform value of parameter type `ty` from the 64-bit flat
+/// values `flat[*cursor..]`; returns its local.
+#[allow(clippy::too_many_arguments)]
+fn lift(
+    l: &Lowerer<'_>,
+    code: &mut Vec<I<'static>>,
+    locals: &mut Vec<ValType>,
+    nparams: u32,
+    ty: &Type,
+    flat: &[u32],
+    cursor: &mut usize,
+) -> Result<u32, WasmError> {
+    let world = l.world;
+    let temp = |locals: &mut Vec<ValType>| {
+        locals.push(ValType::I64);
+        nparams + locals.len() as u32 - 1
+    };
+    let next = |cursor: &mut usize| -> Result<u32, WasmError> {
+        let x = *flat
+            .get(*cursor)
+            .ok_or_else(|| WasmError::Invalid("entry parameter flattening".into()))?;
+        *cursor += 1;
+        Ok(x)
+    };
+    let block = |code: &mut Vec<I<'static>>, locals: &mut Vec<ValType>, slots: usize| {
+        let b = temp(locals);
+        code.extend([
+            I::I64Const(8 * slots as i64),
+            I::Call(l.alloc),
+            I::LocalSet(b),
+        ]);
+        b
+    };
+    let put = |code: &mut Vec<I<'static>>, b: u32, slot: u64, v: u32| {
+        code.extend([
+            I::LocalGet(b),
+            I::I32WrapI64,
+            I::LocalGet(v),
+            I::I64Store(m(8 * slot, 3)),
+        ]);
+    };
+    Ok(match layout::shape(world, ty)? {
+        Shape::Scalar(s) => {
+            let x = next(cursor)?;
+            if matches!(s, Scalar::U32 | Scalar::U8 | Scalar::Bool) {
+                // A joined variant slot carries the i32 in its low bits.
+                code.extend([
+                    I::LocalGet(x),
+                    I::I64Const(0xffff_ffff),
+                    I::I64And,
+                    I::LocalSet(x),
+                ]);
+            }
+            x
+        }
+        Shape::Str => {
+            let (ptr, len) = (next(cursor)?, next(cursor)?);
+            let b = temp(locals);
+            code.extend([
+                I::LocalGet(len),
+                I::I64Const(0xffff_ffff),
+                I::I64And,
+                I::LocalTee(len),
+                I::I64Const(8),
+                I::I64Add,
+                I::Call(l.alloc),
+                I::LocalTee(b),
+                I::I32WrapI64,
+                I::LocalGet(len),
+                I::I64Store(m(0, 3)),
+                I::LocalGet(b),
+                I::I32WrapI64,
+                I::I32Const(8),
+                I::I32Add,
+                I::LocalGet(ptr),
+                I::I32WrapI64,
+                I::LocalGet(len),
+                I::I32WrapI64,
+                I::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                },
+            ]);
+            b
+        }
+        Shape::Tuple(ts) => {
+            let b = block(code, locals, ts.len());
+            for (i, t) in ts.iter().enumerate() {
+                let v = lift(l, code, locals, nparams, t, flat, cursor)?;
+                put(code, b, i as u64, v);
+            }
+            b
+        }
+        Shape::Struct { fields, .. } => {
+            let b = if fields.is_empty() {
+                let z = temp(locals);
+                code.extend([I::I64Const(0), I::LocalSet(z)]);
+                z
+            } else {
+                block(code, locals, fields.len())
+            };
+            for (i, (_, t)) in fields.iter().enumerate() {
+                let v = lift(l, code, locals, nparams, t, flat, cursor)?;
+                put(code, b, i as u64, v);
+            }
+            b
+        }
+        Shape::Enum { variants } => {
+            let disc = next(cursor)?;
+            let mut width = 0;
+            for v in &variants {
+                let mut case = vec![];
+                for (_, t) in &v.fields {
+                    flatten(world, t, &mut case)?;
+                }
+                width = width.max(case.len());
+            }
+            let out = temp(locals);
+            let start = *cursor;
+            code.extend([
+                I::LocalGet(disc),
+                I::I64Const(variants.len() as i64),
+                I::I64GeU,
+                I::If(BlockType::Empty),
+                I::Unreachable,
+                I::End,
+            ]);
+            for (ci, v) in variants.iter().enumerate() {
+                code.extend([
+                    I::LocalGet(disc),
+                    I::I64Const(ci as i64),
+                    I::I64Eq,
+                    I::If(BlockType::Empty),
+                ]);
+                let b = block(code, locals, 1 + v.fields.len());
+                let tag = temp(locals);
+                code.extend([I::I64Const(ci as i64), I::LocalSet(tag)]);
+                put(code, b, 0, tag);
+                let mut c = start;
+                for (fi, (_, t)) in v.fields.iter().enumerate() {
+                    let x = lift(l, code, locals, nparams, t, flat, &mut c)?;
+                    put(code, b, 1 + fi as u64, x);
+                }
+                code.extend([I::LocalGet(b), I::LocalSet(out), I::End]);
+            }
+            *cursor = start + width;
+            out
+        }
+        _ => return Err(export_err(format!("{ty} cannot be an entry parameter"))),
+    })
+}
+
+/// `cabi_realloc(old, old_size, align, new_size)`: the bump allocator,
+/// copying the old bytes (8-byte alignment covers every canonical type).
+fn export_realloc(l: &mut Lowerer<'_>) {
+    let idx = l.b.declare("cabi_realloc", &[ValType::I32; 4], &[ValType::I32]);
+    let p = 4u32;
+    let mut f = Function::new([(1, ValType::I64)]);
+    for ins in [
+        I::LocalGet(3),
+        I::I64ExtendI32U,
+        I::Call(l.alloc),
+        I::LocalSet(p),
+        I::LocalGet(0),
+        I::If(BlockType::Empty),
+        I::LocalGet(p),
+        I::I32WrapI64,
+        I::LocalGet(0),
+        I::LocalGet(1),
+        I::LocalGet(3),
+        I::LocalGet(1),
+        I::LocalGet(3),
+        I::I32LtU,
+        I::Select,
+        I::MemoryCopy {
+            src_mem: 0,
+            dst_mem: 0,
+        },
+        I::End,
+        I::LocalGet(p),
+        I::I32WrapI64,
+        I::End,
+    ] {
+        f.instruction(&ins);
+    }
+    l.b.define(idx, f);
+    l.b.export_func("cabi_realloc", idx);
+}
+
 pub(crate) struct Boundary {
     pub wit: String,
     pub export: String,
@@ -447,11 +686,8 @@ pub(crate) fn exports(
         .functions
         .get(entry)
         .ok_or_else(|| WasmError::Entry(format!("unknown entry function '{entry}'")))?;
-    if !f.effects.instances.is_empty() || f.effects.tail.is_some() {
-        return Err(WasmError::Entry(
-            "the entry must handle all of its effects".into(),
-        ));
-    }
+    // Its effect row was checked by `host::capabilities`: only declared
+    // host capabilities remain, and the wrapper installs their frames.
     if !f.generics.is_empty() {
         return Err(WasmError::Entry("the entry must not be generic".into()));
     }
@@ -459,27 +695,33 @@ pub(crate) fn exports(
     let mut params = vec![];
     let mut core_params = vec![];
     let mut scalars = vec![];
-    // The canonical ABI passes more than 16 flat parameters through memory;
-    // the export wrapper takes them flat only.
-    if f.params.len() > 16 {
-        return Err(WasmError::Entry(format!(
-            "entry has {} parameters; at most 16 are supported",
-            f.params.len()
-        )));
-    }
     for p in &f.params {
         if p.pass == Pass::Inout {
             return Err(WasmError::Entry("entry parameters cannot be inout".into()));
         }
-        let s = layout::shape(l.world, &p.ty)?
-            .scalar()
-            .filter(|s| core_scalar(*s).is_some())
-            .ok_or_else(|| {
-                WasmError::Entry(format!("entry parameter '{}' is not a scalar", p.name))
-            })?;
         params.push(format!("%{}: {}", ident(&p.name), wit.ty(l.world, &p.ty)?));
-        core_params.push(core_scalar(s).expect("scalar"));
-        scalars.push(s);
+        flatten(l.world, &p.ty, &mut core_params).map_err(|e| match e {
+            WasmError::Unsupported { detail, .. } => {
+                WasmError::Entry(format!("entry parameter '{}': {detail}", p.name))
+            }
+            e => e,
+        })?;
+        if let Some(s) = layout::shape(l.world, &p.ty)?.scalar() {
+            scalars.push(s);
+        }
+    }
+    // The canonical ABI passes more than 16 flat parameters through memory;
+    // the export wrapper takes them flat only.
+    if core_params.len() > 16 {
+        return Err(WasmError::Entry(format!(
+            "entry parameters flatten to {} core values; at most 16 are supported",
+            core_params.len()
+        )));
+    }
+    if world == WasmWorld::NexusPlugin && !l.plan.host.is_empty() {
+        return Err(WasmError::Entry(
+            "a Nexus plugin cannot import host capabilities".into(),
+        ));
     }
     let result = crate::numeric::default_type(&f.result);
     let shape = layout::shape(l.world, &result)?;
@@ -511,15 +753,52 @@ pub(crate) fn exports(
     let nparams = core_params.len() as u32;
     let mut locals = vec![];
     let mut code = vec![];
-    for (i, s) in scalars.iter().enumerate() {
+    // Host capability frames: an operation dispatches to the WASI import.
+    for (c, slot) in l.host_slots.clone() {
+        let frame = nparams + locals.len() as u32;
+        locals.push(ValType::I64);
+        code.extend([
+            I::I64Const(8),
+            I::Call(l.alloc),
+            I::LocalTee(frame),
+            I::I32WrapI64,
+            I::I64Const(i64::from(slot)),
+            I::I64Store(m(0, 3)),
+            I::LocalGet(frame),
+            I::GlobalSet(l.env[&format!("$effect:{}", c.effect())]),
+        ]);
+    }
+    // Every flat parameter as 64 bits (i32 zero-extended, f64 as its bits).
+    let mut flat_params = vec![];
+    for (i, t) in core_params.iter().enumerate() {
+        let x = nparams + locals.len() as u32;
+        locals.push(ValType::I64);
         code.push(I::LocalGet(i as u32));
-        match core_scalar(*s) {
-            Some(ValType::I32) => code.push(I::I64ExtendI32U),
-            Some(ValType::F64) => code.push(I::I64ReinterpretF64),
+        match t {
+            ValType::I32 => code.push(I::I64ExtendI32U),
+            ValType::F64 => code.push(I::I64ReinterpretF64),
             _ => {}
         }
+        code.push(I::LocalSet(x));
+        flat_params.push(x);
     }
-    let r = nparams;
+    let mut cursor = 0;
+    let mut args = vec![];
+    for p in &f.params {
+        args.push(lift(
+            l,
+            &mut code,
+            &mut locals,
+            nparams,
+            &p.ty,
+            &flat_params,
+            &mut cursor,
+        )?);
+    }
+    for a in args {
+        code.push(I::LocalGet(a));
+    }
+    let r = nparams + locals.len() as u32;
     locals.push(ValType::I64);
     code.extend([
         I::Call(l.funcs[entry]),
@@ -574,6 +853,15 @@ pub(crate) fn exports(
     let defs: String = wit.defs.iter().map(|d| format!("  {d}\n")).collect();
     let source = match world {
         WasmWorld::Command => {
+            if f.params.iter().any(|p| has_string(l.world, &p.ty)) {
+                export_realloc(l);
+            }
+            let imports: String = l
+                .plan
+                .host
+                .iter()
+                .map(|c| format!("  import {};\n", c.interface()))
+                .collect();
             let run = if f.params.is_empty() {
                 // wasi:cli/run: run the entry and report success.
                 let run = l.b.declare("$wasi:run", &[], &[ValType::I32]);
@@ -597,7 +885,7 @@ pub(crate) fn exports(
                 String::new()
             };
             format!(
-                "package {PACKAGE};\n\ninterface entry {{\n{defs}  main: func({}){ret};\n}}\n\nworld program {{\n{run}  export entry;\n}}\n",
+                "package {PACKAGE};\n\ninterface entry {{\n{defs}  main: func({}){ret};\n}}\n\nworld program {{\n{imports}{run}  export entry;\n}}\n",
                 params.join(", ")
             )
         }
@@ -619,9 +907,15 @@ fn err<E: std::fmt::Display>(stage: &str, e: E) -> WasmError {
 /// Embed the WIT world and encode the component.
 pub(crate) fn encode(mut core: Vec<u8>, wit: &str, world: WasmWorld) -> Result<Vec<u8>, WasmError> {
     let mut resolve = wit_parser::Resolve::default();
-    resolve
-        .push_source("wasi-cli.wit", WASI_CLI_WIT)
-        .map_err(|e| err("WASI WIT", e))?;
+    for (name, source) in [
+        ("wasi-io.wit", super::host::IO_WIT),
+        ("wasi-cli.wit", super::host::CLI_WIT),
+        ("wasi-clocks.wit", super::host::CLOCKS_WIT),
+    ] {
+        resolve
+            .push_source(name, source)
+            .map_err(|e| err("WASI WIT", e))?;
+    }
     let pkg = resolve
         .push_source("vesper-program.wit", wit)
         .map_err(|e| err("program WIT", e))?;

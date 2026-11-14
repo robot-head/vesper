@@ -722,6 +722,293 @@ fn labelled_rows_and_inout_operation_arguments() {
     );
 }
 
+// ---- host capabilities (WASI imports) and entry parameters -----------------
+
+struct WasiHost {
+    ctx: wasmtime_wasi::WasiCtx,
+    table: wasmtime::component::ResourceTable,
+}
+impl wasmtime_wasi::WasiView for WasiHost {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        wasmtime_wasi::WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
+    }
+}
+
+/// A monotonic clock that advances by 1000 ns on every reading.
+struct TickClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
+impl wasmtime_wasi::HostMonotonicClock for TickClock {
+    fn resolution(&self) -> u64 {
+        1
+    }
+    fn now(&self) -> u64 {
+        self.0.fetch_add(1000, std::sync::atomic::Ordering::SeqCst) + 1000
+    }
+}
+
+/// The evaluator as the host of the entry's capabilities: stdout text and
+/// the same tick clock.
+fn evaluate_hosted(world: &World) -> (String, String) {
+    use vesper::runtime::{Execution, Value};
+    let mut out = String::new();
+    let mut ticks = 0u64;
+    let mut r = Runtime::new(world);
+    r.fuel = 10_000_000;
+    let mut ex = r.begin_external("main", vec![]).expect("begin");
+    loop {
+        match ex {
+            Execution::Complete(v) => return (v.to_string(), out),
+            Execution::Suspended(s) => {
+                let req = s.request();
+                let value = match (req.effect.name.as_str(), req.operation.as_str()) {
+                    ("Stdout", "write") => {
+                        match &req.arguments[0] {
+                            Value::String(t) => out.push_str(t),
+                            _ => panic!("write of a non-string"),
+                        }
+                        Value::Tuple(vec![])
+                    }
+                    ("Clock", "now_ns") => {
+                        ticks += 1000;
+                        Value::UInt(ticks, 64)
+                    }
+                    other => panic!("unexpected host operation {other:?}"),
+                };
+                ex = s.resume(value).expect("resume");
+            }
+        }
+    }
+}
+
+fn run_hosted(world: &World, art: &WasmArtifact) -> Result<(String, String), String> {
+    let engine = engine(art.stack_switching);
+    let component = Component::new(&engine, &art.component).map_err(|e| format!("{e:?}"))?;
+    let mut linker = Linker::<WasiHost>::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(|e| format!("{e:?}"))?;
+    let stdout = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1 << 20);
+    let mut b = wasmtime_wasi::WasiCtxBuilder::new();
+    b.stdout(stdout.clone());
+    b.monotonic_clock(TickClock(Default::default()));
+    let mut store = Store::new(
+        &engine,
+        WasiHost {
+            ctx: b.build(),
+            table: Default::default(),
+        },
+    );
+    store.set_fuel(100_000_000).unwrap();
+    let instance = linker
+        .instantiate(&mut store, &component)
+        .map_err(|e| format!("{e:?}"))?;
+    let iface = instance
+        .get_export_index(&mut store, None, ENTRY_INTERFACE)
+        .expect("entry interface");
+    let main = instance
+        .get_export_index(&mut store, Some(&iface), "main")
+        .expect("main export");
+    let func = instance.get_func(&mut store, main).expect("main func");
+    let unit = art.result == Type::unit() || art.result.name() == "Unit";
+    let mut results = if unit { vec![] } else { vec![Val::Bool(false)] };
+    func.call(&mut store, &[], &mut results)
+        .map_err(|e| format!("trap: {e:?}"))?;
+    let value = match results.first() {
+        None => "()".into(),
+        Some(v) => render(world, &art.result, v),
+    };
+    drop(store);
+    Ok((
+        value,
+        String::from_utf8(stdout.contents().to_vec()).expect("utf-8 stdout"),
+    ))
+}
+
+const HOST_PRELUDE: &str =
+    "linear effect Stdout { fn write(s: String); } linear effect Clock { fn now_ns() -> u64; } ";
+
+fn hosted_differential(source: &str) -> WasmArtifact {
+    let source = format!("{HOST_PRELUDE}{source}");
+    let w = world(&source);
+    let expected = evaluate_hosted(&w);
+    for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+        for optimize in [false, true] {
+            let art = compile(
+                &w,
+                &WasmOptions {
+                    optimize,
+                    effects,
+                    ..WasmOptions::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("compile ({effects:?}, {source}): {e}"));
+            if art.stack_switching && !stack_switching_host() {
+                continue;
+            }
+            let got = run_hosted(&w, &art)
+                .unwrap_or_else(|e| panic!("run ({effects:?}, {source}): {e}\n{}", art.wit));
+            assert_eq!(got, expected, "{effects:?}: {source}\n{}", art.wit);
+        }
+    }
+    compile(&w, &WasmOptions::default()).unwrap()
+}
+
+#[test]
+fn wasi_stdout_and_clock_behind_declared_capabilities() {
+    let art = hosted_differential(
+        r#"fn main() -> u64 eff [Stdout, Clock] { Stdout::write("hello "); let a = Clock::now_ns(); Stdout::write("world\n"); let b = Clock::now_ns(); wrapping_sub(b, a) }"#,
+    );
+    assert_eq!(
+        art.imports,
+        vec![
+            wasm_backend::HostCapability::Stdout,
+            wasm_backend::HostCapability::Clock
+        ]
+    );
+    assert!(art.wit.contains("import wasi:cli/stdout@0.2.0;"), "{}", art.wit);
+    assert!(
+        art.wit.contains("import wasi:clocks/monotonic-clock@0.2.0;"),
+        "{}",
+        art.wit
+    );
+    // Capabilities flow through calls, closures and handlers, and a source
+    // handler can shadow the host one.
+    hosted_differential(
+        r#"fn greet(sink name: String) -> Unit eff [Stdout] { Stdout::write("hi "); Stdout::write(name); Stdout::write("\n"); } fn main() -> i64 eff [Stdout] { greet("ada"); let f = || eff [Stdout] Stdout::write("closure\n"); f(); let n = handle Stdout in { Stdout::write("swallowed"); 1 } with { return x => x, write(s, k) => k(()), }; n }"#,
+    );
+    hosted_differential(
+        r#"linear effect Ask { fn ask() -> i64; } fn main() -> i64 eff [Stdout] { handle Ask in { Stdout::write("before "); let v = Ask::ask(); Stdout::write("after "); v } with { return x => x, ask(k) => { Stdout::write("clause "); let r = k(42); Stdout::write("suffix\n"); r }, } }"#,
+    );
+    // A long write is split into 4096-byte chunks.
+    let long = "x".repeat(10_000);
+    hosted_differential(&format!(
+        r#"fn main() -> Unit eff [Stdout] {{ Stdout::write("{long}"); }}"#
+    ));
+    // Only clock: the component imports the clock alone.
+    let art = hosted_differential("fn main() -> u64 eff [Clock] { Clock::now_ns() }");
+    assert_eq!(art.imports, vec![wasm_backend::HostCapability::Clock]);
+    assert!(!art.wit.contains("stdout"), "{}", art.wit);
+}
+
+#[test]
+fn undeclared_or_mismatched_capabilities_are_rejected() {
+    for source in [
+        "linear effect Net { fn send(sink b: u8); } fn main() -> Unit eff [Net] { Net::send(1); }",
+        "effect Stdout { fn write(s: String); } fn main() -> Unit eff [Stdout] { Stdout::write(\"x\"); }",
+        "linear effect Stdout { fn write(s: String) -> u8; } fn main() -> u8 eff [Stdout] { Stdout::write(\"x\") }",
+        "linear effect Clock { fn now_ns() -> i64; } fn main() -> i64 eff [Clock] { Clock::now_ns() }",
+    ] {
+        let w = world(source);
+        assert!(
+            matches!(compile(&w, &WasmOptions::default()), Err(WasmError::Entry(_))),
+            "{source}"
+        );
+    }
+}
+
+/// `entry(args)` on Wasmtime agrees with the evaluator running
+/// `entry(<the same arguments as source literals>)`.
+fn entry_differential(decls: &str, entry: &str, cases: &[(&str, Vec<Val>)]) {
+    for (literal, vals) in cases {
+        let source = format!(
+            "{decls} fn main() -> {ret} {{ {entry}({literal}) }}",
+            ret = {
+                let w = world(&format!("{decls} fn main() -> i64 {{ 0 }}"));
+                vesper::numeric::default_type(&w.functions[entry].result).to_string()
+            }
+        );
+        let w = world(&source);
+        let expected = evaluate(&w).expect("evaluator");
+        for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+            let art = wasm_backend::compile(
+                &w,
+                entry,
+                &WasmOptions {
+                    effects,
+                    ..WasmOptions::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{source}: {e}"));
+            let engine = engine(art.stack_switching);
+            let component = Component::new(&engine, &art.component).unwrap();
+            let mut store = Store::new(&engine, ());
+            store.set_fuel(10_000_000).unwrap();
+            let instance = Linker::<()>::new(&engine)
+                .instantiate(&mut store, &component)
+                .unwrap();
+            let iface = instance
+                .get_export_index(&mut store, None, ENTRY_INTERFACE)
+                .unwrap();
+            let f = instance
+                .get_export_index(&mut store, Some(&iface), "main")
+                .unwrap();
+            let func = instance.get_func(&mut store, f).unwrap();
+            let mut results = vec![Val::Bool(false)];
+            func.call(&mut store, vals, &mut results)
+                .unwrap_or_else(|e| panic!("{source}: {e:?}\n{}", art.wit));
+            assert_eq!(
+                render(&w, &art.result, &results[0]),
+                expected,
+                "{source}\n{}",
+                art.wit
+            );
+        }
+    }
+}
+
+#[test]
+fn aggregate_entry_parameters() {
+    let pair = |a: i64, b: bool| Val::Tuple(vec![Val::S64(a), Val::Bool(b)]);
+    entry_differential(
+        "fn f(p: (i64, bool), q: u8) -> (i64, u8) { let (a, b) = p; if b { (wrapping_add(a, 1), q) } else { (a, q) } }",
+        "f",
+        &[
+            ("(40, true), 2", vec![pair(40, true), Val::U8(2)]),
+            ("(40, false), 2", vec![pair(40, false), Val::U8(2)]),
+        ],
+    );
+    entry_differential(
+        "copy struct P { x: f64, y: u32 } fn f(p: P) -> P { P { x: p.x * 2.0, y: wrapping_add(p.y, 1) } }",
+        "f",
+        &[(
+            "P { x: 1.25, y: 41 }",
+            vec![Val::Record(vec![
+                ("x".into(), Val::Float64(1.25)),
+                ("y".into(), Val::U32(41)),
+            ])],
+        )],
+    );
+    // Variants with joined payloads (i32 with f64 and i64), and strings.
+    entry_differential(
+        "copy enum V { A(u8), B(f64), C(i64, u32), D } fn f(v: V, w: Option[u32]) -> (i64, u32) { let n = match v { V::A(x) => 1, V::B(x) => if x > 1.0 { 2 } else { 20 }, V::C(a, b) => wrapping_add(a, 3), V::D => 4, }; let m = match w { Some(x) => x, None => 0, }; (n, m) }",
+        "f",
+        &[
+            ("V::A(7), Some(9)", vec![Val::Variant("a".into(), Some(Box::new(Val::U8(7)))), Val::Variant("some".into(), Some(Box::new(Val::U32(9))))]),
+            ("V::B(2.5), None", vec![Val::Variant("b".into(), Some(Box::new(Val::Float64(2.5)))), Val::Variant("none".into(), None)]),
+            (
+                "V::C(-10, 4), None",
+                vec![
+                    Val::Variant(
+                        "c".into(),
+                        Some(Box::new(Val::Tuple(vec![Val::S64(-10), Val::U32(4)]))),
+                    ),
+                    Val::Variant("none".into(), None),
+                ],
+            ),
+            ("V::D, Some(1)", vec![Val::Variant("d".into(), None), Val::Variant("some".into(), Some(Box::new(Val::U32(1))))]),
+        ],
+    );
+    entry_differential(
+        r#"fn f(sink s: String, sink t: String) -> (bool, String) { (t == "abc", s) }"#,
+        "f",
+        &[
+            (r#""abc", "abc""#, vec![Val::String("abc".into()), Val::String("abc".into())]),
+            (r#""é😀", "x""#, vec![Val::String("é😀".into()), Val::String("x".into())]),
+            (r#""", """#, vec![Val::String("".into()), Val::String("".into())]),
+        ],
+    );
+}
+
 // ---- rejections --------------------------------------------------------------
 
 #[test]
