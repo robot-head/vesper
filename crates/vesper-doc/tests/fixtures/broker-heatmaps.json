@@ -1,0 +1,161 @@
+{
+  "heatmaps": [
+    {
+      "consumers": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "leaves": [
+        "index",
+        "metrics.sent",
+        "metrics.dropped",
+        "config"
+      ],
+      "opaque": [],
+      "readers": [
+        2,
+        1,
+        1,
+        2
+      ],
+      "rows": [
+        {
+          "cells": [
+            "read",
+            "free",
+            "free",
+            "free"
+          ],
+          "free": [
+            "metrics.sent",
+            "metrics.dropped",
+            "config"
+          ],
+          "function": "begin",
+          "parameter": "broker",
+          "pass": "In",
+          "selector": [
+            "index"
+          ]
+        },
+        {
+          "cells": [
+            "read",
+            "read",
+            "read",
+            "read"
+          ],
+          "free": [],
+          "function": "checksum",
+          "parameter": "broker",
+          "pass": "In",
+          "selector": []
+        },
+        {
+          "cells": [
+            "free",
+            "free",
+            "free",
+            "read"
+          ],
+          "free": [
+            "index",
+            "metrics.sent",
+            "metrics.dropped"
+          ],
+          "function": "config_of",
+          "parameter": "broker",
+          "pass": "In",
+          "selector": [
+            "config"
+          ]
+        },
+        {
+          "cells": [
+            "free",
+            "free",
+            "write",
+            "free"
+          ],
+          "free": [
+            "index",
+            "metrics.sent",
+            "config"
+          ],
+          "function": "drop_one",
+          "parameter": "broker",
+          "pass": "Inout",
+          "selector": [
+            "metrics.dropped"
+          ]
+        },
+        {
+          "cells": [
+            "write",
+            "write",
+            "free",
+            "free"
+          ],
+          "free": [
+            "metrics.dropped",
+            "config"
+          ],
+          "function": "publish",
+          "parameter": "broker",
+          "pass": "Inout",
+          "selector": [
+            "index",
+            "metrics.sent"
+          ]
+        }
+      ],
+      "ty": "Broker",
+      "writers": [
+        1,
+        1,
+        1,
+        0
+      ]
+    },
+    {
+      "consumers": [
+        1
+      ],
+      "leaves": [
+        "slot"
+      ],
+      "opaque": [],
+      "readers": [
+        0
+      ],
+      "rows": [
+        {
+          "cells": [
+            "consume"
+          ],
+          "free": [],
+          "function": "commit",
+          "parameter": "tx",
+          "pass": "Sink",
+          "selector": []
+        }
+      ],
+      "ty": "WriteTxn",
+      "writers": [
+        0
+      ]
+    }
+  ],
+  "unsupported": [
+    [
+      "Metrics",
+      "no documented function borrows or consumes it"
+    ],
+    [
+      "Receipt",
+      "no documented function borrows or consumes it"
+    ]
+  ]
+}

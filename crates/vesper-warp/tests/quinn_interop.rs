@@ -6,7 +6,7 @@
 
 mod common;
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -115,21 +115,25 @@ fn quinn_client_config_from(tls: Arc<rustls::ClientConfig>) -> ClientConfig {
     cfg
 }
 
-/// Every Warp datagram with its destination.
+/// Every Warp datagram, and its destination in `dest` (wave seven).
 #[derive(Default)]
 struct Wire {
     out: Vec<Vec<u8>>,
+    dest: Vec<Option<PeerAddr>>,
 }
 
 impl TxTap for Wire {
     fn on_transmit(&mut self, _: SlotHandle, _: u64, _: u64, d: &[u8]) {
         self.out.push(d.to_vec());
+        self.dest.push(None);
     }
-    fn on_transmit_to(&mut self, _: SlotHandle, _: u64, _: u64, d: &[u8], _: Option<PeerAddr>) {
+    fn on_transmit_to(&mut self, _: SlotHandle, _: u64, _: u64, d: &[u8], to: Option<PeerAddr>) {
         self.out.push(d.to_vec());
+        self.dest.push(to);
     }
-    fn on_stateless(&mut self, d: &[u8], _: Option<PeerAddr>) {
+    fn on_stateless(&mut self, d: &[u8], to: Option<PeerAddr>) {
         self.out.push(d.to_vec());
+        self.dest.push(to);
     }
 }
 
@@ -217,11 +221,11 @@ impl Quinn {
         &mut self.conn.as_mut().expect("connection").1
     }
 
-    fn recv(&mut self, at: Instant, from: SocketAddr, d: &[u8]) {
+    fn recv(&mut self, at: Instant, from: SocketAddr, local: Option<IpAddr>, d: &[u8]) {
         self.buf.clear();
         let event = self
             .ep
-            .handle(at, from, None, None, BytesMut::from(d), &mut self.buf);
+            .handle(at, from, local, None, BytesMut::from(d), &mut self.buf);
         match event {
             Some(DatagramEvent::NewConnection(incoming)) => {
                 if self.retry && !incoming.remote_address_validated() {
@@ -296,6 +300,12 @@ struct Link {
     loss_ppm: u64,
     warp_events: Vec<ConnectionEvent>,
     warp_conn: Option<SlotHandle>,
+    /// quinn's preferred address (wave seven); Warp datagrams to it are
+    /// handed to quinn as received on that address.
+    quinn_preferred: Option<SocketAddr>,
+    /// Warp datagrams to the original and the preferred quinn address.
+    to_original: u64,
+    to_preferred: u64,
 }
 
 impl Link {
@@ -311,6 +321,9 @@ impl Link {
             loss_ppm,
             warp_events: Vec::new(),
             warp_conn: None,
+            quinn_preferred: None,
+            to_original: 0,
+            to_preferred: 0,
         }
     }
 
@@ -325,9 +338,23 @@ impl Link {
     fn step(&mut self) {
         let at = self.at();
         let now = self.now;
-        for d in std::mem::take(&mut self.warp.tap_mut().out) {
+        let dest = std::mem::take(&mut self.warp.tap_mut().dest);
+        for (d, to) in std::mem::take(&mut self.warp.tap_mut().out)
+            .into_iter()
+            .zip(dest)
+        {
+            let local = match to {
+                Some(to) if Some(to) == self.quinn_preferred => {
+                    self.to_preferred += 1;
+                    Some(to.ip())
+                }
+                _ => {
+                    self.to_original += 1;
+                    None
+                }
+            };
             if !self.lose() {
-                self.quinn.recv(at, self.warp_addr, &d);
+                self.quinn.recv(at, self.warp_addr, local, &d);
             }
         }
         self.quinn.drive(at);
@@ -547,6 +574,16 @@ fn warp_client_to_quinn_server() {
         "{:?}",
         link.warp.stats()
     );
+    // Wave seven: quinn retires Warp's handshake connection ID (sequence
+    // 0); Warp's connection table is rekeyed so that ID no longer routes.
+    assert!(
+        link.warp.stats().table_cids_rekeyed >= 1,
+        "{:?}",
+        link.warp.stats()
+    );
+    let keyed = link.warp.table().local_cid(conn).unwrap();
+    assert_ne!(keyed.as_bytes(), &[0xc1; 8]);
+    assert_eq!(link.warp.table().lookup(&[0xc1; 8]), Ok(None));
 
     link.warp.close(conn, 0x42, link.now).unwrap();
     link.until("quinn sees the close", |l| l.quinn.lost().is_some());
@@ -972,4 +1009,103 @@ fn quinn_client_gets_version_negotiation_from_warp() {
     ));
     assert!((1..=2).contains(&link.warp.stats().version_negotiations_sent));
     assert_eq!(link.warp.stats().accepted, 0);
+}
+
+// ----- Wave seven (issue #330): the new lifecycle paths against quinn -----
+
+const QUINN_PREFERRED: &str = "203.0.113.9:8443";
+
+fn quinn_server_with_preferred() -> Arc<ServerConfig> {
+    let mut cfg = (*quinn_server_config()).clone();
+    let SocketAddr::V4(p) = QUINN_PREFERRED.parse().unwrap() else {
+        unreachable!()
+    };
+    cfg.preferred_address_v4(Some(p));
+    Arc::new(cfg)
+}
+
+#[test]
+fn warp_client_moves_to_a_quinn_servers_preferred_address() {
+    let preferred: SocketAddr = QUINN_PREFERRED.parse().unwrap();
+    let mut warp = warp(Role::Client, LifecycleConfig::default());
+    warp.set_rx_source(Some("198.51.100.7:443".parse().unwrap()));
+    let setup = ClientSetup::with_time(roots(), vec![ALPN.to_vec()], time()).unwrap();
+    let odcid = [0x83, 1, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08];
+    let conn = warp
+        .connect(&setup, SERVER_NAME, &[0xc1; 8], &odcid, 0)
+        .unwrap();
+    let mut link = Link::new(
+        warp,
+        Quinn::new(Some(quinn_server_with_preferred()), false),
+        0,
+    );
+    link.warp_conn = Some(conn);
+    link.quinn_preferred = Some(preferred);
+    link.handshake();
+    // Warp probes the preferred address with quinn's sequence-1 ID; quinn
+    // answers the PATH_CHALLENGE, and Warp moves there.
+    link.until("moved to the preferred address", |l| {
+        l.warp_events
+            .contains(&ConnectionEvent::MovedToPreferredAddress(conn))
+    });
+    assert_eq!(link.warp.stats().preferred_address_migrations, 1);
+    let before = link.to_original;
+    let mut rng = Rng(20);
+    warp_client_exchange(&mut link, conn, &rng.bytes(60_000), &rng.bytes(60_000));
+    assert_eq!(link.to_original, before, "nothing to the original address");
+    assert!(link.to_preferred > 10, "{}", link.to_preferred);
+    // quinn keeps sending from the address its connection started on
+    // (quinn-proto does not change a connection's source address); Warp
+    // accepts the server's original address throughout (RFC 9000 §9.6.2).
+    assert_eq!(link.warp.stats().unknown_server_address_drops, 0);
+    assert!(link.quinn.lost().is_none(), "{:?}", link.quinn.lost());
+}
+
+#[test]
+fn quinn_client_accepts_a_warp_preferred_address() {
+    let SocketAddr::V4(p) = "203.0.113.10:8443".parse().unwrap() else {
+        unreachable!()
+    };
+    let lifecycle = LifecycleConfig {
+        preferred_address: Some(vesper_warp::lifecycle::PreferredAddressConfig {
+            ipv4: Some(p),
+            ipv6: None,
+        }),
+        ..LifecycleConfig::default()
+    };
+    let mut link = warp_server(lifecycle, 0);
+    link.handshake();
+    let mut rng = Rng(21);
+    quinn_client_exchange(&mut link, &rng.bytes(50_000), &rng.bytes(50_000));
+    // quinn took the preferred address's ID (sequence 1) and the two
+    // NEW_CONNECTION_IDs within its limit; quinn-proto does not migrate to
+    // a preferred address itself, so the connection stays where it is.
+    assert_eq!(link.warp.stats().cids_issued, 3);
+    assert!(link.quinn.lost().is_none(), "{:?}", link.quinn.lost());
+    assert_eq!(link.warp.stats().preferred_address_migrations, 0);
+}
+
+#[test]
+fn quinn_reads_warp_closes_coalesced_before_confirmation() {
+    // Warp closes while it still has Handshake keys: the Handshake
+    // APPLICATION_ERROR and the 1-RTT application close leave in one
+    // datagram (RFC 9000 §10.2.3, §12.2), and quinn reads one of them.
+    let (mut link, conn) = warp_client(LifecycleConfig::default(), false, 0);
+    link.until("1-RTT keys", |l| {
+        l.warp.handshake_phase(conn) == Some(HandshakePhase::Complete)
+    });
+    let before = link.warp.stats().short_coalesced_sent;
+    link.warp.close(conn, 0x42, link.now).unwrap();
+    assert_eq!(link.warp.stats().short_coalesced_sent, before + 1);
+    link.until("quinn sees the close", |l| l.quinn.lost().is_some());
+    match link.quinn.lost().unwrap() {
+        quinn_proto::ConnectionError::ApplicationClosed(c) => {
+            assert_eq!(c.error_code, VarInt::from_u32(0x42));
+        }
+        quinn_proto::ConnectionError::ConnectionClosed(c) => {
+            // APPLICATION_ERROR (0x0c) from the Handshake packet.
+            assert_eq!(u64::from(c.error_code), 0x0c);
+        }
+        other => panic!("unexpected close {other:?}"),
+    }
 }

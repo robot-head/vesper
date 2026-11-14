@@ -4,6 +4,7 @@
 
 pub mod corpus;
 pub mod depth;
+pub mod kfuncs;
 
 use vesper_ebpf::helpers as h;
 use vesper_ebpf::insn::{AluOp, AtomicOp, Endian, JmpOp, Reg, Size};

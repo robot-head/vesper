@@ -38,6 +38,7 @@
 //! `@choreography` macro.
 
 use crate::chor::{Choreography, RoleId};
+use crate::durable::{DurableLog, PersistentState, SimDisk};
 use crate::parse::parse_choreography;
 use crate::session::{AuditCounts, FaultReason, LeakAuditor, NetFail, RawSession};
 use crate::simnet::SplitMix;
@@ -350,6 +351,20 @@ pub struct RaftConfig {
     pub membership_per_mille: u32,
     /// Membership never shrinks below this.
     pub min_members: u32,
+    /// Keep each server's term, vote, snapshot and log in a
+    /// [`DurableLog`] on a [`SimDisk`], persisted (and synced) at the end
+    /// of every step before its messages leave; a crash loses unsynced
+    /// data and a restart recovers from the disk.
+    pub durable: bool,
+    /// With `durable`: chance per persisting step (per mille) that power
+    /// fails during the persist, before the log sync. The step's messages
+    /// are lost, the server recovers from what reached the disk and
+    /// restarts at once.
+    pub torn_crash_per_mille: u32,
+    /// Deliberately unsafe (for negative tests): a torn persist still
+    /// sends the step's messages, i.e. the server answers before its log
+    /// is synced.
+    pub reply_before_sync: bool,
 }
 
 impl RaftConfig {
@@ -377,6 +392,9 @@ impl RaftConfig {
             initial_members: nodes,
             membership_per_mille: 0,
             min_members: 3,
+            durable: false,
+            torn_crash_per_mille: 0,
+            reply_before_sync: false,
         }
     }
 }
@@ -395,6 +413,13 @@ pub enum Violation {
     CommittedDivergence { node: u32, index: usize },
     /// A node changed an entry inside its compacted snapshot prefix.
     CompactedEntryChanged { node: u32, index: usize },
+    /// A restarted node recovered a state from its disk that differs from
+    /// the state it last synced (or the disk did not recover at all).
+    RecoveryLostState { node: u32 },
+    /// After a power failure during a persist, the recovered state is
+    /// neither the last synced state nor a state between it and the one
+    /// being written.
+    RecoveryInconsistent { node: u32 },
 }
 
 /// Invariant checker over the whole cluster.
@@ -407,7 +432,7 @@ pub struct Checker {
 }
 
 impl Checker {
-    fn record(&mut self, now: u64, v: Violation) {
+    pub fn record(&mut self, now: u64, v: Violation) {
         if self.violation.is_none() {
             self.violation = Some((now, v));
         }
@@ -590,6 +615,20 @@ pub struct RaftStats {
     pub leader_step_downs: u64,
     /// Vote requests ignored under leader stickiness.
     pub sticky_vote_denials: u64,
+    /// Durable mode: persists that wrote something, and log syncs.
+    pub persists: u64,
+    pub disk_syncs: u64,
+    /// Restarts recovered from disk.
+    pub recoveries: u64,
+    /// Power failures during a persist.
+    pub torn_crashes: u64,
+    /// Log entries written in a torn persist that did not survive it.
+    pub torn_entries_lost: u64,
+    /// Bytes of torn log tails dropped by recovery.
+    pub torn_bytes_dropped: u64,
+    /// Log truncations and snapshot installs/compactions written to disk.
+    pub disk_truncations: u64,
+    pub disk_snapshots: u64,
 }
 
 struct Protocols {
@@ -699,6 +738,29 @@ impl Node {
         for (_, o) in std::mem::take(&mut self.outstanding) {
             o.session.fault(FaultReason::Crash);
         }
+    }
+
+    /// The state Raft requires on stable storage.
+    fn persistent(&self) -> PersistentState {
+        let snap = self.snap_index as usize;
+        PersistentState {
+            term: self.term,
+            voted_for: self.voted_for,
+            snapshot_index: self.snap_index,
+            snapshot_term: self.snap_term,
+            snapshot_image: self.log[..snap].to_vec(),
+            log: self.log[snap..].to_vec(),
+        }
+    }
+
+    /// Replace the persistent state with one recovered from disk.
+    fn restore(&mut self, s: &PersistentState) {
+        self.term = s.term;
+        self.voted_for = s.voted_for;
+        self.log = s.full_log();
+        self.snap_index = s.snapshot_index;
+        self.snap_term = s.snapshot_term;
+        self.commit = self.snap_index;
     }
 
     fn restart(&mut self, cx: &mut Ctx<'_>) {
@@ -1462,6 +1524,67 @@ fn fnv(h: &mut u64, v: u64) {
     }
 }
 
+/// Crash a server's disk (power loss) and recover its state.
+fn recover(dl: &mut Option<DurableLog<SimDisk>>, stats: &mut RaftStats) -> Option<PersistentState> {
+    let mut disk = dl.take()?.into_disk();
+    disk.crash();
+    let (log, rec) = DurableLog::open(disk).ok()?;
+    stats.recoveries += 1;
+    stats.torn_bytes_dropped += rec.torn_bytes;
+    let state = log.state().clone();
+    *dl = Some(log);
+    Some(state)
+}
+
+/// Persist `target` and sync. With `torn`, power fails after the writes
+/// but before the log sync: returns the state recovered from the disk,
+/// after checking that it lies between `synced` and `target`.
+fn persist(
+    dl: &mut Option<DurableLog<SimDisk>>,
+    synced: &mut PersistentState,
+    target: PersistentState,
+    torn: bool,
+    stats: &mut RaftStats,
+) -> Result<Option<PersistentState>, fn(u32) -> Violation> {
+    let lost = |node| Violation::RecoveryLostState { node };
+    let log = dl.as_mut().ok_or(lost as fn(u32) -> Violation)?;
+    let before = log.stats;
+    let r = if torn {
+        log.persist_unsynced(&target)
+    } else {
+        log.persist(&target)
+    };
+    r.map_err(|_| lost as fn(u32) -> Violation)?;
+    stats.persists += 1;
+    stats.disk_syncs += log.stats.syncs - before.syncs;
+    stats.disk_truncations += log.stats.truncations - before.truncations;
+    stats.disk_snapshots += log.stats.snapshots - before.snapshots;
+    if !torn {
+        *synced = target;
+        return Ok(None);
+    }
+    stats.torn_crashes += 1;
+    let state = recover(dl, stats).ok_or(lost as fn(u32) -> Violation)?;
+    // Meta and snapshot replacements are synced as they are written; only
+    // the log's unsynced appends and truncation can be lost. The log must
+    // be the old one or a prefix of the new one that keeps every entry
+    // the two share.
+    let old = synced.full_log();
+    let new = target.full_log();
+    let got = state.full_log();
+    let shared = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let log_ok = got == old || (new.starts_with(&got) && got.len() >= shared);
+    let meta_ok = (state.term, state.voted_for) == (target.term, target.voted_for)
+        && state.snapshot_index == target.snapshot_index
+        && state.snapshot_term == target.snapshot_term;
+    if !(log_ok && meta_ok) {
+        return Err(|node| Violation::RecoveryInconsistent { node });
+    }
+    stats.torn_entries_lost += new.len().saturating_sub(got.len()) as u64;
+    *synced = state.clone();
+    Ok(Some(state))
+}
+
 /// Run one seeded cluster to `cfg.duration_ns`. `replay` re-runs a recorded
 /// SimPulse journal and checks every scheduling event against it.
 pub fn run_cluster(
@@ -1491,6 +1614,9 @@ pub fn run_cluster(
             "membership change supports at most 63 nodes",
         ));
     }
+    if cfg.torn_crash_per_mille > 0 && !cfg.durable {
+        return Err(RaftRunError::Config("torn crashes need durable storage"));
+    }
     let protocols = Protocols {
         vote: parse_choreography(VOTE_CHOREOGRAPHY).expect("vote choreography parses"),
         append: parse_choreography(APPEND_CHOREOGRAPHY).expect("append choreography parses"),
@@ -1509,6 +1635,21 @@ pub fn run_cluster(
     let mut checker = Checker::default();
     let mut next_cmd = 0u64;
     let mut seen_requests: Vec<BTreeSet<(u32, u64)>> = vec![BTreeSet::new(); n as usize];
+    // Durable mode: one disk per server, and the state it last synced.
+    // The disk model has its own random stream, so a durable run without
+    // torn crashes schedules exactly like an in-memory one.
+    let mut disk_rng = SplitMix(seed ^ 0x6475_7261_626c_6521);
+    let mut disks: Vec<Option<DurableLog<SimDisk>>> = Vec::new();
+    let mut synced: Vec<PersistentState> = Vec::new();
+    if cfg.durable {
+        for i in 0..n {
+            let disk = SimDisk::new(seed ^ (u64::from(i) << 40));
+            let (dl, _) = DurableLog::open(disk)
+                .map_err(|_| RaftRunError::Config("cannot format the simulated disk"))?;
+            disks.push(Some(dl));
+            synced.push(PersistentState::default());
+        }
+    }
     let mut nodes: Vec<Node> = (0..n)
         .map(|id| Node {
             id,
@@ -1609,6 +1750,17 @@ pub fn run_cluster(
                             nodes[i as usize].crash();
                         }
                         ChaosKind::Restart(i) if !nodes[i as usize].up => {
+                            if cfg.durable {
+                                let iu = i as usize;
+                                // Power was lost while the node was down.
+                                match recover(&mut disks[iu], &mut stats) {
+                                    Some(state) if state == synced[iu] => {
+                                        nodes[iu].restore(&state);
+                                    }
+                                    _ => checker
+                                        .record(now, Violation::RecoveryLostState { node: i }),
+                                }
+                            }
                             let mut cx = Ctx {
                                 now,
                                 cfg,
@@ -1657,6 +1809,33 @@ pub fn run_cluster(
                             events: &mut events,
                         };
                         nodes[iu].step(&mut cx, &mut seen_requests[iu]);
+                        if cfg.durable && nodes[iu].up {
+                            let target = nodes[iu].persistent();
+                            if target != synced[iu] {
+                                let torn = disk_rng.chance(cfg.torn_crash_per_mille);
+                                match persist(
+                                    &mut disks[iu],
+                                    &mut synced[iu],
+                                    target,
+                                    torn,
+                                    cx.stats,
+                                ) {
+                                    Ok(None) => {}
+                                    Ok(Some(state)) => {
+                                        // Power failed mid-persist: nothing
+                                        // this step sent leaves the node.
+                                        if !cfg.reply_before_sync {
+                                            cx.out.clear();
+                                        }
+                                        let node = &mut nodes[iu];
+                                        node.crash();
+                                        node.restore(&state);
+                                        node.restart(&mut cx);
+                                    }
+                                    Err(v) => checker.record(now, v(i)),
+                                }
+                            }
+                        }
                     }
                     if nodes[iu].up {
                         let wake = nodes[iu].next_wake().clamp(now, end);

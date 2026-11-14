@@ -15,7 +15,7 @@
 //! rustls's aws-lc-rs CSPRNG; comparisons use `subtle`. Nothing is
 //! hand-rolled.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
 use aes_gcm::aead::{AeadInPlace, KeyInit};
 use aes_gcm::{Aes256Gcm, Nonce};
@@ -76,6 +76,72 @@ pub struct LifecycleConfig {
     /// Datagrams held while the keys to open them are not installed yet
     /// (RFC 9001 §5.7), endpoint-wide. 0 drops them.
     pub buffered_datagrams: u8,
+    // Wave seven (issue #330).
+    /// Server: advertise these addresses in `preferred_address` (RFC 9000
+    /// §9.6, §18.2) with a connection ID of sequence 1, and move a client
+    /// that validates one there.
+    pub preferred_address: Option<PreferredAddressConfig>,
+    /// Client: probe the server's `preferred_address` after the handshake
+    /// is confirmed and move there once the path is validated (RFC 9000
+    /// §9.6.1). On by default.
+    pub follow_preferred_address: bool,
+}
+
+/// The server addresses a `preferred_address` transport parameter offers.
+/// At least one must be set; an unset family is sent as all zeros.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PreferredAddressConfig {
+    pub ipv4: Option<SocketAddrV4>,
+    pub ipv6: Option<SocketAddrV6>,
+}
+
+impl PreferredAddressConfig {
+    /// Is `addr` one of these addresses?
+    pub fn contains(&self, addr: PeerAddr) -> bool {
+        match addr {
+            SocketAddr::V4(a) => self.ipv4 == Some(a),
+            SocketAddr::V6(a) => self.ipv6 == Some(a),
+        }
+    }
+
+    pub(crate) fn encode(
+        &self,
+        connection_id: vesper_warp_tls::ConnectionId,
+        stateless_reset_token: [u8; RESET_TOKEN_LEN],
+    ) -> vesper_warp_tls::PreferredAddress {
+        let (ipv4, ipv4_port) = self
+            .ipv4
+            .map_or(([0; 4], 0), |a| (a.ip().octets(), a.port()));
+        let (ipv6, ipv6_port) = self
+            .ipv6
+            .map_or(([0; 16], 0), |a| (a.ip().octets(), a.port()));
+        vesper_warp_tls::PreferredAddress {
+            ipv4,
+            ipv4_port,
+            ipv6,
+            ipv6_port,
+            connection_id,
+            stateless_reset_token,
+        }
+    }
+}
+
+/// Client: the address of a received `preferred_address` to probe: the
+/// family of the current path when the server offers it, else the other
+/// one. An all-zero address or port means the family is not offered
+/// (RFC 9000 §18.2). `None` when neither is usable.
+pub(crate) fn choose_preferred(
+    pa: &vesper_warp_tls::PreferredAddress,
+    current: Option<PeerAddr>,
+) -> Option<PeerAddr> {
+    let v4 = (pa.ipv4 != [0; 4] && pa.ipv4_port != 0)
+        .then(|| SocketAddr::V4(SocketAddrV4::new(pa.ipv4.into(), pa.ipv4_port)));
+    let v6 = (pa.ipv6 != [0; 16] && pa.ipv6_port != 0)
+        .then(|| SocketAddr::V6(SocketAddrV6::new(pa.ipv6.into(), pa.ipv6_port, 0, 0)));
+    match current {
+        Some(SocketAddr::V6(_)) => v6.or(v4),
+        _ => v4.or(v6),
+    }
 }
 
 impl Default for LifecycleConfig {
@@ -88,6 +154,8 @@ impl Default for LifecycleConfig {
             active_connection_id_limit: 4,
             migration: true,
             buffered_datagrams: 8,
+            preferred_address: None,
+            follow_preferred_address: true,
         }
     }
 }
@@ -332,9 +400,17 @@ pub(crate) struct PeerCid {
 /// Connection-ID state of one connection.
 #[derive(Debug, Clone)]
 pub(crate) struct Cids {
-    /// Extra IDs we issued (sequence 1 and up); sequence 0 is the
-    /// handshake ID in the connection table.
+    /// Extra IDs we issued, routed through the endpoint's `alt_cids`; the
+    /// one the connection table is keyed by (sequence `table_seq`) is not
+    /// listed here.
     pub local: [Option<LocalCid>; MAX_ACTIVE_CIDS],
+    /// Sequence number of the ID the connection table is keyed by: 0 (the
+    /// handshake ID) until the peer retires it, then the ID that replaced
+    /// it in the table (RFC 9000 §5.1.2).
+    pub table_seq: u64,
+    /// The peer retired the table's ID and no replacement was available
+    /// yet; it still routes until one is.
+    pub table_retired: bool,
     pub next_local_seq: u64,
     /// IDs the peer issued, including the one in use.
     pub peer: [Option<PeerCid>; MAX_ACTIVE_CIDS],
@@ -351,6 +427,8 @@ impl Cids {
     pub fn new() -> Self {
         Self {
             local: [None; MAX_ACTIVE_CIDS],
+            table_seq: 0,
+            table_retired: false,
             next_local_seq: 1,
             peer: [None; MAX_ACTIVE_CIDS],
             active_peer_seq: 0,
@@ -360,7 +438,7 @@ impl Cids {
     }
 
     pub fn active_local(&self) -> usize {
-        1 + self.local.iter().flatten().count()
+        usize::from(!self.table_retired) + self.local.iter().flatten().count()
     }
 
     /// Records a peer ID; `Err` for a RFC 9000 §5.1.1 violation
@@ -437,6 +515,21 @@ pub(crate) struct PathProbe {
     pub fallback: Option<Option<PeerAddr>>,
     /// When the last PATH_CHALLENGE was sent.
     pub sent_ns: u64,
+    // Wave seven (issue #330).
+    /// Our local address the challenge leaves from (server: its preferred
+    /// address), `None` for the path's own.
+    pub local: Option<PeerAddr>,
+    /// The peer connection ID the challenge goes to, when not the active
+    /// one (client: sequence 1, the preferred address's ID).
+    pub dcid_seq: Option<u64>,
+    /// Client: a probe of the server's preferred address; on success the
+    /// connection moves there (RFC 9000 §9.6.1).
+    pub preferred: bool,
+    /// A challenge of this probe left below 1200 bytes (amplification
+    /// limit): its response validates the address, not the MTU.
+    pub unpadded_sent: bool,
+    /// This is the expanded re-validation that follows (RFC 9000 §8.2.3).
+    pub mtu_check: bool,
 }
 
 /// A connection's network path.
@@ -444,6 +537,9 @@ pub(crate) struct PathProbe {
 pub(crate) struct Path {
     /// Where we send; `None` when the caller supplies no addresses.
     pub remote: Option<PeerAddr>,
+    /// Server: the local address we send from, once a client moved to our
+    /// preferred address; `None` for the original one.
+    pub local: Option<PeerAddr>,
     /// The path's address is validated (RFC 9000 §8).
     pub validated: bool,
     /// Bytes received on and sent to an unvalidated migrated path, for its

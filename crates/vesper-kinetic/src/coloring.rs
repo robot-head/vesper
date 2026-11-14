@@ -180,6 +180,11 @@ impl Colorer {
         Ok(())
     }
 
+    /// Most constraints one call may colour.
+    pub fn capacity(&self) -> usize {
+        self.colors.len()
+    }
+
     /// Number of colours the last colouring used.
     pub fn layer_count(&self) -> usize {
         self.layer_count
