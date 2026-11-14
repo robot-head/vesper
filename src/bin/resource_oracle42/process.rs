@@ -278,6 +278,10 @@ fn make_removable(root: &Path) {
             #[cfg(windows)]
             {
                 let mut permissions = metadata.permissions();
+                #[expect(
+                    clippy::permissions_set_readonly_false,
+                    reason = "On Windows this clears only the read-only attribute; ACL permissions are unchanged."
+                )]
                 permissions.set_readonly(false);
                 let _ = fs::set_permissions(&directory, permissions);
             }
@@ -289,6 +293,10 @@ fn make_removable(root: &Path) {
                     #[cfg(windows)]
                     if let Ok(metadata) = entry.metadata() {
                         let mut permissions = metadata.permissions();
+                        #[expect(
+                            clippy::permissions_set_readonly_false,
+                            reason = "On Windows this clears only the read-only attribute; ACL permissions are unchanged."
+                        )]
                         permissions.set_readonly(false);
                         let _ = fs::set_permissions(entry.path(), permissions);
                     }

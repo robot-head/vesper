@@ -802,6 +802,10 @@ fn changed_executable_object_is_refused_before_any_model_response_or_evidence() 
         permissions.set_mode(permissions.mode() | 0o200);
     }
     #[cfg(windows)]
+    #[expect(
+        clippy::permissions_set_readonly_false,
+        reason = "On Windows this clears only the read-only attribute; ACL permissions are unchanged."
+    )]
     permissions.set_readonly(false);
     fs::set_permissions(&object, permissions).unwrap();
     fs::write(object, bytes).unwrap();
