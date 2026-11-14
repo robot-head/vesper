@@ -276,9 +276,8 @@ def applyBin (op : BinOp) (a b : Int) : Except Err Val :=
   | .sub => checked (a - b)
   | .mul => checked (a * b)
   | .div => if b == 0 then .error (.fail .runtime) else checked (a.tdiv b)
-  | .rem => if b == 0 then .error (.fail .runtime)
-            else if a == minI64 ∧ b == -1 then .error (.fail .arith)
-            else checked (a.tmod b)
+  -- `i64::MIN % -1` is 0 (crates/vesper-core numeric contract); only `/` overflows.
+  | .rem => if b == 0 then .error (.fail .runtime) else checked (a.tmod b)
   | .lt => .ok (.bool (decide (a < b)))
   | .le => .ok (.bool (decide (a ≤ b)))
   | .gt => .ok (.bool (decide (a > b)))

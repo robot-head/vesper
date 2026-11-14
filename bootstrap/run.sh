@@ -32,7 +32,8 @@ case "$PROFILE" in
 esac
 command -v "$LEAN" >/dev/null || { echo "Lean not found (set VESPER_LEAN)" >&2; exit 2; }
 command -v "$CC_B" >/dev/null || { echo "$CC_B not found (set CC_B)" >&2; exit 2; }
-LEAN_HOME=$(cd "$(dirname "$(command -v "$LEAN")")/.." && pwd)
+# Ask Lean for its toolchain prefix: under elan, `lean` on PATH is a launcher.
+LEAN_HOME=$("$LEAN" --print-prefix)
 
 cd "$ROOT"
 export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}

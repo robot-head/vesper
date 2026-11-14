@@ -320,3 +320,39 @@ fn two_seed_builds_compile_the_corpus_bit_identically() {
     assert!(status.success(), "bootstrap/run.sh failed");
     SeedLock::parse(&std::fs::read(dir.join("stage0_seed.lock")).unwrap()).expect("seed lock");
 }
+
+#[test]
+fn path_b_reference_follows_the_signed_corner_contract() {
+    let Some(lean) = lean() else {
+        eprintln!("VESPER_LEAN unset; Path B corner cases skipped");
+        return;
+    };
+    // crates/vesper-core numeric contract: `i64::MIN % -1` is 0; `i64::MIN / -1`
+    // overflows (here the handler's 9).
+    let dir = temp_dir("corner");
+    let _cleanup = Cleanup(dir.clone());
+    let program = |body: &str| {
+        format!(
+            "fn main() -> i64 {{\n    handle Fail[ArithOverflow] in {{\n        {body}\n    }} with {{\n        return value => value,\n        raise(error, resume) => 9,\n    }}\n}}\n"
+        )
+    };
+    std::fs::write(
+        dir.join("rem.ves"),
+        program("(-9223372036854775807 - 1) % -1"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("div.ves"),
+        program("(-9223372036854775807 - 1) / -1"),
+    )
+    .unwrap();
+    let out = Command::new(&lean)
+        .current_dir(repo().join("lean"))
+        .arg("--run")
+        .arg("BootstrapDdc/Reference.lean")
+        .arg(dir.join("div.ves"))
+        .arg(dir.join("rem.ves"))
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "div 9\nrem 0\n");
+}

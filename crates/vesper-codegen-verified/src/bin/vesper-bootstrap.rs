@@ -3,7 +3,8 @@
 //! - `seed-lock --base-commit C --rustc V --profile P --epoch N --seed-a F --seed-b F
 //!   --objects-a DIR --objects-b DIR --results-a F --results-b F --lean V --cc V --out F`
 //!   compares the two seed builds and the two paths, writes the seed lock, and
-//!   exits 1 if a gate fails (the lock is written either way, for the record).
+//!   exits 1 if a gate fails (the lock is still written for the record, except
+//!   when a result transcript does not cover exactly the compiled programs).
 //! - `check-seed-lock FILE` validates a seed lock.
 //! - `check-lock FILE` validates a §42.2 `stage3_ddc.lock`.
 #![forbid(unsafe_code)]
@@ -64,6 +65,21 @@ fn seed_lock(args: &[String]) -> Result<bool, String> {
     let results_b =
         ResultTranscript::parse(&read(&path("results-b")?)?).map_err(|e| e.to_string())?;
     let mut ok = true;
+    // Both transcripts must cover exactly the compiled programs, so empty or
+    // partial semantic evidence cannot certify the corpus.
+    let compiled: Vec<&str> = objects_a
+        .entries
+        .iter()
+        .map(|e| e.program.as_str())
+        .collect();
+    for (label, transcript) in [("Path A", &results_a), ("Path B", &results_b)] {
+        let names: Vec<&str> = transcript.lines.iter().map(|l| l.0.as_str()).collect();
+        if names != compiled {
+            // No lock is written: it would record an agreement nobody checked.
+            eprintln!("{label} results do not cover exactly the compiled corpus programs");
+            return Ok(false);
+        }
+    }
     if let Err(e) = objects_a.require_identical(&objects_b) {
         eprintln!("reproducibility gate: {e}");
         ok = false;

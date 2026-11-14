@@ -491,3 +491,26 @@ fn rewrite_hook_is_not_wired() {
         Err(BootstrapVerifyError::RewriteCheckerNotWired)
     );
 }
+
+#[test]
+fn a_lock_edited_after_parsing_is_revalidated() {
+    let b = builders(2);
+    let mut lock = honest_lock(2, false);
+    let bundle = b.sign(&lock, STAGE, &[0, 1]);
+    lock.quorum.path_b_lean_ddc = blake3::hash(b"edited");
+    assert_eq!(
+        audit_ddc_bootstrap_quorum(&lock, &evidence(&b, &bundle, STAGE, STAGE, STAGE)),
+        Err(BootstrapVerifyError::LockNotAtFixedPoint)
+    );
+    let mut lock = honest_lock(2, false);
+    lock.bootstrap.allowed_lean_axioms.push("sorryAx".into());
+    let mut e = evidence(&b, &bundle, STAGE, STAGE, STAGE);
+    e.lean_axioms_used = &["sorryAx"];
+    assert!(matches!(
+        audit_ddc_bootstrap_quorum(&lock, &e),
+        Err(BootstrapVerifyError::InvalidLockField {
+            field: "allowed_lean_axioms",
+            ..
+        })
+    ));
+}

@@ -110,6 +110,8 @@ pub fn audit_ddc_bootstrap_quorum(
     lock: &BootstrapLock,
     evidence: &BootstrapEvidence<'_>,
 ) -> Result<AuditReport, BootstrapVerifyError> {
+    // The fields are public, so a lock may have been edited after parsing.
+    lock.validate()?;
     let source_root = crate::source_merkle(evidence.source_files)?;
     if source_root != lock.bootstrap.source_merkle {
         return Err(BootstrapVerifyError::SourceMerkleMismatch {
@@ -146,7 +148,7 @@ pub fn audit_ddc_bootstrap_quorum(
             stage3_path_b_ddc: ddc,
         });
     }
-    // The lock is a fixed point (checked at parse), so comparing one digest
+    // The lock is a fixed point (revalidated above), so comparing one digest
     // covers all three locked fields.
     if stage3 != lock.quorum.path_a_stage3 {
         return Err(BootstrapVerifyError::TamperedDigest {

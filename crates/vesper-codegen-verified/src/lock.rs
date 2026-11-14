@@ -79,7 +79,7 @@ impl BootstrapLock {
         Ok(lock)
     }
 
-    fn validate(&self) -> Result<(), BootstrapVerifyError> {
+    pub(crate) fn validate(&self) -> Result<(), BootstrapVerifyError> {
         let b = &self.bootstrap;
         vesper_loom_calculus::PackageName::parse(b.compiler_package.clone())
             .map_err(|_| invalid("compiler_package", "not a scoped package name"))?;
