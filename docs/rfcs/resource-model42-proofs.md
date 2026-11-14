@@ -2,13 +2,14 @@
 
 Design checkpoint against the frozen `resource-model42-contracts.md` at
 `ddf5d6c`, based on main `30de7fef8be040a890e34f26370ee15b1429642e`.
-This report is currently a proof plan, not completed proof or execution
-evidence. No Proofs.lean file, build, kernel replay or test execution is claimed
-at this checkpoint. Source implementation waits for the syntax writer's first
-coherent concrete API and the checker/evaluator interfaces built on it.
+The generic erasure foundation now has an actual compiled source checkpoint;
+the complete checker/evaluator correspondence remains in progress. The
+planning sections below describe remaining proof obligations, not completed
+results. No complete model audit, run or exhaustion result is claimed here.
 
-Only new `lean/ResourceModel42/Proofs.lean` and this report belong to the proof
-lane. Existing Full metatheory, compiler, runtime, Cargo and other writers'
+The proof lane owns new `lean/ResourceModel42/ErasureProofs.lean`,
+`lean/ResourceModel42/Proofs.lean` and this report after the coordinator's
+published proof-work partition. Existing Full metatheory, compiler, runtime, Cargo and other writers'
 files remain unchanged. The model is the frozen pure ANF fragment, not the
 full §42 oracle or a source/backend differential campaign.
 
@@ -169,3 +170,37 @@ remaining gaps will replace this planning-only status after implementation.
 No source/Rust/native refinement, full-language completeness, external
 Lean4Lean profile coverage, physical-resource result, 100000-case campaign,
 whole-process resource bound or self-hosting claim follows from this plan.
+
+
+## Erasure foundation: actual source checkpoint
+
+`ErasureProofs.lean` contains 11 public theorems in
+Vesper.ResourceModel42.ErasureProofs: runtimeValue_isVal,
+sourceAtom_erase_toRuntime, sourceExpr_erase_toRuntime,
+runtimeAtom_erase_subst, runtimeExpr_erase_subst,
+runtimeExpr_erase_unpack_subst, runtimeContext_erase_plug,
+runtimeAtom_value_of_isVal, asValue_erase, asValue_sound and
+asValue_complete. They prove actual definitions from Syntax, including the
+right-then-left unpack order and zero-step pair-as-value recognition.
+
+The following actual command ran from this worktree's `lean` directory:
+
+```sh
+LEAN_NUM_THREADS=1 LEAN_PATH=/tmp/resource-model42-evaluator-api-v1 /home/agent/.local/share/vesper-lean/bin/lean -o /tmp/resource-model42-proofs-v1/ResourceModel42/ErasureProofs.olean ResourceModel42/ErasureProofs.lean
+```
+
+Pinned Lean 4.24 returned exit 0 with no diagnostics (0.31 seconds); the log is
+`/tmp/resource-model42-proofs-v1/compile-erasure.log`. Dependency source
+checkpoints are Syntax d51a21b, Checker b9ce0c0 and Evaluator 26ec38f; only Syntax
+and Full are imported by the erasure module. The evaluator dependency's report
+was excluded from the local dependency import, without changing its source.
+Formatting/whitespace checks use `git diff --check`.
+
+Static ContextFits/checker soundness is now separately owned in
+CheckerProofs.lean; finite ledger correspondences are separately owned in
+LedgerProofs.lean; the evaluator author owns EvaluatorProofs.lean for operational
+correspondence. Main Proofs.lean retains checked input closure, reachable
+classification and Full-derived conclusions. This dependency split avoids
+cycles and does not replace any required theorem with a success assumption.
+Transitive audit/catalog acceptance and the remaining main proof gates are
+still pending. No Cargo or semantic-test execution was run by this lane.
