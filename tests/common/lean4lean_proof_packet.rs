@@ -1,4 +1,4 @@
-//! Shared runner for the eleven fixed audited proof packets.
+//! Shared runner for the twelve fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -24,6 +24,7 @@ pub enum Packet {
     Addability,
     Completion,
     Reconstruction,
+    NormalizedCompletion,
 }
 
 struct PacketSpec {
@@ -382,6 +383,11 @@ const RECONSTRUCTION_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.modifyAt_unsorted_target_witness",
 ];
 
+const NORMALIZED_COMPLETION_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.normalize_mapCompletes",
+    "Vesper.Lean4LeanLevel42.normalize_mapCompletes_WF",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -674,6 +680,37 @@ impl Packet {
                 required: RECONSTRUCTION_REQUIRED,
                 scope: "audited_construction_completion_admissible_chains_and_tree_primitives",
                 marker: "LEAN4LEAN_RECONSTRUCTION42_EVIDENCE",
+            },
+            Self::NormalizedCompletion => PacketSpec {
+                label: "lean4lean_normalized_completion42",
+                module: "Lean4LeanLevel42.NormalizedCompletionFinal",
+                projected: "Lean4LeanNormalizedCompletion42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.MapValue",
+                    "Lean4LeanLevel42.Completion",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.MapHelpers",
+                    "Lean4LeanLevel42.LevelSemantics",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.ConstructionCompletion",
+                    "Lean4LeanLevel42.Subsumption",
+                    "Lean4LeanLevel42.NodeResidual",
+                    "Lean4LeanLevel42.MapMinimize",
+                    "Lean4LeanLevel42.MapSubsumption",
+                    "Lean4LeanLevel42.VariableSupport",
+                    "Lean4LeanLevel42.PathPriming",
+                    "Lean4LeanLevel42.NormalizeInvariants",
+                    "Lean4LeanLevel42.NormalizedCompletion",
+                    "Lean4LeanLevel42.NormalizedCompletionFinal",
+                ],
+                required: NORMALIZED_COMPLETION_REQUIRED,
+                scope: "audited_normalized_completion_and_wellformedness",
+                marker: "LEAN4LEAN_NORMALIZED_COMPLETION42_EVIDENCE",
             },
         }
     }
