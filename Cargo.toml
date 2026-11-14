@@ -71,6 +71,7 @@ members = [
     "crates/vesper-aura-gtk",
     "crates/vesper-gpu-compute",
     "crates/vesper-ignis-vulkan",
+    "crates/vesper-fusion",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -143,6 +144,7 @@ default-members = [
     "crates/vesper-aura-gtk",
     "crates/vesper-gpu-compute",
     "crates/vesper-ignis-vulkan",
+    "crates/vesper-fusion",
     "experiments/native-pulse",
 ]
 

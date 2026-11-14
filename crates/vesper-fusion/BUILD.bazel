@@ -1,0 +1,8 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    # Lean resolves symlinked runfiles to the source tree and then rejects
+    # them as outside --root, so the model check runs in a copy of regular files.
+    copy_test_cwd = ["test/lean_model"],
+    extra_test_data = ["//:lean"],
+)
