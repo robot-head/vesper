@@ -752,6 +752,7 @@ fn blocked_stream_limit_is_enforced() {
             qpack_max_table_capacity: 4096,
             qpack_blocked_streams: 1,
             max_field_section_size: Some(16 * 1024),
+            ..Settings::default()
         },
         ..H3Config::default()
     });

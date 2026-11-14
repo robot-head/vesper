@@ -1,0 +1,153 @@
+/*
+ * Hand-written for the wave-eight Silicon tests (describes no real board):
+ * a two-cell T-Head-style PLIC with edge and level sources, a second PLIC,
+ * an interrupt nexus with interrupt-map-pass-thru, nested dma-ranges and a
+ * SiFive cache controller without the JH7100 flush quirk.
+ */
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	compatible = "vesper,aia-edge";
+	model = "Vesper edge/pass-thru/dma-ranges board";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+		timebase-frequency = <1000000>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "thead,c906", "riscv";
+			riscv,isa = "rv64imafdc";
+			cpu0_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+
+		cpu@1 {
+			device_type = "cpu";
+			reg = <1>;
+			compatible = "thead,c906", "riscv";
+			riscv,isa = "rv64imafdc";
+			cpu1_intc: interrupt-controller {
+				#interrupt-cells = <1>;
+				interrupt-controller;
+				compatible = "riscv,cpu-intc";
+			};
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x40000000>;
+	};
+
+	soc {
+		compatible = "simple-bus";
+		#address-cells = <2>;
+		#size-cells = <2>;
+		ranges;
+		/* Bus address 0 reaches DRAM at 0x8000_0000 (1 GiB). */
+		dma-ranges = <0x0 0x0 0x0 0x80000000 0x0 0x40000000>;
+		interrupt-parent = <&plic0>;
+
+		plic0: interrupt-controller@10000000 {
+			compatible = "vesper,test-plic", "thead,c900-plic";
+			reg = <0x0 0x10000000 0x0 0x4000000>;
+			interrupts-extended = <&cpu0_intc 11>, <&cpu0_intc 9>,
+					      <&cpu1_intc 11>, <&cpu1_intc 9>;
+			interrupt-controller;
+			#address-cells = <0>;
+			#interrupt-cells = <2>;
+			riscv,ndev = <64>;
+		};
+
+		plic1: interrupt-controller@14000000 {
+			compatible = "sifive,plic-1.0.0";
+			reg = <0x0 0x14000000 0x0 0x400000>;
+			interrupts-extended = <&cpu1_intc 11>;
+			interrupt-controller;
+			#address-cells = <0>;
+			#interrupt-cells = <1>;
+			riscv,ndev = <32>;
+		};
+
+		cache-controller@2010000 {
+			compatible = "sifive,ccache0", "cache";
+			reg = <0x0 0x2010000 0x0 0x1000>;
+			cache-block-size = <64>;
+			cache-level = <2>;
+			cache-sets = <1024>;
+			cache-size = <0x100000>;
+			cache-unified;
+		};
+
+		uart@20000000 {
+			compatible = "ns16550a";
+			reg = <0x0 0x20000000 0x0 0x100>;
+			interrupts = <5 4>;
+		};
+
+		gpio@20001000 {
+			compatible = "vesper,test-gpio";
+			reg = <0x0 0x20001000 0x0 0x100>;
+			interrupts = <6 1>;
+		};
+
+		falling@20002000 {
+			compatible = "vesper,test-falling";
+			reg = <0x0 0x20002000 0x0 0x100>;
+			interrupts = <7 2>;
+		};
+
+		timer@20003000 {
+			compatible = "vesper,test-timer";
+			reg = <0x0 0x20003000 0x0 0x100>;
+			interrupt-parent = <&plic1>;
+			interrupts = <3>;
+		};
+
+		/* Child specifier <line flags>: the line selects the PLIC source,
+		 * the flags pass through to the PLIC specifier. */
+		connector: connector {
+			#address-cells = <0>;
+			#interrupt-cells = <2>;
+			interrupt-map-mask = <0xffffffff 0x0>;
+			interrupt-map = <1 0 &plic0 20 0>,
+					<2 0 &plic0 21 0>;
+			interrupt-map-pass-thru = <0x0 0xf>;
+		};
+
+		button {
+			compatible = "vesper,test-button";
+			interrupt-parent = <&connector>;
+			interrupts = <1 1>, <2 4>;
+		};
+
+		dma-bus@30000000 {
+			compatible = "simple-bus";
+			#address-cells = <1>;
+			#size-cells = <1>;
+			ranges = <0x0 0x0 0x30000000 0x1000000>;
+			/* Bus 0x1000_0000 is soc bus 0 (DRAM 0x8000_0000); bus 0 is
+			 * soc bus 0x3000_0000 (DRAM 0xb000_0000). */
+			dma-ranges = <0x10000000 0x0 0x0 0x10000000>,
+				     <0x0 0x0 0x30000000 0x10000000>;
+
+			dma@0 {
+				compatible = "vesper,test-dma";
+				reg = <0x0 0x1000>;
+			};
+		};
+
+		nic@20004000 {
+			compatible = "vesper,test-nic";
+			reg = <0x0 0x20004000 0x0 0x1000>;
+		};
+	};
+};
