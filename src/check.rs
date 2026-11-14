@@ -345,7 +345,10 @@ pub struct Checked {
 /// [`crate::pact_frontend`] into ordinary core functions and calls first;
 /// the returned World then contains only the existing core schema.
 pub fn check(module: &Module) -> Checked {
-    crate::pact_frontend::check_module(module)
+    let beacon = crate::trace_effects::with_prelude(module);
+    let mut checked = crate::pact_frontend::check_module(beacon.module());
+    beacon.check(&mut checked);
+    checked
 }
 
 /// Static resolution of trait method calls during the frontend's first
