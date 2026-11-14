@@ -20,34 +20,40 @@ remaining semantic theorems or independent transitive kernel/axiom audit.
 | --- | --- | --- | --- |
 | Syntax and validation | `d51a21b` | `c821dde` | Compiles; 2 public type-cache theorems |
 | Type/ownership checker | `b9ce0c0` | `e9a5e20` | Compiles; private checked wrapper retains actual inference equality |
+| Checker soundness | `9be3eae` | `0430f2a` | 42 public theorems compile, including actual inference-to-Full typing |
 | Evaluator and invocation | `26ec38f` | `6746b2c` | Compiles; private invocation retains actual admission equality |
 | Erasure/substitution | `012a4c7` | `d4c13a4` | 11 public foundation theorems compile |
 | Finite ledger | `6ae4905` | `79ae227` | 20 public store/history/embedding theorems compile |
-| Initial acceptance | `bccfecb` | `1d27bb1` | 28 fixed kernel-computed syntax/admission/metric assertions compile |
+| Operational correspondence | `2c0512b` | `367956d` | 21 public actual-step/prefix/value/event/no-invariant theorems compile |
+| Input closure | `ac90d85` | `4089fe5` | 12 public theorems compile, including actual initial Full.WT |
+| Semantic acceptance | `51baeb2` | `e454c56` | 75 fixed kernel-computed syntax/checker/evaluator assertions compile |
 
 Independent source reviews found no additional blocker in the actual syntax,
 checker and evaluator checkpoints after correcting blanket rejection of zero
 limits. The reviews ran no builds and do not establish the unproved bridges.
 
-The initial acceptance count is **28**, corrected from an earlier estimate of
-29 by inventorying the actual declarations. A checker scratch smoke helper
-failed because it required a nonexistent `Except` equality instance; no smoke
-success is claimed. Acceptance instead uses actual computed equalities.
+The initial acceptance count was **28**, corrected from an earlier estimate of
+29 by inventorying the actual declarations. The later 47 checker/evaluator
+cases bring the actual passing total to **75**. A first checker scratch smoke
+helper failed because it required a nonexistent `Except` equality instance;
+after repair, 24 scratch semantic assertions compiled successfully. These are
+separate from the 75 independently maintained acceptance assertions.
 
 The coordinator aggregate imports implemented production/proof modules only.
 It does not import acceptance. The final acceptance module will import the
 aggregate so its fresh artifact closure includes all implemented proofs.
+The coordinator independently compiled the aggregate at `71f5219` using the
+genuine immutable dependency artifacts (0.24 seconds, exit zero). An initial
+attempt failed to resolve a module across separate partial LEAN_PATH roots;
+assembling a complete private dependency root fixed that infrastructure issue.
+This was an aggregate import check, not fresh compilation or an axiom audit.
 
 ## Required release gates still pending
 
-- Actual inference success constructs `MetatheoryFull.HasType` under the
-  strong finite-context relation, without a caller-supplied typing premise.
-- Separately admitted copy invocation values close the source into an actual
-  initial well-typed configuration; input-closing silent lets count as fuel.
-- Every committed evaluator transition erases to one actual Full transition;
-  complete successful prefixes and event projections correspond.
-- Checked reachable configurations cannot report an invariant failure.
-  Resource refusals must identify genuinely exceeded independent logical
+- Actual inference-to-typing, input closure and successful operational
+  correspondence are implemented and compile as listed above; their complete
+  independent kernel/axiom audit remains pending.
+- Resource refusals must identify genuinely exceeded independent logical
   metrics, including proposed substitutions and enclosing contexts.
 - Preservation/progress and completed-copy exhaustion/exact-once corollaries
   derive from actual correspondence and the existing Full theorems. Returning
