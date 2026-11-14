@@ -11,6 +11,7 @@ pub mod device;
 pub mod durable;
 pub mod page;
 pub mod pool;
+pub mod store;
 pub mod vector;
 pub mod wal;
 
@@ -205,6 +206,13 @@ pub(crate) fn identifier(s: &str) -> Result<String> {
     Ok(s.to_ascii_lowercase())
 }
 
+/// One applied DDL statement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum DdlChange {
+    Create(String, Vec<ColumnDef>),
+    Drop(String),
+}
+
 /// Ordered, private schema state. Migration replay is atomic and never performs I/O.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HermeticCatalog {
@@ -219,9 +227,14 @@ impl HermeticCatalog {
         &self.tables
     }
     pub fn apply_ddl(&mut self, sql: &str, limits: Limits) -> Result<()> {
+        self.apply_ddl_changes(sql, limits).map(drop)
+    }
+    /// `apply_ddl`, also returning each applied statement in order.
+    pub(crate) fn apply_ddl_changes(&mut self, sql: &str, limits: Limits) -> Result<Vec<DdlChange>> {
         limits.validate()?;
         let statements = parse::ddl(sql, limits)?;
         let mut next = self.clone();
+        let mut changes = Vec::with_capacity(statements.len());
         for statement in statements {
             match statement {
                 parse::Ddl::Create(name, cols) => {
@@ -233,12 +246,14 @@ impl HermeticCatalog {
                         limits.tables,
                         "catalog table limit",
                     )?;
-                    next.tables.insert(name, cols);
+                    next.tables.insert(name.clone(), cols.clone());
+                    changes.push(DdlChange::Create(name, cols));
                 }
                 parse::Ddl::Drop(name) => {
                     if next.tables.remove(&name).is_none() {
                         return Err(Error::new(ErrorKind::Unknown, format!("table {name}")));
                     }
+                    changes.push(DdlChange::Drop(name));
                 }
             }
             next.revision = next
@@ -247,7 +262,11 @@ impl HermeticCatalog {
                 .ok_or_else(|| Error::new(ErrorKind::Overflow, "catalog revision overflow"))?;
         }
         *self = next;
-        Ok(())
+        Ok(changes)
+    }
+    /// Rebuilds a catalog persisted by the durable table store.
+    pub(crate) fn from_parts(tables: BTreeMap<String, Vec<ColumnDef>>, revision: u64) -> Self {
+        Self { tables, revision }
     }
     pub fn prepare(&self, sql: &str, params: &[ParamDef], limits: Limits) -> Result<PreparedQuery> {
         limits.validate()?;
