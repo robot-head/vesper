@@ -5,8 +5,8 @@
 //! quantum (`Store::fuel_async_yield_interval`) and traps with out-of-fuel once
 //! the budget is gone. Which tenant runs next is a [`QuantumScheduler`]
 //! decision. The trait mirrors SimPulse's `next_task`/`yield_task`/`finish`
-//! shape so an adapter can drive Nexus from a SimPulse run queue without this
-//! crate depending on it.
+//! shape; [`crate::pulse::SimPulseScheduler`] drives it from a SimPulse run
+//! queue.
 //!
 //! Nothing here reads a real clock. Epoch ticks are advanced by the scheduler
 //! loop itself (one tick per round), so epoch deadlines are deterministic too.

@@ -6,3 +6,6 @@ description = "Vesper Strata region allocator core (design section 15)"
 publish = false
 
 [dependencies]
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

@@ -21,6 +21,7 @@ pub mod fork;
 pub mod guest_mem;
 pub mod host;
 pub mod hotset;
+pub mod hotset_store;
 #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
 mod hw_rng;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
@@ -49,6 +50,7 @@ pub mod pvh;
 pub mod seccomp;
 pub mod slot_plan;
 pub mod virtio;
+pub mod vmm_thread;
 
 use std::fmt;
 use std::io::{self, Read};

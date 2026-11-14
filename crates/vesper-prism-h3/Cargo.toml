@@ -10,3 +10,12 @@ vesper-prism = { path = "../vesper-prism" }
 vesper-warp = { path = "../vesper-warp" }
 vesper-warp-shard = { path = "../vesper-warp-shard" }
 vesper-warp-umem = { path = "../vesper-warp-umem" }
+
+[dev-dependencies]
+# Wave seven (issue #331), tests only, pinned exactly. quinn-proto (already
+# in the lockfile through vesper-warp's tests) carries real QUIC DATAGRAM
+# frames (RFC 9221); wtransport-proto is an independent WebTransport
+# implementation whose codecs the interop test drives against our server.
+bytes = "=1.12.1"
+quinn-proto = { version = "=0.11.13", default-features = false, features = ["rustls-aws-lc-rs"] }
+wtransport-proto = "=0.7.2"

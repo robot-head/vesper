@@ -1,0 +1,10 @@
+// expect: E0763
+// at: w
+// message: argument 2 of 'project': expected Tensor[F32, [3, 5]], found Tensor[F32, [4, 5]]
+fn project[M: dim, K: dim, N: dim](x: Tensor[F32, [M, K]], w: Tensor[F32, [K, N]])
+    -> Tensor[F32, [M, N]] eff [Tensor] {
+    Tensor::matmul(x, w)
+}
+fn main(x: Tensor[F32, [2, 3]], w: Tensor[F32, [4, 5]]) -> Tensor[F32, [2, 5]] eff [Tensor] {
+    project(x, w)
+}

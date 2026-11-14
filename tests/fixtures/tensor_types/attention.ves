@@ -1,0 +1,32 @@
+// Grouped-query decode over a linear paged KV sequence (§28.2, §28.3).
+fn decode_step[QH: dim, KV: dim, D: dim](
+    inout seq: ActiveKvSeq[KV, D],
+    k: Tensor[F32, [KV, D]],
+    v: Tensor[F32, [KV, D]],
+    q: Tensor[F32, [QH, D]],
+) -> Result[Tensor[F32, [QH, D]], KvOomError] eff [Tensor, KvCachePool[KV, D]] {
+    match KvCachePool::append_kv_step(inout seq, Tensor::to_bf16(k), Tensor::to_bf16(v)) {
+        Ok(_) => Ok(KvCachePool::attend(seq, Tensor::rope(q, KvCachePool::tokens(seq)))),
+        Err(e) => Err(e)
+    }
+}
+fn generate(
+    q: Tensor[F32, [4, 8]],
+    k0: Tensor[F32, [2, 8]],
+    v0: Tensor[F32, [2, 8]],
+    k1: Tensor[F32, [2, 8]],
+    v1: Tensor[F32, [2, 8]],
+) -> Result[Tensor[F32, [4, 8]], KvOomError] eff [Tensor, KvCachePool[2, 8]] {
+    match KvCachePool::begin_sequence(7) {
+        Ok(seq) => {
+            let first = decode_step(inout seq, k0, v0, q);
+            let second = decode_step(inout seq, k1, v1, q);
+            KvCachePool::release_sequence(seq);
+            match first {
+                Ok(_) => second,
+                Err(e) => Err(e)
+            }
+        },
+        Err(e) => Err(e)
+    }
+}

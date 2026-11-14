@@ -1,0 +1,16 @@
+// Quantized weights laid out by checked wire structs (§13.2, §28.2).
+wire struct Q4Block32Wire {
+    scale_fp16: u16le,
+    packed_nibbles: ByteArray[16],
+}
+wire struct Q8Block32Wire {
+    scale: u16le,
+    weights: ByteArray[32],
+}
+fn project[R: dim, C: dim](
+    w4: Tensor[Q4Block32Wire, [R, C]],
+    w8: Tensor[Q8Block32Wire, [R, C]],
+    x: Tensor[F32, [C]],
+) -> (Tensor[F32, [R]], Tensor[F32, [R]], f64) eff [Tensor] {
+    (Tensor::qmatvec(w4, x), Tensor::qmatvec(w8, x), Tensor::block_scale(w4, 1, 1))
+}

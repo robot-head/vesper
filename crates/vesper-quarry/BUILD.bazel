@@ -5,4 +5,7 @@ vesper_crate(
     # runfiles outside --root, so it runs in a regular copy.
     copy_test_cwd = ["test/lean_model"],
     extra_test_data = ["//:lean"],
+    # Every crash point of a workload with two secondary indexes is
+    # recovered (about 90 s in a local debug build).
+    test_timeouts = {"test/store_crash": "long"},
 )

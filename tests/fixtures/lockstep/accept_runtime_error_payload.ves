@@ -1,0 +1,12 @@
+fn main() -> i64 {
+    handle Fail[RuntimeError] in {
+        let z = 0;
+        5 / z
+    } with {
+        return v => v,
+        raise(e, _) => match e {
+            RuntimeError::DivisionByZero => 11,
+            RuntimeError::IndexOutOfBounds => 12,
+        },
+    }
+}

@@ -16,6 +16,8 @@ use cranelift_codegen::Context;
 use cranelift_codegen::ir::{
     InstBuilder, MemFlags, StackSlotData, StackSlotKind, condcodes::IntCC, types,
 };
+use cranelift_codegen::isa::TargetIsa;
+use cranelift_codegen::isa::unwind::{UnwindInfo, UnwindInfoKind};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_module::{FuncId, Linkage, Module};
@@ -37,6 +39,33 @@ pub const NESTED_SYMBOL: &str = "vesper_proto_nested";
 pub const STALE_BASE_SYMBOL: &str = "vesper_proto_stale_base";
 /// Lifecycle fixture whose cancellation edge parks again (awaits cleanup).
 pub const CANCEL_REPARK_SYMBOL: &str = "vesper_proto_cancel_repark";
+/// Deep-call fixture (JIT only): `deep_entry` calls `deep_mid` calls
+/// `deep_leaf`, which parks on `Async::yield_now`.
+pub const DEEP_ENTRY_SYMBOL: &str = "vesper_proto_deep_entry";
+pub const DEEP_MID_SYMBOL: &str = "vesper_proto_deep_mid";
+pub const DEEP_LEAF_SYMBOL: &str = "vesper_proto_deep_leaf";
+/// Data-frame words where each deep frame records `(stack pointer, frame
+/// pointer)` at its call site, before the park: entry at words 0–1, mid at
+/// 2–3, leaf at 4–5 (the data frame is not read after the park).
+pub const DEEP_ENTRY_WORDS: usize = 0;
+pub const DEEP_MID_WORDS: usize = 2;
+pub const DEEP_LEAF_WORDS: usize = 4;
+/// Data-frame words the creator fills before start: `deep_entry` and
+/// `deep_mid` each load one before their call and add it to the result
+/// after it, so the value must survive the call in a callee-saved register
+/// or a spill slot (a load cannot be rematerialised across a call).
+pub const DEEP_ENTRY_SECRET: usize = 6;
+pub const DEEP_MID_SECRET: usize = 7;
+/// Data frame of the deep fixture.
+pub const DEEP_DATA_BYTES: usize = 64;
+/// Result of the deep fixture spawned with `arg` and the two secrets and
+/// resumed with `value`.
+pub fn expected_deep(arg: u64, value: u64, entry_secret: u64, mid_secret: u64) -> u64 {
+    value
+        .wrapping_add(arg.wrapping_add(2))
+        .wrapping_add(mid_secret)
+        .wrapping_add(entry_secret)
+}
 
 pub const COUNTER: usize = 0;
 pub const EXIT_NOTE: usize = 8;
@@ -175,9 +204,49 @@ pub struct Ids {
     pub cancel_repark: FuncId,
 }
 
-/// Define both prototype entries in `module`. Returns their ids and the CLIF
+/// A function defined in a module, with what an unwinder needs.
+pub struct DefinedFn {
+    pub id: FuncId,
+    pub name: &'static str,
+    /// Machine-code size in bytes.
+    pub size: u64,
+    /// System V (DWARF CFI) unwind information, generated on every host.
+    pub unwind: Option<UnwindInfo>,
+}
+
+fn record(
+    defined: &mut Vec<DefinedFn>,
+    isa: &dyn TargetIsa,
+    name: &'static str,
+    id: FuncId,
+    ctx: &Context,
+) -> Result<(), String> {
+    let code = ctx
+        .compiled_code()
+        .ok_or_else(|| format!("{name}: no compiled code"))?;
+    let unwind = code
+        .create_unwind_info_of_kind(isa, UnwindInfoKind::SystemV)
+        .map_err(|e| format!("{name}: {e:?}"))?;
+    defined.push(DefinedFn {
+        id,
+        name,
+        size: u64::from(code.code_info().total_size),
+        unwind,
+    });
+    Ok(())
+}
+
+/// Define the prototype entries in `module`. Returns their ids and the CLIF
 /// text (for inspection and review).
 pub fn define<M: Module>(module: &mut M, linkage: Linkage) -> Result<(Ids, String), String> {
+    define_recording(module, linkage, &mut vec![])
+}
+
+fn define_recording<M: Module>(
+    module: &mut M,
+    linkage: Linkage,
+    defined: &mut Vec<DefinedFn>,
+) -> Result<(Ids, String), String> {
     let park = clif::declare_park(module).map_err(|e| e.to_string())?;
     let call_conv = module.isa().default_call_conv();
     let ptr = module.isa().pointer_type();
@@ -399,6 +468,7 @@ pub fn define<M: Module>(module: &mut M, linkage: Linkage) -> Result<(Ids, Strin
     module
         .define_function(pulse_read, &mut ctx)
         .map_err(|e| format!("{e:?}"))?;
+    record(defined, module.isa(), PULSE_READ_SYMBOL, pulse_read, &ctx)?;
     module.clear_context(&mut ctx);
 
     // ---- nested ---------------------------------------------------------
@@ -468,6 +538,7 @@ pub fn define<M: Module>(module: &mut M, linkage: Linkage) -> Result<(Ids, Strin
     module
         .define_function(nested, &mut ctx)
         .map_err(|e| format!("{e:?}"))?;
+    record(defined, module.isa(), NESTED_SYMBOL, nested, &ctx)?;
     module.clear_context(&mut ctx);
 
     // ---- stale_base (negative fixture) ----------------------------------
@@ -509,6 +580,7 @@ pub fn define<M: Module>(module: &mut M, linkage: Linkage) -> Result<(Ids, Strin
     module
         .define_function(stale_base, &mut ctx)
         .map_err(|e| format!("{e:?}"))?;
+    record(defined, module.isa(), STALE_BASE_SYMBOL, stale_base, &ctx)?;
     module.clear_context(&mut ctx);
 
     // ---- cancel_repark (lifecycle fixture) --------------------------------
@@ -620,6 +692,13 @@ pub fn define<M: Module>(module: &mut M, linkage: Linkage) -> Result<(Ids, Strin
     module
         .define_function(cancel_repark, &mut ctx)
         .map_err(|e| format!("{e:?}"))?;
+    record(
+        defined,
+        module.isa(),
+        CANCEL_REPARK_SYMBOL,
+        cancel_repark,
+        &ctx,
+    )?;
     module.clear_context(&mut ctx);
     Ok((
         Ids {
@@ -630,6 +709,158 @@ pub fn define<M: Module>(module: &mut M, linkage: Linkage) -> Result<(Ids, Strin
         },
         text,
     ))
+}
+
+/// Define the deep-call fixture (see [`DEEP_ENTRY_SYMBOL`]). Each frame
+/// stores `get_stack_pointer` and `get_frame_pointer` (which needs
+/// `preserve_frame_pointers`) at its call site, keeps one value live across
+/// its call and adds it to the result, so an unwinder's recovered stack and
+/// frame pointers can be checked against what the code itself saw.
+fn define_deep<M: Module>(
+    module: &mut M,
+    linkage: Linkage,
+    defined: &mut Vec<DefinedFn>,
+) -> Result<(FuncId, String), String> {
+    let park = clif::declare_park(module).map_err(|e| e.to_string())?;
+    let call_conv = module.isa().default_call_conv();
+    let ptr = module.isa().pointer_type();
+    let sig = clif::entry_signature(call_conv, ptr);
+    let mut declare = |name| {
+        module
+            .declare_function(name, linkage, &sig)
+            .map_err(|e| e.to_string())
+    };
+    let entry_id = declare(DEEP_ENTRY_SYMBOL)?;
+    let mid_id = declare(DEEP_MID_SYMBOL)?;
+    let leaf_id = declare(DEEP_LEAF_SYMBOL)?;
+    let mut text = String::new();
+    let mut fctx = FunctionBuilderContext::new();
+    let mut ctx = Context::new();
+    let mem = MemFlags::trusted();
+    let record_pointers = |b: &mut FunctionBuilder, fiber, word: usize| {
+        let base = clif::entry_data_base(b, ptr, fiber);
+        let sp = b.ins().get_stack_pointer(ptr);
+        b.ins().store(mem, sp, base, (word * 8) as i32);
+        let fp = b.ins().get_frame_pointer(ptr);
+        b.ins().store(mem, fp, base, (word * 8 + 8) as i32);
+    };
+
+    // leaf(ctx, arg): park yield; Value(v) -> v + arg, otherwise -1.
+    ctx.func.signature = sig.clone();
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+        let park_ref = module.declare_func_in_func(park, b.func);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let fiber = b.block_params(entry)[0];
+        let arg = b.block_params(entry)[1];
+        let violation = b.create_block();
+        record_pointers(&mut b, fiber, DEEP_LEAF_WORDS);
+        let ev = load_evidence(&mut b, ptr, fiber, 1);
+        let r = emit_park(
+            &mut b,
+            ptr,
+            park_ref,
+            fiber,
+            ev.identity,
+            OP_YIELD,
+            arg,
+            arg,
+            violation,
+        );
+        let is_value = b
+            .ins()
+            .icmp_imm(IntCC::Equal, r.kind, crate::abi::ResumeKind::Value as i64);
+        let sum = b.ins().iadd(r.value, arg);
+        let failed = b.ins().iconst(types::I64, -1);
+        let out = b.ins().select(is_value, sum, failed);
+        b.ins().return_(&[out]);
+        b.switch_to_block(violation);
+        let failed = b.ins().iconst(types::I64, -1);
+        b.ins().return_(&[failed]);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    text.push_str(&ctx.func.display().to_string());
+    module
+        .define_function(leaf_id, &mut ctx)
+        .map_err(|e| format!("{e:?}"))?;
+    record(defined, module.isa(), DEEP_LEAF_SYMBOL, leaf_id, &ctx)?;
+    module.clear_context(&mut ctx);
+
+    // mid(ctx, arg): live = data[DEEP_MID_SECRET]; v = leaf(ctx, arg + 1);
+    // v == -1 ? -1 : v + live.
+    ctx.func.signature = sig.clone();
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+        let leaf_ref = module.declare_func_in_func(leaf_id, b.func);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let fiber = b.block_params(entry)[0];
+        let arg = b.block_params(entry)[1];
+        let base = clif::entry_data_base(&mut b, ptr, fiber);
+        let live = b
+            .ins()
+            .load(types::I64, mem, base, (DEEP_MID_SECRET * 8) as i32);
+        record_pointers(&mut b, fiber, DEEP_MID_WORDS);
+        let next = b.ins().iadd_imm(arg, 1);
+        let call = b.ins().call(leaf_ref, &[fiber, next]);
+        let v = b.inst_results(call)[0];
+        let failed = b.ins().icmp_imm(IntCC::Equal, v, -1);
+        let sum = b.ins().iadd(v, live);
+        let out = b.ins().select(failed, v, sum);
+        b.ins().return_(&[out]);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    text.push_str(&ctx.func.display().to_string());
+    module
+        .define_function(mid_id, &mut ctx)
+        .map_err(|e| format!("{e:?}"))?;
+    record(defined, module.isa(), DEEP_MID_SYMBOL, mid_id, &ctx)?;
+    module.clear_context(&mut ctx);
+
+    // entry(ctx, arg): live = data[DEEP_ENTRY_SECRET]; v = mid(ctx, arg + 1);
+    // v == -1 ? FAILED(0) : COMPLETE(v + live).
+    ctx.func.signature = sig.clone();
+    {
+        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+        let mid_ref = module.declare_func_in_func(mid_id, b.func);
+        let entry = b.create_block();
+        b.append_block_params_for_function_params(entry);
+        b.switch_to_block(entry);
+        let fiber = b.block_params(entry)[0];
+        let arg = b.block_params(entry)[1];
+        let base = clif::entry_data_base(&mut b, ptr, fiber);
+        let live = b
+            .ins()
+            .load(types::I64, mem, base, (DEEP_ENTRY_SECRET * 8) as i32);
+        record_pointers(&mut b, fiber, DEEP_ENTRY_WORDS);
+        let next = b.ins().iadd_imm(arg, 1);
+        let call = b.ins().call(mid_ref, &[fiber, next]);
+        let v = b.inst_results(call)[0];
+        let failed = b.ins().icmp_imm(IntCC::Equal, v, -1);
+        let ok = b.create_block();
+        let bad = b.create_block();
+        b.ins().brif(failed, bad, &[], ok, &[]);
+        b.switch_to_block(ok);
+        let sum = b.ins().iadd(v, live);
+        emit_exit(&mut b, fiber, exit::COMPLETE, sum);
+        b.switch_to_block(bad);
+        let zero = b.ins().iconst(types::I64, 0);
+        emit_exit(&mut b, fiber, exit::FAILED, zero);
+        b.seal_all_blocks();
+        b.finalize();
+    }
+    text.push_str(&ctx.func.display().to_string());
+    module
+        .define_function(entry_id, &mut ctx)
+        .map_err(|e| format!("{e:?}"))?;
+    record(defined, module.isa(), DEEP_ENTRY_SYMBOL, entry_id, &ctx)?;
+    module.clear_context(&mut ctx);
+    Ok((entry_id, text))
 }
 
 /// Cranelift optimization level for the prototype.
@@ -649,7 +880,15 @@ impl OptLevel {
 }
 
 fn flags(pic: bool, opt: OptLevel) -> Result<settings::Flags, String> {
+    flags_with(pic, opt, false)
+}
+
+fn flags_with(pic: bool, opt: OptLevel, frame_pointers: bool) -> Result<settings::Flags, String> {
     let mut f = settings::builder();
+    if frame_pointers {
+        f.set("preserve_frame_pointers", "true")
+            .map_err(|e| e.to_string())?;
+    }
     f.set("is_pic", if pic { "true" } else { "false" })
         .map_err(|e| e.to_string())?;
     f.set("use_colocated_libcalls", "false")
@@ -698,6 +937,8 @@ pub struct JitPrototype {
     nested: crate::fiber::EntryFn,
     stale_base: crate::fiber::EntryFn,
     cancel_repark: crate::fiber::EntryFn,
+    deep: crate::fiber::EntryFn,
+    cfi: crate::unwind::CfiTable,
     clif: String,
 }
 
@@ -722,7 +963,7 @@ impl JitPrototype {
     pub fn new(opt: OptLevel) -> Result<Self, String> {
         let isa = cranelift_native::builder()
             .map_err(str::to_string)?
-            .finish(flags(false, opt)?)
+            .finish(flags_with(false, opt, true)?)
             .map_err(|e| e.to_string())?;
         let mut builder =
             cranelift_jit::JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
@@ -731,19 +972,32 @@ impl JitPrototype {
             crate::fiber::vesper_fiber_park as *const u8,
         );
         let mut module = cranelift_jit::JITModule::new(builder);
-        let (ids, clif) = define(&mut module, Linkage::Local)?;
+        let mut defined = vec![];
+        let (ids, mut clif) = define_recording(&mut module, Linkage::Local, &mut defined)?;
+        let (deep, deep_clif) = define_deep(&mut module, Linkage::Local, &mut defined)?;
+        clif.push_str(&deep_clif);
         module.finalize_definitions().map_err(|e| e.to_string())?;
+        let mut functions = vec![];
+        for f in defined {
+            if let Some(unwind) = f.unwind {
+                let start = module.get_finalized_function(f.id) as u64;
+                functions.push((f.name.to_string(), start, f.size, unwind));
+            }
+        }
+        let cfi =
+            crate::unwind::CfiTable::build(module.isa(), &functions).map_err(|e| e.to_string())?;
         // SAFETY: both functions were defined with `entry_signature`.
         let entry = |id| unsafe {
             std::mem::transmute::<*const u8, crate::fiber::EntryFn>(
                 module.get_finalized_function(id),
             )
         };
-        let (pulse_read, nested, stale_base, cancel_repark) = (
+        let (pulse_read, nested, stale_base, cancel_repark, deep) = (
             entry(ids.pulse_read),
             entry(ids.nested),
             entry(ids.stale_base),
             entry(ids.cancel_repark),
+            entry(deep),
         );
         Ok(Self {
             code: Rc::new(JitCode {
@@ -753,8 +1007,44 @@ impl JitPrototype {
             nested,
             stale_base,
             cancel_repark,
+            deep,
+            cfi,
             clif,
         })
+    }
+    /// DWARF CFI of every generated function, at its final address (see
+    /// [`crate::unwind`]).
+    pub fn cfi(&self) -> &crate::unwind::CfiTable {
+        &self.cfi
+    }
+    /// Spawn the deep-call fixture ([`DEEP_ENTRY_SYMBOL`]; Async at depth
+    /// 1, the `pulse_read` evidence shape).
+    pub fn spawn_deep(
+        &self,
+        arg: u64,
+        evidence: Rc<EvidenceVector>,
+    ) -> std::io::Result<crate::fiber::Fiber> {
+        self.spawn_deep_with(
+            arg,
+            evidence,
+            crate::fiber::FiberConfig {
+                data_bytes: DEEP_DATA_BYTES,
+                ..Default::default()
+            },
+        )
+    }
+    /// [`Self::spawn_deep`] with a caller-chosen configuration
+    /// (`config.data_bytes` at least [`DEEP_DATA_BYTES`]).
+    pub fn spawn_deep_with(
+        &self,
+        arg: u64,
+        evidence: Rc<EvidenceVector>,
+        config: crate::fiber::FiberConfig,
+    ) -> std::io::Result<crate::fiber::Fiber> {
+        if config.data_bytes < DEEP_DATA_BYTES {
+            return Err(std::io::Error::other("deep fixture data frame is 64 bytes"));
+        }
+        self.spawn(self.deep, PULSE_READ_EVIDENCE, arg, evidence, config)
     }
     pub fn clif(&self) -> &str {
         &self.clif

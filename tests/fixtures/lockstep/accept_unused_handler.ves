@@ -1,0 +1,8 @@
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        3
+    } with {
+        return v => v,
+        raise(e, _) => -1,
+    }
+}

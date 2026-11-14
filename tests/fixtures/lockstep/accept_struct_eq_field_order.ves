@@ -1,0 +1,15 @@
+copy struct Pt {
+    x: i64,
+    y: i64,
+}
+fn main() -> bool {
+    let a = Pt {
+        x: 1,
+        y: 2
+    };
+    let b = Pt {
+        y: 2,
+        x: 1
+    };
+    (a == b) && !(a != b)
+}

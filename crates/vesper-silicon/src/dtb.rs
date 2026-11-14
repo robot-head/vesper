@@ -37,11 +37,24 @@
 //! * the per-hart `riscv,isa`, `riscv,isa-base`, `riscv,isa-extensions` and
 //!   `riscv,cbom-block-size`, and each device's `dma-coherent` /
 //!   `dma-noncoherent` marking, which select the Zicbom cache-block
-//!   maintenance of the DMA model ([`Platform::dma_coherence`]).
+//!   maintenance of the DMA model ([`Platform::dma_coherence`]), or the
+//!   SiFive cache controller's `FLUSH64` on the StarFive JH7100
+//!   ([`CcacheInfo`]);
+//! * RISC-V AIA: APLIC domains (`riscv,aplic`, with `riscv,children`,
+//!   `riscv,delegation`/`riscv,delegate` and `msi-parent`) and IMSIC files
+//!   (`riscv,imsics`, with the hart/guest/group index fields), recorded as
+//!   [`AplicInfo`] and [`ImsicInfo`] for [`crate::aia`] and [`crate::intc`];
+//! * interrupt trigger types from two-cell specifiers ([`Platform::trigger`]),
+//!   `interrupt-map-pass-thru`, and any number of PLICs;
+//! * `dma-ranges` on every bus level between a device and the root,
+//!   composed into the CPU-to-bus windows of [`Platform::dma_windows`] and
+//!   [`Platform::dma_address`] (a missing `dma-ranges` is identity, an empty
+//!   one is identity at that level, as in Linux).
 //!
-//! Not supported (typed errors): versions before 16, `interrupt-map-pass-thru`,
-//! more than one PLIC in [`crate::intc`], and translation across a bus
-//! without `ranges` (a non-memory-mapped bus such as I2C or SPI).
+//! Not supported (typed errors): versions before 16, translation across a bus
+//! without `ranges` (a non-memory-mapped bus such as I2C or SPI), PCI
+//! `msi-map`, and resolving a wired interrupt to an IMSIC (IMSICs take MSIs
+//! only).
 
 use std::collections::BTreeMap;
 
@@ -196,7 +209,8 @@ pub enum DtbError {
         node: String,
         controller: String,
     },
-    /// The nexus uses `interrupt-map-pass-thru`, which is not modelled.
+    /// Kept for compatibility: `interrupt-map-pass-thru` is now applied
+    /// (see [`DeviceTree::map_interrupt`]) and this is no longer returned.
     UnsupportedInterruptNexus {
         node: String,
         nexus: String,
@@ -255,6 +269,13 @@ pub enum DtbError {
         detail: String,
     },
     Frames(FrameError),
+    /// `[addr, addr + len)` is not inside one of the device's DMA windows
+    /// (`dma-ranges`), so the bus master cannot reach it.
+    NotDmaAddressable {
+        node: String,
+        addr: u64,
+        len: u64,
+    },
     /// The usable memory exceeds [`MAX_MODEL_FRAMES`].
     TooManyFrames {
         frames: u64,
@@ -860,6 +881,100 @@ impl DeviceTree {
         Err(DtbError::TooDeep)
     }
 
+    /// The DMA windows of device `id`: its bus-master addresses translated
+    /// through every ancestor bus's `dma-ranges` (child bus address, parent
+    /// bus address, length) to CPU physical addresses. A bus with an empty
+    /// or absent `dma-ranges` passes addresses through unchanged (Linux's
+    /// `of_translate_dma_address` treats both as identity); entries of
+    /// several levels compose by intersection. PCI child addresses drop
+    /// their `phys.hi` cell. Windows are sorted by bus address.
+    pub fn dma_windows(&self, id: usize) -> Result<Vec<DmaWindow>, DtbError> {
+        let overflow = || DtbError::AddressOverflow {
+            node: self.path(id),
+        };
+        // (dma, addr in the current bus's parent space, size); `None` is
+        // the identity over everything.
+        let mut cur: Option<Vec<(u128, u128, u128)>> = None;
+        let mut bus = self.nodes[id].parent;
+        while let Some(b) = bus {
+            let Some(parent) = self.nodes[b].parent else {
+                break;
+            };
+            let ranges = self.prop_cells(b, "dma-ranges")?.unwrap_or_default();
+            if !ranges.is_empty() {
+                let (na, ns) = self.bus_cells(b)?;
+                let (pna, _) = self.bus_cells(parent)?;
+                let per = (na + pna + ns) as usize;
+                if na == 0 || pna == 0 || ns == 0 || !ranges.len().is_multiple_of(per) {
+                    return Err(self.bad(
+                        b,
+                        "dma-ranges",
+                        format!(
+                            "{} cells is not a multiple of {na}+{pna}+{ns}",
+                            ranges.len()
+                        ),
+                    ));
+                }
+                let mut entries = Vec::new();
+                for e in ranges.chunks_exact(per) {
+                    let (na, pna) = (na as usize, pna as usize);
+                    let (_, child) = self.decode(b, &e[..na])?;
+                    let (_, paddr) = self.decode(parent, &e[na..na + pna])?;
+                    let len = join_cells(&e[na + pna..]);
+                    child
+                        .checked_add(len)
+                        .ok_or_else(|| self.bad(b, "dma-ranges", "entry overflows"))?;
+                    paddr
+                        .checked_add(len)
+                        .ok_or_else(|| self.bad(b, "dma-ranges", "entry overflows"))?;
+                    entries.push((child, paddr, len));
+                }
+                cur = Some(match cur {
+                    None => entries,
+                    Some(ws) => {
+                        let mut out = Vec::new();
+                        for &(d, a, s) in &ws {
+                            for &(c, p, l) in &entries {
+                                let lo = a.max(c);
+                                let hi = (a + s).min(c + l);
+                                if lo < hi {
+                                    out.push((d + (lo - a), p + (lo - c), hi - lo));
+                                }
+                            }
+                        }
+                        out
+                    }
+                });
+            }
+            bus = Some(parent);
+        }
+        let Some(ws) = cur else {
+            return Ok(vec![DmaWindow {
+                dma_addr: 0,
+                cpu_addr: 0,
+                size: u64::MAX,
+            }]);
+        };
+        let mut out = ws
+            .into_iter()
+            .map(|(d, a, s)| {
+                // Both ends of the window must lie in the 64-bit address
+                // space, so translation inside it cannot overflow.
+                let top = |x: u128| x.checked_add(s).is_none_or(|e| e > 1u128 << 64);
+                if top(d) || top(a) {
+                    return Err(overflow());
+                }
+                Ok(DmaWindow {
+                    dma_addr: u64::try_from(d).map_err(|_| overflow())?,
+                    cpu_addr: u64::try_from(a).map_err(|_| overflow())?,
+                    size: u64::try_from(s).map_err(|_| overflow())?,
+                })
+            })
+            .collect::<Result<Vec<_>, DtbError>>()?;
+        out.sort();
+        Ok(out)
+    }
+
     /// The windows a PCI host bridge's `ranges` opens from PCI space into CPU
     /// physical space.
     pub fn pci_windows(&self, host: usize) -> Result<Vec<PciWindow>, DtbError> {
@@ -1019,12 +1134,6 @@ impl DeviceTree {
             if self.has_prop(ctl, "interrupt-controller") {
                 return Ok((ctl, spec));
             }
-            if self.has_prop(ctl, "interrupt-map-pass-thru") {
-                return Err(DtbError::UnsupportedInterruptNexus {
-                    node: self.path(user),
-                    nexus: self.path(ctl),
-                });
-            }
             let (next, next_unit, next_spec) = self.map_one(user, ctl, &unit, &spec)?;
             ctl = next;
             unit = next_unit;
@@ -1088,7 +1197,23 @@ impl DeviceTree {
                 .zip(&mask)
                 .all(|((x, c), m)| (x ^ c) & m == 0);
             if hit {
-                return Ok((parent, paddr.to_vec(), pspec.to_vec()));
+                let mut pspec = pspec.to_vec();
+                // `interrupt-map-pass-thru` (devicetree specification 0.4,
+                // §2.5.1): bits set in it are copied from the child
+                // specifier into the parent specifier.
+                if let Some(pass) = self.prop_cells(nexus, "interrupt-map-pass-thru")? {
+                    if pass.len() != ni {
+                        return Err(self.bad(
+                            nexus,
+                            "interrupt-map-pass-thru",
+                            format!("{} cells, expected {ni}", pass.len()),
+                        ));
+                    }
+                    for (i, p) in pspec.iter_mut().enumerate().take(ni) {
+                        *p = (*p & !pass[i]) | (spec[i] & pass[i]);
+                    }
+                }
+                return Ok((parent, paddr.to_vec(), pspec));
             }
             k = at + pni;
         }
@@ -1179,6 +1304,12 @@ pub enum ControllerKind {
     /// Specifiers are `<type number flags>`: SPIs map to INTID `32 + n`
     /// (n < 988), PPIs to `16 + n` (n < 16).
     Gic { v3: bool },
+    /// RISC-V AIA APLIC interrupt domain (`riscv,aplic`) with sources
+    /// `1..=sources`; specifiers are `<source flags>`.
+    Aplic { sources: u32 },
+    /// RISC-V AIA IMSIC (`riscv,imsics`) with identities `1..=ids`. It
+    /// receives MSIs, not wired lines (`#interrupt-cells = <0>`).
+    Imsic { ids: u32 },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1277,6 +1408,117 @@ pub struct ClintInfo {
     pub targets: Vec<HartTarget>,
 }
 
+/// Trigger type of a wired interrupt, from the specifier's flags cell
+/// (`IRQ_TYPE_*` of `dt-bindings/interrupt-controller/irq.h`: 1 rising, 2
+/// falling, 4 high, 8 low). One-cell PLIC and hart-local specifiers are
+/// level-high.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Trigger {
+    EdgeRising,
+    EdgeFalling,
+    LevelHigh,
+    LevelLow,
+    /// Flags 0 (`IRQ_TYPE_NONE`): the binding leaves the type to the driver.
+    Unspecified,
+}
+
+/// One `riscv,delegation` (QEMU 8.2 emits `riscv,delegate`) 3-tuple of an
+/// APLIC domain: sources `first..=last` are delegated to `child`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AplicDelegation {
+    pub child: String,
+    pub first: u32,
+    pub last: u32,
+}
+
+/// An APLIC interrupt domain (RISC-V AIA binding `riscv,aplic`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AplicInfo {
+    pub path: String,
+    pub base: u64,
+    pub size: u64,
+    /// `riscv,num-sources`.
+    pub sources: u32,
+    /// Direct delivery: the IDC of index `k` is the `k`-th
+    /// `interrupts-extended` entry (empty in MSI-only domains).
+    pub idcs: Vec<HartTarget>,
+    /// MSI delivery: the IMSIC that `msi-parent` names.
+    pub msi_parent: Option<String>,
+    /// `riscv,children`, in child-index order.
+    pub children: Vec<String>,
+    pub delegations: Vec<AplicDelegation>,
+    /// The domain whose `riscv,children` lists this one (`None` for a root).
+    pub parent: Option<String>,
+}
+
+/// An IMSIC (RISC-V AIA binding `riscv,imsics`): one interrupt file per
+/// `interrupts-extended` entry, plus `2^guest_index_bits - 1` guest files
+/// after each.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImsicInfo {
+    pub path: String,
+    pub regs: Vec<MemRange>,
+    /// `riscv,num-ids`.
+    pub ids: u32,
+    pub guest_index_bits: u32,
+    pub hart_index_bits: u32,
+    pub group_index_bits: u32,
+    pub group_index_shift: u32,
+    /// The hart and cause (MEIP for M-level files, SEIP for S-level) of
+    /// file `k`.
+    pub targets: Vec<HartTarget>,
+    /// Physical address of file `k` (guest 0): the `k`-th
+    /// `2^guest_index_bits`-page stride through the `reg` windows in order,
+    /// as Linux's `imsic_parse_fwnode` lays them out.
+    pub files: Vec<u64>,
+}
+
+impl ImsicInfo {
+    /// Whether these are S-level (SEIP) files.
+    pub fn supervisor(&self) -> bool {
+        self.targets.iter().any(|t| t.cause == Some(9))
+    }
+
+    /// The file address of `hart`'s file, guest `guest` (0 = the hart's own).
+    pub fn file_of(&self, hart: u32, guest: u32) -> Option<u64> {
+        if u64::from(guest) >= 1u64 << self.guest_index_bits {
+            return None;
+        }
+        let k = self.targets.iter().position(|t| t.hart == hart)?;
+        Some(self.files[k] + u64::from(guest) * 0x1000)
+    }
+}
+
+/// A SiFive composable cache controller (L2/L3: `sifive,ccache0`,
+/// `sifive,fu540-c000-ccache`, `sifive,fu740-c000-ccache`,
+/// `starfive,jh7100-ccache`, `starfive,jh7110-ccache`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CcacheInfo {
+    pub path: String,
+    pub base: u64,
+    pub size: u64,
+    /// `cache-block-size`.
+    pub line_bytes: u32,
+    pub sets: Option<u32>,
+    pub cache_bytes: Option<u32>,
+    /// The `FLUSH64` register (`base + 0x200`) when the platform relies on
+    /// it for non-coherent DMA. Linux does so only for the JH7100
+    /// (`starfive,jh7100-ccache`, the `QUIRK_NONSTANDARD_CACHE_OPS` of
+    /// `drivers/cache/sifive_ccache.c`); elsewhere it is `None`.
+    pub dma_flush64: Option<u64>,
+}
+
+/// One DMA window of a device: bus-master addresses `[dma_addr, dma_addr +
+/// size)` reach CPU physical `[cpu_addr, cpu_addr + size)`. A device behind
+/// buses without `dma-ranges` has one identity window covering
+/// `0..u64::MAX`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DmaWindow {
+    pub dma_addr: u64,
+    pub cpu_addr: u64,
+    pub size: u64,
+}
+
 /// What the Silicon models take from a devicetree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Platform {
@@ -1291,6 +1533,12 @@ pub struct Platform {
     pub plics: Vec<PlicInfo>,
     /// RISC-V CLINT / ACLINT blocks, for [`crate::intc`].
     pub clints: Vec<ClintInfo>,
+    /// RISC-V AIA APLIC domains, for [`crate::intc`].
+    pub aplics: Vec<AplicInfo>,
+    /// RISC-V AIA IMSICs, for [`crate::intc`].
+    pub imsics: Vec<ImsicInfo>,
+    /// SiFive cache controllers.
+    pub ccaches: Vec<CcacheInfo>,
     tree: DeviceTree,
 }
 
@@ -1460,7 +1708,11 @@ impl Platform {
                         node: tree.path(cpu),
                     })?,
                 }
-            } else if has("riscv,plic0") || has("sifive,plic-1.0.0") {
+            } else if has("riscv,plic0")
+                || has("sifive,plic-1.0.0")
+                || has("thead,c900-plic")
+                || has("andestech,nceplic100")
+            {
                 let ndev = tree
                     .prop_u32(id, "riscv,ndev")?
                     .ok_or_else(|| tree.bad(id, "riscv,ndev", "missing on a PLIC"))?;
@@ -1468,6 +1720,22 @@ impl Platform {
                     return Err(tree.bad(id, "riscv,ndev", format!("{ndev} sources")));
                 }
                 ControllerKind::Plic { ndev }
+            } else if has("riscv,aplic") || has("qemu,aplic") {
+                let sources = tree
+                    .prop_u32(id, "riscv,num-sources")?
+                    .ok_or_else(|| tree.bad(id, "riscv,num-sources", "missing on an APLIC"))?;
+                if sources == 0 || sources > 1023 {
+                    return Err(tree.bad(id, "riscv,num-sources", format!("{sources} sources")));
+                }
+                ControllerKind::Aplic { sources }
+            } else if has("riscv,imsics") || has("qemu,imsics") {
+                let ids = tree
+                    .prop_u32(id, "riscv,num-ids")?
+                    .ok_or_else(|| tree.bad(id, "riscv,num-ids", "missing on an IMSIC"))?;
+                if !(63..=2047).contains(&ids) || !(ids + 1).is_multiple_of(64) {
+                    return Err(tree.bad(id, "riscv,num-ids", format!("{ids} identities")));
+                }
+                ControllerKind::Imsic { ids }
             } else if has("arm,gic-v3") {
                 ControllerKind::Gic { v3: true }
             } else if has("arm,gic-400") || has("arm,cortex-a15-gic") || has("arm,cortex-a9-gic") {
@@ -1507,6 +1775,8 @@ impl Platform {
         }
 
         let (plics, clints) = riscv_blocks(&tree, &controllers)?;
+        let (aplics, imsics) = aia_blocks(&tree, &controllers)?;
+        let ccaches = ccache_blocks(&tree)?;
 
         Ok(Self {
             arch,
@@ -1517,6 +1787,9 @@ impl Platform {
             irq_lines,
             plics,
             clints,
+            aplics,
+            imsics,
+            ccaches,
             tree,
         })
     }
@@ -1714,40 +1987,176 @@ impl Platform {
         match self.arch {
             Arch::Aarch64 => Ok(DmaCoherence::ArmNonCoherent),
             Arch::X86_64 => Ok(DmaCoherence::Coherent),
-            Arch::Riscv64 => {
-                let node = self.tree.path(id);
-                let fail = |detail: String| DtbError::NoCacheBlockManagement {
-                    node: node.clone(),
-                    detail,
-                };
-                if self.harts.is_empty() {
-                    return Err(fail("no enabled harts".into()));
+            Arch::Riscv64 => self.zicbom_coherence(id).or_else(|e| {
+                // Without Zicbom, Linux maintains the JH7100's non-coherent
+                // DMA through its cache controller's flush register.
+                match self
+                    .ccaches
+                    .iter()
+                    .find_map(|c| c.dma_flush64.map(|r| (r, c)))
+                {
+                    Some((flush64, c)) => Ok(DmaCoherence::SifiveCcache {
+                        flush64,
+                        line_bytes: c.line_bytes,
+                    }),
+                    None => Err(e),
                 }
-                let mut block = None;
-                for h in &self.harts {
-                    if !h.has_extension("zicbom") {
-                        let isa = match &h.isa_extensions {
-                            Some(list) => format!("riscv,isa-extensions = {list:?}"),
-                            None => format!("riscv,isa = {:?}", h.isa.as_deref().unwrap_or("")),
-                        };
-                        return Err(fail(format!("{} lacks Zicbom ({isa})", h.path)));
-                    }
-                    let b = h
-                        .cbom_block_bytes
-                        .ok_or_else(|| fail(format!("{} has no riscv,cbom-block-size", h.path)))?;
-                    if b == 0 || !b.is_power_of_two() {
-                        return Err(fail(format!("{} cbom block size {b}", h.path)));
-                    }
-                    if block.is_some_and(|x| x != b) {
-                        return Err(fail("harts disagree on riscv,cbom-block-size".into()));
-                    }
-                    block = Some(b);
-                }
-                Ok(DmaCoherence::Zicbom {
-                    block_bytes: block.unwrap_or(0),
-                })
-            }
+            }),
         }
+    }
+
+    fn node_of(&self, device: &str) -> Result<usize, DtbError> {
+        self.tree
+            .find(device)
+            .ok_or_else(|| DtbError::NoSuchNode(device.to_string()))
+    }
+
+    /// The trigger type of a wired interrupt, from its specifier: one-cell
+    /// PLIC and hart-local specifiers are level-high; two-cell PLIC
+    /// specifiers (the T-Head C900 and Andes NCEPLIC100 bindings) allow
+    /// rising edge or high level, as Linux's PLIC driver does; APLIC and GIC
+    /// specifiers carry the `IRQ_TYPE_*` flags (both edges is refused).
+    pub fn trigger(&self, line: &IrqLine) -> Result<Trigger, DtbError> {
+        let c = self
+            .controllers
+            .iter()
+            .find(|c| c.path == line.controller)
+            .ok_or_else(|| DtbError::NoSuchNode(line.controller.clone()))?;
+        let bad = |detail: String| DtbError::BadInterruptSpecifier {
+            node: line.device.clone(),
+            detail,
+        };
+        let flags = |f: u32| match f & 0xf {
+            0 => Ok(Trigger::Unspecified),
+            1 => Ok(Trigger::EdgeRising),
+            2 => Ok(Trigger::EdgeFalling),
+            4 => Ok(Trigger::LevelHigh),
+            8 => Ok(Trigger::LevelLow),
+            f => Err(bad(format!("trigger flags {f:#x}"))),
+        };
+        match c.kind {
+            ControllerKind::RiscvHartIntc { .. } => Ok(Trigger::LevelHigh),
+            ControllerKind::Plic { .. } => match line.specifier.get(1) {
+                None => Ok(Trigger::LevelHigh),
+                Some(&f) => match flags(f)? {
+                    t @ (Trigger::EdgeRising | Trigger::LevelHigh) => Ok(t),
+                    t => Err(bad(format!("a PLIC source cannot be {t:?}"))),
+                },
+            },
+            ControllerKind::Aplic { .. } => flags(
+                *line
+                    .specifier
+                    .get(1)
+                    .ok_or_else(|| bad("no flags cell".into()))?,
+            ),
+            ControllerKind::Gic { .. } => flags(
+                *line
+                    .specifier
+                    .get(2)
+                    .ok_or_else(|| bad("no flags cell".into()))?,
+            ),
+            ControllerKind::Imsic { .. } => Err(bad("IMSICs have no wired lines".into())),
+        }
+    }
+
+    /// The IMSIC a device's MSIs go to: `msi-parent` on the node or its
+    /// nearest ancestor that has one (a PCI host bridge for its endpoints).
+    pub fn msi_parent(&self, device: &str) -> Result<Option<String>, DtbError> {
+        let mut cur = Some(self.node_of(device)?);
+        while let Some(n) = cur {
+            if let Some(cells) = self.tree.prop_cells(n, "msi-parent")? {
+                let ph = *cells
+                    .first()
+                    .ok_or_else(|| self.tree.bad(n, "msi-parent", "empty"))?;
+                let ctl = self
+                    .tree
+                    .by_phandle(ph)
+                    .ok_or_else(|| DtbError::UnknownPhandle {
+                        node: self.tree.path(n),
+                        phandle: ph,
+                    })?;
+                return Ok(Some(self.tree.path(ctl)));
+            }
+            cur = self.tree.node(n).parent;
+        }
+        Ok(None)
+    }
+
+    /// The device's DMA windows (see [`DeviceTree::dma_windows`]).
+    pub fn dma_windows(&self, device: &str) -> Result<Vec<DmaWindow>, DtbError> {
+        self.tree.dma_windows(self.node_of(device)?)
+    }
+
+    /// The bus address the device must be given for CPU physical
+    /// `[phys, phys + len)`: the region must lie inside one DMA window.
+    pub fn dma_address(&self, device: &str, phys: u64, len: u64) -> Result<u64, DtbError> {
+        let id = self.node_of(device)?;
+        let end = phys.checked_add(len);
+        self.tree
+            .dma_windows(id)?
+            .iter()
+            .find(|w| {
+                phys >= w.cpu_addr && end.is_some_and(|e| e <= w.cpu_addr.saturating_add(w.size))
+            })
+            .and_then(|w| w.dma_addr.checked_add(phys - w.cpu_addr))
+            .ok_or(DtbError::NotDmaAddressable {
+                node: self.tree.path(id),
+                addr: phys,
+                len,
+            })
+    }
+
+    /// The CPU physical address a device's bus address `[dma, dma + len)`
+    /// reaches.
+    pub fn cpu_address(&self, device: &str, dma: u64, len: u64) -> Result<u64, DtbError> {
+        let id = self.node_of(device)?;
+        let end = dma.checked_add(len);
+        self.tree
+            .dma_windows(id)?
+            .iter()
+            .find(|w| {
+                dma >= w.dma_addr && end.is_some_and(|e| e <= w.dma_addr.saturating_add(w.size))
+            })
+            .and_then(|w| w.cpu_addr.checked_add(dma - w.dma_addr))
+            .ok_or(DtbError::NotDmaAddressable {
+                node: self.tree.path(id),
+                addr: dma,
+                len,
+            })
+    }
+
+    fn zicbom_coherence(&self, id: usize) -> Result<DmaCoherence, DtbError> {
+        let node = self.tree.path(id);
+        let fail = |detail: String| DtbError::NoCacheBlockManagement {
+            node: node.clone(),
+            detail,
+        };
+        if self.harts.is_empty() {
+            return Err(fail("no enabled harts".into()));
+        }
+        let mut block = None;
+        for h in &self.harts {
+            if !h.has_extension("zicbom") {
+                let isa = match &h.isa_extensions {
+                    Some(list) => format!("riscv,isa-extensions = {list:?}"),
+                    None => format!("riscv,isa = {:?}", h.isa.as_deref().unwrap_or("")),
+                };
+                return Err(fail(format!("{} lacks Zicbom ({isa})", h.path)));
+            }
+            let b = h
+                .cbom_block_bytes
+                .ok_or_else(|| fail(format!("{} has no riscv,cbom-block-size", h.path)))?;
+            if b == 0 || !b.is_power_of_two() {
+                return Err(fail(format!("{} cbom block size {b}", h.path)));
+            }
+            if block.is_some_and(|x| x != b) {
+                return Err(fail("harts disagree on riscv,cbom-block-size".into()));
+            }
+            block = Some(b);
+        }
+        Ok(DmaCoherence::Zicbom {
+            block_bytes: block.unwrap_or(0),
+        })
     }
 }
 
@@ -1806,6 +2215,16 @@ fn resolve(
             }
             Ok(Some(src))
         }
+        ControllerKind::Aplic { sources } => {
+            let src = spec[0];
+            if src == 0 || src > sources {
+                return Err(out_of_range(src, sources));
+            }
+            Ok(Some(src))
+        }
+        ControllerKind::Imsic { .. } => Err(bad(
+            "an IMSIC receives MSIs, not wired interrupts".to_string()
+        )),
         ControllerKind::Gic { .. } => {
             if spec.len() < 3 {
                 return Err(bad(format!(
@@ -2034,4 +2453,266 @@ fn riscv_blocks(
         });
     }
     Ok((plics, clints))
+}
+
+/// The APLIC domains and IMSICs of a RISC-V AIA platform.
+fn aia_blocks(
+    tree: &DeviceTree,
+    controllers: &[InterruptController],
+) -> Result<(Vec<AplicInfo>, Vec<ImsicInfo>), DtbError> {
+    let mut imsics = Vec::new();
+    for c in controllers {
+        let ControllerKind::Imsic { ids } = c.kind else {
+            continue;
+        };
+        let id = c.node;
+        if !tree.enabled(id)? {
+            continue;
+        }
+        let regs = tree.reg_translated(id)?;
+        if regs.is_empty() {
+            return Err(tree.bad(id, "reg", "missing on an IMSIC"));
+        }
+        let targets = hart_targets(tree, id, controllers)?;
+        if targets.is_empty() || targets.iter().any(|t| t.cause.is_none()) {
+            return Err(tree.bad(id, "interrupts-extended", "no hart files"));
+        }
+        let cause = targets[0].cause;
+        if targets.iter().any(|t| t.cause != cause) || !matches!(cause, Some(9) | Some(11)) {
+            return Err(tree.bad(
+                id,
+                "interrupts-extended",
+                "files must all be M-level (11) or all S-level (9)",
+            ));
+        }
+        let get = |name: &str, default: u32, max: u32| -> Result<u32, DtbError> {
+            let v = tree.prop_u32(id, name)?.unwrap_or(default);
+            if v > max {
+                return Err(tree.bad(id, name, format!("{v} is above {max}")));
+            }
+            Ok(v)
+        };
+        let n = targets.len() as u32;
+        // Linux: enough hart-index bits for every file by default.
+        let default_hart_bits = 32 - (n - 1).leading_zeros();
+        let guest_index_bits = get("riscv,guest-index-bits", 0, 7)?;
+        let hart_index_bits = get("riscv,hart-index-bits", default_hart_bits, 15)?;
+        let group_index_bits = get("riscv,group-index-bits", 0, 7)?;
+        let group_index_shift = get("riscv,group-index-shift", 24, 55)?;
+        if group_index_shift < 24 {
+            return Err(tree.bad(
+                id,
+                "riscv,group-index-shift",
+                format!("{group_index_shift} is below 24"),
+            ));
+        }
+        let stride = 0x1000u64 << guest_index_bits;
+        let mut files = Vec::new();
+        for k in 0..u64::from(n) {
+            let mut rel = k * stride;
+            let mut at = None;
+            for r in &regs {
+                if !r.base.is_multiple_of(0x1000) {
+                    return Err(tree.bad(id, "reg", format!("{:#x} is not page aligned", r.base)));
+                }
+                if rel < r.size {
+                    if r.size - rel < stride {
+                        return Err(tree.bad(id, "reg", "a file straddles a region end"));
+                    }
+                    at = Some(r.base + rel);
+                    break;
+                }
+                rel -= r.size;
+            }
+            files.push(at.ok_or_else(|| {
+                tree.bad(
+                    id,
+                    "reg",
+                    format!("too small for {n} files of {stride:#x} bytes"),
+                )
+            })?);
+        }
+        imsics.push(ImsicInfo {
+            path: c.path.clone(),
+            regs,
+            ids,
+            guest_index_bits,
+            hart_index_bits,
+            group_index_bits,
+            group_index_shift,
+            targets,
+            files,
+        });
+    }
+
+    let mut aplics = Vec::new();
+    for c in controllers {
+        let ControllerKind::Aplic { sources } = c.kind else {
+            continue;
+        };
+        let id = c.node;
+        if !tree.enabled(id)? {
+            continue;
+        }
+        let r = *tree
+            .reg_translated(id)?
+            .first()
+            .ok_or_else(|| tree.bad(id, "reg", "missing on an APLIC"))?;
+        let idcs = if tree.has_prop(id, "interrupts-extended") {
+            hart_targets(tree, id, controllers)?
+        } else {
+            Vec::new()
+        };
+        let phandle_path = |prop: &str, ph: u32| -> Result<String, DtbError> {
+            let n = tree.by_phandle(ph).ok_or(DtbError::UnknownPhandle {
+                node: tree.path(id),
+                phandle: ph,
+            })?;
+            let _ = prop;
+            Ok(tree.path(n))
+        };
+        let msi_parent = match tree.prop_cells(id, "msi-parent")? {
+            None => None,
+            Some(cells) => {
+                let ph = *cells
+                    .first()
+                    .ok_or_else(|| tree.bad(id, "msi-parent", "empty"))?;
+                let path = phandle_path("msi-parent", ph)?;
+                if !imsics.iter().any(|m| m.path == path) {
+                    return Err(tree.bad(id, "msi-parent", format!("{path} is not an IMSIC")));
+                }
+                Some(path)
+            }
+        };
+        if idcs.is_empty() && msi_parent.is_none() {
+            return Err(tree.bad(
+                id,
+                "interrupts-extended",
+                "an APLIC needs interrupts-extended or msi-parent",
+            ));
+        }
+        let children = tree
+            .prop_cells(id, "riscv,children")?
+            .unwrap_or_default()
+            .into_iter()
+            .map(|ph| phandle_path("riscv,children", ph))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut delegations = Vec::new();
+        for name in ["riscv,delegation", "riscv,delegate"] {
+            let Some(cells) = tree.prop_cells(id, name)? else {
+                continue;
+            };
+            if !cells.len().is_multiple_of(3) {
+                return Err(tree.bad(id, name, "not 3-tuples"));
+            }
+            for &[ph, first, last] in cells.as_chunks::<3>().0 {
+                let child = phandle_path(name, ph)?;
+                if !children.contains(&child) {
+                    return Err(tree.bad(id, name, format!("{child} is not a child")));
+                }
+                if first == 0 || first > last || last > sources {
+                    return Err(tree.bad(id, name, format!("sources {first}..={last}")));
+                }
+                delegations.push(AplicDelegation { child, first, last });
+            }
+        }
+        aplics.push(AplicInfo {
+            path: c.path.clone(),
+            base: r.base,
+            size: r.size,
+            sources,
+            idcs,
+            msi_parent,
+            children,
+            delegations,
+            parent: None,
+        });
+    }
+    let links: Vec<(String, String)> = aplics
+        .iter()
+        .flat_map(|a| a.children.iter().map(|c| (c.clone(), a.path.clone())))
+        .collect();
+    for (child, parent) in links {
+        let Some(a) = aplics.iter_mut().find(|a| a.path == child) else {
+            return Err(DtbError::BadProperty {
+                node: parent,
+                prop: "riscv,children".into(),
+                detail: format!("{child} is not an enabled APLIC"),
+            });
+        };
+        if a.parent.is_some() {
+            return Err(DtbError::BadProperty {
+                node: child,
+                prop: "riscv,children".into(),
+                detail: "listed by two parents".into(),
+            });
+        }
+        a.parent = Some(parent);
+    }
+    // A child chain must end at a root.
+    for a in &aplics {
+        let mut cur = a.parent.clone();
+        let mut hops = 0;
+        while let Some(p) = cur {
+            hops += 1;
+            if hops > aplics.len() {
+                return Err(DtbError::BadProperty {
+                    node: a.path.clone(),
+                    prop: "riscv,children".into(),
+                    detail: "domain cycle".into(),
+                });
+            }
+            cur = aplics
+                .iter()
+                .find(|x| x.path == p)
+                .and_then(|x| x.parent.clone());
+        }
+    }
+    Ok((aplics, imsics))
+}
+
+/// The SiFive cache controllers of a platform.
+fn ccache_blocks(tree: &DeviceTree) -> Result<Vec<CcacheInfo>, DtbError> {
+    let mut out = Vec::new();
+    for id in 0..tree.nodes().len() {
+        let compat = tree.compatible(id)?;
+        let has = |x: &str| compat.iter().any(|c| c == x);
+        if !(has("sifive,ccache0")
+            || has("sifive,fu540-c000-ccache")
+            || has("sifive,fu740-c000-ccache")
+            || has("starfive,jh7100-ccache")
+            || has("starfive,jh7110-ccache"))
+            || !tree.enabled(id)?
+        {
+            continue;
+        }
+        let r = *tree
+            .reg_translated(id)?
+            .first()
+            .ok_or_else(|| tree.bad(id, "reg", "missing on a cache controller"))?;
+        let line_bytes = tree
+            .prop_u32(id, "cache-block-size")?
+            .ok_or_else(|| tree.bad(id, "cache-block-size", "missing"))?;
+        if line_bytes == 0 || !line_bytes.is_power_of_two() {
+            return Err(tree.bad(id, "cache-block-size", format!("{line_bytes}")));
+        }
+        let dma_flush64 = if has("starfive,jh7100-ccache") {
+            if r.size < 0x208 {
+                return Err(tree.bad(id, "reg", "window lacks FLUSH64"));
+            }
+            Some(r.base + 0x200)
+        } else {
+            None
+        };
+        out.push(CcacheInfo {
+            path: tree.path(id),
+            base: r.base,
+            size: r.size,
+            line_bytes,
+            sets: tree.prop_u32(id, "cache-sets")?,
+            cache_bytes: tree.prop_u32(id, "cache-size")?,
+            dma_flush64,
+        });
+    }
+    Ok(out)
 }
