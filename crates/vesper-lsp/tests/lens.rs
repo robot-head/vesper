@@ -59,6 +59,10 @@ fn methods_outside_the_capability_ceiling_rank_last_with_the_missing_effects() {
     assert!(ceiling_grants(&exact, "Ffi[LibLz4]"));
     assert!(!ceiling_grants(&exact, "Ffi[LibZstd]"));
     assert!(ceiling_grants(&ceiling, "Storage[Wal]"));
+    // Rendered arguments are spaced; manifest entries cannot be.
+    let multi: BTreeSet<String> = ["Access[Key,Map[K,V]]".to_owned()].into();
+    assert!(ceiling_grants(&multi, "Access[Key, Map[K, V]]"));
+    assert!(!ceiling_grants(&multi, "Access[Key, Value]"));
     // No manifest: exactly the unconstrained ranking.
     assert_eq!(
         rank_methods_within(true, &[], &methods, None),

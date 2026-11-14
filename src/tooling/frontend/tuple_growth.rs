@@ -54,6 +54,10 @@ struct Admission<'a> {
     // `None` when an inventoried type is outside this envelope; refused only
     // where it is needed, so programs that never use it are unaffected.
     generic_fields: Option<Bound>,
+    // Generic ADTs with a field type outside this envelope (an arrow, a
+    // row, a hole, or another such ADT). Naming one in a type refuses, so
+    // `generic_fields` need not cover them and unrelated code is unaffected.
+    unbounded: Vec<&'a str>,
     // Effect operation parameter and result types, parameters as leaves.
     effect_ops: Option<Bound>,
     // Every effect instance a signature declares, with generated labels.
@@ -88,6 +92,7 @@ pub(super) fn guard(items: &[&Item], limits: AnalysisLimits) -> Result<(), Strin
             depth: 1,
             bytes: 128,
         }),
+        unbounded: Vec::new(),
         effect_ops: Some(Bound {
             nodes: 1,
             depth: 1,
@@ -99,6 +104,7 @@ pub(super) fn guard(items: &[&Item], limits: AnalysisLimits) -> Result<(), Strin
             bytes: 0,
         }),
     };
+    a.unbounded_generics()?;
     for (index, item) in items.iter().enumerate() {
         a.step()?;
         // Pact substitutes Self/associated types into generated methods before
@@ -122,6 +128,9 @@ pub(super) fn guard(items: &[&Item], limits: AnalysisLimits) -> Result<(), Strin
         if let Item::Adt(adt) = item {
             a.adt_inventory(adt, index)?;
             if !adt.generics.is_empty() {
+                if a.unbounded.contains(&adt.name.as_str()) {
+                    continue;
+                }
                 for field in adt.variants.iter().flat_map(|v| &v.fields) {
                     a.generic_fields = a.fold_max(a.generic_fields, &field.ty);
                 }
@@ -185,6 +194,36 @@ pub(super) fn guard(items: &[&Item], limits: AnalysisLimits) -> Result<(), Strin
     Ok(())
 }
 impl<'a> Admission<'a> {
+    /// Fills `unbounded` to a fixpoint: a generic ADT is unbounded when some
+    /// field type cannot be bounded, including through an unbounded ADT.
+    fn unbounded_generics(&mut self) -> Result<(), String> {
+        let items = self.items;
+        loop {
+            let mut changed = false;
+            for item in items {
+                self.step()?;
+                let Item::Adt(adt) = item else { continue };
+                if adt.generics.is_empty() || self.unbounded.contains(&adt.name.as_str()) {
+                    continue;
+                }
+                let mut escapes = false;
+                for field in adt.variants.iter().flat_map(|v| &v.fields) {
+                    if self.ty(&field.ty).is_err_and(|e| e == UNCERTAIN) {
+                        escapes = true;
+                        break;
+                    }
+                }
+                if escapes {
+                    self.unbounded.try_reserve(1).map_err(|_| BUDGET)?;
+                    self.unbounded.push(&adt.name);
+                    changed = true;
+                }
+            }
+            if !changed {
+                return Ok(());
+            }
+        }
+    }
     fn fold_max(&mut self, total: Option<Bound>, t: &'a Type) -> Option<Bound> {
         let total = total?;
         let v = self.ty(t).ok()?;
@@ -335,7 +374,7 @@ impl<'a> Admission<'a> {
                 if let Type::Named(name, args) = t {
                     // Explicit source `_` is retained as a named placeholder
                     // by the current parser; omitted annotations use Infer.
-                    if name == "_" {
+                    if name == "_" || self.unbounded.contains(&name.as_str()) {
                         return Err(UNCERTAIN.into());
                     }
                     self.nominal_arity(name, args.len())?;
@@ -533,6 +572,9 @@ impl<'a> Admission<'a> {
                                 .is_some_and(|suffix| suffix.starts_with("::")))
                     {
                         candidates += 1;
+                        if self.unbounded.contains(&a.name.as_str()) {
+                            return Err(UNCERTAIN.into());
+                        }
                         // Closed alternatives: any one may be the resolution,
                         // so every candidate's field types are expected types.
                         let found = found.get_or_insert(Ctor {
@@ -1129,6 +1171,21 @@ mod tests {
         assert!(guard(shadow).unwrap_err().contains("uncertain"));
         let spelled = "copy enum M { Some(u64) } fn f() -> M { Some(1) }";
         assert!(guard(spelled).unwrap_err().contains("uncertain"));
+    }
+
+    #[test]
+    fn unused_unbounded_generic_adts_leave_tuple_projections_alone() {
+        let unused = "linear struct Callback[T] { f: fn() -> T }
+             fn main() -> i64 { let p = (1, 2); let (a, b) = p; a }";
+        assert!(guard(unused).is_ok(), "{:?}", guard(unused).err());
+        let nested = "linear struct Callback[T] { f: fn() -> T }
+             linear struct Holder[T] { c: Callback[T] }
+             fn main() -> i64 { let p = (1, 2); let (a, b) = p; a }
+             fn g(h: Holder[i64]) -> i64 { 0 }";
+        assert!(guard(nested).unwrap_err().contains("uncertain"));
+        let nullary = "copy enum E[T] { A, B(fn() -> T) }
+             fn main() -> i64 { let e: E[i64] = A; let p = (1, 2); let (a, b) = p; a }";
+        assert!(guard(nullary).unwrap_err().contains("uncertain"));
     }
 
     #[test]

@@ -87,7 +87,10 @@ pub fn rank_methods(
 /// Whether a ceiling grants an effect: by its name (`"Storage"` grants every
 /// `Storage[..]`) or by its exact rendering (`"Ffi[LibLz4]"`).
 pub fn ceiling_grants(ceiling: &BTreeSet<String>, effect: &str) -> bool {
-    ceiling.contains(effect)
+    // Manifest capabilities never contain whitespace; rendered effect
+    // arguments may (`Access[Key, Value]`), so compare without it.
+    let canonical: String = effect.chars().filter(|c| !c.is_whitespace()).collect();
+    ceiling.contains(&canonical)
         || effect
             .split_once('[')
             .is_some_and(|(name, _)| ceiling.contains(name))
