@@ -1,6 +1,7 @@
 //! In-memory bounded editor lifecycle. URIs are labels, never filesystem paths.
 use super::{actions, macro_preview, navigation, search};
 mod lens_requests;
+mod manifests;
 use crate::{
     database::{self, Database, RecoveryFile, SourceFile, SyntaxSnapshot},
     tooling::{
@@ -93,7 +94,13 @@ pub(crate) struct Session {
     timers: Vec<(String, std::time::Duration)>,
     code_lens_refresh: bool,
     refreshes: u64,
+    /// Open Loom.toml buffers: capability ceilings for completion ranking.
+    manifests: manifests::Manifests,
+    /// Buffers over the editor profile's budgets, checked once per source
+    /// hash under Lens's raised profile (see [`Session::large_checked`]).
+    large: RefCell<LargeChecks>,
 }
+type LargeChecks = BTreeMap<String, ([u8; 32], Result<Arc<CheckedSource>, AnalysisFailure>)>;
 type LensModels = BTreeMap<
     String,
     (
@@ -131,6 +138,8 @@ impl Session {
             timers: Vec::new(),
             code_lens_refresh: false,
             refreshes: 0,
+            manifests: manifests::Manifests::new()?,
+            large: RefCell::new(BTreeMap::new()),
         })
     }
     pub(crate) fn with_config(config: LensConfig) -> Result<Self, String> {
@@ -380,6 +389,11 @@ impl Session {
                 let uri = string(field(doc, "uri")?, "uri")?;
                 let version = version(field(doc, "version")?)?;
                 let text = string(field(doc, "text")?, "text")?;
+                if manifests::is_manifest(uri) {
+                    return Ok(NotificationOutcome::Continue(vec![
+                        self.manifests.open(uri, version, text)?,
+                    ]));
+                }
                 self.documents
                     .open(uri, version, text)
                     .map_err(|e| ServerError::params(e.to_string()))?;
@@ -418,6 +432,11 @@ impl Session {
                         })
                     })
                     .collect::<Result<_, ServerError>>()?;
+                if manifests::is_manifest(uri) {
+                    return Ok(NotificationOutcome::Continue(vec![
+                        self.manifests.change(uri, version, &changes)?,
+                    ]));
+                }
                 self.documents
                     .change(uri, version, &changes)
                     .map_err(|e| ServerError::params(e.to_string()))?;
@@ -428,6 +447,11 @@ impl Session {
             "textDocument/didClose" => {
                 let params = object(params.as_ref())?;
                 let uri = document_uri(params)?;
+                if manifests::is_manifest(uri) {
+                    return Ok(NotificationOutcome::Continue(vec![
+                        self.manifests.close(uri)?,
+                    ]));
+                }
                 self.documents
                     .close(uri)
                     .map_err(|e| ServerError::params(e.to_string()))?;
@@ -496,6 +520,11 @@ impl Session {
             .get(uri)
             .ok_or_else(|| ServerError::internal("open source mirror is missing"))?;
         let analysis = database::guarded_analysis(&self.db, file);
+        if let Err(AnalysisFailure::Resource { .. }) = analysis.checked()
+            && let Some(Ok(large)) = self.large_checked(uri)
+        {
+            return Ok(large);
+        }
         analysis.checked_arc().map_err(|failure| ServerError {
             code: ANALYSIS_UNAVAILABLE,
             message: "Checked source analysis is unavailable".into(),
@@ -507,6 +536,26 @@ impl Session {
             ),
         })
     }
+    /// The same `check_source`, under Lens's raised profile, for a buffer
+    /// the editor profile refused for its budgets only. The checker and its
+    /// facts are unchanged; only the resource bounds are larger (and still
+    /// finite). Memoized per URI and exact source hash; `None` when the
+    /// document is not open.
+    fn large_checked(&self, uri: &str) -> Option<Result<Arc<CheckedSource>, AnalysisFailure>> {
+        let text = self.document(uri).ok()?.text();
+        let hash = *blake3::hash(text.as_bytes()).as_bytes();
+        if let Some((cached, result)) = self.large.borrow().get(uri)
+            && *cached == hash
+        {
+            return Some(result.clone());
+        }
+        let result =
+            crate::tooling::frontend::check_source(text, self.lens_config.limits).map(Arc::new);
+        self.large
+            .borrow_mut()
+            .insert(uri.to_owned(), (hash, result.clone()));
+        Some(result)
+    }
     fn open_snapshots(
         &self,
         only: Option<&str>,
@@ -515,9 +564,14 @@ impl Session {
             let document = self.document(uri)?;
             return Ok(vec![(document.uri(), self.snapshot(uri)?)]);
         }
+        // One guarded analysis query per open document: a cancelled
+        // workspace request stops at the next document boundary.
         self.documents
             .iter()
-            .map(|document| Ok((document.uri(), self.snapshot(document.uri())?)))
+            .map(|document| {
+                lens_requests::cancellation_point()?;
+                Ok((document.uri(), self.snapshot(document.uri())?))
+            })
             .collect()
     }
     fn accepted(&mut self, uri: &str) {
@@ -574,6 +628,7 @@ impl Session {
         // reachable, and rebuild them lazily from the new database.
         self.lens_views.borrow_mut().clear();
         self.lens_models.borrow_mut().clear();
+        self.large.borrow_mut().clear();
         self.db = Database::default();
         for document in self.documents.iter() {
             self.files.insert(
@@ -649,6 +704,7 @@ impl Session {
         let analysis = database::guarded_analysis(&self.db, file);
         let mut recovery = None;
         let mut lens_metadata = None;
+        let mut profile = None;
         let (mut diagnostics, status, kind) = match analysis.checked() {
             Ok(_) => (Vec::new(), "checked", None),
             Err(failure @ AnalysisFailure::Parse { .. }) => match self.recovery_payload(uri) {
@@ -669,12 +725,30 @@ impl Session {
                 }
             },
             Err(failure) => {
-                // Over the editor budgets, Lens still builds its own view
-                // under its raised profile; its facts stay presentation only.
-                if matches!(failure, AnalysisFailure::Resource { .. }) {
-                    lens_metadata = Some(self.poison_payload(uri).1);
+                // Over the editor budgets, the buffer is checked again under
+                // Lens's raised profile: a pass publishes "checked" and a
+                // semantic failure its diagnostics. Any other outcome keeps
+                // the editor's own refusal, with Lens's view as metadata.
+                let large = match failure {
+                    AnalysisFailure::Resource { .. } => self.large_checked(uri),
+                    _ => None,
+                };
+                match &large {
+                    Some(Ok(_)) => {
+                        profile = Some("lens");
+                        (Vec::new(), "checked", None)
+                    }
+                    Some(Err(semantic @ AnalysisFailure::Semantic { .. })) => {
+                        profile = Some("lens");
+                        diagnostic_payload(uri, document.index(), semantic)?
+                    }
+                    _ => {
+                        if matches!(failure, AnalysisFailure::Resource { .. }) {
+                            lens_metadata = Some(self.poison_payload(uri).1);
+                        }
+                        diagnostic_payload(uri, document.index(), failure)?
+                    }
                 }
-                diagnostic_payload(uri, document.index(), failure)?
             }
         };
         // Validation covers every supplied span before optional presentation
@@ -700,6 +774,9 @@ impl Session {
         }
         if let Some(lens) = lens_metadata {
             metadata["lens"] = lens;
+        }
+        if let Some(profile) = profile {
+            metadata["profile"] = json!(profile);
         }
         Ok(notification(
             "textDocument/publishDiagnostics",
@@ -1447,9 +1524,37 @@ mod tests {
         assert_eq!(error.code, -32602);
     }
     #[test]
+    fn cancelled_requests_stop_at_query_boundaries_and_cache_nothing() {
+        let mut session = running(true);
+        open(&mut session, "opaque:a", "fn a()->u64{1}");
+        open(&mut session, "opaque:b", "fn b()->u64{2}");
+        let token = vesper_lsp::lens::CancelToken::new();
+        token.cancel();
+        crate::lsp::ACTIVE.with(|active| *active.borrow_mut() = Some(token));
+        let workspace = session.request("workspace/symbol", Some(json!({"query": "a"})));
+        let hints = session.request(
+            "textDocument/inlayHint",
+            Some(json!({"textDocument":{"uri":"opaque:a"},
+                "range":{"start":{"line":0,"character":0},"end":{"line":1,"character":0}}})),
+        );
+        crate::lsp::ACTIVE.with(|active| *active.borrow_mut() = None);
+        assert_eq!(workspace.unwrap_err().code, -32800);
+        assert_eq!(hints.unwrap_err().code, -32800);
+        assert!(session.lens_views.borrow().is_empty());
+        // The same requests succeed once nothing is cancelled.
+        let symbols = session
+            .request("workspace/symbol", Some(json!({"query": "a"})))
+            .unwrap();
+        assert_eq!(symbols[0]["name"], "a");
+    }
+    #[test]
     fn unsupported_and_invalid_spans_publish_explicit_unavailable_warnings() {
         let mut session = running(true);
-        let unavailable = open(&mut session, "opaque:a", "fn main(){let x=Some(0);}");
+        let unavailable = open(
+            &mut session,
+            "opaque:a",
+            "fn id[T](x:T)->T{x} fn main(){let x=id(0);}",
+        );
         assert_eq!(unavailable["vesper"]["status"], "analysis_unavailable");
         assert_eq!(unavailable["diagnostics"][0]["severity"], 2);
         assert_eq!(

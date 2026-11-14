@@ -403,6 +403,73 @@ fn completion_lists_consuming_calls_first_for_a_live_linear_receiver() {
 }
 
 #[test]
+fn the_large_simulation_programs_get_diagnostics_hovers_and_lens_views() {
+    let mut client = Client::start(LensConfig::default());
+    for (uri, text, profile, needle) in [
+        (
+            "untitled:kv.ves",
+            include_str!("fixtures/kv.ves"),
+            Value::Null,
+            "serve_batch(",
+        ),
+        (
+            "untitled:warp_ack_full.ves",
+            include_str!("fixtures/warp_ack_full.ves"),
+            json!("lens"),
+            "poll_and_step_acked(",
+        ),
+    ] {
+        let started = std::time::Instant::now();
+        let published = client.open(uri, text);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            published["vesper"]["status"], "checked",
+            "{uri}: {published}"
+        );
+        assert_eq!(published["vesper"]["profile"], profile, "{uri}");
+        assert_eq!(published["diagnostics"], json!([]), "{uri}");
+        // Generous: this runs unoptimized next to other tests. The release
+        // figures are in docs/parallel-results/lens-large-fixtures.md.
+        assert!(elapsed < Duration::from_secs(10), "{uri}: {elapsed:?}");
+        let (line, column) = position_of(text, needle);
+        let hover = client.at("textDocument/hover", uri, line, column + 1);
+        let value = hover["result"]["contents"]["value"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{uri}: {hover}"));
+        assert!(value.contains("fn "), "{uri}: {value}");
+        let id = client.request(
+            "textDocument/inlayHint",
+            json!({"textDocument":{"uri":uri},"range":{"start":{"line":0,"character":0},
+                "end":{"line":2000,"character":0}}}),
+        );
+        let response = client.response(id);
+        assert!(response["result"].is_array(), "{uri}: {response}");
+        assert_eq!(
+            response["result"][0]["data"]["vesper"]["scope"], "checked",
+            "{uri}: {response}"
+        );
+    }
+    // An edit that breaks the type of the large program publishes the
+    // checker's own diagnostic under the same raised profile.
+    let broken = include_str!("fixtures/warp_ack_full.ves").replacen(
+        "fn max_u64(a: u64, b: u64) -> u64 {",
+        "fn max_u64(a: u64, b: u64) -> bool {",
+        1,
+    );
+    let published = client.replace("untitled:warp_ack_full.ves", 2, &broken);
+    assert_eq!(
+        published["vesper"]["status"], "semantic_error",
+        "{published}"
+    );
+    assert_eq!(published["vesper"]["profile"], "lens");
+    assert!(
+        codes(&published).contains(&"E0200".to_owned()),
+        "{published}"
+    );
+    client.close();
+}
+
+#[test]
 fn hover_and_inlay_hints_show_outstanding_obligations() {
     let mut client = Client::start(LensConfig::default());
     let uri = "untitled:hover.ves";
@@ -901,6 +968,89 @@ fn inlay(client: &mut Client, uri: &str) -> Vec<(String, String)> {
             )
         })
         .collect()
+}
+
+#[test]
+fn completion_ranks_methods_outside_the_open_loom_ceiling_last() {
+    let mut client = Client::start(LensConfig::default());
+    let manifest = "file:///w/app/Loom.toml";
+    let uri = "file:///w/app/src/main.ves";
+    let outside = "file:///w/other/main.ves";
+    let pure = "[package]\nname = \"@w/app\"\nversion = \"1.0.0\"\nedition = \"2026\"\ncapability_ceiling = []\n";
+    let published = client.open(manifest, pure);
+    assert_eq!(published["diagnostics"], json!([]), "{published}");
+    let text = with_main("    let tx = open_txn(1);\n    tx.\n");
+    client.open(uri, &text);
+    client.open(outside, &text);
+    let (line, column) = position_of(&text, "tx.\n");
+    let tiers = |client: &mut Client, uri: &str| -> Vec<(String, String)> {
+        let response = client.at("textDocument/completion", uri, line, column + 3);
+        response["result"]["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{response}"))
+            .iter()
+            .map(|i| {
+                (
+                    i["label"].as_str().unwrap().to_owned(),
+                    i["data"]["vesper"]["tier"].as_str().unwrap().to_owned(),
+                )
+            })
+            .collect()
+    };
+    let ranked = tiers(&mut client, uri);
+    assert_eq!(
+        ranked.last().unwrap(),
+        &(
+            "persist".to_owned(),
+            "exceeds_capability_ceiling".to_owned()
+        ),
+        "{ranked:?}"
+    );
+    let response = client.at("textDocument/completion", uri, line, column + 3);
+    let persist = &response["result"]["items"][3];
+    assert_eq!(
+        persist["labelDetails"]["description"],
+        "exceeds Loom.toml capability ceiling: Storage"
+    );
+    assert_eq!(persist["tags"], json!([1]));
+    assert_eq!(persist["data"]["vesper"]["capability_ceiling"], json!([]));
+    // A document outside the manifest's directory is not constrained.
+    assert!(
+        tiers(&mut client, outside)
+            .iter()
+            .all(|(_, tier)| tier != "exceeds_capability_ceiling")
+    );
+    // Granting Storage restores the frame ranking.
+    let granted = pure.replace("[]", "[\"Storage\"]");
+    client.replace(manifest, 2, &granted);
+    let ranked = tiers(&mut client, uri);
+    assert!(
+        ranked.contains(&("persist".to_owned(), "valid_frame_compatible".to_owned()))
+            || ranked.contains(&("persist".to_owned(), "blocked_by_frame".to_owned())),
+        "{ranked:?}"
+    );
+    // An invalid manifest constrains nothing and says why.
+    let published = client.replace(manifest, 3, "[package]\nname = 7\n");
+    assert_eq!(
+        published["diagnostics"][0]["code"], "VESPER_MANIFEST_UNAVAILABLE",
+        "{published}"
+    );
+    assert!(
+        tiers(&mut client, uri)
+            .iter()
+            .all(|(_, tier)| tier != "exceeds_capability_ceiling")
+    );
+    // Closing the manifest clears it; the Vesper document is unaffected.
+    client.notify(
+        "textDocument/didClose",
+        json!({"textDocument":{"uri":manifest}}),
+    );
+    assert!(
+        tiers(&mut client, uri)
+            .iter()
+            .all(|(_, tier)| tier != "exceeds_capability_ceiling")
+    );
+    client.close();
 }
 
 fn completion_labels(client: &mut Client, uri: &str, text: &str, needle: &str) -> Vec<String> {

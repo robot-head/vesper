@@ -18,7 +18,8 @@
 //! `publishDiagnostics` notification carrying that version. After every
 //! valid edit the client also times a whole-document `textDocument/inlayHint`
 //! request (`lens`), which builds the Lens view of the new text under Lens's
-//! own analysis profile. It includes pipe
+//! own analysis profile, and a `textDocument/hover` at the edited position
+//! (`hover`), which needs the checked snapshot of the new text. It includes pipe
 //! I/O and JSON framing on both sides; it is not a measurement of any single
 //! compiler layer. Nothing is reported that was not measured.
 use serde_json::{Value, json};
@@ -53,11 +54,12 @@ fn percentile(sorted: &[f64], p: f64) -> f64 {
 fn summary(name: &str, samples: &mut [f64]) -> String {
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     format!(
-        "{name:<9} n={:<4} min={:.3} median={:.3} p95={:.3} max={:.3} ms",
+        "{name:<9} n={:<4} min={:.3} median={:.3} p95={:.3} p99={:.3} max={:.3} ms",
         samples.len(),
         samples[0],
         percentile(samples, 0.5),
         percentile(samples, 0.95),
+        percentile(samples, 0.99),
         samples[samples.len() - 1]
     )
 }
@@ -150,6 +152,8 @@ fn main() {
         let mut damaged_status = String::new();
         let mut lens = Vec::new();
         let mut lens_scope = String::new();
+        let mut hover = Vec::new();
+        let mut hover_status = String::new();
         let mut request_id = 1000;
         for _ in 0..iterations {
             for (insert, samples) in [(" ", &mut valid), ("let ", &mut damaging)] {
@@ -187,6 +191,37 @@ fn main() {
                                 if *id == request_id)
                         });
                         lens.push(started.elapsed().as_secs_f64() * 1e3);
+                        request_id += 1;
+                        let started = Instant::now();
+                        input
+                            .write_all(&frame(
+                                json!({"id":request_id,"method":"textDocument/hover",
+                                "params":{"textDocument":{"uri":uri},
+                                    "position":{"line":line,"character":column}}}),
+                            ))
+                            .unwrap();
+                        let hovered = wait(&|m| {
+                            matches!(m, Envelope::Response { id: Some(Id::Integer(id)), .. }
+                                if *id == request_id)
+                        });
+                        hover.push(started.elapsed().as_secs_f64() * 1e3);
+                        if hover_status.is_empty() {
+                            hover_status = match hovered {
+                                Envelope::Response {
+                                    payload: vesper_lsp::ResponsePayload::Result(Value::Null),
+                                    ..
+                                } => "no hover at the edit".into(),
+                                Envelope::Response {
+                                    payload: vesper_lsp::ResponsePayload::Result(_),
+                                    ..
+                                } => "hover".into(),
+                                Envelope::Response {
+                                    payload: vesper_lsp::ResponsePayload::Error { code, .. },
+                                    ..
+                                } => format!("error {code}"),
+                                _ => "?".into(),
+                            };
+                        }
                         if lens_scope.is_empty() {
                             lens_scope = match answer {
                                 Envelope::Response {
@@ -243,6 +278,7 @@ fn main() {
         println!("  {}", summary("valid", &mut valid));
         println!("  {}", summary("damaging", &mut damaging));
         println!("  {} ({lens_scope})", summary("lens", &mut lens));
+        println!("  {} ({hover_status})", summary("hover", &mut hover));
         input
             .write_all(&frame(json!({"method":"textDocument/didClose","params":{
                 "textDocument":{"uri":uri}}})))
