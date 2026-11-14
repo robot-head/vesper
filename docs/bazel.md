@@ -129,7 +129,8 @@ GitHub Actions disk cache otherwise, for example on pull requests from forks.
 
 The `buildbuddy` config also writes remote RPC diagnostics to
 `bazel-remote-grpc.log` and compact execution diagnostics to
-`execution_log.binpb.zst`. Git ignores both files. The pinned Bazel 9.3.1
+`execution_log.binpb.zst`. Git ignores both files, and package input globs
+exclude them. The pinned Bazel 9.3.1
 supports the enabled remote cache chunking flag; BuildBuddy's
 [content-defined chunking support](https://www.buildbuddy.io/blog/content-defined-chunking/)
 uses SplitBlob/SpliceBlob for large artifacts. These settings apply when
