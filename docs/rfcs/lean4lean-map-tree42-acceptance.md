@@ -5,8 +5,9 @@ The thirteenth fixed packet `Packet::MapTree` is authored against contract
 `75ced351d75cd8dde4d5495d90cdefcbb4e9ab85`, whose parent is own PR #556.
 This lane ran static byte/source checks, direct rustfmt and BUILD
 synchronization only. It ran no Cargo, Lean, Bazel or genuine matrix.
-The two proof leaves are still being written: their final actual source
-inventory, complete import graph and genuine acceptance remain pending.
+The completed proof leaves, actual import graph, declaration inventory and
+genuine execution are recorded in the
+[integration report](lean4lean-map-tree42-integration.md).
 
 Fixed IDs are label `lean4lean_map_tree42`, final module
 `Lean4LeanLevel42.MapTreeValueFinal`, projection
@@ -150,6 +151,6 @@ by this acceptance plumbing.
 
 This raw-map theorem does not claim normalized-level reification,
 canonicality, whole-checker/native/compiler equivalence or campaign
-completion. No implementation-proof audit status changes. Final theorem
-statements, full new-source inventory and identities, genuine packet results,
-Clippy and Bazel evidence remain pending.
+completion. No implementation-proof audit status changes. Final statements,
+new-source identities, genuine packet results, Clippy and Bazel evidence are
+recorded in the [integration report](lean4lean-map-tree42-integration.md).
