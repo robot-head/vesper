@@ -2,11 +2,18 @@
 //! `std::time::Instant` elapsed nanoseconds (units, not a clock resolution or
 //! accuracy guarantee) include loop/callback/black_box
 //! overhead. Inputs and output capacity are prepared before timing; teardown
-//! and disposal run afterward. No zero-allocation/spill, code-layout randomizing,
-//! cycle, precision, scheduler-isolation or causal-profiling claim is made.
+//! and disposal run afterward. No zero-allocation/spill, cycle, precision or
+//! scheduler-isolation claim is made.
+//!
+//! [`layout`] randomizes heap offsets, stack padding and (through a process
+//! driver) environment size per paired run and tests whether a difference
+//! survives; it does not relocate machine code. [`causal`] is a Coz-style
+//! virtual-speedup profiler for instrumented host threads.
 #![forbid(unsafe_code)]
 mod arithmetic;
+pub mod causal;
 mod execution;
+pub mod layout;
 mod statistics;
 pub use arithmetic::*;
 pub use execution::*;

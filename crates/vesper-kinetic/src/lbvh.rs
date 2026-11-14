@@ -183,6 +183,11 @@ impl Lbvh {
         }
     }
 
+    /// Primitives reserved for.
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     /// Primitives in the last build.
     pub fn len(&self) -> usize {
         self.keys.len()

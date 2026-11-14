@@ -4,6 +4,8 @@
 //! badge, compiler correctness claim or all-path ownership conclusion.
 #![forbid(unsafe_code)]
 pub mod badges;
+pub mod heatmap;
+pub mod hoogle;
 pub mod links;
 pub mod sim;
 pub mod visual;
@@ -870,7 +872,11 @@ pub fn render_html(value: &impl Serialize, limits: Limits) -> Result<Vec<u8>, St
                         .and_then(|v| v.as_str())
                         .unwrap_or("item");
                     output
-                        .write_all(b"<article><h3>")
+                        .write_all(b"<article id=\"item-")
+                        .map_err(|_| "output byte budget exceeded")?;
+                    escape_html(&mut output, name.as_bytes())?;
+                    output
+                        .write_all(b"\"><h3>")
                         .map_err(|_| "output byte budget exceeded")?;
                     escape_html(&mut output, name.as_bytes())?;
                     output

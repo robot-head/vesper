@@ -4,6 +4,7 @@
 //! `vm.unprivileged_userfaultfd=0` without `CAP_SYS_PTRACE`, seccomp) the test
 //! prints the typed reason and passes without claiming the kernel path ran.
 //! Set `VESPER_REQUIRE_UFFD=1` to turn that skip into a failure.
+use vesper_aether::entropy::CloneEntropy;
 use vesper_aether::fork::*;
 use vesper_aether::host::*;
 use vesper_aether::page_source::{PageFill, PageSource};
@@ -245,7 +246,9 @@ fn forked_clones_restore_with_their_own_generation() {
                 error: Error::NotReseeded
             }
         );
-        let epoch = ticket.reseed_after_fork(&root, &mut clone).unwrap();
+        let epoch = ticket
+            .reseed_after_fork(&root, &mut clone, CloneEntropy::gather().unwrap())
+            .unwrap();
         let region = LazyRegion::new(4).unwrap();
         let (view, stats) = region
             .serve(&clone, 8, |t| {

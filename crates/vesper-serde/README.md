@@ -35,7 +35,11 @@ scratch reads preserve every scratch byte and the cursor position. Rust
 lifetimes enforce these host borrows; they do not implement Vesper Region modes.
 
 Parsing requests one token-vector allocation, bounded by input length, token
-count and `max_index_bytes`. Limits count logical vector payload capacity, not
+count and `max_index_bytes`. What `max_index_bytes` leaves after the tape pays
+for the stage 1 index at 4 bytes per structural or escape position; every
+engine (including recursive descent, which counts the same positions) reports
+`AllocationLimit` at the first position that does not fit, and
+`index_bytes()` reports tape plus index bytes. Limits count logical vector payload capacity, not
 allocator bookkeeping or process RSS. Strings are never heap-allocated by the
 codec. Container recursion has a hard ceiling of 128 in addition to the caller
 limit. All input bytes count toward work before UTF-8 validation; consumed bytes
@@ -77,21 +81,30 @@ outside strings, the positions of escape-starting backslashes inside strings,
 and a UTF-8 verdict. Each path classifies bytes with nibble shuffle tables,
 detects odd backslash runs with branchless carry arithmetic, finds string
 interiors with a carry-less-multiply prefix XOR and validates UTF-8 with the
-Keiser–Lemire lookup tables. Paths: `Isa::Avx2` and `Isa::Sse42` (x86_64,
-with PCLMULQDQ), `Isa::Neon` (AArch64, with PMULL) and `Isa::Scalar`, a
-byte-at-a-time reference that is always available. `Isa::detect()` picks the
-fastest at run time. Every path produces bit-identical per-block masks
+Keiser–Lemire lookup tables. Paths: `Isa::Avx512` (AVX-512F/BW, one register
+per block, and one VPCLMULQDQ computing four blocks' quote parities),
+`Isa::Avx2` and `Isa::Sse42` (x86_64, with PCLMULQDQ), `Isa::Neon` (AArch64,
+with PMULL) and `Isa::Scalar`, a byte-at-a-time reference that is always
+available. `Isa::detect()` picks AVX2, then NEON, then SSE4.2, then AVX-512
+(slower than AVX2 on the one host measured, so opt-in). There is no SVE path:
+Rust's SVE intrinsics are unstable; `Isa::sve_reported()` says whether the CPU
+has SVE. Every path produces bit-identical per-block masks
 (`simd::block_masks`), which the tests check on random and adversarial input.
 
 Stage 2 (`IndexedJson::parse_simd`, `parse_with_isa`, or the reusable
 `SimdParser`) validates the document over the structural index with a bounded
 explicit stack and builds the same subtree-skipping token tape as
 `IndexedJson::parse`. On every input the scalar parser accepts, it produces an
-identical tape and `work_used`; it rejects the same inputs. Nothing is decoded
+identical tape and `work_used`; it rejects the same inputs with the same error
+kind and offset, even when several limits are exceeded at once (it walks in the
+scalar parser's order and maps errors through that parser's work frontier).
+Nothing is decoded
 during stage 2: numbers are converted and escaped strings unescaped only when
 `Node`/`Cursor` reads them, and unescaped strings borrow the input. Stage 1
-allocates its position vector, bounded by `min(input, 4 * max_tokens + 1)`
-entries, in addition to the token tape; `SimdParser` keeps both buffers between
+keeps structural and escape positions in one buffer (structurals from the
+front, escapes from the back) of at most `min(input, entries allowed by
+max_index_bytes)` `u32`s; a document with more is truncated and stage 2 fails
+where the scalar parser would. `SimdParser` keeps both buffers between
 documents, so steady-state parsing of no larger documents makes no allocation.
 
 `NdjsonBatch::parse` now indexes records with `ndjson::Engine::detect()` (SIMD
@@ -100,7 +113,8 @@ when available, sharing one stage 1 buffer across records);
 Batch statistics and `event_columns` projections are identical either way.
 `tiles::TelemetryIngestor` decodes the §20.5 `TelemetryPoint` schema from
 NDJSON into 16-wide AoSoA tiles (64-byte-aligned hot columns, separate cold
-trace ids), transactionally and, once warm, without heap allocation.
+trace ids), transactionally and, once warm, without heap allocation; schema
+keys are matched as two 64-bit words (`tiles::SwarKey`).
 
 ```rust
 use vesper_serde::{IndexedJson, Limits, SimdParser, simd::Isa};
@@ -118,16 +132,24 @@ assert!(Isa::Scalar.is_available());
 
 `examples/simd_throughput.rs` measures stage 1, full parsing and tile
 ingestion per path; see `docs/parallel-results/serde-simd-json.md` for numbers
-measured on one machine. `lean/SimdJsonEscape.lean` proves, with `bv_decide`,
-that a Lean model of the branchless escape kernel satisfies the scalar
-reference's recurrence for all 64-bit masks; it is not a proof about the
-compiled Rust code.
+measured on one machine (and `serde-json-rest.md` for the AVX-512 path and
+float decoding). `lean/SimdJsonEscape.lean` proves, with `bv_decide`, that a
+Lean model of the branchless escape kernel satisfies the scalar reference's
+recurrence for all 64-bit masks. `lean/SimdJsonQuotes.lean` proves that the
+carry-less multiply by all ones equals the prefix-XOR cascade and the per-bit
+quote parity recurrence (with the block carry), and that the whitespace,
+operator and control classifications (x86 `pshufb` and AArch64 `tbl`
+semantics) are exact for all 256 bytes. These are proofs about the Lean models,
+not about the compiled Rust code.
 
 ## Finite binary64 JSON
 
 `Node::as_f64(FloatLimits)` and transactional `Cursor::read_f64(FloatLimits)`
-convert already validated Number nodes using Rust's standard scalar binary64
-conversion. IEEE rounding, subnormals and underflow to correctly signed zero are
+convert already validated Number nodes to the correctly rounded binary64 with
+`number::decode_f64`: Clinger's exact fast path, then Eisel–Lemire over a
+generated 128-bit power-of-five table (`tools/gen_pow5.py`, rechecked by a test
+with an independent big integer), then `str::parse` when Eisel–Lemire cannot
+decide. It reports which path decided. IEEE rounding, subnormals and underflow to correctly signed zero are
 supported. Overflow to Infinity returns `Number` at the original token start;
 non-number nodes retain `Type`, and empty cursors retain `End`. Every failed
 cursor conversion preserves its position for retry or raw forwarding. Existing
@@ -161,7 +183,7 @@ python3 scripts/check-float-json.py --binary target/debug/examples/finite_float_
 The example emits bounded JSON-lines records containing bit strings and actual
 encoded numeric values. Python parses both integer and fractional spellings as
 float, rejects non-JSON constants, and compares exact packed binary64 bits. This
-is a finite scalar host profile, not Eisel-Lemire/Dragonbox/SIMD conversion,
+is a finite scalar host profile, not Dragonbox/SIMD conversion,
 source derives/Region typing, DetFloat arithmetic/backend verification or a
 throughput, allocation-free whole-process, RSS or proof guarantee.
 

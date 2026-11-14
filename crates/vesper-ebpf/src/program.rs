@@ -246,10 +246,14 @@ pub struct Label(usize);
 pub enum AsmError {
     UnboundLabel(usize),
     LabelBoundTwice(usize),
-    JumpTooFar { at: usize },
+    JumpTooFar {
+        at: usize,
+    },
     UnknownMap(String),
     DuplicateMap(String),
     BadMap(String),
+    /// The object BTF could not be built (for `TYPE_ID_*` local ids).
+    Btf(String),
 }
 
 impl fmt::Display for AsmError {
@@ -261,6 +265,7 @@ impl fmt::Display for AsmError {
             AsmError::UnknownMap(m) => write!(f, "unknown map {m}"),
             AsmError::DuplicateMap(m) => write!(f, "duplicate map {m}"),
             AsmError::BadMap(m) => write!(f, "invalid map: {m}"),
+            AsmError::Btf(m) => write!(f, "object BTF: {m}"),
         }
     }
 }
@@ -476,7 +481,13 @@ impl Asm {
         dst: Reg,
         spec: crate::core::CoreSpec,
     ) -> Result<&mut Self, crate::core::CoreError> {
-        let v = spec.local_value()?;
+        // a TYPE_ID_* immediate is the root's id in the object BTF, known
+        // once the program is complete: `finish` fills it in
+        let v = if spec.kind.needs_local_id() {
+            0
+        } else {
+            spec.local_value()?
+        };
         let slot = self.slots.len();
         match i32::try_from(v) {
             Ok(i) => self.mov64(dst, i),
@@ -604,7 +615,7 @@ impl Asm {
         for (n, l) in &self.functions {
             functions.push((n.clone(), resolve(&self.labels, *l)?));
         }
-        Ok(Program {
+        let mut prog = Program {
             name: name.to_owned(),
             prog_type,
             insns: self.slots,
@@ -620,6 +631,8 @@ impl Asm {
                 l.sort_by_key(|l| l.slot);
                 l
             },
-        })
+        };
+        crate::btf_ext::assign_local_ids(&mut prog).map_err(|e| AsmError::Btf(e.0))?;
+        Ok(prog)
     }
 }
