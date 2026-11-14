@@ -1,0 +1,16 @@
+// expect: E0309
+// at: page
+// message: consumed on only some control-flow paths
+fn f(flag: bool) -> u64 eff [KvCachePool[2, 4]] {
+    match KvCachePool::lease_page() {
+        Ok(page) => {
+            if flag {
+                KvCachePool::release_page(page);
+                1
+            } else {
+                2
+            }
+        },
+        Err(_) => 0
+    }
+}

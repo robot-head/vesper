@@ -1,0 +1,6 @@
+// expect: E0763
+// at: Tensor::transpose(x)
+// message: body of 'f': expected Tensor[F32, [M, N]], found Tensor[F32, [N, M]]
+fn f[M: dim, N: dim](x: Tensor[F32, [M, N]]) -> Tensor[F32, [M, N]] eff [Tensor] {
+    Tensor::transpose(x)
+}

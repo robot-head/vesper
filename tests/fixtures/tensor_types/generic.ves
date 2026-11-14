@@ -1,0 +1,42 @@
+// Dimension inference through calls, records and branches.
+copy struct Linear[I: dim, O: dim] {
+    weight: Tensor[F32, [I, O]],
+    bias: Tensor[F32, [O]],
+}
+fn apply[B: dim, I: dim, O: dim](layer: Linear[I, O], x: Tensor[F32, [B, I]])
+    -> Tensor[F32, [B, O]] eff [Tensor] {
+    Tensor::add(Tensor::matmul(x, layer.weight), layer.bias)
+}
+fn pick[N: dim](flag: bool, a: Tensor[F32, [1, N]], b: Tensor[F32, [1, N]])
+    -> Option[Tensor[F32, [1, N]]] {
+    if flag {
+        Some(a)
+    } else {
+        Some(b)
+    }
+}
+fn rotate[D: dim](x: Tensor[F32, [1, D * 2]]) -> Tensor[F32, [1, D * 2]] eff [Tensor] {
+    Tensor::rope(x, 3)
+}
+fn chain[B: dim](
+    x: Tensor[F32, [B, 4]],
+    w1: Tensor[F32, [4, 6]],
+    b1: Tensor[F32, [6]],
+    w2: Tensor[F32, [6, 2]],
+    b2: Tensor[F32, [2]],
+) -> Tensor[F32, [1, B * 2]] eff [Tensor] {
+    let first = Linear {
+        weight: w1,
+        bias: b1
+    };
+    let second: Linear[6, 2] = Linear {
+        weight: w2,
+        bias: b2
+    };
+    let y = apply(second, apply(first, x));
+    let flat = Tensor::reshape[[1, 2 * B]](y);
+    match pick(true, flat, Tensor::fill[[1, B * 2]](0.0)) {
+        Some(t) => rotate(t),
+        None => flat
+    }
+}
