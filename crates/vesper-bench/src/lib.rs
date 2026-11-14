@@ -8,13 +8,15 @@
 //! [`layout`] randomizes heap offsets, stack padding and (through a process
 //! driver) environment size per paired run and tests whether a difference
 //! survives; it does not relocate machine code. [`causal`] is a Coz-style
-//! virtual-speedup profiler for instrumented host threads.
+//! virtual-speedup profiler for instrumented host threads. [`wire`] is the
+//! 64-byte padding-free `PmuSampleWire` record with explicit availability.
 #![forbid(unsafe_code)]
 mod arithmetic;
 pub mod causal;
 mod execution;
 pub mod layout;
 mod statistics;
+pub mod wire;
 pub use arithmetic::*;
 pub use execution::*;
 pub use statistics::*;

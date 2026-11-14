@@ -22,9 +22,18 @@ use vesper_bench::layout::{
     ENV_PADDING_VAR, HeapShim, LayoutPlan, LayoutVerdict, MAX_LAYOUT_RUNS, MIN_LAYOUT_RUNS,
     env_padding_value, layout_plan, layout_survival, with_stack_padding,
 };
+use vesper_bench::wire::{PmuField, PmuSample, backend_bound_bp};
 use vesper_bench_pmu::{
-    CounterDelta, KpcCounters, PerfGroup, Provider, RdpmcCounters, Unavailable, host_pmu_status,
+    AllocationCounts, AllocationDelta, AllocationObserver, CounterDelta, CountingAllocator,
+    EventDelta, HardwareEvent, KpcCounters, PerfEventSet, PerfGroup, Provider, RdpmcCounters,
+    Unavailable, UnavailableReason, host_pmu_status,
 };
+use vesper_loom_cas::{DerivationInputs, Domain, ObjectId, Store};
+
+/// Zero-allocation evidence (`--expect-zero-alloc`) reads this allocator's
+/// per-thread counters. It forwards every call to `System`, the default.
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
 const MAX_SOURCE_BYTES: u64 = 256 * 1024;
 const MAX_CALLS: usize = 1_000_000;
 const HELP: &str = r#"Usage: vesper bench FILE [options]
@@ -32,7 +41,12 @@ const HELP: &str = r#"Usage: vesper bench FILE [options]
 Compile checked finite scalar source kernels before paired A/B/B/A measurement.
 The default baseline is a separately compiled copy of FILE.
 
-  --baseline FILE          Local baseline source (no git/CAS resolution)
+  --baseline FILE          Local baseline source
+  --compare git:REV        Baseline is FILE as committed at REV, resolved with
+                           git and cached as a baseline archive in the Loom CAS
+                           (--store DIR, default $VESPER_STORE or
+                           ~/.vesper/store); a cached archive is reused
+  --store DIR              Loom CAS directory for --compare
   --entry NAME             Candidate no-argument entry (default: main)
   --baseline-entry NAME    Baseline entry (default: candidate entry)
   --samples N              Measured epochs, 1..64 (default: 12)
@@ -53,6 +67,21 @@ The default baseline is a separately compiled copy of FILE.
                            environment size, and report whether the A/B
                            difference survives layout randomization
   --layout-seed N          Seed for --randomize-layout (default: 0)
+  --deterministic          Simulated-clock mode: count Vesper evaluator steps
+                           per call (exact, zero variance) instead of timing
+                           native code; gates compare the exact ratio
+  --asm                    Print the measured functions' Cranelift CLIF and
+                           machine-code listing (same IR and codegen flags as
+                           the benchmark JIT) with vectorization evidence
+  --expect-vectorized      Fail unless the candidate's compiled functions
+                           contain vector (SIMD) instructions
+  --expect-zero-alloc      Count heap allocations of the measuring thread in
+                           every measured window; fail unless all are zero
+  --pmu-events LIST        Extra counters, comma-separated: ref-cycles,
+                           l1d-read-misses, llc-read-misses, branch-mispredicts,
+                           simd-ops, tma-slots, tma-backend-bound (Linux perf;
+                           each reported as counted or unavailable), plus
+                           per-window 64-byte PmuSampleWire records
   --json                   Machine-readable report, including failures
   -h, --help               Show help
 
@@ -63,6 +92,9 @@ and result-storage overhead. Optional PMU counts include clock/observer dispatch
 Unavailable PMU is inconclusive with no clock fallback and reports why (for
 example no hardware PMU device, perf_event_paranoid, or kpc without root).
 PMU availability supplies no evidence about allocation or SIMD.
+Deterministic steps are a cost model of the reference evaluator, not machine
+cycles. Vectorization evidence inspects CLIF value types (exact for Cranelift)
+and lists vector-register machine instructions.
 Layout randomization moves data and stack placement, not machine code. Causal
 profiling is a library API (vesper_bench::causal) for instrumented host
 threads; this command does not run it.
@@ -115,6 +147,13 @@ struct Options {
     layout_seed: u64,
     layout_run: Option<(u64, u32)>,
     forwarded: Vec<String>,
+    compare: Option<String>,
+    store: Option<PathBuf>,
+    deterministic: bool,
+    asm: bool,
+    expect_vectorized: bool,
+    expect_zero_alloc: bool,
+    events: Vec<HardwareEvent>,
 }
 /// Plain `--pmu` keeps meaning the group-read provider on every platform;
 /// RDPMC and kpc are explicit opt-ins.
@@ -145,6 +184,11 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
     let mut threshold = None;
     let mut metric = Metric::Time;
     let mut pmu = false;
+    let mut compare = None;
+    let mut store = None;
+    let (mut deterministic, mut asm, mut expect_vectorized, mut expect_zero_alloc) =
+        (false, false, false, false);
+    let mut events = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--help" | "-h" => {
@@ -152,6 +196,36 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
                 return Ok(None);
             }
             "--json" => {}
+            "--compare" => {
+                let value = argument(&mut args, "--compare")?;
+                let rev = value
+                    .strip_prefix("git:")
+                    .ok_or("--compare requires git:REV")?;
+                validate_rev(rev)?;
+                if compare.replace(rev.to_owned()).is_some() {
+                    return Err("--compare may only be supplied once".into());
+                }
+                forwarded.extend([arg, value]);
+            }
+            "--store" => {
+                let value = argument(&mut args, "--store")?;
+                store = Some(PathBuf::from(&value));
+                forwarded.extend([arg, value]);
+            }
+            "--deterministic" => deterministic = true,
+            "--asm" => asm = true,
+            "--expect-vectorized" => expect_vectorized = true,
+            "--expect-zero-alloc" => expect_zero_alloc = true,
+            "--pmu-events" => {
+                let value = argument(&mut args, "--pmu-events")?;
+                for name in value.split(',') {
+                    let event = HardwareEvent::parse(name.trim())
+                        .ok_or_else(|| format!("unknown --pmu-events entry '{name}'"))?;
+                    if !events.contains(&event) {
+                        events.push(event);
+                    }
+                }
+            }
             "--pmu" => {
                 pmu = true;
                 forwarded.push(arg);
@@ -244,6 +318,31 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
         }
     }
     let path = path.ok_or("bench requires a source file; see bench --help")?;
+    if compare.is_some() && baseline.is_some() {
+        return Err("--compare and --baseline are mutually exclusive".into());
+    }
+    if store.is_some() && compare.is_none() {
+        return Err("--store requires --compare".into());
+    }
+    if deterministic
+        && (pmu
+            || provider.is_some()
+            || metric != Metric::Time
+            || !events.is_empty()
+            || expect_zero_alloc
+            || layouts.is_some())
+    {
+        return Err(
+            "--deterministic counts evaluator steps; it excludes --pmu, --pmu-provider, --metric, --pmu-events, --expect-zero-alloc and --randomize-layout"
+                .into(),
+        );
+    }
+    if layouts.is_some() && (asm || expect_vectorized || expect_zero_alloc || !events.is_empty()) {
+        return Err(
+            "--asm, --expect-vectorized, --expect-zero-alloc and --pmu-events are per-run evidence; not supported with --randomize-layout"
+                .into(),
+        );
+    }
     if config.epochs == 0
         || config.epochs > 64
         || config.warmup_epochs > 64
@@ -276,6 +375,13 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
         layout_seed,
         layout_run,
         forwarded,
+        compare,
+        store,
+        deterministic,
+        asm,
+        expect_vectorized,
+        expect_zero_alloc,
+        events,
     }))
 }
 fn read_source(path: &Path) -> Result<String, String> {
@@ -479,12 +585,18 @@ struct SourceCase {
     runner: NativeBatch,
     entry: String,
     source_id: String,
+    world: vesper::check::World,
 }
 impl SourceCase {
     fn compile(path: &Path, entry: &str) -> Result<Self, String> {
-        let source = read_source(path)?;
-        source_guard(&source)?;
-        let parsed = vesper::parser::parse(&source);
+        Self::compile_text(&read_source(path)?, entry)
+    }
+    fn compile_text(source: &str, entry: &str) -> Result<Self, String> {
+        if source.len() as u64 > MAX_SOURCE_BYTES {
+            return Err("bench source exceeds 256 KiB".into());
+        }
+        source_guard(source)?;
+        let parsed = vesper::parser::parse(source);
         if let Some(error) = parsed.diagnostics.first() {
             return Err(format!(
                 "{} at {:?}: {}",
@@ -504,7 +616,463 @@ impl SourceCase {
             runner,
             entry: entry.to_owned(),
             source_id: blake3::hash(source.as_bytes()).to_hex().to_string(),
+            world: checked.world,
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `--compare git:REV`: baselines resolved with git, cached in the Loom CAS.
+// ---------------------------------------------------------------------------
+
+const BASELINE_SCHEMA: &str = "vesper.bench.baseline/1";
+
+fn validate_rev(rev: &str) -> Result<(), String> {
+    if rev.is_empty()
+        || rev.len() > 256
+        || rev.starts_with('-')
+        || rev.contains(':')
+        || rev.chars().any(|c| c.is_whitespace() || c.is_control())
+    {
+        return Err(
+            "--compare git:REV requires a revision without whitespace, ':' or a leading '-'".into(),
+        );
+    }
+    Ok(())
+}
+
+/// The git operations `--compare` needs, so tests can script them.
+trait Git {
+    fn run(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>, String>;
+}
+struct SystemGit;
+impl Git for SystemGit {
+    fn run(&self, dir: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    "git unavailable: no git executable on PATH".to_string()
+                } else {
+                    format!("git unavailable: {e}")
+                }
+            })?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let mut message: String = stderr.trim().chars().take(512).collect();
+            if message.is_empty() {
+                message = output.status.to_string();
+            }
+            return Err(format!("git {}: {message}", args[0]));
+        }
+        Ok(output.stdout)
+    }
+}
+
+/// A baseline's identity: a full commit ID and the repository-relative path.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitBaseline {
+    commit: String,
+    path: String,
+    repo_dir: PathBuf,
+}
+/// `canonicalize` on Windows returns `\\?\C:\...`, which git does not
+/// accept for `-C`; drop the verbatim prefix for drive paths.
+fn plain_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(rest) = text.strip_prefix(r"\\?\")
+            && rest.as_bytes().get(1) == Some(&b':')
+        {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+fn git_text(git: &dyn Git, dir: &Path, args: &[&str]) -> Result<String, String> {
+    let bytes = git.run(dir, args)?;
+    if bytes.len() > 4096 {
+        return Err(format!("git {}: oversized output", args[0]));
+    }
+    String::from_utf8(bytes)
+        .map(|s| s.trim().to_owned())
+        .map_err(|_| format!("git {}: non-UTF-8 output", args[0]))
+}
+fn resolve_git(git: &dyn Git, candidate: &Path, rev: &str) -> Result<GitBaseline, String> {
+    validate_rev(rev)?;
+    let file = fs::canonicalize(candidate).map_err(|e| format!("{}: {e}", candidate.display()))?;
+    let dir = plain_path(file.parent().ok_or("candidate has no parent directory")?);
+    let spec = format!("{rev}^{{commit}}");
+    let commit = git_text(
+        git,
+        &dir,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "--end-of-options",
+            &spec,
+        ],
+    )
+    .map_err(|e| format!("cannot resolve git:{rev}: {e}"))?;
+    if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!("git:{rev} did not resolve to a full commit ID"));
+    }
+    let top = git_text(git, &dir, &["rev-parse", "--show-toplevel"])?;
+    let top = fs::canonicalize(&top).map_err(|e| format!("git toplevel {top}: {e}"))?;
+    let relative = file
+        .strip_prefix(&top)
+        .map_err(|_| "candidate is outside its git work tree")?;
+    let mut parts = Vec::new();
+    for part in relative.components() {
+        match part {
+            std::path::Component::Normal(p) => {
+                parts.push(p.to_str().ok_or("candidate path is not UTF-8")?.to_owned())
+            }
+            _ => return Err("candidate path is not a plain work-tree path".into()),
+        }
+    }
+    if parts.is_empty() {
+        return Err("candidate path is empty".into());
+    }
+    Ok(GitBaseline {
+        commit: commit.to_ascii_lowercase(),
+        path: parts.join("/"),
+        repo_dir: dir,
+    })
+}
+fn git_source(git: &dyn Git, baseline: &GitBaseline) -> Result<String, String> {
+    let spec = format!("{}:{}", baseline.commit, baseline.path);
+    let size: u64 = git_text(git, &baseline.repo_dir, &["cat-file", "-s", &spec])
+        .map_err(|e| format!("{} at {}: {e}", baseline.path, baseline.commit))?
+        .parse()
+        .map_err(|_| "git cat-file -s: not a size")?;
+    if size > MAX_SOURCE_BYTES {
+        return Err("baseline source exceeds 256 KiB".into());
+    }
+    let bytes = git.run(&baseline.repo_dir, &["cat-file", "blob", &spec])?;
+    if bytes.len() as u64 != size {
+        return Err("git cat-file returned a different size than it reported".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "baseline source must be UTF-8".into())
+}
+fn default_store() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("VESPER_STORE").filter(|d| !d.is_empty()) {
+        return Ok(PathBuf::from(dir));
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .filter(|h| !h.is_empty())
+        .ok_or("--compare needs --store DIR, $VESPER_STORE or a home directory")?;
+    Ok(PathBuf::from(home).join(".vesper").join("store"))
+}
+fn locator_bytes(b: &GitBaseline) -> Vec<u8> {
+    format!("{BASELINE_SCHEMA}\ncommit {}\npath {}\n", b.commit, b.path).into_bytes()
+}
+fn baseline_inputs(locator: ObjectId, b: &GitBaseline) -> DerivationInputs {
+    DerivationInputs::new(Domain::Artifact, "vesper-bench-baseline", BASELINE_SCHEMA)
+        .with_option("git.commit", b.commit.clone())
+        .with_option("git.path", b.path.clone())
+        .with_input("locator", locator)
+}
+fn encode_archive(b: &GitBaseline, source: &str) -> Vec<u8> {
+    serde_json::to_vec(
+        &json!({"schema":BASELINE_SCHEMA,"commit":b.commit,"path":b.path,
+        "source_blake3":blake3::hash(source.as_bytes()).to_hex().to_string(),"source":source}),
+    )
+    .expect("JSON object serializes")
+}
+fn decode_archive(bytes: &[u8], b: &GitBaseline) -> Result<String, String> {
+    let corrupt = |why: &str| format!("CAS baseline archive rejected: {why}");
+    if bytes.len() as u64 > 8 * MAX_SOURCE_BYTES {
+        return Err(corrupt("oversized"));
+    }
+    let data: Json = serde_json::from_slice(bytes).map_err(|_| corrupt("not JSON"))?;
+    if data["schema"] != BASELINE_SCHEMA {
+        return Err(corrupt("unknown schema"));
+    }
+    if data["commit"] != b.commit.as_str() || data["path"] != b.path.as_str() {
+        return Err(corrupt("commit/path differ from the derivation"));
+    }
+    let source = data["source"]
+        .as_str()
+        .ok_or_else(|| corrupt("no source"))?;
+    if source.len() as u64 > MAX_SOURCE_BYTES {
+        return Err(corrupt("source exceeds 256 KiB"));
+    }
+    if data["source_blake3"] != blake3::hash(source.as_bytes()).to_hex().as_str() {
+        return Err(corrupt("source hash mismatch"));
+    }
+    Ok(source.to_owned())
+}
+struct CasBaseline {
+    source: String,
+    git: GitBaseline,
+    archive: ObjectId,
+    cache: &'static str,
+    store: PathBuf,
+}
+fn load_cas_baseline(
+    store_dir: &Path,
+    git: &dyn Git,
+    candidate: &Path,
+    rev: &str,
+) -> Result<CasBaseline, String> {
+    let b = resolve_git(git, candidate, rev)?;
+    let store = Store::open(store_dir).map_err(|e| format!("CAS {}: {e}", store_dir.display()))?;
+    let cas = |e: vesper_loom_cas::CasError| format!("CAS: {e}");
+    let locator = store
+        .put_blob(Domain::Source, &locator_bytes(&b))
+        .map_err(cas)?
+        .id;
+    let inputs = baseline_inputs(locator, &b);
+    if let Some(id) = store.lookup_derivation(&inputs).map_err(cas)? {
+        let source = decode_archive(&store.read_blob(&id).map_err(cas)?, &b)?;
+        return Ok(CasBaseline {
+            source,
+            git: b,
+            archive: id,
+            cache: "hit",
+            store: store.root().to_path_buf(),
+        });
+    }
+    let source = git_source(git, &b)?;
+    let id = store
+        .put_blob(Domain::Artifact, &encode_archive(&b, &source))
+        .map_err(cas)?
+        .id;
+    store.publish_derivation(&inputs, id).map_err(cas)?;
+    Ok(CasBaseline {
+        source,
+        git: b,
+        archive: id,
+        cache: "populated",
+        store: store.root().to_path_buf(),
+    })
+}
+fn cas_json(c: &CasBaseline, rev: &str) -> Json {
+    json!({"rev":rev,"commit":c.git.commit,"path":c.git.path,"archive":c.archive.to_string(),
+        "cache":c.cache,"store":c.store,
+        "scope":"the baseline source archive is content-addressed in the Loom CAS and compiled in this process; native code is not cached"})
+}
+
+// ---------------------------------------------------------------------------
+// `--deterministic`: exact evaluator step counts (simulated clock).
+// ---------------------------------------------------------------------------
+
+const STEP_FUEL: u64 = 50_000_000;
+
+/// Evaluator steps for one call of `entry`, with its result.
+fn evaluator_steps(world: &vesper::check::World, entry: &str) -> Result<(u64, String), String> {
+    let mut runtime = vesper::runtime::Runtime::new(world);
+    // The benchmark JIT compiles unoptimized IR; count the same program.
+    runtime.optimize = false;
+    runtime.fuel = STEP_FUEL;
+    let value = runtime.run(entry, Vec::new())?;
+    let steps = STEP_FUEL - runtime.fuel;
+    if steps == 0 {
+        return Err("evaluator reported zero steps".into());
+    }
+    Ok((steps, format!("{value:?}")))
+}
+fn deterministic_arm(case: &mut SourceCase, repetitions: usize) -> Result<(u64, String), String> {
+    let (steps, value) = evaluator_steps(&case.world, &case.entry)?;
+    for _ in 1..repetitions {
+        if evaluator_steps(&case.world, &case.entry)? != (steps, value.clone()) {
+            return Err("evaluator step count is not deterministic".into());
+        }
+    }
+    let native = format!("{:?}", case.runner.run(&case.entry)?);
+    if native != value {
+        return Err(format!(
+            "native result {native} differs from the evaluator's {value}"
+        ));
+    }
+    Ok((steps, value))
+}
+fn deterministic_outcome(
+    options: &Options,
+    baseline: &mut SourceCase,
+    candidate: &mut SourceCase,
+) -> Result<Outcome, String> {
+    let repetitions = options.config.epochs.clamp(2, 64);
+    let (base, base_value) = deterministic_arm(baseline, repetitions)?;
+    let (cand, cand_value) = deterministic_arm(candidate, repetitions)?;
+    let pair = PairedSample::new(base, cand, 1).map_err(|e| e.to_string())?;
+    let bounds = pair.regression_bp_bounds();
+    let (status, gate_failure) = match options.threshold {
+        None => ("measured", None),
+        Some(t) if bounds.ceil <= i128::from(t) => ("passed", None),
+        Some(_) => (
+            "regression",
+            Some("deterministic step gate detected a regression".to_string()),
+        ),
+    };
+    let text = format!(
+        "{} vs {}: deterministic evaluator steps per call: candidate {cand}, baseline {base} ({} identical repetitions)\nratio: {}..{} basis points; {status}\nsimulated clock (reference evaluator steps), not machine cycles\n",
+        options.path.display(),
+        baseline_label(options),
+        repetitions,
+        bounds.floor,
+        bounds.ceil,
+    );
+    Ok(Outcome {
+        data: json!({"schema":"vesper.bench/1","status":status,"mode":"deterministic","metric":"steps",
+            "provider":"vesper.runtime.evaluator_steps","unit":"evaluator steps per call",
+            "candidate":{"path":options.path,"entry":options.entry,"source_blake3":candidate.source_id,"steps_per_call":cand.to_string(),"result":cand_value},
+            "baseline":{"path":baseline_path_json(options),"entry":options.baseline_entry,"source_blake3":baseline.source_id,"steps_per_call":base.to_string(),"result":base_value},
+            "repetitions":repetitions,"variance":"0: every repetition gave the same count",
+            "regression_basis_points":{"floor":bounds.floor.to_string(),"ceil":bounds.ceil.to_string()},
+            "threshold_bp":options.threshold,
+            "gate_decision":options.threshold.map(|_| if gate_failure.is_some() {"Regression"} else {"Pass"}),
+            "scope":"exact step count of Vesper's reference evaluator on the unoptimized IR (one unit per evaluator step), cross-checked against the native result; a deterministic cost model, not cycles or retired instructions",
+            "evidence":{"hardware_pmu":"unavailable","zero_allocation":"unavailable","vectorization":"unavailable"}}),
+        text,
+        gate_failure,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// `--asm` and `--expect-vectorized`: CLIF and machine listings.
+// ---------------------------------------------------------------------------
+
+/// The benchmark JIT's ISA flags (`NativeBatch`): non-PIC, no colocated
+/// libcalls, NaN canonicalization for DetFloat programs, host target.
+fn batch_isa(
+    world: &vesper::check::World,
+) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
+    use cranelift_codegen::settings::{self, Configurable};
+    let mut flags = settings::builder();
+    flags
+        .set("use_colocated_libcalls", "false")
+        .map_err(|e| e.to_string())?;
+    flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+    if vesper::native::needs_nan_canonicalization(world) {
+        flags
+            .set("enable_nan_canonicalization", "true")
+            .map_err(|e| e.to_string())?;
+    }
+    cranelift_native::builder()
+        .map_err(str::to_string)?
+        .finish(settings::Flags::new(flags))
+        .map_err(|e| e.to_string())
+}
+/// Machine-listing lines that name a vector register. On x86-64 scalar
+/// floats also live in xmm registers, so this is a listing aid, not the
+/// vectorization decision (which uses CLIF value types).
+fn vector_register_line(line: &str) -> bool {
+    const AARCH64: [&str; 8] = [".16b", ".8b", ".8h", ".4h", ".4s", ".2s", ".2d", ".1d"];
+    line.contains("%xmm")
+        || line.contains("%ymm")
+        || line.contains("%zmm")
+        || AARCH64.iter().any(|a| line.contains(a))
+        || line.contains(" z0") // SVE
+}
+struct Listing {
+    data: Json,
+    text: String,
+    vector_instructions: usize,
+}
+fn asm_listing(case: &SourceCase) -> Result<Listing, String> {
+    let mut functions = Vec::new();
+    vesper::native::object_with_observer(
+        &case.world,
+        &case.entry,
+        None,
+        false,
+        Some(&mut |f| functions.push(f)),
+    )?;
+    if functions.is_empty() {
+        return Err("no compiled functions to list".into());
+    }
+    let isa = batch_isa(&case.world)?;
+    let mut text = String::new();
+    let mut entries = Vec::new();
+    let mut total_vector = 0usize;
+    for f in functions {
+        let func = &f.function;
+        let mut vector = 0usize;
+        let mut instructions = 0usize;
+        for block in func.layout.blocks() {
+            for inst in func.layout.block_insts(block) {
+                instructions += 1;
+                let dfg = &func.dfg;
+                if dfg.ctrl_typevar(inst).is_vector()
+                    || dfg
+                        .inst_results(inst)
+                        .iter()
+                        .any(|v| dfg.value_type(*v).is_vector())
+                    || dfg
+                        .inst_args(inst)
+                        .iter()
+                        .any(|v| dfg.value_type(*v).is_vector())
+                {
+                    vector += 1;
+                }
+            }
+        }
+        total_vector += vector;
+        let clif = func.display().to_string();
+        let mut ctx = cranelift_codegen::Context::for_function(func.clone());
+        ctx.set_disasm(true);
+        let compiled = ctx
+            .compile(
+                &*isa,
+                &mut cranelift_codegen::control::ControlPlane::default(),
+            )
+            .map_err(|e| format!("{}: {:?}", f.symbol, e.inner))?;
+        let machine = compiled
+            .vcode
+            .clone()
+            .ok_or("Cranelift produced no machine listing")?;
+        let bytes = compiled.code_buffer();
+        let vector_lines = machine.lines().filter(|l| vector_register_line(l)).count();
+        text.push_str(&format!(
+            ";; {} ({}): {} CLIF instructions, {} vector-typed; {} code bytes\n{clif}\n;; machine code ({})\n{machine}\n",
+            f.symbol,
+            f.source,
+            instructions,
+            vector,
+            bytes.len(),
+            isa.triple(),
+        ));
+        entries.push(
+            json!({"symbol":f.symbol,"source":f.source,"clif":clif,"machine":machine,
+            "clif_instructions":instructions,"vector_clif_instructions":vector,
+            "machine_vector_register_lines":vector_lines,"code_bytes":bytes.len(),
+            "code_blake3":blake3::hash(bytes).to_hex().to_string()}),
+        );
+    }
+    Ok(Listing {
+        data: json!({"target":isa.triple().to_string(),"functions":entries,
+            "scope":"the benchmark's unoptimized IR recompiled with the benchmark JIT's ISA flags; code bytes are this recompilation's, not read from JIT memory"}),
+        text,
+        vector_instructions: total_vector,
+    })
+}
+fn vectorization_status(listing: &Listing) -> &'static str {
+    if listing.vector_instructions > 0 {
+        "vectorized"
+    } else {
+        "scalar"
+    }
+}
+fn baseline_path_json(options: &Options) -> Json {
+    match &options.compare {
+        Some(rev) => json!(format!("git:{rev}")),
+        None => json!(options.baseline),
+    }
+}
+fn baseline_label(options: &Options) -> String {
+    match &options.compare {
+        Some(rev) => format!("git:{rev}"),
+        None => options.baseline.display().to_string(),
     }
 }
 impl BenchCase for SourceCase {
@@ -675,7 +1243,7 @@ struct PmuData {
 fn validate_pmu(
     config: RunConfig,
     report: &RunReport,
-    windows: &[ObservedWindow<CounterDelta>],
+    windows: &[ObservedWindow<CliObservation>],
     provider: Provider,
 ) -> Result<PmuData, String> {
     if windows.len() != expected_windows(config)?
@@ -697,7 +1265,11 @@ fn validate_pmu(
     let mut json_windows = Vec::with_capacity(windows.len());
     for (index, w) in windows.iter().enumerate() {
         let c = &w.completion;
-        let d = &w.observation;
+        let d = w
+            .observation
+            .core
+            .as_ref()
+            .ok_or("PMU window lacks counters")?;
         if w.invocation != expected_invocation(config, index)
             || c.invocation != w.invocation
             || c.planned_operations != config.operations_per_window
@@ -832,21 +1404,213 @@ struct Outcome {
     text: String,
     gate_failure: Option<String>,
 }
-type Observed = (RunReport, Vec<ObservedWindow<CounterDelta>>);
-fn observe<O>(
-    options: &Options,
-    baseline: &mut SourceCase,
-    candidate: &mut SourceCase,
-    opened: Result<O, Unavailable>,
-) -> Result<Observed, Box<Outcome>>
-where
-    O: WindowObserver<Observation = CounterDelta, Error = Unavailable>,
-{
-    let mut counters =
-        opened.map_err(|e| Box::new(unavailable_outcome(options.metric, options.provider, &e)))?;
-    run_abba_observed(options.config, baseline, candidate, &mut counters)
-        .map(|run| run.into_parts())
-        .map_err(|e| Box::new(observed_error_outcome(options.metric, options.provider, e)))
+/// The core cycles/instructions provider `--pmu-provider` selected.
+enum CoreCounters {
+    Group(PerfGroup),
+    Rdpmc(RdpmcCounters),
+    Kpc(KpcCounters),
+}
+enum CoreToken {
+    Group(vesper_bench_pmu::Snapshot),
+    Rdpmc(vesper_bench_pmu::RdpmcSnapshot),
+    Kpc(vesper_bench_pmu::KpcSnapshot),
+}
+/// Every observer a run requested, nested so that the allocation counter is
+/// innermost (closest to the body), then the core counters, then the
+/// optional extended events.
+#[derive(Default)]
+struct CliObserver {
+    core: Option<CoreCounters>,
+    events: Option<PerfEventSet>,
+    alloc: Option<AllocationObserver>,
+}
+struct CliToken {
+    events: Option<vesper_bench_pmu::EventSetToken>,
+    core: Option<CoreToken>,
+    alloc: Option<vesper_bench_pmu::alloc::AllocationToken>,
+}
+struct CliObservation {
+    core: Option<CounterDelta>,
+    events: Option<EventDelta>,
+    alloc: Option<AllocationDelta>,
+}
+impl WindowObserver for CliObserver {
+    type Token = CliToken;
+    type Observation = CliObservation;
+    type Error = Unavailable;
+    fn before_window(&mut self, i: Invocation, n: usize) -> Result<CliToken, Unavailable> {
+        let events = match &mut self.events {
+            Some(e) => Some(e.before_window(i, n)?),
+            None => None,
+        };
+        let core = match &mut self.core {
+            Some(CoreCounters::Group(c)) => Some(CoreToken::Group(c.before_window(i, n)?)),
+            Some(CoreCounters::Rdpmc(c)) => Some(CoreToken::Rdpmc(c.before_window(i, n)?)),
+            Some(CoreCounters::Kpc(c)) => Some(CoreToken::Kpc(c.before_window(i, n)?)),
+            None => None,
+        };
+        let alloc = match &mut self.alloc {
+            Some(a) => Some(a.before_window(i, n)?),
+            None => None,
+        };
+        Ok(CliToken {
+            events,
+            core,
+            alloc,
+        })
+    }
+    fn after_window(
+        &mut self,
+        token: CliToken,
+        completion: WindowCompletion,
+    ) -> Result<CliObservation, Unavailable> {
+        let stale = || Unavailable {
+            reason: UnavailableReason::ForeignOrStaleToken,
+            operation: "bench observer token",
+            os_error: None,
+        };
+        let alloc = match (&mut self.alloc, token.alloc) {
+            (Some(a), Some(t)) => Some(a.after_window(t, completion.clone())?),
+            (None, None) => None,
+            _ => return Err(stale()),
+        };
+        let core = match (&mut self.core, token.core) {
+            (Some(CoreCounters::Group(c)), Some(CoreToken::Group(t))) => {
+                Some(c.after_window(t, completion.clone())?)
+            }
+            (Some(CoreCounters::Rdpmc(c)), Some(CoreToken::Rdpmc(t))) => {
+                Some(c.after_window(t, completion.clone())?)
+            }
+            (Some(CoreCounters::Kpc(c)), Some(CoreToken::Kpc(t))) => {
+                Some(c.after_window(t, completion.clone())?)
+            }
+            (None, None) => None,
+            _ => return Err(stale()),
+        };
+        let events = match (&mut self.events, token.events) {
+            (Some(e), Some(t)) => Some(e.after_window(t, completion)?),
+            (None, None) => None,
+            _ => return Err(stale()),
+        };
+        Ok(CliObservation {
+            core,
+            events,
+            alloc,
+        })
+    }
+}
+fn open_core(provider: Provider) -> Result<CoreCounters, Unavailable> {
+    Ok(match provider {
+        Provider::LinuxGroupRead => CoreCounters::Group(PerfGroup::open()?),
+        Provider::LinuxRdpmc => CoreCounters::Rdpmc(RdpmcCounters::open()?),
+        Provider::MacosKpc => CoreCounters::Kpc(KpcCounters::open()?),
+    })
+}
+/// Allocation evidence over the measured (non-warmup) windows.
+fn allocation_json(windows: &[ObservedWindow<CliObservation>]) -> Result<(Json, bool), String> {
+    let mut total = AllocationCounts::default();
+    let mut allocating_windows = 0usize;
+    let mut measured = 0usize;
+    for w in windows.iter().filter(|w| !w.invocation.warmup) {
+        let c = w
+            .observation
+            .alloc
+            .as_ref()
+            .ok_or("allocation window lacks counts")?
+            .counts;
+        measured += 1;
+        allocating_windows += usize::from(!c.is_zero_allocation());
+        let add = |a: u64, b: u64| a.checked_add(b).ok_or("allocation count overflow");
+        total = AllocationCounts {
+            allocations: add(total.allocations, c.allocations)?,
+            reallocations: add(total.reallocations, c.reallocations)?,
+            deallocations: add(total.deallocations, c.deallocations)?,
+            bytes: add(total.bytes, c.bytes)?,
+        };
+    }
+    if measured == 0 {
+        return Err("no measured windows for allocation evidence".into());
+    }
+    let zero = allocating_windows == 0;
+    Ok((
+        json!({"status":if zero {"zero"} else {"allocated"},"measured_windows":measured,
+            "allocating_windows":allocating_windows,"allocations":total.allocations.to_string(),
+            "reallocations":total.reallocations.to_string(),"deallocations":total.deallocations.to_string(),
+            "bytes":total.bytes.to_string(),
+            "scope":"counting global allocator, measuring thread only, around each measured window after warmup; includes the harness's dispatch, clock and result storage inside the window"}),
+        zero,
+    ))
+}
+/// Per-event totals and the per-window `PmuSampleWire` records.
+fn events_json(windows: &[ObservedWindow<CliObservation>], requested: &[HardwareEvent]) -> Json {
+    let mut summary = serde_json::Map::new();
+    for event in requested {
+        let mut total = Some(0u64);
+        let mut reason = None;
+        for w in windows.iter().filter(|w| !w.invocation.warmup) {
+            match w.observation.events.as_ref().and_then(|e| e.get(*event)) {
+                Some(Ok(n)) => total = total.and_then(|t| t.checked_add(*n)),
+                Some(Err(u)) => {
+                    total = None;
+                    reason.get_or_insert_with(|| u.clone());
+                }
+                None => total = None,
+            }
+        }
+        summary.insert(
+            event.name().into(),
+            match (total, reason) {
+                (Some(n), None) => json!({"status":"counted","total":n.to_string()}),
+                (_, Some(u)) => json!({"status":"unavailable","unavailable":unavailable_json(&u)}),
+                (None, None) => json!({"status":"unavailable","reason":"overflow or missing"}),
+            },
+        );
+    }
+    let mut samples = Vec::new();
+    for (index, w) in windows.iter().enumerate() {
+        let mut sample = PmuSample::new();
+        if let Some(core) = &w.observation.core {
+            let _ = sample.set(PmuField::InstructionsRetired, core.instructions());
+        }
+        let event = |e| match w.observation.events.as_ref().and_then(|d| d.get(e)) {
+            Some(Ok(n)) => Some(*n),
+            _ => None,
+        };
+        for (field, e) in [
+            (PmuField::RefCycles, HardwareEvent::RefCycles),
+            (PmuField::L1dReadMisses, HardwareEvent::L1dReadMisses),
+            (PmuField::LlcMisses, HardwareEvent::LlcReadMisses),
+            (
+                PmuField::BranchMispredicts,
+                HardwareEvent::BranchMispredicts,
+            ),
+            (PmuField::SimdVecUopsRetired, HardwareEvent::SimdOperations),
+        ] {
+            if let Some(n) = event(e) {
+                let _ = sample.set(field, n);
+            }
+        }
+        if let (Some(be), Some(slots)) = (
+            event(HardwareEvent::TmaBackendBoundSlots),
+            event(HardwareEvent::TmaSlots),
+        ) && let Some(bp) = backend_bound_bp(be, slots)
+        {
+            let _ = sample.set(PmuField::TmaBackendBoundSlotsBp, bp);
+        }
+        if let Ok((wire, mask)) = sample.to_wire_masked()
+            && let Ok(bytes) = wire.encode()
+        {
+            let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            samples.push(
+                json!({"window":index,"warmup":w.invocation.warmup,"wire_hex":hex,
+                "available_mask":mask.bits(),
+                "unavailable":sample.unavailable().iter().map(|f| f.name()).collect::<Vec<_>>()}),
+            );
+        }
+    }
+    json!({"events":summary,"pmu_sample_wire":{"schema":"PmuSampleWire/64-byte little-endian (§41.2)",
+        "note":"fields outside available_mask are encoded as 0 and are not measurements; arena_bump_bytes and icache_rand_offset_bytes are never measured here (no region arena, no code-entry jitter)",
+        "samples":samples}})
 }
 fn plan_json(plan: LayoutPlan) -> Json {
     json!({"seed":plan.seed.to_string(),"run":plan.run,"heap_offset_bytes":plan.heap_offset_bytes,
@@ -1009,40 +1773,144 @@ fn randomize_layouts(
         gate_failure,
     })
 }
+/// Static evidence and CAS provenance shared by every report shape.
+struct Extras {
+    cas: Option<Json>,
+    listings: Option<(Listing, Listing)>,
+}
+fn attach_extras(options: &Options, extras: Extras, outcome: &mut Outcome) {
+    if let Some(cas) = extras.cas {
+        outcome.data["baseline"]["cas"] = cas;
+    }
+    if let Some((candidate, baseline)) = extras.listings {
+        let status = vectorization_status(&candidate);
+        outcome.data["evidence"]["vectorization"] = json!(status);
+        outcome.data["vectorization"] = json!({"candidate":status,"baseline":vectorization_status(&baseline),
+            "candidate_vector_clif_instructions":candidate.vector_instructions,
+            "baseline_vector_clif_instructions":baseline.vector_instructions,
+            "method":"vector-typed CLIF values in every compiled function of the measured closure (Cranelift emits SIMD machine instructions only for those)"});
+        if options.asm {
+            outcome.data["asm"] = json!({"candidate":candidate.data,"baseline":baseline.data});
+            outcome.text.push_str(";; candidate\n");
+            outcome.text.push_str(&candidate.text);
+            outcome.text.push_str(";; baseline\n");
+            outcome.text.push_str(&baseline.text);
+        }
+        if options.expect_vectorized {
+            let passed = status == "vectorized";
+            outcome.data["vectorization"]["gate"] = json!(if passed { "Pass" } else { "Fail" });
+            if !passed {
+                add_failure(
+                    outcome,
+                    "--expect-vectorized: the candidate's compiled functions contain no vector instructions",
+                );
+            }
+        }
+    }
+}
+fn add_failure(outcome: &mut Outcome, message: &str) {
+    outcome.text.push_str(message);
+    outcome.text.push('\n');
+    outcome.gate_failure = Some(match outcome.gate_failure.take() {
+        Some(first) => format!("{first}; {message}"),
+        None => message.to_owned(),
+    });
+}
 fn measure(options: Options) -> Result<Option<Outcome>, String> {
-    // Both compilation phases precede run_abba and every timed window.
-    let mut baseline = SourceCase::compile(&options.baseline, &options.baseline_entry)
-        .map_err(|error| format!("baseline {}: {error}", options.baseline.display()))?;
+    // Baseline resolution and both compilations precede every timed window.
+    let cas = match &options.compare {
+        Some(rev) => {
+            let store = match &options.store {
+                Some(dir) => dir.clone(),
+                None => default_store()?,
+            };
+            Some((
+                load_cas_baseline(&store, &SystemGit, &options.path, rev)?,
+                rev.clone(),
+            ))
+        }
+        None => None,
+    };
+    let mut baseline = match &cas {
+        Some((c, rev)) => SourceCase::compile_text(&c.source, &options.baseline_entry)
+            .map_err(|error| format!("baseline git:{rev}:{}: {error}", c.git.path))?,
+        None => SourceCase::compile(&options.baseline, &options.baseline_entry)
+            .map_err(|error| format!("baseline {}: {error}", options.baseline.display()))?,
+    };
     let mut candidate = SourceCase::compile(&options.path, &options.entry)
         .map_err(|error| format!("candidate {}: {error}", options.path.display()))?;
-    if options.path == options.baseline && baseline.source_id != candidate.source_id {
+    if cas.is_none()
+        && options.path == options.baseline
+        && baseline.source_id != candidate.source_id
+    {
         return Err("source changed while preparing the same-file comparison".into());
     }
-    let (report, pmu) = if options.pmu {
-        let observed = match options.provider {
-            Provider::LinuxGroupRead => {
-                observe(&options, &mut baseline, &mut candidate, PerfGroup::open())
+    let listings = if options.asm || options.expect_vectorized {
+        Some((asm_listing(&candidate)?, asm_listing(&baseline)?))
+    } else {
+        None
+    };
+    let extras = Extras {
+        cas: cas.as_ref().map(|(c, rev)| cas_json(c, rev)),
+        listings,
+    };
+    if options.deterministic {
+        let mut outcome = deterministic_outcome(&options, &mut baseline, &mut candidate)?;
+        attach_extras(&options, extras, &mut outcome);
+        return Ok(Some(outcome));
+    }
+    let observed = options.pmu || options.expect_zero_alloc || !options.events.is_empty();
+    let mut alloc_unavailable = None;
+    let mut events_unavailable = None;
+    let (report, pmu, windows) = if observed {
+        let mut observer = CliObserver::default();
+        if options.pmu {
+            match open_core(options.provider) {
+                Ok(core) => observer.core = Some(core),
+                Err(e) => {
+                    let mut outcome = unavailable_outcome(options.metric, options.provider, &e);
+                    attach_extras(&options, extras, &mut outcome);
+                    return Ok(Some(outcome));
+                }
             }
-            Provider::LinuxRdpmc => observe(
-                &options,
-                &mut baseline,
-                &mut candidate,
-                RdpmcCounters::open(),
-            ),
-            Provider::MacosKpc => {
-                observe(&options, &mut baseline, &mut candidate, KpcCounters::open())
+        }
+        if options.expect_zero_alloc {
+            match AllocationObserver::open() {
+                Ok(a) => observer.alloc = Some(a),
+                Err(e) => alloc_unavailable = Some(e),
             }
+        }
+        if !options.events.is_empty() {
+            match PerfEventSet::open(&options.events) {
+                Ok(e) => observer.events = Some(e),
+                Err(e) => events_unavailable = Some(e),
+            }
+        }
+        let (report, windows) =
+            match run_abba_observed(options.config, &mut baseline, &mut candidate, &mut observer) {
+                Ok(run) => run.into_parts(),
+                Err(e) => {
+                    let mut outcome = observed_error_outcome(options.metric, options.provider, e);
+                    attach_extras(&options, extras, &mut outcome);
+                    return Ok(Some(outcome));
+                }
+            };
+        let pmu = if options.pmu {
+            Some(validate_pmu(
+                options.config,
+                &report,
+                &windows,
+                options.provider,
+            )?)
+        } else {
+            None
         };
-        let (report, windows) = match observed {
-            Ok(parts) => parts,
-            Err(outcome) => return Ok(Some(*outcome)),
-        };
-        let pmu = validate_pmu(options.config, &report, &windows, options.provider)?;
-        (report, Some(pmu))
+        (report, pmu, windows)
     } else {
         (
             run_abba(options.config, &mut baseline, &mut candidate).map_err(|e| e.to_string())?,
             None,
+            Vec::new(),
         )
     };
     let selected = match options.metric {
@@ -1075,7 +1943,7 @@ fn measure(options: Options) -> Result<Option<Outcome>, String> {
     let text = format!(
         "{} vs {}: {} paired epochs, {} body calls, provider {} ({})\nmedian upper ratio: {}..{} basis points; {}\nincludes Rust/JIT dispatch and storage overhead; compilation/setup are outside windows\n",
         options.path.display(),
-        options.baseline.display(),
+        baseline_label(&options),
         report.epochs().len(),
         report.total_body_calls(),
         options.metric.provider(options.provider),
@@ -1088,7 +1956,7 @@ fn measure(options: Options) -> Result<Option<Outcome>, String> {
         "schema": "vesper.bench/1", "status": status, "metric":options.metric.name(),
         "provider": options.metric.provider(options.provider), "unit": options.metric.unit(),
         "candidate": {"path": options.path, "entry": options.entry, "source_blake3": candidate.source_id, "jit": stats_json(candidate.runner.stats())},
-        "baseline": {"path": options.baseline, "entry": options.baseline_entry, "source_blake3": baseline.source_id, "jit": stats_json(baseline.runner.stats())},
+        "baseline": {"path": baseline_path_json(&options), "entry": options.baseline_entry, "source_blake3": baseline.source_id, "jit": stats_json(baseline.runner.stats())},
         "config": {"epochs": options.config.epochs, "warmup_epochs": options.config.warmup_epochs, "operations_per_window": options.config.operations_per_window},
         "body_calls": report.total_body_calls(), "elapsed_run_ns": report.elapsed_run_nanos().to_string(),
         "pairs": selected.iter().copied().map(|p|pair_json(p,options.metric)).collect::<Vec<_>>(),
@@ -1121,11 +1989,54 @@ fn measure(options: Options) -> Result<Option<Outcome>, String> {
     } else {
         text
     };
-    Ok(Some(Outcome {
+    let mut outcome = Outcome {
         data,
         text,
         gate_failure,
-    }))
+    };
+    if options.expect_zero_alloc {
+        match alloc_unavailable {
+            Some(e) => {
+                outcome.data["allocation"] =
+                    json!({"status":"unavailable","unavailable":unavailable_json(&e)});
+                add_failure(
+                    &mut outcome,
+                    &format!("--expect-zero-alloc: allocation evidence unavailable ({e})"),
+                );
+            }
+            None => {
+                let (allocation, zero) = allocation_json(&windows)?;
+                outcome.data["evidence"]["zero_allocation"] = allocation["status"].clone();
+                let summary = format!(
+                    "allocations in measured windows: {} ({} of {} windows allocated)",
+                    allocation["allocations"].as_str().unwrap_or("?"),
+                    allocation["allocating_windows"],
+                    allocation["measured_windows"],
+                );
+                outcome.data["allocation"] = allocation;
+                if zero {
+                    outcome.text.push_str(&summary);
+                    outcome.text.push_str("; zero-allocation gate passed\n");
+                } else {
+                    add_failure(&mut outcome, &format!("--expect-zero-alloc: {summary}"));
+                }
+            }
+        }
+    }
+    if !options.events.is_empty() {
+        outcome.data["pmu_events"] = match events_unavailable {
+            Some(e) => {
+                json!({"status":"unavailable","unavailable":unavailable_json(&e),"host":host_json()})
+            }
+            None => {
+                let mut data = events_json(&windows, &options.events);
+                data["host"] = host_json();
+                data
+            }
+        };
+    }
+    attach_extras(&options, extras, &mut outcome);
+    Ok(Some(outcome))
 }
 pub fn run(args: Vec<String>) -> Result<(), String> {
     let json_output = args.iter().any(|arg| arg == "--json");
@@ -1322,11 +2233,18 @@ mod metronome_tests {
             "group",
             "randomize-layout",
             "vesper_bench::causal",
+            "--compare git:",
+            "--deterministic",
+            "--asm",
+            "--expect-zero-alloc",
+            "--expect-vectorized",
+            "--pmu-events",
         ] {
             assert!(HELP.contains(mechanism), "help lacks {mechanism}");
         }
-        // Claims the command does not make.
-        for absent in ["12-cycle", "CAS", "--causal", "--asm", "cargo-show-asm"] {
+        // Claims the command does not make (CAS baselines and --asm exist
+        // since wave-eight lane 15; the README row may mention them).
+        for absent in ["12-cycle", "--causal"] {
             assert!(!row.contains(absent), "README row still claims {absent}");
         }
     }
@@ -1432,5 +2350,498 @@ mod metronome_tests {
         assert_eq!(unavailable.data["status"], "inconclusive");
         assert!(unavailable.gate_failure.is_some());
         assert!(child_sample(&json!({"status":"measured","pairs":[]}), Metric::Time).is_err());
+    }
+}
+
+#[cfg(test)]
+mod metronome_rest_tests {
+    use super::*;
+    use std::cell::RefCell;
+    use std::collections::BTreeMap;
+
+    struct Dir(PathBuf);
+    impl Dir {
+        fn new(tag: &str) -> Self {
+            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let path = std::env::temp_dir().join(format!(
+                "vesper-bench-rest-{tag}-{}-{}",
+                std::process::id(),
+                NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            fs::create_dir_all(&path).unwrap();
+            Self(plain_path(&fs::canonicalize(path).unwrap()))
+        }
+        fn file(&self, name: &str, text: &str) -> PathBuf {
+            let path = self.0.join(name);
+            fs::write(&path, text).unwrap();
+            path
+        }
+    }
+    impl Drop for Dir {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+    fn run_cli(list: &[&str]) -> Outcome {
+        execute(args(list)).unwrap().unwrap()
+    }
+    const SMALL: &str = "fn main()->i64{wrapping_add(1,2)}";
+    const LARGER: &str =
+        "fn f(x:i64)->i64{wrapping_mul(x,x)} fn main()->i64{wrapping_add(f(3),f(4))}";
+
+    #[test]
+    fn new_flags_parse_and_reject_unsupported_combinations() {
+        let o = options(args(&[
+            "c.ves",
+            "--compare",
+            "git:main~2",
+            "--store",
+            "s",
+            "--asm",
+            "--expect-vectorized",
+            "--expect-zero-alloc",
+            "--pmu-events",
+            "l1d-read-misses,tma-slots,l1d-read-misses",
+        ]))
+        .unwrap()
+        .unwrap();
+        assert_eq!(o.compare.as_deref(), Some("main~2"));
+        assert!(o.asm && o.expect_vectorized && o.expect_zero_alloc);
+        assert_eq!(
+            o.events,
+            [HardwareEvent::L1dReadMisses, HardwareEvent::TmaSlots]
+        );
+        assert!(
+            options(args(&["c.ves", "--deterministic"]))
+                .unwrap()
+                .unwrap()
+                .deterministic
+        );
+        for bad in [
+            vec!["c.ves", "--compare", "main"],
+            vec!["c.ves", "--compare", "git:"],
+            vec!["c.ves", "--compare", "git:-x"],
+            vec!["c.ves", "--compare", "git:a b"],
+            vec!["c.ves", "--compare", "git:a:b"],
+            vec!["c.ves", "--compare", "git:a", "--baseline", "b.ves"],
+            vec!["c.ves", "--store", "s"],
+            vec!["c.ves", "--deterministic", "--pmu"],
+            vec!["c.ves", "--deterministic", "--metric", "cycles"],
+            vec!["c.ves", "--deterministic", "--expect-zero-alloc"],
+            vec!["c.ves", "--deterministic", "--randomize-layout", "6"],
+            vec!["c.ves", "--asm", "--randomize-layout", "6"],
+            vec!["c.ves", "--pmu-events", "cycles"],
+        ] {
+            assert!(options(args(&bad)).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn deterministic_mode_is_exact_and_gates_the_exact_ratio() {
+        let dir = Dir::new("det");
+        let small = dir.file("small.ves", SMALL);
+        let larger = dir.file("larger.ves", LARGER);
+        let same = run_cli(&[small.to_str().unwrap(), "--deterministic", "--json"]);
+        assert_eq!(same.data["mode"], "deterministic");
+        assert_eq!(
+            same.data["candidate"]["steps_per_call"],
+            same.data["baseline"]["steps_per_call"]
+        );
+        assert_eq!(same.data["regression_basis_points"]["floor"], "0");
+        let slower = run_cli(&[
+            larger.to_str().unwrap(),
+            "--baseline",
+            small.to_str().unwrap(),
+            "--deterministic",
+            "--max-regression-bp",
+            "100",
+        ]);
+        let cand: u64 = slower.data["candidate"]["steps_per_call"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let base: u64 = slower.data["baseline"]["steps_per_call"]
+            .as_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(cand > base, "{cand} vs {base}");
+        assert_eq!(slower.data["status"], "regression");
+        assert!(slower.gate_failure.is_some());
+        assert_eq!(slower.data["candidate"]["result"], "25");
+        // The reverse comparison passes a 0 bp gate; reruns are identical.
+        let faster = run_cli(&[
+            small.to_str().unwrap(),
+            "--baseline",
+            larger.to_str().unwrap(),
+            "--deterministic",
+            "--max-regression-bp",
+            "0",
+        ]);
+        assert_eq!(faster.data["status"], "passed");
+        assert!(faster.gate_failure.is_none());
+        let again = run_cli(&[
+            small.to_str().unwrap(),
+            "--baseline",
+            larger.to_str().unwrap(),
+            "--deterministic",
+            "--max-regression-bp",
+            "0",
+        ]);
+        assert_eq!(
+            again.data["regression_basis_points"],
+            faster.data["regression_basis_points"]
+        );
+    }
+
+    #[test]
+    fn asm_lists_clif_and_machine_code_and_vectorization_gate_fails_on_scalar() {
+        let dir = Dir::new("asm");
+        let k = dir.file("k.ves", LARGER);
+        let o = run_cli(&[
+            k.to_str().unwrap(),
+            "--asm",
+            "--samples",
+            "1",
+            "--iterations",
+            "2",
+        ]);
+        let functions = o.data["asm"]["candidate"]["functions"].as_array().unwrap();
+        assert_eq!(functions.len(), 2, "main and f");
+        for f in functions {
+            assert!(f["clif"].as_str().unwrap().contains("function u0:"));
+            assert!(f["machine"].as_str().unwrap().lines().count() > 2);
+            assert!(f["code_bytes"].as_u64().unwrap() > 0);
+            assert_eq!(f["vector_clif_instructions"], 0);
+        }
+        assert!(
+            functions
+                .iter()
+                .any(|f| f["clif"].as_str().unwrap().contains("imul"))
+        );
+        assert_eq!(o.data["evidence"]["vectorization"], "scalar");
+        assert!(o.text.contains(";; machine code ("));
+        assert!(o.gate_failure.is_none());
+        let gated = run_cli(&[
+            k.to_str().unwrap(),
+            "--expect-vectorized",
+            "--samples",
+            "1",
+            "--iterations",
+            "2",
+        ]);
+        assert_eq!(gated.data["vectorization"]["gate"], "Fail");
+        assert!(gated.data.get("asm").is_none());
+        assert!(gated.gate_failure.unwrap().contains("--expect-vectorized"));
+        assert!(vector_register_line("  addps %xmm1, %xmm0"));
+        assert!(vector_register_line("  add v0.4s, v1.4s, v2.4s"));
+        assert!(!vector_register_line("  addq %rsi, %rax"));
+    }
+
+    #[test]
+    fn zero_alloc_gate_uses_measuring_thread_counts() {
+        let dir = Dir::new("alloc");
+        let k = dir.file("k.ves", LARGER);
+        let o = run_cli(&[
+            k.to_str().unwrap(),
+            "--expect-zero-alloc",
+            "--samples",
+            "6",
+            "--iterations",
+            "32",
+        ]);
+        assert_eq!(o.data["allocation"]["measured_windows"], 24);
+        assert_eq!(o.data["evidence"]["zero_allocation"], "zero");
+        assert_eq!(o.data["allocation"]["allocations"], "0");
+        assert!(o.gate_failure.is_none(), "{:?}", o.gate_failure);
+        // Synthetic windows: one allocating measured window fails; warmups do not count.
+        let window = |warmup, allocations| ObservedWindow {
+            invocation: Invocation {
+                warmup,
+                ..expected_invocation(RunConfig::default(), 0)
+            },
+            completion: WindowCompletion {
+                invocation: expected_invocation(RunConfig::default(), 0),
+                planned_operations: 1,
+                attempted_operations: 1,
+                successful_operations: 1,
+                body: BodyStatus::Completed,
+                clock: ClockStatus::Measured(1),
+            },
+            observation: CliObservation {
+                core: None,
+                events: None,
+                alloc: Some(AllocationDelta {
+                    counts: AllocationCounts {
+                        allocations,
+                        bytes: allocations * 8,
+                        ..AllocationCounts::default()
+                    },
+                }),
+            },
+        };
+        let (data, zero) = allocation_json(&[window(true, 5), window(false, 0)]).unwrap();
+        assert!(zero && data["status"] == "zero");
+        let (data, zero) = allocation_json(&[window(false, 0), window(false, 2)]).unwrap();
+        assert!(!zero);
+        assert_eq!(
+            (data["allocating_windows"].as_u64(), data["bytes"].as_str()),
+            (Some(1), Some("16"))
+        );
+        assert!(allocation_json(&[window(true, 0)]).is_err());
+    }
+
+    #[test]
+    fn pmu_events_are_counted_or_reported_with_wire_records() {
+        let dir = Dir::new("events");
+        let k = dir.file("k.ves", SMALL);
+        let o = run_cli(&[
+            k.to_str().unwrap(),
+            "--pmu-events",
+            "ref-cycles,l1d-read-misses,llc-read-misses,branch-mispredicts,simd-ops,tma-slots,tma-backend-bound",
+            "--samples",
+            "1",
+            "--warmup",
+            "0",
+            "--iterations",
+            "2",
+        ]);
+        let events = &o.data["pmu_events"];
+        if events["status"] == "unavailable" {
+            eprintln!("BENCH_EVENTS_UNAVAILABLE: {}", events["unavailable"]);
+            return;
+        }
+        for event in HardwareEvent::ALL {
+            let status = &events["events"][event.name()]["status"];
+            assert!(status == "counted" || status == "unavailable", "{status}");
+            if status == "unavailable" {
+                eprintln!(
+                    "BENCH_EVENT_UNAVAILABLE: {} {}",
+                    event.name(),
+                    events["events"][event.name()]
+                );
+            }
+        }
+        let samples = events["pmu_sample_wire"]["samples"].as_array().unwrap();
+        assert_eq!(samples.len(), 4);
+        for sample in samples {
+            let hex = sample["wire_hex"].as_str().unwrap();
+            assert_eq!(hex.len(), 128);
+            let bytes: Vec<u8> = (0..64)
+                .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap())
+                .collect();
+            let wire = vesper_bench::wire::PmuSampleWire::decode(&bytes).unwrap();
+            let mask = vesper_bench::wire::AvailabilityMask::new(
+                sample["available_mask"].as_u64().unwrap() as u16,
+            )
+            .unwrap();
+            for field in PmuField::ALL {
+                if !mask.contains(field) {
+                    assert_eq!(wire.get(field), 0, "{}", field.name());
+                }
+            }
+            // Never measured by this command.
+            assert!(!mask.contains(PmuField::ArenaBumpBytes));
+            assert!(!mask.contains(PmuField::IcacheRandOffsetBytes));
+        }
+    }
+
+    /// Scripted git: a commit, a toplevel and one blob per `commit:path`.
+    struct FakeGit {
+        commit: String,
+        top: PathBuf,
+        blobs: BTreeMap<String, Vec<u8>>,
+        calls: RefCell<Vec<String>>,
+    }
+    impl Git for FakeGit {
+        fn run(&self, _: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
+            self.calls.borrow_mut().push(args.join(" "));
+            match args {
+                ["rev-parse", "--verify", "--quiet", "--end-of-options", spec] => {
+                    if spec.starts_with("main") {
+                        Ok(format!("{}\n", self.commit).into_bytes())
+                    } else {
+                        Err("git rev-parse: exit status: 1".into())
+                    }
+                }
+                ["rev-parse", "--show-toplevel"] => {
+                    Ok(format!("{}\n", self.top.display()).into_bytes())
+                }
+                ["cat-file", "-s", spec] => self
+                    .blobs
+                    .get(*spec)
+                    .map(|b| format!("{}\n", b.len()).into_bytes())
+                    .ok_or_else(|| "git cat-file: missing".into()),
+                ["cat-file", "blob", spec] => self
+                    .blobs
+                    .get(*spec)
+                    .cloned()
+                    .ok_or_else(|| "git cat-file: missing".into()),
+                _ => Err(format!("unexpected git {args:?}")),
+            }
+        }
+    }
+
+    #[test]
+    fn cas_baselines_are_populated_once_then_reused_and_verified() {
+        let dir = Dir::new("cas");
+        fs::create_dir_all(dir.0.join("src")).unwrap();
+        let candidate = dir.file("src/k.ves", LARGER);
+        let store = dir.0.join("store");
+        let commit = "ab".repeat(20);
+        let git = FakeGit {
+            commit: commit.clone(),
+            top: dir.0.clone(),
+            blobs: BTreeMap::from([(format!("{commit}:src/k.ves"), SMALL.as_bytes().to_vec())]),
+            calls: RefCell::new(Vec::new()),
+        };
+        let first = load_cas_baseline(&store, &git, &candidate, "main").unwrap();
+        assert_eq!((first.cache, first.source.as_str()), ("populated", SMALL));
+        assert_eq!(first.git.path, "src/k.ves");
+        assert_eq!(first.git.commit, commit);
+        git.calls.borrow_mut().clear();
+        let second = load_cas_baseline(&store, &git, &candidate, "main").unwrap();
+        assert_eq!((second.cache, second.archive), ("hit", first.archive));
+        assert!(
+            git.calls
+                .borrow()
+                .iter()
+                .all(|c| !c.starts_with("cat-file")),
+            "a cache hit must not read the blob from git: {:?}",
+            git.calls.borrow()
+        );
+        // The archive decodes only for its own commit and path, and only intact.
+        let archive = Store::open(&store)
+            .unwrap()
+            .read_blob(&first.archive)
+            .unwrap();
+        assert_eq!(decode_archive(&archive, &first.git).unwrap(), SMALL);
+        let other = GitBaseline {
+            path: "other.ves".into(),
+            ..first.git.clone()
+        };
+        assert!(decode_archive(&archive, &other).is_err());
+        let mut tampered: Json = serde_json::from_slice(&archive).unwrap();
+        tampered["source"] = json!("fn main()->i64{9}");
+        assert!(decode_archive(&serde_json::to_vec(&tampered).unwrap(), &first.git).is_err());
+        assert!(decode_archive(b"not json", &first.git).is_err());
+        // Unknown revisions, non-commit output and outside paths are errors.
+        assert!(load_cas_baseline(&store, &git, &candidate, "nope").is_err());
+        let short = FakeGit {
+            commit: "abc".into(),
+            ..git
+        };
+        assert!(resolve_git(&short, &candidate, "main").is_err());
+        let elsewhere = FakeGit {
+            top: dir.0.join("src").join("deeper"),
+            commit: commit.clone(),
+            blobs: BTreeMap::new(),
+            calls: RefCell::new(Vec::new()),
+        };
+        fs::create_dir_all(&elsewhere.top).unwrap();
+        assert!(resolve_git(&elsewhere, &candidate, "main").is_err());
+        let huge = FakeGit {
+            top: dir.0.clone(),
+            commit: "cd".repeat(20),
+            blobs: BTreeMap::from([(
+                format!("{}:src/k.ves", "cd".repeat(20)),
+                vec![b' '; MAX_SOURCE_BYTES as usize + 1],
+            )]),
+            calls: RefCell::new(Vec::new()),
+        };
+        assert!(
+            load_cas_baseline(&store, &huge, &candidate, "main")
+                .err()
+                .unwrap()
+                .contains("256 KiB")
+        );
+    }
+
+    #[test]
+    fn compare_git_runs_against_a_real_repository_when_git_exists() {
+        let dir = Dir::new("git");
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&dir.0)
+                .args(args)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .output()
+        };
+        match git(&["--version"]) {
+            Ok(out) if out.status.success() => {}
+            _ => {
+                let error = SystemGit.run(&dir.0, &["--version"]).err();
+                eprintln!("GIT_UNAVAILABLE: {error:?}; real-git path not exercised");
+                return;
+            }
+        }
+        let ok = |args: &[&str]| assert!(git(args).unwrap().status.success(), "git {args:?}");
+        ok(&["init", "-q"]);
+        let k = dir.file("k.ves", SMALL);
+        ok(&["add", "k.ves"]);
+        ok(&[
+            "-c",
+            "user.name=bench",
+            "-c",
+            "user.email=bench@localhost",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "baseline",
+        ]);
+        fs::write(&k, LARGER).unwrap();
+        let store = dir.0.join(".store");
+        let flags = [
+            k.to_str().unwrap(),
+            "--compare",
+            "git:HEAD",
+            "--store",
+            store.to_str().unwrap(),
+            "--deterministic",
+            "--max-regression-bp",
+            "0",
+        ];
+        let first = run_cli(&flags);
+        assert_eq!(first.data["baseline"]["cas"]["cache"], "populated");
+        assert_eq!(first.data["baseline"]["path"], "git:HEAD");
+        assert_eq!(first.data["baseline"]["result"], "3");
+        assert_eq!(first.data["candidate"]["result"], "25");
+        assert_eq!(first.data["status"], "regression");
+        let second = run_cli(&flags);
+        assert_eq!(second.data["baseline"]["cas"]["cache"], "hit");
+        assert_eq!(
+            second.data["baseline"]["cas"]["archive"],
+            first.data["baseline"]["cas"]["archive"]
+        );
+        // The measured (non-deterministic) path accepts the same baseline.
+        let timed = run_cli(&[
+            k.to_str().unwrap(),
+            "--compare",
+            "git:HEAD",
+            "--store",
+            store.to_str().unwrap(),
+            "--samples",
+            "1",
+            "--iterations",
+            "2",
+        ]);
+        assert_eq!(timed.data["status"], "measured");
+        assert_eq!(timed.data["baseline"]["cas"]["cache"], "hit");
+        assert!(
+            execute(args(&[
+                k.to_str().unwrap(),
+                "--compare",
+                "git:does-not-exist",
+                "--store",
+                store.to_str().unwrap()
+            ]))
+            .is_err()
+        );
     }
 }

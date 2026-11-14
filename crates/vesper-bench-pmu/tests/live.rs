@@ -136,3 +136,35 @@ fn kpc_is_actual_counters_or_explicit_unavailable() {
         }
     }
 }
+
+#[test]
+fn extended_events_are_real_counts_or_reported_per_event() {
+    use vesper_bench_pmu::{HardwareEvent, PerfEventSet};
+    let mut set = match PerfEventSet::open(&HardwareEvent::ALL) {
+        Ok(set) => set,
+        Err(error) => {
+            eprintln!("LIVE_EVENTS_UNAVAILABLE: {error}");
+            return;
+        }
+    };
+    for (event, why) in set.unavailable() {
+        eprintln!("LIVE_EVENT_UNAVAILABLE: {} {why}", event.name());
+    }
+    let config = RunConfig {
+        epochs: 1,
+        warmup_epochs: 0,
+        operations_per_window: 8,
+        ..RunConfig::default()
+    };
+    let run = run_abba_observed(config, &mut Work, &mut Work, &mut set).unwrap();
+    for w in run.observations() {
+        // One entry per distinct requested event, each a count or a reason.
+        assert_eq!(w.observation.values.len(), HardwareEvent::ALL.len());
+        for (event, value) in &w.observation.values {
+            match value {
+                Ok(n) => eprintln!("LIVE_EVENT_COUNT: {} {n}", event.name()),
+                Err(e) => eprintln!("LIVE_EVENT_WINDOW_UNAVAILABLE: {} {e}", event.name()),
+            }
+        }
+    }
+}
