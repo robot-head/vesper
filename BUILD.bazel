@@ -8,12 +8,36 @@ exports_files([
 # The root package also owns docs/, examples/, lean/, scripts/ and tools/
 # (directories without their own BUILD.bazel), which the CLI and its tests read.
 vesper_crate(
+    copy_test_cwd = [
+        "test/lean4lean_foundations42",
+        "test/lean4lean_construction42",
+        "test/lean4lean_order42",
+        "test/lean4lean_map42",
+        "test/lean4lean_normalize42",
+        "test/lean4lean_normalization42",
+        "test/lean4lean_comparison42",
+        "test/lean4lean_shape42",
+    ],
     extra_compile_data = ["//crates/vesper-doc:files"],
     extra_test_data = [
         "//crates/vesper-doc:files",
         "//crates/vesper-grammar:files",
         "//crates/vesper-loom-trust:files",
     ],
+    # One Lean -M4096 stage plus estimated wrapper/runtime overhead; see #537.
+    test_tags = {
+        label: ["resources:memory:5120", "resources:cpu:1"]
+        for label in [
+            "test/lean4lean_comparison42",
+            "test/lean4lean_construction42",
+            "test/lean4lean_foundations42",
+            "test/lean4lean_map42",
+            "test/lean4lean_normalization42",
+            "test/lean4lean_normalize42",
+            "test/lean4lean_order42",
+            "test/lean4lean_shape42",
+        ]
+    },
     # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
     # "Linux-only suites" in docs/ci-platforms.md.
     test_target_compatible_with = {
@@ -49,6 +73,48 @@ vesper_crate(
         # Linux and Windows retain every semantic/audit/control assertion;
         # proof_audit_private still exercises portability on macOS too.
         "test/resource_model42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # The complete fixed foundation replay timed out after 300.3 s on
+        # macOS. Linux and Windows keep the full audit and negative controls;
+        # proof_audit_private keeps macOS process/path coverage.
+        "test/lean4lean_foundations42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_construction42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_order42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_map42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_normalize42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_normalization42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_comparison42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_shape42": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),

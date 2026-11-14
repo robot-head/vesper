@@ -66,6 +66,15 @@ paths on every OS (process spawning, file system, paths) keep running there.
 | `scripts/test-format-proof.sh` | Serial Lean witness replay (~3.5 min on macOS) | Not run | Runs against the Cargo binary |
 | `//:test/replay42_kernel`, `//:test/format_proof_cli`, `//:test/oracle42_acceptance` | Serial Lean kernel replays (390 s, 276 s and 135 s on macOS) | Skipped (`BUILD.bazel`) | Run: their `cfg(windows)` process and path code needs Windows |
 | `//:test/resource_model42` | Twelve-module logical-model compilation, 285 source/alternate proof roots, and serial artifact/axiom controls; measured over 300 s on Linux, with a 900 s bound | Skipped (`BUILD.bazel`); `proof_audit_private` still runs its process/path regression | Runs the full target |
+| Fixed `lean4lean_*42` proof packets | Complete logical projection, authored-root/alternate-proof audits and serial artifact/axiom controls; the foundation packet timed out after 300.3 s on macOS | Each packet uses the same macOS-only scheduling exclusion when introduced; `proof_audit_private` retains process/path coverage | Runs every full packet |
+
+The fixed packets are `lean4lean_foundations42`, `lean4lean_construction42`,
+`lean4lean_order42`, `lean4lean_map42`, `lean4lean_normalize42`, and
+`lean4lean_normalization42`. Their dependent PRs add the same scheduling entry
+as each target is introduced. Only the foundation packet's macOS timeout was
+measured; the others share its platform-neutral replay design. Their internal
+300-second limits and complete checks remain unchanged. See
+[the scheduling evidence](rfcs/lean4lean-proof-packets-ci-scheduling.md).
 
 Because nothing else uses it, the macOS and Windows lanes also no longer
 prepare the pinned external Lean4Lean checker (`VESPER_LEAN4LEAN42_ROOT`),
