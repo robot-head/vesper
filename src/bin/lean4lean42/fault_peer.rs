@@ -39,7 +39,7 @@ pub fn run(mode: &str) -> Result<(), Error> {
         }
         "wrong_token" => frame(
             &mut io::stdout().lock(),
-            br#"[1,0,"11111111111111111111111111111111",3,2,"4.24.0","vesper.lean4lean42/1"]"#,
+            br#"[1,0,"11111111111111111111111111111111",3,2,"4.24.0","vesper.lean4lean42/2"]"#,
         )
         .map_err(failure),
         "stall" => park(),
