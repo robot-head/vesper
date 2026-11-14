@@ -8,6 +8,7 @@ description = "Bounded checked host DBSP circuits, owned frontier holds, durable
 [dependencies]
 blake3 = "1.8"
 vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-quarry = { path = "../vesper-quarry" }
 vesper-simpulse = { path = "../vesper-simpulse" }
 
 [dev-dependencies]
