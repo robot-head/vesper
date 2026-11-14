@@ -268,6 +268,9 @@ impl PreparedResource {
     pub fn report_path(&self) -> PathBuf {
         self.root().join("producer-report.json")
     }
+    pub fn owned_names(&self) -> &BTreeSet<String> {
+        &self.expected
+    }
     pub fn aliases(&self) -> &[String] {
         &self.aliases
     }

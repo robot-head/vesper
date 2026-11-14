@@ -1580,6 +1580,7 @@ pub fn execute(
         inputs: &i,
         limits: &config.limits,
     };
+    let mut resource_publication_files = None;
     let result = (|| -> Result<(), Error> {
         let (actual, actual_root) = compiler(&lean, &models.path, &config.limits, Some(report))?;
         if actual != lean || actual_root != sysroot {
@@ -1702,7 +1703,26 @@ pub fn execute(
             &receipt_bytes,
             &config.limits,
             Some(report),
-        )?;
+        )
+        .inspect_err(|_| report.targets[2].status = TargetStatus::Failed)?;
+        if config.artifacts.is_some() {
+            let destination = models.path.join("resource");
+            fs::create_dir(&destination)?;
+            for file in prepared.files() {
+                let to = destination.join(&file.path);
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                copy_evidence(
+                    &prepared.root().join(&file.path),
+                    &to,
+                    file,
+                    until(config.limits.inventory_timeout_ms),
+                )?;
+            }
+            resource_publication_files = Some(prepared.files().to_vec());
+            prepared.revalidate(&config.limits)?;
+        }
         report.targets[2].source = Some(file_digest(
             prepared.root(),
             &prepared.source_path(),
@@ -1812,25 +1832,15 @@ pub fn execute(
                 ));
             }
         }
-        if config.artifacts.is_some() {
-            let destination = models.path.join("resource");
-            fs::create_dir(&destination)?;
-            for file in prepared.files() {
-                let to = destination.join(&file.path);
-                if let Some(parent) = to.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                copy_evidence(
-                    &prepared.root().join(&file.path),
-                    &to,
-                    file,
-                    until(config.limits.inventory_timeout_ms),
-                )?;
-            }
-            prepared.revalidate(&config.limits)?;
-        }
         Ok(())
     })();
+    if let Some(expected) = resource_publication_files {
+        if resource_files(&models.path.join("resource"), &config.limits)? != expected {
+            return Err(identity(
+                "private resource evidence changed before publication",
+            ));
+        }
+    }
     if config.artifacts.is_some() {
         create_file(&models.path.join("setup-receipt.json"), &receipt_bytes)?;
         let controls = serde_json::to_vec(&report.controls)
