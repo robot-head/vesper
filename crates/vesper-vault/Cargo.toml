@@ -17,7 +17,7 @@ poly1305 = { workspace = true }
 polyval = { workspace = true }
 cranelift-codegen = { workspace = true }
 getrandom = { workspace = true }
-ml-kem = { workspace = true }
+libcrux-ml-kem = { workspace = true }
 rand_core = { workspace = true }
 region = { workspace = true }
 x25519-dalek = { workspace = true }
@@ -26,7 +26,17 @@ zeroize = { workspace = true }
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+# ML-KEM-768 vector NTT backends (design §23.1.4 `eff [Isa[P]]`): libcrux's
+# formally verified AVX2 and NEON kernels. Each feature is only enabled on the
+# architecture whose intrinsics it compiles against.
+[target.'cfg(target_arch = "x86_64")'.dependencies]
+libcrux-ml-kem = { workspace = true, features = ["simd256"] }
+
+[target.'cfg(target_arch = "aarch64")'.dependencies]
+libcrux-ml-kem = { workspace = true, features = ["simd128"] }
+
 [dev-dependencies]
+ml-kem = { workspace = true }
 cranelift-frontend = { workspace = true }
 shake = { workspace = true }
 

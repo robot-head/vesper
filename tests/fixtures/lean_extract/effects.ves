@@ -1,0 +1,36 @@
+// Fail and state effects: handlers are CPS folds the kernel can evaluate.
+linear effect Counter {
+    fn next() -> u64;
+}
+
+fn twice(start: u64) -> u64 {
+    handle Counter state count = start in {
+        let a = Counter::next();
+        let b = Counter::next();
+        wrapping_add(a, b)
+    } with {
+        return (value, count) => value,
+        next(count, resume) => resume(count, wrapping_add(count, 1)),
+    }
+}
+
+fn checked_halve(n: u64) -> u64 eff [Fail[ArithOverflow]] {
+    if n % 2 == 1 {
+        Fail::raise(ArithOverflow {})
+    } else {
+        n / 2
+    }
+}
+
+fn halve_or_zero(n: u64) -> u64 {
+    handle Fail[ArithOverflow] in {
+        checked_halve(n)
+    } with {
+        return value => value,
+        raise(error, resume) => 0,
+    }
+}
+
+fn main() -> u64 {
+    twice(5)
+}

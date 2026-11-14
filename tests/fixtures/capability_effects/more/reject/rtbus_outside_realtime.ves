@@ -1,0 +1,19 @@
+// expect: E0725
+// RtBus operations belong to realtime callbacks.
+linear effect RtBus {
+    fn commit_dma_output(frames: u64) -> Unit;
+}
+
+fn flush(frames: u64) -> Unit eff [RtBus] {
+    RtBus::commit_dma_output(frames)
+}
+
+fn main() -> u64 {
+    handle RtBus in {
+        flush(1);
+        0
+    } with {
+        return value => value,
+        commit_dma_output(frames, resume) => resume(()),
+    }
+}

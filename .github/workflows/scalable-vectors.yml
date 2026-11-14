@@ -1,0 +1,125 @@
+name: Scalable vectors under QEMU
+
+# Runs the SVE and RVV 1.0 paths of crates/vesper-simd (VVec strip-mining,
+# the §14.3 scanner) and crates/vesper-serde (the §20.3 stage 1 classifier)
+# under QEMU user mode at several vector lengths, cross-compiled with the
+# targets' GNU linkers. Every run must be bit-identical to the scalar
+# reference; VESPER_REQUIRE_SVE / VESPER_REQUIRE_RVV make a missing vector
+# unit a failure, not a skip. QEMU validates behaviour only: no performance
+# is measured here.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/vesper-simd/**'
+      - 'crates/vesper-serde/**'
+      - '.github/workflows/scalable-vectors.yml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/vesper-simd/**'
+      - 'crates/vesper-serde/**'
+      - '.github/workflows/scalable-vectors.yml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: scalable-vectors-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_RELEASE_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  qemu:
+    name: ${{ matrix.name }}
+    # Pinned: this suite was validated with Ubuntu 24.04's QEMU 8.2.2. On
+    # ubuntu-26.04 (QEMU 10.2.1) the RVV run stopped with SIGILL at start-up;
+    # that is not yet diagnosed (see the lane report).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: SVE (qemu-aarch64)
+            target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+            linker: aarch64-linux-gnu-gcc
+            qemu: qemu-aarch64 -L /usr/aarch64-linux-gnu
+            require: VESPER_REQUIRE_SVE
+            # 128, 256, 384 (not a power of two), 512 and 2048 bits.
+            cpus: >-
+              max,sve128=on
+              max,sve256=on
+              max,sve384=on
+              max,sve512=on
+              max,sve2048=on,sve-default-vector-length=256
+            without: max,sve=off
+          - name: RVV 1.0 (qemu-riscv64)
+            target: riscv64gc-unknown-linux-gnu
+            packages: gcc-riscv64-linux-gnu libc6-dev-riscv64-cross
+            linker: riscv64-linux-gnu-gcc
+            qemu: qemu-riscv64 -L /usr/riscv64-linux-gnu
+            require: VESPER_REQUIRE_RVV
+            # QEMU 8.2 supports VLEN 128..1024.
+            cpus: >-
+              rv64,v=true,vlen=128
+              rv64,v=true,vlen=256
+              rv64,v=true,vlen=512
+              rv64,v=true,vlen=1024
+            without: rv64,v=false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install QEMU user mode and the cross linker
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user ${{ matrix.packages }}
+          qemu-aarch64 --version | head -n1
+          qemu-riscv64 --version | head -n1
+      - name: Build the tests
+        env:
+          LINKER: ${{ matrix.linker }}
+        run: |
+          var="CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')_LINKER"
+          export "$var=$LINKER"
+          cargo test --locked --release --target ${{ matrix.target }} -p vesper-simd --test vvec --no-run
+          cargo test --locked --release --target ${{ matrix.target }} -p vesper-serde --test simd_scalable --no-run
+      - name: Run at every vector length
+        env:
+          LINKER: ${{ matrix.linker }}
+          QEMU: ${{ matrix.qemu }}
+          CPUS: ${{ matrix.cpus }}
+          WITHOUT: ${{ matrix.without }}
+          REQUIRE: ${{ matrix.require }}
+        run: |
+          prefix="CARGO_TARGET_$(echo '${{ matrix.target }}' | tr 'a-z-' 'A-Z_')"
+          export "${prefix}_LINKER=$LINKER"
+          run() {
+            export "${prefix}_RUNNER=$QEMU -cpu $1"
+            cargo test --locked --release --target ${{ matrix.target }} -p vesper-simd --test vvec -- --nocapture
+            cargo test --locked --release --target ${{ matrix.target }} -p vesper-serde --test simd_scalable -- --nocapture
+          }
+          export "$REQUIRE=1"
+          for cpu in $CPUS; do
+            echo "::group::-cpu $cpu"
+            run "$cpu"
+            echo "::endgroup::"
+          done
+          # Without the vector unit the paths must refuse with typed errors.
+          unset "$REQUIRE"
+          echo "::group::-cpu $WITHOUT (vector unit absent)"
+          run "$WITHOUT"
+          echo "::endgroup::"

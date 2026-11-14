@@ -61,6 +61,7 @@ fn render(world: &World, ty: &Type, v: &Val) -> String {
         (Val::U8(x), _) => x.to_string(),
         (Val::Bool(x), _) => x.to_string(),
         (Val::Float64(x), _) => x.to_string(),
+        (Val::String(x), _) => format!("{x:?}"),
         (Val::Tuple(vs), Type::Tuple(ts)) => format!(
             "({})",
             vs.iter()
@@ -185,26 +186,37 @@ fn compile(world: &World, options: &WasmOptions) -> Result<WasmArtifact, WasmErr
     wasm_backend::compile(world, "main", options)
 }
 
-/// Evaluator and Wasmtime agree; returns the artifact.
+/// Evaluator and Wasmtime agree, with and without the IR optimizer and in
+/// both effect-lowering modes; returns the default artifact.
 fn differential(source: &str) -> WasmArtifact {
     let w = world(source);
     let expected = evaluate(&w).expect("evaluator");
-    for optimize in [false, true] {
-        let art = compile(
-            &w,
-            &WasmOptions {
-                optimize,
-                ..WasmOptions::default()
-            },
-        )
-        .unwrap_or_else(|e| panic!("compile ({source}): {e}"));
-        assert!(art.component.starts_with(b"\0asm"));
-        if art.stack_switching && !stack_switching_host() {
-            eprintln!("stack switching unavailable on this host; compiled only: {source}");
-            continue;
+    for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+        for optimize in [false, true] {
+            let art = compile(
+                &w,
+                &WasmOptions {
+                    optimize,
+                    effects,
+                    ..WasmOptions::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("compile ({effects:?}, {source}): {e}"));
+            assert!(art.component.starts_with(b"\0asm"));
+            if effects == EffectLowering::Portable {
+                assert!(
+                    !art.stack_switching,
+                    "portable output uses WasmFX: {source}"
+                );
+            }
+            if art.stack_switching && !stack_switching_host() {
+                eprintln!("stack switching unavailable on this host; compiled only: {source}");
+                continue;
+            }
+            let got = run(&w, &art)
+                .unwrap_or_else(|e| panic!("run ({effects:?}, {source}): {e}\n{}", art.wit));
+            assert_eq!(got, expected, "{effects:?}: {source}\n{}", art.wit);
         }
-        let got = run(&w, &art).unwrap_or_else(|e| panic!("run ({source}): {e}\n{}", art.wit));
-        assert_eq!(got, expected, "{source}\n{}", art.wit);
     }
     compile(&w, &WasmOptions::default()).unwrap()
 }
@@ -486,20 +498,72 @@ fn general_one_shot_handlers_use_stack_switching() {
                 .any(|(_, m)| *m == HandlerMode::StackSwitching)),
             "{s}"
         );
+        // Portable: the same clauses are split at the resumption.
         let w = world(s);
-        match compile(
+        let art = compile(
             &w,
             &WasmOptions {
                 effects: EffectLowering::Portable,
                 ..WasmOptions::default()
             },
-        ) {
-            Err(WasmError::Unsupported {
-                construct: Unsupported::NonTailResumptiveHandler,
-                ..
-            }) => {}
-            other => panic!("{s}: {other:?}"),
-        }
+        )
+        .unwrap();
+        assert!(!art.stack_switching, "{s}");
+        assert!(
+            art.handlers
+                .iter()
+                .any(|h| h.clauses.iter().any(|(_, m)| *m == HandlerMode::Cps)),
+            "{s}"
+        );
+    }
+}
+
+/// Non-tail-resumptive one-shot clauses under the portable CPS split: the
+/// suffix after `resume` runs once the body has produced the handler's
+/// result, innermost first, and composes with aborts, state, nested
+/// handlers and outer effects.
+#[test]
+fn cps_handlers_run_without_stack_switching() {
+    let sources = [
+        // Several pending suffixes fold in LIFO order through the return clause.
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { wrapping_add(Ask::ask(), wrapping_mul(Ask::ask(), 10)) } with { return x => wrapping_mul(x, 1000), ask(k) => { let v = k(1); wrapping_add(wrapping_mul(v, 2), 3) }, } }",
+        // A clause that sometimes resumes and sometimes aborts.
+        "effect Pick { fn pick(sink n: i64) -> i64; } fn main() -> i64 { handle Pick in { let a = Pick::pick(1); let b = Pick::pick(-1); wrapping_add(a, b) } with { return x => x, pick(n, k) => if n > 0 { let r = k(n); wrapping_mul(r, 7) } else { 100 }, } }",
+        // Locals live across the resumption, including aggregates.
+        "copy struct P { a: i64, b: i64 } linear effect Ask { fn ask(sink p: P) -> i64; } fn main() -> i64 { handle Ask in { wrapping_add(Ask::ask(P { a: 1, b: 2 }), Ask::ask(P { a: 30, b: 40 })) } with { return x => x, ask(p, k) => { let before = wrapping_mul(p.a, p.b); let r = k(p.a); let q = P { a: r, b: before }; wrapping_add(q.a, wrapping_mul(q.b, 1000)) }, } }",
+        // Handler state through a CPS clause.
+        "linear effect Log { fn log(sink v: i64); } fn main() -> i64 { handle Log state total = 0 in { Log::log(1); Log::log(2); Log::log(3); 7 } with { return (x, total) => wrapping_add(wrapping_mul(total, 100), x), log(v, total, k) => { let r = k((), wrapping_add(total, v)); wrapping_add(r, 1000) }, } }",
+        // Suffixes perform an outer effect and raise into an outer Fail.
+        "linear effect Ask { fn ask() -> i64; } linear effect Out { fn out(sink v: i64) -> i64; } fn main() -> i64 { handle Out in { handle Ask in { wrapping_add(Ask::ask(), 1) } with { return x => x, ask(k) => { let r = k(5); Out::out(r) }, } } with { return x => x, out(v, k) => k(wrapping_mul(v, 3)), } }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Fail[ArithOverflow] in { handle Ask in { Ask::ask() } with { return x => x, ask(k) => { let r = k(9223372036854775807); r + 1 }, } } with { return x => x, raise(e, k) => -5, } }",
+        // The body aborts to an outer handler after a CPS clause resumed:
+        // the inner handler's pending suffixes are dropped.
+        "linear effect Ask { fn ask(sink n: i64) -> i64; } fn main() -> i64 { handle Fail[ArithOverflow] in { handle Ask in { wrapping_add(Ask::ask(1), Ask::ask(2) + 9223372036854775807) } with { return x => x, ask(n, k) => { let r = k(n); wrapping_add(r, 1000) }, } } with { return x => x, raise(e, k) => -7, } }",
+        // Operations from deep inside calls, nested CPS handlers of two effects.
+        include_str!("../examples/resumptions.ves"),
+        "linear effect A { fn a() -> i64; } linear effect B { fn b() -> i64; } fn both() -> i64 eff [A, B] { wrapping_add(A::a(), B::b()) } fn main() -> i64 { handle A in { handle B in { wrapping_mul(both(), both()) } with { return x => x, b(k) => { let r = k(2); wrapping_mul(r, 3) }, } } with { return x => x, a(k) => { let r = k(5); wrapping_add(r, 1) }, } }",
+        // A CPS clause inside a generic instance.
+        "linear effect Ask { fn ask() -> i64; } fn twice[T: mod copy](sink x: T) -> (T, i64) { let n = handle Ask in { wrapping_add(Ask::ask(), Ask::ask()) } with { return v => v, ask(k) => { let r = k(4); wrapping_add(r, 1) }, }; (x, n) } fn main() -> ((bool, i64), (u8, i64)) { (twice(true), twice[u8](3)) }",
+    ];
+    for s in sources {
+        let art = differential(s);
+        let w = world(s);
+        let portable = compile(
+            &w,
+            &WasmOptions {
+                effects: EffectLowering::Portable,
+                ..WasmOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            portable
+                .handlers
+                .iter()
+                .any(|h| h.clauses.iter().any(|(_, m)| *m == HandlerMode::Cps)),
+            "{s}"
+        );
+        assert!(!portable.stack_switching && art.stack_switching, "{s}");
     }
 }
 
@@ -549,27 +613,450 @@ fn closures_and_function_values() {
     }
 }
 
+// ---- f64 remainder, strings, monomorphization ------------------------------
+
+#[test]
+fn float_remainder_is_exact() {
+    differential(include_str!("fixtures/wasm_backend/remainder.ves"));
+    differential("fn main() -> f64 { let a: f64 = 10.5; a %= 4.0; a }");
+    differential("fn main() -> f64 { let n: f64 = 0.0; let a: f64 = 1.0; a % (n / n) }");
+    differential("fn main() -> f64 { let n: f64 = 0.0; let a: f64 = 1.0; (a / n) % 2.0 }");
+    differential("fn main() -> f64 { let n: f64 = 0.0; let a: f64 = 2.0; a % (1.0 / n) }");
+    differential("fn main() -> f64 { let a: f64 = 5.0; a % 0.0 }");
+    // Every pair of a grid of awkward operands (zeros, subnormals, huge
+    // ratios, exact multiples), compared through the evaluator's display,
+    // which round-trips every finite f64 exactly.
+    let values = [
+        "0.0",
+        "-0.0",
+        "1.0",
+        "-1.0",
+        "0.5",
+        "3.0",
+        "1e-300",
+        "2.5e-308",
+        "5e-324",
+        "3e-320",
+        "1e300",
+        "1.7976931348623157e308",
+        "7.25",
+        "-13.75",
+        "4503599627370497.0",
+        "0.1",
+    ];
+    for x in values {
+        let row: Vec<String> = values
+            .iter()
+            .map(|y| format!("{{ let a: f64 = {x}; let b: f64 = {y}; a % b }}"))
+            .collect();
+        differential(&format!(
+            "fn main() -> ({}) {{ ({}) }}",
+            vec!["f64"; values.len()].join(", "),
+            row.join(", ")
+        ));
+    }
+}
+
+#[test]
+fn strings() {
+    differential(r#"fn main() -> String { "hello, wasm" }"#);
+    differential(r#"fn main() -> String { "" }"#);
+    differential(r#"fn main() -> bool { let a = "abc"; let b = "abd"; a == b }"#);
+    differential(r#"fn main() -> (bool, bool) { ("abc" == "abc", "abc" != "ab") }"#);
+    differential(
+        r#"fn name(n: u8) -> String { match n { 0 => "zero", 1 => "one", _ => "many", } } fn main() -> (String, String, String) { (name(0), name(1), name(7)) }"#,
+    );
+    differential(
+        r#"fn classify(sink s: String) -> i64 { match s { "red" => 1, "green" => 2, _ => 0, } } fn main() -> (i64, i64, i64) { (classify("red"), classify("green"), classify("blue")) }"#,
+    );
+    differential(
+        r#"struct Named { name: String, value: i64 } fn main() -> Named { Named { name: "answer", value: 42 } }"#,
+    );
+    differential(r#"fn main() -> Option[String] { Some("unicode: é😀") }"#);
+    differential(
+        r#"fn main() -> bool { let a: Option[String] = Some("x"); let b: Option[String] = Some("x"); a == b }"#,
+    );
+}
+
+#[test]
+fn generic_functions_are_monomorphized() {
+    differential(
+        "copy struct Pair { x: f64, y: i64 } fn same[T: mod copy](a: T, b: T) -> bool { a == b } fn main() -> bool { let a = Pair { x: 1.0, y: 2 }; same[Pair](a, a) }",
+    );
+    // Inferred type arguments, several instances of one function.
+    differential(
+        "fn same[T: mod copy](a: T, b: T) -> bool { a == b } fn main() -> (bool, bool, bool) { (same(1, 2), same(true, true), same((1, 2.5), (1, 2.5))) }",
+    );
+    differential(
+        r#"fn same[T: mod copy](a: T, b: T) -> bool { a == b } fn twice[T: mod copy](a: T, b: T) -> bool { same(a, b) } fn main() -> (bool, bool) { (twice(7, 7), twice(Some(1), None)) }"#,
+    );
+    // A generic Fail instance resolved per instantiation.
+    differential(
+        "fn fail_with[E](sink e: E) -> i64 eff [Fail[E]] { Fail::raise(e) } fn main() -> i64 { handle Fail[u8] in { handle Fail[bool] in { fail_with(true) } with { return x => x, raise(e, k) => 1, } } with { return x => x, raise(e, k) => 2, } }",
+    );
+    differential(
+        "linear effect Get[T] { fn get() -> T; } fn ask[T]() -> T eff [Get[T]] { Get::get() } fn main() -> (u8, bool) { let a = handle Get[u8] in { ask[u8]() } with { return x => x, get(k) => k(9), }; let b = handle Get[bool] in { ask[bool]() } with { return x => x, get(k) => k(true), }; (a, b) }",
+    );
+    // Closures inside a generic instance see its types.
+    differential(
+        "fn eq_later[T: mod copy](sink a: T, sink b: T) -> bool { let f = || a == b; f() } fn main() -> (bool, bool) { (eq_later(1.5, 1.5), eq_later((1, 2), (2, 1))) }",
+    );
+}
+
+#[test]
+fn labelled_rows_and_inout_operation_arguments() {
+    for source in [
+        "linear effect Ask { fn ask() -> i64; } fn get(b: bool) -> i64 eff [outer: Ask] { if b { outer.ask() } else { wrapping_add(outer.ask(), 1) } } fn main() -> i64 { handle outer: Ask in { get(true) } with { return x => x, ask(k) => k(40), } }",
+        // The labelled row selects the outer handler past an inner one, and
+        // the callee's unlabelled operation resolves to the same handler.
+        "linear effect Ask { fn ask() -> i64; } fn get() -> i64 eff [outer: Ask] { wrapping_add(wrapping_mul(outer.ask(), 100), Ask::ask()) } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { wrapping_add(get(), inner.ask()) } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(40), } }",
+        // Labels pass through nested labelled callees and closures.
+        "linear effect Ask { fn ask() -> i64; } fn leaf() -> i64 eff [a: Ask] { a.ask() } fn mid() -> i64 eff [a: Ask] { let f = || eff [a: Ask] a.ask(); wrapping_add(leaf(), f()) } fn main() -> i64 { handle a: Ask in { handle b: Ask in { mid() } with { return x => x, ask(k) => k(1000), } } with { return x => x, ask(k) => k(21), } }",
+        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
+        // A named function with a labelled row called through a value.
+        "linear effect Ask { fn ask() -> i64; } fn get() -> i64 eff [outer: Ask] { wrapping_add(wrapping_mul(outer.ask(), 100), Ask::ask()) } fn main() -> i64 { handle outer: Ask in { handle inner: Ask in { let f = get; wrapping_add(f(), inner.ask()) } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(40), } }",
+        "copy struct P { a: i64, b: i64 } linear effect Inc { fn inc(inout x: i64); } fn main() -> P { let p = P { a: 1, b: 10 }; handle Inc in { Inc::inc(inout p.b); Inc::inc(inout p.b); p } with { return n => n, inc(n, k) => { n = wrapping_mul(n, 3); k(()) }, } }",
+        "linear effect Swap { fn swap(inout x: i64, sink v: i64) -> i64; } fn go() -> i64 eff [Swap] { let x = 1; let old = Swap::swap(inout x, 5); wrapping_add(wrapping_mul(x, 10), old) } fn main() -> i64 { handle Swap in { go() } with { return n => n, swap(x, v, k) => { let old = x; x = v; k(old) }, } }",
+    ] {
+        differential(source);
+    }
+    // An aborting clause would write the cell after it was copied back.
+    unsupported(
+        "effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = 1; 7 }, } }",
+        Unsupported::InoutEffectArgument,
+    );
+}
+
+// ---- host capabilities (WASI imports) and entry parameters -----------------
+
+struct WasiHost {
+    ctx: wasmtime_wasi::WasiCtx,
+    table: wasmtime::component::ResourceTable,
+}
+impl wasmtime_wasi::WasiView for WasiHost {
+    fn ctx(&mut self) -> wasmtime_wasi::WasiCtxView<'_> {
+        wasmtime_wasi::WasiCtxView {
+            ctx: &mut self.ctx,
+            table: &mut self.table,
+        }
+    }
+}
+
+/// A monotonic clock that advances by 1000 ns on every reading.
+struct TickClock(std::sync::Arc<std::sync::atomic::AtomicU64>);
+impl wasmtime_wasi::HostMonotonicClock for TickClock {
+    fn resolution(&self) -> u64 {
+        1
+    }
+    fn now(&self) -> u64 {
+        self.0.fetch_add(1000, std::sync::atomic::Ordering::SeqCst) + 1000
+    }
+}
+
+/// The evaluator as the host of the entry's capabilities: stdout text and
+/// the same tick clock.
+fn evaluate_hosted(world: &World) -> (String, String) {
+    use vesper::runtime::{Execution, Value};
+    let mut out = String::new();
+    let mut ticks = 0u64;
+    let mut r = Runtime::new(world);
+    r.fuel = 10_000_000;
+    let mut ex = r.begin_external("main", vec![]).expect("begin");
+    loop {
+        match ex {
+            Execution::Complete(v) => return (v.to_string(), out),
+            Execution::Suspended(s) => {
+                let req = s.request();
+                let value = match (req.effect.name.as_str(), req.operation.as_str()) {
+                    ("Stdout", "write") => {
+                        match &req.arguments[0] {
+                            Value::String(t) => out.push_str(t),
+                            _ => panic!("write of a non-string"),
+                        }
+                        Value::Tuple(vec![])
+                    }
+                    ("Clock", "now_ns") => {
+                        ticks += 1000;
+                        Value::UInt(ticks, 64)
+                    }
+                    other => panic!("unexpected host operation {other:?}"),
+                };
+                ex = s.resume(value).expect("resume");
+            }
+        }
+    }
+}
+
+fn run_hosted(world: &World, art: &WasmArtifact) -> Result<(String, String), String> {
+    let engine = engine(art.stack_switching);
+    let component = Component::new(&engine, &art.component).map_err(|e| format!("{e:?}"))?;
+    let mut linker = Linker::<WasiHost>::new(&engine);
+    wasmtime_wasi::p2::add_to_linker_sync(&mut linker).map_err(|e| format!("{e:?}"))?;
+    let stdout = wasmtime_wasi::p2::pipe::MemoryOutputPipe::new(1 << 20);
+    let mut b = wasmtime_wasi::WasiCtxBuilder::new();
+    b.stdout(stdout.clone());
+    b.monotonic_clock(TickClock(Default::default()));
+    let mut store = Store::new(
+        &engine,
+        WasiHost {
+            ctx: b.build(),
+            table: Default::default(),
+        },
+    );
+    store.set_fuel(100_000_000).unwrap();
+    let instance = linker
+        .instantiate(&mut store, &component)
+        .map_err(|e| format!("{e:?}"))?;
+    let iface = instance
+        .get_export_index(&mut store, None, ENTRY_INTERFACE)
+        .expect("entry interface");
+    let main = instance
+        .get_export_index(&mut store, Some(&iface), "main")
+        .expect("main export");
+    let func = instance.get_func(&mut store, main).expect("main func");
+    let unit = art.result == Type::unit() || art.result.name() == "Unit";
+    let mut results = if unit { vec![] } else { vec![Val::Bool(false)] };
+    func.call(&mut store, &[], &mut results)
+        .map_err(|e| format!("trap: {e:?}"))?;
+    let value = match results.first() {
+        None => "()".into(),
+        Some(v) => render(world, &art.result, v),
+    };
+    drop(store);
+    Ok((
+        value,
+        String::from_utf8(stdout.contents().to_vec()).expect("utf-8 stdout"),
+    ))
+}
+
+const HOST_PRELUDE: &str =
+    "linear effect Stdout { fn write(s: String); } linear effect Clock { fn now_ns() -> u64; } ";
+
+fn hosted_differential(source: &str) -> WasmArtifact {
+    let source = format!("{HOST_PRELUDE}{source}");
+    let w = world(&source);
+    let expected = evaluate_hosted(&w);
+    for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+        for optimize in [false, true] {
+            let art = compile(
+                &w,
+                &WasmOptions {
+                    optimize,
+                    effects,
+                    ..WasmOptions::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("compile ({effects:?}, {source}): {e}"));
+            if art.stack_switching && !stack_switching_host() {
+                continue;
+            }
+            let got = run_hosted(&w, &art)
+                .unwrap_or_else(|e| panic!("run ({effects:?}, {source}): {e}\n{}", art.wit));
+            assert_eq!(got, expected, "{effects:?}: {source}\n{}", art.wit);
+        }
+    }
+    compile(&w, &WasmOptions::default()).unwrap()
+}
+
+#[test]
+fn wasi_stdout_and_clock_behind_declared_capabilities() {
+    let art = hosted_differential(
+        r#"fn main() -> u64 eff [Stdout, Clock] { Stdout::write("hello "); let a = Clock::now_ns(); Stdout::write("world\n"); let b = Clock::now_ns(); wrapping_sub(b, a) }"#,
+    );
+    assert_eq!(
+        art.imports,
+        vec![
+            wasm_backend::HostCapability::Stdout,
+            wasm_backend::HostCapability::Clock
+        ]
+    );
+    assert!(
+        art.wit.contains("import wasi:cli/stdout@0.2.0;"),
+        "{}",
+        art.wit
+    );
+    assert!(
+        art.wit
+            .contains("import wasi:clocks/monotonic-clock@0.2.0;"),
+        "{}",
+        art.wit
+    );
+    // Capabilities flow through calls, closures and handlers, and a source
+    // handler can shadow the host one.
+    hosted_differential(
+        r#"fn greet(sink name: String) -> Unit eff [Stdout] { Stdout::write("hi "); Stdout::write(name); Stdout::write("\n"); } fn main() -> i64 eff [Stdout] { greet("ada"); let f = || eff [Stdout] Stdout::write("closure\n"); f(); let n = handle Stdout in { Stdout::write("swallowed"); 1 } with { return x => x, write(s, k) => k(()), }; n }"#,
+    );
+    hosted_differential(
+        r#"linear effect Ask { fn ask() -> i64; } fn main() -> i64 eff [Stdout] { handle Ask in { Stdout::write("before "); let v = Ask::ask(); Stdout::write("after "); v } with { return x => x, ask(k) => { Stdout::write("clause "); let r = k(42); Stdout::write("suffix\n"); r }, } }"#,
+    );
+    // A long write is split into 4096-byte chunks.
+    let long = "x".repeat(10_000);
+    hosted_differential(&format!(
+        r#"fn main() -> Unit eff [Stdout] {{ Stdout::write("{long}"); }}"#
+    ));
+    // Only clock: the component imports the clock alone.
+    let art = hosted_differential("fn main() -> u64 eff [Clock] { Clock::now_ns() }");
+    assert_eq!(art.imports, vec![wasm_backend::HostCapability::Clock]);
+    assert!(!art.wit.contains("stdout"), "{}", art.wit);
+}
+
+#[test]
+fn undeclared_or_mismatched_capabilities_are_rejected() {
+    for source in [
+        "linear effect Net { fn send(sink b: u8); } fn main() -> Unit eff [Net] { Net::send(1); }",
+        "effect Stdout { fn write(s: String); } fn main() -> Unit eff [Stdout] { Stdout::write(\"x\"); }",
+        "linear effect Stdout { fn write(s: String) -> u8; } fn main() -> u8 eff [Stdout] { Stdout::write(\"x\") }",
+        "linear effect Clock { fn now_ns() -> i64; } fn main() -> i64 eff [Clock] { Clock::now_ns() }",
+    ] {
+        let w = world(source);
+        assert!(
+            matches!(
+                compile(&w, &WasmOptions::default()),
+                Err(WasmError::Entry(_))
+            ),
+            "{source}"
+        );
+    }
+}
+
+/// `entry(args)` on Wasmtime agrees with the evaluator running
+/// `entry(<the same arguments as source literals>)`.
+fn entry_differential(decls: &str, entry: &str, cases: &[(&str, Vec<Val>)]) {
+    for (literal, vals) in cases {
+        let source = format!(
+            "{decls} fn main() -> {ret} {{ {entry}({literal}) }}",
+            ret = {
+                let w = world(&format!("{decls} fn main() -> i64 {{ 0 }}"));
+                vesper::numeric::default_type(&w.functions[entry].result).to_string()
+            }
+        );
+        let w = world(&source);
+        let expected = evaluate(&w).expect("evaluator");
+        for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+            let art = wasm_backend::compile(
+                &w,
+                entry,
+                &WasmOptions {
+                    effects,
+                    ..WasmOptions::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("{source}: {e}"));
+            let engine = engine(art.stack_switching);
+            let component = Component::new(&engine, &art.component).unwrap();
+            let mut store = Store::new(&engine, ());
+            store.set_fuel(10_000_000).unwrap();
+            let instance = Linker::<()>::new(&engine)
+                .instantiate(&mut store, &component)
+                .unwrap();
+            let iface = instance
+                .get_export_index(&mut store, None, ENTRY_INTERFACE)
+                .unwrap();
+            let f = instance
+                .get_export_index(&mut store, Some(&iface), "main")
+                .unwrap();
+            let func = instance.get_func(&mut store, f).unwrap();
+            let mut results = vec![Val::Bool(false)];
+            func.call(&mut store, vals, &mut results)
+                .unwrap_or_else(|e| panic!("{source}: {e:?}\n{}", art.wit));
+            assert_eq!(
+                render(&w, &art.result, &results[0]),
+                expected,
+                "{source}\n{}",
+                art.wit
+            );
+        }
+    }
+}
+
+#[test]
+fn aggregate_entry_parameters() {
+    let pair = |a: i64, b: bool| Val::Tuple(vec![Val::S64(a), Val::Bool(b)]);
+    entry_differential(
+        "fn f(p: (i64, bool), q: u8) -> (i64, u8) { let (a, b) = p; if b { (wrapping_add(a, 1), q) } else { (a, q) } }",
+        "f",
+        &[
+            ("(40, true), 2", vec![pair(40, true), Val::U8(2)]),
+            ("(40, false), 2", vec![pair(40, false), Val::U8(2)]),
+        ],
+    );
+    entry_differential(
+        "copy struct P { x: f64, y: u32 } fn f(p: P) -> P { P { x: p.x * 2.0, y: wrapping_add(p.y, 1) } }",
+        "f",
+        &[(
+            "P { x: 1.25, y: 41 }",
+            vec![Val::Record(vec![
+                ("x".into(), Val::Float64(1.25)),
+                ("y".into(), Val::U32(41)),
+            ])],
+        )],
+    );
+    // Variants with joined payloads (i32 with f64 and i64), and strings.
+    entry_differential(
+        "copy enum V { A(u8), B(f64), C(i64, u32), D } fn f(v: V, w: Option[u32]) -> (i64, u32) { let n = match v { V::A(x) => 1, V::B(x) => if x > 1.0 { 2 } else { 20 }, V::C(a, b) => wrapping_add(a, 3), V::D => 4, }; let m = match w { Some(x) => x, None => 0, }; (n, m) }",
+        "f",
+        &[
+            (
+                "V::A(7), Some(9)",
+                vec![
+                    Val::Variant("a".into(), Some(Box::new(Val::U8(7)))),
+                    Val::Variant("some".into(), Some(Box::new(Val::U32(9)))),
+                ],
+            ),
+            (
+                "V::B(2.5), None",
+                vec![
+                    Val::Variant("b".into(), Some(Box::new(Val::Float64(2.5)))),
+                    Val::Variant("none".into(), None),
+                ],
+            ),
+            (
+                "V::C(-10, 4), None",
+                vec![
+                    Val::Variant(
+                        "c".into(),
+                        Some(Box::new(Val::Tuple(vec![Val::S64(-10), Val::U32(4)]))),
+                    ),
+                    Val::Variant("none".into(), None),
+                ],
+            ),
+            (
+                "V::D, Some(1)",
+                vec![
+                    Val::Variant("d".into(), None),
+                    Val::Variant("some".into(), Some(Box::new(Val::U32(1)))),
+                ],
+            ),
+        ],
+    );
+    entry_differential(
+        r#"fn f(sink s: String, sink t: String) -> (bool, String) { (t == "abc", s) }"#,
+        "f",
+        &[
+            (
+                r#""abc", "abc""#,
+                vec![Val::String("abc".into()), Val::String("abc".into())],
+            ),
+            (
+                r#""é😀", "x""#,
+                vec![Val::String("é😀".into()), Val::String("x".into())],
+            ),
+            (
+                r#""", """#,
+                vec![Val::String("".into()), Val::String("".into())],
+            ),
+        ],
+    );
+}
+
 // ---- rejections --------------------------------------------------------------
 
 #[test]
 fn unsupported_constructs_are_typed_errors() {
+    // The continuation escapes into a closure instead of being called.
     unsupported(
-        "fn main() -> f64 { 7.5 % 2.0 }",
-        Unsupported::FloatRemainder,
-    );
-    // Generic functions are compiled once over the uniform representation,
-    // so type-directed operations on a type parameter are rejected.
-    unsupported(
-        "copy struct Pair { x: f64, y: i64 } fn same[T: mod copy](a: T, b: T) -> bool { a == b } fn main() -> bool { let a = Pair { x: 1.0, y: 2 }; same[Pair](a, a) }",
-        Unsupported::GenericOperation,
-    );
-    unsupported(
-        "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
-        Unsupported::InoutEffectArgument,
-    );
-    unsupported(
-        "linear effect Ask { fn ask() -> i64; } fn get(b: bool) -> i64 eff [outer: Ask] { if b { outer.ask() } else { wrapping_add(outer.ask(), 1) } } fn main() -> i64 { handle outer: Ask in { get(true) } with { return x => x, ask(k) => k(40), } }",
-        Unsupported::LabelledEffectRow,
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { Ask::ask() } with { return x => x, ask(k) => { let f = || k(1); f() }, } }",
+        Unsupported::FirstClassContinuation,
     );
 }
 
@@ -623,8 +1110,10 @@ fn entry_and_limit_errors() {
 
 #[test]
 fn memory_exhaustion_traps() {
+    // Live data grows without bound (a non-tail recursion keeps every
+    // block reachable): the bounded memory traps.
     let w = world(
-        "fn build(n: u64, acc: (u64, u64)) -> u64 { let (a, b) = acc; if n == 0 { a } else { build(wrapping_sub(n, 1), (wrapping_add(a, 1), n)) } } fn main() -> u64 { build(10000000, (0, 0)) }",
+        "fn build(n: u64) -> u64 { if n == 0 { 0 } else { let t = (n, n); let (a, b) = t; wrapping_add(build(wrapping_sub(n, 1)), a) } } fn main() -> u64 { build(100000) }",
     );
     let art = compile(
         &w,
@@ -636,6 +1125,51 @@ fn memory_exhaustion_traps() {
     .unwrap();
     let e = run(&w, &art).unwrap_err();
     assert!(e.contains("trap"), "{e}");
+}
+
+/// Tail-recursive loops that allocate run in memory bounded by their live
+/// arguments: the heap is reset to the loop's entry mark at every tail call
+/// after evacuating the arguments.
+#[test]
+fn tail_loops_reclaim_their_garbage() {
+    let loops = [
+        // A tuple accumulator rebuilt every iteration (10M iterations would
+        // need about 160 MB without reclamation).
+        (
+            "fn build(n: u64, acc: (u64, u64)) -> u64 { let (a, b) = acc; if n == 0 { a } else { build(wrapping_sub(n, 1), (wrapping_add(a, 1), n)) } } fn main() -> u64 { build(@N@, (0, 0)) }",
+            "@N@",
+        ),
+        // Nested structs, enums and strings in the carried state; garbage
+        // (an intermediate copy) is built each step too.
+        (
+            r#"copy struct S { tag: Option[u64], inner: (u64, f64) } struct St { s: S, name: String } fn step(sink st: St, n: u64) -> u64 { let St { s, name } = st; let S { tag, inner } = s; let (c, f) = inner; let junk = (c, (c, c)); if n == 0 { match tag { Some(t) => wrapping_add(t, c), None => c, } } else { let next = if n % 2 == 0 { "even" } else { "odd" }; step(St { s: S { tag: Some(n), inner: (wrapping_add(c, 1), f * 1.0) }, name: next }, wrapping_sub(n, 1)) } } fn main() -> u64 { step(St { s: S { tag: None, inner: (0, 1.5) }, name: "start" }, @N@) }"#,
+            "@N@",
+        ),
+        // Mutual tail recursion with a checked accumulator under a Fail handler.
+        (
+            "fn ping(n: u64, acc: (u64, u64)) -> u64 eff [Fail[ArithOverflow]] { let (a, b) = acc; if n == 0 { a } else { pong(n - 1, (a + 1, b)) } } fn pong(n: u64, acc: (u64, u64)) -> u64 eff [Fail[ArithOverflow]] { let (a, b) = acc; if n == 0 { b } else { ping(n - 1, (a, b + 2)) } } fn main() -> u64 { handle Fail[ArithOverflow] in { ping(@N@, (0, 0)) } with { return x => x, raise(e, k) => 0, } }",
+            "@N@",
+        ),
+    ];
+    for (source, n) in loops {
+        // Small: the evaluator agrees (both lowerings, with and without
+        // the optimizer).
+        differential(&source.replace(n, "1000"));
+        // Large, in 4 pages (256 KiB) of linear memory.
+        let w = world(&source.replace(n, "2000000"));
+        for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+            let art = compile(
+                &w,
+                &WasmOptions {
+                    max_memory_pages: 4,
+                    effects,
+                    ..WasmOptions::default()
+                },
+            )
+            .unwrap();
+            run_with_fuel(&w, &art, 5_000_000_000).unwrap_or_else(|e| panic!("{source}: {e}"));
+        }
+    }
 }
 
 // ---- component worlds ----------------------------------------------------------
