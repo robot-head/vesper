@@ -146,9 +146,10 @@ const QUERIES: &[(&str, &[&str])] = &[
     ),
     ("in Broker -> u64", &["checksum", "config_of"]),
     ("in copy Broker.{config} -> copy u64 eff []", &["config_of"]),
-    ("_ -> u64", &["checksum", "config_of"]),
+    // Generic `identity[T]` matches by instantiating T = u64.
+    ("_ -> u64", &["checksum", "config_of", "identity"]),
     ("sink linear WriteTxn -> Receipt eff [Storage]", &["commit"]),
-    ("sink WriteTxn -> _ eff []", &[]),
+    ("sink WriteTxn -> _ eff []", &["identity"]),
     ("in Broker -> linear WriteTxn", &["begin"]),
     ("in Broker -> copy WriteTxn", &[]),
     ("_, _ -> ()", &["publish"]),
