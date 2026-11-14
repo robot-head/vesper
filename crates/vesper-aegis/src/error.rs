@@ -9,6 +9,8 @@ use std::fmt;
 pub enum Format {
     /// An Intel TDX DCAP quote (version 4 or 5).
     TdxQuoteV4,
+    /// An Intel SGX DCAP quote (version 3).
+    SgxQuoteV3,
     SnpReport,
     CcaToken,
     ClaimsWire,

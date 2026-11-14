@@ -43,6 +43,7 @@ mod linear;
 pub mod policy;
 mod reader;
 pub mod roots;
+pub mod sgx;
 pub mod snp;
 pub mod tdx;
 pub mod time;

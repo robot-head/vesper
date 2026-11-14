@@ -386,7 +386,7 @@ struct TcbJson {
 }
 
 #[derive(Deserialize)]
-struct ComponentJson {
+pub(crate) struct ComponentJson {
     svn: u8,
 }
 
@@ -422,11 +422,11 @@ struct QeIdentityJson {
     tcb_levels: Vec<IsvLevelJson>,
 }
 
-fn collateral(what: &'static str, reason: String) -> AttestError {
+pub(crate) fn collateral(what: &'static str, reason: String) -> AttestError {
     AttestError::Collateral { what, reason }
 }
 
-fn hex_array<const N: usize>(s: &str, what: &'static str) -> Result<[u8; N], AttestError> {
+pub(crate) fn hex_array<const N: usize>(s: &str, what: &'static str) -> Result<[u8; N], AttestError> {
     let b = s.as_bytes();
     if b.len() != 2 * N {
         return Err(collateral(
@@ -455,7 +455,7 @@ fn hex_digit(c: u8) -> Option<u8> {
     }
 }
 
-fn svn16(c: &[ComponentJson], what: &'static str) -> Result<[u8; 16], AttestError> {
+pub(crate) fn svn16(c: &[ComponentJson], what: &'static str) -> Result<[u8; 16], AttestError> {
     if c.len() != 16 {
         return Err(collateral(
             what,
@@ -469,7 +469,7 @@ fn svn16(c: &[ComponentJson], what: &'static str) -> Result<[u8; 16], AttestErro
     Ok(out)
 }
 
-fn date(s: &str, what: &'static str) -> Result<u64, AttestError> {
+pub(crate) fn date(s: &str, what: &'static str) -> Result<u64, AttestError> {
     iso8601_utc_to_unix(s).ok_or_else(|| collateral(what, format!("bad UTC timestamp {s:?}")))
 }
 
@@ -599,12 +599,18 @@ impl TdxTcbInfo {
 impl QeIdentity {
     /// Parse a QE identity JSON body. Only `TD_QE` version 2 is accepted.
     pub fn parse(json: &[u8]) -> Result<Self, AttestError> {
+        Self::parse_with_id(json, "TD_QE")
+    }
+
+    /// Parse an enclave identity JSON body (version 2) whose `id` must be
+    /// `expected_id` (`TD_QE` for TDX, `QE` for the SGX quoting enclave).
+    pub fn parse_with_id(json: &[u8], expected_id: &str) -> Result<Self, AttestError> {
         let j: QeIdentityJson = serde_json::from_slice(json)
             .map_err(|e| collateral("enclaveIdentity", e.to_string()))?;
-        if j.id != "TD_QE" {
+        if j.id != expected_id {
             return Err(collateral(
                 "enclaveIdentity.id",
-                format!("{:?}, expected TD_QE", j.id),
+                format!("{:?}, expected {expected_id}", j.id),
             ));
         }
         if j.version != 2 {
@@ -816,7 +822,7 @@ fn parse_tcb(o: &BerObject<'_>) -> Result<([u8; 16], u16, [u8; 16]), AttestError
 
 // ---------------------------------------------------------- evaluation --
 
-fn all_ge(have: &[u8], need: &[u8]) -> bool {
+pub(crate) fn all_ge(have: &[u8], need: &[u8]) -> bool {
     have.iter().zip(need).all(|(h, n)| h >= n)
 }
 
@@ -828,7 +834,7 @@ fn isv_status(levels: &[IsvTcbLevel], isv_svn: u16) -> Option<&IsvTcbLevel> {
     levels.iter().find(|l| l.isv_svn <= isv_svn)
 }
 
-fn push_unique(out: &mut Vec<String>, ids: &[String]) {
+pub(crate) fn push_unique(out: &mut Vec<String>, ids: &[String]) {
     for id in ids {
         if !out.contains(id) {
             out.push(id.clone());
@@ -1084,7 +1090,7 @@ pub fn check_tdx_collateral_floor(
     Ok(())
 }
 
-fn check_window(
+pub(crate) fn check_window(
     issue: u64,
     next_update: u64,
     now_ns: u64,
@@ -1101,7 +1107,7 @@ fn check_window(
 /// with a copy of the root. webpki ignores that copy (the pinned anchor is
 /// used), so a corrupted copy would otherwise pass unnoticed; require it to
 /// be byte-identical to the anchor.
-fn check_embedded_root(certs: &[Vec<u8>], root: &TrustRoot) -> Result<(), AttestError> {
+pub(crate) fn check_embedded_root(certs: &[Vec<u8>], root: &TrustRoot) -> Result<(), AttestError> {
     match certs.last() {
         Some(last) if certs.len() >= 2 && last.as_slice() == root.der() => Ok(()),
         _ => Err(AttestError::CertificateChain(
@@ -1112,7 +1118,7 @@ fn check_embedded_root(certs: &[Vec<u8>], root: &TrustRoot) -> Result<(), Attest
 
 /// Verify a signed collateral body: issuer chain to `root` (with the root
 /// CA CRL) and the ECDSA P-256 signature over the exact body bytes.
-fn verify_signed(
+pub(crate) fn verify_signed(
     signed: &SignedCollateral,
     issuer_chain_pem: &[u8],
     root: &TrustRoot,
