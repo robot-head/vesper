@@ -235,7 +235,7 @@ fn omitted_nocapture_nullable_without_option_and_pointer_to_pointer_are_typed_er
             "out slice",
         ),
         (
-            "fn f(nocapture in p: Option[CSlice[u8]]) -> ForeignVal[Unit];",
+            "fn f(nocapture in p: Option[Option[u8]]) -> ForeignVal[Unit];",
             ErrorKind::Unsupported,
             "nested",
         ),

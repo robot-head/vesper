@@ -3,12 +3,15 @@
 //! file is compiled, every audited theorem's axioms are standard, and the
 //! model's fixture table matches the real mitigator program run in the
 //! interpreter. The Lean theorems are about the model, not the Rust code.
+//! The bounds-tracking model's fixture programs are rebuilt as BPF and
+//! must get the model's verdicts from this crate's verifier (and the
+//! kernel's, where the host loads programs).
 
 use std::path::PathBuf;
 use vesper_ebpf::interp::{XdpEnv, run_xdp};
 use vesper_ebpf::mitigator::{MitigatorConfig, build};
 
-const AUDITED_THEOREMS: usize = 7;
+const AUDITED_THEOREMS: usize = 10;
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Quot.sound", "Classical.choice"];
 
 fn lean_file() -> PathBuf {
@@ -145,6 +148,16 @@ fn lean_checks_and_fixture_matches_the_program() {
             );
             continue;
         }
+        if let Some(rest) = line.strip_prefix("\"bounds: [") {
+            let rest = rest.strip_suffix("]\"").expect("bounds line");
+            let got: Vec<bool> = rest.split(", ").map(|x| x == "true").collect();
+            assert_eq!(
+                got,
+                bounds_verdicts(&source()),
+                "Lean #eval vs the proved example"
+            );
+            continue;
+        }
         if line.ends_with("does not depend on any axioms") {
             audited += 1;
             continue;
@@ -177,4 +190,118 @@ fn fixture_rows_run_in_the_interpreter() {
             2, 2, 1, 1, 2, 2, 2, 2, 2, 1, 2, 1, 1, 2, 2, 2, 2, 1, 2, 2, 2
         ]
     );
+}
+
+/// The bounds model's fixture programs, parsed from `boundsPrograms`: one
+/// program per line, instructions as `.name arg..`.
+fn bounds_programs(src: &str) -> Vec<Vec<(String, Vec<u32>)>> {
+    let start = src.find("def boundsPrograms").expect("boundsPrograms");
+    let body = &src[start..];
+    let body = &body[..body.find("\n\n").expect("end of boundsPrograms")];
+    body.lines()
+        .filter_map(|l| {
+            let a = l.find("[.")?;
+            let e = a + l[a..].find(']').expect("]");
+            Some(
+                l[a + 1..e]
+                    .split(", ")
+                    .map(|i| {
+                        let mut w = i.trim().trim_start_matches('.').split(' ');
+                        let name = w.next().expect("name").to_owned();
+                        (name, w.map(|x| x.parse().expect("arg")).collect())
+                    })
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+/// The verdicts the Lean file proves (`example : ... = [..] := by decide`).
+fn bounds_verdicts(src: &str) -> Vec<bool> {
+    let at = src
+        .find("example : boundsPrograms.map (verify init) = [")
+        .expect("verdict example");
+    let rest = &src[at..];
+    let list = &rest[rest.find("= [").expect("[") + 3..rest.find(']').expect("]")];
+    list.split(", ").map(|x| x == "true").collect()
+}
+
+/// A model program as BPF: model registers are BPF registers 2..=8, `r9`
+/// is the bounds-check scratch register, `r0` is `XDP_PASS` throughout.
+fn bounds_bpf(insns: &[(String, Vec<u32>)]) -> vesper_ebpf::Program {
+    use vesper_ebpf::Asm;
+    use vesper_ebpf::insn::{AluOp, JmpOp, Reg, Size};
+    let reg = |i: u32| {
+        assert!((2..=8).contains(&i), "model register {i}");
+        [
+            Reg::R2,
+            Reg::R3,
+            Reg::R4,
+            Reg::R5,
+            Reg::R6,
+            Reg::R7,
+            Reg::R8,
+        ][i as usize - 2]
+    };
+    let mut a = Asm::new();
+    let out = a.label();
+    a.mov64(Reg::R0, 2);
+    for (name, v) in insns {
+        let imm = |i: usize| v[i] as i32;
+        match name.as_str() {
+            "ldData" => a.ldx(Size::W, reg(v[0]), Reg::R1, 0),
+            "ldDataEnd" => a.ldx(Size::W, reg(v[0]), Reg::R1, 4),
+            "movImm" => a.mov64(reg(v[0]), imm(1)),
+            "mov" => a.mov64(reg(v[0]), reg(v[1])),
+            "addImm" => a.alu64(AluOp::Add, reg(v[0]), imm(1)),
+            "andImm" => a.alu64(AluOp::And, reg(v[0]), imm(1)),
+            "mulImm" => a.alu64(AluOp::Mul, reg(v[0]), imm(1)),
+            "addReg" => a.alu64(AluOp::Add, reg(v[0]), reg(v[1])),
+            "exitIfPast" => {
+                a.mov64(Reg::R9, reg(v[0]));
+                a.alu64(AluOp::Add, Reg::R9, imm(1));
+                a.jmp(JmpOp::Gt, Reg::R9, reg(v[2]), out)
+            }
+            "ldxb" => a.ldx(Size::B, reg(v[0]), reg(v[1]), v[2] as i16),
+            other => panic!("unknown model instruction {other}"),
+        };
+    }
+    a.bind(out).unwrap();
+    a.exit();
+    let mut p = a.finish("bounds", vesper_ebpf::ProgramType::Xdp).unwrap();
+    p.license = "GPL".into();
+    p
+}
+
+#[test]
+fn bounds_model_verdicts_match_the_verifiers() {
+    use vesper_ebpf::{VerifierPolicy, verify};
+    let src = source();
+    let progs = bounds_programs(&src);
+    let want = bounds_verdicts(&src);
+    assert_eq!(progs.len(), want.len());
+    assert!(want.contains(&true) && want.contains(&false));
+    #[cfg(target_os = "linux")]
+    let kernel = vesper_ebpf::kernel::probe().is_ok();
+    for (i, (insns, &ok)) in progs.iter().zip(&want).enumerate() {
+        let p = bounds_bpf(insns);
+        let ours = verify(&p, &VerifierPolicy::default());
+        assert_eq!(ours.is_ok(), ok, "program {i}: {ours:?}");
+        if ok {
+            // accepted: runs without faults on packets of every length
+            for len in [0usize, 14, 33, 34, 35, 60, 74, 128] {
+                let pkt: Vec<u8> = (0..len).map(|b| (b * 37 + 5) as u8).collect();
+                let mut env = XdpEnv::new(&p);
+                assert_eq!(run_xdp(&p, &mut env, &pkt).expect("no fault").ret, 2);
+            }
+        } else {
+            let e = ours.unwrap_err();
+            assert!(e.rule.starts_with("mem."), "program {i}: {e}");
+        }
+        #[cfg(target_os = "linux")]
+        if kernel {
+            let k = vesper_ebpf::kernel::load(&p);
+            assert_eq!(k.is_ok(), ok, "program {i}: kernel {:?}", k.err());
+        }
+    }
 }

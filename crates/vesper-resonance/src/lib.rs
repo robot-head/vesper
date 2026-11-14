@@ -24,8 +24,13 @@
 //!   block splitting with parameter ramps.
 //! * [`kernels`]: the §32.3 state-variable-filter voice bank, the realtime
 //!   quantum and a 1 kHz PID torque controller.
+//! * [`simd`]: `std::arch` SIMD paths (SSE2, AVX, NEON) for the 16-lane SVF
+//!   tile, bit-identical to the scalar reference.
+//! * [`slab`]: the TiledSeq-style slab that packs every graph block buffer
+//!   into one 64-byte-aligned allocation.
 //! * [`denorm`]: the `ConstDenorm` scope (x86_64 MXCSR FTZ|DAZ, AArch64 FPCR
-//!   FZ), the only module allowed to use `unsafe`.
+//!   FZ). It and [`simd`] are the only modules allowed to use `unsafe`
+//!   (control-register asm; vector loads/stores and the AVX call).
 //!
 //! Linear owners (`RtBufferLease`) are non-Clone, non-Copy `#[must_use]`
 //! values whose only exits are consuming calls; a dropped one is counted as a
@@ -43,6 +48,8 @@ pub mod events;
 pub mod kernels;
 pub mod lease;
 pub mod pdc;
+pub mod simd;
+pub mod slab;
 pub mod spsc;
 
 /// One verifier diagnostic (wave-five shared vocabulary).

@@ -1,6 +1,14 @@
 //! Checked documentation fences with finite native execution, and hermetic
 //! `sim(...)` fences on the reference evaluator under a seeded SimPulse kernel
 //! (§40.2). No ambient IO, source arena or hard-timeout/sandbox claim is made.
+//!
+//! Positive non-simulated examples of one file are merged into one checked
+//! module and compiled into ONE shared Cranelift JIT module. When the native
+//! batch subset (finite scalar direct calls) does not cover an example, that
+//! example alone runs on the reference evaluator instead, and its report says
+//! which engine ran and why it fell back. Coverage is decided by compiling a
+//! probe module per example; probe modules are never executed and are
+//! counted separately from the shared module.
 use crate::{
     ast::Diagnostic,
     check,
@@ -98,6 +106,22 @@ pub struct ExampleReport {
     /// Present for `sim(...)` fences that reached execution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub simulation: Option<SimulationReport>,
+    /// Which engine executed the example; absent when nothing ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub engine: Option<Engine>,
+    /// Why the native batch did not cover an evaluator-run example.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Engine {
+    /// The shared Cranelift JIT module of this file.
+    Jit,
+    /// The reference evaluator (the native subset does not cover it).
+    Evaluator,
+    /// The reference evaluator under a seeded SimPulse kernel.
+    SimpulseEvaluator,
 }
 /// A simulated doctest ran twice: a recording run and a replay of its
 /// SimPulse journal. Both must succeed with identical results and traces.
@@ -134,7 +158,13 @@ pub struct DocTestReport {
     pub passed: bool,
     pub base_diagnostics: Vec<LocatedDiagnostic>,
     pub examples: Vec<ExampleReport>,
+    /// Statistics of the one shared JIT module, when any example ran in it.
     pub batch: Option<BatchReport>,
+    /// Never-executed single-entry modules compiled to decide coverage after
+    /// the whole set did not compile as one module (0 when it did).
+    pub coverage_probes: usize,
+    pub jit_examples: usize,
+    pub evaluator_examples: usize,
 }
 struct Line {
     text: String,
@@ -922,6 +952,9 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
             .collect(),
         examples: Vec::new(),
         batch: None,
+        coverage_probes: 0,
+        jit_examples: 0,
+        evaluator_examples: 0,
     };
     if !base_errors.is_empty() {
         return Ok(report);
@@ -1000,6 +1033,8 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
             message: String::new(),
             diagnostics,
             simulation: None,
+            engine: None,
+            fallback_reason: None,
         };
         if let Some(expected) = &example.expected {
             result.passed =
@@ -1018,6 +1053,7 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
                     result.message =
                         "simulated twice under SimPulse; journal replay matched".into();
                     result.simulation = Some(simulation);
+                    result.engine = Some(Engine::SimpulseEvaluator);
                 }
                 Err(error) => result.message = format!("simulated execution failed: {error}"),
             }
@@ -1039,7 +1075,7 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
                 generated.entry.expect("positive entry"),
                 fragment_start..merged.len(),
             ));
-            result.message = "checked; awaiting shared native execution".into();
+            result.message = "checked; awaiting execution".into();
         }
         report.examples.push(result);
     }
@@ -1064,45 +1100,108 @@ pub fn run(source: &str, limits: DocTestLimits) -> Result<DocTestReport, String>
                 );
             }
         } else {
-            let entries: Vec<_> = runnable.iter().map(|(_, n, _)| n.as_str()).collect();
-            match NativeBatch::compile(&checked.world, &entries, limits.batch) {
-                Err(error) => {
-                    for (index, _, _) in &runnable {
-                        report.examples[*index].message =
-                            format!("unsupported native execution: {error}");
-                    }
-                }
-                Ok(mut batch) => {
-                    for (index, entry, _) in &runnable {
-                        let mut first = None;
-                        let mut failed = None;
-                        for _ in 0..limits.runs_per_example {
-                            match batch.run(entry) {
-                                Ok(value) => {
-                                    let value = value.to_string();
-                                    if first.as_ref().is_some_and(|x| x != &value) {
-                                        failed = Some("repeated native results differ".into());
-                                        break;
-                                    }
-                                    first = Some(value);
-                                }
-                                Err(error) => {
-                                    failed = Some(error);
-                                    break;
-                                }
-                            }
-                        }
-                        let result = &mut report.examples[*index];
-                        result.passed = failed.is_none();
-                        result.result = first;
-                        result.message = failed
-                            .unwrap_or_else(|| "executed repeatedly in shared JIT module".into());
-                    }
-                    report.batch = Some(batch.stats().into());
-                }
-            }
+            execute(&checked.world, &runnable, limits, &mut report)?;
         }
     }
     report.passed = report.examples.iter().all(|e| e.passed);
     Ok(report)
+}
+
+/// Repeat `run` and require identical results.
+fn repeated(
+    runs: usize,
+    mut run: impl FnMut() -> Result<crate::runtime::Value, String>,
+) -> (Option<String>, Option<String>) {
+    let mut first: Option<String> = None;
+    for _ in 0..runs {
+        match run() {
+            Ok(value) => {
+                let value = value.to_string();
+                if first.as_ref().is_some_and(|x| *x != value) {
+                    return (first, Some("repeated results differ".into()));
+                }
+                first = Some(value);
+            }
+            Err(error) => return (first, Some(error)),
+        }
+    }
+    (first, None)
+}
+
+/// Run every merged positive entry: the natively covered ones in one shared
+/// JIT module, the rest on the reference evaluator.
+fn execute(
+    world: &check::World,
+    runnable: &[(usize, String, std::ops::Range<usize>)],
+    limits: DocTestLimits,
+    report: &mut DocTestReport,
+) -> Result<(), String> {
+    let all: Vec<&str> = runnable.iter().map(|(_, n, _)| n.as_str()).collect();
+    let mut fallback: std::collections::BTreeMap<&str, String> = Default::default();
+    let batch = match NativeBatch::compile(world, &all, limits.batch) {
+        Ok(batch) => Some(batch),
+        Err(_) => {
+            let mut covered = Vec::new();
+            for entry in &all {
+                report.coverage_probes += 1;
+                match NativeBatch::compile(world, &[entry], limits.batch) {
+                    Ok(_probe) => covered.push(*entry),
+                    Err(error) => {
+                        fallback.insert(entry, error);
+                    }
+                }
+            }
+            if covered.is_empty() {
+                None
+            } else {
+                match NativeBatch::compile(world, &covered, limits.batch) {
+                    Ok(batch) => Some(batch),
+                    Err(error) => {
+                        // Individually covered entries that do not compile
+                        // together (e.g. a shared budget) all fall back.
+                        for entry in covered {
+                            fallback.insert(entry, format!("shared module: {error}"));
+                        }
+                        None
+                    }
+                }
+            }
+        }
+    };
+    let mut batch = batch;
+    let mut evaluator = None;
+    for (index, entry, _) in runnable {
+        let result = &mut report.examples[*index];
+        if let Some(reason) = fallback.get(entry.as_str()) {
+            let runtime = evaluator.get_or_insert_with(|| crate::runtime::Runtime::new(world));
+            let (value, failed) = repeated(limits.runs_per_example, || {
+                runtime.fuel = 1_000_000;
+                runtime.run(entry, vec![])
+            });
+            result.passed = failed.is_none();
+            result.result = value;
+            result.engine = Some(Engine::Evaluator);
+            result.fallback_reason = Some(reason.clone());
+            result.message = match failed {
+                Some(error) => format!("evaluator execution failed: {error}"),
+                None => format!(
+                    "executed repeatedly on the reference evaluator (not covered by the native subset: {reason})"
+                ),
+            };
+            report.evaluator_examples += 1;
+        } else {
+            let batch = batch.as_mut().ok_or("missing shared JIT module")?;
+            let (value, failed) = repeated(limits.runs_per_example, || batch.run(entry));
+            result.passed = failed.is_none();
+            result.result = value;
+            result.engine = Some(Engine::Jit);
+            result.message = match failed {
+                Some(error) => format!("native execution failed: {error}"),
+                None => "executed repeatedly in shared JIT module".into(),
+            };
+            report.jit_examples += 1;
+        }
+    }
+    report.batch = batch.map(|b| b.stats().into());
+    Ok(())
 }
