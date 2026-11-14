@@ -18,7 +18,7 @@ Wave-eight lane 2 ([prompt](../agent-prompts/wave-eight/02-verified-direct-codeg
   - `wrapping_add/sub/mul` are total.
 - **Other operations.** Comparisons, `!`, `if`, and `let` with irrefutable tuple and struct patterns.
 - **Calls.** Direct calls, including recursion. A self call in tail position becomes a jump, so loops (which Vesper writes as tail recursion) run in constant stack.
-- **`inout` arguments.** These are copy-in/copy-out.
+- **`inout` arguments.** These are copy-in/copy-out. A projected parameter (`inout p.{x}: Pair`) copies back only its declared fields, so two `inout` arguments that name disjoint fields of one place both take effect.
 - **Effects.** Only unlabeled `Fail[ArithOverflow]` and `Fail[RuntimeError]` are allowed. The checker already forbids `Fail` from crossing an active `inout` parameter, so an abort can never lose a write-back.
 
 ### Result protocol (`vesper.verified-codegen/1`)
@@ -83,7 +83,7 @@ The x86-64 and AArch64 instruction semantics in the model are an abstraction of 
 These were run locally on Linux x86-64 with Rust 1.100.0 and Lean 4.24.0 from the GitHub release zip. The build environment was `CARGO_BUILD_JOBS=3 CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`.
 
 - `cargo test --locked --test verified_codegen --test verified_codegen_lean --test verified_codegen_cli`, with `VESPER_LEAN=…/lean-4.24.0-linux/bin/lean`: 12 passed, 0 failed.
-  - **`fixtures_agree_with_the_evaluator_and_cranelift`.** Each of the eight fixtures in `tests/fixtures/verified_codegen/` runs on the evaluator and on Cranelift (the JIT, using a status wrapper for failing programs). It also runs as a verified-codegen executable for each target, both with and without `ir_opt`, and every run must give the same `Value` or failure kind. The fixtures cover recursion, loops, nested structs, `inout`, every kind, overflow, division by zero and Unit.
+  - **`fixtures_agree_with_the_evaluator_and_cranelift`.** Each of the nine fixtures in `tests/fixtures/verified_codegen/` runs on the evaluator and on Cranelift (the JIT, using a status wrapper for failing programs). It also runs as a verified-codegen executable for each target, both with and without `ir_opt`, and every run must give the same `Value` or failure kind. The fixtures cover recursion, loops, nested structs, `inout` (including disjoint projections of one place), every kind, overflow, division by zero and Unit.
   - **`checked_arithmetic_boundaries`.** Over 90 generated programs cover every operator and kind at the overflow boundaries, the corner cases of `MIN / -1`, `MIN % -1`, `x / 0` and `x % 0`, and the narrow-kind wrapping masks. The results are compared with the evaluator.
   - **`constructs_outside_the_subset_are_typed_errors`.** Floats, strings, enums, `match`, generic functions, closures, handlers (a user effect), indexing and struct equality each produce the expected `Unsupported` construct. Vector operations reach the wildcard `Operation` arm; that path has no fixture of its own.
   - **`entry_and_target_errors`**, **`containers_are_well_formed`** (ELF and Mach-O headers parsed back) and **`x86_64_code_disassembles`** (with `objdump`, when present).

@@ -248,6 +248,8 @@ fn fixtures_agree_with_the_evaluator_and_cranelift() {
             "Segment { closed: true, from: Point { x: 25, y: 6 }, to: Point { x: 1, y: 2 } }",
         ),
         ("inout.ves", "(2, 22, 42)"),
+        // Disjoint projections of one place: each copy-back is partial.
+        ("projections.ves", "(21, 21)"),
         ("kinds.ves", "(241, 4147483647, 1, (-3, -1, true, false))"),
         ("overflow.ves", "overflow"),
         ("divide.ves", "div0"),

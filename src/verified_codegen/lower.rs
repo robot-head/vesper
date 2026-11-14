@@ -142,6 +142,10 @@ pub struct Planned {
     pub name: String,
     pub label: Label,
     pub params: Vec<(Pass, Shape)>,
+    /// For each parameter, the word ranges `(start, len)` the caller copies
+    /// back after the call: the declared projections of an `inout`
+    /// parameter (`inout p.{x}`), or the whole value when it declares none.
+    pub writeback: Vec<Vec<(u32, u32)>>,
     pub result: Shape,
 }
 
@@ -236,6 +240,28 @@ pub fn plan(
             .iter()
             .map(|p| Ok((p.pass, shape(world, &p.ty, &name)?)))
             .collect::<Result<Vec<_>, VerifiedError>>()?;
+        let writeback = f
+            .params
+            .iter()
+            .zip(&params)
+            .map(|(p, (_, s))| {
+                if p.projections.is_empty() {
+                    return Ok(vec![(0, s.len())]);
+                }
+                p.projections
+                    .iter()
+                    .map(|path| {
+                        s.range(path).ok_or_else(|| {
+                            VerifiedError::Invalid(format!(
+                                "projection {}.{{{}}} of {name}",
+                                p.name,
+                                path.join(".")
+                            ))
+                        })
+                    })
+                    .collect()
+            })
+            .collect::<Result<Vec<_>, VerifiedError>>()?;
         let result = shape(world, &f.result, &name)?;
         for b in &f.blocks {
             for i in &b.instructions {
@@ -252,6 +278,7 @@ pub fn plan(
             name,
             label,
             params,
+            writeback,
             result,
         });
         // Entry label and body label (after the prologue).
@@ -680,8 +707,12 @@ impl FnLower<'_> {
                             format!("call to unplanned function {callee}"),
                         )
                     })?;
-                let (label, nres, params) =
-                    (target.label, target.result.len(), target.params.clone());
+                let (label, nres, params, ranges) = (
+                    target.label,
+                    target.result.len(),
+                    target.params.clone(),
+                    target.writeback.clone(),
+                );
                 if params.len() != args.len() {
                     return Err(VerifiedError::Invalid(format!("arity of {callee}")));
                 }
@@ -689,7 +720,7 @@ impl FnLower<'_> {
                 self.out_words = self.out_words.max(area);
                 let mut index = nres;
                 let mut writebacks = vec![];
-                for (arg, (pass, s)) in args.iter().zip(&params) {
+                for ((arg, (pass, s)), ranges) in args.iter().zip(&params).zip(ranges) {
                     let (src, ashape) = self.value(arg.value)?;
                     if ashape.len() != s.len() {
                         return Err(VerifiedError::Invalid(format!(
@@ -706,7 +737,7 @@ impl FnLower<'_> {
                         let place = arg.place.clone().ok_or_else(|| {
                             VerifiedError::Invalid("inout argument without a place".into())
                         })?;
-                        writebacks.push((place, index));
+                        writebacks.push((place, index, ranges));
                     }
                     index += s.len();
                 }
@@ -721,13 +752,18 @@ impl FnLower<'_> {
                         index: w,
                     })?;
                 }
-                for (place, index) in writebacks {
-                    let (slot, s) = self.place(&place.root, &place.path)?;
-                    for w in 0..s.len() {
-                        self.push(Lir::LoadOut {
-                            dst: slot + w,
-                            index: index + w,
-                        })?;
+                // Copy back only the words the callee may write: two
+                // `inout` arguments may name disjoint projections of one
+                // place (`f(inout p, inout p)` with `p.{x}` and `q.{y}`).
+                for (place, index, ranges) in writebacks {
+                    let (slot, _) = self.place(&place.root, &place.path)?;
+                    for (start, len) in ranges {
+                        for w in start..start + len {
+                            self.push(Lir::LoadOut {
+                                dst: slot + w,
+                                index: index + w,
+                            })?;
+                        }
                     }
                 }
                 Ok(())
