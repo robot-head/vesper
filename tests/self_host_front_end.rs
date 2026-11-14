@@ -452,6 +452,11 @@ fn edge_cases_and_typed_errors() {
             ),
             // `1.x` is an integer, a dot and a field name; `1e` an int and a name.
             ("fn f(x: i64) -> i64 { 1.x }", Expect::Seed),
+            // Tensor shapes, dimension parameters and wire structs (§28.2).
+            (
+                "wire struct H { a: u32 }\nfn f[M: dim, N: dim](x: Tensor[f32, [M, N * 4, 128]]) -> Tensor[f32, [N, M]] { Tensor::reshape[[N, M]](x) }",
+                Expect::Seed,
+            ),
             ("fn f() -> i64 { 1e }", Expect::ParseError(CODE_EXPECTED)),
             // Nested block comments, line comments and every trivia byte.
             ("/* a /* b */ c */ fn f() {}\t\r\n\x0c// end", Expect::Seed),

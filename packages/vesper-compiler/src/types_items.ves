@@ -22,6 +22,9 @@ fn ty_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         effects(q)
     } else if k == 32 {
         expect(ty_list(bump(p)), 33)
+    } else if k == 36 {
+        // A tensor shape `[M, N * K, 128]` (§28.2).
+        expect(dimensions(bump(p)), 37)
     } else if k == 61 {
         fail_p(Diag::Unsupported(5, nth(p, 0).start))
     } else {
@@ -31,6 +34,38 @@ fn ty_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         } else {
             type_args(q)
         }
+    }
+}
+
+fn dimensions(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 37) {
+        p
+    } else {
+        let q = dimension(dimension_factor(p));
+        let r = eat(q, 38);
+        if ate(q, r) {
+            dimensions(r)
+        } else {
+            r
+        }
+    }
+}
+
+// A product of decimal literals and dimension names (`QHeads * HeadDim`).
+fn dimension(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = eat(p, 56);
+    if ate(p, q) {
+        dimension(dimension_factor(q))
+    } else {
+        p
+    }
+}
+
+fn dimension_factor(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at(p, 6) {
+        close(bump(open(p, 204)))
+    } else {
+        ty(p)
     }
 }
 
@@ -181,6 +216,9 @@ fn generic_list(p: P, track: bool) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         let r = if ate(q, c) {
             if row {
                 expect(c, 18)
+            } else if at_word(c, 0, 0x64696d) {
+                // `N: dim` (§28.2), a tensor dimension parameter.
+                bump(c)
             } else if at(c, 3) {
                 let b = trait_ref(c);
                 with_flags(b, b.nostruct, b.rows, true)
@@ -249,7 +287,12 @@ fn item(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     } else if at_word(p, 0, 0x6d6f64656c) {
         fail_p(Diag::Unsupported(2, start))
     } else {
-        let q = mode(p);
+        // `wire struct` (§13.2, §28.2): a padding-free copy struct.
+        let q = if at_word(p, 0, 0x77697265) && nth(p, 1).kind == 8 {
+            bump(p)
+        } else {
+            mode(p)
+        };
         let k = kind(q);
         if k == 8 {
             fields(generics(upper(bump(q)), false))

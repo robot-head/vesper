@@ -41,8 +41,10 @@ for the input.
   seed's `TokenKind` discriminants. The parser keeps no token buffer: its
   state caches the next significant token and re-lexes only for the second
   and third lookahead.
-* **Vector lane counts.** `Vec[u8, 16]` (merged from #379 while this lane
-  ran) is supported: an integer type argument is one TYPE node, as in the seed.
+* **Grammar merged from main while this lane ran.** Vector lane counts
+  (`Vec[u8, 16]`, #379: an integer type argument is one TYPE node) and the
+  §28.2 tensor syntax (shape types `[M, N * 4, 128]`, `N: dim` parameters,
+  `wire struct`, and `f[[M, N]](x)` type arguments) mirror the seed.
 * **CST.** The parser mirrors the seed's batch parser node for node (MODULE,
   ITEM, EXPR, PATTERN, TYPE, with trivia attached as rowan attaches it). With
   no byte buffer to hold the flat CST, it is emitted as a preorder event
@@ -76,19 +78,19 @@ for the input.
 Differential test `tests/self_host_front_end.rs`:
 
 * `differential_over_repository_sources`: every `.ves` file under
-  `examples/`, `tests/fixtures/` and `packages/` (170 files, including the
-  compiler's own five sources) on the evaluator; every sixteenth file (11)
+  `examples/`, `tests/fixtures/` and `packages/` (301 files, including the
+  compiler's own five sources) on the evaluator; every sixteenth file
   also on the Cranelift JIT, which must return the same results. Files over
   6 KB (the compiler's own `lexer`, `cursor`, `types_items` and
   `expressions`) run on the JIT only, since the evaluator needs about 40 s
   each in a debug build. Result:
-  **170/170 token streams identical** (kinds and spans, trivia and EOF
-  included), **102 CSTs identical**, 4 typed `Unsupported` (the trait/model
+  **301/301 token streams identical** (kinds and spans, trivia and EOF
+  included), **233 CSTs identical**, 4 typed `Unsupported` (the trait/model
   examples), 64 seed-rejected inputs rejected (all macro-syntax fixtures:
   `source_macro*`, `macro_preview`, `stylus`, one `format_proof`, where the
-  batch seed reports "expected a declaration"). Assertion floors: 100
+  batch seed reports "expected a declaration"). 23 sources ran on the JIT. Assertion floors: 100
   sources, 100 token matches, 50 CST matches, 8 JIT runs.
-* `edge_cases_and_typed_errors`: 37 hand-written inputs against the seed:
+* `edge_cases_and_typed_errors`: 38 hand-written inputs against the seed:
   number longest-match cases, nested comments, all trivia bytes, compound
   operators, keyword prefixes, escapes, region capacity bounds, literal
   overflow, invalid escapes, raw newlines in strings, syntax errors, lexical
@@ -99,7 +101,7 @@ Differential test `tests/self_host_front_end.rs`:
 Commands and results (cloud host, 4 cores, Rust 1.97; Clippy with 1.100):
 
 ```text
-cargo test --test self_host_front_end            2 passed, 156 s (debug)
+cargo test --test self_host_front_end            2 passed, 279 s (debug)
 cargo fmt --all -- --check                       ok
 cargo +1.100.0 clippy --locked --test self_host_front_end -- -D warnings   ok
 vesper fmt --check packages/vesper-compiler/src/*.ves                      unchanged

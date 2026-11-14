@@ -231,13 +231,24 @@ fn postfix(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
+// Whether `[` followed by this token opens type arguments, not an index.
+// `Tensor::reshape[[M, N]](x)`: no index expression starts with `[`.
+fn starts_type_args(t: Tok) -> bool eff [Fail[ArithOverflow]] {
+    match t.kind {
+        3 => true,
+        12 => true,
+        36 => true,
+        _ => primitive(t),
+    }
+}
+
 fn postfix_op(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     if k == 32 {
         postfix(expect(args(bump(p)), 33))
     } else if k == 36 {
         let one = nth(p, 1);
         let named_row = one.kind == 4 && nth(p, 2).kind == 40;
-        let generic = named_row || one.kind == 3 || one.kind == 12 || primitive(one);
+        let generic = named_row || starts_type_args(one);
         if generic {
             postfix(expect(args(expect(type_args(p), 32)), 33))
         } else if p.rows && one.kind == 4 {
