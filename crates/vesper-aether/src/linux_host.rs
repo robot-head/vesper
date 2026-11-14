@@ -34,7 +34,12 @@ mod uffd {
     const UFFD_USER_MODE_ONLY: libc::c_int = 1;
     const UFFDIO_REGISTER_MODE_MISSING: u64 = 1;
     const UFFDIO_REGISTER_MODE_MINOR: u64 = 1 << 2;
+    const UFFD_FEATURE_MINOR_HUGETLBFS: u64 = 1 << 9;
     const UFFD_FEATURE_MINOR_SHMEM: u64 = 1 << 10;
+    /// One 2 MiB huge page.
+    pub const HUGE_PAGE_BYTES: usize = 2 << 20;
+    /// 4 KiB pages per 2 MiB huge page.
+    pub const PAGES_PER_HUGE_PAGE: usize = HUGE_PAGE_BYTES / PAGE_BYTES;
     const UFFD_EVENT_PAGEFAULT: u8 = 0x12;
     const UFFD_PAGEFAULT_FLAG_MINOR: u64 = 1 << 2;
     const BIT_REGISTER: u64 = 1 << 0x00;
@@ -157,6 +162,11 @@ mod uffd {
     /// `UFFDIO_API` with `features` requested. A kernel without one of them
     /// answers `EINVAL`, reported as the missing feature.
     fn handshake(fd: RawFd, features: u64) -> Result<(), Unavailable> {
+        let name = if features & UFFD_FEATURE_MINOR_HUGETLBFS != 0 {
+            "UFFD_FEATURE_MINOR_HUGETLBFS"
+        } else {
+            "UFFD_FEATURE_MINOR_SHMEM"
+        };
         let mut api = UffdioApi {
             api: UFFD_API,
             features,
@@ -165,7 +175,7 @@ mod uffd {
         // SAFETY: `api` is a live uffdio_api for the call.
         unsafe { ioctl_ptr(fd, UFFDIO_API, &mut api) }.map_err(|errno| {
             if errno == libc::EINVAL && features != 0 {
-                Unavailable::MissingFeature("UFFD_FEATURE_MINOR_SHMEM")
+                Unavailable::MissingFeature(name)
             } else {
                 Unavailable::KernelRefused {
                     op: "UFFDIO_API",
@@ -177,7 +187,7 @@ mod uffd {
             return Err(Unavailable::MissingFeature("UFFDIO_REGISTER"));
         }
         if api.features & features != features {
-            return Err(Unavailable::MissingFeature("UFFD_FEATURE_MINOR_SHMEM"));
+            return Err(Unavailable::MissingFeature(name));
         }
         Ok(())
     }
@@ -327,8 +337,11 @@ mod uffd {
         }
     }
 
-    /// MINOR faults on a shared memfd: map the page-cache page in place.
-    struct ContinueShared;
+    /// MINOR faults on a shared memfd: map the page-cache page in place, one
+    /// granule (4 KiB, or 2 MiB on a huge-page memfd) at a time.
+    struct ContinueShared {
+        granule: u64,
+    }
     fn continue_range(fd: RawFd, start: u64, len: u64) -> Result<(), i32> {
         let mut c = UffdioContinue {
             range: UffdioRange { start, len },
@@ -347,7 +360,7 @@ mod uffd {
             dst: u64,
             stats: &mut UffdStats,
         ) -> Result<Result<(), i32>, UffdError> {
-            Ok(continue_range(fd, dst, PAGE_BYTES as u64).map(|()| stats.continued += 1))
+            Ok(continue_range(fd, dst, self.granule).map(|()| stats.continued += 1))
         }
     }
 
@@ -358,6 +371,8 @@ mod uffd {
         base: usize,
         len: usize,
         pages: usize,
+        /// Bytes one fault resolves: 4 KiB, or 2 MiB on hugetlbfs.
+        granule: usize,
         route: UffdRoute,
         minor: bool,
         unregistered: AtomicBool,
@@ -373,6 +388,7 @@ mod uffd {
             map_fd: RawFd,
             mode: u64,
             need: (u64, &'static str),
+            granule: usize,
         ) -> Result<Self, UffdError> {
             if pages == 0 || pages > MAX_LAZY_PAGES {
                 return Err(UffdError::InvalidRegion);
@@ -386,6 +402,7 @@ mod uffd {
                 base,
                 len,
                 pages,
+                granule,
                 route,
                 minor: mode == UFFDIO_REGISTER_MODE_MINOR,
                 unregistered: AtomicBool::new(false),
@@ -405,6 +422,9 @@ mod uffd {
             )?;
             if reg.ioctls & need.0 != need.0 {
                 return Err(UffdError::Unavailable(Unavailable::MissingFeature(need.1)));
+            }
+            if base % granule != 0 {
+                return Err(UffdError::InvalidRegion);
             }
             Ok(region)
         }
@@ -620,12 +640,13 @@ mod uffd {
                     .ok_or(UffdError::FaultOutsideRegion { address })?;
                 let index = (offset / PAGE_BYTES as u64) as usize;
                 order.push(index);
-                let dst = self.page_address(index);
+                let granule = self.granule as u64;
+                let dst = self.page_address(index) / granule * granule;
                 match resolver.resolve(fd, index, dst, stats)? {
                     Ok(()) => {}
                     Err(e) if e == libc::EEXIST => {
                         stats.raced += 1;
-                        self.wake(dst, PAGE_BYTES as u64)?;
+                        self.wake(dst, granule)?;
                     }
                     Err(errno) => {
                         return Err(UffdError::Os {
@@ -668,6 +689,7 @@ mod uffd {
                         BIT_WAKE | BIT_COPY | BIT_ZEROPAGE,
                         "UFFDIO_COPY/UFFDIO_ZEROPAGE",
                     ),
+                    PAGE_BYTES,
                 )?,
             })
         }
@@ -811,6 +833,15 @@ mod uffd {
     pub struct SealedMemfd {
         file: std::fs::File,
         pages: usize,
+        huge: bool,
+    }
+
+    /// Free 2 MiB pages in the host pool (`HugePages_Free`), if readable.
+    pub fn free_huge_pages() -> Option<u64> {
+        let info = std::fs::read_to_string("/proc/meminfo").ok()?;
+        info.lines()
+            .find_map(|l| l.strip_prefix("HugePages_Free:"))
+            .and_then(|v| v.trim().parse().ok())
     }
 
     impl SealedMemfd {
@@ -820,20 +851,76 @@ mod uffd {
             pages: usize,
             mut fill: impl FnMut(usize, &mut [u8; PAGE_BYTES]) -> Result<bool, Error>,
         ) -> Result<Self, UffdError> {
-            if pages == 0 || pages > MAX_LAZY_PAGES {
+            Self::build_with(pages, false, &mut fill)
+        }
+
+        /// [`SealedMemfd::build`] backed by 2 MiB huge pages
+        /// (`MFD_HUGETLB | MFD_HUGE_2MB`): `pages` (4 KiB pages) must be a
+        /// whole number of huge pages. Where the kernel has no hugetlbfs or
+        /// the pool has too few free pages this is
+        /// [`Unavailable::HugePages`]; regions over it fault and prefetch 2
+        /// MiB at a time.
+        pub fn build_huge(
+            pages: usize,
+            mut fill: impl FnMut(usize, &mut [u8; PAGE_BYTES]) -> Result<bool, Error>,
+        ) -> Result<Self, UffdError> {
+            Self::build_with(pages, true, &mut fill)
+        }
+
+        /// Huge pages where the host allows them (a whole number of 2 MiB
+        /// pages and a pool that can hold them), 4 KiB pages otherwise.
+        pub fn build_preferring_huge(
+            pages: usize,
+            mut fill: impl FnMut(usize, &mut [u8; PAGE_BYTES]) -> Result<bool, Error>,
+        ) -> Result<Self, UffdError> {
+            if pages.is_multiple_of(PAGES_PER_HUGE_PAGE) {
+                match Self::build_with(pages, true, &mut fill) {
+                    Err(UffdError::Unavailable(Unavailable::HugePages { .. })) => {}
+                    other => return other,
+                }
+            }
+            Self::build_with(pages, false, &mut fill)
+        }
+
+        fn build_with(
+            pages: usize,
+            huge: bool,
+            fill: &mut dyn FnMut(usize, &mut [u8; PAGE_BYTES]) -> Result<bool, Error>,
+        ) -> Result<Self, UffdError> {
+            if pages == 0
+                || pages > MAX_LAZY_PAGES
+                || (huge && !pages.is_multiple_of(PAGES_PER_HUGE_PAGE))
+            {
                 return Err(UffdError::InvalidRegion);
             }
             let len = (pages * PAGE_BYTES) as u64;
+            let huge_err = |op: &'static str, errno: i32| {
+                UffdError::Unavailable(Unavailable::HugePages {
+                    op,
+                    errno,
+                    free: free_huge_pages(),
+                })
+            };
+            let flags = libc::MFD_CLOEXEC
+                | libc::MFD_ALLOW_SEALING
+                | if huge {
+                    libc::MFD_HUGETLB | libc::MFD_HUGE_2MB
+                } else {
+                    0
+                };
             // SAFETY: a valid NUL-terminated name; returns a new fd or -1.
             let fd = adopt(libc::c_long::from(unsafe {
-                libc::memfd_create(
-                    c"vesper-aether-snapshot".as_ptr(),
-                    libc::MFD_CLOEXEC | libc::MFD_ALLOW_SEALING,
-                )
+                libc::memfd_create(c"vesper-aether-snapshot".as_ptr(), flags)
             }))
-            .map_err(|errno| UffdError::Os {
-                op: "memfd_create",
-                errno,
+            .map_err(|errno| {
+                if huge {
+                    huge_err("memfd_create(MFD_HUGETLB)", errno)
+                } else {
+                    UffdError::Os {
+                        op: "memfd_create",
+                        errno,
+                    }
+                }
             })?;
             let file = std::fs::File::from(fd);
             file.set_len(len).map_err(|e| UffdError::Os {
@@ -844,22 +931,59 @@ mod uffd {
             // first touch is a minor fault (holes would fault in silently).
             // SAFETY: fallocate on our memfd over its own length.
             if unsafe { libc::fallocate(file.as_raw_fd(), 0, 0, len as libc::off_t) } < 0 {
-                return Err(UffdError::Os {
-                    op: "fallocate(memfd)",
-                    errno: errno(),
+                let e = errno();
+                return Err(if huge {
+                    huge_err("fallocate(hugetlb memfd)", e)
+                } else {
+                    UffdError::Os {
+                        op: "fallocate(memfd)",
+                        errno: e,
+                    }
                 });
             }
             let mut page = Box::new([0u8; PAGE_BYTES]);
-            for index in 0..pages {
-                page.fill(0);
-                let nonzero =
-                    fill(index, &mut page).map_err(|error| UffdError::Source { index, error })?;
-                if nonzero {
-                    file.write_all_at(&page[..], (index * PAGE_BYTES) as u64)
-                        .map_err(|e| UffdError::Os {
-                            op: "pwrite(memfd)",
-                            errno: e.raw_os_error().unwrap_or(0),
-                        })?;
+            if huge {
+                // hugetlbfs has no write(2): fill through a shared mapping,
+                // unmapped again before sealing (F_SEAL_WRITE needs no
+                // writable shared mapping to exist).
+                let base = mmap(len as usize, libc::MAP_SHARED, file.as_raw_fd())?;
+                struct Unmap(usize, usize);
+                impl Drop for Unmap {
+                    fn drop(&mut self) {
+                        // SAFETY: unmaps exactly the mapping made above.
+                        unsafe { libc::munmap(self.0 as *mut libc::c_void, self.1) };
+                    }
+                }
+                let _unmap = Unmap(base, len as usize);
+                for index in 0..pages {
+                    page.fill(0);
+                    let nonzero =
+                        fill(index, &mut page).map_err(|error| UffdError::Source { index, error })?;
+                    if nonzero {
+                        // SAFETY: `base + index * PAGE_BYTES .. + PAGE_BYTES`
+                        // lies in the live shared mapping of `len` bytes, which
+                        // nothing else accesses; `page` is a distinct buffer.
+                        unsafe {
+                            std::ptr::copy_nonoverlapping(
+                                page.as_ptr(),
+                                (base + index * PAGE_BYTES) as *mut u8,
+                                PAGE_BYTES,
+                            );
+                        }
+                    }
+                }
+            } else {
+                for index in 0..pages {
+                    page.fill(0);
+                    let nonzero =
+                        fill(index, &mut page).map_err(|error| UffdError::Source { index, error })?;
+                    if nonzero {
+                        file.write_all_at(&page[..], (index * PAGE_BYTES) as u64)
+                            .map_err(|e| UffdError::Os {
+                                op: "pwrite(memfd)",
+                                errno: e.raw_os_error().unwrap_or(0),
+                            })?;
+                    }
                 }
             }
             // SAFETY: F_ADD_SEALS on our memfd with a constant seal set.
@@ -876,7 +1000,7 @@ mod uffd {
                     errno: errno(),
                 });
             }
-            let sealed = Self { file, pages };
+            let sealed = Self { file, pages, huge };
             if sealed.seals()? & SNAPSHOT_SEALS != SNAPSHOT_SEALS {
                 return Err(UffdError::Os {
                     op: "F_GET_SEALS",
@@ -884,6 +1008,10 @@ mod uffd {
                 });
             }
             Ok(sealed)
+        }
+        /// Backed by 2 MiB huge pages.
+        pub fn is_huge(&self) -> bool {
+            self.huge
         }
         /// A sealed copy of `source` (e.g. a CAS slot).
         pub fn from_source<S: PageSource>(source: &S) -> Result<Self, UffdError> {
@@ -962,14 +1090,27 @@ mod uffd {
     }
 
     impl MinorRegion {
+        /// On a huge-page memfd the private mapping reserves its
+        /// copy-on-write pages up front (no `MAP_NORESERVE`), so an exhausted
+        /// pool is an `mmap` error here rather than `SIGBUS` on a later write.
         pub fn map_private(memfd: &Arc<SealedMemfd>) -> Result<Self, UffdError> {
+            let (features, flags, granule) = if memfd.huge {
+                (UFFD_FEATURE_MINOR_HUGETLBFS, libc::MAP_PRIVATE, HUGE_PAGE_BYTES)
+            } else {
+                (
+                    UFFD_FEATURE_MINOR_SHMEM,
+                    libc::MAP_PRIVATE | libc::MAP_NORESERVE,
+                    PAGE_BYTES,
+                )
+            };
             let reg = Registered::new(
                 memfd.pages,
-                UFFD_FEATURE_MINOR_SHMEM,
-                libc::MAP_PRIVATE | libc::MAP_NORESERVE,
+                features,
+                flags,
                 memfd.file.as_raw_fd(),
                 UFFDIO_REGISTER_MODE_MINOR,
                 (BIT_WAKE | BIT_CONTINUE, "UFFDIO_CONTINUE"),
+                granule,
             )?;
             Ok(Self {
                 reg,
@@ -1001,36 +1142,53 @@ mod uffd {
         where
             F: FnOnce(&Toucher<'_>) -> R,
         {
-            self.reg.serve(&ContinueShared, fault_budget, touch)
+            self.reg.serve(
+                &ContinueShared {
+                    granule: self.reg.granule as u64,
+                },
+                fault_budget,
+                touch,
+            )
         }
         /// Maps the hot set before any touch: one `UFFDIO_CONTINUE` per run of
-        /// up to 2 MiB; pages already mapped are retried singly (raced).
+        /// up to 2 MiB; pages already mapped are retried singly (raced). On a
+        /// huge-page memfd each run is widened to whole 2 MiB pages, and the
+        /// counts are of the 4 KiB pages mapped.
         pub fn prefetch(&self, hot: &HotSet) -> Result<UffdStats, UffdError> {
             if hot.page_count() != self.reg.pages || self.reg.unregistered.load(Ordering::SeqCst) {
                 return Err(UffdError::InvalidRegion);
             }
             let fd = self.reg.fd.as_raw_fd();
+            let per = self.reg.granule / PAGE_BYTES;
             let mut stats = UffdStats::default();
+            // Granule-aligned runs (4 KiB granules leave the runs unchanged).
+            let mut ranges: Vec<(usize, usize)> = Vec::new();
             for run in hot
                 .runs(PREFETCH_BATCH_PAGES)
                 .map_err(|_| UffdError::InvalidRegion)?
             {
-                let start = self.reg.page_address(run.start);
-                match continue_range(fd, start, (run.pages * PAGE_BYTES) as u64) {
+                let first = run.start / per * per;
+                let end = (run.start + run.pages).div_ceil(per) * per;
+                match ranges.last_mut() {
+                    Some(last) if last.1 >= first => last.1 = last.1.max(end),
+                    _ => ranges.push((first, end)),
+                }
+            }
+            for (first, end) in ranges {
+                let pages = end - first;
+                let start = self.reg.page_address(first);
+                match continue_range(fd, start, (pages * PAGE_BYTES) as u64) {
                     Ok(()) => {
-                        stats.continued += run.pages as u64;
-                        stats.prefetched += run.pages as u64;
+                        stats.continued += pages as u64;
+                        stats.prefetched += pages as u64;
                     }
                     Err(e) if e == libc::EEXIST || e == libc::EAGAIN => {
-                        for i in 0..run.pages {
-                            match continue_range(
-                                fd,
-                                self.reg.page_address(run.start + i),
-                                PAGE_BYTES as u64,
-                            ) {
+                        for g in (first..end).step_by(per) {
+                            match continue_range(fd, self.reg.page_address(g), self.reg.granule as u64)
+                            {
                                 Ok(()) => {
-                                    stats.continued += 1;
-                                    stats.prefetched += 1;
+                                    stats.continued += per as u64;
+                                    stats.prefetched += per as u64;
                                 }
                                 Err(e) if e == libc::EEXIST => stats.raced += 1,
                                 Err(errno) => {
@@ -1051,6 +1209,10 @@ mod uffd {
                 }
             }
             Ok(stats)
+        }
+        /// Bytes one fault maps (4 KiB, or 2 MiB over a huge-page memfd).
+        pub fn fault_granule(&self) -> usize {
+            self.reg.granule
         }
         /// Physical frame of page `index`, from `/proc/self/pagemap`. Two
         /// regions report the same frame for a page they share. `None` if the

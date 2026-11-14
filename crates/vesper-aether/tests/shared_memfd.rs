@@ -395,3 +395,16 @@ fn clone_entropy_mixes_hardware_and_os_sources() {
     assert!(!s.supplied);
     assert!(CloneEntropy::supplied([1; 32]).sources().supplied);
 }
+
+#[test]
+fn seal_preferring_huge_falls_back_for_images_below_two_mib() {
+    if !available("prefer_huge_seal") {
+        return;
+    }
+    let root = RootKey::new([0x44; 32]);
+    let mut auth = ForkAuthority::new(0xbeef);
+    let img = image(&mut auth, &root);
+    let sealed = SealedSnapshot::seal_preferring_huge(&img).unwrap();
+    assert!(!sealed.memfd().is_huge(), "not a whole number of 2 MiB pages");
+    assert_eq!(&sealed.memfd().read_page(0).unwrap()[..], &patterned(1)[..]);
+}
