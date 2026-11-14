@@ -54,6 +54,7 @@ impl Layout {
                 ty.name(),
                 "u8" | "u32" | "u64" | "i64" | "f64" | "bool" | "Unit" | "Never"
             )
+            || crate::regions::is_handle_type(ty)
             || *ty == Type::unit()
         {
             return Ok(Self {

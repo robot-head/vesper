@@ -166,7 +166,7 @@ Every developer workflow ships inside a **single static `vesper` binary** (`crat
 | `vesper build` / `check` | Runs WASI `build.vsp` + macros, `mif:blake3` early-cutoff CAS builds, and `--unikernel` / `--tee` targets. | `cargo build` / `check` |
 | `vesper fmt` | **Vesper Stylus**: Zero-config, idempotent, comment-complete Wadler-Lindig formatter over Rowan CSTs. | `cargo fmt` (`rustfmt`) |
 | `vesper lint [--fix]` | **Vesper Lint**: FieldTree narrowing, unused-effect removal, and SemVer-safe CST fixes over a whole package (or one file). `Alloc`-to-`Region` demotion and `egglog` rules are not implemented yet. | `cargo clippy` + `dylint` |
-| `vesper doc` | **Vesper Codex**: Renders linear typestate graphs, `FieldTree` heatmaps, 64B wire rulers, WASM Hoogle, & `.olean` proofs. | `cargo doc` (`rustdoc`) |
+| `vesper doc` | **Vesper Codex**: Checked API HTML/JSON with `FieldTree` borrow heatmaps, linear typestate graphs, 64B wire rulers, an offline signature-search page (`--bundle`), and proof badges linking audited `.olean` certificates from the Loom store. | `cargo doc` (`rustdoc`) |
 | `vesper test` | `--doc` single-JIT-module doctests over a whole package, with exact `compile_fail` codes and `sim(...)` doctests on deterministic *SimPulse* clock, network & disk. Parallel unit tests, `--sim`, `--sim-ui` (*SimAura*) & `--mutate` are not implemented yet. | `cargo test` + `nextest` + `turmoil` + `cargo-mutants` |
 | `vesper bench` | **Vesper Metronome**: paired A/B/B/A runs of checked scalar kernels with an exact median-ratio gate (`--max-regression-bp`), hardware cycles/instructions via Linux perf group reads, user-space `RDPMC` (`--pmu-provider rdpmc`) or macOS `kpc` (root), reported unavailable otherwise, and *Stabilizer*-style heap/stack/environment layout randomization (`--randomize-layout`). *Coz*-style causal profiling is a library API (`vesper_bench::causal`), not a flag. | `criterion` + `divan` + `coz` |
 | `vesper fuzz` | **Vesper Crucible**: Cranelift SSA edge-coverage + Bitwuzla/Z3 concolic fuzzing, `ChoiceTape` shrinking, & MPK `@differential_shadow`. | `cargo-fuzz` + `proptest` + `kani` |
@@ -324,7 +324,7 @@ cd vesper
 lean proofs/VesperMetatheory.lean
 
 # 3. Build the unified `vesper` CLI toolchain in release mode
-cargo build --release -p vesper-cli
+cargo build --release -p vesper
 
 # 4. Run workspace unit tests, Stylus formatting checks, Substructural lints, & JIT doctests
 ./target/release/vesper fmt --check

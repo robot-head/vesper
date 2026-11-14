@@ -199,6 +199,42 @@ pub struct PckExtensions {
     pub fmspc: [u8; 6],
     /// 0 = Standard, 1 = Scalable, 2 = Scalable with integrity.
     pub sgx_type: u32,
+    /// Which Intel CA issued the PCK (from the issuer common name).
+    pub issuer: PckIssuer,
+    /// Platform-instance data: present exactly in certificates issued by
+    /// the PCK Platform CA (multi-package platforms registered with
+    /// Intel's registration service).
+    pub platform_instance: Option<PckPlatformInstance>,
+}
+
+/// The Intel CA that issued a PCK certificate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PckIssuer {
+    /// `Intel SGX PCK Processor CA`: single-package platforms.
+    Processor,
+    /// `Intel SGX PCK Platform CA`: multi-package (platform-instance)
+    /// certificates.
+    Platform,
+}
+
+/// `PlatformInstanceID` (SGX extension entry 6) and `Configuration`
+/// (entry 7) of a Platform CA PCK certificate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PckPlatformInstance {
+    pub platform_instance_id: [u8; 16],
+    /// `None` when the certificate has no `Configuration` entry.
+    pub configuration: Option<PckPlatformConfiguration>,
+}
+
+/// `Configuration` sub-entries (each optional in Intel's specification).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct PckPlatformConfiguration {
+    /// Platform can be extended with additional packages (via package add).
+    pub dynamic_platform: Option<bool>,
+    /// Platform root keys are cached by the registration service.
+    pub cached_keys: Option<bool>,
+    /// SMT (hyper-threading) is enabled on the platform.
+    pub smt_enabled: Option<bool>,
 }
 
 /// One platform TCB level of a TDX TCB info.
@@ -288,7 +324,11 @@ pub struct VerifiedTdxQuote {
     pub pck: PckExtensions,
     pub tcb_info: TdxTcbInfo,
     pub qe_identity: QeIdentity,
+    /// Evaluation of `TEE_TCB_SVN` (launch TCB).
     pub evaluation: TdxTcbEvaluation,
+    /// TD 1.5 bodies: evaluation of `TEE_TCB_SVN_2` (current TCB), which
+    /// must also find a level. `None` for TD 1.0 bodies.
+    pub current_evaluation: Option<TdxTcbEvaluation>,
 }
 
 // ---------------------------------------------------------------- JSON --
@@ -443,10 +483,23 @@ fn isv_levels(
     levels
         .iter()
         .map(|l| {
+            let status = TcbStatus::parse(&l.tcb_status)?;
+            // Intel's enclave and TDX module identity levels carry only
+            // these three statuses; convergence (and the Lean model in
+            // `lean/AegisCollateral.lean`) relies on it.
+            if !matches!(
+                status,
+                TcbStatus::UpToDate | TcbStatus::OutOfDate | TcbStatus::Revoked
+            ) {
+                return Err(collateral(
+                    what,
+                    format!("status {} is not valid for an ISV level", status.as_str()),
+                ));
+            }
             Ok(IsvTcbLevel {
                 isv_svn: l.tcb.isvsvn,
                 tcb_date: date(&l.tcb_date, what)?,
-                status: TcbStatus::parse(&l.tcb_status)?,
+                status,
                 advisory_ids: l.advisory_ids.clone(),
             })
         })
@@ -626,8 +679,26 @@ pub fn parse_pck_extensions(cert_der: &[u8]) -> Result<PckExtensions, AttestErro
     if !rest.is_empty() {
         return Err(ext_err("trailing bytes"));
     }
+    let issuer_cn = cert
+        .issuer()
+        .iter_common_name()
+        .next()
+        .and_then(|cn| cn.as_str().ok())
+        .ok_or_else(|| collateral("PCK certificate", "issuer has no common name".into()))?;
+    let issuer = match issuer_cn {
+        "Intel SGX PCK Processor CA" => PckIssuer::Processor,
+        "Intel SGX PCK Platform CA" => PckIssuer::Platform,
+        other => {
+            return Err(collateral(
+                "PCK certificate",
+                format!("unknown issuer {other:?}"),
+            ));
+        }
+    };
     let base = SGX_EXTENSION_OID;
     let mut ppid = None;
+    let mut instance_id = None;
+    let mut configuration = None;
     let mut tcb = None;
     let mut pce_id = None;
     let mut fmspc = None;
@@ -643,8 +714,10 @@ pub fn parse_pck_extensions(cert_der: &[u8]) -> Result<PckExtensions, AttestErro
             "3" => pce_id.replace(octets::<2>(value, "PCE-ID")?).is_some(),
             "4" => fmspc.replace(octets::<6>(value, "FMSPC")?).is_some(),
             "5" => sgx_type.replace(small_int(value, 2, "SGX type")?).is_some(),
-            // 6 PlatformInstanceID, 7 Configuration: not used for TCB evaluation.
-            "6" | "7" => false,
+            "6" => instance_id
+                .replace(octets::<16>(value, "PlatformInstanceID")?)
+                .is_some(),
+            "7" => configuration.replace(parse_configuration(value)?).is_some(),
             _ => return Err(ext_err("unknown entry")),
         };
         if slot_taken {
@@ -652,7 +725,28 @@ pub fn parse_pck_extensions(cert_der: &[u8]) -> Result<PckExtensions, AttestErro
         }
     }
     let (sgx_components, pce_svn, cpu_svn) = tcb.ok_or_else(|| ext_err("missing TCB"))?;
+    let platform_instance = match (issuer, instance_id, configuration) {
+        (PckIssuer::Platform, Some(platform_instance_id), configuration) => {
+            Some(PckPlatformInstance {
+                platform_instance_id,
+                configuration,
+            })
+        }
+        (PckIssuer::Platform, None, _) => {
+            return Err(ext_err(
+                "Platform CA certificate without PlatformInstanceID",
+            ));
+        }
+        (PckIssuer::Processor, None, None) => None,
+        (PckIssuer::Processor, _, _) => {
+            return Err(ext_err(
+                "Processor CA certificate with platform-instance entries",
+            ));
+        }
+    };
     Ok(PckExtensions {
+        issuer,
+        platform_instance,
         ppid: ppid.ok_or_else(|| ext_err("missing PPID"))?,
         sgx_components,
         pce_svn,
@@ -661,6 +755,27 @@ pub fn parse_pck_extensions(cert_der: &[u8]) -> Result<PckExtensions, AttestErro
         fmspc: fmspc.ok_or_else(|| ext_err("missing FMSPC"))?,
         sgx_type: sgx_type.ok_or_else(|| ext_err("missing SGX type"))?,
     })
+}
+
+fn parse_configuration(o: &BerObject<'_>) -> Result<PckPlatformConfiguration, AttestError> {
+    let prefix = format!("{SGX_EXTENSION_OID}.7.");
+    let mut c = PckPlatformConfiguration::default();
+    for item in seq(o)? {
+        let (oid, value) = entry(item)?;
+        let flag = value
+            .as_bool()
+            .map_err(|_| ext_err("Configuration entry is not BOOLEAN"))?;
+        let slot = match oid.strip_prefix(&prefix) {
+            Some("1") => &mut c.dynamic_platform,
+            Some("2") => &mut c.cached_keys,
+            Some("3") => &mut c.smt_enabled,
+            _ => return Err(ext_err("unknown Configuration entry")),
+        };
+        if slot.replace(flag).is_some() {
+            return Err(ext_err("duplicated Configuration entry"));
+        }
+    }
+    Ok(c)
 }
 
 fn parse_tcb(o: &BerObject<'_>) -> Result<([u8; 16], u16, [u8; 16]), AttestError> {
@@ -757,9 +872,37 @@ pub fn evaluate_qe(qe: &QeReportBody, identity: &QeIdentity) -> Result<IsvTcbLev
 }
 
 /// Evaluate the TCB status of `quote` (already signature-checked) against
-/// parsed collateral and the PCK certificate's extension.
+/// parsed collateral and the PCK certificate's extension, using the TD
+/// report's `TEE_TCB_SVN` (the TCB the TD was launched on).
 pub fn evaluate_tdx_tcb(
     quote: &TdxQuote,
+    pck: &PckExtensions,
+    tcb_info: &TdxTcbInfo,
+    qe_identity: &QeIdentity,
+) -> Result<TdxTcbEvaluation, AttestError> {
+    evaluate_tdx_tcb_svn(quote, &quote.body.tee_tcb_svn, pck, tcb_info, qe_identity)
+}
+
+/// For a TD 1.5 report (quote v5 body type 3 or 4): the same evaluation
+/// with `TEE_TCB_SVN_2`, the TCB currently running after TD-preserving
+/// module updates. Intel's QVL requires it to be appraisable too. `None`
+/// for TD 1.0 bodies.
+pub fn evaluate_tdx_current_tcb(
+    quote: &TdxQuote,
+    pck: &PckExtensions,
+    tcb_info: &TdxTcbInfo,
+    qe_identity: &QeIdentity,
+) -> Result<Option<TdxTcbEvaluation>, AttestError> {
+    quote
+        .td15
+        .as_ref()
+        .map(|t| evaluate_tdx_tcb_svn(quote, &t.tee_tcb_svn2, pck, tcb_info, qe_identity))
+        .transpose()
+}
+
+fn evaluate_tdx_tcb_svn(
+    quote: &TdxQuote,
+    tee: &[u8; 16],
     pck: &PckExtensions,
     tcb_info: &TdxTcbInfo,
     qe_identity: &QeIdentity,
@@ -774,7 +917,6 @@ pub fn evaluate_tdx_tcb(
             what: "PCE-ID (PCK certificate vs TCB info)",
         });
     }
-    let tee = &quote.body.tee_tcb_svn;
     let major = tee[1];
     let use_identities = major > 0 && !tcb_info.tdx_module_identities.is_empty();
 
@@ -866,6 +1008,82 @@ pub fn evaluate_tdx_tcb(
     })
 }
 
+/// Anti-rollback floor for Intel collateral: the newest values a verifier
+/// has already accepted for this FMSPC. Collateral below the floor is an
+/// [`AttestError::CollateralDowngrade`], even if it is signed and inside
+/// its own validity window (old, validly signed collateral stays valid
+/// until its `nextUpdate`, which is exactly what a rollback replays).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TdxCollateralFloor {
+    /// Lowest acceptable TCB info `tcbEvaluationDataNumber`.
+    pub min_tcb_info_evaluation_data_number: u32,
+    /// Lowest acceptable QE identity `tcbEvaluationDataNumber`. Kept apart
+    /// from the TCB info number: the two documents are fetched separately
+    /// and may carry different numbers without either moving backwards.
+    pub min_qe_identity_evaluation_data_number: u32,
+    /// Lowest acceptable TCB info `issueDate` (Unix seconds).
+    pub min_tcb_info_issue_date: u64,
+    /// Lowest acceptable QE identity `issueDate` (Unix seconds).
+    pub min_qe_identity_issue_date: u64,
+}
+
+impl TdxCollateralFloor {
+    /// The floor after accepting `verified`: the componentwise maximum of
+    /// `self` and its collateral, so the floor never moves down.
+    pub fn raised_by(&self, verified: &VerifiedTdxQuote) -> TdxCollateralFloor {
+        TdxCollateralFloor {
+            min_tcb_info_evaluation_data_number: self
+                .min_tcb_info_evaluation_data_number
+                .max(verified.tcb_info.tcb_evaluation_data_number),
+            min_qe_identity_evaluation_data_number: self
+                .min_qe_identity_evaluation_data_number
+                .max(verified.qe_identity.tcb_evaluation_data_number),
+            min_tcb_info_issue_date: self
+                .min_tcb_info_issue_date
+                .max(verified.tcb_info.issue_date),
+            min_qe_identity_issue_date: self
+                .min_qe_identity_issue_date
+                .max(verified.qe_identity.issue_date),
+        }
+    }
+}
+
+/// Reject collateral of `verified` below `floor` (see
+/// [`TdxCollateralFloor`]).
+pub fn check_tdx_collateral_floor(
+    verified: &VerifiedTdxQuote,
+    floor: &TdxCollateralFloor,
+) -> Result<(), AttestError> {
+    let checks = [
+        (
+            "TCB info tcbEvaluationDataNumber",
+            u64::from(verified.tcb_info.tcb_evaluation_data_number),
+            u64::from(floor.min_tcb_info_evaluation_data_number),
+        ),
+        (
+            "QE identity tcbEvaluationDataNumber",
+            u64::from(verified.qe_identity.tcb_evaluation_data_number),
+            u64::from(floor.min_qe_identity_evaluation_data_number),
+        ),
+        (
+            "TCB info issueDate",
+            verified.tcb_info.issue_date,
+            floor.min_tcb_info_issue_date,
+        ),
+        (
+            "QE identity issueDate",
+            verified.qe_identity.issue_date,
+            floor.min_qe_identity_issue_date,
+        ),
+    ];
+    for (what, have, floor) in checks {
+        if have < floor {
+            return Err(AttestError::CollateralDowngrade { what, have, floor });
+        }
+    }
+    Ok(())
+}
+
 fn check_window(
     issue: u64,
     next_update: u64,
@@ -919,7 +1137,8 @@ fn verify_signed(
     verify_by_certificate(leaf, Curve::P256, &signed.body, &signed.signature, what)
 }
 
-/// Verify a TDX quote v4 against Intel collateral, end to end:
+/// Verify a TDX quote (v4, or v5 with a TD 1.0, 1.5 or 1.5-ex body)
+/// against Intel collateral, end to end:
 ///
 /// - the PCK chain to `root`, with the PCK CRL and the root CA CRL (every
 ///   certificate below the root must be covered, CRLs must be current);
@@ -929,7 +1148,8 @@ fn verify_signed(
 ///   (chained to `root`, checked against the root CA CRL) and their
 ///   `issueDate ≤ now < nextUpdate` windows;
 /// - FMSPC/PCE-ID, QE identity and TDX module identity matches, and the TCB
-///   status ([`evaluate_tdx_tcb`]).
+///   status ([`evaluate_tdx_tcb`]), and for TD 1.5 bodies also the
+///   current TCB ([`evaluate_tdx_current_tcb`]), which must find a level.
 ///
 /// The PCK and issuer chains must end with a byte-identical copy of `root`.
 /// Zero padding after the quote's declared length is accepted (DCAP quote
@@ -994,11 +1214,13 @@ pub fn verify_tdx_collateral(
     )?;
 
     let evaluation = evaluate_tdx_tcb(&quote, &pck, &tcb_info, &qe_identity)?;
+    let current_evaluation = evaluate_tdx_current_tcb(&quote, &pck, &tcb_info, &qe_identity)?;
     Ok(VerifiedTdxQuote {
         quote,
         pck,
         tcb_info,
         qe_identity,
         evaluation,
+        current_evaluation,
     })
 }
