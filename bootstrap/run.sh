@@ -87,6 +87,6 @@ cargo run --quiet --locked -p vesper-codegen-verified --bin vesper-bootstrap \
   --seed-a "$WORK/seed-a" --seed-b "$WORK/seed-b" \
   --objects-a "$WORK/objects-a" --objects-b "$WORK/objects-b" \
   --results-a "$WORK/results-a.txt" --results-b "$WORK/results-b.txt" \
-  --lean "$("$LEAN" --version | cut -d' ' -f1-3 | tr -d ',')" \
+  --lean "Lean $("$LEAN" --version | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p')" \
   --cc "$("$CC_B" --version | head -1)" \
   --out "$OUT"

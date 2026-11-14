@@ -1,0 +1,24 @@
+# bootstrap/stage0_seed.lock — Stage 0 seed reproducibility and Path B results.
+# Written by bootstrap/run.sh; checked by crates/vesper-codegen-verified.
+[seed]
+schema = "vesper.bootstrap.stage0-seed/1"
+base_commit = "1094e649c95e4d81eef4e705d13882ab1339542d"
+rustc = "rustc 1.100.0"
+cargo_profile = "release"
+source_date_epoch = 1794650795
+corpus_programs = 10
+
+[reproducibility]
+seed_binary_a = "blake3:b9e8cac375dc2f941183d98bd2855f27a4bfe33a6d85ee28bfbb7ed4da129bfa"
+seed_binary_b = "blake3:b9e8cac375dc2f941183d98bd2855f27a4bfe33a6d85ee28bfbb7ed4da129bfa"
+seed_binary_identical = true
+corpus_objects_a = "blake3:99128d5132c1a4ec007b537a06aadab8811ab23ad49794f9fe3ff8ea94c31047"
+corpus_objects_b = "blake3:99128d5132c1a4ec007b537a06aadab8811ab23ad49794f9fe3ff8ea94c31047"
+corpus_objects_identical = true
+
+[ddc_semantic]
+path_a_results = "blake3:238f6cb6ee2f4c3533a0346e5dd927efb034e169413e00b23052e68d57e6d750"
+path_b_results = "blake3:238f6cb6ee2f4c3533a0346e5dd927efb034e169413e00b23052e68d57e6d750"
+path_b_lean = "Lean 4.24.0"
+path_b_c_compiler = "gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0"
+results_agree = true
