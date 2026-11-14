@@ -1,0 +1,22 @@
+//! Audit helpers in a second file of the same package.
+
+/// Telemetry outside the package's capability ceiling.
+effect Telemetry {
+    fn emit(value: u64) -> u64;
+}
+
+/// Doubles an amount.
+///
+/// ```vesper,entry=doubled
+/// fn doubled() -> u64 {
+///     double(21)
+/// }
+/// ```
+fn double(in amount: u64) -> u64 {
+    wrapping_add(amount, amount)
+}
+
+/// Reports an amount.
+fn report(in amount: u64) -> u64 eff [Telemetry] {
+    Telemetry::emit(amount)
+}

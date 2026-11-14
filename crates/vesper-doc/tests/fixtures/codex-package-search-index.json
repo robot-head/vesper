@@ -1,0 +1,368 @@
+{
+  "entries": [
+    {
+      "badge": "unverified",
+      "effects": [],
+      "file": "src/audit.ves",
+      "generics": [],
+      "href": "files/src/audit.ves.html#item-double",
+      "kind": "function",
+      "model": null,
+      "name": "double",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "amount",
+          "pass": "In",
+          "selector": [],
+          "text": "u64",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "u64"
+            }
+          }
+        }
+      ],
+      "path": "src/audit.ves::double",
+      "result": {
+        "named": {
+          "args": [],
+          "name": "u64"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn double(in amount: u64) -> u64",
+      "trait_name": null
+    },
+    {
+      "badge": "unverified",
+      "effects": [
+        "Telemetry"
+      ],
+      "file": "src/audit.ves",
+      "generics": [],
+      "href": "files/src/audit.ves.html#item-report",
+      "kind": "function",
+      "model": null,
+      "name": "report",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "amount",
+          "pass": "In",
+          "selector": [],
+          "text": "u64",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "u64"
+            }
+          }
+        }
+      ],
+      "path": "src/audit.ves::report",
+      "result": {
+        "named": {
+          "args": [],
+          "name": "u64"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn report(in amount: u64) -> u64 eff [Telemetry]",
+      "trait_name": null
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "file": "src/ledger.ves",
+      "generics": [],
+      "href": "files/src/ledger.ves.html#item-fee",
+      "kind": "function",
+      "model": null,
+      "name": "fee",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "amount",
+          "pass": "In",
+          "selector": [],
+          "text": "u64",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "u64"
+            }
+          }
+        }
+      ],
+      "path": "src/ledger.ves::fee",
+      "result": {
+        "named": {
+          "args": [],
+          "name": "u64"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn fee(in amount: u64) -> u64",
+      "trait_name": null
+    },
+    {
+      "badge": "unverified",
+      "effects": [
+        "Journal"
+      ],
+      "file": "src/ledger.ves",
+      "generics": [],
+      "href": "files/src/ledger.ves.html#item-persist",
+      "kind": "function",
+      "model": null,
+      "name": "persist",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "ledger",
+          "pass": "In",
+          "selector": [
+            [
+              "total"
+            ]
+          ],
+          "text": "Ledger",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "Ledger"
+            }
+          }
+        }
+      ],
+      "path": "src/ledger.ves::persist",
+      "result": {
+        "named": {
+          "args": [],
+          "name": "u64"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn persist(in ledger.{total}: Ledger) -> u64 eff [Journal]",
+      "trait_name": null
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "file": "src/ledger.ves",
+      "generics": [],
+      "href": "files/src/ledger.ves.html#item-post",
+      "kind": "function",
+      "model": null,
+      "name": "post",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "ledger",
+          "pass": "Inout",
+          "selector": [
+            [
+              "total"
+            ],
+            [
+              "count"
+            ]
+          ],
+          "text": "Ledger",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "Ledger"
+            }
+          }
+        },
+        {
+          "mode": "Copy",
+          "name": "amount",
+          "pass": "In",
+          "selector": [],
+          "text": "u64",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "u64"
+            }
+          }
+        }
+      ],
+      "path": "src/ledger.ves::post",
+      "result": {
+        "tuple": {
+          "items": []
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn post(inout ledger.{total, count}: Ledger, in amount: u64) -> ()",
+      "trait_name": null
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "file": "src/models.ves",
+      "generics": [],
+      "href": "files/src/models.ves.html#codex-impls",
+      "kind": "impl_method",
+      "model": null,
+      "name": "impl$Score.Entry$score",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "self",
+          "pass": "In",
+          "selector": [],
+          "text": "Entry",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "Entry"
+            }
+          }
+        }
+      ],
+      "path": "src/models.ves::Entry as Score::score",
+      "result": {
+        "named": {
+          "args": [],
+          "name": "u64"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn Entry as Score::score(in self: Entry) -> u64",
+      "trait_name": "Score"
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "file": "src/models.ves",
+      "generics": [
+        {
+          "bound": "Linear",
+          "name": "T"
+        }
+      ],
+      "href": "files/src/models.ves.html#item-keep",
+      "kind": "function",
+      "model": null,
+      "name": "keep",
+      "params": [
+        {
+          "mode": "Linear",
+          "name": "value",
+          "pass": "Sink",
+          "selector": [],
+          "text": "T",
+          "ty": {
+            "var": {
+              "name": "T"
+            }
+          }
+        }
+      ],
+      "path": "src/models.ves::keep",
+      "result": {
+        "var": {
+          "name": "T"
+        }
+      },
+      "result_mode": "Linear",
+      "signature": "fn keep[T](sink value: T) -> T",
+      "trait_name": null
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "file": "src/models.ves",
+      "generics": [],
+      "href": "files/src/models.ves.html#codex-impls",
+      "kind": "model_method",
+      "model": "ByCount",
+      "name": "model$ByCount$score",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "self",
+          "pass": "In",
+          "selector": [],
+          "text": "Entry",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "Entry"
+            }
+          }
+        }
+      ],
+      "path": "src/models.ves::model ByCount::score",
+      "result": {
+        "named": {
+          "args": [],
+          "name": "u64"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn model ByCount::score(in self: Entry) -> u64",
+      "trait_name": "Score"
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "file": "src/models.ves",
+      "generics": [
+        {
+          "bound": "Copy",
+          "name": "T"
+        }
+      ],
+      "href": "files/src/models.ves.html#item-tag",
+      "kind": "function",
+      "model": null,
+      "name": "tag",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "amount",
+          "pass": "In",
+          "selector": [],
+          "text": "u64",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "u64"
+            }
+          }
+        },
+        {
+          "mode": "Copy",
+          "name": "value",
+          "pass": "In",
+          "selector": [],
+          "text": "T",
+          "ty": {
+            "var": {
+              "name": "T"
+            }
+          }
+        }
+      ],
+      "path": "src/models.ves::tag",
+      "result": {
+        "var": {
+          "name": "T"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn tag[T: mod copy](in amount: u64, in value: T) -> T",
+      "trait_name": null
+    }
+  ],
+  "format": "vesper-codex-search",
+  "unsupported": [],
+  "version": 2
+}

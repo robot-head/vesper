@@ -1,0 +1,87 @@
+//! Accounts used by the Codex may-use, mode-crossing and capability goldens.
+
+/// Durable journal; each write resumes exactly once.
+linear effect Journal {
+    fn write(value: u64) -> u64;
+}
+
+/// Unused telemetry.
+effect Metrics {
+    fn tick(value: u64) -> u64;
+}
+
+/// Account balances and limits.
+copy struct Account {
+    balance: u64,
+    pending: u64,
+    limit: u64
+}
+
+/// A pair holding two values of independent modes.
+struct Pair[A, B] {
+    left: A,
+    right: B
+}
+
+/// A box that only holds affine-or-weaker values.
+struct Shelf[T: mod affine] {
+    item: T
+}
+
+/// A held reservation that must be released.
+linear struct Hold {
+    amount: u64
+}
+
+/// Declares `pending` too, but only touches the balance.
+fn deposit(inout account.{balance, pending}: Account, in amount: u64) {
+    account.balance = wrapping_add(account.balance, amount);
+}
+
+/// Reads the limit through a shadowed local, then the real parameter.
+fn headroom(in account.{limit, balance}: Account) -> u64 {
+    let limit: u64 = 7;
+    wrapping_sub(account.limit, wrapping_add(account.balance, limit))
+}
+
+/// Journals the balance; declares Metrics but never ticks.
+fn record(in account.{balance}: Account) -> u64 eff [Journal, Metrics] {
+    Journal::write(account.balance)
+}
+
+/// Checked subtraction may fail while the caller still holds the reservation.
+fn remaining(in hold: Hold, in amount: u64) -> u64 eff [Fail[ArithOverflow]] {
+    hold.amount - amount
+}
+
+/// Releases a reservation.
+fn release(sink hold: Hold) -> u64 {
+    let Hold {
+        amount
+    }
+    = hold;
+    amount
+}
+
+/// Picks the first of a pair.
+fn first[A: mod copy, B: mod copy](in pair: Pair[A, B]) -> A {
+    pair.left
+}
+
+/// Generic identity, found by instantiation in search.
+fn same[T](sink value: T) -> T {
+    value
+}
+
+/// Unwraps an option with a default.
+fn or_zero(in value: Option[u64]) -> u64 {
+    match value {
+        Some(v) => v,
+        None => 0
+    }
+}
+
+/// A realtime, constant-time fee: no allocation, no secret-dependent branch.
+fn fee(in amount: u64) -> u64 eff [Realtime, ConstTime] {
+    wrapping_add(amount, 1)
+}

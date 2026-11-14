@@ -1,0 +1,677 @@
+{
+  "capabilities": {
+    "items": [
+      {
+        "badges": [
+          {
+            "capability": "pure",
+            "evidence": "checked row is eff []"
+          },
+          {
+            "capability": "zero_alloc",
+            "evidence": "Alloc is absent from the checked row"
+          }
+        ],
+        "effects": [],
+        "item": "deposit"
+      },
+      {
+        "badges": [
+          {
+            "capability": "zero_alloc",
+            "evidence": "Alloc is absent from the checked row"
+          },
+          {
+            "capability": "constant_time",
+            "evidence": "the checker's ConstTime secret-flow rules hold for the body; not a machine-code proof"
+          },
+          {
+            "capability": "hard_realtime",
+            "evidence": "the checker's Realtime discipline holds for the body; no WCSD stack byte bound is computed"
+          }
+        ],
+        "effects": [
+          "ConstTime",
+          "Realtime"
+        ],
+        "item": "fee"
+      },
+      {
+        "badges": [
+          {
+            "capability": "pure",
+            "evidence": "checked row is eff []"
+          },
+          {
+            "capability": "zero_alloc",
+            "evidence": "Alloc is absent from the checked row"
+          }
+        ],
+        "effects": [],
+        "item": "first"
+      },
+      {
+        "badges": [
+          {
+            "capability": "pure",
+            "evidence": "checked row is eff []"
+          },
+          {
+            "capability": "zero_alloc",
+            "evidence": "Alloc is absent from the checked row"
+          }
+        ],
+        "effects": [],
+        "item": "headroom"
+      },
+      {
+        "badges": [
+          {
+            "capability": "pure",
+            "evidence": "checked row is eff []"
+          },
+          {
+            "capability": "zero_alloc",
+            "evidence": "Alloc is absent from the checked row"
+          }
+        ],
+        "effects": [],
+        "item": "or_zero"
+      },
+      {
+        "badges": [
+          {
+            "capability": "zero_alloc",
+            "evidence": "Alloc is absent from the checked row"
+          },
+          {
+            "capability": "uncancellable_linear_io",
+            "evidence": "linear effect(s) Journal resume exactly once. The body performs it."
+          }
+        ],
+        "effects": [
+          "Journal",
+          "Metrics"
+        ],
+        "item": "record"
+      },
+      {
+        "badges": [
+          {
+            "capability": "pure",
+            "evidence": "checked row is eff []"
+          },
+          {
+            "capability": "zero_alloc",
+            "evidence": "Alloc is absent from the checked row"
+          }
+        ],
+        "effects": [],
+        "item": "release"
+      },
+      {
+        "badges": [
+          {
+            "capability": "zero_alloc",
+            "evidence": "Alloc is absent from the checked row"
+          },
+          {
+            "capability": "abortable_checkpoint",
+            "evidence": "Fail may abort the call; linear parameter(s) hold stay live in the caller across an abort"
+          }
+        ],
+        "effects": [
+          "Fail"
+        ],
+        "item": "remaining"
+      },
+      {
+        "badges": [
+          {
+            "capability": "pure",
+            "evidence": "checked row is eff []"
+          },
+          {
+            "capability": "zero_alloc",
+            "evidence": "Alloc is absent from the checked row"
+          }
+        ],
+        "effects": [],
+        "item": "same"
+      }
+    ]
+  },
+  "heatmaps": {
+    "heatmaps": [
+      {
+        "consumers": [
+          0,
+          0,
+          0
+        ],
+        "leaves": [
+          "balance",
+          "pending",
+          "limit"
+        ],
+        "opaque": [],
+        "readers": [
+          2,
+          0,
+          1
+        ],
+        "rows": [
+          {
+            "cells": [
+              "write",
+              "write",
+              "free"
+            ],
+            "free": [
+              "limit"
+            ],
+            "function": "deposit",
+            "may_use": [
+              "write",
+              "free",
+              "free"
+            ],
+            "parameter": "account",
+            "pass": "Inout",
+            "selector": [
+              "balance",
+              "pending"
+            ]
+          },
+          {
+            "cells": [
+              "read",
+              "free",
+              "read"
+            ],
+            "free": [
+              "pending"
+            ],
+            "function": "headroom",
+            "may_use": [
+              "read",
+              "free",
+              "read"
+            ],
+            "parameter": "account",
+            "pass": "In",
+            "selector": [
+              "limit",
+              "balance"
+            ]
+          },
+          {
+            "cells": [
+              "read",
+              "free",
+              "free"
+            ],
+            "free": [
+              "pending",
+              "limit"
+            ],
+            "function": "record",
+            "may_use": [
+              "read",
+              "free",
+              "free"
+            ],
+            "parameter": "account",
+            "pass": "In",
+            "selector": [
+              "balance"
+            ]
+          }
+        ],
+        "ty": "Account",
+        "writers": [
+          1,
+          1,
+          0
+        ]
+      },
+      {
+        "consumers": [
+          1
+        ],
+        "leaves": [
+          "amount"
+        ],
+        "opaque": [],
+        "readers": [
+          1
+        ],
+        "rows": [
+          {
+            "cells": [
+              "consume"
+            ],
+            "free": [],
+            "function": "release",
+            "may_use": [
+              "consume"
+            ],
+            "parameter": "hold",
+            "pass": "Sink",
+            "selector": []
+          },
+          {
+            "cells": [
+              "read"
+            ],
+            "free": [],
+            "function": "remaining",
+            "may_use": [
+              "read"
+            ],
+            "parameter": "hold",
+            "pass": "In",
+            "selector": []
+          }
+        ],
+        "ty": "Hold",
+        "writers": [
+          0
+        ]
+      }
+    ],
+    "unsupported": [
+      [
+        "Pair",
+        "generic struct needs concrete arguments"
+      ],
+      [
+        "Shelf",
+        "generic struct needs concrete arguments"
+      ]
+    ]
+  },
+  "may_use": {
+    "functions": [
+      {
+        "declared_unperformed": [],
+        "effects_complete": true,
+        "function": "deposit",
+        "parameters": [
+          {
+            "declared": [
+              "balance",
+              "pending"
+            ],
+            "parameter": "account",
+            "pass": "Inout",
+            "unused_declared": [
+              "pending"
+            ],
+            "uses": [
+              {
+                "access": "write",
+                "path": "balance"
+              }
+            ]
+          },
+          {
+            "declared": [],
+            "parameter": "amount",
+            "pass": "In",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "read",
+                "path": ""
+              }
+            ]
+          }
+        ],
+        "performed_effects": []
+      },
+      {
+        "declared_unperformed": [
+          "ConstTime",
+          "Realtime"
+        ],
+        "effects_complete": true,
+        "function": "fee",
+        "parameters": [
+          {
+            "declared": [],
+            "parameter": "amount",
+            "pass": "In",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "read",
+                "path": ""
+              }
+            ]
+          }
+        ],
+        "performed_effects": []
+      },
+      {
+        "declared_unperformed": [],
+        "effects_complete": true,
+        "function": "first",
+        "parameters": [
+          {
+            "declared": [],
+            "parameter": "pair",
+            "pass": "In",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "read",
+                "path": "left"
+              }
+            ]
+          }
+        ],
+        "performed_effects": []
+      },
+      {
+        "declared_unperformed": [],
+        "effects_complete": true,
+        "function": "headroom",
+        "parameters": [
+          {
+            "declared": [
+              "limit",
+              "balance"
+            ],
+            "parameter": "account",
+            "pass": "In",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "read",
+                "path": "balance"
+              },
+              {
+                "access": "read",
+                "path": "limit"
+              }
+            ]
+          }
+        ],
+        "performed_effects": []
+      },
+      {
+        "declared_unperformed": [],
+        "effects_complete": true,
+        "function": "or_zero",
+        "parameters": [
+          {
+            "declared": [],
+            "parameter": "value",
+            "pass": "In",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "read",
+                "path": ""
+              }
+            ]
+          }
+        ],
+        "performed_effects": []
+      },
+      {
+        "declared_unperformed": [
+          "Metrics"
+        ],
+        "effects_complete": true,
+        "function": "record",
+        "parameters": [
+          {
+            "declared": [
+              "balance"
+            ],
+            "parameter": "account",
+            "pass": "In",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "read",
+                "path": "balance"
+              }
+            ]
+          }
+        ],
+        "performed_effects": [
+          "Journal"
+        ]
+      },
+      {
+        "declared_unperformed": [],
+        "effects_complete": true,
+        "function": "release",
+        "parameters": [
+          {
+            "declared": [],
+            "parameter": "hold",
+            "pass": "Sink",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "consume",
+                "path": ""
+              }
+            ]
+          }
+        ],
+        "performed_effects": []
+      },
+      {
+        "declared_unperformed": [],
+        "effects_complete": true,
+        "function": "remaining",
+        "parameters": [
+          {
+            "declared": [],
+            "parameter": "hold",
+            "pass": "In",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "read",
+                "path": "amount"
+              }
+            ]
+          },
+          {
+            "declared": [],
+            "parameter": "amount",
+            "pass": "In",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "read",
+                "path": ""
+              }
+            ]
+          }
+        ],
+        "performed_effects": [
+          "Fail"
+        ]
+      },
+      {
+        "declared_unperformed": [],
+        "effects_complete": true,
+        "function": "same",
+        "parameters": [
+          {
+            "declared": [],
+            "parameter": "value",
+            "pass": "Sink",
+            "unused_declared": [],
+            "uses": [
+              {
+                "access": "consume",
+                "path": ""
+              }
+            ]
+          }
+        ],
+        "performed_effects": []
+      }
+    ],
+    "unsupported": []
+  },
+  "mode_crossings": {
+    "tables": [
+      {
+        "complete": true,
+        "declared_mode": "Copy",
+        "origin": "builtin",
+        "params": [
+          {
+            "bound": "Linear",
+            "name": "T"
+          }
+        ],
+        "rows": [
+          {
+            "args": [
+              "Copy"
+            ],
+            "mode": "Copy"
+          },
+          {
+            "args": [
+              "Affine"
+            ],
+            "mode": "Affine"
+          },
+          {
+            "args": [
+              "Linear"
+            ],
+            "mode": "Linear"
+          }
+        ],
+        "ty": "Option"
+      },
+      {
+        "complete": true,
+        "declared_mode": "Affine",
+        "origin": "documented",
+        "params": [
+          {
+            "bound": "Linear",
+            "name": "A"
+          },
+          {
+            "bound": "Linear",
+            "name": "B"
+          }
+        ],
+        "rows": [
+          {
+            "args": [
+              "Copy",
+              "Copy"
+            ],
+            "mode": "Affine"
+          },
+          {
+            "args": [
+              "Copy",
+              "Affine"
+            ],
+            "mode": "Affine"
+          },
+          {
+            "args": [
+              "Copy",
+              "Linear"
+            ],
+            "mode": "Linear"
+          },
+          {
+            "args": [
+              "Affine",
+              "Copy"
+            ],
+            "mode": "Affine"
+          },
+          {
+            "args": [
+              "Affine",
+              "Affine"
+            ],
+            "mode": "Affine"
+          },
+          {
+            "args": [
+              "Affine",
+              "Linear"
+            ],
+            "mode": "Linear"
+          },
+          {
+            "args": [
+              "Linear",
+              "Copy"
+            ],
+            "mode": "Linear"
+          },
+          {
+            "args": [
+              "Linear",
+              "Affine"
+            ],
+            "mode": "Linear"
+          },
+          {
+            "args": [
+              "Linear",
+              "Linear"
+            ],
+            "mode": "Linear"
+          }
+        ],
+        "ty": "Pair"
+      },
+      {
+        "complete": true,
+        "declared_mode": "Affine",
+        "origin": "documented",
+        "params": [
+          {
+            "bound": "Affine",
+            "name": "T"
+          }
+        ],
+        "rows": [
+          {
+            "args": [
+              "Copy"
+            ],
+            "mode": "Affine"
+          },
+          {
+            "args": [
+              "Affine"
+            ],
+            "mode": "Affine"
+          },
+          {
+            "args": [
+              "Linear"
+            ],
+            "mode": null,
+            "rejected": "T is bounded by mod affine"
+          }
+        ],
+        "ty": "Shelf"
+      }
+    ],
+    "unsupported": []
+  }
+}

@@ -69,7 +69,7 @@ fn commit(sink tx: WriteTxn) -> Receipt eff [Storage] {
     }
 }
 
-/// Generic identity: excluded from signature search.
+/// Generic identity: matched in signature search by instantiation.
 fn identity[T](sink x: T) -> T {
     x
 }

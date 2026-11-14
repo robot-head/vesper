@@ -1,0 +1,45 @@
+//! Ledger entries for the Codex package index and package doctest goldens.
+
+/// Durable journal.
+linear effect Journal {
+    fn write(value: u64) -> u64;
+}
+
+/// A ledger with a running total.
+copy struct Ledger {
+    total: u64,
+    count: u64
+}
+
+/// Posts an amount.
+///
+/// ```vesper,entry=posted
+/// fn posted() -> u64 {
+///     let ledger = Ledger {
+///         total: 1,
+///         count: 0
+///     };
+///     post(inout ledger, 2);
+///     ledger.total
+/// }
+/// ```
+fn post(inout ledger.{total, count}: Ledger, in amount: u64) {
+    ledger.total = wrapping_add(ledger.total, amount);
+    ledger.count = wrapping_add(ledger.count, 1);
+}
+
+/// Journals the total.
+fn persist(in ledger.{total}: Ledger) -> u64 eff [Journal] {
+    Journal::write(ledger.total)
+}
+
+/// A flat fee on an amount.
+///
+/// ```vesper,entry=charged
+/// fn charged() -> u64 {
+///     fee(5)
+/// }
+/// ```
+fn fee(in amount: u64) -> u64 {
+    wrapping_add(amount, 1)
+}

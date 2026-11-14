@@ -1,0 +1,19 @@
+{
+  "badges": [
+    "zero_alloc"
+  ],
+  "ceiling": [
+    "Journal"
+  ],
+  "effects": [
+    "Journal",
+    "Telemetry"
+  ],
+  "outside_ceiling": [
+    [
+      "src/audit.ves::report",
+      "Telemetry"
+    ]
+  ],
+  "undetermined": []
+}

@@ -66,6 +66,10 @@ pub struct FootprintRow {
     pub cells: Vec<Access>,
     /// Leaves left free for concurrent disjoint borrows, by name.
     pub free: Vec<String>,
+    /// Per leaf, the strongest access the body may perform
+    /// ([`crate::footprints`]); absent when the body was not analysed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub may_use: Option<Vec<Access>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,6 +283,7 @@ pub fn heatmaps(
                     .map(|(_, l)| l.clone())
                     .collect(),
                 cells: row_cells,
+                may_use: None,
             });
         }
         heatmap
@@ -312,7 +317,7 @@ fn heat(count: u32, rows: usize, full: (u32, u32, u32)) -> String {
 /// aggregate writer/reader rows.
 pub fn render(maps: &Heatmaps) -> String {
     let mut out = String::from(
-        "<section id=\"codex-heatmaps\"><h2>FieldTree borrow footprints</h2><p>Cells come from each parameter's checked pass mode and declared projection: W inout, R in, S sink, blank free for concurrent disjoint borrows. This is the checker-enforced upper bound, not a may-use analysis of the body.</p>",
+        "<section id=\"codex-heatmaps\"><h2>FieldTree borrow footprints</h2><p>Cells come from each parameter's checked pass mode and declared projection: W inout, R in, S sink, blank free for concurrent disjoint borrows. This is the checker-enforced upper bound; a dashed lowercase cell is declared but no use in the body reaches it (may-use analysis).</p>",
     );
     if maps.heatmaps.is_empty() {
         out.push_str("<p>No documented struct is borrowed by a documented function.</p>");
@@ -346,13 +351,23 @@ pub fn render(maps: &Heatmaps) -> String {
                 escape(&r.parameter),
                 escape(&selector)
             ));
-            for c in &r.cells {
-                out.push_str(&format!(
-                    "<td title=\"{}\" style=\"background:{};text-align:center;border:1px solid #fff;min-width:2em\">{}</td>",
-                    c.label(),
-                    color(*c),
-                    c.letter()
-                ));
+            for (i, c) in r.cells.iter().enumerate() {
+                let used = r.may_use.as_ref().and_then(|m| m.get(i).copied());
+                if *c != Access::Free && used == Some(Access::Free) {
+                    out.push_str(&format!(
+                        "<td class=\"unused\" title=\"declared {}, unused by the body\" style=\"background:{};opacity:.45;text-align:center;border:1px dashed #555;min-width:2em\">{}</td>",
+                        c.label(),
+                        color(*c),
+                        c.letter().to_lowercase()
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "<td title=\"{}\" style=\"background:{};text-align:center;border:1px solid #fff;min-width:2em\">{}</td>",
+                        c.label(),
+                        color(*c),
+                        c.letter()
+                    ));
+                }
             }
             out.push_str(&format!("<td>{}</td></tr>", escape(&r.free.join(", "))));
         }

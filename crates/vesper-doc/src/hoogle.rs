@@ -20,8 +20,22 @@
 //! (`copy <= affine <= linear`, contravariant input), the function's result
 //! mode at most the query's (covariant output), every function effect must be
 //! inside the ceiling, and a query projection admits functions whose declared
-//! footprint lies inside it. Generic, open-row and function-typed signatures
-//! are listed as unsupported rather than matched approximately.
+//! footprint lies inside it.
+//!
+//! Generic functions are matched by instantiation: a type parameter `T` in a
+//! signature unifies with any concrete query type, consistently across the
+//! whole signature (`fn id[T](sink x: T) -> T` matches `u64 -> u64`, not
+//! `u64 -> bool`). The parameter's mode in the index is its declared bound,
+//! so the contravariant/covariant mode checks still hold for every
+//! instantiation the bound admits. A hit lists the instantiation and is never
+//! exact. Row binders, open rows, effect rows that mention a type parameter
+//! and function-typed signatures are listed as unsupported rather than
+//! matched approximately.
+//!
+//! A package index ([`build_package_index`]) holds every documented function
+//! of every file under a file-qualified path, plus the methods of source
+//! `impl` and Pact `model` declarations (`Point as Score::score`,
+//! `model ByX::score`), each linking to its file's page.
 use crate::{
     FunctionDoc, Limits, Mode, Pass, Selector, Type,
     badges::{Badge, BadgeLevel},
@@ -31,7 +45,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
 pub const INDEX_FORMAT: &str = "vesper-codex-search";
-pub const INDEX_VERSION: u32 = 1;
+pub const INDEX_VERSION: u32 = 2;
+/// The documentation layer's note for a generic function; search handles
+/// non-row generics by instantiation, so this note alone does not exclude.
+const GENERIC_NOTE: &str = "generic/row binder instantiation is unsupported by search";
 const MAX_QUERY_BYTES: usize = 4096;
 const MAX_QUERY_DEPTH: usize = 16;
 
@@ -39,8 +56,29 @@ const MAX_QUERY_DEPTH: usize = 16;
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IndexType {
-    Named { name: String, args: Vec<IndexType> },
-    Tuple { items: Vec<IndexType> },
+    Named {
+        name: String,
+        args: Vec<IndexType>,
+    },
+    Tuple {
+        items: Vec<IndexType>,
+    },
+    /// A type parameter of the entry, instantiated by matching.
+    Var {
+        name: String,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    Function,
+    ImplMethod,
+    ModelMethod,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IndexGeneric {
+    pub name: String,
+    pub bound: Mode,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexParam {
@@ -55,6 +93,18 @@ pub struct IndexParam {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IndexEntry {
     pub name: String,
+    /// Unique key: the name for one file; `file::name` in a package; the
+    /// conformance-qualified method for impl and model methods.
+    pub path: String,
+    pub kind: EntryKind,
+    /// Package-relative source file, in a package index.
+    pub file: Option<String>,
+    /// Page link of the item, in a package index (else `#item-NAME` of the
+    /// page the index belongs to).
+    pub href: Option<String>,
+    pub generics: Vec<IndexGeneric>,
+    pub trait_name: Option<String>,
+    pub model: Option<String>,
     pub signature: String,
     pub params: Vec<IndexParam>,
     pub result: IndexType,
@@ -84,27 +134,36 @@ pub fn type_text(ty: &IndexType) -> String {
             "({})",
             items.iter().map(type_text).collect::<Vec<_>>().join(", ")
         ),
+        IndexType::Var { name } => name.clone(),
     }
 }
 
-fn index_type(ty: &Type, depth: usize, nodes: &mut usize) -> Result<IndexType, String> {
+fn index_type(
+    ty: &Type,
+    vars: &BTreeSet<&str>,
+    depth: usize,
+    nodes: &mut usize,
+) -> Result<IndexType, String> {
     *nodes = nodes.checked_sub(1).ok_or("search index type budget")?;
     if depth > 32 {
         return Err("type nesting exceeds the search index depth".into());
     }
     match ty {
         Type::Named(n, a) if n == "Unit" && a.is_empty() => Ok(IndexType::Tuple { items: vec![] }),
+        Type::Named(n, a) if a.is_empty() && vars.contains(n.as_str()) => {
+            Ok(IndexType::Var { name: n.clone() })
+        }
         Type::Named(n, a) => Ok(IndexType::Named {
             name: n.clone(),
             args: a
                 .iter()
-                .map(|t| index_type(t, depth + 1, nodes))
+                .map(|t| index_type(t, vars, depth + 1, nodes))
                 .collect::<Result<_, _>>()?,
         }),
         Type::Tuple(ts) => Ok(IndexType::Tuple {
             items: ts
                 .iter()
-                .map(|t| index_type(t, depth + 1, nodes))
+                .map(|t| index_type(t, vars, depth + 1, nodes))
                 .collect::<Result<_, _>>()?,
         }),
         Type::Function { .. } => Err("function-typed signature".into()),
@@ -113,15 +172,31 @@ fn index_type(ty: &Type, depth: usize, nodes: &mut usize) -> Result<IndexType, S
     }
 }
 
-fn effect_text(e: &crate::Effect, nodes: &mut usize) -> Result<String, String> {
+fn mentions_var(t: &IndexType) -> bool {
+    match t {
+        IndexType::Var { .. } => true,
+        IndexType::Named { args, .. } => args.iter().any(mentions_var),
+        IndexType::Tuple { items } => items.iter().any(mentions_var),
+    }
+}
+
+fn effect_text(
+    e: &crate::Effect,
+    vars: &BTreeSet<&str>,
+    nodes: &mut usize,
+) -> Result<String, String> {
     if e.args.is_empty() {
         return Ok(e.name.clone());
     }
     let args = e
         .args
         .iter()
-        .map(|t| index_type(t, 1, nodes).map(|t| type_text(&t)))
+        .map(|t| index_type(t, vars, 1, nodes))
         .collect::<Result<Vec<_>, _>>()?;
+    if args.iter().any(mentions_var) {
+        return Err("effect row mentions a type parameter".into());
+    }
+    let args: Vec<String> = args.iter().map(type_text).collect();
     Ok(format!("{}[{}]", e.name, args.join(", ")))
 }
 
@@ -133,19 +208,61 @@ fn pass_text(p: Pass) -> &'static str {
     }
 }
 
-fn entry(f: &FunctionDoc, badge: BadgeLevel, nodes: &mut usize) -> Result<IndexEntry, String> {
-    if !f.generics.is_empty() {
-        return Err("generic/row binders need instantiation".into());
+/// Where an entry comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EntryOrigin {
+    pub path: String,
+    pub kind: EntryKind,
+    pub file: Option<String>,
+    pub href: Option<String>,
+    pub trait_name: Option<String>,
+    pub model: Option<String>,
+}
+impl EntryOrigin {
+    /// A function of a single-file index.
+    pub fn local(name: &str) -> Self {
+        Self {
+            path: name.into(),
+            kind: EntryKind::Function,
+            file: None,
+            href: None,
+            trait_name: None,
+            model: None,
+        }
+    }
+}
+
+fn entry(
+    f: &FunctionDoc,
+    origin: EntryOrigin,
+    badge: BadgeLevel,
+    nodes: &mut usize,
+) -> Result<IndexEntry, String> {
+    if f.generics.iter().any(|g| g.row) {
+        return Err("row binders need instantiation".into());
     }
     if f.effects.tail.is_some() {
         return Err("open effect row".into());
     }
-    if !f.unsupported.is_empty() {
-        return Err(f.unsupported.join("; "));
+    let notes: Vec<&String> = f
+        .unsupported
+        .iter()
+        .filter(|u| *u != GENERIC_NOTE)
+        .collect();
+    if !notes.is_empty() {
+        return Err(notes
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join("; "));
+    }
+    let vars: BTreeSet<&str> = f.generics.iter().map(|g| g.name.as_str()).collect();
+    if vars.len() != f.generics.len() {
+        return Err("duplicate type parameter".into());
     }
     let mut params = Vec::new();
     for p in &f.parameters {
-        let ty = index_type(&p.ty, 0, nodes)?;
+        let ty = index_type(&p.ty, &vars, 0, nodes)?;
         params.push(IndexParam {
             name: p.name.clone(),
             pass: p.pass,
@@ -158,17 +275,41 @@ fn entry(f: &FunctionDoc, badge: BadgeLevel, nodes: &mut usize) -> Result<IndexE
             },
         });
     }
-    let result = index_type(&f.result, 0, nodes)?;
+    let result = index_type(&f.result, &vars, 0, nodes)?;
     let effects: BTreeSet<String> = f
         .effects
         .instances
         .iter()
-        .map(|e| effect_text(e, nodes))
+        .map(|e| effect_text(e, &vars, nodes))
         .collect::<Result<_, _>>()?;
     let effects: Vec<String> = effects.into_iter().collect();
+    let generics = if f.generics.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[{}]",
+            f.generics
+                .iter()
+                .map(|g| match g.bound {
+                    Mode::Linear => g.name.clone(),
+                    Mode::Affine => format!("{}: mod affine", g.name),
+                    Mode::Copy => format!("{}: mod copy", g.name),
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let shown = match (origin.kind, &origin.file) {
+        (EntryKind::Function, _) => f.name.clone(),
+        (_, Some(file)) => origin
+            .path
+            .strip_prefix(&format!("{file}::"))
+            .unwrap_or(&origin.path)
+            .to_string(),
+        (_, None) => origin.path.clone(),
+    };
     let signature = format!(
-        "fn {}({}) -> {}{}",
-        f.name,
+        "fn {shown}{generics}({}) -> {}{}",
         params
             .iter()
             .map(|p| {
@@ -197,6 +338,20 @@ fn entry(f: &FunctionDoc, badge: BadgeLevel, nodes: &mut usize) -> Result<IndexE
     );
     Ok(IndexEntry {
         name: f.name.clone(),
+        path: origin.path,
+        kind: origin.kind,
+        file: origin.file,
+        href: origin.href,
+        generics: f
+            .generics
+            .iter()
+            .map(|g| IndexGeneric {
+                name: g.name.clone(),
+                bound: g.bound,
+            })
+            .collect(),
+        trait_name: origin.trait_name,
+        model: origin.model,
         signature,
         params,
         result,
@@ -233,13 +388,139 @@ pub fn build_index(
             .iter()
             .find(|b| b.kind == "function" && b.item == f.name)
             .map_or(BadgeLevel::Unverified, |b| b.level);
-        match entry(f, badge, &mut nodes) {
+        match entry(f, EntryOrigin::local(&f.name), badge, &mut nodes) {
             Ok(e) => index.entries.push(e),
             Err(reason) if reason == "search index type budget" => return Err(reason),
             Err(reason) => index.unsupported.push((f.name.clone(), reason)),
         }
     }
-    index.entries.sort_by(|a, b| a.name.cmp(&b.name));
+    index.entries.sort_by(|a, b| a.path.cmp(&b.path));
+    index.unsupported.sort();
+    Ok(index)
+}
+
+/// A method of a source `impl Trait for T` or Pact `model M: Trait for T`
+/// declaration. `function` documents the checked generated function.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ImplMethod {
+    /// Package-qualified conformance declaration path.
+    pub conformance: String,
+    pub trait_name: String,
+    /// The trait's type arguments (`Convert[i64]` has `["i64"]`), which
+    /// tell apart two impls of one generic trait for the same type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trait_args: Vec<String>,
+    pub method: String,
+    pub self_ty: String,
+    pub model: Option<String>,
+    pub public: bool,
+    pub function: FunctionDoc,
+}
+impl ImplMethod {
+    /// `Point as Score::score`, `X as Convert[i64]::convert`, or
+    /// `model ByX::score`.
+    pub fn path(&self) -> String {
+        match &self.model {
+            Some(m) => format!("model {m}::{}", self.method),
+            None => format!("{} as {}::{}", self.self_ty, self.trait_ref(), self.method),
+        }
+    }
+
+    /// The trait with its type arguments, e.g. `Convert[i64]`.
+    pub fn trait_ref(&self) -> String {
+        if self.trait_args.is_empty() {
+            self.trait_name.clone()
+        } else {
+            format!("{}[{}]", self.trait_name, self.trait_args.join(", "))
+        }
+    }
+}
+
+/// One file of a package index.
+pub struct PackageFile<'a> {
+    /// Package-relative path with `/` separators.
+    pub file: &'a str,
+    /// Link of the file's page, relative to the index page.
+    pub href: &'a str,
+    pub functions: &'a [FunctionDoc],
+    pub badges: &'a [Badge],
+    pub impls: &'a [ImplMethod],
+}
+
+/// Build one index over every file of a package: documented functions as
+/// `file::name`, impl and model methods as `file::Self as Trait::method` /
+/// `file::model M::method`. Exceeding a budget is an error.
+pub fn build_package_index(
+    files: &[PackageFile<'_>],
+    limits: Limits,
+) -> Result<SearchIndex, String> {
+    limits.validate()?;
+    let total = files.iter().try_fold(0usize, |n, f| {
+        n.checked_add(f.functions.len())?.checked_add(f.impls.len())
+    });
+    if total.is_none_or(|n| n > limits.max_items.saturating_mul(16)) {
+        return Err("package search index item budget exceeded".into());
+    }
+    let mut nodes = limits.max_type_nodes.saturating_mul(16);
+    let mut index = SearchIndex {
+        format: INDEX_FORMAT.into(),
+        version: INDEX_VERSION,
+        entries: vec![],
+        unsupported: vec![],
+    };
+    let mut seen = BTreeSet::new();
+    for file in files {
+        let mut push = |f: &FunctionDoc, origin: EntryOrigin, badge| -> Result<(), String> {
+            if !seen.insert(origin.path.clone()) {
+                return Err(format!("duplicate search path {}", origin.path));
+            }
+            let path = origin.path.clone();
+            match entry(f, origin, badge, &mut nodes) {
+                Ok(e) => index.entries.push(e),
+                Err(reason) if reason == "search index type budget" => return Err(reason),
+                Err(reason) => index.unsupported.push((path, reason)),
+            }
+            Ok(())
+        };
+        for f in file.functions {
+            let badge = file
+                .badges
+                .iter()
+                .find(|b| b.kind == "function" && b.item == f.name)
+                .map_or(BadgeLevel::Unverified, |b| b.level);
+            push(
+                f,
+                EntryOrigin {
+                    path: format!("{}::{}", file.file, f.name),
+                    kind: EntryKind::Function,
+                    file: Some(file.file.into()),
+                    href: Some(format!("{}#item-{}", file.href, f.name)),
+                    trait_name: None,
+                    model: None,
+                },
+                badge,
+            )?;
+        }
+        for m in file.impls {
+            push(
+                &m.function,
+                EntryOrigin {
+                    path: format!("{}::{}", file.file, m.path()),
+                    kind: if m.model.is_some() {
+                        EntryKind::ModelMethod
+                    } else {
+                        EntryKind::ImplMethod
+                    },
+                    file: Some(file.file.into()),
+                    href: Some(format!("{}#codex-impls", file.href)),
+                    trait_name: Some(m.trait_name.clone()),
+                    model: m.model.clone(),
+                },
+                BadgeLevel::Unverified,
+            )?;
+        }
+    }
+    index.entries.sort_by(|a, b| a.path.cmp(&b.path));
     index.unsupported.sort();
     Ok(index)
 }
@@ -573,22 +854,90 @@ fn pattern_text(p: &TypePattern) -> Option<String> {
     }
 }
 
-/// Whether the pattern matches, and whether it did so without a wildcard.
-fn type_match(p: &TypePattern, t: &IndexType) -> Option<bool> {
+fn pattern_display(p: &TypePattern) -> String {
+    match p {
+        TypePattern::Any => "_".into(),
+        TypePattern::Named { name, args } if args.is_empty() => name.clone(),
+        TypePattern::Named { name, args } => format!(
+            "{name}[{}]",
+            args.iter()
+                .map(pattern_display)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        TypePattern::Tuple { items } => format!(
+            "({})",
+            items
+                .iter()
+                .map(pattern_display)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Whether the pattern matches, and whether it did so without a wildcard
+/// or an instantiated type parameter. `binds` holds the instantiation: a
+/// parameter takes the first non-wildcard pattern it meets, and every later
+/// occurrence must be that same pattern.
+fn type_match(
+    p: &TypePattern,
+    t: &IndexType,
+    binds: &mut Vec<(String, TypePattern)>,
+) -> Option<bool> {
     match (p, t) {
         (TypePattern::Any, _) => Some(false),
+        (_, IndexType::Var { name }) => {
+            match binds.iter_mut().find(|(n, _)| n == name) {
+                // A later occurrence must unify with the binding so far;
+                // wildcards inside either side are filled in by the other.
+                Some((_, bound)) => *bound = unify(bound, p)?,
+                None => binds.push((name.clone(), p.clone())),
+            }
+            Some(false)
+        }
         (TypePattern::Named { name, args }, IndexType::Named { name: n, args: a })
             if name == n && args.len() == a.len() =>
         {
-            args.iter()
-                .zip(a)
-                .try_fold(true, |exact, (p, t)| Some(exact & type_match(p, t)?))
+            let mut exact = true;
+            for (p, t) in args.iter().zip(a) {
+                exact &= type_match(p, t, binds)?;
+            }
+            Some(exact)
         }
         (TypePattern::Tuple { items }, IndexType::Tuple { items: i }) if items.len() == i.len() => {
-            items
-                .iter()
-                .zip(i)
-                .try_fold(true, |exact, (p, t)| Some(exact & type_match(p, t)?))
+            let mut exact = true;
+            for (p, t) in items.iter().zip(i) {
+                exact &= type_match(p, t, binds)?;
+            }
+            Some(exact)
+        }
+        _ => None,
+    }
+}
+
+/// The most specific pattern both `a` and `b` describe (`Option[_]` and
+/// `Option[u64]` give `Option[u64]`), or `None` when they conflict.
+fn unify(a: &TypePattern, b: &TypePattern) -> Option<TypePattern> {
+    let all = |xs: &[TypePattern], ys: &[TypePattern]| -> Option<Vec<TypePattern>> {
+        xs.iter().zip(ys).map(|(x, y)| unify(x, y)).collect()
+    };
+    match (a, b) {
+        (TypePattern::Any, p) | (p, TypePattern::Any) => Some(p.clone()),
+        (TypePattern::Named { name, args }, TypePattern::Named { name: n, args: a })
+            if name == n && args.len() == a.len() =>
+        {
+            Some(TypePattern::Named {
+                name: name.clone(),
+                args: all(args, a)?,
+            })
+        }
+        (TypePattern::Tuple { items }, TypePattern::Tuple { items: i })
+            if items.len() == i.len() =>
+        {
+            Some(TypePattern::Tuple {
+                items: all(items, i)?,
+            })
         }
         _ => None,
     }
@@ -605,21 +954,30 @@ fn within(inner: &[Vec<String>], outer: &[Vec<String>]) -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TextHit {
     pub name: String,
+    pub path: String,
+    pub kind: EntryKind,
+    pub href: Option<String>,
     pub signature: String,
     pub score: u32,
     pub exact: bool,
     pub badge: BadgeLevel,
+    /// Type parameter bindings of a generic match, in parameter order
+    /// (`_` where only a wildcard reached it).
+    pub instantiation: Vec<(String, String)>,
 }
 
-/// Score: 10 for an exact contract match (no wildcard, every pass and mode
-/// given and equal, equal footprints and equal effects), plus 5 for a proved
-/// and 2 for an audited badge. Ties sort by name.
+/// Score: 10 for an exact contract match (no wildcard or instantiation,
+/// every pass and mode given and equal, equal footprints and equal effects),
+/// plus 5 for a proved and 2 for an audited badge. Ties sort by path. A name
+/// query matches a case-insensitive substring of the path (so a trait or
+/// model name finds its methods) and is exact when it equals the name.
 pub fn search(query: &TextQuery, index: &SearchIndex) -> Vec<TextHit> {
     let mut hits = Vec::new();
     for e in &index.entries {
+        let mut binds = Vec::new();
         let exact = match query {
             TextQuery::Name(word) => {
-                if !e.name.to_lowercase().contains(&word.to_lowercase()) {
+                if !e.path.to_lowercase().contains(&word.to_lowercase()) {
                     continue;
                 }
                 e.name == *word
@@ -633,28 +991,11 @@ pub fn search(query: &TextQuery, index: &SearchIndex) -> Vec<TextHit> {
                 if params.len() != e.params.len() {
                     continue;
                 }
-                let Some(mut exact) = type_match(result, &e.result) else {
-                    continue;
-                };
-                if let Some(m) = result_mode {
-                    if e.result_mode > *m {
-                        continue;
-                    }
-                    exact &= e.result_mode == *m;
-                } else {
-                    exact = false;
-                }
-                if let Some(ceiling) = ceiling {
-                    if !e.effects.iter().all(|x| ceiling.contains(x)) {
-                        continue;
-                    }
-                    exact &= e.effects == *ceiling;
-                } else {
-                    exact = false;
-                }
                 let mut ok = true;
+                let mut exact = true;
+                // Parameters first, so instantiation follows argument order.
                 for (q, f) in params.iter().zip(&e.params) {
-                    let Some(ty_exact) = type_match(&q.ty, &f.ty) else {
+                    let Some(ty_exact) = type_match(&q.ty, &f.ty, &mut binds) else {
                         ok = false;
                         break;
                     };
@@ -673,7 +1014,27 @@ pub fn search(query: &TextQuery, index: &SearchIndex) -> Vec<TextHit> {
                 if !ok {
                     continue;
                 }
-                exact
+                let Some(r) = type_match(result, &e.result, &mut binds) else {
+                    continue;
+                };
+                exact &= r;
+                if let Some(m) = result_mode {
+                    if e.result_mode > *m {
+                        continue;
+                    }
+                    exact &= e.result_mode == *m;
+                } else {
+                    exact = false;
+                }
+                if let Some(ceiling) = ceiling {
+                    if !e.effects.iter().all(|x| ceiling.contains(x)) {
+                        continue;
+                    }
+                    exact &= e.effects == *ceiling;
+                } else {
+                    exact = false;
+                }
+                exact && e.generics.is_empty()
             }
         };
         let score = u32::from(exact) * 10
@@ -682,15 +1043,29 @@ pub fn search(query: &TextQuery, index: &SearchIndex) -> Vec<TextHit> {
                 BadgeLevel::Audited => 2,
                 BadgeLevel::Unverified => 0,
             };
+        let instantiation = e
+            .generics
+            .iter()
+            .filter_map(|g| {
+                binds
+                    .iter()
+                    .find(|(n, _)| *n == g.name)
+                    .map(|(n, p)| (n.clone(), pattern_display(p)))
+            })
+            .collect();
         hits.push(TextHit {
             name: e.name.clone(),
+            path: e.path.clone(),
+            kind: e.kind,
+            href: e.href.clone(),
             signature: e.signature.clone(),
             score,
             exact,
             badge: e.badge,
+            instantiation,
         });
     }
-    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.name.cmp(&b.name)));
+    hits.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.path.cmp(&b.path)));
     hits
 }
 
@@ -746,6 +1121,13 @@ mod tests {
     ) -> IndexEntry {
         IndexEntry {
             name: name.into(),
+            path: name.into(),
+            kind: EntryKind::Function,
+            file: None,
+            href: None,
+            generics: vec![],
+            trait_name: None,
+            model: None,
             signature: name.into(),
             params,
             result,
@@ -877,6 +1259,170 @@ mod tests {
         assert!(parse_text_query(&deep).unwrap_err().contains("nesting"));
         assert!(parse_text_query(&"a".repeat(5000)).is_err());
         assert!(parse_text_query(&format!("-> {}", "x".repeat(200))).is_err());
+    }
+
+    #[test]
+    fn generics_instantiate_consistently_within_their_bounds() {
+        let var = |n: &str| IndexType::Var { name: n.into() };
+        let mut keep = entry(
+            "keep",
+            vec![param(Pass::Sink, Mode::Linear, var("T"), &[])],
+            var("T"),
+            Mode::Linear,
+            &[],
+            BadgeLevel::Unverified,
+        );
+        keep.generics = vec![IndexGeneric {
+            name: "T".into(),
+            bound: Mode::Linear,
+        }];
+        let mut tag = entry(
+            "tag",
+            vec![
+                param(Pass::In, Mode::Copy, named("u64"), &[]),
+                param(Pass::In, Mode::Copy, var("T"), &[]),
+            ],
+            var("T"),
+            Mode::Copy,
+            &[],
+            BadgeLevel::Unverified,
+        );
+        tag.generics = vec![IndexGeneric {
+            name: "T".into(),
+            bound: Mode::Copy,
+        }];
+        let idx = SearchIndex {
+            format: INDEX_FORMAT.into(),
+            version: INDEX_VERSION,
+            entries: vec![keep, tag],
+            unsupported: vec![],
+        };
+        let hits = |q: &str| search(&parse_text_query(q).unwrap(), &idx);
+        let keep = hits("sink Option[u64] -> Option[u64]");
+        assert_eq!(keep.len(), 1);
+        assert_eq!(
+            keep[0].instantiation,
+            [("T".to_string(), "Option[u64]".to_string())]
+        );
+        assert!(!keep[0].exact);
+        // Inconsistent instantiation and over-bound modes do not match.
+        assert!(hits("sink u64 -> bool").is_empty());
+        assert_eq!(hits("u64, bool -> bool")[0].name, "tag");
+        assert!(hits("u64, linear Txn -> Txn").is_empty());
+        // A wildcard never binds: `_` then a concrete type still matches.
+        assert_eq!(
+            hits("u64, _ -> bool")[0].instantiation,
+            [("T".to_string(), "bool".to_string())]
+        );
+        assert_eq!(
+            hits("sink _ -> _")[0].instantiation,
+            Vec::<(String, String)>::new()
+        );
+        // A partial pattern unifies with a later, more specific one.
+        assert_eq!(
+            hits("sink Option[_] -> Option[u64]")[0].instantiation,
+            [("T".to_string(), "Option[u64]".to_string())]
+        );
+        assert_eq!(
+            hits("sink (u64, _) -> (_, bool)")[0].instantiation,
+            [("T".to_string(), "(u64, bool)".to_string())]
+        );
+        assert!(hits("sink Option[_] -> Result[u64]").is_empty());
+        assert!(hits("sink Option[bool] -> Option[u64]").is_empty());
+    }
+
+    #[test]
+    fn package_index_qualifies_paths_and_rejects_duplicates() {
+        use crate::{Effects, FunctionDoc, Parameter};
+        let f = |name: &str| FunctionDoc {
+            name: name.into(),
+            docs: String::new(),
+            span: crate::Span { start: 0, end: 0 },
+            generics: vec![],
+            parameters: vec![Parameter {
+                name: "x".into(),
+                pass: Pass::In,
+                mode: Mode::Copy,
+                ty: Type::named("u64"),
+                selector: Selector::All,
+            }],
+            result: Type::named("u64"),
+            declared_result: Type::named("u64"),
+            result_mode: Mode::Copy,
+            effects: Effects::default(),
+            effect_resumptions: vec![],
+            unsupported: vec![],
+        };
+        let a = [f("same")];
+        let b = [f("same")];
+        let convert = |arg: &str| ImplMethod {
+            conformance: format!("impl p::Convert-0-{arg}-2.Point"),
+            trait_name: "Convert".into(),
+            trait_args: vec![arg.into()],
+            method: "convert".into(),
+            self_ty: "Point".into(),
+            model: None,
+            public: true,
+            function: f("$gen"),
+        };
+        let impls = [
+            ImplMethod {
+                conformance: "impl p::Show.Point".into(),
+                trait_name: "Show".into(),
+                trait_args: vec![],
+                method: "show".into(),
+                self_ty: "Point".into(),
+                model: None,
+                public: true,
+                function: f("$gen"),
+            },
+            convert("i64"),
+            convert("bool"),
+        ];
+        let files = [
+            PackageFile {
+                file: "a.ves",
+                href: "files/a.ves.html",
+                functions: &a,
+                badges: &[],
+                impls: &impls,
+            },
+            PackageFile {
+                file: "b.ves",
+                href: "files/b.ves.html",
+                functions: &b,
+                badges: &[],
+                impls: &[],
+            },
+        ];
+        let idx = build_package_index(&files, Limits::default()).unwrap();
+        let paths: Vec<&str> = idx.entries.iter().map(|e| e.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            [
+                "a.ves::Point as Convert[bool]::convert",
+                "a.ves::Point as Convert[i64]::convert",
+                "a.ves::Point as Show::show",
+                "a.ves::same",
+                "b.ves::same"
+            ]
+        );
+        assert_eq!(idx.entries[2].kind, EntryKind::ImplMethod);
+        assert_eq!(
+            idx.entries[2].signature,
+            "fn Point as Show::show(in x: u64) -> u64"
+        );
+        let hits = search(&parse_text_query("Show").unwrap(), &idx);
+        assert_eq!(hits.len(), 1);
+        let dup = [files[0].functions, files[0].functions].concat();
+        let files = [PackageFile {
+            file: "a.ves",
+            href: "a.html",
+            functions: &dup,
+            badges: &[],
+            impls: &[],
+        }];
+        assert!(build_package_index(&files, Limits::default()).is_err());
     }
 
     #[test]

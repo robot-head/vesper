@@ -1,0 +1,36 @@
+//! Traits, impls, Pact models and generic helpers (no doctests).
+
+/// A scored entry.
+copy struct Entry {
+    total: u64,
+    count: u64
+}
+
+/// Something with a score.
+trait Score {
+    fn score(in self) -> u64;
+}
+
+/// The canonical score is the total.
+impl Score for Entry {
+    fn score(in self) -> u64 {
+        self.total
+    }
+}
+
+/// An alternative score: the entry count.
+model ByCount: Score for Entry {
+    fn score(in self) -> u64 {
+        self.count
+    }
+}
+
+/// Keeps a value unchanged; found by instantiation in search.
+fn keep[T](sink value: T) -> T {
+    value
+}
+
+/// Pairs an amount with a value of any copy type.
+fn tag[T: mod copy](in amount: u64, in value: T) -> T {
+    value
+}

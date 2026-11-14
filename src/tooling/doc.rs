@@ -219,10 +219,220 @@ pub(super) fn surface_expansion(module: &Module, limit: usize) -> Result<(), Str
     }
     Ok(())
 }
-/// Checks the complete current source before extracting metadata. Diagnostics
-/// prevent any document from being returned. Callers cannot provide a boolean
-/// to promote unchecked source or proof evidence.
-pub fn document_source(source: &str, limits: Limits) -> Result<Document, String> {
+/// Body-level analyses of a checked source, beside its [`Document`].
+#[derive(Clone, Debug, Default, serde::Serialize)]
+pub struct Analysis {
+    /// May-use footprints and inferred effect rows (§40.1 1b).
+    pub may_use: vesper_doc::footprints::MayUseReport,
+    /// `[K-Adt]` mode-crossing tables (§40.1 1b).
+    pub mode_crossings: vesper_doc::modes::ModeCrossings,
+    /// Methods of source `impl` and Pact `model` declarations.
+    pub impl_methods: Vec<vesper_doc::hoogle::ImplMethod>,
+}
+
+/// Every named type a signature mentions.
+fn mentioned(ty: &Type, out: &mut std::collections::BTreeSet<String>) {
+    match ty {
+        Type::Named(n, args) => {
+            out.insert(n.clone());
+            args.iter().for_each(|a| mentioned(a, out));
+        }
+        Type::Tuple(ts) => ts.iter().for_each(|t| mentioned(t, out)),
+        Type::Function { params, result, .. } => {
+            params.iter().for_each(|(_, t)| mentioned(t, out));
+            mentioned(result, out);
+        }
+        _ => (),
+    }
+}
+
+fn mode_crossings(
+    module: &Module,
+    world: &World,
+    document: &Document,
+) -> vesper_doc::modes::ModeCrossings {
+    use vesper_doc::modes::{self, ModeCrossings, TypeParam};
+    let mut out = ModeCrossings::default();
+    let local: std::collections::BTreeSet<&str> = module
+        .items
+        .iter()
+        .filter_map(|i| match i {
+            Item::Adt(a) => Some(a.name.as_str()),
+            _ => None,
+        })
+        .collect();
+    let mut used = std::collections::BTreeSet::new();
+    for f in &document.functions {
+        for p in &f.parameters {
+            mentioned(&p.ty, &mut used);
+        }
+        mentioned(&f.result, &mut used);
+    }
+    for t in &document.types {
+        for field in t.declaration.variants.iter().flat_map(|v| &v.fields) {
+            mentioned(&field.ty, &mut used);
+        }
+    }
+    for (name, adt) in &world.adts {
+        if adt.generics.is_empty() {
+            continue;
+        }
+        let origin = if local.contains(name.as_str()) {
+            "documented"
+        } else if used.contains(name) {
+            "builtin"
+        } else {
+            continue;
+        };
+        if adt.generics.iter().any(|g| g.row) {
+            out.unsupported
+                .push((name.clone(), "row parameters have no mode".into()));
+            continue;
+        }
+        let params: Vec<TypeParam> = adt
+            .generics
+            .iter()
+            .map(|g| TypeParam {
+                name: g.name.clone(),
+                bound: g.bound,
+            })
+            .collect();
+        let ty = Type::Named(
+            name.clone(),
+            adt.generics.iter().map(|g| Type::named(&g.name)).collect(),
+        );
+        out.tables
+            .push(modes::table(name, origin, adt.mode, params, |args| {
+                let bounds = adt
+                    .generics
+                    .iter()
+                    .zip(args)
+                    .map(|(g, m)| (g.name.clone(), *m))
+                    .collect();
+                world.mode(&ty, &bounds)
+            }));
+    }
+    out.tables.sort_by(|a, b| a.ty.cmp(&b.ty));
+    out.unsupported.sort();
+    out
+}
+
+fn analysis(
+    module: &Module,
+    world: &World,
+    source: &str,
+    document: &Document,
+) -> Result<Analysis, String> {
+    let bodies: Vec<&Function> = document
+        .functions
+        .iter()
+        .filter_map(|f| world.functions.get(&f.name))
+        .collect();
+    let operations: Vec<(String, FunctionDoc)> = document
+        .effects
+        .iter()
+        .flat_map(|e| e.operations.iter().map(|o| (e.name.clone(), o.clone())))
+        .collect();
+    let effect_names = world.effects.keys().cloned().collect();
+    let may_use =
+        vesper_doc::footprints::may_use(&bodies, &document.functions, &operations, &effect_names)?;
+    let conformances: BTreeMap<&str, &vesper_doc::ConformanceInfo> = world
+        .elaboration
+        .conformances
+        .iter()
+        .map(|c| (c.path.as_str(), c))
+        .collect();
+    let mut impl_methods = Vec::new();
+    for (generated, origin) in &world.elaboration.generated {
+        let (Some(f), Some(c)) = (
+            world.functions.get(generated),
+            conformances.get(origin.conformance.as_str()),
+        ) else {
+            continue;
+        };
+        let mut doc = function_doc(world, source, f, &[]);
+        doc.docs.clear();
+        impl_methods.push(vesper_doc::hoogle::ImplMethod {
+            conformance: origin.conformance.clone(),
+            trait_name: origin.trait_name.clone(),
+            trait_args: trait_args(module, &origin.conformance),
+            method: origin.method.clone(),
+            self_ty: c.self_ty.clone(),
+            model: c.model.clone(),
+            public: c.public,
+            function: doc,
+        });
+    }
+    impl_methods.sort_by_key(|m| m.path());
+    Ok(Analysis {
+        may_use,
+        mode_crossings: mode_crossings(module, world, document),
+        impl_methods,
+    })
+}
+
+/// The `impl` key segment of a type, as the Pact frontend spells it in a
+/// conformance path (`Convert[i64]` is `Convert-0-i64-2`).
+fn key_segment(t: &Type) -> String {
+    let join = |ts: Vec<String>| ts.join("-1-");
+    match t {
+        Type::Named(n, args) if args.is_empty() => n.clone(),
+        Type::Named(n, args) => format!("{n}-0-{}-2", join(args.iter().map(key_segment).collect())),
+        Type::Tuple(ts) if ts.is_empty() => "Unit".into(),
+        Type::Tuple(ts) => format!("3-0-{}-2", join(ts.iter().map(key_segment).collect())),
+        Type::Row(e) => format!(
+            "4-0-{}-2",
+            join(
+                e.instances
+                    .iter()
+                    .map(|i| key_segment(&Type::Named(i.name.clone(), i.args.clone())))
+                    .chain(e.tail.clone())
+                    .collect()
+            )
+        ),
+        _ => "5".into(),
+    }
+}
+
+/// The trait type arguments of the conformance at `path` (an `impl` key
+/// `Trait[args].Self` or a model name). Unknown conformances have none.
+fn trait_args(module: &Module, path: &str) -> Vec<String> {
+    let key = path.rsplit("::").next().unwrap_or(path);
+    module
+        .items
+        .iter()
+        .find_map(|item| {
+            let Item::Conformance(c) = item else {
+                return None;
+            };
+            let this = match &c.kind {
+                ConformanceKind::Model { name, .. } => name.clone(),
+                ConformanceKind::Canonical => {
+                    let mut t = c.trait_ref.name.clone();
+                    if !c.trait_ref.args.is_empty() {
+                        t = key_segment(&Type::Named(t, c.trait_ref.args.clone()));
+                    }
+                    format!("{t}.{}", key_segment(&c.self_ty))
+                }
+            };
+            (this == key).then(|| c.trait_ref.args.iter().map(ToString::to_string).collect())
+        })
+        .unwrap_or_default()
+}
+
+/// [`document_source`] plus the body-level [`Analysis`] of the same checked
+/// snapshot.
+pub fn document_with_analysis(
+    source: &str,
+    limits: Limits,
+) -> Result<(Document, Analysis), String> {
+    let (parsed, checked) = check_source(source, limits)?;
+    let document = build_document(source, &parsed.module, &checked.world, limits)?;
+    let analysis = analysis(&parsed.module, &checked.world, source, &document)?;
+    Ok((document, analysis))
+}
+
+fn check_source(source: &str, limits: Limits) -> Result<(parser::Parse, check::Checked), String> {
     vesper_doc::source_preflight(source, limits)?;
     let parsed = parser::parse(source);
     if !parsed.diagnostics.is_empty() {
@@ -243,6 +453,14 @@ pub fn document_source(source: &str, limits: Limits) -> Result<Document, String>
             checked.diagnostics[0].code, checked.diagnostics[0].message
         ));
     }
+    Ok((parsed, checked))
+}
+
+/// Checks the complete current source before extracting metadata. Diagnostics
+/// prevent any document from being returned. Callers cannot provide a boolean
+/// to promote unchecked source or proof evidence.
+pub fn document_source(source: &str, limits: Limits) -> Result<Document, String> {
+    let (parsed, checked) = check_source(source, limits)?;
     build_document(source, &parsed.module, &checked.world, limits)
 }
 
@@ -273,12 +491,12 @@ fn build_document(
 ) -> Result<Document, String> {
     let limitations = vec![
         "Checked source metadata; proof badges come only from supplied proof-audit reports, otherwise unverified".into(),
-        "Search excludes generic, open-row, unresolved and function-typed contracts".into(),
+        "Search matches generic functions by instantiation; row binders, open rows, unresolved and function-typed contracts are excluded".into(),
         "Struct layouts describe the native eight-byte ABI; wire layouts come only from compiled Bridge declarations; no tiled layouts".into(),
         "A terminal path is not an all-path ownership or termination proof".into(),
         "Local intra-doc links cover documented source declarations; package, generic, Self and trait-method links are unsupported".into(),
         "No doctest, JIT, WASM or semver-diff execution; .olean certificates are linked only from an explicit Loom store and prove content identity, not provenance".into(),
-        "FieldTree heatmaps show declared, checker-enforced footprints, not a may-use analysis of bodies".into(),
+        "FieldTree heatmaps show declared, checker-enforced footprints; may-use footprints over-approximate body uses through parameter names (no alias analysis)".into(),
     ];
     let mut document = Document {
         schema_version: 1,

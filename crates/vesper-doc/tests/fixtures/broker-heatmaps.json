@@ -34,6 +34,12 @@
             "config"
           ],
           "function": "begin",
+          "may_use": [
+            "read",
+            "free",
+            "free",
+            "free"
+          ],
           "parameter": "broker",
           "pass": "In",
           "selector": [
@@ -49,6 +55,12 @@
           ],
           "free": [],
           "function": "checksum",
+          "may_use": [
+            "read",
+            "free",
+            "free",
+            "read"
+          ],
           "parameter": "broker",
           "pass": "In",
           "selector": []
@@ -66,6 +78,12 @@
             "metrics.dropped"
           ],
           "function": "config_of",
+          "may_use": [
+            "free",
+            "free",
+            "free",
+            "read"
+          ],
           "parameter": "broker",
           "pass": "In",
           "selector": [
@@ -85,6 +103,12 @@
             "config"
           ],
           "function": "drop_one",
+          "may_use": [
+            "free",
+            "free",
+            "write",
+            "free"
+          ],
           "parameter": "broker",
           "pass": "Inout",
           "selector": [
@@ -103,6 +127,12 @@
             "config"
           ],
           "function": "publish",
+          "may_use": [
+            "write",
+            "write",
+            "free",
+            "free"
+          ],
           "parameter": "broker",
           "pass": "Inout",
           "selector": [
@@ -137,6 +167,9 @@
           ],
           "free": [],
           "function": "commit",
+          "may_use": [
+            "consume"
+          ],
           "parameter": "tx",
           "pass": "Sink",
           "selector": []

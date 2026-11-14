@@ -600,6 +600,9 @@ pub fn render_codex_html(
 pub struct PageExtras<'a> {
     pub heatmaps: Option<&'a crate::heatmap::Heatmaps>,
     pub search_href: Option<&'a str>,
+    /// Further pre-rendered, escaped sections (may-use footprints,
+    /// mode-crossing tables, capability badges, impls), after the heatmaps.
+    pub sections: Option<&'a str>,
 }
 fn certificate_cell(b: &crate::badges::Badge) -> String {
     use crate::badges::CertificateStatus;
@@ -696,6 +699,12 @@ pub fn render_codex_page(
     out.push_str("</table></section>");
     if let Some(maps) = extras.heatmaps {
         out.push_str(&crate::heatmap::render(maps));
+        if out.len() > limits.max_output_bytes {
+            return Err("output byte budget exceeded".into());
+        }
+    }
+    if let Some(sections) = extras.sections {
+        out.push_str(sections);
         if out.len() > limits.max_output_bytes {
             return Err("output byte budget exceeded".into());
         }
