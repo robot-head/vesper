@@ -302,11 +302,7 @@ impl Gguf {
             }
             metadata.push((key, value));
         }
-        let alignment = match metadata.iter().find(|(k, _)| k == "general.alignment") {
-            None => DEFAULT_ALIGNMENT,
-            Some((_, Value::U32(a))) if *a > 0 && a.is_power_of_two() => *a as usize,
-            Some(_) => return Err(Error::Malformed("general.alignment")),
-        };
+        let alignment = alignment_of(&metadata)?;
         let mut infos = Vec::new();
         let mut names = HashSet::new();
         for _ in 0..tensor_count {
@@ -491,8 +487,21 @@ fn put_value(out: &mut Vec<u8>, v: &Value) -> Result<(), Error> {
     Ok(())
 }
 
-/// Serializes a version-3 GGUF file with [`DEFAULT_ALIGNMENT`].
+/// The data alignment `general.alignment` selects: [`DEFAULT_ALIGNMENT`]
+/// when absent, otherwise a non-zero power-of-two `u32`.
+fn alignment_of(metadata: &[(String, Value)]) -> Result<usize, Error> {
+    match metadata.iter().find(|(k, _)| k == "general.alignment") {
+        None => Ok(DEFAULT_ALIGNMENT),
+        Some((_, Value::U32(a))) if *a > 0 && a.is_power_of_two() => Ok(*a as usize),
+        Some(_) => Err(Error::Malformed("general.alignment")),
+    }
+}
+
+/// Serializes a version-3 GGUF file, padded to the alignment that
+/// `general.alignment` selects ([`DEFAULT_ALIGNMENT`] when absent), so the
+/// output reads back with the same offsets.
 pub fn write(metadata: &[(String, Value)], tensors: &[TensorData]) -> Result<Vec<u8>, Error> {
+    let alignment = alignment_of(metadata)?;
     let mut out = Vec::new();
     out.extend_from_slice(MAGIC);
     out.extend_from_slice(&3u32.to_le_bytes());
@@ -514,7 +523,10 @@ pub fn write(metadata: &[(String, Value)], tensors: &[TensorData]) -> Result<Vec
             .iter()
             .try_fold(1usize, |a, d| a.checked_mul(*d))
             .ok_or(Error::Overflow)?;
-        if !t.dims[0].is_multiple_of(block) || elements / block * block_bytes != t.bytes.len() {
+        if t.dims.is_empty()
+            || !t.dims[0].is_multiple_of(block)
+            || elements / block * block_bytes != t.bytes.len()
+        {
             return Err(Error::Shape("GGUF tensor byte length"));
         }
         put_string(&mut out, &t.name);
@@ -525,9 +537,9 @@ pub fn write(metadata: &[(String, Value)], tensors: &[TensorData]) -> Result<Vec
         out.extend_from_slice(&t.ty.0.to_le_bytes());
         out.extend_from_slice(&(offset as u64).to_le_bytes());
         offsets.push(offset);
-        offset = (offset + t.bytes.len()).next_multiple_of(DEFAULT_ALIGNMENT);
+        offset = (offset + t.bytes.len()).next_multiple_of(alignment);
     }
-    out.resize(out.len().next_multiple_of(DEFAULT_ALIGNMENT), 0);
+    out.resize(out.len().next_multiple_of(alignment), 0);
     let data_start = out.len();
     for (t, off) in tensors.iter().zip(offsets) {
         out.resize(data_start + off, 0);

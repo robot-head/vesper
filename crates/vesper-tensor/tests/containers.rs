@@ -219,7 +219,15 @@ fn gguf_rejections_are_typed() {
         Error::Malformed("truncated GGUF array")
     );
     // Bad general.alignment.
-    let bad = gguf::write(&[("general.alignment".into(), Value::U32(3))], &[]).unwrap();
+    // (The writer refuses it too, so patch a valid file's value.)
+    let mut bad = gguf::write(&[("general.alignment".into(), Value::U32(32))], &[]).unwrap();
+    let at = bad
+        .windows(17)
+        .position(|w| w == b"general.alignment")
+        .unwrap()
+        + 17
+        + 4;
+    patch(&mut bad, at, &3u32.to_le_bytes());
     assert_eq!(
         Gguf::from_vec(bad).unwrap_err(),
         Error::Malformed("general.alignment")
@@ -399,4 +407,51 @@ fn mapped_files_parse_like_memory_and_borrow_their_bytes() {
         Error::Io("open weight file")
     );
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[test]
+fn gguf_writer_pads_to_the_alignment_its_metadata_declares() {
+    for alignment in [1u32, 8, 16, 32, 64, 256] {
+        let tensors = [
+            TensorData {
+                name: "xxxxxxxx".into(),
+                dims: vec![3],
+                ty: GgmlType::F32,
+                bytes: [1.0f32, 2.0, 3.0]
+                    .iter()
+                    .flat_map(|v| v.to_le_bytes())
+                    .collect(),
+            },
+            TensorData {
+                name: "y".into(),
+                dims: vec![1],
+                ty: GgmlType::F32,
+                bytes: 4.0f32.to_le_bytes().to_vec(),
+            },
+        ];
+        let meta = [("general.alignment".to_string(), Value::U32(alignment))];
+        let g = Gguf::from_vec(gguf::write(&meta, &tensors).unwrap()).unwrap();
+        assert_eq!(g.alignment(), alignment as usize);
+        for t in &tensors {
+            assert_eq!(
+                g.bytes(g.tensor(&t.name).unwrap()),
+                &t.bytes[..],
+                "{alignment}"
+            );
+        }
+    }
+    for bad in [Value::U32(0), Value::U32(24), Value::U64(32)] {
+        let meta = [("general.alignment".to_string(), bad)];
+        assert_eq!(
+            gguf::write(&meta, &[]),
+            Err(Error::Malformed("general.alignment"))
+        );
+    }
+    let empty_dims = TensorData {
+        name: "z".into(),
+        dims: vec![],
+        ty: GgmlType::F32,
+        bytes: vec![],
+    };
+    assert!(gguf::write(&[], &[empty_dims]).is_err());
 }

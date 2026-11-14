@@ -415,3 +415,92 @@ fn invalid_batches_fail_before_any_mutation() {
     cache.release(b).map_err(|(e, _)| e).unwrap();
     other.release(foreign).map_err(|(e, _)| e).unwrap();
 }
+
+#[test]
+fn numerical_failures_after_kv_appends_leave_no_trace() {
+    // stories260K with every layer-0 Q weight at f32::MAX: the finite-weight
+    // loader accepts it, and the queries overflow after K/V were appended.
+    const MODEL: &[u8] = include_bytes!("../models/stories260K.bin");
+    let mut bytes = MODEL.to_vec();
+    let (dim, vocab, layers) = (64usize, 512usize, 5usize);
+    let wq = 28 + 4 * (vocab * dim + layers * dim);
+    for w in bytes[wq..wq + 4 * dim * dim].chunks_mut(4) {
+        w.copy_from_slice(&f32::MAX.to_le_bytes());
+    }
+    let model = Model::from_llama2c(&bytes).unwrap();
+    let c = model.config();
+    for opts in options() {
+        let mut cache = KvCache::new(c, KvFormat::F32, 1).unwrap();
+        let stats = |cache: &KvCache| cache.pools().iter().map(|p| p.stats()).collect::<Vec<_>>();
+        let mut a = cache.begin().unwrap();
+        let before = stats(&cache);
+        let mut scratch = model.batch_scratch(20, 1).unwrap();
+        let prompt = [BOS; 20];
+        for _ in 0..2 {
+            let r = model.forward_batch(
+                &mut cache,
+                &mut [BatchItem {
+                    session: &mut a,
+                    tokens: &prompt,
+                }],
+                &mut scratch,
+                opts,
+            );
+            assert_eq!(r, Err(Error::NonFinite));
+            assert_eq!(stats(&cache), before);
+            assert_eq!(a.position(), 0);
+            assert!(model.forward_with(&mut cache, &mut a, BOS, opts).is_err());
+            assert_eq!(stats(&cache), before);
+            assert_eq!(a.position(), 0);
+        }
+        cache.release(a).unwrap();
+    }
+}
+
+#[test]
+fn prompts_longer_than_one_batch_are_prefilled_in_chunks() {
+    use vesper_tensor::llama::MAX_BATCH_TOKENS;
+    // A tiny model whose context exceeds one batch.
+    let seq_len = MAX_BATCH_TOKENS + 64;
+    let model = Model::from_llama2c(&common::synthetic_checkpoint(
+        [8, 8, 1, 2, 1, 16, seq_len],
+        77,
+    ))
+    .unwrap();
+    let c = model.config();
+    let prompt: Vec<u32> = std::iter::once(BOS)
+        .chain(
+            tokens(9, MAX_BATCH_TOKENS + 9, 16)
+                .into_iter()
+                .map(|t| t.max(3)),
+        )
+        .collect();
+    let steps = prompt.len() + 8;
+    let mut cache = KvCache::new(c, KvFormat::F32, 2).unwrap();
+    let mut a = cache.begin().unwrap();
+    let mut b = cache.begin().unwrap();
+    let mut sampler = greedy_sampler(&model).unwrap();
+    let sampled = generate(
+        &model,
+        &mut cache,
+        &mut a,
+        &prompt,
+        steps,
+        &mut sampler,
+        RunOptions::SCALAR,
+    )
+    .unwrap();
+    let greedy = generate_greedy(
+        &model,
+        &mut cache,
+        &mut b,
+        &prompt,
+        steps,
+        AttentionMode::TwoPass,
+    )
+    .unwrap();
+    assert!(sampled.len() >= prompt.len() - 1);
+    assert_eq!(sampled, greedy);
+    cache.release(a).unwrap();
+    cache.release(b).unwrap();
+}

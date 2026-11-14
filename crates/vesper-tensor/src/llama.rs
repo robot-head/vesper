@@ -487,7 +487,6 @@ impl Model {
         options: RunOptions,
     ) -> Result<&'s [f32], Error> {
         let c = self.config;
-        let kernel = options.kernel;
         if cache.identity != session.cache || cache.config != c {
             return Err(Error::InvalidId);
         }
@@ -499,6 +498,26 @@ impl Model {
         if position >= c.seq_len {
             return Err(Error::Limit("sequence length"));
         }
+        if let Err(e) = self.forward_step(cache, session, token, options) {
+            undo_appends(cache, &mut session.sequences, position);
+            return Err(e);
+        }
+        session.position += 1;
+        Ok(&session.scratch.logits)
+    }
+
+    /// The body of [`Self::forward_with`] after its checks; on error the
+    /// caller removes whatever K/V it appended.
+    fn forward_step(
+        &self,
+        cache: &mut KvCache,
+        session: &mut Session,
+        token: usize,
+        options: RunOptions,
+    ) -> Result<(), Error> {
+        let c = self.config;
+        let kernel = options.kernel;
+        let position = session.position;
         let s = &mut session.scratch;
         self.embedding.dequantize_row(token, &mut s.x)?;
         let shape = self.attention_shape();
@@ -535,8 +554,7 @@ impl Model {
         if s.logits.iter().any(|v| !v.is_finite()) {
             return Err(Error::NonFinite);
         }
-        session.position += 1;
-        Ok(&session.scratch.logits)
+        Ok(())
     }
 
     fn attention_shape(&self) -> AttentionShape {
@@ -609,7 +627,6 @@ impl Model {
         options: RunOptions,
     ) -> Result<(), Error> {
         let c = self.config;
-        let kernel = options.kernel;
         if cache.config != c || scratch.model != c {
             return Err(Error::InvalidId);
         }
@@ -655,6 +672,33 @@ impl Model {
         if cache.pools.iter().any(|p| p.stats().free_pages < new_pages) {
             return Err(Error::Kv(crate::kv::KvError::OutOfPages));
         }
+        if let Err(e) = self.forward_batch_steps(cache, items, scratch, total, options) {
+            // Arithmetic can still fail (non-finite activations) after K/V
+            // were appended; remove them so the batch leaves no trace.
+            for item in items.iter_mut() {
+                let position = item.session.position;
+                undo_appends(cache, &mut item.session.sequences, position);
+            }
+            return Err(e);
+        }
+        for item in items.iter_mut() {
+            item.session.position += item.tokens.len();
+        }
+        Ok(())
+    }
+
+    /// The body of [`Self::forward_batch`] after its checks; sessions'
+    /// positions are advanced by the caller on success.
+    fn forward_batch_steps(
+        &self,
+        cache: &mut KvCache,
+        items: &mut [BatchItem<'_>],
+        scratch: &mut BatchScratch,
+        total: usize,
+        options: RunOptions,
+    ) -> Result<(), Error> {
+        let c = self.config;
+        let kernel = options.kernel;
         let (dim, kv_dim, hidden) = (c.dim, c.kv_dim(), c.hidden_dim);
         let s = scratch;
         let n = total;
@@ -778,9 +822,20 @@ impl Model {
                 .scratch
                 .logits
                 .copy_from_slice(&s.logits[i * vocab..(i + 1) * vocab]);
-            item.session.position += item.tokens.len();
         }
         Ok(())
+    }
+}
+
+/// Truncates every layer's sequence back to `position` tokens after a failed
+/// forward call. The sequences were validated before any append, so a
+/// truncation failure would be an internal invariant violation; it is ignored
+/// so the caller still reports the original error.
+fn undo_appends(cache: &mut KvCache, sequences: &mut [Sequence], position: usize) {
+    for (pool, sequence) in cache.pools.iter_mut().zip(sequences.iter_mut()) {
+        if pool.len(sequence).is_ok_and(|len| len > position) {
+            let _ = pool.truncate(sequence, position);
+        }
     }
 }
 
@@ -1502,6 +1557,14 @@ impl Model {
         if !shared {
             used.push("lm_head.weight".into());
         }
+        // FP8 matrices carry a scalar `<name>_scale` companion (see
+        // `SafeTensors::matrix`).
+        for name in ["model.embed_tokens.weight", "lm_head.weight"] {
+            let scale = format!("{name}_scale");
+            if used.iter().any(|u| u == name) && st.get(&scale).is_some() {
+                used.push(scale);
+            }
+        }
         let mut layers = Vec::with_capacity(layers_n);
         for i in 0..layers_n {
             let p = format!("model.layers.{i}.");
@@ -1704,8 +1767,9 @@ impl Tokenizer {
     }
 }
 
-/// Generation with any sampler: the whole `prompt` (which must start with
-/// [`BOS`]) is prefilled in one [`Model::forward_batch`] call, then tokens are
+/// Generation with any sampler: the `prompt` (which must start with
+/// [`BOS`]) is prefilled with [`Model::forward_batch`] in chunks of at most
+/// [`MAX_BATCH_TOKENS`], then tokens are
 /// sampled one decode step at a time until `steps` positions have been
 /// processed or [`BOS`] is produced. Returns the tokens after the prompt's
 /// first token, as [`generate_greedy`] does; with
@@ -1740,16 +1804,20 @@ pub fn generate(
     if prefill.is_empty() {
         return Ok(out);
     }
-    let mut scratch = model.batch_scratch(prefill.len(), 1)?;
-    model.forward_batch(
-        cache,
-        &mut [BatchItem {
-            session: &mut *session,
-            tokens: prefill,
-        }],
-        &mut scratch,
-        options,
-    )?;
+    // Prefill in chunks of at most MAX_BATCH_TOKENS; batched logits equal
+    // one-token steps, so the chunking does not change the result.
+    let mut scratch = model.batch_scratch(prefill.len().min(MAX_BATCH_TOKENS), 1)?;
+    for chunk in prefill.chunks(MAX_BATCH_TOKENS) {
+        model.forward_batch(
+            cache,
+            &mut [BatchItem {
+                session: &mut *session,
+                tokens: chunk,
+            }],
+            &mut scratch,
+            options,
+        )?;
+    }
     if prompt.len() > steps {
         return Ok(out);
     }

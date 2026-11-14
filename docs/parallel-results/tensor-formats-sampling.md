@@ -33,7 +33,7 @@ Rust ownership. It is not evidence that the Vesper source typing rules for
 
 ## Tests and evidence
 
-All Tensor tests from before this lane still pass. The lane adds 32
+All Tensor tests from before this lane still pass. The lane adds 35
 integration tests in 8 files plus JSON unit tests.
 
 - `tests/formats_interop.rs` (7). The peers are gguf-py 0.19.0 (llama.cpp's
@@ -47,19 +47,21 @@ integration tests in 8 files plus JSON unit tests.
     encoder matches ml_dtypes on the sample values.
   - The stories260K model that gguf-py converted to Q8_0 GGUF equals our own
     Q8_0 conversion and is mapped without copying.
-- `tests/containers.rs` (4): malformed GGUF and safetensors give typed errors
+- `tests/containers.rs` (5): malformed GGUF and safetensors give typed errors
   and never panic. Covered: every truncation, bad magic and version,
   duplicates, overlaps, misalignment, absurd counts, bad JSON and bad dtypes.
-  Writer round trips are also checked.
+  Writer round trips are also checked, including that the GGUF writer pads
+  to whatever `general.alignment` declares (1 to 256).
 - `tests/model_formats.rs` (5):
   - An F32 GGUF round trip reproduces the 200-token reference text, and the
     model compares equal.
   - An HF safetensors round trip (permuted Q/K, half RoPE) reproduces the
     reference text.
   - Mapped and read loads give identical logits.
+  - An FP8 embedding and an FP8 `lm_head` with `_scale` companions load.
   - Missing or extra tensors and bad metadata give typed errors.
   - A per-format sweep and a logits cosine check (figures below).
-- `tests/batching.rs` (4):
+- `tests/batching.rs` (6):
   - Batched prefill, mixed batches of several sequences, and uneven prompt
     lengths give logits bit-identical to one-token `forward` steps, for both
     attention schedules, both KV formats and both kernels.
@@ -67,6 +69,11 @@ integration tests in 8 files plus JSON unit tests.
     reference text.
   - A rejected batch (foreign session, bad token, over capacity, out of
     pages) leaves every KV pool unchanged.
+  - A batch or single step that fails numerically after appending K/V (a
+    model with `f32::MAX` Q weights overflows) truncates every layer back,
+    so stats and positions are unchanged and a retry fails the same way.
+  - Prompts longer than `MAX_BATCH_TOKENS` are prefilled in chunks, and
+    `generate` equals `generate_greedy` on a 4160-token-context model.
 - `tests/simd_kernels.rs` (3):
   - The SIMD dot product equals `lanes_reference_dot` bit for bit at lengths
     0 to 300. The scalar kernel equals the sequential loop.
@@ -192,9 +199,12 @@ cargo test --workspace --locked                                               # 
   batch attends to the KV positions up to its own, with the same arithmetic
   as a single step. That is why batched logits are bit-identical and not
   just close.
-- **Prechecks before any write.** `forward_batch` validates the whole batch,
-  including free pages for every page boundary it will cross, before
-  appending K/V. A rejected batch therefore needs no rollback.
+- **Prechecks before any write, truncation after a late failure.**
+  `forward_batch` validates the whole batch, including free pages for every
+  page boundary it will cross, before appending K/V. Arithmetic can still
+  fail afterwards (non-finite activations from finite but huge weights); then
+  `forward_batch` and `forward_with` truncate every touched sequence back
+  with the new `KvPool::truncate`, so a failed call leaves no K/V behind.
 - **Quantization policy.** `Model::quantized(format)` quantizes a projection
   only when its width is a whole number of blocks: 32 for Q8_0, Q4_0 and
   MXFP4, 256 for Q4_K, and any width for F16, BF16 and FP8. The function
@@ -203,6 +213,10 @@ cargo test --workspace --locked                                               # 
 - **RoPE layouts.** GGUF and llama2.c use interleaved pairs. HF safetensors
   uses `rotate_half` (`RopeStyle::Half`). `to_safetensors` applies the HF
   conversion permutation to Q/K rows, so both layouts produce the same text.
+- **Top-p when every token is pruned.** With `top_p < 1/n` the `run.c`
+  cutoff `(1 - p)/(n - 1)` removes every token and `run.c` reads out of
+  bounds. The nucleus is then exactly the most likely token, which is what
+  `sample_top_p` returns.
 - **BOS is never merged.** As in `run.c`, BOS and EOS are added around the
   merged pieces, not merged into them.
 

@@ -139,9 +139,17 @@ pub fn sample_top_p(probs: &[f32], top_p: f32, coin: f32, scratch: &mut Vec<(f32
         }
     }
     if scratch.is_empty() {
-        // Unreachable for a normalized distribution (some p >= 1/n > cutoff);
-        // fall back to the full distribution rather than panic.
-        return sample_mult(probs, coin);
+        // Every token is below the cutoff only when `top_p < 1/n`: then the
+        // largest probability (at least `1/n`) alone exceeds `top_p`, so the
+        // nucleus is exactly that token (first index on ties). `run.c` reads
+        // out of bounds here.
+        let mut best = 0;
+        for (i, &p) in probs.iter().enumerate() {
+            if p > probs[best] {
+                best = i;
+            }
+        }
+        return best as u32;
     }
     scratch.sort_unstable_by(|a, b| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1)));
     let mut cumulative = 0.0f32;

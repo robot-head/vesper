@@ -220,6 +220,12 @@ fn sampling_follows_the_distribution_and_the_nucleus() {
     // Ties sort by ascending id.
     assert_eq!(sample_top_p(&[0.25; 4], 0.3, 0.9, &mut scratch), 1);
     assert_eq!(sample_top_p(&[1.0], 0.5, 0.5, &mut scratch), 0);
+    // top_p below 1/n prunes every token (cutoff 0.9 here); the nucleus is
+    // still the most likely token, whatever the coin.
+    for coin in [0.0, 0.5, 0.9, 0.999_999] {
+        assert_eq!(sample_top_p(&[0.6, 0.4], 0.1, coin, &mut scratch), 0);
+        assert_eq!(sample_top_p(&[0.3, 0.4, 0.3], 0.01, coin, &mut scratch), 1);
+    }
 
     // Empirical frequencies at temperature 1 match softmax(logits).
     let logits: Vec<f32> = probs.iter().map(|p| p.ln()).collect();

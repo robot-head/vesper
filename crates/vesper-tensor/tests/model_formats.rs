@@ -132,6 +132,56 @@ fn fp32_gguf_and_safetensors_round_trips_reproduce_the_reference_text() {
         }
     );
     let from_st = Model::from_safetensors(&st, hf).unwrap();
+    // FP8 embedding and an FP8 lm_head, each with its `_scale` companion,
+    // are accepted (not reported as unused tensors).
+    {
+        use vesper_tensor::formats::{quantize_fp8, Fp8};
+        use vesper_tensor::safetensors::{self, Dtype, TensorData};
+        let mut tensors: Vec<TensorData> = st
+            .tensors()
+            .iter()
+            .map(|t| TensorData {
+                name: t.name.clone(),
+                dtype: t.dtype,
+                shape: t.shape.clone(),
+                bytes: st.bytes(t).to_vec(),
+            })
+            .collect();
+        let embed = tensors
+            .iter()
+            .position(|t| t.name == "model.embed_tokens.weight")
+            .unwrap();
+        let values: Vec<f32> = tensors[embed]
+            .bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        let (codes, scale) = quantize_fp8(&values, Fp8::E4M3).unwrap();
+        let shape = tensors[embed].shape.clone();
+        tensors.remove(embed);
+        for name in ["model.embed_tokens.weight", "lm_head.weight"] {
+            tensors.push(TensorData {
+                name: name.into(),
+                dtype: Dtype::F8E4M3,
+                shape: shape.clone(),
+                bytes: codes.clone(),
+            });
+            tensors.push(TensorData {
+                name: format!("{name}_scale"),
+                dtype: Dtype::F32,
+                shape: vec![],
+                bytes: scale.to_le_bytes().to_vec(),
+            });
+        }
+        let meta: Vec<(String, String)> = st.metadata().to_vec();
+        let fp8 = SafeTensors::from_vec(safetensors::write(&tensors, &meta).unwrap()).unwrap();
+        let m = Model::from_safetensors(&fp8, hf).unwrap();
+        assert_eq!(m.embedding().format(), WeightFormat::F8E4M3);
+        assert_eq!(m.classifier().format(), WeightFormat::F8E4M3);
+        assert!(!m.config().shared_classifier);
+    }
     assert_eq!(from_st.config().rope, RopeStyle::Half);
     assert!(from_st.mapped_weight_bytes() > 0);
     // Head elements are summed in a different order after the permutation,
