@@ -65,6 +65,10 @@ pub const HOST_BUF_ALLOC: u32 = 64 * 1024;
 pub const OUTBOX_LIMIT: usize = 512;
 /// Connections per device.
 pub const MAX_CONNECTIONS: usize = 1024;
+/// Complete seqpacket messages a connection holds for the host. Credit only
+/// counts payload bytes, so empty messages would otherwise be unbounded; a
+/// guest that goes past this is reset.
+pub const MAX_QUEUED_MESSAGES: usize = 256;
 const QUEUE_MAX: [u16; 3] = [256, 256, 64];
 const CONFIG_BYTES: usize = 8;
 
@@ -201,6 +205,9 @@ pub struct VsockStats {
     pub spoofed: u64,
     pub resets_sent: u64,
     pub credit_violations: u64,
+    /// Seqpacket connections reset for queueing more than
+    /// [`MAX_QUEUED_MESSAGES`] unread messages.
+    pub message_overflows: u64,
     pub packets_rx: u64,
     pub packets_tx: u64,
     pub messages_rx: u64,
@@ -498,6 +505,13 @@ impl VsockDevice {
                 let c = self.conns.get_mut(&key).expect("present");
                 if payload.len() as u64 > u64::from(c.host_free()) {
                     self.stats.credit_violations += 1;
+                    self.conns.remove(&key);
+                    self.rst_reply(&h);
+                } else if c.kind == TYPE_SEQPACKET
+                    && h.flags & SEQ_EOM != 0
+                    && c.messages.len() >= MAX_QUEUED_MESSAGES
+                {
+                    self.stats.message_overflows += 1;
                     self.conns.remove(&key);
                     self.rst_reply(&h);
                 } else {

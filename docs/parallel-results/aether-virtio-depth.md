@@ -67,7 +67,7 @@ when it is) and these ring features:
   `connect_seqpacket`, `send_message(key, data, eor)` and `recv_message`, with
   `VIRTIO_VSOCK_SEQ_EOM`/`EOR` message boundaries. A message split across RX
   packets carries EOM/EOR only on its last part. Type mismatches are reset,
-  and seqpacket without the feature is `VsockError::WrongType`. Sends are all
+  and seqpacket without the feature is `VsockError::WrongType`. Credit counts only payload bytes, so unread messages per connection are capped at `MAX_QUEUED_MESSAGES` (256). A guest that goes past the cap is reset, which stops empty messages from growing host memory without bound (found in review). Sends are all
   or nothing (`WouldBlock`).
 
 ### 3. The compiled seccomp profile on a VMM thread (`vmm_thread.rs`, `seccomp.rs`)

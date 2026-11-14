@@ -662,6 +662,28 @@ fn vsock_seqpacket_type_rules_and_credit() {
 }
 
 #[test]
+fn vsock_seqpacket_unread_messages_are_bounded() {
+    // Empty messages use no credit, so the message count is bounded on its
+    // own: one past the limit resets the connection.
+    let mut v = vsock(RingFormat::Split, VIRTIO_VSOCK_F_SEQPACKET);
+    let key = (1234, 6000);
+    send(&mut v, &pkt(TYPE_SEQPACKET, OP_REQUEST, 6000, 0, &[]));
+    assert_eq!(recv(&mut v, 4096).unwrap().0.op, OP_RESPONSE);
+    for _ in 0..MAX_QUEUED_MESSAGES {
+        send(&mut v, &pkt(TYPE_SEQPACKET, OP_RW, 6000, SEQ_EOM, &[]));
+    }
+    assert_eq!(
+        v.0.device().connection_state(key),
+        Some(ConnState::Connected)
+    );
+    send(&mut v, &pkt(TYPE_SEQPACKET, OP_RW, 6000, SEQ_EOM, &[]));
+    assert_eq!(v.0.device().connection_state(key), None);
+    assert_eq!(v.0.device().stats().message_overflows, 1);
+    assert_eq!(v.0.device().stats().credit_violations, 0);
+    assert_eq!(recv(&mut v, 4096).unwrap().0.op, OP_RST);
+}
+
+#[test]
 fn vsock_seqpacket_needs_the_feature() {
     let mut v = vsock(RingFormat::Packed, 0);
     assert_eq!(
