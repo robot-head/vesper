@@ -4578,6 +4578,7 @@ dependencies = [
  "vesper-loom-trust",
  "vesper-lsp",
  "vesper-migrate",
+ "vesper-nexus",
  "vesper-pact",
  "vesper-pact-binding",
  "vesper-pulse",
@@ -4589,6 +4590,10 @@ dependencies = [
  "vesper-span",
  "vesper-syntax",
  "vesper-vault",
+ "wasm-encoder 0.261.0",
+ "wasmtime",
+ "wit-component",
+ "wit-parser",
 ]
 
 [[package]]

@@ -155,3 +155,77 @@ fn cancel_parameters_are_typed() {
     }
     assert_eq!(cancel_params(None), Err(LensError::InvalidCancel));
 }
+
+#[test]
+fn debouncer_arms_one_timer_per_burst_and_fires_after_idle() {
+    use std::time::{Duration, Instant};
+    use vesper_lsp::lens::{CancelToken, Debouncer, TimerAction};
+    let delay = Duration::from_millis(150);
+    let mut debounce = Debouncer::new(delay, 2).unwrap();
+    let t0 = Instant::now();
+    // The first edit arms a timer; later edits in the window only move the
+    // deadline back.
+    assert_eq!(debounce.touch("a", t0), TimerAction::Arm(delay));
+    assert_eq!(
+        debounce.touch("a", t0 + Duration::from_millis(100)),
+        TimerAction::Idle
+    );
+    // The timer fires early relative to the moved deadline: re-arm for the rest.
+    assert_eq!(
+        debounce.timer("a", t0 + delay),
+        TimerAction::Arm(Duration::from_millis(100))
+    );
+    let generation = match debounce.timer("a", t0 + Duration::from_millis(260)) {
+        TimerAction::Fire { generation } => generation,
+        other => panic!("{other:?}"),
+    };
+    assert_eq!(generation, 2);
+    assert!(debounce.is_current("a", generation));
+    // A second firing for the same generation does nothing.
+    assert_eq!(
+        debounce.timer("a", t0 + Duration::from_secs(1)),
+        TimerAction::Idle
+    );
+    // A run in progress is cancelled by the next edit.
+    let token = CancelToken::new();
+    debounce.started("a", generation, token.clone());
+    assert!(!token.is_cancelled());
+    assert_eq!(
+        debounce.touch("a", t0 + Duration::from_secs(2)),
+        TimerAction::Arm(delay)
+    );
+    assert!(token.is_cancelled());
+    assert!(!debounce.is_current("a", generation));
+    // A run started for a stale generation is cancelled at once.
+    let stale = CancelToken::new();
+    debounce.started("a", generation, stale.clone());
+    assert!(stale.is_cancelled());
+    // Bounded: a third document is not tracked.
+    assert_eq!(debounce.touch("b", t0), TimerAction::Arm(delay));
+    assert_eq!(debounce.touch("c", t0), TimerAction::Idle);
+    assert_eq!(debounce.len(), 2);
+    let running = CancelToken::new();
+    let generation = match debounce.timer("b", t0 + delay) {
+        TimerAction::Fire { generation } => generation,
+        other => panic!("{other:?}"),
+    };
+    debounce.started("b", generation, running.clone());
+    debounce.forget("b");
+    assert!(running.is_cancelled());
+    debounce.cancel_all();
+    assert!(debounce.is_empty());
+    assert!(Debouncer::new(Duration::from_secs(61), 1).is_err());
+    assert!(Debouncer::new(delay, 0).is_err());
+}
+
+#[test]
+fn pending_requests_check_without_answering() {
+    use vesper_lsp::{Id, lens::PendingRequests};
+    let mut pending = PendingRequests::new(4).unwrap();
+    let token = pending.begin(Id::Integer(1)).unwrap();
+    assert!(pending.is_pending(&Id::Integer(1), &token));
+    assert!(pending.is_pending(&Id::Integer(1), &token));
+    assert!(pending.cancel(&Id::Integer(1)));
+    assert!(!pending.is_pending(&Id::Integer(1), &token));
+    assert!(token.is_cancelled());
+}
