@@ -23,6 +23,9 @@ use std::{cell::RefCell, rc::Rc};
 /// Lane 27: bare-metal RISC-V and AArch64 images with no runtime.
 #[path = "native_freestanding.rs"]
 pub mod freestanding;
+/// Cranelift SIMD lowering of `Op::Vector` (lane 28).
+#[path = "native_vector.rs"]
+mod native_vector;
 /// Source Strata region blocks lowered to `vesper_region_*` runtime calls.
 #[path = "regions/native.rs"]
 mod regions;
@@ -2169,6 +2172,18 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let v = self.ir_temp(*v, &values, &f.values)?;
                         self.expr(&make(ExprKind::Try(Box::new(v))))?
                     }
+                    Op::Vector { op, args } => {
+                        let operands = args
+                            .iter()
+                            .map(|id| {
+                                values
+                                    .get(id)
+                                    .copied()
+                                    .ok_or_else(|| format!("undefined native IR value %{id}"))
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        self.vector_op(op, &operands)?
+                    }
                     Op::Closure { expr, aliases, .. } | Op::Handle { expr, aliases, .. } => {
                         let old_vars = self.vars.clone();
                         let old_types = self.local_types.clone();
@@ -3061,6 +3076,23 @@ impl<M: Module> Codegen<'_, '_, M> {
                     if let Some(var) = self.vars.get(n) {
                         let tag = self.use_var(*var);
                         return self.invoke_tag(tag, &self.ty(callee), args, e);
+                    }
+                    if !self.world.functions.contains_key(n)
+                        && let Some(op) = crate::vector::VectorOp::resolve(
+                            n,
+                            instance,
+                            &args.iter().map(|a| &a.expr).collect::<Vec<_>>(),
+                            &args.iter().map(|a| self.ty(&a.expr)).collect::<Vec<_>>(),
+                            &self.ty(e),
+                        )
+                    {
+                        let mut operands = vec![];
+                        for (i, a) in args.iter().enumerate() {
+                            if crate::vector::is_operand(n, i, args.len()) {
+                                operands.push(self.expr(&a.expr)?);
+                            }
+                        }
+                        return self.vector_op(&op, &operands);
                     }
                     if crate::numeric::wrapping_intrinsic(n).is_some()
                         && !self.world.functions.contains_key(n)
