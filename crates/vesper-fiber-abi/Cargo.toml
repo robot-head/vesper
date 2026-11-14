@@ -18,5 +18,8 @@ target-lexicon = "0.13"
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 libc = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Diagnostics_Debug", "Win32_System_Kernel", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_SystemInformation"] }
+
 [dev-dependencies]
 object = { version = "0.37", default-features = false, features = ["read", "std", "elf", "macho"] }

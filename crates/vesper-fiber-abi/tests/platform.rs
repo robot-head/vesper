@@ -1,5 +1,7 @@
 //! Platform checks for the direct pinned-fiber port (Linux x86_64/AArch64 and
-//! macOS AArch64), independent of the Linux-only Pulse scheduler:
+//! macOS AArch64), independent of the Linux-only Pulse scheduler. Windows x64
+//! has its own version in `windows_platform.rs` (different calling convention
+//! and fault reporting):
 //!
 //! * the guard page below a pinned stack really faults, both when touched
 //!   directly and when a running fiber overflows into it;
@@ -11,7 +13,7 @@
 //!
 //! The stack-frame ABI offsets and v2 layouts are covered by the unit tests in
 //! `abi.rs`; this file exercises the machine behaviour of the current target.
-#![cfg(vesper_direct_fibers)]
+#![cfg(all(vesper_direct_fibers, unix))]
 use std::any::Any;
 use std::process::Command;
 use std::rc::Rc;

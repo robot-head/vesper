@@ -30,6 +30,21 @@ vesper_crate(
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
+        # Serial Lean kernel replays, 135-390 s each on macOS. They keep
+        # running on Windows (Cargo), which exercises their cfg(windows)
+        # process and executable-path code; macOS shares Linux's Unix paths.
+        "test/format_proof_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        "test/oracle42_acceptance": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        "test/replay42_kernel": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
     },
     # Actual formatter witnesses replay Lean serially; keep every case enabled
     # while allowing the complete target 900 seconds on slower macOS runners.

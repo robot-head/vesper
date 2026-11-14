@@ -197,7 +197,18 @@ impl Fiber {
         });
         let ctx = NonNull::new(Box::into_raw(ctx)).unwrap();
         // SAFETY: the stack is fresh, aligned and exclusively ours.
+        #[cfg(not(windows))]
         let sp = unsafe { initial_stack(stack.top() as u64, ctx.as_ptr(), fiber_main) };
+        // SAFETY: as above; Windows also installs the stack's TEB limits.
+        #[cfg(windows)]
+        let sp = unsafe {
+            initial_stack(
+                stack.top() as u64,
+                ctx.as_ptr(),
+                fiber_main,
+                stack.teb_limits(),
+            )
+        };
         // SAFETY: just allocated.
         unsafe { (*ctx.as_ptr()).saved_sp = sp };
         Ok(Self {
