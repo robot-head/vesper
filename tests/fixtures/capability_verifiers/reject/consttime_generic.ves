@@ -1,0 +1,25 @@
+// expect: const-time/capability.generic-unsupported
+// A generic ConstTime function is source-accepted, but the backend verifier
+// needs concrete parameter layouts, so the build rejects it explicitly.
+copy struct Secret[T] {
+    value: T,
+}
+
+fn ct_id[T](sink s: Secret[T]) -> Secret[T] eff [ConstTime] {
+    s
+}
+
+fn declassify_u64(s: Secret[u64]) -> u64 eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = ct_id(s);
+    value
+}
+
+fn main() -> u64 {
+    let s: Secret[u64] = Secret {
+        value: 4
+    };
+    declassify_u64(s)
+}

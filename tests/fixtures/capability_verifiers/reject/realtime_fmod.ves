@@ -1,0 +1,16 @@
+// expect: realtime/rt-unknown-callee
+// Float remainder is legal under Realtime in the source, but the backend lowers
+// it to a call to the C library's fmod, which has no realtime effect
+// declaration: Resonance rejects the reachable unknown callee.
+fn wrap_phase(phase: f64, period: f64) -> f64 eff [Realtime] {
+    phase % period
+}
+
+fn main() -> u64 {
+    let p = wrap_phase(7.5, 2.0);
+    if p > 1.0 {
+        1
+    } else {
+        0
+    }
+}

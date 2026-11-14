@@ -245,6 +245,7 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
                     ty: ty.name().into(),
                     constructor: ty.name().into(),
                     fields: values,
+                    resource_identity: None,
                 }
             })
         }
@@ -263,6 +264,7 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
                 ty: ty.name().into(),
                 constructor: v.name.clone(),
                 fields,
+                resource_identity: None,
             })
         }
     }

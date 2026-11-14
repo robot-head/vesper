@@ -208,11 +208,47 @@ fn contains_function(world: &World, t: &Type) -> bool {
     visit(world, t, &mut BTreeSet::new())
 }
 fn specialized_function(world: &World, f: &Function) -> bool {
-    (!f.effects.instances.is_empty()
+    (!capability_only(f)
         || f.effects.tail.is_some()
         || contains_function(world, &f.result)
         || f.params.iter().any(|p| contains_function(world, &p.ty)))
         && !fail_only(world, f)
+}
+/// Whether every effect in `f`'s row is a built-in capability effect
+/// (`ConstTime`, `Realtime`, `DetFloat`, lane 15), including the empty row.
+/// Capability effects have no operations and no handlers: they constrain
+/// the body, not its calling convention, so such a function is compiled once
+/// like a pure function instead of being inlined into its callers. That is
+/// what lets the Stage-5 verifiers (lane 24) check its code on its own.
+fn capability_only(f: &Function) -> bool {
+    f.effects
+        .instances
+        .iter()
+        .all(|e| crate::capability_effects::is_capability_effect(&e.name))
+}
+/// Whether the program needs Cranelift's NaN canonicalisation: any
+/// `eff [DetFloat]` function promises bit-identical floats on x86-64 and
+/// AArch64, whose default NaN bits differ (§36.2).
+pub fn needs_nan_canonicalization(world: &World) -> bool {
+    world.functions.values().any(|f| {
+        crate::capability_effects::capabilities(&f.effects)
+            .contains(&crate::capability_effects::Capability::DetFloat)
+            || closure_capabilities(f).contains(&crate::capability_effects::Capability::DetFloat)
+    })
+}
+/// Capability effects declared on closure literals anywhere in `f`'s body.
+/// Closures are specialized into the function that contains them, so their
+/// code is part of that function's Cranelift function.
+pub fn closure_capabilities(f: &Function) -> BTreeSet<crate::capability_effects::Capability> {
+    let mut out = BTreeSet::new();
+    if let Some(body) = &f.body {
+        visit(body, &mut |e| {
+            if let ExprKind::Closure { effects, .. } = &e.kind {
+                out.extend(crate::capability_effects::capabilities(effects));
+            }
+        });
+    }
+    out
 }
 /// A function whose only effects are unlabeled `Fail` instances, such as a
 /// recursive function using checked arithmetic. `raise` never resumes (its
@@ -573,6 +609,11 @@ pub fn jit_with_options(
         .set("use_colocated_libcalls", "false")
         .map_err(|e| e.to_string())?;
     flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+    if needs_nan_canonicalization(world) {
+        flags
+            .set("enable_nan_canonicalization", "true")
+            .map_err(|e| e.to_string())?;
+    }
     let isa = cranelift_native::builder()
         .map_err(str::to_string)?
         .finish(settings::Flags::new(flags))
@@ -644,8 +685,27 @@ pub fn object_with_options(
 pub fn object_isa(
     target: Option<&str>,
 ) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
+    isa_with_flags(target, false)
+}
+/// [`object_isa`] for `world`: NaN canonicalisation is enabled when the
+/// program has a DetFloat function ([`needs_nan_canonicalization`]).
+pub fn object_isa_for(
+    world: &World,
+    target: Option<&str>,
+) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
+    isa_with_flags(target, needs_nan_canonicalization(world))
+}
+fn isa_with_flags(
+    target: Option<&str>,
+    canonicalize_nans: bool,
+) -> Result<std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>, String> {
     let mut flags = settings::builder();
     flags.set("is_pic", "true").map_err(|e| e.to_string())?;
+    if canonicalize_nans {
+        flags
+            .set("enable_nan_canonicalization", "true")
+            .map_err(|e| e.to_string())?;
+    }
     let builder = if let Some(target) = target {
         let triple: target_lexicon::Triple =
             target.parse().map_err(|e| format!("invalid target: {e}"))?;
@@ -686,7 +746,7 @@ pub fn object_instrumented(
     observer: Option<&mut dyn FnMut(EmittedFunction)>,
     instrument: Option<Instrument<'_>>,
 ) -> Result<(Vec<u8>, String), String> {
-    let isa = object_isa(target)?;
+    let isa = object_isa_for(world, target)?;
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     let mut m = ObjectModule::new(builder);
@@ -733,6 +793,11 @@ impl InstrumentedJit {
             .set("use_colocated_libcalls", "false")
             .map_err(|e| e.to_string())?;
         flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+        if needs_nan_canonicalization(world) {
+            flags
+                .set("enable_nan_canonicalization", "true")
+                .map_err(|e| e.to_string())?;
+        }
         let isa = cranelift_native::builder()
             .map_err(str::to_string)?
             .finish(settings::Flags::new(flags))
