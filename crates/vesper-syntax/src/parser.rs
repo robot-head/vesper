@@ -1240,6 +1240,13 @@ impl Parser<'_> {
                             tail: Some(label),
                         }));
                     }
+                } else if self.at(K::Int) {
+                    // A decimal lane count, as in `Vec[u8, 16]` (§14.3). No
+                    // identifier can spell an all-digit type name.
+                    self.builder.start_node(TYPE);
+                    let digits = self.bump();
+                    self.builder.finish_node();
+                    args.push(Type::Named(digits, vec![]));
                 } else {
                     let t = self.ty();
                     if self.eat(K::Pipe) {
