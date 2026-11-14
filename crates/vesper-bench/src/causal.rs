@@ -178,10 +178,10 @@ pub struct CausalThread {
 fn pause(nanos: u64) -> u64 {
     let start = Instant::now();
     let target = Duration::from_nanos(nanos);
-    // Sleep for the bulk, spin for the last millisecond.
-    if target > Duration::from_millis(2) {
-        std::thread::sleep(target - Duration::from_millis(1));
-    }
+    // Busy-wait rather than sleep: on macOS a multi-millisecond sleep can
+    // wake several milliseconds late, which bunches delays into a few long
+    // pauses and, with threads that meet at barriers, distorts the very
+    // speedup being predicted (CI saw ~2% predicted for a true 50%).
     while start.elapsed() < target {
         std::hint::spin_loop();
     }

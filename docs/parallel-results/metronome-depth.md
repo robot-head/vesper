@@ -97,8 +97,10 @@ time as elapsed minus inserted delay, and reports the exact predicted
 end-to-end speedup `1 - period_s/period_0` in basis points per region.
 Each experiment run is paired with an adjacent baseline run and the median
 per-pair prediction is reported, so load drift between experiments cancels;
-like Coz, a pause that overshoots (late wakeup) is credited against later
-delay. Inserted delay exceeding elapsed time is a typed error, not a
+pauses busy-wait instead of sleeping, because macOS sleeps of a few
+milliseconds wake late and bunch delays into long stalls (the second macOS CI
+run, with the test already alone, predicted 2% for a true 50%); any overshoot
+is still credited against later delay, as in Coz. Inserted delay exceeding elapsed time is a typed error, not a
 prediction. The test is tagged `exclusive` in Bazel: the first macOS CI run,
 sharing three cores with other test actions, produced negative predictions for
 every region before these changes.
