@@ -951,9 +951,19 @@ impl Lower<'_> {
                             .iter()
                             .enumerate()
                             .filter(|(i, _)| crate::vector::is_operand(&name, *i, args.len()))
-                            // By-value lanes are copy; a string operand is
-                            // a shared `in` borrow.
-                            .map(|(_, a)| self.argument(&a.expr, Pass::In, vec![]).value)
+                            // Lanes are copied by value; a string operand
+                            // is a shared `in` borrow.
+                            .map(|(_, a)| {
+                                let string = self
+                                    .types
+                                    .get(&(a.expr.span.start, a.expr.span.end))
+                                    .is_some_and(|t| t.name() == "String");
+                                if string {
+                                    self.argument(&a.expr, Pass::In, vec![]).value
+                                } else {
+                                    self.expr(&a.expr)
+                                }
+                            })
                             .collect();
                         return self.emit(Op::Vector { op, args: operands }, e, false);
                     }

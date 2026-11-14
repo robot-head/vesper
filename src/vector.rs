@@ -678,6 +678,29 @@ pub(crate) fn check_world(world: &World) -> Vec<Diagnostic> {
     }
     out
 }
+/// Whether a value of `t` holds a vector or mask lane anywhere inline.
+fn contains_vector(world: &World, t: &Type, depth: usize) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    match t {
+        _ if shape_of(t).is_some() => true,
+        Type::Tuple(ts) => ts.iter().any(|t| contains_vector(world, t, depth + 1)),
+        Type::Named(n, args) => world.adts.get(n).is_some_and(|a| {
+            let vars = a
+                .generics
+                .iter()
+                .zip(args)
+                .map(|(g, t)| (g.name.clone(), t.clone()))
+                .collect();
+            a.variants
+                .iter()
+                .flat_map(|v| &v.fields)
+                .any(|f| contains_vector(world, &substitute(&f.ty, &vars), depth + 1))
+        }),
+        _ => false,
+    }
+}
 struct IsaWalker<'a> {
     world: &'a World,
     out: &'a mut Vec<Diagnostic>,
@@ -785,6 +808,21 @@ impl IsaWalker<'_> {
                         }
                     }
                 } else {
+                    // An inherent method `receiver.method(..)` resolves
+                    // through the receiver's type, like the checker does.
+                    if let ExprKind::Field(base, method) = &callee.kind {
+                        let name = format!("{}::{method}", self.ty(base).name());
+                        if let Some(f) = self.world.functions.get(&name) {
+                            for q in row_profiles(&f.effects) {
+                                self.require(
+                                    q,
+                                    available,
+                                    format!("calling '{name}'"),
+                                    e.span.clone(),
+                                );
+                            }
+                        }
+                    }
                     if let Type::Function { effects, .. } = self.ty(callee) {
                         for q in row_profiles(&effects) {
                             self.require(
@@ -845,6 +883,21 @@ impl IsaWalker<'_> {
             }
             ExprKind::Field(e, _) | ExprKind::Try(e) | ExprKind::Unary(_, e) => {
                 self.expr(e, available)
+            }
+            ExprKind::Binary(op, a, _)
+                if matches!(op.as_str(), "==" | "!=" | "<" | "<=" | ">" | ">=")
+                    && contains_vector(self.world, &self.ty(a), 0) =>
+            {
+                // Aggregate equality would compare lane bits, not values
+                // (-0.0 and NaN): lanes are compared with Vec::eq and friends.
+                self.out.push(
+                    Diagnostic::new(
+                        "E1402",
+                        format!("'{op}' is not defined on vector and mask values"),
+                        e.span.clone(),
+                    )
+                    .with_help("compare lanes with Vec::eq, Vec::ne, Vec::lt, ... and reduce the mask with Mask::all or Mask::any"),
+                );
             }
             ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
                 self.expr(a, available);

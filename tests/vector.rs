@@ -200,6 +200,39 @@ fn closures_hold_only_their_own_profile() {
 }
 
 #[test]
+fn review_findings_are_covered() {
+    // Aggregate equality would compare lane bits (-0.0, NaN): rejected,
+    // including through tuples and records.
+    rejected(
+        "fn f(a: Vec[f64, 2]) -> bool { a == a }",
+        "E1402",
+        "'==' is not defined on vector",
+    );
+    rejected(
+        "copy struct P { v: Vec[u8, 16] } fn f(a: P, b: (u64, Mask[u8, 16])) -> bool { if a != a { true } else { b == b } }",
+        "E1402",
+        "'!=' is not defined on vector",
+    );
+    // Inherent methods carrying Isa need the profile like named calls.
+    rejected(
+        "copy struct S { x: u64 } impl S { fn wide(self) -> u64 eff [Isa[Avx2]] { Mask::count(Mask::active[u8, 32](0, self.x)) } } fn main() -> u64 { let s = S { x: 3 }; s.wide() }",
+        "E1403",
+        "calling 'S::wide'",
+    );
+    accepted(
+        "copy struct S { x: u64 } impl S { fn wide(self) -> u64 eff [Isa[Avx2]] { Mask::count(Mask::active[u8, 32](0, self.x)) } } fn main() -> u64 { let s = S { x: 3 }; if Isa::supported[Avx2]() { s.wide() } else { 0 } }",
+    );
+    // Operands are evaluated by value, in order.
+    assert_eq!(
+        differential(&baseline(
+            "(u64, u64)",
+            "let x: u64 = 1; let v = Vec::from[u64, 2](x, { x = 2; x }); (Vec::extract(v, 0), Vec::extract(v, 1))"
+        )),
+        "Some((1, 2))"
+    );
+}
+
+#[test]
 fn isa_is_reserved_and_cannot_be_handled() {
     rejected(
         "fn f() -> u64 eff [Isa[Neon]] { 0 }",

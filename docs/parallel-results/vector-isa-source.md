@@ -25,7 +25,7 @@ dispatch.
 | `src/capability_effects.rs` | `Isa` registered as an erased capability effect (`is_capability_effect`), with its own row-entry diagnostic |
 | `src/layout.rs` | Native layout and decoding of vectors (packed lane bytes as words) |
 | `crates/vesper-syntax/src/parser.rs` | Decimal lane counts in type arguments (`Vec[u8, 16]`), encoded as an all-digit type name no identifier can spell |
-| `tests/vector.rs`, `tests/vector_kernel.rs` (new) | 18 tests |
+| `tests/vector.rs`, `tests/vector_kernel.rs` (new) | 19 tests |
 | `tests/fixtures/vector/json_escape.ves` (new) | The ported kernel, canonically formatted |
 
 ### Types
@@ -62,7 +62,9 @@ order; a string load past the end or at an overflowing offset reads zero
 lanes and never faults. Typing errors are E1402 (unknown operation, wrong lane
 type, non-literal or out-of-range lane index, `bitmask` over 64 lanes), E0207
 (arity, stray type arguments), E0200 and E0209 (operand types and literal
-ranges), E0308 (non-value passing).
+ranges), E0308 (non-value passing). `==`, `!=` and the orderings are rejected
+on any value holding a vector or mask (E1402): native aggregate equality would
+compare lane bits, which differs from lane equality for -0.0 and NaN.
 
 ### `Isa[P]`
 
@@ -135,7 +137,7 @@ the 128-bit path.
 
 ## Checks
 
-- `cargo test --locked --test vector --test vector_kernel`: 18 passed (x86_64
+- `cargo test --locked --test vector --test vector_kernel`: 19 passed (x86_64
   host with AVX2 and AVX-512, so all three profiles ran their vector branch;
   128/256/512-bit differential tests take 6, 9 and 13 s in a debug build).
 - `cargo +1.100.0 clippy --locked -p vesper -p vesper-syntax --all-targets -- -D warnings`: clean.
