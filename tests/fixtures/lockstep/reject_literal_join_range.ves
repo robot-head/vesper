@@ -1,0 +1,8 @@
+fn main() -> bool {
+    let n = if true {
+        -1
+    } else {
+        18446744073709551615
+    };
+    true
+}
