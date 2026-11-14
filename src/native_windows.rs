@@ -426,6 +426,19 @@ impl Linker {
         }
     }
 
+    /// Outside a Visual Studio developer shell `LIB` is unset, and an
+    /// explicit `lld-link`, `rust-lld` or `link.exe` would not find the
+    /// runtime libraries. Borrow the installed Visual Studio's library
+    /// environment then; a `LIB` the caller already set is left alone.
+    pub fn with_library_environment(mut self) -> Self {
+        if std::env::var_os("LIB").is_none()
+            && let Some(found) = find_visual_studio_link()
+        {
+            self.env = found.env;
+        }
+        self
+    }
+
     /// Find a linker: the Visual Studio `link.exe` for x64 (with its library
     /// environment), else `lld-link` on `PATH`. A bare `link` on `PATH` is
     /// never used, because Git for Windows and MSYS put coreutils `link`
@@ -540,7 +553,7 @@ pub fn link(
     linker: Option<&Path>,
 ) -> Result<PathBuf, WindowsNativeError> {
     let linker = match linker {
-        Some(path) => Linker::explicit(path),
+        Some(path) => Linker::explicit(path).with_library_environment(),
         None => Linker::find()?,
     };
     let output = executable_path(output);
@@ -1002,7 +1015,10 @@ fn main() -> u64 eff [Pulse] {
 extern long long run(void);
 static DWORD64 caller_begin;
 static volatile long long result = -7;
-__declspec(noinline) long long call_generated(void) { long long r = run(); return r + 0; }
+static volatile long long sink;
+/* The volatile store after the call keeps this a real frame with its own
+   .pdata entry: `return run();` may compile to a tail jump. */
+__declspec(noinline) long long call_generated(void) { sink = run(); return sink; }
 static DWORD WINAPI worker(LPVOID p) { (void)p; result = call_generated(); return 0; }
 int main(void) {
     DWORD64 base;
