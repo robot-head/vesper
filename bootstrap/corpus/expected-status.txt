@@ -1,0 +1,10 @@
+ackermann 9
+collatz 111
+divide_by_zero 42
+factorial_overflow 7
+fib 233
+gcd 21
+lets_negative 181
+max3 99
+pow_mod 149
+sum_squares 54

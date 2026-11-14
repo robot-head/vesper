@@ -1,0 +1,21 @@
+// Ackermann at small arguments: deep non-tail recursion.
+fn ack(m: i64, n: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if m == 0 {
+        n + 1
+    } else {
+        if n == 0 {
+            ack(m - 1, 1)
+        } else {
+            ack(m - 1, ack(m, n - 1))
+        }
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        ack(2, 3)
+    } with {
+        return value => value,
+        raise(error, resume) => -1,
+    }
+}

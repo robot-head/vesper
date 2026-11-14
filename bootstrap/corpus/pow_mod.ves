@@ -1,0 +1,28 @@
+// Square-and-multiply modular exponentiation.
+fn pow_mod(base: i64, exp: i64, m: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    if exp == 0 {
+        1
+    } else {
+        let half = pow_mod(base, exp / 2, m);
+        let sq = half * half % m;
+        if exp % 2 == 1 {
+            sq * base % m
+        } else {
+            sq
+        }
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            pow_mod(3, 200, 251)
+        } with {
+            return value => value,
+            raise(error, resume) => -1,
+        }
+    } with {
+        return value => value,
+        raise(error, _) => -2,
+    }
+}

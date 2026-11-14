@@ -1,0 +1,26 @@
+// Nested comparisons and branches.
+fn max2(a: i64, b: i64) -> i64 {
+    if a >= b {
+        a
+    } else {
+        b
+    }
+}
+
+fn max3(a: i64, b: i64, c: i64) -> i64 {
+    max2(max2(a, b), c)
+}
+
+fn main() -> i64 {
+    let x = max3(17, 99, 64);
+    let y = max3(-5, -9, -1);
+    if x != 99 {
+        0
+    } else {
+        if y > -2 {
+            x
+        } else {
+            1
+        }
+    }
+}

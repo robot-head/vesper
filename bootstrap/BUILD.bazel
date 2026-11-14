@@ -1,0 +1,7 @@
+# Bootstrap corpus, expected statuses and seed lock, read by the tests of
+# //crates/vesper-codegen-verified.
+filegroup(
+    name = "files",
+    srcs = glob(["**"], exclude = ["BUILD.bazel"]),
+    visibility = ["//visibility:public"],
+)

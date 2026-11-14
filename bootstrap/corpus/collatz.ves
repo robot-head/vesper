@@ -1,0 +1,26 @@
+// Collatz stopping time of 27.
+fn steps(n: i64, count: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    if n == 1 {
+        count
+    } else {
+        if n % 2 == 0 {
+            steps(n / 2, count + 1)
+        } else {
+            steps(3 * n + 1, count + 1)
+        }
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            steps(27, 0)
+        } with {
+            return value => value,
+            raise(error, resume) => -1,
+        }
+    } with {
+        return value => value,
+        raise(error, _) => -2,
+    }
+}
