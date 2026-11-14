@@ -182,3 +182,20 @@ claimed from compiling these definitions.
   and full-action prefixes. `events`/`actions` expose chronological lists and
   `residual` exposes actual live serials and original mint sites. Completed may
   return an owned handle; no empty-ledger guard exists.
+
+## Evaluator proof checkpoint
+
+The separately authorized `EvaluatorProofs.lean` imports the actual compiled
+erasure (`012a4c7`) and ledger (`6ae4905`) checkpoints without a reverse evaluator
+dependency. Its first seven public theorems compile with real Lean 4.24:
+`locate_plug`, `prepare_sound`, `step_sound`, `terminal_isVal`,
+`runMachine_completed_isVal`, `runMachine_prefix`, and `runMachine_steps`.
+These prove actual context decomposition, each successful head/step, terminal
+value soundness and the actual complete successful prefix through Full.Steps.
+The log is `/tmp/resource-model42-evaluator-proofs-v1.log`; the combined private
+artifact root is `/tmp/resource-model42-evaluator-proofs-v1`.
+
+These first proofs do not yet discharge event projection, generalized typed
+no-invariant, measured-refusal classification, initial checked reachability,
+exhaustion or the complete transitive audit. Those remain release gates; the
+successful-step theorem alone is not presented as completion.
