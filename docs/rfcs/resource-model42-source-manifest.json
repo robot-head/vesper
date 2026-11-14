@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "source_snapshot_commit": "fd7480c6a31ea2234dbbfb49ec92fb4ad623e7d9",
+  "specification_sha256": "8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d",
+  "meaning": "Source-byte association for the model and acceptance harness; not a proof of binary derivation or Rust/compiler refinement.",
+  "lean_module_count": 12,
+  "files": [
+    {
+      "path": "lean/MetatheoryFull.lean",
+      "bytes": 117218,
+      "sha256": "edde94a07c2a995b87b575449a82c8e71fb19e81801b60282dea0fb52e21237c"
+    },
+    {
+      "path": "lean/ResourceModel42.lean",
+      "bytes": 610,
+      "sha256": "cb0f8bfa75aa2a885a73df0613ec8054adb876779e7137d5ba90e49362f9e21c"
+    },
+    {
+      "path": "lean/ResourceModel42/Acceptance.lean",
+      "bytes": 19357,
+      "sha256": "2bbe2eb7e525ee1b649dec2ebbadd7d326545e710be08f78cf1f15eecca7b094"
+    },
+    {
+      "path": "lean/ResourceModel42/Checker.lean",
+      "bytes": 9026,
+      "sha256": "60d7997ba2905ca7e5a0c07d7667b0e5f571fec4aeb28ece3566d7ecc71eae28"
+    },
+    {
+      "path": "lean/ResourceModel42/CheckerProofs.lean",
+      "bytes": 31198,
+      "sha256": "5481328cf31f2ab68008237c81b9ce9b7d623c8549c9ffd5cbd19e8ca795e55d"
+    },
+    {
+      "path": "lean/ResourceModel42/ErasureProofs.lean",
+      "bytes": 4746,
+      "sha256": "a628884d62914da5a16b76ac52da9d64acf5286492a11ef710caa35864b04b84"
+    },
+    {
+      "path": "lean/ResourceModel42/Evaluator.lean",
+      "bytes": 11133,
+      "sha256": "8793d5fac613ad6ba63effe24550fb1c6f309df31952cc8eb78efeba00fa12e7"
+    },
+    {
+      "path": "lean/ResourceModel42/EvaluatorProofs.lean",
+      "bytes": 40499,
+      "sha256": "cf2ee2d92d28cef0c29ba5dc1f3df9a8036f861b0cb6e69c9f4dd84149820d2b"
+    },
+    {
+      "path": "lean/ResourceModel42/LedgerProofs.lean",
+      "bytes": 5709,
+      "sha256": "8c35dce983d9ce5e43d79394fa04e4a78bff3a0e5670226ad6f5b074c16d883a"
+    },
+    {
+      "path": "lean/ResourceModel42/MetricsProofs.lean",
+      "bytes": 41137,
+      "sha256": "9754340dc3f4b43d014be8291f14ab20eb3b105858f08b49b72dd64c6e6eae0f"
+    },
+    {
+      "path": "lean/ResourceModel42/Proofs.lean",
+      "bytes": 18335,
+      "sha256": "5d87091c292b6187bf5c73533b23b738754df1941c2c9801c78105e9b0a2669a"
+    },
+    {
+      "path": "lean/ResourceModel42/Syntax.lean",
+      "bytes": 19712,
+      "sha256": "a0be7e7541b3d7639f49678acb33b86e8296145626d8fd2877e8ae1cd3c738d0"
+    },
+    {
+      "path": "tests/resource_model42.rs",
+      "bytes": 26783,
+      "sha256": "35de73a2c9bfba6a48cd6426cfe65aa189ff7617029c1487ca7dd7e158ca7c95"
+    }
+  ]
+}
