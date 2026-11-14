@@ -103,9 +103,13 @@ fn module_has_structured_prelude_effect_class_instances_and_functions() {
             >= 2
     );
     assert!(declarations.iter().any(|d|matches!(d,Declaration::MutualTypes(types)if types.iter().any(|t|matches!(t,TypeDeclaration::Structure{..})))));
-    assert!(declarations.iter().any(
-        |d| matches!(d,Declaration::MutualDefinitions(definitions)if !definitions.is_empty())
-    ));
+    // Non-recursive functions are ordinary definitions in dependency order;
+    // only recursive groups keep a `mutual` block.
+    assert!(declarations.iter().any(|d| match d {
+        Declaration::MutualDefinitions(definitions) => !definitions.is_empty(),
+        Declaration::Definition(definition) => definition.name.components()[0].as_str() == "main",
+        _ => false,
+    }));
 }
 
 #[test]

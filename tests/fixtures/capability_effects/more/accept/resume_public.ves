@@ -1,0 +1,25 @@
+// Handlers inside ConstTime may resume with public values and branch on
+// what the continuation returns when it is public.
+linear effect Pad {
+    fn pad() -> u64;
+}
+
+fn padded(x: u64) -> u64 eff [ConstTime] {
+    handle Pad in {
+        wrapping_add(x, Pad::pad())
+    } with {
+        return value => value,
+        pad(resume) => {
+            let total = resume(16);
+            if total > 100 {
+                100
+            } else {
+                total
+            }
+        },
+    }
+}
+
+fn main() -> u64 {
+    padded(26)
+}

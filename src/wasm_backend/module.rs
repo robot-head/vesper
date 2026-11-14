@@ -2,10 +2,14 @@
 //! element and code sections in the order the binary format requires.
 use std::{borrow::Cow, collections::BTreeMap};
 use wasm_encoder::{
-    CodeSection, ConstExpr, ContType, ElementSection, Elements, ExportKind, ExportSection,
-    Function, FunctionSection, GlobalSection, GlobalType, MemoryType, Module, RefType,
-    TableSection, TableType, TagKind, TagSection, TagType, TypeSection, ValType,
+    CodeSection, ConstExpr, ContType, DataSection, ElementSection, Elements, EntityType,
+    ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
+    MemoryType, Module, RefType, TableSection, TableType, TagKind, TagSection, TagType,
+    TypeSection, ValType,
 };
+
+/// First byte of static data (string literals); the heap follows it.
+pub(crate) const DATA_START: u64 = 16;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum TypeDef {
@@ -21,6 +25,12 @@ struct FuncDef {
 /// An append-only builder: every index it returns stays valid.
 #[derive(Default)]
 pub(crate) struct Builder {
+    /// Imported functions `(module, name, type)`; they take the first
+    /// function indices.
+    imports: Vec<(String, String, u32)>,
+    data: Vec<u8>,
+    /// The global initialised to the first heap address.
+    heap_global: Option<u32>,
     types: Vec<TypeDef>,
     type_index: BTreeMap<TypeDef, u32>,
     funcs: Vec<FuncDef>,
@@ -55,13 +65,45 @@ impl Builder {
     pub(crate) fn declare_typed(&mut self, name: &str, ty: u32) -> u32 {
         self.funcs.push(FuncDef { ty, body: None });
         self.func_names.push(name.to_owned());
-        (self.funcs.len() - 1) as u32
+        (self.imports.len() + self.funcs.len() - 1) as u32
+    }
+    /// Import a function; all imports precede every declared function.
+    pub(crate) fn import(
+        &mut self,
+        module: &str,
+        name: &str,
+        params: &[ValType],
+        results: &[ValType],
+    ) -> Result<u32, String> {
+        if !self.funcs.is_empty() {
+            return Err("imports must be declared before functions".into());
+        }
+        let ty = self.func_type(params, results);
+        self.imports.push((module.to_owned(), name.to_owned(), ty));
+        Ok((self.imports.len() - 1) as u32)
     }
     pub(crate) fn define(&mut self, index: u32, body: Function) {
-        self.funcs[index as usize].body = Some(body);
+        let i = index as usize - self.imports.len();
+        self.funcs[i].body = Some(body);
     }
     pub(crate) fn function_count(&self) -> usize {
-        self.funcs.len()
+        self.imports.len() + self.funcs.len()
+    }
+    /// Append 8-byte-aligned static bytes; returns their address.
+    pub(crate) fn data(&mut self, bytes: &[u8]) -> u64 {
+        let at = DATA_START + self.data.len() as u64;
+        self.data.extend_from_slice(bytes);
+        while !self.data.len().is_multiple_of(8) {
+            self.data.push(0);
+        }
+        at
+    }
+    /// Mark `global` as the heap pointer (initialised past the data).
+    pub(crate) fn set_heap_global(&mut self, global: u32) {
+        self.heap_global = Some(global);
+    }
+    pub(crate) fn heap_start(&self) -> u64 {
+        DATA_START + self.data.len() as u64
     }
     /// A mutable `i64` global with the given initial value.
     pub(crate) fn global(&mut self, init: i64) -> u32 {
@@ -103,6 +145,13 @@ impl Builder {
             }
         }
         module.section(&types);
+        if !self.imports.is_empty() {
+            let mut imports = ImportSection::new();
+            for (m, n, ty) in &self.imports {
+                imports.import(m, n, EntityType::Function(*ty));
+            }
+            module.section(&imports);
+        }
         let mut functions = FunctionSection::new();
         for f in &self.funcs {
             functions.function(f.ty);
@@ -117,9 +166,14 @@ impl Builder {
             shared: false,
         });
         module.section(&tables);
+        let heap_start = self.heap_start();
+        let min_pages = heap_start.div_ceil(65536).max(1);
+        if min_pages > u64::from(max_pages) {
+            return Err("static data exceeds max_memory_pages".into());
+        }
         let mut memories = wasm_encoder::MemorySection::new();
         memories.memory(MemoryType {
-            minimum: 1,
+            minimum: min_pages,
             maximum: Some(u64::from(max_pages)),
             memory64: false,
             shared: false,
@@ -137,7 +191,12 @@ impl Builder {
             module.section(&tags);
         }
         let mut globals = GlobalSection::new();
-        for init in &self.globals {
+        for (i, init) in self.globals.iter().enumerate() {
+            let init = if self.heap_global == Some(i as u32) {
+                &(heap_start as i64)
+            } else {
+                init
+            };
             globals.global(
                 GlobalType {
                     val_type: ValType::I64,
@@ -179,6 +238,15 @@ impl Builder {
             code.function(body);
         }
         module.section(&code);
+        if !self.data.is_empty() {
+            let mut data = DataSection::new();
+            data.active(
+                0,
+                &ConstExpr::i32_const(DATA_START as i32),
+                self.data.iter().copied(),
+            );
+            module.section(&data);
+        }
         Ok(module.finish())
     }
 }

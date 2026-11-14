@@ -1,0 +1,23 @@
+copy struct P {
+    x: i64,
+    y: i64
+}
+fn main() -> i64 {
+    handle Fail[RuntimeError] in {
+        handle Fail[ArithOverflow] in {
+            let a = 0;
+            let m = 9223372036854775807;
+            let p = P {
+                y: 1 / a,
+                x: m + 1
+            };
+            p.x
+        } with {
+            return v => v,
+            raise(e, _) => -1,
+        }
+    } with {
+        return v => v,
+        raise(e, _) => -2,
+    }
+}

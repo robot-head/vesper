@@ -1,0 +1,17 @@
+package vesper:handles@0.1.0;
+
+interface host {
+  resource blob {
+    constructor(tag: u32);
+  }
+  record pair { left: blob, right: u32 }
+}
+
+world handles {
+  use host.{blob, pair};
+  import host;
+  /// Exports that take and return imported resources.
+  export inspect: func(b: borrow<blob>) -> u32;
+  export swap: func(b: blob) -> blob;
+  export unpack: func(p: pair) -> option<blob>;
+}

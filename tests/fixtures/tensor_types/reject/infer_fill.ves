@@ -1,0 +1,7 @@
+// expect: E0764
+// at: Tensor::fill(1.0)
+// message: needs a target shape
+fn main() -> u64 eff [Tensor] {
+    let z = Tensor::fill(1.0);
+    0
+}

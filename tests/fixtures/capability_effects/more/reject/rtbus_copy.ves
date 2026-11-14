@@ -1,0 +1,9 @@
+// expect: E0724
+// The realtime bus is resumed exactly once by the host: it is linear.
+copy effect RtBus {
+    fn commit_dma_output(frames: u64) -> Unit;
+}
+
+fn main() -> u64 {
+    0
+}

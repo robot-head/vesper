@@ -1,0 +1,65 @@
+name: Ignis Vulkan (lavapipe)
+
+# Runs the vesper-ignis-vulkan tests on Mesa lavapipe (a CPU Vulkan driver)
+# with VK_LAYER_KHRONOS_validation and synchronization validation required.
+# Elsewhere (Bazel, macOS, Windows) the device tests report the device as
+# unavailable and pass; here VESPER_IGNIS_VULKAN_REQUIRE makes that a failure,
+# and any validation error fails the test that caused it.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/vesper-ignis/**'
+      - 'crates/vesper-ignis-vulkan/**'
+      - '.github/workflows/ignis-vulkan.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/vesper-ignis/**'
+      - 'crates/vesper-ignis-vulkan/**'
+      - '.github/workflows/ignis-vulkan.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ignis-vulkan-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+  VESPER_IGNIS_VULKAN_REQUIRE: '1'
+  VESPER_IGNIS_VULKAN_VALIDATION: required
+  VESPER_IGNIS_VULKAN_DEVICE: llvmpipe
+  VESPER_IGNIS_VULKAN_PRINT: '1'
+
+jobs:
+  lavapipe:
+    name: Vulkan on lavapipe with validation layers
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Mesa lavapipe and the Vulkan validation layers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers libvulkan1 vulkan-validationlayers vulkan-tools
+      - name: Report the Vulkan device
+        run: |
+          dpkg-query -W mesa-vulkan-drivers vulkan-validationlayers libvulkan1
+          vulkaninfo --summary
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test vesper-ignis-vulkan on lavapipe
+        run: cargo test --locked -p vesper-ignis-vulkan -- --nocapture
+      - name: Test the vesper-ignis planner it depends on
+        run: cargo test --locked -p vesper-ignis

@@ -56,13 +56,25 @@
 //!
 //! # Runtime
 //!
-//! Each region block owns a [`vesper_alloc::Region`] bounded by its capacity.
-//! The evaluator stores payload values in it and the native JIT stores scalar
-//! payloads through the `vesper_region_*` runtime calls in [`native_runtime`].
-//! Both close the region when the block returns. Handles that outlive their
-//! allocation by any path the static rules do not cover are caught by the
-//! allocator's region/serial checks and reported as runtime errors, never as
-//! reads of reclaimed memory.
+//! Each region block owns a [`vesper_alloc::Region`] of one chunk bounded by
+//! its capacity, and every backend charges it the same bytes (the native
+//! layout size of each payload, `vesper.region.accounting/1` in [`store`]).
+//! The evaluator keeps payload values beside their byte allocations; the
+//! native JIT stores payloads of any layout (scalars, tuples, structs,
+//! enums) word by word through the `vesper_region_*` calls in
+//! [`native_runtime`]; object output (`vesper build`) defines the same calls
+//! in generated code (`src/regions/aot_runtime.rs`) that needs only the C
+//! library. All of them close the region when the block returns. Handles
+//! that outlive their allocation by any path the static rules do not cover
+//! are caught by region/serial checks and reported as runtime errors, never
+//! as reads of reclaimed memory.
+//!
+//! # Model
+//!
+//! `lean/StrataRegions.lean` models the escape and lifetime rules for a
+//! first-order fragment and proves soundness (well-typed programs never
+//! touch a freed or foreign region) and escape freedom. It is a theorem
+//! about that model, not about this checker.
 use crate::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
 

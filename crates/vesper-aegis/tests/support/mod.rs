@@ -282,6 +282,9 @@ pub fn snp_report_struct(vcek: &Signer, p: &SnpParams) -> SnpReport {
         launch_tcb: p.reported_tcb,
         launch_mit_vector: 0,
         current_mit_vector: 0,
+        current_etcb: None,
+        launch_etcb: None,
+        committed_etcb: None,
         signature_r_s: [0; 96],
     };
     r.signature_r_s = vcek.sign(&r.signed_bytes()).try_into().unwrap();
@@ -334,6 +337,10 @@ pub fn cca_token(iak: &Signer, rak: &Signer, p: &CcaParams) -> Vec<u8> {
         implementation_id: vec![2; 32],
         lifecycle: p.lifecycle,
         hash_algo: RegisterHash::Sha256,
+        sw_components: Vec::new(),
+        config: None,
+        manufacturing_config: None,
+        tbb_rotpks: Vec::new(),
     };
     let realm_tok = cca::build_sign1(Curve::P384, realm.to_cbor(), |d| rak.sign(d));
     let platform_tok = cca::build_sign1(iak.curve, platform.to_cbor(), |d| iak.sign(d));
