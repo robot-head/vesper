@@ -1,0 +1,120 @@
+# Finite resource evaluator design (#322)
+
+This lane owns only new `lean/ResourceModel42/Evaluator.lean` and this report.
+The frozen contract is `ddf5d6c`, read from the coordinator's integration
+worktree. This checkpoint is a design report: no evaluator source, Lean build,
+Cargo execution or semantic validation is claimed. Exact declarations await
+the syntax writer's first coherent API checkpoint.
+
+## Operational representation
+
+Use the syntax module's decorated runtime expression and closed value types,
+with finite tombstone ledger entries and an ordered successful action prefix.
+Only mint and consume operations retain logical source labels at runtime.
+Values carry unit, bounded naturals, structural pairs or actual dynamically
+minted serials; they have no fabricated input operation sites. Model sites are
+not yet source-language byte spans or backend observations.
+
+The evaluator owns an opaque invocation wrapper. Its only admission function
+checks separate copy values against the checked program's declared input types
+and all input value/depth/aggregate caps. It does not infer source facts from
+these actual values, accept expected answers or traces, or expose a constructor
+that accepts unchecked admission flags. The checked program comes from actual
+checker success through its frozen readonly accessors.
+
+Initialization closes inputs using pure nested value lets with input zero
+innermost. These ordinary `Full.Head.letV` reductions consume global fuel.
+Structural pair values are already values: recognizing a pair of closed value
+atoms must erase to the identical Full expression rather than inventing an
+extra operational transition.
+
+## One semantic transition
+
+Search only strict let initializer contexts for the next redex. An unused
+initializer still executes. Full unpack and if-zero operate on atoms; only the
+selected branch continues. Unpack substitutes the right component at index zero
+first, then the left component at index zero. Closed value substitution requires
+no value shifting and preserves surviving mint/consume operator labels.
+
+Each successful transition corresponds to exactly one `Full.Head`, lifted
+through the actual enclosing let context to one `Full.Step`. Internal focus
+search, metric traversal and reconstruction are not separate semantic fuel
+steps. The complete successful action prefix includes silent actions for the
+proof bridge; the public logical resource trace filters those silent actions.
+
+Mint obtains its fresh serial from total allocation history, appends a live
+ledger entry and one ordered mint action. Consume checks that actual serial is
+live, marks its retained entry dead and appends one ordered consume action.
+Packing, unpacking, substitution and ordinary binding never invent terminal
+resource actions. Tombstones remain until the run ends and serials never reuse
+the live count, lexical index or source occurrence label.
+
+Terminal detection precedes the fuel-zero test on an admitted state. Otherwise,
+fuel zero retains the actual current expression, ledger and trace prefix. One
+successful transition costs one unit of the same global fuel. Completed accepts
+any admitted result kind and returns its actual residual identities; empty
+residuals are not an evaluator postcondition imposed to simulate a proof.
+
+## Prepaid bounds and refusal
+
+All model limits retain the contract's default and hard values. Raw source and
+inferred type bounds alone do not control substitution: repeated copy-pair
+doubling can produce a large runtime tree from small ANF syntax. Metric
+arithmetic saturates at the relevant cap plus one before materializing copied
+values or a new expression. Both nodes and depth require independent checks.
+
+Preflight the complete prospective root state, including unchanged let bodies,
+both branch subtrees and every enclosing let node. Either focus with an explicit
+context and count its retained overhead, or pass the remaining node/depth budget
+to the initializer planner. Building a full-cap inner result and only then
+measuring its reconstructed parent is insufficient.
+
+For unpack, check the intermediate right substitution and the final left
+substitution before semantic commitment. A bounded temporary intermediate is
+not a successful transition; if the second stage refuses, retain the original
+configuration. Prepay logical work traversals, expression/value copies,
+ledger/event capacity and reconstruction before their corresponding growth.
+Do not construct an oversized candidate and then measure it.
+
+Measured resource refusals are separate from runtime invariant failures and
+from language semantics; this fragment has no abort/effects/arithmetic. A
+refusal leaves the expression, ledger and successful action prefix unchanged.
+No cleanup consumes are appended. A smaller independent dynamic value cap must
+be checked before materializing the affected value, preserving earlier genuine
+mints when it refuses. The exact exposed guard metadata and helper names will
+follow the coordinated syntax/evaluator API.
+
+## Proof interface and release gates
+
+Evaluator definitions needed by the proof module remain publicly unfoldable;
+the evaluator must not import the downstream proof module. No named helper
+theorem is hidden from the complete audit catalog. The planned bridge requires:
+
+- Closed runtime values erase to `Full.IsVal` values, and runtime substitution
+  erases to `Full.subst` of that closed value.
+- The finite ledger embeds as `Full.RCtx`: live entries map to linear and dead
+  or unallocated entries to none. Its retained length supplies the next fresh
+  serial; mint and consume agree with Full store push/update behavior.
+- Every actual successful step erases to one `Full.Step`, and the entire
+  successful prefix erases to `Full.Steps`.
+- Completed values erase to `Full.IsVal`.
+- Checked reachable execution cannot choose an invariant failure: it produces
+  a value, a genuine transition, fuel exhaustion or a specifically measured
+  resource refusal. Success soundness alone would allow an always-refusing
+  implementation and does not satisfy this gate.
+- Preservation/progress classification follows actual checked-program typing
+  and the bridge. Copy-result exhaustion/exact-once consequences are conditional
+  on the existing Full theorem's hypotheses, not asserted for returned owners.
+
+These establish a finite logical model only. They do not bind a Vesper source
+adapter, native/runtime observation stream, compiler refinement, general source
+decidability, full resource campaign or self-hosting claim.
+
+## Current evidence
+
+Read actual `MetatheoryFull.Expr`, `subst`, `IsVal`, ANF typing rules, `EC`,
+`Head`, `Step`, `Steps`, finite-store freshness and terminal exhaustion
+definitions, together with the historical resource-model plan and complete
+frozen contract. The syntax, checker and proof planners independently agree on
+the decorated substitution route and right-then-left unpack order. No evaluator
+implementation or build has started at this checkpoint.
