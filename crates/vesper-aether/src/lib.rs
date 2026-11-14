@@ -5,19 +5,48 @@
 //! plans, [`fork`] models copy-on-write snapshot forks with per-clone nonce
 //! reseeding, and [`host`] executes userfaultfd lazy restore and a gated KVM
 //! guest where the kernel allows it (reporting `Unavailable` otherwise).
+//! Wave seven adds zero-copy `UFFDIO_CONTINUE` over a sealed shared memfd and
+//! hot-set prefetch ([`hotset`]), fork clones that remap the snapshot
+//! `MAP_PRIVATE` (`mapped_fork`, Linux) with hardware-plus-OS clone entropy
+//! ([`entropy`]), the VirtIO MMIO block/net/vsock and VMGENID device models
+//! ([`devices`]), PVH direct boot ([`pvh`]) and the VMM seccomp-bpf profile
+//! ([`seccomp`]).
 //! Immutable output copies remove writable file aliases after verification; CAS
 //! filesystem permissions are not a defence against a privileged concurrent writer.
 #![deny(unsafe_code)]
 
+pub mod devices;
+pub mod entropy;
 pub mod fork;
+pub mod guest_mem;
 pub mod host;
+pub mod hotset;
+#[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+mod hw_rng;
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+mod hw_rng {
+    pub fn instruction() -> Option<&'static str> {
+        None
+    }
+    pub fn word() -> Option<u64> {
+        None
+    }
+}
 #[cfg(all(
     target_os = "linux",
     any(target_arch = "x86_64", target_arch = "aarch64"),
-    any(feature = "uffd", feature = "kvm")
+    any(feature = "uffd", feature = "kvm", feature = "seccomp")
 ))]
 mod linux_host;
+#[cfg(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    feature = "uffd"
+))]
+pub mod mapped_fork;
 pub mod page_source;
+pub mod pvh;
+pub mod seccomp;
 pub mod slot_plan;
 pub mod virtio;
 

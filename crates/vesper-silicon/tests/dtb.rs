@@ -309,7 +309,7 @@ fn malformed_headers_are_typed_errors() {
     b[0] ^= 1;
     assert!(matches!(DeviceTree::parse(&b), Err(DtbError::BadMagic(_))));
     let mut b = BOARD.to_vec();
-    patch_u32(&mut b, 20, 16); // version 16
+    patch_u32(&mut b, 20, 15); // version 15 (16 and 17 are supported)
     assert!(matches!(
         DeviceTree::parse(&b),
         Err(DtbError::UnsupportedVersion { .. })
