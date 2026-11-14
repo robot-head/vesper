@@ -20,7 +20,16 @@
 //!   and rejection of loops that revisit an in-progress state unchanged.
 //! * per-type context layouts and helper sets; tail calls through program
 //!   arrays; `bpf_loop` callbacks, explored once per iteration until their
-//!   entry state repeats; the `bpf_preempt_disable`/`enable` kfuncs;
+//!   entry state repeats; the generic kfuncs (`bpf_preempt_*`,
+//!   `bpf_rcu_read_*` and `bpf_local_irq_*` regions that must be closed
+//!   in order before exit or a call that leaves the program, and the
+//!   open-coded `bpf_iter_num_*` iterator in its stack slot);
+//! * loop widening as the kernel's `widen_imprecise_scalars`: at a
+//!   bounded back edge (an active iterator or a `bpf_loop` callback) a
+//!   scalar that changed is widened to unknown; a widened value that later
+//!   decides a branch, a pointer offset or a helper argument aborts the
+//!   pass (`loop.widened_precise`) and the program is explored again
+//!   without widening, as the kernel's precision tracking would;
 //! * scalar ids: a 64-bit `mov` links two scalar registers, and a bound
 //!   learnt for one by a comparison applies to both.
 //!

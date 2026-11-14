@@ -1,9 +1,18 @@
-//! A concrete userspace eBPF interpreter for XDP programs, used to execute
-//! verified programs over packet fixtures and to check the verifier: every
+//! A concrete userspace eBPF interpreter for XDP, tc (`sched_cls`),
+//! tracepoint and kprobe programs ([`Input`]), used to execute verified
+//! programs over fixtures and to check the verifier: every
 //! value carries its provenance, and any access outside the region a
 //! pointer was derived from, any read of uninitialised stack, any use of a
 //! released reference and any reference still held at exit is an
 //! [`InterpError`]. An accepted program that faults here is a verifier bug.
+//!
+//! Contexts are modelled as the kernel lays them out: `struct xdp_md`,
+//! `struct __sk_buff` built from [`SkbMeta`] (what `BPF_PROG_TEST_RUN`
+//! derives from a packet on `lo`), a tracepoint record (common fields
+//! unreadable) and `pt_regs`. Tail calls run installed targets
+//! ([`Env::install_tail_call`]) with the kernel's 33-call limit; the
+//! generic kfuncs of [`crate::helpers::KFUNCS`] (RCU and irq-flag regions,
+//! `bpf_iter_num_*`) run with kernel semantics.
 //!
 //! Single-CPU model: per-CPU maps hold the value of CPU [`Env::cpu`].
 //! No real clock is read; `bpf_ktime_get_ns` returns [`Env::now_ns`].
