@@ -1,0 +1,5 @@
+fn main() -> i64 {
+    let x = 40;
+    let f = | y: i64 | wrapping_add(x, y);
+    f(2)
+}
