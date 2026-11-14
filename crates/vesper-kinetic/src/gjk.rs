@@ -304,12 +304,23 @@ fn gjk_cores(sa: &Shape, sb: &Shape) -> Result<GjkOutcome, GjkError> {
     // separated shapes keep their positive distance).
     let size = norm(first.w);
     let mut converged = false;
+    let mut stalled = false;
+    let mut best_vv = f64::INFINITY;
     for _ in 0..GJK_MAX_ITER {
         let vv = dot(v, v);
         if vv <= 1e-24 * size * size || simplex.len() == 4 {
             converged = true;
             break;
         }
+        // No progress: rounding keeps the simplex from closing on the
+        // origin (shapes touching or overlapping by a hair, often with
+        // coplanar faces). Stop with the closest point found.
+        if !(vv < best_vv) {
+            converged = true;
+            stalled = true;
+            break;
+        }
+        best_vv = vv;
         let p = core_support_point(sa, sb, scale(v, -1.0));
         // Converged: the new support does not get closer than |v|.
         if vv - dot(v, p.w) <= 1e-12 * vv || simplex.iter().any(|s| s.w == p.w) {
@@ -329,8 +340,13 @@ fn gjk_cores(sa: &Shape, sb: &Shape) -> Result<GjkOutcome, GjkError> {
         pb = add(pb, scale(s.b, *l));
     }
     let vv = dot(v, v);
-    // A full tetrahedron means the origin is inside it.
-    let distance = if vv <= 1e-24 * size * size || simplex.len() == 4 {
+    // A full tetrahedron means the origin is inside it. A stall within
+    // 1e-6 (relative) of the origin is treated as contact, so EPA measures
+    // it (and reports the hair-width gap or overlap).
+    let distance = if vv <= 1e-24 * size * size
+        || simplex.len() == 4
+        || (stalled && vv <= 1e-12 * size * size)
+    {
         0.0
     } else {
         vv.sqrt()

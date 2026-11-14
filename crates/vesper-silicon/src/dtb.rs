@@ -1,34 +1,47 @@
-//! Flattened Devicetree (DTB) input for memory and interrupt-controller
-//! nodes (§26.1 items 3 and 5).
+//! Flattened Devicetree (DTB) input for memory, interrupt-controller and
+//! bus nodes (§26.1 items 3 and 5).
 //!
-//! [`DeviceTree::parse`] reads a DTB blob (format version 17, the one `dtc`
-//! and QEMU emit) into a node tree. Every length, offset, alignment, string
-//! terminator, token and nesting level is checked; malformed or over-budget
-//! input is a typed [`DtbError`], never a panic. The parser is written here
-//! rather than taken from the `fdt` crate because `fdt` 0.1.5 `expect`s and
-//! `assert`s on malformed structure blocks, which this crate's untrusted-input
-//! rule does not allow.
+//! [`DeviceTree::parse`] reads a DTB blob (format version 16 or 17; 17 is
+//! what `dtc` and QEMU emit) into a node tree. Every length, offset,
+//! alignment, string terminator, token and nesting level is checked;
+//! malformed or over-budget input is a typed [`DtbError`], never a panic. The
+//! parser is written here rather than taken from the `fdt` crate because
+//! `fdt` 0.1.5 `expect`s and `assert`s on malformed structure blocks, which
+//! this crate's untrusted-input rule does not allow.
+//!
+//! Addresses: `#address-cells` / `#size-cells` up to 4 are read into 128-bit
+//! values ([`DeviceTree::reg_raw`]); [`DeviceTree::reg_translated`] maps a
+//! node's `reg` to CPU physical addresses through every ancestor's `ranges`
+//! (including PCI address-space matching), and [`DeviceTree::pci_windows`]
+//! lists a PCI host bridge's windows.
+//!
+//! Interrupts: specifiers are followed through `interrupt-map` nexus nodes
+//! (masked unit-address + specifier matching, chains of nexus nodes, parent
+//! unit addresses) to the receiving controller ([`DeviceTree::interrupts`],
+//! [`DeviceTree::map_interrupt`], [`Platform::pci_intx`]).
 //!
 //! [`Platform::from_tree`] then extracts what the Silicon models consume:
 //!
 //! * memory banks (`device_type = "memory"`), the header's `/memreserve/`
-//!   entries and `/reserved-memory` children, and the 4 KiB frame ranges that
-//!   remain ([`Platform::usable_frame_ranges`]), which seed
-//!   [`FrameAllocator`]s for the frame-conservation model;
+//!   entries and `/reserved-memory` children, both fixed (`reg`) and
+//!   dynamically placed (`size`, `alignment`, `alloc-ranges`; see
+//!   [`place_dynamic`]), and the 4 KiB frame ranges that remain
+//!   ([`Platform::usable_frame_ranges`]), which seed [`FrameAllocator`]s for
+//!   the frame-conservation model;
 //! * interrupt controllers (RISC-V hart-local `riscv,cpu-intc`, PLIC, GICv2
-//!   and GICv3) and every device interrupt resolved through
-//!   `interrupt-parent` / `interrupts` / `interrupts-extended` to a
-//!   controller-global number, range-checked against the controller
-//!   (`riscv,ndev` for a PLIC, the SPI/PPI ranges for a GIC), which install
-//!   ISRs on the IrqGuard [`Cpu`] model ([`Platform::install_isr`]);
-//! * the per-hart `riscv,isa` / `riscv,cbom-block-size` and each device's
-//!   `dma-coherent` / `dma-noncoherent` marking, which select the Zicbom
-//!   cache-block maintenance of the DMA model ([`Platform::dma_coherence`]).
+//!   and GICv3) and every device interrupt resolved to a controller-global
+//!   number, range-checked against the controller (`riscv,ndev` for a PLIC,
+//!   the SPI/PPI ranges for a GIC), which install ISRs on the IrqGuard
+//!   [`Cpu`] model ([`Platform::install_isr`]); the PLIC contexts and
+//!   CLINT/ACLINT blocks, which [`crate::intc`] emulates;
+//! * the per-hart `riscv,isa`, `riscv,isa-base`, `riscv,isa-extensions` and
+//!   `riscv,cbom-block-size`, and each device's `dma-coherent` /
+//!   `dma-noncoherent` marking, which select the Zicbom cache-block
+//!   maintenance of the DMA model ([`Platform::dma_coherence`]).
 //!
-//! Not supported (typed errors where they matter): interrupt nexus nodes
-//! (`interrupt-map`), address translation of device `reg` through bus
-//! `ranges`, `#address-cells`/`#size-cells` above 2, and dynamically placed
-//! `/reserved-memory` regions (`size` without `reg`).
+//! Not supported (typed errors): versions before 16, `interrupt-map-pass-thru`,
+//! more than one PLIC in [`crate::intc`], and translation across a bus
+//! without `ranges` (a non-memory-mapped bus such as I2C or SPI).
 
 use std::collections::BTreeMap;
 
@@ -45,6 +58,8 @@ const FDT_PROP: u32 = 3;
 const FDT_NOP: u32 = 4;
 const FDT_END: u32 = 9;
 const HEADER_BYTES: usize = 40;
+/// A version-16 header lacks the trailing `size_dt_struct` field.
+const HEADER_V16_BYTES: usize = 36;
 
 /// Parser budgets. Real trees are far below these.
 pub const MAX_DEPTH: usize = 64;
@@ -52,6 +67,18 @@ pub const MAX_NODES: usize = 65_536;
 pub const MAX_RESERVATIONS: usize = 1024;
 /// Most 4 KiB frames [`Platform::frame_allocators`] will model (16 GiB).
 pub const MAX_MODEL_FRAMES: u64 = 1 << 22;
+/// Widest `#address-cells` / `#size-cells` accepted (Linux's
+/// `OF_MAX_ADDR_CELLS`); addresses are computed in 128 bits.
+pub const MAX_CELLS: u32 = 4;
+/// Most interrupt nexus nodes one specifier may pass through.
+pub const MAX_NEXUS_HOPS: usize = 16;
+/// PCI `phys.hi` address-space bits (`ss`), compared when matching `ranges`.
+const PCI_SPACE_MASK: u32 = 0x0300_0000;
+
+/// Big-endian cells as one number (at most [`MAX_CELLS`] cells, so it fits).
+fn join_cells(c: &[u32]) -> u128 {
+    c.iter().fold(0u128, |v, &x| (v << 32) | u128::from(x))
+}
 
 /// A physical address range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -65,6 +92,33 @@ impl MemRange {
     pub fn end(&self) -> Option<u64> {
         self.base.checked_add(self.size)
     }
+}
+
+/// One raw `reg` entry: the address in the parent bus's cells and the size.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RegEntry {
+    pub address: Vec<u32>,
+    pub size: u128,
+}
+
+/// PCI address space of a host-bridge window (`phys.hi` bits 24..25).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PciSpace {
+    Config,
+    Io,
+    Mem32,
+    Mem64,
+}
+
+/// One window of a PCI host bridge's `ranges`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PciWindow {
+    pub space: PciSpace,
+    pub prefetchable: bool,
+    pub pci_addr: u64,
+    /// CPU physical address after translating through every ancestor bus.
+    pub cpu_addr: u64,
+    pub size: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -142,11 +196,33 @@ pub enum DtbError {
         node: String,
         controller: String,
     },
-    /// The interrupt parent is a nexus (`interrupt-map`), which is not
-    /// modelled.
+    /// The nexus uses `interrupt-map-pass-thru`, which is not modelled.
     UnsupportedInterruptNexus {
         node: String,
         nexus: String,
+    },
+    /// No `interrupt-map` entry of `nexus` matches the masked unit address
+    /// and specifier.
+    NoInterruptMapEntry {
+        node: String,
+        nexus: String,
+        unit: Vec<u32>,
+        specifier: Vec<u32>,
+    },
+    /// The specifier passed through more than [`MAX_NEXUS_HOPS`] nexus nodes.
+    NexusLoop {
+        node: String,
+    },
+    /// `bus` (an ancestor of `node`) has no `ranges`, so its child addresses
+    /// do not map to CPU physical addresses.
+    Untranslatable {
+        node: String,
+        bus: String,
+    },
+    /// No entry of `bus`'s `ranges` covers the whole region.
+    NoRangesEntry {
+        node: String,
+        bus: String,
     },
     BadInterruptSpecifier {
         node: String,
@@ -158,10 +234,12 @@ pub enum DtbError {
         irq: u32,
         limit: u32,
     },
-    /// A `/reserved-memory` child with `size` but no `reg`: firmware places
-    /// it, so the usable frames are not known from the tree alone.
-    DynamicReservation {
+    /// A dynamically placed `/reserved-memory` child (`size` without `reg`)
+    /// for which no aligned free range exists in memory (or `alloc-ranges`).
+    ReservationDoesNotFit {
         node: String,
+        size: u64,
+        alignment: u64,
     },
     UnknownArch {
         compatible: String,
@@ -228,6 +306,8 @@ fn align4(n: usize) -> Option<usize> {
 /// A parsed devicetree.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceTree {
+    /// The header's format version (16 or 17).
+    pub version: u32,
     pub boot_cpuid: u32,
     /// The header's memory reservation block (`/memreserve/`).
     pub reservations: Vec<MemRange>,
@@ -236,9 +316,14 @@ pub struct DeviceTree {
 }
 
 impl DeviceTree {
-    /// Parses a version-17 DTB. Bytes after `totalsize` are ignored.
+    /// Parses a version-16 or version-17 DTB (a later version is accepted
+    /// when its `last_comp_version` is at most 17, as the format requires).
+    /// Version 16 has no `size_dt_struct` header field; its structure block
+    /// runs to `FDT_END`, bounded by `totalsize`. Versions before 16 use a
+    /// different node-name encoding and are rejected. Bytes after
+    /// `totalsize` are ignored.
     pub fn parse(blob: &[u8]) -> Result<Self, DtbError> {
-        if blob.len() < HEADER_BYTES {
+        if blob.len() < HEADER_V16_BYTES {
             return Err(DtbError::Truncated { what: "header" });
         }
         let h = |i: usize| be32(blob, i * 4, "header");
@@ -254,22 +339,33 @@ impl DeviceTree {
         let last_compatible = h(6)?;
         let boot_cpuid = h(7)?;
         let size_strings = h(8)? as usize;
-        let size_struct = h(9)? as usize;
-        if version < 17 || last_compatible > 17 {
+        if version < 16 || last_compatible > 17 || last_compatible > version {
             return Err(DtbError::UnsupportedVersion {
                 version,
                 last_compatible,
             });
         }
-        if total < HEADER_BYTES || total > blob.len() {
+        let header = if version >= 17 {
+            HEADER_BYTES
+        } else {
+            HEADER_V16_BYTES
+        };
+        if total < header || total > blob.len() {
             return Err(DtbError::Truncated { what: "totalsize" });
         }
+        let size_struct = if version >= 17 {
+            h(9)? as usize
+        } else {
+            total
+                .checked_sub(off_struct)
+                .ok_or(DtbError::BlockOutOfBounds { block: "structure" })?
+        };
         let blob = &blob[..total];
         let block = |off: usize, size: usize, name: &'static str| -> Result<&[u8], DtbError> {
             let end = off
                 .checked_add(size)
                 .ok_or(DtbError::BlockOutOfBounds { block: name })?;
-            if off < HEADER_BYTES || end > total {
+            if off < header || end > total {
                 return Err(DtbError::BlockOutOfBounds { block: name });
             }
             Ok(&blob[off..end])
@@ -290,7 +386,7 @@ impl DeviceTree {
         // Memory reservation block: (u64 address, u64 size) pairs up to a
         // (0, 0) terminator, all inside the blob.
         let mut reservations = Vec::new();
-        if off_rsv < HEADER_BYTES {
+        if off_rsv < header {
             return Err(DtbError::BlockOutOfBounds {
                 block: "memory reservation",
             });
@@ -398,6 +494,7 @@ impl DeviceTree {
             return Err(DtbError::BadStructure("no root node"));
         }
         let mut tree = Self {
+            version,
             boot_cpuid,
             reservations,
             nodes,
@@ -551,22 +648,32 @@ impl DeviceTree {
         Ok(true)
     }
 
+    /// The node's own `#address-cells` / `#size-cells` (2 and 1 when absent),
+    /// which apply to its children's `reg` and to its `ranges` child side.
+    /// Up to [`MAX_CELLS`] cells are accepted (PCI buses use 3 address
+    /// cells); `#address-cells = 0` is allowed here and rejected where an
+    /// address is needed.
+    pub fn bus_cells(&self, bus: usize) -> Result<(u32, u32), DtbError> {
+        let a = self.prop_u32(bus, "#address-cells")?.unwrap_or(2);
+        let s = self.prop_u32(bus, "#size-cells")?.unwrap_or(1);
+        for c in [a, s] {
+            if c > MAX_CELLS {
+                return Err(DtbError::UnsupportedCells {
+                    node: self.path(bus),
+                    cells: c,
+                });
+            }
+        }
+        Ok((a, s))
+    }
+
     /// `#address-cells` / `#size-cells` that apply to `id`'s `reg` (the
     /// parent's, defaulting to 2 and 1).
     pub fn reg_cells(&self, id: usize) -> Result<(u32, u32), DtbError> {
         let Some(p) = self.nodes[id].parent else {
             return Ok((2, 1));
         };
-        let a = self.prop_u32(p, "#address-cells")?.unwrap_or(2);
-        let s = self.prop_u32(p, "#size-cells")?.unwrap_or(1);
-        for c in [a, s] {
-            if c > 2 {
-                return Err(DtbError::UnsupportedCells {
-                    node: self.path(p),
-                    cells: c,
-                });
-            }
-        }
+        let (a, s) = self.bus_cells(p)?;
         if a == 0 {
             return Err(DtbError::UnsupportedCells {
                 node: self.path(p),
@@ -576,9 +683,9 @@ impl DeviceTree {
         Ok((a, s))
     }
 
-    /// The node's `reg` entries in its parent bus's address space (no
-    /// `ranges` translation).
-    pub fn reg(&self, id: usize) -> Result<Vec<MemRange>, DtbError> {
+    /// The node's `reg` entries as raw bus addresses (`#address-cells` cells
+    /// of the parent bus) and sizes.
+    pub fn reg_raw(&self, id: usize) -> Result<Vec<RegEntry>, DtbError> {
         let Some(cells) = self.prop_cells(id, "reg")? else {
             return Ok(Vec::new());
         };
@@ -591,21 +698,214 @@ impl DeviceTree {
                 format!("{} cells is not a multiple of {a}+{s}", cells.len()),
             ));
         }
-        let join = |c: &[u32]| c.iter().fold(0u64, |v, &x| (v << 32) | u64::from(x));
-        let mut out = Vec::new();
-        for e in cells.chunks_exact(per) {
-            let r = MemRange {
-                base: join(&e[..a as usize]),
-                size: join(&e[a as usize..]),
-            };
-            if r.end().is_none() {
-                return Err(DtbError::AddressOverflow {
-                    node: self.path(id),
-                });
-            }
-            out.push(r);
+        Ok(cells
+            .chunks_exact(per)
+            .map(|e| RegEntry {
+                address: e[..a as usize].to_vec(),
+                size: join_cells(&e[a as usize..]),
+            })
+            .collect())
+    }
+
+    /// The node's `reg` entries in its parent bus's address space, without
+    /// `ranges` translation. Addresses or sizes wider than 64 bits (for
+    /// example a 3-cell PCI address) are [`DtbError::AddressOverflow`]; use
+    /// [`DeviceTree::reg_raw`] or [`DeviceTree::reg_translated`] for those.
+    pub fn reg(&self, id: usize) -> Result<Vec<MemRange>, DtbError> {
+        self.reg_raw(id)?
+            .into_iter()
+            .map(|e| {
+                let base = u64::try_from(join_cells(&e.address)).ok();
+                let size = u64::try_from(e.size).ok();
+                match (base, size) {
+                    (Some(base), Some(size)) if base.checked_add(size).is_some() => {
+                        Ok(MemRange { base, size })
+                    }
+                    _ => Err(DtbError::AddressOverflow {
+                        node: self.path(id),
+                    }),
+                }
+            })
+            .collect()
+    }
+
+    /// The node's `reg` entries translated to CPU physical addresses through
+    /// every ancestor bus's `ranges` (as Linux's `of_translate_address`
+    /// does). An empty `ranges` is a 1:1 mapping; a missing one ends the
+    /// translatable region ([`DtbError::Untranslatable`]); a region that no
+    /// `ranges` entry covers entirely is [`DtbError::NoRangesEntry`]. PCI
+    /// buses (`device_type = "pci"`/`"pciex"` with 3 address cells) match
+    /// entries by address space (`phys.hi` bits 24..25) as well.
+    pub fn reg_translated(&self, id: usize) -> Result<Vec<MemRange>, DtbError> {
+        let Some(bus) = self.nodes[id].parent else {
+            return Err(self.bad(id, "reg", "the root node has no bus"));
+        };
+        self.reg_raw(id)?
+            .into_iter()
+            .map(|e| {
+                let base = self.translate(bus, &e.address, e.size, id)?;
+                Ok(MemRange {
+                    base,
+                    size: e.size as u64,
+                })
+            })
+            .collect()
+    }
+
+    fn is_pci_bus(&self, bus: usize) -> Result<bool, DtbError> {
+        Ok(matches!(
+            self.prop_str(bus, "device_type")?.as_deref(),
+            Some("pci") | Some("pciex")
+        ) && self.bus_cells(bus)?.0 == 3)
+    }
+
+    /// Splits a bus address into (PCI `phys.hi`, numeric address).
+    fn decode(&self, bus: usize, cells: &[u32]) -> Result<(Option<u32>, u128), DtbError> {
+        if self.is_pci_bus(bus)? {
+            Ok((Some(cells[0]), join_cells(&cells[1..])))
+        } else {
+            Ok((None, join_cells(cells)))
         }
-        Ok(out)
+    }
+
+    /// Translates `[addr, addr + size)` in `bus`'s child address space (`addr`
+    /// has `bus`'s `#address-cells` cells) to a CPU physical address. `who`
+    /// names the node in errors.
+    pub fn translate(
+        &self,
+        bus: usize,
+        addr: &[u32],
+        size: u128,
+        who: usize,
+    ) -> Result<u64, DtbError> {
+        let overflow = || DtbError::AddressOverflow {
+            node: self.path(who),
+        };
+        let (na, _) = self.bus_cells(bus)?;
+        if addr.len() != na as usize || na == 0 {
+            return Err(DtbError::UnsupportedCells {
+                node: self.path(bus),
+                cells: na,
+            });
+        }
+        let (mut hi, mut value) = self.decode(bus, addr)?;
+        let mut bus = bus;
+        for _ in 0..=MAX_DEPTH {
+            let Some(parent) = self.nodes[bus].parent else {
+                // The root's child address space is the CPU's.
+                let base = u64::try_from(value).map_err(|_| overflow())?;
+                let size = u64::try_from(size).map_err(|_| overflow())?;
+                base.checked_add(size).ok_or_else(overflow)?;
+                return Ok(base);
+            };
+            let (na, ns) = self.bus_cells(bus)?;
+            let (pna, _) = self.bus_cells(parent)?;
+            let Some(ranges) = self.prop_cells(bus, "ranges")? else {
+                return Err(DtbError::Untranslatable {
+                    node: self.path(who),
+                    bus: self.path(bus),
+                });
+            };
+            if ranges.is_empty() {
+                // Identity: the parent sees the same number.
+                if pna == 0 || (pna < 4 && value >> (32 * pna) != 0) {
+                    return Err(overflow());
+                }
+                hi = if self.is_pci_bus(parent)? { hi } else { None };
+                bus = parent;
+                continue;
+            }
+            let per = (na + pna + ns) as usize;
+            if na == 0 || pna == 0 || ns == 0 || !ranges.len().is_multiple_of(per) {
+                return Err(self.bad(
+                    bus,
+                    "ranges",
+                    format!(
+                        "{} cells is not a multiple of {na}+{pna}+{ns}",
+                        ranges.len()
+                    ),
+                ));
+            }
+            let end = value.checked_add(size).ok_or_else(overflow)?;
+            let mut hit = None;
+            for e in ranges.chunks_exact(per) {
+                let (na, pna) = (na as usize, pna as usize);
+                let (chi, child) = self.decode(bus, &e[..na])?;
+                let len = join_cells(&e[na + pna..]);
+                if let (Some(a), Some(b)) = (hi, chi)
+                    && (a ^ b) & PCI_SPACE_MASK != 0
+                {
+                    continue;
+                }
+                let Some(cend) = child.checked_add(len) else {
+                    return Err(self.bad(bus, "ranges", "entry overflows"));
+                };
+                if value >= child && end <= cend {
+                    let (phi, pbase) = self.decode(parent, &e[na..na + pna])?;
+                    let v = pbase.checked_add(value - child).ok_or_else(overflow)?;
+                    hit = Some((phi, v));
+                    break;
+                }
+            }
+            let Some((phi, v)) = hit else {
+                return Err(DtbError::NoRangesEntry {
+                    node: self.path(who),
+                    bus: self.path(bus),
+                });
+            };
+            hi = phi;
+            value = v;
+            bus = parent;
+        }
+        Err(DtbError::TooDeep)
+    }
+
+    /// The windows a PCI host bridge's `ranges` opens from PCI space into CPU
+    /// physical space.
+    pub fn pci_windows(&self, host: usize) -> Result<Vec<PciWindow>, DtbError> {
+        if !self.is_pci_bus(host)? {
+            return Err(self.bad(host, "device_type", "not a PCI bus with 3 address cells"));
+        }
+        let parent = self.nodes[host]
+            .parent
+            .ok_or_else(|| self.bad(host, "ranges", "PCI host at the root"))?;
+        let (_, ns) = self.bus_cells(host)?;
+        let (pna, _) = self.bus_cells(parent)?;
+        let cells = self
+            .prop_cells(host, "ranges")?
+            .ok_or_else(|| self.bad(host, "ranges", "missing"))?;
+        let per = (3 + pna + ns) as usize;
+        if pna == 0 || ns == 0 || cells.is_empty() || !cells.len().is_multiple_of(per) {
+            return Err(self.bad(
+                host,
+                "ranges",
+                format!("{} cells is not a multiple of 3+{pna}+{ns}", cells.len()),
+            ));
+        }
+        let overflow = || DtbError::AddressOverflow {
+            node: self.path(host),
+        };
+        cells
+            .chunks_exact(per)
+            .map(|e| {
+                let hi = e[0];
+                let pna = pna as usize;
+                let size = join_cells(&e[3 + pna..]);
+                let space = match (hi >> 24) & 3 {
+                    0 => PciSpace::Config,
+                    1 => PciSpace::Io,
+                    2 => PciSpace::Mem32,
+                    _ => PciSpace::Mem64,
+                };
+                Ok(PciWindow {
+                    space,
+                    prefetchable: hi & 0x4000_0000 != 0,
+                    pci_addr: u64::try_from(join_cells(&e[1..3])).map_err(|_| overflow())?,
+                    cpu_addr: self.translate(parent, &e[3..3 + pna], size, host)?,
+                    size: u64::try_from(size).map_err(|_| overflow())?,
+                })
+            })
+            .collect()
     }
 
     /// The interrupt parent of `id`: its own `interrupt-parent`, else its
@@ -633,15 +933,11 @@ impl DeviceTree {
         })
     }
 
-    /// `#interrupt-cells` of a controller referenced by `user`.
-    fn controller_cells(&self, user: usize, ctl: usize) -> Result<u32, DtbError> {
-        if self.has_prop(ctl, "interrupt-map") {
-            return Err(DtbError::UnsupportedInterruptNexus {
-                node: self.path(user),
-                nexus: self.path(ctl),
-            });
-        }
-        if !self.has_prop(ctl, "interrupt-controller") {
+    /// `#interrupt-cells` of an interrupt controller or nexus referenced by
+    /// `user`. A node with `interrupt-controller` is a controller even if it
+    /// also has an `interrupt-map` (Linux's rule).
+    fn interrupt_cells(&self, user: usize, ctl: usize) -> Result<u32, DtbError> {
+        if !self.has_prop(ctl, "interrupt-controller") && !self.has_prop(ctl, "interrupt-map") {
             return Err(DtbError::NotAnInterruptController {
                 node: self.path(user),
                 controller: self.path(ctl),
@@ -656,11 +952,160 @@ impl DeviceTree {
         Ok(cells)
     }
 
+    /// `#address-cells` used for unit addresses matched by `nexus`'s
+    /// `interrupt-map`: the nexus's own, else the nearest ancestor's, else 2
+    /// (Linux's `of_irq_parse_raw` lookup).
+    fn nexus_address_cells(&self, nexus: usize) -> Result<u32, DtbError> {
+        let mut cur = Some(nexus);
+        while let Some(n) = cur {
+            if let Some(a) = self.prop_u32(n, "#address-cells")? {
+                if a > MAX_CELLS {
+                    return Err(DtbError::UnsupportedCells {
+                        node: self.path(n),
+                        cells: a,
+                    });
+                }
+                return Ok(a);
+            }
+            cur = self.nodes[n].parent;
+        }
+        Ok(2)
+    }
+
+    /// The unit address `user` presents to an interrupt nexus: the first
+    /// `cells` cells of its `reg`, zero-padded (as Linux does when `reg` is
+    /// absent or short).
+    fn unit_address(&self, user: usize, cells: u32) -> Result<Vec<u32>, DtbError> {
+        let mut v = self.prop_cells(user, "reg")?.unwrap_or_default();
+        v.resize(cells as usize, 0);
+        Ok(v)
+    }
+
+    /// Follows interrupt nexus nodes from `(ctl, unit, spec)` to an
+    /// interrupt controller, returning it and the specifier in its format.
+    /// `unit` is the child unit address the first nexus matches (as many
+    /// cells as that nexus's unit addresses have; later hops use the parent
+    /// unit address from the matched entry, sized by the parent's
+    /// `#address-cells`, 0 when absent, as in Linux).
+    /// Each hop matches `(unit & mask, spec & mask)` against the nexus's
+    /// `interrupt-map` entries (`interrupt-map-mask` defaults to all ones);
+    /// no match is [`DtbError::NoInterruptMapEntry`], a chain longer than
+    /// [`MAX_NEXUS_HOPS`] is [`DtbError::NexusLoop`].
+    pub fn map_interrupt(
+        &self,
+        user: usize,
+        mut ctl: usize,
+        mut unit: Vec<u32>,
+        mut spec: Vec<u32>,
+    ) -> Result<(usize, Vec<u32>), DtbError> {
+        if unit.len() > MAX_CELLS as usize {
+            return Err(DtbError::UnsupportedCells {
+                node: self.path(ctl),
+                cells: unit.len() as u32,
+            });
+        }
+        for _ in 0..=MAX_NEXUS_HOPS {
+            let n = self.interrupt_cells(user, ctl)? as usize;
+            if spec.len() != n {
+                return Err(DtbError::BadInterruptSpecifier {
+                    node: self.path(user),
+                    detail: format!(
+                        "{} specifier cells for {} which takes {n}",
+                        spec.len(),
+                        self.path(ctl)
+                    ),
+                });
+            }
+            if self.has_prop(ctl, "interrupt-controller") {
+                return Ok((ctl, spec));
+            }
+            if self.has_prop(ctl, "interrupt-map-pass-thru") {
+                return Err(DtbError::UnsupportedInterruptNexus {
+                    node: self.path(user),
+                    nexus: self.path(ctl),
+                });
+            }
+            let (next, next_unit, next_spec) = self.map_one(user, ctl, &unit, &spec)?;
+            ctl = next;
+            unit = next_unit;
+            spec = next_spec;
+        }
+        Err(DtbError::NexusLoop {
+            node: self.path(user),
+        })
+    }
+
+    /// One `interrupt-map` lookup in `nexus`.
+    fn map_one(
+        &self,
+        user: usize,
+        nexus: usize,
+        unit: &[u32],
+        spec: &[u32],
+    ) -> Result<(usize, Vec<u32>, Vec<u32>), DtbError> {
+        let na = unit.len();
+        let ni = spec.len();
+        let mut key = unit.to_vec();
+        key.extend_from_slice(spec);
+        let mask = match self.prop_cells(nexus, "interrupt-map-mask")? {
+            Some(m) if m.len() == na + ni => m,
+            Some(m) => {
+                return Err(self.bad(
+                    nexus,
+                    "interrupt-map-mask",
+                    format!("{} cells, expected {na}+{ni}", m.len()),
+                ));
+            }
+            None => vec![u32::MAX; na + ni],
+        };
+        let map = self
+            .prop_cells(nexus, "interrupt-map")?
+            .ok_or_else(|| self.bad(nexus, "interrupt-map", "missing"))?;
+        let truncated = || self.bad(nexus, "interrupt-map", "ends inside an entry");
+        let mut k = 0usize;
+        while k < map.len() {
+            let child = map.get(k..k + na + ni).ok_or_else(truncated)?;
+            let ph = *map.get(k + na + ni).ok_or_else(truncated)?;
+            let parent = self.by_phandle(ph).ok_or(DtbError::UnknownPhandle {
+                node: self.path(nexus),
+                phandle: ph,
+            })?;
+            let pna = self.prop_u32(parent, "#address-cells")?.unwrap_or(0);
+            if pna > MAX_CELLS {
+                return Err(DtbError::UnsupportedCells {
+                    node: self.path(parent),
+                    cells: pna,
+                });
+            }
+            let pni = self.interrupt_cells(nexus, parent)? as usize;
+            let at = k + na + ni + 1;
+            let paddr = map.get(at..at + pna as usize).ok_or_else(truncated)?;
+            let at = at + pna as usize;
+            let pspec = map.get(at..at + pni).ok_or_else(truncated)?;
+            let hit = key
+                .iter()
+                .zip(child)
+                .zip(&mask)
+                .all(|((x, c), m)| (x ^ c) & m == 0);
+            if hit {
+                return Ok((parent, paddr.to_vec(), pspec.to_vec()));
+            }
+            k = at + pni;
+        }
+        Err(DtbError::NoInterruptMapEntry {
+            node: self.path(user),
+            nexus: self.path(nexus),
+            unit: unit.to_vec(),
+            specifier: spec.to_vec(),
+        })
+    }
+
     /// The node's interrupt specifiers as `(controller, cells)`, from
     /// `interrupts-extended` when present, otherwise from `interrupts` and
-    /// the interrupt parent.
+    /// the interrupt parent, each followed through interrupt nexus nodes to
+    /// the controller that receives it.
     pub fn interrupts(&self, id: usize) -> Result<Vec<(usize, Vec<u32>)>, DtbError> {
-        let mut out = Vec::new();
+        let mut raw = Vec::new();
         if let Some(cells) = self.prop_cells(id, "interrupts-extended")? {
             let mut k = 0usize;
             while k < cells.len() {
@@ -669,7 +1114,7 @@ impl DeviceTree {
                     node: self.path(id),
                     phandle: ph,
                 })?;
-                let n = self.controller_cells(id, ctl)? as usize;
+                let n = self.interrupt_cells(id, ctl)? as usize;
                 let spec =
                     cells
                         .get(k + 1..k + 1 + n)
@@ -677,26 +1122,29 @@ impl DeviceTree {
                             node: self.path(id),
                             detail: format!("interrupts-extended ends inside a {n}-cell specifier"),
                         })?;
-                out.push((ctl, spec.to_vec()));
+                raw.push((ctl, spec.to_vec()));
                 k += 1 + n;
             }
-            return Ok(out);
+        } else if let Some(cells) = self.prop_cells(id, "interrupts")? {
+            let ctl = self.interrupt_parent(id)?;
+            let n = self.interrupt_cells(id, ctl)? as usize;
+            if cells.is_empty() || !cells.len().is_multiple_of(n) {
+                return Err(DtbError::BadInterruptSpecifier {
+                    node: self.path(id),
+                    detail: format!("{} cells is not a multiple of {n}", cells.len()),
+                });
+            }
+            raw.extend(cells.chunks_exact(n).map(|spec| (ctl, spec.to_vec())));
         }
-        let Some(cells) = self.prop_cells(id, "interrupts")? else {
-            return Ok(out);
-        };
-        let ctl = self.interrupt_parent(id)?;
-        let n = self.controller_cells(id, ctl)? as usize;
-        if cells.is_empty() || !cells.len().is_multiple_of(n) {
-            return Err(DtbError::BadInterruptSpecifier {
-                node: self.path(id),
-                detail: format!("{} cells is not a multiple of {n}", cells.len()),
-            });
-        }
-        for spec in cells.chunks_exact(n) {
-            out.push((ctl, spec.to_vec()));
-        }
-        Ok(out)
+        raw.into_iter()
+            .map(|(ctl, spec)| {
+                if self.has_prop(ctl, "interrupt-controller") {
+                    return Ok((ctl, spec));
+                }
+                let unit = self.unit_address(id, self.nexus_address_cells(ctl)?)?;
+                self.map_interrupt(id, ctl, unit, spec)
+            })
+            .collect()
     }
 }
 
@@ -705,8 +1153,12 @@ impl DeviceTree {
 pub enum ReservationSource {
     /// The header's memory reservation block.
     MemReserve,
-    /// A `/reserved-memory` child, by path.
+    /// A `/reserved-memory` child with a fixed `reg`, by path.
     Node { path: String, no_map: bool },
+    /// A `/reserved-memory` child with `size` (and optionally `alignment`
+    /// and `alloc-ranges`) but no `reg`, placed by [`Platform::from_tree`]
+    /// the way Linux's early allocator does (see [`place_dynamic`]).
+    Dynamic { path: String, no_map: bool },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -754,7 +1206,75 @@ pub struct Hart {
     pub id: u32,
     /// `riscv,isa`, when present.
     pub isa: Option<String>,
+    /// `riscv,isa-base` (`rv64i`), when present.
+    pub isa_base: Option<String>,
+    /// `riscv,isa-extensions` (one lowercase name per entry), when present.
+    pub isa_extensions: Option<Vec<String>>,
     pub cbom_block_bytes: Option<u32>,
+}
+
+impl Hart {
+    /// Whether the hart implements `ext`: from `riscv,isa-extensions` when
+    /// the hart has it (the binding that supersedes `riscv,isa`, preferred
+    /// as Linux does), else from the `riscv,isa` string.
+    pub fn has_extension(&self, ext: &str) -> bool {
+        match &self.isa_extensions {
+            Some(list) => list.iter().any(|e| e.eq_ignore_ascii_case(ext)),
+            None => self
+                .isa
+                .as_deref()
+                .is_some_and(|isa| isa_has_extension(isa, ext)),
+        }
+    }
+}
+
+/// Where one interrupt output of a RISC-V platform controller lands: a
+/// hart and the local interrupt cause (11 MEIP, 9 SEIP, 3 MSIP, 1 SSIP,
+/// 7 MTIP). `cause` is `None` for an output the tree marks `0xffffffff`
+/// (present in hardware, not for this software).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HartTarget {
+    pub hart: u32,
+    pub cause: Option<u32>,
+}
+
+/// A PLIC with its register window and contexts. Context `k` is the `k`-th
+/// `interrupts-extended` entry; an entry whose cause is `0xffffffff` (as on
+/// the SiFive FU540/FU740 M-mode contexts) exists in hardware but is not
+/// for the operating system, and has `cause: None` here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlicInfo {
+    pub path: String,
+    pub base: u64,
+    pub size: u64,
+    pub ndev: u32,
+    pub contexts: Vec<HartTarget>,
+}
+
+/// Kind of a RISC-V software-interrupt / timer block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClintKind {
+    /// SiFive CLINT (`sifive,clint0` / `riscv,clint0`): MSIP at `0x0 +
+    /// 4*k`, MTIMECMP at `0x4000 + 8*k`, MTIME at `0xbff8`.
+    Clint,
+    /// ACLINT MSWI (`riscv,aclint-mswi`): MSIP at `4*k`.
+    AclintMswi,
+    /// ACLINT SSWI (`riscv,aclint-sswi`): SETSSIP at `4*k` (write-1 edge).
+    AclintSswi,
+    /// ACLINT MTIMER (`riscv,aclint-mtimer`): `reg` is MTIME then the
+    /// MTIMECMP array (`8*k`), the order QEMU and the binding use.
+    AclintMtimer,
+}
+
+/// A CLINT or ACLINT device: its `reg` windows (CPU physical) and the hart
+/// line of each per-hart index `k`, from `interrupts-extended` (a CLINT has
+/// two entries per hart, software then timer).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClintInfo {
+    pub path: String,
+    pub kind: ClintKind,
+    pub regs: Vec<MemRange>,
+    pub targets: Vec<HartTarget>,
 }
 
 /// What the Silicon models take from a devicetree.
@@ -767,6 +1287,10 @@ pub struct Platform {
     pub harts: Vec<Hart>,
     pub controllers: Vec<InterruptController>,
     pub irq_lines: Vec<IrqLine>,
+    /// RISC-V PLICs, for [`crate::intc`].
+    pub plics: Vec<PlicInfo>,
+    /// RISC-V CLINT / ACLINT blocks, for [`crate::intc`].
+    pub clints: Vec<ClintInfo>,
     tree: DeviceTree,
 }
 
@@ -820,11 +1344,31 @@ impl Platform {
                 continue;
             }
             let id = tree.reg(c)?.first().map(|r| r.base).unwrap_or(0);
+            let isa_extensions = match tree.prop_strings(c, "riscv,isa-extensions")? {
+                None => None,
+                Some(list) => {
+                    for e in &list {
+                        let ok = !e.is_empty()
+                            && e.bytes()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit());
+                        if !ok {
+                            return Err(tree.bad(
+                                c,
+                                "riscv,isa-extensions",
+                                format!("{e:?} is not a lowercase extension name"),
+                            ));
+                        }
+                    }
+                    Some(list)
+                }
+            };
             harts.push(Hart {
                 path: tree.path(c),
                 id: u32::try_from(id)
                     .map_err(|_| DtbError::AddressOverflow { node: tree.path(c) })?,
                 isa: tree.prop_str(c, "riscv,isa")?,
+                isa_base: tree.prop_str(c, "riscv,isa-base")?,
+                isa_extensions,
                 cbom_block_bytes: tree.prop_u32(c, "riscv,cbom-block-size")?,
             });
         }
@@ -832,7 +1376,7 @@ impl Platform {
         let mut memory = Vec::new();
         for id in 0..n {
             if tree.prop_str(id, "device_type")?.as_deref() == Some("memory") && tree.enabled(id)? {
-                memory.extend(tree.reg(id)?.into_iter().filter(|r| r.size > 0));
+                memory.extend(tree.reg_translated(id)?.into_iter().filter(|r| r.size > 0));
             }
         }
         memory.sort();
@@ -857,15 +1401,16 @@ impl Platform {
                 });
             }
         }
+        let mut dynamic = Vec::new();
         if let Some(rm) = tree.find("/reserved-memory") {
             for &c in &tree.node(rm).children {
                 if !tree.enabled(c)? {
                     continue;
                 }
-                let regs = tree.reg(c)?;
+                let regs = tree.reg_translated(c)?;
                 if regs.is_empty() {
                     if tree.has_prop(c, "size") {
-                        return Err(DtbError::DynamicReservation { node: tree.path(c) });
+                        dynamic.push(c);
                     }
                     continue;
                 }
@@ -879,6 +1424,22 @@ impl Platform {
                     });
                 }
             }
+        }
+
+        if reservations.len() + dynamic.len() > MAX_RESERVATIONS {
+            return Err(DtbError::TooManyReservations);
+        }
+        // Static regions first, then the dynamic ones in tree order, each
+        // avoiding everything placed before it (Linux's order).
+        for c in dynamic {
+            let range = place_dynamic(&tree, c, &memory, &reservations)?;
+            reservations.push(Reservation {
+                range,
+                source: ReservationSource::Dynamic {
+                    path: tree.path(c),
+                    no_map: tree.has_prop(c, "no-map"),
+                },
+            });
         }
 
         let mut controllers = Vec::new();
@@ -933,7 +1494,9 @@ impl Platform {
                 let Some(c) = controllers.iter().find(|c| c.node == ctl) else {
                     continue;
                 };
-                let number = resolve(&tree, id, c, &spec)?;
+                let Some(number) = resolve(&tree, id, c, &spec)? else {
+                    continue;
+                };
                 irq_lines.push(IrqLine {
                     device: tree.path(id),
                     controller: c.path.clone(),
@@ -943,6 +1506,8 @@ impl Platform {
             }
         }
 
+        let (plics, clints) = riscv_blocks(&tree, &controllers)?;
+
         Ok(Self {
             arch,
             memory,
@@ -950,7 +1515,67 @@ impl Platform {
             harts,
             controllers,
             irq_lines,
+            plics,
+            clints,
             tree,
+        })
+    }
+
+    /// A device's `reg` windows as CPU physical addresses (translated
+    /// through bus `ranges`).
+    pub fn mmio(&self, device: &str) -> Result<Vec<MemRange>, DtbError> {
+        let id = self
+            .tree
+            .find(device)
+            .ok_or_else(|| DtbError::NoSuchNode(device.to_string()))?;
+        self.tree.reg_translated(id)
+    }
+
+    /// The controller and number that PCI legacy interrupt `pin` (1 = INTA
+    /// .. 4 = INTD) of `bus:device.function` reaches through `host`'s
+    /// `interrupt-map`, as the PCI binding encodes the child unit address
+    /// (`bus << 16 | device << 11 | function << 8`, 0, 0).
+    pub fn pci_intx(
+        &self,
+        host: &str,
+        bus: u8,
+        device: u8,
+        function: u8,
+        pin: u8,
+    ) -> Result<IrqLine, DtbError> {
+        let h = self
+            .tree
+            .find(host)
+            .ok_or_else(|| DtbError::NoSuchNode(host.to_string()))?;
+        let path = self.tree.path(h);
+        if device >= 32 || function >= 8 || !(1..=4).contains(&pin) {
+            return Err(DtbError::BadInterruptSpecifier {
+                node: path,
+                detail: format!("PCI {bus:02x}:{device:02x}.{function} INT{pin} does not exist"),
+            });
+        }
+        if !self.tree.is_pci_bus(h)? {
+            return Err(self.tree.bad(h, "device_type", "not a PCI bus"));
+        }
+        let mut unit =
+            vec![(u32::from(bus) << 16) | (u32::from(device) << 11) | (u32::from(function) << 8)];
+        unit.resize(self.tree.nexus_address_cells(h)? as usize, 0);
+        let (ctl, spec) = self.tree.map_interrupt(h, h, unit, vec![u32::from(pin)])?;
+        let c = self
+            .controllers
+            .iter()
+            .find(|c| c.node == ctl)
+            .ok_or_else(|| DtbError::NotAnInterruptController {
+                node: path.clone(),
+                controller: self.tree.path(ctl),
+            })?;
+        let number = resolve(&self.tree, h, c, &spec)?
+            .ok_or(DtbError::NoInterrupt { node: path.clone() })?;
+        Ok(IrqLine {
+            device: path,
+            controller: c.path.clone(),
+            number,
+            specifier: spec,
         })
     }
 
@@ -1100,12 +1725,12 @@ impl Platform {
                 }
                 let mut block = None;
                 for h in &self.harts {
-                    let isa = h.isa.as_deref().unwrap_or("");
-                    if !isa_has_extension(isa, "zicbom") {
-                        return Err(fail(format!(
-                            "{} lacks Zicbom (riscv,isa = {isa:?})",
-                            h.path
-                        )));
+                    if !h.has_extension("zicbom") {
+                        let isa = match &h.isa_extensions {
+                            Some(list) => format!("riscv,isa-extensions = {list:?}"),
+                            None => format!("riscv,isa = {:?}", h.isa.as_deref().unwrap_or("")),
+                        };
+                        return Err(fail(format!("{} lacks Zicbom ({isa})", h.path)));
                     }
                     let b = h
                         .cbom_block_bytes
@@ -1144,12 +1769,15 @@ pub fn isa_has_extension(isa: &str, ext: &str) -> bool {
             .any(|e| e == ext || e.strip_prefix(ext).is_some_and(versioned))
 }
 
+/// The controller-global number of one specifier, or `None` for a hart-local
+/// specifier of `0xffffffff` (a controller output the tree marks as not
+/// for this software, as the SiFive PLIC and CLINT bindings do).
 fn resolve(
     tree: &DeviceTree,
     id: usize,
     c: &InterruptController,
     spec: &[u32],
-) -> Result<u32, DtbError> {
+) -> Result<Option<u32>, DtbError> {
     let bad = |detail: String| DtbError::BadInterruptSpecifier {
         node: tree.path(id),
         detail,
@@ -1163,17 +1791,20 @@ fn resolve(
     match c.kind {
         ControllerKind::RiscvHartIntc { .. } => {
             let cause = spec[0];
+            if cause == HIDDEN_CAUSE {
+                return Ok(None);
+            }
             if cause >= 64 {
                 return Err(out_of_range(cause, 63));
             }
-            Ok(cause)
+            Ok(Some(cause))
         }
         ControllerKind::Plic { ndev } => {
             let src = spec[0];
             if src == 0 || src > ndev {
                 return Err(out_of_range(src, ndev));
             }
-            Ok(src)
+            Ok(Some(src))
         }
         ControllerKind::Gic { .. } => {
             if spec.len() < 3 {
@@ -1183,12 +1814,224 @@ fn resolve(
                 )));
             }
             match spec[0] {
-                0 if spec[1] < 988 => Ok(32 + spec[1]),
+                0 if spec[1] < 988 => Ok(Some(32 + spec[1])),
                 0 => Err(out_of_range(spec[1], 987)),
-                1 if spec[1] < 16 => Ok(16 + spec[1]),
+                1 if spec[1] < 16 => Ok(Some(16 + spec[1])),
                 1 => Err(out_of_range(spec[1], 15)),
                 t => Err(bad(format!("GIC interrupt type {t}"))),
             }
         }
     }
+}
+
+/// A hart-local specifier marking a controller output that is not for this
+/// software (SiFive PLIC/CLINT bindings).
+pub const HIDDEN_CAUSE: u32 = 0xffff_ffff;
+
+/// Places a dynamic `/reserved-memory` child (`size`, optional `alignment`
+/// and `alloc-ranges`, no `reg`) the way Linux's
+/// `__reserved_mem_alloc_size` does with memblock's default top-down
+/// policy: in each `alloc-ranges` entry in order (or anywhere in memory when
+/// there are none), at the highest address aligned to `alignment` whose
+/// whole region lies inside one memory bank and outside every reservation
+/// placed before it. Model choices: `alignment` defaults to 4 KiB (Linux
+/// uses `SMP_CACHE_BYTES`; the frame model is page-granular anyway), and
+/// the kernel image and firmware regions that are not in the tree are not
+/// known, so a real kernel may place the region elsewhere.
+pub fn place_dynamic(
+    tree: &DeviceTree,
+    node: usize,
+    memory: &[MemRange],
+    placed: &[Reservation],
+) -> Result<MemRange, DtbError> {
+    let rm = tree
+        .node(node)
+        .parent
+        .ok_or_else(|| tree.bad(node, "size", "not under /reserved-memory"))?;
+    let (a, s) = tree.bus_cells(rm)?;
+    let number = |prop: &str| -> Result<Option<u64>, DtbError> {
+        let Some(c) = tree.prop_cells(node, prop)? else {
+            return Ok(None);
+        };
+        if c.len() != s as usize {
+            return Err(tree.bad(node, prop, format!("{} cells, expected {s}", c.len())));
+        }
+        u64::try_from(join_cells(&c))
+            .map(Some)
+            .map_err(|_| DtbError::AddressOverflow {
+                node: tree.path(node),
+            })
+    };
+    let size = number("size")?.ok_or_else(|| tree.bad(node, "size", "missing"))?;
+    if size == 0 {
+        return Err(tree.bad(node, "size", "zero"));
+    }
+    let align = number("alignment")?.unwrap_or(PAGE_BYTES);
+    if align == 0 || !align.is_power_of_two() {
+        return Err(tree.bad(node, "alignment", format!("{align:#x}")));
+    }
+    let mut allowed = Vec::new();
+    match tree.prop_cells(node, "alloc-ranges")? {
+        None => allowed.push((0u64, u64::MAX)),
+        Some(c) => {
+            let per = (a + s) as usize;
+            if a == 0 || c.is_empty() || !c.len().is_multiple_of(per) {
+                return Err(tree.bad(
+                    node,
+                    "alloc-ranges",
+                    format!("{} cells is not a multiple of {a}+{s}", c.len()),
+                ));
+            }
+            for e in c.chunks_exact(per) {
+                let len = join_cells(&e[a as usize..]);
+                let base = tree.translate(rm, &e[..a as usize], len, node)?;
+                // `translate` checked that base + len fits in 64 bits.
+                allowed.push((base, base + len as u64));
+            }
+        }
+    }
+    // Reserved byte ranges, sorted, as [lo, hi).
+    let mut holes: Vec<(u64, u64)> = placed
+        .iter()
+        .map(|r| (r.range.base, r.range.end().unwrap_or(u64::MAX)))
+        .collect();
+    holes.sort();
+    for (lo, hi) in allowed {
+        // Free intervals of (memory ∩ [lo, hi)) minus the holes.
+        let mut free = Vec::new();
+        for m in memory {
+            let mut cur = m.base.max(lo);
+            let end = m.end().unwrap_or(u64::MAX).min(hi);
+            for &(h0, h1) in &holes {
+                if h1 <= cur || h0 >= end {
+                    continue;
+                }
+                if h0 > cur {
+                    free.push((cur, h0));
+                }
+                cur = cur.max(h1);
+            }
+            if end > cur {
+                free.push((cur, end));
+            }
+        }
+        free.sort_by_key(|x| std::cmp::Reverse(x.1));
+        for (f0, f1) in free {
+            if f1 - f0 < size {
+                continue;
+            }
+            let at = (f1 - size) & !(align - 1);
+            if at >= f0 {
+                return Ok(MemRange { base: at, size });
+            }
+        }
+    }
+    Err(DtbError::ReservationDoesNotFit {
+        node: tree.path(node),
+        size,
+        alignment: align,
+    })
+}
+
+/// Hart targets of a RISC-V platform controller's `interrupts-extended`.
+fn hart_targets(
+    tree: &DeviceTree,
+    id: usize,
+    controllers: &[InterruptController],
+) -> Result<Vec<HartTarget>, DtbError> {
+    tree.interrupts(id)?
+        .into_iter()
+        .map(|(ctl, spec)| {
+            let hart = controllers.iter().find_map(|c| match c.kind {
+                ControllerKind::RiscvHartIntc { hart } if c.node == ctl => Some(hart),
+                _ => None,
+            });
+            let Some(hart) = hart else {
+                return Err(DtbError::BadInterruptSpecifier {
+                    node: tree.path(id),
+                    detail: format!("output routed to {}, not a hart", tree.path(ctl)),
+                });
+            };
+            Ok(match spec[0] {
+                HIDDEN_CAUSE => HartTarget { hart, cause: None },
+                cause if cause < 64 => HartTarget {
+                    hart,
+                    cause: Some(cause),
+                },
+                cause => {
+                    return Err(DtbError::IrqOutOfRange {
+                        node: tree.path(id),
+                        controller: tree.path(ctl),
+                        irq: cause,
+                        limit: 63,
+                    });
+                }
+            })
+        })
+        .collect()
+}
+
+fn riscv_blocks(
+    tree: &DeviceTree,
+    controllers: &[InterruptController],
+) -> Result<(Vec<PlicInfo>, Vec<ClintInfo>), DtbError> {
+    let mut plics = Vec::new();
+    for c in controllers {
+        let ControllerKind::Plic { ndev } = c.kind else {
+            continue;
+        };
+        if !tree.enabled(c.node)? {
+            continue;
+        }
+        let reg = tree.reg_translated(c.node)?;
+        let r = *reg
+            .first()
+            .ok_or_else(|| tree.bad(c.node, "reg", "missing on a PLIC"))?;
+        plics.push(PlicInfo {
+            path: c.path.clone(),
+            base: r.base,
+            size: r.size,
+            ndev,
+            contexts: hart_targets(tree, c.node, controllers)?,
+        });
+    }
+    let mut clints = Vec::new();
+    for id in 0..tree.nodes().len() {
+        let compat = tree.compatible(id)?;
+        let has = |x: &str| compat.iter().any(|c| c == x);
+        let kind = if has("sifive,clint0") || has("riscv,clint0") {
+            ClintKind::Clint
+        } else if has("riscv,aclint-mswi") {
+            ClintKind::AclintMswi
+        } else if has("riscv,aclint-sswi") {
+            ClintKind::AclintSswi
+        } else if has("riscv,aclint-mtimer") {
+            ClintKind::AclintMtimer
+        } else {
+            continue;
+        };
+        if !tree.enabled(id)? {
+            continue;
+        }
+        let regs = tree.reg_translated(id)?;
+        let want = if kind == ClintKind::AclintMtimer {
+            2
+        } else {
+            1
+        };
+        if regs.len() < want {
+            return Err(tree.bad(
+                id,
+                "reg",
+                format!("{} regions, expected {want}", regs.len()),
+            ));
+        }
+        clints.push(ClintInfo {
+            path: tree.path(id),
+            kind,
+            regs,
+            targets: hart_targets(tree, id, controllers)?,
+        });
+    }
+    Ok((plics, clints))
 }
