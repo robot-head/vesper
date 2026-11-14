@@ -9,7 +9,7 @@ use vesper::{
 };
 
 const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]";
-const HELP: &str = "Usage: vesper test --doc [FILE|DIR] [--json]\n\nExtract actual Vesper doc-comment fences, fully check examples, and run supported finite scalar entries in one owned JIT module.\nWith no path (or a directory), run every .ves source of the package that has doc examples: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-* and nested-package\ndirectories are skipped and symlinks are not followed. Files without examples are listed, not run; a package\nwith no examples at all fails.\ncompile_fail(E...) must match exact example diagnostics; base errors and unsupported execution never count as success.\n`vesper,sim(seed=N,clock,net,disk)` fences run on the reference evaluator under a seeded SimPulse kernel with\nsimulated clock, network and disk effects, twice: the second run replays the first run's journal.\nSource/check/module budgets apply; this is not an OS sandbox or a hard deadline.\n";
+const HELP: &str = "Usage: vesper test --doc [FILE|DIR] [--json]\n\nExtract actual Vesper doc-comment fences, fully check examples, and run supported finite scalar entries in one shared JIT module per file;\nexamples outside the native subset run on the reference evaluator instead, and each result names its engine.\nWith no path (or a directory), run every .ves source of the package that has doc examples: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-* and nested-package\ndirectories are skipped and symlinks are not followed. Files without examples are listed, not run; a package\nwith no examples at all fails.\ncompile_fail(E...) must match exact example diagnostics; base errors and unsupported execution never count as success.\n`vesper,sim(seed=N,clock,net,disk)` fences run on the reference evaluator under a seeded SimPulse kernel with\nsimulated clock, network and disk effects, twice: the second run replays the first run's journal.\nSource/check/module budgets apply; this is not an OS sandbox or a hard deadline.\n";
 
 fn read_source(file: &Path, limits: DocTestLimits) -> Result<String, String> {
     let name = file.display();
@@ -53,8 +53,14 @@ fn print_report(file: &str, report: &DocTestReport) {
         println!("{file}:{}:{}: {}: {}", d.line, d.column, d.code, d.message);
     }
     for example in &report.examples {
+        let engine = match example.engine {
+            Some(doctest::Engine::Jit) => " [jit]",
+            Some(doctest::Engine::Evaluator) => " [evaluator]",
+            Some(doctest::Engine::SimpulseEvaluator) => " [simpulse]",
+            None => "",
+        };
         println!(
-            "{file}:{}:{}: {} doctest {}: {}",
+            "{file}:{}:{}: {} doctest {}: {}{engine}",
             example.line,
             example.column,
             if example.passed { "PASS" } else { "FAIL" },
