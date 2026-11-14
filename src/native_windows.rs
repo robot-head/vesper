@@ -20,7 +20,7 @@
 //! The object half is target-independent and runs on any host; linking and
 //! running need a Windows host or an `lld-link` with the MSVC libraries.
 
-use super::{EmittedFunction, Instrument};
+use super::{CodegenOptions, EmittedFunction, Instrument};
 use crate::check::World;
 use cranelift_codegen::{
     CodegenError, Context,
@@ -354,9 +354,10 @@ pub(super) fn object(
     optimize: bool,
     observer: Option<&mut dyn FnMut(EmittedFunction)>,
     instrument: Option<Instrument<'_>>,
+    options: CodegenOptions,
 ) -> Result<(Vec<u8>, String), String> {
     emit_with(isa, "vesper", |m| {
-        Ok(super::compile(m, world, entry, optimize, observer, instrument)?.1)
+        Ok(super::compile(m, world, entry, optimize, observer, instrument, options)?.1)
     })
 }
 

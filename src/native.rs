@@ -983,7 +983,7 @@ pub fn object_with_codegen_options(
 ) -> Result<(Vec<u8>, String), String> {
     let isa = object_isa_for(world, target)?;
     if windows::is_windows(isa.triple()) {
-        return windows::object(world, entry, isa, optimize, observer, instrument);
+        return windows::object(world, entry, isa, optimize, observer, instrument, options);
     }
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
