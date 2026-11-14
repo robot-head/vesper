@@ -28,6 +28,10 @@ pub const RX_QUEUE: u16 = 0;
 pub const TX_QUEUE: u16 = 1;
 /// Frames held for the guest before drops start.
 pub const RX_BACKLOG: usize = 256;
+/// Frames the guest may have transmitted that the host has not yet taken;
+/// further frames are dropped (and counted) so a slow host consumer cannot be
+/// made to grow memory without bound.
+pub const TX_BACKLOG: usize = 256;
 const QUEUE_MAX: [u16; 2] = [256, 256];
 const CONFIG_BYTES: usize = 12;
 
@@ -35,6 +39,7 @@ const CONFIG_BYTES: usize = 12;
 pub struct NetStats {
     pub tx_frames: u64,
     pub tx_dropped: u64,
+    pub tx_dropped_backlog: u64,
     pub rx_frames: u64,
     pub rx_dropped_backlog: u64,
     pub rx_dropped_small_buffer: u64,
@@ -108,7 +113,9 @@ impl NetDevice {
             && readable[1] == VIRTIO_NET_HDR_GSO_NONE
             && readable.len() - NET_HDR_BYTES <= self.max_frame()
             && self.link_up;
-        if ok {
+        if ok && self.transmitted.len() >= TX_BACKLOG {
+            self.stats.tx_dropped_backlog += 1;
+        } else if ok {
             self.transmitted
                 .push_back(readable[NET_HDR_BYTES..].to_vec());
             self.stats.tx_frames += 1;

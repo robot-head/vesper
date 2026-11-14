@@ -266,7 +266,7 @@ Commands with `CARGO_TARGET_DIR` outside the checkout, `CARGO_INCREMENTAL=0`,
 
 - `cargo fmt --all -- --check`: clean
 - `cargo test -p vesper-aether --locked` with
-  `VESPER_LEAN=lean-4.24.0-linux/bin/lean`: all 90 tests pass (unit, 12
+  `VESPER_LEAN=lean-4.24.0-linux/bin/lean`: all 91 tests pass (unit, 12
   integration files, doctest)
 - the `shared_memfd` and `seccomp` binaries again under
   `setpriv --reuid=65534 --regid=65534 --clear-groups --inh-caps=-all --bounding-set=-all`:
@@ -278,6 +278,15 @@ Commands with `CARGO_TARGET_DIR` outside the checkout, `CARGO_INCREMENTAL=0`,
   aarch64-unknown-linux-gnu} -- -D warnings`: clean
 - `lean lean/AetherMemory.lean` (4.24.0): compiles, standard axioms only
 - workspace runs: see the PR description
+
+## Review fixes
+
+Codex review on the first push found three real defects, fixed with tests:
+the net TX backlog is now bounded (`TX_BACKLOG`, excess counted as
+`tx_dropped_backlog`); vsock credit saturates when the guest shrinks
+`buf_alloc` below the bytes in flight (it used to wrap into a fresh grant);
+and the userfaultfd server loop calls `ppoll`, which the VMM seccomp profile
+allows, instead of `poll` (syscall 7 on x86_64, which the profile kills).
 
 ## Remaining gaps
 

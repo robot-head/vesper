@@ -542,15 +542,19 @@ mod uffd {
                         revents: 0,
                     },
                 ];
-                // SAFETY: `fds` is a live array of two pollfd records.
-                let n = unsafe { libc::poll(fds.as_mut_ptr(), 2, -1) };
+                // `ppoll` rather than `poll`: the VMM seccomp profile allows
+                // only `ppoll` (x86_64 glibc `poll` issues syscall 7).
+                // SAFETY: `fds` is a live array of two pollfd records; a null
+                // timeout and signal mask mean block indefinitely, unchanged mask.
+                let n =
+                    unsafe { libc::ppoll(fds.as_mut_ptr(), 2, std::ptr::null(), std::ptr::null()) };
                 if n < 0 {
                     let e = errno();
                     if e == libc::EINTR {
                         continue;
                     }
                     return Err(self.fail(UffdError::Os {
-                        op: "poll",
+                        op: "ppoll",
                         errno: e,
                     }));
                 }

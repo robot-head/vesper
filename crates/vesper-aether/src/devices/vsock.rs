@@ -140,9 +140,11 @@ impl Conn {
     }
     /// Bytes we may still send the guest.
     fn guest_credit(&self) -> u32 {
+        // The in-flight count wraps (sequence counters); the subtraction from
+        // the advertised allocation saturates, so a shrunken allocation grants
+        // no credit until the guest forwards enough bytes.
         self.peer_buf_alloc
-            .wrapping_sub(self.tx_cnt.wrapping_sub(self.peer_fwd_cnt))
-            .min(self.peer_buf_alloc)
+            .saturating_sub(self.tx_cnt.wrapping_sub(self.peer_fwd_cnt))
     }
 }
 

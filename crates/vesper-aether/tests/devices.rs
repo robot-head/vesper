@@ -520,6 +520,33 @@ fn net_transmit_and_receive_frames() {
 }
 
 #[test]
+fn net_transmit_backlog_is_bounded() {
+    let (mut t, mut m, _rx, mut tx) = net();
+    let f = frame(60, 0x44);
+    m.write(0x1_0000, &[0u8; NET_HDR_BYTES]).unwrap();
+    m.write(0x1_1000, &f).unwrap();
+    for _ in 0..TX_BACKLOG + 10 {
+        let id = tx.post(
+            &mut m,
+            &[
+                (0x1_0000, NET_HDR_BYTES as u32, false),
+                (0x1_1000, 60, false),
+            ],
+        );
+        w32(&mut t, &mut m, reg::QUEUE_NOTIFY, 1);
+        assert_eq!(tx.used(&m), Some((id, 0)));
+    }
+    let stats = t.device().stats();
+    assert_eq!(stats.tx_frames, TX_BACKLOG as u64);
+    assert_eq!(stats.tx_dropped_backlog, 10);
+    let mut drained = 0;
+    while t.with_device(|d| d.take_tx()).is_some() {
+        drained += 1;
+    }
+    assert_eq!(drained, TX_BACKLOG);
+}
+
+#[test]
 fn net_link_change_bumps_config_generation() {
     let (mut t, mut m, _rx, _tx) = net();
     let g0 = r32(&mut t, reg::CONFIG_GENERATION);
@@ -657,6 +684,12 @@ fn vsock_stream_connect_data_and_credit() {
         &guest_pkt(OP_CREDIT_UPDATE, 1234, 5000, &[], 4096),
     );
     assert_eq!(t.with_device(|d| d.send(key, &big)).unwrap(), 4096);
+    // The guest shrinks its allocation below what is in flight (8192 bytes):
+    // credit saturates at zero rather than wrapping into a fresh grant.
+    let mut shrink = guest_pkt(OP_CREDIT_UPDATE, 1234, 5000, &[], 4096);
+    shrink[36..40].copy_from_slice(&4096u32.to_le_bytes());
+    send(&mut t, &mut m, &mut tx, &shrink);
+    assert_eq!(t.with_device(|d| d.send(key, &big)).unwrap(), 0);
     // Full shutdown from the guest: host answers RST and forgets the socket.
     while recv(&mut t, &mut m, &mut rx).is_some() {}
     let mut sd = guest_pkt(OP_SHUTDOWN, 1234, 5000, &[], 4096);
