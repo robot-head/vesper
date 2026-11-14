@@ -1442,8 +1442,8 @@ impl World {
                 outs.iter_mut().take(threads).map(Mutex::new).collect();
             let barrier = SpinBarrier::new(threads);
             std::thread::scope(|s| {
-                for t in 1..threads {
-                    let (bodies, barrier, slot) = (&bodies, &barrier, &slots[t]);
+                for (t, slot) in slots.iter().enumerate().skip(1) {
+                    let (bodies, barrier) = (&bodies, &barrier);
                     s.spawn(move || {
                         let mut u = TileUpdate::EMPTY;
                         for color in 0..colors {

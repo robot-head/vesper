@@ -296,6 +296,8 @@ const MEDIUM_LIMIT: f64 = 1_647_099.0;
 /// Sine (binary64), within [`F64_MAX_ULP`] of the correctly rounded value.
 pub fn sin(x: f64) -> f64 {
     if !x.is_finite() {
+        // NaN for ±∞, the input's own NaN otherwise (as fdlibm does).
+        #[allow(clippy::eq_op)]
         return x - x;
     }
     let ax = x.abs();
@@ -321,6 +323,8 @@ pub fn sin(x: f64) -> f64 {
 /// Cosine (binary64), within [`F64_MAX_ULP`] of the correctly rounded value.
 pub fn cos(x: f64) -> f64 {
     if !x.is_finite() {
+        // NaN for ±∞, the input's own NaN otherwise (as fdlibm does).
+        #[allow(clippy::eq_op)]
         return x - x;
     }
     let ax = x.abs();

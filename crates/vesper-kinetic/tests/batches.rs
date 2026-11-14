@@ -62,7 +62,7 @@ fn random_pair(rng: &mut Rng) -> PairLanes {
             0 => 0.0,
             _ => rng.f(0.0, 1e-3),
         };
-        if rng.next() % 2 == 0 {
+        if rng.next().is_multiple_of(2) {
             p.inequality |= 1 << l;
         }
     }

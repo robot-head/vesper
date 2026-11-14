@@ -31,6 +31,7 @@ pub mod fastmath;
 pub mod gjk;
 pub mod lbvh;
 pub mod morton;
+pub mod rigid;
 pub mod rollback;
 pub mod sap;
 pub mod simd;
@@ -41,6 +42,10 @@ pub mod world;
 pub use coloring::{BodyId, Colorer, ColoringError, ConstraintBodies};
 pub use detfloat::{AuditError, DetFloatPolicy, ReductionOrder, VerifierFinding, audit};
 pub use morton::MortonError;
+pub use rigid::{
+    ColliderShape, ContactManifold, GroundPlane, RigidBody, RigidBroadphase, RigidCollider,
+    RigidConfig, RigidError, RigidMaterial, RigidWorld,
+};
 pub use rollback::{ResimulateError, RollbackError, RollbackTicket, SnapshotRing};
 pub use sap::{SapError, SweepAndPrune};
 pub use simd::{SimdBackend, SimdUnavailable};
