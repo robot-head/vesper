@@ -159,7 +159,7 @@ target directory inside the checkout:
 
 ```sh
 cargo fmt --all -- --check                                                   # clean
-cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings       # see below
+cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings       # clean
 for t in aarch64-unknown-linux-gnu aarch64-apple-darwin x86_64-pc-windows-msvc; do
   cargo +1.100.0 clippy -p vesper-bench -p vesper-bench-pmu --locked --all-targets \
     --target $t -- -D warnings                                               # clean
@@ -168,8 +168,14 @@ cargo +1.100.0 build -p vesper-bench-pmu --lib --target aarch64-unknown-linux-gn
 cargo test -p vesper-bench -p vesper-bench-pmu --locked                      # pass
 cargo test --locked --bin vesper bench_commands                              # 14 pass
 cargo test --locked -p vesper --test bench_cli                               # 6 pass
-cargo test --workspace --locked --no-fail-fast                               # see below
+cargo test --workspace --locked --no-fail-fast                               # all pass except 6 Lean targets
 ```
+
+The six failing workspace targets (`lean4lean42_acceptance`,
+`oracle42_acceptance`, `oracle42_runner`, `proof_audit_private`,
+`replay42_kernel`, `resource_model42`) need a `lean` executable, which this
+checkout does not have (`"lean" "--print-prefix": No such file or directory`);
+they are §42 paths this lane does not touch and run in CI with Lean.
 
 New tests:
 
