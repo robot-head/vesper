@@ -29,10 +29,27 @@ use std::{
 use vesper::{ast::Diagnostic, check, ir, lean, lsp, native, optimize, parser, runtime::Runtime};
 
 const HELP: &str = "Vesper — modal ownership and lexical effects\n\nUsage: vesper <command> [FILE|DIR] [options]   (most commands take one .ves file; see vesper <command> --help)\n\nCommands:\n  forge   Check and expand explicit source Expr macros (forge --help)\n  grammar Validate canonical protocol bytes and Arrow IPC\n  verify  Kernel-check formatter document models (--format), or refute a contract (--refute)\n  fuzz    Crucible fuzzing of a source function (fuzz --help)\n  migrate Lift C/Rust signatures into .ves/.vsys (migrate --help)\n  replay  Verify and replay a Chrono .vchrono bundle (replay --help)\n  ebpf    Pre-flight verify an eBPF program (ebpf check --help)\n  fmt     Format supported source without changing tokens/comments\n  lint    Analyze checked source and validate supported fixes\n  doc     Generate checked API docs, heatmaps and a search bundle (doc --help)\n  test    Run doctests in one shared JIT module, else the evaluator (test --doc)\n  bench   Measure finite scalar source kernels (bench --help)\n  check   Check types, effects, ownership, and places\n  run     Execute with the one-shot effect stack machine\n  jit     Execute native code with Cranelift\n  build   Compile and link a native executable (-o <path>)\n  emit    Emit cst, hir, ir, clif, object, lean, or interface (--emit <kind>)\n  resolve Resolve or validate a locked local Loom catalog\n  graph   Inspect a solution snapshot (see graph --help)\n  sbom    Emit a CycloneDX snapshot inventory (see sbom --help)\n  audit   Audit declared dependencies against local policies (see audit --help)\n  json    Validate bounded JSON documents (see json --help)\n  traceparent  Validate W3C TraceContext v00 (see traceparent --help)\n  simd    Run the native byte scanner (see simd --help)\n  proof-audit  Kernel-replay local Lean artifacts (see proof-audit --help)\n  attest  Verify and import configured-key signed artifacts (see attest --help)\n  cas     Ingest, verify and materialize local content (see cas --help)\n  semver  Compare baseline and candidate interface JSON files\n  lsp     Serve incremental diagnostics over stdio\n\nOptions:\n  -o <path>       Output file (stdout for textual output by default)\n  --emit <kind>   Output format (default: ir)\n  --package <id>  Interface namespace (@org/name or std/name)\n  --entry <name>  Entry function (default: main)\n  --fuel <steps>  Evaluation step limit (default: 10000000)\n  --target <triple>  Object/executable target (default: host)\n  --linker <path>    Linker for build (default: cc)\n  --no-opt       Disable equality saturation\n  --verify=<list>    Run Stage-5 verifiers on emitted Cranelift (const-time,stack,realtime,detfloat,all)\n  --verify-<name>    One verifier (--verify-const-time, --verify-stack, ...)\n  --verify-policy <file>  Verifier policy JSON (vesper.native-verifiers/1)\n  --tee          build: write the TDX RTMR / CCA REM measurement of the executable\n  --json         Machine-readable diagnostics\n  -h, --help     Show help\n  -V, --version  Show version\n";
+/// Stack for the CLI thread. The checker, parser and lowering recurse over
+/// expression depth (bounded by their own budgets), and debug builds use large
+/// frames. Windows gives the main thread only 1 MiB, which a 25-deep generic
+/// call chain already exceeds, so run every command on a thread with an
+/// explicit, platform-independent stack.
+const CLI_STACK_BYTES: usize = 64 * 1024 * 1024;
+
 fn main() {
-    if let Err(e) = cli() {
-        eprintln!("vesper: {e}");
-        process::exit(1);
+    let result = std::thread::Builder::new()
+        .name("vesper".to_owned())
+        .stack_size(CLI_STACK_BYTES)
+        .spawn(cli)
+        .expect("spawn the vesper CLI thread")
+        .join();
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            eprintln!("vesper: {e}");
+            process::exit(1);
+        }
+        Err(panic) => std::panic::resume_unwind(panic),
     }
 }
 fn cli() -> Result<(), String> {
@@ -274,6 +291,25 @@ fn cli() -> Result<(), String> {
             println!("{}", runtime.run(&entry, vec![])?);
         }
         "jit" => println!("{}", native::jit_with_options(&checked.world, &entry, opt)?),
+        // Wave-seven lane 25: `--target wasm32-wasip2` builds a component.
+        "build" if target.as_deref() == Some(vesper::wasm_backend::TARGET) => {
+            if !verifiers.is_empty() || verifier_policy.is_some() || tee_measure {
+                return Err("--verify and --tee apply to native targets only".into());
+            }
+            let options = vesper::wasm_backend::WasmOptions {
+                optimize: opt,
+                ..Default::default()
+            };
+            let artifact = vesper::wasm_backend::compile(&checked.world, &entry, &options)
+                .map_err(|e| e.to_string())?;
+            let path = output.unwrap_or_else(|| PathBuf::from("a.wasm"));
+            package_commands::atomic_write(&path, &artifact.component)?;
+            println!(
+                "built {} ({} component)",
+                path.display(),
+                vesper::wasm_backend::TARGET
+            );
+        }
         "build" => {
             if entry != "main" {
                 return Err("build currently requires entry 'main'".into());

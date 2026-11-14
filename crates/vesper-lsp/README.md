@@ -113,9 +113,17 @@ consumes it). `ProofLedger` records proof-lens outcomes keyed by exact source
 hash and function name, bounded with oldest-first eviction, so a new source
 never inherits an old outcome. `PendingRequests` and `CancelToken` give
 `$/cancelRequest` an answer-exactly-once discipline: cancelling a pending ID
-removes it and flags its job, and a late result for that ID is dropped.
-`cancel_params` accepts only i32 or bounded string IDs. Nothing here computes
-compiler facts or runs a process.
+removes it and flags its job, and a late result for that ID is dropped;
+`is_pending` checks a job without answering it. `ProofStatus` distinguishes
+kernel-replayed proofs (`proved`), decision-procedure results the kernel
+auditor does not replay (`checked_native`), counterexamples (`refuted`) and
+failures. `Debouncer` bounds debounced background runs: one armed timer per
+document, a generation per edit, and cancellation of a run started for an
+older generation. `cancel_params` accepts only i32 or bounded string IDs.
+Nothing here computes compiler facts, runs a process or keeps time itself
+(callers pass `Instant`s).
 
 `examples/keystroke_latency.rs` drives a real `vesper lsp` process over pipes
-and reports keystroke-to-`publishDiagnostics` wall time per edit kind.
+and reports keystroke-to-`publishDiagnostics` wall time per edit kind, and the
+time of a whole-document `textDocument/inlayHint` request after each valid
+edit (the Lens view of the new text).
