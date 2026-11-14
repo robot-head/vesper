@@ -1,10 +1,31 @@
 # Normalized-map equality and shape acceptance (#503)
 
-The eighth fixed `Packet::Shape` specification and required catalog are
-authored. This lane ran direct rustfmt and static byte/source checks only.
-It ran no Cargo or Lean command, genuine matrix, Clippy or Bazel execution.
-All eight genuine matrices and final integrated validation remain coordinator
-work; this report does not claim they passed.
+All eight genuine fixed matrices passed. The actual code revision was
+`325b83972774c8c365173e6b8ac4ac8e3c72cbe0`; the seven prior matrices ran
+from final Cargo-built executables at documentation-only descendant
+`3bdeba499fefe4d66c7c5a1efd1bc53927eca74a`, with at most two concurrent
+Lean processes. The coordinator ran Cargo/Lean. This acceptance lane
+independently checked the actual evidence, source catalogs, executable/log
+hashes and historical artifact identities without executing either.
+
+| Genuine packet | Authored/audited roots | Audit batches | Observed seconds |
+| --- | ---: | --- | ---: |
+| Foundations | 49 | 49 | 129.630 |
+| Construction | 37 | 37 | 130.534 |
+| Order | 64 | 64 | 135.816 |
+| Map | 99 | 99 | 144.935 |
+| Normalize, before subsumption | 131 | 128 + 3 | 172.999 |
+| Normalization, including subsumption | 173 | 128 + 45 | 188.026 |
+| Comparison | 191 | 128 + 63 | 193.239 |
+| Shape | 226 | 128 + 98 | 205.99 |
+
+The seven prior timings are measured executable durations from their
+complete receipt; Shape's timing is the test harness result. Every matrix
+reported one passed test, zero failed and zero ignored tests, including
+completion of the actual negative controls. All retained the unchanged
+300-second internal budget. Strict targeted eight-test Clippy passed in
+29.26 seconds; formatting, BUILD synchronization and whitespace checks passed.
+No Bazel execution, hosted CI or broader compiler/runtime proof is claimed.
 
 The fixed specification uses label `lean4lean_shape42`, module
 `Lean4LeanLevel42.ShapeFinal`, projection `Lean4LeanShape42Kernel`, scope
@@ -60,8 +81,8 @@ original-module compilation did not establish inclusion in that catalog.
 The coordinator moved the proofs to the new `Lean4LeanLevel42.ShapeFinal`
 module. This correction changes only Shape's fixed target module and final
 source-list entry, preserving its twenty-four-module size, all guards and
-other identifiers. The collector and validator are unchanged. All eight
-complete post-correction genuine matrices remain pending.
+other identifiers. The collector and validator are unchanged. The complete
+post-correction results are recorded in the table above.
 
 
 The 26 unique required theorem guards use the proof authors' frozen public
@@ -127,7 +148,7 @@ changed-source refusal and the forbidden alternate-proof control. Its
 standard-three axiom policy, every cap, 128-root batching and finite
 300-second per-matrix budget remain unchanged.
 
-The intended claims concern actual map Boolean equality and actual
+The proved claims concern actual map Boolean equality and actual
 normalization shape. Map equality reflection and its denotation consequence
 require no map WF or sorting premise. Construction carries the current
 path's sortedness where needed, while pruning preserves the respective
@@ -140,8 +161,91 @@ There is no reflection assumption for the opaque native `Lean.Level.beq`
 fast branch and no unconditional `isEquiv'` soundness claim. Comparison
 completeness, canonicality, reification, whole-checker correctness and
 compiler/native equivalence remain outside this packet, and existing
-implementation-proof audit status is unchanged. Genuine post-extension
-Foundations, Construction, Order, Map, Normalize, Normalization, Comparison
-and Shape matrices, strict targeted Clippy, repository formatting, BUILD
-synchronization, Bazel and final source associations remain coordinator
-integration work.
+implementation-proof audit status is unchanged. All eight post-extension
+matrices and the observed repository checks are recorded here; the
+coordinator owns the final integration report and PR status.
+
+
+Independent inspection of
+`/tmp/lean4lean-shape42-shape42-evidence.json` and
+`/tmp/lean4lean-shape42-root-shape-v2.log` confirmed the complete corrected
+Shape replay, audit and negative-control run. There are 226 actual public
+authored roots, exactly equal to the audited root set. An independent source
+inventory of every selected helper module recovered the same 226 names,
+including all forty-one newly authored roots: eight from `MapEquality`,
+fourteen from `ConstructionShape`, fourteen from `SubsumptionShape` and five
+from `ShapeFinal`. The 185 existing roots comprise 170 shared with the prior
+Normalization packet, eleven SortedKeys theorems and four MapAll theorems.
+All actual public helpers and the two construction witnesses are included;
+the guard list is not the audited inventory.
+
+The exact new inventory consists of the 26 guarded declarations listed above
+plus these fifteen additional public declarations in the same namespace:
+
+- Construction: `normalizeAux_empty_varsSorted`,
+  `normalizeAux_empty_keysSorted`, `normalizeAux_needs_sorted_path`,
+  `map_addVar_varsSorted_merge_witness`.
+- Pruning and outer fold: `subsumeVars_shape_sublist`, `subsumeVars_sorted`,
+  `node_subsumeBy_varsSorted`, `node_subsume_varsSorted`,
+  `minimize_varsSorted`, `minimizeEntry_keysSorted`,
+  `minimizeEntry_varsSorted`, `subsumption_fold_keysSorted`,
+  `subsumption_fold_varsSorted`, `minimizeEntry_current_noEmpty`,
+  `subsumption_fold_noEmpty`.
+
+
+The actual twenty-four-module transitive import closure exactly matches the
+fixed selected sources and contains 48 original source/object identities.
+There are 713 original constant occurrences, partitioned into 697 retained
+canonical constants and sixteen exact matched compiler recursion helpers.
+The omission set, including module, name, parent and reason, is identical to
+the prior Normalization checkpoint. It includes existing generated helpers
+from List, Level and LevelSemantics; no new proof omission was added. The
+evidence reports zero duplicates and zero alternate-proof aliases, exact
+inventory, constant-info equality, empty extensions and IR, successful kernel
+replay and verified reimport. Logical traversal visited 1,834,420 expression
+nodes. The projection `Lean4LeanShape42Kernel.olean` is 9,772,016 bytes,
+BLAKE3 `dcdcb30859e5bb7d0919d0a1164af835408c6c3209588b7a25fd7f3f8754730f`.
+
+The audit batches contain 128 and 98 disjoint roots, exactly covering all
+226 authored roots. Both are accepted with status `audited`, successful
+kernel replay, `cache_eligible = false`, 697 checked constants and no
+forbidden axioms. Each batch's actual theorem axiom union is exactly
+`Classical.choice`, `Quot.sound` and `propext`. Both audit artifact records
+match the projection's exact filename, byte count and BLAKE3. All authored
+root names occur in the retained canonical occurrence partition. The actual
+original module is `Lean4LeanLevel42.ShapeFinal` throughout these associations.
+Evidence records `whole_checker_verified = false`.
+
+Every shared original `.lean`/`.olean` fingerprint matches the previous
+Normalization and Comparison checkpoints: thirty-four shared records with
+Normalization and thirty-six with Comparison. Independent source hashes
+match the proof-lane identities, including ShapeFinal SHA-256
+`d143cf873e59e6bd1604de7923bc4a501c8b5677c0ed0f8549c8d6f47d873a98`.
+No source-catalog, scope or original/projected association defect was found.
+The inspection result and all forty-one new root names are retained in
+`/tmp/lean4lean-shape42-independent-check.json`.
+
+The complete seven-prior-matrix execution receipt is
+`/tmp/lean4lean-shape42-prior-matrices-receipt.json`; its progress log ends
+`ALL SEVEN PRIOR MATRICES PASSED`. Independent checks verified every recorded
+executable and full log SHA-256. For each prior packet, the complete authored
+and audited root catalogs, all original source/object fingerprints, the
+projected artifact fingerprint, provenance and snapshot-tool identity match
+the corresponding previous Comparison-wave checkpoint exactly. Every audit
+is accepted, kernel-replayed, cache-ineligible and free of forbidden axioms,
+with complete root coverage and actual per-packet axiom union equal to the
+standard three. Each batch uses only that allowed set; the final three-root
+Normalize batch uses `propext` alone. All original records shared with Shape
+also match. These final comparisons are retained in the independent-check
+JSON alongside the forty-one new root names.
+
+The coordinator's execution receipt is
+`/tmp/lean4lean-shape42-root-execution-receipt.json`. This lane independently
+verified its five log hashes and seven current source hashes. The strict
+Clippy pass is recorded in `/tmp/lean4lean-shape42-root-clippy-v1.log`;
+`/tmp/lean4lean-shape42-root-fmt-v1.log` and
+`/tmp/lean4lean-shape42-root-buildsync-v1.log` are empty successful logs.
+The original v1 required-root failure remains intact and is not represented
+as a successful replay. All genuine evidence comes from original compiled
+objects and their exact existing logical projection, with no source,
+validator, policy, cap or budget exception.
