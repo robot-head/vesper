@@ -17,7 +17,8 @@
 //! * any other one-shot clause captures the continuation with the WasmFX
 //!   stack-switching proposal (`cont.new`/`suspend`/`resume`), which
 //!   Wasmtime 50 executes on x86_64 Linux and macOS only. With
-//!   [`EffectLowering::Portable`] such handlers are rejected instead.
+//!   [`EffectLowering::Portable`] such clauses are split at the resumption
+//!   instead ([`HandlerMode::Cps`]), so the output runs on any Wasmtime.
 //!
 //! Everything else (strings, `f64` remainder,
 //! labelled effect rows of ordinary functions, generic effect instances and
@@ -62,7 +63,8 @@ pub enum EffectLowering {
     /// Capture continuations with WasmFX stack switching.
     #[default]
     StackSwitching,
-    /// Reject them, so the output runs on every Wasmtime platform.
+    /// Split such clauses at their resumption ([`HandlerMode::Cps`]), so
+    /// the output runs on every Wasmtime platform.
     Portable,
 }
 
@@ -189,6 +191,12 @@ pub enum HandlerMode {
     Tail,
     /// The clause captures its continuation with WasmFX.
     StackSwitching,
+    /// Portable one-shot lowering of a clause that resumes before
+    /// returning: the clause is split at the resumption, its prefix runs at
+    /// the operation and returns the resumed value to the body, and its
+    /// suffix (the clause's continuation after `resume`) runs at the handler
+    /// once the body has produced the handler's result.
+    Cps,
 }
 
 /// One lowered handler, for reports and tests.

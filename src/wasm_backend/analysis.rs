@@ -28,7 +28,9 @@ pub(crate) enum Role {
 #[derive(Clone, Debug)]
 pub(crate) struct OpClause {
     pub op: usize,
+    /// Instance key of the clause function, and its IR function.
     pub function: String,
+    pub base: String,
     pub mode: HandlerMode,
     pub arg_patterns: Vec<Pattern>,
     pub arg_types: Vec<Type>,
@@ -44,9 +46,12 @@ pub(crate) struct Handler {
     pub effect: Effect,
     pub keys: Vec<String>,
     pub state: Option<Type>,
+    /// Instance keys of the body and return clause, and their IR functions.
     pub body: String,
+    pub body_base: String,
     pub body_type: Type,
     pub ret: String,
+    pub ret_base: String,
     pub ret_pattern: Pattern,
     pub ret_captures: Vec<String>,
     pub ops: Vec<OpClause>,
@@ -76,6 +81,10 @@ pub(crate) fn instance_name(base: &str, vars: &Vars) -> String {
 
 #[derive(Default)]
 pub(crate) struct Plan {
+    /// Clause instances lowered with [`HandlerMode::Cps`], with their blocks
+    /// split after every resumption, and the resumption points:
+    /// `(call value, block that continues after it)`.
+    pub split: BTreeMap<String, (FunctionIr, Vec<(ValueId, usize)>)>,
     /// Reachable function instances in a deterministic order.
     pub functions: Vec<String>,
     /// Instance key -> IR function and type arguments.
@@ -317,12 +326,20 @@ pub(crate) fn plan(
                         if let Some(l) = &h.effect.label {
                             inner.insert(l.clone());
                         }
-                        let (k, inst) = nested(h.body.clone());
+                        let (k, inst) = nested(h.body_base.clone());
                         queue.push_back((k, inst, Role::HandlerBody, inner));
-                        let (k, inst) = nested(h.ret.clone());
+                        let (k, inst) = nested(h.ret_base.clone());
                         queue.push_back((k, inst, Role::ReturnClause, labels.clone()));
                         for c in &h.ops {
-                            let (k, inst) = nested(c.function.clone());
+                            if c.mode == HandlerMode::Cps
+                                && let Some(resume) = &c.resume
+                            {
+                                let split =
+                                    split_at_resumptions(&program.functions[&c.base], resume);
+                                p.split.insert(c.function.clone(), split);
+                            }
+                            let base = c.base.clone();
+                            let (k, inst) = nested(base);
                             queue.push_back((
                                 k,
                                 inst,
@@ -460,19 +477,15 @@ fn handler(
                 ));
             }
         }
-        if mode == HandlerMode::StackSwitching && !stack_switching {
-            return Err(WasmError::unsupported(
-                Unsupported::NonTailResumptiveHandler,
-                site,
-                format!(
-                    "clause '{}' of {} uses its continuation before returning; portable lowering supports aborting and tail-resumptive clauses only",
-                    clause.name, effect.name
-                ),
-            ));
-        }
+        let mode = if mode == HandlerMode::StackSwitching && !stack_switching {
+            HandlerMode::Cps
+        } else {
+            mode
+        };
         clauses.push(OpClause {
             op,
             function: instance_name(&function, ivars),
+            base: function.clone(),
             mode,
             arg_patterns: clause.pats.iter().take(n).cloned().collect(),
             arg_types: sig
@@ -493,6 +506,8 @@ fn handler(
         body_type: substitute(&program.functions[&body_fn].result, ivars),
         body: instance_name(&body_fn, ivars),
         ret: instance_name(&ret_fn, ivars),
+        body_base: body_fn.clone(),
+        ret_base: ret_fn.clone(),
         ret_pattern: ret
             .pats
             .first()
@@ -616,6 +631,47 @@ fn clause_mode(f: &FunctionIr, resume: Option<&str>, name: &str) -> Result<Handl
     } else {
         Ok(HandlerMode::StackSwitching)
     }
+}
+
+/// Split every block of clause `f` after each call of its continuation
+/// `resume`, so that each resumption ends a block and the code after it
+/// starts one. Returns the new function and `(call value, continuation
+/// block)` for each resumption.
+fn split_at_resumptions(f: &FunctionIr, resume: &str) -> (FunctionIr, Vec<(ValueId, usize)>) {
+    let mut f = f.clone();
+    let reads: BTreeSet<ValueId> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter_map(|i| match &i.op {
+            Op::Read { root, .. } if root == resume => Some(i.dest),
+            _ => None,
+        })
+        .collect();
+    let mut points = vec![];
+    let mut b = 0;
+    while b < f.blocks.len() {
+        let at = f.blocks[b].instructions.iter().position(
+            |i| matches!(&i.op, Op::Indirect { callee, .. } if reads.contains(callee)),
+        );
+        if let Some(at) = at {
+            let dest = f.blocks[b].instructions[at].dest;
+            let rest = f.blocks[b].instructions.split_off(at + 1);
+            let next = f.blocks.len();
+            let mut tail = f.blocks[b].clone();
+            tail.params = vec![];
+            tail.instructions = rest;
+            tail.incoming_tokens = vec![];
+            f.blocks[b].terminator = Terminator::Jump {
+                block: next,
+                args: vec![],
+            };
+            f.blocks.push(tail);
+            points.push((dest, next));
+        }
+        b += 1;
+    }
+    (f, points)
 }
 
 fn first_class(name: &str) -> WasmError {

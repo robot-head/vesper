@@ -495,20 +495,72 @@ fn general_one_shot_handlers_use_stack_switching() {
                 .any(|(_, m)| *m == HandlerMode::StackSwitching)),
             "{s}"
         );
+        // Portable: the same clauses are split at the resumption.
         let w = world(s);
-        match compile(
+        let art = compile(
             &w,
             &WasmOptions {
                 effects: EffectLowering::Portable,
                 ..WasmOptions::default()
             },
-        ) {
-            Err(WasmError::Unsupported {
-                construct: Unsupported::NonTailResumptiveHandler,
-                ..
-            }) => {}
-            other => panic!("{s}: {other:?}"),
-        }
+        )
+        .unwrap();
+        assert!(!art.stack_switching, "{s}");
+        assert!(
+            art.handlers
+                .iter()
+                .any(|h| h.clauses.iter().any(|(_, m)| *m == HandlerMode::Cps)),
+            "{s}"
+        );
+    }
+}
+
+/// Non-tail-resumptive one-shot clauses under the portable CPS split: the
+/// suffix after `resume` runs once the body has produced the handler's
+/// result, innermost first, and composes with aborts, state, nested
+/// handlers and outer effects.
+#[test]
+fn cps_handlers_run_without_stack_switching() {
+    let sources = [
+        // Several pending suffixes fold in LIFO order through the return clause.
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { wrapping_add(Ask::ask(), wrapping_mul(Ask::ask(), 10)) } with { return x => wrapping_mul(x, 1000), ask(k) => { let v = k(1); wrapping_add(wrapping_mul(v, 2), 3) }, } }",
+        // A clause that sometimes resumes and sometimes aborts.
+        "effect Pick { fn pick(sink n: i64) -> i64; } fn main() -> i64 { handle Pick in { let a = Pick::pick(1); let b = Pick::pick(-1); wrapping_add(a, b) } with { return x => x, pick(n, k) => if n > 0 { let r = k(n); wrapping_mul(r, 7) } else { 100 }, } }",
+        // Locals live across the resumption, including aggregates.
+        "copy struct P { a: i64, b: i64 } linear effect Ask { fn ask(sink p: P) -> i64; } fn main() -> i64 { handle Ask in { wrapping_add(Ask::ask(P { a: 1, b: 2 }), Ask::ask(P { a: 30, b: 40 })) } with { return x => x, ask(p, k) => { let before = wrapping_mul(p.a, p.b); let r = k(p.a); let q = P { a: r, b: before }; wrapping_add(q.a, wrapping_mul(q.b, 1000)) }, } }",
+        // Handler state through a CPS clause.
+        "linear effect Log { fn log(sink v: i64); } fn main() -> i64 { handle Log state total = 0 in { Log::log(1); Log::log(2); Log::log(3); 7 } with { return (x, total) => wrapping_add(wrapping_mul(total, 100), x), log(v, total, k) => { let r = k((), wrapping_add(total, v)); wrapping_add(r, 1000) }, } }",
+        // Suffixes perform an outer effect and raise into an outer Fail.
+        "linear effect Ask { fn ask() -> i64; } linear effect Out { fn out(sink v: i64) -> i64; } fn main() -> i64 { handle Out in { handle Ask in { wrapping_add(Ask::ask(), 1) } with { return x => x, ask(k) => { let r = k(5); Out::out(r) }, } } with { return x => x, out(v, k) => k(wrapping_mul(v, 3)), } }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Fail[ArithOverflow] in { handle Ask in { Ask::ask() } with { return x => x, ask(k) => { let r = k(9223372036854775807); r + 1 }, } } with { return x => x, raise(e, k) => -5, } }",
+        // The body aborts to an outer handler after a CPS clause resumed:
+        // the inner handler's pending suffixes are dropped.
+        "linear effect Ask { fn ask(sink n: i64) -> i64; } fn main() -> i64 { handle Fail[ArithOverflow] in { handle Ask in { wrapping_add(Ask::ask(1), Ask::ask(2) + 9223372036854775807) } with { return x => x, ask(n, k) => { let r = k(n); wrapping_add(r, 1000) }, } } with { return x => x, raise(e, k) => -7, } }",
+        // Operations from deep inside calls, nested CPS handlers of two effects.
+        include_str!("../examples/resumptions.ves"),
+        "linear effect A { fn a() -> i64; } linear effect B { fn b() -> i64; } fn both() -> i64 eff [A, B] { wrapping_add(A::a(), B::b()) } fn main() -> i64 { handle A in { handle B in { wrapping_mul(both(), both()) } with { return x => x, b(k) => { let r = k(2); wrapping_mul(r, 3) }, } } with { return x => x, a(k) => { let r = k(5); wrapping_add(r, 1) }, } }",
+        // A CPS clause inside a generic instance.
+        "linear effect Ask { fn ask() -> i64; } fn twice[T: mod copy](sink x: T) -> (T, i64) { let n = handle Ask in { wrapping_add(Ask::ask(), Ask::ask()) } with { return v => v, ask(k) => { let r = k(4); wrapping_add(r, 1) }, }; (x, n) } fn main() -> ((bool, i64), (u8, i64)) { (twice(true), twice[u8](3)) }",
+    ];
+    for s in sources {
+        let art = differential(s);
+        let w = world(s);
+        let portable = compile(
+            &w,
+            &WasmOptions {
+                effects: EffectLowering::Portable,
+                ..WasmOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            portable
+                .handlers
+                .iter()
+                .any(|h| h.clauses.iter().any(|(_, m)| *m == HandlerMode::Cps)),
+            "{s}"
+        );
+        assert!(!portable.stack_switching && art.stack_switching, "{s}");
     }
 }
 

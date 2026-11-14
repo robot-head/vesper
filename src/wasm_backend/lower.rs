@@ -61,6 +61,11 @@ pub(crate) struct HandlerFns {
     pub run: Option<u32>,
     pub fx_op: Option<u32>,
     pub frame_size: u64,
+    /// Pending clause suffixes of a [`HandlerMode::Cps`] handler: a linked
+    /// list of suspension records `[next, point, op, locals...]`.
+    pub pending_offset: u64,
+    /// `$resume_i(frame, record, value)`: run one pending suffix.
+    pub resume: Option<u32>,
     pub env_offset: u64,
     pub capture_offset: BTreeMap<String, u64>,
     pub body_offset: u64,
@@ -74,6 +79,9 @@ pub(crate) struct Lowerer<'a> {
     pub funcs: BTreeMap<String, u32>,
     pub heap: u32,
     pub abort: u32,
+    /// The suspension record a [`HandlerMode::Cps`] clause prefix leaves
+    /// when it resumes (0 otherwise).
+    pub cps: u32,
     pub env: BTreeMap<String, u32>,
     pub alloc: u32,
     pub dispatch_ty: u32,
@@ -122,6 +130,7 @@ impl<'a> Lowerer<'a> {
         let heap = b.global(0);
         b.set_heap_global(heap);
         let abort = b.global(0);
+        let cps = b.global(0);
         let env = plan.keys.iter().map(|k| (k.clone(), b.global(0))).collect();
         let alloc = b.declare("$alloc", &[ValType::I64], &[ValType::I64]);
         let arity = plan.max_arity;
@@ -149,6 +158,7 @@ impl<'a> Lowerer<'a> {
             funcs: BTreeMap::new(),
             heap,
             abort,
+            cps,
             env,
             alloc,
             dispatch_ty,
@@ -167,6 +177,9 @@ impl<'a> Lowerer<'a> {
 
     /// The IR function of an instance key.
     pub(crate) fn ir(&self, key: &str) -> &'a FunctionIr {
+        if let Some((f, _)) = self.plan.split.get(key) {
+            return f;
+        }
         let base = self
             .plan
             .instances
@@ -205,6 +218,7 @@ impl<'a> Lowerer<'a> {
                     HandlerMode::Abort => vec![],
                     HandlerMode::Tail => vec![ValType::I64],
                     HandlerMode::StackSwitching => vec![ValType::I64, self.k_type()],
+                    HandlerMode::Cps => vec![ValType::I64; 3],
                 };
                 (c.resume.clone(), hidden)
             }
@@ -255,7 +269,12 @@ impl<'a> Lowerer<'a> {
             } else {
                 (None, None, None)
             };
-            let env_offset = F_ARGS + 8 * self.arity as u64;
+            let resume = h.ops.iter().any(|c| c.mode == HandlerMode::Cps).then(|| {
+                self.b
+                    .declare(&format!("$resume{i}"), &[ValType::I64; 3], &[ValType::I64])
+            });
+            let pending_offset = F_ARGS + 8 * self.arity as u64;
+            let env_offset = pending_offset + 8;
             let mut offset = env_offset + 8 * self.env.len() as u64;
             let mut capture_offset = BTreeMap::new();
             for name in h
@@ -279,6 +298,8 @@ impl<'a> Lowerer<'a> {
                 run,
                 fx_op,
                 frame_size: offset,
+                pending_offset,
+                resume,
                 env_offset,
                 capture_offset,
                 body_offset,
@@ -872,6 +893,9 @@ impl<'a> Lowerer<'a> {
         self.define_dispatch(i, &h)?;
         self.define_ret(i, &h)?;
         self.define_abort(i, &h)?;
+        if self.hfns[i].resume.is_some() {
+            self.define_resume(i, &h)?;
+        }
         if h.stack_switching {
             self.define_body_entry(i, &h)?;
             self.define_run(i, &h)?;
@@ -1123,6 +1147,79 @@ impl<'a> Lowerer<'a> {
                     self.restore_env_locals(&mut code, env_save);
                     code.push(I::Return);
                 }
+                HandlerMode::Cps => {
+                    let pending = self.hfns[i].pending_offset;
+                    let fresh = |locals: &mut Vec<ValType>| {
+                        locals.push(ValType::I64);
+                        nparams + locals.len() as u32 - 1
+                    };
+                    let (r, rec, zero) = (
+                        fresh(&mut locals),
+                        fresh(&mut locals),
+                        fresh(&mut locals),
+                    );
+                    self.save_env(&mut code, env_save);
+                    self.restore_env_frame(&mut code, frame, i);
+                    self.call_clause(
+                        &mut code,
+                        &mut locals,
+                        nparams,
+                        i,
+                        c,
+                        frame,
+                        &args,
+                        &[frame, zero, zero],
+                    )?;
+                    code.push(I::LocalSet(r));
+                    self.restore_env_locals(&mut code, env_save);
+                    code.extend([
+                        // The prefix resumed: keep its suffix, return the
+                        // resumed value to the body.
+                        I::GlobalGet(self.cps),
+                        I::I64Eqz,
+                        I::I32Eqz,
+                        I::If(BlockType::Empty),
+                        I::GlobalGet(self.cps),
+                        I::LocalSet(rec),
+                        I::I64Const(0),
+                        I::GlobalSet(self.cps),
+                        I::LocalGet(rec),
+                        I::I32WrapI64,
+                        I::LocalGet(frame),
+                        I::I32WrapI64,
+                        I::I64Load(mem(pending)),
+                        I::I64Store(mem(0)),
+                        I::LocalGet(frame),
+                        I::I32WrapI64,
+                        I::LocalGet(rec),
+                        I::I64Store(mem(pending)),
+                        I::LocalGet(r),
+                        I::Return,
+                        I::End,
+                        // An outer abort passes through.
+                        I::GlobalGet(self.abort),
+                        I::I64Eqz,
+                        I::I32Eqz,
+                        I::If(BlockType::Empty),
+                        I::I64Const(0),
+                        I::Return,
+                        I::End,
+                        // It finished without resuming: its result is the
+                        // handler's, so abort to the handler with it.
+                        I::LocalGet(frame),
+                        I::I32WrapI64,
+                        I::I64Const(-1),
+                        I::I64Store(mem(F_ABORT_OP)),
+                        I::LocalGet(frame),
+                        I::I32WrapI64,
+                        I::LocalGet(r),
+                        I::I64Store(mem(F_ARGS)),
+                        I::LocalGet(frame),
+                        I::GlobalSet(self.abort),
+                        I::I64Const(0),
+                        I::Return,
+                    ]);
+                }
                 HandlerMode::StackSwitching => {
                     let fx = self.fx.as_ref().ok_or_else(|| {
                         WasmError::Invalid("stack switching types missing".into())
@@ -1146,6 +1243,37 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    /// $resume_i(frame, record, value): run the suffix of the Cps clause
+    /// that left `record`, with `value` as the result of its `resume`.
+    fn define_resume(&mut self, i: usize, h: &Handler) -> Result<(), WasmError> {
+        let (frame, rec, rv) = (0u32, 1u32, 2u32);
+        let mut code = vec![];
+        for c in h.ops.iter().filter(|c| c.mode == HandlerMode::Cps) {
+            let n = self.signature(&c.function).len() - 3;
+            code.extend([
+                I::LocalGet(rec),
+                I::I32WrapI64,
+                I::I64Load(mem(16)),
+                I::I64Const(c.op as i64),
+                I::I64Eq,
+                I::If(BlockType::Empty),
+            ]);
+            code.extend(std::iter::repeat_n(I::I64Const(0), n));
+            code.extend([
+                I::LocalGet(frame),
+                I::LocalGet(rec),
+                I::LocalGet(rv),
+                I::Call(self.funcs[&c.function]),
+                I::Return,
+                I::End,
+            ]);
+        }
+        code.extend([I::Unreachable, I::End]);
+        let idx = self.hfns[i].resume.expect("cps handler");
+        self.b.define(idx, Self::finish_fn(code, vec![]));
+        Ok(())
+    }
+
     /// $abort_i(frame): run the aborting clause recorded in the frame.
     fn define_abort(&mut self, i: usize, h: &Handler) -> Result<(), WasmError> {
         let frame = 0u32;
@@ -1153,6 +1281,22 @@ impl<'a> Lowerer<'a> {
         let mut locals = vec![ValType::I64; self.arity];
         let args: Vec<u32> = (0..self.arity as u32).map(|j| 1 + j).collect();
         let mut code = vec![];
+        if h.ops.iter().any(|c| c.mode == HandlerMode::Cps) {
+            // A Cps clause that finished without resuming left its result.
+            code.extend([
+                I::LocalGet(frame),
+                I::I32WrapI64,
+                I::I64Load(mem(F_ABORT_OP)),
+                I::I64Const(-1),
+                I::I64Eq,
+                I::If(BlockType::Empty),
+                I::LocalGet(frame),
+                I::I32WrapI64,
+                I::I64Load(mem(F_ARGS)),
+                I::Return,
+                I::End,
+            ]);
+        }
         for (j, a) in args.iter().enumerate() {
             code.extend([
                 I::LocalGet(frame),
@@ -1161,10 +1305,7 @@ impl<'a> Lowerer<'a> {
                 I::LocalSet(*a),
             ]);
         }
-        for c in h.ops.iter().filter(|c| c.mode != HandlerMode::Tail) {
-            if c.mode == HandlerMode::StackSwitching {
-                continue;
-            }
+        for c in h.ops.iter().filter(|c| c.mode == HandlerMode::Abort) {
             code.extend([
                 I::LocalGet(frame),
                 I::I32WrapI64,
@@ -1333,6 +1474,31 @@ impl<'a> Lowerer<'a> {
     }
 }
 
+/// A [`HandlerMode::Cps`] clause under construction. Its Wasm function
+/// takes `(params..., frame, record, value)`: with `record == 0` it runs
+/// from the start (the prefix); a resumption saves every local into a fresh
+/// record, leaves it in the `cps` global and returns the resumed value.
+/// With a record it restores the locals, sets the resumption's result to
+/// `value` and continues after it (the suffix).
+struct CpsState {
+    record: u32,
+    value: u32,
+    /// Set once the clause has resumed: a second resumption traps.
+    once: u32,
+    op: usize,
+    /// IR parameters are locals `0..first_hidden`.
+    first_hidden: u32,
+    /// `(call value, continuation block)` of each resumption.
+    splits: Vec<(ValueId, usize)>,
+    /// Topological position of each block.
+    position: BTreeMap<usize, usize>,
+    prologue_at: usize,
+    /// `(code position, record local, point)` of each save sequence.
+    saves: Vec<(usize, u32, usize)>,
+    /// `(point, result local, continuation position)`.
+    points: Vec<(usize, u32, usize)>,
+}
+
 /// One function body under construction.
 struct Emit<'l, 'a> {
     l: &'l mut Lowerer<'a>,
@@ -1349,6 +1515,8 @@ struct Emit<'l, 'a> {
     frame: Option<u32>,
     k: Option<u32>,
     clause_handler: Option<usize>,
+    /// Splitting state of a [`HandlerMode::Cps`] clause.
+    cps: Option<CpsState>,
     labels: BTreeSet<String>,
     generics: BTreeSet<String>,
     /// Type arguments of this instance.
@@ -1374,6 +1542,7 @@ impl<'l, 'a> Emit<'l, 'a> {
             frame: None,
             k: None,
             clause_handler: None,
+            cps: None,
             labels: l.plan.labels.get(name).cloned().unwrap_or_default(),
             generics: l
                 .world
@@ -1421,9 +1590,38 @@ impl<'l, 'a> Emit<'l, 'a> {
                 e.k = Some(index + 1);
                 index += 2;
             }
+            Some(HandlerMode::Cps) => {
+                let Role::OpClause { op, .. } = role else {
+                    unreachable!()
+                };
+                e.frame = Some(index);
+                e.cps = Some(CpsState {
+                    record: index + 1,
+                    value: index + 2,
+                    once: 0,
+                    op,
+                    first_hidden: index,
+                    splits: e
+                        .l
+                        .plan
+                        .split
+                        .get(name)
+                        .map(|(_, p)| p.clone())
+                        .unwrap_or_default(),
+                    position: BTreeMap::new(),
+                    prologue_at: 0,
+                    saves: vec![],
+                    points: vec![],
+                });
+                index += 3;
+            }
             _ => {}
         }
         e.nparams = index;
+        if e.cps.is_some() {
+            let once = e.local();
+            e.cps.as_mut().expect("cps").once = once;
+        }
         for name in f.locals.keys() {
             if !e.names.contains_key(name) && Some(name) != e.resume.as_ref() {
                 let x = e.local();
@@ -1431,6 +1629,7 @@ impl<'l, 'a> Emit<'l, 'a> {
             }
         }
         e.body()?;
+        e.finish_cps();
         let mut func = Function::new(e.locals.iter().map(|t| (1, *t)));
         e.l.instructions += e.code.len();
         if e.l.instructions > e.l.max_instructions {
@@ -1443,6 +1642,76 @@ impl<'l, 'a> Emit<'l, 'a> {
             func.instruction(ins);
         }
         Ok(func)
+    }
+
+    /// Insert the save sequences and the resumption prologue of a Cps
+    /// clause, now that its locals are known.
+    fn finish_cps(&mut self) {
+        let Some(c) = self.cps.take() else {
+            return;
+        };
+        let saved: Vec<u32> = (0..c.first_hidden)
+            .chain(self.nparams..self.nparams + self.locals.len() as u32)
+            .collect();
+        let size = 24 + 8 * saved.len() as i64;
+        let mut saves = c.saves.clone();
+        saves.sort_by_key(|(at, _, _)| std::cmp::Reverse(*at));
+        for (at, rec, point) in saves {
+            let mut seq = vec![
+                I::I64Const(size),
+                I::Call(self.l.alloc),
+                I::LocalSet(rec),
+                I::LocalGet(rec),
+                I::I32WrapI64,
+                I::I64Const(point as i64),
+                I::I64Store(mem(8)),
+                I::LocalGet(rec),
+                I::I32WrapI64,
+                I::I64Const(c.op as i64),
+                I::I64Store(mem(16)),
+            ];
+            for (slot, x) in saved.iter().enumerate() {
+                seq.extend([
+                    I::LocalGet(rec),
+                    I::I32WrapI64,
+                    I::LocalGet(*x),
+                    I::I64Store(mem(24 + 8 * slot as u64)),
+                ]);
+            }
+            seq.extend([I::LocalGet(rec), I::GlobalSet(self.l.cps)]);
+            self.code.splice(at..at, seq);
+        }
+        let mut pro = vec![
+            I::LocalGet(c.record),
+            I::I64Eqz,
+            I::I32Eqz,
+            I::If(BlockType::Empty),
+        ];
+        for (slot, x) in saved.iter().enumerate() {
+            pro.extend([
+                I::LocalGet(c.record),
+                I::I32WrapI64,
+                I::I64Load(mem(24 + 8 * slot as u64)),
+                I::LocalSet(*x),
+            ]);
+        }
+        pro.extend([I::I64Const(1), I::LocalSet(c.once)]);
+        for (point, dest, pos) in &c.points {
+            pro.extend([
+                I::LocalGet(c.record),
+                I::I32WrapI64,
+                I::I64Load(mem(8)),
+                I::I64Const(*point as i64),
+                I::I64Eq,
+                I::If(BlockType::Empty),
+                I::LocalGet(c.value),
+                I::LocalSet(*dest),
+                I::Br((*pos as u32 - 1) + 2),
+                I::End,
+            ]);
+        }
+        pro.extend([I::Unreachable, I::End]);
+        self.code.splice(c.prologue_at..c.prologue_at, pro);
     }
 
     fn err(&self, construct: Unsupported, detail: impl Into<String>) -> WasmError {
@@ -1615,6 +1884,10 @@ impl<'l, 'a> Emit<'l, 'a> {
         }
         for _ in 1..order.len() {
             self.push(I::Block(BlockType::Empty));
+        }
+        if let Some(c) = &mut self.cps {
+            c.position = position.clone();
+            c.prologue_at = self.code.len();
         }
         for (pos, &bi) in order.iter().enumerate() {
             if pos > 0 {
@@ -2885,6 +3158,28 @@ impl<'l, 'a> Emit<'l, 'a> {
             )?;
             self.store(frame, F_STATE, s);
         }
+        if self.cps.is_some() {
+            let once = self.cps.as_ref().expect("cps").once;
+            self.code
+                .extend([I::LocalGet(once), I::I32WrapI64, I::If(BlockType::Empty)]);
+            self.code.extend([I::Unreachable, I::End]);
+            let d = self.dest(dest);
+            let rec = self.local();
+            let at = self.code.len();
+            let c = self.cps.as_mut().expect("cps");
+            let block = c
+                .splits
+                .iter()
+                .find(|(v, _)| *v == dest)
+                .map(|(_, b)| *b)
+                .ok_or_else(|| WasmError::Invalid("unsplit resumption".into()))?;
+            let pos = c.position[&block];
+            let point = c.points.len();
+            c.points.push((point, d, pos));
+            c.saves.push((at, rec, point));
+            self.code.extend([I::LocalGet(v), I::Return]);
+            return Ok(());
+        }
         match self.k {
             None => {
                 self.values.insert(dest, v);
@@ -2923,6 +3218,13 @@ impl<'l, 'a> Emit<'l, 'a> {
         self.code
             .extend([I::I64Const(i64::from(slot)), I::LocalSet(t)]);
         self.store(frame, F_DISPATCH, t);
+        let (pending, resume) = (self.l.hfns[id].pending_offset, self.l.hfns[id].resume);
+        self.code.extend([
+            I::LocalGet(frame),
+            I::I32WrapI64,
+            I::I64Const(0),
+            I::I64Store(mem(pending)),
+        ]);
         if let Some(sv) = state_value {
             let s = self.value(sv)?;
             self.store(frame, F_STATE, s);
@@ -3033,6 +3335,39 @@ impl<'l, 'a> Emit<'l, 'a> {
                 I::End,
                 I::LocalSet(out),
             ]);
+            if let Some(resume) = resume {
+                // Run the pending clause suffixes, innermost first, each
+                // receiving the handler's result so far.
+                let rec = self.local();
+                self.code.extend([
+                    I::Block(BlockType::Empty),
+                    I::Loop(BlockType::Empty),
+                    I::GlobalGet(self.l.abort),
+                    I::I64Eqz,
+                    I::I32Eqz,
+                    I::BrIf(1),
+                    I::LocalGet(frame),
+                    I::I32WrapI64,
+                    I::I64Load(mem(pending)),
+                    I::LocalTee(rec),
+                    I::I64Eqz,
+                    I::BrIf(1),
+                    I::LocalGet(frame),
+                    I::I32WrapI64,
+                    I::LocalGet(rec),
+                    I::I32WrapI64,
+                    I::I64Load(mem(0)),
+                    I::I64Store(mem(pending)),
+                    I::LocalGet(frame),
+                    I::LocalGet(rec),
+                    I::LocalGet(out),
+                    I::Call(resume),
+                    I::LocalSet(out),
+                    I::Br(0),
+                    I::End,
+                    I::End,
+                ]);
+            }
         }
         self.abort_check();
         Ok(out)
