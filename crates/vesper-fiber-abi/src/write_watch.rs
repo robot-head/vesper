@@ -240,6 +240,11 @@ mod sys {
         page: AtomicUsize,
         bits: AtomicPtr<AtomicU64>,
         faults: AtomicU64,
+        /// Handlers currently reading this slot. `destroy` unpublishes the
+        /// slot and waits for this to drain before it unmaps, frees or
+        /// lets the slot be reused, so a handler never mixes the fields of
+        /// two regions or touches a freed bitmap.
+        readers: AtomicUsize,
     }
 
     #[allow(clippy::declare_interior_mutable_const)]
@@ -250,6 +255,7 @@ mod sys {
         page: AtomicUsize::new(0),
         bits: AtomicPtr::new(std::ptr::null_mut()),
         faults: AtomicU64::new(0),
+        readers: AtomicUsize::new(0),
     };
     static SLOTS: [Slot; MAX_REGIONS] = [FREE; MAX_REGIONS];
 
@@ -302,31 +308,23 @@ mod sys {
         info: *mut libc::siginfo_t,
         context: *mut libc::c_void,
     ) {
-        // SAFETY: the kernel passes a valid siginfo for SA_SIGINFO handlers.
-        let address = unsafe { fault_address(info) };
-        for slot in &SLOTS {
-            if slot.state.load(Ordering::Acquire) != 2 {
-                continue;
-            }
-            let start = slot.start.load(Ordering::Relaxed);
-            let len = slot.len.load(Ordering::Relaxed);
-            if address < start || address >= start + len {
-                continue;
-            }
-            let page = slot.page.load(Ordering::Relaxed);
-            let index = (address - start) / page;
-            let bits = slot.bits.load(Ordering::Relaxed);
-            // SAFETY: `bits` has one bit per page and lives as long as the
-            // slot is live; the page is inside the mapping.
-            unsafe {
-                (*bits.add(index / 64)).fetch_or(1 << (index % 64), Ordering::Relaxed);
-                slot.faults.fetch_add(1, Ordering::Relaxed);
-                let at = (start + index * page) as *mut libc::c_void;
-                if libc::mprotect(at, page, libc::PROT_READ | libc::PROT_WRITE) == 0 {
-                    return;
-                }
-            }
-            break;
+        // SAFETY: the kernel passes a valid siginfo and ucontext for
+        // SA_SIGINFO handlers.
+        let (address, pc, protection) = unsafe {
+            (
+                fault_address(info),
+                fault_pc(context),
+                protection_fault(sig, info),
+            )
+        };
+        // Only a store into a present, read-only page is ours. An
+        // instruction fetch from the (never executable) region faults at
+        // the instruction pointer, and unmapped-address faults are not
+        // protection faults: making the page writable would not fix
+        // either, so they go to the previous handler instead of looping.
+        let executing = pc / 4096 == address / 4096;
+        if protection && !executing && service(address) {
+            return;
         }
         // Not ours (or the page could not be unprotected): hand it on.
         let i = if sig == libc::SIGSEGV { 0 } else { 1 };
@@ -349,6 +347,94 @@ mod sys {
                 // Restore the default action; returning re-executes the
                 // faulting instruction, which now takes it.
                 libc::sigaction(sig, previous, std::ptr::null_mut());
+            }
+        }
+    }
+
+    /// Record and unprotect the tracked page containing `address`; false if
+    /// no live region contains it or the page cannot be unprotected.
+    fn service(address: usize) -> bool {
+        for slot in &SLOTS {
+            slot.readers.fetch_add(1, Ordering::SeqCst);
+            let mut done = None;
+            if slot.state.load(Ordering::SeqCst) == 2 {
+                let start = slot.start.load(Ordering::Relaxed);
+                let len = slot.len.load(Ordering::Relaxed);
+                if address >= start && address < start + len {
+                    let page = slot.page.load(Ordering::Relaxed);
+                    let index = (address - start) / page;
+                    let bits = slot.bits.load(Ordering::Relaxed);
+                    // SAFETY: the slot is live and `readers` keeps
+                    // `destroy` from freeing the bitmap or unmapping the
+                    // region; the page is inside the mapping.
+                    unsafe {
+                        (*bits.add(index / 64)).fetch_or(1 << (index % 64), Ordering::Relaxed);
+                        slot.faults.fetch_add(1, Ordering::Relaxed);
+                        let at = (start + index * page) as *mut libc::c_void;
+                        done =
+                            Some(libc::mprotect(at, page, libc::PROT_READ | libc::PROT_WRITE) == 0);
+                    }
+                }
+            }
+            slot.readers.fetch_sub(1, Ordering::SeqCst);
+            if let Some(ok) = done {
+                return ok;
+            }
+        }
+        false
+    }
+
+    /// Whether the signal reports an access-permission fault (as opposed
+    /// to an unmapped address or a bus error of another kind). macOS
+    /// reports protection faults on mapped memory as `SIGBUS` with codes
+    /// that vary by release, so only the Linux codes are checked.
+    unsafe fn protection_fault(sig: libc::c_int, info: *mut libc::siginfo_t) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            // SAFETY: caller passes a valid siginfo.
+            let code = unsafe { (*info).si_code };
+            sig == libc::SIGSEGV && code == SEGV_ACCERR
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (sig, info);
+            true
+        }
+    }
+    #[cfg(target_os = "linux")]
+    const SEGV_ACCERR: libc::c_int = 2;
+
+    /// The interrupted instruction pointer.
+    unsafe fn fault_pc(context: *mut libc::c_void) -> usize {
+        let uc = context.cast::<libc::ucontext_t>();
+        // SAFETY: the kernel passes the interrupted context.
+        unsafe {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+            {
+                (*uc).uc_mcontext.gregs[libc::REG_RIP as usize] as usize
+            }
+            #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+            {
+                (*uc).uc_mcontext.pc as usize
+            }
+            #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+            {
+                (*(*uc).uc_mcontext).__ss.__pc as usize
+            }
+            #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+            {
+                (*(*uc).uc_mcontext).__ss.__rip as usize
+            }
+            #[cfg(not(any(
+                all(
+                    target_os = "linux",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
+                target_os = "macos"
+            )))]
+            {
+                let _ = uc;
+                0
             }
         }
     }
@@ -463,9 +549,13 @@ mod sys {
 
     pub(super) fn destroy(region: &mut TrackedRegion) {
         let s = &SLOTS[region.slot];
-        // Unpublish before unmapping, so the handler never matches a range
-        // that is about to be reused by another mapping.
-        s.state.store(1, Ordering::Release);
+        // Unpublish, then wait for handlers already reading the slot: after
+        // that none can see this region's fields, so unmapping, freeing the
+        // bitmap and reusing the slot are safe.
+        s.state.store(1, Ordering::SeqCst);
+        while s.readers.load(Ordering::SeqCst) != 0 {
+            std::hint::spin_loop();
+        }
         let bits = s.bits.swap(std::ptr::null_mut(), Ordering::AcqRel);
         s.start.store(0, Ordering::Relaxed);
         s.len.store(0, Ordering::Relaxed);

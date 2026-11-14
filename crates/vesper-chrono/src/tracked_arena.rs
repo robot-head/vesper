@@ -26,7 +26,7 @@ use std::io;
 use vesper_fiber_abi::write_watch::{Mechanism, TrackedRegion};
 
 use crate::arena::{ArenaDelta, ArenaError};
-use crate::ring::FlightRecorder;
+use crate::ring::{FlightRecorder, RecordError};
 
 /// Errors of a [`TrackedArena`].
 #[derive(Debug)]
@@ -34,6 +34,14 @@ pub enum TrackedArenaError {
     Arena(ArenaError),
     /// The kernel refused to map or (re-)arm the region.
     Os(io::Error),
+    /// [`TrackedArena::capture`] ended the epoch but the recorder rejected
+    /// its image. The image is handed back so it can still be recorded
+    /// (for example `recorder.capture_snapshot(time, &image.encode())` on a
+    /// larger recorder); later deltas build on it.
+    NotRecorded {
+        image: Box<ArenaDelta>,
+        error: RecordError,
+    },
 }
 
 impl std::fmt::Display for TrackedArenaError {
@@ -41,6 +49,11 @@ impl std::fmt::Display for TrackedArenaError {
         match self {
             Self::Arena(e) => write!(f, "{e}"),
             Self::Os(e) => write!(f, "chrono tracked arena: {e}"),
+            Self::NotRecorded { image, error } => write!(
+                f,
+                "chrono tracked arena: epoch {} image not recorded: {error}",
+                image.epoch
+            ),
         }
     }
 }
@@ -256,7 +269,9 @@ impl TrackedArena {
     /// Store this epoch's checkpoint in `recorder` as a snapshot epoch:
     /// every `keyframe_every`-th epoch (1, 1 + k, …) as a keyframe, the
     /// others as deltas (see [`crate::arena::capture_arena_epoch`]).
-    /// Returns the epoch id and the image.
+    /// Returns the epoch id and the image. If the recorder rejects the
+    /// image, the epoch has still ended and the image comes back in
+    /// [`TrackedArenaError::NotRecorded`].
     pub fn capture(
         &mut self,
         recorder: &mut FlightRecorder,
@@ -271,9 +286,12 @@ impl TrackedArena {
         } else {
             self.checkpoint()?
         };
-        let id = recorder
-            .capture_snapshot(time_ns, &image.encode())
-            .map_err(ArenaError::Record)?;
-        Ok((id, image))
+        match recorder.capture_snapshot(time_ns, &image.encode()) {
+            Ok(id) => Ok((id, image)),
+            Err(error) => Err(TrackedArenaError::NotRecorded {
+                image: Box::new(image),
+                error,
+            }),
+        }
     }
 }

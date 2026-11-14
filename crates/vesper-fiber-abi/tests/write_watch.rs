@@ -149,3 +149,93 @@ fn foreign_faults_keep_their_default_action() {
         "child should die of the fault, got {status:?}"
     );
 }
+
+/// An instruction fetch from a tracked (never executable) page is not a
+/// write: the handler forwards it instead of unprotecting the page and
+/// retrying forever, so the child dies of the fault.
+#[cfg(all(unix, any(target_arch = "x86_64", target_arch = "aarch64")))]
+#[test]
+fn executing_a_tracked_page_is_forwarded_not_looped() {
+    if std::env::var_os("VESPER_WRITE_WATCH_EXEC_CHILD").is_some() {
+        let mut tracked = TrackedRegion::new(page_size()).unwrap();
+        tracked.arm().unwrap();
+        // SAFETY: deliberately jumping into a non-executable page.
+        unsafe {
+            let f: extern "C" fn() = std::mem::transmute(tracked.as_mut_ptr());
+            f();
+        }
+        std::process::exit(0);
+    }
+    let exe = std::env::current_exe().unwrap();
+    let mut cmd = match std::env::var("VESPER_PROBE_RUNNER") {
+        Ok(runner) if !runner.is_empty() => {
+            let mut parts = runner.split_whitespace();
+            let mut c = std::process::Command::new(parts.next().unwrap());
+            c.args(parts).arg(exe);
+            c
+        }
+        _ => std::process::Command::new(exe),
+    };
+    let mut child = cmd
+        .args([
+            "--exact",
+            "executing_a_tracked_page_is_forwarded_not_looped",
+            "--test-threads=1",
+        ])
+        .env("VESPER_WRITE_WATCH_EXEC_CHILD", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("the exec fault looped in the handler");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    use std::os::unix::process::ExitStatusExt;
+    assert!(
+        matches!(status.signal(), Some(libc::SIGSEGV) | Some(libc::SIGBUS)),
+        "child should die of the fault, got {status:?}"
+    );
+}
+
+/// Regions created and dropped on one thread while another thread keeps
+/// writing to its own region: every write of the long-lived region is
+/// still recorded (slot reuse never steals its faults).
+#[test]
+fn concurrent_slot_reuse_keeps_other_regions_tracked() {
+    let page = page_size();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let churn = {
+        let stop = stop.clone();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let mut r = TrackedRegion::new(page).unwrap();
+                r.arm().unwrap();
+                r.write(0, &[1]).unwrap();
+                assert_eq!(r.take_dirty().unwrap(), vec![0]);
+            }
+        })
+    };
+    let mut region = TrackedRegion::new(4 * page).unwrap();
+    region.arm().unwrap();
+    for round in 0..500usize {
+        let p = round % 4;
+        // SAFETY: in bounds of the live region.
+        unsafe {
+            region
+                .as_mut_ptr()
+                .add(p * page)
+                .write_volatile(round as u8)
+        };
+        assert_eq!(region.take_dirty().unwrap(), vec![p], "round {round}");
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    churn.join().unwrap();
+}

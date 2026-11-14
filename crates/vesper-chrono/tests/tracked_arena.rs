@@ -152,3 +152,36 @@ fn bad_geometry_and_bounds_are_typed_errors() {
         Err(TrackedArenaError::Arena(ArenaError::NoKeyframe))
     ));
 }
+
+#[test]
+fn a_rejected_capture_hands_the_image_back_for_retry() {
+    let s = shard();
+    let mut arena = TrackedArena::new(4 * s, s).unwrap();
+    arena.write(s, &[1]).unwrap();
+    // Too small for a keyframe of four shards.
+    let mut small = FlightRecorder::new(RecorderConfig {
+        snapshot_image_bytes: s,
+        ..RecorderConfig::small()
+    })
+    .unwrap();
+    let Err(TrackedArenaError::NotRecorded { image, .. }) = arena.capture(&mut small, 0, 10) else {
+        panic!("expected the recorder to reject the keyframe")
+    };
+    assert!(image.keyframe && image.epoch == 1);
+    let mut big = FlightRecorder::new(RecorderConfig {
+        snapshot_slots: 8,
+        snapshot_image_bytes: 4 * (s + 4) + 128,
+        ..RecorderConfig::small()
+    })
+    .unwrap();
+    big.capture_snapshot(0, &image.encode()).unwrap();
+    arena.write(2 * s, &[2]).unwrap();
+    let (_, next) = arena.capture(&mut big, 1, 10).unwrap();
+    assert_eq!(next.epoch, 2);
+    let rebuilt = rebuild_arena(
+        [image.encode(), next.encode()].iter().map(Vec::as_slice),
+        64,
+    )
+    .unwrap();
+    assert_eq!(shard_bytes(&rebuilt), bytes(&arena));
+}
