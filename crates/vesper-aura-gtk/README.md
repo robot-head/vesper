@@ -104,8 +104,9 @@ row counts read back from GTK.
   bounded slices, yielding to GLib between slices; with only I/O in flight it
   re-polls the driver on a bounded backoff (Pulse drivers expose no pollable
   descriptor yet).
-- `mainloop::spawn_pulse_worker` runs a scheduler on a worker thread with
-  blocking waits and posts each result through a `Dispatcher`.
+- `mainloop::spawn_pulse_worker` runs a scheduler on a worker thread and
+  posts each result through a `Dispatcher`; closing the inbox stops it even
+  while its I/O is still pending.
 
 ## Accessibility and screenshots
 

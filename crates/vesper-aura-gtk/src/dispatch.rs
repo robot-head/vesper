@@ -197,13 +197,18 @@ impl<T> Inbox<T> {
     /// Refuse further sends and return the undelivered messages so the UI
     /// thread can account for them; they are never silently dropped.
     pub fn close(&self) -> Vec<T> {
-        let waker = {
+        let (waker, undelivered) = {
             let mut state = self.shared.lock();
             state.closed = true;
-            state.waker.take()
+            let undelivered: Vec<T> = state.queue.drain(..).collect();
+            (state.waker.take(), undelivered)
         };
-        drop(waker);
-        self.shared.lock().queue.drain(..).collect()
+        // Wake a pending receiver (outside the lock) so it observes
+        // `Ready(empty)`, the closed-and-drained signal.
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+        undelivered
     }
 }
 
@@ -266,6 +271,12 @@ mod tests {
         tx.send(7).unwrap();
         assert_eq!(count.0.load(Ordering::SeqCst), 2);
         assert_eq!(rx.stats().sent, 401);
+        // Closing wakes a pending receiver, which then sees closed-and-empty.
+        assert_eq!(rx.poll_batch(&mut cx, 8), Poll::Ready(vec![7]));
+        assert!(rx.poll_batch(&mut cx, 8).is_pending());
+        assert!(rx.close().is_empty());
+        assert_eq!(count.0.load(Ordering::SeqCst), 3);
+        assert_eq!(rx.poll_batch(&mut cx, 8), Poll::Ready(vec![]));
     }
 
     #[test]

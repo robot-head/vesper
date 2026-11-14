@@ -131,17 +131,29 @@ impl GtkHost {
         rows: u32,
         row_text: RowText,
     ) -> Result<(), HostError> {
-        if let Some(spec) = self.lists.get_mut(&key) {
-            spec.row_text = Rc::clone(&row_text);
-            if let Some(widget) = spec.attached {
-                spec.rows = rows;
-                return self
-                    .session
-                    .backend_mut(thread)
-                    .map_err(|_| HostError::Backend(GtkError::WrongThread))?
-                    .set_virtual_rows(thread, widget, rows)
-                    .map_err(|error| HostError::Style { key, error });
-            }
+        // Validate before storing anything, so a later render cannot fail
+        // after its commit because of this specification.
+        if rows > crate::MAX_VIRTUAL_ROWS {
+            return Err(HostError::Style {
+                key,
+                error: GtkError::Unsupported("too many virtual rows"),
+            });
+        }
+        if let Some(widget) = self.lists.get(&key).and_then(|s| s.attached) {
+            let backend = self
+                .session
+                .backend_mut(thread)
+                .map_err(|_| HostError::Backend(GtkError::WrongThread))?;
+            backend
+                .set_virtual_rows(thread, widget, rows)
+                .map_err(|error| HostError::Style { key, error })?;
+            backend
+                .set_virtual_row_text(thread, widget, Rc::clone(&row_text))
+                .map_err(|error| HostError::Style { key, error })?;
+            let spec = self.lists.get_mut(&key).expect("checked above");
+            spec.rows = rows;
+            spec.row_text = row_text;
+            return Ok(());
         }
         let attached = match self.widget(key) {
             Some(widget) => {

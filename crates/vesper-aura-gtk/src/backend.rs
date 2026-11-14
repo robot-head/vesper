@@ -137,7 +137,12 @@ pub struct VirtualListStats {
 /// Rows of a virtual list are fetched from the host at bind time.
 pub type RowText = Rc<dyn Fn(u32) -> String>;
 
+/// List items currently bound, so a new row callback can re-text them.
+type BoundRows = Rc<RefCell<Vec<gtk::ListItem>>>;
+
 struct Island {
+    row_text: Rc<RefCell<RowText>>,
+    bound: BoundRows,
     scrolled: gtk::ScrolledWindow,
     list: gtk::ListView,
     model: gtk::StringList,
@@ -329,7 +334,7 @@ impl GtkBackend {
     pub fn pump(&self, thread: &UiThread) -> Result<(), GtkError> {
         self.check(thread)?;
         let context = glib::MainContext::default();
-        while context.iteration(false) {}
+        crate::mainloop::drain_bounded(&context, Instant::now() + Duration::from_millis(250));
         Ok(())
     }
 
@@ -451,7 +456,7 @@ impl GtkBackend {
         }
         self.release_window();
         let context = glib::MainContext::default();
-        while context.iteration(false) {}
+        crate::mainloop::drain_bounded(&context, Instant::now() + Duration::from_millis(250));
         let tracked = std::mem::take(&mut self.tracked);
         Ok(TeardownReport {
             created: self.created,
@@ -632,6 +637,10 @@ impl GtkBackend {
             item.set_child(Some(&label));
             setup_stats.borrow_mut().row_widgets += 1;
         });
+        let row_text = Rc::new(RefCell::new(row_text));
+        let bind_text = Rc::clone(&row_text);
+        let bound: BoundRows = Rc::new(RefCell::new(Vec::new()));
+        let bind_bound = Rc::clone(&bound);
         let bind_stats = Rc::clone(&stats);
         factory.connect_bind(move |_, item| {
             let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
@@ -641,14 +650,20 @@ impl GtkBackend {
                 return;
             };
             let index = item.position();
-            label.set_text(&row_text(index));
+            let text = bind_text.borrow()(index);
+            label.set_text(&text);
+            bind_bound.borrow_mut().push(item.clone());
             let mut s = bind_stats.borrow_mut();
             s.bound += 1;
             s.binds += 1;
             s.max_bound_index = Some(s.max_bound_index.map_or(index, |m| m.max(index)));
         });
         let unbind_stats = Rc::clone(&stats);
-        factory.connect_unbind(move |_, _| {
+        let unbind_bound = Rc::clone(&bound);
+        factory.connect_unbind(move |_, item| {
+            unbind_bound
+                .borrow_mut()
+                .retain(|b| b.upcast_ref::<glib::Object>() != item);
             let mut s = unbind_stats.borrow_mut();
             s.bound = s.bound.saturating_sub(1);
         });
@@ -670,6 +685,8 @@ impl GtkBackend {
         self.islands.insert(
             widget,
             Island {
+                row_text,
+                bound,
                 scrolled,
                 list,
                 model,
@@ -693,6 +710,26 @@ impl GtkBackend {
         let island = self.islands.get(&widget).ok_or(GtkError::StaleWidget)?;
         splice_rows(&island.model, rows);
         island.stats.borrow_mut().rows = rows;
+        Ok(())
+    }
+
+    /// Replace the row-text callback of an attached virtual list and rebind
+    /// every row so the displayed rows use it immediately.
+    pub fn set_virtual_row_text(
+        &mut self,
+        thread: &UiThread,
+        widget: WidgetId,
+        row_text: RowText,
+    ) -> Result<(), GtkError> {
+        self.check(thread)?;
+        let island = self.islands.get(&widget).ok_or(GtkError::StaleWidget)?;
+        *island.row_text.borrow_mut() = row_text;
+        let row_text = island.row_text.borrow();
+        for item in island.bound.borrow().iter() {
+            if let Some(label) = item.child().and_then(|c| c.downcast::<gtk::Label>().ok()) {
+                label.set_text(&row_text(item.position()));
+            }
+        }
         Ok(())
     }
 
@@ -757,7 +794,7 @@ impl GtkBackend {
             // Request a redraw each round: the frame clock only advances when
             // something asks for a frame.
             window.queue_draw();
-            while context.iteration(false) {}
+            crate::mainloop::drain_bounded(&context, deadline);
             if let Some(clock) = window.frame_clock() {
                 let now = clock.frame_counter();
                 let first = *start.get().get_or_insert(now);

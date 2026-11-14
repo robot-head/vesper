@@ -31,9 +31,15 @@ Ubuntu 24.04 has 4.14.5.
      it re-polls the driver after a bounded exponential backoff (250 µs to
      8 ms by default). `PulseTask::stop` returns the scheduler with all
      still-owned continuations.
-   - `mainloop::spawn_pulse_worker`: runs a scheduler on its own thread with
-     blocking waits and posts every result through a `Dispatcher`; a closed
-     inbox cancels in-flight I/O and stops the worker with `BrokenPipe`.
+   - `mainloop::spawn_pulse_worker`: runs a scheduler on its own thread and
+     posts every result through a `Dispatcher`. It never blocks indefinitely
+     in the driver (non-blocking polls with a 50 µs to 2 ms backoff while
+     nothing is runnable), so closing the inbox cancels in-flight I/O and
+     stops the worker with `BrokenPipe` even if no I/O ever completes.
+   - The inbox task yields to GLib after every batch, and every helper that
+     drains the main context (`pump`, `pump_until`, `settle`, `close`) does
+     at most 64 iterations between condition and deadline checks, so an
+     always-ready source cannot starve the UI or trap a caller.
    - `mainloop::pump_until` and `run_off_thread` (pump GLib while a helper
      thread works; needed to query this process's own AT-SPI tree).
 2. **Layouts, virtual lists, CSS, close wiring.**
@@ -88,8 +94,9 @@ on the GTK main thread under Xvfb inside `dbus-run-session`:
 3. `virtual_list_recycles_rows`: 100 000 rows. Initially 16 rows visible and
    205 row widgets created (GTK's overscan); after scrolling to the last row
    206 row widgets, `row 99999` visible, 410 text fetches in total. Row-count
-   changes, rejection of Aura children in the list container, and
-   re-attachment after unmount/remount.
+   changes, a replacement row callback re-texting the rows already shown,
+   invalid row counts rejected before anything is stored, rejection of Aura
+   children in the list container, and re-attachment after unmount/remount.
 4. `close_button_requests_close`: `gtk_window_close` becomes a pending
    decision, a second request is coalesced, veto keeps the window, the next
    request allows and unmounts, a request after closing is ignored.
@@ -104,7 +111,8 @@ on the GTK main thread under Xvfb inside `dbus-run-session`:
    ran. All seven results arrive.
 7. `pulse_worker_posts_to_the_ui`: a worker-thread scheduler posts 11
    results through a 4-slot dispatcher; a worker whose inbox is gone stops
-   with `BrokenPipe`.
+   with `BrokenPipe`, also while it waits on a pipe whose writer stays open
+   and silent (stopped within 1 s).
 8. `accessibility_tree_through_atspi`: through the AT-SPI registry of
    at-spi2-core 2.52.0 (Ubuntu 24.04), the app's tree has the `Save` button
    without `sensitive`, `Go` with `sensitive` and `focusable`, a `text box`
@@ -183,12 +191,13 @@ produces none).
 - **Layout managers instead of different container widgets.** Swapping
   `GtkBoxLayout`/`GtkGridLayout` on the same `GtkBox` keeps widget identity
   across layout changes, so the reconciler's identity guarantees hold.
-- **Pulse co-scheduling uses timed re-polls while only I/O is pending.** The
-  Pulse drivers (`vesper-pulse`, not owned here) expose no descriptor to add
-  to the `GMainContext`, so the GLib task cannot sleep on I/O readiness. The
-  worker-thread mode has no polling at all and is the recommended form for
-  I/O-heavy work; the co-scheduled mode guarantees bounded slices on the UI
-  thread.
+- **Pulse integration uses bounded re-polls while only I/O is pending.** The
+  Pulse drivers (`vesper-pulse`, not owned here) expose neither a descriptor
+  to add to the `GMainContext` nor a way to interrupt a blocking wait, so the
+  GLib task cannot sleep on I/O readiness and a worker blocked in the driver
+  could not notice that its inbox closed. Both modes therefore poll the
+  driver without waiting and back off (co-scheduled: 250 µs to 8 ms; worker:
+  50 µs to 2 ms). The UI-to-Pulse direction is fully waker-driven.
 - **Virtual list model.** `GtkStringList` holds one empty `GtkStringObject`
   per row (bounded by `MAX_VIRTUAL_ROWS = 1 000 000`); a custom lazy
   `GListModel` would need GObject subclassing, which uses unsafe code in

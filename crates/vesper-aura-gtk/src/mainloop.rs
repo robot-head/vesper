@@ -11,8 +11,9 @@
 //!   with Pulse work. While only I/O is in flight it re-polls the driver
 //!   with a bounded exponential backoff, because Pulse's drivers do not yet
 //!   expose a pollable descriptor that could be added to the `GMainContext`.
-//! * [`spawn_pulse_worker`] runs a scheduler on its own thread with blocking
-//!   waits and posts every result through a [`Dispatcher`]. That worker has
+//! * [`spawn_pulse_worker`] runs a scheduler on its own thread (bounded
+//!   non-blocking polls, so it notices a closed inbox) and posts every result
+//!   through a [`Dispatcher`]. That worker has
 //!   no `UiThread` token, so it can only reach the UI by message, the
 //!   runtime counterpart of §18.4's "background shards lack UiThread".
 //!
@@ -100,6 +101,9 @@ pub fn spawn_inbox<T: 'static>(
             }
             task_delivered.set(task_delivered.get() + messages.len() as u64);
             handler(messages);
+            // Return to GLib between batches so a steady stream of messages
+            // cannot starve input and redraws.
+            YieldNow(false).await;
         }
     });
     Ok(InboxTask {
@@ -285,11 +289,14 @@ where
     })
 }
 
-/// Run a Pulse scheduler on a worker thread with blocking driver waits and
-/// post each result to the UI through `dispatcher`. `make` runs on the worker
-/// (drivers need not be `Send`). A full inbox is retried with a short sleep;
-/// a closed inbox cancels the scheduler's in-flight I/O and stops the worker
-/// with `BrokenPipe`.
+/// Run a Pulse scheduler on a worker thread and post each result to the UI
+/// through `dispatcher`. `make` runs on the worker (drivers need not be
+/// `Send`). A full inbox is retried with a short sleep. The worker never
+/// blocks indefinitely in the driver: while nothing is runnable it polls the
+/// driver without waiting and sleeps on a bounded backoff (50 µs to 2 ms),
+/// checking between polls whether the inbox was closed, so closing the inbox
+/// cancels in-flight I/O and stops the worker with `BrokenPipe` even when no
+/// I/O ever completes.
 pub fn spawn_pulse_worker<C, D, F>(
     make: F,
     dispatcher: Dispatcher<PulseOutput>,
@@ -318,8 +325,18 @@ where
                 }
             }
         };
+        let mut backoff = Duration::from_micros(50);
         while !scheduler.is_idle() {
-            scheduler.tick(true)?;
+            if !dispatcher.is_open() {
+                let _ = scheduler.cancel_all();
+                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
+            }
+            if scheduler.tick(false)? {
+                backoff = Duration::from_micros(50);
+            } else {
+                thread::sleep(backoff);
+                backoff = (backoff * 2).min(Duration::from_millis(2));
+            }
             while let Some(value) = scheduler.take_completed() {
                 post(&mut scheduler, PulseOutput::Completed(value))?;
             }
@@ -331,6 +348,21 @@ where
     })
 }
 
+/// Dispatch ready GLib sources without blocking, at most
+/// [`MAX_ITERATIONS_PER_DRAIN`] times and never past `deadline`, so a source
+/// that is always ready (a continuously runnable task) cannot trap the caller.
+pub(crate) fn drain_bounded(context: &glib::MainContext, deadline: Instant) {
+    for _ in 0..MAX_ITERATIONS_PER_DRAIN {
+        if !context.iteration(false) || Instant::now() >= deadline {
+            return;
+        }
+    }
+}
+
+/// Bound on non-blocking GLib iterations between checks of a caller's
+/// condition.
+pub const MAX_ITERATIONS_PER_DRAIN: usize = 64;
+
 /// Iterate the default main context (non-blocking, with short sleeps) until
 /// `done` returns true or `timeout` expires.
 pub fn pump_until(
@@ -341,7 +373,7 @@ pub fn pump_until(
     let context = on_gtk_thread(thread)?;
     let deadline = Instant::now() + timeout;
     loop {
-        while context.iteration(false) {}
+        drain_bounded(&context, deadline);
         if done() {
             return Ok(());
         }

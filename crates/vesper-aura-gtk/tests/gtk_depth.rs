@@ -331,6 +331,29 @@ fn virtual_list_recycles_rows(thread: &UiThread) {
         .unwrap();
     h.backend(thread).unwrap().audit(thread).unwrap();
     assert_eq!(native(&h, thread).children[1].virtual_rows, Some(10));
+    // A replacement row callback applies to the rows already shown.
+    h.set_virtual_list(thread, Key(1), 10, Rc::new(|i| format!("item {i}")))
+        .unwrap();
+    settle(&h, thread);
+    let shown = h
+        .backend(thread)
+        .unwrap()
+        .visible_rows(thread, list)
+        .unwrap();
+    assert_eq!(
+        shown.first().map(String::as_str),
+        Some("item 0"),
+        "{shown:?}"
+    );
+    // An invalid row count is rejected before anything is stored.
+    assert!(matches!(
+        h.set_virtual_list(thread, Key(1), MAX_VIRTUAL_ROWS + 1, Rc::clone(&rows)),
+        Err(HostError::Style { .. })
+    ));
+    assert!(matches!(
+        h.set_virtual_list(thread, Key(42), MAX_VIRTUAL_ROWS + 1, Rc::clone(&rows)),
+        Err(HostError::Style { .. })
+    ));
     // Aura children may not enter a list container: rejected up front.
     let revision = h.session().revision();
     let err = h
@@ -680,6 +703,34 @@ fn pulse_worker_posts_to_the_ui(thread: &UiThread) {
         worker.join().unwrap().unwrap_err().kind(),
         std::io::ErrorKind::BrokenPipe
     );
+    // Closing the inbox stops a worker whose I/O never completes (the pipe's
+    // writer stays open and silent).
+    let (tx, rx) = dispatch::channel::<PulseOutput>(1).unwrap();
+    let (r, silent_writer) = pipe();
+    let worker = mainloop::spawn_pulse_worker(
+        move || {
+            let (driver, _) =
+                vesper_pulse::select::open::<Job>(4, vesper_pulse::select::Preference::Auto)
+                    .map_err(std::io::Error::other)?;
+            let mut s = Scheduler::new(driver);
+            s.spawn(Job::Read {
+                file: Some(r),
+                tag: 0,
+            });
+            Ok(s)
+        },
+        tx,
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    drop(rx);
+    let started = std::time::Instant::now();
+    mainloop::pump_until(thread, SETTLE, || worker.is_finished()).unwrap();
+    assert_eq!(
+        worker.join().unwrap().unwrap_err().kind(),
+        std::io::ErrorKind::BrokenPipe
+    );
+    assert!(started.elapsed() < Duration::from_secs(1));
+    drop(silent_writer);
     shutdown(h, thread);
 }
 
