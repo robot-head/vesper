@@ -136,7 +136,10 @@ fn chained_submissions_complete_in_timeline_order() {
     assert!(s1.is_complete().unwrap());
     s1.wait().unwrap();
     assert!(ctx.completed_value().unwrap() >= start + 2);
-    assert_eq!(c.to_u32(), (0..n).map(|i| i + 110).collect::<Vec<u32>>());
+    assert_eq!(
+        c.to_u32().unwrap(),
+        (0..n).map(|i| i + 110).collect::<Vec<u32>>()
+    );
 }
 
 #[test]
@@ -156,7 +159,34 @@ fn a_dropped_submission_is_counted_and_still_completes() {
         }
     }
     assert_eq!(leaked_submissions(), before + 1);
-    assert_eq!(b.to_u32(), vec![2, 3, 4, 5]);
+    assert_eq!(b.to_u32().unwrap(), vec![2, 3, 4, 5]);
+}
+
+/// `mem::forget` on a submission ends its borrows without running its
+/// destructor. The submission's command buffer still owns references to every
+/// buffer and kernel it bound, so dropping the Rust handles frees nothing
+/// the device may use, and host reads wait for the device.
+#[test]
+fn a_forgotten_submission_keeps_its_resources_alive() {
+    let Some(ctx) = test_context() else { return };
+    let kernel = ctx.kernel(ADD, "add", 2, 8).unwrap();
+    let n = 1 << 16;
+    let a = ctx.buffer_from(&vec![5u32; n as usize]).unwrap();
+    let b = ctx.buffer((n * 4) as u64).unwrap();
+    let mut rec = ctx.record().unwrap();
+    for _ in 0..64 {
+        rec.dispatch(&kernel, &[&a, &b], &[n, 1], [n / 64, 1, 1])
+            .unwrap();
+    }
+    std::mem::forget(rec.submit().unwrap());
+    // Reading waits for the device instead of racing its writes.
+    assert!(b.to_u32().unwrap().iter().all(|v| *v == 6));
+    drop(a);
+    drop(kernel);
+    drop(b);
+    // The context still works.
+    let c = ctx.buffer_from(&[1u32]).unwrap();
+    assert_eq!(c.to_u32().unwrap(), vec![1]);
 }
 
 #[test]
@@ -170,7 +200,7 @@ fn out_of_bounds_kernel_accesses_are_clamped() {
     rec.dispatch(&kernel, &[&b], &[], [1, 1, 1]).unwrap();
     rec.submit().unwrap().wait().unwrap();
     // naga's Restrict policy clamps the index to the last element.
-    assert_eq!(b.to_u32(), vec![0, 0, 0, 7]);
+    assert_eq!(b.to_u32().unwrap(), vec![0, 0, 0, 7]);
 }
 
 #[test]
@@ -222,5 +252,5 @@ fn runtime_arguments_are_validated() {
     assert_eq!(rec.dispatches(), 0);
     // An unsubmitted recording is simply dropped.
     drop(rec);
-    let _ = b.bytes_mut();
+    b.write(0, &[1u32, 2]).unwrap();
 }

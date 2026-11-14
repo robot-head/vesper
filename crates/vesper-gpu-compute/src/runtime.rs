@@ -7,14 +7,17 @@
 //! Vulkan call goes through `ash`. The safety argument for each block is in
 //! the comment next to it; the invariants it relies on are:
 //!
-//! * every Vulkan object is owned by exactly one Rust value, and each owner
-//!   holds an [`Arc`] of the device, so the device outlives all its objects;
-//! * a [`Recording`] borrows every buffer it binds for its lifetime `'a`, and
-//!   the [`Submission`] it becomes keeps that borrow until the GPU has
-//!   signalled its timeline value, so a buffer cannot be written by the host,
-//!   or freed, while a dispatch can still read it;
-//! * host access to mapped memory happens only through `&Buffer` / `&mut
-//!   Buffer`, which the borrow checker excludes while a submission is live.
+//! * every Vulkan object is owned through an [`Arc`], and each owner holds an
+//!   `Arc` of the device, so the device outlives all its objects;
+//! * a [`Recording`] takes an `Arc` of every buffer and kernel it binds and
+//!   keeps them until its command buffer is freed, which happens only after
+//!   the GPU signalled the submission's timeline value (or never, if the
+//!   [`Submission`] is leaked), so nothing the device may use is freed, even
+//!   after `mem::forget`;
+//! * host access to mapped memory is only by copying ([`Buffer::read`],
+//!   [`Buffer::write`]), under the queue lock, after waiting for the last
+//!   submission that bound the buffer; no reference into mapped memory is
+//!   handed out, so the host never touches memory the device may access.
 //!
 //! Memory is host-visible and host-coherent. On lavapipe all memory is; on a
 //! discrete GPU this would put buffers in system memory, which is correct but
@@ -177,21 +180,27 @@ impl Context {
             .map_err(|e| GpuError::Unavailable(format!("vkCreateInstance failed: {e}")))?;
         match Self::open(entry, instance) {
             Ok(ctx) => Ok(ctx),
-            Err((instance, err)) => {
-                // SAFETY: no child object of `instance` exists on this path.
+            Err((entry, instance, err)) => {
+                // SAFETY: no child object of `instance` exists on this path,
+                // and `entry` (which owns the loaded library the instance's
+                // function pointers point into) is dropped only afterwards.
                 unsafe { instance.destroy_instance(None) };
+                drop(entry);
                 Err(err)
             }
         }
     }
 
     #[allow(clippy::result_large_err)]
-    fn open(entry: ash::Entry, instance: ash::Instance) -> Result<Self, (ash::Instance, GpuError)> {
+    fn open(
+        entry: ash::Entry,
+        instance: ash::Instance,
+    ) -> Result<Self, (ash::Entry, ash::Instance, GpuError)> {
         let wanted = std::env::var("VESPER_GPU_DEVICE").ok();
         // SAFETY: valid instance.
         let physical = match unsafe { instance.enumerate_physical_devices() } {
             Ok(p) => p,
-            Err(e) => return Err((instance, vk_err("vkEnumeratePhysicalDevices")(e))),
+            Err(e) => return Err((entry, instance, vk_err("vkEnumeratePhysicalDevices")(e))),
         };
         let mut chosen = None;
         for pd in physical {
@@ -249,6 +258,7 @@ impl Context {
         }
         let Some((pd, queue_family, info)) = chosen else {
             return Err((
+                entry,
                 instance,
                 GpuError::Unavailable(match wanted {
                     Some(w) => format!("no Vulkan 1.2 compute device whose name contains {w:?}"),
@@ -268,7 +278,7 @@ impl Context {
         // (checked above); the create-info chain lives for the call.
         let device = match unsafe { instance.create_device(pd, &create, None) } {
             Ok(d) => d,
-            Err(e) => return Err((instance, vk_err("vkCreateDevice")(e))),
+            Err(e) => return Err((entry, instance, vk_err("vkCreateDevice")(e))),
         };
         // SAFETY: family `queue_family` with one queue was created above.
         let queue = unsafe { device.get_device_queue(queue_family, 0) };
@@ -284,7 +294,7 @@ impl Context {
             Err(e) => {
                 // SAFETY: no other child of `device` exists yet.
                 unsafe { device.destroy_device(None) };
-                return Err((instance, vk_err("vkCreateSemaphore")(e)));
+                return Err((entry, instance, vk_err("vkCreateSemaphore")(e)));
             }
         };
         Ok(Self {
@@ -377,24 +387,41 @@ impl Context {
 }
 
 /// A host-visible, host-coherent storage buffer, mapped for its lifetime.
+///
+/// Every submission that binds the buffer keeps a reference to its storage
+/// until the GPU has signalled that submission's timeline value, so the
+/// memory stays allocated even if a [`Submission`] is leaked with
+/// `mem::forget`. Host access copies in and out ([`Buffer::read`],
+/// [`Buffer::write`]) and first waits until every submission that bound the
+/// buffer has completed, so the host never reads or writes it while the
+/// device may. No reference into the mapped memory is ever handed out.
 pub struct Buffer {
+    inner: Arc<BufferInner>,
+}
+
+struct BufferInner {
     ctx: Arc<DeviceInner>,
     buffer: vk::Buffer,
     memory: vk::DeviceMemory,
     ptr: *mut u8,
     len: u64,
+    /// Highest timeline value of a submission that bound this buffer.
+    busy_until: AtomicU64,
 }
 
-// SAFETY: the mapped pointer is only dereferenced through `&self`/`&mut self`
-// methods, so Rust's aliasing rules apply to it as to a `Vec<u8>`; the Vulkan
-// handles are plain identifiers usable from any thread.
-unsafe impl Send for Buffer {}
-// SAFETY: see above; shared references only read.
-unsafe impl Sync for Buffer {}
+// SAFETY: the mapped pointer is only dereferenced by `Buffer::read`/`write`,
+// which copy through it after waiting for the device (see `settle`), with
+// `write` requiring `&mut Buffer`; the Vulkan handles are plain identifiers
+// usable from any thread.
+unsafe impl Send for BufferInner {}
+// SAFETY: see above; concurrent `read`s through `&Buffer` only read.
+unsafe impl Sync for BufferInner {}
 
 impl std::fmt::Debug for Buffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Buffer").field("len", &self.len).finish()
+        f.debug_struct("Buffer")
+            .field("len", &self.inner.len)
+            .finish()
     }
 }
 
@@ -465,87 +492,108 @@ impl Buffer {
         // zeroing gives deterministic initial contents.
         unsafe { std::ptr::write_bytes(ptr, 0, len as usize) };
         Ok(Self {
-            ctx: ctx.inner.clone(),
-            buffer,
-            memory,
-            ptr,
-            len,
+            inner: Arc::new(BufferInner {
+                ctx: ctx.inner.clone(),
+                buffer,
+                memory,
+                ptr,
+                len,
+                busy_until: AtomicU64::new(0),
+            }),
         })
     }
 
     /// Size in bytes (a multiple of 4).
     pub fn len(&self) -> u64 {
-        self.len
+        self.inner.len
     }
 
     /// Always false: zero-sized buffers are rejected at creation.
     pub fn is_empty(&self) -> bool {
-        self.len == 0
+        self.inner.len == 0
     }
 
-    /// The mapped contents.
-    pub fn bytes(&self) -> &[u8] {
-        // SAFETY: `ptr` maps `len` bytes for the buffer's lifetime; no
-        // submission can write it while `&self` exists outside a recording
-        // (a live `Submission` borrows the buffer).
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len as usize) }
+    /// Runs `copy` on the mapped pointer once every submission that bound
+    /// this buffer has completed. The queue lock is held throughout, so no
+    /// submission can start between the check and the copy (`submit` marks
+    /// its buffers busy under the same lock before handing work to the
+    /// device).
+    fn with_idle(&self, copy: impl FnOnce(*mut u8)) -> Result<(), GpuError> {
+        let ctx = &self.inner.ctx;
+        let _queue = ctx
+            .queue
+            .lock()
+            .map_err(|_| GpuError::Shape("queue mutex poisoned"))?;
+        let value = self.inner.busy_until.load(Ordering::Acquire);
+        if value != 0 {
+            let semaphores = [ctx.timeline];
+            let values = [value];
+            let info = vk::SemaphoreWaitInfo::default()
+                .semaphores(&semaphores)
+                .values(&values);
+            // SAFETY: a host wait on this device's timeline semaphore for a
+            // value a submission was handed (under this lock); with the
+            // compute-to-host barrier after every dispatch it makes the
+            // device's writes visible to the host.
+            unsafe { ctx.device.wait_semaphores(&info, u64::MAX) }
+                .map_err(vk_err("vkWaitSemaphores"))?;
+        }
+        copy(self.inner.ptr);
+        Ok(())
     }
 
-    /// The mapped contents, writable.
-    pub fn bytes_mut(&mut self) -> &mut [u8] {
-        // SAFETY: as in `bytes`, with exclusive access through `&mut self`.
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.len as usize) }
+    fn range(&self, offset: u64, bytes: usize) -> Result<usize, GpuError> {
+        let start = usize::try_from(offset).map_err(|_| GpuError::Shape("buffer offset"))?;
+        let end = start
+            .checked_add(bytes)
+            .ok_or(GpuError::Shape("buffer range"))?;
+        if end as u64 > self.inner.len {
+            return Err(GpuError::Shape("buffer range"));
+        }
+        Ok(start)
     }
 
-    /// Copies `data` to byte offset `offset`.
+    /// Copies `data` to byte offset `offset`, after waiting for every
+    /// submission that bound this buffer.
     pub fn write<T: bytemuck::Pod>(&mut self, offset: u64, data: &[T]) -> Result<(), GpuError> {
         let src: &[u8] = bytemuck::cast_slice(data);
-        let start = usize::try_from(offset).map_err(|_| GpuError::Shape("buffer offset"))?;
-        let end = start
-            .checked_add(src.len())
-            .ok_or(GpuError::Shape("buffer write range"))?;
-        let dst = self
-            .bytes_mut()
-            .get_mut(start..end)
-            .ok_or(GpuError::Shape("buffer write range"))?;
-        dst.copy_from_slice(src);
-        Ok(())
+        let start = self.range(offset, src.len())?;
+        self.with_idle(|ptr| {
+            // SAFETY: `start + src.len() <= len` bytes are mapped, the
+            // device is done with the buffer and cannot start on it during
+            // the copy (`with_idle`), and `src` is host memory.
+            unsafe { std::ptr::copy_nonoverlapping(src.as_ptr(), ptr.add(start), src.len()) }
+        })
     }
 
-    /// Copies from byte offset `offset` into `out`.
+    /// Copies from byte offset `offset` into `out`, after waiting for every
+    /// submission that bound this buffer.
     pub fn read<T: bytemuck::Pod>(&self, offset: u64, out: &mut [T]) -> Result<(), GpuError> {
         let dst: &mut [u8] = bytemuck::cast_slice_mut(out);
-        let start = usize::try_from(offset).map_err(|_| GpuError::Shape("buffer offset"))?;
-        let end = start
-            .checked_add(dst.len())
-            .ok_or(GpuError::Shape("buffer read range"))?;
-        let src = self
-            .bytes()
-            .get(start..end)
-            .ok_or(GpuError::Shape("buffer read range"))?;
-        dst.copy_from_slice(src);
-        Ok(())
+        let start = self.range(offset, dst.len())?;
+        self.with_idle(|ptr| {
+            // SAFETY: as in `write`; concurrent host reads only read.
+            unsafe { std::ptr::copy_nonoverlapping(ptr.add(start), dst.as_mut_ptr(), dst.len()) }
+        })
     }
 
     /// The whole buffer as `u32` words.
-    pub fn to_u32(&self) -> Vec<u32> {
-        self.bytes()
-            .as_chunks::<4>()
-            .0
-            .iter()
-            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect()
+    pub fn to_u32(&self) -> Result<Vec<u32>, GpuError> {
+        let mut out = vec![0u32; (self.inner.len / 4) as usize];
+        self.read(0, &mut out)?;
+        Ok(out)
     }
 
     fn same_device(&self, ctx: &Context) -> bool {
-        Arc::ptr_eq(&self.ctx, &ctx.inner)
+        Arc::ptr_eq(&self.inner.ctx, &ctx.inner)
     }
 }
 
-impl Drop for Buffer {
+impl Drop for BufferInner {
     fn drop(&mut self) {
-        // SAFETY: a buffer bound into a live submission is borrowed by it, so
-        // it cannot be dropped before the submission completed.
+        // SAFETY: every recording that bound this buffer holds an `Arc` to
+        // it until its submission completed (or was never submitted), so the
+        // device no longer uses it.
         unsafe {
             self.ctx.device.unmap_memory(self.memory);
             self.ctx.device.destroy_buffer(self.buffer, None);
@@ -555,8 +603,13 @@ impl Drop for Buffer {
 }
 
 /// A compute pipeline with `bindings` storage buffers and an optional
-/// immediate block.
+/// immediate block. Submissions that use it keep its pipeline alive until
+/// they complete.
 pub struct Kernel {
+    inner: Arc<KernelInner>,
+}
+
+struct KernelInner {
     ctx: Arc<DeviceInner>,
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
@@ -569,8 +622,8 @@ pub struct Kernel {
 impl std::fmt::Debug for Kernel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Kernel")
-            .field("name", &self.name)
-            .field("bindings", &self.bindings)
+            .field("name", &self.inner.name)
+            .field("bindings", &self.inner.bindings)
             .finish()
     }
 }
@@ -659,24 +712,27 @@ impl Kernel {
             }
         };
         Ok(Self {
-            ctx: ctx.inner.clone(),
-            set_layout,
-            layout,
-            pipeline,
-            bindings,
-            immediate_bytes,
-            name: entry.to_owned(),
+            inner: Arc::new(KernelInner {
+                ctx: ctx.inner.clone(),
+                set_layout,
+                layout,
+                pipeline,
+                bindings,
+                immediate_bytes,
+                name: entry.to_owned(),
+            }),
         })
     }
 
     pub fn name(&self) -> &str {
-        &self.name
+        &self.inner.name
     }
 }
 
-impl Drop for Kernel {
+impl Drop for KernelInner {
     fn drop(&mut self) {
-        // SAFETY: recordings that use this kernel borrow it, so none is live.
+        // SAFETY: every recording that used this kernel holds an `Arc` to it
+        // until its submission completed, so no pending work uses it.
         unsafe {
             self.ctx.device.destroy_pipeline(self.pipeline, None);
             self.ctx.device.destroy_pipeline_layout(self.layout, None);
@@ -695,6 +751,10 @@ struct Commands {
     cmd: vk::CommandBuffer,
     descriptor_pools: Vec<vk::DescriptorPool>,
     sets_left: u32,
+    /// Everything the command buffer references, kept alive until the
+    /// commands are freed (after completion, or never if leaked).
+    buffers: Vec<Arc<BufferInner>>,
+    kernels: Vec<Arc<KernelInner>>,
 }
 
 impl Drop for Commands {
@@ -710,8 +770,9 @@ impl Drop for Commands {
     }
 }
 
-/// A command buffer being recorded. Every buffer and kernel it uses is
-/// borrowed for `'a`. A full compute-to-compute memory barrier follows each
+/// A command buffer being recorded. It keeps a reference to every buffer and
+/// kernel it binds (the `'a` borrows are a convenience, not what memory
+/// safety rests on). A full compute-to-compute memory barrier follows each
 /// dispatch, so dispatches observe their predecessors' writes in order.
 #[must_use = "a recording does nothing until it is submitted"]
 pub struct Recording<'a> {
@@ -736,6 +797,8 @@ impl<'a> Recording<'a> {
             cmd: vk::CommandBuffer::null(),
             descriptor_pools: Vec::new(),
             sets_left: 0,
+            buffers: Vec::new(),
+            kernels: Vec::new(),
         };
         let alloc = vk::CommandBufferAllocateInfo::default()
             .command_pool(pool)
@@ -782,7 +845,7 @@ impl<'a> Recording<'a> {
             .descriptor_pools
             .last()
             .ok_or(GpuError::Shape("descriptor pool"))?;
-        let layouts = [kernel.set_layout];
+        let layouts = [kernel.inner.set_layout];
         let alloc = vk::DescriptorSetAllocateInfo::default()
             .descriptor_pool(pool)
             .set_layouts(&layouts);
@@ -803,17 +866,17 @@ impl<'a> Recording<'a> {
         immediates: &[u32],
         groups: [u32; 3],
     ) -> Result<(), GpuError> {
-        if !Arc::ptr_eq(&kernel.ctx, &self.ctx.inner)
-            || buffers.iter().any(|b| !b.same_device(self.ctx))
+        let k = &kernel.inner;
+        if !Arc::ptr_eq(&k.ctx, &self.ctx.inner) || buffers.iter().any(|b| !b.same_device(self.ctx))
         {
             return Err(GpuError::ForeignObject);
         }
-        if buffers.len() != kernel.bindings as usize {
+        if buffers.len() != k.bindings as usize {
             return Err(GpuError::Shape(
                 "dispatch buffer count differs from the kernel",
             ));
         }
-        if std::mem::size_of_val(immediates) != kernel.immediate_bytes as usize {
+        if std::mem::size_of_val(immediates) != k.immediate_bytes as usize {
             return Err(GpuError::Shape(
                 "dispatch immediates differ from the kernel",
             ));
@@ -829,7 +892,7 @@ impl<'a> Recording<'a> {
             .iter()
             .map(|b| {
                 [vk::DescriptorBufferInfo::default()
-                    .buffer(b.buffer)
+                    .buffer(b.inner.buffer)
                     .offset(0)
                     .range(vk::WHOLE_SIZE)]
             })
@@ -855,15 +918,16 @@ impl<'a> Recording<'a> {
                     | vk::AccessFlags::HOST_READ,
             )];
         // SAFETY: `set` was allocated for `kernel`'s layout and every buffer
-        // is a live storage buffer of this device, borrowed for `'a`; the
-        // command buffer is in the recording state.
+        // is a live storage buffer of this device, kept alive by the `Arc`s
+        // pushed into `self.commands` below; the command buffer is in the
+        // recording state.
         unsafe {
             d.update_descriptor_sets(&writes, &[]);
-            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, kernel.pipeline);
+            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, k.pipeline);
             d.cmd_bind_descriptor_sets(
                 cmd,
                 vk::PipelineBindPoint::COMPUTE,
-                kernel.layout,
+                k.layout,
                 0,
                 &[set],
                 &[],
@@ -871,7 +935,7 @@ impl<'a> Recording<'a> {
             if !immediates.is_empty() {
                 d.cmd_push_constants(
                     cmd,
-                    kernel.layout,
+                    k.layout,
                     vk::ShaderStageFlags::COMPUTE,
                     0,
                     bytemuck::cast_slice(immediates),
@@ -888,6 +952,10 @@ impl<'a> Recording<'a> {
                 &[],
             );
         }
+        self.commands.kernels.push(kernel.inner.clone());
+        self.commands
+            .buffers
+            .extend(buffers.iter().map(|b| b.inner.clone()));
         self.dispatches += 1;
         Ok(())
     }
@@ -924,8 +992,17 @@ impl<'a> Recording<'a> {
         // SAFETY: the queue is externally synchronized by the mutex; the
         // command buffer is executable; wait and signal values increase
         // monotonically because `issued` is only advanced under the mutex.
-        unsafe { d.queue_submit(*queue, &submit, vk::Fence::null()) }
-            .map_err(vk_err("vkQueueSubmit"))?;
+        let submitted = unsafe { d.queue_submit(*queue, &submit, vk::Fence::null()) };
+        if let Err(e) = submitted {
+            // Nothing was handed to the device; the recording's resources
+            // are freed when `self` drops.
+            return Err(vk_err("vkQueueSubmit")(e));
+        }
+        // Marked under the queue lock, before any host copy can observe the
+        // buffer again (`Buffer::with_idle` takes the same lock).
+        for b in &self.commands.buffers {
+            b.busy_until.fetch_max(value, Ordering::AcqRel);
+        }
         inner.issued.store(value, Ordering::Release);
         drop(queue);
         Ok(Submission {
@@ -937,10 +1014,11 @@ impl<'a> Recording<'a> {
     }
 }
 
-/// Work in flight on the queue, identified by its timeline value. It borrows
-/// every buffer the recording bound until [`Submission::wait`] consumes it.
-/// Dropping it without waiting is counted by [`leaked_submissions`] (the drop
-/// still blocks until the GPU is done, so nothing is freed while in use).
+/// Work in flight on the queue, identified by its timeline value. Its only
+/// intended exit is [`Submission::wait`]. Dropping it without waiting is
+/// counted by [`leaked_submissions`] (the drop still blocks until the GPU is
+/// done); `mem::forget` leaks its command buffer and the buffer and kernel
+/// references it holds, which is a leak, never a use after free.
 #[must_use = "a submission must be waited for with Submission::wait"]
 pub struct Submission<'a> {
     ctx: &'a Context,
@@ -986,7 +1064,7 @@ impl Submission<'_> {
     }
 
     /// Blocks until the GPU signals this submission's timeline value, then
-    /// frees its command buffer and descriptor sets and releases the borrows.
+    /// frees its command buffer and descriptor sets and releases its references.
     pub fn wait(mut self) -> Result<Completed, GpuError> {
         let result = self.block();
         if result.is_ok() {

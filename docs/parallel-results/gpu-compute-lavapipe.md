@@ -31,7 +31,7 @@ GPU are deferred**: there is no GPU on the cloud host or the CI runners.
 ### Public API
 
 - `Context::{new, info, buffer, buffer_from, kernel, record, completed_value, issued_value}`, `DeviceInfo` (`is_lavapipe`), `DeviceType`.
-- `Buffer::{len, is_empty, bytes, bytes_mut, write, read, to_u32}`; `Kernel::name`.
+- `Buffer::{len, is_empty, write, read, to_u32}`; `Kernel::name`.
 - `Recording::{dispatch, dispatches, submit}`; `Submission::{value, is_complete, wait}` → `Completed { value }`; `leaked_submissions()`.
 - `shader::{compile_wgsl, Compiled, ShaderError, MAX_SOURCE_BYTES}`.
 - `tensor::{TensorKernels, GpuModel, GpuKvCache, GpuSession, rope_frequencies, leaked_sessions, SOURCES, MAX_ATTENTION_TOKENS, MAX_HEAD_DIM}`.
@@ -41,11 +41,16 @@ GPU are deferred**: there is no GPU on the cloud host or the CI runners.
 ### Obligations
 
 `Submission` and `GpuSession` are non-Clone, non-Copy, `#[must_use]` owners.
-A submission's only exit is `Submission::wait`; it borrows every buffer and
-kernel its recording bound until then, so the host cannot write or free a
-buffer the device may still read. Dropping it unwaited is counted by
-`leaked_submissions()`, and the drop still blocks on the timeline value
-before freeing the command buffer, so nothing is freed while in use. A
+A submission's intended exit is `Submission::wait`. Memory safety does not
+rest on that obligation: each recording holds an `Arc` of every buffer and
+kernel it binds until its command buffer is freed after completion, so a
+submission leaked with `mem::forget` leaks those resources instead of
+freeing them under the device. Host access to a buffer is only by copying
+in or out, under the queue lock, after waiting for the last submission that
+bound it, so the host never reads or writes memory the device may be using
+(both points were review findings on the first push). Dropping a submission
+unwaited is counted by `leaked_submissions()`, and the drop still blocks on
+the timeline value. A
 session's only exit is `GpuKvCache::release`, which returns its pages; a
 release into another cache hands the session back with
 `GpuError::ForeignObject`, and a dropped unreleased session is counted by
@@ -55,7 +60,7 @@ the Vesper source typing rules (linear resources, [T-Let]) are implemented.
 
 ## Tests and evidence
 
-22 integration tests in four files. Device tests call `test_context()`:
+23 integration tests in four files. Device tests call `test_context()`:
 without a Vulkan device they print `GPU unavailable, test not run` and
 return, unless `VESPER_GPU_REQUIRE=1` (set by the new workflow), which turns
 that into a failure, so the differential tests cannot pass vacuously there.
@@ -106,7 +111,7 @@ that into a failure, so the differential tests cannot pass vacuously there.
     same index as the CPU; too many boxes is `CapacityExceeded`; too many
     pairs is `PairOverflow` with `out` cleared; the broadphase is reusable
     afterwards.
-- `tests/runtime.rs` (7):
+- `tests/runtime.rs` (8):
   - Every bundled kernel compiles to SPIR-V (runs everywhere, including the
     Bazel, macOS and Windows jobs, which have no device).
   - No workgroup-memory array carries an `ArrayStride` decoration (see
@@ -117,6 +122,8 @@ that into a failure, so the differential tests cannot pass vacuously there.
   - Two submissions chained without an intermediate wait complete in
     timeline order and the second sees the first's writes.
   - A dropped submission is counted and still completes.
+  - A submission leaked with `mem::forget` keeps its buffers and kernel
+    alive; host reads wait for it; dropping the handles frees nothing in use.
   - A kernel that indexes far past its buffer writes the clamped last
     element (naga `Restrict`), not other memory.
   - Zero-sized and over-limit buffers, out-of-range reads and writes, a
@@ -134,14 +141,17 @@ CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`):
 
 ```sh
 apt-get install mesa-vulkan-drivers vulkan-tools vulkan-validationlayers   # Mesa 25.2.8
-VESPER_GPU_REQUIRE=1 cargo test -p vesper-gpu-compute                       # 22 passed
+VESPER_GPU_REQUIRE=1 cargo test -p vesper-gpu-compute                       # 23 passed
 VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VESPER_GPU_REQUIRE=1 \
-  cargo test -p vesper-gpu-compute -- --test-threads=1                     # 22 passed, 0 validation messages
+  cargo test -p vesper-gpu-compute -- --test-threads=1                     # 23 passed, 0 validation messages
 VK_ICD_FILENAMES=/nonexistent.json cargo test -p vesper-gpu-compute        # device tests report unavailable; compile tests pass
 VK_ICD_FILENAMES=/nonexistent.json VESPER_GPU_REQUIRE=1 cargo test ...     # fails, as intended
 cargo fmt --all -- --check                                                  # pass
 cargo +1.100.0 clippy -p vesper-gpu-compute --locked --all-targets -- -D warnings   # pass
-cargo test --workspace --locked                                             # see the PR for the result
+cargo test --workspace --locked --no-fail-fast                              # this crate passes; failures only in the root
+                                                                            # Lean §42 acceptance tests (no Lean binary here) and
+                                                                            # vesper-loom-build build/cli (host-specific, as in the
+                                                                            # wave-six Tensor report); none touches this crate
 ```
 
 ## Decisions
