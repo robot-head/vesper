@@ -17,17 +17,17 @@ static NEXT_ORIGIN: AtomicU64 = AtomicU64::new(1);
 // uninitialized contents. Supported LE64 targets use this documented ABI.
 #[repr(C)]
 #[derive(Default)]
-struct Attr {
-    event_type: u32,
-    size: u32,
-    config: u64,
-    sample_period: u64,
-    sample_type: u64,
-    read_format: u64,
-    flags: u64,
-    wakeup_events: u32,
-    bp_type: u32,
-    bp_addr: u64,
+pub(crate) struct Attr {
+    pub(crate) event_type: u32,
+    pub(crate) size: u32,
+    pub(crate) config: u64,
+    pub(crate) sample_period: u64,
+    pub(crate) sample_type: u64,
+    pub(crate) read_format: u64,
+    pub(crate) flags: u64,
+    pub(crate) wakeup_events: u32,
+    pub(crate) bp_type: u32,
+    pub(crate) bp_addr: u64,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Counts {
@@ -65,7 +65,7 @@ pub struct Snapshot {
     counts: Counts,
     _thread_bound: PhantomData<Rc<()>>,
 }
-fn os_error(operation: &'static str) -> Unavailable {
+pub(crate) fn os_error(operation: &'static str) -> Unavailable {
     let errno = io::Error::last_os_error().raw_os_error();
     Unavailable {
         reason: if matches!(errno, Some(libc::EACCES | libc::EPERM)) {
@@ -77,7 +77,7 @@ fn os_error(operation: &'static str) -> Unavailable {
         os_error: errno,
     }
 }
-fn identity() -> (libc::pid_t, libc::pid_t) {
+pub(crate) fn identity() -> (libc::pid_t, libc::pid_t) {
     // SAFETY: getpid/gettid have no pointer arguments and return the calling IDs.
     unsafe {
         (
@@ -126,7 +126,7 @@ fn open_event(config: u64, leader: Option<RawFd>) -> Result<OwnedFd, Unavailable
     }
     Ok(owned)
 }
-fn event_id(fd: &OwnedFd) -> Result<u64, Unavailable> {
+pub(crate) fn event_id(fd: &OwnedFd) -> Result<u64, Unavailable> {
     let mut id = 0u64;
     // SAFETY: ID ioctl writes one u64 to a valid aligned output and FD is live.
     if unsafe { libc::ioctl(fd.as_raw_fd(), ID, &mut id) } < 0 {
@@ -219,6 +219,7 @@ fn delta(before: Counts, after: Counts) -> Result<CounterDelta, Unavailable> {
         ));
     }
     Ok(CounterDelta {
+        provider: Provider::LinuxGroupRead,
         cycles,
         instructions,
         enabled,
@@ -226,7 +227,7 @@ fn delta(before: Counts, after: Counts) -> Result<CounterDelta, Unavailable> {
         _thread_bound: PhantomData,
     })
 }
-fn next_origin() -> Result<u64, Unavailable> {
+pub(crate) fn next_origin() -> Result<u64, Unavailable> {
     let mut value = NEXT_ORIGIN.load(Ordering::Relaxed);
     loop {
         let next = value
