@@ -1,10 +1,37 @@
 # Addability foundations and raw reification acceptance (#532)
 
-The ninth fixed `Packet::Addability` specification and required catalog are
-authored. This lane ran direct rustfmt and static byte/source checks only.
-It ran no Cargo or Lean command, genuine matrix, Clippy or Bazel execution.
-The new packet and all eight prior complete matrices remain coordinator
-execution work; this report does not claim they passed.
+All nine genuine fixed matrices passed on source revision
+`0714ae39c83ee107e9fc559d79514e5c7e330fbb`. The coordinator executed the
+harnesses and Lean processes, with at most two concurrent Lean processes.
+This acceptance lane independently checked the actual source catalogs,
+original/projected identities, executable/log hashes and execution receipts
+without running Cargo or Lean.
+
+| Genuine packet | Authored/audited roots | Audit batches | Observed seconds |
+| --- | ---: | --- | ---: |
+| Foundations | 49 | 49 | 139.983 |
+| Construction | 37 | 37 | 138.915 |
+| Order | 64 | 64 | 149.116 |
+| Map | 99 | 99 | 152.172 |
+| Normalize, before subsumption | 131 | 128 + 3 | 179.134 |
+| Normalization, including subsumption | 173 | 128 + 45 | 200.209 |
+| Comparison | 191 | 128 + 63 | 201.356 |
+| Shape | 226 | 128 + 98 | 206.513 |
+| Addability | 179 | 128 + 51 | 182.80 |
+
+The eight prior timings are measured harness-process durations from their
+complete receipt; Addability's timing is the test harness result. Every
+matrix reported one passed test, zero failed and zero ignored tests, including
+all real refusal controls. The unchanged internal whole-matrix limit is 300
+seconds.
+
+Execution uses exact repository Rust test sources compiled directly with
+CI-pinned Rust 1.100.0 and real dependency artifacts. These are neither
+Cargo-built nor Bazel-built test binaries. They call the archived production
+`vesper` CLI built by Bazel 9.3.1 with Rust 1.100.0 at producer revision
+`d6357113e08805064e438498b81a81fa0dcf1122`. The CLI's proof command and
+embedded audit/projection sources are byte-identical to the proof-stack
+parent. The separate build origins are part of the evidence scope.
 
 The fixed IDs are label `lean4lean_addability42`, source module
 `Lean4LeanLevel42.AddabilityFinal`, projection
@@ -120,7 +147,7 @@ artifact controls, changed-source refusal and the forbidden alternate-proof
 control. The source cap of 24, 128-root batching, standard-three axiom policy,
 all other caps and finite 300-second whole-matrix budget are unchanged.
 
-The intended mathematical claims concern the actual prefix-first sorted
+The proved mathematical claims concern the actual prefix-first sorted
 subset test, actual short-circuit `NormLevel.any`, and actual addability.
 Map-any and lookup congruence require no sorting, map WF or physical tree
 equality premise. The unconditional addability witness retains an arbitrary
@@ -141,7 +168,105 @@ completeness work. This packet does not prove feasible completeness,
 fallback unreachability, canonicality, reification correctness on normalized
 maps, reflection of opaque native Level.beq, whole-checker correctness,
 compiler/native equivalence or a successful source campaign. Existing
-implementation-proof audit status is unchanged. Genuine Addability and all
-eight earlier complete matrices, strict targeted Clippy, repository
-formatting, BUILD synchronization, Bazel and final source/object evidence
-remain coordinator integration work.
+implementation-proof audit status is unchanged. All nine completed matrices
+and the observed checks are recorded here. The actual Bazel proof-target
+build is pending separately at this report's commit; no successful Bazel
+proof-target deployment or hosted CI result is claimed.
+
+
+Independent inspection of
+`/tmp/lean4lean-addability42-addability42-evidence.json` and
+`/tmp/lean4lean-addability42-root-addability-v1.log` confirmed the complete
+new packet, including real refusal controls and exact original/projected
+identities. The actual source catalog has 179 public authored roots,
+exactly equal to the audited set: 139 existing roots and forty new roots.
+The new modules contribute nine SortedSubset, six MapAny, eleven Addable
+and fourteen ReifyCycle roots. These are the 38 guarded declarations above
+plus `list_forIn_any_eq` and `addable_eq_toList_any`, both automatically
+included by the unchanged extractor. The imports-only final module adds no
+theorem. An independent inventory of every selected helper source recovered
+exactly the same 179 root names.
+
+The nineteen-module actual transitive closure matches all selected sources
+and 38 original source/object records. Its 649 original constant occurrences
+partition into 633 canonical constants and sixteen matched compiler recursion
+helpers. The complete omission records match the earlier Normalization
+checkpoint exactly. There are zero duplicates and zero alternate-proof
+aliases, exact inventory and constant-info equality, empty extensions and
+IR, successful kernel replay and verified reimport. Logical traversal
+visited 1,695,656 expression nodes. The projection
+`Lean4LeanAddability42Kernel.olean` is 5,984,688 bytes, BLAKE3
+`e33177656ba1fd8f1975a1c004ac5242c475dae293393a17a52dfe1ad2ebc9be`.
+
+The 128- and 51-root audit batches are accepted with status `audited`,
+`kernel_replayed = true`, `cache_eligible = false`, 633 checked constants
+and no forbidden axioms. Each batch's actual theorem axiom union is exactly
+`Classical.choice`, `Quot.sound` and `propext`. The two disjoint batch sets
+cover every authored root, all of which occur in the retained canonical
+partition. Audit artifact filenames, byte counts and BLAKE3 match the exact
+projection. The original module is consistently
+`Lean4LeanLevel42.AddabilityFinal`; evidence records
+`whole_checker_verified = false`.
+
+All original records shared with historical checkpoints match exactly:
+twenty-two with Normalization, twenty-four with Comparison and twenty-eight
+with Shape. All 139 existing roots are present in the earlier Shape catalog.
+The five current new source hashes match the proof authors' final identities.
+The combined immutable original compilation root
+`/tmp/lean4lean-addability42-integration-v1` has a verified 69-file SHA-256
+manifest; its five new source files exactly match the current repository and
+each has a genuine original executable object. This separate compilation
+manifest does not replace the nineteen-module packet evidence.
+
+The build receipt is
+`/tmp/lean4lean-addability42-rust100-harnesses-v1/receipt.json`.
+Independent checks verified the actual compiler version
+`rustc 1.100.0 (0ef1bc386 2026-11-09)`, all nine harness executable/source
+hashes, the shared runner hash and empty successful compile logs. The
+recorded real blake3/serde/serde_json dependency artifacts exist. CLI receipt
+`/tmp/vesper-proof-auditor-bazel-d635-v1/receipt.json` binds both the original
+Bazel output and archive to 150,460,744 identical bytes, SHA-256
+`8ee12bf3d266b6a0f1a47784ed1b5752b574134138d72444f6d14f46a7a31a32`.
+All six logged proof-audit invocations in the new matrix use that archive.
+`src/proof_commands.rs`, `tools/proof-audit/Audit.lean` and
+`tools/resource-model42/KernelSnapshot.lean` match between parent, producer
+and executed source tree. The audit report's `auditor_blake3` identifies the
+embedded Audit.lean text; the CLI executable identity is supplied separately
+by this receipt. No stub or substituted mathematical report is involved.
+
+The cycle result is exact: both empty-accumulator starts fail, feasibility is
+false and lexChain falls back to the original two-name path. Actual
+`toTree.reify` reconstructs `imax (imax b a) b`. At `ρ(a)=0`, `ρ(b)=1`,
+the raw map denotes zero while that level denotes one. WF, strict key and
+variable sorting, nonempty rows and PathPrimed all hold. The formal boundary
+is about this raw map; it does not assert that normalization emits it.
+
+Independent checks are retained in
+`/tmp/lean4lean-addability42-independent-check.json` and
+`/tmp/lean4lean-addability42-independent-build-check.json`. The complete
+prior-eight receipt is
+`/tmp/lean4lean-addability42-prior-matrices-receipt.json`, and its progress
+log ends `ALL EIGHT PRIOR MATRICES PASSED`. Independent checks verified every
+recorded harness and full log SHA-256. For each earlier packet, the complete
+authored/audited catalogs, all original source/object fingerprints, exact
+projected artifact fingerprint, provenance and snapshot-tool identity match
+the corresponding earlier Shape-wave checkpoint. All records shared with
+Addability also match. Every audit is accepted, kernel-replayed,
+cache-ineligible and free of forbidden axioms, with complete root coverage.
+Each packet's actual theorem axiom union is the standard three; individual
+batches use only that allowed set. The final three-root Normalize batch uses
+`propext` alone. No historical fingerprint mismatch or source/CLI association
+defect was found.
+
+Strict Clippy of all nine exact repository test sources passed in 8.295
+seconds under Rust 1.100.0 via a minimal real-dependency package, with
+`--tests -- -D warnings`. This is targeted harness linting, not a claim about
+the whole root package or workspace. The package uses actual serde 1.0.229,
+serde_json 1.0.154 and blake3 1.8.7 dependencies. Its manifest, log and the
+nine repository source paths/hashes were independently checked against
+`/tmp/vesper-addability-ci-clippy-1.100-v1/receipt.json`. Rustfmt 1.100
+`--edition 2024 --check` passed for the new test and common runner; BUILD
+synchronization and whitespace checks passed. These checks do not relabel the
+runtime matrices as Cargo-built or Bazel-built test executions. The archived
+production CLI's successful Bazel build and the separately pending proof
+target build have distinct scopes.
