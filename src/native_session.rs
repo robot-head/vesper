@@ -903,6 +903,8 @@ pub(super) fn compile_session<M: Module>(
             handlers: vec![],
             inline_depth: 0,
             fail_record: None,
+            source_locations: true,
+            srcloc: cranelift_codegen::ir::SourceLoc::default(),
             session: Some(SessionCodegen {
                 ctx: context,
                 park,
@@ -1084,9 +1086,17 @@ pub fn check_data_base_freshness(
     Ok(())
 }
 
-fn isa_flags(pic: bool) -> Result<cranelift_codegen::settings::Flags, String> {
+/// Codegen flags for a session module. DetFloat programs
+/// ([`super::needs_nan_canonicalization`]) get Cranelift's NaN
+/// canonicalisation, as object emission and the JIT do (lane 23, #346).
+fn isa_flags(world: &World, pic: bool) -> Result<cranelift_codegen::settings::Flags, String> {
     use cranelift_codegen::settings::{self, Configurable};
     let mut flags = settings::builder();
+    if super::needs_nan_canonicalization(world) {
+        flags
+            .set("enable_nan_canonicalization", "true")
+            .map_err(|e| e.to_string())?;
+    }
     if !pic {
         flags
             .set("use_colocated_libcalls", "false")
@@ -1123,7 +1133,7 @@ pub fn object(
         cranelift_native::builder().map_err(str::to_string)?
     };
     let isa = builder
-        .finish(isa_flags(true)?)
+        .finish(isa_flags(world, true)?)
         .map_err(|e| e.to_string())?;
     let builder = cranelift_object::ObjectBuilder::new(
         isa,
@@ -1224,7 +1234,7 @@ mod host {
             let plan = plan(world, entry, bindings)?;
             let isa = cranelift_native::builder()
                 .map_err(str::to_string)?
-                .finish(isa_flags(false)?)
+                .finish(isa_flags(world, false)?)
                 .map_err(|e| e.to_string())?;
             let mut builder =
                 cranelift_jit::JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());

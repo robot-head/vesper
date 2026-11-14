@@ -128,6 +128,13 @@ impl NativeBatch {
             .set("use_colocated_libcalls", "false")
             .map_err(|e| e.to_string())?;
         flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+        // DetFloat programs promise bit-identical floats across x86-64 and
+        // AArch64, as in object emission and the JIT (lane 23, #346).
+        if super::needs_nan_canonicalization(world) {
+            flags
+                .set("enable_nan_canonicalization", "true")
+                .map_err(|e| e.to_string())?;
+        }
         let isa = cranelift_native::builder()
             .map_err(str::to_string)?
             .finish(settings::Flags::new(flags))

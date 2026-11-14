@@ -75,9 +75,49 @@ fn signature<M: Module>(m: &M, world: &World, f: &Function) -> Result<ir::Signat
 fn instance_key(name: &str, vars: &BTreeMap<String, Type>) -> String {
     if vars.is_empty() {
         name.into()
+    } else if vars.keys().all(|k| k.starts_with(FN_ARG)) {
+        // A function-value instance: `apply$fn[f=triple]`.
+        let bound = function_arguments(vars)
+            .into_iter()
+            .map(|(p, f)| format!("{p}={f}"))
+            .collect::<Vec<_>>();
+        format!("{name}$fn[{}]", bound.join(","))
     } else {
         format!("{name}${vars:?}")
     }
+}
+/// Instance-variable prefix binding a function-value parameter to a
+/// top-level function ([`function_arguments`]): `"$fn:<param>"` maps to
+/// `Type::Named(<function>, [])`. `$` never starts a generic name, so
+/// substitution ignores these entries.
+const FN_ARG: &str = "$fn:";
+/// The function-value parameters of an instance bound to top-level
+/// functions, `param -> function`.
+fn function_arguments(vars: &BTreeMap<String, Type>) -> BTreeMap<String, String> {
+    vars.iter()
+        .filter_map(|(k, t)| Some((k.strip_prefix(FN_ARG)?.to_string(), t.name().to_string())))
+        .collect()
+}
+/// Whether calls to `f` whose function-value arguments are all top-level
+/// functions get an instance of their own, with those parameters bound at
+/// compile time (lane 23, #346). Only functions whose row is non-empty and
+/// contains only capability effects qualify, so the Stage-5 verifiers can
+/// check a capability function that takes a function value on its own;
+/// every other function taking a function value is still specialized into
+/// its callers, as before.
+fn function_value_instance(world: &World, f: &Function) -> bool {
+    !f.effects.instances.is_empty()
+        && f.effects.tail.is_none()
+        && capability_only(f)
+        && f.generics.is_empty()
+        && !contains_function(world, &f.result)
+        && f.params
+            .iter()
+            .any(|p| matches!(p.ty, Type::Function { .. }))
+        && f.params.iter().all(|p| match &p.ty {
+            Type::Function { .. } => p.pass != Pass::Inout,
+            t => !contains_function(world, t),
+        })
 }
 fn concrete(world: &World, name: &str, vars: &BTreeMap<String, Type>) -> Result<Function, String> {
     let mut f = world
@@ -85,6 +125,11 @@ fn concrete(world: &World, name: &str, vars: &BTreeMap<String, Type>) -> Result<
         .get(name)
         .ok_or_else(|| format!("unknown function '{name}'"))?
         .clone();
+    let bound = function_arguments(vars);
+    if !bound.is_empty() {
+        // Function-value parameters bound at compile time are not passed.
+        f.params.retain(|p| !bound.contains_key(&p.name));
+    }
     for p in &mut f.params {
         p.ty = substitute(&p.ty, vars);
     }
@@ -256,20 +301,61 @@ pub fn closure_capabilities(f: &Function) -> BTreeSet<crate::capability_effects:
 /// handlers it is compiled once with a hidden failure-record pointer: the
 /// callee stores the instance index and error value and returns, and the
 /// caller re-raises through the capability it would have passed.
+///
+/// Capability effects (`ConstTime`, `Realtime`, `DetFloat`) may share the
+/// row (lane 23, #346): they have no operations, so the failure record is
+/// the only capability such a function is passed, and `[Realtime, Fail[E]]`
+/// functions are compiled once like `[Fail[E]]` ones instead of being
+/// specialized into their callers. That is the capability-passing ABI
+/// ([`CAPABILITY_ABI`]); rows without a capability effect compile exactly
+/// as before.
 fn fail_only(world: &World, f: &Function) -> bool {
     f.effects.tail.is_none()
-        && !f.effects.instances.is_empty()
+        && f.effects.instances.iter().any(|e| e.name == "Fail")
+        && f.effects.instances.iter().all(|e| {
+            (e.name == "Fail" && e.label.is_none() && e.args.len() == 1)
+                || (crate::capability_effects::is_capability_effect(&e.name)
+                    && e.label.is_none()
+                    && e.args.is_empty())
+        })
+        && !contains_function(world, &f.result)
+        && !f.params.iter().any(|p| contains_function(world, &p.ty))
+}
+/// The `Fail` instances of a `fail_only` row, in row order: failure-record
+/// tag `k + 1` is the `k`-th of them.
+fn fail_instances(f: &Function) -> impl Iterator<Item = &Effect> {
+    f.effects.instances.iter().filter(|e| e.name == "Fail")
+}
+/// Whether `f` uses the capability-passing ABI: a `fail_only` row that also
+/// names a capability effect.
+fn capability_abi(world: &World, f: &Function) -> bool {
+    fail_only(world, f)
         && f.effects
             .instances
             .iter()
-            .all(|e| e.name == "Fail" && e.label.is_none() && e.args.len() == 1)
-        && !contains_function(world, &f.result)
-        && !f.params.iter().any(|p| contains_function(world, &p.ty))
+            .any(|e| crate::capability_effects::is_capability_effect(&e.name))
+}
+/// Version of the capability-passing ABI. Objects with at least one such
+/// function carry a local data symbol [`CAPABILITY_ABI_SYMBOL`] whose bytes
+/// are this string, a newline, and the symbols compiled with it, one per
+/// line; objects without one are unchanged.
+pub const CAPABILITY_ABI: &str = "vesper.native.capability-abi/1";
+pub const CAPABILITY_ABI_SYMBOL: &str = "__vesper_capability_abi";
+/// Instance keys of `entry`'s program compiled with the capability-passing
+/// ABI (empty for programs without `[Capability, Fail[E]]` rows).
+pub fn capability_abi_functions(world: &World, entry: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for (key, (name, vars)) in instances(world, entry)? {
+        if capability_abi(world, &concrete(world, &name, &vars)?) {
+            out.push(key);
+        }
+    }
+    Ok(out)
 }
 /// Bytes of a failure record: an instance tag followed by the error payload.
 fn fail_record_size(world: &World, f: &Function) -> Result<u32, String> {
     let mut payload = 8;
-    for e in &f.effects.instances {
+    for e in fail_instances(f) {
         payload = payload.max(Layout::of(world, &e.args[0])?.size);
     }
     Ok(8 + payload.div_ceil(8) * 8)
@@ -307,7 +393,7 @@ fn instances(world: &World, entry: &str) -> Result<InstanceMap, String> {
             return Err("native monomorphization exceeds 1024 function instances".into());
         }
         let f = concrete(world, &name, &vars)?;
-        if !specialized_function(world, &f) {
+        if !specialized_function(world, &f) || !function_arguments(&vars).is_empty() {
             result.insert(key, (name.clone(), vars.clone()));
         }
         if let Some(body) = &f.body {
@@ -336,7 +422,38 @@ fn instances(world: &World, entry: &str) -> Result<InstanceMap, String> {
                         _ => None,
                     };
                     if let Some(name) = target {
-                        todo.push((name, call_vars(world, e, &vars)));
+                        let mut instance = call_vars(world, e, &vars);
+                        if let ExprKind::Call { args, .. } = &e.kind
+                            && let Some(callee) = world.functions.get(&name)
+                            && function_value_instance(world, callee)
+                        {
+                            let mut bound = BTreeMap::new();
+                            for (p, a) in callee.params.iter().zip(args) {
+                                if !matches!(p.ty, Type::Function { .. }) {
+                                    continue;
+                                }
+                                match &a.expr.kind {
+                                    ExprKind::Name(n)
+                                        if references.contains(&(
+                                            a.expr.span.start,
+                                            a.expr.span.end,
+                                            n.clone(),
+                                        )) && world.functions[n].generics.is_empty() =>
+                                    {
+                                        bound.insert(
+                                            format!("{FN_ARG}{}", p.name),
+                                            Type::Named(n.clone(), vec![]),
+                                        );
+                                    }
+                                    _ => {
+                                        bound.clear();
+                                        break;
+                                    }
+                                }
+                            }
+                            instance.extend(bound);
+                        }
+                        todo.push((name, instance));
                     }
                 }
             });
@@ -351,6 +468,7 @@ fn compile<M: Module>(
     optimize: bool,
     observer: Option<&mut dyn FnMut(EmittedFunction)>,
     instrument: Option<Instrument<'_>>,
+    options: CodegenOptions,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
     if !entry_fn.effects.instances.is_empty() || entry_fn.effects.tail.is_some() {
@@ -370,8 +488,35 @@ fn compile<M: Module>(
         crate::ir_opt::optimize(world, &mut program)?;
     }
     let ids = declare_instances(m, world, entry, &instances)?;
-    let clif =
-        define_instances_observed(m, world, &instances, &ids, &program, observer, instrument)?;
+    let clif = define_instances_observed(
+        m, world, &instances, &ids, &program, observer, instrument, options,
+    )?;
+    let mut abi = Vec::new();
+    for (key, (name, vars)) in &instances {
+        if capability_abi(world, &concrete(world, name, vars)?) {
+            let id = ids[key];
+            abi.push(
+                m.declarations()
+                    .get_function_decl(id)
+                    .linkage_name(id)
+                    .into_owned(),
+            );
+        }
+    }
+    if !abi.is_empty() {
+        let mut bytes = format!("{CAPABILITY_ABI}\n").into_bytes();
+        for symbol in abi {
+            bytes.extend_from_slice(symbol.as_bytes());
+            bytes.push(b'\n');
+        }
+        let data = m
+            .declare_data(CAPABILITY_ABI_SYMBOL, Linkage::Local, false, false)
+            .map_err(|e| e.to_string())?;
+        let mut description = cranelift_module::DataDescription::new();
+        description.define(bytes.into_boxed_slice());
+        m.define_data(data, &description)
+            .map_err(|e| e.to_string())?;
+    }
     Ok((ids, clif))
 }
 /// Lane-23 instrumentation hook ([`crate::native_coverage`]): rewrites each
@@ -400,6 +545,21 @@ pub struct EmittedFunction {
     /// `(func_id, symbol)` of every function this one references, defined
     /// or imported (for example `fmod`).
     pub callees: Vec<(u32, String)>,
+    /// Generic substitution of this instance (empty for a non-generic
+    /// function). [`EmittedFunction::instance`] applies it.
+    pub vars: BTreeMap<String, Type>,
+}
+impl EmittedFunction {
+    /// The source function with this instance's generic arguments
+    /// substituted into its parameters, result and effects: the concrete
+    /// types whose [`Layout`]s the emitted signature was built from.
+    pub fn instance(&self, world: &World) -> Result<Function, String> {
+        concrete(world, &self.source, &self.vars)
+    }
+    /// Source byte offset of instruction `inst` ([`source_offset`]).
+    pub fn source_offset(&self, inst: ir::Inst) -> Option<usize> {
+        source_offset(&self.function, inst)
+    }
 }
 /// Declare every monomorphized ordinary function. `entry` is exported under
 /// its source name when it is itself an ordinary instance.
@@ -440,7 +600,16 @@ fn define_instances<M: Module>(
     ids: &BTreeMap<String, FuncId>,
     program: &crate::ir::Program,
 ) -> Result<String, String> {
-    define_instances_observed(m, world, instances, ids, program, None, None)
+    define_instances_observed(
+        m,
+        world,
+        instances,
+        ids,
+        program,
+        None,
+        None,
+        CodegenOptions::default(),
+    )
 }
 fn define_instances_observed<M: Module>(
     m: &mut M,
@@ -450,6 +619,7 @@ fn define_instances_observed<M: Module>(
     program: &crate::ir::Program,
     mut observer: Option<&mut dyn FnMut(EmittedFunction)>,
     mut instrument: Option<Instrument<'_>>,
+    options: CodegenOptions,
 ) -> Result<String, String> {
     let mut clif = String::new();
     for (key, (name, generic_vars)) in instances {
@@ -517,18 +687,39 @@ fn define_instances_observed<M: Module>(
                 fail_record: fail_record.map(|record| {
                     (
                         record,
-                        f.effects
-                            .instances
-                            .iter()
-                            .map(|e| e.args[0].clone())
-                            .collect(),
+                        fail_instances(&f).map(|e| e.args[0].clone()).collect(),
                     )
                 }),
                 session: None,
+                source_locations: options.source_locations,
+                srcloc: ir::SourceLoc::default(),
             };
+            c.set_location(f.span.start);
+            // Function-value parameters bound to top-level functions by
+            // this instance: bind each to that function's tag, as an
+            // inlining caller would have.
+            for (param, function) in function_arguments(generic_vars) {
+                let ty = world.functions[name]
+                    .params
+                    .iter()
+                    .find(|p| p.name == param)
+                    .map(|p| substitute(&p.ty, generic_vars))
+                    .ok_or("function-value instance names an unknown parameter")?;
+                let tag = c.function_tag(&function, &ty)?;
+                let var = c.b.declare_var(c.b.func.dfg.value_type(tag));
+                c.def_var(var, tag);
+                c.vars.insert(param.clone(), var);
+                c.local_types.insert(param, ty);
+            }
             if fail_record.is_some() {
+                let mut fails = 0;
                 for (index, effect) in f.effects.instances.iter().enumerate() {
-                    let identity = format!("native-fail-exit:{index}");
+                    if effect.name != "Fail" {
+                        // A capability effect: no operations, no evidence.
+                        continue;
+                    }
+                    let identity = format!("native-fail-exit:{fails}");
+                    fails += 1;
                     c.capabilities
                         .insert(format!("$effect:{}", effect.name), identity.clone());
                     c.capabilities
@@ -584,6 +775,7 @@ fn define_instances_observed<M: Module>(
                 func_id: id.as_u32(),
                 function,
                 callees,
+                vars: generic_vars.clone(),
             });
         }
         m.define_function(ids[key], &mut ctx)
@@ -621,7 +813,15 @@ pub fn jit_with_options(
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.symbol("fmod", native_float_remainder as *const u8);
     let mut m = JITModule::new(builder);
-    let (ids, _) = compile(&mut m, world, entry, optimize, None, None)?;
+    let (ids, _) = compile(
+        &mut m,
+        world,
+        entry,
+        optimize,
+        None,
+        None,
+        CodegenOptions::default(),
+    )?;
     m.finalize_definitions().map_err(|e| e.to_string())?;
     let code = m.get_finalized_function(ids[entry]);
     // SAFETY: compile() verified the signature and entry arity above. The module
@@ -746,11 +946,36 @@ pub fn object_instrumented(
     observer: Option<&mut dyn FnMut(EmittedFunction)>,
     instrument: Option<Instrument<'_>>,
 ) -> Result<(Vec<u8>, String), String> {
+    object_with_codegen_options(
+        world,
+        entry,
+        target,
+        optimize,
+        observer,
+        instrument,
+        CodegenOptions::default(),
+    )
+}
+/// [`object_instrumented`] with explicit [`CodegenOptions`]. The default
+/// options are what every other entry point uses; turning
+/// `source_locations` off is for the identity test that shows locations do
+/// not change object bytes.
+pub fn object_with_codegen_options(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+    instrument: Option<Instrument<'_>>,
+    options: CodegenOptions,
+) -> Result<(Vec<u8>, String), String> {
     let isa = object_isa_for(world, target)?;
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     let mut m = ObjectModule::new(builder);
-    let (_, clif) = compile(&mut m, world, entry, optimize, observer, instrument)?;
+    let (_, clif) = compile(
+        &mut m, world, entry, optimize, observer, instrument, options,
+    )?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
 }
@@ -810,7 +1035,15 @@ impl InstrumentedJit {
             _single_thread: std::marker::PhantomData,
         };
         let m = owned.module.as_mut().expect("owned JIT module");
-        let (ids, _) = compile(m, world, entry, false, None, Some(instrument))?;
+        let (ids, _) = compile(
+            m,
+            world,
+            entry,
+            false,
+            None,
+            Some(instrument),
+            CodegenOptions::default(),
+        )?;
         let sig = signature(m, world, f)?;
         if !sig.params.is_empty()
             || sig.returns.len() != 1
@@ -925,6 +1158,46 @@ struct Codegen<'a, 'b, M: Module> {
     /// Present only while compiling a suspending session entry: external
     /// operations park instead of resolving to a lexical handler.
     session: Option<session::SessionCodegen>,
+    /// Attach source byte offsets to emitted instructions.
+    source_locations: bool,
+    /// The location instructions are currently emitted at.
+    srcloc: ir::SourceLoc,
+}
+/// The Cranelift source location of source byte `offset`. Locations are
+/// byte offsets into the checked module's source; the all-ones value is
+/// Cranelift's "no location", so larger offsets saturate below it.
+fn source_loc(offset: usize) -> ir::SourceLoc {
+    ir::SourceLoc::new(
+        u32::try_from(offset)
+            .unwrap_or(u32::MAX - 1)
+            .min(u32::MAX - 1),
+    )
+}
+/// The source byte offset Cranelift instruction `inst` of `function` was
+/// emitted for, when the backend attached one ([`CodegenOptions`]).
+pub fn source_offset(function: &ir::Function, inst: ir::Inst) -> Option<usize> {
+    if inst.as_u32() as usize >= function.dfg.num_insts() {
+        return None;
+    }
+    let loc = function.srcloc(inst);
+    (!loc.is_default()).then(|| loc.bits() as usize)
+}
+/// Code-generation switches that do not change machine code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CodegenOptions {
+    /// Attach the source byte offset of the Place-IR instruction (or source
+    /// expression) each Cranelift instruction was lowered from as its
+    /// Cranelift `SourceLoc` (lane 23, #346). Locations appear in CLIF text
+    /// as `@xxxx` and in [`EmittedFunction::function`]; object bytes do not
+    /// change, because no debug information is emitted.
+    pub source_locations: bool,
+}
+impl Default for CodegenOptions {
+    fn default() -> Self {
+        Self {
+            source_locations: true,
+        }
+    }
 }
 impl<M: Module> Codegen<'_, '_, M> {
     fn info(&self, value: ir::Value) -> NativeInfo {
@@ -1522,6 +1795,21 @@ impl<M: Module> Codegen<'_, '_, M> {
         sret: Option<ir::Value>,
         return_to: Option<ir::Block>,
     ) -> Result<(), String> {
+        // An inlined graph restores the caller's location when it is done.
+        let saved = self.srcloc;
+        let result = self.ir_graph_at(f, sret, return_to);
+        if return_to.is_some() && self.source_locations {
+            self.srcloc = saved;
+            self.b.set_srcloc(saved);
+        }
+        result
+    }
+    fn ir_graph_at(
+        &mut self,
+        f: &crate::ir::FunctionIr,
+        sret: Option<ir::Value>,
+        return_to: Option<ir::Block>,
+    ) -> Result<(), String> {
         use crate::ir::{Op, Terminator};
         let entry = self
             .b
@@ -1637,6 +1925,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             for inst in &block.instructions {
                 for (id, register) in &registers {
                     values.insert(*id, self.use_var(*register));
+                }
+                if inst.span.end != 0 {
+                    self.set_location(inst.span.start);
                 }
                 let ty = crate::numeric::default_type(&substitute(&inst.ty, &self.generic_vars));
                 let make = |kind| Expr {
@@ -2320,7 +2611,29 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         Ok(result)
     }
+    /// Lower `e` with its source span as the location of the instructions
+    /// it emits ([`CodegenOptions::source_locations`]); the enclosing
+    /// location is restored afterwards, so the rest of the parent's code
+    /// keeps the parent's span. Synthetic expressions (`0..0`) keep the
+    /// enclosing location.
     fn expr(&mut self, e: &Expr) -> Result<ir::Value, String> {
+        if !self.source_locations || e.span.end == 0 {
+            return self.expr_at(e);
+        }
+        let saved = self.srcloc;
+        self.set_location(e.span.start);
+        let result = self.expr_at(e);
+        self.srcloc = saved;
+        self.b.set_srcloc(saved);
+        result
+    }
+    fn set_location(&mut self, offset: usize) {
+        if self.source_locations {
+            self.srcloc = source_loc(offset);
+            self.b.set_srcloc(self.srcloc);
+        }
+    }
+    fn expr_at(&mut self, e: &Expr) -> Result<ir::Value, String> {
         let value = match &e.kind {
             ExprKind::Literal(l) => match l {
                 Literal::Int(n) => self.b.ins().iconst(types::I64, *n as i64),
@@ -3026,7 +3339,7 @@ impl<M: Module> Codegen<'_, '_, M> {
             .b
             .ins()
             .load(types::I64, ir::MemFlags::new(), record, 0);
-        for (index, effect) in f.effects.instances.iter().enumerate() {
+        for (index, effect) in fail_instances(f).enumerate() {
             let failed = self.b.ins().icmp_imm(IntCC::Equal, tag, index as i64 + 1);
             let bad = self.b.create_block();
             let good = self.b.create_block();
@@ -3199,6 +3512,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                 values.push(self.expr(&arg.expr)?);
             }
         }
+        let bound = self.bound_function_arguments(name, &f, &vars, &values);
+        let (f, vars, mut values) = match bound {
+            Some((vars, values)) => (concrete(self.world, name, &vars)?, vars, values),
+            None => (f, vars, values),
+        };
         let result = if specialized_function(self.world, &f) {
             if self.inline_depth >= 64 {
                 return Err("recursive effect specialization exceeds 64 inline frames".into());
@@ -3320,6 +3638,49 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
         }
         Ok(result)
+    }
+    /// When `name` takes function values ([`function_value_instance`]) and
+    /// every function-value argument of this call is statically one
+    /// top-level function, the instance with those parameters bound and the
+    /// remaining argument values, provided the instance was declared.
+    #[allow(clippy::type_complexity)]
+    fn bound_function_arguments(
+        &self,
+        name: &str,
+        f: &Function,
+        vars: &BTreeMap<String, Type>,
+        values: &[ir::Value],
+    ) -> Option<(BTreeMap<String, Type>, Vec<ir::Value>)> {
+        let source = self.world.functions.get(name)?;
+        if !function_value_instance(self.world, source) || f.params.len() != values.len() {
+            return None;
+        }
+        let mut bound = vars.clone();
+        let mut rest = Vec::new();
+        for (p, v) in f.params.iter().zip(values) {
+            if !matches!(p.ty, Type::Function { .. }) {
+                rest.push(*v);
+                continue;
+            }
+            let info = self.info(*v);
+            let [id] = info.targets.iter().copied().collect::<Vec<_>>()[..] else {
+                return None;
+            };
+            let closure = self.closures.get(id.checked_sub(1)?)?;
+            let ClosureTarget::Function(function) = &closure.target else {
+                return None;
+            };
+            if !closure.captures.is_empty() {
+                return None;
+            }
+            bound.insert(
+                format!("{FN_ARG}{}", p.name),
+                Type::Named(function.clone(), vec![]),
+            );
+        }
+        self.ids
+            .contains_key(&instance_key(name, &bound))
+            .then_some((bound, rest))
     }
     /// Abort the current `fail_only` function: record the raised instance and
     /// error value for the caller, then return a placeholder result.
