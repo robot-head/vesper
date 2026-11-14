@@ -7,4 +7,11 @@ publish = false
 
 [dependencies]
 vesper-ffi = { path = "../vesper-ffi" }
+vesper-simpulse = { path = "../vesper-simpulse" }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "async", "runtime", "std", "wat", "stack-switching", "gc", "gc-null"] }
+# The parser Wasmtime's own bindgen uses; same version as the lockfile.
+wit-parser = { version = "=0.261.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+vesper-fmt = { path = "../vesper-fmt" }
+vesper-syntax = { path = "../vesper-syntax" }

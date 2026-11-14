@@ -1,0 +1,30 @@
+// Linear payloads are moved out with take; the newest one gives its bytes back.
+linear struct Ticket {
+    id: i64,
+    weight: i64,
+}
+
+fn main() -> u64 {
+    region r(256) {
+        let keep = r.box(5);
+        let t = r
+            .box(
+            Ticket {
+                id: 9,
+                weight: 3
+            }
+        );
+        let before = r.used();
+        let Ticket {
+            id,
+            weight
+        }
+        = r.take(t);
+        let after = r.used();
+        if before == 24 && after == 8 && wrapping_add(wrapping_add(id, weight), r.get(keep)) == 17 {
+            after
+        } else {
+            0
+        }
+    }
+}

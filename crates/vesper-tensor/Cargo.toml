@@ -5,3 +5,7 @@ edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Bounded host tensor planning, paged KV cache and greedy CPU inference for small Llama-architecture models"
+
+[dependencies]
+# Already in Cargo.lock (cranelift-jit uses it); read-only weight mapping.
+memmap2 = "=0.2.3"

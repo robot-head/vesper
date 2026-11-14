@@ -15,6 +15,13 @@
 | `vesper-edge-cases.dts` / `.dtb` | Hand-written: implicit interrupt parent, disabled bus, versioned `riscv,isa` extension; compiled with `dtc` 1.7.0 |
 | `vesper-nexus-ranges.dts` / `.dtb` | Hand-written: a masked two-cell interrupt nexus chained to a second nexus, nested non-identity `ranges`, a 3-address-cell bus, a CLINT, `riscv,isa-extensions` and dynamic `/reserved-memory`; compiled with `dtc` 1.7.0 (its unit-name warnings are expected) |
 | `vesper-nexus-loop.dts` / `.dtb` | Hand-written: a nexus that maps to itself |
+| `qemu-riscv64-virt-aplic.dtb` | Same QEMU: `qemu-system-riscv64 -machine virt,aia=aplic,dumpdtb=out.dtb -smp 2 -m 256M -nographic` (APLIC M and S domains in direct mode), compacted with `dtc -I dtb -O dtb` |
+| `qemu-riscv64-virt-aplic-imsic.dtb` | Same QEMU: `-machine virt,aia=aplic-imsic,dumpdtb=out.dtb -smp 2 -m 256M -nographic` (APLIC domains in MSI mode with M and S IMSIC files), compacted the same way; `.dts` is the listing |
+| `qemu-riscv64-virt-aplic-imsic-guests.dtb` | Same QEMU: `-machine virt,aia=aplic-imsic,aia-guests=2,dumpdtb=out.dtb -smp 4 -m 256M -nographic` (two guest interrupt files per hart), compacted |
+| `qemu-riscv64-virt-2socket.dtb` | Same QEMU: `-machine virt,dumpdtb=out.dtb -m 512M -smp 4,sockets=2,cores=2 -numa node,cpus=0-1,memdev=m0 -numa node,cpus=2-3,memdev=m1 -object memory-backend-ram,id=m0,size=256M -object memory-backend-ram,id=m1,size=256M -nographic` (one PLIC per socket), compacted |
+| `qemu-riscv64-virt-aia-2socket.dtb` | The same two-socket command with `virt,aia=aplic-imsic` (one APLIC pair per socket, IMSIC group bits), compacted |
+| `sun20i-d1-nezha.dtb` | Allwinner D1 Nezha (T-Head C906 PLIC with two-cell edge/level specifiers), same Ubuntu package, `allwinner/` (`GPL-2.0 OR MIT`). Unmodified. |
+| `vesper-aia-edge.dts` / `.dtb` | Hand-written: a two-cell T-Head-style PLIC with edge and level sources, a second PLIC, an `interrupt-map-pass-thru` nexus, nested `dma-ranges` and a SiFive cache controller without the JH7100 flush; compiled with `dtc` 1.7.0 |
 
 The `.dts` files next to the QEMU blobs are `dtc -I dtb -O dts` listings,
 kept only so a reader can see what the tests assert; the tests read the
@@ -37,7 +44,26 @@ d739d475201acd6419fae1e198952d3f024a0bae979feafb411e61a35e515d21  vesper-rv-boar
 f5221222fed7af14cc61ec31cdcc9e35c9a0700dd545e26038b7270c68fd55a9  vesper-edge-cases.dtb
 dc2b2c090961759936e877a782832f6bf422b060cb182cf90ab2fe0979f6d054  vesper-nexus-ranges.dtb
 a5750222501ed81ce42bf76f0ea9160b89ea9cc8f098e3685d439ce60c0166f6  vesper-nexus-loop.dtb
+80464eb2d955ab35c09b503b8b5d2c749ba1b133bb8354cef43d03c7f2414fa1  qemu-riscv64-virt-aplic.dtb
+056159dcf88a53564159b8c3875245432ba2831fe05e5fb53246a170d9290ce6  qemu-riscv64-virt-aplic-imsic.dtb
+650a421a5bcbe18d3ea4880b6be559d194bc4d271d5fb163816d60059aa1550d  qemu-riscv64-virt-aplic-imsic-guests.dtb
+afe0d68f2d601196ea686a2749ae66816c1751f863d8901a75afe8cfd0ef43d4  qemu-riscv64-virt-2socket.dtb
+283674439d5e47a12f49bbc12c0f30989db8d5b6f692ec99a77ca43f81642238  qemu-riscv64-virt-aia-2socket.dtb
+828a3637480ed073543399da0a493d8c65e3c256bee9969a5cf8bba7ebcce709  sun20i-d1-nezha.dtb
+7a1d5241aeebba85b868bd26b4493656073242f8da26f0b76ea23e3e6abc7ae1  vesper-aia-edge.dtb
 ```
 
 The full package SHA-256 is
 `c526043b37bcc8871b141b0a90196c4470b70a3e04a57cf7169a152b975477b6`.
+
+## `../qemu/`
+
+`aia-probe.S` is a bare-metal M-mode op interpreter that `tests/aia_qemu.rs`
+runs on `qemu-system-riscv64 -machine virt,aia=... -smp 2 -m 256M -bios none`
+to read the APLIC/IMSIC state QEMU produces for the same operations the model
+runs. `aia-probe.elf` (SHA-256
+`f7d495ce6e7aa3e8a2de18c82e8411a0920ebd755fbf0a3053a70e99362116bd`) is built
+from it with clang 18 and ld.lld 18 as its header says. The test compares
+against recorded QEMU 8.2.2 output always, and against a live QEMU when
+`qemu-system-riscv64` is on `PATH` (or `VESPER_QEMU_RISCV64` names it;
+`VESPER_REQUIRE_QEMU=1` makes its absence a failure).

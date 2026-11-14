@@ -161,22 +161,11 @@ fn main() -> i64 {
 
 #[test]
 fn linear_payloads_are_moved_out_with_take() {
-    // The evaluator runs aggregate payloads; native payloads are words.
+    // Aggregate payloads run natively too (wave eight): a linear struct is
+    // stored as its native layout and moved out word by word.
     let source = "linear struct Token { v: i64 }
 fn main() -> i64 { region r { let t = r.box(Token { v: 5 }); let Token { v } = r.take(t); v } }";
-    let world = accepted(source);
-    assert_eq!(
-        Runtime::new(&world)
-            .run("main", vec![])
-            .unwrap()
-            .to_string(),
-        "5"
-    );
-    let error = native::jit(&world, "main").unwrap_err();
-    assert!(
-        error.contains("native region payloads must be machine words"),
-        "{error}"
-    );
+    assert_eq!(both(source), "5");
 }
 
 #[test]
@@ -193,10 +182,14 @@ fn region_bounds_are_enforced_at_run_time() {
 }
 
 #[test]
-fn native_object_output_is_a_typed_error() {
+fn native_object_output_carries_the_region_runtime() {
+    // Object output defines the region runtime itself (wave eight), so it
+    // needs only the C library at link time.
     let world = accepted("fn main() -> i64 { region r { let a = r.box(1); r.get(a) } }");
-    let error = native::object(&world, "main").unwrap_err();
-    assert!(error.contains("needs a region runtime library"), "{error}");
+    let (bytes, _) = native::object(&world, "main").unwrap();
+    let names = String::from_utf8_lossy(&bytes);
+    assert!(names.contains("vesper_region_open"), "runtime symbols");
+    assert!(names.contains("malloc"), "C library import");
 }
 
 #[test]

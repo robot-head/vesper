@@ -2,9 +2,10 @@
 //!
 //! The native backend lowers a region block to `vesper_region_open` on entry
 //! and `vesper_region_close` on every normal exit, and each region operation
-//! to one call below. Payloads are single machine words (integers, `bool`,
-//! `Unit`, and `f64` bit patterns); the words themselves live in a
-//! [`vesper_alloc::Region`] owned by a per-thread table. No call is `unsafe`:
+//! to calls below. A payload is its native layout, moved word by word
+//! (`vesper_region_alloc`, then `vesper_region_store` per word; reads with
+//! `vesper_region_load`); the bytes live in a [`vesper_alloc::Region`] owned
+//! by a per-thread table. No call is `unsafe`:
 //! handles are table indices checked by the allocator, never raw pointers.
 //!
 //! A failing call (exhausted bound, stale handle) records a [`RegionFault`]
@@ -16,7 +17,7 @@ use std::cell::RefCell;
 
 #[derive(Default)]
 struct Native {
-    regions: Regions<i64>,
+    regions: Regions<()>,
     next: u64,
     fault: Option<RegionFault>,
     /// Regions opened and closed by executions already finished.
@@ -43,14 +44,16 @@ fn with<R: Default>(f: impl FnOnce(&mut Native) -> Result<R, RegionFault>) -> R 
 }
 
 /// Symbols the native backend imports, with their addresses for the JIT.
+/// AOT executables define the same symbols in generated code
+/// (`src/regions/aot_runtime.rs`).
 pub fn symbols() -> [(&'static str, *const u8); 10] {
     [
         ("vesper_region_open", vesper_region_open as *const u8),
         ("vesper_region_close", vesper_region_close as *const u8),
-        ("vesper_region_box", vesper_region_box as *const u8),
-        ("vesper_region_get", vesper_region_get as *const u8),
-        ("vesper_region_set", vesper_region_set as *const u8),
-        ("vesper_region_take", vesper_region_take as *const u8),
+        ("vesper_region_alloc", vesper_region_alloc as *const u8),
+        ("vesper_region_load", vesper_region_load as *const u8),
+        ("vesper_region_store", vesper_region_store as *const u8),
+        ("vesper_region_release", vesper_region_release as *const u8),
         (
             "vesper_region_checkpoint",
             vesper_region_checkpoint as *const u8,
@@ -76,17 +79,25 @@ pub extern "C" fn vesper_region_open(capacity: u64) -> u64 {
 pub extern "C" fn vesper_region_close(id: u64) -> u64 {
     with(|n| n.regions.close(id).map(|()| 0))
 }
-pub extern "C" fn vesper_region_box(id: u64, word: i64) -> u64 {
-    with(|n| n.regions.alloc(id, word, false))
+/// Allocates a zeroed payload of `size` bytes (rounded to whole words).
+pub extern "C" fn vesper_region_alloc(id: u64, size: u64) -> u64 {
+    with(|n| {
+        let size = usize::try_from(size)
+            .map_err(|_| RegionFault::Exhausted("payload exceeds the address space".into()))?;
+        n.regions.alloc(id, size, None)
+    })
 }
-pub extern "C" fn vesper_region_get(id: u64, handle: u64) -> i64 {
-    with(|n| n.regions.get(id, handle).copied())
+/// Word `index` of a payload.
+pub extern "C" fn vesper_region_load(id: u64, handle: u64, index: u64) -> u64 {
+    with(|n| n.regions.load(id, handle, index))
 }
-pub extern "C" fn vesper_region_set(id: u64, handle: u64, word: i64) -> u64 {
-    with(|n| n.regions.set(id, handle, word).map(|()| 0))
+/// Writes word `index` of a payload.
+pub extern "C" fn vesper_region_store(id: u64, handle: u64, index: u64, word: u64) -> u64 {
+    with(|n| n.regions.store(id, handle, index, word).map(|()| 0))
 }
-pub extern "C" fn vesper_region_take(id: u64, handle: u64) -> i64 {
-    with(|n| n.regions.take(id, handle))
+/// Releases a payload moved out by `take`.
+pub extern "C" fn vesper_region_release(id: u64, handle: u64) -> u64 {
+    with(|n| n.regions.take(id, handle).map(|_| 0))
 }
 pub extern "C" fn vesper_region_checkpoint(id: u64) -> u64 {
     with(|n| n.regions.checkpoint(id))
