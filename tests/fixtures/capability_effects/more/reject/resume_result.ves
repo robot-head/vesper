@@ -1,0 +1,35 @@
+// expect: E0702
+// Calling the continuation returns the handled computation's result: when
+// that is secret, so is what `resume` returns in the clause.
+copy struct Secret[T] {
+    value: T,
+}
+
+linear effect Tick {
+    fn tick() -> u64;
+}
+
+fn run(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    let r = handle Tick in {
+        wrapping_add(value, Tick::tick())
+    } with {
+        return v => v,
+        tick(resume) => {
+            let after = resume(1);
+            if after == 0 {
+                0
+            } else {
+                after
+            }
+        },
+    };
+    s
+}
+
+fn main() -> u64 {
+    0
+}

@@ -1,0 +1,14 @@
+linear effect Ask {
+    fn ask() -> i64;
+}
+fn main() -> i64 {
+    handle Ask in {
+        Ask::ask()
+    } with {
+        return x => x,
+        ask(k) => {
+            let j = k;
+            j(7)
+        },
+    }
+}

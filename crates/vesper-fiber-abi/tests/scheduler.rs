@@ -1,16 +1,19 @@
 //! Native fibers scheduled by the unmodified `vesper_pulse` scheduler.
-#![cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+//!
+//! Runs on every direct-fiber target (Linux x86_64/AArch64, macOS AArch64,
+//! Windows x86_64); kernel round trips use whichever `vesper_pulse` driver
+//! the host starts (`select::open`).
+#![cfg(vesper_direct_fibers)]
 use std::fs::File;
 use std::io::{self, Write};
 use vesper_fiber_abi::abi::exit;
 use vesper_fiber_abi::evidence::EvidenceRegistry;
 use vesper_fiber_abi::prototype::{self, JitPrototype, OptLevel};
 use vesper_fiber_abi::pulse::{Completed, NativeTask};
-use vesper_pulse::io_driver::{IoDriver, Request};
+use vesper_pulse::driver::DriverKind;
+use vesper_pulse::io_driver::Request;
 use vesper_pulse::scheduler::{Driver, Finished, PollError, Scheduler};
+use vesper_pulse::select::{self, AnyDriver, Preference};
 
 /// Local fixture driver: completes reads with a fixed payload, or an error.
 struct FixtureDriver {
@@ -57,7 +60,7 @@ impl Driver<NativeTask> for FixtureDriver {
             .drain(..)
             .map(|mut request| {
                 let result = if self.cancelled {
-                    Err(io::Error::from_raw_os_error(125))
+                    Err(vesper_pulse::driver::cancelled_error())
                 } else if let Some(code) = self.error {
                     Err(io::Error::from_raw_os_error(code))
                 } else {
@@ -79,7 +82,7 @@ impl Driver<NativeTask> for FixtureDriver {
 }
 
 fn dev_null() -> File {
-    File::open("/dev/null").unwrap()
+    vesper_fiber_abi::pulse::null_file().unwrap()
 }
 
 fn drain<D: Driver<NativeTask>>(s: &mut Scheduler<NativeTask, D>) -> (Vec<Completed>, Vec<String>) {
@@ -235,7 +238,13 @@ fn cancellation_resumes_each_parked_fiber_exactly_once() {
         assert_eq!(c.result, 1);
     }
     assert_eq!(failed.len(), 1);
-    assert!(failed[0].contains("code 125"), "{failed:?}");
+    assert!(
+        failed[0].contains(&format!(
+            "code {}",
+            vesper_fiber_abi::pulse::cancelled_code()
+        )),
+        "{failed:?}"
+    );
     assert_eq!(unsafe { *clock_calls }, 3);
 }
 
@@ -256,15 +265,26 @@ fn unstarted_fiber_cancelled_in_queue_never_runs() {
     assert_eq!(unsafe { *clock_calls }, 0);
 }
 
-#[test]
-fn kernel_io_uring_round_trip_or_reported_unavailable() {
-    let driver = match IoDriver::<NativeTask>::new(8) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("io_uring unavailable on this host ({e}); kernel round trip NOT validated");
-            return;
+/// Every Pulse driver this host can start (io_uring and epoll on Linux,
+/// kqueue on macOS, IOCP on Windows); unavailable ones are reported.
+fn host_drivers() -> Vec<(DriverKind, AnyDriver<NativeTask>)> {
+    let mut out = vec![];
+    for &kind in select::host_order() {
+        match AnyDriver::start(kind, 8) {
+            Ok(d) => out.push((kind, d)),
+            Err(e) => eprintln!("{kind} unavailable on this host ({e}); NOT validated"),
         }
-    };
+    }
+    // `select::open` picks the first of these; it must start on every host
+    // the fibers support.
+    let (_, report) = select::open::<NativeTask>(8, Preference::Auto).unwrap();
+    eprintln!("{report}");
+    assert!(!out.is_empty(), "no Pulse driver started");
+    out
+}
+
+#[test]
+fn kernel_round_trip_on_every_host_driver() {
     let dir = std::env::temp_dir().join(format!("vesper-fiber-abi-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("payload");
@@ -275,17 +295,35 @@ fn kernel_io_uring_round_trip_or_reported_unavailable() {
     let jit = JitPrototype::new(OptLevel::Speed).unwrap();
     let mut registry = EvidenceRegistry::new();
     let (evidence, _) = prototype::pulse_read_evidence(&mut registry).unwrap();
-    let mut s = Scheduler::new(driver);
-    s.spawn(NativeTask::new(
-        jit.spawn_pulse_read(4, evidence).unwrap(),
-        Some(File::open(&path).unwrap()),
-    ));
-    let (done, failed) = drain(&mut s);
-    assert!(failed.is_empty(), "{failed:?}");
-    assert_eq!(
-        done[0].result,
-        prototype::expected_pulse_read(4, 1001, &[2, 7, 1, 8, 2, 8, 1, 8])
-    );
-    eprintln!("io_uring kernel round trip validated");
+    // The shared Clock handler counts every call across drivers.
+    let mut now = 1000;
+    for (kind, driver) in host_drivers() {
+        now += 2;
+        let mut s = Scheduler::new(driver);
+        s.spawn(NativeTask::new(
+            jit.spawn_pulse_read(4, evidence.clone()).unwrap(),
+            Some(File::open(&path).unwrap()),
+        ));
+        let (done, failed) = drain(&mut s);
+        assert!(failed.is_empty(), "{kind}: {failed:?}");
+        assert_eq!(
+            done[0].result,
+            prototype::expected_pulse_read(4, now - 1, &[2, 7, 1, 8, 2, 8, 1, 8]),
+            "{kind}"
+        );
+        // The null file reads as end of file on every driver.
+        s.spawn(NativeTask::new(
+            jit.spawn_pulse_read(4, evidence.clone()).unwrap(),
+            Some(dev_null()),
+        ));
+        let (done, failed) = drain(&mut s);
+        assert!(failed.is_empty(), "{kind}: {failed:?}");
+        assert_eq!(
+            done[0].result,
+            prototype::expected_pulse_read(4, now, &[]),
+            "{kind}"
+        );
+        eprintln!("{kind} kernel round trip validated");
+    }
     let _ = std::fs::remove_dir_all(dir);
 }

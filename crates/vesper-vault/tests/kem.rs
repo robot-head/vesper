@@ -5,8 +5,8 @@ use ml_kem::{Decapsulate, KeyExport, MlKem768};
 use shake::Shake128;
 use shake::{ExtendableOutput, Update, XofReader};
 use vesper_vault::kem::{
-    CLIENT_SHARE_LEN, HybridClientSecret, KemError, MLKEM768_CT_LEN, MLKEM768_EK_LEN,
-    SERVER_SHARE_LEN, server_encapsulate_for_testing,
+    CLIENT_SHARE_LEN, HybridClientSecret, KemError, KemIsa, MLKEM768_CT_LEN, MLKEM768_EK_LEN,
+    SERVER_SHARE_LEN, server_encapsulate_for_testing, server_encapsulate_for_testing_on,
 };
 use vesper_vault::{LeakAuditor, LockPolicy, ObligationKind, SystemRng, server_encapsulate};
 
@@ -55,13 +55,7 @@ fn x25519_half_matches_rfc7748() {
     let _ = server_ss.shred();
 }
 
-/// The C2SP/Go "accumulated" ML-KEM-768 vectors (crypto/mlkem TestAccumulated):
-/// seeds, messages and random ciphertexts are drawn from SHAKE128(""), every
-/// output is absorbed into a second SHAKE128, and the 32-byte digest is
-/// compared with the published value. 100 iterations by default (Go's
-/// -short value); set VAULT_MLKEM_ACCUMULATED=10000 for the full vector.
-#[test]
-fn mlkem768_matches_accumulated_vectors() {
+fn accumulated_iterations() -> (usize, &'static str) {
     let n: usize = std::env::var("VAULT_MLKEM_ACCUMULATED")
         .ok()
         .and_then(|v| v.parse().ok())
@@ -71,6 +65,57 @@ fn mlkem768_matches_accumulated_vectors() {
         10000 => "8a518cc63da366322a8e7a818c7a0d63483cb3528d34a4cf42f35d5ad73f22fc",
         other => panic!("no published accumulated value for {other} iterations"),
     };
+    (n, expected)
+}
+
+/// The C2SP/Go "accumulated" ML-KEM-768 vectors (crypto/mlkem TestAccumulated)
+/// through Vault's own ML-KEM entry points, once per backend this CPU runs
+/// (libcrux portable plus AVX2 on x86-64 or NEON on AArch64): seeds,
+/// messages and random ciphertexts are drawn from SHAKE128(""), every output
+/// is absorbed into a second SHAKE128, and the 32-byte digest is compared
+/// with the published value. 100 iterations by default (Go's -short value);
+/// set VAULT_MLKEM_ACCUMULATED=10000 for the full vector.
+#[test]
+fn mlkem768_matches_accumulated_vectors_on_every_backend() {
+    let (n, expected) = accumulated_iterations();
+    let backends: Vec<KemIsa> = KemIsa::available().collect();
+    assert!(backends.contains(&KemIsa::Portable));
+    if cfg!(target_arch = "aarch64") {
+        assert!(
+            backends.contains(&KemIsa::Neon),
+            "NEON is baseline on AArch64"
+        );
+    }
+    for isa in backends {
+        let mut s = Shake128::default().finalize_xof();
+        let mut o = Shake128::default();
+        for _ in 0..n {
+            let mut seed = [0u8; 64];
+            s.read(&mut seed);
+            let ek = isa.mlkem768_encapsulation_key_for_testing(&seed).unwrap();
+            o.update(&ek);
+            let mut msg = [0u8; 32];
+            s.read(&mut msg);
+            let (ct, k) = isa.mlkem768_encapsulate_for_testing(&ek, &msg).unwrap();
+            o.update(&ct);
+            o.update(&k);
+            assert_eq!(isa.mlkem768_decapsulate_for_testing(&seed, &ct).unwrap(), k);
+            let mut ct1 = [0u8; MLKEM768_CT_LEN];
+            s.read(&mut ct1);
+            let k1 = isa.mlkem768_decapsulate_for_testing(&seed, &ct1).unwrap();
+            o.update(&k1);
+        }
+        let mut digest = [0u8; 32];
+        o.finalize_xof().read(&mut digest);
+        assert_eq!(to_hex(&digest), expected, "backend {}", isa.name());
+    }
+}
+
+/// The same accumulated vectors through RustCrypto `ml-kem`, an independent
+/// implementation, so a regression in either library is caught.
+#[test]
+fn rustcrypto_reference_matches_accumulated_vectors() {
+    let (n, expected) = accumulated_iterations();
     let mut s = Shake128::default().finalize_xof();
     let mut o = Shake128::default();
     for _ in 0..n {
@@ -93,6 +138,106 @@ fn mlkem768_matches_accumulated_vectors() {
     let mut digest = [0u8; 32];
     o.finalize_xof().read(&mut digest);
     assert_eq!(to_hex(&digest), expected);
+}
+
+/// Every available backend agrees byte for byte with RustCrypto `ml-kem` on
+/// random seeds and messages, and full hybrid exchanges interoperate across
+/// backends (client on one ISA, server on another).
+#[test]
+fn backends_agree_with_each_other_and_with_rustcrypto() {
+    let backends: Vec<KemIsa> = KemIsa::available().collect();
+    let mut s = Shake128::default();
+    s.update(b"vault cross-backend");
+    let mut s = s.finalize_xof();
+    for _ in 0..16 {
+        let mut seed = [0u8; 64];
+        s.read(&mut seed);
+        let mut m = [0u8; 32];
+        s.read(&mut m);
+        let dk = ml_kem::DecapsulationKey::<MlKem768>::from_seed(seed.into());
+        let (ref_ct, ref_k) = dk.encapsulation_key().encapsulate_deterministic(&m.into());
+        let ref_ek = dk.encapsulation_key().to_bytes();
+        for &isa in &backends {
+            let ek = isa.mlkem768_encapsulation_key_for_testing(&seed).unwrap();
+            assert_eq!(&ek[..], ref_ek.as_slice(), "{}", isa.name());
+            let (ct, k) = isa.mlkem768_encapsulate_for_testing(&ek, &m).unwrap();
+            assert_eq!(&ct[..], ref_ct.as_slice(), "{}", isa.name());
+            assert_eq!(&k[..], ref_k.as_slice(), "{}", isa.name());
+        }
+    }
+    let mut x = [0u8; 32];
+    for &client_isa in &backends {
+        for &server_isa in &backends {
+            let mut seed = [0u8; 64];
+            s.read(&mut seed);
+            s.read(&mut x);
+            let (client, share) = HybridClientSecret::from_seeds_for_testing_on(
+                client_isa,
+                &mut seed,
+                &mut x,
+                LockPolicy::BestEffort,
+            )
+            .unwrap();
+            assert_eq!(client.isa(), client_isa);
+            let mut m = [0u8; 32];
+            s.read(&mut m);
+            s.read(&mut x);
+            let (server_share, ss) = server_encapsulate_for_testing_on(
+                server_isa,
+                &share,
+                &m,
+                &x,
+                LockPolicy::BestEffort,
+            )
+            .unwrap();
+            let cs = client
+                .decapsulate(&server_share, LockPolicy::BestEffort)
+                .unwrap();
+            cs.with(|c| ss.with(|s| assert_eq!(c, s)));
+            let _ = cs.shred();
+            let _ = ss.shred();
+        }
+    }
+}
+
+/// A backend the CPU lacks is refused, never run, and the caller's seeds are
+/// still wiped.
+#[test]
+fn unavailable_backend_is_refused() {
+    assert!(KemIsa::detect().is_available());
+    let missing = if cfg!(target_arch = "x86_64") {
+        KemIsa::Neon
+    } else {
+        KemIsa::Avx2
+    };
+    assert!(!missing.is_available());
+    let mut seed = [7u8; 64];
+    let mut x = [8u8; 32];
+    let e = HybridClientSecret::from_seeds_for_testing_on(
+        missing,
+        &mut seed,
+        &mut x,
+        LockPolicy::BestEffort,
+    )
+    .unwrap_err();
+    assert_eq!(e, KemError::IsaUnavailable(missing));
+    assert_eq!(seed, [0u8; 64]);
+    assert_eq!(x, [0u8; 32]);
+    assert_eq!(
+        missing
+            .mlkem768_encapsulation_key_for_testing(&[0u8; 64])
+            .unwrap_err(),
+        KemError::IsaUnavailable(missing)
+    );
+    assert!(matches!(
+        vesper_vault::server_encapsulate_on(
+            missing,
+            &mut SystemRng,
+            &[0u8; CLIENT_SHARE_LEN],
+            LockPolicy::BestEffort
+        ),
+        Err(KemError::IsaUnavailable(_))
+    ));
 }
 
 /// The hybrid's ML-KEM half equals plain ML-KEM-768 on the same seeds, and
