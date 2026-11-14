@@ -168,7 +168,7 @@ Every developer workflow ships inside a **single static `vesper` binary** (`crat
 | `vesper lint [--fix]` | **Vesper Lint**: FieldTree narrowing, unused-effect removal, and SemVer-safe CST fixes over a whole package (or one file). `Alloc`-to-`Region` demotion and `egglog` rules are not implemented yet. | `cargo clippy` + `dylint` |
 | `vesper doc` | **Vesper Codex**: Checked API HTML/JSON with `FieldTree` borrow heatmaps, linear typestate graphs, 64B wire rulers, an offline signature-search page (`--bundle`), and proof badges linking audited `.olean` certificates from the Loom store. | `cargo doc` (`rustdoc`) |
 | `vesper test` | `--doc` single-JIT-module doctests over a whole package, with exact `compile_fail` codes and `sim(...)` doctests on deterministic *SimPulse* clock, network & disk. Parallel unit tests, `--sim`, `--sim-ui` (*SimAura*) & `--mutate` are not implemented yet. | `cargo test` + `nextest` + `turmoil` + `cargo-mutants` |
-| `vesper bench` | **Vesper Metronome**: 12-cycle user-space `RDPMC`/`kpc` PMU counters, CAS paired A/B *Stabilizer* runs, & *Coz* causal profiling. | `criterion` + `divan` + `iai-callgrind` + `cargo-show-asm` |
+| `vesper bench` | **Vesper Metronome**: paired A/B/B/A runs of checked scalar kernels with an exact median-ratio gate (`--max-regression-bp`), hardware cycles/instructions via Linux perf group reads, user-space `RDPMC` (`--pmu-provider rdpmc`) or macOS `kpc` (root), reported unavailable otherwise, and *Stabilizer*-style heap/stack/environment layout randomization (`--randomize-layout`). *Coz*-style causal profiling is a library API (`vesper_bench::causal`), not a flag. | `criterion` + `divan` + `coz` |
 | `vesper fuzz` | **Vesper Crucible**: Cranelift SSA edge-coverage + Bitwuzla/Z3 concolic fuzzing, `ChoiceTape` shrinking, & MPK `@differential_shadow`. | `cargo-fuzz` + `proptest` + `kani` |
 | `vesper verify` | Extracts prophecy-free Lean 4 specs, runs `--refute` concolic pre-checks, mounts CAS `.olean` certs, & audits `0 sorryAx`. | `charon` + `aeneas` + `hax` |
 | `vesper semver` | Mathematically proves modal, `FieldTree`, and `eff [...]` contextual substitutability ($I_{\text{new}} \preceq_{\text{pub}} I_{\text{old}}$) with witness synthesis. | `cargo-semver-checks` |
@@ -265,7 +265,7 @@ vesper/
     │   ├── vesper-fmt/            # Vesper Stylus comment-complete Wadler-Lindig CST formatter
     │   ├── vesper-lint/           # Vesper Lint substructural/FieldTree/egglog analyzer & MIF autofixer
     │   ├── vesper-doc/            # Vesper Codex typestate/wire diagrams, WASM Hoogle & JIT doctests
-    │   ├── vesper-bench/          # Vesper Metronome RDPMC/kpc PMU runner, Stabilizer A/B & Coz profiler
+    │   ├── vesper-bench/          # Vesper Metronome paired A/B runner, layout randomization & causal profiler
     │   ├── vesper-crucible/       # Concolic SMT fuzzer, ChoiceTape shrinker & Rust/C migration lifter
     │   ├── vesper-chrono/         # Effect-boundary time-travel debugger, IPT/ETM & linear provenance
     │   └── vesper-cli/            # Single static `vesper` toolchain binary
