@@ -1,0 +1,12 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    # tests/model.rs reads lean/BootstrapDdc*.lean and bootstrap/ (corpus,
+    # expected statuses, seed lock). Lean rejects symlinked runfiles outside
+    # --root, so the model test runs in a copy of regular files.
+    copy_test_cwd = ["test/model"],
+    extra_test_data = [
+        "//:lean",
+        "//bootstrap:files",
+    ],
+)
