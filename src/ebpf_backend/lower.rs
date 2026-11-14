@@ -125,6 +125,7 @@ fn op_name(op: &Op) -> &'static str {
         Op::Unary(..) => "unary operator",
         Op::Binary(..) => "binary operator",
         Op::Tuple(_) => "tuple",
+        Op::Vector { .. } => "vector operation",
         Op::Data(..) => "struct or variant value",
         Op::Project(..) => "field projection",
         Op::Index(..) => "indexing",
@@ -142,7 +143,7 @@ fn op_uses(op: &Op) -> Vec<ValueId> {
             vec![*value]
         }
         Op::Binary(_, a, b) | Op::Index(a, b) => vec![*a, *b],
-        Op::Tuple(v) => v.clone(),
+        Op::Tuple(v) | Op::Vector { args: v, .. } => v.clone(),
         Op::Data(_, f) => f.iter().map(|(_, v)| *v).collect(),
         Op::Project(v, _) => vec![*v],
         Op::Call { args, .. } => args.iter().map(|a| a.value).collect(),
