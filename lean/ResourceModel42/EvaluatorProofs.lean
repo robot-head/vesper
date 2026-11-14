@@ -229,4 +229,283 @@ theorem runMachine_steps (Sig : Nat → MetatheoryFull.EffSig) (l : Limits)
   rw [eq]
   exact steps
 
+theorem terminal_value_erase {l : Limits} {count : Nat} {c : Config} {value : RuntimeValue}
+    (h : step l count c = .terminal value) : c.expr.erase = value.erase := by
+  cases hv : c.expr.asValue with
+  | some actual =>
+      simp [step, hv] at h
+      subst value
+      exact asValue_erase hv
+  | none =>
+      obtain ⟨actual, ha⟩ := asValue_complete (terminal_isVal h)
+      rw [hv] at ha
+      contradiction
+
+theorem completed_value_erase (l : Limits) (fuel : Nat) (c : Config)
+    (events : List ResourceEvent) (actions : List MetatheoryFull.Act) (value : RuntimeValue)
+    (h : (runMachine l fuel c events actions).status = .completed value) :
+    (runMachine l fuel c events actions).config.expr.erase = value.erase := by
+  induction fuel generalizing c events actions with
+  | zero =>
+      cases hv : c.expr.asValue with
+      | some actual =>
+          simp [runMachine, hv] at h
+          subst value
+          simpa [runMachine, hv] using asValue_erase hv
+      | none => simp [runMachine, hv] at h
+  | succ fuel ih =>
+      cases hv : c.expr.asValue with
+      | some actual =>
+          simp [runMachine, hv] at h
+          subst value
+          simpa [runMachine, hv] using asValue_erase hv
+      | none =>
+          cases hs : step l events.length c with
+          | terminal actual =>
+              simp [runMachine, hv, hs] at h
+              subst value
+              simpa [runMachine, hv, hs] using terminal_value_erase hs
+          | limited error => simp [runMachine, hv, hs] at h
+          | invariant error => simp [runMachine, hv, hs] at h
+          | next next action event =>
+              cases event with
+              | none =>
+                  simpa [runMachine, hv, hs] using
+                    ih next events (action :: actions) (by simpa [runMachine, hv, hs] using h)
+              | some ev =>
+                  simpa [runMachine, hv, hs] using
+                    ih next (ev :: events) (action :: actions) (by simpa [runMachine, hv, hs] using h)
+
+def eventAct (event : ResourceEvent) : MetatheoryFull.Act :=
+  match event.action with | .mint => .mint event.id | .consume => .consume event.id
+
+def resourceAction (action : MetatheoryFull.Act) : Bool := action != .silent
+
+theorem planned_event_projection (size : Nat) (action : PlannedAction) :
+    (action.event size).toList.map eventAct = [action.full size].filter resourceAction := by
+  cases action <;> simp [PlannedAction.event, PlannedAction.full, eventAct, resourceAction]
+
+theorem step_event_projection {l : Limits} {count : Nat} {c next : Config}
+    {action : MetatheoryFull.Act} {event : Option ResourceEvent}
+    (h : step l count c = .next next action event) :
+    event.toList.map eventAct = [action].filter resourceAction := by
+  cases hv : c.expr.asValue with
+  | some value => simp [step, hv] at h
+  | none =>
+      cases hf : locate l.runtimeDepth c.expr with
+      | error error => simp [step, hv, hf] at h
+      | ok focus =>
+          cases hp : prepare c.ledger focus.redex with
+          | error error => simp [step, hv, hf, hp] at h
+          | ok plan =>
+              cases hs : plan.replacement.preflight l focus.context with
+              | error error => simp [step, hv, hf, hp, hs] at h
+              | ok stats =>
+                  cases ha : plan.action.preflight l c.ledger.size count with
+                  | error error => simp [step, hv, hf, hp, hs, ha] at h
+                  | ok okValue =>
+                      simp [step, hv, hf, hp, hs, ha] at h
+                      rcases h with ⟨rfl, rfl, rfl⟩
+                      exact planned_event_projection _ _
+
+theorem runMachine_event_projection (l : Limits) (fuel : Nat) (c : Config)
+    (events : List ResourceEvent) (actions : List MetatheoryFull.Act)
+    (seed : events.map eventAct = actions.filter resourceAction) :
+    (runMachine l fuel c events actions).eventsRev.map eventAct =
+      (runMachine l fuel c events actions).actionsRev.filter resourceAction := by
+  induction fuel generalizing c events actions with
+  | zero => cases hv : c.expr.asValue <;> simpa [runMachine, hv] using seed
+  | succ fuel ih =>
+      cases hv : c.expr.asValue with
+      | some value => simpa [runMachine, hv] using seed
+      | none =>
+          cases hs : step l events.length c with
+          | terminal value => simpa [runMachine, hv, hs] using seed
+          | limited error => simpa [runMachine, hv, hs] using seed
+          | invariant error => simpa [runMachine, hv, hs] using seed
+          | next next action event =>
+              have projection := step_event_projection hs
+              cases event with
+              | none =>
+                  have nextSeed : events.map eventAct = (action :: actions).filter resourceAction := by
+                    have joined := congrArg (fun xs => xs ++ events.map eventAct) projection
+                    simpa [seed, ← List.filter_append] using joined
+                  simpa [runMachine, hv, hs] using ih next events (action :: actions) nextSeed
+              | some ev =>
+                  have nextSeed : (ev :: events).map eventAct = (action :: actions).filter resourceAction := by
+                    have joined := congrArg (fun xs => xs ++ events.map eventAct) projection
+                    simpa [seed, ← List.filter_append] using joined
+                  simpa [runMachine, hv, hs] using ih next (ev :: events) (action :: actions) nextSeed
+
+theorem runMachine_trace_actions (l : Limits) (fuel : Nat) (c : Config) :
+    (runMachine l fuel c [] []).events.map eventAct =
+      (runMachine l fuel c [] []).actions.filter resourceAction := by
+  have h := runMachine_event_projection l fuel c [] [] rfl
+  simpa [EvalResult.events, EvalResult.actions] using congrArg List.reverse h
+
+theorem typed_atom_value (Sig : Nat → MetatheoryFull.EffSig) {R τ m ε}
+    {a : RuntimeAtom} (typing : MetatheoryFull.HasType Sig MetatheoryFull.Ctx.empty R a.erase τ m ε) :
+    ∃ value, a = .val value := by
+  apply runtimeAtom_value_of_isVal
+  apply MetatheoryFull.atom_closed _ typing
+  cases a with
+  | var index => exact .var index
+  | val value => exact .val (runtimeValue_isVal value)
+
+theorem typed_atom_pair (Sig : Nat → MetatheoryFull.EffSig) {R floor left ma right mb m ε}
+    {a : RuntimeAtom}
+    (typing : MetatheoryFull.HasType Sig MetatheoryFull.Ctx.empty R a.erase
+      (.pair floor left ma right mb) m ε) :
+    ∃ x y, a = .val (.pair x y) := by
+  obtain ⟨value, rfl⟩ := typed_atom_value Sig typing
+  obtain ⟨x, y, shape, _, _⟩ := MetatheoryFull.canon_pair typing (runtimeValue_isVal value)
+  cases value <;> simp_all [RuntimeAtom.erase, RuntimeValue.erase]
+
+theorem typed_atom_nat (Sig : Nat → MetatheoryFull.EffSig) {R m ε} {a : RuntimeAtom}
+    (typing : MetatheoryFull.HasType Sig MetatheoryFull.Ctx.empty R a.erase .nat m ε) :
+    ∃ n, a = .val (.nat n) := by
+  obtain ⟨value, rfl⟩ := typed_atom_value Sig typing
+  obtain ⟨n, shape⟩ := MetatheoryFull.canon_nat typing (runtimeValue_isVal value)
+  cases value <;> simp_all [RuntimeAtom.erase, RuntimeValue.erase]
+
+theorem typed_atom_handle (Sig : Nat → MetatheoryFull.EffSig) {R m ε} {a : RuntimeAtom}
+    (typing : MetatheoryFull.HasType Sig MetatheoryFull.Ctx.empty R a.erase .hdl m ε) :
+    ∃ id, a = .val (.hdl id) ∧ R id = some .linear := by
+  obtain ⟨value, rfl⟩ := typed_atom_value Sig typing
+  obtain ⟨id, shape, owned⟩ := MetatheoryFull.canon_hdl typing (runtimeValue_isVal value)
+  cases value <;> simp_all [RuntimeAtom.erase, RuntimeValue.erase]
+
+theorem locate_prepared (Sig : Nat → MetatheoryFull.EffSig) (c : Config)
+    {fuel : Nat} {e : RuntimeExpr} {R τ m ε} {focus : Focus}
+    (typing : MetatheoryFull.HasType Sig MetatheoryFull.Ctx.empty R e.erase τ m ε)
+    (included : ∀ id mode, R id = some mode → c.live id = some mode)
+    (nonvalue : e.asValue = none) (found : locate fuel e = .ok focus) :
+    ∃ plan, prepare c.ledger focus.redex = .ok plan := by
+  induction fuel generalizing e R τ m ε focus with
+  | zero => simp [locate] at found
+  | succ fuel ih =>
+      cases e with
+      | atom a =>
+          obtain ⟨value, rfl⟩ := typed_atom_value Sig typing
+          simp [RuntimeExpr.asValue] at nonvalue
+      | pair a b =>
+          cases typing with
+          | pair _ _ split _ left right _ _ _ =>
+              obtain ⟨gl, gr⟩ := MetatheoryFull.split_empty split
+              rw [gl] at left
+              rw [gr] at right
+              obtain ⟨x, rfl⟩ := typed_atom_value Sig left
+              obtain ⟨y, rfl⟩ := typed_atom_value Sig right
+              simp [RuntimeExpr.asValue] at nonvalue
+      | letE initializer body =>
+          cases hv : initializer.asValue with
+          | some value =>
+              simp [locate, hv] at found
+              subst focus
+              exact ⟨⟨.substitute value body, .silent⟩, by simp [prepare, hv]⟩
+          | none =>
+              cases hi : locate fuel initializer with
+              | error error =>
+                  simp only [locate, hv] at found
+                  rw [hi] at found
+                  change Except.error error = Except.ok focus at found
+                  contradiction
+              | ok inner =>
+                  simp only [locate, hv] at found
+                  rw [hi] at found
+                  change Except.ok (Focus.mk (.letC inner.context body) inner.redex) = Except.ok focus at found
+                  cases found
+                  cases typing with
+                  | letE split splitR initTy _ _ _ _ =>
+                      obtain ⟨gi, _⟩ := MetatheoryFull.split_empty split
+                      rw [gi] at initTy
+                      obtain ⟨plan, hp⟩ := ih (focus := inner) initTy
+                        (MetatheoryFull.sub_left splitR included) hv hi
+                      exact ⟨plan, hp⟩
+      | unpack a body =>
+          cases typing with
+          | letPair _ split _ valueTy _ =>
+              obtain ⟨ga, _⟩ := MetatheoryFull.split_empty split
+              rw [ga] at valueTy
+              obtain ⟨left, right, rfl⟩ := typed_atom_pair Sig valueTy
+              simp [locate] at found
+              subst focus
+              exact ⟨_, rfl⟩
+      | ifz a zero nonzero =>
+          cases typing with
+          | ifz _ split _ conditionTy _ _ =>
+              obtain ⟨ga, _⟩ := MetatheoryFull.split_empty split
+              rw [ga] at conditionTy
+              obtain ⟨n, rfl⟩ := typed_atom_nat Sig conditionTy
+              simp [locate] at found
+              subst focus
+              exact ⟨_, rfl⟩
+      | mint site =>
+          simp [locate] at found
+          subst focus
+          exact ⟨_, rfl⟩
+      | consume site a =>
+          cases typing with
+          | consume _ valueTy =>
+              obtain ⟨id, rfl, owned⟩ := typed_atom_handle Sig valueTy
+              obtain ⟨entry, lookup, alive⟩ := (live_linear_iff c id).1 (included id .linear owned)
+              simp [locate] at found
+              subst focus
+              exact ⟨⟨.unit, .consume site id⟩, by simp [prepare, lookup, alive]⟩
+
+theorem step_noInvariant (Sig : Nat → MetatheoryFull.EffSig) {l : Limits} {count : Nat}
+    {c : Config} {R τ m ε}
+    (typing : MetatheoryFull.HasType Sig MetatheoryFull.Ctx.empty R c.expr.erase τ m ε)
+    (included : ∀ id mode, R id = some mode → c.live id = some mode)
+    (error : InvariantError) : step l count c ≠ .invariant error := by
+  intro bad
+  cases hv : c.expr.asValue with
+  | some value => simp [step, hv] at bad
+  | none =>
+      cases hf : locate l.runtimeDepth c.expr with
+      | error error => simp [step, hv, hf] at bad
+      | ok focus =>
+          obtain ⟨plan, hp⟩ := locate_prepared Sig c typing included hv hf
+          cases hs : plan.replacement.preflight l focus.context with
+          | error error => simp [step, hv, hf, hp, hs] at bad
+          | ok stats =>
+              cases ha : plan.action.preflight l c.ledger.size count with
+              | error error => simp [step, hv, hf, hp, hs, ha] at bad
+              | ok okValue => simp [step, hv, hf, hp, hs, ha] at bad
+
+theorem typed_step_classification (Sig : Nat → MetatheoryFull.EffSig)
+    {l : Limits} {count : Nat} {c : Config} {R τ m ε}
+    (typing : MetatheoryFull.HasType Sig MetatheoryFull.Ctx.empty R c.expr.erase τ m ε)
+    (included : ∀ id mode, R id = some mode → c.live id = some mode) :
+    (∃ value, step l count c = .terminal value) ∨
+    (∃ next action event, step l count c = .next next action event) ∨
+    (∃ reason, step l count c = .limited reason) := by
+  cases h : step l count c with
+  | terminal value => exact Or.inl ⟨value, rfl⟩
+  | next next action event => exact Or.inr (Or.inl ⟨next, action, event, rfl⟩)
+  | limited reason => exact Or.inr (Or.inr ⟨reason, rfl⟩)
+  | invariant error => exact False.elim (step_noInvariant Sig typing included error h)
+
+theorem runMachine_noInvariant (Sig : Nat → MetatheoryFull.EffSig) (l : Limits)
+    (fuel : Nat) (c : Config) (events : List ResourceEvent)
+    (actions : List MetatheoryFull.Act) {τ m ε}
+    (typing : MetatheoryFull.WT Sig c.erase τ m ε) (error : InvariantError) :
+    (runMachine l fuel c events actions).status ≠ .invariantFailure error := by
+  induction fuel generalizing c events actions with
+  | zero => cases hv : c.expr.asValue <;> simp [runMachine, hv]
+  | succ fuel ih =>
+      cases hv : c.expr.asValue with
+      | some value => simp [runMachine, hv]
+      | none =>
+          cases hs : step l events.length c with
+          | terminal value => simp [runMachine, hv, hs]
+          | limited reason => simp [runMachine, hv, hs]
+          | invariant reason =>
+              exact False.elim (step_noInvariant Sig typing.1 (fun _ _ h => h) reason hs)
+          | next next action event =>
+              have nextTyping := MetatheoryFull.preservation (step_sound Sig hs) typing
+              cases event with
+              | none => simpa [runMachine, hv, hs] using ih next events (action :: actions) nextTyping
+              | some ev => simpa [runMachine, hv, hs] using ih next (ev :: events) (action :: actions) nextTyping
+
 end Vesper.ResourceModel42.EvaluatorProofs

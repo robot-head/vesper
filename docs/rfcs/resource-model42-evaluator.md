@@ -195,7 +195,31 @@ value soundness and the actual complete successful prefix through Full.Steps.
 The log is `/tmp/resource-model42-evaluator-proofs-v1.log`; the combined private
 artifact root is `/tmp/resource-model42-evaluator-proofs-v1`.
 
-These first proofs do not yet discharge event projection, generalized typed
-no-invariant, measured-refusal classification, initial checked reachability,
-exhaustion or the complete transitive audit. Those remain release gates; the
-successful-step theorem alone is not presented as completion.
+The next actual compiled checkpoint extends the module to 21 public theorems.
+Log: `/tmp/resource-model42-evaluator-proofs-v2.log`, with no diagnostics. Its
+consistent source/olean dependency snapshot is read-only at
+`/tmp/resource-model42-evaluator-proofs-v2`; the earlier v1 output path is retired.
+The complete current theorem catalog is:
+
+- `locate_plug`, `prepare_sound`, `step_sound`, `terminal_isVal`,
+  `runMachine_completed_isVal`, `runMachine_prefix`, `runMachine_steps`;
+- `terminal_value_erase`, `completed_value_erase`, `planned_event_projection`,
+  `step_event_projection`, `runMachine_event_projection`,
+  `runMachine_trace_actions`;
+- `typed_atom_value`, `typed_atom_pair`, `typed_atom_nat`, `typed_atom_handle`,
+  `locate_prepared`, `step_noInvariant`, `typed_step_classification`,
+  `runMachine_noInvariant`.
+
+Returned-value erasure now identifies the actual completed value with the final
+term. Event projection relates the actual chronological public events and their
+IDs/actions to the successful Full action prefix, rather than assuming a trace.
+The generalized typed progress argument uses resource-subcontext inclusion in
+the actual ledger, Full canonical-value lemmas, and genuine handle ownership.
+The whole-run no-invariant corollary uses actual Full preservation across actual
+successful transitions.
+
+Measured-refusal soundness still requires the independent metric/preflight
+proofs to link capacity tags to genuine exceeded current/proposed bounds.
+Initial checked reachability, exhaustion consequences and the complete
+transitive audit remain downstream release gates. Neither successful-step
+soundness nor a bare limited-reason alternative is presented as completion.
