@@ -553,13 +553,17 @@ impl EventGroup {
 pub struct PerfEventSet {
     groups: Vec<EventGroup>,
     unavailable: Vec<(HardwareEvent, Unavailable)>,
-    active: bool,
+    origin: u64,
+    generation: u64,
+    active: Option<u64>,
     process: libc::pid_t,
     thread: libc::pid_t,
     _thread_bound: PhantomData<Rc<()>>,
 }
 /// Counts at the start of one window, per group.
 pub struct EventSetToken {
+    origin: u64,
+    generation: u64,
     counts: Vec<Result<GroupCounts, Unavailable>>,
     _thread_bound: PhantomData<Rc<()>>,
 }
@@ -607,7 +611,9 @@ impl PerfEventSet {
         Ok(Self {
             groups,
             unavailable,
-            active: false,
+            origin: next_origin()?,
+            generation: 0,
+            active: None,
             process,
             thread,
             _thread_bound: PhantomData,
@@ -640,12 +646,15 @@ impl WindowObserver for PerfEventSet {
     type Error = Unavailable;
     fn before_window(&mut self, _: Invocation, _: usize) -> Result<EventSetToken, Unavailable> {
         self.check_owner()?;
-        if self.active {
+        if self.active.is_some() {
             return Err(Unavailable::new(
                 UnavailableReason::InvalidState,
                 "extended before_window",
             ));
         }
+        let generation = self.generation.checked_add(1).ok_or_else(|| {
+            Unavailable::new(UnavailableReason::Exhausted, "extended window generation")
+        })?;
         let mut counts = Vec::with_capacity(self.groups.len());
         for group in &self.groups {
             counts.push(
@@ -654,8 +663,11 @@ impl WindowObserver for PerfEventSet {
                     .and_then(|c| control(&group.leader, ENABLE).map(|()| c)),
             );
         }
-        self.active = true;
+        self.generation = generation;
+        self.active = Some(generation);
         Ok(EventSetToken {
+            origin: self.origin,
+            generation,
             counts,
             _thread_bound: PhantomData,
         })
@@ -666,7 +678,12 @@ impl WindowObserver for PerfEventSet {
         _: WindowCompletion,
     ) -> Result<EventDelta, Unavailable> {
         self.check_owner()?;
-        if !self.active || token.counts.len() != self.groups.len() {
+        // A token from another set (or an earlier window) never touches
+        // these counters: same origin, current generation, same shape.
+        if token.origin != self.origin
+            || self.active != Some(token.generation)
+            || token.counts.len() != self.groups.len()
+        {
             return Err(Unavailable::new(
                 UnavailableReason::ForeignOrStaleToken,
                 "extended after_window",
@@ -689,7 +706,7 @@ impl WindowObserver for PerfEventSet {
         for group in &self.groups {
             let _ = control(&group.leader, DISABLE);
         }
-        self.active = false;
+        self.active = None;
         values.extend(self.unavailable.iter().cloned().map(|(e, u)| (e, Err(u))));
         values.sort_by_key(|(e, _)| *e);
         Ok(EventDelta { values })
@@ -761,6 +778,50 @@ mod extended_tests {
         assert!(set.opened().is_empty());
         assert_eq!(set.unavailable().len(), 1);
         assert!(PerfEventSet::open_with(&[], resolve_host_event).is_err());
+    }
+    #[test]
+    fn tokens_are_bound_to_their_set_and_window() {
+        let none = |e: HardwareEvent| {
+            Err(Unavailable::new(
+                UnavailableReason::EventNotExposed,
+                e.name(),
+            ))
+        };
+        let mut a = PerfEventSet::open_with(&[HardwareEvent::SimdOperations], none).unwrap();
+        let mut b = PerfEventSet::open_with(&[HardwareEvent::SimdOperations], none).unwrap();
+        let invocation = Invocation {
+            arm: vesper_bench::Arm::Baseline,
+            epoch: 0,
+            window: 0,
+            operation: 0,
+            warmup: false,
+            layout_offset_bytes: 0,
+        };
+        let completion = WindowCompletion {
+            invocation,
+            planned_operations: 1,
+            attempted_operations: 1,
+            successful_operations: 1,
+            body: vesper_bench::BodyStatus::Completed,
+            clock: vesper_bench::ClockStatus::Measured(1),
+        };
+        let from_a = a.before_window(invocation, 1).unwrap();
+        let _from_b = b.before_window(invocation, 1).unwrap();
+        assert_eq!(
+            b.after_window(from_a, completion.clone())
+                .unwrap_err()
+                .reason,
+            UnavailableReason::ForeignOrStaleToken
+        );
+        let stale = a.before_window(invocation, 1);
+        assert!(stale.is_err(), "a is still active");
+        let mut c = PerfEventSet::open_with(&[HardwareEvent::SimdOperations], none).unwrap();
+        let first = c.before_window(invocation, 1).unwrap();
+        let delta = c.after_window(first, completion.clone()).unwrap();
+        assert!(matches!(
+            delta.get(HardwareEvent::SimdOperations),
+            Some(Err(_))
+        ));
     }
 }
 

@@ -98,8 +98,17 @@ fn rdpmc_is_actual_counters_or_explicit_unavailable_with_a_host_reason() {
         Ok(counters) => exercise("RDPMC", counters),
         Err(error) => {
             eprintln!("LIVE_RDPMC_UNAVAILABLE: {error}; host {status:?}");
-            if cfg!(not(all(target_os = "linux", target_arch = "x86_64"))) {
+            if cfg!(not(all(
+                target_os = "linux",
+                target_pointer_width = "64",
+                target_endian = "little",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))) {
                 assert_eq!(error.reason, UnavailableReason::UnsupportedPlatform);
+            } else {
+                assert_ne!(error.reason, UnavailableReason::UnsupportedPlatform);
+            }
+            if cfg!(not(all(target_os = "linux", target_arch = "x86_64"))) {
             } else if status.cpu_pmu_device == Some(false) {
                 // No hardware PMU device: the kernel reports it missing, or a
                 // sandbox (seccomp in a container executor) refuses the

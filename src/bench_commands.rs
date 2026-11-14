@@ -1541,6 +1541,47 @@ fn allocation_json(windows: &[ObservedWindow<CliObservation>]) -> Result<(Json, 
         zero,
     ))
 }
+/// One text line per requested event: its total or why it is unavailable.
+fn events_text(data: &Json, requested: &[HardwareEvent]) -> String {
+    let reason = |u: &Json| {
+        format!(
+            "{} at {}{}",
+            u["reason"].as_str().unwrap_or("unknown"),
+            u["operation"].as_str().unwrap_or("?"),
+            u["errno"]
+                .as_i64()
+                .map_or(String::new(), |e| format!(" (OS error {e})"))
+        )
+    };
+    if data["status"] == "unavailable" {
+        return format!(
+            "PMU events: all unavailable: {}\n",
+            reason(&data["unavailable"])
+        );
+    }
+    let mut text = String::new();
+    for event in requested {
+        let e = &data["events"][event.name()];
+        if e["status"] == "counted" {
+            text.push_str(&format!(
+                "PMU event {}: {} in measured windows\n",
+                event.name(),
+                e["total"].as_str().unwrap_or("?")
+            ));
+        } else {
+            text.push_str(&format!(
+                "PMU event {}: unavailable: {}\n",
+                event.name(),
+                if e["unavailable"].is_object() {
+                    reason(&e["unavailable"])
+                } else {
+                    e["reason"].as_str().unwrap_or("unknown").to_owned()
+                }
+            ));
+        }
+    }
+    text
+}
 /// Per-event totals and the per-window `PmuSampleWire` records.
 fn events_json(windows: &[ObservedWindow<CliObservation>], requested: &[HardwareEvent]) -> Json {
     let mut summary = serde_json::Map::new();
@@ -2034,6 +2075,8 @@ fn measure(options: Options) -> Result<Option<Outcome>, String> {
                 data
             }
         };
+        let text = events_text(&outcome.data["pmu_events"], &options.events);
+        outcome.text.push_str(&text);
     }
     attach_extras(&options, extras, &mut outcome);
     Ok(Some(outcome))
@@ -2625,6 +2668,13 @@ mod metronome_rest_tests {
                     events["events"][event.name()]
                 );
             }
+        }
+        for event in HardwareEvent::ALL {
+            assert!(
+                o.text.contains(&format!("PMU event {}: ", event.name())),
+                "text report lacks {}",
+                event.name()
+            );
         }
         let samples = events["pmu_sample_wire"]["samples"].as_array().unwrap();
         assert_eq!(samples.len(), 4);
