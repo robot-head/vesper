@@ -15,7 +15,7 @@
 //!   two-pass schedule but rounds differently; tests bound the difference.
 use crate::kv::{KvFormat, KvPool, Sequence, TOKENS_PER_PAGE};
 use crate::ops::softmax;
-use crate::quant::decode_bf16;
+use crate::simd::{self, ByteElements, DotAcc, Kernel};
 use crate::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,19 +32,6 @@ pub struct AttentionShape {
     pub head_dim: usize,
 }
 
-fn element(bytes: &[u8], format: KvFormat, index: usize) -> f32 {
-    match format {
-        KvFormat::F32 => {
-            let b = &bytes[index * 4..index * 4 + 4];
-            f32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        }
-        KvFormat::Bf16 => {
-            let b = &bytes[index * 2..index * 2 + 2];
-            decode_bf16(u16::from_le_bytes([b[0], b[1]]))
-        }
-    }
-}
-
 /// Attends `query` (`[query_heads, head_dim]`) over every token stored for
 /// `sequence`, writing `[query_heads, head_dim]` into `out`. `scores` is
 /// scratch of at least `query_heads * tokens` values for
@@ -58,6 +45,35 @@ pub fn paged_gqa_attention(
     scores: &mut [f32],
     out: &mut [f32],
     mode: AttentionMode,
+) -> Result<(), Error> {
+    paged_gqa_attention_with(
+        pool,
+        sequence,
+        shape,
+        query,
+        scores,
+        out,
+        mode,
+        Kernel::Scalar,
+        None,
+    )
+}
+
+/// [`paged_gqa_attention`] with a dot-product [`Kernel`] and an optional
+/// causal limit: with `visible = Some(n)` only the first `n` stored tokens
+/// are attended (`1 <= n <= len`), which is how batched prefill gives each
+/// prompt token exactly the context a one-token decode step would see.
+#[allow(clippy::too_many_arguments)]
+pub fn paged_gqa_attention_with(
+    pool: &KvPool,
+    sequence: &Sequence,
+    shape: AttentionShape,
+    query: &[f32],
+    scores: &mut [f32],
+    out: &mut [f32],
+    mode: AttentionMode,
+    kernel: Kernel,
+    visible: Option<usize>,
 ) -> Result<(), Error> {
     let AttentionShape {
         query_heads,
@@ -73,36 +89,49 @@ pub fn paged_gqa_attention(
         return Err(Error::Shape("attention query/output lengths"));
     }
     crate::shape::gqa_ratio(query_heads as u64, kv_heads as u64)?;
-    let tokens = pool.len(sequence).map_err(kv)?;
+    let stored = pool.len(sequence).map_err(kv)?;
+    let tokens = match visible {
+        None => stored,
+        Some(n) if n <= stored => n,
+        Some(_) => return Err(Error::Shape("attention beyond the stored tokens")),
+    };
     if tokens == 0 {
         return Err(Error::Shape("attention over an empty sequence"));
     }
-    let pages = pool.page_count(sequence).map_err(kv)?;
-    let format = pool.format();
+    let pages = tokens.div_ceil(TOKENS_PER_PAGE);
+    let elements = match pool.format() {
+        KvFormat::F32 => ByteElements::F32Le,
+        KvFormat::Bf16 => ByteElements::Bf16Le,
+    };
+    let width_bytes = elements.width();
     let scale = (head_dim as f32).sqrt();
     let kv_stride = kv_heads * head_dim;
     if mode == AttentionMode::TwoPass && scores.len() < query_heads * tokens {
         return Err(Error::Shape("attention score scratch too small"));
     }
+    let head_bytes = |t: usize, kv_head: usize| -> std::ops::Range<usize> {
+        let base = (t * kv_stride + kv_head * head_dim) * width_bytes;
+        base..base + head_dim * width_bytes
+    };
     for h in 0..query_heads {
         let kv_head =
             crate::shape::gqa_kv_head(query_heads as u64, kv_heads as u64, h as u64)? as usize;
         let q = &query[h * head_dim..(h + 1) * head_dim];
         let o = &mut out[h * head_dim..(h + 1) * head_dim];
         let dot = |keys: &[u8], t: usize| {
-            let base = t * kv_stride + kv_head * head_dim;
-            let mut s = 0.0f32;
-            for (i, q) in q.iter().enumerate() {
-                s += q * element(keys, format, base + i);
-            }
-            s / scale
+            let mut acc = DotAcc::ZERO;
+            simd::dot_acc_bytes(kernel, &mut acc, q, &keys[head_bytes(t, kv_head)], elements);
+            acc.finish(kernel) / scale
         };
+        // Tokens of page `p` that are visible.
+        let page_tokens =
+            |page: &crate::kv::KvPage<'_>| page.tokens.min(tokens - page.first_position);
         match mode {
             AttentionMode::TwoPass => {
                 let att = &mut scores[h * tokens..(h + 1) * tokens];
                 for p in 0..pages {
                     let page = pool.read_page(sequence, p).map_err(kv)?;
-                    for t in 0..page.tokens {
+                    for t in 0..page_tokens(&page) {
                         att[page.first_position + t] = dot(page.keys, t);
                     }
                 }
@@ -110,12 +139,10 @@ pub fn paged_gqa_attention(
                 o.fill(0.0);
                 for p in 0..pages {
                     let page = pool.read_page(sequence, p).map_err(kv)?;
-                    for t in 0..page.tokens {
+                    for t in 0..page_tokens(&page) {
                         let a = att[page.first_position + t];
-                        let base = t * kv_stride + kv_head * head_dim;
-                        for (i, o) in o.iter_mut().enumerate() {
-                            *o += a * element(page.values, format, base + i);
-                        }
+                        let v = &page.values[head_bytes(t, kv_head)];
+                        simd::axpy_bytes(kernel, o, a, v, elements);
                     }
                 }
             }
@@ -125,9 +152,10 @@ pub fn paged_gqa_attention(
                 o.fill(0.0);
                 for p in 0..pages {
                     let page = pool.read_page(sequence, p).map_err(kv)?;
+                    let n = page_tokens(&page);
                     let mut block = [0.0f32; TOKENS_PER_PAGE];
                     let mut block_max = f32::NEG_INFINITY;
-                    for (t, b) in block.iter_mut().enumerate().take(page.tokens) {
+                    for (t, b) in block.iter_mut().enumerate().take(n) {
                         *b = dot(page.keys, t);
                         block_max = block_max.max(*b);
                     }
@@ -137,18 +165,14 @@ pub fn paged_gqa_attention(
                     if block_max > max {
                         let rescale = (max - block_max).exp(); // exp(-inf) = 0 first time
                         sum *= rescale;
-                        for o in o.iter_mut() {
-                            *o *= rescale;
-                        }
+                        simd::scale(kernel, o, rescale);
                         max = block_max;
                     }
-                    for (t, &s) in block.iter().enumerate().take(page.tokens) {
+                    for (t, &s) in block.iter().enumerate().take(n) {
                         let weight = (s - max).exp();
                         sum += weight;
-                        let base = t * kv_stride + kv_head * head_dim;
-                        for (i, o) in o.iter_mut().enumerate() {
-                            *o += weight * element(page.values, format, base + i);
-                        }
+                        let v = &page.values[head_bytes(t, kv_head)];
+                        simd::axpy_bytes(kernel, o, weight, v, elements);
                     }
                 }
                 for o in o.iter_mut() {
