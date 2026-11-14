@@ -113,7 +113,10 @@ impl Runtime<'_> {
     }
 
     /// Native layout size of a payload: from the call's checked result type
-    /// `RegionBox[r, T]` when `T` is concrete, otherwise from the value.
+    /// `RegionBox[r, T]` when `T` is concrete, otherwise from the value
+    /// (inside generic functions, whose instantiation the evaluator does not
+    /// track). A generic argument the value does not determine counts as one
+    /// word, so such a payload may be charged less than natively.
     fn region_payload_size(&self, payload: &Value) -> Result<usize, String> {
         let from_call = match self.stack.last() {
             Some(Frame::IrResume { ty, .. }) => crate::regions::box_parts(ty)
@@ -123,9 +126,8 @@ impl Runtime<'_> {
         let layout = match from_call {
             Some(l) => l,
             None => {
-                let ty = value_type(self.world, payload).ok_or(
-                    "the size of this region payload is not known: annotate the box with its RegionBox type",
-                )?;
+                let ty = value_type(self.world, payload)
+                    .ok_or("the size of this region payload is not known")?;
                 crate::layout::Layout::of(self.world, &ty)?
             }
         };
@@ -146,8 +148,9 @@ impl Runtime<'_> {
     }
 }
 
-/// The type of a value whose layout does not depend on unseen variants or
-/// type arguments; `None` for generic data.
+/// The type of a value, for its layout. Type arguments of generic data are
+/// recovered from the fields the value holds; an argument the value does not
+/// determine (the `T` of `Option::None`) is taken as one machine word.
 fn value_type(world: &crate::check::World, v: &Value) -> Option<Type> {
     Some(match v {
         Value::Int(_) => Type::named("i64"),
@@ -163,9 +166,63 @@ fn value_type(world: &crate::check::World, v: &Value) -> Option<Type> {
                 .map(|v| value_type(world, v))
                 .collect::<Option<_>>()?,
         ),
-        Value::Data { ty, .. } if world.adts.get(ty)?.generics.is_empty() => Type::named(ty),
-        Value::Data { .. } => return None,
+        Value::Data {
+            ty,
+            constructor,
+            fields,
+            ..
+        } => {
+            let adt = world.adts.get(ty)?;
+            let mut bound = BTreeMap::new();
+            let short = constructor.rsplit("::").next().unwrap_or(constructor);
+            if let Some(variant) = adt.variants.iter().find(|v| v.name == short) {
+                for field in &variant.fields {
+                    if let Some(value) = fields.get(&field.name)
+                        && let Some(actual) = value_type(world, value)
+                    {
+                        bind_generics(&field.ty, &actual, &adt.generics, &mut bound);
+                    }
+                }
+            }
+            Type::Named(
+                ty.clone(),
+                adt.generics
+                    .iter()
+                    .map(|g| {
+                        bound
+                            .get(&g.name)
+                            .cloned()
+                            .unwrap_or_else(|| Type::named("u64"))
+                    })
+                    .collect(),
+            )
+        }
         // Functions, closures and capabilities are one machine word.
         _ => Type::named("u64"),
     })
+}
+
+/// Binds the generic parameters of `declared` that `actual` determines.
+fn bind_generics(
+    declared: &Type,
+    actual: &Type,
+    generics: &[Generic],
+    bound: &mut BTreeMap<String, Type>,
+) {
+    match (declared, actual) {
+        (Type::Named(n, args), _) if args.is_empty() && generics.iter().any(|g| g.name == *n) => {
+            bound.entry(n.clone()).or_insert_with(|| actual.clone());
+        }
+        (Type::Named(n, a), Type::Named(m, b)) if n == m && a.len() == b.len() => {
+            for (d, x) in a.iter().zip(b) {
+                bind_generics(d, x, generics, bound);
+            }
+        }
+        (Type::Tuple(a), Type::Tuple(b)) if a.len() == b.len() => {
+            for (d, x) in a.iter().zip(b) {
+                bind_generics(d, x, generics, bound);
+            }
+        }
+        _ => {}
+    }
 }

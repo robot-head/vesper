@@ -15,7 +15,7 @@ use vesper::{check, native, parser, runtime::Runtime};
 
 /// Accepted programs and the value of `main` (below 256, so that an
 /// executable's exit status carries it).
-const PROGRAMS: [(&str, &str, &str); 7] = [
+const PROGRAMS: [(&str, &str, &str); 8] = [
     (
         "aggregates",
         include_str!("fixtures/regions/aggregates.ves"),
@@ -65,6 +65,23 @@ const PROGRAMS: [(&str, &str, &str); 7] = [
 }
 ",
         "10",
+    ),
+    (
+        "generic",
+        "fn count[T: mod copy](x: T) -> u64 {
+    region r {
+        let _ = r.box(x);
+        r.used()
+    }
+}
+
+fn main() -> u64 {
+    let a: Option[(i64, i64)] = Option::Some((1, 2));
+    let b: Option[i64] = Option::None;
+    wrapping_add(count(a), count(b))
+}
+",
+        "40",
     ),
 ];
 
@@ -394,4 +411,25 @@ fn lean_model_checks_with_standard_axioms_only() {
             assert!(line.ends_with("does not depend on any axioms"), "{line}");
         }
     }
+}
+
+#[test]
+fn rewind_drops_the_evaluator_values_it_discards() {
+    use std::rc::Rc;
+    use vesper::regions::store::Regions;
+    let payload = Rc::new(());
+    let mut regions: Regions<Rc<()>> = Regions::default();
+    regions.open(1, 1024).unwrap();
+    let keep = regions.alloc(1, 8, Some(payload.clone())).unwrap();
+    let mark = regions.checkpoint(1).unwrap();
+    for _ in 0..4 {
+        regions.alloc(1, 8, Some(payload.clone())).unwrap();
+    }
+    assert_eq!(Rc::strong_count(&payload), 6);
+    regions.rewind(1, mark).unwrap();
+    assert_eq!(Rc::strong_count(&payload), 2, "discarded values dropped");
+    assert_eq!(regions.used(1).unwrap(), 8);
+    assert!(regions.get(1, keep).is_ok());
+    regions.close(1).unwrap();
+    assert_eq!(Rc::strong_count(&payload), 1);
 }

@@ -241,7 +241,16 @@ impl<T: 'static> Regions<T> {
                 RegionFault::LinearLive(count)
             }
             vesper_alloc::RewindError::Handle(_) => RegionFault::Stale,
-        })
+        })?;
+        // Drop the evaluator values of the discarded allocations now, as the
+        // allocator dropped their bytes; their handles are stale anyway.
+        let Block { region, boxes, .. } = b;
+        for slot in boxes.iter_mut() {
+            if slot.as_ref().is_some_and(|s| region.len(&s.bytes).is_err()) {
+                *slot = None;
+            }
+        }
+        Ok(())
     }
     /// `r.commit(mark)`.
     pub fn commit(&mut self, id: u64, handle: u64) -> Result<(), RegionFault> {

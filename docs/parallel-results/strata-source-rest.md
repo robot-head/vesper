@@ -40,7 +40,11 @@ use that allocator directly. Before this lane the evaluator scaled its bound
 by `size_of::<Value>()` and reported `used()` in word units; it now charges
 real layout bytes. The evaluator takes the payload type from the call's
 checked result type `RegionBox[r, T]` (the IR resume frame) and falls back to
-the value's own type when `T` is not concrete (generic callers).
+the value's own type when `T` is not concrete, recovering generic data
+arguments from the fields the value holds; an argument the value does not
+determine (the `T` of `None` seen without a concrete type) counts as one word,
+so in that case only the evaluator may charge less than the native backends.
+A rewind drops the evaluator values of the allocations it discards at once.
 
 ### Native payloads (`src/regions/native.rs`)
 
