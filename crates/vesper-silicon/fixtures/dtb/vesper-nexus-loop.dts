@@ -1,0 +1,34 @@
+// Hand-written: an interrupt nexus whose map points back at itself, which
+// must be a typed error rather than an endless walk. Compile with:
+//   dtc -I dts -O dtb -o vesper-nexus-loop.dtb vesper-nexus-loop.dts
+/dts-v1/;
+
+/ {
+	#address-cells = <2>;
+	#size-cells = <2>;
+	compatible = "vesper,nexus-loop";
+
+	cpus {
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		cpu@0 {
+			device_type = "cpu";
+			reg = <0>;
+			compatible = "riscv";
+			riscv,isa = "rv64imac";
+		};
+	};
+
+	loop: nexus {
+		#address-cells = <0>;
+		#interrupt-cells = <1>;
+		interrupt-map = <0 &loop 0>;
+	};
+
+	dev {
+		compatible = "vesper,looped";
+		interrupt-parent = <&loop>;
+		interrupts = <0>;
+	};
+};

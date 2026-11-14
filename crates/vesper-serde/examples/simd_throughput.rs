@@ -80,7 +80,7 @@ fn main() {
     );
     let index_limits = IndexLimits {
         max_input_bytes: 64 << 20,
-        max_structurals: 64 << 20,
+        max_entries: 64 << 20,
     };
     println!(
         "{:<8} {:>12} {:>12} {:>12}",
@@ -119,5 +119,34 @@ fn main() {
         black_box(serde_json::from_slice::<serde_json::Value>(black_box(&doc)).unwrap());
     });
     println!("recursive-descent IndexedJson::parse: {scalar:.0} MB/s");
+    // Float decoding: shortest round-trip spellings of pseudo-random doubles.
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let floats: Vec<String> = (0..100_000)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let x = f64::from_bits(seed >> 2); // finite, positive
+            format!("{x:?}")
+        })
+        .collect();
+    let bytes: usize = floats.iter().map(String::len).sum();
+    let lemire = mb_per_s(bytes, &mut || {
+        for f in &floats {
+            black_box(vesper_serde::number::decode_f64(black_box(f)));
+        }
+    });
+    let std = mb_per_s(bytes, &mut || {
+        for f in &floats {
+            black_box(black_box(f).parse::<f64>().unwrap());
+        }
+    });
+    let n = floats.len() as f64;
+    println!(
+        "f64 decode, {} numbers ({bytes} bytes): Eisel-Lemire {lemire:.0} MB/s ({:.1} M/s), str::parse {std:.0} MB/s ({:.1} M/s)",
+        floats.len(),
+        lemire * 1e6 / (bytes as f64 / n) / 1e6,
+        std * 1e6 / (bytes as f64 / n) / 1e6
+    );
     println!("serde_json::from_slice::<Value> (builds a DOM, for scale): {serde:.0} MB/s");
 }

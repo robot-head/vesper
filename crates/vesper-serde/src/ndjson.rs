@@ -330,7 +330,7 @@ impl<'a> NdjsonBatch<'a> {
                 }
                 .map_err(|error| relocate(error, &span, ordinal, line))?;
                 let tokens = json.token_count();
-                let index = json.index_capacity_bytes();
+                let index = json.index_bytes();
                 let parsed_work = json.work_used();
                 if tokens > remaining_tokens {
                     return Err(here(ErrorKind::TokenLimit));

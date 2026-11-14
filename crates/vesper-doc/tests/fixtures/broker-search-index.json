@@ -1,0 +1,214 @@
+{
+  "entries": [
+    {
+      "badge": "unverified",
+      "effects": [],
+      "name": "begin",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "broker",
+          "pass": "In",
+          "selector": [
+            [
+              "index"
+            ]
+          ],
+          "text": "Broker",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "Broker"
+            }
+          }
+        }
+      ],
+      "result": {
+        "named": {
+          "args": [],
+          "name": "WriteTxn"
+        }
+      },
+      "result_mode": "Linear",
+      "signature": "fn begin(in broker.{index}: Broker) -> WriteTxn"
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "name": "checksum",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "broker",
+          "pass": "In",
+          "selector": [],
+          "text": "Broker",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "Broker"
+            }
+          }
+        }
+      ],
+      "result": {
+        "named": {
+          "args": [],
+          "name": "u64"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn checksum(in broker: Broker) -> u64"
+    },
+    {
+      "badge": "unverified",
+      "effects": [
+        "Storage"
+      ],
+      "name": "commit",
+      "params": [
+        {
+          "mode": "Linear",
+          "name": "tx",
+          "pass": "Sink",
+          "selector": [],
+          "text": "WriteTxn",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "WriteTxn"
+            }
+          }
+        }
+      ],
+      "result": {
+        "named": {
+          "args": [],
+          "name": "Receipt"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn commit(sink tx: WriteTxn) -> Receipt eff [Storage]"
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "name": "config_of",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "broker",
+          "pass": "In",
+          "selector": [
+            [
+              "config"
+            ]
+          ],
+          "text": "Broker",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "Broker"
+            }
+          }
+        }
+      ],
+      "result": {
+        "named": {
+          "args": [],
+          "name": "u64"
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn config_of(in broker.{config}: Broker) -> u64"
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "name": "drop_one",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "broker",
+          "pass": "Inout",
+          "selector": [
+            [
+              "metrics",
+              "dropped"
+            ]
+          ],
+          "text": "Broker",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "Broker"
+            }
+          }
+        }
+      ],
+      "result": {
+        "tuple": {
+          "items": []
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn drop_one(inout broker.{metrics.dropped}: Broker) -> ()"
+    },
+    {
+      "badge": "unverified",
+      "effects": [],
+      "name": "publish",
+      "params": [
+        {
+          "mode": "Copy",
+          "name": "broker",
+          "pass": "Inout",
+          "selector": [
+            [
+              "index"
+            ],
+            [
+              "metrics",
+              "sent"
+            ]
+          ],
+          "text": "Broker",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "Broker"
+            }
+          }
+        },
+        {
+          "mode": "Copy",
+          "name": "config",
+          "pass": "In",
+          "selector": [],
+          "text": "u64",
+          "ty": {
+            "named": {
+              "args": [],
+              "name": "u64"
+            }
+          }
+        }
+      ],
+      "result": {
+        "tuple": {
+          "items": []
+        }
+      },
+      "result_mode": "Copy",
+      "signature": "fn publish(inout broker.{index, metrics.sent}: Broker, in config: u64) -> ()"
+    }
+  ],
+  "format": "vesper-codex-search",
+  "unsupported": [
+    [
+      "identity",
+      "generic/row binders need instantiation"
+    ]
+  ],
+  "version": 1
+}

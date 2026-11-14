@@ -25,6 +25,7 @@
 //! evidence that the Vesper source typing rules for these types are implemented.
 #![forbid(unsafe_code)]
 
+use crate::entropy::{CloneEntropy, EntropySources};
 use crate::page_source::{PageFill, PageSource};
 use crate::{Error, PAGE_BYTES};
 use std::collections::BTreeMap;
@@ -37,6 +38,8 @@ pub const VMGENID_WIRE_BYTES: usize = 24;
 /// Hard ceiling on snapshot pages (4 GiB of 4 KiB pages).
 pub const MAX_SNAPSHOT_PAGES: usize = 1 << 20;
 const KEY_CONTEXT: &str = "vesper.aether.fork-epoch/1";
+/// Context for clone keys that also absorb post-fork [`CloneEntropy`].
+const CLONE_KEY_CONTEXT: &str = "vesper.aether.fork-epoch/2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ForkError {
@@ -137,14 +140,27 @@ pub fn leaked_obligations() -> LeakCounts {
     }
 }
 
-fn derive_key(root: &RootKey, generation: VmGenId, epoch: u64) -> [u8; 32] {
-    let mut material = [0u8; 56];
+/// Boot sealers: root key, generation id and epoch. Clone sealers also absorb
+/// 32 bytes of post-fork entropy (hardware RNG mixed with the OS generator).
+fn derive_key(
+    root: &RootKey,
+    generation: VmGenId,
+    epoch: u64,
+    entropy: Option<&[u8; 32]>,
+) -> [u8; 32] {
+    let mut material = [0u8; 88];
     material[..32].copy_from_slice(&root.0);
     material[32..40].copy_from_slice(&generation.lo.to_le_bytes());
     material[40..48].copy_from_slice(&generation.hi.to_le_bytes());
     material[48..56].copy_from_slice(&epoch.to_le_bytes());
-    let key = blake3::derive_key(KEY_CONTEXT, &material);
-    material = [0; 56];
+    let key = match entropy {
+        None => blake3::derive_key(KEY_CONTEXT, &material[..56]),
+        Some(e) => {
+            material[56..88].copy_from_slice(e);
+            blake3::derive_key(CLONE_KEY_CONTEXT, &material)
+        }
+    };
+    material = [0; 88];
     std::hint::black_box(&material);
     key
 }
@@ -168,9 +184,14 @@ impl std::fmt::Debug for Sealer {
     }
 }
 impl Sealer {
-    fn new(root: &RootKey, epoch: u64, generation: VmGenId) -> Self {
+    pub(crate) fn new(
+        root: &RootKey,
+        epoch: u64,
+        generation: VmGenId,
+        entropy: Option<&[u8; 32]>,
+    ) -> Self {
         Self {
-            key: derive_key(root, generation, epoch),
+            key: derive_key(root, generation, epoch, entropy),
             epoch,
             generation,
             next: 0,
@@ -254,7 +275,7 @@ impl ForkAuthority {
     /// The first sealer of a freshly booted (not forked) VM.
     pub fn boot_sealer(&mut self, root: &RootKey) -> Result<Sealer, ForkError> {
         let (epoch, generation) = self.issue()?;
-        Ok(Sealer::new(root, epoch, generation))
+        Ok(Sealer::new(root, epoch, generation, None))
     }
 }
 
@@ -338,6 +359,32 @@ impl SnapshotImage {
     pub fn page_count(&self) -> usize {
         self.inner.pages.len()
     }
+    /// Page `index` of the frozen image; `Some(None)` is a zero page.
+    pub fn page_bytes(&self, index: usize) -> Option<Option<&Page>> {
+        self.inner.pages.get(index).map(|p| p.as_deref())
+    }
+    pub fn genid_location(&self) -> VmGenIdLocation {
+        self.inner.genid
+    }
+    pub fn host_tsc_khz(&self) -> u32 {
+        self.inner.host_tsc_khz
+    }
+    pub fn virtio_mmio_count(&self) -> u32 {
+        self.inner.virtio_mmio_count
+    }
+    /// Issues a fresh epoch and its ticket without building a host-model
+    /// clone (used for clones mapped from a sealed memfd).
+    pub(crate) fn issue_ticket(
+        &self,
+        authority: &mut ForkAuthority,
+    ) -> Result<SnapshotResumeTicket, ForkError> {
+        let (epoch, generation) = authority.issue()?;
+        Ok(SnapshotResumeTicket {
+            epoch,
+            generation,
+            armed: true,
+        })
+    }
     /// Generation id of the VM that was snapshotted.
     pub fn snapshot_generation(&self) -> VmGenId {
         self.inner.snapshot_generation
@@ -347,20 +394,16 @@ impl SnapshotImage {
         &self,
         authority: &mut ForkAuthority,
     ) -> Result<(ForkClone, SnapshotResumeTicket), ForkError> {
-        let (epoch, generation) = authority.issue()?;
+        let ticket = self.issue_ticket(authority)?;
         Ok((
             ForkClone {
                 image: Arc::clone(&self.inner),
                 private: BTreeMap::new(),
-                epoch,
-                generation,
+                epoch: ticket.epoch,
+                generation: ticket.generation,
                 reseeded: false,
             },
-            SnapshotResumeTicket {
-                epoch,
-                generation,
-                armed: true,
-            },
+            ticket,
         ))
     }
 }
@@ -509,6 +552,8 @@ pub struct SnapshotResumeTicket {
 pub struct ReseededVaultEpoch {
     pub fresh_sealer: Sealer,
     pub fork_epoch_id: u64,
+    /// Which entropy sources went into the clone key.
+    pub entropy: EntropySources,
 }
 impl SnapshotResumeTicket {
     pub fn generation(&self) -> VmGenId {
@@ -518,11 +563,14 @@ impl SnapshotResumeTicket {
         self.epoch
     }
     /// `AetherVm::reseed_after_fork`: writes the clone's generation block and
-    /// mints its sealer. A ticket for another clone is handed back unconsumed.
+    /// mints its sealer from the root key, generation id, epoch and `entropy`
+    /// (gather it after the fork with [`CloneEntropy::gather`]). A ticket for
+    /// another clone is handed back unconsumed.
     pub fn reseed_after_fork(
-        mut self,
+        self,
         master_key: &RootKey,
         clone: &mut ForkClone,
+        entropy: CloneEntropy,
     ) -> Result<ReseededVaultEpoch, Box<(ForkError, SnapshotResumeTicket)>> {
         if clone.epoch != self.epoch || clone.generation != self.generation {
             return Err(Box::new((ForkError::TicketMismatch, self)));
@@ -530,22 +578,43 @@ impl SnapshotResumeTicket {
         if clone.reseeded {
             return Err(Box::new((ForkError::AlreadyReseeded, self)));
         }
-        let wire = VmGenIdWire {
-            vm_gen_lo: self.generation.lo,
-            vm_gen_hi: self.generation.hi,
-            host_tsc_khz: clone.image.host_tsc_khz,
-            virtio_mmio_count: clone.image.virtio_mmio_count,
-        };
+        let wire = self.wire(clone.image.host_tsc_khz, clone.image.virtio_mmio_count);
         let at = clone.image.genid.page * PAGE_BYTES + clone.image.genid.offset;
         if let Err(e) = clone.write(at, &wire.encode()) {
             return Err(Box::new((e, self)));
         }
         clone.reseeded = true;
+        Ok(self.discharge(master_key, entropy))
+    }
+
+    /// The clone this ticket belongs to was found and its generation block
+    /// written: consume the ticket and mint the sealer.
+    pub(crate) fn discharge(
+        mut self,
+        master_key: &RootKey,
+        entropy: CloneEntropy,
+    ) -> ReseededVaultEpoch {
         self.armed = false;
-        Ok(ReseededVaultEpoch {
-            fresh_sealer: Sealer::new(master_key, self.epoch, self.generation),
+        ReseededVaultEpoch {
+            fresh_sealer: Sealer::new(
+                master_key,
+                self.epoch,
+                self.generation,
+                Some(entropy.bytes()),
+            ),
             fork_epoch_id: self.epoch,
-        })
+            entropy: entropy.sources(),
+        }
+    }
+
+    /// The `AetherVmGenIdWire` this ticket's clone must see.
+    pub(crate) fn wire(&self, host_tsc_khz: u32, virtio_mmio_count: u32) -> VmGenIdWire {
+        VmGenIdWire {
+            vm_gen_lo: self.generation.lo,
+            vm_gen_hi: self.generation.hi,
+            host_tsc_khz,
+            virtio_mmio_count,
+        }
     }
 }
 impl Drop for SnapshotResumeTicket {
