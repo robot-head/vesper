@@ -24,8 +24,8 @@ CI: `.github/workflows/aura-gtk.yml` (GTK 4 from Ubuntu 24.04 under Xvfb).
 | Input | `GtkEntry` | `placeholder-text` | `text` | Changed → `GtkEditable::changed`, Focused |
 
 `Enabled` → `sensitive`, `Visible` → `visible`, `Width` → `width-request`
-(values above `i32::MAX` are rejected with `GtkError::Unsupported` before any
-change). Unbinding a property restores the GTK default. The mounted root is the
+(values above `i32::MAX`, and text containing NUL, are rejected with
+`GtkError::Unsupported` before any change). Unbinding a property restores the GTK default. The mounted root is the
 child of one `GtkWindow` the backend owns.
 
 ## Transactions

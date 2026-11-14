@@ -22,7 +22,7 @@ Owned paths: new `crates/vesper-aura-gtk/**`, new
 - **Atomicity.** GTK has no transactional API, so every transaction is first
   applied to a private `RecordingBackend` shadow (the core's staged,
   all-or-nothing checker) and to GTK-specific checks (`Width` must fit
-  `i32`). Only an accepted transaction is replayed into GTK. Replay calls cannot
+  `i32`; text must not contain NUL, since GTK setters take C strings). Only an accepted transaction is replayed into GTK. Replay calls cannot
   fail on an accepted state; if GTK and the shadow ever disagree mid-replay the
   backend poisons itself (`Desynchronized`, then `Poisoned` on every call).
 - **Callbacks by key.** `clicked`, `GtkEditable::changed` and a named
@@ -79,7 +79,8 @@ cases sequentially on the main thread against a real GTK 4:
    installed and removed by plans; with the window presented under Xvfb,
    `grab_focus` delivers exactly one Focused event to the handler key.
 5. `rejected_plans_leave_gtk_untouched`: rejection injected before every patch
-   index (and after the last) and an over-`i32` width leave the GTK tree equal
+   index (and after the last), an over-`i32` width and text with an embedded
+   NUL leave the GTK tree equal
    to its pre-commit read-back; the retained plan then commits.
 6. `close_request_is_routed`: `gtk_window_close` is reported, not obeyed, then
    allowed through the session's close decision, which unmounts.
@@ -89,7 +90,7 @@ cases sequentially on the main thread against a real GTK 4:
    every native widget and the window are dead and `still_alive == 0`; a backend
    dropped while mounted is counted and its widgets freed.
 
-Plus two unit tests for the pure helpers (run in every build) and a
+Plus three unit tests for the pure helpers (run in every build) and a
 compile-fail doctest for `!Send`.
 
 ## Checks run
@@ -98,13 +99,13 @@ Local host: Ubuntu 24.04, `libgtk-4-dev 4.14.5+ds-0ubuntu0.10`, Xvfb via
 `xvfb-run -a`, rustc 1.97.0 and 1.100.0.
 
 ```
-GSK_RENDERER=cairo xvfb-run -a cargo test -p vesper-aura-gtk --features gtk   # 2 unit + 8 GTK + 1 doctest, ok (5 repeated runs)
+GSK_RENDERER=cairo xvfb-run -a cargo test -p vesper-aura-gtk --features gtk   # 3 unit + 8 GTK + 1 doctest, ok (5 repeated runs)
 xvfb-run -a cargo test -p vesper-aura-gtk --features gtk                      # default GSK renderer, ok
-cargo test -p vesper-aura-gtk                                                 # without GTK: 2 unit tests, ok
+cargo test -p vesper-aura-gtk                                                 # without GTK: 3 unit tests, ok
 cargo +1.100.0 clippy -p vesper-aura-gtk --features gtk --locked --all-targets -- -D warnings   # clean
 cargo +1.100.0 clippy -p vesper-aura-gtk --locked --all-targets -- -D warnings                  # clean
-cargo fmt --all -- --check                                                    # WORKSPACE_FMT
-cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings       # WORKSPACE_CLIPPY
+cargo fmt --all -- --check                                                    # ok
+cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings       # ok
 cargo test --workspace --locked                                               # WORKSPACE_TEST
 ```
 

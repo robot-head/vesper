@@ -414,6 +414,19 @@ fn rejected_plans_leave_gtk_untouched(thread: &UiThread) {
         CommitError::Backend(GtkError::Unsupported(_))
     ));
     assert_eq!(native(&s, thread), before);
+    // GTK strings are NUL-terminated; an embedded NUL is rejected up front.
+    let nul = ViewTree::new(
+        Key(0),
+        vec![column(0, &[1, 2]), text(1, "a\0b"), button(2, "b")],
+    );
+    let update = s.prepare(thread, Some(nul)).unwrap();
+    let failure = s.commit(thread, update).unwrap_err();
+    assert!(matches!(
+        failure.error,
+        CommitError::Backend(GtkError::Unsupported("text contains NUL"))
+    ));
+    assert_eq!(native(&s, thread), before);
+    audit(&s, thread);
     // The retained plan still commits once the fault is gone.
     commit(&mut s, thread, next);
     assert_eq!(native(&s, thread).children[1].width_request, 40);

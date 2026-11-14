@@ -98,18 +98,21 @@ pub fn width_request(width: i64) -> Result<i32, GtkError> {
 /// GTK-specific checks that the core contract does not impose. They run before
 /// the shadow model so a rejected transaction changes nothing.
 pub fn validate_transaction(transaction: &Transaction) -> Result<(), GtkError> {
-    // `Width` is the only integer-valued property in the core grammar.
     for patch in transaction.patches() {
-        if let Patch::BindSlot {
-            value: Value::Int(width),
-            ..
-        }
-        | Patch::SetSlot {
-            value: Value::Int(width),
-            ..
-        } = patch
-        {
-            width_request(*width)?;
+        let value = match patch {
+            Patch::BindSlot { value, .. } | Patch::SetSlot { value, .. } => value,
+            _ => continue,
+        };
+        match value {
+            // `Width` is the only integer-valued property in the core grammar.
+            Value::Int(width) => {
+                width_request(*width)?;
+            }
+            // GTK's string setters take NUL-terminated C strings.
+            Value::Text(text) if text.contains('\0') => {
+                return Err(GtkError::Unsupported("text contains NUL"));
+            }
+            _ => {}
         }
     }
     Ok(())
@@ -162,6 +165,41 @@ mod tests {
             Err(GtkError::Unsupported("width exceeds i32::MAX"))
         );
         assert!(width_request(-1).is_err());
+    }
+
+    #[test]
+    fn embedded_nul_and_wide_widths_are_rejected_before_any_backend() {
+        use vesper_aura::{
+            Key, Limits, Node, Property, RecordingBackend, Session, UiThread, ViewTree,
+        };
+        let thread = UiThread::claim_current();
+        let limits = Limits::default();
+        let mut session = Session::new(
+            &thread,
+            RecordingBackend::new(&thread, limits.clone()),
+            limits,
+        )
+        .unwrap();
+        let mut check = |value: Value, property: Property| {
+            let kind = if property == Property::Width {
+                Kind::Container
+            } else {
+                Kind::Text
+            };
+            let tree = ViewTree::new(
+                Key(0),
+                vec![Node::new(Key(0), kind).property(property, value)],
+            );
+            let update = session.prepare(&thread, Some(tree)).unwrap();
+            validate_transaction(update.transaction())
+        };
+        assert_eq!(check(Value::Text("ok".into()), Property::Text), Ok(()));
+        assert_eq!(
+            check(Value::Text("a\0b".into()), Property::Text),
+            Err(GtkError::Unsupported("text contains NUL"))
+        );
+        assert_eq!(check(Value::Int(7), Property::Width), Ok(()));
+        assert!(check(Value::Int(i64::MAX), Property::Width).is_err());
     }
 
     #[test]
