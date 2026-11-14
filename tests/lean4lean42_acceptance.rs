@@ -1516,7 +1516,19 @@ fn resource_binding_and_inventory_refusals(root: &Path, receipt: &Value, positiv
         .iter()
         .position(|module| module.id == owned_module)
         .unwrap();
-    for which in 0..9 {
+    let producer_bytes = fs::read(prepared.report_path()).unwrap();
+    assert!(producer_bytes.len() <= 16 * 1024 * 1024);
+    let producer: Value = serde_json::from_slice(&producer_bytes).unwrap();
+    let omission_parent = producer["omitted"][0]["parent"].as_str().unwrap();
+    let parent_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant.name.resource_display().ok().as_deref() == Some(omission_parent)
+        })
+        .expect("actual retained definition justifying an implementation-helper omission");
+    for which in 0..10 {
         let mut changed = inventory.clone();
         match which {
             0 => changed.constants[alias_index]
@@ -1543,6 +1555,7 @@ fn resource_binding_and_inventory_refusals(root: &Path, receipt: &Value, positiv
                     .unwrap()
                     .id
             }
+            9 => changed.constants[parent_index].form = 0,
             _ => unreachable!(),
         }
         let error = prepared
@@ -1650,6 +1663,29 @@ fn resource_binding_and_inventory_refusals(root: &Path, receipt: &Value, positiv
     fs::remove_file(sidecar).unwrap();
     prepared.revalidate(&config.limits).unwrap();
     prepared.validate_inventory(&inventory).unwrap();
+    for limits in [
+        Limits {
+            artifact_files: 1,
+            ..config.limits.clone()
+        },
+        Limits {
+            artifact_bytes: 1,
+            ..config.limits.clone()
+        },
+    ] {
+        let error = prepared
+            .revalidate(&limits)
+            .expect_err("actual prepared envelope must honor smaller configured caps");
+        assert_eq!(error.kind, ErrorKind::OutputLimit);
+        assert!(!error.detail.is_empty());
+    }
+    let mut small_inventory = config.clone();
+    small_inventory.limits.declarations = 1;
+    let error = driver::artifact::resource_inventory(&small_inventory, &prepared)
+        .expect_err("real native header above configured declaration cap cannot allocate or pass");
+    assert_eq!(error.kind, ErrorKind::OutputLimit);
+    assert!(!error.detail.is_empty());
+    prepared.revalidate(&config.limits).unwrap();
 }
 
 #[test]
