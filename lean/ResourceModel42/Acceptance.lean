@@ -1,4 +1,4 @@
-import ResourceModel42.Evaluator
+import ResourceModel42
 
 /-! Independent fixed semantic assertions. This model trace is not a backend
 observation, and returned owners are not an exhaustion failure. -/

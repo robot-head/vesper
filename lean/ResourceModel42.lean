@@ -5,6 +5,7 @@ import ResourceModel42.Evaluator
 import ResourceModel42.ErasureProofs
 import ResourceModel42.LedgerProofs
 import ResourceModel42.EvaluatorProofs
+import ResourceModel42.MetricsProofs
 import ResourceModel42.Proofs
 
 /-! The finite executable resource model and its implemented proof components.
