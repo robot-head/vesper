@@ -127,6 +127,15 @@ GitHub Actions disk cache otherwise, for example on pull requests from forks.
 | `rbe` | also execute every action on BuildBuddy's Linux executors |
 | `rbe_build` | remote execution for builds, tests on the local machine |
 
+The `buildbuddy` config also writes remote RPC diagnostics to
+`bazel-remote-grpc.log` and compact execution diagnostics to
+`execution_log.binpb.zst`. Git ignores both files, and package input globs
+exclude them. The pinned Bazel 9.3.1
+supports the enabled remote cache chunking flag; BuildBuddy's
+[content-defined chunking support](https://www.buildbuddy.io/blog/content-defined-chunking/)
+uses SplitBlob/SpliceBlob for large artifacts. These settings apply when
+`buildbuddy` is selected, including through `rbe` and `rbe_build`.
+
 To use BuildBuddy locally, put your personal API key in `user.bazelrc` (git
 ignores it):
 
