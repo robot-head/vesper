@@ -1,5 +1,19 @@
-//! Intel TDX DCAP quote version 4 (ECDSA-256 attestation key, TD 1.0
-//! report body, certification data type 6 wrapping a type-5 PCK chain).
+//! Intel TDX DCAP quotes (ECDSA-256 attestation key, certification data
+//! type 6 wrapping a type-5 PCK chain):
+//!
+//! - version 4: header, TD 1.0 report body (584 bytes);
+//! - version 5: header, then a body descriptor (`type u16`, `size u32`)
+//!   and one of the TD report bodies of Intel's `sgx_quote_5.h`: type 2
+//!   TD 1.0 (584 bytes), type 3 TD 1.5 (648: adds `TEE_TCB_SVN_2` and
+//!   `MRSERVICETD`), type 4 TD 1.5 "ex" (885: adds the VM index, TD ID,
+//!   device-info hash, initial/current service-TD bindings and the initial
+//!   platform TCB). The size must be the type's exact size. Type 1 (SGX
+//!   enclave report) and unknown types are rejected.
+//!
+//! For v5 the attestation key signs header, descriptor and body. TCB
+//! evaluation uses `TEE_TCB_SVN` for every body type, as Intel's QVL does
+//! (`TEE_TCB_SVN_2` reflects TD-preserving module updates and is reported,
+//! not appraised).
 
 use crate::chain::{Curve, EcPublicKey, TrustRoot, pem_certificates, verify_chain};
 use crate::claims::{
@@ -12,6 +26,14 @@ use crate::reader::Reader;
 use ring::digest;
 
 pub const TDX_QUOTE_VERSION: u16 = 4;
+pub const TDX_QUOTE_VERSION_5: u16 = 5;
+/// Quote v5 body types.
+pub const TDX_BODY_TYPE_SGX: u16 = 1;
+pub const TDX_BODY_TYPE_TD10: u16 = 2;
+pub const TDX_BODY_TYPE_TD15: u16 = 3;
+pub const TDX_BODY_TYPE_TD15_EX: u16 = 4;
+pub const TDX_BODY_TD15_LEN: usize = 648;
+pub const TDX_BODY_TD15_EX_LEN: usize = 885;
 pub const TDX_ATT_KEY_ECDSA_P256: u16 = 2;
 pub const TDX_TEE_TYPE: u32 = 0x81;
 pub const TDX_HEADER_LEN: usize = 48;
@@ -51,6 +73,78 @@ pub struct TdReportBody {
     pub report_data: [u8; 64],
 }
 
+/// Fields a TD 1.5 report body (quote v5 body type 3) adds after the TD
+/// 1.0 body.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Td15Fields {
+    pub tee_tcb_svn2: [u8; 16],
+    pub mr_service_td: [u8; 48],
+}
+
+/// Fields a TD 1.5 "ex" report body (quote v5 body type 4) adds after the
+/// TD 1.5 fields (`sgx_report2_body_v1_5_ex_t`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Td15ExFields {
+    pub vm_index: u8,
+    pub td_id: [u8; 32],
+    pub dev_info_hash: [u8; 48],
+    pub init_service_td_hash: [u8; 48],
+    pub init_service_td_attributes: [u8; 8],
+    pub init_cpu_svn: [u8; 16],
+    pub init_tee_tcb_svn: [u8; 16],
+    pub init_tee_fmspc: [u8; 12],
+    pub cur_service_td_hash: [u8; 48],
+    pub cur_service_td_attributes: [u8; 8],
+}
+
+impl Td15Fields {
+    fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
+        Ok(Td15Fields {
+            tee_tcb_svn2: r.array("body.tee_tcb_svn2")?,
+            mr_service_td: r.array("body.mr_service_td")?,
+        })
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&self.tee_tcb_svn2);
+        out.extend_from_slice(&self.mr_service_td);
+    }
+}
+
+impl Td15ExFields {
+    fn parse(r: &mut Reader<'_>) -> Result<Self, ParseError> {
+        let vm_index: [u8; 1] = r.array("body.vm_index")?;
+        if vm_index[0] > 3 {
+            return Err(unsupported("body.vm_index", vm_index[0].into()));
+        }
+        Ok(Td15ExFields {
+            vm_index: vm_index[0],
+            td_id: r.array("body.td_id")?,
+            dev_info_hash: r.array("body.dev_info_hash")?,
+            init_service_td_hash: r.array("body.init_service_td_hash")?,
+            init_service_td_attributes: r.array("body.init_service_td_attributes")?,
+            init_cpu_svn: r.array("body.init_cpu_svn")?,
+            init_tee_tcb_svn: r.array("body.init_tee_tcb_svn")?,
+            init_tee_fmspc: r.array("body.init_tee_fmspc")?,
+            cur_service_td_hash: r.array("body.cur_service_td_hash")?,
+            cur_service_td_attributes: r.array("body.cur_service_td_attributes")?,
+        })
+    }
+
+    fn encode(&self, out: &mut Vec<u8>) {
+        out.push(self.vm_index);
+        out.extend_from_slice(&self.td_id);
+        out.extend_from_slice(&self.dev_info_hash);
+        out.extend_from_slice(&self.init_service_td_hash);
+        out.extend_from_slice(&self.init_service_td_attributes);
+        out.extend_from_slice(&self.init_cpu_svn);
+        out.extend_from_slice(&self.init_tee_tcb_svn);
+        out.extend_from_slice(&self.init_tee_fmspc);
+        out.extend_from_slice(&self.cur_service_td_hash);
+        out.extend_from_slice(&self.cur_service_td_attributes);
+    }
+}
+
 /// The SGX report body of the Quoting Enclave (384 bytes).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct QeReportBody {
@@ -67,7 +161,12 @@ pub struct QeReportBody {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TdxQuote {
     pub header: TdxQuoteHeader,
+    /// The TD 1.0 part of the report body (every body type starts with it).
     pub body: TdReportBody,
+    /// Version 5, body types 3 and 4 only.
+    pub td15: Option<Td15Fields>,
+    /// Version 5, body type 4 only.
+    pub td15_ex: Option<Td15ExFields>,
     /// ECDSA P-256 `r || s` over header and body.
     pub quote_signature: [u8; 64],
     /// Attestation public key `X || Y`.
@@ -94,7 +193,7 @@ impl TdxQuoteHeader {
         for (field, ok, value) in [
             (
                 "header.version",
-                h.version == TDX_QUOTE_VERSION,
+                h.version == TDX_QUOTE_VERSION || h.version == TDX_QUOTE_VERSION_5,
                 u64::from(h.version),
             ),
             (
@@ -246,7 +345,34 @@ impl TdxQuote {
     pub fn parse_prefix(bytes: &[u8]) -> Result<(Self, usize), ParseError> {
         let mut r = Reader::new(bytes, Format::TdxQuoteV4);
         let header = TdxQuoteHeader::parse(&mut r)?;
-        let body = TdReportBody::parse(&mut r)?;
+        let (body, td15, td15_ex) = if header.version == TDX_QUOTE_VERSION_5 {
+            let body_type = r.u16("body.type")?;
+            let body_size = r.u32("body.size")? as usize;
+            let want = match body_type {
+                TDX_BODY_TYPE_TD10 => TDX_BODY_LEN,
+                TDX_BODY_TYPE_TD15 => TDX_BODY_TD15_LEN,
+                TDX_BODY_TYPE_TD15_EX => TDX_BODY_TD15_EX_LEN,
+                other => return Err(unsupported("body.type", other.into())),
+            };
+            if body_size != want {
+                return Err(unsupported("body.size", body_size as u64));
+            }
+            let body_bytes = r.take(body_size, "body")?;
+            let mut b = Reader::new(body_bytes, Format::TdxQuoteV4);
+            let body = TdReportBody::parse(&mut b)?;
+            let td15 = match body_type {
+                TDX_BODY_TYPE_TD10 => None,
+                _ => Some(Td15Fields::parse(&mut b)?),
+            };
+            let td15_ex = match body_type {
+                TDX_BODY_TYPE_TD15_EX => Some(Td15ExFields::parse(&mut b)?),
+                _ => None,
+            };
+            b.finish()?;
+            (body, td15, td15_ex)
+        } else {
+            (TdReportBody::parse(&mut r)?, None, None)
+        };
         let sig_len = r.u32("signature_data_len")? as usize;
         if sig_len > MAX_SIG_DATA_LEN {
             return Err(over_budget("signature_data_len", MAX_SIG_DATA_LEN, sig_len));
@@ -282,6 +408,8 @@ impl TdxQuote {
             TdxQuote {
                 header,
                 body,
+                td15,
+                td15_ex,
                 quote_signature,
                 attestation_key,
                 qe_report,
@@ -293,11 +421,40 @@ impl TdxQuote {
         ))
     }
 
-    /// Header and body: the bytes the attestation key signs.
+    /// The v5 body type (`None` for a v4 quote).
+    pub fn body_type(&self) -> Option<u16> {
+        if self.header.version != TDX_QUOTE_VERSION_5 {
+            return None;
+        }
+        Some(match (&self.td15, &self.td15_ex) {
+            (_, Some(_)) => TDX_BODY_TYPE_TD15_EX,
+            (Some(_), None) => TDX_BODY_TYPE_TD15,
+            (None, None) => TDX_BODY_TYPE_TD10,
+        })
+    }
+
+    /// Header and body (with the v5 body descriptor): the bytes the
+    /// attestation key signs.
     pub fn signed_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(TDX_HEADER_LEN + TDX_BODY_LEN);
+        let mut out = Vec::with_capacity(TDX_HEADER_LEN + 6 + TDX_BODY_TD15_EX_LEN);
         self.header.encode(&mut out);
-        self.body.encode(&mut out);
+        let mut body = Vec::with_capacity(TDX_BODY_TD15_EX_LEN);
+        self.body.encode(&mut body);
+        if let Some(t) = &self.td15 {
+            t.encode(&mut body);
+        }
+        if let Some(t) = &self.td15_ex {
+            t.encode(&mut body);
+        }
+        if let Some(body_type) = self.body_type() {
+            out.extend_from_slice(&body_type.to_le_bytes());
+            out.extend_from_slice(
+                &u32::try_from(body.len())
+                    .expect("body fits u32")
+                    .to_le_bytes(),
+            );
+        }
+        out.extend_from_slice(&body);
         out
     }
 

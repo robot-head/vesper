@@ -17,7 +17,7 @@ import threading
 import time
 
 
-PROFILE = "vesper.lean4lean42/1"
+PROFILE = "vesper.lean4lean42/2"
 UPSTREAM = "4faf51403bc4cb35cf6666d91fc9c938ae46d3aa"
 BATTERIES = "8da40b72fece29b7d3fe3d768bac4c8910ce9bee"
 BATTERIES_DOC_ALIAS_BLOB = "32d46ee883b58d6a383eed06eb98f33aa6530ded"
@@ -100,18 +100,19 @@ def load_recipe():
     pins = decode_json(read_bounded(TOOL / "pins.json", 16384), "pins")
     fields = {"schema", "profile", "upstream_commit", "batteries_commit",
               "lean_release", "lean_commit", "patches", "controls_overlay",
-              "known_fixes_blake3", "source_manifest_blake3", "build_argv",
+              "known_fixes_blake3", "source_manifest_blake3", "resource_bundle_blake3", "build_argv",
               "checker_relative_path"}
     if not isinstance(pins, dict) or set(pins) != fields:
         fail("pins must have the exact frozen schema fields")
-    expected = {"schema": 1, "profile": PROFILE, "upstream_commit": UPSTREAM,
+    expected = {"schema": 2, "profile": PROFILE, "upstream_commit": UPSTREAM,
                 "batteries_commit": BATTERIES, "lean_release": RELEASE,
                 "lean_commit": LEAN_COMMIT,
                 "build_argv": ["{lake}", "build", "lean4lean"],
                 "checker_relative_path": ".lake/build/bin/lean4lean"}
     if type(pins["schema"]) is not int or any(pins[key] != value for key, value in expected.items()):
         fail("pins differ from the frozen immutable recipe")
-    if not all(digest_shape(pins[key]) for key in ("known_fixes_blake3", "source_manifest_blake3")):
+    if not all(digest_shape(pins[key]) for key in
+               ("known_fixes_blake3", "source_manifest_blake3", "resource_bundle_blake3")):
         fail("invalid pin digest representation")
     patches = pins["patches"]
     if not isinstance(patches, list) or len(patches) != len(PATCHES):
@@ -130,6 +131,7 @@ def load_recipe():
     # Verify presence/ordinary file bounds, but do not pretend Python stdlib
     # implements BLAKE3. The genuine sealer checks complete byte identities.
     read_bounded(TOOL / "source-manifest.json", RECEIPT_BYTES)
+    read_bounded(TOOL / "resource-source-manifest.json", RECEIPT_BYTES)
     read_bounded(TOOL / "known-fixes.json", RECEIPT_BYTES)
     patch_bytes = [read_bounded(REPOSITORY / path, RECEIPT_BYTES) for path in PATCHES]
     controls = read_bounded(REPOSITORY / OVERLAY["source"], RECEIPT_BYTES)
