@@ -1,0 +1,54 @@
+# Verified bootstrap: a direct, proof-carrying code generator for the scalar core (x86-64 and AArch64)
+
+Suggested branch: `wave8/verified-direct-codegen`. Claim issue: #451.
+
+~~~text
+You are implementing one substantial milestone of the Vesper design (§42, §7) in https://github.com/robot-head/vesper.
+
+Start from a fresh origin/main in a NEW cloud checkout or dedicated git worktree. Require baseline ea1ed2964c2583b5dc2da8e0fd7651daa39b00e2 or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Read AGENTS.md if present, docs/parallel-work.md, docs/implementation.md, docs/bazel.md, docs/rfcs/wave-eight-contracts.md, docs/agent-prompts/wave-eight/README.md, docs/parallel-results/native-coverage.md, docs/parallel-results/wasm-backend.md, and the whole of §42, §7 in docs/specification.txt (the snapshot matches the Google Doc revision modified 2026-11-13 04:46 UTC) before editing.
+
+When to start: now. If a PR this lane waits on is still open, check its state first; if it has not merged, work only on the parts that do not depend on it and merge origin/main once it lands.
+
+Claim: this work is claimed by GitHub issue #451. Before you start, check the open issues and PRs in robot-head/vesper for overlapping work by other agents; if something overlaps, stop and report instead of duplicating it. Link #451 from your PR ("Closes #451").
+
+Delivery and coordination:
+- Deliver working code and meaningful acceptance tests, not only a proposal or scaffold. Finish the supported slice; reject unsupported cases explicitly with typed errors. If an item turns out to be infeasible, deliver the rest and explain why in the report.
+- Edit only the exclusive paths below. Other wave-eight lanes and the still-open wave-seven PRs run concurrently; never edit their paths and never depend on an unmerged lane's work. Library crates must not depend on the root `vesper` package.
+- Other agents (Codex) hold §16.4 attribute/item macros, the §39 formatter work (#170, #214), and these §42 paths: the resource model (lean/ResourceModel42*, docs/rfcs/resource-model42-*), rewrite witnesses and optimizer certificates (src/optimize*, tests/rewrite_*, scripts/check-rewrite-witness.py, docs/rfcs/rewrite42-*, lean/RewriteWitness*), and the Lean4Lean replay (lean/Lean4Lean*, tests/lean4lean*, issues #402-#448). Do not edit those paths and do not add attribute or item macro syntax. Do not write the eBPF linear ringbuf/socket builder API (PR #165, excluded by the owner).
+- Root patch rule (user-approved 2026-11-12): you MAY commit your own minimal root patch onto YOUR PR branch so CI goes green: new `[workspace.dependencies]` entries and the regenerated Cargo.lock, and, for a new crate, registration in root Cargo.toml `members` AND `default-members` (insert before "experiments/native-pulse") plus its BUILD.bazel from `python3 tools/bazel/sync_build_files.py`. Keep it in its own commit. Root Cargo.toml and Cargo.lock conflict often: merge origin/main into your branch right before merging, regenerate the lockfile with cargo rather than hand-merging it, and wait for CI on the merged head. Merges that touch the root manifests are serialized: if another lane's PR touching them is about to merge, let it land first.
+- Shared files that several lanes touch through narrow hunks (src/native.rs, src/check.rs, src/main.rs, crates/vesper-syntax/**, crates/vesper-doc/**) are listed in docs/rfcs/wave-eight-contracts.md with one owner each. Keep your hunk in those files small and in its own commit, and merge origin/main right before merging.
+- Bazel: Linux CI runs `bazel test //...` on BuildBuddy with Rust 1.100 (run `cargo +1.100.0 clippy` before pushing if your local toolchain is older). Files a test reads from outside its crate directory must be declared in that crate's BUILD.bazel (`extra_compile_data`, `extra_test_data`); Lean-model tests need `extra_test_data = ["//:lean"]` and usually `copy_test_cwd` (see crates/vesper-chrono/BUILD.bazel). Bazel's rustfmt also checks test fixtures. Windows CI uses Cargo.
+- `vesper fmt --check` runs in CI on every tracked .ves file; new .ves fixtures must be canonically formatted unless listed with a reason in scripts/fmt-exclude.txt.
+- Prefer mature, widely used crates for cryptography, parsing and kernel/hardware access; pin exact compatible versions; never vendor or hand-roll cryptographic primitives. Reuse versions already in Cargo.lock where possible (Cranelift 0.125, Wasmtime 50, rustls 0.23, arrow 56).
+- Use an isolated target directory per checkout. Use CARGO_BUILD_JOBS=2, CARGO_PROFILE_DEV_DEBUG=0, CARGO_PROFILE_TEST_DEBUG=0 and CARGO_INCREMENTAL=0 where space is limited.
+- Shared core ExprKind, Type and Place-IR Op/Terminator schemas, arithmetic semantics (vesper.arith.checked/1), interface semantics v2 and native/fiber ABI v2 are frozen unless your assignment says otherwise; additions are additive, and every backend rejects IR operations it does not know with a typed error. Preserve k_i ⊑ m_i and the existing abort/loan/one-shot checks.
+- Unsafe code is forbidden except where your assignment allows it: None (run emitted code as a separate process, never by mapping it executable in the test process).
+- Linear obligations in host libraries are non-Clone, non-Copy, #[must_use] owners whose only exits are documented consuming calls; a dropped owner is detected (debug panic or counted leak), never silently released. Rust ownership is not evidence that the Vesper source typing rules are implemented; say so in your report.
+- Malformed, ambiguous, overflowed and over-budget inputs are typed errors, never success, and never panics on untrusted bytes.
+- "0 Alloc" claims require a counting global allocator test over the warmed-up steady state. Hardware and kernel features must be reported as unavailable unless actually exercised (the cloud host has no /dev/kvm, no Intel PT, no hardware PMU, no GPU; perf_event_paranoid is 2; it does have PKU). A software model or QEMU validates the modelled behaviour only. Report only performance you measured, with the setup. Interop claims name the peer implementation and version.
+- Lean: files must compile with the pinned Lean 4.24.0 (elan downloads are blocked in the cloud; use the GitHub release .zip), contain no `sorry`/`admit`/new axioms, and be checked from your tests when `VESPER_LEAN` is set (follow crates/vesper-simd/tests/model.rs). State exactly what is proved about which model, and that it is not a theorem about the Rust code.
+- Do not start overlapping subagents, edit the Google Doc, publish packages, or message third parties.
+- Run `cargo fmt --all -- --check`, focused tests, `cargo test --workspace --locked` and strict `cargo clippy --workspace --locked --all-targets -- -D warnings`. Record exact commands and results.
+- Commit and push YOUR branch only. Open a ready-for-review PR against main that closes #451. The user has authorized merging this effort's PRs once all required CI checks (`Test all targets`, `Native and acceptance scripts (BuildBuddy)`, `macOS (AArch64)`, `Windows (x86_64 MSVC)`) are green and review comments are addressed. If main itself is red and your PR fixes it, follow the standing rule: cancel the other in-progress Actions runs and merge the fix first. Return base/commit/PR, public API, checks, root patch, decisions and remaining gaps. Your report path below is mandatory.
+
+Assignment: Verified bootstrap: a direct, proof-carrying code generator for the scalar core (x86-64 and AArch64) (§42, §7).
+
+Exclusive ownership:
+- NEW src/verified_codegen.rs and src/verified_codegen/**
+- NEW lean/VerifiedCodegen.lean and lean/VerifiedCodegen/**
+- NEW tests/verified_codegen*.rs and tests/fixtures/verified_codegen/**
+- One routing hunk for `vesper build --codegen verified` in src/main.rs (own commit)
+- docs/parallel-results/verified-direct-codegen.md
+Dependencies: `object` at the version already in Cargo.lock for ELF/Mach-O output. No Cranelift in this path.
+
+Implement:
+1. §42.1 pillar 3b: a small direct code generator from checked Place IR to machine code for the scalar subset (integers with checked arithmetic aborts, booleans, calls, loops, structs passed in registers or on the stack) with no Cranelift, emitting x86-64 and AArch64 ELF executables (and Mach-O for AArch64 if cheap).
+2. Keep the emitter structured as a total function from an explicit instruction-selection table so that each table row has a Lean counterpart.
+3. `lean/VerifiedCodegen.lean`: a model of the IR subset, a model of the target instruction subset and its semantics, and a forward-simulation theorem for the instruction-selection table (each row preserves the modelled state relation). State exactly what is proved about the model; it is not a theorem about the Rust emitter.
+4. Reject everything outside the subset (effects, floats, vectors, regions) with typed errors and a wildcard arm for unknown IR operations.
+
+Acceptance:
+- Differential tests: every supported fixture gives the same result on the evaluator, the Cranelift native backend and the verified codegen (x86-64 runs natively in Linux CI; AArch64 runs on macOS CI or under `qemu-aarch64` when present, otherwise it is reported unavailable).
+- The Lean file compiles with no `sorry`/`admit`/new axioms and is checked from the tests under `VESPER_LEAN`.
+- Report: docs/parallel-results/verified-direct-codegen.md, with what was built, checks, decisions and remaining gaps.
+~~~

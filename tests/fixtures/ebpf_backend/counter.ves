@@ -1,0 +1,98 @@
+// XDP packet counter: per-CPU counts of IPv4 TCP, UDP and other packets.
+// The IPv4 header checksum is verified with a bounded loop over its ten
+// 16-bit words; packets with a bad checksum are counted and dropped.
+copy enum XdpAction {
+    Aborted,
+    Drop,
+    Pass,
+    Tx,
+    Redirect,
+}
+
+copy enum BpfMapKind {
+    Hash,
+    Array,
+    PerCpuHash,
+    PerCpuArray,
+    LruHash,
+}
+
+copy struct BpfMapSpec {
+    kind: BpfMapKind,
+    max_entries: u32,
+}
+
+effect Packet {
+    fn load_u8(offset: u32) -> Option[u8];
+    fn load_u16be(offset: u32) -> Option[u32];
+    fn load_u32be(offset: u32) -> Option[u32];
+}
+
+// 0: TCP, 1: UDP, 2: other IPv4, 3: bad header checksum.
+effect Counters {
+    fn add(key: u32, delta: u64) -> Unit;
+}
+
+fn counters_map() -> BpfMapSpec {
+    BpfMapSpec {
+        kind: BpfMapKind::PerCpuArray,
+        max_entries: 4
+    }
+}
+
+// Sum of the 16-bit words i..10 of the IPv4 header; 0x100000 when the
+// header is truncated. Tail self-recursion: lowered to a bounded loop.
+fn header_sum(i: u32, acc: u32) -> u32 eff [Packet] {
+    if i >= 10 {
+        acc
+    } else {
+        match Packet::load_u16be(wrapping_add(14, wrapping_mul(i, 2))) {
+            Some(word) => header_sum(wrapping_add(i, 1), wrapping_add(acc, word)),
+            None => 1048576,
+        }
+    }
+}
+
+fn fold(sum: u32) -> u32 {
+    let once = wrapping_add(sum % 65536, sum / 65536);
+    wrapping_add(once % 65536, once / 65536)
+}
+
+fn protocol_slot(proto: u8) -> u32 {
+    if proto == 6 {
+        0
+    } else if proto == 17 {
+        1
+    } else {
+        2
+    }
+}
+
+fn ipv4() -> XdpAction eff [Packet, Counters] {
+    let sum = header_sum(0, 0);
+    if sum == 1048576 {
+        XdpAction::Pass
+    } else if fold(sum) != 65535 {
+        Counters::add(3, 1);
+        XdpAction::Drop
+    } else {
+        match Packet::load_u8(23) {
+            Some(proto) => {
+                Counters::add(protocol_slot(proto), 1);
+                XdpAction::Pass
+            },
+            None => XdpAction::Pass,
+        }
+    }
+}
+
+fn main() -> XdpAction eff [Packet, Counters] {
+    match Packet::load_u16be(12) {
+        Some(ether_type) => if ether_type == 2048 {
+            ipv4()
+        } else {
+            XdpAction::Pass
+        },
+        None => XdpAction::Pass,
+    }
+}

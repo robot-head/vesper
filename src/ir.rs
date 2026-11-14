@@ -78,6 +78,12 @@ pub enum Op {
         aliases: BTreeMap<String, String>,
         moves: Vec<Place>,
     },
+    /// A total vector operation (§14.3, lane 28) on its by-value operands.
+    /// Backends that do not know an operation reject it with a typed error.
+    Vector {
+        op: crate::vector::VectorOp,
+        args: Vec<ValueId>,
+    },
 }
 #[derive(Debug, Clone, Serialize)]
 pub enum Terminator {
@@ -568,6 +574,24 @@ impl Lower<'_> {
         self.next += 1;
         n
     }
+    /// The checked vector operation a reserved path call denotes.
+    fn vector_op(
+        &self,
+        name: &str,
+        types: &[Type],
+        args: &[Arg],
+        e: &Expr,
+    ) -> Option<crate::vector::VectorOp> {
+        let ty = |e: &Expr| {
+            self.types
+                .get(&(e.span.start, e.span.end))
+                .cloned()
+                .unwrap_or(Type::Infer)
+        };
+        let exprs = args.iter().map(|a| &a.expr).collect::<Vec<_>>();
+        let arg_types = exprs.iter().map(|e| ty(e)).collect::<Vec<_>>();
+        crate::vector::VectorOp::resolve(name, types, &exprs, &arg_types, &ty(e))
+    }
     fn emit(&mut self, op: Op, e: &Expr, effect: bool) -> u32 {
         let dest = self.fresh();
         let token = if effect {
@@ -919,6 +943,30 @@ impl Lower<'_> {
                     _ => None,
                 };
                 if let Some(name) = name {
+                    if receiver.is_none()
+                        && !self.world.functions.contains_key(&name)
+                        && let Some(op) = self.vector_op(&name, types, args, e)
+                    {
+                        let operands = args
+                            .iter()
+                            .enumerate()
+                            .filter(|(i, _)| crate::vector::is_operand(&name, *i, args.len()))
+                            // Lanes are copied by value; a string operand
+                            // is a shared `in` borrow.
+                            .map(|(_, a)| {
+                                let string = self
+                                    .types
+                                    .get(&(a.expr.span.start, a.expr.span.end))
+                                    .is_some_and(|t| t.name() == "String");
+                                if string {
+                                    self.argument(&a.expr, Pass::In, vec![]).value
+                                } else {
+                                    self.expr(&a.expr)
+                                }
+                            })
+                            .collect();
+                        return self.emit(Op::Vector { op, args: operands }, e, false);
+                    }
                     // Wrapping intrinsics are total binary operators in IR.
                     if crate::numeric::wrapping_intrinsic(&name).is_some()
                         && !self.world.functions.contains_key(&name)
@@ -927,6 +975,21 @@ impl Lower<'_> {
                         let a = self.expr(&args[0].expr);
                         let b = self.expr(&args[1].expr);
                         return self.emit(Op::Binary(name, a, b), e, false);
+                    }
+                    // Bitwise intrinsics of the secret operations
+                    // (`capability_effects`) are total operators too.
+                    if !self.world.functions.contains_key(&name) {
+                        if crate::capability_effects::bit_intrinsic(&name).is_some()
+                            && args.len() == 2
+                        {
+                            let a = self.expr(&args[0].expr);
+                            let b = self.expr(&args[1].expr);
+                            return self.emit(Op::Binary(name, a, b), e, false);
+                        }
+                        if name == crate::capability_effects::WIDEN_INTRINSIC && args.len() == 1 {
+                            let a = self.expr(&args[0].expr);
+                            return self.emit(Op::Unary(name, a), e, false);
+                        }
                     }
                     if self.world.constructor(&name).is_some() {
                         let fields = args

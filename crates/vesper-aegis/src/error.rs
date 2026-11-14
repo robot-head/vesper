@@ -9,7 +9,11 @@ use std::fmt;
 pub enum Format {
     /// An Intel TDX DCAP quote (version 4 or 5).
     TdxQuoteV4,
+    /// An Intel SGX DCAP quote (version 3).
+    SgxQuoteV3,
     SnpReport,
+    /// A CoRIM (signed or unsigned).
+    Corim,
     CcaToken,
     ClaimsWire,
 }
@@ -125,6 +129,23 @@ pub enum AttestError {
         what: &'static str,
         have: u64,
         floor: u64,
+    },
+    /// Evidence does not match the endorsed reference values (CoRIM
+    /// appraisal): a software component, configuration, key hash, RIM,
+    /// REM or personalization value differs.
+    ReferenceValueMismatch {
+        what: &'static str,
+    },
+    /// No reference value covers the evidence (no CoMID for the
+    /// implementation ID or RIM, or evidence lacks a claim the reference
+    /// values constrain).
+    ReferenceValueMissing {
+        what: &'static str,
+    },
+    /// A reference value or endorsement this verifier cannot evaluate; it
+    /// is refused rather than silently ignored.
+    UnsupportedReferenceValue {
+        what: &'static str,
     },
 }
 

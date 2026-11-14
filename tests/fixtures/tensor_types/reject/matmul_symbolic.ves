@@ -1,0 +1,7 @@
+// expect: E0763
+// at: Tensor::matmul(x, w)
+// message: [M, K] has K columns but [N, M] has N rows
+fn f[M: dim, K: dim, N: dim](x: Tensor[F32, [M, K]], w: Tensor[F32, [N, M]])
+    -> Tensor[F32, [M, M]] eff [Tensor] {
+    Tensor::matmul(x, w)
+}

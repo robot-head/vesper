@@ -1,0 +1,6 @@
+// expect: E0761
+// at: x: Tensor[u64, [4]]
+// message: 'u64' is not a tensor dtype
+fn f(x: Tensor[u64, [4]]) -> u64 {
+    0
+}

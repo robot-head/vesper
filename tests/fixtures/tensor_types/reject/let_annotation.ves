@@ -1,0 +1,7 @@
+// expect: E0763
+// at: Tensor::softmax(x)
+// message: let binding: expected Tensor[F32, [8]]
+fn f(x: Tensor[F32, [4]]) -> Tensor[F32, [4]] eff [Tensor] {
+    let y: Tensor[F32, [8]] = Tensor::softmax(x);
+    x
+}

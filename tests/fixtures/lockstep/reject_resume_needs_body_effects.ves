@@ -1,0 +1,12 @@
+linear effect Ask {
+    fn ask() -> i64;
+}
+fn main() -> i64 {
+    handle Ask in {
+        let m = 9223372036854775807;
+        m + 1
+    } with {
+        return v => v,
+        ask(k) => k(1),
+    }
+}
