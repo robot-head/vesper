@@ -204,3 +204,32 @@ classification and Full-derived conclusions. This dependency split avoids
 cycles and does not replace any required theorem with a success assumption.
 Transitive audit/catalog acceptance and the remaining main proof gates are
 still pending. No Cargo or semantic-test execution was run by this lane.
+
+
+## Checked input closure: actual source checkpoint
+
+Main Proofs.lean now contains 12 compiled public theorems plus the explicit
+TypedInputs proposition. Actual successful checkInputValue/checkInputList
+computations imply Full value typing; invocation.admission_ok supplies the
+actual success evidence. Pure input foldl closure, the checked body's genuine
+inference theorem and the finite empty ledger yield invocation_initial_WT
+without a caller-supplied typing premise. Any admitted result kind is allowed.
+
+The following actual command ran from this worktree's `lean` directory:
+
+```sh
+LEAN_NUM_THREADS=1 LEAN_PATH=/tmp/resource-model42-proof-deps-v1 /home/agent/.local/share/vesper-lean/bin/lean -o /tmp/resource-model42-proofs-v1/ResourceModel42/Proofs.olean ResourceModel42/Proofs.lean
+```
+
+Pinned Lean 4.24 returned exit 0 with no diagnostics (0.59 seconds), logged in
+`/tmp/resource-model42-proofs-v1/compile-input-fifth.log`. The private dependency
+root combines immutable source checkpoints Syntax d51a21b, Checker b9ce0c0,
+Evaluator 26ec38f, ErasureProofs 012a4c7, LedgerProofs 6ae4905 and CheckerProofs
+9be3eae. The reported outcome refers to the final compile after real elaboration
+fixes; the earlier logs remain in that private root. No escape, unproved
+placeholder or weakened initial-typing hypothesis was introduced.
+
+Operational correspondence, checked-run classification, completed-copy
+exhaustion and actual measured-refusal evidence remain pending dependencies or
+main corollaries at this checkpoint. This is not a full model acceptance
+receipt. No Cargo, external Lean4Lean or resource campaign was run by this lane.
