@@ -149,6 +149,7 @@ pub struct Txn {
     id: u64,
     store: u64,
     snapshot: u64,
+    isolation: Isolation,
     leaks: Arc<AtomicU64>,
     finished: bool,
 }
@@ -160,6 +161,70 @@ impl Txn {
     pub fn snapshot(&self) -> u64 {
         self.snapshot
     }
+    pub fn isolation(&self) -> Isolation {
+        self.isolation
+    }
+}
+
+/// Isolation level of a transaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Isolation {
+    /// Snapshot isolation: no dirty or non-repeatable reads, phantoms or
+    /// lost updates; write skew is possible.
+    #[default]
+    Snapshot,
+    /// Serializable snapshot isolation (Cahill, Röhm and Fekete): snapshot
+    /// isolation plus tracking of rw-antidependencies among serializable
+    /// transactions; one with both an incoming and an outgoing edge (or
+    /// next to a committed one that has both) aborts with
+    /// [`StoreErrorKind::Serialization`]. Serializable only with respect to
+    /// other serializable transactions; may abort transactions that would
+    /// have been serializable (false positives).
+    Serializable,
+}
+
+/// SIREAD predicates of a serializable transaction: rows read, tables
+/// scanned (any change to the table conflicts) and index ranges looked up
+/// (`(table, column, lo, hi)`: a write whose old or new value is in the
+/// range conflicts).
+#[derive(Clone, Debug, Default)]
+struct Reads {
+    rows: BTreeSet<(u32, u64)>,
+    tables: BTreeSet<u32>,
+    ranges: Vec<(u32, usize, Value, Value)>,
+}
+impl Reads {
+    /// Whether writing `(tid, rowid)` from `old` to `new` changes something
+    /// these predicates read.
+    fn hit(&self, tid: u32, rowid: u64, old: Option<&[Value]>, new: Option<&[Value]>) -> bool {
+        self.tables.contains(&tid)
+            || self.rows.contains(&(tid, rowid))
+            || self.ranges.iter().any(|(t, col, lo, hi)| {
+                *t == tid
+                    && [old, new]
+                        .into_iter()
+                        .flatten()
+                        .any(|row| index::within(&row[*col], lo, hi))
+            })
+    }
+}
+/// Conflict-graph state of a serializable transaction: its predicates and
+/// rw-antidependency edges (`ins`: transactions that read what this one
+/// writes; `outs`: transactions that wrote what this one read).
+#[derive(Clone, Debug, Default)]
+struct Ssi {
+    reads: Reads,
+    ins: BTreeSet<u64>,
+    outs: BTreeSet<u64>,
+}
+/// A committed serializable transaction kept while a transaction that did
+/// not see it may still create an edge to it. `end` is its commit
+/// timestamp (for a read-only one, the newest timestamp at its commit):
+/// a transaction with `snapshot < end` is concurrent with it.
+#[derive(Clone, Debug)]
+struct Done {
+    end: u64,
+    ssi: Ssi,
 }
 impl Drop for Txn {
     fn drop(&mut self) {
@@ -172,6 +237,11 @@ impl Drop for Txn {
 #[derive(Debug, Default)]
 struct TxnState {
     snapshot: u64,
+    /// `Some` for a serializable transaction.
+    ssi: Option<Ssi>,
+    /// Row values this transaction's snapshot saw for rows it updates or
+    /// deletes (for index-range conflicts).
+    old_rows: BTreeMap<(u32, u64), Vec<Value>>,
     /// (table id, row id) -> new row, or `None` for a delete.
     writes: BTreeMap<(u32, u64), Option<Vec<Value>>>,
 }
@@ -235,6 +305,9 @@ pub struct StoreStats {
     pub checkpoints_begun: u64,
     pub checkpoints_done: u64,
     pub versions_collected: u64,
+    /// Committed serializable transactions still retained for
+    /// rw-antidependency tracking.
+    pub ssi_retained: usize,
 }
 
 /// What [`Store::vacuum`] did.
@@ -281,6 +354,90 @@ struct Txns {
     visible_ts: u64,
     /// Deferred commits not yet durable: (commit LSN, ts).
     pending: VecDeque<(u64, u64)>,
+    /// Committed serializable transactions still relevant, by id, and the
+    /// writers among them by commit timestamp.
+    done: BTreeMap<u64, Done>,
+    done_by_ts: BTreeMap<u64, u64>,
+}
+impl Txns {
+    fn ssi_mut(&mut self, id: u64) -> Option<&mut Ssi> {
+        match self.active.get_mut(&id) {
+            Some(s) => s.ssi.as_mut(),
+            None => self.done.get_mut(&id).map(|d| &mut d.ssi),
+        }
+    }
+    /// Records the rw-antidependency `from -> to` (from read what to
+    /// writes) between two serializable transactions.
+    fn edge(&mut self, from: u64, to: u64) {
+        if from == to || self.ssi_mut(from).is_none() || self.ssi_mut(to).is_none() {
+            return;
+        }
+        self.ssi_mut(from).expect("tracked").outs.insert(to);
+        self.ssi_mut(to).expect("tracked").ins.insert(from);
+    }
+    /// Cahill's rule: a pivot (an incoming and an outgoing edge) must not
+    /// commit, and a transaction next to a committed pivot must abort.
+    fn dangerous(&self, ssi: &Ssi) -> bool {
+        if !ssi.ins.is_empty() && !ssi.outs.is_empty() {
+            return true;
+        }
+        ssi.ins
+            .iter()
+            .chain(&ssi.outs)
+            .filter_map(|n| self.done.get(n))
+            .any(|d| !d.ssi.ins.is_empty() && !d.ssi.outs.is_empty())
+    }
+    /// Removes an aborted serializable transaction and its edges.
+    fn forget(&mut self, id: u64) {
+        self.done.remove(&id);
+        self.done_by_ts.retain(|_, t| *t != id);
+        for ssi in self
+            .active
+            .values_mut()
+            .filter_map(|s| s.ssi.as_mut())
+            .chain(self.done.values_mut().map(|d| &mut d.ssi))
+        {
+            ssi.ins.remove(&id);
+            ssi.outs.remove(&id);
+        }
+    }
+    /// Drops committed records no transaction can still be concurrent with.
+    fn prune(&mut self) {
+        let oldest = self
+            .active
+            .values()
+            .filter(|s| s.ssi.is_some())
+            .map(|s| s.snapshot)
+            .min();
+        let visible = self.visible_ts;
+        let gone: Vec<u64> = self
+            .done
+            .iter()
+            .filter(|(_, d)| d.end <= visible && oldest.is_none_or(|o| o >= d.end))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in gone {
+            self.done.remove(&id);
+        }
+        let done = &self.done;
+        self.done_by_ts.retain(|_, id| done.contains_key(id));
+    }
+    /// After a serializable read: edges to the writers of versions newer
+    /// than the snapshot and to serializable holders of write locks.
+    fn read_edges(&mut self, reader: u64, newer: &BTreeSet<u64>, locked: &[(u32, u64)]) {
+        let mut writers: BTreeSet<u64> = newer
+            .iter()
+            .filter_map(|ts| self.done_by_ts.get(ts).copied())
+            .collect();
+        for k in locked {
+            if let Some(&owner) = self.locks.get(k) {
+                writers.insert(owner);
+            }
+        }
+        for w in writers {
+            self.edge(reader, w);
+        }
+    }
 }
 
 /// A durable SQL table store over a [`Device`].
@@ -631,6 +788,13 @@ fn table_types(t: &TableMeta) -> Vec<ScalarType> {
     t.columns.iter().map(|c| c.ty).collect()
 }
 
+fn serialization_failure() -> StoreError {
+    StoreError::new(
+        StoreErrorKind::Serialization,
+        "rw-antidependencies would complete a dangerous structure; retry the transaction",
+    )
+}
+
 fn state_error(message: &str) -> StoreError {
     StoreError::new(StoreErrorKind::State, message)
 }
@@ -918,6 +1082,7 @@ impl<D: Device> Store<D> {
             t.visible_ts = ts;
             t.pending.pop_front();
         }
+        t.prune();
     }
     /// Every snapshot a present or future transaction can read.
     fn snapshots(&self) -> BTreeSet<u64> {
@@ -1224,8 +1389,13 @@ impl<D: Device> Store<D> {
 
     // ---- transactions ----------------------------------------------------
 
-    /// Starts a transaction reading the snapshot of every durable commit.
+    /// Starts a snapshot-isolation transaction reading the snapshot of
+    /// every durable commit.
     pub fn begin(&self) -> StoreResult<Txn> {
+        self.begin_with(Isolation::Snapshot)
+    }
+    /// Starts a transaction at the given isolation level.
+    pub fn begin_with(&self, isolation: Isolation) -> StoreResult<Txn> {
         self.check_usable()?;
         self.refresh_visible();
         let mut t = self.txns();
@@ -1241,13 +1411,15 @@ impl<D: Device> Store<D> {
             id,
             TxnState {
                 snapshot,
-                writes: BTreeMap::new(),
+                ssi: (isolation == Isolation::Serializable).then(Ssi::default),
+                ..TxnState::default()
             },
         );
         Ok(Txn {
             id,
             store: self.id,
             snapshot,
+            isolation,
             leaks: Arc::clone(&self.leaks),
             finished: false,
         })
@@ -1366,12 +1538,10 @@ impl<D: Device> Store<D> {
         let mut g = self.txns();
         let st = &mut *g;
         match checked {
-            Ok(()) => {
-                st.active
-                    .get_mut(&txn.id)
-                    .expect("active")
-                    .writes
-                    .insert((tid, rowid), row);
+            Ok(old) => {
+                let state = st.active.get_mut(&txn.id).expect("active");
+                state.writes.insert((tid, rowid), row);
+                state.old_rows.insert((tid, rowid), old);
                 Ok(())
             }
             Err(e) => {
@@ -1380,9 +1550,10 @@ impl<D: Device> Store<D> {
             }
         }
     }
-    fn check_writable(&self, tid: u32, rowid: u64, snapshot: u64) -> StoreResult<()> {
+    /// The row's values at `snapshot`, if it may be written.
+    fn check_writable(&self, tid: u32, rowid: u64, snapshot: u64) -> StoreResult<Vec<Value>> {
         let mut newest: Option<(Key, bool)> = None;
-        let mut visible: Option<bool> = None;
+        let mut visible: Option<Entry> = None;
         self.read_tree(
             Tree::Table(tid),
             Key { rowid, inv_ts: 0 },
@@ -1393,7 +1564,7 @@ impl<D: Device> Store<D> {
             &mut |e| {
                 newest.get_or_insert((e.key, e.tomb));
                 if e.key.ts() <= snapshot {
-                    visible = Some(e.tomb);
+                    visible = Some(e);
                     return Ok(false);
                 }
                 Ok(true)
@@ -1410,7 +1581,7 @@ impl<D: Device> Store<D> {
             }
         }
         match visible {
-            Some(false) => Ok(()),
+            Some(e) if !e.tomb => Ok(e.values),
             _ => Err(StoreError::new(
                 StoreErrorKind::NotFound,
                 format!("row {rowid}"),
@@ -1433,21 +1604,61 @@ impl<D: Device> Store<D> {
                 return Ok(w.clone());
             }
         }
-        let snapshot = txn.snapshot;
+        let serializable = self.siread(txn, |r| {
+            r.rows.insert((tid, rowid));
+        })?;
+        let mut newer = BTreeSet::new();
+        let found = self.read_version(tid, rowid, txn.snapshot, &mut newer)?;
+        if serializable {
+            self.txns().read_edges(txn.id, &newer, &[(tid, rowid)]);
+        }
+        Ok(found.filter(|e| !e.tomb).map(|e| e.values))
+    }
+    /// The version of a row a snapshot sees; collects the timestamps of
+    /// newer versions into `newer`.
+    fn read_version(
+        &self,
+        tid: u32,
+        rowid: u64,
+        snapshot: u64,
+        newer: &mut BTreeSet<u64>,
+    ) -> StoreResult<Option<Entry>> {
         let mut found = None;
         self.read_tree(
             Tree::Table(tid),
-            Key::version(rowid, snapshot),
+            Key { rowid, inv_ts: 0 },
             Key {
                 rowid,
                 inv_ts: u64::MAX,
             },
             &mut |e| {
+                if e.key.ts() > snapshot {
+                    newer.insert(e.key.ts());
+                    return Ok(true);
+                }
                 found = Some(e);
                 Ok(false)
             },
         )?;
-        Ok(found.filter(|e| !e.tomb).map(|e| e.values))
+        Ok(found)
+    }
+    /// Registers a SIREAD predicate for a serializable transaction (before
+    /// it reads, so a concurrent committer either sees the predicate or has
+    /// its versions or locks seen by the read). Returns whether it is
+    /// serializable.
+    fn siread(&self, txn: &Txn, add: impl FnOnce(&mut Reads)) -> StoreResult<bool> {
+        let mut t = self.txns();
+        let state = t
+            .active
+            .get_mut(&txn.id)
+            .ok_or_else(|| state_error("transaction is not active"))?;
+        match state.ssi.as_mut() {
+            Some(ssi) => {
+                add(&mut ssi.reads);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Every row the transaction sees, by row id.
@@ -1455,13 +1666,17 @@ impl<D: Device> Store<D> {
         self.check_usable()?;
         self.check_store(txn)?;
         let tid = self.view().table(table)?.id;
-        if !self.txns().active.contains_key(&txn.id) {
-            return Err(state_error("transaction is not active"));
-        }
+        let serializable = self.siread(txn, |r| {
+            r.tables.insert(tid);
+        })?;
         let snapshot = txn.snapshot;
         let mut rows: BTreeMap<u64, Vec<Value>> = BTreeMap::new();
         let mut last = None;
+        let mut newer = BTreeSet::new();
         self.read_tree(Tree::Table(tid), Key::MIN, Key::MAX, &mut |e| {
+            if e.key.ts() > snapshot {
+                newer.insert(e.key.ts());
+            }
             if last != Some(e.key.rowid) && e.key.ts() <= snapshot {
                 last = Some(e.key.rowid);
                 if !e.tomb {
@@ -1470,7 +1685,15 @@ impl<D: Device> Store<D> {
             }
             Ok(true)
         })?;
-        let t = self.txns();
+        let mut t = self.txns();
+        if serializable {
+            let locked: Vec<(u32, u64)> = t
+                .locks
+                .range((tid, 0)..=(tid, u64::MAX))
+                .map(|(k, _)| *k)
+                .collect();
+            t.read_edges(txn.id, &newer, &locked);
+        }
         let state = t
             .active
             .get(&txn.id)
@@ -1524,9 +1747,9 @@ impl<D: Device> Store<D> {
                 "index bounds must have the column type",
             ));
         }
-        if !self.txns().active.contains_key(&txn.id) {
-            return Err(state_error("transaction is not active"));
-        }
+        let serializable = self.siread(txn, |r| {
+            r.ranges.push((tid, col, lo.clone(), hi.clone()));
+        })?;
         let mut candidates = BTreeSet::new();
         if plo <= phi {
             self.read_tree(
@@ -1541,27 +1764,20 @@ impl<D: Device> Store<D> {
         }
         let snapshot = txn.snapshot;
         let mut rows = BTreeMap::new();
-        for rowid in candidates {
-            let mut found = None;
-            self.read_tree(
-                Tree::Table(tid),
-                Key::version(rowid, snapshot),
-                Key {
-                    rowid,
-                    inv_ts: u64::MAX,
-                },
-                &mut |e| {
-                    found = Some(e);
-                    Ok(false)
-                },
-            )?;
+        let mut newer = BTreeSet::new();
+        for &rowid in &candidates {
+            let found = self.read_version(tid, rowid, snapshot, &mut newer)?;
             if let Some(e) = found.filter(|e| !e.tomb) {
                 if index::within(&e.values[col], lo, hi) {
                     rows.insert(rowid, e.values);
                 }
             }
         }
-        let g = self.txns();
+        let mut g = self.txns();
+        if serializable {
+            let locked: Vec<(u32, u64)> = candidates.iter().map(|&r| (tid, r)).collect();
+            g.read_edges(txn.id, &newer, &locked);
+        }
         let state = g
             .active
             .get(&txn.id)
@@ -1587,6 +1803,8 @@ impl<D: Device> Store<D> {
         }
         txn.finished = true;
         t.locks.retain(|_, owner| *owner != txn.id);
+        t.forget(txn.id);
+        t.prune();
         Ok(())
     }
 
@@ -1607,14 +1825,29 @@ impl<D: Device> Store<D> {
     pub fn commit_deferred(&self, mut txn: Txn) -> StoreResult<Commit> {
         self.check_usable()?;
         self.check_store(&txn)?;
-        let state = self
-            .txns()
-            .active
-            .remove(&txn.id)
-            .ok_or_else(|| state_error("transaction is not active"))?;
-        txn.finished = true;
-        let release = |store: &Self| store.txns().locks.retain(|_, owner| *owner != txn.id);
-        if state.writes.is_empty() {
+        let serializable = txn.isolation == Isolation::Serializable;
+        let read_only = {
+            let t = self.txns();
+            let state = t
+                .active
+                .get(&txn.id)
+                .ok_or_else(|| state_error("transaction is not active"))?;
+            state.writes.is_empty()
+        };
+        if read_only {
+            let mut t = self.txns();
+            let state = t.active.remove(&txn.id).expect("active");
+            txn.finished = true;
+            if let Some(ssi) = state.ssi {
+                let end = self.view().meta.last_ts;
+                t.done.insert(txn.id, Done { end, ssi });
+                if t.dangerous(&t.done[&txn.id].ssi) {
+                    t.forget(txn.id);
+                    t.prune();
+                    return Err(serialization_failure());
+                }
+                t.prune();
+            }
             return Ok(Commit {
                 ts: state.snapshot,
                 lsn: 0,
@@ -1622,13 +1855,77 @@ impl<D: Device> Store<D> {
             });
         }
         let mut w = lock(&self.writer);
-        let r = self.commit_group(&mut w, txn.id, &state);
+        let ts = self
+            .view()
+            .meta
+            .last_ts
+            .checked_add(1)
+            .ok_or_else(|| overflow("commit timestamps"))?;
+        let state = {
+            let mut t = self.txns();
+            let mut state = t.active.remove(&txn.id).expect("active");
+            txn.finished = true;
+            if let Some(ssi) = state.ssi.take() {
+                // The committer joins the retained set before its versions
+                // can be seen, so readers find it by timestamp or lock.
+                t.done.insert(txn.id, Done { end: ts, ssi });
+                t.done_by_ts.insert(ts, txn.id);
+                let readers: Vec<u64> = t
+                    .active
+                    .iter()
+                    .filter(|(_, a)| {
+                        a.ssi.as_ref().is_some_and(|ssi| {
+                            state.writes.iter().any(|(&(tid, rowid), new)| {
+                                let old = state.old_rows.get(&(tid, rowid));
+                                ssi.reads
+                                    .hit(tid, rowid, old.map(Vec::as_slice), new.as_deref())
+                            })
+                        })
+                    })
+                    .map(|(&id, _)| id)
+                    .chain(
+                        t.done
+                            .iter()
+                            .filter(|(&id, d)| {
+                                id != txn.id
+                                    && state.snapshot < d.end
+                                    && state.writes.iter().any(|(&(tid, rowid), new)| {
+                                        let old = state.old_rows.get(&(tid, rowid));
+                                        d.ssi.reads.hit(
+                                            tid,
+                                            rowid,
+                                            old.map(Vec::as_slice),
+                                            new.as_deref(),
+                                        )
+                                    })
+                            })
+                            .map(|(&id, _)| id),
+                    )
+                    .collect();
+                for r in readers {
+                    t.edge(r, txn.id);
+                }
+                if t.dangerous(&t.done[&txn.id].ssi) {
+                    t.forget(txn.id);
+                    t.locks.retain(|_, owner| *owner != txn.id);
+                    t.prune();
+                    return Err(serialization_failure());
+                }
+            }
+            state
+        };
+        let r = self.commit_group(&mut w, txn.id, ts, &state);
         let r = self.poison_on(r);
-        let (lsn, ts) = match r {
+        let lsn = match r {
             Ok(x) => x,
             Err(e) => {
                 drop(w);
-                release(self);
+                let mut t = self.txns();
+                if serializable {
+                    t.forget(txn.id);
+                }
+                t.locks.retain(|_, owner| *owner != txn.id);
+                t.prune();
                 return Err(e);
             }
         };
@@ -1641,6 +1938,7 @@ impl<D: Device> Store<D> {
         }
         drop(w);
         self.refresh_visible();
+        self.txns().prune();
         Ok(Commit {
             ts,
             lsn,
@@ -1648,13 +1946,14 @@ impl<D: Device> Store<D> {
         })
     }
     /// Builds and installs a transaction's group; returns (commit LSN, ts).
-    fn commit_group(&self, w: &mut Writer, txn: u64, state: &TxnState) -> StoreResult<(u64, u64)> {
+    fn commit_group(
+        &self,
+        w: &mut Writer,
+        txn: u64,
+        ts: u64,
+        state: &TxnState,
+    ) -> StoreResult<u64> {
         let view = self.view();
-        let ts = view
-            .meta
-            .last_ts
-            .checked_add(1)
-            .ok_or_else(|| overflow("commit timestamps"))?;
         let snapshots = self.snapshots();
         let cfg = self.limits.tree();
         let tables: BTreeMap<u32, (String, Vec<ScalarType>)> = view
@@ -1709,7 +2008,7 @@ impl<D: Device> Store<D> {
             Ok(())
         })?;
         w.versions_collected += collected;
-        Ok((lsn, ts))
+        Ok(lsn)
     }
 
     /// Syncs the log: every deferred commit becomes durable and visible.
@@ -2195,6 +2494,7 @@ impl<D: Device> Store<D> {
             checkpoints_begun: w.checkpoints_begun,
             checkpoints_done: w.checkpoints_done,
             versions_collected: w.versions_collected,
+            ssi_retained: t.done.len(),
         }
     }
     /// Transaction owners dropped without commit or abort.
