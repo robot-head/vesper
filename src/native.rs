@@ -20,6 +20,9 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
 
+/// Foreign calls of imported `.vsys` libraries (§13, `crate::ffi_lowering`).
+#[path = "ffi_lowering/native.rs"]
+mod ffi;
 /// Source Strata region blocks lowered to `vesper_region_*` runtime calls.
 #[path = "regions/native.rs"]
 mod regions;
@@ -271,11 +274,13 @@ fn specialized_function(world: &World, f: &Function) -> bool {
 /// the body, not its calling convention, so such a function is compiled once
 /// like a pure function instead of being inlined into its callers. That is
 /// what lets the Stage-5 verifiers (lane 24) check its code on its own.
+/// Foreign-library effects (`Ffi[Lib]`, §13) count too: their operations
+/// lower to direct native calls and need no handler evidence.
 fn capability_only(f: &Function) -> bool {
-    f.effects
-        .instances
-        .iter()
-        .all(|e| crate::capability_effects::is_capability_effect(&e.name))
+    f.effects.instances.iter().all(|e| {
+        crate::capability_effects::is_capability_effect(&e.name)
+            || crate::ffi_lowering::is_foreign_effect(&e.name)
+    })
 }
 /// Whether the program needs Cranelift's NaN canonicalisation: any
 /// `eff [DetFloat]` function promises bit-identical floats on x86-64 and
@@ -320,7 +325,8 @@ fn fail_only(world: &World, f: &Function) -> bool {
         && f.effects.instances.iter().any(|e| e.name == "Fail")
         && f.effects.instances.iter().all(|e| {
             (e.name == "Fail" && e.label.is_none() && e.args.len() == 1)
-                || (crate::capability_effects::is_capability_effect(&e.name)
+                || ((crate::capability_effects::is_capability_effect(&e.name)
+                    || crate::ffi_lowering::is_foreign_effect(&e.name))
                     && e.label.is_none()
                     && e.args.is_empty())
         })
@@ -477,7 +483,14 @@ fn compile<M: Module>(
     options: CodegenOptions,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
-    if !entry_fn.effects.instances.is_empty() || entry_fn.effects.tail.is_some() {
+    // Foreign capabilities are granted by the package's `.vsys` import.
+    if entry_fn
+        .effects
+        .instances
+        .iter()
+        .any(|e| !crate::ffi_lowering::is_foreign_effect(&e.name))
+        || entry_fn.effects.tail.is_some()
+    {
         return Err("native entry must handle all effects".into());
     }
     if contains_function(world, &entry_fn.result)
@@ -3753,6 +3766,9 @@ impl<M: Module> Codegen<'_, '_, M> {
     ) -> Result<ir::Value, String> {
         if effect == crate::regions::REGION_EFFECT && crate::regions::active(self.world) {
             return self.region_perform(label, op, args);
+        }
+        if crate::ffi_lowering::is_foreign_effect(effect) {
+            return self.foreign_perform(effect, op, args);
         }
         let signature = self
             .world
