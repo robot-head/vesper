@@ -2,12 +2,15 @@
 
 `vesper-quarry` is a bounded host library implementing the catalog, query
 checking, relational optimization, reference row execution, vectorized
-single-table execution, recoverable slotted-page/pin slices, and a durable
-write-ahead-logged page store of specification §24. Its only dependency is
+execution (single-table plans and hash/nested-loop joins, with AoSoA tile
+output), recoverable slotted-page/pin slices, a durable write-ahead-logged
+record store, and a transactional B+Tree table store with MVCC snapshot
+isolation (`store::Store`) of specification §24. Its only dependency is
 `vesper-simd` (for the selection-mask counting kernel). It is **not** a source
 `@sql` macro, WASI component, or compiler integration: source `@sql` remains a
 Forge-macro step, and nothing here is reachable from Vesper source yet. The
-durable store holds opaque records; it is not yet connected to the SQL catalog.
+older `durable::Db` holds opaque records; `store::Store` holds typed SQL tables
+and runs `PreparedQuery` plans over committed snapshots.
 
 Run the self-checking example from the repository after workspace registration:
 
@@ -402,8 +405,26 @@ selection vector and answers `COUNT(*)`/`COUNT(col)`. Rustc auto-vectorization
 of the comparison loops is not claimed and no speedup was measured.
 
 Results (rows, order and column definitions) equal the row executor's;
-`work` counts batch cells and is not comparable. Joins return
-`ErrorKind::Unsupported`. Aggregates (`vector::Aggregate`): `CountRows`,
+`work` counts batch cells and is not comparable.
+
+Plans with joins (`src/vector/join.rs`) materialize each input as a column
+relation. An inner, left, right or full join whose ON clause has equality
+conjuncts between the two sides builds a hash table on the right side's keys
+(`-0.0` and `0.0` hash alike; NULL keys never match) and probes it from the
+left in row order; the remaining ON conjuncts run as a vectorized residual
+over batches of candidate pairs. Without an equality conjunct the join is a
+nested loop over pair batches. Outer joins null-extend in the row executor's
+order (left-major, then unmatched right rows). Pair and output budgets
+(`intermediate_rows`, `work`) are enforced as in the row executor; scratch
+vectors are reused across batches.
+
+`PreparedQuery::execute_tiled` writes the result into a reusable
+`tiles::TileSet` (§24.3 `tiled(16)`): 16-row tiles, each fixed-width column a
+contiguous `[u64; 16]` lane array (i64/f64 bit patterns, booleans 0/1), text
+and bytes as `(offset, len)` lanes into one arena, and a 16-bit null mask per
+column. Re-executing into a warmed set of the same shape allocates no tiles
+and grows no arena (asserted by `allocated_tiles`/`arena_capacity`, not by a
+counting allocator, so no zero-allocation claim is made). Aggregates (`vector::Aggregate`): `CountRows`,
 `Count`, `Sum` (U64/I64 exact, `Overflow` iff the exact total does not fit;
 F64 in row order), `Min`, `Max` (first wins among equals), with
 `vector::aggregate_rows` as the row-at-a-time reference. SQL has no aggregate
@@ -413,3 +434,76 @@ syntax yet, so aggregates are host calls over a query's output columns.
 optimized, under five engine/batch configurations (including batch size 1 and
 7), against the row executor; and 16 aggregates for every predicate against
 `aggregate_rows`.
+
+`tests/vector_join.rs` compares 7 ON clauses × 6 WHERE clauses × 4 join kinds
+over three seeded datasets, unoptimized and optimized, under four engine/batch
+configurations (batch 1, 7, 64 and the default), for both `execute_vectorized`
+and `execute_tiled` (8,064 comparisons), plus three-way, self and outer-chain
+joins with aggregates, tile layout and reuse, and join budgets.
+
+## Transactional table store (`store::Store`)
+
+`store::Store<D: Device>` keeps SQL tables in B+Trees over 16 KiB durable
+pages, on the same `Device` crash model as `durable::Db`, with its own WAL.
+
+* **DDL and catalog.** `execute_ddl` applies `CREATE TABLE`/`DROP TABLE`
+  through `HermeticCatalog` and persists the catalog, table roots and counters
+  in the meta page (page 0). DDL requires no open transactions.
+* **Pages.** Internal pages are fixed key/child arrays. Leaves use a PAX
+  layout: per column a null bitmap and fixed-width data (or `(offset, len)`
+  into a heap growing down from the page end), plus a key array of versions
+  `(rowid, !commit_ts)` and a tombstone bitmap. A free-space bitmap (page 1)
+  records free pages; freed pages and leaf slots are reused, and leaf heaps
+  are compacted when tombstoned or collected versions leave garbage. Rows are
+  at most 4,096 encoded bytes.
+* **MVCC.** `begin` takes a snapshot at the newest durable commit. Writes are
+  buffered per transaction (deferred update, no steal) under no-wait
+  record-level locks on `(table, rowid)`; a lock held by another transaction,
+  or a committed version newer than the snapshot, is `Conflict` (first
+  committer wins). This is snapshot isolation: write skew is allowed, and
+  `tests/store.rs` checks that dirty writes, dirty reads, non-repeatable
+  reads, lost updates, phantoms and read skew do not occur while write skew
+  does. A version is collected once no
+  open snapshot can see it.
+* **Commit groups.** A commit stages copies of the pages it touches, applies
+  the tree operations to the copies, appends one log group (page images on
+  first touch after a checkpoint, otherwise byte diffs, then `Commit`) and
+  only then installs the pages. `commit` syncs; `commit_deferred` returns
+  before the sync, and one `flush` makes all pending commits durable and
+  visible (ten deferred commits, one sync). `SharedStore` lets threads commit
+  through a leader that waits a short window and syncs once for the group
+  (8 threads × 25 commits: 200 commits, 40 syncs in one run; counts vary).
+* **Fuzzy checkpoints.** The log has two regions. `checkpoint_begin` switches
+  regions; `checkpoint_step` writes back a few pages dirty at the switch while
+  commits continue; when they are all written the data file is synced and the
+  previous region dropped. Groups start a checkpoint when a region is half
+  full.
+* **Recovery.** Open scans both regions, redoes complete groups by page LSN
+  (an incomplete trailing group is ignored, never partly applied), writes the
+  pages back, syncs and starts a fresh log generation. No undo is needed
+  because uncommitted writes never reach the log or the disk.
+* **SQL.** `dataset(&txn)` materializes a snapshot as a `DataSet`;
+  `query`/`query_vectorized` run a `PreparedQuery` over it.
+
+`tests/store_crash.rs` runs seeded workloads (inserts, updates, deletes,
+aborts, deferred commits, checkpoints, vacuum) and, for every device operation
+of the run, crashes there under several crash choices and also tears the WAL
+at every frame boundary of the last write; each recovery must equal the state
+after exactly the acknowledged commits (or one more when a commit was in
+flight) and pass structural checks of every tree and the page partition. One
+run: 427 crash points, 2,079 recoveries, 371 WAL frame boundaries. Removing
+the log flush before page write-back, or redoing an incomplete trailing group,
+each makes the test fail. Crashes during recovery and during store creation
+are enumerated too.
+
+`lean/QuarryWal.lean` (checked by `tests/lean_model.rs` when `VESPER_LEAN` is
+set) proves, about small models only: redo by page LSN from any WAL-consistent
+disk yields the full history and is idempotent; recovery ignores a torn
+trailing group; undo of losers under strict record locks restores the winners'
+state, and is the identity under no-steal; and the §24.4 pin conservation for
+a reference pool scan on its Ok and Err paths. It is not a proof about the
+Rust code.
+
+Not built: latch coupling or concurrency inside one `Store` (callers serialize
+through `&mut` or `SharedStore`), leaf merge or rebalancing (empty leaves are
+freed), secondary indexes, serializable isolation, rows over 4,096 bytes.

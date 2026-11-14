@@ -98,7 +98,10 @@ impl StoreRecord {
     /// Strict decode: unknown tags, bad lengths, overlapping or out-of-page
     /// ranges and trailing bytes are `Corrupt`.
     pub fn decode(payload: &[u8]) -> StoreResult<Self> {
-        let mut r = Reader { bytes: payload, at: 0 };
+        let mut r = Reader {
+            bytes: payload,
+            at: 0,
+        };
         let record = match r.u8()? {
             1 => {
                 let page = r.u64()?;
@@ -144,7 +147,10 @@ struct Reader<'a> {
 }
 impl Reader<'_> {
     fn take(&mut self, n: usize) -> StoreResult<&[u8]> {
-        let end = self.at.checked_add(n).ok_or_else(|| corrupt("log length"))?;
+        let end = self
+            .at
+            .checked_add(n)
+            .ok_or_else(|| corrupt("log length"))?;
         let s = self
             .bytes
             .get(self.at..end)
@@ -350,7 +356,8 @@ pub(crate) fn scan(dev: &mut impl Device) -> StoreResult<Option<LogScan>> {
         Ok(bytes)
     };
     let mut read = |offset: u64, buf: &mut [u8]| -> StoreResult<()> {
-        dev.read_at(FileId::Wal, offset, buf).map_err(StoreError::from)
+        dev.read_at(FileId::Wal, offset, buf)
+            .map_err(StoreError::from)
     };
     let mut records = Vec::new();
     let prev_needed = h.prev_gen != 0;
@@ -407,7 +414,9 @@ impl StoreLog {
         hseq: u64,
         next_lsn: u64,
     ) -> StoreResult<Self> {
-        let gen = hseq.checked_add(1).ok_or_else(|| overflow("log generation"))?;
+        let gen = hseq
+            .checked_add(1)
+            .ok_or_else(|| overflow("log generation"))?;
         let mut log = Self {
             region_bytes,
             hseq,

@@ -6,9 +6,9 @@
 //! and every mutation runs inside one commit group's private page staging.
 use super::error::{corrupt, StoreError, StoreErrorKind, StoreResult};
 use super::pages::{
-    child, count, entry_bytes, internal_build, internal_insert, internal_parts,
-    internal_remove, kind, layout_of, leaf_build, leaf_decode, leaf_insert, leaf_remove,
-    leaf_search, level, new_page, route, Entry, Key, Page, KIND_INTERNAL, KIND_LEAF,
+    child, count, entry_bytes, internal_build, internal_insert, internal_parts, internal_remove,
+    kind, layout_of, leaf_build, leaf_decode, leaf_insert, leaf_remove, leaf_search, level,
+    new_page, route, Entry, Key, Page, KIND_INTERNAL, KIND_LEAF,
 };
 use crate::ScalarType;
 
@@ -188,7 +188,13 @@ fn propagate(
         return Err(tree_corrupt("too deep"));
     }
     let new_root = p.alloc()?;
-    internal_build(p.page_mut(new_root)?, new_root, lvl + 1, &[root, right], &[sep]);
+    internal_build(
+        p.page_mut(new_root)?,
+        new_root,
+        lvl + 1,
+        &[root, right],
+        &[sep],
+    );
     Ok(new_root)
 }
 

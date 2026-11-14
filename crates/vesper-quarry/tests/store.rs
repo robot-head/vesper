@@ -40,7 +40,10 @@ fn btree_splits_reuses_freed_pages_and_survives_reopen() {
         let mut t = s.begin().unwrap();
         for i in 0..20 {
             let n = batch * 20 + i;
-            ids.push(s.insert(&mut t, "t", &row(n, &format!("name-{n}"))).unwrap());
+            ids.push(
+                s.insert(&mut t, "t", &row(n, &format!("name-{n}")))
+                    .unwrap(),
+            );
         }
         s.commit(t).unwrap();
     }
@@ -63,7 +66,8 @@ fn btree_splits_reuses_freed_pages_and_survives_reopen() {
         s.delete(&mut t, "t", id).unwrap();
     }
     for &id in &ids[90..150] {
-        s.update(&mut t, "t", id, &row(id * 1000, "updated")).unwrap();
+        s.update(&mut t, "t", id, &row(id * 1000, "updated"))
+            .unwrap();
     }
     s.commit(t).unwrap();
     s.check().unwrap();
@@ -76,7 +80,10 @@ fn btree_splits_reuses_freed_pages_and_survives_reopen() {
     assert!(v.leaves_compacted > 0);
     let shape = s.check().unwrap()["t"];
     assert_eq!(shape.versions, 110);
-    assert!(s.stats().free_pages > 0, "emptied leaves return to the free-space map");
+    assert!(
+        s.stats().free_pages > 0,
+        "emptied leaves return to the free-space map"
+    );
     // New inserts reuse free pages before growing the file.
     let free = s.stats().free_pages;
     let mut t = s.begin().unwrap();
@@ -187,7 +194,10 @@ fn snapshot_isolation_anomalies() {
     );
     s.abort(g).unwrap();
     let h = s.begin().unwrap();
-    assert!(s.get(&h, "t", x).unwrap().is_some(), "abort discards writes");
+    assert!(
+        s.get(&h, "t", x).unwrap().is_some(),
+        "abort discards writes"
+    );
     s.commit(h).unwrap();
     assert_eq!(s.stats().locks, 0);
     assert_eq!(s.stats().pinned, 0);
@@ -234,10 +244,17 @@ fn deferred_commits_share_one_sync_and_become_visible_when_durable() {
     assert_eq!(s.stats().log_flushes, flushes, "no sync yet");
     assert_eq!(s.stats().pending_commits, 10);
     let before = s.begin().unwrap();
-    assert!(s.scan(&before, "t").unwrap().is_empty(), "not durable, not visible");
+    assert!(
+        s.scan(&before, "t").unwrap().is_empty(),
+        "not durable, not visible"
+    );
     s.commit(before).unwrap();
     s.flush().unwrap();
-    assert_eq!(s.stats().log_flushes, flushes + 1, "one sync for ten commits");
+    assert_eq!(
+        s.stats().log_flushes,
+        flushes + 1,
+        "one sync for ten commits"
+    );
     assert!(lsns.iter().all(|&l| l <= s.durable_lsn()));
     let after = s.begin().unwrap();
     assert_eq!(s.scan(&after, "t").unwrap().len(), 10);
@@ -255,7 +272,8 @@ fn shared_store_groups_concurrent_commits() {
                 for i in 0..25 {
                     let t = shared.with(|s| {
                         let mut t = s.begin().unwrap();
-                        s.insert(&mut t, "t", &row(th * 1000 + i, "thread")).unwrap();
+                        s.insert(&mut t, "t", &row(th * 1000 + i, "thread"))
+                            .unwrap();
                         t
                     });
                     let c = shared.commit(t).unwrap();
@@ -333,8 +351,12 @@ fn sql_queries_and_vectorized_joins_run_over_durable_tables() {
     .unwrap();
     let mut t = s.begin().unwrap();
     for org in 0..4u64 {
-        s.insert(&mut t, "orgs", &[Value::U64(org), Value::Text(format!("org{org}"))])
-            .unwrap();
+        s.insert(
+            &mut t,
+            "orgs",
+            &[Value::U64(org), Value::Text(format!("org{org}"))],
+        )
+        .unwrap();
     }
     for o in 0..120u64 {
         s.insert(
@@ -344,7 +366,11 @@ fn sql_queries_and_vectorized_joins_run_over_durable_tables() {
                 Value::U64(o),
                 Value::U64(o % 5),
                 Value::I64((o as i64 * 37) % 1000),
-                if o % 7 == 0 { Value::Null } else { Value::Text(format!("c{o}")) },
+                if o % 7 == 0 {
+                    Value::Null
+                } else {
+                    Value::Text(format!("c{o}"))
+                },
             ],
         )
         .unwrap();
@@ -361,13 +387,25 @@ fn sql_queries_and_vectorized_joins_run_over_durable_tables() {
         nullable: false,
     }];
     let binds = BTreeMap::from([("min".to_string(), Value::I64(500))]);
-    let rows = s.query(&t, sql, &params, &binds, Limits::default()).unwrap();
+    let rows = s
+        .query(&t, sql, &params, &binds, Limits::default())
+        .unwrap();
     let vec = s
-        .query_vectorized(&t, sql, &params, &binds, Limits::default(), &VectorEngine::detect())
+        .query_vectorized(
+            &t,
+            sql,
+            &params,
+            &binds,
+            Limits::default(),
+            &VectorEngine::detect(),
+        )
         .unwrap();
     assert_eq!(rows.rows, vec.rows, "row and vectorized executors agree");
     assert_eq!(rows.columns, vec.columns);
-    assert!(rows.rows.iter().any(|r| r[1] == Value::Null), "org 4 does not exist");
+    assert!(
+        rows.rows.iter().any(|r| r[1] == Value::Null),
+        "org 4 does not exist"
+    );
     assert_eq!(
         rows.rows.len(),
         (0..120).filter(|o| (o * 37) % 1000 >= 500).count()
@@ -379,9 +417,15 @@ fn sql_queries_and_vectorized_joins_run_over_durable_tables() {
     s.check().unwrap();
     let t = s.begin().unwrap();
     assert_eq!(
-        s.query(&t, "SELECT * FROM orders", &[], &BTreeMap::new(), Limits::default())
-            .unwrap_err()
-            .kind,
+        s.query(
+            &t,
+            "SELECT * FROM orders",
+            &[],
+            &BTreeMap::new(),
+            Limits::default()
+        )
+        .unwrap_err()
+        .kind,
         StoreErrorKind::Sql(vesper_quarry::ErrorKind::Unknown)
     );
     s.commit(t).unwrap();
@@ -396,9 +440,13 @@ fn typed_errors_and_no_leaked_pins() {
         StoreErrorKind::Data
     );
     assert_eq!(
-        s.insert(&mut t, "t", &[Value::I64(1), Value::Text("x".into()), Value::Null])
-            .unwrap_err()
-            .kind,
+        s.insert(
+            &mut t,
+            "t",
+            &[Value::I64(1), Value::Text("x".into()), Value::Null]
+        )
+        .unwrap_err()
+        .kind,
         StoreErrorKind::Data
     );
     assert_eq!(
@@ -420,7 +468,10 @@ fn typed_errors_and_no_leaked_pins() {
     let mut other = Store::open(SimDevice::new(), small()).unwrap().0;
     let mut t = s.begin().unwrap();
     assert_eq!(
-        other.update(&mut t, "t", id, &row(2, "x")).unwrap_err().kind,
+        other
+            .update(&mut t, "t", id, &row(2, "x"))
+            .unwrap_err()
+            .kind,
         StoreErrorKind::WrongStore
     );
     s.abort(t).unwrap();
@@ -478,12 +529,14 @@ fn dropped_transactions_are_counted_and_limits_hold() {
     drop(u);
     assert_eq!(s.leaked_txns(), 1);
     s.commit(t).unwrap();
-    assert!(StoreLimits {
-        btree_fanout: 2,
-        ..small()
-    }
-    .pool_frames
-        > 0);
+    assert!(
+        StoreLimits {
+            btree_fanout: 2,
+            ..small()
+        }
+        .pool_frames
+            > 0
+    );
     assert_eq!(
         Store::open(
             SimDevice::new(),

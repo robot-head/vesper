@@ -85,6 +85,9 @@ impl<D: Device> SharedStore<D> {
         (g.commits, g.store.stats().log_flushes)
     }
     pub fn into_inner(self) -> Store<D> {
-        self.inner.into_inner().unwrap_or_else(|e| e.into_inner()).store
+        self.inner
+            .into_inner()
+            .unwrap_or_else(|e| e.into_inner())
+            .store
     }
 }

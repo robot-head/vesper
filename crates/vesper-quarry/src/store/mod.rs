@@ -56,9 +56,9 @@ use error::{corrupt, limit, overflow};
 use frames::{Core, FramePool};
 use log::StoreLog;
 use pages::{
-    check_structure, decode_fsm, encode_fsm, format, kind, leaf_compact, leaf_garbage,
-    layout_of, new_page, page_lsn, Entry, Key, Meta, Page, TableMeta, FSM_CAPACITY, FSM_PAGE,
-    INTERNAL_CAP, KIND_FSM, KIND_LEAF, KIND_META, META_PAGE,
+    check_structure, decode_fsm, encode_fsm, format, kind, layout_of, leaf_compact, leaf_garbage,
+    new_page, page_lsn, Entry, Key, Meta, Page, TableMeta, FSM_CAPACITY, FSM_PAGE, INTERNAL_CAP,
+    KIND_FSM, KIND_LEAF, KIND_META, META_PAGE,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -113,7 +113,7 @@ impl StoreLimits {
         let ok = (4..=4096).contains(&self.pool_frames)
             && (8..=FSM_CAPACITY).contains(&self.max_pages)
             && (64 << 10..=128 << 20).contains(&self.log_region_bytes)
-            && self.log_region_bytes % 1024 == 0
+            && self.log_region_bytes.is_multiple_of(1024)
             && (1..=1024).contains(&self.max_active_txns)
             && (1..=100_000).contains(&self.max_txn_writes)
             && (8..=4096).contains(&self.max_group_pages)
@@ -274,11 +274,16 @@ pub struct Store<D: Device> {
 }
 impl<D: Device> fmt::Debug for Store<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Store").field("stats", &self.stats()).finish()
+        f.debug_struct("Store")
+            .field("stats", &self.stats())
+            .finish()
     }
 }
 
 // ---- page staging for one group -----------------------------------------
+
+/// Log records, page images to install, the new meta and the freed pages.
+type Finished = (Vec<StoreRecord>, Vec<(u64, Box<Page>)>, Meta, BTreeSet<u64>);
 
 /// Private copies of the pages one commit group reads and changes.
 struct Staging<'a, D: Device> {
@@ -308,12 +313,7 @@ impl<D: Device> Staging<'_, D> {
     }
     /// Log records for every changed page plus the commit record; the new
     /// page images to install.
-    fn finish(
-        mut self,
-        imaged: &BTreeSet<u64>,
-        txn: u64,
-        ts: u64,
-    ) -> StoreResult<(Vec<StoreRecord>, Vec<(u64, Box<Page>)>, Meta, BTreeSet<u64>)> {
+    fn finish(mut self, imaged: &BTreeSet<u64>, txn: u64, ts: u64) -> StoreResult<Finished> {
         let meta = self.meta.clone();
         meta.encode(&mut self.page_mut(META_PAGE)?[..])?;
         let free = self.free.clone();
@@ -430,13 +430,22 @@ impl<D: Device> Pager for Reader<'_, D> {
         Ok(&self.current.as_ref().expect("cached").1)
     }
     fn page_mut(&mut self, _: u64) -> StoreResult<&mut Page> {
-        Err(StoreError::new(StoreErrorKind::State, "read-only page access"))
+        Err(StoreError::new(
+            StoreErrorKind::State,
+            "read-only page access",
+        ))
     }
     fn alloc(&mut self) -> StoreResult<u64> {
-        Err(StoreError::new(StoreErrorKind::State, "read-only page access"))
+        Err(StoreError::new(
+            StoreErrorKind::State,
+            "read-only page access",
+        ))
     }
     fn free(&mut self, _: u64) -> StoreResult<()> {
-        Err(StoreError::new(StoreErrorKind::State, "read-only page access"))
+        Err(StoreError::new(
+            StoreErrorKind::State,
+            "read-only page access",
+        ))
     }
 }
 
@@ -544,7 +553,8 @@ impl<D: Device> Store<D> {
             store.core.write_back(page)?;
         }
         store.core.dev.sync(FileId::Data)?;
-        store.core.log = StoreLog::reset(&mut store.core.dev, limits.log_region_bytes, hseq, next_lsn)?;
+        store.core.log =
+            StoreLog::reset(&mut store.core.dev, limits.log_region_bytes, hseq, next_lsn)?;
         let initialized = page_bound > FSM_PAGE
             && (store.core.pool.resident(META_PAGE) || store.core.read_disk(META_PAGE)?.is_some());
         if !initialized {
@@ -640,7 +650,11 @@ impl<D: Device> Store<D> {
         Ok(())
     }
 
-    fn redo(&mut self, records: Vec<(u64, StoreRecord)>, report: &mut StoreRecovery) -> StoreResult<()> {
+    fn redo(
+        &mut self,
+        records: Vec<(u64, StoreRecord)>,
+        report: &mut StoreRecovery,
+    ) -> StoreResult<()> {
         let complete = records
             .iter()
             .rposition(|(_, r)| matches!(r, StoreRecord::Commit { .. }))
@@ -845,7 +859,12 @@ impl<D: Device> Store<D> {
         self.refresh_visible();
         r?;
         self.catalog = next;
-        self.next_rowid = self.meta.tables.values().map(|t| (t.id, t.next_rowid)).collect();
+        self.next_rowid = self
+            .meta
+            .tables
+            .values()
+            .map(|t| (t.id, t.next_rowid))
+            .collect();
         Ok(())
     }
 
@@ -864,7 +883,9 @@ impl<D: Device> Store<D> {
             return Err(limit("too many active transactions"));
         }
         let id = self.next_txn;
-        self.next_txn = id.checked_add(1).ok_or_else(|| overflow("transaction ids"))?;
+        self.next_txn = id
+            .checked_add(1)
+            .ok_or_else(|| overflow("transaction ids"))?;
         let snapshot = self.visible_ts;
         self.txns.insert(
             id,
@@ -928,7 +949,13 @@ impl<D: Device> Store<D> {
         Ok(rowid)
     }
     /// Replaces a row visible to the transaction.
-    pub fn update(&mut self, txn: &mut Txn, table: &str, rowid: u64, row: &[Value]) -> StoreResult<()> {
+    pub fn update(
+        &mut self,
+        txn: &mut Txn,
+        table: &str,
+        rowid: u64,
+        row: &[Value],
+    ) -> StoreResult<()> {
         self.check_usable()?;
         self.state_of(txn)?;
         let t = self.table(table)?;
@@ -945,7 +972,13 @@ impl<D: Device> Store<D> {
         let r = self.write_row(txn, tid, rowid, None);
         self.poison_on(r)
     }
-    fn write_row(&mut self, txn: &Txn, tid: u32, rowid: u64, row: Option<Vec<Value>>) -> StoreResult<()> {
+    fn write_row(
+        &mut self,
+        txn: &Txn,
+        tid: u32,
+        rowid: u64,
+        row: Option<Vec<Value>>,
+    ) -> StoreResult<()> {
         if let Some(&owner) = self.locks.get(&(tid, rowid)) {
             if owner != txn.id {
                 return Err(StoreError::new(
@@ -959,7 +992,10 @@ impl<D: Device> Store<D> {
         let (pending_writes, snapshot) = (state.writes.len(), state.snapshot);
         match existing {
             Some(false) => {
-                return Err(StoreError::new(StoreErrorKind::NotFound, "row deleted by this transaction"));
+                return Err(StoreError::new(
+                    StoreErrorKind::NotFound,
+                    "row deleted by this transaction",
+                ));
             }
             Some(true) => {}
             None => {
@@ -980,7 +1016,12 @@ impl<D: Device> Store<D> {
                 }
                 match versions.iter().find(|(k, _)| k.ts() <= snapshot) {
                     Some((_, false)) => {}
-                    _ => return Err(StoreError::new(StoreErrorKind::NotFound, format!("row {rowid}"))),
+                    _ => {
+                        return Err(StoreError::new(
+                            StoreErrorKind::NotFound,
+                            format!("row {rowid}"),
+                        ))
+                    }
                 }
             }
         }
@@ -1265,7 +1306,10 @@ impl<D: Device> Store<D> {
     pub fn checkpoint_begin(&mut self) -> StoreResult<()> {
         self.check_usable()?;
         if self.ckpt.is_some() {
-            return Err(StoreError::new(StoreErrorKind::State, "a checkpoint is running"));
+            return Err(StoreError::new(
+                StoreErrorKind::State,
+                "a checkpoint is running",
+            ));
         }
         let r = self.checkpoint_begin_inner();
         self.poison_on(r)
@@ -1313,7 +1357,10 @@ impl<D: Device> Store<D> {
             let mut victims = Vec::new();
             let mut versions: Vec<(Key, bool)> = Vec::new();
             let r = btree::visit(&mut self.reader(), root, Key::MIN, Key::MAX, &mut |e| {
-                if versions.first().is_some_and(|(k, _)| k.rowid != e.key.rowid) {
+                if versions
+                    .first()
+                    .is_some_and(|(k, _)| k.rowid != e.key.rowid)
+                {
                     victims.extend(collectable(&versions, &snapshots));
                     versions.clear();
                 }

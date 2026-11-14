@@ -365,10 +365,7 @@ pub(crate) struct Key {
 }
 impl Key {
     pub fn version(rowid: u64, ts: u64) -> Self {
-        Self {
-            rowid,
-            inv_ts: !ts,
-        }
+        Self { rowid, inv_ts: !ts }
     }
     pub fn ts(self) -> u64 {
         !self.inv_ts
@@ -462,7 +459,10 @@ pub(crate) fn internal_remove(b: &mut [u8], i: usize) {
     let k = i.saturating_sub(1);
     b.copy_within(KEY_OFF + 16 * (k + 1)..KEY_OFF + 16 * n, KEY_OFF + 16 * k);
     b[KEY_OFF + 16 * (n - 1)..KEY_OFF + 16 * n].fill(0);
-    b.copy_within(CHILD_OFF + 4 * (i + 1)..CHILD_OFF + 4 * (n + 1), CHILD_OFF + 4 * i);
+    b.copy_within(
+        CHILD_OFF + 4 * (i + 1)..CHILD_OFF + 4 * (n + 1),
+        CHILD_OFF + 4 * i,
+    );
     b[CHILD_OFF + 4 * n..CHILD_OFF + 4 * (n + 1)].fill(0);
     set_count(b, n - 1);
 }

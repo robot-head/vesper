@@ -8,7 +8,9 @@
 //! JIT byte scanner when the host supports it (a portable count otherwise);
 //! that count sizes the selection vector and answers `COUNT` aggregates.
 //! Comparison loops are plain Rust over slices; whether rustc vectorizes
-//! them is not claimed. Joins are rejected with `ErrorKind::Unsupported`.
+//! them is not claimed. Plans with joins run through the `join` module
+//! (hash joins over materialized column relations); results can be written
+//! into AoSoA tiles ([`TileSet`]) that are reused across executions.
 use crate::execute::{check_inputs, row_bytes, rows_bytes, validate_rows, DataSet, QueryResult};
 use crate::parse::Cmp;
 use crate::plan::{ExprNode, PreparedQuery, RelPlan, TypedExpr};
@@ -17,6 +19,10 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use vesper_simd::{IsaProfileKind, JitScanner};
+
+mod join;
+mod tiles;
+pub use tiles::{Tile, TileSet, TILE_LANES};
 
 /// Rows per column batch unless configured otherwise.
 pub const DEFAULT_BATCH: usize = 1024;
@@ -633,6 +639,20 @@ impl PreparedQuery {
         sink: &mut BatchSink<'_>,
     ) -> Result<usize> {
         self.check_call(catalog, data, params)?;
+        if join::has_join(&self.plan) {
+            let mut run = join::Run {
+                query: self,
+                data,
+                params,
+                engine,
+                work: 0,
+                rows: 0,
+                scratch: join::Scratch::default(),
+            };
+            let rel = run.rel(&self.plan)?;
+            run.project(&rel, sink)?;
+            return Ok(run.work);
+        }
         let (table, slots, predicates) = flatten(&self.plan)?;
         let rows = &data.tables[table];
         let types: Vec<ScalarType> = catalog.tables[table].iter().map(|c| c.ty).collect();

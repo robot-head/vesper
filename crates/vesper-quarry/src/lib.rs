@@ -230,7 +230,11 @@ impl HermeticCatalog {
         self.apply_ddl_changes(sql, limits).map(drop)
     }
     /// `apply_ddl`, also returning each applied statement in order.
-    pub(crate) fn apply_ddl_changes(&mut self, sql: &str, limits: Limits) -> Result<Vec<DdlChange>> {
+    pub(crate) fn apply_ddl_changes(
+        &mut self,
+        sql: &str,
+        limits: Limits,
+    ) -> Result<Vec<DdlChange>> {
         limits.validate()?;
         let statements = parse::ddl(sql, limits)?;
         let mut next = self.clone();

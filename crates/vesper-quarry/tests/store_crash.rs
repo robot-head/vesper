@@ -57,10 +57,16 @@ struct Observed {
 fn random_row(rng: &mut Rng, table: &str) -> Vec<Value> {
     if table == "a" {
         let len = [0usize, 5, 40, 300, 1200][rng.below(5) as usize];
-        let text: String = (0..len).map(|i| (b'a' + ((i as u64 + rng.0) % 26) as u8) as char).collect();
+        let text: String = (0..len)
+            .map(|i| (b'a' + ((i as u64 + rng.0) % 26) as u8) as char)
+            .collect();
         vec![
             Value::U64(rng.next()),
-            if rng.below(4) == 0 { Value::Null } else { Value::Text(text) },
+            if rng.below(4) == 0 {
+                Value::Null
+            } else {
+                Value::Text(text)
+            },
             if rng.below(3) == 0 {
                 Value::Null
             } else {
@@ -70,7 +76,11 @@ fn random_row(rng: &mut Rng, table: &str) -> Vec<Value> {
     } else {
         vec![
             Value::I64(rng.next() as i64),
-            if rng.below(3) == 0 { Value::Null } else { Value::Bool(rng.below(2) == 1) },
+            if rng.below(3) == 0 {
+                Value::Null
+            } else {
+                Value::Bool(rng.below(2) == 1)
+            },
         ]
     }
 }
@@ -88,12 +98,11 @@ fn workload(dev: &mut SimDevice, seed: u64, steps: usize, obs: &mut Observed) {
     let Ok((mut s, _)) = Store::open(&mut *dev, limits()) else {
         return;
     };
-    if s
-        .execute_ddl(
-            "CREATE TABLE a (k U64 NOT NULL, v TEXT NULL, f F64 NULL); \
+    if s.execute_ddl(
+        "CREATE TABLE a (k U64 NOT NULL, v TEXT NULL, f F64 NULL); \
              CREATE TABLE b (k I64 NOT NULL, flag BOOL NULL)",
-        )
-        .is_err()
+    )
+    .is_err()
     {
         return;
     }
@@ -247,9 +256,10 @@ fn contents(s: &mut Store<&mut SimDevice>) -> State {
 
 /// Recovers `medium` and checks it against `obs`. Returns the report.
 fn recover_and_check(medium: &mut SimDevice, obs: &Observed, what: &str) -> StoreRecovery {
-    let (mut s, report) =
-        Store::open(&mut *medium, limits()).unwrap_or_else(|e| panic!("{what}: recovery failed: {e}"));
-    s.check().unwrap_or_else(|e| panic!("{what}: invalid store: {e}"));
+    let (mut s, report) = Store::open(&mut *medium, limits())
+        .unwrap_or_else(|e| panic!("{what}: recovery failed: {e}"));
+    s.check()
+        .unwrap_or_else(|e| panic!("{what}: invalid store: {e}"));
     let ts = s.stats().last_ts;
     assert!(
         ts >= obs.acked && ts <= obs.appended.max(obs.acked),
@@ -306,7 +316,10 @@ fn enumerate(seed: u64, steps: usize, cov: &mut Coverage) {
     let mut obs = Observed::default();
     workload(&mut full, seed, steps, &mut obs);
     let total = full.stats().ops;
-    eprintln!("seed {seed}: {} ops, appended ts {}, acked {}", total, obs.appended, obs.acked);
+    eprintln!(
+        "seed {seed}: {} ops, appended ts {}, acked {}",
+        total, obs.appended, obs.acked
+    );
     assert!(obs.appended > 5, "seed {seed} committed too little");
     for n in 0..total {
         let mut dev = SimDevice::new();
@@ -413,9 +426,14 @@ fn creation_crashes_at_every_operation_leave_a_usable_store() {
         dev.crash_after(n);
         let mut obs = Observed::default();
         workload(&mut dev, 99, 3, &mut obs);
-        for choice in [CrashChoice::LoseUnsynced, CrashChoice::KeepUnsynced, CrashChoice::Subset { seed: n }] {
+        for choice in [
+            CrashChoice::LoseUnsynced,
+            CrashChoice::KeepUnsynced,
+            CrashChoice::Subset { seed: n },
+        ] {
             let mut medium = dev.crash(choice);
-            let (mut s, _) = Store::open(&mut medium, limits()).unwrap_or_else(|e| panic!("op {n}: {e}"));
+            let (mut s, _) =
+                Store::open(&mut medium, limits()).unwrap_or_else(|e| panic!("op {n}: {e}"));
             s.check().unwrap();
             // Either both tables exist (the DDL group survived) or none.
             let a = s.columns("a").is_ok();
@@ -425,7 +443,8 @@ fn creation_crashes_at_every_operation_leave_a_usable_store() {
                     .unwrap();
             }
             let mut t = s.begin().unwrap();
-            s.insert(&mut t, "a", &[Value::U64(1), Value::Null, Value::Null]).unwrap();
+            s.insert(&mut t, "a", &[Value::U64(1), Value::Null, Value::Null])
+                .unwrap();
             s.commit(t).unwrap();
         }
     }
