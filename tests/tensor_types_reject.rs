@@ -97,3 +97,24 @@ fn every_diagnostic_code_has_a_fixture() {
         assert!(seen.contains(code), "no fixture for {code}");
     }
 }
+
+#[test]
+fn the_core_check_entry_routes_tensor_modules() {
+    // `check::check` (used by the CLI) runs the tensor checker first.
+    let src = include_str!("fixtures/tensor_types/reject/matmul_inner.ves");
+    let parsed = vesper::parser::parse(src);
+    let checked = vesper::check::check(&parsed.module);
+    assert!(
+        checked
+            .diagnostics
+            .iter()
+            .any(|d| d.code == header(src, "expect")),
+        "{:?}",
+        checked.diagnostics
+    );
+    let ok = vesper::parser::parse(include_str!(
+        "../tests/fixtures/tensor_types/projection.ves"
+    ));
+    let checked = vesper::check::check(&ok.module);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+}

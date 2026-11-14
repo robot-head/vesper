@@ -98,7 +98,7 @@ rule, each with the expected code, message and source span.
 
 Run on the cloud host (x86_64 Linux, Rust 1.97 and 1.100):
 
-- `cargo test --test tensor_types --test tensor_types_reject`: 10 + 2 passed.
+- `cargo test --test tensor_types --test tensor_types_reject`: 10 + 3 passed.
 - `cargo fmt --all -- --check`: clean. `vesper fmt --check tests/fixtures/tensor_types`: all 47 fixtures canonical.
 - `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`: clean
   (run with PR #490's fix for main's `Op::Vector` break applied locally).
@@ -133,11 +133,9 @@ Run on the cloud host (x86_64 Linux, Rust 1.97 and 1.100):
 
 ## Remaining gaps
 
-- **check.rs hook not yet wired.** The contract puts this lane's `src/check.rs`
-  hook after PRs #379 and #375. #379 has merged, #375 is open. Until the hook
-  lands, `vesper::tensor_types::check` / `analyze` is the entry point (used by
-  the tests); `check::check` and the CLI do not yet route tensor modules to it.
-  The hook is one call at the top of `check::check`.
+- **check.rs hook** landed after #379 and #375 merged: `check::check` (and
+  so `vesper check` and every other caller) runs `tensor_types::check` first
+  and returns its result for modules that use tensor syntax.
 - No CLI command runs the evaluator; `vesper run` stops at the unhandled
   `Tensor` effect.
 - A `wire struct` none of whose fields is wire-only (for example
