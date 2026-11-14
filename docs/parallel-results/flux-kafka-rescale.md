@@ -113,13 +113,26 @@ exactly-once in the Quarry sink.
   of each output partition (the *fence*) and skips everything at or before
   its `(epoch, seq)`. A tail written by another circuit, or a partition
   emptied by retention (no fence), is a typed error instead of a guess.
+- A failed produce request may still be in flight at the broker, so a fence
+  read right away could miss it and the resend would duplicate the batch.
+  After a produce error the sink therefore closes its produce connections
+  and leaves that partition *in doubt* for `KafkaConfig::produce_in_doubt`
+  (60 s by default): commits keep landing in Quarry, publication returns
+  `Error::Kafka("produce in doubt")`, and only after the window does the
+  sink read the fence and resend.
+- A sink opened over a Quarry sink that already holds commits starts with
+  publication pending, so its first commit (or `flush`) republishes the whole
+  committed outbox under the fence before any newer epoch. Epochs a dead
+  incarnation committed but never published are not skipped.
 - `read_kafka_output` reads a topic back and fails on any LSN gap or
-  duplicate, out-of-order `(epoch, seq)` or foreign circuit.
+  duplicate, out-of-order `(epoch, seq)`, or a circuit tag other than that of
+  the supplied circuit's execution identity.
 
 Rskafka 0.6 implements neither Kafka transactions nor idempotent-producer
 sequence numbers, so the sink is not a Kafka transactional producer and
 `read_committed` consumers gain nothing; the guarantee rests on the fence
-and on there being one writer per output partition.
+on there being one writer per output partition, and on the in-doubt window
+outlasting any failed request (a time bound, not a broker-side fence).
 
 ## Lean (`lean/FluxDbsp.lean`)
 
@@ -171,8 +184,11 @@ is set (Lean 4.24.0 from the GitHub release zip).
     error and cuts nothing; a run whose reads fail commits nothing; after the
     restart the run completes (with a live rescale); with the broker down
     between commit and publication the commits land in Quarry, publication
-    stays pending, and a flush after the restart publishes every epoch once;
-  - fence: a new sink incarnation republishes nothing; a foreign record at a
+    stays pending; that process then dies, and a new incarnation starts with
+    publication pending and its first commit publishes every committed epoch
+    once (the assertion fails if the reopened sink starts clean);
+  - fence: a new sink incarnation republishes nothing; reading the topic as
+    another circuit of the same width is refused; a foreign record at a
     partition tail is refused; `release` deletes exactly the committed
     records and the uncommitted epochs still replay; malformed values, wrong
     schema or partition id, zero weight and LSN gaps are typed errors; a torn
@@ -229,7 +245,13 @@ Cloud host (x86_64 Linux, 4 cores), isolated target directories,
 - Worker and coordinator faults inside the reconfiguration window cost a
   whole-cluster recovery.
 - Kafka: no TLS/SASL, no compression, no consumer groups, no Kafka
-  transactions; one writer per output partition is assumed, not enforced;
+  transactions or idempotent producer; one writer per output partition is
+  assumed, not enforced. Exactly-once publication after an ambiguous produce
+  failure rests on `produce_in_doubt` outlasting the failed request; a new
+  process does not wait out a window its dead predecessor left open (it
+  relies on the predecessor's connections being closed by its death). The
+  in-doubt wait itself is exercised only through the broker-down runs, not
+  by a test that delays a request in flight;
   a fence lost to retention stops publication. A malformed record in a
   partition blocks the job (a typed error on every poll) until an operator
   intervenes. The Kafka tests run only in the new workflow, not under Bazel.

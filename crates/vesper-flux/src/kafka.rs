@@ -65,7 +65,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How to reach the brokers.
 #[derive(Clone, Debug)]
@@ -80,6 +80,10 @@ pub struct KafkaConfig {
     pub request_timeout: Duration,
     /// Upper bound of one fetch response.
     pub fetch_bytes: i32,
+    /// After a failed produce, how long the sink waits before it reads the
+    /// partition back and resends: the failed request may still be in flight
+    /// at the broker, and the wait must outlast it (see `KafkaSink`).
+    pub produce_in_doubt: Duration,
 }
 impl KafkaConfig {
     pub fn new(bootstrap: impl Into<String>) -> Self {
@@ -89,6 +93,7 @@ impl KafkaConfig {
             retry_for: Duration::from_secs(20),
             request_timeout: Duration::from_secs(30),
             fetch_bytes: 1 << 20,
+            produce_in_doubt: Duration::from_secs(60),
         }
     }
 }
@@ -100,8 +105,9 @@ pub struct KafkaConnection {
     /// Retries transient failures for `retry_for`.
     client: Client,
     /// Never retries (produce: a retry after a lost response could append
-    /// the same batch twice).
-    once: Client,
+    /// the same batch twice). Dropped after a failed produce, which closes
+    /// its broker connections; rebuilt on the next produce.
+    once: RefCell<Option<Arc<Client>>>,
     cfg: KafkaConfig,
     partitions: RefCell<BTreeMap<(String, i32, bool), Arc<PartitionClient>>>,
     last_error: RefCell<Option<String>>,
@@ -111,6 +117,31 @@ impl std::fmt::Debug for KafkaConnection {
         f.debug_struct("KafkaConnection")
             .field("bootstrap", &self.cfg.bootstrap)
             .finish_non_exhaustive()
+    }
+}
+
+fn new_client(
+    rt: &tokio::runtime::Runtime,
+    cfg: &KafkaConfig,
+    deadline: Duration,
+    last_error: &RefCell<Option<String>>,
+) -> Result<Client, Error> {
+    let build = ClientBuilder::new(cfg.bootstrap.clone())
+        .client_id(cfg.client_id.clone())
+        .backoff_config(BackoffConfig {
+            init_backoff: Duration::from_millis(50),
+            max_backoff: Duration::from_secs(1),
+            base: 3.0,
+            deadline: Some(deadline),
+        })
+        .build();
+    match rt.block_on(async { tokio::time::timeout(cfg.request_timeout, build).await }) {
+        Ok(Ok(c)) => Ok(c),
+        Ok(Err(e)) => {
+            *last_error.borrow_mut() = Some(format!("connect: {e}"));
+            Err(classify(&e))
+        }
+        Err(_) => Err(Error::Kafka("timeout")),
     }
 }
 
@@ -138,38 +169,22 @@ impl KafkaConnection {
             .enable_all()
             .build()
             .map_err(|_| Error::Kafka("runtime"))?;
-        let build = |deadline: Duration| {
-            ClientBuilder::new(cfg.bootstrap.clone())
-                .client_id(cfg.client_id.clone())
-                .backoff_config(BackoffConfig {
-                    init_backoff: Duration::from_millis(50),
-                    max_backoff: Duration::from_secs(1),
-                    base: 3.0,
-                    deadline: Some(deadline),
-                })
-                .build()
-        };
         let last_error = RefCell::new(None);
-        let connect = |deadline| match rt
-            .block_on(async { tokio::time::timeout(cfg.request_timeout, build(deadline)).await })
-        {
-            Ok(Ok(c)) => Ok(c),
-            Ok(Err(e)) => {
-                *last_error.borrow_mut() = Some(format!("connect: {e}"));
-                Err(classify(&e))
-            }
-            Err(_) => Err(Error::Kafka("timeout")),
-        };
-        let client = connect(cfg.retry_for)?;
-        let once = connect(Duration::ZERO)?;
+        let client = new_client(&rt, cfg, cfg.retry_for, &last_error)?;
+        let once = new_client(&rt, cfg, Duration::ZERO, &last_error)?;
         Ok(Self {
             rt,
             client,
-            once,
+            once: RefCell::new(Some(Arc::new(once))),
             cfg: cfg.clone(),
             partitions: RefCell::new(BTreeMap::new()),
             last_error,
         })
+    }
+
+    /// How long a failed produce stays in doubt (`KafkaConfig::produce_in_doubt`).
+    pub fn in_doubt_window(&self) -> Duration {
+        self.cfg.produce_in_doubt
     }
 
     /// The client's message for the last failed operation.
@@ -208,11 +223,31 @@ impl KafkaConnection {
         if let Some(p) = self.partitions.borrow().get(&key) {
             return Ok(Arc::clone(p));
         }
-        let client = if once { &self.once } else { &self.client };
-        let p = self.run(
-            "partition",
-            client.partition_client(topic, partition, UnknownTopicHandling::Error),
-        )?;
+        let p = if once {
+            let client = match self.once.borrow().clone() {
+                Some(c) => c,
+                None => {
+                    let c = Arc::new(new_client(
+                        &self.rt,
+                        &self.cfg,
+                        Duration::ZERO,
+                        &self.last_error,
+                    )?);
+                    *self.once.borrow_mut() = Some(Arc::clone(&c));
+                    c
+                }
+            };
+            self.run(
+                "partition",
+                client.partition_client(topic, partition, UnknownTopicHandling::Error),
+            )?
+        } else {
+            self.run(
+                "partition",
+                self.client
+                    .partition_client(topic, partition, UnknownTopicHandling::Error),
+            )?
+        };
         let p = Arc::new(p);
         self.partitions.borrow_mut().insert(key, Arc::clone(&p));
         Ok(p)
@@ -261,10 +296,11 @@ impl KafkaConnection {
         let p = self.partition(topic, partition, true)?;
         let out = self.run("produce", p.produce(records, Compression::NoCompression));
         if out.is_err() {
-            // A broken connection is cached in the client; reconnect next time.
-            self.partitions
-                .borrow_mut()
-                .remove(&(topic.to_string(), partition, true));
+            // Close the produce connections (a broken one is cached in the
+            // client, and an open one could still carry the request): every
+            // produce partition client goes, then the client itself.
+            self.partitions.borrow_mut().retain(|k, _| !k.2);
+            *self.once.borrow_mut() = None;
         }
         out
     }
@@ -918,6 +954,8 @@ pub struct KafkaSink<S: CommitSink> {
     cfg: KafkaSinkConfig,
     width: usize,
     fences: Vec<Fence>,
+    /// Per partition: a failed produce may land until this instant.
+    in_doubt: Vec<Option<Instant>>,
     pending: Option<Error>,
     stats: KafkaSinkStats,
 }
@@ -950,6 +988,11 @@ fn header_u64(r: &Record, name: &str) -> Result<u64, Error> {
             .try_into()
             .map_err(|_| Error::Kafka("output record headers"))?,
     ))
+}
+/// The execution identity a cluster run writes into its commit records.
+fn circuit_identity(circuit: &Circuit) -> Result<[u8; 32], Error> {
+    let limits = super::CheckpointLimits::default();
+    super::checkpoint::identity(circuit, None, limits, &mut limits.budget(circuit))
 }
 fn circuit_tag(fp: &[u8; 32]) -> Vec<u8> {
     fp[..16].to_vec()
@@ -989,13 +1032,21 @@ impl<S: CommitSink> KafkaSink<S> {
             return Err(Error::Kafka("sink configuration"));
         }
         let fences = vec![Fence::Unknown; cfg.partitions as usize];
+        let in_doubt = vec![None; cfg.partitions as usize];
+        let mut inner = inner;
+        // A reopened sink may hold committed epochs a dead incarnation never
+        // published: replay the whole outbox before anything newer.
+        let pending = inner
+            .last_commit()?
+            .map(|_| Error::Kafka("opened with committed epochs"));
         Ok(Self {
             inner,
             conn,
             cfg,
             width,
             fences,
-            pending: None,
+            pending,
+            in_doubt,
             stats: KafkaSinkStats::default(),
         })
     }
@@ -1059,6 +1110,15 @@ impl<S: CommitSink> KafkaSink<S> {
         let tag = circuit_tag(fingerprint);
         for p in 0..self.cfg.partitions {
             let slot = p as usize;
+            if let Some(until) = self.in_doubt[slot] {
+                // A failed produce may still be in flight at the broker: do not
+                // read the fence (and resend) until it can no longer land.
+                if Instant::now() < until {
+                    return Err(Error::Kafka("produce in doubt"));
+                }
+                self.in_doubt[slot] = None;
+                self.fences[slot] = Fence::Unknown;
+            }
             if self.fences[slot] == Fence::Unknown {
                 self.fences[slot] = self.read_fence(p, &tag)?;
             }
@@ -1134,8 +1194,11 @@ impl<S: CommitSink> KafkaSink<S> {
                 Ok(())
             }
             Err(e) => {
-                // The batch may or may not be in the log: read it back first.
+                // The batch may or may not be in the log, and the request may
+                // still be in flight: the produce connection is dropped, and the
+                // partition is read back only after the in-doubt window.
                 self.fences[p as usize] = Fence::Unknown;
+                self.in_doubt[p as usize] = Some(Instant::now() + self.conn.in_doubt_window());
                 Err(e)
             }
         }
@@ -1189,8 +1252,8 @@ pub fn read_kafka_output(
 ) -> Result<BTreeMap<u64, ZSet>, Error> {
     let width = circuit.nodes[circuit.output].width;
     let limits = circuit.limits;
+    let tag = circuit_tag(&circuit_identity(circuit)?);
     let mut epochs: BTreeMap<u64, Vec<(Row, i64)>> = BTreeMap::new();
-    let mut tag: Option<Vec<u8>> = None;
     for p in 0..partitions {
         let (earliest, latest) = conn.offsets(topic, p)?;
         if earliest != 0 {
@@ -1202,7 +1265,7 @@ pub fn read_kafka_output(
             if got_lsn != lsn as u64 {
                 return Err(Error::Kafka("output LSN gap or duplicate"));
             }
-            if tag.get_or_insert_with(|| got_tag.clone()) != &got_tag {
+            if got_tag != tag {
                 return Err(Error::Kafka("output topic belongs to another circuit"));
             }
             let ok = match previous {

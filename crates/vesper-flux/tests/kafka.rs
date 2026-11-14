@@ -168,6 +168,9 @@ impl Broker {
         KafkaConfig {
             retry_for: Duration::from_secs(5),
             request_timeout: Duration::from_secs(10),
+            // The broker here is local: a failed request lands quickly or
+            // never (and a SIGKILLed broker never applies it).
+            produce_in_doubt: Duration::from_secs(2),
             ..KafkaConfig::new(self.bootstrap())
         }
     }
@@ -686,7 +689,7 @@ fn broker_crash_and_restart() {
     let (mut source, mut sink, store) = job.open(&broker, &t, 2);
     {
         let conn = broker.connect();
-        for c in &changes[6..] {
+        for c in &changes[6..9] {
             producer.epoch(&conn, &t, c, true);
             source.poll().unwrap();
         }
@@ -713,11 +716,20 @@ fn broker_crash_and_restart() {
     assert_eq!(run.outputs.len() as u64, warm.epochs() - run.start_epoch);
     assert!(sink.pending().is_some());
     assert!(sink.stats().failures > 0);
+    // 5. That process dies too: a new incarnation finds committed epochs it
+    //    never published, and its first commit publishes them before the
+    //    newer epoch (none is skipped behind the advancing fence).
+    drop((warm, sink, store));
     broker.restart();
-    sink.flush()
-        .unwrap_or_else(|e| panic!("{e}: {:?}", sink.connection().last_error()));
+    let (mut source, mut sink, store) = job.open(&broker, &t, 2);
+    assert!(sink.pending().is_some());
     let conn = broker.connect();
-    let expected = from_source(&warm, &changes);
+    producer.epoch(&conn, &t, &changes[9], true);
+    source.poll().unwrap();
+    run_cluster_with(&circuit(), &source, &mut sink, &store, &config(3, &[]), &[])
+        .unwrap_or_else(|e| panic!("{e}: {:?}", sink.connection().last_error()));
+    assert!(sink.pending().is_none(), "{:?}", sink.pending());
+    let expected = from_source(&source, &changes);
     verify(&conn, &t, 2, &mut sink, &expected, "after broker crashes");
 }
 
@@ -749,6 +761,18 @@ fn sink_fence_never_duplicates() {
     assert_eq!(sink.stats().published, 0);
     assert_eq!(sink.stats().fences_read, 2);
     verify(&conn, &t, 2, &mut sink, &expected, "republish");
+    // Read back as another circuit with the same output width: refused.
+    let other = {
+        let mut b = CircuitBuilder::new(l()).unwrap();
+        let x = b.input(3).unwrap();
+        let _ = b.input(2).unwrap();
+        let _ = b.input(2).unwrap();
+        b.finish(x).unwrap()
+    };
+    assert!(matches!(
+        read_kafka_output(&conn, &other, &t.output, 2),
+        Err(Error::Kafka("output topic belongs to another circuit"))
+    ));
     drop(sink);
     // A record from another circuit at the tail of a partition is refused.
     let mut wrong = kafka_record(cdc_value(
