@@ -3,20 +3,20 @@
 The genuine Comparison matrix passed on executed revision
 `788a17a9226e6257e3614905e6c5d62651e3bbd7`, which includes current main
 `b2bd14eda54ace6b9e666c5b5a895ccd5c421e36`. Current-main ancestry was
-independently checked. The complete seven-matrix run is still in progress;
-this report is an integration checkpoint and does not declare the PR ready.
+independently checked. All seven genuine matrices completed successfully; the table below records
+complete runs, including every actual negative control.
 The coordinator runs Cargo/Lean; the acceptance lane reads the actual
 structured evidence, execution receipt and logs without executing either.
 
 | Genuine matrix | Status at this checkpoint | Test duration |
 | --- | --- | ---: |
 | Comparison | Passed, including real negative controls | 195.48 s |
-| Construction | Awaiting final coordinator results | Pending |
-| Foundations | Awaiting final coordinator results | Pending |
-| Map | Awaiting final coordinator results | Pending |
-| Normalize, before subsumption | Awaiting final coordinator results | Pending |
-| Normalization, including subsumption | Awaiting final coordinator results | Pending |
-| Order | Awaiting final coordinator results | Pending |
+| Construction | Passed, including real negative controls | 128.77 s |
+| Foundations | Passed, including real negative controls | 134.99 s |
+| Map | Passed, including real negative controls | 148.66 s |
+| Normalize, before subsumption | Passed, including real negative controls | 187.33 s |
+| Normalization, including subsumption | Passed, including real negative controls | 196.44 s |
+| Order | Passed, including real negative controls | 144.73 s |
 
 The Comparison test reported one passed, zero failed, zero ignored and zero
 filtered tests. Its complete acceptance timing was 195.45 seconds; the test
@@ -99,7 +99,20 @@ and source-association checks passed. The six earlier specifications and the
 complete validator suffix remain frozen: 47,588 bytes, SHA-256
 `2162a7e23f7de857d06542325e26be039d9e589ea117f6a93a7f62906b4da0b9`.
 
-Final completion still requires the coordinator's complete seven-matrix
-results and final validation report. The inherited #443 macOS-only scheduling
-select preserves Linux/Windows execution, all Rust/Lean checks and internal
-budgets. Hosted CI status is reported separately.
+All seven complete matrices pass with zero failed, ignored or filtered tests.
+Every prior projected object remains byte-identical to its earlier checkpoint.
+Actual source/object associations, strict audit results and all refusal checks
+pass on the executed tree. The inherited #443 macOS-only scheduling select
+preserves Linux/Windows execution, every Rust/Lean check and internal budget.
+No local full Bazel invocation is claimed: BUILD synchronization and static
+configuration checks pass, while hosted CI is reported separately.
+
+Separate Kinetic compatibility PR #434 subsequently merged as
+`085a7c9c1bd1aadcdba6ba63d1d3fe7917e7126d`. The coordinator imports that already
+merged change into the proof stack, retaining all proof/test/tool bytes.
+Its two runtime files must exactly match the composite patch used for the
+strict seven-target Clippy check above; no temporary patch remains. The
+seven genuine matrix results remain explicitly associated with executed
+revision `788a17a`, before that import. The Kinetic fixed-axis loop change
+has its own complete package and platform validation; it changes no proof,
+auditor, projector or model source.
