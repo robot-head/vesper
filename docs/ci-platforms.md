@@ -65,6 +65,7 @@ paths on every OS (process spawning, file system, paths) keep running there.
 | `//:test/proof_audit_cli` | Six serial kernel replays of Lean's Std (>15 min on macOS) | Skipped (`BUILD.bazel`) | Runs |
 | `scripts/test-format-proof.sh` | Serial Lean witness replay (~3.5 min on macOS) | Not run | Runs against the Cargo binary |
 | `//:test/replay42_kernel`, `//:test/format_proof_cli`, `//:test/oracle42_acceptance` | Serial Lean kernel replays (390 s, 276 s and 135 s on macOS) | Skipped (`BUILD.bazel`) | Run: their `cfg(windows)` process and path code needs Windows |
+| `//:test/resource_model42` | Twelve-module logical-model compilation, 285 source/alternate proof roots, and serial artifact/axiom controls; measured over 300 s on Linux, with a 900 s bound | Skipped (`BUILD.bazel`); `proof_audit_private` still runs its process/path regression | Runs the full target |
 
 Because nothing else uses it, the macOS and Windows lanes also no longer
 prepare the pinned external Lean4Lean checker (`VESPER_LEAN4LEAN42_ROOT`),

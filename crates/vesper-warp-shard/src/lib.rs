@@ -34,7 +34,9 @@ pub mod tile;
 
 pub use batch::{ConnEvent, ConnEventDesc, MAX_BATCH};
 pub use cid::{ConnectionId, MAX_CID_LEN};
-pub use error::{BatchError, ConfigError, InsertError, LookupError, SetError, StaleHandle};
+pub use error::{
+    BatchError, ConfigError, InsertError, LookupError, RekeyError, SetError, StaleHandle,
+};
 pub use rss::{FiveTuple, HashFields, IndirectionTable, MICROSOFT_RSS_KEY, RssError, Toeplitz};
 pub use shard::{Shard, ShardId, ShardSet, ShardSetError};
 pub use simd::{IsaPath, Kernels, LANES, UnsupportedIsa};

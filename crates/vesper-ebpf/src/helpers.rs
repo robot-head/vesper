@@ -73,9 +73,19 @@ pub fn allowed(prog_type: ProgramType, id: i32) -> bool {
         }
 }
 
-/// kfuncs the verifier models (generic kfuncs registered for every
-/// program type).
-pub const KFUNCS: &[&str] = &["bpf_preempt_disable", "bpf_preempt_enable"];
+/// kfuncs the verifier and the interpreter model (generic kfuncs the
+/// kernel registers for every program type).
+pub const KFUNCS: &[&str] = &[
+    "bpf_preempt_disable",
+    "bpf_preempt_enable",
+    "bpf_rcu_read_lock",
+    "bpf_rcu_read_unlock",
+    "bpf_local_irq_save",
+    "bpf_local_irq_restore",
+    "bpf_iter_num_new",
+    "bpf_iter_num_next",
+    "bpf_iter_num_destroy",
+];
 
 /// `license_is_gpl_compatible`.
 pub fn gpl_compatible(license: &str) -> bool {

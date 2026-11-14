@@ -95,6 +95,167 @@ def load (names : Array Name) : IO Environment :=
   importModules (names.map fun moduleName => { module := moduleName }) {} 0
     (plugins := #[]) (loadExts := false)
 
+-- BEGIN CHECKED KERNEL REPLAY
+/-
+Adapted from Lean/Replay.lean, Copyright (c) 2023 Kim Morrison,
+released under the Apache 2.0 license. The dependency replay and postponed
+constructor/recursor checks remain, but declarations enter the checked kernel
+environment directly. This avoids the elaborator's privateToUserName index:
+distinct full private names need not have distinct displayed names.
+
+No declaration is inserted without kernel checking. The wrapper reconstructed
+with Environment.ofKernelEnv is used only for inspection and axiom collection.
+-/
+namespace CheckedKernelReplay
+
+structure Context where
+  newConstants : Std.HashMap Name ConstantInfo
+
+structure State where
+  env : Kernel.Environment
+  remaining : NameSet := {}
+  pending : NameSet := {}
+  postponedConstructors : NameSet := {}
+  postponedRecursors : NameSet := {}
+
+abbrev M := ReaderT Context <| StateRefT State IO
+
+def expressionReferences (expression : Expr) : IO NameSet := do
+  let names ← IO.mkRef ({} : NameSet)
+  expression.forEach fun node => do
+    match node with
+    | .const name _ | .proj name _ _ => names.modify (·.insert name)
+    | _ => pure ()
+  names.get
+
+/-- Include projection structure names and recursor rule expressions as well
+as ordinary type/value references. The kernel still validates all expressions. -/
+def references (info : ConstantInfo) : IO NameSet := do
+  let mut names ← expressionReferences info.type
+  match info with
+  | .defnInfo value => names := names ++ (← expressionReferences value.value)
+  | .thmInfo value => names := names ++ (← expressionReferences value.value)
+  | .opaqueInfo value => names := names ++ (← expressionReferences value.value)
+  | .inductInfo value => names := names ++ .ofList value.ctors
+  | .ctorInfo value => names := names.insert value.induct
+  | .recInfo value =>
+    names := names ++ .ofList value.all
+    for rule in value.rules do
+      names := (names.insert rule.ctor) ++ (← expressionReferences rule.rhs)
+  | _ => pure ()
+  pure names
+
+def isTodo (name : Name) : M Bool := do
+  if (← get).remaining.contains name then
+    modify fun state => { state with
+      remaining := state.remaining.erase name, pending := state.pending.insert name }
+    return true
+  return false
+
+def addChecked (declaration : Declaration) : M Unit := do
+  match (← get).env.addDeclCore 0 declaration none with
+  | .ok env => modify fun state => { state with env }
+  | .error error =>
+    throw <| IO.userError <| (← error.toMessageData {} |>.toString)
+
+def lookup (name : Name) : M ConstantInfo := do
+  let some info := (← read).newConstants[name]? |
+    throw <| IO.userError s!"missing replay declaration: {name}"
+  pure info
+
+mutual
+partial def replayConstant (name : Name) : M Unit := do
+  if ← isTodo name then
+    let info ← lookup name
+    replayConstants (← references info)
+    if (← get).pending.contains name then
+      match info with
+      | .defnInfo value => addChecked (.defnDecl value)
+      | .thmInfo value => addChecked (.thmDecl value)
+      | .axiomInfo value => addChecked (.axiomDecl value)
+      | .opaqueInfo value => addChecked (.opaqueDecl value)
+      | .inductInfo value =>
+        unless !value.all.isEmpty && value.all.contains name do
+          throw <| IO.userError "malformed replay inductive group"
+        let mut members : List InductiveVal := []
+        let mut seen : NameSet := {}
+        for memberName in value.all do
+          if seen.contains memberName then
+            throw <| IO.userError "duplicate replay inductive group member"
+          seen := seen.insert memberName
+          let .inductInfo member ← lookup memberName |
+            throw <| IO.userError "non-inductive replay group member"
+          unless member.all == value.all && member.levelParams == value.levelParams &&
+              member.numParams == value.numParams do
+            throw <| IO.userError "inconsistent replay inductive group"
+          members := members ++ [member]
+        -- A single checked inductive declaration reconstructs the whole mutual
+        -- block. Do not recursively try to add one of its members separately.
+        for member in members do
+          modify fun state => { state with
+            remaining := state.remaining.erase member.name,
+            pending := state.pending.erase member.name }
+        let mut types : List InductiveType := []
+        for member in members do
+          replayConstants (← expressionReferences member.type)
+          let mut constructors : List Constructor := []
+          for constructorName in member.ctors do
+            let .ctorInfo constructor ← lookup constructorName |
+              throw <| IO.userError "non-constructor in replay inductive group"
+            unless constructor.induct == member.name do
+              throw <| IO.userError "replay constructor belongs to a different inductive"
+            replayConstants (← references (.ctorInfo constructor))
+            constructors := constructors ++ [{ name := constructor.name, type := constructor.type }]
+          types := types ++ [{ name := member.name, type := member.type, ctors := constructors }]
+        addChecked (.inductDecl value.levelParams value.numParams types false)
+      | .ctorInfo value =>
+        modify fun state => { state with
+          postponedConstructors := state.postponedConstructors.insert value.name }
+      | .recInfo value =>
+        modify fun state => { state with
+          postponedRecursors := state.postponedRecursors.insert value.name }
+      | .quotInfo _ => addChecked .quotDecl
+      modify fun state => { state with pending := state.pending.erase name }
+
+partial def replayConstants (names : NameSet) : M Unit := do
+  for name in names do replayConstant name
+end
+
+def checkPostponed : M Unit := do
+  for name in (← get).postponedConstructors do
+    match (← get).env.find? name, (← read).newConstants[name]? with
+    | some (.ctorInfo actual), some (.ctorInfo expected) =>
+      unless actual == expected do
+        throw <| IO.userError s!"kernel replay changed constructor: {name}"
+    | _, _ => throw <| IO.userError s!"kernel replay omitted constructor: {name}"
+  for name in (← get).postponedRecursors do
+    match (← get).env.find? name, (← read).newConstants[name]? with
+    | some (.recInfo actual), some (.recInfo expected) =>
+      unless actual == expected do
+        throw <| IO.userError s!"kernel replay changed recursor: {name}"
+    | _, _ => throw <| IO.userError s!"kernel replay omitted recursor: {name}"
+
+def replay (newConstants : Std.HashMap Name ConstantInfo) (base : Environment) : IO Environment := do
+  let mut remaining : NameSet := {}
+  for (name, info) in newConstants.toList do
+    unless name == info.name do
+      throw <| IO.userError "kernel replay map key/name mismatch"
+    if base.contains name then
+      throw <| IO.userError s!"kernel replay shadows trusted declaration: {name}"
+    if info.isUnsafe || info.isPartial then
+      throw <| IO.userError s!"unsupported unsafe or partial replay declaration: {name}"
+    remaining := remaining.insert name
+  let (_, state) ← StateRefT'.run (s := { env := base.toKernelEnv, remaining }) do
+    ReaderT.run (r := { newConstants }) do
+      for name in remaining do replayConstant name
+      checkPostponed
+  unless state.remaining.isEmpty && state.pending.isEmpty do
+    throw <| IO.userError "kernel replay did not finish all declarations"
+  pure <| Environment.ofKernelEnv state.env
+
+end CheckedKernelReplay
+-- END CHECKED KERNEL REPLAY
+
 def audit (request : Request) : IO Json := do
   let library ← IO.FS.realPath (request.toolchainPrefix / "lib" / "lean")
   if within library request.root || within request.root library then
@@ -148,16 +309,16 @@ def audit (request : Request) : IO Json := do
     let some (.thmInfo _) := additions[name]? |
       fail s!"requested name is not an artifact theorem: {name}"
 
-  let replayed ← Environment.replay additions base
+  let replayed ← CheckedKernelReplay.replay additions base
   for (name, expected) in additions.toList do
-    let some checked := replayed.find? name |
+    let some checked := replayed.toKernelEnv.find? name |
       fail s!"kernel replay omitted declaration: {name}"
     unless sameInfo expected checked do
       fail s!"kernel replay changed declaration: {name}"
 
   let mut theoremReports : Array Json := #[]
   for name in request.theorems do
-    let some (.thmInfo checkedTheorem) := replayed.find? name |
+    let some (.thmInfo checkedTheorem) := replayed.toKernelEnv.find? name |
       fail s!"kernel replay did not retain theorem: {name}"
     let (axioms, _) ← (collectAxioms name : CoreM (Array Name)).toIO
       { fileName := "<vesper-proof-audit>", fileMap := default }

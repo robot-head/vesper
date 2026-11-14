@@ -7,6 +7,7 @@ use std::fmt;
 /// Which evidence format a parse error came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Format {
+    /// An Intel TDX DCAP quote (version 4 or 5).
     TdxQuoteV4,
     SnpReport,
     CcaToken,
@@ -115,6 +116,15 @@ pub enum AttestError {
     /// A pinned vendor certificate does not have its recorded SHA-256.
     PinnedRootDigestMismatch {
         name: &'static str,
+    },
+    /// Collateral is older than collateral the verifier already accepted
+    /// (a rollback): a lower Intel `tcbEvaluationDataNumber`, an earlier
+    /// `issueDate`, or a CRL with an earlier `thisUpdate`. `have` and
+    /// `floor` are in the field's own unit (number or Unix seconds).
+    CollateralDowngrade {
+        what: &'static str,
+        have: u64,
+        floor: u64,
     },
 }
 
