@@ -14,6 +14,7 @@ pub mod capability_effects;
 pub mod check;
 pub mod database;
 pub mod doctest;
+pub mod ebpf_backend;
 pub mod forge_frontend;
 pub mod interface;
 #[cfg(target_os = "linux")]
@@ -35,4 +36,5 @@ pub mod regions;
 pub mod runtime;
 pub mod stack_bound;
 pub mod tooling;
+pub mod vector;
 pub mod wasm_backend;
