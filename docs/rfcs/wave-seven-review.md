@@ -26,8 +26,8 @@ PR #295, with native coverage from lane 23, PR #307).
 | 15 | Strata | Lane 29 (lexical regions, lifetimes) | ShardSlab, `tiled(N)`/AoSoA collections, `@fip` reuse |
 | 16 | Pact and Forge | — | §16.4 attribute/item macros (Codex) |
 | 17 | Prism | Lane 8 (WebTransport, datagrams, priorities, streaming bodies) | — |
-| 18 | Aura | — | WinUI 3, GTK 4, SwiftUI backends: owner's decision on hosts |
-| 19 | Ignis | — | DirectX 12, Vulkan, Metal execution: owner's decision on hosts |
+| 18 | Aura | Lane 31 (GTK 4 under Xvfb) | WinUI 3 and SwiftUI backends need Windows/macOS desktops |
+| 19 | Ignis | Lane 32 (Vulkan on Mesa lavapipe) | DirectX 12 and Metal; real-GPU performance |
 | 20 | Wire/Json | Lane 9 (AVX-512/NEON, Eisel-Lemire, Lean) | Source derives (Forge item macros) |
 | 21 | Lens | Lane 10 | — |
 | 22 | Beacon | Lane 1 (tonic gRPC, collector interop, full columns) | Source `Trace` propagation and `Telemetrable` coherence (checker work alongside lanes 28-30) |
@@ -36,7 +36,7 @@ PR #295, with native coverage from lane 23, PR #307).
 | 25 | Chorus | Lane 16 (TLS over Warp, recursive duality, durable Raft) | `@choreography` (Forge macros), RDMA hardware |
 | 26 | Silicon | Lanes 18 (devicetree), 27 (freestanding target) | `@svd_pac` (Forge macros), real boards |
 | 27 | eBPF | Lanes 17 (library), 26 (source backend) | `@btf_core` (Forge macros); linear builder excluded |
-| 28 | Tensor | Lane 20 (formats, BPE, sampling, SIMD, Lean) | Source tensor types, GPU, egglog fusion (optimizer held by other agents) |
+| 28 | Tensor | Lanes 20 (formats, BPE, sampling, SIMD, Lean), 33 (Vulkan compute on lavapipe) | Source tensor types, real GPUs, egglog fusion (optimizer held by other agents) |
 | 29 | Crucible and migrate | Lanes 19 (DPOR depth, Lean), 23 (fuel, refute coverage) | `@fuzz_prop`, MPK differential shadowing, SMT-backed solving |
 | 30 | Nexus | Lanes 22 (WIT generator, SimPulse adapter), 25 (Wasm target) | WasmFX beyond what Wasmtime 50 supports |
 | 31 | Chrono | Lane 3 (byte-image checkpoints, CoreSight, ETE flow) | Live IPT/CoreSight capture needs hardware |
@@ -44,7 +44,7 @@ PR #295, with native coverage from lane 23, PR #307).
 | 33 | Aegis | Lane 4 (AMD KDS, VLEK, Genoa/Turin, CCA, new formats) | Evidence generation on real TEEs |
 | 34 | Flux | Lane 12 (durable sources/sinks, partial recovery, rescaling) | Source operators |
 | 35 | Warp | Lane 7 (coalescing, CID retirement, idle timer, migration) | DPDK, AF_XDP and NIC offloads on hardware |
-| 36 | Kinetic | Lane 5 (SIMD batches, contacts, broadphase kernel), lane 30 (`ConstDenorm`) | GPU broadphase execution, articulated and soft bodies |
+| 36 | Kinetic | Lanes 5 (SIMD batches, contacts, broadphase kernel), 30 (`ConstDenorm`), 33 (broadphase on Vulkan compute) | Real-GPU broadphase performance, articulated and soft bodies |
 | 37 | Aether | Lane 13 (memfd minor faults, devices) | KVM execution and unikernel targets need `/dev/kvm`; `vesper build --unikernel` |
 | 38 | Grammar | — | Source `@wire_grammar` (Forge macros) |
 | 39 | Stylus and Lint | — | Held by other agents earlier; no open claim at planning time |
@@ -53,10 +53,12 @@ PR #295, with native coverage from lane 23, PR #307).
 | 42 | Verified bootstrap | — | Held by other agents (#322, PR #323 and earlier) |
 | A | Mechanized metatheory | Lane 15 | See §2–6 |
 
-## Hardware-only work (owner's decision)
+## Hardware-only work
 
 These need machines that the cloud host and the GitHub/BuildBuddy runners do
-not have. They were left out of waves six and seven:
+not have. On 2026-11-14 the owner chose software stand-ins where one exists:
+lanes 31 (GTK 4 under Xvfb), 32 (Vulkan on lavapipe), 33 (GPU compute on
+lavapipe) and QEMU in lane 27. The rest stays deferred:
 
 | Work | Needs | Possible software stand-in in Linux CI |
 | --- | --- | --- |
@@ -74,4 +76,4 @@ not have. They were left out of waves six and seven:
 
 Once wave seven merges: source `Trace` propagation, the Strata collection suite,
 Forge-macro dependents if the other agents deliver item and attribute macros,
-the Metronome follow-up, and whichever hardware rows the owner provides hosts for.
+the Metronome follow-up, and any hardware rows the owner later provides hosts for.

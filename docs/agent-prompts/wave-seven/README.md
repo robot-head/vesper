@@ -16,9 +16,12 @@ in [specification.txt](../../specification.txt) (Google Doc revision modified
 Lanes 1-22 add depth to host-library crates that already exist. Lanes 23-30
 work in the root compiler: the native backend (23, 24), three new targets
 (Wasm 25, eBPF 26, freestanding Silicon 27) and three source-language features
-(Vector 28, Strata regions 29, capability effects 30). No lane adds a workspace
-member, so most lanes touch the root only through `Cargo.lock` when they add a
-dependency; those merges are still serialized (merge `origin/main` into the lane
+(Vector 28, Strata regions 29, capability effects 30). Lanes 31-33 run
+hardware-backed sections on software stand-ins the owner chose on 2026-11-14:
+Aura GTK 4 under Xvfb, Ignis Vulkan on Mesa lavapipe, and Tensor/Kinetic GPU
+compute on lavapipe. Only lanes 31-33 add workspace members (one new crate
+each). Most other lanes touch the root only through `Cargo.lock` when they add
+a dependency; all root-manifest merges are serialized (merge `origin/main` into the lane
 branch right before merging, regenerate the lockfile with cargo, wait for CI).
 
 ## Lanes
@@ -55,8 +58,12 @@ branch right before merging, regenerate the lockfile with cargo, wait for CI).
 | 28 | [Source Vector: vector types and `eff [Isa[P]]` lowered to Cranelift SIMD](28-vector-isa-source.md) | #351 | §14 | now | NEW src/vector.rs and src/vector/** (types, checking, lowering helpers); Additive vector operations in src/ir.rs and the evaluator (own commit); NEW src/native_vector.rs plus one dispatch arm in src/native.rs; Narrow hook calls in src/check.rs; Additive syntax in crates/vesper-syntax/** only if unavoidable; NEW tests/vector*.rs and tests/fixtures/vector/** |
 | 29 | [Source Strata: lexical regions and lifetime checking](29-strata-source-regions.md) | #352 | §15 | now | NEW src/regions.rs and src/regions/**; Narrow hook calls in src/check.rs; Additive syntax in crates/vesper-syntax/** only if unavoidable; NEW tests/regions*.rs and tests/fixtures/regions/** |
 | 30 | [Source capability effects: secret operations, ConstDenorm, RtBus and interprocedural taint](30-capability-effects-rest.md) | #353 | §23, §32, §36 | now | src/capability_effects.rs; NEW tests/capability_effects_more*.rs and fixtures under tests/fixtures/capability_effects/**; NEW lean/CapabilityEffects.lean |
+| 31 | [Aura: a GTK 4 backend driven under Xvfb](31-aura-gtk4-xvfb.md) | #355 | §18 | now | NEW crates/vesper-aura-gtk/**; NEW .github/workflows/aura-gtk.yml; Root registration patch for vesper-aura-gtk (own commit) |
+| 32 | [Ignis: a Vulkan 1.3 backend run on Mesa lavapipe](32-ignis-vulkan-lavapipe.md) | #356 | §19 | now | NEW crates/vesper-ignis-vulkan/**; NEW .github/workflows/ignis-vulkan.yml; Root registration patch for vesper-ignis-vulkan (own commit) |
+| 33 | [GPU compute for Tensor and Kinetic on Vulkan (lavapipe)](33-gpu-compute-lavapipe.md) | #357 | §28, §36 | now | NEW crates/vesper-gpu-compute/**; NEW .github/workflows/gpu-compute.yml; Root registration patch for vesper-gpu-compute (own commit) |
 
-All thirty lanes can start now. Lane 24 merges after lane 23 if both changed
+All thirty-three lanes can start now. Lanes 31-33 each register a new crate,
+so their merges go one at a time. Lane 24 merges after lane 23 if both changed
 `src/native.rs`. Lanes 27 and 28 also add narrow hunks to `src/native.rs`, and
 lanes 28 and 29 to `src/check.rs` and possibly `crates/vesper-syntax/**`; the
 second to merge in each pair merges `origin/main` first.
@@ -74,12 +81,12 @@ second to merge in each pair merges `origin/main` first.
   lane is planned from its report once it lands.
 - **Source `Trace` propagation** (§22) and the Strata collection suite
   (`tiled(N)`/AoSoA): they change the checker and IR alongside lanes 28-30.
-- **Hardware the CI and cloud hosts lack, waiting on the owner's decision**:
-  Aura (WinUI 3, GTK 4, SwiftUI) and Ignis (DirectX 12, Vulkan, Metal)
-  backends; Tensor and Kinetic GPU execution; real TEE evidence (TDX, SEV-SNP,
+- **Hardware the CI and cloud hosts lack**: the owner chose software stand-ins
+  (lanes 31-33 and QEMU in lane 27). Still deferred because no stand-in exists
+  in Linux CI: Aura WinUI 3 and SwiftUI; Ignis DirectX 12 and Metal; real-GPU
+  performance; real TEE evidence (TDX, SEV-SNP,
   CCA guests); KVM execution (Aether); RDMA NICs (Chorus); Intel PT/CoreSight
   capture (Chrono); hardware PMU counters (Metronome); POE on AArch64;
   io_uring on a permitting host; AF_XDP/DPDK and NIC offloads (Warp); RISC-V
-  boards; audio and MIDI drivers (Resonance). Some of these can run on
-  software stand-ins in Linux CI (GTK 4 under Xvfb, Vulkan on Mesa lavapipe,
-  RISC-V under QEMU); lanes that touch them report what ran.
+  boards; audio and MIDI drivers (Resonance). Lanes that touch them report
+  what ran.

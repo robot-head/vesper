@@ -1,14 +1,16 @@
 # Seventh-wave integration contracts
 
 Baseline: the `main` commit named in the [wave-seven prompt index](../agent-prompts/wave-seven/README.md)
-or a descendant. This is an ownership and interface agreement so that thirty
+or a descendant. This is an ownership and interface agreement so that thirty-three
 lanes can run with as little overlap as possible. It is not a soundness theorem.
 
 Wave six added depth to every started section and wired the wave-five crates
 into the CLI and native backend. Wave seven finishes the host-library gaps the
 wave-six reports recorded (lanes 1-22) and starts the compiler work those
 reports kept deferring: native-backend depth, three new code-generation
-targets, and three source-language features (lanes 23-30). The
+targets, and three source-language features (lanes 23-30). Lanes 31-33 run
+Aura, Ignis and GPU compute on software stand-ins (Xvfb, Mesa lavapipe), as the
+owner chose on 2026-11-14. The
 [section status review](wave-seven-review.md) maps each remaining gap to a lane
 or to a later wave.
 
@@ -47,6 +49,8 @@ could reasonably touch are assigned like this:
 | `crates/vesper-nexus/**` | Lane 22; lane 25 depends on it read-only | — |
 | `crates/vesper-quarry/**` | Lane 11; lane 12 depends on it read-only | — |
 | `.github/workflows/platforms.yml` | Lane 24 (Windows host-native step only) | — |
+| NEW `.github/workflows/aura-gtk.yml`, `ignis-vulkan.yml`, `gpu-compute.yml` | Lanes 31, 32, 33 respectively | — |
+| `crates/vesper-aura/**`, `crates/vesper-ignis/**`, `crates/vesper-tensor/**`, `crates/vesper-kinetic/**` | Read-only for lanes 31-33 (Tensor and Kinetic are owned by lanes 20 and 5) | — |
 | Root `Cargo.toml` dependency lines, `Cargo.lock` | Each lane commits its own minimal patch in its own commit | — |
 | `tools/bazel/**`, root `BUILD.bazel`, other CI workflows | Not edited | — |
 
@@ -80,7 +84,14 @@ that does not know it. Lanes 25-27 lower from the checked Place IR and reuse
 ## Root and lockfile
 
 New dependencies are pinned exactly and reuse versions already in `Cargo.lock`
-where possible. No lane adds a workspace member. Because many lanes will touch
+where possible. Only lanes 31-33 add workspace members (`vesper-aura-gtk`,
+`vesper-ignis-vulkan`, `vesper-gpu-compute`): each registers its crate in
+`members` and `default-members` before `experiments/native-pulse` and generates
+its `BUILD.bazel` with `tools/bazel/sync_build_files.py`. If a crate's system
+libraries (GTK 4, Vulkan loader) cannot build under hermetic Bazel, its Bazel
+targets are tagged `manual` with a comment naming the lane's own workflow, and
+that workflow runs the tests on every PR touching the crate. Lanes 32 and 33
+use the same `ash` and `naga` versions; the second to merge adopts the first's. Because many lanes will touch
 `Cargo.lock`, merges that change it are serialized: a lane merges `origin/main`
 into its branch right before merging, regenerates the lockfile with cargo
 instead of hand-merging it, and waits for CI on that head. When several green
@@ -126,12 +137,13 @@ contains the previous one) so CI runs once per PR.
 | 5, 9, 20, 21 | `std::arch` SIMD with a scalar reference (20 also mmap for weights) |
 | 13 | userfaultfd, memfd, seccomp and KVM ioctls (Linux) |
 | 17 | the existing `bpf()` module |
+| 32, 33 | Vulkan calls through `ash`, confined to one backend/runtime module |
 | 23, 24, 27, 28 | none beyond what `src/native*.rs` already has (JIT and object emission) |
 | others | none |
 
 ## Sequencing
 
-- All thirty lanes start now.
+- All thirty-three lanes start now. Lanes 31-33 merge one at a time (root registration).
 - Lane 24 merges after lane 23 if both changed `src/native.rs`; lanes 27 and 28
   merge `origin/main` first for the same reason, as do lanes 28 and 29 for
   `src/check.rs` and `crates/vesper-syntax/**`.
