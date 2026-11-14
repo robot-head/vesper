@@ -15,6 +15,7 @@ vesper_crate(
         "test/lean4lean_map42",
         "test/lean4lean_normalize42",
         "test/lean4lean_normalization42",
+        "test/lean4lean_comparison42",
     ],
     extra_compile_data = ["//crates/vesper-doc:files"],
     extra_test_data = [
@@ -89,6 +90,11 @@ vesper_crate(
         }),
         # Same fixed logical replay and complete controls; see #443.
         "test/lean4lean_normalization42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_comparison42": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),

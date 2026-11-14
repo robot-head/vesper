@@ -1,4 +1,4 @@
-//! Shared runner for the six fixed audited proof packets.
+//! Shared runner for the seven fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -19,6 +19,7 @@ pub enum Packet {
     Map,
     Normalize,
     Normalization,
+    Comparison,
 }
 
 struct PacketSpec {
@@ -208,6 +209,21 @@ const NORMALIZATION_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.normalize_value_witness",
 ];
 
+const COMPARISON_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.norm_all_eq_toList_all",
+    "Vesper.Lean4LeanLevel42.norm_all_eq_true_iff",
+    "Vesper.Lean4LeanLevel42.norm_all_lookup",
+    "Vesper.Lean4LeanLevel42.compareStep_none_bound",
+    "Vesper.Lean4LeanLevel42.compareStep_some_union",
+    "Vesper.Lean4LeanLevel42.compareFold_none_bound",
+    "Vesper.Lean4LeanLevel42.norm_le_sound",
+    "Vesper.Lean4LeanLevel42.geq_sound",
+    "Vesper.Lean4LeanLevel42.norm_le_needs_right_WF_counterexample",
+    "Vesper.Lean4LeanLevel42.norm_le_split_dominators",
+    "Vesper.Lean4LeanLevel42.norm_le_raw_empty_row_incomplete",
+    "Vesper.Lean4LeanLevel42.geq_split_dominators",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -338,6 +354,38 @@ impl Packet {
                 required: NORMALIZATION_REQUIRED,
                 scope: "audited_normalization_map_denotation",
                 marker: "LEAN4LEAN_NORMALIZATION42_EVIDENCE",
+            },
+            Self::Comparison => PacketSpec {
+                label: "lean4lean_comparison42",
+                module: "Lean4LeanComparison42",
+                projected: "Lean4LeanComparison42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.Subsumption",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.MapValue",
+                    "Lean4LeanLevel42.MapHelpers",
+                    "Lean4LeanLevel42.PathPriming",
+                    "Lean4LeanLevel42.LevelSemantics",
+                    "Lean4LeanLevel42.NormalizeInvariants",
+                    "Lean4LeanLevel42.NormalizeValue",
+                    "Lean4LeanLevel42.NodeResidual",
+                    "Lean4LeanLevel42.MapMinimize",
+                    "Lean4LeanLevel42.MapSubsumption",
+                    "Lean4LeanLevel42.NormalizeFinal",
+                    "Lean4LeanLevel42.MapAll",
+                    "Lean4LeanLevel42.CompareFold",
+                    "Lean4LeanLevel42.MapComparison",
+                    "Lean4LeanComparison42",
+                ],
+                required: COMPARISON_REQUIRED,
+                scope: "audited_level_comparison_soundness",
+                marker: "LEAN4LEAN_COMPARISON42_EVIDENCE",
             },
         }
     }
