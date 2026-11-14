@@ -80,7 +80,7 @@ fn main() {
     );
     let index_limits = IndexLimits {
         max_input_bytes: 64 << 20,
-        max_structurals: 64 << 20,
+        max_entries: 64 << 20,
     };
     println!(
         "{:<8} {:>12} {:>12} {:>12}",

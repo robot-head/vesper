@@ -105,9 +105,9 @@ fn tight_limits_are_enforced_identically() {
             },
         ));
     }
-    // Several limits can fail at once, and the engines check them in a
-    // different order; acceptance is identical (asserted in `compare`).
-    eprintln!("tight limits: errors identical on {agree}/{total}");
+    // Several limits can fail at once; every engine reports the first one
+    // the scalar parser meets (see also tests/limits_differential.rs).
+    assert_eq!(agree, total, "tight limits: errors identical on {agree}/{total}");
 }
 
 #[test]

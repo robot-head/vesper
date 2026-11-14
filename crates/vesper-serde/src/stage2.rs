@@ -9,43 +9,28 @@
 //! asks through [`Node`](crate::Node) or [`Cursor`](crate::Cursor).
 //!
 //! On every input the scalar parser accepts, this builder produces the same
-//! tape, the same `work_used` and the same capacity; it rejects exactly the
-//! inputs the scalar parser rejects. Error offsets and, for inputs with
-//! several faults, error kinds may differ.
-use crate::index::{HARD_DEPTH, Token, check_duplicate, escape};
+//! tape, the same `work_used` and the same capacity; on every input it
+//! rejects, it reports the same error kind at the same offset, including
+//! when several limits are exceeded at once (see [`Builder`]).
+use crate::index::{HARD_DEPTH, IndexPlan, Token, check_duplicate, escape, escape_with};
 use crate::simd::{IndexLimits, Isa, StructuralIndex};
 use crate::{Error, ErrorKind, IndexedJson, Kind, Limits};
 
-/// Admission and capacity shared by owned and reusable parsing.
-struct Plan {
-    capacity: usize,
-}
-
-fn admit(input: &[u8], limits: &Limits) -> Result<Plan, Error> {
+/// Admission and the `max_index_bytes` split shared by owned and reusable
+/// parsing (and, through [`IndexPlan`], by the scalar parser).
+fn admit(input: &[u8], limits: &Limits) -> Result<(IndexPlan, IndexLimits), Error> {
     if input.len() > limits.max_input_bytes {
         return Err(Error::new(ErrorKind::InputLimit, 0));
     }
     if input.len() > limits.max_work {
         return Err(Error::new(ErrorKind::WorkLimit, 0));
     }
-    let capacity = input
-        .len()
-        .min(limits.max_tokens)
-        .min(limits.max_index_bytes / size_of::<Token>());
-    Ok(Plan { capacity })
-}
-
-fn index_limits(input: &[u8], limits: &Limits) -> IndexLimits {
-    // A document of T tokens has at most 4T structurals: two per value plus
-    // one comma and one colon per value. More means TokenLimit or bad syntax.
-    IndexLimits {
+    let plan = IndexPlan::new(input.len(), limits);
+    let index = IndexLimits {
         max_input_bytes: limits.max_input_bytes,
-        max_structurals: limits
-            .max_tokens
-            .saturating_mul(4)
-            .saturating_add(1)
-            .min(input.len()),
-    }
+        max_entries: plan.entries,
+    };
+    Ok((plan, index))
 }
 
 impl<'a> IndexedJson<'a> {
@@ -67,8 +52,8 @@ impl<'a> IndexedJson<'a> {
         isa: Isa,
         index: &mut StructuralIndex,
     ) -> Result<Self, Error> {
-        let plan = admit(input, &limits)?;
-        index.build(input, isa, index_limits(input, &limits))?;
+        let (plan, index_limits) = admit(input, &limits)?;
+        index.build(input, isa, index_limits)?;
         let mut tokens = Vec::new();
         tokens
             .try_reserve_exact(plan.capacity)
@@ -78,6 +63,7 @@ impl<'a> IndexedJson<'a> {
             input: whole_str(input)?,
             tokens,
             work_used,
+            index_entries: index.structurals().len() + index.escapes().len(),
         })
     }
 }
@@ -124,9 +110,7 @@ impl SimdParser {
     }
     /// Retained structural-index and tape capacity in bytes.
     pub fn retained_bytes(&self) -> usize {
-        self.index.structurals.capacity() * 4
-            + self.index.escapes.capacity() * 4
-            + self.tokens.capacity() * size_of::<Token>()
+        self.index.capacity_bytes() + self.tokens.capacity() * size_of::<Token>()
     }
 
     /// Validate `input` and lend the document to `f`. Views cannot outlive
@@ -137,9 +121,8 @@ impl SimdParser {
         limits: Limits,
         f: impl FnOnce(&IndexedJson<'a>) -> R,
     ) -> Result<R, Error> {
-        let plan = admit(input, &limits)?;
-        self.index
-            .build(input, self.isa, index_limits(input, &limits))?;
+        let (plan, index_limits) = admit(input, &limits)?;
+        self.index.build(input, self.isa, index_limits)?;
         let mut tokens = core::mem::take(&mut self.tokens);
         tokens.clear();
         if tokens.capacity() < plan.capacity {
@@ -166,6 +149,7 @@ impl SimdParser {
             input: text,
             tokens,
             work_used,
+            index_entries: self.index.structurals().len() + self.index.escapes().len(),
         };
         let result = f(&doc);
         self.tokens = doc.tokens;
@@ -185,15 +169,26 @@ struct Frame {
     object: bool,
 }
 
+/// Walks the structural index in document order, the order in which the
+/// scalar parser meets every byte, so that the first error reported is the
+/// scalar parser's first error. Work is not charged byte by byte: the scalar
+/// parser charges `len` up front, one unit per byte it consumes and the
+/// duplicate-key comparisons, so its `WorkLimit` fires when it steps the
+/// byte at the *frontier* `max_work - len - dup`. Each error candidate
+/// records how far the scalar parser had stepped when it would detect it,
+/// and becomes `WorkLimit` at the frontier if that lies earlier.
 struct Builder<'i, 't> {
     input: &'i [u8],
     s: &'i [u32],
     escapes: &'i [u32],
     control: Option<usize>,
+    /// The first stage 1 entry not in the index, when it was truncated.
+    truncated: Option<usize>,
     tokens: &'t mut Vec<Token>,
     capacity: usize,
     limits: &'i Limits,
-    work: usize,
+    /// Duplicate-key work so far.
+    dup: usize,
     string_bytes: usize,
     esc: usize,
 }
@@ -210,50 +205,121 @@ fn build(
         s: index.structurals(),
         escapes: index.escapes(),
         control: index.first_string_control().map(|c| c as usize),
+        truncated: index.truncated_at().map(|p| p as usize),
         tokens,
         capacity,
         limits,
-        // The scalar parser charges every byte once up front and once as it
-        // is consumed; a complete parse consumes every byte exactly once.
-        work: input.len(),
+        dup: 0,
         string_bytes: 0,
         esc: 0,
     };
-    b.tick(input.len())?;
     b.document()?;
-    if index.unclosed_string() || b.control.is_some_and(|c| c < input.len()) {
+    // The scalar parser charges every byte once up front and once as it is
+    // consumed; a complete parse consumes every byte exactly once.
+    b.check_frontier(input.len())?;
+    if b.truncated.is_some()
+        || index.unclosed_string()
+        || b.control.is_some_and(|c| c < input.len())
+    {
         // Unreachable for a successful walk; kept as a typed backstop.
         return Err(Error::new(ErrorKind::Syntax, input.len()));
     }
-    Ok(b.work)
+    Ok(2 * input.len() + b.dup)
 }
 
 impl Builder<'_, '_> {
-    fn tick(&mut self, amount: usize) -> Result<(), Error> {
-        self.work = self
-            .work
-            .checked_add(amount)
-            .ok_or(Error::new(ErrorKind::WorkLimit, 0))?;
-        if self.work > self.limits.max_work {
-            return Err(Error::new(ErrorKind::WorkLimit, 0));
+    /// The first byte whose step would exceed `max_work`.
+    fn frontier(&self) -> usize {
+        // `admit` guarantees len <= max_work; dup checks keep len+at+dup in it.
+        (self.limits.max_work - self.input.len()).saturating_sub(self.dup)
+    }
+    /// `e` as the scalar parser reports it, given it had stepped every byte
+    /// before `stepped` when detecting it.
+    #[cold]
+    fn fail(&self, e: Error, stepped: usize) -> Error {
+        let frontier = self.frontier();
+        if frontier < stepped {
+            Error::new(ErrorKind::WorkLimit, self.work_offset(frontier))
+        } else {
+            e
+        }
+    }
+    fn err(&self, kind: ErrorKind, at: usize) -> Error {
+        self.fail(Error::new(kind, at), at)
+    }
+    fn check_frontier(&self, stepped: usize) -> Result<(), Error> {
+        if self.frontier() < stepped {
+            return Err(Error::new(
+                ErrorKind::WorkLimit,
+                self.work_offset(self.frontier()),
+            ));
         }
         Ok(())
     }
-    fn pos(&self, i: usize) -> usize {
-        self.s.get(i).map_or(self.input.len(), |&p| p as usize)
+    /// Where the scalar parser reports running out of work at byte `p`: at
+    /// `p`, unless `p` is inside an escape body, whose bytes it charges in
+    /// one step after decoding, reporting just past the escape.
+    #[cold]
+    fn work_offset(&self, p: usize) -> usize {
+        let k = self.escapes.partition_point(|&e| (e as usize) < p);
+        let decode_end = |e: usize| {
+            let mut pos = e + 1;
+            escape(self.input, &mut pos).ok().map(|_| pos)
+        };
+        for back in [2usize, 1] {
+            // The containing escape is the last one before `p`, or the one
+            // before that when the last is the low half of a surrogate pair.
+            if let Some(&e) = k.checked_sub(back).and_then(|j| self.escapes.get(j))
+                && let Some(end) = decode_end(e as usize)
+                && end > p
+            {
+                return end;
+            }
+        }
+        p
     }
+
+    /// Position of structural `i`; past the index, the truncation point or
+    /// the end of input.
+    fn pos(&self, i: usize) -> usize {
+        match self.s.get(i) {
+            Some(&p) => p as usize,
+            None => self.truncated.unwrap_or(self.input.len()),
+        }
+    }
+    /// Byte at structural `i`, including the first entry cut by truncation.
     fn byte(&self, i: usize) -> Option<u8> {
-        self.s.get(i).map(|&p| self.input[p as usize])
+        match self.s.get(i) {
+            Some(&p) => Some(self.input[p as usize]),
+            None if i == self.s.len() => self.truncated.map(|p| self.input[p]),
+            None => None,
+        }
+    }
+    /// Charge structural `i`'s index entry: it fails exactly at truncation.
+    fn entry(&self, i: usize) -> Result<(), Error> {
+        if i >= self.s.len()
+            && let Some(p) = self.truncated
+        {
+            return Err(self.err(ErrorKind::AllocationLimit, p));
+        }
+        Ok(())
     }
     fn syntax(&self, i: usize) -> Error {
-        Error::new(ErrorKind::Syntax, self.pos(i))
+        self.err(ErrorKind::Syntax, self.pos(i))
+    }
+    /// An operator at structural `i` that the grammar expects here.
+    fn op(&self, i: usize, b: u8) -> Result<(), Error> {
+        if self.byte(i) != Some(b) {
+            return Err(self.syntax(i));
+        }
+        self.entry(i)
     }
     fn push(&mut self, kind: Kind, depth: usize, start: usize) -> Result<usize, Error> {
         if self.tokens.len() >= self.limits.max_tokens {
-            return Err(Error::new(ErrorKind::TokenLimit, start));
+            return Err(self.err(ErrorKind::TokenLimit, start));
         }
         if self.tokens.len() >= self.capacity {
-            return Err(Error::new(ErrorKind::AllocationLimit, start));
+            return Err(self.err(ErrorKind::AllocationLimit, start));
         }
         let index = self.tokens.len();
         self.tokens.push(Token {
@@ -282,13 +348,15 @@ impl Builder<'_, '_> {
                 Some(open @ (b'{' | b'[')) => {
                     let object = open == b'{';
                     if depth >= self.limits.max_depth || depth >= HARD_DEPTH {
-                        return Err(Error::new(ErrorKind::DepthLimit, self.pos(i)));
+                        return Err(self.err(ErrorKind::DepthLimit, self.pos(i)));
                     }
                     let kind = if object { Kind::Object } else { Kind::Array };
                     let token = self.push(kind, depth, self.pos(i))?;
+                    self.entry(i)?;
                     i += 1;
                     let close = if object { b'}' } else { b']' };
                     if self.byte(i) == Some(close) {
+                        self.entry(i)?;
                         self.tokens[token].end = self.pos(i) + 1;
                         i += 1;
                     } else {
@@ -307,7 +375,7 @@ impl Builder<'_, '_> {
             // A value just ended at structural `i`; close finished containers.
             loop {
                 if depth == 0 {
-                    return if i == self.s.len() {
+                    return if i == self.s.len() && self.truncated.is_none() {
                         Ok(())
                     } else {
                         Err(self.syntax(i))
@@ -317,6 +385,7 @@ impl Builder<'_, '_> {
                 let close = if frame.object { b'}' } else { b']' };
                 match self.byte(i) {
                     Some(b',') => {
+                        self.entry(i)?;
                         i += 1;
                         if frame.object {
                             i = self.key(i, frame.token, depth)?;
@@ -324,6 +393,7 @@ impl Builder<'_, '_> {
                         break;
                     }
                     Some(b) if b == close => {
+                        self.entry(i)?;
                         self.tokens[frame.token].end = self.pos(i) + 1;
                         self.tokens[frame.token].next = self.tokens.len();
                         depth -= 1;
@@ -344,105 +414,111 @@ impl Builder<'_, '_> {
         let key = self.tokens.len();
         let next = self.string(i, depth)?;
         let at = self.pos(next - 1) + 1;
+        self.check_frontier(at)?;
+        let before = self.input.len() + at + self.dup;
+        let mut work = before;
         check_duplicate(
             self.tokens,
             self.input,
             object + 1,
             key,
-            &mut self.work,
+            &mut work,
             self.limits.max_work,
             at,
         )?;
-        if self.byte(next) != Some(b':') {
-            return Err(self.syntax(next));
-        }
+        self.dup += work - before;
+        self.op(next, b':')?;
         Ok(next + 1)
     }
 
+    /// A string at structural `i`. The scalar parser meets, in byte order:
+    /// ordinary bytes (one decoded byte each), escapes (entry, decode,
+    /// decoded length), control bytes (an error) and the closing quote
+    /// (entry), checking `max_string_bytes` after each unit.
     fn string(&mut self, i: usize, depth: usize) -> Result<usize, Error> {
         let open = self.pos(i);
-        // An unclosed string runs to the end; its escapes are still checked
-        // first, in byte order, as the scalar parser does.
-        let closed = self.byte(i + 1) == Some(b'"');
-        let close = if closed {
+        let token = self.push(Kind::String, depth, open)?;
+        self.entry(i)?;
+        let closed = self.byte(i + 1) == Some(b'"') && i + 1 < self.s.len();
+        // How far the units run: the closing quote, the truncation point
+        // (the next entry, inside or closing this string) or the end.
+        let bound = if closed {
             self.pos(i + 1)
         } else {
-            self.input.len()
+            self.truncated.unwrap_or(self.input.len())
         };
-        let token = self.push(Kind::String, depth, open)?;
-        let mut decoded = close - open - 1;
+        let max = self.limits.max_string_bytes;
+        let control = self.control.filter(|&c| c > open && c < bound);
+        let mut decoded = 0usize;
         let mut escaped = false;
-        let mut consumed = open + 1;
-        while let Some(&e) = self.escapes.get(self.esc) {
-            let e = e as usize;
-            if e >= close {
+        let mut at = open + 1;
+        loop {
+            let next_escape = loop {
+                match self.escapes.get(self.esc) {
+                    Some(&e) if (e as usize) < at => self.esc += 1, // low half, done
+                    Some(&e) if (e as usize) < bound => break Some(e as usize),
+                    _ => break None,
+                }
+            };
+            let event = match (next_escape, control) {
+                (Some(e), Some(c)) => e.min(c),
+                (Some(e), None) => e,
+                (None, Some(c)) => c,
+                (None, None) => bound,
+            };
+            // Ordinary bytes up to the event.
+            let run = event - at;
+            if decoded + run > max {
+                let limit = at + (max - decoded) + 1;
+                return Err(self.err(ErrorKind::StringLimit, limit));
+            }
+            decoded += run;
+            if event == bound {
                 break;
             }
+            if Some(event) == control {
+                return Err(self.err(ErrorKind::Syntax, event));
+            }
+            // An escape: its entry is present (it is before any truncation).
             self.esc += 1;
-            if e < consumed {
-                // The low half of a surrogate pair, already decoded.
-                continue;
-            }
             escaped = true;
-            if let Some(c) = self.control
-                && c < e
-            {
-                return Err(Error::new(ErrorKind::Syntax, c));
+            let mut pos = event + 1;
+            let truncated = self.truncated;
+            let ch = escape_with(self.input, &mut pos, &mut |second| match truncated {
+                Some(p) if second >= p => Err(Error::new(ErrorKind::AllocationLimit, p)),
+                _ => Ok(()),
+            })
+            .map_err(|e| self.fail(e, event + 1))?;
+            decoded += ch.len_utf8();
+            at = pos;
+            if decoded > max {
+                return Err(self.err(ErrorKind::StringLimit, at));
             }
-            let mut pos = e + 1;
-            let ch = escape(self.input, &mut pos)?;
-            decoded = decoded - (pos - e) + ch.len_utf8();
-            consumed = pos;
-        }
-        if let Some(c) = self.control
-            && c < close
-        {
-            return Err(Error::new(ErrorKind::Syntax, c));
         }
         if !closed {
-            return Err(Error::new(ErrorKind::Syntax, self.input.len()));
-        }
-        if decoded > self.limits.max_string_bytes {
-            let at = self.limit_offset(open, close);
-            return Err(Error::new(ErrorKind::StringLimit, at));
+            return Err(match self.truncated {
+                Some(p) => self.err(ErrorKind::AllocationLimit, p),
+                None => self.err(ErrorKind::Syntax, self.input.len()),
+            });
         }
         self.string_bytes = self
             .string_bytes
             .checked_add(decoded)
-            .ok_or(Error::new(ErrorKind::StringLimit, close + 1))?;
+            .ok_or(self.err(ErrorKind::StringLimit, bound + 1))?;
         if self.string_bytes > self.limits.max_total_string_bytes {
-            return Err(Error::new(ErrorKind::StringLimit, close + 1));
+            return Err(self.err(ErrorKind::StringLimit, bound + 1));
         }
         let t = &mut self.tokens[token];
-        t.end = close + 1;
+        t.end = bound + 1;
         t.decoded_len = decoded;
         t.escaped = escaped;
         Ok(i + 2)
     }
 
-    /// Error path only: the offset just past the unit (byte or escape) at
-    /// which the decoded length first exceeds `max_string_bytes`.
-    fn limit_offset(&self, open: usize, close: usize) -> usize {
-        let mut pos = open + 1;
-        let mut decoded = 0usize;
-        while pos < close {
-            if self.input[pos] == b'\\' {
-                let mut next = pos + 1;
-                decoded += escape(self.input, &mut next).map_or(1, char::len_utf8);
-                pos = next;
-            } else {
-                decoded += 1;
-                pos += 1;
-            }
-            if decoded > self.limits.max_string_bytes {
-                return pos;
-            }
-        }
-        close
-    }
-
     fn scalar(&mut self, i: usize, depth: usize) -> Result<usize, Error> {
         let start = self.pos(i);
+        let token = self.push(Kind::Null, depth, start)?;
+        self.entry(i)?;
         let mut end = self.pos(i + 1);
         while end > start && matches!(self.input[end - 1], b' ' | b'\t' | b'\n' | b'\r') {
             end -= 1;
@@ -456,20 +532,21 @@ impl Builder<'_, '_> {
                     _ => (Kind::Bool, b"false"),
                 };
                 if let Some(at) = (0..literal.len()).find(|&k| text.get(k) != Some(&literal[k])) {
-                    return Err(Error::new(ErrorKind::Syntax, start + at));
+                    return Err(self.err(ErrorKind::Syntax, start + at));
                 }
                 (kind, literal.len())
             }
             _ => (
                 Kind::Number,
-                number(text).map_err(|at| Error::new(ErrorKind::Number, start + at))?,
+                number(text).map_err(|at| self.err(ErrorKind::Number, start + at))?,
             ),
         };
         if len != text.len() {
-            return Err(Error::new(ErrorKind::Syntax, start + len));
+            return Err(self.err(ErrorKind::Syntax, start + len));
         }
-        let token = self.push(kind, depth, start)?;
-        self.tokens[token].end = end;
+        let t = &mut self.tokens[token];
+        t.kind = kind;
+        t.end = end;
         Ok(i + 1)
     }
 }

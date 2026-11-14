@@ -181,12 +181,22 @@ pub(crate) fn block_finish(
 }
 
 /// Stage 1 output, reusable across documents (capacity is retained).
+///
+/// Structural and escape positions share one `u32` buffer: structurals grow
+/// from the front, escapes from the back, so the index never holds more
+/// than [`IndexLimits::max_entries`] positions (4 bytes each) in total. A
+/// document with more entries is *truncated*: every entry before
+/// [`truncated_at`](Self::truncated_at) is kept, and stage 2 reports
+/// `AllocationLimit` when it reaches that position, exactly where the scalar
+/// parser's equivalent count runs out.
 #[derive(Debug, Default)]
 pub struct StructuralIndex {
-    pub(crate) structurals: Vec<u32>,
-    pub(crate) escapes: Vec<u32>,
+    pub(crate) buf: Vec<u32>,
+    pub(crate) structural_len: usize,
+    pub(crate) escape_len: usize,
     pub(crate) first_string_control: Option<u32>,
     pub(crate) unclosed_string: bool,
+    pub(crate) truncated_at: Option<u32>,
     isa: Option<Isa>,
 }
 
@@ -194,13 +204,14 @@ pub struct StructuralIndex {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct IndexLimits {
     pub max_input_bytes: usize,
-    pub max_structurals: usize,
+    /// Structural plus escape positions kept, 4 bytes each.
+    pub max_entries: usize,
 }
 impl Default for IndexLimits {
     fn default() -> Self {
         Self {
             max_input_bytes: 1024 * 1024,
-            max_structurals: 1024 * 1024,
+            max_entries: 1024 * 1024,
         }
     }
 }
@@ -209,40 +220,97 @@ impl Default for IndexLimits {
 pub const MAX_INDEX_INPUT: usize = (u32::MAX as usize) - 64;
 
 pub(crate) struct Sink<'s> {
-    pub structurals: &'s mut Vec<u32>,
-    pub escapes: &'s mut Vec<u32>,
-    pub max_structurals: usize,
+    /// Front: structurals; back (`buf.len() - escapes..`): escapes, newest
+    /// lowest, reversed into increasing order when the run ends.
+    buf: &'s mut Vec<u32>,
+    structurals: usize,
+    escapes: usize,
+    max_entries: usize,
+    /// Never grow `buf` past this many entries.
+    cap_entries: usize,
     pub first_string_control: Option<u32>,
-    pub overflow: bool,
+    pub truncated_at: Option<u32>,
     pub alloc_failed: bool,
 }
-impl Sink<'_> {
+impl<'s> Sink<'s> {
+    pub(crate) fn new(buf: &'s mut Vec<u32>, input_len: usize, max_entries: usize) -> Self {
+        // Structurals and escapes are distinct byte positions, so a document
+        // never has more entries than bytes.
+        let cap_entries = max_entries.min(input_len);
+        Sink {
+            buf,
+            structurals: 0,
+            escapes: 0,
+            max_entries,
+            cap_entries,
+            first_string_control: None,
+            truncated_at: None,
+            alloc_failed: false,
+        }
+    }
+
+    /// Make room for `n` more entries, growing geometrically up to the cap.
+    #[cold]
+    fn grow(&mut self, n: usize) -> bool {
+        let used = self.structurals + self.escapes;
+        let old = self.buf.len();
+        let want = (used + n).max(old.saturating_mul(2)).max(256).min(self.cap_entries);
+        if want < used + n {
+            return false;
+        }
+        if self.buf.try_reserve_exact(want - old).is_err() {
+            self.alloc_failed = true;
+            return false;
+        }
+        self.buf.resize(want, 0);
+        self.buf.copy_within(old - self.escapes..old, want - self.escapes);
+        true
+    }
+
     #[inline(always)]
     pub fn push(&mut self, m: &BlockMasks, base: u32) {
-        let mut bits = m.structurals;
-        let count = bits.count_ones() as usize;
-        if self.structurals.len() + count > self.max_structurals {
-            self.overflow = true;
-            return;
-        }
-        while bits != 0 {
-            self.structurals.push(base + bits.trailing_zeros());
-            bits &= bits - 1;
-        }
-        let mut esc = m.escape_starts;
-        if esc != 0 {
-            let n = esc.count_ones() as usize;
-            if self.escapes.try_reserve(n).is_err() {
-                self.alloc_failed = true;
-                return;
-            }
-            while esc != 0 {
-                self.escapes.push(base + esc.trailing_zeros());
-                esc &= esc - 1;
-            }
-        }
         if m.string_controls != 0 && self.first_string_control.is_none() {
             self.first_string_control = Some(base + m.string_controls.trailing_zeros());
+        }
+        if self.truncated_at.is_some() || self.alloc_failed {
+            return;
+        }
+        let mut bits = m.structurals;
+        let mut esc = m.escape_starts;
+        let n = (bits.count_ones() + esc.count_ones()) as usize;
+        if n == 0 {
+            return;
+        }
+        let used = self.structurals + self.escapes;
+        if used + n > self.max_entries {
+            // Keep the entries before the first one over the limit.
+            let all = bits | esc;
+            let mut rest = all;
+            for _ in 0..self.max_entries - used {
+                rest &= rest - 1;
+            }
+            let cut = rest.trailing_zeros();
+            self.truncated_at = Some(base + cut);
+            let keep = (1u64 << cut) - 1;
+            bits &= keep;
+            esc &= keep;
+        }
+        let n = (bits.count_ones() + esc.count_ones()) as usize;
+        if used + n > self.buf.len() && !self.grow(n) {
+            return;
+        }
+        let mut at = self.structurals;
+        while bits != 0 {
+            self.buf[at] = base + bits.trailing_zeros();
+            at += 1;
+            bits &= bits - 1;
+        }
+        self.structurals = at;
+        let end = self.buf.len();
+        while esc != 0 {
+            self.escapes += 1;
+            self.buf[end - self.escapes] = base + esc.trailing_zeros();
+            esc &= esc - 1;
         }
     }
 }
@@ -274,11 +342,11 @@ impl StructuralIndex {
     }
     /// Structural byte positions in increasing order.
     pub fn structurals(&self) -> &[u32] {
-        &self.structurals
+        &self.buf[..self.structural_len]
     }
     /// Positions of backslashes that begin an escape inside a string.
     pub fn escapes(&self) -> &[u32] {
-        &self.escapes
+        &self.buf[self.buf.len() - self.escape_len..]
     }
     /// The first control byte inside a string, if any (a JSON syntax error).
     pub fn first_string_control(&self) -> Option<u32> {
@@ -288,57 +356,61 @@ impl StructuralIndex {
     pub fn unclosed_string(&self) -> bool {
         self.unclosed_string
     }
+    /// The position of the first structural or escape that did not fit in
+    /// `max_entries`, if any; every earlier entry is present.
+    pub fn truncated_at(&self) -> Option<u32> {
+        self.truncated_at
+    }
+    /// Bytes of index buffer currently held (retained between builds).
+    pub fn capacity_bytes(&self) -> usize {
+        self.buf.capacity() * size_of::<u32>()
+    }
     /// The path that built this index.
     pub fn isa(&self) -> Option<Isa> {
         self.isa
     }
 
-    /// Index `input` on `isa`. Invalid UTF-8 is an error here; string control
-    /// bytes and unclosed strings are recorded for stage 2, which reports them
-    /// in document order. Errors leave the index empty.
-    pub fn build(&mut self, input: &[u8], isa: Isa, limits: IndexLimits) -> Result<(), Error> {
-        self.structurals.clear();
-        self.escapes.clear();
+    fn reset(&mut self) {
+        self.structural_len = 0;
+        self.escape_len = 0;
         self.first_string_control = None;
         self.unclosed_string = false;
+        self.truncated_at = None;
         self.isa = None;
+    }
+
+    /// Index `input` on `isa`. Invalid UTF-8 is an error here; string control
+    /// bytes, unclosed strings and truncation at `max_entries` are recorded
+    /// for stage 2, which reports them in document order. Errors leave the
+    /// index empty. The buffer never grows past `max_entries` entries (nor
+    /// past one entry per input byte).
+    pub fn build(&mut self, input: &[u8], isa: Isa, limits: IndexLimits) -> Result<(), Error> {
+        self.reset();
         if input.len() > limits.max_input_bytes || input.len() > MAX_INDEX_INPUT {
             return Err(Error::new(ErrorKind::InputLimit, 0));
         }
         if !isa.is_available() {
             return Err(Error::new(ErrorKind::IsaUnavailable, 0));
         }
-        let want = input.len().min(limits.max_structurals);
-        if self.structurals.capacity() < want {
-            self.structurals
-                .try_reserve_exact(want)
-                .map_err(|_| Error::new(ErrorKind::AllocationFailed, 0))?;
-        }
-        let mut sink = Sink {
-            structurals: &mut self.structurals,
-            escapes: &mut self.escapes,
-            max_structurals: limits.max_structurals,
-            first_string_control: None,
-            overflow: false,
-            alloc_failed: false,
-        };
+        let mut sink = Sink::new(&mut self.buf, input.len(), limits.max_entries);
         let outcome = run(isa, input, &mut sink, &mut NoRecord)?;
-        let (overflow, alloc_failed, control) =
-            (sink.overflow, sink.alloc_failed, sink.first_string_control);
-        let result = finish(input, &outcome, overflow, alloc_failed);
-        if let Err(e) = result {
-            self.structurals.clear();
-            self.escapes.clear();
-            return Err(e);
-        }
+        let (structurals, escapes) = (sink.structurals, sink.escapes);
+        let (alloc_failed, control, truncated) =
+            (sink.alloc_failed, sink.first_string_control, sink.truncated_at);
+        finish(input, &outcome, alloc_failed)?;
+        let len = self.buf.len();
+        self.buf[len - escapes..].reverse();
+        self.structural_len = structurals;
+        self.escape_len = escapes;
         self.first_string_control = control;
+        self.truncated_at = truncated;
         self.unclosed_string = outcome.carry.prev_in_string != 0;
         self.isa = Some(isa);
         Ok(())
     }
 }
 
-fn finish(input: &[u8], outcome: &RunOutcome, overflow: bool, alloc: bool) -> Result<(), Error> {
+fn finish(input: &[u8], outcome: &RunOutcome, alloc: bool) -> Result<(), Error> {
     if !outcome.utf8_ok {
         // The kernel decides; std only locates the first bad byte. If they
         // ever disagreed this still reports a typed error, never success.
@@ -349,9 +421,6 @@ fn finish(input: &[u8], outcome: &RunOutcome, overflow: bool, alloc: bool) -> Re
     }
     if alloc {
         return Err(Error::new(ErrorKind::AllocationFailed, 0));
-    }
-    if overflow {
-        return Err(Error::new(ErrorKind::TokenLimit, 0));
     }
     Ok(())
 }
@@ -379,16 +448,8 @@ pub fn block_masks(input: &[u8], isa: Isa) -> Result<(Vec<BlockMasks>, bool), Er
     if !isa.is_available() {
         return Err(Error::new(ErrorKind::IsaUnavailable, 0));
     }
-    let mut structurals = Vec::new();
-    let mut escapes = Vec::new();
-    let mut sink = Sink {
-        structurals: &mut structurals,
-        escapes: &mut escapes,
-        max_structurals: usize::MAX,
-        first_string_control: None,
-        overflow: false,
-        alloc_failed: false,
-    };
+    let mut buf = Vec::new();
+    let mut sink = Sink::new(&mut buf, input.len(), usize::MAX);
     let mut rec = Vec::new();
     let outcome = run(isa, input, &mut sink, &mut rec)?;
     Ok((rec, outcome.utf8_ok))
