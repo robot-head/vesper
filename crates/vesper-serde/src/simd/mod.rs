@@ -24,16 +24,19 @@ pub enum Isa {
     Sse42,
     /// x86_64 AVX2 and PCLMULQDQ, two 32-byte lanes.
     Avx2,
+    /// x86_64 AVX-512F/BW and VPCLMULQDQ: one 64-byte register per block,
+    /// and one carry-less multiply computes four blocks' quote parities.
+    Avx512,
     /// AArch64 Advanced SIMD and PMULL (the `aes` feature), four 16-byte lanes.
     Neon,
 }
 
 impl Isa {
-    pub const ALL: [Isa; 4] = [Isa::Scalar, Isa::Sse42, Isa::Avx2, Isa::Neon];
+    pub const ALL: [Isa; 5] = [Isa::Scalar, Isa::Sse42, Isa::Avx2, Isa::Avx512, Isa::Neon];
 
     /// The fastest path this CPU supports, detected at run time.
     pub fn detect() -> Self {
-        [Isa::Avx2, Isa::Neon, Isa::Sse42]
+        [Isa::Avx512, Isa::Avx2, Isa::Neon, Isa::Sse42]
             .into_iter()
             .find(|isa| isa.is_available())
             .unwrap_or(Isa::Scalar)
@@ -45,8 +48,16 @@ impl Isa {
             Isa::Scalar => true,
             Isa::Sse42 => kernels::sse42_available(),
             Isa::Avx2 => kernels::avx2_available(),
+            Isa::Avx512 => kernels::avx512_available(),
             Isa::Neon => kernels::neon_available(),
         }
+    }
+
+    /// Whether the CPU reports the Arm Scalable Vector Extension. No SVE path
+    /// exists (Rust's SVE intrinsics are unstable), so such hosts use NEON;
+    /// callers can report that SVE was present but not used.
+    pub fn sve_reported() -> bool {
+        kernels::sve_reported()
     }
 
     /// Every path available here, scalar first.
@@ -59,6 +70,7 @@ impl Isa {
             Isa::Scalar => "scalar",
             Isa::Sse42 => "sse4.2+pclmulqdq",
             Isa::Avx2 => "avx2+pclmulqdq",
+            Isa::Avx512 => "avx512bw+vpclmulqdq",
             Isa::Neon => "neon+pmull",
         }
     }
