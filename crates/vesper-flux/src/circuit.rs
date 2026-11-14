@@ -11,7 +11,8 @@ pub use checkpoint::durable::{
 mod cluster;
 pub use cluster::{
     CheckpointMode, CheckpointPhase, ClusterConfig, ClusterRun, CommittedCheckpoint, EpochSource,
-    Fault, FaultKind, GcReport, Recovery, Rescale, run_cluster, run_cluster_with,
+    Fault, FaultKind, GcReport, LiveMigration, LiveRescale, Recovery, Rescale, run_cluster,
+    run_cluster_with,
 };
 #[path = "log.rs"]
 mod log;

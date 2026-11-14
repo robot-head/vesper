@@ -18,9 +18,9 @@ pub use circuit::{
     CdcHeader, CdcPolicy, CheckpointLimits, CheckpointMode, CheckpointPhase, Circuit,
     CircuitBuilder, ClusterConfig, ClusterRun, CommitRecord, CommitSink, CommittedCheckpoint,
     CrashMedium, DurableCheckpointer, DurableReport, DurableRestore, EpochSource, Executor, Fault,
-    FaultKind, Field, GcReport, Ingested, InputLog, LogLimits, LogRecovery, MAX_SPINE_LEVELS,
-    MemorySink, NodeId, Predicate, QuarrySink, Recovery, Rescale, SinkRecovery, SourceBinding,
-    TickInput, WeightPolicy, run_cluster, run_cluster_with,
+    FaultKind, Field, GcReport, Ingested, InputLog, LiveMigration, LiveRescale, LogLimits,
+    LogRecovery, MAX_SPINE_LEVELS, MemorySink, NodeId, Predicate, QuarrySink, Recovery, Rescale,
+    SinkRecovery, SourceBinding, TickInput, WeightPolicy, run_cluster, run_cluster_with,
 };
 pub use frontier::{Frontier, FrontierTicket, TicketError};
 pub use zset::{Row, ZSet};
