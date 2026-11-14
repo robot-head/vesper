@@ -1147,6 +1147,97 @@ fn control_fixtures(base: &Fixture) {
     );
 }
 
+fn proof_variant_controls(base: &Fixture) {
+    let directory =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/resource-model42/fixtures");
+    for (module, import_order, source_suffix, canonical_suffix, forbidden) in [
+        ("ResourceSnapshotAliasClean", ["A", "B"], "A", "B", None),
+        (
+            "ResourceSnapshotAliasAxiom",
+            ["B", "A"],
+            "B",
+            "A",
+            Some("ResourceSnapshotAliasAxiom.forbidden"),
+        ),
+    ] {
+        let original = base.sibling(module, true);
+        for name in import_order
+            .iter()
+            .map(|suffix| format!("{module}{suffix}"))
+            .chain(std::iter::once(module.to_owned()))
+        {
+            original
+                .compile(
+                    &name,
+                    &read_source(&directory.join(format!("{name}.lean"))).text,
+                )
+                .success();
+        }
+        let projected = original.project(
+            module,
+            &format!("{module}Kernel"),
+            &BTreeSet::from([
+                module.to_owned(),
+                format!("{module}A"),
+                format!("{module}B"),
+            ]),
+        );
+        assert_eq!(projected.report["proof_alias_count"], 1);
+        assert_eq!(projected.report["duplicate_constants"], 1);
+        let alias = &projected.report["proof_aliases"][0];
+        let canonical = format!("{module}.shared");
+        assert_eq!(alias["original_name"], canonical);
+        assert_eq!(alias["source_module"], format!("{module}{source_suffix}"));
+        assert_eq!(
+            alias["canonical_module"],
+            format!("{module}{canonical_suffix}")
+        );
+        let manual = vec![canonical.clone()];
+        let roots = all_projection_roots(&projected, &manual);
+        assert_eq!(roots.len(), 2);
+        if let Some(forbidden) = forbidden {
+            // The real imported canonical theorem is clean: accepting only
+            // that requested name would omit the alternate proof's axiom.
+            let clean = positive_audit(&projected.fixture, &projected.module, &manual);
+            assert_eq!(clean["theorems"][0]["axioms"], json!([]));
+            let denied = projected.fixture.audit(&projected.module, &roots);
+            assert!(!denied.status.success());
+            let report = denied.json();
+            assert_eq!(report["status"], "audited");
+            assert_eq!(report["accepted"], false);
+            assert_eq!(report["kernel_replayed"], true);
+            assert_eq!(report["cache_eligible"], false);
+            assert_eq!(report["forbidden_axioms"], json!([forbidden]));
+            assert_eq!(
+                report["checked_constants"],
+                projected.report["output_constants"]
+            );
+            let actual = report["theorems"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|theorem| {
+                    let name = theorem["name"].as_str().unwrap();
+                    if name == canonical {
+                        assert_eq!(theorem["axioms"], json!([]));
+                    } else {
+                        assert_eq!(theorem["name"], alias["name"]);
+                        assert_eq!(theorem["axioms"], json!([forbidden]));
+                    }
+                    name.to_owned()
+                })
+                .collect::<BTreeSet<_>>();
+            assert_eq!(actual, roots.into_iter().collect());
+        } else {
+            let accepted = positive_audit(&projected.fixture, &projected.module, &roots);
+            assert_eq!(
+                accepted["checked_constants"],
+                projected.report["output_constants"]
+            );
+        }
+    }
+}
+
 #[test]
 fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
     let started = Instant::now();
@@ -1299,6 +1390,7 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
     );
     assert_eq!(fs::read(&artifact).unwrap(), before);
     control_fixtures(&fixture);
+    proof_variant_controls(&fixture);
     let binding = json!({"scope":"kernel_logical_projection_not_native_equivalence",
         "snapshot_report":projected.report,"original_artifact_hashes":projected.original_hashes,
         "projected_artifact_hashes":projected.projected_hashes,"tool_source_blake3":projected.tool_blake3,
