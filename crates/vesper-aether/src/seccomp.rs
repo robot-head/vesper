@@ -3,7 +3,10 @@
 //! [`SeccompProfile::vmm`] is an allowlist of the system calls the VMM's vCPU
 //! and device threads need after setup (memory, file I/O on already-open
 //! descriptors, polling, futexes, signals, clocks, exit), with `ioctl` limited
-//! to the KVM and userfaultfd requests the run loop issues. Everything else,
+//! to the KVM and userfaultfd requests the run loop issues on that
+//! architecture (x86_64: `KVM_RUN`, the register and dirty-log calls;
+//! AArch64: `KVM_RUN`, `KVM_GET/SET_ONE_REG`, `KVM_IRQ_LINE`,
+//! `KVM_SIGNAL_MSI`, `KVM_GET_DIRTY_LOG`). Everything else,
 //! including `execve`, `open*`, `socket`, `ptrace` and `mmap` of new devices, gets
 //! the profile's default action.
 //!
@@ -18,12 +21,17 @@
 //! in-range forward jumps, terminating return).
 //!
 //! The gated Linux backend installs a compiled profile with
-//! `PR_SET_NO_NEW_PRIVS` and `seccomp(SECCOMP_SET_MODE_FILTER)`.
+//! `PR_SET_NO_NEW_PRIVS` and `seccomp(SECCOMP_SET_MODE_FILTER)` on the calling
+//! thread only (no `TSYNC`); [`crate::vmm_thread`] runs VMM work on a thread
+//! that installs it before doing anything else. With
+//! [`DefaultAction::KillThread`] a denied call kills that thread and leaves the
+//! rest of the process running.
 #![forbid(unsafe_code)]
 
 pub const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 pub const AUDIT_ARCH_AARCH64: u32 = 0xc000_00b7;
 pub const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
+pub const SECCOMP_RET_KILL_THREAD: u32 = 0x0000_0000;
 pub const SECCOMP_RET_ERRNO: u32 = 0x0005_0000;
 pub const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 /// The kernel's `BPF_MAXINSNS`.
@@ -150,9 +158,17 @@ impl Syscall {
     }
 }
 
-/// `ioctl` requests the KVM run loop and userfaultfd server issue.
+/// `ioctl` requests the KVM run loop and userfaultfd server issue. All use the
+/// generic `_IOC` encoding shared by x86_64 and AArch64 (checked against the
+/// host's `<linux/kvm.h>` in the tests where the structures are generic).
 pub mod ioctl {
     pub const KVM_RUN: u32 = 0xae80;
+    /// `_IOW(KVMIO, 0xab, struct kvm_one_reg)` (16 bytes): AArch64 registers.
+    pub const KVM_GET_ONE_REG: u32 = 0x4010_aeab;
+    /// `_IOW(KVMIO, 0xac, struct kvm_one_reg)`.
+    pub const KVM_SET_ONE_REG: u32 = 0x4010_aeac;
+    /// `_IOW(KVMIO, 0xa5, struct kvm_msi)` (32 bytes): GICv3 ITS interrupts.
+    pub const KVM_SIGNAL_MSI: u32 = 0x4020_aea5;
     pub const KVM_GET_REGS: u32 = 0x8090_ae81;
     pub const KVM_SET_REGS: u32 = 0x4090_ae82;
     pub const KVM_GET_SREGS: u32 = 0x8138_ae83;
@@ -168,6 +184,9 @@ pub mod ioctl {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DefaultAction {
     KillProcess,
+    /// Kill only the offending thread (`SECCOMP_RET_KILL_THREAD`); the rest of
+    /// the process keeps running and can observe that the VMM thread died.
+    KillThread,
     /// Fail the call with this errno (for testing a profile in a live process).
     Errno(u16),
 }
@@ -175,6 +194,7 @@ impl DefaultAction {
     fn ret(self) -> u32 {
         match self {
             Self::KillProcess => SECCOMP_RET_KILL_PROCESS,
+            Self::KillThread => SECCOMP_RET_KILL_THREAD,
             Self::Errno(e) => SECCOMP_RET_ERRNO | u32::from(e),
         }
     }
@@ -284,7 +304,16 @@ impl SeccompProfile {
                 Gettid,
                 Tgkill,
             ],
-            ioctl_requests: vec![
+            ioctl_requests: Self::vmm_ioctls(arch),
+            default,
+        }
+    }
+
+    /// The run-loop `ioctl` requests for `arch`: the KVM vCPU calls of that
+    /// architecture plus the userfaultfd server's.
+    pub fn vmm_ioctls(arch: Arch) -> Vec<u32> {
+        let mut v = match arch {
+            Arch::X86_64 => vec![
                 ioctl::KVM_RUN,
                 ioctl::KVM_GET_REGS,
                 ioctl::KVM_SET_REGS,
@@ -292,13 +321,23 @@ impl SeccompProfile {
                 ioctl::KVM_SET_SREGS,
                 ioctl::KVM_IRQ_LINE,
                 ioctl::KVM_GET_DIRTY_LOG,
-                ioctl::UFFDIO_WAKE,
-                ioctl::UFFDIO_COPY,
-                ioctl::UFFDIO_ZEROPAGE,
-                ioctl::UFFDIO_CONTINUE,
             ],
-            default,
-        }
+            Arch::Aarch64 => vec![
+                ioctl::KVM_RUN,
+                ioctl::KVM_GET_ONE_REG,
+                ioctl::KVM_SET_ONE_REG,
+                ioctl::KVM_IRQ_LINE,
+                ioctl::KVM_SIGNAL_MSI,
+                ioctl::KVM_GET_DIRTY_LOG,
+            ],
+        };
+        v.extend([
+            ioctl::UFFDIO_WAKE,
+            ioctl::UFFDIO_COPY,
+            ioctl::UFFDIO_ZEROPAGE,
+            ioctl::UFFDIO_CONTINUE,
+        ]);
+        v
     }
 
     /// Compiles to classic BPF (see the module docs for the layout).
