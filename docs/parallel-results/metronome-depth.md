@@ -199,3 +199,10 @@ spinning for their work cannot overlap on one core. The synthetic workload now
 does off-CPU work and pauses yield; it then passes pinned to 1, 2 and 4 CPUs
 and with four CPU hogs running (slow +50% 4608..4998 bp, fast within
 -133..30 bp).
+
+macOS CI then failed with sleep-based work: rounds meant to last 8 ms took
+about 45 ms (24.6 s for the test against 5 s locally), and slow +50% predicted
+2606 bp. The synthetic work is now a wall-clock wait that calls
+`yield_now()` on every check, like the pauses. Locally it passes pinned to 1,
+2 and 4 CPUs (slow +50% 4985..4994 bp, fast within -10..2 bp) and on 2 CPUs
+with four CPU hogs (slow +50% 3965 bp, fast -1004 and 550 bp).

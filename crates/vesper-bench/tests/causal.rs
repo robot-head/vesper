@@ -2,8 +2,8 @@
 //!
 //! Two threads do one round of work each, then meet at a barrier; the round
 //! ends with a progress point. Thread "slow" works 8 ms per round and thread
-//! "fast" 3 ms (blocking waits, so the program behaves the same on a
-//! single-CPU host), so a round lasts max(8, 3) ms. Truly speeding "slow" up by s
+//! "fast" 3 ms (wall-clock waits that yield, so the program behaves the same on
+//! a single-CPU host), so a round lasts max(8, 3) ms. Truly speeding "slow" up by s
 //! gives a round of max(8(1-s), 3) ms: 50% predicts 50%, 100% predicts
 //! 1 - 3/8 = 62.5%. Speeding "fast" up changes nothing.
 use std::{
@@ -15,11 +15,14 @@ use std::{
 use vesper_bench::causal::{CausalConfig, CausalProfiler, profile};
 
 fn work(d: Duration) {
-    // Off-CPU work: a parallel program on one CPU cannot overlap two
-    // spinning threads, which is not the bottleneck structure under test.
+    // Wall-clock work that yields the CPU on every check. Pure spinning
+    // cannot overlap two threads on a single-CPU host, and sleeping is too
+    // coarse on macOS CI (rounds meant to last 8 ms took about 45 ms), which
+    // buries the bottleneck structure under timer noise. Yielding threads
+    // share one CPU and still finish at their wall-clock deadlines.
     let start = Instant::now();
-    while let Some(left) = d.checked_sub(start.elapsed()) {
-        thread::sleep(left);
+    while start.elapsed() < d {
+        thread::yield_now();
     }
 }
 
