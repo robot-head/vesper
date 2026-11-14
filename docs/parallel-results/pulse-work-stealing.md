@@ -21,9 +21,9 @@ the drivers and `select` are unchanged for existing callers
 | --- | --- |
 | `PoolConfig { workers, seed, lifo_slot, driver_wakeup }` | `workers` in `1..=MAX_WORKERS` (1024), else `PoolError::InvalidWorkers`. `Default` is one worker per available core. |
 | `Pool::spawn`, `Pool::spawn_pinned(worker, c)`, `Pool::spawner()`, `Pool::cancel()` | Portable fibers go to the shared injector; pinned fibers (§12.4 `spawn_local`) go to that worker's pinned queue and are never stolen. |
-| `Spawner<C>` (`Clone`, `Send`) | `spawn` from inside a running fiber puts the child in the current worker's LIFO slot (the previous occupant moves to the run queue); `spawn_pinned`; `cancel`. Spawning into a finished pool is `PoolError::Closed` and returns the fiber. |
+| `Spawner<C>` (`Clone`, `Send`, holds the pool weakly so a queued fiber holding one never keeps its pool alive) | `spawn` from inside a running fiber puts the child in the current worker's LIFO slot (the previous occupant moves to the run queue); `spawn_pinned`; `cancel`. Spawning into a finished pool is `PoolError::Closed` and returns the fiber. |
 | `Pool::run(factory)` | One OS thread per worker (`std::thread::scope`, so neither the factory nor the fibers need `'static`). `factory(i)` builds worker *i*'s driver on its own thread, so the driver need not be `Send`; fibers must be `Send`. |
-| `Pool::run_seeded(factory)` | The same workers interleaved on the calling thread. Which worker steps next and which victim a thief tries first come from the seed (SplitMix64 streams). Returns a `TraceEntry { worker, fiber, event, stolen_from }` per resumption. |
+| `Pool::run_seeded(factory)` | The same workers interleaved on the calling thread. Which worker steps next and which victim a thief tries first come from the seed (SplitMix64 streams). Returns a `TraceEntry { step, worker, fiber, event, stolen_from }` per resumption, in global order. |
 | `PoolOutput { completed, failures, workers: Vec<WorkerStats>, trace, abandoned }` | `WorkerStats { resumed, stolen, steal_attempts, submitted, parked }`. |
 | `RunError::{Setup { worker, error, pool }, Driver { worker, error, output, stranded }}` | A driver that fails to start returns the untouched pool; a driver that fails while running returns everything that finished plus the runnable fibers it could not run (`Stranded`). |
 | `Task<C>` | The opaque continuation type the drivers carry (`AnyDriver<Task<C>>`): a fiber or the pool's wake-up read. |
@@ -69,7 +69,12 @@ Protocol guarantees:
 * A pool dropped with queued fibers counts them in
   `driver::abandoned_requests()`, like a dropped driver.
 * A panicking fiber stops every worker, drops the drivers through their own
-  `Drop` protocol, and the panic is re-raised from `run`.
+  `Drop` protocol, and the panic is re-raised from `run`. A panicking driver
+  factory still releases the start-up barrier, so its siblings exit and the
+  panic is re-raised instead of hanging the run.
+* The wake read takes one driver slot. When a driver is full of fiber I/O
+  and the wake read is refused with `WouldBlock`, the worker parks on a 1 ms
+  timed wait instead; capacity saturation never cancels the pool.
 
 Determinism: `run_seeded` with a deterministic driver produces an identical
 trace, output and per-worker statistics for identical seeds (tested), and a
@@ -129,21 +134,28 @@ ran. The unsafe code is confined to the new `afd` module and the existing
 * Packets are matched to requests through a table of the driver's own
   `OVERLAPPED` addresses; the driver no longer dereferences an unknown
   pointer. A stray packet is a typed `PollError`.
-* Reused handle values: a handle that another port owns and that this driver
-  never bound is rejected (`InvalidInput`, request returned). A value this
-  driver bound before, which no request of its own currently holds open, may
-  have been closed and reused by a file that another port owns: the driver
-  rebinds it to its own port with `NtSetInformationFile`
-  (`FileReplaceCompletionInformation`) before issuing I/O, so a packet for
-  this driver's `OVERLAPPED` cannot reach another port. Where the OS lacks that
-  class (probed once by `iocp::rebinds_reused_handles()`; Wine 9 lacks it),
-  the previous assumption is kept and that one case stays unsupported.
+* Handle bindings: a process-wide table records, per handle value, which
+  Pulse IOCP port bound it and how many requests are in flight on it. An
+  unbound handle is associated normally. A handle already bound to some port
+  is accepted only if a Pulse driver bound that value and nothing is in flight
+  on it: it is either a sibling worker's file (work stealing moved its fiber
+  here) or a closed value reused by a file another port owns. Either way the
+  driver rebinds it to its own port with `NtSetInformationFile`
+  (`FileReplaceCompletionInformation`) before issuing I/O, so a packet for this
+  driver's `OVERLAPPED` cannot reach another port. Anything else (a handle a
+  non-Pulse port owns, or one with I/O in flight on another Pulse port) is
+  `InvalidInput` with the request returned. A closing driver marks its
+  bindings dead so a new port that reuses its handle value never trusts them.
+  Where the OS lacks the rebind class (probed once by
+  `iocp::rebinds_reused_handles()`; Wine 9 lacks it), a value bound to this
+  driver before is trusted as before, and moving a file between ports is
+  refused with the typed error.
 
 ## Tests
 
-Unit tests (`cargo test -p vesper-pulse --lib`, 35 on Linux): the existing scheduler,
-nursery, frames, ledger, readiness and selection tests, plus seven pool tests
-over a deterministic in-memory driver:
+Unit tests (`cargo test -p vesper-pulse --lib`, 39 on Linux): the existing scheduler,
+nursery, frames, ledger, readiness and selection tests, plus pool tests
+over a deterministic in-memory driver (eleven since the review round):
 
 * `seeded_runs_replay_identically_and_steal`: 88 fibers (64 spawned, 24 spawned
   by fibers) on 4 workers; identical trace, output and statistics for the same
@@ -154,6 +166,10 @@ over a deterministic in-memory driver:
   threaded; cancel before the run and from a fiber while reads are parked).
 * `a_failing_driver_strands_nothing_silently`: every fiber is completed,
   failed, abandoned or returned as stranded.
+* `seeded_traces_keep_the_global_resumption_order`,
+  `a_panicking_factory_does_not_hang_the_other_workers`,
+  `a_queued_fiber_holding_a_spawner_does_not_keep_its_pool_alive`,
+  `a_retired_worker_runs_nothing_after_giving_up` (32 seeds).
 * `threaded_mock_pool_runs_every_fiber`, `a_dropped_unrun_pool_counts_its_fibers`,
   `configuration_and_setup_errors_are_typed` (zero or too many workers, an
   unknown pinned worker, a driver that fails to start returns the pool, which
@@ -178,7 +194,11 @@ then reuses the sockets on a second driver), `socket_end_of_stream_and_cancellat
 `an_empty_synchronous_pipe_does_not_block_the_scheduler`,
 `an_offloaded_read_on_an_empty_pipe_can_be_cancelled`,
 `reused_handle_values_never_route_packets_to_another_port`,
-`sockets_across_pool_workers` (12 TCP pairs over a 3-thread pool).
+`sockets_across_pool_workers` (12 TCP pairs over a 3-thread pool),
+`overlapped_files_follow_stolen_fibers_between_ports` (48 unpinned fibers
+each doing seven overlapped reads of their own file on a 3-thread pool; with
+rebinding every one must succeed, without it a moved file fails with the
+typed error).
 
 The existing `tests/drivers.rs` (8) passes unchanged on every driver.
 
@@ -186,8 +206,8 @@ The existing `tests/drivers.rs` (8) passes unchanged on every driver.
 
 | Where | Driver(s) | Result |
 | --- | --- | --- |
-| Cloud container, Linux x86_64, Rust 1.97 | io_uring (permitted here) and epoll; also `VESPER_PULSE_DRIVER=epoll` | lib 35/35, drivers 8/8, pool 3/3; the pool integration binary 40 times in a row without a failure or hang |
-| Wine 9.0 (Ubuntu), `x86_64-pc-windows-gnu` build, Rust 1.100 | IOCP, AFD, offload threads | lib 22/22 (Windows count), drivers 8/8, pool 3/3, windows 6/6, five repeated rounds |
+| Cloud container, Linux x86_64, Rust 1.97 | io_uring (permitted here) and epoll; also `VESPER_PULSE_DRIVER=epoll` | lib 39/39, drivers 8/8, pool 3/3; the pool integration binary 40 times in a row without a failure or hang |
+| Wine 9.0 (Ubuntu), `x86_64-pc-windows-gnu` build, Rust 1.100 | IOCP, AFD, offload threads | lib 27/27 (Windows count), drivers 8/8, pool 3/3, windows 7/7; repeated rounds |
 | `aarch64-apple-darwin` | kqueue | `cargo +1.100.0 clippy --all-targets -D warnings` only; not executed locally |
 | CI: Linux BuildBuddy, macOS (AArch64), Windows (x86_64 MSVC) | as above; kqueue; real IOCP/AFD | see the PR's checks |
 
@@ -205,7 +225,7 @@ operations), IOCP under Wine about 290 ms. No other performance was measured.
 
 ```
 cargo fmt --all -- --check
-cargo test -p vesper-pulse                                   # lib 35 (Linux), drivers 8, pool 3
+cargo test -p vesper-pulse                                   # lib 39 (Linux), drivers 8, pool 3
 VESPER_PULSE_DRIVER=epoll cargo test -p vesper-pulse --test pool --test drivers
 cargo test --locked -p vesper-fiber-abi -p vesper-crucible   # dependants and SimPulse
 cargo +1.100.0 clippy -p vesper-pulse --all-targets --target {x86_64-unknown-linux-gnu,x86_64-pc-windows-gnu,aarch64-apple-darwin} -- -D warnings
@@ -269,7 +289,13 @@ from the host's build-engine fingerprint). CI runs them with its own setup.
   workload with thousands of parked synchronous pipe reads spawns that many
   threads. Overlapped handles avoid this.
 * The handle-rebind path depends on `FileReplaceCompletionInformation`
-  (Windows 8.1+); on systems without it (Wine) reusing a closed handle value
-  for a file another port owns remains unsupported, as documented in the code.
+  (Windows 8.1+). Without it (Wine), an unpinned fiber whose overlapped file
+  was bound by one worker fails with `InvalidInput` if it is stolen and
+  submits that file on another worker (observed: 1 of 48 under Wine), and
+  reusing a closed handle value for a file another port owns stays
+  unsupported. Pin such fibers there.
+* Process-wide binding counts are left as they were if a driver's `Drop`
+  has to leak entries after a failed poll; those handle values then stay
+  refused by other drivers.
 * SimPulse (`vesper-crucible`) still runs its own single-threaded
   interpreter; it does not yet model several workers stealing from each other.

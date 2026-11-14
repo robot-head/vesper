@@ -160,6 +160,8 @@ pub enum TraceEvent {
 /// One resumption under [`Pool::run_seeded`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TraceEntry {
+    /// Position in the run's global resumption order, from 0.
+    pub step: u64,
     pub worker: usize,
     pub fiber: FiberId,
     pub event: TraceEvent,
@@ -304,6 +306,7 @@ struct Shared<C> {
     sleep: Mutex<()>,
     cv: Condvar,
     first_error: Mutex<Option<(usize, io::Error)>>,
+    trace_step: AtomicU64,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -458,8 +461,12 @@ impl<C> Drop for Shared<C> {
 
 /// A handle that spawns into, or cancels, a pool. Cloneable and `Send`, so a
 /// running fiber can hold one.
+///
+/// A spawner holds the pool weakly, so a queued fiber that holds one does
+/// not keep its own pool alive: once the pool (and its run) is gone, every
+/// call reports [`PoolError::Closed`].
 pub struct Spawner<C> {
-    shared: Arc<Shared<C>>,
+    shared: std::sync::Weak<Shared<C>>,
 }
 
 impl<C> Clone for Spawner<C> {
@@ -475,7 +482,10 @@ impl<C> Spawner<C> {
     /// current worker's LIFO slot (or run queue); otherwise to the injector.
     /// Fails, returning the fiber, once a started pool has finished.
     pub fn spawn(&self, continuation: C) -> Result<FiberId, (PoolError, C)> {
-        let shared = &self.shared;
+        let Some(shared) = self.shared.upgrade() else {
+            return Err((PoolError::Closed, continuation));
+        };
+        let shared = &shared;
         if !shared.reserve() {
             return Err((PoolError::Closed, continuation));
         }
@@ -506,7 +516,10 @@ impl<C> Spawner<C> {
     /// Spawn a fiber pinned to `worker`: it is never stolen, and all of its
     /// I/O goes through that worker's driver.
     pub fn spawn_pinned(&self, worker: usize, continuation: C) -> Result<FiberId, (PoolError, C)> {
-        let shared = &self.shared;
+        let Some(shared) = self.shared.upgrade() else {
+            return Err((PoolError::Closed, continuation));
+        };
+        let shared = &shared;
         if worker >= shared.workers.len() {
             return Err((PoolError::NoSuchWorker(worker), continuation));
         }
@@ -528,13 +541,18 @@ impl<C> Spawner<C> {
     /// Cancel every fiber: queued and later events arrive as
     /// [`Event::Cancelled`], and in-flight I/O is cancelled in every driver.
     pub fn cancel(&self) {
-        self.shared.cancel();
+        if let Some(shared) = self.shared.upgrade() {
+            shared.cancel();
+        }
     }
     pub fn is_cancelled(&self) -> bool {
-        self.shared.cancelled.load(SeqCst)
+        self.shared
+            .upgrade()
+            .is_some_and(|s| s.cancelled.load(SeqCst))
     }
+    /// The pool's worker count, or 0 once the pool is gone.
     pub fn workers(&self) -> usize {
-        self.shared.workers.len()
+        self.shared.upgrade().map_or(0, |s| s.workers.len())
     }
 }
 
@@ -576,6 +594,7 @@ impl<C> Pool<C> {
                 sleep: Mutex::new(()),
                 cv: Condvar::new(),
                 first_error: Mutex::new(None),
+                trace_step: AtomicU64::new(0),
             }),
             config,
         })
@@ -585,7 +604,7 @@ impl<C> Pool<C> {
     }
     pub fn spawner(&self) -> Spawner<C> {
         Spawner {
-            shared: self.shared.clone(),
+            shared: Arc::downgrade(&self.shared),
         }
     }
     pub fn spawn(&self, continuation: C) -> FiberId {
@@ -714,7 +733,12 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
             Ok(_) => self.wake_inflight = true,
             Err((e, request)) => {
                 self.wake_reader = Some(request.file);
-                shared.record_error(self.index, e);
+                // A driver full of fiber I/O is not a failure: this park
+                // falls back to timed polling and the wake read is retried
+                // at the next park.
+                if e.kind() != io::ErrorKind::WouldBlock {
+                    shared.record_error(self.index, e);
+                }
             }
         }
     }
@@ -889,6 +913,7 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
         }
         if let Some(trace) = &mut self.trace {
             trace.push(TraceEntry {
+                step: shared.trace_step.fetch_add(1, SeqCst),
                 worker: self.index,
                 fiber: id,
                 event: match &event {
@@ -991,6 +1016,11 @@ impl<C: Resume, D: CompletionDriver<Task<C>>> Worker<C, D> {
         self.observe_cancel(shared);
         if self.driver().pending() > 0 {
             self.harvest(shared, false);
+            // Three failed polls in a row retire the worker: it must not
+            // run anything after `give_up` handed its fibers on.
+            if self.gave_up {
+                return false;
+            }
         }
         match self.next_job(shared) {
             Some((ready, from)) => {
@@ -1116,6 +1146,8 @@ impl<C: Resume> Pool<C> {
             out.abandoned += w.abandoned;
             out.workers.push(w.stats);
         }
+        // Each worker records its own resumptions; restore the global order.
+        out.trace.sort_by_key(|t| t.step);
         if let Some(order) = order {
             out.completed = order;
         }
@@ -1173,26 +1205,41 @@ impl<C: Resume> Pool<C> {
                     std::thread::Builder::new()
                         .name(format!("pulse-worker-{i}"))
                         .spawn_scoped(scope, move || {
-                            let built = factory(i).and_then(|driver| {
-                                let reader = if wakeup {
-                                    let (r, w) = wake_pipe()?;
-                                    *lock(&shared.workers[i].wake) = Some(w);
-                                    Some(r)
-                                } else {
-                                    None
-                                };
-                                Ok((driver, reader))
-                            });
-                            let built = match built {
-                                Ok(b) => Some(b),
-                                Err(e) => {
+                            // A panicking factory must still reach the
+                            // barrier, or its siblings would wait forever.
+                            let built = panic::catch_unwind(AssertUnwindSafe(|| {
+                                factory(i).and_then(|driver| {
+                                    let reader = if wakeup {
+                                        let (r, w) = wake_pipe()?;
+                                        *lock(&shared.workers[i].wake) = Some(w);
+                                        Some(r)
+                                    } else {
+                                        None
+                                    };
+                                    Ok((driver, reader))
+                                })
+                            }));
+                            let (built, panicked) = match built {
+                                Ok(Ok(b)) => (Some(b), None),
+                                Ok(Err(e)) => {
                                     lock(setup).get_or_insert((i, e));
-                                    None
+                                    (None, None)
+                                }
+                                Err(payload) => {
+                                    lock(setup).get_or_insert((
+                                        i,
+                                        io::Error::other("the driver factory panicked"),
+                                    ));
+                                    (None, Some(payload))
                                 }
                             };
                             barrier.wait();
                             if lock(setup).is_some() {
                                 *lock(&shared.workers[i].wake) = None;
+                                drop(built);
+                                if let Some(payload) = panicked {
+                                    panic::resume_unwind(payload);
+                                }
                                 return None;
                             }
                             let (driver, reader) = built?;
@@ -1220,15 +1267,6 @@ impl<C: Resume> Pool<C> {
                 .collect();
             handles.into_iter().map(|h| h.join()).collect::<Vec<_>>()
         });
-        if let Some((worker, error)) = lock(&setup).take() {
-            shared.started.store(false, SeqCst);
-            shared.done.store(false, SeqCst);
-            return Err(RunError::Setup {
-                worker,
-                error,
-                pool: self,
-            });
-        }
         let mut workers = vec![];
         let mut panicked = None;
         for r in results {
@@ -1242,6 +1280,15 @@ impl<C: Resume> Pool<C> {
         }
         if let Some(payload) = panicked {
             panic::resume_unwind(payload);
+        }
+        if let Some((worker, error)) = lock(&setup).take() {
+            shared.started.store(false, SeqCst);
+            shared.done.store(false, SeqCst);
+            return Err(RunError::Setup {
+                worker,
+                error,
+                pool: self,
+            });
         }
         let out = Self::output(workers, true, None);
         self.finish_run(out)
@@ -1331,6 +1378,7 @@ mod tests {
         is_cancelled,
     };
     use std::collections::BTreeMap;
+    use std::sync::atomic::AtomicUsize;
 
     fn null_file() -> File {
         File::open(if cfg!(windows) { "NUL" } else { "/dev/null" }).unwrap()
@@ -1704,6 +1752,110 @@ mod tests {
             .unwrap();
         drop(pool);
         assert!(crate::driver::abandoned_requests() >= before + 2);
+    }
+
+    #[test]
+    fn seeded_traces_keep_the_global_resumption_order() {
+        let pool = Pool::new(PoolConfig::new(2).seed(11)).unwrap();
+        for w in 0..2 {
+            pool.spawn_pinned(w, Fiber::new(w as u8, 3))
+                .map_err(|_| ())
+                .unwrap();
+        }
+        let out = pool.run_seeded(|_| Ok(LoopDriver::new(1))).unwrap();
+        let steps: Vec<u64> = out.trace.iter().map(|t| t.step).collect();
+        assert_eq!(steps, (0..steps.len() as u64).collect::<Vec<_>>());
+        // Both workers ran, interleaved rather than grouped by worker.
+        let workers: Vec<usize> = out.trace.iter().map(|t| t.worker).collect();
+        let switches = workers.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(switches > 1, "{workers:?}");
+    }
+
+    #[test]
+    fn a_panicking_factory_does_not_hang_the_other_workers() {
+        let pool = Pool::new(PoolConfig::new(3).driver_wakeup(false)).unwrap();
+        pool.spawn(Fiber::new(1, 0));
+        let r = panic::catch_unwind(AssertUnwindSafe(|| {
+            pool.run(|i| {
+                if i == 0 {
+                    panic!("factory 0 panics");
+                }
+                Ok(LoopDriver::new(1))
+            })
+        }));
+        assert!(r.is_err(), "the factory's panic propagates");
+    }
+
+    #[test]
+    fn a_queued_fiber_holding_a_spawner_does_not_keep_its_pool_alive() {
+        struct Guard(Arc<AtomicUsize>);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, SeqCst);
+            }
+        }
+        struct Holder(
+            #[allow(dead_code)] Spawner<Holder>,
+            #[allow(dead_code)] Guard,
+        );
+        impl Resume for Holder {
+            fn resume(self, _: Event) -> Step<Self> {
+                Step::Complete(vec![])
+            }
+        }
+        let dropped = Arc::new(AtomicUsize::new(0));
+        let pool = Pool::new(PoolConfig::new(1)).unwrap();
+        pool.spawn(Holder(pool.spawner(), Guard(dropped.clone())));
+        let spawner = pool.spawner();
+        drop(pool);
+        assert_eq!(dropped.load(SeqCst), 1, "the queued fiber was released");
+        assert_eq!(spawner.workers(), 0);
+        assert!(matches!(
+            spawner.spawn(Holder(spawner.clone(), Guard(dropped.clone()))),
+            Err((PoolError::Closed, _))
+        ));
+    }
+
+    #[test]
+    fn a_retired_worker_runs_nothing_after_giving_up() {
+        // Worker 0 fails every poll while it owns I/O and has pinned work
+        // queued; worker 1 must still finish every portable fiber.
+        for seed in 0..32 {
+            let pool = Pool::new(PoolConfig::new(2).seed(seed).driver_wakeup(false)).unwrap();
+            for t in 0..4 {
+                pool.spawn_pinned(0, Fiber::new(t, 0))
+                    .map_err(|_| ())
+                    .unwrap();
+            }
+            for t in 10..20 {
+                pool.spawn(Fiber::new(t, 2));
+            }
+            let err = pool
+                .run_seeded(|i| {
+                    let mut d = LoopDriver::new(2);
+                    if i == 0 {
+                        d.fail_polls = u32::MAX;
+                    }
+                    Ok(d)
+                })
+                .unwrap_err();
+            let RunError::Driver {
+                output, stranded, ..
+            } = err
+            else {
+                panic!("expected a driver error")
+            };
+            assert_eq!(
+                output.completed.len() + output.failures.len() + output.abandoned + stranded.len(),
+                14,
+                "seed {seed}"
+            );
+            assert!(
+                stranded.iter().all(|s| s.id.get() <= 4),
+                "seed {seed}: only pinned fibers may strand: {:?}",
+                stranded.iter().map(|s| s.id).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]

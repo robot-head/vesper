@@ -245,6 +245,7 @@ fn an_offloaded_read_on_an_empty_pipe_can_be_cancelled() {
 
 fn overlapped_temp(tag: &str) -> (std::path::PathBuf, File) {
     let path = std::env::temp_dir().join(format!("vesper-iocp-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_file(&path);
     let mut f = File::create(&path).unwrap();
     f.write_all(b"reuse").unwrap();
     drop(f);
@@ -272,32 +273,105 @@ fn reused_handle_values_never_route_packets_to_another_port() {
     let _guard = watchdog("handle reuse");
     let mut d1 = IocpDriver::<u8>::new(4).unwrap();
     let mut d2 = IocpDriver::<u8>::new(4).unwrap();
-    let mut d3 = IocpDriver::<u8>::new(4).unwrap();
     let (pa, a) = overlapped_temp("a");
     let a = read_once(&mut d1, a).unwrap();
     let a_value = a.into_raw_handle();
     drop(unsafe { File::from_raw_handle(a_value) });
-    // A new file, very likely given the closed handle's value, bound to d2.
+    // A new, unbound file, very likely given the closed handle's value:
+    // d2 binds it normally even though the table remembers d1.
     let (pb, b) = overlapped_temp("b");
     let reused = std::os::windows::io::AsRawHandle::as_raw_handle(&b) == a_value;
     let b = read_once(&mut d2, b).unwrap();
-    // d3 never bound this value: the foreign binding is a typed error.
-    let err = read_once(&mut d3, b.try_clone().unwrap());
-    assert!(err.is_err() || !reused);
-    if let Err(e) = &err {
-        assert_eq!(e.kind(), io::ErrorKind::InvalidInput, "{e}");
-    }
+    // A duplicate handle of b's file object is bound (to d2's port) under a
+    // value no Pulse driver bound: a foreign binding, a typed error.
+    let err = read_once(&mut d1, b.try_clone().unwrap()).unwrap_err();
+    assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
     if rebinds_reused_handles() {
-        // d1 bound this value before: it rebinds the new file to itself, so
-        // the packet arrives at d1 instead of d2.
+        // b's value is known to the table with nothing in flight: d1 rebinds
+        // it to its own port, so the packet arrives at d1, not d2; and back.
         let b = read_once(&mut d1, b).unwrap();
+        let b = read_once(&mut d2, b).unwrap();
         drop(b);
-        eprintln!("iocp: reused handle value rebound (reused: {reused})");
+        eprintln!("iocp: handle moved between ports by rebinding (value reused: {reused})");
     } else {
-        eprintln!("iocp: FileReplaceCompletionInformation unavailable here; rebind not exercised");
+        let err = read_once(&mut d1, b).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
+        eprintln!("iocp: FileReplaceCompletionInformation unavailable here; moving refused");
     }
     let _ = std::fs::remove_file(pa);
     let _ = std::fs::remove_file(pb);
+}
+
+/// Unpinned fibers doing several overlapped operations on their own files
+/// while being stolen between workers: each operation goes to whichever
+/// driver runs the fiber, so the file must move between ports.
+enum Hop {
+    Start(File, u8),
+    Step(u8, u32),
+}
+impl Resume for Hop {
+    fn resume(self, event: Event) -> Step<Self> {
+        match (self, event) {
+            (Hop::Start(f, tag), Event::Start) => Step::Io(Request {
+                file: f,
+                buffer: vec![0; 5],
+                continuation: Hop::Step(tag, 0),
+                operation: Operation::Read,
+                offset: 0,
+            }),
+            (Hop::Step(tag, n), Event::Io(e)) => match e.result {
+                Ok(5) if e.buffer == b"reuse" => {
+                    if n == 6 {
+                        drop(e.file);
+                        return Step::Complete(vec![tag]);
+                    }
+                    // Yield between reads by re-reading after a no-op step.
+                    Step::Io(Request {
+                        file: e.file,
+                        buffer: vec![0; 5],
+                        continuation: Hop::Step(tag, n + 1),
+                        operation: Operation::Read,
+                        offset: 0,
+                    })
+                }
+                other => Step::Failed(format!("{tag}: {other:?}")),
+            },
+            _ => Step::Failed("wrong event".into()),
+        }
+    }
+}
+
+#[test]
+fn overlapped_files_follow_stolen_fibers_between_ports() {
+    let _guard = watchdog("stolen overlapped fibers");
+    let pool = Pool::new(PoolConfig::new(3).seed(5)).unwrap();
+    let mut paths = vec![];
+    for t in 0..48u8 {
+        let (p, f) = overlapped_temp(&format!("hop{t}"));
+        paths.push(p);
+        pool.spawn(Hop::Start(f, t));
+    }
+    let out = pool.run(|_| IocpDriver::new(64)).unwrap();
+    let stolen: u64 = out.workers.iter().map(|w| w.stolen).sum();
+    if rebinds_reused_handles() {
+        assert!(out.failures.is_empty(), "{:?}", out.failures);
+        assert_eq!(out.completed.len(), 48);
+    } else {
+        // Without rebinding, a stolen fiber's file cannot follow it; the
+        // failure is the typed error, never a hang or a lost packet.
+        assert_eq!(out.completed.len() + out.failures.len(), 48);
+        for (_, f) in &out.failures {
+            assert!(f.contains("cannot rebind") || f.contains("another"), "{f}");
+        }
+    }
+    eprintln!(
+        "iocp: {} overlapped fibers done, {} refused, {stolen} stolen",
+        out.completed.len(),
+        out.failures.len()
+    );
+    for p in paths {
+        let _ = std::fs::remove_file(p);
+    }
 }
 
 /// Echo pairs over TCP across a multi-threaded pool: readers pinned to one

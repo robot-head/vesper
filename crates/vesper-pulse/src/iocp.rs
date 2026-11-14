@@ -40,7 +40,7 @@ use crate::driver::{
     cancelled_error, check_entries, first_error, queue_full,
 };
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fs::File,
     io,
     os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle, RawHandle},
@@ -113,6 +113,33 @@ struct Entry<T> {
     request: Request<T>,
     slot: Box<Slot>,
     state: State,
+    /// Counted in the handle's [`Binding::in_flight`].
+    bound: bool,
+}
+
+/// Which Pulse IOCP port a handle value was last bound to, and how many
+/// requests are in flight on it, process-wide. A handle can be bound to one
+/// port at a time; this table lets a pool worker take over a handle that a
+/// sibling worker's driver bound (work stealing moves fibers, and their
+/// files, between drivers) once that driver has nothing in flight on it,
+/// and lets a driver detect values it bound that may have been reused.
+struct Binding {
+    port: usize,
+    in_flight: usize,
+}
+
+fn bindings() -> std::sync::MutexGuard<'static, HashMap<usize, Binding>> {
+    static TABLE: std::sync::OnceLock<Mutex<HashMap<usize, Binding>>> = std::sync::OnceLock::new();
+    TABLE
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+fn release(h: HANDLE) {
+    if let Some(b) = bindings().get_mut(&(h as usize)) {
+        b.in_flight = b.in_flight.saturating_sub(1);
+    }
 }
 
 /// The port handle, shared with offload threads so it outlives them.
@@ -166,8 +193,6 @@ pub struct IocpDriver<T> {
     /// The driver's live `OVERLAPPED` addresses.
     slots: HashMap<usize, RequestId>,
     cancelling: BTreeSet<RequestId>,
-    /// Handle values this driver bound to its port.
-    associated: HashSet<usize>,
     /// The AFD device handle for socket polls, opened on first use.
     afd: Option<OwnedHandle>,
     afd_polls: u64,
@@ -313,7 +338,6 @@ impl<T> IocpDriver<T> {
             entries: BTreeMap::new(),
             slots: HashMap::new(),
             cancelling: BTreeSet::new(),
-            associated: HashSet::new(),
             afd: None,
             afd_polls: 0,
             offloaders: vec![],
@@ -344,40 +368,73 @@ impl<T> IocpDriver<T> {
     pub fn offload_threads(&self) -> usize {
         self.offloaders.len()
     }
+    /// Bind `file` to this port (or confirm it is bound here) and count one
+    /// more request of this driver on it. See [`Binding`].
     fn associate(&mut self, file: &File) -> io::Result<()> {
         let h = handle(file);
-        let live = self.entries.values().any(|e| handle(&e.request.file) == h);
-        if live {
+        let me = self.port() as usize;
+        let mut table = bindings();
+        let known = table.get(&(h as usize)).map(|b| (b.port, b.in_flight));
+        match known {
             // A request this driver owns holds this very handle open, so it
             // is the file bound here; nothing can have reused the value.
-        } else if self.associated.contains(&(h as usize)) {
-            // This value was bound here before, but the handle may since
-            // have been closed and the value reused by a file that another
-            // port owns: bind it to this port explicitly, so no packet for
-            // this driver's OVERLAPPED can reach another port.
-            self.rebind(h)?;
-        } else {
-            // SAFETY: associating a live handle with our live port.
-            let rc = unsafe { CreateIoCompletionPort(h, self.port(), KEY_KERNEL, 0) };
-            if rc.is_null() {
-                let e = last_error();
-                if e.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        "handle is bound to another completion port",
-                    ));
-                }
+            Some((port, n)) if port == me && n > 0 => {}
+            Some((_, n)) if n > 0 => {
                 return Err(io::Error::new(
-                    e.kind(),
-                    format!("cannot associate handle with the completion port: {e}"),
+                    io::ErrorKind::InvalidInput,
+                    "handle has I/O in flight on another Pulse completion port",
                 ));
             }
-            self.associated.insert(h as usize);
+            _ => {
+                // SAFETY: associating a live handle with our live port.
+                let rc = unsafe { CreateIoCompletionPort(h, self.port(), KEY_KERNEL, 0) };
+                if rc.is_null() {
+                    let e = last_error();
+                    if e.raw_os_error() != Some(ERROR_INVALID_PARAMETER as i32) {
+                        return Err(io::Error::new(
+                            e.kind(),
+                            format!("cannot associate handle with the completion port: {e}"),
+                        ));
+                    }
+                    // Already bound to some port. Only a value a Pulse
+                    // driver bound, with nothing in flight on it, may move:
+                    // it is either a sibling's file (a stolen fiber's) or a
+                    // closed value reused by a file another port owns.
+                    let Some((port, _)) = known else {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "handle is bound to another completion port",
+                        ));
+                    };
+                    if rebinds_reused_handles() {
+                        self.rebind(h)?;
+                    } else if port != me {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            "handle is bound to another Pulse completion port and this OS cannot rebind it",
+                        ));
+                    }
+                    // Without rebinding, a value bound here before is assumed
+                    // to still be this driver's file (see
+                    // `rebinds_reused_handles`).
+                }
+                table.insert(
+                    h as usize,
+                    Binding {
+                        port: me,
+                        in_flight: 0,
+                    },
+                );
+            }
         }
+        table.get_mut(&(h as usize)).expect("bound above").in_flight += 1;
+        drop(table);
         let flags = (FILE_SKIP_COMPLETION_PORT_ON_SUCCESS | FILE_SKIP_SET_EVENT_ON_HANDLE) as u8;
         // SAFETY: flags call on a live handle.
         if unsafe { SetFileCompletionNotificationModes(h, flags) } == 0 {
-            return Err(last_error());
+            let e = last_error();
+            release(h);
+            return Err(e);
         }
         Ok(())
     }
@@ -550,6 +607,9 @@ impl<T> IocpDriver<T> {
         self.slots
             .remove(&(&entry.slot.ov as *const OVERLAPPED as usize));
         self.cancelling.remove(&id);
+        if entry.bound {
+            release(handle(&entry.request.file));
+        }
         Ok(entry)
     }
     fn finish(
@@ -647,6 +707,7 @@ impl<T> IocpDriver<T> {
             request,
             slot,
             state,
+            ..
         } = self.take(id)?;
         let result = match state {
             State::Posted(result) => result,
@@ -717,6 +778,7 @@ impl<T> CompletionDriver<T> for IocpDriver<T> {
             id: id.0,
             poll: afd::PollInfo::zeroed(),
         });
+        let mut bound = false;
         let state = if let Some((socket, base)) = afd::socket_of(&request.file) {
             match self.start_socket(&mut request, &mut slot, socket, base) {
                 Ok(state) => state,
@@ -737,6 +799,7 @@ impl<T> CompletionDriver<T> for IocpDriver<T> {
                 if let Err(e) = self.associate(&request.file) {
                     return Err((e, request));
                 }
+                bound = true;
                 match Self::start(&mut request, &mut slot) {
                     None => State::Kernel,
                     Some(result) => State::Posted(result),
@@ -757,6 +820,7 @@ impl<T> CompletionDriver<T> for IocpDriver<T> {
                 request,
                 slot,
                 state,
+                bound,
             },
         );
         if posted {
@@ -834,13 +898,15 @@ impl<T> CompletionDriver<T> for IocpDriver<T> {
                     })
                 )
             });
+            // A CancelSynchronousIo that raced ahead of its ReadFile missed
+            // it: re-issue on every poll, blocking or not.
+            if retrying {
+                self.retry_sync_cancels();
+            }
             let timeout = match (wait, retrying) {
                 (false, _) => 0,
                 (true, false) => INFINITE,
-                (true, true) => {
-                    self.retry_sync_cancels();
-                    CANCEL_RETRY_MS
-                }
+                (true, true) => CANCEL_RETRY_MS,
             };
             let mut n = 0u32;
             // SAFETY: events has BATCH entries for the kernel to fill.
@@ -918,6 +984,15 @@ impl<T> Drop for IocpDriver<T> {
             }
         }
         crate::driver::note_abandoned(abandoned);
+        // This port is about to close: handles bound to it must be rebound
+        // (or rejected) by the next driver, never trusted as its own when a
+        // new port reuses this one's handle value.
+        let me = self.port() as usize;
+        for b in bindings().values_mut() {
+            if b.port == me {
+                b.port = 0;
+            }
+        }
         // Idle offload threads exit when their job senders drop; they hold
         // the port alive through their `Arc` until then.
     }
