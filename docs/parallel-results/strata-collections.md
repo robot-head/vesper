@@ -50,9 +50,10 @@ Cloud host, Linux x86_64, rustc 1.97.0 stable, 1.100.0 for Clippy, Miri on night
 | `cargo +1.100.0 clippy -p vesper-alloc --locked --all-targets -- -D warnings` | clean |
 | `VESPER_LEAN=… cargo test -p vesper-alloc --locked` | all pass (new: 13 sharded, 9 virtual arena, 6 tiled, 3 RegionRef, 5 zero-alloc, 3 slot-arena model; 4 new `compile_fail` doctests) |
 | `lean lean/StrataCollections.lean` (4.24.0) | compiles; axioms ⊆ {propext, Classical.choice, Quot.sound} |
-| `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` | WS_CLIPPY |
-| `cargo test --workspace --locked` | WS_TEST |
-| `cargo +nightly miri test -p vesper-alloc --tests` | MIRI |
+| `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` | clean (on 5dc25b3, before the review fixes, which touch only vesper-alloc) |
+| `cargo test --workspace --locked` | stopped at the first failing binary: `tests/lean4lean42_acceptance.rs::genuine_three_model_replay_and_independent_refusal_matrix` needs `VESPER_LEAN4LEAN42_ROOT` (a prepared Lean4Lean candidate; Codex-held path, unrelated to this lane). Every test binary before it passed. Bazel CI runs the full suite. |
+| `cargo +nightly miri test -p vesper-alloc --tests` (Stacked Borrows) | every existing test binary passes; new binaries: virtual_arena 8 (the Linux RSS test is `cfg(not(miri))`; Miri uses the global-allocator path), tiled_aosoa 6, region_ref 3, zero_alloc 5, slot_arena_model 1 (the two Lean-file tests are ignored under Miri's file-system isolation) and sharded 14 (threads included) all pass |
+| same, default leak check, `--test sharded` | reports the one deliberate leak: `dropped_blocks_are_counted_and_keep_close_failing` drops a live block, so the heap keeps that one 64 KiB slab allocated by design (its metadata is freed). With `-Zmiri-ignore-leaks`, 14/14 pass |
 
 ### Decisions
 

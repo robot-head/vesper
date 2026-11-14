@@ -54,6 +54,7 @@ fn strip_comments(source: &str) -> String {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "reads the Lean source; Miri isolates the file system")]
 fn lean_source_has_no_escape_hatches_and_audits_every_theorem() {
     let source = std::fs::read_to_string(lean_dir().join("StrataCollections.lean")).unwrap();
     let code = strip_comments(&source);
@@ -81,6 +82,7 @@ fn lean_source_has_no_escape_hatches_and_audits_every_theorem() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "runs the Lean binary")]
 fn lean_model_compiles_with_standard_axioms_only() {
     let Ok(lean) = std::env::var("VESPER_LEAN") else {
         eprintln!("VESPER_LEAN unset; Lean compilation skipped");

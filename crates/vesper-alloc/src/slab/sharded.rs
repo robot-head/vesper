@@ -294,11 +294,10 @@ impl Drop for Shared {
             }
             if local.live == 0 {
                 local.deallocate_all();
-            } else {
-                // Live (or dropped) owners may still reach these bytes: keep
-                // the slabs allocated rather than free memory in use.
-                mem::forget(local);
             }
+            // Otherwise live (or dropped) owners may still reach the slab
+            // bytes: dropping `local` frees only its metadata and keeps the
+            // slabs allocated rather than free memory in use.
         }
     }
 }
