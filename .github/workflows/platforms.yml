@@ -86,8 +86,8 @@ jobs:
           scripts/ci/prebuild-acceptance.sh "$RUNNER_TEMP/bazel-executables"
           echo "VESPER_BAZEL_EXECUTABLES=$RUNNER_TEMP/bazel-executables" >> "$GITHUB_ENV"
       # On Apple silicon the host is real AArch64 hardware, so native code
-      # runs here rather than under QEMU. The native executable driver does
-      # not yet support linking with MSVC.
+      # runs here rather than under QEMU. Windows runs the same script in its
+      # Cargo job below.
       - name: Validate host native executables
         if: runner.os != 'Windows'
         run: scripts/test-native-host.sh
@@ -149,6 +149,14 @@ jobs:
         env:
           VESPER_LEAN: lean
       - run: scripts/ci/check-lean-models.sh
+      # The examples the Linux and macOS jobs run natively, built by the
+      # Cargo binary as x86_64-pc-windows-msvc COFF objects with unwind
+      # tables and linked by the Visual Studio link.exe (#347). The script
+      # takes its vesper executable from the prebuilt-executables file.
+      - name: Validate host native executables
+        run: |
+          printf '//:bin/vesper %s\n' "$PWD/target/debug/vesper.exe" > "$RUNNER_TEMP/vesper-executables"
+          VESPER_BAZEL_EXECUTABLES="$RUNNER_TEMP/vesper-executables" scripts/test-native-host.sh
       - name: Run proof acceptance against the actual Cargo executable
         run: >-
           python scripts/check-format-proof.py --binary target/debug/vesper.exe
