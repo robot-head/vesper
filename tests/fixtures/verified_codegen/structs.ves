@@ -1,0 +1,48 @@
+copy struct Point {
+    x: i64,
+    y: i64
+}
+
+copy struct Segment {
+    from: Point,
+    to: Point,
+    closed: bool
+}
+
+fn length2(in s: Segment) -> i64 eff [Fail[ArithOverflow]] {
+    let dx = s.to.x - s.from.x;
+    let dy = s.to.y - s.from.y;
+    dx * dx + dy * dy
+}
+
+fn flip(sink s: Segment) -> Segment {
+    Segment {
+        from: s.to,
+        to: s.from,
+        closed: !s.closed
+    }
+}
+
+fn main() -> Segment eff [Fail[ArithOverflow]] {
+    let s = Segment {
+        from: Point {
+            x: 1,
+            y: 2
+        },
+        to: Point {
+            x: 4,
+            y: 6
+        },
+        closed: false
+    };
+    let f = flip(s);
+    let n = length2(in f);
+    Segment {
+        from: Point {
+            x: n,
+            y: f.from.y
+        },
+        to: f.to,
+        closed: f.closed
+    }
+}

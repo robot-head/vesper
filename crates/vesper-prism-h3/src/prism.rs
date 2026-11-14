@@ -126,6 +126,8 @@ pub struct ServeReport {
     pub failed_requests: u64,
     /// Responses that could not be sent (the stream was reset instead).
     pub reset: u64,
+    /// Extended CONNECT requests refused with 501.
+    pub refused: u64,
     pub goaway: bool,
 }
 
@@ -176,8 +178,32 @@ pub fn serve<T, X: Transport>(
                     report.goaway = true;
                 }
             }
+            // `serve` answers whole requests only: an extended CONNECT is
+            // refused (501), and so is a streaming request (configure
+            // whole bodies to use `serve`).
+            Event::Connect(c) => {
+                let reply = Response {
+                    status: 501,
+                    fields: Vec::new(),
+                    body: Vec::new(),
+                };
+                match c.responder.respond(conn, t, reply) {
+                    Ok(_) => report.refused += 1,
+                    Err((responder, _)) => {
+                        report.reset += 1;
+                        let _ = responder.reset(conn, t, Code::INTERNAL_ERROR);
+                    }
+                }
+            }
+            Event::StreamingRequest(r) => {
+                report.reset += 1;
+                let _ = r.responder.reset(conn, t, Code::INTERNAL_ERROR);
+            }
             Event::RequestFailed { .. } => report.failed_requests += 1,
-            Event::ResponseAbandoned { .. } | Event::GoAway(_) => {}
+            Event::ResponseAbandoned { .. }
+            | Event::GoAway(_)
+            | Event::BodyReadable { .. }
+            | Event::Session(_) => {}
         }
     }
     conn.poll(t);

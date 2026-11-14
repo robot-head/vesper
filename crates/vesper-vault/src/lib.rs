@@ -108,7 +108,10 @@ pub use aead::{
     VerifiedPlaintext,
 };
 pub use consttime::{ConstTime, HardwareCtMode};
-pub use kem::{HybridClientSecret, HybridSharedSecret, KemError, SystemRng, server_encapsulate};
+pub use kem::{
+    HybridClientSecret, HybridSharedSecret, KemError, KemIsa, SystemRng, server_encapsulate,
+    server_encapsulate_on,
+};
 pub use obligation::{LeakAuditor, LeakReport, ObligationKind};
 pub use secret::{SecMask64, SecU8, SecU32, SecU64, SecVec, verify_tag_16_ct};
 pub use slot::{LockPolicy, SecretSlot, ShredReceipt, SlotError, SlotProtection};

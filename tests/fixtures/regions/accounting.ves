@@ -1,0 +1,44 @@
+// Bytes in use follow vesper.region.accounting/1 on every backend.
+copy struct Triple {
+    a: i64,
+    b: i64,
+    c: f64,
+}
+
+fn main() -> u64 {
+    region r(1024) {
+        let t = r
+            .box(
+            Triple {
+                a: 1,
+                b: 2,
+                c: 0.5
+            }
+        );
+        let w = r.box(7);
+        let none: RegionBox[r, Option[(i64, i64)]] = r.box(Option::None);
+        let first = r.used();
+        let m = r.checkpoint();
+        let _ = r
+            .box(
+            Triple {
+                a: 3,
+                b: 4,
+                c: 1.5
+            }
+        );
+        let grown = r.used();
+        r.rewind(m);
+        let back = r.used();
+        let extra = match r.get(none) {
+            Option::None => 0,
+            Option::Some((x, y)) => wrapping_add(x, y),
+        };
+        let total = wrapping_add(wrapping_add(r.get(t).a, r.get(w)), extra);
+        if first == 56 && grown == 80 && back == 56 && total == 8 {
+            first
+        } else {
+            0
+        }
+    }
+}

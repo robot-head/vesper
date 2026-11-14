@@ -1,0 +1,8 @@
+fn touch(inout x: u8) {
+    x = wrapping_add(x, 255);
+}
+
+fn main() {
+    let a: u8 = 1;
+    touch(inout a);
+}

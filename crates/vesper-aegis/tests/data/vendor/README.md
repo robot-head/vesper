@@ -68,3 +68,59 @@ searched carries one): a real AMD KDS CRL. AMD revocation and the ARK CRL
 floor are tested with generated chains (`tests/revocation.rs`). There is no
 real Arm CCA silicon-vendor chain: the CCA samples are verified against
 TF-A's reference platform key and Veraison reference keys.
+
+
+## Wave eight additions (`tests/sgx_quote_v3.rs`, `tests/corim_cca.rs`)
+
+Fetched on 2026-11-14 with `git clone --depth 1` of the public GitHub
+repositories at the commits given. Byte-for-byte copies. The Veraison
+services files under `end-to-end/input/` are renamed with an `e2e-`
+prefix. The CoRIMs are CBOR; `signed-good-corim.cbor` is a COSE_Sign1
+CoRIM whose signer public key (the `x`/`y` of the JWK in the same
+repository's `corim/testcases/src/ec-p256.jwk`) is embedded in
+`tests/corim_cca.rs`.
+
+| File | Source | Licence | SHA-256 |
+| --- | --- | --- | --- |
+| `sgx-dcap-qvl/sgx_quote` | `Phala-Network/dcap-qvl` @ `7c01913045cca2f728340a0bfcd8eadd40d7c2d3`, `sample/sgx_quote`: a real SGX DCAP quote v3 (body type 1), PCK chain under the Intel SGX Root CA, Processor CA | MIT | `f8b81014b6e443609746822194910f5dc1c92c322fa0584298d1e33e505ca3b5` |
+| `sgx-dcap-qvl/sgx_quote_collateral.json` | same, `sample/sgx_quote_collateral.json` (PCCS collateral: SGX TCB info v3, QE identity v2, CRLs; `tcbEvaluationDataNumber` 17) | MIT | `bdd694bbe50f3a2a1cfe12f9e2bd83125921107a368edcf10780a5523b8501ce` |
+| `sgx-trustee/occlum_quote.dat` | `confidential-containers/trustee` @ `564a3ba51eaedd4734e88e1883a905dd780ee45b`, `deps/verifier/test_data/occlum_quote.dat` (a real SGX quote v3 from an Occlum enclave, Platform CA; no collateral published) | Apache-2.0 | `77bcbdfa9c1abb98fd19d60f815b049d187e4e7495203a2e13aeac91fb9f9772` |
+| `cca-veraison-services/cca-good.cbor` | `veraison/services` @ `0a7f44beaa31ca6f84c639c0d8d31e9b6806ff1d`, `scheme/arm-cca/test/evidence/cca-good.cbor` (CCA token, Veraison reference keys; synthetic) | Apache-2.0 | `027df543c122f36a87f8b4f7340a1dcfc6fa4ad52fee77d57d0aabb1b0da2faa` |
+| `cca-veraison-services/corim-cca-platform-bad-no-class.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-no-class.cbor` | Apache-2.0 | `5b63c4309858796c5cb52826ce39906bf3dc2f36be3492fd040e363722bbb95f` |
+| `cca-veraison-services/corim-cca-platform-bad-refval-cryptokeys.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-refval-cryptokeys.cbor` | Apache-2.0 | `a76c67442466ad76370f015873629606b5f2a61098e05affed92abc1f6894c5f` |
+| `cca-veraison-services/corim-cca-platform-bad-refval-instance.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-refval-instance.cbor` | Apache-2.0 | `1ac1eec9e5c009e478b8030265003a299b1df2e7e5c5358c451712608ce7ca5e` |
+| `cca-veraison-services/corim-cca-platform-bad-refval-mfg-cfg.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-refval-mfg-cfg.cbor` | Apache-2.0 | `5a4f7f8040c1a54e4a048f9859556ebe3a81e29cc426373b12391835b87abc81` |
+| `cca-veraison-services/corim-cca-platform-bad-refval-mkey-string.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-refval-mkey-string.cbor` | Apache-2.0 | `f660e52e4b88eb17467d6ff4d78d7f7f914344723e243dc8e617f12f67da8aa5` |
+| `cca-veraison-services/corim-cca-platform-bad-refval-mkey.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-refval-mkey.cbor` | Apache-2.0 | `148cfe550c336d7b560dc7543bc59382599ec8efe91010955ad056b977a35577` |
+| `cca-veraison-services/corim-cca-platform-bad-refval-no-digests.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-refval-no-digests.cbor` | Apache-2.0 | `ec5e0fb8844bde048e2cceb24cc0a95799a67a489769e1dd714f702f29cd2019` |
+| `cca-veraison-services/corim-cca-platform-bad-refval-no-mkey.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-refval-no-mkey.cbor` | Apache-2.0 | `ad8c8e2c3869c89dbb8f4751a583c77b8c802898bd88b79490f4734f21356bf6` |
+| `cca-veraison-services/corim-cca-platform-bad-refval-no-raw-value.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-refval-no-raw-value.cbor` | Apache-2.0 | `34627466cfae5b412a7a05d1a31005852f58d21aa3b0cf55fd5707fc37f2a201` |
+| `cca-veraison-services/corim-cca-platform-bad-refval-tbb-rotpk.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-refval-tbb-rotpk.cbor` | Apache-2.0 | `9bd776e19a6d713319094a25a59f13767b7430c894d00799fec0bb70db1b71f6` |
+| `cca-veraison-services/corim-cca-platform-bad-ta-cert.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-ta-cert.cbor` | Apache-2.0 | `5d6581482f63c2f27a57f0948bc53058193506c3d90fbb012062823cb4681c2b` |
+| `cca-veraison-services/corim-cca-platform-bad-ta-instance.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-ta-instance.cbor` | Apache-2.0 | `0b7e0f5d4a45340d82aa8c10156ac3560f288a13605c363101d9f6ca636b764d` |
+| `cca-veraison-services/corim-cca-platform-bad-ta-no-instance.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-bad-ta-no-instance.cbor` | Apache-2.0 | `2d1a7fde9729af6a644ffa6a84e26b88cab09735f6b3f26de8366670846c6464` |
+| `cca-veraison-services/corim-cca-platform-valid.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-platform-valid.cbor` | Apache-2.0 | `dc77be65beea2aef09c58b65421552d0a2188ef4adc04d3db1d8e66b782f7c9b` |
+| `cca-veraison-services/corim-cca-realm-bad-instance.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-realm-bad-instance.cbor` | Apache-2.0 | `549e69df76ad0c1413bd034cfcdc07fd2e75b49285d19eeafccc2f03672ef8b6` |
+| `cca-veraison-services/corim-cca-realm-bad-no-instance.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-realm-bad-no-instance.cbor` | Apache-2.0 | `5eb3fc3e75ce9e13133618385e873a6a36fd1457ead3fc39bb505938c9cfc706` |
+| `cca-veraison-services/corim-cca-realm-bad-no-integ-regs.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-realm-bad-no-integ-regs.cbor` | Apache-2.0 | `ba07a8078f143181531433bbc31eb98e810c6ed9a206a62cf3f221425ff2bb45` |
+| `cca-veraison-services/corim-cca-realm-bad-no-raw-value.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-realm-bad-no-raw-value.cbor` | Apache-2.0 | `e506c3c9cbbe255e69cfe06c81f882fcab8635160a893902e75d6f3e3e645f78` |
+| `cca-veraison-services/corim-cca-realm-bad-no-rim.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-realm-bad-no-rim.cbor` | Apache-2.0 | `ac9e369c491d14c22f3aac536068dadf6258f720bad2c87f01f3e4064d0e941c` |
+| `cca-veraison-services/corim-cca-realm-valid.cbor` | same, `scheme/arm-cca/test/corim/corim-cca-realm-valid.cbor` | Apache-2.0 | `7d74d4e7a19aca4ef541fd2ce241bca15570cee0a21ec199ed17c69bc611670e` |
+| `cca-veraison-services/e2e-cca-endorsements.cbor` | same, `end-to-end/input/cca-endorsements.cbor` | Apache-2.0 | `325036455c604342f7edf84fc8cdc7362f2905afe350491d7b335db50d3eff9c` |
+| `cca-veraison-services/e2e-cca-evidence.cbor` | same, `end-to-end/input/cca-evidence.cbor` | Apache-2.0 | `73a56853bfb7a0ae048ec72fa5fa2f0a7d8f79072beaee45f52af40255035b90` |
+| `cca-veraison-services/e2e-cca-realm-endorsements.cbor` | same, `end-to-end/input/cca-realm-endorsements.cbor` | Apache-2.0 | `1a70ac499307595fc5f65b077c9b7ef27fdb66a33abafc3703ed00f58c3ce727` |
+| `cca-veraison-corim/cca-platform-invalid-digests.cbor` | `veraison/corim` @ `43f4a78fd0a78a1aec5d4733cc2509b0a971525a`, `profiles/cca/testcases/cca-platform-invalid-digests.cbor` | Apache-2.0 | `56d525794031dfa5d194b6550f2e15ae6a29ae82f22f7b1781424c945eee2495` |
+| `cca-veraison-corim/cca-platform-invalid-impl-id.cbor` | same, `profiles/cca/testcases/cca-platform-invalid-impl-id.cbor` | Apache-2.0 | `ae5f07e946611cf55f0e31e529f9909747f725a45822377d3410315b2d3d720a` |
+| `cca-veraison-corim/cca-platform-valid.cbor` | same, `profiles/cca/testcases/cca-platform-valid.cbor` | Apache-2.0 | `e84c5966c482c8da08ada6582da37ddea4dd4f38d5b7926c94ea5ecbf2069fd0` |
+| `cca-veraison-corim/cca-realm-invalid-missing-rim.cbor` | same, `profiles/cca/testcases/cca-realm-invalid-missing-rim.cbor` | Apache-2.0 | `682ec3d6b0ee7f8ca2fc25b4d0c0d7c657acf176c114228d0eff4817c5bc44da` |
+| `cca-veraison-corim/cca-realm-invalid-rim-size.cbor` | same, `profiles/cca/testcases/cca-realm-invalid-rim-size.cbor` | Apache-2.0 | `8b305318e5f74dff2b9186f02a37b9932f5653cf7aa39f7413a8eb1d9379c6af` |
+| `cca-veraison-corim/cca-realm-valid.cbor` | same, `profiles/cca/testcases/cca-realm-valid.cbor` | Apache-2.0 | `657e28054d595764021c6de1540fc22cd2a2b1c981ff4b2c931ed8eb4ba38538` |
+| `cca-veraison-corim/no-profile.cbor` | same, `profiles/cca/testcases/no-profile.cbor` | Apache-2.0 | `a8e4e7f838981acee8f1655772f50f3508ae7e3265c3c9f4e841723df9cbc706` |
+| `cca-veraison-corim/signed-good-corim.cbor` | same, `corim/testcases/signed-good-corim.cbor` | Apache-2.0 | `99fcfe7d27304529979d5c62597db46b195b07b3084ba6368da5dc3f6aab94c5` |
+| `cca-veraison-corim/unsigned-good-corim.cbor` | same, `corim/testcases/unsigned-good-corim.cbor` | Apache-2.0 | `a68f3182a3752a60a8bec33eb1e54544972e77c934e23ab64ab439cfdfb270c7` |
+
+No real SEV-SNP report version 6 is published in any repository or
+package reachable from the sandbox (Project Oak, Trustee, go-sev-guest,
+VirTEE `sev` and `snpguest`, Contrast and others were searched), and AMD
+has not published a Venice ARK. `tests/snp_v6.rs` uses the Oak Genoa and
+Turin reports above relabelled as version 6, plus generated chains.

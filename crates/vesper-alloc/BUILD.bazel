@@ -1,3 +1,8 @@
 load("//tools/bazel:defs.bzl", "vesper_crate")
 
-vesper_crate()
+vesper_crate(
+    # tests/slot_arena_model.rs reads lean/StrataCollections.lean; Lean
+    # rejects symlinked runfiles outside --root, so it runs in a regular copy.
+    copy_test_cwd = ["test/slot_arena_model"],
+    extra_test_data = ["//:lean"],
+)

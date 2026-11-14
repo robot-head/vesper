@@ -173,7 +173,7 @@ fn lean_model_matches_rust_policy() {
 // ------------------------------------------- lean/AegisCollateral.lean --
 
 const COLLATERAL_MODEL_ID: &str = "vesper.aegis.tcb-evaluation-model/1";
-const COLLATERAL_AUDITED_THEOREMS: usize = 12;
+const COLLATERAL_AUDITED_THEOREMS: usize = 15;
 
 fn collateral_file() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../lean/AegisCollateral.lean")
@@ -198,6 +198,9 @@ fn collateral_model_source_audit() {
         "theorem evaluate_module_first",
         "theorem evaluate_platform_before_qe",
         "theorem rollback_rejected",
+        "theorem appraise_sound",
+        "theorem appraise_refs_mono",
+        "theorem appraise_rejects_unknown",
     ] {
         assert!(source.contains(theorem), "missing {theorem}");
     }
