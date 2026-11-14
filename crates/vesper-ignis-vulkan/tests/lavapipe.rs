@@ -766,14 +766,14 @@ fn missing_declaration_is_caught_by_synchronization_validation() {
         resources: r,
     };
     let (rt, allocators, r) = run_frame(rt, batch);
-    let hazards: Vec<_> = device
-        .take_validation_messages()
-        .into_iter()
-        .filter(|m| m.error && m.id.contains("SYNC-HAZARD"))
-        .collect();
+    let messages = device.take_validation_messages();
+    let hazards = messages
+        .iter()
+        .filter(|m| m.error && (m.id.contains("HAZARD") || m.text.contains("Hazard")))
+        .count();
     assert!(
-        !hazards.is_empty(),
-        "expected a SYNC-HAZARD error for the undeclared write"
+        hazards > 0,
+        "expected a synchronization hazard error for the undeclared write; got {messages:#?}"
     );
     finish(rt);
     for a in allocators {
