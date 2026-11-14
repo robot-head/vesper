@@ -620,6 +620,12 @@ impl Fixture {
         let tool_source = read_source(&tool).text;
         let tool_blake3 = blake3::hash(tool_source.as_bytes()).to_hex().to_string();
         let before = artifact_hashes(&self.root);
+        assert!(
+            before.keys().all(|path| !path.ends_with(".ir")
+                && !path.ends_with(".olean.private")
+                && !path.ends_with(".olean.server")),
+            "snapshot acceptance profile uses fresh legacy objects without package sidecars"
+        );
         let mut command = Command::new(&self.lean);
         command
             .env_clear()
@@ -1062,6 +1068,24 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
     for module in &order {
         fixture.compile(module, &sources[module].text).success();
     }
+    let expected_files = sources
+        .keys()
+        .flat_map(|module| {
+            ["lean", "olean"].map(|suffix| {
+                module_path(module, suffix)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        artifact_hashes(&fixture.root)
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<_>>(),
+        expected_files,
+        "production input is exactly the freshly compiled legacy source/object pairs"
+    );
     let artifact = fixture.root.join(module_path(MODULE, "olean"));
     let before = fs::read(&artifact).unwrap();
     let projected = fixture.project(MODULE, PROJECTED_MODULE, &sources.keys().cloned().collect());
