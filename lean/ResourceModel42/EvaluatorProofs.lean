@@ -1,8 +1,9 @@
 import ResourceModel42.ErasureProofs
 import ResourceModel42.LedgerProofs
+import ResourceModel42.MetricsProofs
 
 namespace Vesper.ResourceModel42.EvaluatorProofs
-open ErasureProofs LedgerProofs
+open ErasureProofs LedgerProofs MetricsProofs
 
 theorem locate_plug {fuel : Nat} {e : RuntimeExpr} {focus : Focus}
     (h : locate fuel e = .ok focus) : focus.context.plug focus.redex = e := by
@@ -507,5 +508,330 @@ theorem runMachine_noInvariant (Sig : Nat → MetatheoryFull.EffSig) (l : Limits
               cases event with
               | none => simpa [runMachine, hv, hs] using ih next events (action :: actions) nextTyping
               | some ev => simpa [runMachine, hv, hs] using ih next (ev :: events) (action :: actions) nextTyping
+
+theorem plug_exceeds {l : Limits} {hole : RuntimeExpr} {reason : CapacityError}
+    (context : RuntimeContext) (h : ExprExceeds l hole reason) :
+    ExprExceeds l (context.plug hole) reason := by
+  induction context with
+  | hole => exact h
+  | letC inner body ih =>
+      cases reason <;>
+        simp_all [ExprExceeds, ExprOverAt, RuntimeContext.plug, exprMetrics, binaryMetrics] <;> omega
+
+def ReplacementExceeds (l : Limits) (context : RuntimeContext)
+    (replacement : Replacement) (reason : CapacityError) : Prop :=
+  match replacement with
+  | .term term => ExprExceeds l (context.plug term) reason
+  | .substitute value body => ValueExceeds l value reason ∨
+      ExprExceeds l (context.plug (body.subst 0 value)) reason
+  | .unpack left right body => ValueExceeds l right reason ∨ ValueExceeds l left reason ∨
+      ExprExceeds l (context.plug (body.subst 0 right)) reason ∨
+      ExprExceeds l (context.plug ((body.subst 0 right).subst 0 left)) reason
+  | .handle id => ExprExceeds l (context.plug (.atom (.val (.hdl id)))) reason
+  | .unit => ExprExceeds l (context.plug (.atom (.val .unit))) reason
+
+theorem replacement_preflight_error {l : Limits} {context : RuntimeContext}
+    {replacement : Replacement} {reason : CapacityError}
+    (h : replacement.preflight l context = .error reason) :
+    ReplacementExceeds l context replacement reason := by
+  cases replacement with
+  | term term =>
+      cases hm : term.measure l with
+      | error error =>
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
+          subst reason
+          exact plug_exceeds context (measureExpr_error hm)
+      | ok stats =>
+          have eq := (measureExpr_ok hm).1
+          simp only [Replacement.preflight, hm, bind, Except.bind] at h
+          rw [eq] at h
+          exact preflightPlug_error h
+  | substitute value body =>
+      cases hm : body.preflightSubst l 0 value with
+      | error error =>
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
+          subst reason
+          rcases preflightSubst_error hm with incoming | candidate
+          · exact Or.inl incoming
+          · exact Or.inr (plug_exceeds context candidate)
+      | ok stats =>
+          have eq := (preflightSubst_ok hm).1
+          simp only [Replacement.preflight, hm, bind, Except.bind] at h
+          rw [eq] at h
+          exact Or.inr (preflightPlug_error h)
+  | unpack left right body =>
+      cases hm : body.preflightUnpack l left right with
+      | error error =>
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
+          subst reason
+          rcases preflightUnpack_error hm with incomingRight | incomingLeft | temporary | candidate
+          · exact Or.inl incomingRight
+          · exact Or.inr (Or.inl incomingLeft)
+          · exact Or.inr (Or.inr (Or.inl (plug_exceeds context temporary)))
+          · exact Or.inr (Or.inr (Or.inr (plug_exceeds context candidate)))
+      | ok stats =>
+          obtain ⟨temporary, final⟩ := stats
+          obtain ⟨eqTemporary, _, eqFinal, _⟩ := preflightUnpack_ok hm
+          cases ht : context.preflightPlug l temporary with
+          | error error =>
+              simp [Replacement.preflight, hm, ht, bind, Except.bind] at h
+              subst reason
+              rw [eqTemporary] at ht
+              exact Or.inr (Or.inr (Or.inl (preflightPlug_error ht)))
+          | ok ignored =>
+              simp only [Replacement.preflight, hm, ht, bind, Except.bind] at h
+              rw [eqFinal] at h
+              exact Or.inr (Or.inr (Or.inr (preflightPlug_error h)))
+  | handle id =>
+      cases hm : checkExprStats l (valueExprStats ⟨1, 1⟩) with
+      | error error =>
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
+          subst reason
+          apply plug_exceeds context
+          simpa [ExprExceeds, exprMetrics, atomMetrics, valueExpr, valueMetrics, valueExprStats] using
+            checkExprStats_error hm l.runtimeDepth
+      | ok stats =>
+          have eq := (checkExprStats_ok hm).1
+          simp only [Replacement.preflight, hm, bind, Except.bind] at h
+          rw [eq] at h
+          exact preflightPlug_error h
+  | unit =>
+      cases hm : checkExprStats l (valueExprStats ⟨1, 1⟩) with
+      | error error =>
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
+          subst reason
+          apply plug_exceeds context
+          simpa [ExprExceeds, exprMetrics, atomMetrics, valueExpr, valueMetrics, valueExprStats] using
+            checkExprStats_error hm l.runtimeDepth
+      | ok stats =>
+          have eq := (checkExprStats_ok hm).1
+          simp only [Replacement.preflight, hm, bind, Except.bind] at h
+          rw [eq] at h
+          exact preflightPlug_error h
+
+def ActionExceeds (l : Limits) (ledgerSize eventCount : Nat)
+    (action : PlannedAction) (reason : ResourceRefusal) : Prop :=
+  match action, reason with
+  | .mint _, .resources requested cap =>
+      requested = ledgerSize + 1 ∧ cap = l.resources ∧ cap < requested
+  | .mint _, .events requested cap | .consume _ _, .events requested cap =>
+      requested = eventCount + 1 ∧ cap = l.events ∧ cap < requested
+  | _, _ => False
+
+theorem action_preflight_error {l : Limits} {ledgerSize eventCount : Nat}
+    {action : PlannedAction} {reason : ResourceRefusal}
+    (h : action.preflight l ledgerSize eventCount = .error reason) :
+    ActionExceeds l ledgerSize eventCount action reason := by
+  cases action with
+  | silent => simp [PlannedAction.preflight] at h
+  | mint site =>
+      by_cases hr : l.resources < ledgerSize + 1 <;>
+        by_cases he : l.events < eventCount + 1 <;>
+          simp_all [PlannedAction.preflight, ActionExceeds, bind, Except.bind,
+            pure, Except.pure] <;> subst reason <;> simp_all
+  | consume site id =>
+      by_cases he : l.events < eventCount + 1 <;>
+        simp_all [PlannedAction.preflight, ActionExceeds, bind, Except.bind,
+          pure, Except.pure] <;> subst reason <;> simp_all
+
+theorem locate_error_exceeds {fuel : Nat} {e : RuntimeExpr} {reason : CapacityError}
+    (h : locate fuel e = .error reason) :
+    reason = .runtimeDepth ∧ fuel < (exprMetrics e).depth := by
+  induction fuel generalizing e reason with
+  | zero =>
+      simp [locate] at h
+      subst reason
+      exact ⟨rfl, expr_depth_positive e⟩
+  | succ fuel ih =>
+      cases e with
+      | letE initializer body =>
+          cases hv : initializer.asValue with
+          | some value => simp [locate, hv] at h
+          | none =>
+              cases hi : locate fuel initializer with
+              | error error =>
+                  simp only [locate, hv] at h
+                  rw [hi] at h
+                  change Except.error error = Except.error reason at h
+                  cases h
+                  obtain ⟨rfl, depth⟩ := ih hi
+                  exact ⟨rfl, by simp only [exprMetrics, binaryMetrics]; omega⟩
+              | ok inner =>
+                  simp only [locate, hv] at h
+                  rw [hi] at h
+                  change Except.ok (Focus.mk (.letC inner.context body) inner.redex) = Except.error reason at h
+                  contradiction
+      | atom a => simp [locate] at h
+      | pair a b => simp [locate] at h
+      | unpack a body => simp [locate] at h
+      | ifz a zero nonzero => simp [locate] at h
+      | mint site => simp [locate] at h
+      | consume site a => simp [locate] at h
+
+def StepRefusalWitness (l : Limits) (eventCount : Nat) (c : Config) : ResourceRefusal → Prop
+  | .capacity reason => ExprExceeds l c.expr reason ∨
+      ∃ focus plan, locate l.runtimeDepth c.expr = .ok focus ∧
+        prepare c.ledger focus.redex = .ok plan ∧
+        ReplacementExceeds l focus.context plan.replacement reason
+  | reason => ∃ focus plan, locate l.runtimeDepth c.expr = .ok focus ∧
+      prepare c.ledger focus.redex = .ok plan ∧
+      ActionExceeds l c.ledger.size eventCount plan.action reason
+
+theorem step_refusal_witness {l : Limits} {count : Nat} {c : Config} {reason : ResourceRefusal}
+    (h : step l count c = .limited reason) : StepRefusalWitness l count c reason := by
+  cases hv : c.expr.asValue with
+  | some value => simp [step, hv] at h
+  | none =>
+      cases hf : locate l.runtimeDepth c.expr with
+      | error error =>
+          simp [step, hv, hf] at h
+          subst reason
+          obtain ⟨rfl, depth⟩ := locate_error_exceeds hf
+          exact Or.inl (by simpa [ExprExceeds, ExprOverAt] using depth)
+      | ok focus =>
+          cases hp : prepare c.ledger focus.redex with
+          | error error => simp [step, hv, hf, hp] at h
+          | ok plan =>
+              cases hs : plan.replacement.preflight l focus.context with
+              | error error =>
+                  simp [step, hv, hf, hp, hs] at h
+                  subst reason
+                  exact Or.inr ⟨focus, plan, hf, hp, replacement_preflight_error hs⟩
+              | ok stats =>
+                  cases ha : plan.action.preflight l c.ledger.size count with
+                  | error error =>
+                      simp [step, hv, hf, hp, hs, ha] at h
+                      subst reason
+                      have exceeded := action_preflight_error ha
+                      cases error with
+                      | capacity error =>
+                          have impossible : False := by
+                            cases actionCase : plan.action <;>
+                              simp [ActionExceeds, actionCase] at exceeded
+                          exact False.elim impossible
+                      | resources requested cap => exact ⟨focus, plan, hf, hp, exceeded⟩
+                      | events requested cap => exact ⟨focus, plan, hf, hp, exceeded⟩
+                  | ok okValue => simp [step, hv, hf, hp, hs, ha] at h
+
+theorem runMachine_refusal_witness (l : Limits) (fuel : Nat) (c : Config)
+    (events : List ResourceEvent) (actions : List MetatheoryFull.Act) (reason : ResourceRefusal)
+    (h : (runMachine l fuel c events actions).status = .resourceLimit reason) :
+    StepRefusalWitness l (runMachine l fuel c events actions).eventsRev.length
+      (runMachine l fuel c events actions).config reason := by
+  induction fuel generalizing c events actions with
+  | zero => cases hv : c.expr.asValue <;> simp [runMachine, hv] at h
+  | succ fuel ih =>
+      cases hv : c.expr.asValue with
+      | some value => simp [runMachine, hv] at h
+      | none =>
+          cases hs : step l events.length c with
+          | terminal value => simp [runMachine, hv, hs] at h
+          | invariant error => simp [runMachine, hv, hs] at h
+          | limited actual =>
+              simp [runMachine, hv, hs] at h
+              subst reason
+              simpa [runMachine, hv, hs] using step_refusal_witness hs
+          | next next action event =>
+              cases event with
+              | none =>
+                  simpa [runMachine, hv, hs] using
+                    ih next events (action :: actions) (by simpa [runMachine, hv, hs] using h)
+              | some ev =>
+                  simpa [runMachine, hv, hs] using
+                    ih next (ev :: events) (action :: actions) (by simpa [runMachine, hv, hs] using h)
+
+def EventOrigin (redex : RuntimeExpr) (event : ResourceEvent) (ledgerSize : Nat) : Prop :=
+  match redex, event.action with
+  | .mint site, .mint => event.site = site ∧ event.id = ledgerSize
+  | .consume site (.val (.hdl id)), .consume => event.site = site ∧ event.id = id
+  | _, _ => False
+
+theorem prepare_event_site (c : Config) {redex : RuntimeExpr} {plan : Prepared}
+    {event : ResourceEvent} (hp : prepare c.ledger redex = .ok plan)
+    (he : plan.action.event c.ledger.size = some event) :
+    EventOrigin redex event c.ledger.size := by
+  cases redex with
+  | atom a => simp [prepare] at hp
+  | pair a b => simp [prepare] at hp
+  | letE initializer body =>
+      cases hv : initializer.asValue with
+      | none => simp [prepare, hv] at hp
+      | some value =>
+          simp [prepare, hv] at hp
+          subst plan
+          simp [PlannedAction.event] at he
+  | unpack a body =>
+      cases a with
+      | var _ => simp [prepare] at hp
+      | val value =>
+          cases value with
+          | unit => simp [prepare] at hp
+          | nat _ => simp [prepare] at hp
+          | hdl _ => simp [prepare] at hp
+          | pair left right =>
+              simp [prepare] at hp
+              subst plan
+              simp [PlannedAction.event] at he
+  | ifz a zero nonzero =>
+      cases a with
+      | var _ => simp [prepare] at hp
+      | val value =>
+          cases value with
+          | unit => simp [prepare] at hp
+          | hdl _ => simp [prepare] at hp
+          | pair _ _ => simp [prepare] at hp
+          | nat n =>
+              simp [prepare] at hp
+              subst plan
+              simp [PlannedAction.event] at he
+  | mint site =>
+      simp [prepare] at hp
+      subst plan
+      simp [PlannedAction.event] at he
+      subst event
+      exact ⟨rfl, rfl⟩
+  | consume site a =>
+      cases a with
+      | var _ => simp [prepare] at hp
+      | val value =>
+          cases value with
+          | unit => simp [prepare] at hp
+          | nat _ => simp [prepare] at hp
+          | pair _ _ => simp [prepare] at hp
+          | hdl id =>
+              cases hl : c.ledger[id]? with
+              | none => simp [prepare, hl] at hp
+              | some entry =>
+                  cases hb : entry.live with
+                  | false => simp [prepare, hl, hb] at hp
+                  | true =>
+                      simp [prepare, hl, hb] at hp
+                      subst plan
+                      simp [PlannedAction.event] at he
+                      subst event
+                      exact ⟨rfl, rfl⟩
+
+theorem step_event_site {l : Limits} {count : Nat} {c next : Config}
+    {action : MetatheoryFull.Act} {event : ResourceEvent}
+    (h : step l count c = .next next action (some event)) :
+    ∃ focus, locate l.runtimeDepth c.expr = .ok focus ∧
+      EventOrigin focus.redex event c.ledger.size := by
+  cases hv : c.expr.asValue with
+  | some value => simp [step, hv] at h
+  | none =>
+      cases hf : locate l.runtimeDepth c.expr with
+      | error error => simp [step, hv, hf] at h
+      | ok focus =>
+          cases hp : prepare c.ledger focus.redex with
+          | error error => simp [step, hv, hf, hp] at h
+          | ok plan =>
+              cases hs : plan.replacement.preflight l focus.context with
+              | error error => simp [step, hv, hf, hp, hs] at h
+              | ok stats =>
+                  cases ha : plan.action.preflight l c.ledger.size count with
+                  | error error => simp [step, hv, hf, hp, hs, ha] at h
+                  | ok okValue =>
+                      simp [step, hv, hf, hp, hs, ha] at h
+                      exact ⟨focus, rfl, prepare_event_site c hp h.2.2⟩
 
 end Vesper.ResourceModel42.EvaluatorProofs

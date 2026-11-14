@@ -218,8 +218,36 @@ the actual ledger, Full canonical-value lemmas, and genuine handle ownership.
 The whole-run no-invariant corollary uses actual Full preservation across actual
 successful transitions.
 
-Measured-refusal soundness still requires the independent metric/preflight
-proofs to link capacity tags to genuine exceeded current/proposed bounds.
-Initial checked reachability, exhaustion consequences and the complete
-transitive audit remain downstream release gates. Neither successful-step
-soundness nor a bare limited-reason alternative is presented as completion.
+The final evaluator proof checkpoint imports the independently compiled metrics
+module through `defc692`. It compiles 29 public theorems with no diagnostics
+(`/tmp/resource-model42-evaluator-proofs-v4.log`). The fresh read-only complete
+source/olean snapshot is `/tmp/resource-model42-evaluator-proofs-v4`.
+Its eight additional public theorem roots are `plug_exceeds`,
+`replacement_preflight_error`, `action_preflight_error`,
+`locate_error_exceeds`, `step_refusal_witness`, `runMachine_refusal_witness`,
+`prepare_event_site` and `step_event_site`.
+
+`ReplacementExceeds` independently measures actual incoming closed values,
+whole proposed terms and whole intermediate unpack terms. It is not defined
+by an algorithm error tag. The actual focus and prepare equalities bind those
+values/terms to the actual current execution. Context-depth refusal proves a
+real current-term depth excess. Resource/event refusal independently requires
+the prepared action to need that space: only mint requests resource space,
+and only mint/consume request event space. Requested counts equal actual ledger
+history or event count plus one, and the actual configured cap is smaller.
+Silent steps cannot justify a resource/event refusal merely by reaching a cap.
+`runMachine_refusal_witness` transports this evidence to the actual retained
+final configuration and prefix after a resource-limit result.
+
+An independent source reviewer caught the counts-only version of that final
+predicate; the action-specific predicate and actual locate/prepare witness
+replace it. The corrected statement was re-reviewed with no remaining blocker.
+All 29 theorems compile after the strengthening. `step_event_site` separately
+identifies each actual event's focused mint/consume operator site and actual
+serial, which Full erasure intentionally omits.
+
+Initial checked reachability and copy-only exhaustion consequences are handled
+by the separately compiled main proof checkpoint `64e4394`, not assumed by this
+lane's raw proof helpers. Final combined acceptance and the complete transitive
+audit remain coordinator gates. This lane has not executed Cargo, submitted
+audit requests or claimed a full source/backend resource oracle.
