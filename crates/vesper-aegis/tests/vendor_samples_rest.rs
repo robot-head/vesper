@@ -271,8 +271,9 @@ fn snp_report_versions_and_reserved_fields() {
         r[..4].copy_from_slice(&v.to_le_bytes());
         r
     };
-    // Version 6 (Venice extended TCBs) and 1 are unsupported.
-    for v in [0, 1, 6, 7, u32::MAX] {
+    // Versions 0, 1 and above 6 are unsupported (version 6 is covered in
+    // `tests/snp_v6.rs`).
+    for v in [0, 1, 7, u32::MAX] {
         assert!(matches!(
             SnpReport::parse(&set_version(&genoa, v)),
             Err(ParseError::UnsupportedValue {
