@@ -9,9 +9,12 @@ open Lean Lean.Level.Normalize
 def EdgeCovered (s : NormLevel) (acc : List Name) (a : Name) : Prop :=
   ∃ p n k, s.get? p = some n ∧ (⟨a, k⟩ : VarNode) ∈ n.var ∧ p ⊆ a :: acc
 
-def Admissible (s : NormLevel) (acc : List Name) : List Name → Prop
-  | [] => True
-  | a :: rest => EdgeCovered s acc a ∧ Admissible s (a :: acc) rest
+/-- Folding the existing list recursor keeps this logical certificate free of
+an additional compiler-generated unsafe recursion helper. -/
+def Admissible (s : NormLevel) (acc order : List Name) : Prop :=
+  order.foldr
+    (fun a continuation prior => EdgeCovered s prior a ∧ continuation (a :: prior))
+    (fun _ => True) acc
 
 def Completes (s : NormLevel) (acc rem : List Name) : Prop :=
   ∃ order, order.Perm rem ∧ Admissible s acc order
