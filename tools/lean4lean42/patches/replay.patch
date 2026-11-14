@@ -1,8 +1,8 @@
 diff --git a/Main.lean b/Main.lean
-index e23b981..2c48a98 100644
+index e23b981..684952b 100644
 --- a/Main.lean
 +++ b/Main.lean
-@@ -2,365 +2,649 @@
+@@ -2,365 +2,661 @@
  Copyright (c) 2023 Scott Morrison. All rights reserved.
  Released under Apache 2.0 license as described in the file LICENSE.
  Authors: Scott Morrison
@@ -236,7 +236,9 @@ index e23b981..2c48a98 100644
 +  a.toConstantVal == b.toConstantVal && quotientKind a.kind == quotientKind b.kind
 +
 +def targetName : Nat → Name
-+  | 0 => `RewriteWitness | 1 => `ArithmeticOracle | _ => `Lean4Lean.VesperControls
++  | 0 => `RewriteWitness | 1 => `ArithmeticOracle
++  | 2 => `Lean4Lean.VesperControls | 3 => `ResourceModel42Kernel
++  | _ => .anonymous
 +private def rwRoot (s : String) : Name := .str (.str (.str .anonymous "Vesper") "RewriteWitness") s
 +private def arRoot (s : String) : Name := .str (.str (.str .anonymous "Vesper") "ArithmeticOracle") s
 +private def controlRoot : Name := `Vesper.Lean4Lean42Controls.runControls
@@ -374,19 +376,29 @@ index e23b981..2c48a98 100644
 +      for owner in quotientIds do
 +        let some e := entries[owner]? | coverageError "quotient ID missing"
 +        if e.form != 7 || e.moduleId != entry.moduleId then coverageError "quotient group form or origin"
-+  let roots := if target == 2 then #[controlRoot]
-+    else if target == 0 then witnessRoots else witnessRoots ++ arithmeticRoots
-+  let mut required := #[]
-+  for root in roots do
-+    let some id := index[root]? | coverageError "required root absent"
-+    let e := entries[id]!
-+    let expectedModule := if target == 2 then targetName 2
-+      else if witnessRoots.contains root then targetName 0 else targetName 1
-+    if e.skip != 0 || modules[e.moduleId]!.name != expectedModule then
-+      coverageError "required root origin or eligibility"
-+    if (witnessRoots.contains root && e.form != 2) ||
-+        (!witnessRoots.contains root && e.form != 1) then coverageError "required root form"
-+    required := required.push id
++  if target == 3 then
++    for e in entries do
++      if modules[e.moduleId]!.name == targetName target && e.skip != 0 then
++        coverageError "resource projection contains skipped declarations"
++  let mut required := if target == 3 then Array.mkEmpty targetEligibility[0]! else #[]
++  if target == 3 then
++    for i in [:entries.size] do
++      let e := entries[i]!
++      if modules[e.moduleId]!.name == targetName target then
++        required := required.push i
++  else
++    let roots := if target == 2 then #[controlRoot]
++      else if target == 0 then witnessRoots else witnessRoots ++ arithmeticRoots
++    for root in roots do
++      let some id := index[root]? | coverageError "required root absent"
++      let e := entries[id]!
++      let expectedModule := if target == 2 then targetName 2
++        else if witnessRoots.contains root then targetName 0 else targetName 1
++      if e.skip != 0 || modules[e.moduleId]!.name != expectedModule then
++        coverageError "required root origin or eligibility"
++      if (witnessRoots.contains root && e.form != 2) ||
++          (!witnessRoots.contains root && e.form != 1) then coverageError "required root form"
++      required := required.push id
 +  if targetEligibility[0]! == 0 then coverageError "no target-owned eligible constants"
 +  pure ⟨target, modules, entries, index, forms, eligibility, targetEligibility, nameBytes, required⟩
 +
@@ -896,7 +908,7 @@ index e23b981..2c48a98 100644
 +      | "0" => pure 0 | "1" => pure 1 | "2" => pure 2 | "3" => pure 3
 +      | _ => throw ⟨"io", "invalid machine mode"⟩
 +    let target ← match target with
-+      | "0" => pure 0 | "1" => pure 1 | "2" => pure 2
++      | "0" => pure 0 | "1" => pure 1 | "2" => pure 2 | "3" => pure 3
 +      | _ => throw ⟨"io", "invalid machine target"⟩
 +    if !validToken token then throw ⟨"io", "invalid machine token"⟩
 +    if (mode == 1 && target == 2) || (mode >= 2 && target != 2) then
@@ -963,7 +975,7 @@ index e23b981..2c48a98 100644
 +private unsafe def machine (out : Output) (args : Arguments) : MachineM Unit := do
 +  if Lean.versionString != "4.24.0" then fail "internal" "unsupported Lean version"
 +  send out (frame 0 #[.str args.token, jn args.mode, jn args.target,
-+    .str "4.24.0", .str "vesper.lean4lean42/1"])
++    .str "4.24.0", .str "vesper.lean4lean42/2"])
 +  let input ← IO.getStdin
 +  let unexpected ← input.read 1
 +  if !unexpected.isEmpty then fail "io" "machine mode accepts no stdin language"
