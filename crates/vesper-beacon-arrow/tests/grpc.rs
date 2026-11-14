@@ -235,14 +235,26 @@ async fn malformed_batch_is_answered_invalid_argument_without_ending_the_stream(
     assert_eq!(status.status_code, StatusCode::InvalidArgument as i32);
     assert!(!status.is_retryable());
     assert!(!status.status_message.is_empty());
-    // The stream stays open and a valid batch is accepted afterwards.
+    // The stream stays open and a valid batch is accepted afterwards; the
+    // server keeps (undecoded) HPACK headers as upstream's exporter sends.
     let mut enc = TraceEncoder::new(EncoderConfig::default());
     let mut good = enc.encode(&groups(vec![span(1, 0)])).unwrap();
     good.batch_id = 8;
+    good.headers = vec![0x40, 0x01, b'k', 0x01, b'v'];
     stream.send(good).await.unwrap();
     let ok = stream.recv_status().await.unwrap();
     assert!(ok.is_ok(), "{ok:?}");
-    assert_eq!(rx.recv().await.unwrap().batch.spans[0].span_id, 1);
+    let got = rx.recv().await.unwrap().batch;
+    assert_eq!(got.spans[0].span_id, 1);
+    assert_eq!(got.headers, [0x40, 0x01, b'k', 0x01, b'v']);
+    // Headers over the server's limit are a typed rejection.
+    let mut big = enc.encode(&groups(vec![span(2, 0)])).unwrap();
+    big.batch_id = 9;
+    big.headers = vec![0; DEFAULT_MAX_HEADER_BYTES + 1];
+    stream.send(big).await.unwrap();
+    let st = stream.recv_status().await.unwrap();
+    assert_eq!(st.status_code, StatusCode::InvalidArgument as i32);
+    assert!(st.status_message.contains("HeadersTooLarge"), "{st:?}");
     // Graceful shutdown waits for open streams.
     assert!(stream.finish().await.unwrap().is_empty());
     server.stop().await;

@@ -185,7 +185,12 @@ with hand-written service stubs under the upstream names:
 runs against a real OpenTelemetry Collector when `VESPER_OTELCOL` names an
 `otelcol-contrib` binary (it bundles the `otelarrow` receiver and exporter):
 Beacon OTAP and OTLP into the collector, and the collector's `otelarrow`
-exporter into Beacon's server. Without the variable it is skipped.
+exporter into Beacon's server. Without the variable it is skipped. Both
+directions passed against OpenTelemetry Collector Contrib 0.165.0. Beacon
+has no compression, so a collector exporting to Beacon needs
+`compression: none` and `arrow: {payload_compression: none}`. The server
+keeps each batch's HPACK `headers` raw and undecoded
+(`HeaderPolicy::KeepRaw`); the plain decoder rejects them by default.
 
 **PII redaction (§22.4).** `SpanAttributes::insert` (alias `Attributes`, used for resource, scope,
 event, link, data-point and log attributes and log bodies) accepts only

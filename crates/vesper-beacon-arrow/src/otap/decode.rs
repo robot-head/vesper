@@ -49,6 +49,21 @@ pub struct DecodeLimits {
     /// expand each referenced value per row, so this bounds the expansion
     /// independently of the encoded size.
     pub max_decoded_string_bytes: usize,
+    /// What to do with a batch's `headers` (HPACK-encoded gRPC metadata).
+    pub headers: HeaderPolicy,
+}
+/// Handling of `BatchArrowRecords::headers`.
+///
+/// Upstream's exporter fills `headers` with its outgoing gRPC metadata
+/// (for example W3C trace context), HPACK-encoded with a dynamic table that
+/// persists across one stream's batches. Beacon has no HPACK decoder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderPolicy {
+    /// Any non-empty `headers` is [`DecodeError::HeadersUnsupported`].
+    Reject,
+    /// Keep the raw bytes, undecoded, in [`DecodedBatch::headers`], up to
+    /// `max_bytes` per batch ([`DecodeError::HeadersTooLarge`] beyond).
+    KeepRaw { max_bytes: usize },
 }
 impl Default for DecodeLimits {
     fn default() -> Self {
@@ -60,6 +75,7 @@ impl Default for DecodeLimits {
             max_stream_bytes: 256 << 20,
             max_rows: super::encode::MAX_BATCH_ROWS,
             max_decoded_string_bytes: 64 << 20,
+            headers: HeaderPolicy::Reject,
         }
     }
 }
@@ -67,6 +83,8 @@ impl Default for DecodeLimits {
 #[derive(Debug)]
 pub enum DecodeError {
     HeadersUnsupported,
+    /// Raw `headers` larger than [`HeaderPolicy::KeepRaw`] allows.
+    HeadersTooLarge,
     TooManyPayloads,
     UnknownPayloadType(i32),
     UnsupportedPayloadType(ArrowPayloadType),
@@ -230,6 +248,10 @@ pub struct DecodedBatch {
     pub spans: Vec<DecodedSpan>,
     pub histograms: Vec<DecodedHistogram>,
     pub logs: Vec<DecodedLog>,
+    /// The batch's raw HPACK `headers` under [`HeaderPolicy::KeepRaw`]
+    /// (empty otherwise). Not decoded: the HPACK dynamic table spans the
+    /// stream, so a consumer must decode a stream's headers in order.
+    pub headers: Vec<u8>,
 }
 
 struct RxStream {
@@ -295,8 +317,14 @@ impl OtapDecoder {
 
     fn decode_inner(&mut self, batch: &BatchArrowRecords) -> Result<DecodedBatch, DecodeError> {
         self.string_budget.set(self.limits.max_decoded_string_bytes);
-        if !batch.headers.is_empty() {
-            return Err(DecodeError::HeadersUnsupported);
+        match self.limits.headers {
+            HeaderPolicy::Reject if !batch.headers.is_empty() => {
+                return Err(DecodeError::HeadersUnsupported)
+            }
+            HeaderPolicy::KeepRaw { max_bytes } if batch.headers.len() > max_bytes => {
+                return Err(DecodeError::HeadersTooLarge)
+            }
+            _ => {}
         }
         if batch.arrow_payloads.len() > self.limits.max_payloads {
             return Err(DecodeError::TooManyPayloads);
@@ -349,6 +377,7 @@ impl OtapDecoder {
             records: &mut records,
             out: DecodedBatch {
                 batch_id: batch.batch_id,
+                headers: batch.headers.clone(),
                 ..DecodedBatch::default()
             },
         };
@@ -607,15 +636,17 @@ fn lists<T: ArrowPrimitiveType>(
             .as_list::<i32>()
             .iter()
             .map(|v| {
+                // Upstream's Go producer appends zero items as nulls (its
+                // `AppendNonZero` builders): a null item is the zero value.
                 v.map(|values| {
-                    let values = values.as_primitive::<T>();
-                    if values.null_count() != 0 {
-                        return Err(DecodeError::NullValue(c.name));
-                    }
-                    Ok(values.values().to_vec())
+                    values
+                        .as_primitive::<T>()
+                        .iter()
+                        .map(Option::unwrap_or_default)
+                        .collect()
                 })
-                .transpose()
             })
+            .map(Ok)
             .collect(),
         _ => Err(DecodeError::ColumnType(c.name)),
     }

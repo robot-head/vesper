@@ -19,7 +19,6 @@
 #![cfg(feature = "grpc")]
 
 use core::num::NonZeroU64;
-use std::io::Read;
 use std::net::{TcpListener as StdListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -49,11 +48,7 @@ fn wait_listening(port: u16, child: &mut Child) {
     let deadline = Instant::now() + Duration::from_secs(30);
     while TcpStream::connect(("127.0.0.1", port)).is_err() {
         if let Ok(Some(status)) = child.try_wait() {
-            let mut err = String::new();
-            if let Some(e) = child.stderr.as_mut() {
-                let _ = e.read_to_string(&mut err);
-            }
-            panic!("collector exited ({status}): {err}");
+            panic!("collector exited ({status})");
         }
         assert!(
             Instant::now() < deadline,
@@ -86,7 +81,13 @@ impl Drop for Collector {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if std::thread::panicking() {
+            // Leave the evidence: print the collector's log on failure.
+            let log = std::fs::read_to_string(self.dir.join("collector.log")).unwrap_or_default();
+            eprintln!("--- collector log ({}) ---\n{log}", self.dir.display());
+        } else {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -124,15 +125,20 @@ exporters:
     endpoint: 127.0.0.1:{beacon_server}
     tls:
       insecure: true
+    # Beacon's server has no gRPC compression; the exporter's default is
+    # `zstdarrow5`.
+    compression: none
     arrow:
       num_streams: 1
       disable_downgrade: true
+      # Nor Arrow IPC buffer compression (on when gRPC compression is off).
+      payload_compression: none
 service:
   telemetry:
     metrics:
       level: none
     logs:
-      level: warn
+      level: info
   pipelines:
     traces:
       receivers: [otelarrow, otlp]
@@ -170,7 +176,7 @@ service:
         .arg("--config")
         .arg(&config_path)
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
+        .stderr(std::fs::File::create(dir.join("collector.log")).unwrap())
         .spawn()
         .unwrap();
     for port in [ports.arrow_in, ports.otlp_in, ports.otlp_back] {
@@ -444,6 +450,12 @@ fn collector_otelarrow_exporter_reaches_the_beacon_server() {
         logs.extend(b.logs);
     }
     spans.sort_by_key(|s| s.span_id);
+    eprintln!(
+        "decoded {} spans, {} histograms, {} logs from the Go encoder",
+        spans.len(),
+        hists.len(),
+        logs.len()
+    );
     assert_eq!(spans[0].trace_id, TRACE);
     assert_eq!(spans[1].parent_span_id, Some(1));
     assert_eq!(spans[0].trace_state.as_deref(), Some("vesper=1"));

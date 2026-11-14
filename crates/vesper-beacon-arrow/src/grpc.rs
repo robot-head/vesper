@@ -29,12 +29,18 @@
 //! step whatever the client does next. [`OtlpService`] queues export
 //! requests the same way and answers `RESOURCE_EXHAUSTED` when full.
 //!
-//! No TLS, compression, authentication or HPACK `headers` support: the
-//! transport is plaintext HTTP/2 (`http://` endpoints) and compressed
-//! messages are rejected by tonic.
+//! No TLS, compression or authentication: the transport is plaintext
+//! HTTP/2 (`http://` endpoints) and compressed messages are rejected by
+//! tonic, so the collector's `otelarrow` exporter needs `compression: none`
+//! (its default is `zstdarrow5`). The server keeps each batch's HPACK
+//! `headers` raw and undecoded in [`DecodedBatch::headers`]
+//! ([`HeaderPolicy::KeepRaw`], [`DEFAULT_MAX_HEADER_BYTES`]); Beacon has no
+//! HPACK decoder.
 
 use crate::otap::proto::{BatchArrowRecords, BatchStatus, StatusCode};
-use crate::otap::{BatchTransport, DecodeLimits, DecodedBatch, OtapDecoder, TransportError};
+use crate::otap::{
+    BatchTransport, DecodeLimits, DecodedBatch, HeaderPolicy, OtapDecoder, TransportError,
+};
 use crate::otlp::proto::{
     ExportLogsServiceRequest, ExportLogsServiceResponse, ExportMetricsServiceRequest,
     ExportMetricsServiceResponse, ExportTraceServiceRequest, ExportTraceServiceResponse,
@@ -59,6 +65,9 @@ pub const OTLP_TRACES_PATH: &str = "/opentelemetry.proto.collector.trace.v1.Trac
 pub const OTLP_METRICS_PATH: &str =
     "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export";
 pub const OTLP_LOGS_PATH: &str = "/opentelemetry.proto.collector.logs.v1.LogsService/Export";
+
+/// Default ceiling for one batch's raw HPACK `headers` at the server.
+pub const DEFAULT_MAX_HEADER_BYTES: usize = 64 << 10;
 
 /// Default ceiling for one gRPC message in either direction.
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 << 20;
@@ -354,7 +363,12 @@ impl Default for ServerConfig {
         Self {
             queue_depth: 64,
             admission_timeout: Duration::from_secs(1),
-            decode_limits: DecodeLimits::default(),
+            decode_limits: DecodeLimits {
+                headers: HeaderPolicy::KeepRaw {
+                    max_bytes: DEFAULT_MAX_HEADER_BYTES,
+                },
+                ..DecodeLimits::default()
+            },
             max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
         }
     }

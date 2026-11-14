@@ -1134,3 +1134,52 @@ fn failed_split_after_written_pieces_resets_streams() {
     let decoded = OtapDecoder::default().decode(&next).unwrap();
     assert_eq!(decoded.logs.len(), 1);
 }
+
+/// Upstream's Go producer writes zero list items as nulls (seen from the
+/// collector's `otelarrow` exporter: Beacon's first bound, 0.0, arrives as
+/// null). A null item decodes as the zero value.
+#[test]
+fn null_list_items_decode_as_zero_like_upstream() {
+    let mut h = FastLogHistogram::default();
+    h.record_with_exemplar(42, nz(1)).unwrap();
+    let batch = MetricsEncoder::new(EncoderConfig::default())
+        .encode_histograms(&[HistogramPoint::new("h", "ns", 1, 2, &h)])
+        .unwrap();
+    let expected = OtapDecoder::default().decode(&batch).unwrap().histograms[0].clone();
+    assert_eq!(expected.explicit_bounds[0], 0.0);
+    let at = batch
+        .arrow_payloads
+        .iter()
+        .position(|p| p.r#type == ArrowPayloadType::HistogramDataPoints as i32)
+        .unwrap();
+    let mut reader =
+        arrow_ipc::reader::StreamReader::try_new(&batch.arrow_payloads[at].record[..], None)
+            .unwrap();
+    let rb = reader.next().unwrap().unwrap();
+    let idx = rb.schema().index_of("explicit_bounds").unwrap();
+    let list = rb
+        .column(idx)
+        .as_any()
+        .downcast_ref::<arrow_array::ListArray>()
+        .unwrap();
+    let (field, offsets, values, nulls) = list.clone().into_parts();
+    let values = values
+        .as_any()
+        .downcast_ref::<arrow_array::Float64Array>()
+        .unwrap()
+        .iter()
+        .map(|v| v.filter(|x| *x != 0.0))
+        .collect::<arrow_array::Float64Array>();
+    let mut cols = rb.columns().to_vec();
+    cols[idx] = Arc::new(arrow_array::ListArray::new(
+        field,
+        offsets,
+        Arc::new(values),
+        nulls,
+    ));
+    let go_style = RecordBatch::try_new(rb.schema(), cols).unwrap();
+    let mut b = batch.clone();
+    b.arrow_payloads[at].record = strip_eos(ipc(&go_style));
+    let got = OtapDecoder::default().decode(&b).unwrap().histograms[0].clone();
+    assert_eq!(got, expected);
+}

@@ -139,7 +139,7 @@ codegen API, so the build needs no `protoc` and no build script.
 
 ## Tests
 
-* `tests/otap_columns.rs` (10 tests):
+* `tests/otap_columns.rs` (13 tests):
   * a full trace round trip in both id encodings;
   * exact transport delta and quasi-delta values;
   * decoding upstream-style sorted quasi-delta input and kind/duration
@@ -153,7 +153,10 @@ codegen API, so the build needs no `protoc` and no build script.
   * the trace state grammar;
   * malformed related payloads: dangling parents, missing main payload,
     mixed signals, id overflow and bad encoding metadata all give typed
-    errors.
+    errors;
+  * repeated resource placements charged against the string budget;
+  * a failed split resetting the streams;
+  * null list items decoding as zero, as upstream writes them.
 * `tests/otap.rs` (21 tests): updated for the intended format changes:
   * resource and scope dictionaries in the message sequence;
   * capacity errors no longer reset;
@@ -166,6 +169,7 @@ codegen API, so the build needs no `protoc` and no build script.
     on the same stream;
   * the blocking `GrpcTransport` under `TraceExporter`, including
     `export_ring`;
+  * raw HPACK `headers` kept, and over-limit headers rejected;
   * an unreachable peer and an invalid endpoint;
   * OTLP round trips for all three signals;
   * OTLP load shedding;
@@ -181,29 +185,43 @@ codegen API, so the build needs no `protoc` and no build script.
 
 ## Collector interop
 
-Peer: OpenTelemetry Collector Contrib **v0.165.0**
-(`otel/opentelemetry-collector-contrib:0.165.0-amd64` from Docker Hub; the
-binary layer's sha256 was verified against the manifest). It bundles the
-`otelarrow` receiver and exporter.
+**Peer:** OpenTelemetry Collector Contrib **v0.165.0**.
 
-**Status: not yet run.** The binary was extracted on the cloud host, but the
-session's safety classifier blocked executing a downloaded binary without
-the owner's explicit approval, and that approval has not been given yet. The
-run command is:
+* **Source:** the official image `otel/opentelemetry-collector-contrib:0.165.0-amd64` from Docker Hub. The binary layer's sha256 was checked against the image manifest. The binary's own sha256 is `b90f3e7f3b31c2eaea2403a51b5e55d4f5dbe9a98f1255c9d3fc63144db29035`.
+* **Version:** `otelcol-contrib --version` prints `otelcol-contrib version 0.165.0`.
+* **Components used:** `otelarrowreceiver` v0.165.0 and `otelarrowexporter` v0.165.0.
+* **Run:** on the cloud host on 2026-11-14 (owner-approved). Command:
 
 ```sh
-VESPER_OTELCOL=/path/to/otelcol-contrib cargo test -p vesper-beacon-arrow --test collector -- --nocapture
+VESPER_OTELCOL=/home/claude/otelcol/bin/otelcol-contrib \
+  cargo test -p vesper-beacon-arrow --test collector -- --nocapture --test-threads 1
 ```
 
-Until it runs, Beacon's compatibility with the Go implementation rests on
-three things:
+**Result: both tests pass.**
 
-* reading the upstream Go encoder and decoder source;
-* the transport-encoding tests above;
-* decoding upstream-style quasi-delta input.
+1. **Beacon → collector.**
+   * Beacon OTAP traces go over one stream as two batches; the second batch carries delta dictionaries. Metrics and logs go on their own streams. All of it is accepted by the Go `otelarrow` receiver.
+   * Beacon OTLP traces, metrics and logs are accepted by the `otlp` receiver.
+   * The collector's `file` exporter output (OTLP-JSON) was checked for:
+     * trace and span ids, parent ids, kind, trace state;
+     * span attributes and events;
+     * resource and scope names and attributes;
+     * histogram sum, min and max, and data-point attributes;
+     * log bodies and event names.
 
-None of these is a run against the real peer. Go's handling of Arrow *delta*
-dictionary batches in particular is unverified until the collector runs.
+     The raw PII value is absent, and `[REDACTED]` is present.
+   * So the Go decoder accepts Beacon's transport delta and quasi-delta ids and its Arrow delta dictionaries.
+2. **Collector → Beacon.**
+   * OTLP sent into the collector is re-encoded by the Go `otelarrow` exporter and decoded by Beacon's `serve_otap`.
+   * The test checks the spans' trace id, parent id, trace state, events, links and attributes, plus the histogram and log contents.
+
+**Three incompatibilities this run found and fixed, all on the Beacon side:**
+
+* **Compression.** The Go exporter compresses by default, using gRPC `zstdarrow5`, and also turns on Arrow IPC zstd buffer compression when gRPC compression is off. Beacon supports neither. The test therefore configures `compression: none` and `arrow.payload_compression: none`; the README and module docs say so.
+* **`headers`.** The Go exporter fills `headers` with its outgoing gRPC metadata, encoded as stateful HPACK. The decoder now has a `HeaderPolicy`:
+  * The plain `OtapDecoder` keeps `Reject` as its default.
+  * The gRPC server defaults to `KeepRaw`, which keeps up to 64 KiB of raw, undecoded bytes in `DecodedBatch::headers`.
+* **Zero list items.** The Go producer writes zero list items (Beacon's first histogram bound, 0.0) as nulls. A null item now decodes as the zero value. `null_list_items_decode_as_zero_like_upstream` covers this in CI.
 
 ## Checks
 
@@ -213,8 +231,9 @@ the Bazel CI.
 * `cargo fmt --all -- --check`: see the PR.
 * `cargo test -p vesper-beacon -p vesper-beacon-arrow --locked`: all pass.
   * vesper-beacon: 2 unit tests and 10 behavior tests.
-  * vesper-beacon-arrow: 3 unit tests, plus collector 2 (skipped), grpc 8,
-    interoperability 5, lean_model 2, otap 21, otap_columns 10, and 8
+  * vesper-beacon-arrow: 3 unit tests, plus collector 2 (they skip without
+    `VESPER_OTELCOL`; with it set they pass, see above), grpc 8,
+    interoperability 5, lean_model 2, otap 21, otap_columns 13, and 8
     doctests.
 * `cargo +1.100.0 clippy -p vesper-beacon -p vesper-beacon-arrow --locked --all-targets -- -D warnings`
   and `cargo test --workspace --locked`: results recorded in the PR
@@ -244,11 +263,12 @@ live in the crate manifest.
 
 ## Remaining gaps
 
-* The collector run (above) is waiting on the owner's approval.
+* Beacon has no gRPC compression and no Arrow IPC buffer compression, so the collector's `otelarrow` exporter needs `compression: none` and `arrow.payload_compression: none` to talk to Beacon.
+* There is no HPACK decoder. The gRPC server keeps `headers` raw and undecoded.
 * OTLP metrics cover histograms only. There are no gauges, sums or
   exponential histograms, because Beacon produces none.
 * There are no exemplars.
-* There is no TLS, compression, auth or HPACK `headers`.
+* There is no TLS or auth.
 * Attribute values are scalar and string only. Upstream map, slice and
   bytes values are typed as such in the schema but not produced, and are
   rejected on decode.
