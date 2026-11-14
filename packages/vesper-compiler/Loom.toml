@@ -1,0 +1,13 @@
+[package]
+name = "@vesper-lang/compiler"
+version = "0.1.0"
+edition = "2026"
+# Design §42.3: the compiler may only fail; no I/O, clock or network effects.
+capability_ceiling = ["Fail"]
+
+# Self-hosting Stage 1. Loom does not yet assemble multi-file packages, so
+# the Rust seed checks the sources as one compilation unit, in this order:
+#   src/lexer.ves, src/cursor.ves, src/types_items.ves, src/expressions.ves,
+#   src/driver.ves
+# followed by a generated module that defines `source_len()` and
+# `source_byte(i)` for the input being compiled (tests/self_host_front_end.rs).

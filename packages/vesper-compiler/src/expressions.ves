@@ -1,0 +1,396 @@
+// @vesper-lang/compiler, part 4 of 5: blocks, expressions and patterns.
+// Blocks and statements.
+fn block(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    expect(statements(expect(p, 34)), 35)
+}
+
+fn statements(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else if at_word(p, 0, 0x757365) && at_word(p, 1, 0x6d6f64656c) {
+        fail_p(Diag::Unsupported(3, nth(p, 0).start))
+    } else {
+        let l = eat(p, 13);
+        if ate(p, l) {
+            let q = pattern(l);
+            let c = eat(q, 40);
+            let q = if ate(q, c) {
+                ty(c)
+            } else {
+                q
+            };
+            statements(expect(expr(expect(q, 48)), 39))
+        } else {
+            let q = expr(p);
+            let s = eat(q, 39);
+            if ate(q, s) {
+                statements(s)
+            } else {
+                q
+            }
+        }
+    }
+}
+
+// Expressions.
+fn expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    close(expr_inner(open(p, 202)))
+}
+
+fn expr_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    if k == 23 {
+        handle_expr(p)
+    } else if at_region(p) {
+        region_expr(p)
+    } else if k == 27 {
+        match_expr(p)
+    } else if k == 28 {
+        if_expr(p)
+    } else if k == 68 || k == 66 {
+        closure(p)
+    } else {
+        binary(p, 0)
+    }
+}
+
+// `region` is contextual: only `region <name> {` or `region <name>(`.
+fn at_region(p: P) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+    let next = nth(p, 2).kind;
+    at_word(p, 0, 0x726567696f6e) && nth(p, 1).kind == 4 && (next == 34 || next == 32)
+}
+
+fn restricted(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = expr(with_flags(p, true, p.rows, p.bounds));
+    with_flags(q, p.nostruct, q.rows, q.bounds)
+}
+
+fn if_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = block(restricted(expect(p, 28)));
+    let e = eat(q, 29);
+    if ate(q, e) {
+        if at(e, 28) {
+            if_expr(e)
+        } else {
+            block(e)
+        }
+    } else {
+        q
+    }
+}
+
+fn match_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = expect(restricted(expect(p, 27)), 34);
+    expect(arms(q), 35)
+}
+
+fn arms(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = expr(expect(pattern(p), 47));
+        let r = eat(q, 38);
+        if ate(q, r) {
+            arms(r)
+        } else if at(q, 35) {
+            q
+        } else {
+            fail_p(Diag::Expected(38, nth(q, 0).start))
+        }
+    }
+}
+
+fn closure(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let o = eat(p, 66);
+    let q = if ate(p, o) {
+        o
+    } else {
+        expect(params(expect(p, 68), 68), 68)
+    };
+    let a = eat(q, 44);
+    let q = if ate(q, a) {
+        mode(a)
+    } else {
+        q
+    };
+    let r = eat(q, 46);
+    let q = if ate(q, r) {
+        ty(r)
+    } else {
+        q
+    };
+    expr(effects(q))
+}
+
+fn handle_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = expect(p, 23);
+    let q = if at(q, 4) {
+        expect(lower(q), 40)
+    } else {
+        q
+    };
+    let q = type_args(upper(q));
+    let s = eat(q, 24);
+    let q = if ate(q, s) {
+        expr(expect(pattern(s), 48))
+    } else {
+        q
+    };
+    let q = expect(expect(block(expect(q, 19)), 25), 34);
+    let q = expr(expect(pattern(expect(q, 26)), 47));
+    expect(clauses(eat(q, 38)), 35)
+}
+
+fn clauses(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = expect(lower(p), 32);
+        let q = expect(expect(pattern_list(q, 33), 33), 47);
+        clauses(eat(expr(q), 38))
+    }
+}
+
+fn region_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = lower(bump(p));
+    let l = eat(q, 32);
+    if ate(q, l) {
+        let t = nth(l, 0);
+        if t.kind == 6 {
+            let v = int_small(t);
+            if int_over(t) || v == 0 || v > 1073741824 {
+                fail_p(Diag::Invalid(t.start))
+            } else {
+                block(expect(bump(l), 33))
+            }
+        } else {
+            fail_p(Diag::Invalid(t.start))
+        }
+    } else {
+        block(q)
+    }
+}
+
+fn precedence(k: i64) -> i64 {
+    if k == 48 || k == 49 || k == 53 || k == 50 || k == 51 || k == 52 {
+        1
+    } else if k == 66 {
+        2
+    } else if k == 65 {
+        3
+    } else if k == 59 || k == 60 {
+        4
+    } else if k == 61 || k == 62 || k == 63 || k == 64 {
+        5
+    } else if k == 54 || k == 55 {
+        6
+    } else if k == 56 || k == 57 || k == 58 {
+        7
+    } else {
+        0
+    }
+}
+
+fn binary(p: P, min: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    let lhs = if k == 55 || k == 67 {
+        binary(bump(p), 12)
+    } else {
+        postfix(primary(p))
+    };
+    binary_rest(lhs, min)
+}
+
+fn binary_rest(p: P, min: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let prec = precedence(kind(p));
+    if prec == 0 || prec < min {
+        p
+    } else {
+        let q = bump(p);
+        let r = if prec == 1 {
+            expr(q)
+        } else {
+            binary(q, prec + 1)
+        };
+        binary_rest(r, min)
+    }
+}
+
+fn postfix(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    if k == 32 {
+        postfix(expect(args(bump(p)), 33))
+    } else if k == 36 {
+        let one = nth(p, 1);
+        let named_row = one.kind == 4 && nth(p, 2).kind == 40;
+        let generic = named_row || one.kind == 3 || one.kind == 12 || primitive(one);
+        if generic {
+            postfix(expect(args(expect(type_args(p), 32)), 33))
+        } else if p.rows && one.kind == 4 {
+            fail_p(Diag::Unsupported(6, one.start))
+        } else {
+            postfix(expect(expr(bump(p)), 37))
+        }
+    } else if k == 42 {
+        postfix(lower(bump(p)))
+    } else if k == 43 {
+        postfix(bump(p))
+    } else {
+        p
+    }
+}
+
+fn args(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 33) {
+        p
+    } else {
+        let q = expr(pass(p));
+        let r = eat(q, 38);
+        if ate(q, r) {
+            args(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn primary(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    if at_literal(p) {
+        literal(p)
+    } else if k == 4 || k == 22 {
+        bump(p)
+    } else if k == 3 {
+        let q = bump(p);
+        let c = eat(q, 41);
+        let q = if ate(q, c) {
+            ident(c)
+        } else {
+            q
+        };
+        if at(q, 34) && !q.nostruct {
+            expect(field_values(bump(q)), 35)
+        } else {
+            q
+        }
+    } else if k == 32 {
+        expect(tuple_values(bump(p)), 33)
+    } else if k == 34 {
+        block(p)
+    } else {
+        fail_p(Diag::Expected(202, nth(p, 0).start))
+    }
+}
+
+fn field_values(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = lower(p);
+        let c = eat(q, 40);
+        let q = if ate(q, c) {
+            expr(c)
+        } else {
+            q
+        };
+        let r = eat(q, 38);
+        if ate(q, r) {
+            field_values(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn tuple_values(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 33) {
+        p
+    } else {
+        let q = expr(p);
+        let r = eat(q, 38);
+        if ate(q, r) {
+            tuple_values(r)
+        } else {
+            r
+        }
+    }
+}
+
+// Patterns.
+fn pattern(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    close(pattern_inner(open(p, 203)))
+}
+
+fn pattern_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let n = eat(p, 55);
+    let negative = ate(p, n);
+    let k = kind(n);
+    if at_literal(n) {
+        if negative && k != 5 && k != 6 {
+            fail_p(Diag::Invalid(nth(n, 0).start))
+        } else {
+            literal(n)
+        }
+    } else if negative {
+        fail_p(Diag::Invalid(nth(n, 0).start))
+    } else if k == 4 {
+        bump(n)
+    } else if k == 3 {
+        let q = upper(n);
+        let c = eat(q, 41);
+        let q = if ate(q, c) {
+            upper(c)
+        } else {
+            q
+        };
+        let l = eat(q, 32);
+        if ate(q, l) {
+            expect(pattern_list(l, 33), 33)
+        } else {
+            let b = eat(q, 34);
+            if ate(q, b) {
+                expect(field_patterns(b), 35)
+            } else {
+                q
+            }
+        }
+    } else if k == 32 {
+        expect(pattern_list(bump(n), 33), 33)
+    } else {
+        fail_p(Diag::Expected(203, nth(n, 0).start))
+    }
+}
+
+fn pattern_list(p: P, end: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, end) {
+        p
+    } else {
+        let q = pattern(p);
+        let r = eat(q, 38);
+        if ate(q, r) {
+            pattern_list(r, end)
+        } else {
+            r
+        }
+    }
+}
+
+fn field_patterns(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = lower(p);
+        let c = eat(q, 40);
+        let q = if ate(q, c) {
+            pattern(c)
+        } else {
+            q
+        };
+        let r = eat(q, 38);
+        if ate(q, r) {
+            field_patterns(r)
+        } else {
+            r
+        }
+    }
+}

@@ -1,0 +1,402 @@
+// @vesper-lang/compiler, part 3 of 5: types, generics and items.
+// Types.
+fn ty(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    close(ty_inner(open(p, 204)))
+}
+
+fn ty_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    if k == 12 {
+        let q = bump(p);
+        let q = if at(q, 44) {
+            mode(bump(q))
+        } else {
+            q
+        };
+        let q = expect(ty_params(expect(q, 32)), 33);
+        let q = if at(q, 46) {
+            ty(bump(q))
+        } else {
+            q
+        };
+        effects(q)
+    } else if k == 32 {
+        expect(ty_list(bump(p)), 33)
+    } else if k == 61 {
+        fail_p(Diag::Unsupported(5, nth(p, 0).start))
+    } else {
+        let q = ident(p);
+        if at(q, 41) && nth(q, 1).kind == 3 {
+            fail_p(Diag::Unsupported(5, nth(q, 0).start))
+        } else {
+            type_args(q)
+        }
+    }
+}
+
+fn ty_params(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 33) {
+        p
+    } else {
+        let q = ty(pass(p));
+        let r = eat(q, 38);
+        if ate(q, r) {
+            ty_params(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn ty_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 33) {
+        p
+    } else {
+        let q = ty(p);
+        let r = eat(q, 38);
+        if ate(q, r) {
+            ty_list(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn type_args(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = eat(p, 36);
+    if ate(p, q) {
+        expect(type_arg_list(q), 37)
+    } else {
+        p
+    }
+}
+
+fn type_arg_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 37) {
+        p
+    } else {
+        let q = type_arg(p);
+        let r = eat(q, 38);
+        if ate(q, r) {
+            type_arg_list(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn type_arg(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let t = nth(p, 0);
+    if t.kind == 4 && !primitive(t) {
+        let q = bump(p);
+        let r = eat(q, 40);
+        if ate(q, r) {
+            let s = type_args(upper(r));
+            let u = eat(s, 68);
+            if ate(s, u) {
+                lower(u)
+            } else {
+                u
+            }
+        } else {
+            r
+        }
+    } else {
+        let named = t.kind == 3 || t.kind == 4 || t.kind == 22;
+        let q = ty(p);
+        let r = eat(q, 68);
+        if ate(q, r) {
+            if named {
+                lower(r)
+            } else {
+                fail_p(Diag::Expected(3, t.start))
+            }
+        } else {
+            r
+        }
+    }
+}
+
+fn effects(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = eat(p, 18);
+    if ate(p, q) {
+        expect(effect_list(expect(q, 36)), 37)
+    } else {
+        p
+    }
+}
+
+fn effect_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 37) {
+        p
+    } else {
+        let q = eat(p, 68);
+        if ate(p, q) {
+            lower(q)
+        } else if at(p, 4) && nth(p, 1).kind != 40 {
+            lower(p)
+        } else {
+            let q = if at(p, 4) {
+                expect(lower(p), 40)
+            } else {
+                p
+            };
+            let r = type_args(upper(q));
+            let s = eat(r, 38);
+            if ate(r, s) || at(r, 68) {
+                effect_list(s)
+            } else {
+                s
+            }
+        }
+    }
+}
+
+// Generics, bounds and fields.
+fn generics(p: P, track: bool) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = eat(p, 36);
+    if ate(p, q) {
+        expect(generic_list(q, track), 37)
+    } else {
+        p
+    }
+}
+
+fn generic_list(p: P, track: bool) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 37) {
+        p
+    } else {
+        let row = at(p, 4);
+        let q = ident(p);
+        let q = if row && track {
+            with_flags(q, q.nostruct, true, q.bounds)
+        } else {
+            q
+        };
+        let c = eat(q, 40);
+        let r = if ate(q, c) {
+            if row {
+                expect(c, 18)
+            } else if at(c, 3) {
+                let b = trait_ref(c);
+                with_flags(b, b.nostruct, b.rows, true)
+            } else {
+                required_mode(expect(c, 17))
+            }
+        } else if row {
+            fail_p(Diag::Expected(40, nth(q, 0).start))
+        } else {
+            q
+        };
+        let s = eat(r, 38);
+        if ate(r, s) {
+            generic_list(s, track)
+        } else {
+            s
+        }
+    }
+}
+
+fn trait_ref(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at(p, 44) {
+        fail_p(Diag::Unsupported(8, nth(p, 0).start))
+    } else {
+        type_args(upper(p))
+    }
+}
+
+fn fields(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    expect(field_list(expect(p, 34)), 35)
+}
+
+fn field_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = ty(expect(lower(p), 40));
+        let m = eat(q, 45);
+        let r = if ate(q, m) {
+            required_mode(m)
+        } else {
+            q
+        };
+        let s = eat(r, 38);
+        if ate(r, s) {
+            field_list(s)
+        } else {
+            s
+        }
+    }
+}
+
+// Items.
+fn at_trait_or_model(p: P, n: i64) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+    at_word(p, n, 0x7472616974) || at_word(p, n, 0x6d6f64656c)
+}
+
+fn item(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let start = nth(p, 0).start;
+    if at_word(p, 0, 0x757365) && at_word(p, 1, 0x6d6f64656c) {
+        fail_p(Diag::Unsupported(3, start))
+    } else if at_word(p, 0, 0x707562) && at_trait_or_model(p, 1) {
+        fail_p(Diag::Unsupported(1, start))
+    } else if at_word(p, 0, 0x7472616974) {
+        fail_p(Diag::Unsupported(1, start))
+    } else if at_word(p, 0, 0x6d6f64656c) {
+        fail_p(Diag::Unsupported(2, start))
+    } else {
+        let q = mode(p);
+        let k = kind(q);
+        if k == 8 {
+            fields(generics(upper(bump(q)), false))
+        } else if k == 9 {
+            let r = expect(generics(upper(bump(q)), false), 34);
+            expect(variants(r), 35)
+        } else if k == 10 {
+            let r = expect(generics(upper(bump(q)), false), 34);
+            expect(functions(r, true), 35)
+        } else if k == 12 {
+            function(q, false)
+        } else if k == 11 {
+            impl_item(q)
+        } else {
+            fail_p(Diag::Expected(12, nth(q, 0).start))
+        }
+    }
+}
+
+fn variants(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = upper(p);
+        let r = if at(q, 34) {
+            fields(q)
+        } else {
+            let l = eat(q, 32);
+            if ate(q, l) {
+                expect(ty_list(l), 33)
+            } else {
+                q
+            }
+        };
+        let s = eat(r, 38);
+        if ate(r, s) {
+            variants(s)
+        } else {
+            s
+        }
+    }
+}
+
+fn functions(p: P, op: bool) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at(p, 12) {
+        functions(function(p, op), op)
+    } else {
+        p
+    }
+}
+
+fn impl_item(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = generics(bump(p), true);
+    if at(q, 44) {
+        fail_p(Diag::Unsupported(4, nth(q, 0).start))
+    } else {
+        let r = ty(q);
+        if at_word(r, 0, 0x666f72) {
+            fail_p(Diag::Unsupported(4, nth(r, 0).start))
+        } else if r.bounds {
+            fail_p(Diag::Invalid(nth(r, 0).start))
+        } else {
+            let s = expect(functions(expect(r, 34), false), 35);
+            with_flags(s, s.nostruct, p.rows, false)
+        }
+    }
+}
+
+fn function(p: P, op: bool) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let g = generics(lower(expect(p, 12)), true);
+    let q = expect(params(expect(with_flags(g, g.nostruct, g.rows, false), 32), 33), 33);
+    let q = if at(q, 46) {
+        ty(bump(q))
+    } else {
+        q
+    };
+    let q = effects(q);
+    let q = if at_word(q, 0, 0x7768657265) {
+        where_clauses(bump(q))
+    } else {
+        q
+    };
+    let r = if op {
+        expect(q, 39)
+    } else {
+        block(q)
+    };
+    with_flags(r, r.nostruct, p.rows, r.bounds)
+}
+
+fn where_clauses(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = trait_ref(expect(ty(p), 40));
+    let r = eat(q, 38);
+    if !ate(q, r) || at(r, 34) || at(r, 39) {
+        r
+    } else {
+        where_clauses(r)
+    }
+}
+
+fn params(p: P, end: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, end) {
+        p
+    } else {
+        let q = lower(pass(p));
+        let d = eat(q, 42);
+        let q = if ate(q, d) {
+            place_tree(d)
+        } else {
+            q
+        };
+        let c = eat(q, 40);
+        let q = if ate(q, c) {
+            ty(c)
+        } else {
+            q
+        };
+        let r = eat(q, 38);
+        if ate(q, r) {
+            params(r, end)
+        } else {
+            r
+        }
+    }
+}
+
+fn place_tree(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = eat(p, 34);
+    if ate(p, q) {
+        expect(place_list(q), 35)
+    } else {
+        let r = lower(p);
+        let d = eat(r, 42);
+        if ate(r, d) {
+            place_tree(d)
+        } else {
+            r
+        }
+    }
+}
+
+fn place_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at_end(p, 35) {
+        p
+    } else {
+        let q = place_tree(p);
+        let r = eat(q, 38);
+        if ate(q, r) {
+            place_list(r)
+        } else {
+            r
+        }
+    }
+}

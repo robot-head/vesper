@@ -1,0 +1,422 @@
+// @vesper-lang/compiler, part 1 of 5 (self-hosting Stage 1, design §42.3):
+// a lexer and a recursive-descent parser for the core subset, in Vesper.
+//
+// Vesper has no strings with byte access, no arrays and no growable buffers
+// yet, so the source is a pure function `source_byte(i)` (-1 past the end)
+// and `source_len()`, supplied by a separate generated module. Tokens are
+// produced on demand from a byte cursor; the parser keeps no token buffer.
+// The flat CST is emitted as a preorder event stream (open kind and start
+// offset, close and end offset) folded into a 63-bit digest, because the
+// language has no byte buffer to hold it. Unsupported syntax raises
+// `Fail[Diag]`; the parser never returns a tree for it.
+copy struct Tok {
+    kind: i64,
+    start: i64,
+    end: i64
+}
+
+copy struct Lexer {
+    pos: i64,
+    h: i64,
+    count: i64,
+    done: bool
+}
+
+copy struct P {
+    pos: i64,
+    cur: Tok,
+    h: i64,
+    nostruct: bool,
+    rows: bool,
+    bounds: bool,
+    depth: i64
+}
+
+copy enum Diag {
+    Lex(i64),
+    Expected(i64, i64),
+    Unsupported(i64, i64),
+    Invalid(i64),
+    Limit(i64)
+}
+
+// Kind numbers used below. Token kinds are the `vesper-syntax` TokenKind
+// discriminants: 0 Whitespace, 1 Comment, 2 BlockComment, 3 Upper, 4 Lower,
+// 5 Float, 6 Int, 7 String, 8 struct, 9 enum, 10 effect, 11 impl, 12 fn,
+// 13 let, 14 copy, 15 affine, 16 linear, 17 mod, 18 eff, 19 in, 20 inout,
+// 21 sink, 22 self, 23 handle, 24 state, 25 with, 26 return, 27 match, 28 if,
+// 29 else, 30 true, 31 false, 32 ( 33 ) 34 { 35 } 36 [ 37 ] 38 , 39 ;
+// 40 : 41 :: 42 . 43 ? 44 @ 45 @@ 46 -> 47 => 48 = 49 += 50 *= 51 /=
+// 52 %= 53 -= 54 + 55 - 56 * 57 / 58 % 59 == 60 != 61 < 62 <= 63 > 64 >=
+// 65 && 66 || 67 ! 68 | 69 Error 70 Eof 71 $.
+// CST node kinds are the seed's batch SyntaxKinds: 200 MODULE, 201 ITEM,
+// 202 EXPR, 203 PATTERN, 204 TYPE.
+// Diag::Unsupported codes: 1 trait, 2 model, 3 use model, 4 trait impl,
+// 5 associated-type projection, 6 call or index after a row generic is in
+// scope, 7 \u escape, 8 package trait reference.
+fn max_depth() -> i64 {
+    96
+}
+
+fn max_tokens() -> i64 {
+    65536
+}
+
+// Raising helpers: `Err(d)?` is the source spelling of Fail[Diag]::raise.
+fn fail_tok(d: Diag) -> Tok eff [Fail[Diag]] {
+    let r: Result[Tok, Diag] = Err(d);
+    r?
+}
+
+fn fail_p(d: Diag) -> P eff [Fail[Diag]] {
+    let r: Result[P, Diag] = Err(d);
+    r?
+}
+
+fn fail_i(d: Diag) -> i64 eff [Fail[Diag]] {
+    let r: Result[i64, Diag] = Err(d);
+    r?
+}
+
+fn fail_lexer(d: Diag) -> Lexer eff [Fail[Diag]] {
+    let r: Result[Lexer, Diag] = Err(d);
+    r?
+}
+
+// Byte classes.
+fn is_digit(c: i64) -> bool {
+    c >= 48 && c <= 57
+}
+
+fn is_upper(c: i64) -> bool {
+    c >= 65 && c <= 90
+}
+
+fn is_lower_start(c: i64) -> bool {
+    c >= 97 && c <= 122 || c == 95
+}
+
+fn is_ident(c: i64) -> bool {
+    is_digit(c) || is_upper(c) || is_lower_start(c)
+}
+
+fn is_hex(c: i64) -> bool {
+    is_digit(c) || c >= 97 && c <= 102 || c >= 65 && c <= 70 || c == 95
+}
+
+fn is_space(c: i64) -> bool {
+    c == 32 || c == 9 || c == 10 || c == 13 || c == 12
+}
+
+fn is_trivia(kind: i64) -> bool {
+    kind == 0 || kind == 1 || kind == 2
+}
+
+// Scanners return the first index that does not continue the run.
+fn scan_space(i: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if is_space(source_byte(i)) {
+        scan_space(i + 1)
+    } else {
+        i
+    }
+}
+
+fn scan_ident(i: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if is_ident(source_byte(i)) {
+        scan_ident(i + 1)
+    } else {
+        i
+    }
+}
+
+fn scan_digits(i: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if is_digit(source_byte(i)) {
+        scan_digits(i + 1)
+    } else {
+        i
+    }
+}
+
+fn scan_decimal(i: i64) -> i64 eff [Fail[ArithOverflow]] {
+    let c = source_byte(i);
+    if is_digit(c) || c == 95 {
+        scan_decimal(i + 1)
+    } else {
+        i
+    }
+}
+
+fn scan_hex(i: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if is_hex(source_byte(i)) {
+        scan_hex(i + 1)
+    } else {
+        i
+    }
+}
+
+fn scan_line(i: i64) -> i64 eff [Fail[ArithOverflow]] {
+    let c = source_byte(i);
+    if c == -1 || c == 10 {
+        i
+    } else {
+        scan_line(i + 1)
+    }
+}
+
+// Nested block comment body after an opening `/*`.
+fn scan_block(start: i64, i: i64, depth: i64) -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
+    let c = source_byte(i);
+    let d = source_byte(i + 1);
+    if c == -1 || d == -1 {
+        fail_i(Diag::Lex(start))
+    } else if c == 47 && d == 42 {
+        scan_block(start, i + 2, depth + 1)
+    } else if c == 42 && d == 47 {
+        if depth == 1 {
+            i + 2
+        } else {
+            scan_block(start, i + 2, depth - 1)
+        }
+    } else {
+        scan_block(start, i + 1, depth)
+    }
+}
+
+// String body after the opening quote: `([^"\\]|\\.)*"`.
+fn scan_string(start: i64, i: i64) -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
+    let c = source_byte(i);
+    if c == -1 {
+        fail_i(Diag::Lex(start))
+    } else if c == 34 {
+        i + 1
+    } else if c == 92 {
+        let d = source_byte(i + 1);
+        if d == -1 || d == 10 {
+            fail_i(Diag::Lex(start))
+        } else {
+            scan_string(start, i + 2)
+        }
+    } else {
+        scan_string(start, i + 1)
+    }
+}
+
+// Big-endian packed bytes of a word of at most six bytes, else -1.
+fn pack(i: i64, end: i64, acc: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if i >= end {
+        acc
+    } else {
+        pack(i + 1, end, acc * 256 + source_byte(i))
+    }
+}
+
+fn word(start: i64, end: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if end - start > 6 {
+        -1
+    } else {
+        pack(start, end, 0)
+    }
+}
+
+fn keyword(start: i64, end: i64) -> i64 eff [Fail[ArithOverflow]] {
+    match word(start, end) {
+        0x737472756374 => 8,
+        0x656e756d => 9,
+        0x656666656374 => 10,
+        0x696d706c => 11,
+        0x666e => 12,
+        0x6c6574 => 13,
+        0x636f7079 => 14,
+        0x616666696e65 => 15,
+        0x6c696e656172 => 16,
+        0x6d6f64 => 17,
+        0x656666 => 18,
+        0x696e => 19,
+        0x696e6f7574 => 20,
+        0x73696e6b => 21,
+        0x73656c66 => 22,
+        0x68616e646c65 => 23,
+        0x7374617465 => 24,
+        0x77697468 => 25,
+        0x72657475726e => 26,
+        0x6d61746368 => 27,
+        0x6966 => 28,
+        0x656c7365 => 29,
+        0x74727565 => 30,
+        0x66616c7365 => 31,
+        _ => 4,
+    }
+}
+
+fn tok(kind: i64, start: i64, end: i64) -> Tok {
+    Tok {
+        kind: kind,
+        start: start,
+        end: end
+    }
+}
+
+// Longest match between `[0-9][0-9_]*`, `0[xX][0-9a-fA-F_]+` and the two
+// float forms, as logos resolves them.
+fn exponent_end(i: i64) -> i64 eff [Fail[ArithOverflow]] {
+    let c = source_byte(i);
+    if c == 101 || c == 69 {
+        let s = source_byte(i + 1);
+        if is_digit(s) {
+            scan_digits(i + 1)
+        } else if (s == 43 || s == 45) && is_digit(source_byte(i + 2)) {
+            scan_digits(i + 2)
+        } else {
+            -1
+        }
+    } else {
+        -1
+    }
+}
+
+fn number(i: i64) -> Tok eff [Fail[ArithOverflow]] {
+    let decimal = scan_decimal(i + 1);
+    let x = source_byte(i + 1);
+    let hex = if source_byte(i) == 48 && (x == 120 || x == 88) && is_hex(source_byte(i + 2)) {
+        scan_hex(i + 2)
+    } else {
+        -1
+    };
+    let int_end = if hex > decimal {
+        hex
+    } else {
+        decimal
+    };
+    let digits = scan_digits(i);
+    let float_end = if source_byte(digits) == 46 && is_digit(source_byte(digits + 1)) {
+        let fraction = scan_digits(digits + 1);
+        let e = exponent_end(fraction);
+        if e == -1 {
+            fraction
+        } else {
+            e
+        }
+    } else {
+        exponent_end(digits)
+    };
+    if float_end > int_end {
+        tok(5, i, float_end)
+    } else {
+        tok(6, i, int_end)
+    }
+}
+
+// One- and two-byte punctuation; `/` is handled with comments.
+fn punct(i: i64, c: i64) -> Tok eff [Fail[Diag], Fail[ArithOverflow]] {
+    let d = source_byte(i + 1);
+    match c {
+        40 => tok(32, i, i + 1),
+        41 => tok(33, i, i + 1),
+        123 => tok(34, i, i + 1),
+        125 => tok(35, i, i + 1),
+        91 => tok(36, i, i + 1),
+        93 => tok(37, i, i + 1),
+        44 => tok(38, i, i + 1),
+        59 => tok(39, i, i + 1),
+        58 => if d == 58 {
+            tok(41, i, i + 2)
+        } else {
+            tok(40, i, i + 1)
+        },
+        46 => tok(42, i, i + 1),
+        63 => tok(43, i, i + 1),
+        64 => if d == 64 {
+            tok(45, i, i + 2)
+        } else {
+            tok(44, i, i + 1)
+        },
+        45 => if d == 62 {
+            tok(46, i, i + 2)
+        } else if d == 61 {
+            tok(53, i, i + 2)
+        } else {
+            tok(55, i, i + 1)
+        },
+        61 => if d == 62 {
+            tok(47, i, i + 2)
+        } else if d == 61 {
+            tok(59, i, i + 2)
+        } else {
+            tok(48, i, i + 1)
+        },
+        43 => if d == 61 {
+            tok(49, i, i + 2)
+        } else {
+            tok(54, i, i + 1)
+        },
+        42 => if d == 61 {
+            tok(50, i, i + 2)
+        } else {
+            tok(56, i, i + 1)
+        },
+        37 => if d == 61 {
+            tok(52, i, i + 2)
+        } else {
+            tok(58, i, i + 1)
+        },
+        33 => if d == 61 {
+            tok(60, i, i + 2)
+        } else {
+            tok(67, i, i + 1)
+        },
+        60 => if d == 61 {
+            tok(62, i, i + 2)
+        } else {
+            tok(61, i, i + 1)
+        },
+        62 => if d == 61 {
+            tok(64, i, i + 2)
+        } else {
+            tok(63, i, i + 1)
+        },
+        38 => if d == 38 {
+            tok(65, i, i + 2)
+        } else {
+            fail_tok(Diag::Lex(i))
+        },
+        124 => if d == 124 {
+            tok(66, i, i + 2)
+        } else {
+            tok(68, i, i + 1)
+        },
+        36 => tok(71, i, i + 1),
+        _ => fail_tok(Diag::Lex(i)),
+    }
+}
+
+// The raw token (trivia included) starting at byte `i`.
+fn lex_at(i: i64) -> Tok eff [Fail[Diag], Fail[ArithOverflow]] {
+    let c = source_byte(i);
+    if c == -1 {
+        tok(70, i, i)
+    } else if is_space(c) {
+        tok(0, i, scan_space(i))
+    } else if c == 47 {
+        let d = source_byte(i + 1);
+        if d == 47 {
+            tok(1, i, scan_line(i))
+        } else if d == 42 {
+            tok(2, i, scan_block(i, i + 2, 1))
+        } else if d == 61 {
+            tok(51, i, i + 2)
+        } else {
+            tok(57, i, i + 1)
+        }
+    } else if is_upper(c) {
+        tok(3, i, scan_ident(i))
+    } else if is_lower_start(c) {
+        let end = scan_ident(i);
+        tok(keyword(i, end), i, end)
+    } else if is_digit(c) {
+        number(i)
+    } else if c == 34 {
+        tok(7, i, scan_string(i, i + 1))
+    } else {
+        punct(i, c)
+    }
+}
