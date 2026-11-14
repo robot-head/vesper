@@ -1,0 +1,21 @@
+[package]
+name = "vesper-codegen-verified"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "Vesper §42.5 bootstrap fixed-point and diverse double-compiling (DDC) auditor"
+
+[dependencies]
+blake3 = "1.8"
+serde = { version = "1", features = ["derive"] }
+toml = "=0.8.23"
+vesper-loom-calculus = { path = "../vesper-loom-calculus" }
+vesper-loom-cas = { path = "../vesper-loom-cas" }
+vesper-loom-trust = { path = "../vesper-loom-trust" }
+
+[dev-dependencies]
+ed25519-dalek = "2"
+
+[[bin]]
+name = "vesper-bootstrap"
+path = "src/bin/vesper-bootstrap.rs"

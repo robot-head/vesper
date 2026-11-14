@@ -1,0 +1,17 @@
+// Sum of squares 1..20; the exit status keeps the low eight bits.
+fn sum_sq(n: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if n == 0 {
+        0
+    } else {
+        n * n + sum_sq(n - 1)
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        sum_sq(20)
+    } with {
+        return value => value,
+        raise(error, resume) => -1,
+    }
+}

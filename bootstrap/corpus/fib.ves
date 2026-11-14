@@ -1,0 +1,17 @@
+// Path A / Path B corpus: naive recursion under checked arithmetic.
+fn fib(n: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if n < 2 {
+        n
+    } else {
+        fib(n - 1) + fib(n - 2)
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        fib(13)
+    } with {
+        return value => value,
+        raise(error, resume) => -1,
+    }
+}

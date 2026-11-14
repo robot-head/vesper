@@ -5362,6 +5362,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vesper-codegen-verified"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "ed25519-dalek",
+ "serde",
+ "toml 0.8.23",
+ "vesper-loom-calculus",
+ "vesper-loom-cas",
+ "vesper-loom-trust",
+]
+
+[[package]]
 name = "vesper-core"
 version = "0.1.0"
 dependencies = [

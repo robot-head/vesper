@@ -1,0 +1,17 @@
+// Euclid with checked remainder; the divisor is never zero here.
+fn gcd(a: i64, b: i64) -> i64 eff [Fail[RuntimeError]] {
+    if b == 0 {
+        a
+    } else {
+        gcd(b, a % b)
+    }
+}
+
+fn main() -> i64 {
+    handle Fail[RuntimeError] in {
+        gcd(1071, 462)
+    } with {
+        return value => value,
+        raise(error, _) => 0,
+    }
+}
