@@ -1,0 +1,29 @@
+// Structs are Lean structures; inout parameters return the updated value.
+struct Point {
+    x: u64,
+    y: u64,
+}
+
+struct Segment {
+    start: Point,
+    end: Point,
+}
+
+fn swap(inout p: Point) {
+    let t = p.x;
+    p.x = p.y;
+    p.y = t;
+}
+
+fn move_start(inout s: Segment, x: u64) {
+    s.start.x = x;
+}
+
+fn main() -> u64 {
+    let p = Point {
+        x: 1,
+        y: 2
+    };
+    swap(p);
+    p.x
+}

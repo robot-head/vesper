@@ -69,6 +69,7 @@ members = [
     "crates/vesper-kinetic",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
+    "crates/vesper-gpu-compute",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -139,6 +140,7 @@ default-members = [
     "crates/vesper-kinetic",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
+    "crates/vesper-gpu-compute",
     "experiments/native-pulse",
 ]
 
@@ -169,6 +171,7 @@ cranelift-frontend = "0.125"
 getrandom = "0.4"
 libc = "0.2"
 ml-kem = { version = "=0.3.4", default-features = false, features = ["zeroize"] }
+libcrux-ml-kem = { version = "=0.0.11", default-features = false, features = ["mlkem768"] }
 rand_core = "0.10"
 region = "3.0.2"
 shake = "0.1"
@@ -226,13 +229,16 @@ ariadne = "0.5"
 petgraph = "0.8"
 egg = "0.10"
 egglog = { version = "3", default-features = false }
-cranelift-codegen = { version = "0.125", features = ["arm64"] }
+cranelift-codegen = { version = "0.125", features = ["arm64", "riscv64"] }
 cranelift-frontend = "0.125"
 cranelift-module = "0.125"
 cranelift-jit = "0.125"
 cranelift-object = "0.125"
 cranelift-native = "0.125"
 target-lexicon = "0.13"
+# Freestanding images (wave seven lane 27): read relocatable objects, write
+# the entry stub. Same version and features as vesper-ebpf.
+object = { version = "=0.37.3", default-features = false, features = ["write_core", "elf", "std", "read_core"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 salsa = "0.24"
@@ -244,6 +250,7 @@ wit-parser = "=0.261.0"
 [dev-dependencies]
 vesper-nexus = { path = "crates/vesper-nexus" }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 
 [target.'cfg(unix)'.dependencies]
 getrandom = "0.4"

@@ -5,8 +5,11 @@
 //! every aggregate is a pointer into linear memory. An aggregate block is a
 //! sequence of 8-byte slots: tuples and structs store their fields in
 //! declaration order; an enum stores its variant index in slot 0 and the
-//! variant's fields after it. Aggregates are immutable values: a field write
+//! variant's fields after it. A `String` is a pointer to its byte length
+//! (one slot) followed by its UTF-8 bytes; literals live in static data. Aggregates are immutable values: a field write
 //! copies the block, so `let b = a; b.x = 1` leaves `a` unchanged.
+#[allow(unused_imports)]
+use super::Unsupported as _;
 use super::{Unsupported, WasmError};
 use crate::{ast::*, check::World};
 use std::collections::BTreeMap;
@@ -41,6 +44,8 @@ pub(crate) enum Shape {
     Enum {
         variants: Vec<VariantShape>,
     },
+    /// `String`: an immutable byte block `[len, bytes...]`.
+    Str,
     /// A generic parameter or inferred type: the value is carried uniformly
     /// but no type-directed operation may be applied to it.
     Opaque,
@@ -69,13 +74,7 @@ pub(crate) fn shape(world: &World, ty: &Type) -> Result<Shape, WasmError> {
             "f64" => Shape::Scalar(Scalar::F64),
             "Unit" => Shape::Scalar(Scalar::Unit),
             "Never" => Shape::Scalar(Scalar::Never),
-            "String" => {
-                return Err(WasmError::unsupported(
-                    Unsupported::String,
-                    "",
-                    "String values have no Wasm lowering yet",
-                ));
-            }
+            "String" => Shape::Str,
             _ => {
                 let Some(adt) = world.adts.get(n) else {
                     return Ok(Shape::Opaque);

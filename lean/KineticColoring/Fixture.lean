@@ -14,7 +14,8 @@ LEAN_PATH="$out" lean --run lean/KineticColoring/Fixture.lean < cases
 Each input line is space-separated decimal naturals: `0 x y z` prints
 `interleave 10 x y z` and the three deinterleaved axes; `1 a1 b1 a2 b2 ...`
 prints the colours `colorAll` assigns to the constraints `(a1, b1), (a2, b2),
-...` in that order; `3 x y z` prints `interleave 21 x y z` (the LBVH's
+...` in that order; `2 k b1 .. bk k' ...` prints the colours `colorAllSets`
+assigns to the length-prefixed body lists in that order; `3 x y z` prints `interleave 21 x y z` (the LBVH's
 63-bit code). After one header naming the model and its claim boundary,
 each output line answers one input line. An unparseable line prints `error`.
 -/
@@ -27,6 +28,14 @@ def pairs : List Nat → Option (List Constraint)
   | a :: b :: rest => (pairs rest).map ((a, b) :: ·)
   | [_] => none
 
+/-- Length-prefixed body lists: `k b1 .. bk k' ...`. -/
+def sets : List Nat → Nat → Option (List SetConstraint)
+  | [], _ => some []
+  | _, 0 => none
+  | k :: rest, fuel + 1 =>
+    if k = 0 || rest.length < k then none
+    else (sets (rest.drop k) fuel).map ((rest.take k) :: ·)
+
 def runCase : List Nat → Option String
   | [0, x, y, z] =>
     let m := interleave 10 x y z
@@ -34,6 +43,8 @@ def runCase : List Nat → Option String
   | [3, x, y, z] => some s!"{interleave 21 x y z}"
   | 1 :: rest => (pairs rest).map fun cs =>
     " ".intercalate ((colorAll cs).map (fun x => toString x.2))
+  | 2 :: rest => (sets rest rest.length).map fun cs =>
+    " ".intercalate ((colorAllSets cs).map (fun x => toString x.2))
   | _ => none
 
 partial def loop (stdin : IO.FS.Stream) (stdout : IO.FS.Stream) : IO Unit := do

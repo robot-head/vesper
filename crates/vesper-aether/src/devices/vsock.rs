@@ -1,8 +1,18 @@
 //! virtio-vsock device model (virtio-v1.2 §5.10) with a host-side socket
-//! table, stream sockets only.
+//! table: stream sockets, and seqpacket sockets with `VIRTIO_VSOCK_F_SEQPACKET`.
 //!
-//! Queues: receive (0), transmit (1) and event (2). No feature bits are
-//! offered, so only `VIRTIO_VSOCK_TYPE_STREAM` is valid. The host is CID 2.
+//! Queues: receive (0), transmit (1) and event (2). The device offers
+//! `VIRTIO_VSOCK_F_SEQPACKET`; without it only `VIRTIO_VSOCK_TYPE_STREAM` is
+//! valid and a seqpacket packet gets `RST`. A connection keeps the type it was
+//! opened with: a request for a listener of the other type, or a packet of the
+//! other type on an open connection, is answered with `RST`. Seqpacket `RW`
+//! packets carry message boundaries (§5.10.6.3.1): the device reassembles a
+//! guest message until a packet with `VIRTIO_VSOCK_SEQ_EOM` and hands it to the
+//! host whole ([`VsockDevice::recv_message`]), keeping `SEQ_EOR`; a host
+//! message ([`VsockDevice::send_message`]) is queued only if the guest's credit
+//! and the outbox take all of it, split into packets of at most 4 KiB with
+//! `EOM` (and `EOR` if asked) on the last, and when a receive buffer splits a
+//! packet the boundary flags stay on the final part only. The host is CID 2.
 //! Guest packets are validated before any effect: the header must be 44
 //! bytes, `len` must equal the payload length and be at most
 //! [`MAX_PAYLOAD`], `src_cid` must be the guest's CID and `dst_cid` the host's
@@ -22,13 +32,20 @@
 #![forbid(unsafe_code)]
 
 use super::mmio::{DeviceError, QueueIo, VirtioDevice};
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 pub const VIRTIO_ID_VSOCK: u32 = 19;
 pub const HOST_CID: u64 = 2;
 pub const HEADER_BYTES: usize = 44;
 pub const MAX_PAYLOAD: usize = 64 * 1024;
 pub const TYPE_STREAM: u16 = 1;
+pub const TYPE_SEQPACKET: u16 = 2;
+pub const VIRTIO_VSOCK_F_SEQPACKET: u64 = 1 << 1;
+/// Seqpacket `RW` flags: end of message, end of record.
+pub const SEQ_EOM: u32 = 1;
+pub const SEQ_EOR: u32 = 2;
+/// Largest packet payload the host sends.
+pub const HOST_PACKET_BYTES: usize = 4096;
 pub const OP_REQUEST: u16 = 1;
 pub const OP_RESPONSE: u16 = 2;
 pub const OP_RST: u16 = 3;
@@ -48,6 +65,10 @@ pub const HOST_BUF_ALLOC: u32 = 64 * 1024;
 pub const OUTBOX_LIMIT: usize = 512;
 /// Connections per device.
 pub const MAX_CONNECTIONS: usize = 1024;
+/// Complete seqpacket messages a connection holds for the host. Credit only
+/// counts payload bytes, so empty messages would otherwise be unbounded; a
+/// guest that goes past this is reset.
+pub const MAX_QUEUED_MESSAGES: usize = 256;
 const QUEUE_MAX: [u16; 3] = [256, 256, 64];
 const CONFIG_BYTES: usize = 8;
 
@@ -110,8 +131,17 @@ pub enum ConnState {
     Connected,
 }
 
+/// One reassembled seqpacket message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SeqMessage {
+    pub data: Vec<u8>,
+    /// The last packet carried `SEQ_EOR`.
+    pub eor: bool,
+}
+
 #[derive(Debug)]
 struct Conn {
+    kind: u16,
     state: ConnState,
     peer_buf_alloc: u32,
     peer_fwd_cnt: u32,
@@ -119,11 +149,15 @@ struct Conn {
     rx_cnt: u32,
     fwd_cnt: u32,
     rx: VecDeque<u8>,
+    /// Seqpacket: complete messages, and the one being reassembled.
+    messages: VecDeque<SeqMessage>,
+    partial: Vec<u8>,
     peer_shutdown: u32,
 }
 impl Conn {
-    fn new(state: ConnState) -> Self {
+    fn new(kind: u16, state: ConnState) -> Self {
         Self {
+            kind,
             state,
             peer_buf_alloc: 0,
             peer_fwd_cnt: 0,
@@ -131,6 +165,8 @@ impl Conn {
             rx_cnt: 0,
             fwd_cnt: 0,
             rx: VecDeque::new(),
+            messages: VecDeque::new(),
+            partial: Vec::new(),
             peer_shutdown: 0,
         }
     }
@@ -156,6 +192,11 @@ pub enum VsockError {
     NotConnected,
     TooManyConnections,
     OutboxFull,
+    /// A stream call on a seqpacket connection or vice versa, or seqpacket
+    /// before the driver negotiated `VIRTIO_VSOCK_F_SEQPACKET`.
+    WrongType,
+    /// The guest's credit or the outbox cannot take the whole message now.
+    WouldBlock,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -164,14 +205,21 @@ pub struct VsockStats {
     pub spoofed: u64,
     pub resets_sent: u64,
     pub credit_violations: u64,
+    /// Seqpacket connections reset for queueing more than
+    /// [`MAX_QUEUED_MESSAGES`] unread messages.
+    pub message_overflows: u64,
     pub packets_rx: u64,
     pub packets_tx: u64,
+    pub messages_rx: u64,
+    pub messages_tx: u64,
 }
 
 #[derive(Debug)]
 pub struct VsockDevice {
     guest_cid: u64,
-    listeners: BTreeSet<u32>,
+    features: u64,
+    /// Host port -> socket type.
+    listeners: BTreeMap<u32, u16>,
     conns: BTreeMap<ConnKey, Conn>,
     outbox: VecDeque<(VsockHeader, Vec<u8>)>,
     events: VecDeque<u32>,
@@ -186,7 +234,8 @@ impl VsockDevice {
         }
         Ok(Self {
             guest_cid,
-            listeners: BTreeSet::new(),
+            features: 0,
+            listeners: BTreeMap::new(),
             conns: BTreeMap::new(),
             outbox: VecDeque::new(),
             events: VecDeque::new(),
@@ -197,10 +246,21 @@ impl VsockDevice {
         self.stats
     }
     pub fn listen(&mut self, host_port: u32) -> Result<(), VsockError> {
-        if !self.listeners.insert(host_port) {
+        self.listen_typed(host_port, TYPE_STREAM)
+    }
+    /// A seqpacket listener (usable once the driver negotiated SEQPACKET).
+    pub fn listen_seqpacket(&mut self, host_port: u32) -> Result<(), VsockError> {
+        self.listen_typed(host_port, TYPE_SEQPACKET)
+    }
+    fn listen_typed(&mut self, host_port: u32, kind: u16) -> Result<(), VsockError> {
+        if self.listeners.contains_key(&host_port) {
             return Err(VsockError::PortInUse);
         }
+        self.listeners.insert(host_port, kind);
         Ok(())
+    }
+    fn seqpacket(&self) -> bool {
+        self.features & VIRTIO_VSOCK_F_SEQPACKET != 0
     }
     pub fn connection_state(&self, key: ConnKey) -> Option<ConnState> {
         self.conns.get(&key).map(|c| c.state)
@@ -219,7 +279,7 @@ impl VsockDevice {
             src_port: key.1,
             dst_port: key.0,
             len,
-            kind: TYPE_STREAM,
+            kind: self.conns.get(&key).map_or(TYPE_STREAM, |c| c.kind),
             op,
             flags,
             buf_alloc: HOST_BUF_ALLOC,
@@ -236,6 +296,25 @@ impl VsockDevice {
 
     /// Host-initiated connection to a guest listener on `guest_port`.
     pub fn connect(&mut self, host_port: u32, guest_port: u32) -> Result<ConnKey, VsockError> {
+        self.connect_typed(host_port, guest_port, TYPE_STREAM)
+    }
+    /// Host-initiated seqpacket connection.
+    pub fn connect_seqpacket(
+        &mut self,
+        host_port: u32,
+        guest_port: u32,
+    ) -> Result<ConnKey, VsockError> {
+        if !self.seqpacket() {
+            return Err(VsockError::WrongType);
+        }
+        self.connect_typed(host_port, guest_port, TYPE_SEQPACKET)
+    }
+    fn connect_typed(
+        &mut self,
+        host_port: u32,
+        guest_port: u32,
+        kind: u16,
+    ) -> Result<ConnKey, VsockError> {
         let key = (guest_port, host_port);
         if self.conns.contains_key(&key) {
             return Err(VsockError::PortInUse);
@@ -246,16 +325,20 @@ impl VsockDevice {
         if self.outbox.len() >= OUTBOX_LIMIT {
             return Err(VsockError::OutboxFull);
         }
-        self.conns.insert(key, Conn::new(ConnState::Connecting));
+        self.conns
+            .insert(key, Conn::new(kind, ConnState::Connecting));
         self.push(key, OP_REQUEST, 0, Vec::new());
         Ok(key)
     }
-    /// Takes everything the guest sent on `key` and returns credit.
+    /// Takes everything the guest sent on stream `key` and returns credit.
     pub fn recv(&mut self, key: ConnKey) -> Result<Vec<u8>, VsockError> {
         let conn = self
             .conns
             .get_mut(&key)
             .ok_or(VsockError::NoSuchConnection)?;
+        if conn.kind != TYPE_STREAM {
+            return Err(VsockError::WrongType);
+        }
         let data: Vec<u8> = conn.rx.drain(..).collect();
         conn.fwd_cnt = conn.fwd_cnt.wrapping_add(data.len() as u32);
         if !data.is_empty() && self.outbox.len() < OUTBOX_LIMIT {
@@ -263,9 +346,65 @@ impl VsockDevice {
         }
         Ok(data)
     }
+    /// The oldest complete message the guest sent on seqpacket `key`, which
+    /// returns its bytes as credit.
+    pub fn recv_message(&mut self, key: ConnKey) -> Result<Option<SeqMessage>, VsockError> {
+        let conn = self
+            .conns
+            .get_mut(&key)
+            .ok_or(VsockError::NoSuchConnection)?;
+        if conn.kind != TYPE_SEQPACKET {
+            return Err(VsockError::WrongType);
+        }
+        let Some(msg) = conn.messages.pop_front() else {
+            return Ok(None);
+        };
+        conn.fwd_cnt = conn.fwd_cnt.wrapping_add(msg.data.len() as u32);
+        if !msg.data.is_empty() && self.outbox.len() < OUTBOX_LIMIT {
+            self.push(key, OP_CREDIT_UPDATE, 0, Vec::new());
+        }
+        Ok(Some(msg))
+    }
+    /// Queues one whole message on seqpacket `key`, or nothing
+    /// ([`VsockError::WouldBlock`]) if the guest's credit or the outbox
+    /// cannot take all of it now.
+    pub fn send_message(&mut self, key: ConnKey, data: &[u8], eor: bool) -> Result<(), VsockError> {
+        let conn = self.conns.get(&key).ok_or(VsockError::NoSuchConnection)?;
+        if conn.kind != TYPE_SEQPACKET {
+            return Err(VsockError::WrongType);
+        }
+        if conn.state != ConnState::Connected || conn.peer_shutdown & SHUTDOWN_RCV != 0 {
+            return Err(VsockError::NotConnected);
+        }
+        let packets = data.len().div_ceil(HOST_PACKET_BYTES).max(1);
+        if (conn.guest_credit() as usize) < data.len() || self.outbox.len() + packets > OUTBOX_LIMIT
+        {
+            return Err(VsockError::WouldBlock);
+        }
+        let conn = self.conns.get_mut(&key).expect("checked above");
+        conn.tx_cnt = conn.tx_cnt.wrapping_add(data.len() as u32);
+        let mut parts: Vec<&[u8]> = data.chunks(HOST_PACKET_BYTES).collect();
+        if parts.is_empty() {
+            parts.push(&[]);
+        }
+        let last = parts.len() - 1;
+        for (i, part) in parts.into_iter().enumerate() {
+            let flags = if i == last {
+                SEQ_EOM | if eor { SEQ_EOR } else { 0 }
+            } else {
+                0
+            };
+            self.push(key, OP_RW, flags, part.to_vec());
+        }
+        self.stats.messages_tx += 1;
+        Ok(())
+    }
     /// Sends up to the guest's credit; returns the number of bytes queued.
     pub fn send(&mut self, key: ConnKey, data: &[u8]) -> Result<usize, VsockError> {
         let conn = self.conns.get(&key).ok_or(VsockError::NoSuchConnection)?;
+        if conn.kind != TYPE_STREAM {
+            return Err(VsockError::WrongType);
+        }
         if conn.state != ConnState::Connected || conn.peer_shutdown & SHUTDOWN_RCV != 0 {
             return Err(VsockError::NotConnected);
         }
@@ -333,11 +472,16 @@ impl VsockDevice {
             return false;
         }
         self.stats.packets_tx += 1;
-        if h.kind != TYPE_STREAM {
+        if h.kind != TYPE_STREAM && !(h.kind == TYPE_SEQPACKET && self.seqpacket()) {
             self.rst_reply(&h);
             return true;
         }
         let key = (h.src_port, h.dst_port);
+        if self.conns.get(&key).is_some_and(|c| c.kind != h.kind) {
+            self.conns.remove(&key);
+            self.rst_reply(&h);
+            return true;
+        }
         if let Some(c) = self.conns.get_mut(&key) {
             c.peer_buf_alloc = h.buf_alloc;
             c.peer_fwd_cnt = h.fwd_cnt;
@@ -345,9 +489,10 @@ impl VsockDevice {
         let state = self.conns.get(&key).map(|c| c.state);
         match (h.op, state) {
             (OP_REQUEST, None)
-                if self.listeners.contains(&h.dst_port) && self.conns.len() < MAX_CONNECTIONS =>
+                if self.listeners.get(&h.dst_port) == Some(&h.kind)
+                    && self.conns.len() < MAX_CONNECTIONS =>
             {
-                let mut c = Conn::new(ConnState::Connected);
+                let mut c = Conn::new(h.kind, ConnState::Connected);
                 c.peer_buf_alloc = h.buf_alloc;
                 c.peer_fwd_cnt = h.fwd_cnt;
                 self.conns.insert(key, c);
@@ -362,9 +507,27 @@ impl VsockDevice {
                     self.stats.credit_violations += 1;
                     self.conns.remove(&key);
                     self.rst_reply(&h);
+                } else if c.kind == TYPE_SEQPACKET
+                    && h.flags & SEQ_EOM != 0
+                    && c.messages.len() >= MAX_QUEUED_MESSAGES
+                {
+                    self.stats.message_overflows += 1;
+                    self.conns.remove(&key);
+                    self.rst_reply(&h);
                 } else {
                     c.rx_cnt = c.rx_cnt.wrapping_add(payload.len() as u32);
-                    c.rx.extend(payload);
+                    if c.kind == TYPE_SEQPACKET {
+                        c.partial.extend_from_slice(payload);
+                        if h.flags & SEQ_EOM != 0 {
+                            c.messages.push_back(SeqMessage {
+                                data: std::mem::take(&mut c.partial),
+                                eor: h.flags & SEQ_EOR != 0,
+                            });
+                            self.stats.messages_rx += 1;
+                        }
+                    } else {
+                        c.rx.extend(payload);
+                    }
                 }
             }
             (OP_CREDIT_UPDATE, Some(_)) => {}
@@ -394,7 +557,7 @@ impl VirtioDevice for VsockDevice {
         VIRTIO_ID_VSOCK
     }
     fn device_features(&self) -> u64 {
-        0
+        VIRTIO_VSOCK_F_SEQPACKET
     }
     fn queue_max_sizes(&self) -> &[u16] {
         &QUEUE_MAX
@@ -406,8 +569,11 @@ impl VirtioDevice for VsockDevice {
         let cfg = self.guest_cid.to_le_bytes();
         out.copy_from_slice(&cfg[offset..offset + out.len()]);
     }
-    fn activate(&mut self, _features: u64) {}
+    fn activate(&mut self, features: u64) {
+        self.features = features;
+    }
     fn reset(&mut self) {
+        self.features = 0;
         self.conns.clear();
         self.outbox.clear();
         self.events.clear();
@@ -436,6 +602,10 @@ impl VirtioDevice for VsockDevice {
                     let n = payload.len().min(room - HEADER_BYTES);
                     let mut head = h;
                     head.len = n as u32;
+                    if n < payload.len() {
+                        // Message boundaries belong to the final part only.
+                        head.flags &= !(SEQ_EOM | SEQ_EOR);
+                    }
                     let mut out = head.encode().to_vec();
                     out.extend_from_slice(&payload[..n]);
                     io.complete(chain, &out)?;

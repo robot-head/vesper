@@ -1,6 +1,8 @@
 //! Bidirectional type/mode inference and path-sensitive place capability checking.
 use crate::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
+#[path = "vector/check.rs"]
+mod vector_check;
 
 #[path = "regions/check.rs"]
 mod region_rules;
@@ -33,7 +35,15 @@ impl World {
             builtins.items.extend(crate::regions::prelude());
         }
         let builtin_count = builtins.items.len();
-        for (index, item) in builtins.items.iter().chain(module.items.iter()).enumerate() {
+        // Built-in secret operations used by the module (§23.2).
+        let secret_prelude = crate::capability_effects::secret_prelude(module);
+        for (index, item) in builtins
+            .items
+            .iter()
+            .chain(module.items.iter())
+            .chain(secret_prelude.items.iter())
+            .enumerate()
+        {
             match item {
                 Item::Adt(a) => {
                     if matches!(a.name.as_str(), "Unit" | "Never" | "String") {
@@ -173,6 +183,9 @@ impl World {
                 Type::Named(n, args) => {
                     if let Some(m) = bounds.get(n) {
                         return *m;
+                    }
+                    if crate::vector::shape_of(ty).is_some() {
+                        return Mode::Copy;
                     }
                     if matches!(
                         n.as_str(),
@@ -445,6 +458,7 @@ pub(crate) fn check_core(
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::capability_effects::check_world(&world));
+        diagnostics.extend(crate::vector::check_world(&world));
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::regions::check_world(&world));
@@ -572,6 +586,12 @@ impl Checker<'_> {
         }
     }
     fn valid_type(&mut self, t: &Type, g: &[Generic], span: Span) {
+        if crate::vector::is_vector_spelling(t) {
+            if let Some(message) = crate::vector::type_error(t) {
+                self.error("E1401", message, span);
+            }
+            return;
+        }
         if crate::regions::active(self.world)
             && let Some(errors) = crate::regions::validate_type(t, span.clone())
         {
@@ -1756,8 +1776,21 @@ impl Checker<'_> {
             if crate::numeric::wrapping_intrinsic(name).is_some() {
                 return self.wrapping_call(name, types, args, env, span, expected);
             }
+            if !self.world.functions.contains_key(name)
+                && let Some(t) = self.vector_call(name, types, args, env, span.clone(), expected)
+            {
+                return t;
+            }
             if let Some(f) = self.world.functions.get(name) {
                 return self.apply(f, types, args, None, env, span, expected);
+            }
+            // Bitwise intrinsics behind the built-in secret operations
+            // (`capability_effects`); user functions take precedence.
+            if crate::capability_effects::bit_intrinsic(name).is_some() {
+                return self.wrapping_call(name, types, args, env, span, expected);
+            }
+            if name == crate::capability_effects::WIDEN_INTRINSIC {
+                return self.widen_call(name, types, args, env, span);
             }
             if name
                 .split_once("::")
@@ -2887,6 +2920,49 @@ impl Checker<'_> {
             }
         }
         common
+    }
+    /// `widen_u64(x)`: zero extension of one `u8`, `u32` or `u64` operand.
+    fn widen_call(
+        &mut self,
+        name: &str,
+        types: &[Type],
+        args: &[Arg],
+        env: &mut Env,
+        span: Span,
+    ) -> Type {
+        if !types.is_empty() || args.len() != 1 {
+            self.error(
+                "E0207",
+                format!("'{name}' takes one operand and no type arguments"),
+                span.clone(),
+            );
+        }
+        for a in args {
+            if a.pass != Pass::In || a.explicit {
+                self.error(
+                    "E0308",
+                    format!("'{name}' takes its operand by value"),
+                    a.expr.span.clone(),
+                );
+            }
+            let t = self.expr_expected(&a.expr, env, Usage::Own, &Type::Infer);
+            let t = if let Type::IntLiteral(_) = t {
+                let u64 = Type::named("u64");
+                self.types
+                    .insert((a.expr.span.start, a.expr.span.end), u64.clone());
+                u64
+            } else {
+                t
+            };
+            if !matches!(t.name(), "u8" | "u32" | "u64") {
+                self.error(
+                    "E0200",
+                    format!("'{name}' requires a u8, u32 or u64 operand, found {t}"),
+                    a.expr.span.clone(),
+                );
+            }
+        }
+        Type::named("u64")
     }
     fn nonzero(&self, e: &Expr, env: &Env) -> bool {
         self.integer_fact(e, env).is_some_and(|n| n != 0)

@@ -10,13 +10,19 @@ default = []
 # Links the system GTK 4 (>= 4.0) through gtk4-rs. Off by default so that
 # workspace builds on hosts without GTK (macOS, Windows, hermetic Bazel) keep
 # working; .github/workflows/aura-gtk.yml enables it under Xvfb.
-gtk = ["dep:gtk4"]
+gtk = ["dep:gtk4", "dep:vesper-pulse"]
 
 [dependencies]
 vesper-aura = { path = "../vesper-aura" }
-gtk4 = { version = "=0.11.5", optional = true }
+vesper-pulse = { path = "../vesper-pulse", optional = true }
+gtk4 = { version = "=0.11.5", optional = true, features = ["v4_12"] }
 
 [[test]]
 name = "gtk_tree"
+harness = false
+required-features = ["gtk"]
+
+[[test]]
+name = "gtk_depth"
 harness = false
 required-features = ["gtk"]

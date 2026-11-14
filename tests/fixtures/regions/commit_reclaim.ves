@@ -1,0 +1,41 @@
+// Committing an older watermark keeps newer ones; take reclaims the
+// unprotected tip only, and the moved payloads below it follow.
+linear struct Cell {
+    v: i64,
+}
+
+fn main() -> u64 {
+    region r(256) {
+        let outer = r.checkpoint();
+        let a = r
+            .box(
+            Cell {
+                v: 1
+            }
+        );
+        let inner = r.checkpoint();
+        let b = r
+            .box(
+            Cell {
+                v: 2
+            }
+        );
+        r.commit(outer);
+        let Cell {
+            v
+        }
+        = r.take(a);
+        let protected = r.used();
+        r.commit(inner);
+        let Cell {
+            v: w
+        }
+        = r.take(b);
+        let freed = r.used();
+        if protected == 16 && freed == 0 && wrapping_add(v, w) == 3 {
+            wrapping_add(protected, 1)
+        } else {
+            0
+        }
+    }
+}

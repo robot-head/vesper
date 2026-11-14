@@ -231,7 +231,7 @@ fn old_versions_stay_until_no_snapshot_needs_them() {
 
 #[test]
 fn deferred_commits_share_one_sync_and_become_visible_when_durable() {
-    let mut s = store(StoreLimits::default());
+    let s = store(StoreLimits::default());
     let flushes = s.stats().log_flushes;
     let mut lsns = Vec::new();
     for i in 0..10 {
@@ -289,7 +289,7 @@ fn shared_store_groups_concurrent_commits() {
     eprintln!("group commit: {commits} commits, {syncs} log syncs");
     assert_eq!(commits, 200);
     assert!(syncs < commits, "{syncs} syncs for {commits} commits");
-    let mut s = Arc::try_unwrap(shared).ok().unwrap().into_inner();
+    let s = Arc::try_unwrap(shared).ok().unwrap().into_inner();
     let t = s.begin().unwrap();
     assert_eq!(s.scan(&t, "t").unwrap().len(), 200);
     s.commit(t).unwrap();
@@ -465,7 +465,7 @@ fn typed_errors_and_no_leaked_pins() {
         "DDL waits for transactions"
     );
     s.commit(t).unwrap();
-    let mut other = Store::open(SimDevice::new(), small()).unwrap().0;
+    let other = Store::open(SimDevice::new(), small()).unwrap().0;
     let mut t = s.begin().unwrap();
     assert_eq!(
         other
@@ -486,7 +486,7 @@ fn typed_errors_and_no_leaked_pins() {
     // silent repair, and leaves no frame pinned.
     let mut dev = s.close().unwrap();
     dev.corrupt(FileId::Data, 5 * 16384 + 100, 0x40);
-    let (mut s, _) = Store::open(dev, small()).unwrap();
+    let (s, _) = Store::open(dev, small()).unwrap();
     let t = s.begin().unwrap();
     let err = s.scan(&t, "t").unwrap_err();
     assert_eq!(err.kind, StoreErrorKind::Corrupt);
@@ -511,7 +511,7 @@ fn typed_errors_and_no_leaked_pins() {
 
 #[test]
 fn dropped_transactions_are_counted_and_limits_hold() {
-    let mut s = store(StoreLimits {
+    let s = store(StoreLimits {
         max_active_txns: 2,
         max_txn_writes: 3,
         ..small()
@@ -572,7 +572,7 @@ fn file_device_store_round_trips() {
         // Crash: no close.
         drop(s.into_device());
     }
-    let (mut s, rep) = Store::open(FsDevice::open(&dir).unwrap(), small()).unwrap();
+    let (s, rep) = Store::open(FsDevice::open(&dir).unwrap(), small()).unwrap();
     assert!(rep.groups >= 2);
     let t = s.begin().unwrap();
     assert_eq!(s.scan(&t, "t").unwrap().len(), 50);
@@ -592,7 +592,7 @@ fn vacuum_crashes_never_resurrect_deleted_rows() {
         ..small()
     };
     // Built with the default group size; only the vacuum runs with 8 pages.
-    let mut s = store(small());
+    let s = store(small());
     let mut t = s.begin().unwrap();
     let ids: Vec<u64> = (0..12)
         .map(|i| s.insert(&mut t, "t", &row(i, "orig")).unwrap())
@@ -671,7 +671,7 @@ fn close_keeps_deferred_commits_during_a_running_checkpoint() {
     s.update(&mut t, "t", ids[1], &row(1, "late")).unwrap();
     assert!(!s.commit_deferred(t).unwrap().durable);
     let dev = s.close().unwrap();
-    let (mut s, _) = Store::open(dev.crash(CrashChoice::LoseUnsynced), limits).unwrap();
+    let (s, _) = Store::open(dev.crash(CrashChoice::LoseUnsynced), limits).unwrap();
     let r = s.begin().unwrap();
     assert_eq!(s.get(&r, "t", ids[1]).unwrap(), Some(row(1, "late")));
     assert_eq!(s.scan(&r, "t").unwrap().len(), 40);

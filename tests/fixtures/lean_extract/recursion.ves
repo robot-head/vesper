@@ -1,0 +1,56 @@
+// Recursion over data and over a counter: executable partial defs plus
+// total fuel companions.
+enum List {
+    Nil,
+    Cons {
+        head: u64,
+        tail: List
+    },
+}
+
+fn length(sink l: List) -> u64 {
+    match l {
+        List::Nil => 0,
+        List::Cons {
+            head,
+            tail
+        }
+        => wrapping_add(1, length(tail)),
+    }
+}
+
+fn drain(n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        drain(wrapping_sub(n, 1))
+    }
+}
+
+fn is_even(n: u64) -> bool {
+    if n == 0 {
+        true
+    } else {
+        is_odd(wrapping_sub(n, 1))
+    }
+}
+
+fn is_odd(n: u64) -> bool {
+    if n == 0 {
+        false
+    } else {
+        is_even(wrapping_sub(n, 1))
+    }
+}
+
+fn main() -> u64 {
+    length(
+        List::Cons {
+            head: 7,
+            tail: List::Cons {
+                head: 8,
+                tail: List::Nil
+            }
+        }
+    )
+}

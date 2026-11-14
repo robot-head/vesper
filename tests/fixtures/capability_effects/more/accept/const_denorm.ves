@@ -1,0 +1,22 @@
+// A realtime one-pole filter step with subnormals flushed to zero: callees
+// carry the same capabilities, and DetFloat stays out of the scope.
+copy struct Pole {
+    a: f64,
+    b: f64,
+}
+
+fn decay(x: f64, k: f64) -> f64 eff [Realtime, ConstDenorm] {
+    x * k
+}
+
+fn step(in p: Pole, memory: f64, input: f64) -> f64 eff [Realtime, ConstDenorm] {
+    decay(memory, p.a) + decay(input, p.b)
+}
+
+fn main() -> f64 {
+    let p = Pole {
+        a: 0.5,
+        b: 0.25
+    };
+    step(in p, 1.0, 2.0)
+}

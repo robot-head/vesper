@@ -1,0 +1,10 @@
+// expect: E0732
+// Flushing subnormals to zero changes IEEE 754 results: a bit-deterministic
+// function cannot run in a ConstDenorm scope.
+fn half(x: f64) -> f64 eff [DetFloat, ConstDenorm] {
+    x * 0.5
+}
+
+fn main() -> f64 {
+    half(1.0)
+}

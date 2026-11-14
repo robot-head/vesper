@@ -1,6 +1,8 @@
-//! Bounded host implementation of relational DBSP, durable content-addressed
-//! checkpoints and a SimPulse-scheduled multi-worker executor with aligned
-//! barrier checkpoints and rollback recovery.
+//! Bounded host implementation of relational DBSP, LSM-spine durable
+//! checkpoints in a content-addressed store, a durable input log, an
+//! exactly-once Quarry sink and a SimPulse-scheduled multi-worker executor
+//! with re-shuffled joins, aligned and unaligned barrier checkpoints, whole,
+//! partial and coordinator recovery, rescaling and checkpoint GC.
 //! Uses allocating BTreeMaps,
 //! checked i128 accumulators and i64 stored weights, not SIMD/arena or compiler lowering.
 //! Errors are transactional; tick input is borrowed and all prior integrals survive.
@@ -13,9 +15,12 @@ mod frontier;
 mod zset;
 
 pub use circuit::{
-    CdcHeader, CdcPolicy, CheckpointLimits, Circuit, CircuitBuilder, ClusterConfig, ClusterRun,
-    CommittedCheckpoint, DurableCheckpointer, DurableReport, DurableRestore, Executor, Field,
-    Ingested, NodeId, Predicate, Recovery, SourceBinding, TickInput, WeightPolicy, run_cluster,
+    CdcHeader, CdcPolicy, CheckpointLimits, CheckpointMode, CheckpointPhase, Circuit,
+    CircuitBuilder, ClusterConfig, ClusterRun, CommitRecord, CommitSink, CommittedCheckpoint,
+    CrashMedium, DurableCheckpointer, DurableReport, DurableRestore, EpochSource, Executor, Fault,
+    FaultKind, Field, GcReport, Ingested, InputLog, LogLimits, LogRecovery, MAX_SPINE_LEVELS,
+    MemorySink, NodeId, Predicate, QuarrySink, Recovery, Rescale, SinkRecovery, SourceBinding,
+    TickInput, WeightPolicy, run_cluster, run_cluster_with,
 };
 pub use frontier::{Frontier, FrontierTicket, TicketError};
 pub use zset::{Row, ZSet};
