@@ -7,6 +7,7 @@ use super::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::mem::size_of;
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -80,6 +81,55 @@ impl Name {
             }
         }
         Some(parts)
+    }
+    /// Injective display bridge for the fixed resource snapshot's owned names.
+    /// Typed components remain authoritative; producer strings are never parsed.
+    /// Trusted imported names do not use this restricted renderer.
+    pub fn resource_display(&self) -> Result<String, Error> {
+        self.validate()?;
+        let mut len = self.components.len() - 1;
+        for component in &self.components {
+            let part_len = match component {
+                Component::String(value) => {
+                    let identifier = value.as_bytes().split_first().is_some_and(|(first, rest)| {
+                        (first.is_ascii_alphabetic() || *first == b'_')
+                            && rest.iter().all(|byte| {
+                                byte.is_ascii_alphanumeric() || matches!(*byte, b'_' | b'\'')
+                            })
+                    });
+                    if !identifier && value != "_@" {
+                        return Err(coverage_error("unsupported resource-owned name component"));
+                    }
+                    value.len()
+                }
+                Component::Number(value) => {
+                    if *value == 0 {
+                        1
+                    } else {
+                        value.ilog10() as usize + 1
+                    }
+                }
+            };
+            len = add(len, part_len)?;
+        }
+        if len > 4096 {
+            return Err(limit());
+        }
+        let mut rendered = String::new();
+        rendered
+            .try_reserve_exact(len)
+            .map_err(|_| Error::new(ErrorKind::Allocation, "resource-owned name rendering"))?;
+        for (index, component) in self.components.iter().enumerate() {
+            if index != 0 {
+                rendered.push('.');
+            }
+            match component {
+                Component::String(value) => rendered.push_str(value),
+                Component::Number(value) => write!(rendered, "{value}")
+                    .map_err(|_| invalid("resource-owned numeric name rendering"))?,
+            }
+        }
+        Ok(rendered)
     }
     pub fn hash_into(&self, hash: &mut blake3::Hasher) {
         hash.update(&(self.components.len() as u16).to_le_bytes());
@@ -471,16 +521,44 @@ const ROOTS: [&str; 33] = [
     "congr_checked",
     "congr_wrapping",
 ];
-fn target_module(target: u8) -> &'static [&'static str] {
-    match target {
+fn target_module(target: u8) -> Result<&'static [&'static str], Error> {
+    Ok(match target {
         0 => &["RewriteWitness"],
         1 => &["ArithmeticOracle"],
-        _ => &["Lean4Lean", "VesperControls"],
-    }
+        2 => &["Lean4Lean", "VesperControls"],
+        3 => &["ResourceModel42Kernel"],
+        _ => return Err(invalid("unknown target")),
+    })
 }
-fn root_ids(inventory: &Inventory) -> Result<Vec<u32>, Error> {
+fn root_ids(inventory: &Inventory, budget: &mut Budget) -> Result<Vec<u32>, Error> {
+    let module = target_module(inventory.target)?;
+    let count = match inventory.target {
+        0 => 33,
+        1 => 37,
+        2 => 1,
+        3 => {
+            let mut count = 0;
+            for constant in &inventory.constants {
+                if inventory.modules[constant.module_id as usize]
+                    .name
+                    .is(module)
+                {
+                    if constant.skip != 0 {
+                        return Err(coverage_error("resource-owned declaration is skipped"));
+                    }
+                    count = add(count, 1)?;
+                }
+            }
+            if count == 0 {
+                return Err(coverage_error("missing resource-owned declarations"));
+            }
+            count
+        }
+        _ => return Err(invalid("unknown target")),
+    };
+    budget.charge(mul(count, size_of::<u32>())?)?;
     let mut roots = Vec::new();
-    reserve(&mut roots, 37)?;
+    reserve(&mut roots, count)?;
     if inventory.target <= 1 {
         for root in ROOTS {
             let c = inventory
@@ -520,21 +598,25 @@ fn root_ids(inventory: &Inventory) -> Result<Vec<u32>, Error> {
                 roots.push(c.id);
             }
         }
-    } else {
+    } else if inventory.target == 2 {
         let c = inventory
             .constants
             .iter()
             .find(|c| c.name.is(&["Vesper", "Lean4Lean42Controls", "runControls"]))
             .ok_or_else(|| coverage_error("missing control baseline root"))?;
-        if c.skip != 0
-            || c.form != 1
-            || !inventory.modules[c.module_id as usize]
-                .name
-                .is(target_module(2))
-        {
+        if c.skip != 0 || c.form != 1 || !inventory.modules[c.module_id as usize].name.is(module) {
             return Err(coverage_error("control baseline root binding"));
         }
         roots.push(c.id);
+    } else {
+        for constant in &inventory.constants {
+            if inventory.modules[constant.module_id as usize]
+                .name
+                .is(module)
+            {
+                roots.push(constant.id);
+            }
+        }
     }
     Ok(roots)
 }
@@ -605,7 +687,7 @@ fn validate_owners(inventory: &Inventory) -> Result<(), Error> {
     Ok(())
 }
 fn validate_inventory(inv: &Inventory, limits: &Limits, budget: &mut Budget) -> Result<(), Error> {
-    if inv.target > 2
+    if inv.target > 3
         || inv.modules.is_empty()
         || inv.modules.len() > limits.declarations
         || inv.constants.len() > limits.declarations
@@ -653,7 +735,7 @@ fn validate_inventory(inv: &Inventory, limits: &Limits, budget: &mut Budget) -> 
         totals.eligibility[c.skip as usize] += 1;
         if inv.modules[c.module_id as usize]
             .name
-            .is(target_module(inv.target))
+            .is(target_module(inv.target)?)
         {
             totals.target_eligibility[c.skip as usize] += 1;
         }
@@ -671,8 +753,7 @@ fn validate_inventory(inv: &Inventory, limits: &Limits, budget: &mut Budget) -> 
         return Err(coverage_error("expected inventory integrity"));
     }
     validate_owners(inv)?;
-    budget.charge(37 * size_of::<u32>())?;
-    root_ids(inv)?;
+    root_ids(inv, budget)?;
     Ok(())
 }
 fn zero_coverage() -> Coverage {
@@ -778,7 +859,7 @@ impl<'a> Machine<'a> {
         expected_inventory: Option<&'a Inventory>,
     ) -> Result<Self, Error> {
         limits.validate()?;
-        if !matches!((mode, target), (0, 0..=2) | (1, 0..=1) | (2 | 3, 2))
+        if !matches!((mode, target), (0, 0..=3) | (1, 0 | 1 | 3) | (2 | 3, 2))
             || token.len() != 32
             || !token
                 .bytes()
@@ -1127,7 +1208,7 @@ impl<'a> Machine<'a> {
         let inventory = self.inventory();
         if inventory.modules[c.module_id as usize]
             .name
-            .is(target_module(self.target))
+            .is(target_module(self.target)?)
         {
             self.actual.target_eligibility[c.skip as usize] += 1;
         }
@@ -1168,7 +1249,6 @@ impl<'a> Machine<'a> {
             return Err(coverage_error("native/replay inventory hash differs"));
         }
         self.inventory_digest = Some(digest);
-        self.budget.charge(37 * size_of::<u32>())?;
         if self.expected.is_none() {
             let view = Inventory {
                 target: self.target,
@@ -1179,13 +1259,16 @@ impl<'a> Machine<'a> {
             };
             let checked = (|| {
                 validate_owners(&view)?;
-                root_ids(&view)
+                root_ids(&view, &mut self.budget)
             })();
             self.modules = view.modules;
             self.constants = view.constants;
             self.roots = checked?;
         } else {
-            self.roots = root_ids(self.expected.ok_or_else(|| invalid("expected inventory"))?)?;
+            self.roots = root_ids(
+                self.expected.ok_or_else(|| invalid("expected inventory"))?,
+                &mut self.budget,
+            )?;
             validate_owners(self.expected.ok_or_else(|| invalid("expected inventory"))?)?;
         }
         if self.mode == 1 {
@@ -1321,9 +1404,16 @@ impl<'a> Machine<'a> {
             let c = &self.inventory().constants[*id as usize];
             let target = self.inventory().modules[c.module_id as usize]
                 .name
-                .is(target_module(self.target));
+                .is(target_module(self.target)?);
             self.bits[*id as usize / 8] |= 1 << (*id % 8);
-            let required = self.roots.contains(id);
+            // Resource roots are exactly every owned declaration. Avoid a
+            // linear search of that potentially large set for every imported
+            // declaration in the complete closure.
+            let required = if self.target == 3 {
+                target
+            } else {
+                self.roots.contains(id)
+            };
             let coverage = self.coverage.as_mut().ok_or_else(|| invalid("coverage"))?;
             coverage.covered += 1;
             coverage.remaining -= 1;
@@ -1678,5 +1768,229 @@ mod tests {
         };
         assert!(Machine::new(1, 0, TOKEN, &Limits::default(), &[], Some(&inv)).is_err());
         assert!(Machine::new(0, 0, TOKEN, &Limits::default(), &[], Some(&inv)).is_err());
+    }
+
+    // Synthetic state-machine inputs only. These are never external-checker
+    // evidence and do not replace PreparedResource's artifact/catalog checks.
+    fn resource_inventory(owned: usize, owned_skip: u8) -> Inventory {
+        let modules = vec![ModuleRecord {
+            id: 0,
+            name: Name {
+                components: vec![Component::String("ResourceModel42Kernel".into())],
+            },
+            path: "/synthetic-only/ResourceModel42Kernel.olean".into(),
+        }];
+        let constants = (0..owned)
+            .map(|index| Constant {
+                id: index as u32,
+                name: Name {
+                    components: vec![
+                        Component::String("SyntheticOnly".into()),
+                        Component::String(format!("declaration_{index}")),
+                    ],
+                },
+                module_id: 0,
+                form: 1,
+                skip: if index == 0 { owned_skip } else { 0 },
+                owners: vec![],
+            })
+            .collect::<Vec<_>>();
+        let mut totals = totals_zero(1);
+        let mut hash = inventory_hasher(3, 1, owned as u64);
+        hash_module(&mut hash, &modules[0]);
+        for constant in &constants {
+            totals.forms[1] += 1;
+            totals.eligibility[constant.skip as usize] += 1;
+            totals.target_eligibility[constant.skip as usize] += 1;
+            totals.encoded_name_bytes += constant.name.encoded_len().unwrap() as u64;
+            hash_constant(&mut hash, constant);
+        }
+        Inventory {
+            target: 3,
+            modules,
+            constants,
+            totals,
+            blake3: *hash.finalize().as_bytes(),
+        }
+    }
+
+    fn wire_name(name: &Name) -> Value {
+        Value::Array(
+            name.components
+                .iter()
+                .map(|component| match component {
+                    Component::String(value) => serde_json::json!([0, value]),
+                    Component::Number(value) => serde_json::json!([1, value.to_string()]),
+                })
+                .collect(),
+        )
+    }
+
+    fn resource_prefix(inventory: &Inventory) -> Vec<Value> {
+        let mut frames = vec![
+            serde_json::json!([1, 0, TOKEN, 1, 3, "4.24.0", PROFILE]),
+            serde_json::json!([
+                1,
+                1,
+                inventory.totals.modules,
+                inventory.totals.forms,
+                inventory.totals.eligibility,
+                inventory.totals.target_eligibility,
+                inventory.totals.encoded_name_bytes
+            ]),
+        ];
+        for module in &inventory.modules {
+            frames.push(serde_json::json!([
+                1,
+                2,
+                module.id,
+                wire_name(&module.name),
+                module.path
+            ]));
+        }
+        for constant in &inventory.constants {
+            frames.push(serde_json::json!([
+                1,
+                3,
+                constant.id,
+                wire_name(&constant.name),
+                constant.module_id,
+                constant.form,
+                constant.skip,
+                constant.owners
+            ]));
+        }
+        frames.push(serde_json::json!([1, 4]));
+        frames
+    }
+
+    fn feed_value(machine: &mut Machine<'_>, frame: &Value) -> Result<(), Error> {
+        machine.feed(&serde_json::to_vec(frame).unwrap())
+    }
+
+    fn resource_done(count: usize) -> Value {
+        serde_json::json!([
+            1, 9, TOKEN, 1, 3, count, count, 0, 0, 0, 0, 0, count, 0, 0, 0, 0, 0, 0
+        ])
+    }
+
+    #[test]
+    fn resource_routes_are_disjoint_from_controls_and_unknown_targets() {
+        let limits = Limits::default();
+        let inventory = resource_inventory(1, 0);
+        for target in 0..=3 {
+            assert!(Machine::new(0, target, TOKEN, &limits, &[], None).is_ok());
+        }
+        assert!(Machine::new(1, 3, TOKEN, &limits, &[], Some(&inventory)).is_ok());
+        assert!(Machine::new(3, 2, TOKEN, &limits, &[], None).is_ok());
+        for (mode, target) in [(1, 2), (2, 3), (3, 3), (0, 4), (1, 4), (4, 3)] {
+            let error = match Machine::new(mode, target, TOKEN, &limits, &[], Some(&inventory)) {
+                Ok(_) => panic!("unexpected route {mode}/{target}"),
+                Err(error) => error,
+            };
+            assert_eq!(error.kind, ErrorKind::Protocol);
+            assert_eq!(error.detail, "mode/target/token");
+        }
+        assert!(target_module(4).is_err());
+        let mut machine = Machine::new(0, 3, TOKEN, &limits, &[], None).unwrap();
+        // An otherwise valid controls hello cannot be reused as resource input.
+        assert!(machine.feed(&hello(0)).is_err());
+        assert!(machine.finish().is_err());
+    }
+
+    #[test]
+    fn resource_roots_include_every_owned_declaration_and_are_prepaid() {
+        let inventory = resource_inventory(64, 0);
+        let mut budget = Budget { used: 0, cap: 256 };
+        assert_eq!(
+            root_ids(&inventory, &mut budget).unwrap(),
+            (0..64).collect::<Vec<_>>()
+        );
+        assert_eq!(budget.used, 256);
+        assert_eq!(
+            root_ids(&inventory, &mut Budget { used: 0, cap: 255 })
+                .unwrap_err()
+                .kind,
+            ErrorKind::OutputLimit
+        );
+        for skip in 1..=3 {
+            // Even a self-consistent inventory cannot make owned skips legal.
+            let skipped = resource_inventory(2, skip);
+            assert!(Machine::new(1, 3, TOKEN, &Limits::default(), &[], Some(&skipped)).is_err());
+            assert_eq!(
+                root_ids(&skipped, &mut Budget { used: 0, cap: 1024 })
+                    .unwrap_err()
+                    .kind,
+                ErrorKind::Coverage
+            );
+        }
+    }
+
+    #[test]
+    fn resource_coverage_cannot_omit_or_repeat_an_owned_helper() {
+        let inventory = resource_inventory(3, 0);
+        let limits = Limits::default();
+        for fault in [0, 1, 2] {
+            let mut machine = Machine::new(1, 3, TOKEN, &limits, &[], Some(&inventory)).unwrap();
+            for frame in resource_prefix(&inventory) {
+                feed_value(&mut machine, &frame).unwrap();
+            }
+            let count = if fault == 1 { 2 } else { 3 };
+            for id in 0..count {
+                feed_value(&mut machine, &serde_json::json!([1, 5, id, 0, [id]])).unwrap();
+            }
+            if fault == 2 {
+                assert!(feed_value(&mut machine, &serde_json::json!([1, 5, 3, 0, [2]])).is_err());
+                assert!(machine.finish().is_err());
+            } else if fault == 1 {
+                assert!(feed_value(&mut machine, &resource_done(3)).is_err());
+                assert!(machine.finish().is_err());
+            } else {
+                feed_value(&mut machine, &resource_done(3)).unwrap();
+                let coverage = machine.finish().unwrap().coverage.unwrap();
+                assert_eq!(coverage.required_roots, 3);
+                assert_eq!(coverage.required_roots_covered, 3);
+                assert_eq!(coverage.target_covered, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn resource_display_is_typed_injective_and_restricts_only_owned_names() {
+        let admitted = Name {
+            components: vec![
+                Component::String("_private".into()),
+                Component::String("Module".into()),
+                Component::Number(0),
+                Component::String("_@".into()),
+                Component::String("proof'".into()),
+                Component::Number(u64::MAX),
+            ],
+        };
+        assert_eq!(
+            admitted.resource_display().unwrap(),
+            "_private.Module.0._@.proof'.18446744073709551615"
+        );
+        for component in ["0", "a.b", "a@", "é", "«x»", "a\n"] {
+            let name = Name {
+                components: vec![Component::String(component.into())],
+            };
+            assert!(
+                name.validate().is_ok(),
+                "trusted codec still admits {component:?}"
+            );
+            assert!(
+                name.resource_display().is_err(),
+                "resource codec rejects {component:?}"
+            );
+        }
+        let number = Name {
+            components: vec![Component::Number(0)],
+        };
+        assert_eq!(number.resource_display().unwrap(), "0");
+        let fields = Name {
+            components: vec![Component::String("a".into()), Component::String("b".into())],
+        };
+        assert_eq!(fields.resource_display().unwrap(), "a.b");
     }
 }
