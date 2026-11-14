@@ -162,10 +162,9 @@ Commands from the repository root, `CARGO_TARGET_DIR` outside the checkout,
 | --- | --- |
 | `cargo fmt --all -- --check` | clean |
 | `cargo +1.100.0 clippy -p vesper-chorus --locked --all-targets -- -D warnings` | clean |
-| `VESPER_LEAN=… cargo test -p vesper-chorus --locked` | pending |
+| `VESPER_LEAN=… cargo test -p vesper-chorus --locked` | all pass (88 tests plus doctests, 1 ignored child) |
 | `lean ChorusQuorum/RecursiveDuality.lean` (in `lean/`) | passes, no warnings |
-| `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` | pending |
-| `VESPER_LEAN=… cargo test --workspace --locked --no-fail-fast` | pending |
+| `VESPER_LEAN=… cargo test --workspace --locked --no-fail-fast` | 4,014 passed, 17 failed in 544 binaries; every failure is environmental and outside this crate: `vesper-loom-build` `tests/build.rs` and `tests/cli.rs` (no build identity in this container) and `vesper` `tests/lean4lean42_acceptance.rs` (needs `VESPER_LEAN4LEAN42_ROOT`) |
 | `python3 tools/bazel/sync_build_files.py` | no changes |
 
 Bazel is not installed in this cloud container. The crate's `BUILD.bazel`
@@ -189,7 +188,7 @@ New tests (debug build, this container):
   as a typed error; CONNECTION_CLOSE fails a blocked receive with
   `NetFail::Closed` within a few steps, the peer records `Peer { error_code
   }`, the producer's next send fails, and other links keep working.
-- `tests/durable_log.rs` (10 tests and one child, about 2 s): CRC-32C check
+- `tests/durable_log.rs` (10 tests and one child, about 2 s; the review fixes added checks for two adjacent damaged records and an oversized snapshot): CRC-32C check
   value; a real-file round trip with truncation and compaction and typed
   invalid calls; 300 seeds × 120 random persists on `SimDisk` with power
   failures before the log sync (8,942 torn persists, 3,449 recovering a
