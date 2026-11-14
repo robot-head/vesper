@@ -9,12 +9,13 @@
 use std::path::{Path, PathBuf};
 use vesper_kinetic::lbvh::morton64;
 use vesper_kinetic::morton::{decode_masked, encode_masked};
-use vesper_kinetic::{Colorer, ConstraintBodies};
+use vesper_kinetic::soft::SoftWorld;
+use vesper_kinetic::{Colorer, ConstraintBodies, MultiColorer};
 
-const MODEL_ID: &str = "vesper.kinetic.coloring-morton-model/2";
+const MODEL_ID: &str = "vesper.kinetic.coloring-morton-model/3";
 const MODEL_CLAIM: &str =
     "Lean model of greedy colouring and Morton codes; proofs cover the model, not Rust";
-const AUDITED_THEOREMS: usize = 15;
+const AUDITED_THEOREMS: usize = 19;
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
 
 fn lean_dir() -> PathBuf {
@@ -58,6 +59,10 @@ fn lean_model_source_audit() {
         "theorem colorAll_pairwise_disjoint",
         "theorem colorAll_constraints",
         "theorem same_color_constraints_disjoint_bodies",
+        "theorem colorAllSets_pairwise_disjoint",
+        "theorem colorAllSets_constraints",
+        "theorem same_color_sets_disjoint_bodies",
+        "theorem colorAll_eq_colorAllSets",
         "theorem morton_deinterleave_interleave",
         "theorem morton_10bit_roundtrip",
         "theorem morton_10bit_injective",
@@ -254,6 +259,48 @@ fn lean_model_matches_rust_morton_and_colouring() {
         }
         push(line, want.join(" "));
     }
+    // k-body batches: random sets of 1 to 4 bodies, and the soft-body
+    // tetrahedral mesh (distance and volume constraints together).
+    let set_case =
+        |bodies: &[u32], offsets: &[u32], n: usize, push: &mut dyn FnMut(String, String)| {
+            let mut colorer = MultiColorer::new(n, offsets.len() - 1);
+            colorer.color(bodies, offsets).expect("colour sets");
+            let mut line = String::from("2");
+            let mut want = Vec::new();
+            for &i in colorer.visiting_order() {
+                let set = &bodies[offsets[i as usize] as usize..offsets[i as usize + 1] as usize];
+                line.push_str(&format!(" {}", set.len()));
+                for b in set {
+                    line.push_str(&format!(" {b}"));
+                }
+                want.push(colorer.color_of(i as usize).to_string());
+            }
+            push(line, want.join(" "));
+        };
+    for _ in 0..150 {
+        let n = 4 + (rng.next() % 28) as usize;
+        let count = (rng.next() % 40) as usize;
+        let mut bodies = Vec::new();
+        let mut offsets = vec![0u32];
+        for _ in 0..count {
+            let k = 1 + (rng.next() % 4) as usize;
+            let mut set: Vec<u32> = Vec::new();
+            while set.len() < k {
+                let b = (rng.next() % n as u64) as u32;
+                if !set.contains(&b) {
+                    set.push(b);
+                }
+            }
+            bodies.extend(set);
+            offsets.push(bodies.len() as u32);
+        }
+        set_case(&bodies, &offsets, n, &mut push);
+    }
+    let (particles, constraints) =
+        SoftWorld::tetrahedral_box([0.0; 3], 1.0, [2, 2, 2], 1.0, 0.0, 0.0).expect("mesh");
+    let world = SoftWorld::new(Default::default(), &particles, &constraints).expect("world");
+    let (bodies, offsets) = world.constraint_sets();
+    set_case(bodies, offsets, particles.len(), &mut push);
     // The LBVH's 63-bit codes against the model's 21-bit interleave.
     for (x, y, z) in [
         (0u32, 0u32, 0u32),
@@ -273,6 +320,7 @@ fn lean_model_matches_rust_morton_and_colouring() {
         push(format!("3 {x} {y} {z}"), morton64(x, y, z).to_string());
     }
     push("2 1".into(), "error".into());
+    push("2 0 3".into(), "error".into());
     push("1 3".into(), "error".into());
     let got = run_fixture(&lean, &out, &input);
     assert_eq!(got.len(), expected.len(), "one answer per case");

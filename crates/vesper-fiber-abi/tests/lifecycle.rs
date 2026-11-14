@@ -1,8 +1,9 @@
 //! Owned cancellation, shutdown and drain of native fibers.
-#![cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+//!
+//! Runs on every direct-fiber target (Linux x86_64/AArch64, macOS AArch64,
+//! Windows x86_64); kernel round trips use whichever `vesper_pulse` driver
+//! the host starts (`select::open`).
+#![cfg(vesper_direct_fibers)]
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io;
@@ -11,8 +12,9 @@ use vesper_fiber_abi::abi::exit;
 use vesper_fiber_abi::evidence::{EvidenceRegistry, EvidenceVector};
 use vesper_fiber_abi::prototype::{self, JitPrototype, OptLevel};
 use vesper_fiber_abi::pulse::{CancelPoint, Incomplete, NativeRuntime, NativeTask, TaskOwner};
-use vesper_pulse::io_driver::{IoDriver, Request};
+use vesper_pulse::io_driver::Request;
 use vesper_pulse::scheduler::{Driver, Event, Finished, PollError, Resume, Step};
+use vesper_pulse::select::{self, AnyDriver};
 
 fn setup() -> (JitPrototype, Rc<EvidenceVector>, *const u64) {
     let jit = JitPrototype::new(OptLevel::Speed).unwrap();
@@ -22,7 +24,7 @@ fn setup() -> (JitPrototype, Rc<EvidenceVector>, *const u64) {
 }
 
 fn dev_null() -> File {
-    File::open("/dev/null").unwrap()
+    vesper_fiber_abi::pulse::null_file().unwrap()
 }
 
 // ---- scheduler adapter --------------------------------------------------
@@ -86,7 +88,7 @@ impl Driver<NativeTask> for DelayedDriver {
                 continue;
             }
             let result = if self.cancelled {
-                Err(io::Error::from_raw_os_error(125))
+                Err(vesper_pulse::driver::cancelled_error())
             } else {
                 let n = self.payload.len().min(request.buffer.len());
                 request.buffer[..n].copy_from_slice(&self.payload[..n]);
@@ -401,36 +403,66 @@ fn unscoped_tasks_keep_the_v1_in_flight_cancellation_contract() {
     while !s.is_idle() {
         s.tick(false).unwrap();
     }
-    assert!(s.take_failure().unwrap().contains("code 125"));
+    assert!(s.take_failure().unwrap().contains(&format!(
+        "code {}",
+        vesper_fiber_abi::pulse::cancelled_code()
+    )));
+}
+
+/// A pipe whose read end stays pending until written: an anonymous pipe on
+/// Unix, an overlapped named pipe on Windows (IOCP completes synchronous
+/// handles inline, so an anonymous pipe would block `submit`).
+fn quiet_pipe() -> (File, File) {
+    #[cfg(unix)]
+    {
+        let (reader, writer) = std::io::pipe().unwrap();
+        (
+            File::from(std::os::fd::OwnedFd::from(reader)),
+            File::from(std::os::fd::OwnedFd::from(writer)),
+        )
+    }
+    #[cfg(windows)]
+    {
+        vesper_pulse::iocp::overlapped_pipe().unwrap()
+    }
 }
 
 #[test]
-fn kernel_cancellation_during_io_or_reported_unavailable() {
-    let driver = match IoDriver::<NativeTask>::new(8) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("io_uring unavailable on this host ({e}); kernel cancellation NOT validated");
-            return;
+fn kernel_cancellation_during_io_on_every_host_driver() {
+    let mut validated = 0;
+    for &kind in select::host_order() {
+        let driver = match AnyDriver::<NativeTask>::start(kind, 8) {
+            Ok(d) => d,
+            Err(e) => {
+                eprintln!(
+                    "{kind} unavailable on this host ({e}); kernel cancellation NOT validated"
+                );
+                continue;
+            }
+        };
+        // A pipe nobody writes to: the read stays in the kernel until
+        // cancelled.
+        let (reader, writer) = quiet_pipe();
+        let (jit, evidence, _) = setup();
+        let mut rt = NativeRuntime::new(driver);
+        let id = rt.spawn(jit.spawn_pulse_read(1, evidence).unwrap(), Some(reader));
+        for _ in 0..4 {
+            rt.tick(false).unwrap();
         }
-    };
-    // A pipe nobody writes to: the read stays in the kernel until cancelled.
-    let (reader, writer) = std::io::pipe().unwrap();
-    let file = File::from(std::os::fd::OwnedFd::from(reader));
-    let (jit, evidence, _) = setup();
-    let mut rt = NativeRuntime::new(driver);
-    let id = rt.spawn(jit.spawn_pulse_read(1, evidence).unwrap(), Some(file));
-    for _ in 0..4 {
-        rt.tick(false).unwrap();
+        assert_eq!(
+            rt.driver().pending(),
+            1,
+            "{kind}: the read must stay owned by the driver"
+        );
+        let drained = rt.shutdown(64, true).unwrap();
+        let r = &drained.records[0];
+        assert_eq!(r.fiber_id, id);
+        assert_eq!(r.cancelled, Some(CancelPoint::DuringIo), "{kind}");
+        assert_eq!(r.status, exit::CANCELLED, "{kind}");
+        assert_eq!(drained.driver.pending(), 0);
+        drop(writer);
+        eprintln!("{kind} kernel cancellation during I/O validated");
+        validated += 1;
     }
-    if rt.driver().pending() != 1 {
-        eprintln!("kernel read did not stay pending; kernel cancellation NOT validated");
-        return;
-    }
-    let drained = rt.shutdown(64, true).unwrap();
-    let r = &drained.records[0];
-    assert_eq!(r.fiber_id, id);
-    assert_eq!(r.cancelled, Some(CancelPoint::DuringIo));
-    assert_eq!(r.status, exit::CANCELLED);
-    drop(writer);
-    eprintln!("io_uring kernel cancellation during I/O validated");
+    assert!(validated > 0, "no host driver started");
 }

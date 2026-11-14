@@ -1,0 +1,6 @@
+// expect: E0763
+// at: Tensor::add(a, b)
+// message: do not broadcast
+fn f[N: dim](a: Tensor[F32, [N, 4]], b: Tensor[F32, [3]]) -> Tensor[F32, [N, 4]] eff [Tensor] {
+    Tensor::add(a, b)
+}

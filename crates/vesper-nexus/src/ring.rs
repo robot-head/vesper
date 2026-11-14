@@ -18,7 +18,8 @@
 //! * Every module importing the ring can address all of it. Slot leases stop
 //!   the *host* from granting one tenant's slot to another, but Wasm does not
 //!   stop a filter from touching other slots. Mutually distrusting tenants
-//!   need one ring each; Domain-1 hardware protection (MPK) is not exercised.
+//!   need one ring each: [`crate::tenant_ring::TenantRings`]. Domain-1
+//!   hardware protection (MPK) is not exercised.
 
 use crate::table::{LeakAuditor, Obligation, TenantId};
 use std::fmt;
@@ -445,53 +446,73 @@ impl StreamFilterBroker {
             .iter()
             .position(|t| t.tenant == lease.tenant)
             .ok_or(FilterError::UnknownTenant(lease.tenant))?;
-        if !len.is_multiple_of(RECORD_BYTES) {
-            return Err(FilterError::UnalignedInput { len });
-        }
-        let grant_offset = self.ring.grant_offset(lease);
-        self.ring.publish(
+        let t = &mut self.tenants[idx];
+        run_filter(
             &mut self.store,
+            &self.ring,
+            &t.filter,
+            t.fuel_per_call,
+            &mut t.metrics,
             lease,
             len,
             schema_id,
-            1,
             record_timestamp_ns,
-        )?;
-        let t = &mut self.tenants[idx];
-        let fuel = t.fuel_per_call;
-        self.store
-            .set_fuel(fuel)
-            .map_err(|e| FilterError::InitFailed(format!("{e:?}")))?;
-        // Grant offsets fit in i32: the ring is at most 4 GiB and slots are
-        // addressed by the guest as unsigned i32 loads.
-        let r = t.filter.call(&mut self.store, grant_offset as i32);
-        let consumed = fuel - self.store.get_fuel().unwrap_or(0).min(fuel);
-        t.metrics.fuel_consumed += consumed;
-        t.metrics.bytes_in += u64::from(len);
-        match r {
-            Ok(written)
-                if written >= 0
-                    && (written as u32) <= len
-                    && (written as u32).is_multiple_of(RECORD_BYTES) =>
-            {
-                t.metrics.udf_invocations += 1;
-                t.metrics.bytes_out += written as u64;
-                Ok(written as u32)
-            }
-            Ok(written) => {
-                t.metrics.udf_traps += 1;
-                Err(FilterError::GuestContract {
-                    returned: written,
-                    byte_len: len,
-                })
-            }
-            Err(e) => {
-                t.metrics.udf_traps += 1;
-                Err(match e.downcast_ref::<Trap>() {
-                    Some(Trap::OutOfFuel) => FilterError::OutOfFuel,
-                    _ => FilterError::GuestTrapped(format!("{e:?}")),
-                })
-            }
+        )
+    }
+}
+
+/// The body of `apply_tenant_wasm_udf` (§30.3), shared by
+/// [`StreamFilterBroker`] and [`crate::tenant_ring::TenantRings`]: publish
+/// the grant, run `filter` in place under `fuel` and account the call.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_filter(
+    store: &mut Store<()>,
+    ring: &SharedPluginRing,
+    filter: &TypedFunc<i32, i32>,
+    fuel: u64,
+    metrics: &mut TenantUdfMetrics,
+    lease: &SlotLease,
+    len: u32,
+    schema_id: u32,
+    record_timestamp_ns: u64,
+) -> Result<u32, FilterError> {
+    if !len.is_multiple_of(RECORD_BYTES) {
+        return Err(FilterError::UnalignedInput { len });
+    }
+    let grant_offset = ring.grant_offset(lease);
+    ring.publish(&mut *store, lease, len, schema_id, 1, record_timestamp_ns)?;
+    store
+        .set_fuel(fuel)
+        .map_err(|e| FilterError::InitFailed(format!("{e:?}")))?;
+    // Grant offsets fit in i32: the ring is at most 4 GiB and slots are
+    // addressed by the guest as unsigned i32 loads.
+    let r = filter.call(&mut *store, grant_offset as i32);
+    let consumed = fuel - store.get_fuel().unwrap_or(0).min(fuel);
+    metrics.fuel_consumed += consumed;
+    metrics.bytes_in += u64::from(len);
+    match r {
+        Ok(written)
+            if written >= 0
+                && (written as u32) <= len
+                && (written as u32).is_multiple_of(RECORD_BYTES) =>
+        {
+            metrics.udf_invocations += 1;
+            metrics.bytes_out += written as u64;
+            Ok(written as u32)
+        }
+        Ok(written) => {
+            metrics.udf_traps += 1;
+            Err(FilterError::GuestContract {
+                returned: written,
+                byte_len: len,
+            })
+        }
+        Err(e) => {
+            metrics.udf_traps += 1;
+            Err(match e.downcast_ref::<Trap>() {
+                Some(Trap::OutOfFuel) => FilterError::OutOfFuel,
+                _ => FilterError::GuestTrapped(format!("{e:?}")),
+            })
         }
     }
 }

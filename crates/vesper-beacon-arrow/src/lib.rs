@@ -6,10 +6,15 @@
 //! zero-allocation, fiber propagation, or performance claim is made.
 //!
 //! The [`otap`] module adds the OpenTelemetry Arrow Protocol encoding,
-//! decoding, framed transport and PII redaction boundary.
+//! decoding, framed transport and PII redaction boundary. [`otlp`] builds
+//! OTLP protobuf requests from the same data, and [`grpc`] (feature `grpc`,
+//! on by default) carries OTAP and OTLP over tonic gRPC.
 #![forbid(unsafe_code)]
 
+#[cfg(feature = "grpc")]
+pub mod grpc;
 pub mod otap;
+pub mod otlp;
 
 use arrow_array::{ArrayRef, RecordBatch, UInt64Array, UInt8Array};
 use arrow_ipc::{

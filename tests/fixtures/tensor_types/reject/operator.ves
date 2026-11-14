@@ -1,0 +1,6 @@
+// expect: E0770
+// at: a + b
+// message: not operators
+fn f(a: Tensor[F32, [4]], b: Tensor[F32, [4]]) -> Tensor[F32, [4]] {
+    a + b
+}

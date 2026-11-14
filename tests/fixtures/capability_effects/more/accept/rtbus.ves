@@ -1,0 +1,39 @@
+// The realtime bus: a realtime callback performs RtBus operations, and the
+// host handles them with clauses that are themselves realtime safe.
+linear effect RtBus {
+    fn poll_param_events(max_events: u32) -> u32;
+    fn commit_dma_output(frames: u64) -> Unit;
+}
+
+fn render(frames: u64, events: u32) -> u64 eff [Realtime] {
+    if events > 0 {
+        wrapping_add(frames, 1)
+    } else {
+        frames
+    }
+}
+
+fn callback(frames: u64) -> u64 eff [Realtime, RtBus] {
+    let events = RtBus::poll_param_events(32);
+    let out = render(frames, events);
+    RtBus::commit_dma_output(out);
+    out
+}
+
+fn count(n: u32) -> u32 eff [Realtime] {
+    if n > 4 {
+        4
+    } else {
+        n
+    }
+}
+
+fn main() -> u64 {
+    handle RtBus in {
+        callback(63)
+    } with {
+        return value => value,
+        poll_param_events(max_events, resume) => resume(count(max_events)),
+        commit_dma_output(frames, resume) => resume(()),
+    }
+}
