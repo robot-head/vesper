@@ -311,14 +311,14 @@ def audit (request : Request) : IO Json := do
 
   let replayed ← CheckedKernelReplay.replay additions base
   for (name, expected) in additions.toList do
-    let some checked := replayed.find? name |
+    let some checked := replayed.toKernelEnv.find? name |
       fail s!"kernel replay omitted declaration: {name}"
     unless sameInfo expected checked do
       fail s!"kernel replay changed declaration: {name}"
 
   let mut theoremReports : Array Json := #[]
   for name in request.theorems do
-    let some (.thmInfo checkedTheorem) := replayed.find? name |
+    let some (.thmInfo checkedTheorem) := replayed.toKernelEnv.find? name |
       fail s!"kernel replay did not retain theorem: {name}"
     let (axioms, _) ← (collectAxioms name : CoreM (Array Name)).toIO
       { fileName := "<vesper-proof-audit>", fileMap := default }
