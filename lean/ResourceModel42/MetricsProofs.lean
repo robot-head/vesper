@@ -564,4 +564,200 @@ theorem preflightPlug_error {l context hole reason}
   rw [h] at spec
   exact spec
 
+def closeList (values : List RuntimeValue) (body : RuntimeExpr) : RuntimeExpr :=
+  values.foldl (fun e v => .letE (.atom (.val v)) e) body
+
+def initialNodes (values : List RuntimeValue) : Nat :=
+  (values.map (fun v => (valueMetrics v).nodes)).sum
+
+def InputsOver (l : Limits) (total : Nat) (values : List RuntimeValue)
+    (body : RuntimeExpr) : CapacityError → Prop
+  | .initialValues => l.initialValueNodes < total + initialNodes values
+  | .inputCount => False
+  | reason => ExprExceeds l (closeList values body) reason
+
+def inputStep (l : Limits) (value : RuntimeValue) (state : MProd ExprStats Nat) :
+    Except CapacityError (ForInStep (MProd ExprStats Nat)) := do
+  let stats ← value.measure l
+  let total := state.snd + stats.nodes
+  if total > l.initialValueNodes then throw .initialValues
+  let result ← binaryStats l (valueExprStats stats) state.fst
+  pure (.yield ⟨result,total⟩)
+
+def inputLoop (l : Limits) : List RuntimeValue → MProd ExprStats Nat →
+    Except CapacityError (MProd ExprStats Nat)
+  | [],state => .ok state
+  | value::rest,state => do
+    let stats ← value.measure l
+    let total := state.snd + stats.nodes
+    if total > l.initialValueNodes then throw .initialValues
+    let result ← binaryStats l (valueExprStats stats) state.fst
+    inputLoop l rest ⟨result,total⟩
+
+theorem input_forIn (l : Limits) (values : List RuntimeValue) (state : MProd ExprStats Nat) :
+    forIn values state (inputStep l) = inputLoop l values state := by
+  induction values generalizing state with
+  | nil => rfl
+  | cons value rest ih =>
+    simp only [List.forIn_cons,inputStep,inputLoop]
+    cases hv : RuntimeValue.measure l value with
+    | error reason => simp [bind,Except.bind]
+    | ok stats =>
+      by_cases over : l.initialValueNodes < state.snd+stats.nodes
+      · simp [over,bind,Except.bind]
+      · simp only [over,↓reduceIte,bind,Except.bind,pure,Except.pure]
+        cases hb : binaryStats l (valueExprStats stats) state.fst with
+        | error reason => simp
+        | ok result => simpa [hb,bind,Except.bind] using ih (MProd.mk result _)
+
+theorem input_preflight_eq (l : Limits) (values : Array RuntimeValue) (body : RuntimeExpr) :
+    preflightInputs l values body = (do
+      if values.size > l.inputs then throw .inputCount
+      let stats ← body.measure l
+      let result ← inputLoop l values.toList ⟨stats,0⟩
+      pure result.fst) := by
+  unfold preflightInputs
+  have same : (fun value state => do
+      let stats ← value.measure l
+      let total := state.snd + stats.nodes
+      if total > l.initialValueNodes then throw .initialValues
+      let result ← binaryStats l (valueExprStats stats) state.fst
+      pure PUnit.unit
+      pure (ForInStep.yield (MProd.mk result total))) = inputStep l := by
+    funext value state
+    cases hv : RuntimeValue.measure l value with
+    | error reason => simp [inputStep,hv,bind,Except.bind]
+    | ok stats =>
+      by_cases over : l.initialValueNodes < state.snd+stats.nodes <;>
+        simp [inputStep,hv,over,bind,Except.bind,pure,Except.pure]
+  simp only [same,← Array.forIn_toList,input_forIn]
+
+theorem closeList_cons (v : RuntimeValue) (vs : List RuntimeValue) (body : RuntimeExpr) :
+    closeList (v::vs) body = closeList vs (.letE (.atom (.val v)) body) := rfl
+
+theorem initialNodes_cons (v : RuntimeValue) (vs : List RuntimeValue) :
+    initialNodes (v::vs) = (valueMetrics v).nodes + initialNodes vs := rfl
+
+theorem wrapper_over {l body reason} (h : ExprExceeds l body reason) (v : RuntimeValue) :
+    ExprExceeds l (.letE (.atom (.val v)) body) reason := by
+  cases reason <;> simp_all [ExprExceeds,ExprOverAt,exprMetrics,binaryMetrics] <;> omega
+
+theorem closeList_over {l body reason} (h : ExprExceeds l body reason) (vs : List RuntimeValue) :
+    ExprExceeds l (closeList vs body) reason := by
+  induction vs generalizing body with
+  | nil => exact h
+  | cons v rest ih => exact ih (wrapper_over h v)
+
+theorem input_value_over {l v reason} (h : ValueExceeds l v reason) (body : RuntimeExpr) :
+    ExprExceeds l (.letE (.atom (.val v)) body) reason := by
+  have hv := value_over_atom h l.runtimeDepth
+  cases reason <;> simp_all [ExprExceeds,ExprOverAt,exprMetrics,binaryMetrics] <;> omega
+
+def InputLoopResult (l : Limits) (values : List RuntimeValue) (body : RuntimeExpr) (total : Nat) :
+    Except CapacityError (MProd ExprStats Nat) → Prop
+  | .ok state => state.fst = exprMetrics (closeList values body) ∧ Within l state.fst ∧
+      state.snd = total + initialNodes values ∧ state.snd ≤ l.initialValueNodes
+  | .error reason => InputsOver l total values body reason
+
+theorem actual_over_inputs {l total values body reason}
+    (h : ExprExceeds l (closeList values body) reason) : InputsOver l total values body reason := by
+  cases reason <;> simp_all [InputsOver,ExprExceeds,ExprOverAt]
+
+theorem inputLoop_spec (l : Limits) (values : List RuntimeValue) (body : RuntimeExpr) (total : Nat)
+    (within : Within l (exprMetrics body)) (budget : total ≤ l.initialValueNodes) :
+    InputLoopResult l values body total (inputLoop l values ⟨exprMetrics body,total⟩) := by
+  induction values generalizing body total with
+  | nil => exact ⟨rfl,within,by simp [initialNodes],budget⟩
+  | cons v rest ih =>
+    cases hv : RuntimeValue.measure l v with
+    | error reason =>
+      have over := closeList_over (input_value_over (measureValue_error hv) body) rest
+      have actual : InputsOver l total (v::rest) body reason :=
+        actual_over_inputs (by simpa [closeList_cons] using over)
+      simpa [inputLoop,hv,bind,Except.bind,InputLoopResult] using actual
+    | ok stats =>
+      obtain ⟨rfl,_⟩ := measureValue_ok hv
+      by_cases over : l.initialValueNodes < total+(valueMetrics v).nodes
+      · simp only [inputLoop,hv,over,↓reduceIte,bind,Except.bind,InputLoopResult,InputsOver]
+        simp only [initialNodes_cons]
+        omega
+      · simp only [inputLoop,hv,over,↓reduceIte,bind,Except.bind,pure,Except.pure]
+        cases hb : binaryStats l (valueExprStats (valueMetrics v)) (exprMetrics body) with
+        | error reason =>
+          have excess := checkExprStats_error hb l.runtimeDepth
+          have final := closeList_over (body := .letE (.atom (.val v)) body) excess rest
+          have actual : InputsOver l total (v::rest) body reason :=
+            actual_over_inputs (by simpa [closeList_cons] using final)
+          exact actual
+        | ok result =>
+          obtain ⟨rfl,bounded⟩ := checkExprStats_ok hb
+          have spec := ih (.letE (.atom (.val v)) body) (total+(valueMetrics v).nodes) bounded (by omega)
+          change InputLoopResult l (v::rest) body total
+            (inputLoop l rest ⟨exprMetrics (.letE (.atom (.val v)) body),total+(valueMetrics v).nodes⟩)
+          cases hr : inputLoop l rest
+            ⟨exprMetrics (.letE (.atom (.val v)) body),total+(valueMetrics v).nodes⟩ with
+          | error reason =>
+            rw [hr] at spec
+            cases reason <;>
+              simpa [InputLoopResult,InputsOver,initialNodes_cons,closeList_cons,Nat.add_assoc] using spec
+          | ok state =>
+            rw [hr] at spec
+            obtain ⟨exactStats,exactWithin,exactTotal,totalWithin⟩ := spec
+            exact ⟨exactStats,exactWithin,by simpa [initialNodes_cons,Nat.add_assoc] using exactTotal,totalWithin⟩
+
+/-- Initial admission errors describe actual requested input count, aggregate
+value expansion, or the whole expression with every pure input let included. -/
+def InitialExceeds (l : Limits) (values : Array RuntimeValue) (body : RuntimeExpr) :
+    CapacityError → Prop
+  | .inputCount => l.inputs < values.size
+  | .initialValues => l.initialValueNodes < initialNodes values.toList
+  | reason => ExprExceeds l (closeInputs values body) reason
+
+def InitialResult (l : Limits) (values : Array RuntimeValue) (body : RuntimeExpr) :
+    Except CapacityError ExprStats → Prop
+  | .ok result => result = exprMetrics (closeInputs values body) ∧ Within l result ∧
+      values.size ≤ l.inputs ∧ initialNodes values.toList ≤ l.initialValueNodes
+  | .error reason => InitialExceeds l values body reason
+
+theorem preflightInputs_spec (l : Limits) (values : Array RuntimeValue) (body : RuntimeExpr) :
+    InitialResult l values body (preflightInputs l values body) := by
+  rw [input_preflight_eq]
+  by_cases count : l.inputs < values.size
+  · simp [count,bind,Except.bind,InitialResult,InitialExceeds]
+  · simp only [count,↓reduceIte,bind,Except.bind,pure,Except.pure]
+    cases hb : RuntimeExpr.measure l body with
+    | error reason =>
+      have actual := closeList_over (measureExpr_error hb) values.toList
+      cases reason <;>
+        simpa [InitialResult,InitialExceeds,closeInputs,closeList,ExprExceeds,ExprOverAt] using actual
+    | ok stats =>
+      obtain ⟨rfl,bounded⟩ := measureExpr_ok hb
+      have spec := inputLoop_spec l values.toList body 0 bounded (by omega)
+      simp only [bind,Except.bind]
+      cases hi : inputLoop l values.toList ⟨exprMetrics body,0⟩ with
+      | error reason =>
+        rw [hi] at spec
+        cases reason <;>
+          simpa [InitialResult,InitialExceeds,InputLoopResult,InputsOver,closeInputs,closeList,hi,bind,Except.bind] using spec
+      | ok result =>
+        rw [hi] at spec
+        obtain ⟨exactStats,exactWithin,exactTotal,totalWithin⟩ := spec
+        simp only [bind,Except.bind,InitialResult]
+        exact ⟨exactStats,exactWithin,by omega,by omega⟩
+
+theorem preflightInputs_ok {l values body result}
+    (h : preflightInputs l values body = .ok result) :
+    result = exprMetrics (closeInputs values body) ∧ Within l result ∧
+    values.size ≤ l.inputs ∧ initialNodes values.toList ≤ l.initialValueNodes := by
+  have spec := preflightInputs_spec l values body
+  rw [h] at spec
+  exact spec
+
+theorem preflightInputs_error {l values body reason}
+    (h : preflightInputs l values body = .error reason) :
+    InitialExceeds l values body reason := by
+  have spec := preflightInputs_spec l values body
+  rw [h] at spec
+  exact spec
+
 end Vesper.ResourceModel42.MetricsProofs
