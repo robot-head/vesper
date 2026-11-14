@@ -913,6 +913,34 @@ fn hostile_peers_use_production_process_and_cannot_return_mathematical_evidence(
             "bounded cleanup for {kind}"
         );
     }
+    #[cfg(unix)]
+    {
+        let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/resource_oracle42/bye_eof_stall.sh");
+        let mut command = Command::new("sh");
+        command.arg(script).arg(&binary);
+        let started = Instant::now();
+        let cleanup_failures = process::cleanup_failures();
+        let error = process::test_transport_failure(
+            command,
+            &[],
+            HarnessLimits {
+                request_timeout_ms: 300,
+                shutdown_timeout_ms: 300,
+                ..HarnessLimits::default()
+            },
+        );
+        assert_eq!(
+            error.kind,
+            HarnessErrorKind::Timeout,
+            "BYE and stdout EOF do not prove process retirement"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "shutdown retains finite kill/reap/join allowance"
+        );
+        assert_eq!(process::cleanup_failures(), cleanup_failures);
+    }
     let mut blocked = request("unit");
     // Sixty-four independent balanced trees use 131,008 rows, below the
     // 131,072-row aggregate cap, and exceed ordinary OS pipe capacity.

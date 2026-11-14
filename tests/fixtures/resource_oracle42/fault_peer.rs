@@ -35,7 +35,12 @@ fn main() {
         std::thread::sleep(Duration::from_secs(10));
         return;
     }
-    if kind == "bad_bye" || kind == "trailing" || kind == "exit_failure" || kind == "no_bye" {
+    if kind == "bad_bye"
+        || kind == "trailing"
+        || kind == "exit_failure"
+        || kind == "no_bye"
+        || kind == "bye_only"
+    {
         let mut input = Vec::new();
         io::stdin().read_to_end(&mut input).unwrap();
         assert!(input.is_empty());
