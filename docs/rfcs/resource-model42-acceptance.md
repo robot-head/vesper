@@ -1,8 +1,8 @@
 # Executable resource model: independent acceptance (#322)
 
-## Design checkpoint, not executed evidence
+## Scope and initial design checkpoint
 
-This lane owns only `lean/ResourceModel42/Acceptance.lean`, `tests/resource_model42.rs`, and this report. The published contract is `ddf5d6c`, frozen against main `30de7fef8be040a890e34f26370ee15b1429642e` and specification snapshot `8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d`. At this checkpoint only this design report has been written. No Lean/Rust implementation, model compilation, Cargo command, CLI probe, kernel audit or external replay was executed by this lane. Source authoring waits for the syntax writer's first coherent API checkpoint.
+This lane owns only `lean/ResourceModel42/Acceptance.lean`, `tests/resource_model42.rs`, and this report. The published contract is `ddf5d6c`, frozen against main `30de7fef8be040a890e34f26370ee15b1429642e` and specification snapshot `8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d`, with subsequent coordinator clarifications. The initial design commits `c27e30e`/`84b8e23` contained only this report and claimed no code or execution. Source authoring began only after the coherent compiled syntax checkpoint `d51a21b` was published and authorized.
 
 This is a finite logical reference model, not an observation adapter. Its own Mint/Consume trace is not a native or evaluator backend trace. Existing runtime-provider, arithmetic-campaign and external Lean4Lean results do not establish this new model's correctness or coverage.
 
@@ -57,4 +57,8 @@ Cargo/Bazel discovers the new integration target, but existing BUILD/CI ownershi
 
 ## Current status
 
-Design only. The syntax API checkpoint, implemented theorem catalog, semantic assertions and real compile/replay results are pending. No source/test/artifact success is claimed by this document.
+The writer imported syntax `d51a21b` and checker `b9ce0c0` as dependency copies, not owned implementation work. The first owned acceptance checkpoint contains **28** explicitly named admission/type/metric/substitution assertions against the actual Syntax API. Their computed equalities use `rfl`; they do not assume a nonexistent `DecidableEq (Except ...)` instance or copy any unexecuted scratch smoke result.
+
+Under a coordinator-granted short exclusive Lean lease, the writer copied the fixed handwritten acceptance file into `/tmp/resource-model42-acceptance-syntax-nVXK0M/ResourceModel42/Acceptance.lean` and executed the actual `/home/agent/.local/share/vesper-lean/bin/lean -j1 -M4096 -o ResourceModel42/Acceptance.olean ResourceModel42/Acceptance.lean`, with `LEAN_PATH=/tmp/resource-model42-syntax-api-d51a21b` and `LEAN_NUM_THREADS=1`. The immutable import root contains the syntax owner's actual compiled Full/Syntax dependencies. Initial compilation reported only elaborator recursion-depth limits. The owned test file now uses fixed `maxRecDepth 8192`; model admission/execution limits were unchanged. The retry exited zero in 0.75s with empty output, compiling all 28 named assertions. Log: `/tmp/resource-model42-acceptance-syntax.log`. The lease was released promptly afterward. An earlier message estimated 29 cases; the actual source inventory is 28 and this report uses that count.
+
+Checker/evaluator semantic cases, the remaining proof catalog and Rust compile/replay/policy target are still being authored. No separate `proof-audit`, Cargo command, native/backend resource observation, external resource-model replay or large campaign has been run by this lane. The 28 compiled assertions are not a completed model-soundness or full integration claim.
