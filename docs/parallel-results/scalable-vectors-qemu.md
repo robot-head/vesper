@@ -104,7 +104,7 @@ cargo +1.100.0 clippy -p vesper-simd -p vesper-serde --all-targets --locked \
   -- -D warnings                                             # ok, all three
 cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings
 cargo test --workspace --locked
-# QEMU matrix as in the workflow, release builds: vvec 5/5 and simd_scalable
+# QEMU matrix as in the workflow, release builds: vvec 7/7 and simd_scalable
 # 8/8 at each of the nine lengths above.
 ```
 

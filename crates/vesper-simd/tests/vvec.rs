@@ -40,10 +40,37 @@ fn random_mask<P: IsaProfile>(p: P, rng: &mut Rng) -> VMask<P> {
     let mut m = VMask::none(p);
     for i in 0..p.lanes() {
         if rng.next() & 3 != 0 {
-            m = m.or(p.active_mask(i, i + 1).and_not(p.active_mask(0, i)));
+            m = m.or(p.active_mask(0, i + 1).and_not(p.active_mask(0, i)));
         }
     }
     m
+}
+
+#[test]
+fn random_masks_cover_every_lane() {
+    let p = Scalar::new(100).unwrap();
+    let mut rng = Rng(5);
+    let mut seen = VMask::none(p);
+    let mut holes = false;
+    for _ in 0..32 {
+        let m = random_mask(p, &mut rng);
+        holes |= m.any() && m.count_ones() < m.last_active().unwrap() + 1;
+        seen = seen.or(m);
+    }
+    assert_eq!(seen, VMask::all(p));
+    assert!(holes, "random masks must leave inactive holes");
+}
+
+#[test]
+fn mask_ops_across_scalar_widths_keep_the_left_profile() {
+    let narrow = Scalar::new(1).unwrap();
+    let wide = Scalar::new(2).unwrap();
+    let m = VMask::none(narrow).or(VMask::all(wide));
+    assert_eq!(m.count_ones(), 1);
+    assert_eq!(m, VMask::all(narrow));
+    assert_eq!(m.xor(VMask::all(wide)).count_ones(), 0);
+    let v = VVec::load_masked(&[10, 20], 0, &m, 0).unwrap();
+    assert_eq!(v.as_slice(), &[10]);
 }
 
 fn vec_of<P: IsaProfile>(p: P, bytes: &[u8]) -> VVec<P> {

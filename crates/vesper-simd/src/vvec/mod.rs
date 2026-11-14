@@ -395,10 +395,15 @@ impl<P: IsaProfile> VMask<P> {
             .find(|(_, w)| **w != 0)
             .map(|(i, w)| i * 64 + 63 - w.leading_zeros() as usize)
     }
+    /// Combine lane-wise, keeping `self`'s profile. Two scalar profiles of
+    /// different widths share a type, so the result is clipped to `self`'s
+    /// lanes to keep the invariant that no bit lies past them.
     fn zip(self, other: Self, f: impl Fn(u64, u64) -> u64) -> Self {
+        let mut keep = [0u64; MASK_WORDS];
+        prefix_bits(self.profile.lanes(), &mut keep);
         let mut bits = self.bits;
-        for (a, b) in bits.iter_mut().zip(other.bits) {
-            *a = f(*a, b);
+        for ((a, b), k) in bits.iter_mut().zip(other.bits).zip(keep) {
+            *a = f(*a, b) & k;
         }
         Self { bits, ..self }
     }
