@@ -2,7 +2,8 @@
 #![allow(dead_code)]
 
 use vesper_crucible::{
-    Footprint, IoRequest, IoResult, PropError, SimFiber, SimStep, SplitMix64, StepCx, Wake,
+    Footprint, IoChoices, IoRequest, IoResult, PropError, SimFiber, SimStep, SplitMix64, StepCx,
+    Wake,
 };
 
 // ---------------------------------------------------------------------------
@@ -119,7 +120,7 @@ pub fn applied_once(w: &Rpc) -> Result<(), PropError> {
 // wake reason, virtual time) into a per-fiber accumulator so that the final
 // world distinguishes schedules whose order matters.
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Op {
     Read(u64),
     Write(u64),
@@ -132,7 +133,27 @@ pub enum Op {
     Sleep(u64),
     Scheduled(u64),
     External(u64),
+    /// Park on external I/O whose result the explorer chooses from
+    /// `CHOICES` (success, an error, or cancelled).
+    ExternalChoice,
+    /// Spawn a child fiber running `[Update(c), Read(c)]`.
+    Spawn(u64),
+    /// Request cancellation of fiber `t`. A fiber that sees a cancellation
+    /// request on a step stops there (finishes) instead of running its op.
+    Cancel(usize),
 }
+
+pub fn choices() -> IoChoices {
+    IoChoices::new(&[
+        IoResult::Success { bytes: 1 },
+        IoResult::Error { code: 5 },
+        IoResult::Cancelled,
+    ])
+    .unwrap()
+}
+
+/// Room for spawned fibers' accumulators.
+pub const SPARE_ACCS: usize = 16;
 
 pub const CELLS: u64 = 3;
 
@@ -146,6 +167,19 @@ pub struct OpFiber {
     pub id: usize,
     pub ops: Vec<Op>,
     pub pc: usize,
+    pub child: Option<Box<OpFiber>>,
+}
+
+impl OpFiber {
+    /// Everything that determines this fiber's future (for state caching).
+    pub fn key(&self) -> (usize, usize, Vec<Op>) {
+        (self.id, self.pc, self.ops.clone())
+    }
+}
+
+/// A state-caching key for `Cells` programs.
+pub fn cells_key(w: &Cells, fibers: &[OpFiber]) -> (Cells, Vec<(usize, usize, Vec<Op>)>) {
+    (w.clone(), fibers.iter().map(OpFiber::key).collect())
 }
 
 fn mix(a: u64, b: u64) -> u64 {
@@ -166,8 +200,14 @@ impl SimFiber<Cells> for OpFiber {
         match self.ops.get(self.pc) {
             Some(Op::Read(c) | Op::Check(c)) => fp.read(*c),
             Some(Op::Write(c) | Op::Update(c)) => fp.write(*c),
+            Some(Op::Spawn(_)) => fp.spawn(),
+            Some(Op::Cancel(t)) => fp.cancel(*t),
             _ => fp,
         }
+    }
+
+    fn take_spawned(&mut self) -> Option<Self> {
+        self.child.take().map(|b| *b)
     }
 
     fn step(&mut self, w: &mut Cells, cx: &mut StepCx) -> Result<SimStep, PropError> {
@@ -184,6 +224,11 @@ impl SimFiber<Cells> for OpFiber {
             },
         };
         w.acc[me] = mix(mix(w.acc[me], reason), cx.now_ns());
+        if cx.cancel_requested() {
+            w.acc[me] = mix(w.acc[me], 77);
+            self.pc = self.ops.len();
+            return Ok(SimStep::Done);
+        }
         let op = self.ops[self.pc];
         self.pc += 1;
         let tag = (me as u64 + 1) * 1000 + self.pc as u64;
@@ -220,6 +265,22 @@ impl SimFiber<Cells> for OpFiber {
             Op::External(bytes) => SimStep::Io(IoRequest::External {
                 result: IoResult::Success { bytes },
             }),
+            Op::ExternalChoice => SimStep::Io(IoRequest::ExternalChoice(choices())),
+            Op::Spawn(c) => {
+                let id = cx.spawn();
+                w.acc[me] = mix(w.acc[me], id as u64);
+                self.child = Some(Box::new(OpFiber {
+                    id,
+                    ops: vec![Op::Update(c), Op::Read(c)],
+                    pc: 0,
+                    child: None,
+                }));
+                SimStep::Yield
+            }
+            Op::Cancel(t) => {
+                cx.request_cancel(t);
+                SimStep::Yield
+            }
         };
         Ok(if self.pc == self.ops.len() && next == SimStep::Yield {
             SimStep::Done
@@ -262,11 +323,45 @@ pub fn random_program(seed: u64, fibers: usize, max_ops: usize) -> Vec<Vec<Op>> 
         .collect()
 }
 
+/// Like `random_program`, with spawns, cancellation requests (of fibers
+/// `0..fibers`) and external I/O whose result the explorer chooses.
+pub fn random_program_ext(seed: u64, fibers: usize, max_ops: usize) -> Vec<Vec<Op>> {
+    let mut rng = SplitMix64(seed ^ 0x005e_ed0f_d90e);
+    (0..fibers)
+        .map(|_| {
+            let n = 1 + rng.index(max_ops);
+            let mut ops: Vec<Op> = (0..n)
+                .map(|_| {
+                    let cell = rng.below_inclusive(CELLS - 1);
+                    match rng.index(12) {
+                        0 => Op::Read(cell),
+                        1 | 2 => Op::Write(cell),
+                        3 => Op::Update(cell),
+                        4 => Op::Check(cell),
+                        5 => Op::Sleep(1 + rng.below_inclusive(1) * 10),
+                        6 => Op::External(rng.below_inclusive(2)),
+                        7 | 8 => Op::ExternalChoice,
+                        9 | 10 => Op::Spawn(cell),
+                        _ => Op::Cancel(rng.index(fibers)),
+                    }
+                })
+                .collect();
+            if matches!(
+                ops.last(),
+                Some(Op::Sleep(_) | Op::Scheduled(_) | Op::External(_) | Op::ExternalChoice)
+            ) {
+                ops.push(Op::Local);
+            }
+            ops
+        })
+        .collect()
+}
+
 pub fn build(program: &[Vec<Op>]) -> (Cells, Vec<OpFiber>) {
     (
         Cells {
             cells: vec![0; CELLS as usize],
-            acc: vec![0; program.len()],
+            acc: vec![0; program.len() + SPARE_ACCS],
         },
         program
             .iter()
@@ -275,6 +370,7 @@ pub fn build(program: &[Vec<Op>]) -> (Cells, Vec<OpFiber>) {
                 id,
                 ops: ops.clone(),
                 pc: 0,
+                child: None,
             })
             .collect(),
     )
