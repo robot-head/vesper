@@ -29,8 +29,10 @@
 //! without any flag.
 //!
 //! Findings name source functions (instance keys) and carry the source span
-//! of the function. Instruction-level source spans are not available: the
-//! backend does not attach source locations to Cranelift instructions.
+//! of the function. When a verifier names an instruction, the finding also
+//! carries the source byte offset the backend attached to that Cranelift
+//! instruction ([`crate::native::source_offset`], lane 23, #346), and
+//! [`render`] points at it instead of at the function.
 use crate::{check::World, native::EmittedFunction, stack_bound};
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -229,6 +231,30 @@ pub struct NativeFinding {
     pub message: String,
     /// Byte span of the source function, when it is a source function.
     pub span: Option<(usize, usize)>,
+    /// Source byte offset of the instruction `inst` names, when the backend
+    /// attached one: the start of the Place-IR instruction or source
+    /// expression the Cranelift instruction was lowered from.
+    pub location: Option<usize>,
+}
+
+/// The Cranelift instruction a verifier's index names. Vault and the stack
+/// analysis report entity indices (`Inst::as_u32`); Resonance and Kinetic
+/// report positions in layout order.
+fn verifier_inst(
+    verifier: NativeVerifier,
+    function: &cranelift_codegen::ir::Function,
+    index: u32,
+) -> Option<cranelift_codegen::ir::Inst> {
+    match verifier {
+        NativeVerifier::ConstTime | NativeVerifier::Stack => {
+            Some(cranelift_codegen::ir::Inst::from_u32(index))
+        }
+        NativeVerifier::Realtime | NativeVerifier::DetFloat => function
+            .layout
+            .blocks()
+            .flat_map(|b| function.layout.block_insts(b))
+            .nth(index as usize),
+    }
 }
 
 /// Result of [`verify_emitted`].
@@ -461,7 +487,20 @@ pub fn verify_emitted(
         stack: None,
         notes: Vec::new(),
     };
-    let span_of = |key: &str| world.functions.get(key).map(|f| (f.span.start, f.span.end));
+    let by_key: BTreeMap<&str, &EmittedFunction> =
+        functions.iter().map(|f| (f.key.as_str(), f)).collect();
+    let span_of = |key: &str| {
+        let source = by_key.get(key).map_or(key, |f| f.source.as_str());
+        world
+            .functions
+            .get(source)
+            .map(|f| (f.span.start, f.span.end))
+    };
+    let location_of = |verifier: NativeVerifier, key: &str, inst: Option<u32>| {
+        let emitted = by_key.get(key)?;
+        let inst = verifier_inst(verifier, &emitted.function, inst?)?;
+        crate::native::source_offset(&emitted.function, inst)
+    };
     let push = |report: &mut NativeVerifierReport,
                 verifier: NativeVerifier,
                 function: &str,
@@ -470,6 +509,7 @@ pub fn verify_emitted(
                 message: String| {
         let function = names.source(function);
         let span = span_of(&function);
+        let location = location_of(verifier, &function, inst);
         report.findings.push(NativeFinding {
             verifier,
             function,
@@ -477,10 +517,9 @@ pub fn verify_emitted(
             rule: rule.to_string(),
             message,
             span,
+            location,
         });
     };
-    let by_key: BTreeMap<&str, &EmittedFunction> =
-        functions.iter().map(|f| (f.key.as_str(), f)).collect();
 
     if verifiers.contains(&NativeVerifier::ConstTime) {
         if policy.const_time.is_empty() {
@@ -492,15 +531,9 @@ pub fn verify_emitted(
             let emitted = by_key.get(name.as_str()).ok_or_else(|| {
                 format!("verifier policy: const_time names '{name}', which was not emitted")
             })?;
-            let source = world
-                .functions
-                .get(name)
-                .ok_or_else(|| format!("verifier policy: '{name}' is not a source function"))?;
-            if !source.generics.is_empty() {
-                return Err(format!(
-                    "verifier policy: const_time on generic function '{name}' is not supported"
-                ));
-            }
+            // The instance's concrete parameter types decide which
+            // parameters are passed by pointer (generic instances included).
+            let source = emitted.instance(world)?;
             let sret = usize::from(crate::layout::Layout::of(world, &source.result)?.aggregate());
             let mut ct = vesper_vault::CtPolicy::default();
             for secret in &entry.secret {
@@ -743,25 +776,37 @@ pub fn render(report: &NativeVerifierReport, file: &str, source: &str) -> String
         out.push_str(&stack_bound::render(stack));
     }
     for f in &report.findings {
-        let location = f.span.map_or_else(String::new, |(start, end)| {
-            // Function spans include leading comments; point at the item.
-            let mut start = start.min(source.len());
-            let end = end.min(source.len()).max(start);
-            while let Some(rest) = source.get(start..end) {
-                let trimmed = rest.trim_start();
-                let skipped = rest.len() - trimmed.len();
-                if trimmed.starts_with("//") {
-                    start += skipped + trimmed.find('\n').map_or(trimmed.len(), |n| n + 1);
-                } else {
-                    start += skipped;
-                    break;
-                }
-            }
+        let at = |offset: usize| {
+            let start = offset.min(source.len());
+            let start = (0..=start)
+                .rev()
+                .find(|&i| source.is_char_boundary(i))
+                .unwrap_or(0);
             let before = &source[..start];
             let line = before.matches('\n').count() + 1;
             let column = before.rsplit('\n').next().map_or(0, |l| l.chars().count()) + 1;
             format!("{file}:{line}:{column}: ")
-        });
+        };
+        let location = if let Some(offset) = f.location {
+            at(offset)
+        } else {
+            f.span.map_or_else(String::new, |(start, end)| {
+                // Function spans include leading comments; point at the item.
+                let mut start = start.min(source.len());
+                let end = end.min(source.len()).max(start);
+                while let Some(rest) = source.get(start..end) {
+                    let trimmed = rest.trim_start();
+                    let skipped = rest.len() - trimmed.len();
+                    if trimmed.starts_with("//") {
+                        start += skipped + trimmed.find('\n').map_or(trimmed.len(), |n| n + 1);
+                    } else {
+                        start += skipped;
+                        break;
+                    }
+                }
+                at(start)
+            })
+        };
         let inst = f.inst.map_or_else(String::new, |i| format!(" (inst {i})"));
         out.push_str(&format!(
             "{location}error[{}/{}]: {}{inst}: {}\n",
@@ -835,7 +880,7 @@ fn not_emitted(world: &World, name: &str) -> String {
     });
     if inlined {
         format!(
-            "'{name}' is specialized into its callers (its row has non-capability effects or it takes or returns a function value); its code is checked only inside callers that carry the same capability"
+            "'{name}' is specialized into its callers (its row has non-capability effects other than Fail, or it returns a function value, or a function-value argument is not a top-level function); its code is checked only inside callers that carry the same capability"
         )
     } else {
         format!("'{name}' is not reachable from the entry and was not compiled")
@@ -850,8 +895,9 @@ fn not_emitted(world: &World, name: &str) -> String {
 /// - `eff [ConstTime]`: one `const_time` entry per emitted function, with its
 ///   secret-typed parameters (`Secret[T]`, `SecU64`, ...) as `secret`, its
 ///   declassification-gate callees as `declassify` and its other (ConstTime)
-///   callees as `constant_time_callees`. Generic ConstTime functions are
-///   reported, not checked.
+///   callees as `constant_time_callees`. A generic ConstTime function gets
+///   one entry per emitted instance, checked with that instance's concrete
+///   parameter layouts.
 /// - `eff [Realtime]`: every emitted realtime function is a realtime root
 ///   (the source roots are a subset, and a root that was specialized into
 ///   its caller has no function to start from), with its `Realtime` effect;
@@ -861,7 +907,7 @@ fn not_emitted(world: &World, name: &str) -> String {
 ///
 /// Returns the policy, notes about capability functions that could not be
 /// checked on their own, and findings for capability functions the backend
-/// cannot check at all (reachable generic ConstTime functions).
+/// cannot check at all (ConstTime closures in non-ConstTime functions).
 pub fn policy_from_capabilities(
     world: &World,
     functions: &[EmittedFunction],
@@ -884,7 +930,6 @@ fn derive_policy(
     let mut policy = base.clone();
     let mut notes = Vec::new();
     let mut findings = Vec::new();
-    let emitted: BTreeSet<&str> = functions.iter().map(|f| f.key.as_str()).collect();
     // Source callee names -> the emitted instance keys of those functions
     // (a callee that was specialized into its caller has none).
     let keep_emitted = |list: &[String]| -> Vec<String> {
@@ -901,26 +946,9 @@ fn derive_policy(
             .functions
             .get(&ct.function)
             .ok_or_else(|| format!("capability policy names unknown function '{}'", ct.function))?;
-        if !source.generics.is_empty() {
-            // Reachable generic instances cannot be checked: the parameter
-            // mapping needs concrete layouts. Reject rather than pass.
-            if !instances_of(functions, &ct.function).is_empty() {
-                findings.push(NativeFinding {
-                    verifier: NativeVerifier::ConstTime,
-                    function: ct.function.clone(),
-                    inst: None,
-                    rule: "capability.generic-unsupported".into(),
-                    message: "eff [ConstTime] on a generic function is not checked by the backend verifier yet; make the function concrete".into(),
-                    span: Some((source.span.start, source.span.end)),
-                });
-            }
-            continue;
-        }
-        if !emitted.contains(ct.function.as_str()) {
+        let instances = instances_of(functions, &ct.function);
+        if instances.is_empty() {
             notes.push(format!("const-time: {}", not_emitted(world, &ct.function)));
-            continue;
-        }
-        if policy.const_time.contains_key(&ct.function) {
             continue;
         }
         let secret = ct
@@ -932,14 +960,45 @@ fn derive_policy(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        policy.const_time.insert(
-            ct.function.clone(),
-            ConstTimeEntry {
-                secret,
-                declassify: keep_emitted(&ct.declassify_callees),
-                constant_time_callees: keep_emitted(&ct.constant_time_callees),
-            },
-        );
+        // One entry per emitted instance: a generic ConstTime function is
+        // checked at each instance, whose concrete layouts the backend
+        // exposes through `EmittedFunction::instance`.
+        for f in instances {
+            if policy.const_time.contains_key(&f.key)
+                || (f.key != ct.function && policy.const_time.contains_key(&ct.function))
+            {
+                continue;
+            }
+            // A function-value instance calls its bound functions directly.
+            // The source walk sees those calls as calls through a parameter,
+            // so it lists none of them; trust the bound ConstTime functions
+            // the same way as direct ConstTime callees (declassification
+            // gates as declassify).
+            let mut declassify = ct.declassify_callees.clone();
+            let mut trusted = ct.constant_time_callees.clone();
+            for bound in crate::native::function_arguments(&f.vars).into_values() {
+                let constant_time = world.functions.get(&bound).is_some_and(|b| {
+                    crate::capability_effects::capabilities(&b.effects)
+                        .contains(&crate::capability_effects::Capability::ConstTime)
+                });
+                if !constant_time {
+                    continue;
+                }
+                if crate::capability_effects::is_declassify_gate(&bound) {
+                    declassify.push(bound);
+                } else {
+                    trusted.push(bound);
+                }
+            }
+            policy.const_time.insert(
+                f.key.clone(),
+                ConstTimeEntry {
+                    secret: secret.clone(),
+                    declassify: keep_emitted(&declassify),
+                    constant_time_callees: keep_emitted(&trusted),
+                },
+            );
+        }
     }
 
     let rt_effect = crate::capability_effects::Capability::Realtime.name();
@@ -1014,6 +1073,7 @@ fn derive_policy(
                         rule: "capability.closure-unsupported".into(),
                         message: "an eff [ConstTime] closure is specialized into this function, which is not ConstTime; the backend cannot tell which of its values are secret. Move the closure body into a named ConstTime function".into(),
                         span: Some((f.span.start, f.span.end)),
+                        location: None,
                     }),
                     Capability::Realtime => {
                         notes.push(format!(
