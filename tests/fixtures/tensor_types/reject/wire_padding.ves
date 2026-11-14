@@ -1,0 +1,11 @@
+// expect: E0767
+// at: wire struct Padded
+// message: add explicit ZeroPad[1]
+wire struct Padded {
+    tag: u8,
+    flags: u16le,
+    value: u32,
+}
+fn main() -> u64 {
+    0
+}

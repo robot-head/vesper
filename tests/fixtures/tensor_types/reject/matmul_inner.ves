@@ -1,0 +1,6 @@
+// expect: E0763
+// at: Tensor::matmul(x, w)
+// message: inner dimensions differ
+fn f(x: Tensor[F32, [2, 3]], w: Tensor[F32, [4, 2]]) -> Tensor[F32, [2, 2]] eff [Tensor] {
+    Tensor::matmul(x, w)
+}

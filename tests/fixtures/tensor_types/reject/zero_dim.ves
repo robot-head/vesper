@@ -1,0 +1,6 @@
+// expect: E0762
+// at: x: Tensor[F32, [0, 4]]
+// message: dimensions must be positive
+fn f(x: Tensor[F32, [0, 4]]) -> u64 {
+    0
+}

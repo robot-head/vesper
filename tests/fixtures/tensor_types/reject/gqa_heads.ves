@@ -1,0 +1,7 @@
+// expect: E0765
+// at: KvCachePool::attend(seq, q)
+// message: QHeads % KvHeads == 0
+fn f(seq: ActiveKvSeq[4, 8], q: Tensor[F32, [6, 8]])
+    -> Tensor[F32, [6, 8]] eff [KvCachePool[4, 8]] {
+    KvCachePool::attend(seq, q)
+}

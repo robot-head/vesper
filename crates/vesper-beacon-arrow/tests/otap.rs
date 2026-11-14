@@ -197,6 +197,10 @@ fn later_batches_carry_only_delta_dictionaries_and_no_schema() {
         kinds(&first),
         vec![
             (H::Schema, false, 0),
+            (H::DictionaryBatch, false, 0), // resource.schema_url: empty
+            (H::DictionaryBatch, false, 0), // scope.name: empty
+            (H::DictionaryBatch, false, 0), // scope.version: empty
+            (H::DictionaryBatch, false, 0), // schema_url: empty
             (H::DictionaryBatch, false, 1), // name: request
             (H::DictionaryBatch, false, 0), // status_message: still empty
             (H::RecordBatch, false, 0)
@@ -269,20 +273,29 @@ fn dictionary_growth_past_the_limit_resets_the_stream() {
     assert_eq!(encoder.resets(), 1);
     // The decoder dropped the replaced stream: one spans + one attrs stream.
     assert_eq!(decoder.stream_count(), 2);
-    // A single batch needing more than the limit is a typed error and
-    // resets every stream.
+    // A single batch needing more than the limit is a typed error found
+    // while planning, before any stream is touched: the streams carry on.
     let too_many: Vec<OtapSpan> = ["p", "q", "r", "s"].iter().map(|e| span(e)).collect();
     assert!(matches!(
         encoder.encode_spans(&too_many),
         Err(EncodeError::DictionaryOverflow { column: "str" })
     ));
-    let next = encoder.encode_spans(&[span("z")]).unwrap();
-    assert_eq!(next.arrow_payloads[0].schema_id, "spans:3");
+    assert_eq!(encoder.resets(), 1);
+    let next = encoder.encode_spans(&[span("a@x")]).unwrap();
+    assert_eq!(next.arrow_payloads[0].schema_id, "spans:0");
     assert_eq!(
         messages(&next.arrow_payloads[0].record)[0].0,
-        MessageHeader::Schema
+        MessageHeader::RecordBatch
     );
     decoder.decode(&next).unwrap();
+    // The splitting entry point cuts the same input into batches that fit.
+    let split = encoder.encode_spans_split(&too_many).unwrap();
+    assert!(split.len() >= 2);
+    let mut fingerprints = 0;
+    for batch in &split {
+        fingerprints += decoder.decode(batch).unwrap().spans.len();
+    }
+    assert_eq!(fingerprints, 4);
 }
 
 #[test]
@@ -482,6 +495,7 @@ fn histograms_round_trip_with_explicit_bounds() {
             start_unix_ns: 10,
             time_unix_ns: 20,
             histogram: &latency,
+            attributes: Attributes::new(),
         },
         HistogramPoint {
             name: "vesper.idle",
@@ -489,6 +503,7 @@ fn histograms_round_trip_with_explicit_bounds() {
             start_unix_ns: 10,
             time_unix_ns: 20,
             histogram: &empty,
+            attributes: Attributes::new(),
         },
     ];
     let mut decoder = OtapDecoder::default();
@@ -701,7 +716,7 @@ fn malformed_batches_are_typed_errors() {
         Err(DecodeError::UnknownPayloadType(99))
     ));
     let mut b = good[0].clone();
-    b.arrow_payloads[0].r#type = ArrowPayloadType::Logs as i32;
+    b.arrow_payloads[0].r#type = ArrowPayloadType::SummaryDataPoints as i32;
     assert!(matches!(
         d.decode(&b),
         Err(DecodeError::UnsupportedPayloadType(_))
@@ -851,7 +866,7 @@ fn arrow2_reads_the_first_payload_and_rejects_deltas_it_lacks() {
             let StreamState::Some(chunk) = state? else {
                 panic!("waiting on a complete stream")
             };
-            let dict = chunk.arrays()[7]
+            let dict = chunk.arrays()[11]
                 .as_any()
                 .downcast_ref::<arrow2::array::DictionaryArray<u8>>()
                 .unwrap();
@@ -873,13 +888,21 @@ fn arrow2_reads_the_first_payload_and_rejects_deltas_it_lacks() {
         fields,
         [
             "id",
+            "resource",
+            "scope",
+            "schema_url",
             "start_time_unix_nano",
             "duration_time_unix_nano",
             "trace_id",
             "span_id",
+            "trace_state",
             "parent_span_id",
             "flags",
             "name",
+            "kind",
+            "dropped_attributes_count",
+            "dropped_events_count",
+            "dropped_links_count",
             "status"
         ]
     );
@@ -896,20 +919,48 @@ fn arrow2_reads_the_first_payload_and_rejects_deltas_it_lacks() {
 // ---------------------------------------------------------------- reference schema
 
 /// Upstream column tables transcribed from open-telemetry/otel-arrow `main`
-/// on 2026-11-13: `go/pkg/otel/traces/arrow/traces.go` (`TracesSchema`),
-/// `status.go` (`StatusDT`), `go/pkg/otel/common/arrow/attributes_16.go`
-/// (`AttrsSchema16`), `go/pkg/otel/metrics/arrow/metrics.go`
-/// (`MetricsSchema`) and `histogram_dp.go` (`HistogramDataPointSchema`).
+/// on 2026-11-13 and extended on 2026-11-14: `go/pkg/otel/traces/arrow/`
+/// `traces.go` (`TracesSchema`), `status.go` (`StatusDT`), `event.go`
+/// (`EventSchema`), `link.go` (`LinkSchema`); `go/pkg/otel/common/arrow/`
+/// `resource.go` (`ResourceDT`), `scope.go` (`ScopeDT`), `attributes_16.go`
+/// (`AttrsSchema16`), `attributes_32.go` (`AttrsSchema32`);
+/// `go/pkg/otel/metrics/arrow/metrics.go` (`MetricsSchema`),
+/// `histogram_dp.go` (`HistogramDataPointSchema`) and
+/// `go/pkg/otel/logs/arrow/logs.go` (`LogsSchema`).
 /// `(name, type, required)`; `string` admits plain or dictionary-encoded
 /// utf8, since upstream picks the encoding adaptively.
 type Columns = &'static [(&'static str, &'static str, bool)];
-const REFERENCE: [(&str, Columns); 4] = [
+const RESOURCE: &str = "struct{id:u16,schema_url:string,dropped_attributes_count:u32}";
+const SCOPE: &str = "struct{id:u16,name:string,version:string,dropped_attributes_count:u32}";
+const ATTRS16: Columns = &[
+    ("parent_id", "u16", true),
+    ("key", "string", true),
+    ("type", "u8", true),
+    ("str", "string", false),
+    ("int", "i64", false),
+    ("double", "f64", false),
+    ("bool", "bool", false),
+    ("bytes", "binary", false),
+    ("ser", "binary", false),
+];
+const ATTRS32: Columns = &[
+    ("parent_id", "u32", true),
+    ("key", "string", true),
+    ("type", "u8", true),
+    ("str", "string", false),
+    ("int", "i64", false),
+    ("double", "f64", false),
+    ("bool", "bool", false),
+    ("bytes", "binary", false),
+    ("ser", "binary", false),
+];
+const REFERENCE: [(&str, Columns); 8] = [
     (
         "SPANS",
         &[
             ("id", "u16", false),
-            ("resource", "struct", false),
-            ("scope", "struct", false),
+            ("resource", RESOURCE, false),
+            ("scope", SCOPE, false),
             ("schema_url", "string", false),
             ("start_time_unix_nano", "timestamp_ns", true),
             ("duration_time_unix_nano", "duration_ns", true),
@@ -926,26 +977,36 @@ const REFERENCE: [(&str, Columns); 4] = [
             ("status", "struct{code:i32,status_message:string}", false),
         ],
     ),
+    ("ATTRS16", ATTRS16),
+    ("ATTRS32", ATTRS32),
     (
-        "SPAN_ATTRS",
+        "SPAN_EVENTS",
         &[
+            ("id", "u32", false),
             ("parent_id", "u16", true),
-            ("key", "string", true),
-            ("type", "u8", true),
-            ("str", "string", false),
-            ("int", "i64", false),
-            ("double", "f64", false),
-            ("bool", "bool", false),
-            ("bytes", "binary", false),
-            ("ser", "binary", false),
+            ("time_unix_nano", "timestamp_ns", false),
+            ("name", "string", true),
+            ("dropped_attributes_count", "u32", false),
+        ],
+    ),
+    (
+        "SPAN_LINKS",
+        &[
+            ("id", "u32", false),
+            ("parent_id", "u16", true),
+            ("trace_id", "fsb16", true),
+            ("span_id", "fsb8", true),
+            ("trace_state", "string", false),
+            ("dropped_attributes_count", "u32", false),
+            ("flags", "u32", false),
         ],
     ),
     (
         "UNIVARIATE_METRICS",
         &[
             ("id", "u16", true),
-            ("resource", "struct", false),
-            ("scope", "struct", false),
+            ("resource", RESOURCE, false),
+            ("scope", SCOPE, false),
             ("schema_url", "string", false),
             ("metric_type", "u8", true),
             ("name", "string", true),
@@ -969,6 +1030,29 @@ const REFERENCE: [(&str, Columns); 4] = [
             ("flags", "u32", false),
             ("min", "f64", false),
             ("max", "f64", false),
+        ],
+    ),
+    (
+        "LOGS",
+        &[
+            ("id", "u16", false),
+            ("resource", RESOURCE, false),
+            ("scope", SCOPE, false),
+            ("schema_url", "string", false),
+            ("time_unix_nano", "timestamp_ns", false),
+            ("observed_time_unix_nano", "timestamp_ns", false),
+            ("trace_id", "fsb16", false),
+            ("span_id", "fsb8", false),
+            ("severity_number", "i32", false),
+            ("severity_text", "string", false),
+            (
+                "body",
+                "struct{type:u8,str:string,int:i64,double:f64,bool:bool}",
+                false,
+            ),
+            ("dropped_attributes_count", "u32", false),
+            ("flags", "u32", false),
+            ("event_name", "string", false),
         ],
     ),
 ];
@@ -1007,9 +1091,13 @@ fn token(t: &arrow_schema::DataType) -> String {
 fn emitted_schemas_are_subsets_of_the_upstream_otap_schemas() {
     let ours = [
         schema::spans_schema(),
-        schema::span_attrs_schema(),
+        schema::attrs16_schema(),
+        schema::attrs32_schema(),
+        schema::span_events_schema(),
+        schema::span_links_schema(),
         schema::metrics_schema(),
         schema::histogram_points_schema(),
+        schema::logs_schema(),
     ];
     for ((payload, reference), ours) in REFERENCE.iter().zip(ours) {
         for field in ours.fields() {
