@@ -5217,6 +5217,15 @@ name = "vesper-ignis"
 version = "0.1.0"
 
 [[package]]
+name = "vesper-ignis-vulkan"
+version = "0.1.0"
+dependencies = [
+ "ash",
+ "naga",
+ "vesper-ignis",
+]
+
+[[package]]
 name = "vesper-kinetic"
 version = "0.1.0"
 dependencies = [
