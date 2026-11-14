@@ -1,0 +1,9 @@
+// expect: E0768
+// at: copy struct Holder
+// message: must be a linear type
+copy struct Holder {
+    page: KvPageLease[2, 4],
+}
+fn main() -> u64 {
+    0
+}
