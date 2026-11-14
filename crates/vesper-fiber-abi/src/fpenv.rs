@@ -41,9 +41,17 @@ pub struct FpEnv {
 impl FpEnv {
     /// Power-on/ABI default: round to nearest, all exceptions masked, no
     /// FTZ/DAZ; x87 extended precision, all exceptions masked.
+    #[cfg(not(windows))]
     pub const DEFAULT: Self = Self {
         mxcsr: 0x1F80,
         x87_control: 0x037F,
+    };
+    /// Windows x64 default: as above, but the x87 unit runs at 53-bit
+    /// (double) precision, control word 0x027F.
+    #[cfg(windows)]
+    pub const DEFAULT: Self = Self {
+        mxcsr: 0x1F80,
+        x87_control: 0x027F,
     };
     const MXCSR_STATUS: u32 = 0x3F;
     /// The callee-saved part only (status flags cleared).

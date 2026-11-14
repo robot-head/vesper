@@ -2,7 +2,7 @@
 //! cancel before start, cancellation edges that park again, table-wide
 //! cancellation and the counted drop fallback. These need no Pulse scheduler,
 //! so they run on every direct-fiber target (Linux x86_64/AArch64, macOS
-//! AArch64). Scheduler/runtime lifecycle tests stay in `lifecycle.rs`.
+//! AArch64, Windows x86_64). Scheduler/runtime lifecycle tests stay in `lifecycle.rs`.
 #![cfg(vesper_direct_fibers)]
 use std::rc::Rc;
 use vesper_fiber_abi::abi::exit;
