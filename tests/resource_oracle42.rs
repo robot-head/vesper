@@ -888,7 +888,9 @@ fn hostile_peers_use_production_process_and_cannot_return_mathematical_evidence(
         let mut command = Command::new(&interpreter);
         command.arg(&peer).arg(kind);
         let limits = HarnessLimits {
-            request_timeout_ms: 300,
+            // Allow interpreter startup for semantic faults; retain the short
+            // request clock for the intentional stall probe.
+            request_timeout_ms: if kind == "stall" { 300 } else { 2_000 },
             shutdown_timeout_ms: 300,
             stderr_bytes: 1024,
             ..HarnessLimits::default()
