@@ -105,3 +105,23 @@ The owned Rust draft now compiles the original fixed sources first, invokes the 
 Input loading may deserialize existing private/IR/extension data; disabling initialization is not a claim that such data was never read. Empty IR/extensions describe the **output** projection. The strict auditor remains the final kernel/axiom check on that output, with `cache_eligible = false`. Neither successful export flags nor artifact hash association prove equivalence of the original native executable.
 
 Privacy controls retain the original executable imports. The isolated AST-built `sorryAx` control instead imports the projection, so it can reach the unchanged axiom policy. Missing/corrupt controls target the actual audited projection, and additional missing/corrupt original-input controls must fail export without a success record. Six separate fixed tool fixtures exercise genuine total recursion, safe user-owned `user._unsafe_rec` retention, explicit unsafe refusal, opaque partial-facade refusal, deceptive unsafe suffix refusal, and a projected project axiom that the final strict policy must reject. These controls are authored against the published request/report API; compilation, actual exporter/auditor results and portability remain pending for this integration revision. The two actual raw-artifact failures above remain part of the evidence history.
+
+## Fresh full-model projection: genuine duplicate-proof rejection
+
+Under a coordinator-granted exclusive Cargo plus one-Lean lease, the writer executed the complete target at owned head `5be840d30cf1cba4f09fe662bb56918686c181f8`, using the actual narrow snapshot implementation `5797515` and its prerequisites. Before execution, all 19 fixed model/tool/control sources matched coordinator integration bytes. The actual command remained `cargo test -p vesper --locked --test resource_model42 -- --nocapture`, with the established single-job/debug-zero/incremental-off environment and pinned Lean 4.24. The unchanged strict auditor was not edited.
+
+Rust compilation passed in 1.60s. All 12 fresh original modules compiled, including all 78 acceptance equalities. The input-profile assertions passed: precisely the 12 fixed `.lean`/legacy `.olean` pairs, regular files without symlinked package inputs or `.ir`, `.olean.private`, or `.olean.server` sidecars. This is a deliberately restricted fresh legacy-artifact profile, not a claim that arbitrary modern package sidecars are bound by base-object checks.
+
+The real snapshot process then exited one after 12.38s, before emitting a success record:
+
+```text
+kernel snapshot failed: conflicting theorem duplicate:
+Vesper.ResourceModel42.RuntimeExpr.asValue.eq_3;
+type_equal=true; levels_equal=true; group_equal=true; value_equal=false
+```
+
+This establishes that differently realized proof bodies also occur in the final freshly compiled model, not only an old mixed-source experiment. The current policy permits exact identical safe theorem copies only; it correctly refused this different-body case. No duplicate policy was relaxed, no projected object was accepted, and no strict theorem partition, privacy control, or later artifact/tool-fixture control completed in this run.
+
+The target exited 101: zero passed, one failed, none ignored; target time 47.92s and independently measured outer time 49.597s. Actual log: `/tmp/resource-kernel42-acceptance-narrow.log`; wrapper evidence: `/tmp/resource-kernel42-acceptance-narrow-timing.json`. The failure-only retention path preserved all 24 original files at `/tmp/vesper-resource-model42-782806-0` (26,945,728 bytes). Their exact paths, lengths and SHA-256 values are recorded in `/tmp/resource-kernel42-acceptance-narrow-preserved-artifacts.json`; fixed-source preflight is `/tmp/resource-kernel42-acceptance-source-preflight.json`. These temporary diagnostics are execution evidence, not a portable proof certificate. The Cargo/Lean lease was released immediately after the failed run.
+
+A separately reviewed and publicly authorized resolution of distinct equation-theorem realizations is required before another complete run. The two earlier raw-artifact policy rejections remain separate historical failures. Neither the fresh compilation nor this failed projection establishes kernel acceptance of the model projection or native executable equivalence.
