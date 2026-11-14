@@ -101,8 +101,18 @@ fn rdpmc_is_actual_counters_or_explicit_unavailable_with_a_host_reason() {
             if cfg!(not(all(target_os = "linux", target_arch = "x86_64"))) {
                 assert_eq!(error.reason, UnavailableReason::UnsupportedPlatform);
             } else if status.cpu_pmu_device == Some(false) {
-                // No hardware PMU device at all: the kernel must say so.
-                assert_eq!(error.reason, UnavailableReason::NoHardwarePmu);
+                // No hardware PMU device: the kernel reports it missing, or a
+                // sandbox (seccomp in a container executor) refuses the
+                // syscall first. Either way no count may be produced.
+                assert!(
+                    matches!(
+                        error.reason,
+                        UnavailableReason::NoHardwarePmu
+                            | UnavailableReason::PermissionDenied
+                            | UnavailableReason::OsError
+                    ),
+                    "{error}"
+                );
             }
         }
     }

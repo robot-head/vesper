@@ -51,7 +51,7 @@ fn causal_profile_finds_the_known_bottleneck() {
     let profiler = CausalProfiler::new(&["slow", "fast"], &["round"]).unwrap();
     let config = CausalConfig {
         speedups_pct: vec![50, 100],
-        repetitions: 3,
+        repetitions: 5,
         progress_point: "round",
     };
     let report = profile(&profiler, &config, program).unwrap();
