@@ -60,8 +60,27 @@ Only the new Shape specification's module/path was corrected; the collector
 and policy were preserved. The failure is retained in
 `/tmp/lean4lean-shape42-root-shape-v1.log`.
 
-The corrected full Shape audit and all seven previous complete matrices are
-pending. No projected/audited packet pass is claimed at this checkpoint.
-Component reports retain their compiler attempts, manifests and actual
-artifact identities; see the equality, construction, subsumption and
-acceptance reports alongside this file.
+The corrected full Shape matrix passed in 205.99 seconds at actual code
+`325b83972774c8c365173e6b8ac4ac8e3c72cbe0` (subsequent changes are documentation
+only). Its complete source-derived catalog has 226 authored and audited
+roots: 185 imported existing roots plus the 41 new roots. Both audit batches
+(128 and 98 roots) reported audited status, kernel replay and no forbidden
+axioms, with cache eligibility false. Their actual axiom union is exactly
+Classical.choice, Quot.sound and propext.
+
+The exact projection retained 697 canonical constants from 713 occurrences,
+with sixteen matched compiler helpers, no duplicate constants or proof
+aliases, 1,834,420 logical expression visits, constant-info equality,
+verified reimport and empty extensions/IR. The projection is 9,772,016 bytes,
+BLAKE3 `dcdcb30859e5bb7d0919d0a1164af835408c6c3209588b7a25fd7f3f8754730f`.
+All 48 original source/object identities were recorded. Independently
+comparing shared records found 34 identities unchanged from Normalization
+and 36 unchanged from Comparison, including the exact same sixteen helper
+omissions. Every actual corruption and forbidden-alias control passed.
+
+Evidence is `/tmp/lean4lean-shape42-shape42-evidence.json`; independent checks
+are `/tmp/lean4lean-shape42-independent-check.json`. Strict targeted Clippy
+for all eight fixed targets passed in 29.26 seconds, and workspace formatting,
+BUILD synchronization and whitespace checks passed. The seven previous full
+matrix replays are still in progress; no all-eight completion is claimed.
+Component reports retain their compiler attempts and artifact identities.
