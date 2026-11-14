@@ -94,7 +94,11 @@ enum Ctx {
 
 struct Walk<'a> {
     params: BTreeMap<&'a str, Pass>,
-    scopes: Vec<BTreeSet<String>>,
+    /// Local bindings, innermost last. The flag is true for a binding whose
+    /// calls are already counted: a closure literal bound by `let` (its body
+    /// is walked where it is written) or a handler clause's continuation
+    /// (resuming runs the rest of the handled body, walked already).
+    scopes: Vec<BTreeMap<String, bool>>,
     uses: BTreeMap<(String, Vec<String>), Access>,
     passes: &'a BTreeMap<String, Vec<Pass>>,
     rows: &'a BTreeMap<String, Vec<String>>,
@@ -147,7 +151,7 @@ fn constructor_like(name: &str) -> bool {
 
 impl<'a> Walk<'a> {
     fn live(&self, name: &str) -> Option<Pass> {
-        if self.scopes.iter().any(|s| s.contains(name)) {
+        if self.scopes.iter().any(|s| s.contains_key(name)) {
             return None;
         }
         self.params.get(name).copied()
@@ -178,16 +182,27 @@ impl<'a> Walk<'a> {
         names: BTreeSet<String>,
         f: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, String> {
-        self.scopes.push(names);
+        self.scopes
+            .push(names.into_iter().map(|n| (n, false)).collect());
         let r = f(self);
         self.scopes.pop();
         r
     }
+    /// The innermost local binding of `name`, with its counted flag.
+    fn local(&self, name: &str) -> Option<bool> {
+        self.scopes.iter().rev().find_map(|s| s.get(name).copied())
+    }
     fn call_effects(&mut self, callee: &Expr) {
         match &callee.kind {
-            // A local binding (closure or continuation): its body's effects
-            // are counted where it is written.
-            ExprKind::Name(n) if self.scopes.iter().any(|s| s.contains(n)) => {}
+            // A local closure literal or continuation: its effects are counted
+            // where its body is written. Any other local (a function value
+            // such as `let cb = record;`, a closure parameter, a pattern
+            // binding) may hold any callee, so the row is incomplete.
+            ExprKind::Name(n) if self.local(n).is_some() => {
+                if self.local(n) != Some(true) {
+                    self.complete = false;
+                }
+            }
             ExprKind::Name(n) if self.live(n).is_none() => {
                 if let Some(row) = self.rows.get(n) {
                     self.performed.extend(row.iter().cloned());
@@ -249,7 +264,12 @@ impl<'a> Walk<'a> {
                                 w.expr(value, Ctx::Value, depth + 1)?;
                                 let mut names = BTreeSet::new();
                                 bind(pat, &mut names);
-                                w.scopes.last_mut().expect("scope").extend(names);
+                                let counted = matches!(pat.kind, PatternKind::Bind(_))
+                                    && matches!(value.kind, ExprKind::Closure { .. });
+                                w.scopes
+                                    .last_mut()
+                                    .expect("scope")
+                                    .extend(names.into_iter().map(|n| (n, counted)));
                             }
                             Statement::Expr(x) => w.expr(x, Ctx::Value, depth + 1)?,
                         }
@@ -353,12 +373,22 @@ impl<'a> Walk<'a> {
                 let mut inner = std::mem::replace(&mut self.performed, outer);
                 inner.remove(&effect.name);
                 self.performed.extend(inner);
-                for clause in std::iter::once(&**ret).chain(ops) {
+                for (i, clause) in std::iter::once(&**ret).chain(ops).enumerate() {
                     let mut names = state_names.clone();
                     for p in &clause.pats {
                         bind(p, &mut names);
                     }
-                    self.scoped(names, |w| w.expr(&clause.body, Ctx::Value, depth + 1))?;
+                    // An operation clause's last pattern is its continuation.
+                    let resume = match clause.pats.last().map(|p| &p.kind) {
+                        Some(PatternKind::Bind(k)) if i > 0 => Some(k.clone()),
+                        _ => None,
+                    };
+                    self.scoped(names, |w| {
+                        if let Some(k) = resume {
+                            w.scopes.last_mut().expect("scope").insert(k, true);
+                        }
+                        w.expr(&clause.body, Ctx::Value, depth + 1)
+                    })?;
                 }
             }
         }
@@ -730,6 +760,22 @@ mod tests {
         let g = r.functions.iter().find(|x| x.function == "g").unwrap();
         assert!(g.performed_effects.is_empty());
         assert_eq!(g.declared_unperformed, ["E"]);
+    }
+
+    #[test]
+    fn calls_through_function_values_are_incomplete() {
+        let r = analyse(&format!(
+            "{S}fn record() -> u64 eff [E] {{\n    E::op(1)\n}}\nfn alias() -> u64 eff [E] {{\n    let cb = record;\n    cb()\n}}\nfn literal() -> u64 eff [E] {{\n    let k = || -> u64 eff [E] {{ E::op(2) }};\n    k()\n}}\nfn shadowed() -> u64 eff [E] {{\n    let k = || -> u64 eff [E] {{ E::op(2) }};\n    let k = record;\n    k()\n}}\n"
+        ));
+        let f = |n: &str| r.functions.iter().find(|x| x.function == n).unwrap();
+        // `cb` holds a function value: its effects are not known locally.
+        assert!(!f("alias").effects_complete);
+        assert!(f("alias").declared_unperformed.is_empty());
+        // A closure literal's body is walked where it is written.
+        assert!(f("literal").effects_complete);
+        assert_eq!(f("literal").performed_effects, ["E"]);
+        // The innermost binding decides.
+        assert!(!f("shadowed").effects_complete);
     }
 
     #[test]

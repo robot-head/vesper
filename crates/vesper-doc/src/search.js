@@ -155,7 +155,11 @@ function typeMatch(p, t, binds) {
   if (t.var !== undefined) {
     const b = binds.find((x) => x[0] === t.var.name);
     if (b === undefined) binds.push([t.var.name, p]);
-    else if (JSON.stringify(b[1]) !== JSON.stringify(p)) return null;
+    else {
+      const u = unify(b[1], p);
+      if (u === null) return null;
+      b[1] = u;
+    }
     return false;
   }
   let ps, ts;
@@ -171,6 +175,25 @@ function typeMatch(p, t, binds) {
     exact = exact && m;
   }
   return exact;
+}
+function unify(a, b) {
+  if (a === "any") return b;
+  if (b === "any") return a;
+  let xs, ys, wrap;
+  if (a.named && b.named && a.named.name === b.named.name && a.named.args.length === b.named.args.length) {
+    xs = a.named.args; ys = b.named.args;
+    wrap = (args) => ({ named: { name: a.named.name, args } });
+  } else if (a.tuple && b.tuple && a.tuple.items.length === b.tuple.items.length) {
+    xs = a.tuple.items; ys = b.tuple.items;
+    wrap = (items) => ({ tuple: { items } });
+  } else return null;
+  const out = [];
+  for (let i = 0; i < xs.length; i++) {
+    const u = unify(xs[i], ys[i]);
+    if (u === null) return null;
+    out.push(u);
+  }
+  return wrap(out);
 }
 function startsWith(p, q) { return q.length <= p.length && q.every((x, i) => p[i] === x); }
 function within(inner, outer) {

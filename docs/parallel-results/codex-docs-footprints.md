@@ -31,9 +31,10 @@ ones, and a declared-but-unreached cell renders dashed and lowercase.
 The same walk infers the effects the body may perform: `Effect::op` calls, the
 declared rows of called documented functions, `?` and checked arithmetic
 (`+ - * / % << >>`, unary `-`, compound assignment) as `Fail`, minus effects
-handled by an enclosing `handle`. Calls to locals (closures, continuations)
-are counted where their bodies are written. A method call, a call through a
-parameter or an unknown callee makes the row incomplete; only a complete row
+handled by an enclosing `handle`. Calls to a `let`-bound closure literal or a
+handler clause's continuation are counted where their bodies are written. A
+method call, a call through a parameter or any other local (a function value
+such as `let cb = record; cb()`) or an unknown callee makes the row incomplete; only a complete row
 reports `declared_unperformed` (e.g. `eff [Journal, Metrics]` that never
 ticks `Metrics`). The declared row remains the checked contract.
 
@@ -74,11 +75,19 @@ builds ONE `vesper-codex-search` **v2** index (`hoogle::build_package_index`):
 - methods of source `impl` and Pact `model` declarations from the elaborated
   generated functions, as `file::Entry as Score::score` (`impl_method`) and
   `file::model ByCount::score` (`model_method`), with trait and model names;
-- each entry links to its file's page (`files/src/ledger.ves.html#item-post`).
+  a generic trait keeps its arguments (`X as Convert[i64]::convert` and
+  `X as Convert[bool]::convert` stay distinct);
+- each entry links to its file's page (`files/src/ledger.ves.html#item-post`),
+  percent-encoded so file names with `#`, `%` or spaces still link.
+
+Impl and model methods also join the per-file and package capability
+summaries under the same paths.
 
 Generic functions are no longer excluded: a type parameter becomes
 `IndexType::Var` and unifies with the query type, consistently across the
-signature (`keep[T](sink T) -> T` matches `u64 -> u64`, not `u64 -> bool`).
+signature (`keep[T](sink T) -> T` matches `u64 -> u64`, not `u64 -> bool`);
+a partial pattern unifies with a later one (`Option[_] -> Option[u64]` binds
+`T = Option[u64]`).
 The parameter's mode in the index is its bound, so variance checks hold for
 every admitted instantiation (`tag[T: mod copy]` refuses an `affine`
 argument). Wildcards never bind. A hit lists its `instantiation` and is never

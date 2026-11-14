@@ -355,6 +355,7 @@ fn analysis(
         impl_methods.push(vesper_doc::hoogle::ImplMethod {
             conformance: origin.conformance.clone(),
             trait_name: origin.trait_name.clone(),
+            trait_args: trait_args(module, &origin.conformance),
             method: origin.method.clone(),
             self_ty: c.self_ty.clone(),
             model: c.model.clone(),
@@ -368,6 +369,55 @@ fn analysis(
         mode_crossings: mode_crossings(module, world, document),
         impl_methods,
     })
+}
+
+/// The `impl` key segment of a type, as the Pact frontend spells it in a
+/// conformance path (`Convert[i64]` is `Convert-0-i64-2`).
+fn key_segment(t: &Type) -> String {
+    let join = |ts: Vec<String>| ts.join("-1-");
+    match t {
+        Type::Named(n, args) if args.is_empty() => n.clone(),
+        Type::Named(n, args) => format!("{n}-0-{}-2", join(args.iter().map(key_segment).collect())),
+        Type::Tuple(ts) if ts.is_empty() => "Unit".into(),
+        Type::Tuple(ts) => format!("3-0-{}-2", join(ts.iter().map(key_segment).collect())),
+        Type::Row(e) => format!(
+            "4-0-{}-2",
+            join(
+                e.instances
+                    .iter()
+                    .map(|i| key_segment(&Type::Named(i.name.clone(), i.args.clone())))
+                    .chain(e.tail.clone())
+                    .collect()
+            )
+        ),
+        _ => "5".into(),
+    }
+}
+
+/// The trait type arguments of the conformance at `path` (an `impl` key
+/// `Trait[args].Self` or a model name). Unknown conformances have none.
+fn trait_args(module: &Module, path: &str) -> Vec<String> {
+    let key = path.rsplit("::").next().unwrap_or(path);
+    module
+        .items
+        .iter()
+        .find_map(|item| {
+            let Item::Conformance(c) = item else {
+                return None;
+            };
+            let this = match &c.kind {
+                ConformanceKind::Model { name, .. } => name.clone(),
+                ConformanceKind::Canonical => {
+                    let mut t = c.trait_ref.name.clone();
+                    if !c.trait_ref.args.is_empty() {
+                        t = key_segment(&Type::Named(t, c.trait_ref.args.clone()));
+                    }
+                    format!("{t}.{}", key_segment(&c.self_ty))
+                }
+            };
+            (this == key).then(|| c.trait_ref.args.iter().map(ToString::to_string).collect())
+        })
+        .unwrap_or_default()
 }
 
 /// [`document_source`] plus the body-level [`Analysis`] of the same checked

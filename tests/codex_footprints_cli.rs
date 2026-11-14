@@ -450,6 +450,9 @@ fn package_bundle_links_every_page_and_matches_the_page_script() {
         "Option[_] -> _",
         "a b",
         "sink _ -> _",
+        "sink Option[_] -> Option[u64]",
+        "sink (u64, _) -> (_, bool)",
+        "sink Option[bool] -> Option[u64]",
     ]);
     fs::write(dir.path("search.js"), script).unwrap();
     fs::write(
@@ -656,4 +659,60 @@ fn package_doctests_fall_back_per_file_when_names_collide() {
         assert_eq!(f["report"]["batch"]["module_count"], 1);
         assert_eq!(f["report"]["examples"][0]["engine"], "jit");
     }
+}
+
+#[test]
+fn package_links_escape_file_names_and_generic_trait_impls_stay_distinct() {
+    let source = "/// A value.\ncopy struct X {\n    v: i64\n}\n\n/// Converts a value.\ntrait Convert[T] {\n    fn convert(in self) -> T;\n}\n\nimpl Convert[i64] for X {\n    fn convert(in self) -> i64 {\n        self.v\n    }\n}\n\nimpl Convert[bool] for X {\n    fn convert(in self) -> bool {\n        true\n    }\n}\n";
+    let manifest = PACKAGE_FILES[0].1.as_bytes();
+    let dir = Scratch::new(&[
+        ("Loom.toml", manifest),
+        ("src/a#b%c d.ves", source.as_bytes()),
+    ]);
+    let out = vesper(&dir.0, &["doc", ".", "--json"]);
+    ok(&out);
+    let report = json(&out);
+    let paths: Vec<&str> = report["search_index"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        [
+            "src/a#b%c d.ves::X as Convert[bool]::convert",
+            "src/a#b%c d.ves::X as Convert[i64]::convert",
+        ]
+    );
+    let hrefs: Vec<&str> = report["search_index"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["href"].as_str().unwrap())
+        .collect();
+    assert!(
+        hrefs
+            .iter()
+            .all(|h| *h == "files/src/a%23b%25c%20d.ves.html#codex-impls"),
+        "{hrefs:?}"
+    );
+    // Impl methods join the capability summary under their paths.
+    let items: Vec<&str> = report["files"][0]["capabilities"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["item"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        items,
+        ["X as Convert[bool]::convert", "X as Convert[i64]::convert"]
+    );
+
+    let out = vesper(&dir.0, &["doc", ".", "--bundle", "site"]);
+    ok(&out);
+    // The page is written at its literal name and linked percent-encoded.
+    assert!(dir.path("site/files/src/a#b%c d.ves.html").is_file());
+    let index = fs::read_to_string(dir.path("site/index.html")).unwrap();
+    assert!(index.contains("href=\"files/src/a%23b%25c%20d.ves.html\""));
 }

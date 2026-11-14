@@ -406,6 +406,10 @@ pub struct ImplMethod {
     /// Package-qualified conformance declaration path.
     pub conformance: String,
     pub trait_name: String,
+    /// The trait's type arguments (`Convert[i64]` has `["i64"]`), which
+    /// tell apart two impls of one generic trait for the same type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trait_args: Vec<String>,
     pub method: String,
     pub self_ty: String,
     pub model: Option<String>,
@@ -413,11 +417,21 @@ pub struct ImplMethod {
     pub function: FunctionDoc,
 }
 impl ImplMethod {
-    /// `Point as Score::score`, or `model ByX::score`.
+    /// `Point as Score::score`, `X as Convert[i64]::convert`, or
+    /// `model ByX::score`.
     pub fn path(&self) -> String {
         match &self.model {
             Some(m) => format!("model {m}::{}", self.method),
-            None => format!("{} as {}::{}", self.self_ty, self.trait_name, self.method),
+            None => format!("{} as {}::{}", self.self_ty, self.trait_ref(), self.method),
+        }
+    }
+
+    /// The trait with its type arguments, e.g. `Convert[i64]`.
+    pub fn trait_ref(&self) -> String {
+        if self.trait_args.is_empty() {
+            self.trait_name.clone()
+        } else {
+            format!("{}[{}]", self.trait_name, self.trait_args.join(", "))
         }
     }
 }
@@ -874,9 +888,10 @@ fn type_match(
     match (p, t) {
         (TypePattern::Any, _) => Some(false),
         (_, IndexType::Var { name }) => {
-            match binds.iter().find(|(n, _)| n == name) {
-                Some((_, bound)) if bound != p => return None,
-                Some(_) => {}
+            match binds.iter_mut().find(|(n, _)| n == name) {
+                // A later occurrence must unify with the binding so far;
+                // wildcards inside either side are filled in by the other.
+                Some((_, bound)) => *bound = unify(bound, p)?,
                 None => binds.push((name.clone(), p.clone())),
             }
             Some(false)
@@ -896,6 +911,33 @@ fn type_match(
                 exact &= type_match(p, t, binds)?;
             }
             Some(exact)
+        }
+        _ => None,
+    }
+}
+
+/// The most specific pattern both `a` and `b` describe (`Option[_]` and
+/// `Option[u64]` give `Option[u64]`), or `None` when they conflict.
+fn unify(a: &TypePattern, b: &TypePattern) -> Option<TypePattern> {
+    let all = |xs: &[TypePattern], ys: &[TypePattern]| -> Option<Vec<TypePattern>> {
+        xs.iter().zip(ys).map(|(x, y)| unify(x, y)).collect()
+    };
+    match (a, b) {
+        (TypePattern::Any, p) | (p, TypePattern::Any) => Some(p.clone()),
+        (TypePattern::Named { name, args }, TypePattern::Named { name: n, args: a })
+            if name == n && args.len() == a.len() =>
+        {
+            Some(TypePattern::Named {
+                name: name.clone(),
+                args: all(args, a)?,
+            })
+        }
+        (TypePattern::Tuple { items }, TypePattern::Tuple { items: i })
+            if items.len() == i.len() =>
+        {
+            Some(TypePattern::Tuple {
+                items: all(items, i)?,
+            })
         }
         _ => None,
     }
@@ -1276,6 +1318,17 @@ mod tests {
             hits("sink _ -> _")[0].instantiation,
             Vec::<(String, String)>::new()
         );
+        // A partial pattern unifies with a later, more specific one.
+        assert_eq!(
+            hits("sink Option[_] -> Option[u64]")[0].instantiation,
+            [("T".to_string(), "Option[u64]".to_string())]
+        );
+        assert_eq!(
+            hits("sink (u64, _) -> (_, bool)")[0].instantiation,
+            [("T".to_string(), "(u64, bool)".to_string())]
+        );
+        assert!(hits("sink Option[_] -> Result[u64]").is_empty());
+        assert!(hits("sink Option[bool] -> Option[u64]").is_empty());
     }
 
     #[test]
@@ -1302,15 +1355,30 @@ mod tests {
         };
         let a = [f("same")];
         let b = [f("same")];
-        let impls = [ImplMethod {
-            conformance: "impl p::Show.Point".into(),
-            trait_name: "Show".into(),
-            method: "show".into(),
+        let convert = |arg: &str| ImplMethod {
+            conformance: format!("impl p::Convert-0-{arg}-2.Point"),
+            trait_name: "Convert".into(),
+            trait_args: vec![arg.into()],
+            method: "convert".into(),
             self_ty: "Point".into(),
             model: None,
             public: true,
             function: f("$gen"),
-        }];
+        };
+        let impls = [
+            ImplMethod {
+                conformance: "impl p::Show.Point".into(),
+                trait_name: "Show".into(),
+                trait_args: vec![],
+                method: "show".into(),
+                self_ty: "Point".into(),
+                model: None,
+                public: true,
+                function: f("$gen"),
+            },
+            convert("i64"),
+            convert("bool"),
+        ];
         let files = [
             PackageFile {
                 file: "a.ves",
@@ -1331,11 +1399,17 @@ mod tests {
         let paths: Vec<&str> = idx.entries.iter().map(|e| e.path.as_str()).collect();
         assert_eq!(
             paths,
-            ["a.ves::Point as Show::show", "a.ves::same", "b.ves::same"]
+            [
+                "a.ves::Point as Convert[bool]::convert",
+                "a.ves::Point as Convert[i64]::convert",
+                "a.ves::Point as Show::show",
+                "a.ves::same",
+                "b.ves::same"
+            ]
         );
-        assert_eq!(idx.entries[0].kind, EntryKind::ImplMethod);
+        assert_eq!(idx.entries[2].kind, EntryKind::ImplMethod);
         assert_eq!(
-            idx.entries[0].signature,
+            idx.entries[2].signature,
             "fn Point as Show::show(in x: u64) -> u64"
         );
         let hits = search(&parse_text_query("Show").unwrap(), &idx);

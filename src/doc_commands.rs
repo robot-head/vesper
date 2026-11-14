@@ -339,7 +339,18 @@ fn file_parts(
     }
     let mut heatmaps = heatmap::heatmaps(&document.types, &document.functions, limits)?;
     footprints::attach(&mut heatmaps, &analysis.may_use);
-    let capabilities = capabilities::capabilities(&document.functions, Some(&analysis.may_use));
+    let mut capabilities = capabilities::capabilities(&document.functions, Some(&analysis.may_use));
+    // Impl and model methods are callable API too: their checked rows join
+    // the file's (and so the package's) capabilities under their
+    // conformance-qualified path. Their bodies are not in the may-use walk.
+    capabilities
+        .items
+        .extend(analysis.impl_methods.iter().map(|m| {
+            let mut i = capabilities::item(&m.function, None);
+            i.item = m.path();
+            i
+        }));
+    capabilities.items.sort_by(|a, b| a.item.cmp(&b.item));
     Ok(FileParts {
         document,
         visuals,
@@ -511,7 +522,7 @@ fn generate_package(opts: Options) -> Result<Rendered, String> {
             .ok_or("package source byte budget exceeded")?;
         let parts = file_parts(&source, &[], &parsed, &certificates, limits)
             .map_err(|e| format!("{name}: {e}"))?;
-        files.push((name.clone(), format!("files/{name}.html"), parts));
+        files.push((name.clone(), url_path(&format!("files/{name}.html")), parts));
     }
     let index_files: Vec<hoogle::PackageFile<'_>> = files
         .iter()
@@ -596,7 +607,9 @@ fn generate_package(opts: Options) -> Result<Rendered, String> {
             },
             limits,
         )?;
-        extra.push((href.clone(), page));
+        // The page is written at the literal file name; links use its
+        // percent-encoded form.
+        extra.push((format!("files/{file}.html"), page));
         summaries.push(vesper_doc::package::FileSummary {
             file: file.clone(),
             href: href.clone(),
@@ -621,6 +634,20 @@ fn generate_package(opts: Options) -> Result<Rendered, String> {
         output: Output::Bundle(PathBuf::from(opts.bundle.expect("bundle checked"))),
         extra,
     })
+}
+/// Percent-encode a relative path for use in an href: `/` separates
+/// segments and every byte outside the unreserved set is escaped, so file
+/// names holding `#`, `?`, `%` or spaces still link to their page.
+fn url_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b"-._~/".contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 fn create_new(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut file = OpenOptions::new()

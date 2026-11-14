@@ -36,7 +36,7 @@ pub fn render_impls(impls: &[ImplMethod]) -> String {
                 } else {
                     "impl method"
                 },
-                escape(&m.trait_name),
+                escape(&m.trait_ref()),
                 escape(&m.self_ty),
                 if m.public { "" } else { " (private model)" }
             ));
