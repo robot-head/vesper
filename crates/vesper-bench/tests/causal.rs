@@ -6,9 +6,19 @@
 //! a single-CPU host), so a round lasts max(8, 3) ms. Truly speeding "slow" up by s
 //! gives a round of max(8(1-s), 3) ms: 50% predicts 50%, 100% predicts
 //! 1 - 3/8 = 62.5%. Speeding "fast" up changes nothing.
+//!
+//! Those figures hold only when the round has no other cost. Any per-round
+//! time outside both regions is not sped up and dilutes the prediction, as it
+//! should in a causal profile. `std::sync::Barrier` parks on a condition
+//! variable, and on macOS CI the wakeup took several milliseconds per round
+//! (the measured curve fit 6 to 12 ms of fixed cost: 2777 bp at 50% and
+//! 2443 bp at 100%), so the rounds meet at a yielding spin barrier instead.
 use std::{
     convert::Infallible,
-    sync::{Arc, Barrier},
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -26,9 +36,37 @@ fn work(d: Duration) {
     }
 }
 
+/// A reusable barrier that waits by yielding instead of parking, so the last
+/// arrival releases the others without a wakeup delay.
+struct SpinBarrier {
+    parties: usize,
+    arrived: AtomicUsize,
+    generation: AtomicUsize,
+}
+impl SpinBarrier {
+    fn new(parties: usize) -> Self {
+        Self {
+            parties,
+            arrived: AtomicUsize::new(0),
+            generation: AtomicUsize::new(0),
+        }
+    }
+    fn wait(&self) {
+        let generation = self.generation.load(Ordering::Acquire);
+        if self.arrived.fetch_add(1, Ordering::AcqRel) + 1 == self.parties {
+            self.arrived.store(0, Ordering::Release);
+            self.generation.fetch_add(1, Ordering::AcqRel);
+            return;
+        }
+        while self.generation.load(Ordering::Acquire) == generation {
+            thread::yield_now();
+        }
+    }
+}
+
 fn program(p: &CausalProfiler) -> Result<(), Infallible> {
     const ROUNDS: usize = 12;
-    let barrier = Arc::new(Barrier::new(2));
+    let barrier = Arc::new(SpinBarrier::new(2));
     let slow = p.region("slow").unwrap();
     let fast = p.region("fast").unwrap();
     let done = p.progress_point("round").unwrap();
