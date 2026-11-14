@@ -141,3 +141,48 @@ fn every_failure_is_typed_and_transactional() {
         (TileErrorKind::Json(ErrorKind::Utf8), 6)
     );
 }
+
+#[test]
+fn swar_keys_match_exactly_the_equal_byte_strings() {
+    use vesper_serde::tiles::SwarKey;
+    assert!(SwarKey::compile("").is_none());
+    assert!(SwarKey::compile("seventeen_bytes_x").is_none());
+    assert!(SwarKey::compile("a\"b").is_none());
+    assert!(SwarKey::compile("a\\b").is_none());
+    assert!(SwarKey::compile("é").is_none());
+    let alphabet = b"ab_\0z";
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    for _ in 0..200_000 {
+        let n = 1 + (next() % 16) as usize;
+        let key: String = (0..n)
+            .map(|_| char::from(b"ab_z9"[(next() % 5) as usize]))
+            .collect();
+        let compiled = SwarKey::compile(&key).unwrap();
+        // Candidates: equal, one byte changed, shorter, longer, NUL padded.
+        let mut raw = key.as_bytes().to_vec();
+        match next() % 5 {
+            0 => {}
+            1 => {
+                let at = (next() as usize) % raw.len();
+                raw[at] = alphabet[(next() % 5) as usize];
+            }
+            2 => {
+                raw.pop();
+            }
+            3 => raw.push(alphabet[(next() % 5) as usize]),
+            _ => raw.push(0),
+        }
+        assert_eq!(compiled.matches_raw(&raw), raw == key.as_bytes(), "{key:?} {raw:?}");
+    }
+    // Escaped spellings decode before comparing.
+    let doc = vesper_serde::IndexedJson::parse(br#"{"flags":1}"#, Default::default()).unwrap();
+    let (name, _) = doc.root().fields().unwrap().next().unwrap();
+    assert!(SwarKey::compile("flags").unwrap().matches(name));
+    assert!(!SwarKey::compile("flag").unwrap().matches(name));
+}
