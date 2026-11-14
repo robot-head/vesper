@@ -76,6 +76,8 @@ only) in its own commit.
 
   Capacity errors are checked in a pure planning phase before any state
   changes. They no longer reset the streams. Other encode errors still reset.
+  If a split fails after writing earlier pieces, those pieces are discarded
+  and the streams reset, so the next batch starts with a fresh schema.
 * **Decoder.** It builds `DecodedResource`, `DecodedScope`, `DecodedSpan`
   (with events and links), `DecodedHistogram` and `DecodedLog`. New typed
   errors:
@@ -84,6 +86,12 @@ only) in its own commit.
   * `IdOverflow`;
   * `DanglingParent` (names the column);
   * the existing missing-main-payload error.
+
+  Copying an attribute group again when the same resource or scope id is
+  placed twice (possible with plain ids) is charged against
+  `max_decoded_string_bytes` before the copy. Without that charge, a small
+  batch could multiply memory on the server, which decodes before admission
+  control.
 
 **OTLP (`otlp`).** `traces_request`, `metrics_request` and `logs_request`
 build `ExportTraceServiceRequest` / `ExportMetricsServiceRequest` /

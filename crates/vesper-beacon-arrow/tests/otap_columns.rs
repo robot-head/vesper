@@ -1038,3 +1038,99 @@ fn malformed_related_payloads_are_typed_errors() {
         Err(DecodeError::BadIdEncoding("id"))
     ));
 }
+
+/// Plain ids may place the same resource again (ids 0, 1, 0, 1, ...); each
+/// repeat copies its attributes, so repeats are charged against the
+/// decoded-string budget instead of multiplying memory unchecked.
+#[test]
+fn repeated_resource_placements_are_charged_against_the_string_budget() {
+    let big: &'static str = Box::leak("x".repeat(1 << 20).into_boxed_str());
+    let mut heavy = Resource::default();
+    heavy.attributes.insert("blob", big).unwrap();
+    let light = Resource::default();
+    let logs = |n| (0..n).map(|_| LogRecord::default()).collect::<Vec<_>>();
+    let groups = vec![
+        ResourceGroup::single(heavy, Scope::default(), logs(8)),
+        ResourceGroup::single(light, Scope::default(), logs(8)),
+    ];
+    let batch = LogsEncoder::new(EncoderConfig {
+        id_encoding: IdEncoding::Plain,
+        ..EncoderConfig::default()
+    })
+    .encode(&groups)
+    .unwrap();
+    let limits = DecodeLimits {
+        max_decoded_string_bytes: 4 << 20,
+        ..DecodeLimits::default()
+    };
+    // As encoded: each resource placed once, well inside the budget.
+    let decoded = OtapDecoder::new(limits).decode(&batch).unwrap();
+    assert_eq!(decoded.resources.len(), 2);
+
+    // Rewrite the LOGS record so resource ids alternate 0, 1, 0, 1, ...
+    let main = batch
+        .arrow_payloads
+        .iter()
+        .position(|p| p.r#type == ArrowPayloadType::Logs as i32)
+        .unwrap();
+    let mut reader =
+        arrow_ipc::reader::StreamReader::try_new(&batch.arrow_payloads[main].record[..], None)
+            .unwrap();
+    let rb = reader.next().unwrap().unwrap();
+    let idx = rb.schema().index_of("resource").unwrap();
+    let resource = rb
+        .column(idx)
+        .as_any()
+        .downcast_ref::<arrow_array::StructArray>()
+        .unwrap();
+    let (fields, mut columns, nulls) = resource.clone().into_parts();
+    let id = fields.iter().position(|f| f.name() == "id").unwrap();
+    columns[id] = Arc::new(UInt16Array::from(
+        (0..rb.num_rows())
+            .map(|i| Some((i % 2) as u16))
+            .collect::<Vec<_>>(),
+    ));
+    let mut cols = rb.columns().to_vec();
+    cols[idx] = Arc::new(arrow_array::StructArray::new(fields, columns, nulls));
+    let alternating = RecordBatch::try_new(rb.schema(), cols).unwrap();
+    let mut evil = batch.clone();
+    evil.arrow_payloads[main].record = strip_eos(ipc(&alternating));
+    assert!(matches!(
+        OtapDecoder::new(limits).decode(&evil),
+        Err(DecodeError::DecodedTooLarge)
+    ));
+    // With room for the copies the same batch decodes: 16 placements.
+    let roomy = DecodeLimits {
+        max_decoded_string_bytes: 16 << 20,
+        ..limits
+    };
+    assert_eq!(
+        OtapDecoder::new(roomy)
+            .decode(&evil)
+            .unwrap()
+            .resources
+            .len(),
+        16
+    );
+}
+
+/// A split that fails after writing earlier pieces discards them, so it must
+/// reset the streams: otherwise the next batch continues a schema the
+/// receiver never saw.
+#[test]
+fn failed_split_after_written_pieces_resets_streams() {
+    let mut enc = LogsEncoder::new(EncoderConfig {
+        max_dictionary_entries: 1,
+        ..EncoderConfig::default()
+    });
+    let plain = LogRecord::default();
+    let mut wide = LogRecord::default();
+    wide.attributes.insert("a", 1i64).unwrap();
+    wide.attributes.insert("b", 2i64).unwrap();
+    let resets = enc.resets();
+    assert!(enc.encode_logs_split(&[plain.clone(), wide]).is_err());
+    assert_eq!(enc.resets(), resets + 1);
+    let next = enc.encode_logs(&[plain]).unwrap();
+    let decoded = OtapDecoder::default().decode(&next).unwrap();
+    assert_eq!(decoded.logs.len(), 1);
+}

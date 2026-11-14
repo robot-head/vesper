@@ -710,13 +710,51 @@ fn quasi_ids(c: &C<'_>, same: impl Fn(usize) -> bool) -> Result<Vec<u32>, Decode
 
 // ------------------------------------------------------------------ related data
 
+/// Bytes a repeated copy of a decoded item costs against the string budget.
+trait Weight {
+    fn weight(&self) -> usize;
+}
+/// Fixed charge per copied entry, so repeats of string-free rows count too.
+const ENTRY_WEIGHT: usize = 32;
+fn attrs_weight(attrs: &DecodedAttributes) -> usize {
+    attrs
+        .iter()
+        .map(Weight::weight)
+        .fold(0, usize::saturating_add)
+}
+impl Weight for (String, DecodedValue) {
+    fn weight(&self) -> usize {
+        let value = match &self.1 {
+            DecodedValue::Str(s) => s.len(),
+            _ => 0,
+        };
+        ENTRY_WEIGHT
+            .saturating_add(self.0.len())
+            .saturating_add(value)
+    }
+}
+impl Weight for DecodedEvent {
+    fn weight(&self) -> usize {
+        ENTRY_WEIGHT
+            .saturating_add(self.name.len())
+            .saturating_add(attrs_weight(&self.attributes))
+    }
+}
+impl Weight for DecodedLink {
+    fn weight(&self) -> usize {
+        ENTRY_WEIGHT
+            .saturating_add(self.trace_state.as_ref().map_or(0, String::len))
+            .saturating_add(attrs_weight(&self.attributes))
+    }
+}
+
 /// Related rows grouped by parent id; every group must be claimed.
 struct ByParent<T> {
     map: HashMap<u32, Vec<T>>,
     claimed: HashSet<u32>,
     name: &'static str,
 }
-impl<T: Clone> ByParent<T> {
+impl<T: Clone + Weight> ByParent<T> {
     fn new(name: &'static str) -> Self {
         Self {
             map: HashMap::new(),
@@ -727,9 +765,28 @@ impl<T: Clone> ByParent<T> {
     fn push(&mut self, parent: u32, item: T) {
         self.map.entry(parent).or_default().push(item);
     }
-    fn claim(&mut self, id: u32) -> Vec<T> {
-        self.claimed.insert(id);
-        self.map.get(&id).cloned().unwrap_or_default()
+    /// The group for `id`. The first claim's strings were charged when they
+    /// were decoded; a repeated claim (the same resource or scope id placed
+    /// again, possible with plain ids) copies them again, so it is charged
+    /// against the decoded-string budget, with a per-entry overhead, before
+    /// the copy.
+    fn claim(&mut self, id: u32, budget: &Cell<usize>) -> Result<Vec<T>, DecodeError> {
+        let Some(group) = self.map.get(&id) else {
+            self.claimed.insert(id);
+            return Ok(Vec::new());
+        };
+        if !self.claimed.insert(id) {
+            let cost = group
+                .iter()
+                .try_fold(0usize, |acc, item| acc.checked_add(item.weight()))
+                .ok_or(DecodeError::DecodedTooLarge)?;
+            let left = budget
+                .get()
+                .checked_sub(cost)
+                .ok_or(DecodeError::DecodedTooLarge)?;
+            budget.set(left);
+        }
+        Ok(group.clone())
     }
     fn finish(self) -> Result<(), DecodeError> {
         if self.map.keys().all(|k| self.claimed.contains(k)) {
@@ -888,7 +945,7 @@ impl Cx<'_> {
                 prev_res = Some(res_id);
                 prev_scope = None;
                 let attributes = match r.ids[i] {
-                    Some(_) if r.valid[i] => res_attrs.claim(res_id),
+                    Some(_) if r.valid[i] => res_attrs.claim(res_id, self.budget)?,
                     _ => Vec::new(),
                 };
                 self.out.resources.push(DecodedResource {
@@ -901,7 +958,7 @@ impl Cx<'_> {
             if prev_scope != Some(scope_id) {
                 prev_scope = Some(scope_id);
                 let attributes = match s.ids[i] {
-                    Some(_) if s.valid[i] => scope_attrs.claim(scope_id),
+                    Some(_) if s.valid[i] => scope_attrs.claim(scope_id, self.budget)?,
                     _ => Vec::new(),
                 };
                 self.out.scopes.push(DecodedScope {
@@ -989,7 +1046,11 @@ impl Cx<'_> {
                     if !seen.insert(id) {
                         return Err(DecodeError::DuplicateId("id"));
                     }
-                    (attrs.claim(id), events.claim(id), links.claim(id))
+                    (
+                        attrs.claim(id, self.budget)?,
+                        events.claim(id, self.budget)?,
+                        links.claim(id, self.budget)?,
+                    )
                 }
                 None => Default::default(),
             };
@@ -1070,7 +1131,7 @@ impl Cx<'_> {
                 Some(id) if !seen.insert(id) => {
                     return Err(DecodeError::DuplicateId("span_events.id"))
                 }
-                Some(id) => attrs.claim(id),
+                Some(id) => attrs.claim(id, self.budget)?,
                 None => Vec::new(),
             };
             out.push(
@@ -1123,7 +1184,7 @@ impl Cx<'_> {
                 Some(id) if !seen.insert(id) => {
                     return Err(DecodeError::DuplicateId("span_links.id"))
                 }
-                Some(id) => attrs.claim(id),
+                Some(id) => attrs.claim(id, self.budget)?,
                 None => Vec::new(),
             };
             let span = span_ids[i]
@@ -1252,7 +1313,7 @@ impl Cx<'_> {
                 Some(id) if !seen.insert(id) => {
                     return Err(DecodeError::DuplicateId("histogram_dps.id"))
                 }
-                Some(id) => dp_attrs.claim(id),
+                Some(id) => dp_attrs.claim(id, self.budget)?,
                 None => Vec::new(),
             };
             self.out.histograms.push(DecodedHistogram {
@@ -1356,7 +1417,7 @@ impl Cx<'_> {
         for i in 0..n {
             let attributes = match ids[i] {
                 Some(id) if !seen.insert(id) => return Err(DecodeError::DuplicateId("id")),
-                Some(id) => attrs.claim(id),
+                Some(id) => attrs.claim(id, self.budget)?,
                 None => Vec::new(),
             };
             self.out.logs.push(DecodedLog {

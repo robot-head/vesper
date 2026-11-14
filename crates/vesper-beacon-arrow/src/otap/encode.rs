@@ -894,6 +894,26 @@ fn encode_chunked<T>(
         Err(e) => Err(e),
     }
 }
+/// [`encode_chunked`] over all of `entries`. Pieces already written advance
+/// the streams; if a later piece fails they are discarded with the error, so
+/// the streams are reset and the next batch starts fresh schemas the
+/// receiver can read.
+fn encode_split_all<T>(
+    set: &mut StreamSet,
+    entries: &[Entry<'_, T>],
+    plan: &impl Fn(&[Entry<'_, T>], IdEncoding) -> Result<Vec<Plan>, EncodeError>,
+) -> Result<Vec<BatchArrowRecords>, EncodeError> {
+    let mut out = Vec::new();
+    match encode_chunked(set, entries, plan, &mut out) {
+        Ok(()) => Ok(out),
+        Err(e) => {
+            if !out.is_empty() {
+                set.reset();
+            }
+            Err(e)
+        }
+    }
+}
 fn encode_one<T>(
     set: &mut StreamSet,
     entries: &[Entry<'_, T>],
@@ -1142,7 +1162,8 @@ impl TraceEncoder {
     }
     /// Like [`encode_spans`](Self::encode_spans), but splits the input into
     /// as many batches as needed to respect every row and dictionary limit.
-    /// Fails only if a single span does not fit on its own.
+    /// Fails only if a single span does not fit on its own; batches made
+    /// before such a failure are discarded and the streams reset.
     pub fn encode_spans_split(
         &mut self,
         spans: &[OtapSpan],
@@ -1153,9 +1174,7 @@ impl TraceEncoder {
         &mut self,
         groups: &[ResourceGroup<OtapSpan>],
     ) -> Result<Vec<BatchArrowRecords>, EncodeError> {
-        let mut out = Vec::new();
-        encode_chunked(&mut self.set, &flatten(groups), &plan_traces, &mut out)?;
-        Ok(out)
+        encode_split_all(&mut self.set, &flatten(groups), &plan_traces)
     }
 }
 
@@ -1390,9 +1409,7 @@ impl MetricsEncoder {
         &mut self,
         groups: &[ResourceGroup<HistogramPoint<'_>>],
     ) -> Result<Vec<BatchArrowRecords>, EncodeError> {
-        let mut out = Vec::new();
-        encode_chunked(&mut self.set, &flatten(groups), &plan_metrics, &mut out)?;
-        Ok(out)
+        encode_split_all(&mut self.set, &flatten(groups), &plan_metrics)
     }
 }
 
@@ -1538,8 +1555,6 @@ impl LogsEncoder {
         &mut self,
         groups: &[ResourceGroup<LogRecord>],
     ) -> Result<Vec<BatchArrowRecords>, EncodeError> {
-        let mut out = Vec::new();
-        encode_chunked(&mut self.set, &flatten(groups), &plan_logs, &mut out)?;
-        Ok(out)
+        encode_split_all(&mut self.set, &flatten(groups), &plan_logs)
     }
 }

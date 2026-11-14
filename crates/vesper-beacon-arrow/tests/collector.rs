@@ -429,7 +429,7 @@ fn collector_otelarrow_exporter_reaches_the_beacon_server() {
     while spans.len() < 2 || hists.is_empty() || logs.is_empty() {
         let left = deadline.saturating_duration_since(Instant::now());
         let got = rt
-            .block_on(tokio::time::timeout(left, rx.recv()))
+            .block_on(async { tokio::time::timeout(left, rx.recv()).await })
             .expect("collector did not deliver to the Beacon server")
             .unwrap();
         let b = got.batch;
