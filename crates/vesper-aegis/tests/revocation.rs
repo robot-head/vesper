@@ -7,10 +7,15 @@ use rcgen::{
     BasicConstraints, CertificateParams, CertificateRevocationListParams, CustomExtension, DnType,
     IsCa, Issuer, KeyIdMethod, KeyPair, RevokedCertParams, SerialNumber, date_time_ymd,
 };
-use vesper_aegis::amd::{AmdTcb, SnpCollateral, SnpTcbBaseline, verify_snp_collateral};
+use vesper_aegis::amd::{
+    AmdTcb, SnpCollateral, SnpTcbBaseline, check_snp_crl_floor, verify_snp_collateral,
+};
 use vesper_aegis::chain::{Curve, RevocationScope, verify_chain_with_crls};
 use vesper_aegis::error::AttestError;
-use vesper_aegis::intel::{SignedCollateral, TcbStatus, TdxCollateral, verify_tdx_collateral};
+use vesper_aegis::intel::{
+    PckIssuer, SignedCollateral, TcbStatus, TdxCollateral, parse_pck_extensions,
+    verify_tdx_collateral,
+};
 use vesper_aegis::roots::{AmdProduct, AmdSigningKey};
 use vesper_aegis::{TrustRoot, tdx::TdxQuote};
 
@@ -78,8 +83,13 @@ fn leaf(parent: &Ca, signer: &Signer, serial: u64, ext: Vec<CustomExtension>) ->
 
 /// A CRL by `ca` listing `revoked` serials; valid 2025-01-01..`next`.
 fn crl(ca: &Ca, revoked: &[u64], next: (i32, u8, u8)) -> Vec<u8> {
+    crl_at(ca, revoked, (2025, 1, 1), next)
+}
+
+/// A CRL by `ca` valid `this`..`next`.
+fn crl_at(ca: &Ca, revoked: &[u64], this: (i32, u8, u8), next: (i32, u8, u8)) -> Vec<u8> {
     CertificateRevocationListParams {
-        this_update: date_time_ymd(2025, 1, 1),
+        this_update: date_time_ymd(this.0, this.1, this.2),
         next_update: date_time_ymd(next.0, next.1, next.2),
         crl_number: SerialNumber::from(7u64),
         issuing_distribution_point: None,
@@ -384,4 +394,179 @@ fn amd_shaped_revocation_and_binding() {
         verify_snp_collateral(&r, &collateral(None, vcek_der), &root, NOW_NS, None),
         Err(AttestError::BadSignature { .. })
     ));
+}
+
+#[test]
+fn amd_crl_rollback_is_a_typed_error() {
+    let ark = root(Curve::P384, "ARK-Milan");
+    let ask = sub_ca(&ark, Curve::P384, "SEV-Milan", 2);
+    let vcek = Signer::generate(Curve::P384);
+    let params = SnpParams::default();
+    let tcb = AmdTcb::from_raw(AmdProduct::Milan, params.reported_tcb).unwrap();
+    let (vcek_der, _) = leaf(&ask, &vcek, 0x55, vcek_extensions(tcb, &[0xC1; 64]));
+    let report = support::snp_report(&vcek, &params);
+    let root = trust(&ark);
+    let verify = |crl_der: Vec<u8>| {
+        verify_snp_collateral(
+            &report,
+            &SnpCollateral {
+                product: AmdProduct::Milan,
+                signing_key: AmdSigningKey::Vcek,
+                leaf_der: vcek_der.clone(),
+                intermediate_der: Some(ask.der.clone()),
+                crl_der: Some(crl_der),
+            },
+            &root,
+            NOW_NS,
+            None,
+        )
+        .unwrap()
+    };
+    // Two valid, current CRLs: an older one (2025-01-01, listing nothing)
+    // and a newer one (2025-09-01).
+    let older = verify(crl_at(&ark, &[], (2025, 1, 1), CURRENT));
+    let newer = verify(crl_at(&ark, &[], (2025, 9, 1), CURRENT));
+    let floor = newer.crl_this_update;
+    assert_eq!(floor, Some(1_756_684_800));
+    check_snp_crl_floor(&newer, floor).unwrap();
+    check_snp_crl_floor(&older, None).unwrap();
+    // After accepting the newer CRL, replaying the older (still valid,
+    // still signed) one is a rollback.
+    assert!(matches!(
+        check_snp_crl_floor(&older, floor),
+        Err(AttestError::CollateralDowngrade {
+            what: "ARK CRL thisUpdate",
+            have: 1_735_689_600,
+            floor: 1_756_684_800
+        })
+    ));
+}
+
+// ------------------------------------------- PCK platform-instance data --
+
+const SGX_ARC: [u64; 9] = [1, 2, 840, 113741, 1, 13, 1, 0, 0];
+
+fn der(tag: u8, body: &[u8]) -> Vec<u8> {
+    let mut out = vec![tag];
+    let n = body.len();
+    if n < 0x80 {
+        out.push(n as u8);
+    } else if n < 0x100 {
+        out.extend_from_slice(&[0x81, n as u8]);
+    } else {
+        out.extend_from_slice(&[0x82, (n >> 8) as u8, n as u8]);
+    }
+    out.extend_from_slice(body);
+    out
+}
+
+/// `SEQUENCE { OID 1.2.840.113741.1.13.1.<suffix>, value }`.
+fn sgx_entry(suffix: &[u8], value: Vec<u8>) -> Vec<u8> {
+    let mut oid = vec![0x2a, 0x86, 0x48, 0x86, 0xf8, 0x4d, 0x01, 0x0d, 0x01];
+    oid.extend_from_slice(suffix);
+    let mut body = der(0x06, &oid);
+    body.extend(value);
+    der(0x30, &body)
+}
+
+/// A PCK SGX extension; `instance` adds entry 6, `config` entry 7 with the
+/// given `(sub-entry, flag)` pairs.
+fn sgx_extension(instance: bool, config: Option<&[(u8, bool)]>) -> Vec<u8> {
+    let mut tcb = Vec::new();
+    for i in 1..=16u8 {
+        tcb.extend(sgx_entry(&[2, i], der(0x02, &[1])));
+    }
+    tcb.extend(sgx_entry(&[2, 17], der(0x02, &[13])));
+    tcb.extend(sgx_entry(&[2, 18], der(0x04, &[1; 16])));
+    let mut entries = sgx_entry(&[1], der(0x04, &[0xAA; 16]));
+    entries.extend(sgx_entry(&[2], der(0x30, &tcb)));
+    entries.extend(sgx_entry(&[3], der(0x04, &[0, 0])));
+    entries.extend(sgx_entry(&[4], der(0x04, &[0x90, 0xC0, 0x6F, 0, 0, 0])));
+    entries.extend(sgx_entry(&[5], der(0x0a, &[1])));
+    if instance {
+        entries.extend(sgx_entry(&[6], der(0x04, &[0x5A; 16])));
+    }
+    if let Some(cfg) = config {
+        let mut c = Vec::new();
+        for &(n, flag) in cfg {
+            c.extend(sgx_entry(
+                &[7, n],
+                der(0x01, &[if flag { 0xFF } else { 0 }]),
+            ));
+        }
+        entries.extend(sgx_entry(&[7], der(0x30, &c)));
+    }
+    der(0x30, &entries)
+}
+
+fn pck_cert(issuer_cn: &str, ext: Vec<u8>) -> Vec<u8> {
+    let r = root(Curve::P256, "Test SGX Root CA");
+    let ca = sub_ca(&r, Curve::P256, issuer_cn, 20);
+    let oid = &SGX_ARC[..7];
+    leaf(
+        &ca,
+        &Signer::generate(Curve::P256),
+        300,
+        vec![CustomExtension::from_oid_content(oid, ext)],
+    )
+    .0
+}
+
+#[test]
+fn pck_platform_instance_entries_follow_the_issuing_ca() {
+    const PLATFORM: &str = "Intel SGX PCK Platform CA";
+    const PROCESSOR: &str = "Intel SGX PCK Processor CA";
+    // Platform CA with instance ID and full configuration.
+    let p = parse_pck_extensions(&pck_cert(
+        PLATFORM,
+        sgx_extension(true, Some(&[(1, true), (2, false), (3, true)])),
+    ))
+    .unwrap();
+    assert_eq!(p.issuer, PckIssuer::Platform);
+    let inst = p.platform_instance.unwrap();
+    assert_eq!(inst.platform_instance_id, [0x5A; 16]);
+    let cfg = inst.configuration.unwrap();
+    assert_eq!(
+        (cfg.dynamic_platform, cfg.cached_keys, cfg.smt_enabled),
+        (Some(true), Some(false), Some(true))
+    );
+    // Configuration is optional, and so is each of its entries.
+    let p = parse_pck_extensions(&pck_cert(PLATFORM, sgx_extension(true, None))).unwrap();
+    assert_eq!(p.platform_instance.unwrap().configuration, None);
+    let p = parse_pck_extensions(&pck_cert(
+        PLATFORM,
+        sgx_extension(true, Some(&[(3, false)])),
+    ))
+    .unwrap();
+    let cfg = p.platform_instance.unwrap().configuration.unwrap();
+    assert_eq!(cfg.smt_enabled, Some(false));
+    assert_eq!(cfg.dynamic_platform, None);
+    // Processor CA: no platform-instance entries.
+    let p = parse_pck_extensions(&pck_cert(PROCESSOR, sgx_extension(false, None))).unwrap();
+    assert_eq!(p.issuer, PckIssuer::Processor);
+    assert_eq!(p.platform_instance, None);
+
+    let bad = |cn: &str, ext: Vec<u8>| {
+        assert!(
+            matches!(
+                parse_pck_extensions(&pck_cert(cn, ext)),
+                Err(AttestError::Collateral { .. })
+            ),
+            "{cn}"
+        )
+    };
+    // Platform CA without an instance ID.
+    bad(PLATFORM, sgx_extension(false, None));
+    bad(PLATFORM, sgx_extension(false, Some(&[(1, true)])));
+    // Processor CA with platform-instance entries.
+    bad(PROCESSOR, sgx_extension(true, None));
+    bad(PROCESSOR, sgx_extension(false, Some(&[(1, true)])));
+    // Duplicated or unknown configuration entries.
+    bad(
+        PLATFORM,
+        sgx_extension(true, Some(&[(1, true), (1, false)])),
+    );
+    bad(PLATFORM, sgx_extension(true, Some(&[(4, true)])));
+    // An issuer that is neither Intel PCK CA.
+    bad("Test SGX PCK Platform CA", sgx_extension(true, None));
 }
