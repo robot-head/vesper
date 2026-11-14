@@ -10,8 +10,10 @@
 //! asked about regular files) are serviced inline with positional
 //! `pread`/`pwrite` at the request offset, and their completion is delivered by
 //! the next `poll`, never by `submit`. Stream descriptors (pipes, sockets,
-//! terminals) are registered one-shot; after readiness the operation runs with
-//! `O_NONBLOCK` set for its duration, and a spurious wake-up re-arms it.
+//! terminals) are switched to `O_NONBLOCK` (and left so) and registered
+//! one-shot; a spurious wake-up re-arms. Zero-length operations and operations
+//! against the descriptor's access mode (`EBADF`) need no readiness and
+//! complete at the next poll.
 #![allow(unsafe_code)]
 use crate::driver::{
     Completion, DriverKind, Operation, PollError, Rejected, Request, RequestId, cancelled_error,
@@ -102,6 +104,26 @@ impl<T, P: Poller> Readiness<T, P> {
         let id = RequestId(self.next);
         let interest = Interest::from(request.operation);
         let fd = request.file.as_raw_fd();
+        let flags = match status_flags(fd) {
+            Ok(flags) => flags,
+            Err(e) => return Err((e, request)),
+        };
+        // Requests that can finish without readiness complete at the next
+        // poll: a readiness event for them might never arrive (an empty pipe
+        // never signals a zero-length read; a read-only end never signals
+        // writability).
+        let immediate = if wrong_direction(flags, request.operation) {
+            Some(Err(io::Error::from_raw_os_error(libc::EBADF)))
+        } else if request.buffer.is_empty() {
+            Some(Ok(0))
+        } else {
+            None
+        };
+        if let Some(result) = immediate {
+            self.next += 1;
+            self.ready.push_back(finish(id, request, result));
+            return Ok(id);
+        }
         match self.poller.arm(fd, interest, id.0) {
             Err(e) => return Err((e, request)),
             Ok(Armed::Registered) => {
@@ -110,6 +132,10 @@ impl<T, P: Poller> Readiness<T, P> {
                     // reading from somewhere other than the requested offset.
                     let _ = self.poller.deregister(fd, interest);
                     return Err((io::Error::from_raw_os_error(libc::ESPIPE), request));
+                }
+                if let Err(e) = set_nonblocking(fd, flags) {
+                    let _ = self.poller.deregister(fd, interest);
+                    return Err((e, request));
                 }
                 self.next += 1;
                 self.waiting.insert(id, request);
@@ -242,31 +268,45 @@ fn positional<T>(request: &mut Request<T>) -> io::Result<usize> {
     }
 }
 
-/// Stream I/O after readiness, with `O_NONBLOCK` for the call only. The file
-/// description's flags are restored, so other holders of a duplicate see no
-/// lasting change.
-fn streamed<T>(request: &mut Request<T>) -> io::Result<usize> {
-    let fd = request.file.as_raw_fd();
-    // SAFETY: fcntl on a descriptor this request owns; no memory is passed.
+fn status_flags(fd: RawFd) -> io::Result<libc::c_int> {
+    // SAFETY: fcntl on a descriptor the request owns; no memory is passed.
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(io::Error::last_os_error());
     }
-    let toggled = flags & libc::O_NONBLOCK == 0;
-    // SAFETY: as above.
-    if toggled && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+    Ok(flags)
+}
+
+fn wrong_direction(flags: libc::c_int, op: Operation) -> bool {
+    let mode = flags & libc::O_ACCMODE;
+    match op {
+        Operation::Read => mode == libc::O_WRONLY,
+        Operation::Write => mode == libc::O_RDONLY,
+    }
+}
+
+/// A registered stream is switched to `O_NONBLOCK` and left that way: the
+/// flag belongs to the open file description, so restoring it after each
+/// call could make a concurrent operation on a duplicate (`try_clone`, `dup`)
+/// block. Callers that later use the file synchronously see `WouldBlock`.
+fn set_nonblocking(fd: RawFd, flags: libc::c_int) -> io::Result<()> {
+    if flags & libc::O_NONBLOCK != 0 {
+        return Ok(());
+    }
+    // SAFETY: as in status_flags.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(())
+}
+
+/// Stream I/O after readiness on a descriptor already in `O_NONBLOCK` mode.
+fn streamed<T>(request: &mut Request<T>) -> io::Result<usize> {
     let mut file = &request.file;
-    let result = match request.operation {
+    match request.operation {
         Operation::Read => retry(|| file.read(&mut request.buffer)),
         Operation::Write => retry(|| file.write(&request.buffer)),
-    };
-    // SAFETY: as above.
-    if toggled && unsafe { libc::fcntl(fd, libc::F_SETFL, flags) } < 0 && result.is_ok() {
-        return Err(io::Error::last_os_error());
     }
-    result
 }
 
 #[cfg(test)]
@@ -400,6 +440,51 @@ mod tests {
             .unwrap();
         assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(driver.abandon(), 1);
+    }
+    #[test]
+    fn requests_that_need_no_readiness_complete_at_the_next_poll() {
+        let mut driver = Readiness::<u32, _>::new(Script::default(), DriverKind::Epoll, 8);
+        let (r, w) = pipe();
+        let (r2, w2) = (r.try_clone().unwrap(), w.try_clone().unwrap());
+        // Zero-length read on an empty pipe whose writer stays open.
+        driver
+            .submit(request(r, Operation::Read, vec![], 0))
+            .unwrap_or_else(|_| panic!());
+        // Wrong direction on each end.
+        driver
+            .submit(request(r2, Operation::Write, vec![1], 0))
+            .unwrap_or_else(|_| panic!());
+        driver
+            .submit(request(w2, Operation::Read, vec![0; 4], 0))
+            .unwrap_or_else(|_| panic!());
+        assert!(driver.poller.armed.is_empty(), "nothing was registered");
+        let done = driver.poll(true).unwrap();
+        assert_eq!(done.len(), 3);
+        assert_eq!(*done[0].result.as_ref().unwrap(), 0);
+        for c in &done[1..] {
+            assert_eq!(
+                c.result.as_ref().unwrap_err().raw_os_error(),
+                Some(libc::EBADF)
+            );
+        }
+        drop(w);
+    }
+    #[test]
+    fn registered_streams_stay_nonblocking_for_duplicates() {
+        let mut driver = Readiness::<u32, _>::new(Script::default(), DriverKind::Epoll, 8);
+        let (r, _w) = pipe();
+        let dup = r.try_clone().unwrap();
+        driver
+            .submit(request(r, Operation::Read, vec![0; 4], 0))
+            .unwrap_or_else(|_| panic!());
+        let flags = status_flags(dup.as_raw_fd()).unwrap();
+        assert_ne!(flags & libc::O_NONBLOCK, 0);
+        driver.poller.fire = driver.poller.armed.iter().copied().collect();
+        // A spurious wake-up on an empty pipe must not block.
+        assert!(driver.poll(false).unwrap().is_empty());
+        assert_ne!(status_flags(dup.as_raw_fd()).unwrap() & libc::O_NONBLOCK, 0);
+        driver.cancel_all().unwrap();
+        assert_eq!(driver.poll(false).unwrap().len(), 1);
     }
     fn tempfile() -> File {
         let path = std::env::temp_dir().join(format!(

@@ -124,8 +124,12 @@ python3 tools/bazel/sync_build_files.py                     # no BUILD change ne
   kqueue reports them always readable, so this is the honest equivalent; the
   cost is that a slow disk read blocks the scheduler thread for its duration
   (io_uring does not).
-* Streams under epoll/kqueue use `O_NONBLOCK` only for the call and restore the
-  file's flags, so a caller's file description keeps its mode.
+* Streams submitted to epoll/kqueue are switched to `O_NONBLOCK` and left that
+  way. Restoring the flag per call (the first version) let a concurrent
+  operation on a duplicated descriptor block (Codex review on #363). Zero-length
+  requests and requests against the descriptor's access mode complete at the
+  next poll with `Ok(0)`/`EBADF` instead of waiting for a readiness event that
+  never comes (same review).
 * IOCP keeps synchronous handles working (positional, then posted), because
   `std::fs::File` opens them that way; true asynchrony needs
   `FILE_FLAG_OVERLAPPED`.
