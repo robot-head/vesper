@@ -1,8 +1,13 @@
-use crate::{EventBatch, GtkError, Payload, UiEvent, validate_transaction, width_request};
+use crate::{
+    EventBatch, GtkError, Payload, UiEvent,
+    image::RgbaImage,
+    style::{Layout, Style, grid_cell},
+    validate_transaction, width_request,
+};
 use gtk4 as gtk;
-use gtk4::{glib, prelude::*};
+use gtk4::{glib, graphene, prelude::*};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, VecDeque},
     rc::Rc,
     sync::{
@@ -10,6 +15,7 @@ use std::{
         atomic::{AtomicU64, Ordering},
     },
     thread::{self, ThreadId},
+    time::{Duration, Instant},
 };
 use vesper_aura::{
     Backend, Event, HandlerKey, Kind, Limits, Patch, Property, RecordingBackend, SlotId,
@@ -24,6 +30,22 @@ static DROPPED_WHILE_MOUNTED: AtomicU64 = AtomicU64::new(0);
 /// Name given to the focus controllers this backend installs, so tests and
 /// tooling can find them through `gtk_widget_observe_controllers`.
 pub const FOCUS_CONTROLLER_NAME: &str = "aura-focus";
+
+/// Widget name of the scrolled window that hosts a virtual list inside an
+/// Aura container.
+pub const VIRTUAL_LIST_NAME: &str = "aura-virtual-list";
+
+/// Most rows a virtual list may have. The model holds one small
+/// `GtkStringObject` per row; row widgets are created only for visible rows.
+pub const MAX_VIRTUAL_ROWS: u32 = 1_000_000;
+
+/// Largest stylesheet accepted by [`GtkBackend::load_css`].
+pub const MAX_CSS_BYTES: usize = 64 * 1024;
+
+/// CSS classes GTK itself adds to the widgets this backend creates. They are
+/// left out of [`NativeNode::css_classes`], which reports host classes only.
+pub const GTK_INTRINSIC_CLASSES: &[&str] =
+    &["text-button", "image-button", "vertical", "horizontal"];
 
 /// Number of [`GtkBackend`]s dropped while still holding a mounted tree. A
 /// backend owns native widgets and must be released through
@@ -47,9 +69,79 @@ pub struct NativeNode {
     pub width_request: i32,
     /// Names of the controllers this backend installed (focus subscriptions).
     pub aura_controllers: usize,
+    /// The layout manager of a container, read back from GTK.
+    pub layout: Option<NativeLayout>,
+    /// `GtkGridLayoutChild` column and row, when the parent uses a grid.
+    pub grid_cell: Option<(i32, i32)>,
+    /// Host CSS classes (sorted; GTK's own classes are left out).
+    pub css_classes: Vec<String>,
+    /// Row count of a virtual list hosted in this container.
+    pub virtual_rows: Option<u32>,
     /// Children in GTK order. Only `GtkBox` children are walked; the internal
-    /// children of buttons and entries are GTK implementation details.
+    /// children of buttons and entries are GTK implementation details, and a
+    /// hosted virtual list is reported through `virtual_rows`.
     pub children: Vec<NativeNode>,
+}
+
+/// A container's layout manager as GTK reports it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeLayout {
+    /// `GtkBoxLayout`.
+    Box { horizontal: bool, spacing: i32 },
+    /// `GtkGridLayout`.
+    Grid {
+        row_spacing: i32,
+        column_spacing: i32,
+    },
+    /// Any other layout manager (never installed by this crate).
+    Other(String),
+}
+
+impl NativeLayout {
+    fn of(layout: Layout) -> Self {
+        match layout {
+            Layout::VStack { spacing } => NativeLayout::Box {
+                horizontal: false,
+                spacing: i32::from(spacing),
+            },
+            Layout::HStack { spacing } => NativeLayout::Box {
+                horizontal: true,
+                spacing: i32::from(spacing),
+            },
+            Layout::Grid {
+                row_spacing,
+                column_spacing,
+                ..
+            } => NativeLayout::Grid {
+                row_spacing: i32::from(row_spacing),
+                column_spacing: i32::from(column_spacing),
+            },
+        }
+    }
+}
+
+/// Counters of one virtual list's row recycling.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VirtualListStats {
+    pub rows: u32,
+    /// Row widgets GTK asked the factory to create (`setup`).
+    pub row_widgets: u64,
+    /// Rows currently bound to a widget.
+    pub bound: u64,
+    /// Total `bind` calls (each fetches the row's text from the host).
+    pub binds: u64,
+    /// Largest row index ever bound.
+    pub max_bound_index: Option<u32>,
+}
+
+/// Rows of a virtual list are fetched from the host at bind time.
+pub type RowText = Rc<dyn Fn(u32) -> String>;
+
+struct Island {
+    scrolled: gtk::ScrolledWindow,
+    list: gtk::ListView,
+    model: gtk::StringList,
+    stats: Rc<RefCell<VirtualListStats>>,
 }
 
 /// Result of [`GtkBackend::close`].
@@ -126,6 +218,9 @@ pub struct GtkBackend {
     slots: BTreeMap<SlotId, (WidgetId, Property)>,
     subscriptions: BTreeMap<SubscriptionId, Subscription>,
     queue: Rc<RefCell<Queue>>,
+    decor: BTreeMap<WidgetId, Style>,
+    islands: BTreeMap<WidgetId, Island>,
+    css: Vec<gtk::CssProvider>,
     tracked: Vec<glib::WeakRef<glib::Object>>,
     created: usize,
     max_text_bytes: usize,
@@ -198,6 +293,9 @@ impl GtkBackend {
             slots: BTreeMap::new(),
             subscriptions: BTreeMap::new(),
             queue,
+            decor: BTreeMap::new(),
+            islands: BTreeMap::new(),
+            css: Vec::new(),
             tracked,
             created: 1,
             poisoned: false,
@@ -302,7 +400,9 @@ impl GtkBackend {
     pub fn expected_tree(&self, thread: &UiThread) -> Result<Option<NativeNode>, GtkError> {
         self.check(thread)?;
         let snapshot = self.shadow.snapshot(thread)?;
-        Ok(snapshot.root.map(|root| expected(snapshot, root)))
+        Ok(snapshot
+            .root
+            .map(|root| self.expected(snapshot, root, None)))
     }
 
     /// Check that GTK's widget tree equals the shadow model and that every
@@ -359,7 +459,361 @@ impl GtkBackend {
         })
     }
 
+    /// The decorations last applied to `widget` (default if none).
+    pub fn style(&self, thread: &UiThread, widget: WidgetId) -> Result<Style, GtkError> {
+        self.check(thread)?;
+        if !self.widgets.contains_key(&widget) {
+            return Err(GtkError::StaleWidget);
+        }
+        Ok(self.decor.get(&widget).cloned().unwrap_or_default())
+    }
+
+    /// Apply a layout and CSS classes to a live widget. A layout is only
+    /// valid on a container. Validation happens before any GTK change.
+    pub fn set_style(
+        &mut self,
+        thread: &UiThread,
+        widget: WidgetId,
+        style: Style,
+    ) -> Result<(), GtkError> {
+        self.check(thread)?;
+        let style = style.validate()?;
+        let native = self.widgets.get(&widget).ok_or(GtkError::StaleWidget)?;
+        if style.layout.is_some() && native.kind != Kind::Container {
+            return Err(GtkError::Unsupported("layout on a non-container"));
+        }
+        let w = native.widget.clone();
+        let old = self.decor.get(&widget).cloned().unwrap_or_default();
+        for class in &old.classes {
+            if !style.classes.contains(class) {
+                w.remove_css_class(class);
+            }
+        }
+        for class in &style.classes {
+            w.add_css_class(class);
+        }
+        if native.kind == Kind::Container {
+            let container = downcast::<gtk::Box>(&w)?;
+            install_layout(container, style.layout.unwrap_or_default());
+        }
+        if style == Style::default() {
+            self.decor.remove(&widget);
+        } else {
+            self.decor.insert(widget, style);
+        }
+        self.relayout(&widget);
+        Ok(())
+    }
+
+    /// Recompute grid cells of one container (no-op for stacks).
+    fn relayout(&self, widget: &WidgetId) {
+        let Some(Layout::Grid { columns, .. }) = self.decor.get(widget).and_then(|s| s.layout)
+        else {
+            return;
+        };
+        let Some(native) = self.widgets.get(widget) else {
+            return;
+        };
+        let Some(manager) = native.widget.layout_manager() else {
+            return;
+        };
+        let Some(container) = native.widget.downcast_ref::<gtk::Box>() else {
+            return;
+        };
+        for (i, child) in children(container).enumerate() {
+            if let (Ok((col, row)), Ok(cell)) = (
+                grid_cell(i, columns),
+                manager
+                    .layout_child(&child)
+                    .downcast::<gtk::GridLayoutChild>(),
+            ) {
+                cell.set_column(col);
+                cell.set_row(row);
+            }
+        }
+    }
+
+    /// Load a stylesheet for this backend's display at user priority.
+    /// Any parse error rejects the whole stylesheet (nothing stays loaded).
+    pub fn load_css(&mut self, thread: &UiThread, css: &str) -> Result<(), GtkError> {
+        self.check(thread)?;
+        if css.len() > MAX_CSS_BYTES {
+            return Err(GtkError::Unsupported("stylesheet too large"));
+        }
+        if css.contains('\0') {
+            return Err(GtkError::Unsupported("text contains NUL"));
+        }
+        let display = gtk::prelude::WidgetExt::display(self.window());
+        let provider = gtk::CssProvider::new();
+        let errors = Rc::new(RefCell::new(Vec::<String>::new()));
+        let sink = Rc::clone(&errors);
+        let handler = provider.connect_parsing_error(move |_, section, error| {
+            let start = section.start_location();
+            sink.borrow_mut().push(format!(
+                "{}:{}: {}",
+                start.lines() + 1,
+                start.line_chars() + 1,
+                error
+            ));
+        });
+        provider.load_from_string(css);
+        provider.disconnect(handler);
+        let errors = errors.take();
+        if !errors.is_empty() {
+            return Err(GtkError::Css(errors));
+        }
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_USER,
+        );
+        self.css.push(provider);
+        Ok(())
+    }
+
+    /// Remove every stylesheet loaded through [`GtkBackend::load_css`].
+    pub fn clear_css(&mut self, thread: &UiThread) -> Result<(), GtkError> {
+        self.check(thread)?;
+        self.remove_css();
+        Ok(())
+    }
+
+    fn remove_css(&mut self) {
+        if let Some(window) = &self.window {
+            let display = gtk::prelude::WidgetExt::display(window);
+            for provider in self.css.drain(..) {
+                gtk::style_context_remove_provider_for_display(&display, &provider);
+            }
+        }
+    }
+
+    /// Host a virtualized `GtkListView` with `rows` rows inside an Aura
+    /// container that has no Aura children. Row widgets are `GtkLabel`s
+    /// created only for visible rows and recycled while scrolling; their text
+    /// is fetched from `row_text` at bind time. While the list is attached,
+    /// a transaction inserting Aura children into that container is rejected
+    /// before any change. Destroying the container detaches the list.
+    pub fn attach_virtual_list(
+        &mut self,
+        thread: &UiThread,
+        widget: WidgetId,
+        rows: u32,
+        row_text: RowText,
+    ) -> Result<(), GtkError> {
+        self.check(thread)?;
+        if rows > MAX_VIRTUAL_ROWS {
+            return Err(GtkError::Unsupported("too many virtual rows"));
+        }
+        let native = self.widgets.get(&widget).ok_or(GtkError::StaleWidget)?;
+        if native.kind != Kind::Container {
+            return Err(GtkError::Unsupported("virtual list outside a container"));
+        }
+        if self.islands.contains_key(&widget) {
+            return Err(GtkError::Unsupported(
+                "container already hosts a virtual list",
+            ));
+        }
+        let container = downcast::<gtk::Box>(&native.widget)?.clone();
+        if container.first_child().is_some() {
+            return Err(GtkError::Unsupported("container has Aura children"));
+        }
+        let stats = Rc::new(RefCell::new(VirtualListStats {
+            rows,
+            ..VirtualListStats::default()
+        }));
+        let factory = gtk::SignalListItemFactory::new();
+        let setup_stats = Rc::clone(&stats);
+        factory.connect_setup(move |_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let label = gtk::Label::new(None);
+            label.set_xalign(0.0);
+            item.set_child(Some(&label));
+            setup_stats.borrow_mut().row_widgets += 1;
+        });
+        let bind_stats = Rc::clone(&stats);
+        factory.connect_bind(move |_, item| {
+            let Some(item) = item.downcast_ref::<gtk::ListItem>() else {
+                return;
+            };
+            let Some(label) = item.child().and_then(|c| c.downcast::<gtk::Label>().ok()) else {
+                return;
+            };
+            let index = item.position();
+            label.set_text(&row_text(index));
+            let mut s = bind_stats.borrow_mut();
+            s.bound += 1;
+            s.binds += 1;
+            s.max_bound_index = Some(s.max_bound_index.map_or(index, |m| m.max(index)));
+        });
+        let unbind_stats = Rc::clone(&stats);
+        factory.connect_unbind(move |_, _| {
+            let mut s = unbind_stats.borrow_mut();
+            s.bound = s.bound.saturating_sub(1);
+        });
+        let model = gtk::StringList::new(&[]);
+        splice_rows(&model, rows);
+        let selection = gtk::NoSelection::new(Some(model.clone()));
+        let list = gtk::ListView::new(Some(selection), Some(factory));
+        let scrolled = gtk::ScrolledWindow::new();
+        scrolled.set_widget_name(VIRTUAL_LIST_NAME);
+        scrolled.set_policy(gtk::PolicyType::Never, gtk::PolicyType::Automatic);
+        scrolled.set_vexpand(true);
+        scrolled.set_hexpand(true);
+        scrolled.set_child(Some(&list));
+        container.append(&scrolled);
+        for object in [scrolled.upcast_ref::<glib::Object>(), list.upcast_ref()] {
+            self.tracked.push(object.downgrade());
+        }
+        self.created = self.created.saturating_add(2);
+        self.islands.insert(
+            widget,
+            Island {
+                scrolled,
+                list,
+                model,
+                stats,
+            },
+        );
+        Ok(())
+    }
+
+    /// Change the row count of an attached virtual list.
+    pub fn set_virtual_rows(
+        &mut self,
+        thread: &UiThread,
+        widget: WidgetId,
+        rows: u32,
+    ) -> Result<(), GtkError> {
+        self.check(thread)?;
+        if rows > MAX_VIRTUAL_ROWS {
+            return Err(GtkError::Unsupported("too many virtual rows"));
+        }
+        let island = self.islands.get(&widget).ok_or(GtkError::StaleWidget)?;
+        splice_rows(&island.model, rows);
+        island.stats.borrow_mut().rows = rows;
+        Ok(())
+    }
+
+    /// Scroll an attached virtual list so that `row` is visible.
+    pub fn scroll_virtual_list(
+        &self,
+        thread: &UiThread,
+        widget: WidgetId,
+        row: u32,
+    ) -> Result<(), GtkError> {
+        self.check(thread)?;
+        let island = self.islands.get(&widget).ok_or(GtkError::StaleWidget)?;
+        if row >= island.model.n_items() {
+            return Err(GtkError::Unsupported("row out of range"));
+        }
+        island
+            .list
+            .scroll_to(row, gtk::ListScrollFlags::NONE, None::<gtk::ScrollInfo>);
+        Ok(())
+    }
+
+    /// Row recycling counters of an attached virtual list.
+    pub fn virtual_list_stats(
+        &self,
+        thread: &UiThread,
+        widget: WidgetId,
+    ) -> Result<VirtualListStats, GtkError> {
+        self.check(thread)?;
+        let island = self.islands.get(&widget).ok_or(GtkError::StaleWidget)?;
+        Ok(*island.stats.borrow())
+    }
+
+    /// The row labels GTK currently has bound, in row order, read back from
+    /// the list view's widget tree.
+    pub fn visible_rows(
+        &self,
+        thread: &UiThread,
+        widget: WidgetId,
+    ) -> Result<Vec<String>, GtkError> {
+        self.check(thread)?;
+        let island = self.islands.get(&widget).ok_or(GtkError::StaleWidget)?;
+        let mut labels = Vec::new();
+        collect_labels(island.list.upcast_ref(), &mut labels);
+        Ok(labels)
+    }
+
+    /// Present the window and pump GLib until GTK has drawn at least
+    /// `frames` new frames, or fail with [`GtkError::Timeout`].
+    pub fn settle(
+        &self,
+        thread: &UiThread,
+        frames: i64,
+        timeout: Duration,
+    ) -> Result<(), GtkError> {
+        self.check(thread)?;
+        let window = self.window();
+        window.present();
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + timeout;
+        let start = Cell::new(None);
+        loop {
+            // Request a redraw each round: the frame clock only advances when
+            // something asks for a frame.
+            window.queue_draw();
+            while context.iteration(false) {}
+            if let Some(clock) = window.frame_clock() {
+                let now = clock.frame_counter();
+                let first = *start.get().get_or_insert(now);
+                start.set(Some(first));
+                if window.is_mapped() && now - first >= frames {
+                    return Ok(());
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(GtkError::Timeout("no frame drawn"));
+            }
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Render the mounted root widget at its allocated size through the
+    /// window's own GSK renderer and download it as unpremultiplied RGBA8.
+    pub fn screenshot(&self, thread: &UiThread) -> Result<RgbaImage, GtkError> {
+        self.check(thread)?;
+        let root = self
+            .window()
+            .child()
+            .ok_or(GtkError::Unsupported("nothing mounted"))?;
+        if !root.is_mapped() {
+            return Err(GtkError::Unsupported("root is not mapped"));
+        }
+        let (width, height) = (root.width(), root.height());
+        if width <= 0 || height <= 0 {
+            return Err(GtkError::Unsupported("root has no allocation"));
+        }
+        let paintable = gtk::WidgetPaintable::new(Some(&root));
+        let snapshot = gtk::Snapshot::new();
+        paintable.snapshot(&snapshot, f64::from(width), f64::from(height));
+        let node = snapshot
+            .to_node()
+            .ok_or(GtkError::Unsupported("root rendered nothing"))?;
+        let renderer = root
+            .native()
+            .and_then(|n| n.renderer())
+            .ok_or(GtkError::Unsupported("no renderer"))?;
+        let texture = renderer.render_texture(
+            node,
+            Some(&graphene::Rect::new(0.0, 0.0, width as f32, height as f32)),
+        );
+        crate::image::download(&texture).map_err(|_| GtkError::Unsupported("texture download"))
+    }
+
     fn release_window(&mut self) {
+        self.remove_css();
+        for (widget, island) in std::mem::take(&mut self.islands) {
+            if let Some(native) = self.widgets.get(&widget)
+                && let Some(container) = native.widget.downcast_ref::<gtk::Box>()
+            {
+                container.remove(&island.scrolled);
+            }
+        }
         if let Some(window) = self.window.take() {
             if let Some(id) = self.close_handler.take() {
                 window.disconnect(id);
@@ -419,6 +873,12 @@ impl GtkBackend {
                     .ok_or(GtkError::Desynchronized("destroy unknown widget"))?;
                 if native.widget.parent().is_some() {
                     return Err(GtkError::Desynchronized("destroy attached widget"));
+                }
+                self.decor.remove(widget);
+                if let Some(island) = self.islands.remove(widget)
+                    && let Some(container) = native.widget.downcast_ref::<gtk::Box>()
+                {
+                    container.remove(&island.scrolled);
                 }
                 // Dropping the last reference finalizes the GTK widget.
                 drop(native);
@@ -564,7 +1024,16 @@ impl GtkBackend {
             (Kind::Button, Property::Text) => downcast::<gtk::Button>(w)?.set_label(&text(value)?),
             (Kind::Input, Property::Text) => {
                 let placeholder = value.map(|v| text(Some(v))).transpose()?;
-                downcast::<gtk::Entry>(w)?.set_placeholder_text(placeholder.as_deref());
+                let entry = downcast::<gtk::Entry>(w)?;
+                entry.set_placeholder_text(placeholder.as_deref());
+                // The placeholder is the entry's only visible description:
+                // expose it as the accessible name (AT-SPI `Name`).
+                match placeholder.as_deref() {
+                    Some(name) if !name.is_empty() => {
+                        entry.update_property(&[gtk::accessible::Property::Label(name)]);
+                    }
+                    _ => entry.reset_property(gtk::AccessibleProperty::Label),
+                }
             }
             (Kind::Input, Property::Value) => {
                 let entry = downcast::<gtk::Entry>(w)?;
@@ -642,19 +1111,88 @@ impl GtkBackend {
     }
 }
 
+impl GtkBackend {
+    fn expected(
+        &self,
+        snapshot: &vesper_aura::RecordingSnapshot,
+        widget: WidgetId,
+        grid_cell: Option<(i32, i32)>,
+    ) -> NativeNode {
+        let node = &snapshot.widgets[&widget];
+        let value = |p: Property| node.properties.get(&p).map(|s| &snapshot.slots[s]);
+        let text = |p: Property| match value(p) {
+            Some(Value::Text(t)) => t.clone(),
+            _ => String::new(),
+        };
+        let flag = |p: Property| !matches!(value(p), Some(Value::Bool(false)));
+        let (text_prop, value_prop) = match node.kind {
+            Kind::Container => (None, None),
+            Kind::Text | Kind::Button => (Some(text(Property::Text)), None),
+            Kind::Input => (Some(text(Property::Text)), Some(text(Property::Value))),
+        };
+        let style = self.decor.get(&widget).cloned().unwrap_or_default();
+        let layout = style.layout.unwrap_or_default();
+        let cell = |i: usize| match layout {
+            Layout::Grid { columns, .. } => crate::style::grid_cell(i, columns).ok(),
+            _ => None,
+        };
+        NativeNode {
+            type_name: crate::gtk_type_name(node.kind).to_string(),
+            text: text_prop,
+            value: value_prop,
+            sensitive: flag(Property::Enabled),
+            visible: flag(Property::Visible),
+            width_request: match value(Property::Width) {
+                Some(Value::Int(w)) => i32::try_from(*w).unwrap_or(i32::MAX),
+                _ => -1,
+            },
+            aura_controllers: usize::from(node.subscriptions.contains_key(&Event::Focused)),
+            layout: (node.kind == Kind::Container).then(|| NativeLayout::of(layout)),
+            grid_cell,
+            css_classes: style.classes,
+            virtual_rows: self.islands.get(&widget).map(|i| i.stats.borrow().rows),
+            children: node
+                .children
+                .iter()
+                .enumerate()
+                .map(|(i, c)| self.expected(snapshot, *c, cell(i)))
+                .collect(),
+        }
+    }
+}
+
 impl Backend for GtkBackend {
     type Error = GtkError;
 
     fn apply(&mut self, thread: &UiThread, transaction: &Transaction) -> Result<(), GtkError> {
         self.check(thread)?;
         validate_transaction(transaction)?;
+        for patch in transaction.patches() {
+            if let Patch::InsertChild { parent, .. } = patch
+                && self.islands.contains_key(parent)
+            {
+                return Err(GtkError::Unsupported("container hosts a virtual list"));
+            }
+        }
         // Staged validation: the shadow applies all-or-nothing.
         self.shadow.apply(thread, transaction)?;
+        let mut touched = Vec::new();
         for patch in transaction.patches() {
+            if let Patch::InsertChild { parent, .. }
+            | Patch::RemoveChild { parent, .. }
+            | Patch::MoveChild { parent, .. } = patch
+            {
+                touched.push(*parent);
+            }
             if let Err(error) = self.replay(patch) {
                 self.poisoned = true;
                 return Err(error);
             }
+        }
+        touched.sort();
+        touched.dedup();
+        for parent in &touched {
+            self.relayout(parent);
         }
         Ok(())
     }
@@ -727,10 +1265,55 @@ fn read_native(widget: &gtk::Widget) -> NativeNode {
     } else {
         (None, None)
     };
+    let manager = widget.layout_manager();
+    let layout = widget.downcast_ref::<gtk::Box>().map(|_| match &manager {
+        Some(m) if m.is::<gtk::GridLayout>() => {
+            let grid = m.downcast_ref::<gtk::GridLayout>().expect("checked type");
+            NativeLayout::Grid {
+                row_spacing: i32::try_from(grid.row_spacing()).unwrap_or(i32::MAX),
+                column_spacing: i32::try_from(grid.column_spacing()).unwrap_or(i32::MAX),
+            }
+        }
+        Some(m) if m.is::<gtk::BoxLayout>() => {
+            let boxed = m.downcast_ref::<gtk::BoxLayout>().expect("checked type");
+            NativeLayout::Box {
+                horizontal: boxed.orientation() == gtk::Orientation::Horizontal,
+                spacing: i32::try_from(boxed.spacing()).unwrap_or(i32::MAX),
+            }
+        }
+        Some(m) => NativeLayout::Other(m.type_().name().to_string()),
+        None => NativeLayout::Other("none".into()),
+    });
+    let mut virtual_rows = None;
     let children = match widget.downcast_ref::<gtk::Box>() {
-        Some(container) => children(container).map(|c| read_native(&c)).collect(),
+        Some(container) => children(container)
+            .filter(|c| {
+                if c.widget_name() == VIRTUAL_LIST_NAME {
+                    virtual_rows = virtual_list_rows(c);
+                    false
+                } else {
+                    true
+                }
+            })
+            .map(|c| {
+                let mut node = read_native(&c);
+                if let Some(m) = manager.as_ref().filter(|m| m.is::<gtk::GridLayout>())
+                    && let Ok(cell) = m.layout_child(&c).downcast::<gtk::GridLayoutChild>()
+                {
+                    node.grid_cell = Some((cell.column(), cell.row()));
+                }
+                node
+            })
+            .collect(),
         None => Vec::new(),
     };
+    let mut css_classes: Vec<String> = widget
+        .css_classes()
+        .iter()
+        .map(|c| c.to_string())
+        .filter(|c| !GTK_INTRINSIC_CLASSES.contains(&c.as_str()))
+        .collect();
+    css_classes.sort();
     NativeNode {
         type_name: widget.type_().name().to_string(),
         text,
@@ -739,39 +1322,99 @@ fn read_native(widget: &gtk::Widget) -> NativeNode {
         visible: widget.get_visible(),
         width_request: widget.width_request(),
         aura_controllers: aura_controllers(widget),
+        layout,
+        grid_cell: None,
+        css_classes,
+        virtual_rows,
         children,
     }
 }
 
-fn expected(snapshot: &vesper_aura::RecordingSnapshot, widget: WidgetId) -> NativeNode {
-    let node = &snapshot.widgets[&widget];
-    let value = |p: Property| node.properties.get(&p).map(|s| &snapshot.slots[s]);
-    let text = |p: Property| match value(p) {
-        Some(Value::Text(t)) => t.clone(),
-        _ => String::new(),
-    };
-    let flag = |p: Property| !matches!(value(p), Some(Value::Bool(false)));
-    let (text_prop, value_prop) = match node.kind {
-        Kind::Container => (None, None),
-        Kind::Text | Kind::Button => (Some(text(Property::Text)), None),
-        Kind::Input => (Some(text(Property::Text)), Some(text(Property::Value))),
-    };
-    NativeNode {
-        type_name: crate::gtk_type_name(node.kind).to_string(),
-        text: text_prop,
-        value: value_prop,
-        sensitive: flag(Property::Enabled),
-        visible: flag(Property::Visible),
-        width_request: match value(Property::Width) {
-            Some(Value::Int(w)) => i32::try_from(*w).unwrap_or(i32::MAX),
-            _ => -1,
-        },
-        aura_controllers: usize::from(node.subscriptions.contains_key(&Event::Focused)),
-        children: node
-            .children
-            .iter()
-            .map(|c| expected(snapshot, *c))
-            .collect(),
+fn virtual_list_rows(scrolled: &gtk::Widget) -> Option<u32> {
+    let list = scrolled
+        .downcast_ref::<gtk::ScrolledWindow>()?
+        .child()?
+        .downcast::<gtk::ListView>()
+        .ok()?;
+    Some(list.model()?.n_items())
+}
+
+fn collect_labels(widget: &gtk::Widget, out: &mut Vec<String>) {
+    if let Some(label) = widget.downcast_ref::<gtk::Label>() {
+        if widget.is_mapped() {
+            out.push(label.text().to_string());
+        }
+        return;
+    }
+    let mut child = widget.first_child();
+    while let Some(c) = child {
+        collect_labels(&c, out);
+        child = c.next_sibling();
+    }
+}
+
+fn splice_rows(model: &gtk::StringList, rows: u32) {
+    let current = model.n_items();
+    if rows < current {
+        model.splice(rows, current - rows, &[]);
+        return;
+    }
+    // Append in bounded chunks of empty strings; row text is fetched at bind.
+    const CHUNK: u32 = 4096;
+    let blank = [""; CHUNK as usize];
+    let mut n = current;
+    while n < rows {
+        let take = (rows - n).min(CHUNK);
+        model.splice(n, 0, &blank[..take as usize]);
+        n += take;
+    }
+}
+
+/// Install `layout` as the container's layout manager.
+fn install_layout(container: &gtk::Box, layout: Layout) {
+    match layout {
+        Layout::VStack { spacing } | Layout::HStack { spacing } => {
+            let orientation = if matches!(layout, Layout::HStack { .. }) {
+                gtk::Orientation::Horizontal
+            } else {
+                gtk::Orientation::Vertical
+            };
+            let manager = match container
+                .layout_manager()
+                .and_then(|m| m.downcast::<gtk::BoxLayout>().ok())
+            {
+                Some(m) => m,
+                None => {
+                    let m = gtk::BoxLayout::new(orientation);
+                    container.set_layout_manager(Some(m.clone()));
+                    m
+                }
+            };
+            // GtkBox keeps its own orientation/spacing mirror; set both.
+            container.set_orientation(orientation);
+            container.set_spacing(i32::from(spacing));
+            manager.set_orientation(orientation);
+            manager.set_spacing(u32::from(spacing));
+        }
+        Layout::Grid {
+            row_spacing,
+            column_spacing,
+            ..
+        } => {
+            let grid = match container
+                .layout_manager()
+                .and_then(|m| m.downcast::<gtk::GridLayout>().ok())
+            {
+                Some(g) => g,
+                None => {
+                    let g = gtk::GridLayout::new();
+                    container.set_layout_manager(Some(g.clone()));
+                    g
+                }
+            };
+            grid.set_row_spacing(u32::from(row_spacing));
+            grid.set_column_spacing(u32::from(column_spacing));
+        }
     }
 }
 
