@@ -1,4 +1,5 @@
 //! Pure checked-source adapter for the root-free documentation library.
+pub mod certs;
 mod links;
 pub mod sources;
 
@@ -272,11 +273,12 @@ fn build_document(
 ) -> Result<Document, String> {
     let limitations = vec![
         "Checked source metadata; proof badges come only from supplied proof-audit reports, otherwise unverified".into(),
-        "Search excludes generic, open-row, unresolved and effectful-arrow binder contracts".into(),
+        "Search excludes generic, open-row, unresolved and function-typed contracts".into(),
         "Struct layouts describe the native eight-byte ABI; wire layouts come only from compiled Bridge declarations; no tiled layouts".into(),
         "A terminal path is not an all-path ownership or termination proof".into(),
         "Local intra-doc links cover documented source declarations; package, generic, Self and trait-method links are unsupported".into(),
-        "No doctest, JIT, WASM, proof-cache certificate, or semver-diff execution".into(),
+        "No doctest, JIT, WASM or semver-diff execution; .olean certificates are linked only from an explicit Loom store and prove content identity, not provenance".into(),
+        "FieldTree heatmaps show declared, checker-enforced footprints, not a may-use analysis of bodies".into(),
     ];
     let mut document = Document {
         schema_version: 1,

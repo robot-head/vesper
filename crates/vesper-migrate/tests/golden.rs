@@ -100,15 +100,17 @@ fn c_sys_spec_round_trips_through_the_bridge_on_every_target() {
         assert!(matches!(
             f.parameters()[0].ty(),
             ParameterType::Slice {
-                element: Scalar::U8,
-                access: vesper_ffi::sys::Access::In
+                element: Pointee::Scalar(Scalar::U8),
+                access: vesper_ffi::sys::Access::In,
+                nullable: false,
             }
         ));
         assert!(matches!(
             f.parameters()[1].ty(),
             ParameterType::Slice {
-                element: Scalar::U32,
-                access: vesper_ffi::sys::Access::Inout
+                element: Pointee::Scalar(Scalar::U32),
+                access: vesper_ffi::sys::Access::Inout,
+                nullable: false,
             }
         ));
         // The slice expands back to the C header's four machine arguments.
@@ -358,7 +360,8 @@ fn single_out_pointers_lift_to_the_design_signature() {
         panic!("{:?}", reset.parameters()[0].ty())
     };
     assert_eq!((w.name(), w.layout().size()), ("DecoderStats", 16));
-    // The C header's struct out-pointer carries its nested wire structs.
+    // The C header's struct out-pointer carries its nested wire structs. The
+    // header does not declare it nonnull, so it is lifted as `Option`.
     let c = c_migration();
     let spec = synth::sys_spec(&c, &options(Target::LinuxAarch64)).unwrap();
     let fill = spec.descriptor.function("legacy_fill").unwrap();
@@ -368,7 +371,7 @@ fn single_out_pointers_lift_to_the_design_signature() {
             size: 32,
             alignment: 8,
             access: PointerAccess::Inout,
-            nullable: false
+            nullable: true
         })
     );
     assert_eq!(spec.descriptor.wire_structs().len(), 2);

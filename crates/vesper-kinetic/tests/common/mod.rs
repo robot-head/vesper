@@ -92,3 +92,32 @@ pub fn scene() -> World {
 pub fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
+
+/// A dense pile for batch and thread tests: `side × side` columns of
+/// `levels` touching spheres on the ground, with small integer-derived
+/// sideways velocities, so colours hold hundreds of contacts.
+pub fn pile(side: i32, levels: i32) -> World {
+    let mut bodies = Vec::new();
+    for gx in 0..side {
+        for gz in 0..side {
+            for level in 0..levels {
+                let seed = (gx * 13 + gz * 7 + level * 5) % 9 - 4;
+                bodies.push(dynamic(
+                    [
+                        gx as f32 * 0.5,
+                        0.25 + level as f32 * 0.5,
+                        gz as f32 * 0.5 + (level % 2) as f32 * 0.125,
+                    ],
+                    [seed as f32 * 0.0625, 0.0, -(seed as f32) * 0.03125],
+                ));
+            }
+        }
+    }
+    let config = WorldConfig {
+        cell_size: 1.0,
+        contact_margin: 0.0625,
+        max_contacts: bodies.len() * 8,
+        ..WorldConfig::default()
+    };
+    World::new(config, &bodies, &[SphereCollider { radius: RADIUS }], &[]).expect("pile")
+}

@@ -390,7 +390,7 @@ pub fn visuals(
     Ok(v)
 }
 
-fn escape(text: &str) -> String {
+pub(crate) fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
         match c {
@@ -585,6 +585,50 @@ pub fn render_codex_html(
     audits_supplied: usize,
     limits: crate::Limits,
 ) -> Result<Vec<u8>, String> {
+    render_codex_page(
+        document,
+        report,
+        visuals,
+        badges,
+        audits_supplied,
+        &PageExtras::default(),
+        limits,
+    )
+}
+/// Optional page sections: FieldTree heatmaps and a link to the search page.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PageExtras<'a> {
+    pub heatmaps: Option<&'a crate::heatmap::Heatmaps>,
+    pub search_href: Option<&'a str>,
+}
+fn certificate_cell(b: &crate::badges::Badge) -> String {
+    use crate::badges::CertificateStatus;
+    let mut cells = Vec::new();
+    for c in &b.certificates {
+        cells.push(match (c.status, &c.href, &c.object_id) {
+            (CertificateStatus::Linked, Some(href), _) => format!(
+                "<a href=\"{}\">{}</a> <code>{}</code>",
+                escape(href),
+                escape(&c.path),
+                escape(c.blake3.get(..16).unwrap_or(""))
+            ),
+            (CertificateStatus::Linked, None, Some(id)) => {
+                format!("{} <code>{}</code>", escape(&c.path), escape(id))
+            }
+            _ => format!("{}: not in store", escape(&c.path)),
+        });
+    }
+    cells.join("<br>")
+}
+pub fn render_codex_page(
+    document: &crate::Document,
+    report: &impl Serialize,
+    visuals: &Visuals,
+    badges: &[crate::badges::Badge],
+    audits_supplied: usize,
+    extras: &PageExtras<'_>,
+    limits: crate::Limits,
+) -> Result<Vec<u8>, String> {
     let base = crate::render_document_html(document, report, limits)?;
     let base = String::from_utf8(base).map_err(|_| "renderer produced non-UTF-8 output")?;
     let body = base
@@ -604,7 +648,18 @@ pub fn render_codex_html(
     out.push_str(&body[..at]);
     out.push_str(&escape(&note));
     out.push_str(&body[at + BASE_NOTE.len()..]);
-    out.push_str("<section id=\"codex-badges\"><h2>Proof badges</h2><table><tr><th>Item</th><th>Badge</th><th>Theorems</th><th>Reason</th></tr>");
+    if let Some(href) = extras.search_href {
+        out.push_str(&format!(
+            "<p id=\"codex-search-link\"><a href=\"{}\">Search signatures</a></p>",
+            escape(href)
+        ));
+    }
+    let with_certs = badges.iter().any(|b| !b.certificates.is_empty());
+    out.push_str("<section id=\"codex-badges\"><h2>Proof badges</h2><table><tr><th>Item</th><th>Badge</th><th>Theorems</th><th>Reason</th>");
+    if with_certs {
+        out.push_str("<th>.olean certificates</th>");
+    }
+    out.push_str("</tr>");
     for b in badges {
         let color = match b.level {
             crate::badges::BadgeLevel::Proved => "#2d7a3e",
@@ -633,8 +688,19 @@ pub fn render_codex_html(
             escape(&if theorems.is_empty() { b.anchors.join(", ") } else { theorems.join("; ") }),
             escape(&b.reason)
         ));
+        if with_certs {
+            let at = out.len() - "</tr>".len();
+            out.insert_str(at, &format!("<td>{}</td>", certificate_cell(b)));
+        }
     }
-    out.push_str("</table></section><section id=\"codex-layouts\"><h2>Byte layouts</h2>");
+    out.push_str("</table></section>");
+    if let Some(maps) = extras.heatmaps {
+        out.push_str(&crate::heatmap::render(maps));
+        if out.len() > limits.max_output_bytes {
+            return Err("output byte budget exceeded".into());
+        }
+    }
+    out.push_str("<section id=\"codex-layouts\"><h2>Byte layouts</h2>");
     for d in &visuals.layouts {
         out.push_str(&format!(
             "<article><h3>{} ({} layout, {} bytes, align {})</h3>",

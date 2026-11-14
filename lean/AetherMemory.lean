@@ -136,6 +136,91 @@ theorem cow_write_reads_back (mem : Nat → Nat) (page value : Nat) :
 theorem cow_write_other_pages (mem : Nat → Nat) (page value q : Nat) (ne : q ≠ page) :
     cowWrite mem page value q = mem q := by simp [cowWrite, ne]
 
+/-! ## Seccomp allowlist (wave seven)
+
+The compiled VMM filter loads `nr` and runs a chain of `jeq k, ALLOW, next`
+instructions, falling through to the default action. `scan` is that chain. -/
+
+def scan : List Nat → Nat → Bool
+  | [], _ => false
+  | k :: ks, nr => if nr = k then true else scan ks nr
+
+theorem scan_allows_iff_mem (l : List Nat) (nr : Nat) : scan l nr = true ↔ nr ∈ l := by
+  induction l with
+  | nil => simp [scan]
+  | cons k ks ih =>
+    by_cases h : nr = k
+    · simp [scan, h]
+    · simp [scan, h, ih]
+
+theorem scan_denies_unlisted (l : List Nat) (nr : Nat) (h : nr ∉ l) : scan l nr = false := by
+  cases hs : scan l nr with
+  | false => rfl
+  | true => exact absurd ((scan_allows_iff_mem l nr).1 hs) h
+
+/-! ## Hot-set prefetch batches
+
+A contiguous run of `len` pages is issued as batches of at most `batch`
+pages; `fuel` bounds the recursion (any `fuel ≥ len` suffices). -/
+
+def chunks (batch : Nat) : Nat → Nat → Nat → List (Nat × Nat)
+  | 0, _, _ => []
+  | fuel + 1, start, len =>
+    if len = 0 then [] else (start, min batch len) :: chunks batch fuel (start + min batch len) (len - min batch len)
+
+def total : List (Nat × Nat) → Nat
+  | [] => 0
+  | p :: ps => p.2 + total ps
+
+theorem chunks_bounded (batch fuel start len : Nat) :
+    ∀ p ∈ chunks batch fuel start len, p.2 ≤ batch := by
+  induction fuel generalizing start len with
+  | zero => simp [chunks]
+  | succ f ih =>
+    intro p hp
+    unfold chunks at hp
+    split at hp
+    · simp at hp
+    · simp only [List.mem_cons] at hp
+      rcases hp with rfl | hp
+      · exact Nat.min_le_left _ _
+      · exact ih _ _ p hp
+
+theorem chunks_cover (batch fuel start len : Nat) (hb : 0 < batch) (hf : len ≤ fuel) :
+    total (chunks batch fuel start len) = len := by
+  induction fuel generalizing start len with
+  | zero =>
+    have : len = 0 := by omega
+    subst this; simp [chunks, total]
+  | succ f ih =>
+    unfold chunks
+    split
+    · simp [total]; omega
+    · simp only [total]
+      have hm : 0 < min batch len := by
+        simp [Nat.lt_min]; omega
+      rw [ih (start + min batch len) (len - min batch len) (by omega)]
+      have := Nat.min_le_right batch len
+      omega
+
+/-! ## Packed-ring cursors
+
+Advancing a cursor by at most the ring size keeps its index in range and
+flips the wrap counter exactly when the index passes the end. -/
+
+def advance (size idx count : Nat) : Nat × Bool :=
+  if idx + count ≥ size then (idx + count - size, true) else (idx + count, false)
+
+theorem advance_in_range (size idx count : Nat) (hi : idx < size) (hc : count ≤ size) :
+    (advance size idx count).1 < size := by
+  unfold advance
+  split <;> simp <;> omega
+
+theorem advance_wraps_iff (size idx count : Nat) :
+    (advance size idx count).2 = true ↔ idx + count ≥ size := by
+  unfold advance
+  split <;> simp_all
+
 #print axioms checked_interval_sound
 #print axioms checked_endpoint_exact
 #print axioms separated_no_common_address
@@ -151,4 +236,10 @@ theorem cow_write_other_pages (mem : Nat → Nat) (page value q : Nat) (ne : q �
 #print axioms fork_clones_nonce_disjoint
 #print axioms cow_write_reads_back
 #print axioms cow_write_other_pages
+#print axioms scan_allows_iff_mem
+#print axioms scan_denies_unlisted
+#print axioms chunks_bounded
+#print axioms chunks_cover
+#print axioms advance_in_range
+#print axioms advance_wraps_iff
 end Vesper.AetherMemory
