@@ -74,6 +74,13 @@ pub trait Transport {
     fn recv_datagram(&mut self) -> Option<Vec<u8>> {
         None
     }
+
+    /// Hints a stream's RFC 9218 priority to the transport's own packet
+    /// scheduler, so bytes already handed over are sent in the same order
+    /// HTTP/3 chose. Transports without a scheduler ignore it.
+    fn set_priority(&mut self, stream_id: u64, urgency: u8, incremental: bool) {
+        let _ = (stream_id, urgency, incremental);
+    }
 }
 
 /// Bit 1 of a QUIC stream ID: unidirectional.

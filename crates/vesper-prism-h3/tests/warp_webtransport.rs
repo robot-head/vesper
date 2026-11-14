@@ -64,18 +64,22 @@ impl Rng {
 }
 
 /// Small QUIC windows, so flow control is what holds senders back.
-fn endpoint(role: Role) -> Ep {
+fn small_windows() -> StreamConfig {
+    StreamConfig {
+        stream_window: 32 * 1024,
+        send_buffer: 32 * 1024,
+        conn_window: 256 * 1024,
+        max_streams_bidi: 16,
+        max_streams_uni: 8,
+        ..StreamConfig::default()
+    }
+}
+
+fn endpoint(role: Role, streams: StreamConfig) -> Ep {
     let cfg = EndpointConfig {
         role,
         initial_rtt_ns: 20 * MS,
-        streams: StreamConfig {
-            stream_window: 32 * 1024,
-            send_buffer: 32 * 1024,
-            conn_window: 256 * 1024,
-            max_streams_bidi: 16,
-            max_streams_uni: 8,
-            ..StreamConfig::default()
-        },
+        streams,
         ..EndpointConfig::default()
     };
     let xsk = SoftNic::xsk(UmemConfig::with_frames(2048), SoftNicMode::Scripted).unwrap();
@@ -122,7 +126,17 @@ macro_rules! st {
 
 impl Net {
     fn new(seed: u64, loss_ppm: u64, ccfg: H3Config, scfg: H3Config) -> Self {
-        let mut server = endpoint(Role::Server);
+        Self::with_streams(seed, loss_ppm, ccfg, scfg, small_windows())
+    }
+
+    fn with_streams(
+        seed: u64,
+        loss_ppm: u64,
+        ccfg: H3Config,
+        scfg: H3Config,
+        streams: StreamConfig,
+    ) -> Self {
+        let mut server = endpoint(Role::Server, streams);
         let setup = ServerSetup::new(
             vec![CertificateDer::from(SERVER_CERT.to_vec())],
             PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(SERVER_KEY.to_vec())),
@@ -132,7 +146,7 @@ impl Net {
         server
             .listen(Listener::with_cids(setup, Box::new(Cids(0))))
             .unwrap();
-        let mut client = endpoint(Role::Client);
+        let mut client = endpoint(Role::Client, streams);
         let mut roots = RootCertStore::empty();
         roots.add(CertificateDer::from(TEST_CA.to_vec())).unwrap();
         let time = Arc::new(FixedTime(UnixTime::since_unix_epoch(Duration::from_secs(
@@ -521,7 +535,24 @@ fn streaming_upload_is_held_back_by_the_server_window_over_warp() {
 
 #[test]
 fn urgent_responses_finish_first_over_warp() {
-    let mut n = Net::new(11, 0, H3Config::default(), H3Config::default());
+    // Small stream windows (each stream held by its own flow control) and
+    // windows larger than the responses (bytes sit in Warp's send buffers
+    // and the shared congestion window is the bottleneck). In both, the
+    // order holds because HTTP/3 both schedules its own writes and hints
+    // the priority to Warp's packet scheduler.
+    let large = StreamConfig {
+        stream_window: 512 * 1024,
+        send_buffer: 512 * 1024,
+        conn_window: 1024 * 1024,
+        ..small_windows()
+    };
+    for streams in [small_windows(), large] {
+        urgent_first(streams);
+    }
+}
+
+fn urgent_first(streams: StreamConfig) {
+    let mut n = Net::with_streams(11, 0, H3Config::default(), H3Config::default(), streams);
     let mut ids = Vec::new();
     for (path, prio) in [("/bulk", "u=6"), ("/page", "u=0")] {
         let mut r = ClientRequest::get("prism.test", path);

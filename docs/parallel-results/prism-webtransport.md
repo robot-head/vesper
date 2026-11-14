@@ -21,7 +21,8 @@ All in `vesper-prism-h3` (still `#![forbid(unsafe_code)]`):
 | `session` (new) | Extended CONNECT sessions on the shared core: WebTransport streams, HTTP Datagrams (QUIC DATAGRAM frames or capsules), held streams, session ends, `SessionEvent`, `SessionError`, `SessionStats` |
 | `frame` | New SETTINGS (ENABLE_CONNECT_PROTOCOL, H3_DATAGRAM, the three WebTransport identifiers, NO_RFC7540_PRIORITIES); WEBTRANSPORT_STREAM (0x41) signal and stream type 0x54 |
 | `message` | `:protocol` (RFC 9220 §4): CONNECT without it is still refused; with it, `:scheme`, `:path` and `:authority` are required; on another method it is malformed |
-| `transport` | Optional datagram methods with defaults (`max_datagram_size`, `send_datagram`, `recv_datagram`), so transports without datagrams are unchanged |
+| `transport` | Optional methods with defaults (`max_datagram_size`, `send_datagram`, `recv_datagram`, `set_priority`), so other transports are unchanged |
+| `warp` | `WarpTransport::set_priority` maps to Warp's existing `stream_set_priority` (Warp itself is unchanged) |
 | `connection` | Streaming request bodies, the per-connection memory budget, the priority scheduler in `flush`, interim responses, `Responder::accept_session` and the linear `Session` |
 | `client` | Extended CONNECT sessions, streaming request bodies, PRIORITY_UPDATE and interim responses on the test client |
 | `prism` | `serve` answers extended CONNECT with 501 and resets streaming requests, so the existing Service bridge is unchanged |
@@ -84,6 +85,13 @@ All in `vesper-prism-h3` (still `#![forbid(unsafe_code)]`):
   queued bytes, because Warp's own stream fairness would otherwise undo the
   order; a higher group that is blocked by flow control does not hold the
   others back. `SETTINGS_NO_RFC7540_PRIORITIES = 1` is sent.
+* Bytes already handed to the transport are ordered by the transport. A
+  new optional `Transport::set_priority` hint (default: ignored) passes
+  each stream's priority on; `WarpTransport` maps it to Warp's existing
+  `stream_set_priority`. Without the hint, the Warp ordering test passed
+  alone but failed when the workspace's unified dependency features
+  changed packet timing; with it, the test passes both ways, with small
+  stream windows and with windows larger than the responses.
 
 ### Streaming request bodies and the memory budget
 
@@ -151,7 +159,7 @@ checkout and `VLB_CARGO_LOCK` pointing at the root `Cargo.lock`:
 | `cargo fmt --all -- --check` | clean |
 | `cargo test -p vesper-prism-h3` | pass (all suites, including the five new ones) |
 | `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` | clean (the only output is the existing `unused dependency serde_json` manifest warning in `vesper-pact`) |
-| `cargo test --workspace --locked` | WORKSPACE_RESULT |
+| `cargo test --workspace --locked --no-fail-fast` | 4046 passed, 4 failed, 2 ignored. The 4 failures are root-package Lean tests (`lean4lean42_acceptance`, `oracle42_acceptance`, `oracle42_runner`, `replay42_kernel`) that need a Lean toolchain on `PATH` and `VESPER_LEAN4LEAN42_ROOT`, which this host lacks and CI provides; none touch this crate |
 
 Bazel picks up the new dev-dependencies from `Cargo.lock` through
 `crate.from_cargo`; `BUILD.bazel` is unchanged.
@@ -167,9 +175,10 @@ Bazel picks up the new dev-dependencies from `Cargo.lock` through
 * **0x41 is only a signal when WebTransport is offered.** Without it, 0x41
   on a request stream stays an unknown frame type, which keeps earlier
   behaviour and the RFC 9114 grease rules.
-* **Non-work-conserving priority by default.** Without it Warp's
-  round-robin between streams made urgency invisible; the knob
-  `work_conserving = true` restores the old behaviour.
+* **Non-work-conserving priority by default, plus the transport hint.**
+  Ordering our own writes is not enough once bytes sit in the
+  transport's buffers, so both are done; `work_conserving = true` turns
+  off the waiting.
 * **Deadlock relief resets the newest whole body**, so earlier requests,
   which have the most progress, complete.
 * **`prism::serve` refuses extended CONNECT with 501.** The `Service` trait

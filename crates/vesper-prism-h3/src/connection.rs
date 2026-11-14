@@ -226,6 +226,8 @@ pub(crate) struct Core {
     /// Streams whose priority came from PRIORITY_UPDATE (it wins over the
     /// header).
     pub(crate) priority_updated: std::collections::BTreeSet<u64>,
+    /// The priority last hinted to the transport, per stream.
+    hinted: BTreeMap<u64, Priority>,
     rr: usize,
     pub(crate) encoder: Encoder,
     pub(crate) decoder: Decoder,
@@ -259,6 +261,7 @@ impl Core {
             sessions: Sessions::default(),
             priorities: BTreeMap::new(),
             priority_updated: Default::default(),
+            hinted: BTreeMap::new(),
             rr: 0,
             encoder: Encoder::new(cfg.encoder),
             decoder: Decoder::new(DecoderConfig {
@@ -395,7 +398,13 @@ impl Core {
             if is_uni(id) {
                 self.write_out(t, id, usize::MAX, &critical, &mut failure);
             } else {
-                bidi.push((id, self.priorities.get(&id).copied().unwrap_or_default()));
+                let p = self.priorities.get(&id).copied().unwrap_or_default();
+                // The transport's scheduler orders what it already holds.
+                if self.hinted.get(&id) != Some(&p) {
+                    t.set_priority(id, p.urgency, p.incremental);
+                    self.hinted.insert(id, p);
+                }
+                bidi.push((id, p));
             }
         }
         self.rr = self.rr.wrapping_add(1);
@@ -440,6 +449,10 @@ impl Core {
                 self.out.remove(&id);
             }
         }
+        // Hints only matter while bytes are queued; a stream that queues
+        // again is hinted again.
+        let out = &self.out;
+        self.hinted.retain(|id, _| out.contains_key(id));
         if let Some(e) = failure {
             self.fail(t, e);
         }
@@ -505,6 +518,7 @@ impl Core {
     pub(crate) fn forget_priority(&mut self, id: u64) {
         self.priorities.remove(&id);
         self.priority_updated.remove(&id);
+        self.hinted.remove(&id);
     }
 
     /// Routes a newly accepted peer unidirectional stream.
