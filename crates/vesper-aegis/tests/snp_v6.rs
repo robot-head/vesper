@@ -14,11 +14,11 @@
 //! - every v6-specific rule (ETCB only on Venice, ETCB reserved bits,
 //!   round trips, unknown versions) has a negative test.
 
+use vesper_aegis::Curve;
 use vesper_aegis::amd::{SnpCollateral, verify_snp_collateral};
 use vesper_aegis::error::{AttestError, ParseError};
 use vesper_aegis::roots::{AmdProduct, AmdSigningKey, amd_ark};
 use vesper_aegis::snp::{SNP_ETCB_LEN, SnpEtcb, SnpReport, verify_snp_report};
-use vesper_aegis::Curve;
 
 mod support;
 use support::{NOW_NS, SnpParams, chain, runtime, snp_report_struct};
@@ -120,8 +120,18 @@ fn generated_v6_reports_verify_end_to_end() {
         assert_eq!(parsed.current_etcb, Some(etcb(10)));
         assert_eq!(parsed.launch_etcb, Some(etcb(5)));
         assert_eq!(bytes[0x220..0x22E], etcb(10).to_bytes()[..14]);
-        assert!(parsed.current_etcb.unwrap().at_least(&parsed.launch_etcb.unwrap()));
-        assert!(!parsed.launch_etcb.unwrap().at_least(&parsed.current_etcb.unwrap()));
+        assert!(
+            parsed
+                .current_etcb
+                .unwrap()
+                .at_least(&parsed.launch_etcb.unwrap())
+        );
+        assert!(
+            !parsed
+                .launch_etcb
+                .unwrap()
+                .at_least(&parsed.current_etcb.unwrap())
+        );
         verify_snp_report(&bytes, &ark.der_chain(), &ark.root, NOW_NS, &rt).unwrap();
         // A flipped ETCB SVN breaks the signature.
         let mut t = bytes.clone();

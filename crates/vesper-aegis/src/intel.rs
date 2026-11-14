@@ -426,7 +426,10 @@ pub(crate) fn collateral(what: &'static str, reason: String) -> AttestError {
     AttestError::Collateral { what, reason }
 }
 
-pub(crate) fn hex_array<const N: usize>(s: &str, what: &'static str) -> Result<[u8; N], AttestError> {
+pub(crate) fn hex_array<const N: usize>(
+    s: &str,
+    what: &'static str,
+) -> Result<[u8; N], AttestError> {
     let b = s.as_bytes();
     if b.len() != 2 * N {
         return Err(collateral(

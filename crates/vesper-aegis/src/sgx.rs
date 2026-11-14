@@ -31,9 +31,9 @@ use crate::chain::{
 use crate::claims::ct_eq;
 use crate::error::{AttestError, Format, ParseError};
 use crate::intel::{
-    ComponentJson, PckExtensions, QeIdentity, TcbStatus, TdxCollateral,
-    TdxTcbEvaluation, all_ge, check_embedded_root, check_window, collateral, date, evaluate_qe,
-    hex_array, parse_pck_extensions, push_unique, svn16, verify_signed,
+    ComponentJson, PckExtensions, QeIdentity, TcbStatus, TdxCollateral, TdxTcbEvaluation, all_ge,
+    check_embedded_root, check_window, collateral, date, evaluate_qe, hex_array,
+    parse_pck_extensions, push_unique, svn16, verify_signed,
 };
 use crate::reader::Reader;
 use crate::tdx::{CERT_DATA_PCK_CHAIN_PEM, MAX_SIG_DATA_LEN, QeReportBody, TdxQuote};

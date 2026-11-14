@@ -60,6 +60,12 @@ pub mod keys {
     pub const PLATFORM_HASH_ALGO: i64 = 2402;
     pub const PLATFORM_SW_COMPONENTS: i64 = 2399;
     pub const PLATFORM_CONFIG: i64 = 2401;
+    pub const PLATFORM_MANUFACTURING_CONFIG: i64 = 2403;
+    pub const PLATFORM_TBB_ROTPK: i64 = 2405;
+    /// TBB RoTPK entry keys.
+    pub const ROTPK_NAME: i64 = 1;
+    pub const ROTPK_INDEX: i64 = 2;
+    pub const ROTPK_HASH: i64 = 3;
     /// Software-component map keys (PSA/CCA token).
     pub const SW_MEASUREMENT_TYPE: i64 = 1;
     pub const SW_MEASUREMENT_VALUE: i64 = 2;
@@ -101,6 +107,61 @@ pub struct CcaPlatformClaims {
     pub sw_components: Vec<CcaSwComponent>,
     /// Claim 2401 (platform configuration), when present.
     pub config: Option<Vec<u8>>,
+    /// Claim 2403 (2024 profile: platform manufacturing configuration).
+    pub manufacturing_config: Option<Vec<u8>>,
+    /// Claim 2405 (2024 profile: hashes of the trusted-board-boot root of
+    /// trust public keys), in token order.
+    pub tbb_rotpks: Vec<CcaTbbRotpk>,
+}
+
+/// One entry of the TBB RoTPK claim (2405).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CcaTbbRotpk {
+    /// `"CM"` (chip manufacturer) or `"DM"` (device manufacturer).
+    pub name: String,
+    pub index: u64,
+    pub hash: Vec<u8>,
+}
+
+impl CcaTbbRotpk {
+    fn from_value(v: &Value) -> Result<Self, ParseError> {
+        use keys::*;
+        let m = ClaimMap::new(v, "TBB RoTPK")?;
+        if m.0.len() != 3 {
+            return Err(cbor_err("TBB RoTPK", "expected name, index and hash"));
+        }
+        let name = m
+            .get(ROTPK_NAME, "TBB RoTPK name")?
+            .as_text()
+            .ok_or_else(|| cbor_err("TBB RoTPK name", "expected text"))?;
+        if name != "CM" && name != "DM" {
+            return Err(cbor_err("TBB RoTPK name", "expected CM or DM"));
+        }
+        let index = m
+            .get(ROTPK_INDEX, "TBB RoTPK index")?
+            .as_integer()
+            .and_then(|i| u64::try_from(i).ok())
+            .filter(|i| *i <= 5)
+            .ok_or_else(|| cbor_err("TBB RoTPK index", "expected 0..=5"))?;
+        let hash = bytes(m.get(ROTPK_HASH, "TBB RoTPK hash")?, "TBB RoTPK hash")?.to_vec();
+        if !matches!(hash.len(), 32 | 48 | 64) {
+            return Err(cbor_err("TBB RoTPK hash", "length is not 32, 48 or 64"));
+        }
+        Ok(CcaTbbRotpk {
+            name: name.to_owned(),
+            index,
+            hash,
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        use keys::*;
+        Value::Map(vec![
+            (ROTPK_NAME.into(), Value::Text(self.name.clone())),
+            (ROTPK_INDEX.into(), Value::Integer(self.index.into())),
+            (ROTPK_HASH.into(), Value::Bytes(self.hash.clone())),
+        ])
+    }
 }
 
 /// One entry of the platform software-components claim (2399).
@@ -247,7 +308,7 @@ fn unpadded_measurement(m: &[u8], algo: RegisterHash) -> &[u8] {
 /// Compare a reported measurement with an expected digest. A register in
 /// the 64-byte encoding matches when it is the digest followed by zero
 /// padding; any nonzero padding byte is a mismatch.
-fn measurement_eq(reported: &[u8], expected: &[u8]) -> bool {
+pub(crate) fn measurement_eq(reported: &[u8], expected: &[u8]) -> bool {
     if reported.len() == expected.len() {
         return ct_eq(reported, expected);
     }
@@ -344,7 +405,7 @@ impl<'v> ClaimMap<'v> {
     }
 }
 
-fn decode_value(bytes: &[u8], what: &'static str) -> Result<Value, ParseError> {
+pub(crate) fn decode_value(bytes: &[u8], what: &'static str) -> Result<Value, ParseError> {
     let mut rest = bytes;
     let v: Value =
         coset::cbor::de::from_reader(&mut rest).map_err(|_| cbor_err(what, "malformed CBOR"))?;
@@ -460,13 +521,36 @@ impl CcaPlatformClaims {
                     .collect::<Result<_, _>>()?
             }
         };
-        let config = match m.0.iter().find(|(k, _)| *k == PLATFORM_CONFIG) {
-            None => None,
-            Some((_, v)) => Some(bytes(v, "platform config")?.to_vec()),
+        let opt_bytes = |key, field| -> Result<Option<Vec<u8>>, ParseError> {
+            match m.0.iter().find(|(k, _)| *k == key) {
+                None => Ok(None),
+                Some((_, v)) => Ok(Some(bytes(v, field)?.to_vec())),
+            }
+        };
+        let config = opt_bytes(PLATFORM_CONFIG, "platform config")?;
+        let manufacturing_config = opt_bytes(
+            PLATFORM_MANUFACTURING_CONFIG,
+            "platform manufacturing config",
+        )?;
+        let tbb_rotpks = match m.0.iter().find(|(k, _)| *k == PLATFORM_TBB_ROTPK) {
+            None => Vec::new(),
+            Some((_, v)) => {
+                let a = v
+                    .as_array()
+                    .ok_or_else(|| cbor_err("TBB RoTPK", "expected array"))?;
+                if a.len() > 12 {
+                    return Err(cbor_err("TBB RoTPK", "too many entries"));
+                }
+                a.iter()
+                    .map(CcaTbbRotpk::from_value)
+                    .collect::<Result<_, _>>()?
+            }
         };
         Ok(CcaPlatformClaims {
             sw_components,
             config,
+            manufacturing_config,
+            tbb_rotpks,
             challenge: bytes(
                 m.get(CHALLENGE, "platform challenge")?,
                 "platform challenge",
@@ -519,6 +603,15 @@ impl CcaPlatformClaims {
         if let Some(c) = &self.config {
             m.push((PLATFORM_CONFIG.into(), b(c)));
         }
+        if let Some(c) = &self.manufacturing_config {
+            m.push((PLATFORM_MANUFACTURING_CONFIG.into(), b(c)));
+        }
+        if !self.tbb_rotpks.is_empty() {
+            m.push((
+                PLATFORM_TBB_ROTPK.into(),
+                Value::Array(self.tbb_rotpks.iter().map(|r| r.to_value()).collect()),
+            ));
+        }
         encode_value(&Value::Map(m))
     }
 }
@@ -552,7 +645,7 @@ pub struct CcaToken {
     pub realm_claims: CcaRealmClaims,
 }
 
-fn sign1_curve(sign1: &CoseSign1, what: &'static str) -> Result<Curve, AttestError> {
+pub(crate) fn sign1_curve(sign1: &CoseSign1, what: &'static str) -> Result<Curve, AttestError> {
     use coset::{Algorithm, RegisteredLabelWithPrivate};
     match &sign1.protected.header.alg {
         Some(Algorithm::Assigned(iana::Algorithm::ES256)) => Ok(Curve::P256),
@@ -565,7 +658,7 @@ fn sign1_curve(sign1: &CoseSign1, what: &'static str) -> Result<Curve, AttestErr
     }
 }
 
-fn verify_sign1(
+pub(crate) fn verify_sign1(
     sign1: &CoseSign1,
     key: &EcPublicKey,
     what: &'static str,

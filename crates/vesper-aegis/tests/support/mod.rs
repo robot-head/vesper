@@ -339,6 +339,8 @@ pub fn cca_token(iak: &Signer, rak: &Signer, p: &CcaParams) -> Vec<u8> {
         hash_algo: RegisterHash::Sha256,
         sw_components: Vec::new(),
         config: None,
+        manufacturing_config: None,
+        tbb_rotpks: Vec::new(),
     };
     let realm_tok = cca::build_sign1(Curve::P384, realm.to_cbor(), |d| rak.sign(d));
     let platform_tok = cca::build_sign1(iak.curve, platform.to_cbor(), |d| iak.sign(d));
