@@ -3,6 +3,8 @@
 use crate::{ast::*, check::World};
 use std::{cell::RefCell, collections::BTreeMap, fmt, rc::Rc};
 
+#[path = "regions/eval.rs"]
+mod regions;
 pub mod resource_trace;
 #[cfg(test)]
 mod resource_trace_acceptance;
@@ -343,6 +345,8 @@ pub struct Runtime<'a> {
     call_site: Option<(usize, usize)>,
     resource_trace: Option<Box<ResourceTraceEngine>>,
     resource_fuel_exhausted: bool,
+    /// Open source region blocks (`region r { ... }`, design §15).
+    regions: Box<crate::regions::store::Regions<Value>>,
 }
 impl<'a> Runtime<'a> {
     pub fn new(world: &'a World) -> Self {
@@ -358,6 +362,7 @@ impl<'a> Runtime<'a> {
             call_site: None,
             resource_trace: None,
             resource_fuel_exhausted: false,
+            regions: Default::default(),
         }
     }
     /// Observe selected empty linear data carriers without changing evaluation
@@ -1703,6 +1708,7 @@ impl<'a> Runtime<'a> {
                             self.lowered_control("handler_body", body, env)
                         }
                         Frame::Handler(h) => {
+                            self.region_end(&h)?;
                             let mut env = h.env.clone();
                             let v = if let Some(state) = h.state {
                                 Value::Tuple(vec![value, state])
@@ -2171,6 +2177,9 @@ impl<'a> Runtime<'a> {
         refs: Vec<Option<Slot>>,
         target: Option<u64>,
     ) -> Result<Control, String> {
+        if effect == crate::regions::REGION_EFFECT && crate::regions::active(self.world) {
+            return self.region_perform(op, args, target);
+        }
         let index = self.stack.iter().rposition(|f| matches!(f, Frame::Handler(h) if h.effect.name == effect && target.map(|id|h.id == id).unwrap_or_else(|| label.is_none() || h.effect.label.as_deref() == label)));
         let Some(index) = index else {
             if let Some(effect) = target.and_then(|id| self.external.get(&id)).cloned() {

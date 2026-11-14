@@ -31,7 +31,10 @@ SimPulse, and a software RDMA lease model.
   reordering, duplication, partitions). Each direction of a session is one
   unidirectional QUIC stream; closing sends FIN, dropping or faulting sends
   an abandon marker the peer sees as `PeerGone`, and malformed peer bytes
-  are `NetFail::Malformed`.
+  are `NetFail::Malformed`. Every link is opened by Warp's TLS 1.3
+  handshake with mutual authentication against a `WarpTls` PKI (one
+  certificate per host); `key_update` and `close_link` exercise the
+  connection lifecycle under session traffic.
 - `replog::run_replicated_log` runs Raft elections and log replication with
   every RequestVote and AppendEntries exchange a typed `Session` over
   `WarpNet`, under loss and per-term partitions, then checks that every log
@@ -42,7 +45,14 @@ SimPulse, and a software RDMA lease model.
   safety, log matching and committed-prefix agreement throughout. Optional
   depth: snapshots with InstallSnapshot (`snapshot_threshold`) and
   single-server membership change (`initial_members`,
-  `membership_per_mille`).
+  `membership_per_mille`), and durable servers (`durable`,
+  `torn_crash_per_mille`) that persist through a `DurableLog` before they
+  answer and recover from their simulated disks after crashes.
+- `durable::DurableLog` keeps a Raft server's term, vote, snapshot and log
+  in files (atomic replacement, CRC-32C log records, truncation in place,
+  torn-tail recovery) on a `Disk`: `FsDisk` (real files) or `SimDisk`, a
+  model that loses unsynced data, tears writes and fails between
+  operations.
 - `rdma::RdmaFabric` models region registration and `InFlightRdmaWrite`
   leases that keep the source buffer immutable until the completion.
 

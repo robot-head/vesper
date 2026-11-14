@@ -129,6 +129,66 @@ pub struct Badge {
     pub level: BadgeLevel,
     pub reason: String,
     pub evidence: Vec<Evidence>,
+    /// `.olean` certificates of the audited modules found (or not found) in
+    /// a Loom content-addressed store. Empty when no store was consulted.
+    #[serde(default)]
+    pub certificates: Vec<CertificateLink>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CertificateStatus {
+    /// A derivation record for exactly this audit report and file names a
+    /// store object whose bytes rehash to the audited size and BLAKE3.
+    Linked,
+    /// The store holds no record for this audit report and file.
+    Missing,
+}
+/// One audited `.olean` artifact and where its bytes live in the store.
+/// A link establishes content identity with the audited artifact only; it
+/// is not provenance and it does not upgrade or downgrade the badge.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateLink {
+    pub module: String,
+    pub artifact_inventory_blake3: String,
+    pub path: String,
+    pub bytes: u64,
+    pub blake3: String,
+    pub status: CertificateStatus,
+    /// The Loom CAS object id (`artifact:blob:<hex>`) when linked.
+    pub object_id: Option<String>,
+    /// Relative link to a copy inside a generated documentation bundle.
+    pub href: Option<String>,
+}
+
+/// The `.olean` files an audit report inventories, in report order.
+pub fn olean_files(audit: &ProofAudit) -> Vec<&FileDigest> {
+    audit
+        .artifact_files
+        .iter()
+        .filter(|f| f.path.ends_with(".olean"))
+        .collect()
+}
+
+/// Attach store links to every badge whose evidence names their audit.
+/// Unverified badges get none: there is no accepted evidence to link.
+pub fn attach_certificates(badges: &mut [Badge], links: &[CertificateLink]) {
+    for badge in badges {
+        badge.certificates.clear();
+        if badge.level == BadgeLevel::Unverified {
+            continue;
+        }
+        for link in links {
+            let used = badge.evidence.iter().any(|e| {
+                e.module == link.module
+                    && e.artifact_inventory_blake3 == link.artifact_inventory_blake3
+            });
+            if used && !badge.certificates.contains(link) {
+                badge.certificates.push(link.clone());
+            }
+        }
+    }
 }
 
 fn lean_name(name: &str) -> bool {
@@ -177,6 +237,7 @@ fn badge(item: &str, kind: &str, docs: &str, audits: &[ProofAudit]) -> Result<Ba
         level: BadgeLevel::Unverified,
         reason: String::new(),
         evidence: Vec::new(),
+        certificates: Vec::new(),
     };
     if anchors.is_empty() {
         result.reason = "no @proof anchor".into();

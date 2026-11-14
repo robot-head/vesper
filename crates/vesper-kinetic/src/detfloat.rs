@@ -108,6 +108,19 @@ impl DetFloatPolicy {
         }
         self
     }
+
+    /// Allow calls to this crate's fast deterministic transcendentals
+    /// ([`crate::fastmath::SYMBOLS`]). They are not correctly rounded, but
+    /// they are fixed sequences of IEEE-754 basic operations, so their bits
+    /// are the same on every target.
+    pub fn with_fast_deterministic_math(mut self) -> Self {
+        for symbol in crate::fastmath::SYMBOLS {
+            if !self.allowed_float_calls.iter().any(|s| s == symbol) {
+                self.allowed_float_calls.push((*symbol).to_string());
+            }
+        }
+        self
+    }
 }
 
 /// The function could not be audited.
