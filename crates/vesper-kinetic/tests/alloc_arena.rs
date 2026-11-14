@@ -42,9 +42,15 @@ static GLOBAL: Counting = Counting;
 
 #[test]
 fn region_arena_steps_do_not_allocate_in_steady_state() {
+    for broadphase in [BroadphaseMode::Lbvh, BroadphaseMode::SweepAndPrune] {
+        steady_state_does_not_allocate(broadphase);
+    }
+}
+
+fn steady_state_does_not_allocate(broadphase: BroadphaseMode) {
     let mut world = common::scene();
     world.set_solver_mode(SolverMode::Batched16);
-    world.set_broadphase(BroadphaseMode::Lbvh);
+    world.set_broadphase(broadphase);
     world
         .set_contact_material(ContactMaterial {
             static_friction: 0.6,
@@ -77,7 +83,7 @@ fn region_arena_steps_do_not_allocate_in_steady_state() {
     assert_eq!(
         ALLOCS.load(Ordering::SeqCst),
         0,
-        "allocations in steady state (checksum {checksum})"
+        "{broadphase:?}: allocations in steady state (checksum {checksum})"
     );
     // The arena is rewound after every step: nothing accumulates.
     let after = arena.stats();

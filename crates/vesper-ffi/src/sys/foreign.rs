@@ -31,6 +31,19 @@ pub enum ValidationError {
     },
     /// The pointee range `[address, address + size)` wraps the address space.
     PointerRangeOverflow,
+    /// An `Option[CSlice[T]]` was null with a nonzero length. `None` is
+    /// exactly `(NULL, 0)`.
+    NullSliceWithLength,
+    /// The returned pointer lies inside the range borrowed by `argument`:
+    /// the callee handed back an address derived from a `nocapture` borrow.
+    ReturnAliasesBorrow {
+        argument: usize,
+    },
+    /// Guard bytes just past a borrowed range changed across the call: the
+    /// callee wrote beyond one element (pointer) or beyond the length (slice).
+    GuardOverwritten {
+        first_changed: usize,
+    },
 }
 impl fmt::Display for ValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -171,7 +184,7 @@ fn address(bits: u64, pointee: Scalar, nullable: bool) -> Result<CheckedAddress,
         nullable,
     })
 }
-fn validate(contract: &ValueType, bits: u64) -> Result<ValidatedValue, ValidationError> {
+pub(super) fn validate(contract: &ValueType, bits: u64) -> Result<ValidatedValue, ValidationError> {
     Ok(match contract {
         ValueType::Unit => {
             if bits != 0 {
@@ -300,83 +313,15 @@ impl FunctionDescriptor {
         &self,
         args: &[RawArgument],
     ) -> Result<(), (Option<usize>, ValidationError)> {
-        if args.len() != self.parameters.len() {
-            return Err((None, ValidationError::ArgumentCount));
+        match self.check_arguments(args).into_first_violation() {
+            None => Ok(()),
+            Some((position, error)) => Err((
+                match position {
+                    super::Position::Argument(i) => Some(i),
+                    _ => None,
+                },
+                error,
+            )),
         }
-        // At most the configured parameter cap (hard limit 32) ranges:
-        // (argument, first byte, last byte, callee may write).
-        let mut ranges: Vec<(usize, u64, u64, bool)> = vec![];
-        fn claim(
-            ranges: &mut Vec<(usize, u64, u64, bool)>,
-            i: usize,
-            first: u64,
-            last: u64,
-            writes: bool,
-        ) -> Result<(), (Option<usize>, ValidationError)> {
-            for (other, f, l, other_writes) in ranges.iter() {
-                if first <= *l && *f <= last && (writes || *other_writes) {
-                    return Err((
-                        Some(i),
-                        ValidationError::OverlappingSlices { other: *other },
-                    ));
-                }
-            }
-            ranges.push((i, first, last, writes));
-            Ok(())
-        }
-        for (i, (p, a)) in self.parameters.iter().zip(args).enumerate() {
-            match (&p.ty, a) {
-                (ParameterType::Value(t), RawArgument::Bits(bits)) => {
-                    validate(t, *bits).map_err(|e| (Some(i), e))?;
-                }
-                (
-                    ParameterType::Slice { element, access },
-                    RawArgument::Slice {
-                        address: base,
-                        length,
-                    },
-                ) => {
-                    address(*base, *element, *length == 0).map_err(|e| (Some(i), e))?;
-                    let bytes = length
-                        .checked_mul((element.bits() / 8) as u64)
-                        .ok_or((Some(i), ValidationError::SliceRangeOverflow))?;
-                    if bytes > i64::MAX as u64 {
-                        return Err((Some(i), ValidationError::SliceTooLarge));
-                    }
-                    if bytes > 0 {
-                        let last = base
-                            .checked_add(bytes - 1)
-                            .ok_or((Some(i), ValidationError::SliceRangeOverflow))?;
-                        claim(&mut ranges, i, *base, last, *access == Access::Inout)?;
-                    }
-                }
-                (
-                    ParameterType::Pointer {
-                        pointee,
-                        access,
-                        nullable,
-                    },
-                    RawArgument::Pointer { address },
-                ) => {
-                    if *address == 0 {
-                        if *nullable {
-                            continue;
-                        }
-                        return Err((Some(i), ValidationError::NullPointer));
-                    }
-                    let alignment = pointee.alignment();
-                    if !address.is_multiple_of(alignment as u64) {
-                        return Err((Some(i), ValidationError::MisalignedPointer { alignment }));
-                    }
-                    // Pointee sizes are at most 1 MiB, so size - 1 fits.
-                    let last = address
-                        .checked_add(pointee.size() as u64 - 1)
-                        .ok_or((Some(i), ValidationError::PointerRangeOverflow))?;
-                    claim(&mut ranges, i, *address, last, access.writes())?;
-                }
-                _ => return Err((Some(i), ValidationError::ArgumentKind)),
-            }
-        }
-        Ok(())
     }
 }

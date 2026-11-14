@@ -176,6 +176,9 @@ pub struct Btf {
     pub types: Vec<BtfType>,
     strings: Vec<u8>,
     by_name: HashMap<String, Vec<u32>>,
+    /// Number of types (including `void`) that came from the base BTF of
+    /// split BTF; 0 for a standalone blob.
+    base_len: usize,
 }
 
 fn rd32(b: &[u8], at: usize) -> Result<u32, BtfError> {
@@ -188,6 +191,27 @@ fn rd32(b: &[u8], at: usize) -> Result<u32, BtfError> {
 impl Btf {
     /// Parse a little-endian BTF blob.
     pub fn parse(btf: &[u8]) -> Result<Btf, BtfError> {
+        Self::parse_with(btf, None)
+    }
+
+    /// Parse split BTF (a kernel module's `/sys/kernel/btf/<module>`) on
+    /// top of `base`: its type ids continue after the base's and its name
+    /// offsets continue after the base's string section. The result holds
+    /// both, so ids and names resolve as the kernel resolves them.
+    pub fn parse_split(btf: &[u8], base: &Btf) -> Result<Btf, BtfError> {
+        if base.base_len != 0 {
+            return Err(bad("the base of split BTF must not be split itself"));
+        }
+        Self::parse_with(btf, Some(base))
+    }
+
+    /// Types that came from the base BTF (all of them for vmlinux): ids
+    /// below this belong to the base.
+    pub fn base_len(&self) -> u32 {
+        self.base_len as u32
+    }
+
+    fn parse_with(btf: &[u8], base: Option<&Btf>) -> Result<Btf, BtfError> {
         if btf.len() < 24 || u16::from_le_bytes([btf[0], btf[1]]) != BTF_MAGIC {
             return Err(bad("bad header"));
         }
@@ -208,11 +232,17 @@ impl Btf {
             btf.get(s..e).ok_or_else(|| bad("section out of range"))
         };
         let types = span(type_off, type_len)?;
-        let strings = span(str_off, str_len)?.to_vec();
-        if !strings.is_empty() && (strings[0] != 0 || *strings.last().expect("nonempty") != 0) {
+        let own = span(str_off, str_len)?;
+        // split BTF strings need not start with NUL (offset 0 is the base's)
+        if !own.is_empty()
+            && ((base.is_none() && own[0] != 0) || *own.last().expect("nonempty") != 0)
+        {
             return Err(bad("string section must start and end with NUL"));
         }
-        let mut out = vec![BtfType::Void];
+        let mut strings = base.map_or_else(Vec::new, |b| b.strings.clone());
+        strings.extend_from_slice(own);
+        let mut out = base.map_or_else(|| vec![BtfType::Void], |b| b.types.clone());
+        let first_own = if base.is_some() { out.len() } else { 0 };
         let mut at = 0;
         while at < types.len() {
             let name = rd32(types, at)?;
@@ -346,11 +376,13 @@ impl Btf {
             types: out,
             strings,
             by_name: HashMap::new(),
+            base_len: first_own,
         };
         // validate references and names up front so lookups cannot fail
         let n = b.types.len() as u32;
-        let mut by_name: HashMap<String, Vec<u32>> = HashMap::new();
-        for (id, t) in b.types.iter().enumerate() {
+        let mut by_name: HashMap<String, Vec<u32>> =
+            base.map_or_else(HashMap::new, |b| b.by_name.clone());
+        for (id, t) in b.types.iter().enumerate().skip(first_own) {
             let refs: Vec<u32> = match t {
                 BtfType::Ptr { ty }
                 | BtfType::Typedef { ty, .. }
@@ -486,6 +518,8 @@ pub struct BtfBuilder {
     strings: Vec<u8>,
     str_index: HashMap<String, u32>,
     count: u32,
+    /// Length of the base's string section for split BTF.
+    str_base: u32,
 }
 
 impl BtfBuilder {
@@ -493,6 +527,16 @@ impl BtfBuilder {
         let mut b = Self::default();
         b.strings.push(0);
         b
+    }
+
+    /// A builder for split BTF on top of `base` (as a kernel module's):
+    /// new type ids start after the base's last id.
+    pub fn split(base: &Btf) -> Self {
+        Self {
+            count: base.types.len() as u32 - 1,
+            str_base: base.strings.len() as u32,
+            ..Self::default()
+        }
     }
 
     /// Offset of `s` in the string section (added once).
@@ -503,7 +547,7 @@ impl BtfBuilder {
         if let Some(&o) = self.str_index.get(s) {
             return o;
         }
-        let o = self.strings.len() as u32;
+        let o = self.str_base + self.strings.len() as u32;
         self.strings.extend_from_slice(s.as_bytes());
         self.strings.push(0);
         self.str_index.insert(s.to_owned(), o);
@@ -565,6 +609,37 @@ impl BtfBuilder {
             self.word(nm);
             self.word(m.1);
             self.word(m.2);
+        }
+        t
+    }
+
+    /// A struct with bitfield members (`kind_flag` set): `members` are
+    /// (name, type, bit offset, bitfield size; 0 for a plain member).
+    pub fn structure_bits(
+        &mut self,
+        name: &str,
+        size: u32,
+        members: &[(&str, u32, u32, u32)],
+    ) -> u32 {
+        self.aggregate_bits(name, false, size, members)
+    }
+
+    /// [`Self::structure_bits`] for a struct or a union.
+    pub fn aggregate_bits(
+        &mut self,
+        name: &str,
+        union: bool,
+        size: u32,
+        members: &[(&str, u32, u32, u32)],
+    ) -> u32 {
+        let names: Vec<u32> = members.iter().map(|m| self.str(m.0)).collect();
+        let n = self.str(name);
+        let kind = if union { KIND_UNION } else { KIND_STRUCT };
+        let t = self.header(n, kind, members.len() as u32, true, size);
+        for (m, nm) in members.iter().zip(names) {
+            self.word(nm);
+            self.word(m.1);
+            self.word((m.3 << 24) | (m.2 & 0xff_ffff));
         }
         t
     }
@@ -651,6 +726,29 @@ pub const VMLINUX_PATH: &str = "/sys/kernel/btf/vmlinux";
 pub fn host_vmlinux() -> Result<Btf, BtfError> {
     let bytes = std::fs::read(VMLINUX_PATH).map_err(|e| bad(format!("{VMLINUX_PATH}: {e}")))?;
     Btf::parse(&bytes)
+}
+
+/// The running kernel's module BTF (`/sys/kernel/btf/<module>`, split on
+/// top of `vmlinux`), by module name. Empty when the kernel exposes none.
+pub fn host_modules(vmlinux: &Btf) -> Result<Vec<(String, Btf)>, BtfError> {
+    let dir = match std::fs::read_dir("/sys/kernel/btf") {
+        Ok(d) => d,
+        Err(e) => return Err(bad(format!("/sys/kernel/btf: {e}"))),
+    };
+    let mut out = Vec::new();
+    for e in dir.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name == "vmlinux" {
+            continue;
+        }
+        let bytes = std::fs::read(e.path()).map_err(|err| bad(format!("{name}: {err}")))?;
+        out.push((
+            name.clone(),
+            Btf::parse_split(&bytes, vmlinux).map_err(|err| bad(format!("{name}: {err}")))?,
+        ));
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(out)
 }
 
 /// Write the BTF id of each kfunc call's target (`FUNC` named

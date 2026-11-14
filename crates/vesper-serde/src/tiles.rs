@@ -2,7 +2,8 @@
 //!
 //! Each line is indexed by stage 1 (SIMD when available), validated by the
 //! stage 2 tape builder of a reusable [`SimdParser`], and only the five schema
-//! fields are decoded; unknown members are skipped over their subtree ends.
+//! fields are decoded, their keys matched a 64-bit word at a time ([`SwarKey`]);
+//! unknown members are skipped over their subtree ends.
 //! Hot fields live in 64-byte-aligned [`HotTile`]s, the cold trace id in a
 //! parallel [`ColdTile`] array. The parser's buffers and the tile storage are
 //! reused, so once capacity is warm, ingesting further batches of no larger
@@ -289,12 +290,107 @@ impl TelemetryIngestor {
     }
 }
 
-fn key_is(name: JsonString<'_>, key: &str) -> bool {
-    if name.is_escaped() {
-        name.equals(key)
-    } else {
-        name.raw_content() == key
+/// A JSON object key of at most 16 bytes compiled to two little-endian
+/// 64-bit words, compared a word at a time (SWAR) instead of byte by byte.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SwarKey {
+    words: [u64; 2],
+    len: u8,
+}
+
+impl SwarKey {
+    /// Keys of 1 to 16 printable ASCII bytes other than `"` and `\\`, the
+    /// only ones whose unescaped spelling is unique.
+    pub const fn compile(key: &str) -> Option<Self> {
+        let bytes = key.as_bytes();
+        if bytes.is_empty() || bytes.len() > 16 {
+            return None;
+        }
+        let mut i = 0;
+        while i < bytes.len() {
+            let b = bytes[i];
+            if b < 0x20 || b > 0x7e || b == b'"' || b == b'\\' {
+                return None;
+            }
+            i += 1;
+        }
+        Some(Self {
+            words: pack(bytes),
+            len: bytes.len() as u8,
+        })
     }
+    /// Whether the raw (unescaped) key content `raw` is this key: a length
+    /// check and two word compares.
+    #[inline]
+    pub fn matches_raw(self, raw: &[u8]) -> bool {
+        raw.len() == self.len as usize && pack(raw) == self.words
+    }
+    /// Whether a validated key is this key, decoding escaped spellings such
+    /// as `"\\u0069d"` without allocating.
+    pub fn matches(self, key: JsonString<'_>) -> bool {
+        if key.is_escaped() {
+            let bytes = unpack(self.words);
+            let name =
+                core::str::from_utf8(&bytes[..self.len as usize]).expect("compiled ASCII key");
+            key.equals(name)
+        } else {
+            self.matches_raw(key.raw_content().as_bytes())
+        }
+    }
+}
+
+/// Up to 16 bytes as two zero-padded little-endian words; longer input
+/// packs only its first 16 bytes (callers compare lengths first).
+#[inline]
+const fn pack(bytes: &[u8]) -> [u64; 2] {
+    let mut buf = [0u8; 16];
+    let n = if bytes.len() < 16 { bytes.len() } else { 16 };
+    let mut i = 0;
+    while i < n {
+        buf[i] = bytes[i];
+        i += 1;
+    }
+    let (lo, hi) = buf.split_at(8);
+    [
+        u64::from_le_bytes([lo[0], lo[1], lo[2], lo[3], lo[4], lo[5], lo[6], lo[7]]),
+        u64::from_le_bytes([hi[0], hi[1], hi[2], hi[3], hi[4], hi[5], hi[6], hi[7]]),
+    ]
+}
+
+fn unpack(words: [u64; 2]) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    out[..8].copy_from_slice(&words[0].to_le_bytes());
+    out[8..].copy_from_slice(&words[1].to_le_bytes());
+    out
+}
+
+const fn key(name: &str) -> SwarKey {
+    match SwarKey::compile(name) {
+        Some(k) => k,
+        None => panic!("telemetry keys are short printable ASCII"),
+    }
+}
+
+/// The five §20.5 keys, compiled at build time.
+const KEYS: [SwarKey; 5] = [
+    key(FIELDS[0].0),
+    key(FIELDS[1].0),
+    key(FIELDS[2].0),
+    key(FIELDS[3].0),
+    key(FIELDS[4].0),
+];
+
+fn field_slot(name: JsonString<'_>) -> Option<usize> {
+    if name.is_escaped() {
+        return KEYS.iter().position(|k| k.matches(name));
+    }
+    let raw = name.raw_content().as_bytes();
+    if raw.len() > 16 {
+        return None;
+    }
+    let words = pack(raw);
+    KEYS.iter()
+        .position(|k| k.len as usize == raw.len() && k.words == words)
 }
 
 fn decode(root: Node<'_, '_>) -> Result<TelemetryPoint, TileErrorKind> {
@@ -302,7 +398,7 @@ fn decode(root: Node<'_, '_>) -> Result<TelemetryPoint, TileErrorKind> {
     let mut found: [Option<Node<'_, '_>>; 5] = [None; 5];
     for (name, value) in fields {
         // Parsing already rejected duplicate keys, so at most one match each.
-        if let Some(slot) = FIELDS.iter().position(|(key, _)| key_is(name, key)) {
+        if let Some(slot) = field_slot(name) {
             found[slot] = Some(value);
         }
     }

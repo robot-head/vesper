@@ -3,9 +3,16 @@
 //! A descriptor records assertions about a foreign library. It neither loads
 //! code nor authenticates an artifact, proves `nocapture`, or grants authority.
 //! Calls must still cross an appropriately authorized, unsafe foreign boundary.
+mod assume;
+mod clayout;
 mod foreign;
 mod parser;
 
+pub use assume::{
+    Assumption, AssumptionCheck, BoundaryReport, Checkability, DeclaredAssumption,
+    GuardObservation, MAX_GUARD_BYTES, Outcome, Position,
+};
+pub use clayout::{C_LAYOUT_SCHEMA, CLayoutMismatch, MAX_PROBE_OUTPUT};
 pub use foreign::{
     CallFailure, CheckedAddress, ForeignValue, InvalidForeignValue, PreparedCall, RawArgument,
     ValidatedReturn, ValidatedValue, ValidationError,
@@ -369,7 +376,8 @@ impl WireStructDescriptor {
         &self.shared.layout
     }
 }
-/// What a single-element pointer parameter points to.
+/// What a single-element pointer parameter points to, or the element type of
+/// a `CSlice`: a total-bit integer or a `wire struct`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pointee {
     /// One total-bit integer with its natural C alignment.
@@ -407,13 +415,25 @@ pub struct PointerLayout {
     pub access: PointerAccess,
     pub nullable: bool,
 }
+/// Typed layout of one pointer/length slice parameter. The byte stride of the
+/// C array is `element_size`; the base address must be `alignment`-aligned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SliceLayout {
+    pub element_size: usize,
+    pub alignment: usize,
+    pub access: Access,
+    pub nullable: bool,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParameterType {
     Value(ValueType),
     /// A borrowed, noncapturing pointer followed by element count (`size_t`).
+    /// Elements are total-bit integers or `wire struct`s. `nullable` only
+    /// when declared `Option[CSlice[T]]`; then `(NULL, 0)` means `None`.
     Slice {
-        element: Scalar,
+        element: Pointee,
         access: Access,
+        nullable: bool,
     },
     /// A borrowed, noncapturing pointer to exactly one scalar or wire struct,
     /// passed as one C pointer. `nullable` only when declared `Option[T]`.
@@ -434,6 +454,22 @@ impl ParameterType {
             } => Some(PointerLayout {
                 size: pointee.size(),
                 alignment: pointee.alignment(),
+                access: *access,
+                nullable: *nullable,
+            }),
+            _ => None,
+        }
+    }
+    /// Element size, alignment, direction and nullability of a slice.
+    pub fn slice_layout(&self) -> Option<SliceLayout> {
+        match self {
+            Self::Slice {
+                element,
+                access,
+                nullable,
+            } => Some(SliceLayout {
+                element_size: element.size(),
+                alignment: element.alignment(),
                 access: *access,
                 nullable: *nullable,
             }),
@@ -681,13 +717,38 @@ fn canonicalize(library: &LibraryDescriptor, limit: usize) -> Result<Vec<u8>, Er
                     e.text("value")?;
                     e.value(t)?;
                 }
-                ParameterType::Slice { element, access } => {
-                    e.text("nocapture-slice")?;
-                    e.text(match access {
+                ParameterType::Slice {
+                    element,
+                    access,
+                    nullable,
+                } => {
+                    let access = match access {
                         Access::In => "in",
                         Access::Inout => "inout",
-                    })?;
-                    e.text(element.name())?;
+                    };
+                    match (element, nullable) {
+                        // The original form keeps its exact canonical bytes.
+                        (Pointee::Scalar(s), false) => {
+                            e.text("nocapture-slice")?;
+                            e.text(access)?;
+                            e.text(s.name())?;
+                        }
+                        _ => {
+                            e.text("nocapture-slice/2")?;
+                            e.text(access)?;
+                            e.text(if *nullable { "option" } else { "nonnull" })?;
+                            match element {
+                                Pointee::Scalar(s) => {
+                                    e.text("scalar")?;
+                                    e.text(s.name())?;
+                                }
+                                Pointee::Struct(w) => {
+                                    e.text("wire-struct")?;
+                                    e.text(w.name())?;
+                                }
+                            }
+                        }
+                    }
                 }
                 ParameterType::Pointer {
                     pointee,
