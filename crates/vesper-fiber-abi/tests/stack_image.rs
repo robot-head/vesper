@@ -105,12 +105,15 @@ fn stack_image_and_register_frame_describe_the_parked_fiber() {
             assert_eq!(frame.abi, FrameAbi::HOST);
             assert_eq!(Some(&frame), image.register_frame().as_ref());
             assert_ne!(frame.return_address, 0);
-            // A fiber parks from `vesper_fiber_park`, Rust code whose own
-            // frame is on the stack, so the switch returns into this binary.
-            let park = vesper_fiber_abi::fiber::vesper_fiber_park as *const () as u64;
-            assert!(
-                frame.return_address > park && frame.return_address < park + 4096,
-                "{opt:?}: return address {:#x} is not inside vesper_fiber_park at {park:#x}",
+            // `vesper_fiber_park` has no frame of its own (it tail-jumps into
+            // the switch), so the switch returns straight into the generated
+            // code that called it.
+            assert_eq!(
+                jit.cfi()
+                    .function_at(frame.return_address - 1)
+                    .map(|f| f.name.as_str()),
+                Some(vesper_fiber_abi::prototype::PULSE_READ_SYMBOL),
+                "{opt:?}: return address {:#x}",
                 frame.return_address
             );
             match frame.abi {

@@ -1,4 +1,8 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::RefCell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 use vesper_bench::*;
 #[derive(Default)]
 struct State {
@@ -10,6 +14,16 @@ struct State {
     after: usize,
 }
 type Shared = Rc<RefCell<State>>;
+/// Spins until `Instant` (the harness's `InstantClock`) visibly advances, so a
+/// measured window that encloses this body can never read zero. A trivial body
+/// can finish inside one tick of a coarse clock (seen on Windows MSVC CI),
+/// which the harness correctly rejects as `Error::ZeroDuration`.
+fn busy_until_clock_advances() {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_micros(1) {
+        std::hint::spin_loop();
+    }
+}
 struct Case {
     state: Shared,
     fail_run: bool,
@@ -32,6 +46,7 @@ impl BenchCase for Case {
         if self.fail_run && s.runs == 2 {
             Err("body")
         } else {
+            busy_until_clock_advances();
             Ok(std::hint::black_box(input))
         }
     }

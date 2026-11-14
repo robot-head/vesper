@@ -1,0 +1,8 @@
+// A signature can only name a region it receives.
+fn leak() -> RegionBox[r, i64] {
+    leak()
+}
+
+fn main() -> i64 {
+    0
+}

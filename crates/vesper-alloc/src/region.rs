@@ -183,6 +183,67 @@ impl<T> fmt::Debug for RegionBox<T> {
     }
 }
 
+/// Copyable checked weak reference to a [`RegionBox`] payload
+/// (`RegionRef[r, T]`). It does not own the payload: the box (or the region)
+/// still decides when it is taken or finalized. Copies can be stored inside
+/// other region payloads to build shared and cyclic graphs; every access goes
+/// through the region (`&Region` to read, `&mut Region` to write), and a taken,
+/// rewound, reset or released payload makes every copy stale.
+pub struct RegionRef<T> {
+    region: RegionId,
+    slot: u32,
+    serial: u64,
+    _payload: PhantomData<fn(T) -> T>,
+}
+
+impl<T> RegionRef<T> {
+    pub fn region(&self) -> RegionId {
+        self.region
+    }
+}
+
+impl<T> Clone for RegionRef<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for RegionRef<T> {}
+impl<T> PartialEq for RegionRef<T> {
+    fn eq(&self, other: &Self) -> bool {
+        (self.region, self.slot, self.serial) == (other.region, other.slot, other.serial)
+    }
+}
+impl<T> Eq for RegionRef<T> {}
+impl<T> std::hash::Hash for RegionRef<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        (self.region, self.slot, self.serial).hash(state);
+    }
+}
+impl<T> fmt::Debug for RegionRef<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RegionRef")
+            .field("region", &self.region)
+            .field("slot", &self.slot)
+            .field("serial", &self.serial)
+            .finish()
+    }
+}
+
+/// Failure of [`Region::ref_get_disjoint_mut`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RefPairError {
+    Handle(HandleError),
+    /// Both references name the same payload.
+    Aliased,
+}
+
+impl fmt::Display for RefPairError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for RefPairError {}
+
 /// Linear checkpoint token (`Watermark`). It must be passed by value to
 /// [`Region::rewind`] or [`Region::commit`]. Rewinding to an older watermark
 /// invalidates every newer one.
@@ -861,6 +922,55 @@ impl<B: ChunkBacking> Region<B> {
         let mut ptr = self.ptr_at(s.chunk, s.start).cast::<T>();
         // SAFETY: as in `get`; `&mut self` makes this the only view.
         Ok(unsafe { ptr.as_mut() })
+    }
+
+    /// Mints a copyable weak reference to a live box payload.
+    pub fn box_ref<T>(&self, b: &RegionBox<T>) -> Result<RegionRef<T>, HandleError> {
+        self.resolve_box(b)?;
+        Ok(RegionRef {
+            region: b.region,
+            slot: b.slot,
+            serial: b.serial,
+            _payload: PhantomData,
+        })
+    }
+
+    fn resolve_ref<T>(&self, r: &RegionRef<T>) -> Result<usize, HandleError> {
+        self.resolve(r.region, r.slot, r.serial, SlotKind::Value)
+    }
+
+    pub fn ref_get<T>(&self, r: RegionRef<T>) -> Result<&T, HandleError> {
+        let s = &self.slots[self.resolve_ref(&r)?];
+        let ptr = self.ptr_at(s.chunk, s.start).cast::<T>();
+        // SAFETY: a reference is only minted from a live `RegionBox<T>` with
+        // the same unique serial, so the slot holds an initialized `T`.
+        Ok(unsafe { ptr.as_ref() })
+    }
+
+    pub fn ref_get_mut<T>(&mut self, r: RegionRef<T>) -> Result<&mut T, HandleError> {
+        let s = &self.slots[self.resolve_ref(&r)?];
+        let mut ptr = self.ptr_at(s.chunk, s.start).cast::<T>();
+        // SAFETY: as in `ref_get`; `&mut self` makes this the only view.
+        Ok(unsafe { ptr.as_mut() })
+    }
+
+    /// Two mutable payloads at once (for example both ends of a graph edge).
+    pub fn ref_get_disjoint_mut<T>(
+        &mut self,
+        a: RegionRef<T>,
+        b: RegionRef<T>,
+    ) -> Result<(&mut T, &mut T), RefPairError> {
+        let ia = self.resolve_ref(&a).map_err(RefPairError::Handle)?;
+        let ib = self.resolve_ref(&b).map_err(RefPairError::Handle)?;
+        if ia == ib {
+            return Err(RefPairError::Aliased);
+        }
+        let (sa, sb) = (&self.slots[ia], &self.slots[ib]);
+        let mut pa = self.ptr_at(sa.chunk, sa.start).cast::<T>();
+        let mut pb = self.ptr_at(sb.chunk, sb.start).cast::<T>();
+        // SAFETY: two distinct live value slots never overlap, and `&mut self`
+        // excludes every other view of region memory.
+        Ok(unsafe { (pa.as_mut(), pb.as_mut()) })
     }
 
     /// Moves the value out, unregistering its finalizer and discharging a

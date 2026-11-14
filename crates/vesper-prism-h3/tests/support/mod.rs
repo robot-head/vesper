@@ -1,7 +1,8 @@
 //! An in-memory QUIC stream pair for deterministic HTTP/3 tests. It models
 //! stream IDs, ordered bytes, FIN, RESET_STREAM, STOP_SENDING and
-//! CONNECTION_CLOSE codes; there is no loss or flow control (Warp tests
-//! cover those).
+//! CONNECTION_CLOSE codes, and optionally QUIC DATAGRAM frames; there is
+//! no loss or flow control (Warp tests cover those). A per-side write
+//! budget and write log let scheduler tests see the order bytes leave in.
 
 #![allow(dead_code)]
 
@@ -28,6 +29,8 @@ struct Shared {
     accept: [VecDeque<u64>; 2],
     next: [[u64; 2]; 2],
     closed: [Option<Code>; 2],
+    /// Datagrams in flight towards each side.
+    datagrams: [VecDeque<Vec<u8>>; 2],
 }
 
 pub struct Mem {
@@ -37,6 +40,12 @@ pub struct Mem {
     pub write_limit: usize,
     /// Unidirectional streams this side may still open (None = unlimited).
     pub uni_credit: Option<usize>,
+    /// QUIC DATAGRAM support: the largest datagram (None = no datagrams).
+    pub max_datagram: Option<usize>,
+    /// Bytes this side may still write in total (None = unlimited).
+    pub budget: Option<usize>,
+    /// Every accepted write: (stream id, bytes).
+    pub log: Vec<(u64, usize)>,
 }
 
 pub fn pair() -> (Mem, Mem) {
@@ -47,12 +56,18 @@ pub fn pair() -> (Mem, Mem) {
             side: 0,
             write_limit: 0,
             uni_credit: None,
+            max_datagram: None,
+            budget: None,
+            log: Vec::new(),
         },
         Mem {
             shared,
             side: 1,
             write_limit: 0,
             uni_credit: None,
+            max_datagram: None,
+            budget: None,
+            log: Vec::new(),
         },
     )
 }
@@ -97,6 +112,26 @@ impl Mem {
     pub fn raw_open(&mut self, uni: bool) -> u64 {
         self.open(uni)
     }
+    /// Bytes waiting to be read on our peer's sending half of `id`.
+    pub fn pending(&self, id: u64) -> usize {
+        self.shared
+            .borrow()
+            .halves
+            .get(&(id, 1 - self.side))
+            .map_or(0, |h| h.data.len())
+    }
+    /// Bytes we wrote on `id` that the peer has not read yet.
+    pub fn unread(&self, id: u64) -> usize {
+        self.shared
+            .borrow()
+            .halves
+            .get(&(id, self.side))
+            .map_or(0, |h| h.data.len())
+    }
+    /// A raw datagram towards the peer (bypasses HTTP/3).
+    pub fn raw_datagram(&mut self, d: &[u8]) {
+        self.shared.borrow_mut().datagrams[1 - self.side].push_back(d.to_vec());
+    }
 }
 
 impl Transport for Mem {
@@ -126,12 +161,19 @@ impl Transport for Mem {
         if h.fin {
             return Err(TransportError::UnknownStream);
         }
-        let n = if self.write_limit == 0 {
+        let mut n = if self.write_limit == 0 {
             data.len()
         } else {
             data.len().min(self.write_limit)
         };
+        if let Some(b) = &mut self.budget {
+            n = n.min(*b);
+            *b -= n;
+        }
         h.data.extend(&data[..n]);
+        if n > 0 {
+            self.log.push((id, n));
+        }
         Ok(n)
     }
     fn finish(&mut self, id: u64) -> Result<(), TransportError> {
@@ -186,5 +228,21 @@ impl Transport for Mem {
     }
     fn close(&mut self, code: Code) {
         self.shared.borrow_mut().closed[self.side].get_or_insert(code);
+    }
+    fn max_datagram_size(&mut self) -> Option<usize> {
+        self.max_datagram
+    }
+    fn send_datagram(&mut self, data: &[u8]) -> Result<(), TransportError> {
+        match self.max_datagram {
+            None => Err(TransportError::Unsupported),
+            Some(m) if data.len() > m => Err(TransportError::TooLarge),
+            Some(_) => {
+                self.shared.borrow_mut().datagrams[1 - self.side].push_back(data.to_vec());
+                Ok(())
+            }
+        }
+    }
+    fn recv_datagram(&mut self) -> Option<Vec<u8>> {
+        self.shared.borrow_mut().datagrams[self.side].pop_front()
     }
 }

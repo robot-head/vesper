@@ -659,6 +659,7 @@ fn define_instances_observed<M: Module>(
     options: CodegenOptions,
 ) -> Result<String, String> {
     let mut clif = String::new();
+    let denorm = crate::capability_effects::const_denorm_spans(world);
     for (key, (name, generic_vars)) in instances {
         let f = concrete(world, name, generic_vars)?;
         let mut ctx = m.make_context();
@@ -728,6 +729,7 @@ fn define_instances_observed<M: Module>(
                     )
                 }),
                 session: None,
+                denorm: &denorm,
                 source_locations: options.source_locations,
                 srcloc: ir::SourceLoc::default(),
             };
@@ -1231,6 +1233,9 @@ struct Codegen<'a, 'b, M: Module> {
     /// Present only while compiling a suspending session entry: external
     /// operations park instead of resolving to a lexical handler.
     session: Option<session::SessionCodegen>,
+    /// Spans of `eff [ConstDenorm]` code, whose float operations flush
+    /// subnormal operands and results to zero.
+    denorm: &'b [crate::ast::Span],
     /// Attach source byte offsets to emitted instructions.
     source_locations: bool,
     /// The location instructions are currently emitted at.
@@ -1273,6 +1278,24 @@ impl Default for CodegenOptions {
     }
 }
 impl<M: Module> Codegen<'_, '_, M> {
+    /// Whether float operations at `span` run under `eff [ConstDenorm]`.
+    fn flushes(&self, span: &crate::ast::Span) -> bool {
+        crate::capability_effects::flushes_subnormals(self.denorm, span)
+    }
+    /// Software flush-to-zero of an `f64` value when `flush` holds: a
+    /// subnormal (magnitude below `f64::MIN_POSITIVE`) becomes a zero of the
+    /// same sign. Other values pass through.
+    fn flush(&mut self, flush: bool, v: ir::Value) -> ir::Value {
+        if !flush || self.b.func.dfg.value_type(v) != types::F64 {
+            return v;
+        }
+        let magnitude = self.b.ins().fabs(v);
+        let smallest = self.b.ins().f64const(f64::MIN_POSITIVE);
+        let tiny = self.b.ins().fcmp(FloatCC::LessThan, magnitude, smallest);
+        let zero = self.b.ins().f64const(0.0);
+        let signed_zero = self.b.ins().fcopysign(zero, v);
+        self.b.ins().select(tiny, signed_zero, v)
+    }
     fn info(&self, value: ir::Value) -> NativeInfo {
         self.infos
             .get(&value)
@@ -2850,6 +2873,8 @@ impl<M: Module> Codegen<'_, '_, M> {
                 let kind = crate::numeric::IntegerKind::from_type(&self.ty(v));
                 let v = self.expr(v)?;
                 let float = self.b.func.dfg.value_type(v) == types::F64;
+                let flush = float && self.flushes(&e.span);
+                let v = self.flush(flush, v);
                 if op == "-"
                     && let Some(kind) = kind
                     && self
@@ -2867,11 +2892,17 @@ impl<M: Module> Codegen<'_, '_, M> {
                 }
                 match (op.as_str(), float) {
                     ("-", false) => self.b.ins().ineg(v),
-                    ("-", true) => self.b.ins().fneg(v),
+                    ("-", true) => {
+                        let r = self.b.ins().fneg(v);
+                        self.flush(flush, r)
+                    }
                     ("!", false) => {
                         let b = self.b.ins().icmp_imm(IntCC::Equal, v, 0);
                         self.b.ins().uextend(types::I64, b)
                     }
+                    // Place-IR form of `widen_u64`: unsigned values are
+                    // already zero-extended in I64.
+                    (crate::capability_effects::WIDEN_INTRINSIC, false) => v,
                     _ => return Err("invalid native unary op".into()),
                 }
             }
@@ -2924,8 +2955,16 @@ impl<M: Module> Codegen<'_, '_, M> {
                             .contains(&(e.span.start, e.span.end))
                     {
                         self.checked_arithmetic(op, kind, av, bv)
+                    } else if crate::capability_effects::bit_intrinsic(op).is_some() {
+                        // Place-IR form of a bitwise intrinsic call.
+                        let v = self.bitwise(op, kind, av, bv)?;
+                        Ok(self.coerce(v, Some(&ty)))
                     } else {
-                        self.binary(op, av, bv, unsigned)
+                        let flush = self.flushes(&e.span);
+                        let av = self.flush(flush, av);
+                        let bv = self.flush(flush, bv);
+                        let r = self.binary(op, av, bv, unsigned)?;
+                        Ok(self.flush(flush, r))
                     }?
                 }
             }
@@ -2955,7 +2994,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let v = if let Some(kind) = checked {
                             self.checked_arithmetic(&op[..1], kind, old, value)?
                         } else {
-                            self.binary(&op[..1], old, value, unsigned)?
+                            let flush = self.flushes(&e.span);
+                            let old = self.flush(flush, old);
+                            let value = self.flush(flush, value);
+                            let r = self.binary(&op[..1], old, value, unsigned)?;
+                            self.flush(flush, r)
                         };
                         self.coerce(v, Some(&ty))
                     };
@@ -2979,7 +3022,11 @@ impl<M: Module> Codegen<'_, '_, M> {
                         if let Some(kind) = checked {
                             self.checked_arithmetic(&op[..1], kind, old, value)?
                         } else {
-                            self.binary(&op[..1], old, value, unsigned)?
+                            let flush = self.flushes(&e.span);
+                            let old = self.flush(flush, old);
+                            let value = self.flush(flush, value);
+                            let r = self.binary(&op[..1], old, value, unsigned)?;
+                            self.flush(flush, r)
                         }
                     };
                     self.store(ptr, value, &ty)?;
@@ -3108,6 +3155,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let b = self.expr(&args[1].expr)?;
                         let v = self.binary(n, a, b, false)?;
                         return Ok(self.coerce(v, Some(&self.ty(e))));
+                    }
+                    // Bitwise intrinsics of the secret operations
+                    // (`capability_effects`).
+                    if !self.world.functions.contains_key(n) {
+                        if crate::capability_effects::bit_intrinsic(n).is_some() && args.len() == 2
+                        {
+                            let kind = crate::numeric::IntegerKind::from_type(&self.ty(e));
+                            let a = self.expr(&args[0].expr)?;
+                            let b = self.expr(&args[1].expr)?;
+                            let v = self.bitwise(n, kind, a, b)?;
+                            return Ok(self.coerce(v, Some(&self.ty(e))));
+                        }
+                        if n == crate::capability_effects::WIDEN_INTRINSIC && args.len() == 1 {
+                            // Unsigned values are kept zero-extended in I64.
+                            return self.expr(&args[0].expr);
+                        }
                     }
                     if self.world.constructor(n).is_some() {
                         self.data(
@@ -3468,6 +3531,43 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.jump(good, &[]);
         self.b.switch_to_block(good);
         Ok(())
+    }
+    /// A bitwise intrinsic on 64-bit lanes holding `kind` values. Shift
+    /// amounts are taken modulo the kind's width; callers reduce narrow
+    /// results with `coerce`.
+    fn bitwise(
+        &mut self,
+        name: &str,
+        kind: Option<crate::numeric::IntegerKind>,
+        a: ir::Value,
+        b: ir::Value,
+    ) -> Result<ir::Value, String> {
+        let kind = kind.ok_or("native bitwise intrinsic on a non-integer type")?;
+        if self.b.func.dfg.value_type(a) != types::I64
+            || self.b.func.dfg.value_type(b) != types::I64
+        {
+            return Err("native bitwise intrinsic on a non-integer value".into());
+        }
+        let op = crate::capability_effects::bit_intrinsic(name)
+            .ok_or_else(|| format!("unknown native bitwise intrinsic '{name}'"))?;
+        let amount = |s: &mut Self| s.b.ins().band_imm(b, i64::from(kind.bits()) - 1);
+        Ok(match op {
+            "&" => self.b.ins().band(a, b),
+            "|" => self.b.ins().bor(a, b),
+            "^" => self.b.ins().bxor(a, b),
+            "<<" => {
+                let n = amount(self);
+                self.b.ins().ishl(a, n)
+            }
+            _ => {
+                let n = amount(self);
+                if kind.unsigned() {
+                    self.b.ins().ushr(a, n)
+                } else {
+                    self.b.ins().sshr(a, n)
+                }
+            }
+        })
     }
     fn binary(
         &mut self,

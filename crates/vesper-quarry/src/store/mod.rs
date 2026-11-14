@@ -34,6 +34,7 @@
 mod btree;
 mod error;
 mod frames;
+mod index;
 mod log;
 mod pages;
 mod shared;
@@ -53,17 +54,17 @@ use crate::{
 };
 use btree::{Pager, TreeCfg};
 use error::{corrupt, limit, overflow};
-use frames::{Core, FramePool};
+use frames::{lock, Core, Io, SharedFrame};
 use log::StoreLog;
 use pages::{
     check_structure, decode_fsm, encode_fsm, format, kind, layout_of, leaf_compact, leaf_garbage,
-    new_page, page_lsn, Entry, Key, Meta, Page, TableMeta, FSM_CAPACITY, FSM_PAGE, INTERNAL_CAP,
-    KIND_FSM, KIND_LEAF, KIND_META, META_PAGE,
+    new_page, page_lsn, Entry, IndexMeta, Key, Meta, Page, TableMeta, FSM_CAPACITY, FSM_PAGE,
+    INTERNAL_CAP, KIND_FSM, KIND_INTERNAL, KIND_LEAF, KIND_META, META_PAGE,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 /// Largest variable-width payload (text and bytes) of one row, so that any
 /// leaf can always be split into two pages.
@@ -148,6 +149,7 @@ pub struct Txn {
     id: u64,
     store: u64,
     snapshot: u64,
+    isolation: Isolation,
     leaks: Arc<AtomicU64>,
     finished: bool,
 }
@@ -159,6 +161,70 @@ impl Txn {
     pub fn snapshot(&self) -> u64 {
         self.snapshot
     }
+    pub fn isolation(&self) -> Isolation {
+        self.isolation
+    }
+}
+
+/// Isolation level of a transaction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Isolation {
+    /// Snapshot isolation: no dirty or non-repeatable reads, phantoms or
+    /// lost updates; write skew is possible.
+    #[default]
+    Snapshot,
+    /// Serializable snapshot isolation (Cahill, Röhm and Fekete): snapshot
+    /// isolation plus tracking of rw-antidependencies among serializable
+    /// transactions; one with both an incoming and an outgoing edge (or
+    /// next to a committed one that has both) aborts with
+    /// [`StoreErrorKind::Serialization`]. Serializable only with respect to
+    /// other serializable transactions; may abort transactions that would
+    /// have been serializable (false positives).
+    Serializable,
+}
+
+/// SIREAD predicates of a serializable transaction: rows read, tables
+/// scanned (any change to the table conflicts) and index ranges looked up
+/// (`(table, column, lo, hi)`: a write whose old or new value is in the
+/// range conflicts).
+#[derive(Clone, Debug, Default)]
+struct Reads {
+    rows: BTreeSet<(u32, u64)>,
+    tables: BTreeSet<u32>,
+    ranges: Vec<(u32, usize, Value, Value)>,
+}
+impl Reads {
+    /// Whether writing `(tid, rowid)` from `old` to `new` changes something
+    /// these predicates read.
+    fn hit(&self, tid: u32, rowid: u64, old: Option<&[Value]>, new: Option<&[Value]>) -> bool {
+        self.tables.contains(&tid)
+            || self.rows.contains(&(tid, rowid))
+            || self.ranges.iter().any(|(t, col, lo, hi)| {
+                *t == tid
+                    && [old, new]
+                        .into_iter()
+                        .flatten()
+                        .any(|row| index::within(&row[*col], lo, hi))
+            })
+    }
+}
+/// Conflict-graph state of a serializable transaction: its predicates and
+/// rw-antidependency edges (`ins`: transactions that read what this one
+/// writes; `outs`: transactions that wrote what this one read).
+#[derive(Clone, Debug, Default)]
+struct Ssi {
+    reads: Reads,
+    ins: BTreeSet<u64>,
+    outs: BTreeSet<u64>,
+}
+/// A committed serializable transaction kept while a transaction that did
+/// not see it may still create an edge to it. `end` is its commit
+/// timestamp (for a read-only one, the newest timestamp at its commit):
+/// a transaction with `snapshot < end` is concurrent with it.
+#[derive(Clone, Debug)]
+struct Done {
+    end: u64,
+    ssi: Ssi,
 }
 impl Drop for Txn {
     fn drop(&mut self) {
@@ -171,6 +237,11 @@ impl Drop for Txn {
 #[derive(Debug, Default)]
 struct TxnState {
     snapshot: u64,
+    /// `Some` for a serializable transaction.
+    ssi: Option<Ssi>,
+    /// Row values this transaction's snapshot saw for rows it updates or
+    /// deletes (for index-range conflicts).
+    old_rows: BTreeMap<(u32, u64), Vec<Value>>,
     /// (table id, row id) -> new row, or `None` for a delete.
     writes: BTreeMap<(u32, u64), Option<Vec<Value>>>,
 }
@@ -234,6 +305,9 @@ pub struct StoreStats {
     pub checkpoints_begun: u64,
     pub checkpoints_done: u64,
     pub versions_collected: u64,
+    /// Committed serializable transactions still retained for
+    /// rw-antidependency tracking.
+    pub ssi_retained: usize,
 }
 
 /// What [`Store::vacuum`] did.
@@ -244,33 +318,145 @@ pub struct VacuumReport {
     pub groups: u64,
 }
 
-/// A durable SQL table store over a [`Device`].
-pub struct Store<D: Device> {
-    id: u64,
-    core: Core<D>,
+/// What readers see: the meta page and the SQL catalog, replaced as a whole
+/// when a commit group installs.
+#[derive(Clone, Debug)]
+struct View {
     meta: Meta,
-    free: BTreeSet<u64>,
     catalog: HermeticCatalog,
-    limits: StoreLimits,
+}
+
+/// State only the single writer (commit groups, DDL, vacuum, checkpoints)
+/// changes; guarded by the writer mutex.
+#[derive(Debug, Default)]
+struct Writer {
+    free: BTreeSet<u64>,
     /// Pages with a full image in the current log region.
     imaged: BTreeSet<u64>,
     /// Pages a running checkpoint still has to write back.
     ckpt: Option<BTreeSet<u64>>,
-    visible_ts: u64,
-    /// Deferred commits not yet durable: (commit LSN, ts).
-    pending: VecDeque<(u64, u64)>,
-    txns: BTreeMap<u64, TxnState>,
+    groups: u64,
+    checkpoints_begun: u64,
+    checkpoints_done: u64,
+    versions_collected: u64,
+}
+
+/// The transaction table, guarded by its own mutex (taken last: nothing
+/// else is acquired while it is held).
+#[derive(Debug, Default)]
+struct Txns {
+    active: BTreeMap<u64, TxnState>,
     locks: BTreeMap<(u32, u64), u64>,
     /// Next row id per table id (ahead of the meta page while uncommitted
     /// inserts exist; aborted ids are never reused).
     next_rowid: BTreeMap<u32, u64>,
     next_txn: u64,
+    visible_ts: u64,
+    /// Deferred commits not yet durable: (commit LSN, ts).
+    pending: VecDeque<(u64, u64)>,
+    /// Committed serializable transactions still relevant, by id, and the
+    /// writers among them by commit timestamp.
+    done: BTreeMap<u64, Done>,
+    done_by_ts: BTreeMap<u64, u64>,
+}
+impl Txns {
+    fn ssi_mut(&mut self, id: u64) -> Option<&mut Ssi> {
+        match self.active.get_mut(&id) {
+            Some(s) => s.ssi.as_mut(),
+            None => self.done.get_mut(&id).map(|d| &mut d.ssi),
+        }
+    }
+    /// Records the rw-antidependency `from -> to` (from read what to
+    /// writes) between two serializable transactions.
+    fn edge(&mut self, from: u64, to: u64) {
+        if from == to || self.ssi_mut(from).is_none() || self.ssi_mut(to).is_none() {
+            return;
+        }
+        self.ssi_mut(from).expect("tracked").outs.insert(to);
+        self.ssi_mut(to).expect("tracked").ins.insert(from);
+    }
+    /// Cahill's rule: a pivot (an incoming and an outgoing edge) must not
+    /// commit, and a transaction next to a committed pivot must abort.
+    fn dangerous(&self, ssi: &Ssi) -> bool {
+        if !ssi.ins.is_empty() && !ssi.outs.is_empty() {
+            return true;
+        }
+        ssi.ins
+            .iter()
+            .chain(&ssi.outs)
+            .filter_map(|n| self.done.get(n))
+            .any(|d| !d.ssi.ins.is_empty() && !d.ssi.outs.is_empty())
+    }
+    /// Removes an aborted serializable transaction and its edges.
+    fn forget(&mut self, id: u64) {
+        self.done.remove(&id);
+        self.done_by_ts.retain(|_, t| *t != id);
+        for ssi in self
+            .active
+            .values_mut()
+            .filter_map(|s| s.ssi.as_mut())
+            .chain(self.done.values_mut().map(|d| &mut d.ssi))
+        {
+            ssi.ins.remove(&id);
+            ssi.outs.remove(&id);
+        }
+    }
+    /// Drops committed records no transaction can still be concurrent with.
+    fn prune(&mut self) {
+        let oldest = self
+            .active
+            .values()
+            .filter(|s| s.ssi.is_some())
+            .map(|s| s.snapshot)
+            .min();
+        let visible = self.visible_ts;
+        let gone: Vec<u64> = self
+            .done
+            .iter()
+            .filter(|(_, d)| d.end <= visible && oldest.is_none_or(|o| o >= d.end))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in gone {
+            self.done.remove(&id);
+        }
+        let done = &self.done;
+        self.done_by_ts.retain(|_, id| done.contains_key(id));
+    }
+    /// After a serializable read: edges to the writers of versions newer
+    /// than the snapshot and to serializable holders of write locks.
+    fn read_edges(&mut self, reader: u64, newer: &BTreeSet<u64>, locked: &[(u32, u64)]) {
+        let mut writers: BTreeSet<u64> = newer
+            .iter()
+            .filter_map(|ts| self.done_by_ts.get(ts).copied())
+            .collect();
+        for k in locked {
+            if let Some(&owner) = self.locks.get(k) {
+                writers.insert(owner);
+            }
+        }
+        for w in writers {
+            self.edge(reader, w);
+        }
+    }
+}
+
+/// A durable SQL table store over a [`Device`].
+///
+/// Readers ([`Store::get`], [`Store::scan`], queries) and writers
+/// ([`Store::insert`], [`Store::commit`], ...) take `&self` and may run on
+/// many threads at once (`Store` is `Sync` when the device is `Send`):
+/// readers traverse installed pages with latch coupling while one commit
+/// group at a time is built and installed. DDL, vacuum, checkpoints and
+/// the tree check take `&mut self`.
+pub struct Store<D: Device> {
+    id: u64,
+    limits: StoreLimits,
+    core: Core<D>,
+    view: RwLock<Arc<View>>,
+    writer: Mutex<Writer>,
+    txns: Mutex<Txns>,
     leaks: Arc<AtomicU64>,
-    poisoned: bool,
-    groups: u64,
-    checkpoints_begun: u64,
-    checkpoints_done: u64,
-    versions_collected: u64,
+    poisoned: AtomicBool,
 }
 impl<D: Device> fmt::Debug for Store<D> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -280,19 +466,100 @@ impl<D: Device> fmt::Debug for Store<D> {
     }
 }
 
+/// Which tree a reader walks.
+#[derive(Clone, Copy, Debug)]
+enum Tree {
+    Table(u32),
+    Index(u32),
+}
+impl View {
+    fn root(&self, tree: Tree) -> StoreResult<u64> {
+        match tree {
+            Tree::Table(tid) => self
+                .meta
+                .tables
+                .values()
+                .find(|t| t.id == tid)
+                .map(|t| t.root)
+                .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, "table dropped")),
+            Tree::Index(iid) => self
+                .meta
+                .indexes
+                .values()
+                .find(|i| i.id == iid)
+                .map(|i| i.root)
+                .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, "index dropped")),
+        }
+    }
+    fn index(&self, name: &str) -> StoreResult<&IndexMeta> {
+        let name = identifier(name)?;
+        self.meta
+            .indexes
+            .get(&name)
+            .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, format!("index {name}")))
+    }
+    /// (index name, column, column type) of every index on a table.
+    fn indexes_of(&self, table: &str) -> Vec<(String, usize, ScalarType)> {
+        let Some(t) = self.meta.tables.get(table) else {
+            return Vec::new();
+        };
+        self.meta
+            .indexes
+            .iter()
+            .filter(|(_, i)| i.table == table)
+            .map(|(n, i)| (n.clone(), i.column, t.columns[i.column].ty))
+            .collect()
+    }
+    fn table(&self, name: &str) -> StoreResult<&TableMeta> {
+        let name = identifier(name)?;
+        self.meta
+            .tables
+            .get(&name)
+            .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, format!("table {name}")))
+    }
+}
+
 // ---- page staging for one group -----------------------------------------
 
-/// Log records, page images to install, the new meta and the freed pages.
-type Finished = (Vec<StoreRecord>, Vec<(u64, Box<Page>)>, Meta, BTreeSet<u64>);
+/// Tree-order position of a page for exclusive latching: pages readers can
+/// reach before the group by level (root first), leaves left to right by
+/// their first key; unreachable pages after them.
+type LatchKey = (u8, std::cmp::Reverse<u8>, Key, u64);
+fn latch_key(id: u64, before: Option<&Page>, free_before: &BTreeSet<u64>) -> LatchKey {
+    use std::cmp::Reverse;
+    match before {
+        Some(b) if !free_before.contains(&id) && kind(&b[..]) == KIND_LEAF => {
+            let first = layout_of(&b[..])
+                .ok()
+                .filter(|_| pages::count(&b[..]) > 0)
+                .map_or(Key::MIN, |lay| pages::leaf_key(&b[..], &lay, 0));
+            (0, Reverse(0), first, id)
+        }
+        Some(b) if !free_before.contains(&id) && kind(&b[..]) == KIND_INTERNAL => {
+            (0, Reverse(pages::level(&b[..])), Key::MIN, id)
+        }
+        _ => (1, Reverse(0), Key::MIN, id),
+    }
+}
+
+/// What a finished group logs and installs.
+struct Finished {
+    records: Vec<StoreRecord>,
+    /// (latch order, page, new bytes or `None` for a freed page to latch).
+    plan: Vec<(LatchKey, u64, Option<Box<Page>>)>,
+    meta: Meta,
+    free: BTreeSet<u64>,
+}
 
 /// Private copies of the pages one commit group reads and changes.
 struct Staging<'a, D: Device> {
-    core: &'a mut Core<D>,
+    core: &'a Core<D>,
     /// page -> (bytes before the group, or `None` for a page new to the
     /// file; bytes now)
     pages: BTreeMap<u64, (Option<Box<Page>>, Box<Page>)>,
     meta: Meta,
     free: BTreeSet<u64>,
+    free_before: BTreeSet<u64>,
     max_pages: u64,
     max_group_pages: usize,
 }
@@ -311,41 +578,57 @@ impl<D: Device> Staging<'_, D> {
         self.pages.insert(id, (Some(copy.clone()), copy));
         Ok(())
     }
-    /// Log records for every changed page plus the commit record; the new
-    /// page images to install.
+    /// Log records for every changed page plus the commit record; the
+    /// install plan in latch order.
     fn finish(mut self, imaged: &BTreeSet<u64>, txn: u64, ts: u64) -> StoreResult<Finished> {
         let meta = self.meta.clone();
         meta.encode(&mut self.page_mut(META_PAGE)?[..])?;
         let free = self.free.clone();
         encode_fsm(&mut self.page_mut(FSM_PAGE)?[..], &free);
         let mut records = Vec::new();
-        let mut installs = Vec::new();
+        let mut plan = Vec::new();
         for (id, (before, now)) in self.pages {
+            let key = latch_key(id, before.as_deref(), &self.free_before);
             let record = match &before {
                 Some(b) if imaged.contains(&id) => {
                     let ranges = diff(&b[..], &now[..]);
                     if ranges.is_empty() {
-                        continue;
-                    }
-                    StoreRecord::PageDiff {
-                        page: id,
-                        prev_lsn: page_lsn(&b[..]),
-                        ranges,
+                        None
+                    } else {
+                        Some(StoreRecord::PageDiff {
+                            page: id,
+                            prev_lsn: page_lsn(&b[..]),
+                            ranges,
+                        })
                     }
                 }
-                Some(b) if diff(&b[..], &now[..]).is_empty() => continue,
+                Some(b) if diff(&b[..], &now[..]).is_empty() => None,
                 _ => {
                     let mut bytes = now.to_vec();
                     bytes[..8].fill(0);
                     bytes[16..20].fill(0);
-                    StoreRecord::PageImage { page: id, bytes }
+                    Some(StoreRecord::PageImage { page: id, bytes })
                 }
             };
-            records.push(record);
-            installs.push((id, now));
+            match record {
+                Some(r) => {
+                    records.push(r);
+                    plan.push((key, id, Some(now)));
+                }
+                // A page freed by this group: latched, so no reader stays.
+                None if free.contains(&id) && !self.free_before.contains(&id) => {
+                    plan.push((key, id, None));
+                }
+                None => {}
+            }
         }
         records.push(StoreRecord::Commit { txn, ts });
-        Ok((records, installs, self.meta, self.free))
+        Ok(Finished {
+            records,
+            plan,
+            meta: self.meta,
+            free: self.free,
+        })
     }
 }
 impl<D: Device> Pager for Staging<'_, D> {
@@ -382,7 +665,7 @@ impl<D: Device> Pager for Staging<'_, D> {
         if id <= FSM_PAGE || id >= self.meta.page_count || !self.free.insert(id) {
             return Err(corrupt(format!("freeing page {id} twice or out of range")));
         }
-        Ok(())
+        self.stage(id)
     }
 }
 
@@ -413,9 +696,10 @@ fn diff(before: &[u8], after: &[u8]) -> Vec<(u16, Vec<u8>)> {
         .collect()
 }
 
-/// Read-only page access outside a group (one cached page at a time).
+/// Read-only page access by the writer (one cached page at a time). Only
+/// the writer changes pages, so its reads need no coupling.
 struct Reader<'a, D: Device> {
-    core: &'a mut Core<D>,
+    core: &'a Core<D>,
     page_count: u64,
     current: Option<(u64, Box<Page>)>,
 }
@@ -504,6 +788,17 @@ fn table_types(t: &TableMeta) -> Vec<ScalarType> {
     t.columns.iter().map(|c| c.ty).collect()
 }
 
+fn serialization_failure() -> StoreError {
+    StoreError::new(
+        StoreErrorKind::Serialization,
+        "rw-antidependencies would complete a dangerous structure; retry the transaction",
+    )
+}
+
+fn state_error(message: &str) -> StoreError {
+    StoreError::new(StoreErrorKind::State, message)
+}
+
 impl<D: Device> Store<D> {
     /// Opens (creating if empty) and recovers a store, then checkpoints.
     ///
@@ -526,7 +821,7 @@ impl<D: Device> Store<D> {
                 return Err(corrupt("existing store without a valid log header"));
             }
             let log = StoreLog::reset(&mut dev, limits.log_region_bytes, 0, 1)?;
-            let mut store = Self::assemble(id, dev, log, limits, 0);
+            let store = Self::assemble(id, dev, log, limits, 0);
             store.initialize()?;
             report.created = true;
             return Ok((store, report));
@@ -546,82 +841,89 @@ impl<D: Device> Store<D> {
         }
         let log = StoreLog::recovering(&scan, limits.log_region_bytes);
         let (hseq, next_lsn) = (scan.hseq, scan.next_lsn);
-        let mut store = Self::assemble(id, dev, log, limits, page_bound);
+        let store = Self::assemble(id, dev, log, limits, page_bound);
         store.redo(scan.records, &mut report)?;
         // Sharp checkpoint: every page durable, then a fresh log.
         for page in store.core.pool.dirty_pages() {
             store.core.write_back(page)?;
         }
-        store.core.dev.sync(FileId::Data)?;
-        store.core.log =
-            StoreLog::reset(&mut store.core.dev, limits.log_region_bytes, hseq, next_lsn)?;
+        {
+            let mut io = store.core.io();
+            io.dev.sync(FileId::Data)?;
+            let Io { dev, log, .. } = &mut *io;
+            *log = StoreLog::reset(dev, limits.log_region_bytes, hseq, next_lsn)?;
+        }
         let initialized = page_bound > FSM_PAGE
             && (store.core.pool.resident(META_PAGE) || store.core.read_disk(META_PAGE)?.is_some());
         if !initialized {
             // The log never held a complete initialization group.
-            store.core.page_count = 0;
+            store.core.set_page_count(0);
             store.initialize()?;
             report.created = true;
             return Ok((store, report));
         }
-        store.core.page_count = page_bound.max(2);
+        store.core.set_page_count(page_bound.max(2));
         let meta = Meta::decode(&store.core.copy(META_PAGE)?[..])?;
         if meta.page_count > limits.max_pages {
             return Err(limit("store has more pages than max_pages"));
         }
-        store.core.page_count = meta.page_count;
-        store.free = decode_fsm(&store.core.copy(FSM_PAGE)?[..])?;
-        if store.free.iter().any(|&p| p >= meta.page_count) {
+        store.core.set_page_count(meta.page_count);
+        let free = decode_fsm(&store.core.copy(FSM_PAGE)?[..])?;
+        if free.iter().any(|&p| p >= meta.page_count) {
             return Err(corrupt("free-space map names pages beyond the store"));
         }
-        store.catalog = HermeticCatalog::from_parts(
+        lock(&store.writer).free = free;
+        let catalog = HermeticCatalog::from_parts(
             meta.tables
                 .iter()
                 .map(|(n, t)| (n.clone(), t.columns.clone()))
                 .collect(),
             meta.catalog_revision,
         );
-        store.next_rowid = meta.tables.values().map(|t| (t.id, t.next_rowid)).collect();
-        store.visible_ts = meta.last_ts;
+        {
+            let mut t = store.txns();
+            t.next_rowid = meta.tables.values().map(|t| (t.id, t.next_rowid)).collect();
+            t.visible_ts = meta.last_ts;
+        }
         report.last_ts = meta.last_ts;
-        store.meta = meta;
+        store.publish(View { meta, catalog });
         Ok((store, report))
     }
 
     fn assemble(id: u64, dev: D, log: StoreLog, limits: StoreLimits, pages: u64) -> Self {
         Self {
             id,
-            core: Core {
-                dev,
-                log,
-                pool: FramePool::new(limits.pool_frames),
-                page_count: pages,
-                evictions: 0,
-                page_writes: 0,
-            },
-            meta: Meta::new(),
-            free: BTreeSet::new(),
-            catalog: HermeticCatalog::default(),
             limits,
-            imaged: BTreeSet::new(),
-            ckpt: None,
-            visible_ts: 0,
-            pending: VecDeque::new(),
-            txns: BTreeMap::new(),
-            locks: BTreeMap::new(),
-            next_rowid: BTreeMap::new(),
-            next_txn: 1,
+            core: Core::new(dev, log, limits.pool_frames, pages),
+            view: RwLock::new(Arc::new(View {
+                meta: Meta::new(),
+                catalog: HermeticCatalog::default(),
+            })),
+            writer: Mutex::new(Writer::default()),
+            txns: Mutex::new(Txns {
+                next_txn: 1,
+                ..Txns::default()
+            }),
             leaks: Arc::new(AtomicU64::new(0)),
-            poisoned: false,
-            groups: 0,
-            checkpoints_begun: 0,
-            checkpoints_done: 0,
-            versions_collected: 0,
+            poisoned: AtomicBool::new(false),
         }
     }
 
+    fn view(&self) -> Arc<View> {
+        Arc::clone(&self.view.read().unwrap_or_else(|e| e.into_inner()))
+    }
+    fn publish(&self, view: View) {
+        *self.view.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(view);
+    }
+    fn txns(&self) -> MutexGuard<'_, Txns> {
+        lock(&self.txns)
+    }
+    fn writer(&self) -> MutexGuard<'_, Writer> {
+        lock(&self.writer)
+    }
+
     /// Writes the meta and free-space-map pages as the first group.
-    fn initialize(&mut self) -> StoreResult<()> {
+    fn initialize(&self) -> StoreResult<()> {
         let meta = Meta::new();
         let mut m = new_page();
         format(&mut m[..], META_PAGE, KIND_META, 0);
@@ -640,18 +942,26 @@ impl<D: Device> Store<D> {
             },
             StoreRecord::Commit { txn: 0, ts: 0 },
         ];
-        let lsns = self.core.log.append_group(&records)?;
-        self.core.log.flush(&mut self.core.dev)?;
-        self.core.page_count = 2;
+        let lsns = {
+            let mut io = self.core.io();
+            let lsns = io.log.append_group(&records)?;
+            let Io { dev, log, .. } = &mut *io;
+            log.flush(dev)?;
+            lsns
+        };
+        self.core.set_page_count(2);
         self.core.install(META_PAGE, &m, lsns[0])?;
         self.core.install(FSM_PAGE, &f, lsns[1])?;
-        self.imaged.extend([META_PAGE, FSM_PAGE]);
-        self.meta = meta;
+        self.writer().imaged.extend([META_PAGE, FSM_PAGE]);
+        self.publish(View {
+            meta,
+            catalog: HermeticCatalog::default(),
+        });
         Ok(())
     }
 
     fn redo(
-        &mut self,
+        &self,
         records: Vec<(u64, StoreRecord)>,
         report: &mut StoreRecovery,
     ) -> StoreResult<()> {
@@ -670,8 +980,7 @@ impl<D: Device> Store<D> {
                     if !self.core.pool.resident(page) {
                         match self.lenient_disk(page)? {
                             Some(disk) if page_lsn(&disk[..]) >= lsn => {
-                                self.core.make_room()?;
-                                self.core.pool.insert(page, disk, false);
+                                self.core.insert_clean(page, disk)?;
                                 report.skipped += 1;
                                 continue;
                             }
@@ -701,8 +1010,7 @@ impl<D: Device> Store<D> {
                                 "page {page} is missing or torn and no logged image covers it"
                             ))
                         })?;
-                        self.core.make_room()?;
-                        self.core.pool.insert(page, disk, false);
+                        self.core.insert_clean(page, disk)?;
                     }
                     let mut current = self.core.copy(page)?;
                     let at = page_lsn(&current[..]);
@@ -728,7 +1036,7 @@ impl<D: Device> Store<D> {
         Ok(())
     }
     /// A page from the data file, or `None` when missing or invalid (torn).
-    fn lenient_disk(&mut self, page: u64) -> StoreResult<Option<Box<Page>>> {
+    fn lenient_disk(&self, page: u64) -> StoreResult<Option<Box<Page>>> {
         match self.core.read_disk(page) {
             Ok(p) => Ok(p),
             Err(e) if e.kind == StoreErrorKind::Corrupt => Ok(None),
@@ -739,68 +1047,153 @@ impl<D: Device> Store<D> {
     // ---- state checks --------------------------------------------------
 
     fn check_usable(&self) -> StoreResult<()> {
-        if self.poisoned {
-            Err(StoreError::new(
-                StoreErrorKind::State,
+        if self.poisoned.load(Ordering::Acquire) {
+            Err(state_error(
                 "store is poisoned by an earlier I/O failure; reopen it",
             ))
         } else {
             Ok(())
         }
     }
-    fn poison_on<T>(&mut self, r: StoreResult<T>) -> StoreResult<T> {
+    fn poison(&self) {
+        self.poisoned.store(true, Ordering::Release);
+    }
+    fn poison_on<T>(&self, r: StoreResult<T>) -> StoreResult<T> {
         if let Err(e) = &r {
             if e.poisons() {
-                self.poisoned = true;
+                self.poison();
             }
         }
         r
     }
-    fn state_of(&self, txn: &Txn) -> StoreResult<()> {
+    fn check_store(&self, txn: &Txn) -> StoreResult<()> {
         if txn.store != self.id {
             return Err(StoreError::new(
                 StoreErrorKind::WrongStore,
                 "transaction of another store",
             ));
         }
-        if !self.txns.contains_key(&txn.id) {
-            return Err(StoreError::new(
-                StoreErrorKind::State,
-                "transaction is not active",
-            ));
-        }
         Ok(())
     }
-    fn table(&self, name: &str) -> StoreResult<&TableMeta> {
-        let name = identifier(name)?;
-        self.meta
-            .tables
-            .get(&name)
-            .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, format!("table {name}")))
-    }
     /// Commits durable now: advance the visible snapshot.
-    fn refresh_visible(&mut self) {
-        let durable = self.core.log.durable_lsn();
-        while let Some(&(lsn, ts)) = self.pending.front() {
+    fn refresh_visible(&self) {
+        let durable = self.core.io().log.durable_lsn();
+        let mut t = self.txns();
+        while let Some(&(lsn, ts)) = t.pending.front() {
             if lsn > durable {
                 break;
             }
-            self.visible_ts = ts;
-            self.pending.pop_front();
+            t.visible_ts = ts;
+            t.pending.pop_front();
         }
+        t.prune();
     }
     /// Every snapshot a present or future transaction can read.
     fn snapshots(&self) -> BTreeSet<u64> {
-        let mut out: BTreeSet<u64> = self.txns.values().map(|t| t.snapshot).collect();
-        out.insert(self.visible_ts);
+        let t = self.txns();
+        let mut out: BTreeSet<u64> = t.active.values().map(|s| s.snapshot).collect();
+        out.insert(t.visible_ts);
         out
     }
-    fn reader(&mut self) -> Reader<'_, D> {
+    fn reader(&self) -> Reader<'_, D> {
         Reader {
-            page_count: self.meta.page_count,
-            core: &mut self.core,
+            page_count: self.core.page_count(),
+            core: &self.core,
             current: None,
         }
+    }
+
+    // ---- latch-coupled reads --------------------------------------------
+
+    /// Visits entries of `tree` with `lo <= key <= hi` in key order until `f`
+    /// returns `false`. The root is latched while the view naming it is
+    /// held; each child (and each right sibling across leaves) is latched
+    /// before its parent (or left neighbour) is released, so the walk never
+    /// sees a commit group half installed and never stands on a freed page.
+    fn read_tree(
+        &self,
+        tree: Tree,
+        lo: Key,
+        hi: Key,
+        f: &mut dyn FnMut(Entry) -> StoreResult<bool>,
+    ) -> StoreResult<()> {
+        let first = {
+            let view = self.view.read().unwrap_or_else(|e| e.into_inner());
+            let root = view.root(tree)?;
+            // A root that fails to load poisons the store like any page.
+            self.poison_on(self.core.fix_shared(root))?
+        };
+        let mut cur = Some(first);
+        let r = self.walk(&mut cur, lo, hi, f);
+        let released = match cur.take() {
+            Some(pin) => self.core.unpin_clean(pin),
+            None => Ok(()),
+        };
+        let r = r.and(released);
+        self.poison_on(r)
+    }
+    fn walk(
+        &self,
+        cur: &mut Option<SharedFrame>,
+        lo: Key,
+        hi: Key,
+        f: &mut dyn FnMut(Entry) -> StoreResult<bool>,
+    ) -> StoreResult<()> {
+        enum Step {
+            Child(u64, u8),
+            Leaf(Vec<Entry>, u64),
+        }
+        let mut expect: Option<u8> = None;
+        // A walk visits each page at most once, so more steps than pages
+        // means a cycle. The bound is re-read each step: commits that run
+        // during the walk may allocate pages and link them into the chain.
+        let mut steps = 0u64;
+        while steps <= self.core.page_count().saturating_add(1) {
+            steps += 1;
+            let pin = cur.as_ref().expect("a latched page");
+            let step = self.core.view(pin, |b| -> StoreResult<Step> {
+                if expect.is_some_and(|l| l != pages::level(&b[..])) {
+                    return Err(corrupt("B+Tree: child level"));
+                }
+                match kind(&b[..]) {
+                    KIND_INTERNAL => {
+                        let lvl = pages::level(&b[..]);
+                        let at = pages::route(&b[..], lo);
+                        Ok(Step::Child(pages::child(&b[..], at), lvl - 1))
+                    }
+                    KIND_LEAF => {
+                        let (_, entries) = pages::leaf_decode(&b[..])?;
+                        Ok(Step::Leaf(entries, pages::sibling(&b[..])))
+                    }
+                    _ => Err(corrupt("B+Tree: unexpected page kind")),
+                }
+            })??;
+            let next = match step {
+                Step::Child(c, lvl) => {
+                    expect = Some(lvl);
+                    c
+                }
+                Step::Leaf(entries, sib) => {
+                    for e in entries {
+                        if e.key < lo {
+                            continue;
+                        }
+                        if e.key > hi || !f(e)? {
+                            return Ok(());
+                        }
+                    }
+                    if sib == 0 {
+                        return Ok(());
+                    }
+                    expect = Some(0);
+                    sib
+                }
+            };
+            let pin = self.core.fix_shared(next)?;
+            let old = cur.replace(pin).expect("a latched page");
+            self.core.unpin_clean(old)?;
+        }
+        Err(corrupt("B+Tree: walk does not terminate"))
     }
 
     // ---- DDL -----------------------------------------------------------
@@ -810,17 +1203,26 @@ impl<D: Device> Store<D> {
     /// Dropping a table frees all its pages.
     pub fn execute_ddl(&mut self, sql: &str) -> StoreResult<()> {
         self.check_usable()?;
-        if !self.txns.is_empty() {
-            return Err(StoreError::new(
-                StoreErrorKind::State,
-                "DDL requires no active transactions",
-            ));
+        if !self.txns().active.is_empty() {
+            return Err(state_error("DDL requires no active transactions"));
         }
-        let mut next = self.catalog.clone();
+        let mut next = self.view().catalog.clone();
         let changes = next.apply_ddl_changes(sql, Limits::default())?;
+        let indexes = self.view().meta.indexes.clone();
+        for change in &changes {
+            if let DdlChange::Create(name, _) = change {
+                if indexes.contains_key(name) {
+                    return Err(StoreError::new(
+                        StoreErrorKind::Sql(crate::ErrorKind::Duplicate),
+                        format!("{name} already names an index"),
+                    ));
+                }
+            }
+        }
         let cfg = self.limits.tree();
         let revision = next.revision();
-        let r = self.run_group(0, 0, &mut |st| {
+        let mut w = lock(&self.writer);
+        let r = self.run_group(&mut w, 0, 0, Some(&next), &mut |st| {
             for change in &changes {
                 match change {
                     DdlChange::Create(name, columns) => {
@@ -845,6 +1247,17 @@ impl<D: Device> Store<D> {
                         })?;
                         let mut all = Vec::new();
                         btree::pages(st, t.root, &mut all)?;
+                        let gone: Vec<String> = st
+                            .meta
+                            .indexes
+                            .iter()
+                            .filter(|(_, i)| &i.table == name)
+                            .map(|(n, _)| n.clone())
+                            .collect();
+                        for n in gone {
+                            let ix = st.meta.indexes.remove(&n).expect("index");
+                            btree::pages(st, ix.root, &mut all)?;
+                        }
                         for p in all {
                             st.free(p)?;
                         }
@@ -854,12 +1267,13 @@ impl<D: Device> Store<D> {
             st.meta.catalog_revision = revision;
             Ok(())
         });
-        let r = r.and_then(|_| self.core.log.flush(&mut self.core.dev));
+        drop(w);
+        let r = r.and_then(|_| self.flush_log());
         let r = self.poison_on(r);
         self.refresh_visible();
         r?;
-        self.catalog = next;
-        self.next_rowid = self
+        let view = self.view();
+        self.txns().next_rowid = view
             .meta
             .tables
             .values()
@@ -867,37 +1281,152 @@ impl<D: Device> Store<D> {
             .collect();
         Ok(())
     }
+    /// Creates a secondary index on `table.column`, filled from every stored
+    /// version, in one synced system group. Requires no active transaction.
+    /// NULLs are not indexed.
+    pub fn create_index(&mut self, name: &str, table: &str, column: &str) -> StoreResult<()> {
+        self.check_usable()?;
+        if !self.txns().active.is_empty() {
+            return Err(state_error("DDL requires no active transactions"));
+        }
+        let view = self.view();
+        let name = identifier(name)?;
+        if view.meta.tables.contains_key(&name) || view.meta.indexes.contains_key(&name) {
+            return Err(StoreError::new(
+                StoreErrorKind::Sql(crate::ErrorKind::Duplicate),
+                format!("{name} already names a table or index"),
+            ));
+        }
+        let t = view.table(table)?.clone();
+        let table = identifier(table)?;
+        let column = identifier(column)?;
+        let col = t
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, format!("column {column}")))?;
+        let ty = t.columns[col].ty;
+        let cfg = self.limits.tree();
+        let mut w = lock(&self.writer);
+        let r = self.run_group(&mut w, 0, 0, None, &mut |st| {
+            let mut entries: BTreeMap<Key, Value> = BTreeMap::new();
+            btree::visit(st, t.root, Key::MIN, Key::MAX, &mut |e| {
+                if let Some(px) = e.values.get(col).and_then(index::prefix) {
+                    entries
+                        .entry(index::key(px, e.key.rowid))
+                        .or_insert_with(|| e.values[col].clone());
+                }
+                Ok(true)
+            })?;
+            let mut root = btree::new_leaf(st, &[ty], cfg)?;
+            for (key, v) in entries {
+                let e = Entry {
+                    key,
+                    tomb: false,
+                    values: vec![v],
+                };
+                root = btree::insert(st, cfg, &[ty], root, e)?;
+            }
+            let id = st.meta.next_table_id;
+            st.meta.next_table_id = id.checked_add(1).ok_or_else(|| overflow("index ids"))?;
+            st.meta.indexes.insert(
+                name.clone(),
+                IndexMeta {
+                    id,
+                    table: table.clone(),
+                    column: col,
+                    root,
+                },
+            );
+            Ok(())
+        });
+        drop(w);
+        let r = r.and_then(|_| self.flush_log());
+        let r = self.poison_on(r);
+        self.refresh_visible();
+        r
+    }
+    /// Drops a secondary index and frees its pages (one synced group).
+    pub fn drop_index(&mut self, name: &str) -> StoreResult<()> {
+        self.check_usable()?;
+        if !self.txns().active.is_empty() {
+            return Err(state_error("DDL requires no active transactions"));
+        }
+        let name = identifier(name)?;
+        self.view().index(&name)?;
+        let mut w = lock(&self.writer);
+        let r = self.run_group(&mut w, 0, 0, None, &mut |st| {
+            let ix = st.meta.indexes.remove(&name).expect("index");
+            let mut all = Vec::new();
+            btree::pages(st, ix.root, &mut all)?;
+            for p in all {
+                st.free(p)?;
+            }
+            Ok(())
+        });
+        drop(w);
+        let r = r.and_then(|_| self.flush_log());
+        let r = self.poison_on(r);
+        self.refresh_visible();
+        r
+    }
+    /// Secondary indexes: name -> (table, column).
+    pub fn indexes(&self) -> BTreeMap<String, (String, String)> {
+        let view = self.view();
+        view.meta
+            .indexes
+            .iter()
+            .map(|(n, i)| {
+                let col = view.meta.tables[&i.table].columns[i.column].name.clone();
+                (n.clone(), (i.table.clone(), col))
+            })
+            .collect()
+    }
+
+    fn flush_log(&self) -> StoreResult<()> {
+        let mut io = self.core.io();
+        let Io { dev, log, .. } = &mut *io;
+        log.flush(dev)
+    }
 
     /// The SQL catalog of the durable tables.
-    pub fn catalog(&self) -> &HermeticCatalog {
-        &self.catalog
+    pub fn catalog(&self) -> HermeticCatalog {
+        self.view().catalog.clone()
     }
 
     // ---- transactions ----------------------------------------------------
 
-    /// Starts a transaction reading the snapshot of every durable commit.
-    pub fn begin(&mut self) -> StoreResult<Txn> {
+    /// Starts a snapshot-isolation transaction reading the snapshot of
+    /// every durable commit.
+    pub fn begin(&self) -> StoreResult<Txn> {
+        self.begin_with(Isolation::Snapshot)
+    }
+    /// Starts a transaction at the given isolation level.
+    pub fn begin_with(&self, isolation: Isolation) -> StoreResult<Txn> {
         self.check_usable()?;
         self.refresh_visible();
-        if self.txns.len() >= self.limits.max_active_txns {
+        let mut t = self.txns();
+        if t.active.len() >= self.limits.max_active_txns {
             return Err(limit("too many active transactions"));
         }
-        let id = self.next_txn;
-        self.next_txn = id
+        let id = t.next_txn;
+        t.next_txn = id
             .checked_add(1)
             .ok_or_else(|| overflow("transaction ids"))?;
-        let snapshot = self.visible_ts;
-        self.txns.insert(
+        let snapshot = t.visible_ts;
+        t.active.insert(
             id,
             TxnState {
                 snapshot,
-                writes: BTreeMap::new(),
+                ssi: (isolation == Isolation::Serializable).then(Ssi::default),
+                ..TxnState::default()
             },
         );
         Ok(Txn {
             id,
             store: self.id,
             snapshot,
+            isolation,
             leaks: Arc::clone(&self.leaks),
             finished: false,
         })
@@ -928,157 +1457,239 @@ impl<D: Device> Store<D> {
     }
 
     /// Inserts a row; returns its new row id.
-    pub fn insert(&mut self, txn: &mut Txn, table: &str, row: &[Value]) -> StoreResult<u64> {
+    pub fn insert(&self, txn: &mut Txn, table: &str, row: &[Value]) -> StoreResult<u64> {
         self.check_usable()?;
-        self.state_of(txn)?;
-        let t = self.table(table)?;
+        self.check_store(txn)?;
+        let view = self.view();
+        let t = view.table(table)?;
         Self::validate_row(t, row)?;
         let tid = t.id;
-        if self.txns[&txn.id].writes.len() >= self.limits.max_txn_writes {
+        let mut g = self.txns();
+        let st = &mut *g;
+        let state = st
+            .active
+            .get_mut(&txn.id)
+            .ok_or_else(|| state_error("transaction is not active"))?;
+        if state.writes.len() >= self.limits.max_txn_writes {
             return Err(limit("transaction write limit"));
         }
-        let next = self.next_rowid.entry(tid).or_insert(1);
+        let next = st.next_rowid.entry(tid).or_insert(1);
         let rowid = *next;
         *next = rowid.checked_add(1).ok_or_else(|| overflow("row ids"))?;
-        self.locks.insert((tid, rowid), txn.id);
-        self.txns
-            .get_mut(&txn.id)
-            .expect("active")
-            .writes
-            .insert((tid, rowid), Some(row.to_vec()));
+        st.locks.insert((tid, rowid), txn.id);
+        state.writes.insert((tid, rowid), Some(row.to_vec()));
         Ok(rowid)
     }
     /// Replaces a row visible to the transaction.
-    pub fn update(
-        &mut self,
-        txn: &mut Txn,
-        table: &str,
-        rowid: u64,
-        row: &[Value],
-    ) -> StoreResult<()> {
+    pub fn update(&self, txn: &mut Txn, table: &str, rowid: u64, row: &[Value]) -> StoreResult<()> {
         self.check_usable()?;
-        self.state_of(txn)?;
-        let t = self.table(table)?;
+        self.check_store(txn)?;
+        let view = self.view();
+        let t = view.table(table)?;
         Self::validate_row(t, row)?;
         let tid = t.id;
-        let r = self.write_row(txn, tid, rowid, Some(row.to_vec()));
-        self.poison_on(r)
+        self.write_row(txn, tid, rowid, Some(row.to_vec()))
     }
     /// Deletes a row visible to the transaction.
-    pub fn delete(&mut self, txn: &mut Txn, table: &str, rowid: u64) -> StoreResult<()> {
+    pub fn delete(&self, txn: &mut Txn, table: &str, rowid: u64) -> StoreResult<()> {
         self.check_usable()?;
-        self.state_of(txn)?;
-        let tid = self.table(table)?.id;
-        let r = self.write_row(txn, tid, rowid, None);
-        self.poison_on(r)
+        self.check_store(txn)?;
+        let tid = self.view().table(table)?.id;
+        self.write_row(txn, tid, rowid, None)
     }
+    /// Takes the record lock first (no-wait), then checks the committed
+    /// versions: a lock holder's versions are installed before it releases
+    /// the lock, so a version committed after this snapshot is always seen.
     fn write_row(
-        &mut self,
+        &self,
         txn: &Txn,
         tid: u32,
         rowid: u64,
         row: Option<Vec<Value>>,
     ) -> StoreResult<()> {
-        if let Some(&owner) = self.locks.get(&(tid, rowid)) {
-            if owner != txn.id {
-                return Err(StoreError::new(
-                    StoreErrorKind::Conflict,
-                    format!("row {rowid} is locked by transaction {owner}"),
-                ));
+        let snapshot = {
+            let mut g = self.txns();
+            let st = &mut *g;
+            let state = st
+                .active
+                .get_mut(&txn.id)
+                .ok_or_else(|| state_error("transaction is not active"))?;
+            if let Some(&owner) = st.locks.get(&(tid, rowid)) {
+                if owner != txn.id {
+                    return Err(StoreError::new(
+                        StoreErrorKind::Conflict,
+                        format!("row {rowid} is locked by transaction {owner}"),
+                    ));
+                }
+            }
+            match state.writes.get(&(tid, rowid)).map(Option::is_some) {
+                Some(false) => {
+                    return Err(StoreError::new(
+                        StoreErrorKind::NotFound,
+                        "row deleted by this transaction",
+                    ));
+                }
+                Some(true) => {
+                    state.writes.insert((tid, rowid), row);
+                    return Ok(());
+                }
+                None => {}
+            }
+            if state.writes.len() >= self.limits.max_txn_writes {
+                return Err(limit("transaction write limit"));
+            }
+            st.locks.insert((tid, rowid), txn.id);
+            state.snapshot
+        };
+        let checked = self.check_writable(tid, rowid, snapshot);
+        let mut g = self.txns();
+        let st = &mut *g;
+        match checked {
+            Ok(old) => {
+                let state = st.active.get_mut(&txn.id).expect("active");
+                state.writes.insert((tid, rowid), row);
+                state.old_rows.insert((tid, rowid), old);
+                Ok(())
+            }
+            Err(e) => {
+                st.locks.remove(&(tid, rowid));
+                Err(e)
             }
         }
-        let state = &self.txns[&txn.id];
-        let existing = state.writes.get(&(tid, rowid)).map(Option::is_some);
-        let (pending_writes, snapshot) = (state.writes.len(), state.snapshot);
-        match existing {
-            Some(false) => {
-                return Err(StoreError::new(
-                    StoreErrorKind::NotFound,
-                    "row deleted by this transaction",
-                ));
-            }
-            Some(true) => {}
-            None => {
-                if pending_writes >= self.limits.max_txn_writes {
-                    return Err(limit("transaction write limit"));
-                }
-                let root = self.table_by_id(tid)?.root;
-                let versions = row_versions(&mut self.reader(), root, rowid)?;
-                if let Some((newest, _)) = versions.first() {
-                    if newest.ts() > snapshot {
-                        return Err(StoreError::new(
-                            StoreErrorKind::Conflict,
-                            format!(
-                                "row {rowid} has a version committed after this snapshot (first committer wins)"
-                            ),
-                        ));
-                    }
-                }
-                match versions.iter().find(|(k, _)| k.ts() <= snapshot) {
-                    Some((_, false)) => {}
-                    _ => {
-                        return Err(StoreError::new(
-                            StoreErrorKind::NotFound,
-                            format!("row {rowid}"),
-                        ))
-                    }
-                }
-            }
-        }
-        self.locks.insert((tid, rowid), txn.id);
-        self.txns
-            .get_mut(&txn.id)
-            .expect("active")
-            .writes
-            .insert((tid, rowid), row);
-        Ok(())
     }
-    fn table_by_id(&self, tid: u32) -> StoreResult<&TableMeta> {
-        self.meta
-            .tables
-            .values()
-            .find(|t| t.id == tid)
-            .ok_or_else(|| corrupt("table id vanished"))
-    }
-
-    /// The row as the transaction sees it.
-    pub fn get(&mut self, txn: &Txn, table: &str, rowid: u64) -> StoreResult<Option<Vec<Value>>> {
-        self.check_usable()?;
-        self.state_of(txn)?;
-        let t = self.table(table)?;
-        let (tid, root) = (t.id, t.root);
-        if let Some(w) = self.txns[&txn.id].writes.get(&(tid, rowid)) {
-            return Ok(w.clone());
-        }
-        let snapshot = txn.snapshot;
-        let mut found = None;
-        let r = btree::visit(
-            &mut self.reader(),
-            root,
-            Key::version(rowid, snapshot),
+    /// The row's values at `snapshot`, if it may be written.
+    fn check_writable(&self, tid: u32, rowid: u64, snapshot: u64) -> StoreResult<Vec<Value>> {
+        let mut newest: Option<(Key, bool)> = None;
+        let mut visible: Option<Entry> = None;
+        self.read_tree(
+            Tree::Table(tid),
+            Key { rowid, inv_ts: 0 },
             Key {
                 rowid,
                 inv_ts: u64::MAX,
             },
             &mut |e| {
+                newest.get_or_insert((e.key, e.tomb));
+                if e.key.ts() <= snapshot {
+                    visible = Some(e);
+                    return Ok(false);
+                }
+                Ok(true)
+            },
+        )?;
+        if let Some((k, _)) = newest {
+            if k.ts() > snapshot {
+                return Err(StoreError::new(
+                    StoreErrorKind::Conflict,
+                    format!(
+                        "row {rowid} has a version committed after this snapshot (first committer wins)"
+                    ),
+                ));
+            }
+        }
+        match visible {
+            Some(e) if !e.tomb => Ok(e.values),
+            _ => Err(StoreError::new(
+                StoreErrorKind::NotFound,
+                format!("row {rowid}"),
+            )),
+        }
+    }
+
+    /// The row as the transaction sees it.
+    pub fn get(&self, txn: &Txn, table: &str, rowid: u64) -> StoreResult<Option<Vec<Value>>> {
+        self.check_usable()?;
+        self.check_store(txn)?;
+        let tid = self.view().table(table)?.id;
+        {
+            let t = self.txns();
+            let state = t
+                .active
+                .get(&txn.id)
+                .ok_or_else(|| state_error("transaction is not active"))?;
+            if let Some(w) = state.writes.get(&(tid, rowid)) {
+                return Ok(w.clone());
+            }
+        }
+        let serializable = self.siread(txn, |r| {
+            r.rows.insert((tid, rowid));
+        })?;
+        let mut newer = BTreeSet::new();
+        let found = self.read_version(tid, rowid, txn.snapshot, &mut newer)?;
+        if serializable {
+            self.txns().read_edges(txn.id, &newer, &[(tid, rowid)]);
+        }
+        Ok(found.filter(|e| !e.tomb).map(|e| e.values))
+    }
+    /// The version of a row a snapshot sees; collects the timestamps of
+    /// newer versions into `newer`.
+    fn read_version(
+        &self,
+        tid: u32,
+        rowid: u64,
+        snapshot: u64,
+        newer: &mut BTreeSet<u64>,
+    ) -> StoreResult<Option<Entry>> {
+        let mut found = None;
+        self.read_tree(
+            Tree::Table(tid),
+            Key { rowid, inv_ts: 0 },
+            Key {
+                rowid,
+                inv_ts: u64::MAX,
+            },
+            &mut |e| {
+                if e.key.ts() > snapshot {
+                    newer.insert(e.key.ts());
+                    return Ok(true);
+                }
                 found = Some(e);
                 Ok(false)
             },
-        );
-        self.poison_on(r)?;
-        Ok(found.filter(|e| !e.tomb).map(|e| e.values))
+        )?;
+        Ok(found)
+    }
+    /// Registers a SIREAD predicate for a serializable transaction (before
+    /// it reads, so a concurrent committer either sees the predicate or has
+    /// its versions or locks seen by the read). Returns whether it is
+    /// serializable.
+    fn siread(&self, txn: &Txn, add: impl FnOnce(&mut Reads)) -> StoreResult<bool> {
+        // A committer runs its predicate check and installs its pages under
+        // the writer mutex. Registering under it too means a committer has
+        // either seen this predicate or installed versions this read will
+        // find newer than its snapshot, never neither (an uninstalled
+        // insert is in no tree and holds no lock a read would meet).
+        let _w = (txn.isolation == Isolation::Serializable).then(|| lock(&self.writer));
+        let mut t = self.txns();
+        let state = t
+            .active
+            .get_mut(&txn.id)
+            .ok_or_else(|| state_error("transaction is not active"))?;
+        match state.ssi.as_mut() {
+            Some(ssi) => {
+                add(&mut ssi.reads);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
     }
 
     /// Every row the transaction sees, by row id.
-    pub fn scan(&mut self, txn: &Txn, table: &str) -> StoreResult<Vec<(u64, Vec<Value>)>> {
+    pub fn scan(&self, txn: &Txn, table: &str) -> StoreResult<Vec<(u64, Vec<Value>)>> {
         self.check_usable()?;
-        self.state_of(txn)?;
-        let t = self.table(table)?;
-        let (tid, root) = (t.id, t.root);
+        self.check_store(txn)?;
+        let tid = self.view().table(table)?.id;
+        let serializable = self.siread(txn, |r| {
+            r.tables.insert(tid);
+        })?;
         let snapshot = txn.snapshot;
         let mut rows: BTreeMap<u64, Vec<Value>> = BTreeMap::new();
         let mut last = None;
-        let r = btree::visit(&mut self.reader(), root, Key::MIN, Key::MAX, &mut |e| {
+        let mut newer = BTreeSet::new();
+        self.read_tree(Tree::Table(tid), Key::MIN, Key::MAX, &mut |e| {
+            if e.key.ts() > snapshot {
+                newer.insert(e.key.ts());
+            }
             if last != Some(e.key.rowid) && e.key.ts() <= snapshot {
                 last = Some(e.key.rowid);
                 if !e.tomb {
@@ -1086,9 +1697,21 @@ impl<D: Device> Store<D> {
                 }
             }
             Ok(true)
-        });
-        self.poison_on(r)?;
-        for ((t, rowid), w) in self.txns[&txn.id].writes.range((tid, 0)..=(tid, u64::MAX)) {
+        })?;
+        let mut t = self.txns();
+        if serializable {
+            let locked: Vec<(u32, u64)> = t
+                .locks
+                .range((tid, 0)..=(tid, u64::MAX))
+                .map(|(k, _)| *k)
+                .collect();
+            t.read_edges(txn.id, &newer, &locked);
+        }
+        let state = t
+            .active
+            .get(&txn.id)
+            .ok_or_else(|| state_error("transaction is not active"))?;
+        for ((t, rowid), w) in state.writes.range((tid, 0)..=(tid, u64::MAX)) {
             debug_assert_eq!(*t, tid);
             match w {
                 Some(row) => rows.insert(*rowid, row.clone()),
@@ -1098,18 +1721,108 @@ impl<D: Device> Store<D> {
         Ok(rows.into_iter().collect())
     }
 
-    /// Discards the transaction's writes and releases its locks.
-    pub fn abort(&mut self, mut txn: Txn) -> StoreResult<()> {
+    /// Rows the transaction sees whose indexed column equals `value`.
+    pub fn lookup(
+        &self,
+        txn: &Txn,
+        index: &str,
+        value: &Value,
+    ) -> StoreResult<Vec<(u64, Vec<Value>)>> {
+        self.lookup_range(txn, index, value, value)
+    }
+    /// Rows the transaction sees with `lo <= column <= hi`, by row id, found
+    /// through the secondary index: candidate row ids from the index key
+    /// range, each rechecked against the version this snapshot sees, plus
+    /// the transaction's own writes.
+    pub fn lookup_range(
+        &self,
+        txn: &Txn,
+        index: &str,
+        lo: &Value,
+        hi: &Value,
+    ) -> StoreResult<Vec<(u64, Vec<Value>)>> {
         self.check_usable()?;
-        self.state_of(&txn)?;
+        self.check_store(txn)?;
+        let view = self.view();
+        let ix = view.index(index)?;
+        let t = &view.meta.tables[&ix.table];
+        let (iid, tid, col) = (ix.id, t.id, ix.column);
+        let ty = t.columns[col].ty;
+        let (Some(plo), Some(phi)) = (index::prefix(lo), index::prefix(hi)) else {
+            return Err(StoreError::new(
+                StoreErrorKind::Data,
+                "index bounds must be non-null",
+            ));
+        };
+        if lo.scalar_type() != Some(ty) || hi.scalar_type() != Some(ty) {
+            return Err(StoreError::new(
+                StoreErrorKind::Data,
+                "index bounds must have the column type",
+            ));
+        }
+        let serializable = self.siread(txn, |r| {
+            r.ranges.push((tid, col, lo.clone(), hi.clone()));
+        })?;
+        let mut candidates = BTreeSet::new();
+        if plo <= phi {
+            self.read_tree(
+                Tree::Index(iid),
+                index::key(plo, 0),
+                index::key(phi, u64::MAX),
+                &mut |e| {
+                    candidates.insert(e.key.inv_ts);
+                    Ok(true)
+                },
+            )?;
+        }
+        let snapshot = txn.snapshot;
+        let mut rows = BTreeMap::new();
+        let mut newer = BTreeSet::new();
+        for &rowid in &candidates {
+            let found = self.read_version(tid, rowid, snapshot, &mut newer)?;
+            if let Some(e) = found.filter(|e| !e.tomb) {
+                if index::within(&e.values[col], lo, hi) {
+                    rows.insert(rowid, e.values);
+                }
+            }
+        }
+        let mut g = self.txns();
+        if serializable {
+            let locked: Vec<(u32, u64)> = candidates.iter().map(|&r| (tid, r)).collect();
+            g.read_edges(txn.id, &newer, &locked);
+        }
+        let state = g
+            .active
+            .get(&txn.id)
+            .ok_or_else(|| state_error("transaction is not active"))?;
+        for (&(_, rowid), w) in state.writes.range((tid, 0)..=(tid, u64::MAX)) {
+            rows.remove(&rowid);
+            if let Some(row) = w {
+                if index::within(&row[col], lo, hi) {
+                    rows.insert(rowid, row.clone());
+                }
+            }
+        }
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Discards the transaction's writes and releases its locks.
+    pub fn abort(&self, mut txn: Txn) -> StoreResult<()> {
+        self.check_usable()?;
+        self.check_store(&txn)?;
+        let mut t = self.txns();
+        if t.active.remove(&txn.id).is_none() {
+            return Err(state_error("transaction is not active"));
+        }
         txn.finished = true;
-        self.txns.remove(&txn.id);
-        self.locks.retain(|_, owner| *owner != txn.id);
+        t.locks.retain(|_, owner| *owner != txn.id);
+        t.forget(txn.id);
+        t.prune();
         Ok(())
     }
 
     /// Commits and syncs the log: `durable` is true on `Ok`.
-    pub fn commit(&mut self, txn: Txn) -> StoreResult<Commit> {
+    pub fn commit(&self, txn: Txn) -> StoreResult<Commit> {
         let mut c = self.commit_deferred(txn)?;
         if !c.durable {
             self.flush()?;
@@ -1122,37 +1835,163 @@ impl<D: Device> Store<D> {
     /// in the pool, but the commit is durable (and visible to new snapshots)
     /// only after a later [`Store::flush`], a synced commit, or a log write
     /// forced by page write-back. A crash before that loses it.
-    pub fn commit_deferred(&mut self, mut txn: Txn) -> StoreResult<Commit> {
+    pub fn commit_deferred(&self, mut txn: Txn) -> StoreResult<Commit> {
         self.check_usable()?;
-        self.state_of(&txn)?;
-        txn.finished = true;
-        let state = self.txns.remove(&txn.id).expect("active");
-        self.locks.retain(|_, owner| *owner != txn.id);
-        if state.writes.is_empty() {
+        self.check_store(&txn)?;
+        let serializable = txn.isolation == Isolation::Serializable;
+        let read_only = {
+            let t = self.txns();
+            let state = t
+                .active
+                .get(&txn.id)
+                .ok_or_else(|| state_error("transaction is not active"))?;
+            state.writes.is_empty()
+        };
+        if read_only {
+            let mut t = self.txns();
+            let state = t.active.remove(&txn.id).expect("active");
+            txn.finished = true;
+            if let Some(ssi) = state.ssi {
+                let end = self.view().meta.last_ts;
+                t.done.insert(txn.id, Done { end, ssi });
+                if t.dangerous(&t.done[&txn.id].ssi) {
+                    t.forget(txn.id);
+                    t.prune();
+                    return Err(serialization_failure());
+                }
+                t.prune();
+            }
             return Ok(Commit {
                 ts: state.snapshot,
                 lsn: 0,
                 durable: true,
             });
         }
-        let ts = match self.meta.last_ts.checked_add(1) {
-            Some(ts) => ts,
-            None => return Err(overflow("commit timestamps")),
+        let mut w = lock(&self.writer);
+        let ts = self
+            .view()
+            .meta
+            .last_ts
+            .checked_add(1)
+            .ok_or_else(|| overflow("commit timestamps"))?;
+        let state = {
+            let mut t = self.txns();
+            let mut state = t.active.remove(&txn.id).expect("active");
+            txn.finished = true;
+            if let Some(ssi) = state.ssi.take() {
+                // The committer joins the retained set before its versions
+                // can be seen, so readers find it by timestamp or lock.
+                t.done.insert(txn.id, Done { end: ts, ssi });
+                t.done_by_ts.insert(ts, txn.id);
+                let readers: Vec<u64> = t
+                    .active
+                    .iter()
+                    .filter(|(_, a)| {
+                        a.ssi.as_ref().is_some_and(|ssi| {
+                            state.writes.iter().any(|(&(tid, rowid), new)| {
+                                let old = state.old_rows.get(&(tid, rowid));
+                                ssi.reads
+                                    .hit(tid, rowid, old.map(Vec::as_slice), new.as_deref())
+                            })
+                        })
+                    })
+                    .map(|(&id, _)| id)
+                    .chain(
+                        t.done
+                            .iter()
+                            .filter(|(&id, d)| {
+                                id != txn.id
+                                    && state.snapshot < d.end
+                                    && state.writes.iter().any(|(&(tid, rowid), new)| {
+                                        let old = state.old_rows.get(&(tid, rowid));
+                                        d.ssi.reads.hit(
+                                            tid,
+                                            rowid,
+                                            old.map(Vec::as_slice),
+                                            new.as_deref(),
+                                        )
+                                    })
+                            })
+                            .map(|(&id, _)| id),
+                    )
+                    .collect();
+                for r in readers {
+                    t.edge(r, txn.id);
+                }
+                if t.dangerous(&t.done[&txn.id].ssi) {
+                    t.forget(txn.id);
+                    t.locks.retain(|_, owner| *owner != txn.id);
+                    t.prune();
+                    return Err(serialization_failure());
+                }
+            }
+            state
         };
+        let r = self.commit_group(&mut w, txn.id, ts, &state);
+        let r = self.poison_on(r);
+        let lsn = match r {
+            Ok(x) => x,
+            Err(e) => {
+                drop(w);
+                let mut t = self.txns();
+                if serializable {
+                    t.forget(txn.id);
+                }
+                t.locks.retain(|_, owner| *owner != txn.id);
+                t.prune();
+                return Err(e);
+            }
+        };
+        // Locks are released only after the versions are installed, so a
+        // later writer of the same row sees this commit's version.
+        {
+            let mut t = self.txns();
+            t.locks.retain(|_, owner| *owner != txn.id);
+            t.pending.push_back((lsn, ts));
+        }
+        drop(w);
+        self.refresh_visible();
+        self.txns().prune();
+        Ok(Commit {
+            ts,
+            lsn,
+            durable: self.core.io().log.durable_lsn() >= lsn,
+        })
+    }
+    /// Builds and installs a transaction's group; returns (commit LSN, ts).
+    fn commit_group(
+        &self,
+        w: &mut Writer,
+        txn: u64,
+        ts: u64,
+        state: &TxnState,
+    ) -> StoreResult<u64> {
+        let view = self.view();
         let snapshots = self.snapshots();
         let cfg = self.limits.tree();
-        let tables: BTreeMap<u32, (String, Vec<ScalarType>)> = self
+        let tables: BTreeMap<u32, (String, Vec<ScalarType>)> = view
             .meta
             .tables
             .iter()
             .map(|(n, t)| (t.id, (n.clone(), table_types(t))))
             .collect();
+        let indexes: BTreeMap<u32, Vec<(String, usize, ScalarType)>> = view
+            .meta
+            .tables
+            .iter()
+            .map(|(n, t)| (t.id, view.indexes_of(n)))
+            .collect();
         let mut collected = 0u64;
-        let r = self.run_group(txn.id, ts, &mut |st| {
+        let lsn = self.run_group(w, txn, ts, None, &mut |st| {
             collected = 0;
             for (&(tid, rowid), row) in &state.writes {
                 let (name, types) = &tables[&tid];
                 let root = st.meta.tables[name].root;
+                let ixs = &indexes[&tid];
+                let mut before = Vec::with_capacity(ixs.len());
+                for (_, col, _) in ixs {
+                    before.push(index::row_prefixes(st, root, rowid, *col)?);
+                }
                 let entry = Entry {
                     key: Key::version(rowid, ts),
                     tomb: row.is_none(),
@@ -1168,87 +2007,91 @@ impl<D: Device> Store<D> {
                     root = r;
                     collected += 1;
                 }
+                for ((iname, col, ty), before) in ixs.iter().zip(&before) {
+                    let after = index::row_prefixes(st, root, rowid, *col)?;
+                    let iroot = st.meta.indexes[iname].root;
+                    let iroot = index::apply(st, cfg, *ty, iroot, rowid, before, &after)?;
+                    st.meta.indexes.get_mut(iname).expect("index").root = iroot;
+                }
                 let t = st.meta.tables.get_mut(name).expect("table");
                 t.root = root;
                 t.next_rowid = t.next_rowid.max(rowid + 1);
             }
             st.meta.last_ts = ts;
             Ok(())
-        });
-        let r = self.poison_on(r);
-        let lsn = r?;
-        self.versions_collected += collected;
-        self.pending.push_back((lsn, ts));
-        self.refresh_visible();
-        Ok(Commit {
-            ts,
-            lsn,
-            durable: self.core.log.durable_lsn() >= lsn,
-        })
+        })?;
+        w.versions_collected += collected;
+        Ok(lsn)
     }
 
     /// Syncs the log: every deferred commit becomes durable and visible.
     /// Returns the newest visible commit timestamp.
-    pub fn flush(&mut self) -> StoreResult<u64> {
+    pub fn flush(&self) -> StoreResult<u64> {
         self.check_usable()?;
-        let r = self.core.log.flush(&mut self.core.dev);
+        let r = self.flush_log();
         self.poison_on(r)?;
         self.refresh_visible();
-        Ok(self.visible_ts)
+        Ok(self.txns().visible_ts)
     }
     pub fn durable_lsn(&self) -> u64 {
-        self.core.log.durable_lsn()
+        self.core.io().log.durable_lsn()
     }
 
     /// Builds, logs and installs one commit group. On `LogFull` it finishes
     /// any running checkpoint, switches log regions and retries once.
+    /// `catalog` replaces the published catalog (DDL).
     fn run_group(
-        &mut self,
+        &self,
+        w: &mut Writer,
         txn: u64,
         ts: u64,
+        catalog: Option<&HermeticCatalog>,
         body: &mut dyn FnMut(&mut Staging<'_, D>) -> StoreResult<()>,
     ) -> StoreResult<u64> {
-        if self.ckpt.is_none() && self.core.log.region_used() * 2 >= self.core.log.region_bytes() {
-            self.checkpoint_begin_inner()?;
+        let (used, bytes) = {
+            let io = self.core.io();
+            (io.log.region_used(), io.log.region_bytes())
+        };
+        if w.ckpt.is_none() && used * 2 >= bytes {
+            self.checkpoint_begin_inner(w)?;
         }
+        let view = self.view();
         for attempt in 0..2 {
             let mut st = Staging {
-                core: &mut self.core,
+                core: &self.core,
                 pages: BTreeMap::new(),
-                meta: self.meta.clone(),
-                free: self.free.clone(),
+                meta: view.meta.clone(),
+                free: w.free.clone(),
+                free_before: w.free.clone(),
                 max_pages: self.limits.max_pages,
                 max_group_pages: self.limits.max_group_pages,
             };
             body(&mut st)?;
-            let (records, installs, meta, free) = st.finish(&self.imaged, txn, ts)?;
-            let lsns = match self.core.log.append_group(&records) {
+            let fin = st.finish(&w.imaged, txn, ts)?;
+            let appended = self.core.io().log.append_group(&fin.records);
+            let lsns = match appended {
                 Ok(lsns) => lsns,
                 Err(e) if e.kind == StoreErrorKind::LogFull && attempt == 0 => {
-                    if self.ckpt.is_some() {
-                        self.checkpoint_finish_inner()?;
+                    if w.ckpt.is_some() {
+                        self.checkpoint_finish_inner(w)?;
                     }
-                    self.checkpoint_begin_inner()?;
+                    self.checkpoint_begin_inner(w)?;
                     continue;
                 }
                 Err(e) => return Err(e),
             };
-            // The whole group is in the log buffer before any of its pages
-            // is in the pool, so a page write (which flushes the log through
-            // its LSN) always makes the complete group durable first.
-            self.core.page_count = meta.page_count;
-            for ((id, bytes), (&lsn, record)) in installs.iter().zip(lsns.iter().zip(&records)) {
-                self.core.install(*id, bytes, lsn)?;
-                if matches!(record, StoreRecord::PageImage { .. }) {
-                    self.imaged.insert(*id);
-                }
+            // From here on the group is in the log buffer: a failure leaves
+            // memory and log disagreeing, so it poisons the store.
+            let r = self.install(w, &fin, &lsns, view.catalog_for(catalog));
+            if r.is_err() {
+                self.poison();
             }
-            self.meta = meta;
-            self.free = free;
-            self.groups += 1;
+            r?;
+            w.free = fin.free;
+            w.groups += 1;
             let commit_lsn = *lsns.last().expect("commit record");
-            if self.ckpt.is_some() {
-                self.checkpoint_step_inner(self.limits.checkpoint_step_pages)?;
+            if w.ckpt.is_some() {
+                self.checkpoint_step_inner(w, self.limits.checkpoint_step_pages)?;
             }
             return Ok(commit_lsn);
         }
@@ -1257,20 +2100,63 @@ impl<D: Device> Store<D> {
             "commit group does not fit an empty log region",
         ))
     }
+    /// Installs a logged group's pages in latch order and publishes the new
+    /// view while holding the view lock, so no reader starts from a root
+    /// the group changes until every page is in place.
+    fn install(
+        &self,
+        w: &mut Writer,
+        fin: &Finished,
+        lsns: &[u64],
+        catalog: HermeticCatalog,
+    ) -> StoreResult<()> {
+        // The whole group is in the log buffer before any of its pages is
+        // in the pool, so a page write (which flushes the log through its
+        // LSN) always makes the complete group durable first.
+        let mut lsn_of = BTreeMap::new();
+        for (record, &lsn) in fin.records.iter().zip(lsns) {
+            if let Some(p) = record.page() {
+                lsn_of.insert(p, lsn);
+                if matches!(record, StoreRecord::PageImage { .. }) {
+                    w.imaged.insert(p);
+                }
+            }
+        }
+        let mut plan: Vec<&(LatchKey, u64, Option<Box<Page>>)> = fin.plan.iter().collect();
+        plan.sort_by_key(|(k, _, _)| *k);
+        let pages: Vec<(u64, Option<(&Page, u64)>)> = plan
+            .iter()
+            .map(|(_, id, now)| (*id, now.as_deref().map(|b| (b, lsn_of[id]))))
+            .collect();
+        let mut vg = self.view.write().unwrap_or_else(|e| e.into_inner());
+        if fin.meta.page_count > self.core.page_count() {
+            self.core.set_page_count(fin.meta.page_count);
+        }
+        self.core.install_group(&pages)?;
+        *vg = Arc::new(View {
+            meta: fin.meta.clone(),
+            catalog,
+        });
+        Ok(())
+    }
 
     // ---- checkpoints -------------------------------------------------------
 
-    fn checkpoint_begin_inner(&mut self) -> StoreResult<()> {
-        self.core.log.switch(&mut self.core.dev)?;
+    fn checkpoint_begin_inner(&self, w: &mut Writer) -> StoreResult<()> {
+        {
+            let mut io = self.core.io();
+            let Io { dev, log, .. } = &mut *io;
+            log.switch(dev)?;
+        }
         self.refresh_visible();
-        self.imaged.clear();
-        self.ckpt = Some(self.core.pool.dirty_pages().into_iter().collect());
-        self.checkpoints_begun += 1;
+        w.imaged.clear();
+        w.ckpt = Some(self.core.pool.dirty_pages().into_iter().collect());
+        w.checkpoints_begun += 1;
         Ok(())
     }
     /// Writes back up to `n` pages; finishes when none are left.
-    fn checkpoint_step_inner(&mut self, n: usize) -> StoreResult<bool> {
-        let Some(set) = self.ckpt.as_mut() else {
+    fn checkpoint_step_inner(&self, w: &mut Writer, n: usize) -> StoreResult<bool> {
+        let Some(set) = w.ckpt.as_mut() else {
             return Ok(true);
         };
         let batch: Vec<u64> = set.iter().copied().take(n).collect();
@@ -1278,26 +2164,24 @@ impl<D: Device> Store<D> {
             set.remove(&p);
         }
         for p in batch {
-            if self.core.pool.resident(p) {
-                self.core.write_back(p)?;
-            }
+            self.core.write_back(p)?;
         }
-        if self.ckpt.as_ref().is_some_and(BTreeSet::is_empty) {
-            self.checkpoint_finish_inner()?;
+        if w.ckpt.as_ref().is_some_and(BTreeSet::is_empty) {
+            self.checkpoint_finish_inner(w)?;
             return Ok(true);
         }
         Ok(false)
     }
-    fn checkpoint_finish_inner(&mut self) -> StoreResult<()> {
-        if let Some(set) = self.ckpt.take() {
+    fn checkpoint_finish_inner(&self, w: &mut Writer) -> StoreResult<()> {
+        if let Some(set) = w.ckpt.take() {
             for p in set {
-                if self.core.pool.resident(p) {
-                    self.core.write_back(p)?;
-                }
+                self.core.write_back(p)?;
             }
-            self.core.dev.sync(FileId::Data)?;
-            self.core.log.drop_prev(&mut self.core.dev)?;
-            self.checkpoints_done += 1;
+            let mut io = self.core.io();
+            io.dev.sync(FileId::Data)?;
+            let Io { dev, log, .. } = &mut *io;
+            log.drop_prev(dev)?;
+            w.checkpoints_done += 1;
         }
         Ok(())
     }
@@ -1305,32 +2189,35 @@ impl<D: Device> Store<D> {
     /// and records the pages dirty now. Transactions and commits continue.
     pub fn checkpoint_begin(&mut self) -> StoreResult<()> {
         self.check_usable()?;
-        if self.ckpt.is_some() {
-            return Err(StoreError::new(
-                StoreErrorKind::State,
-                "a checkpoint is running",
-            ));
+        let mut w = lock(&self.writer);
+        if w.ckpt.is_some() {
+            return Err(state_error("a checkpoint is running"));
         }
-        let r = self.checkpoint_begin_inner();
+        let r = self.checkpoint_begin_inner(&mut w);
+        drop(w);
         self.poison_on(r)
     }
     /// Writes back up to `pages` pages of the running checkpoint; `true` once
     /// it has finished (data file synced, previous log region dropped).
     pub fn checkpoint_step(&mut self, pages: usize) -> StoreResult<bool> {
         self.check_usable()?;
-        let r = self.checkpoint_step_inner(pages.max(1));
+        let mut w = lock(&self.writer);
+        let r = self.checkpoint_step_inner(&mut w, pages.max(1));
+        drop(w);
         self.poison_on(r)
     }
     /// A complete fuzzy checkpoint (begin, write back, finish). Active
     /// transactions are allowed: their writes are not in the log yet.
     pub fn checkpoint(&mut self) -> StoreResult<()> {
         self.check_usable()?;
+        let mut w = lock(&self.writer);
         let r = (|| {
-            if self.ckpt.is_none() {
-                self.checkpoint_begin_inner()?;
+            if w.ckpt.is_none() {
+                self.checkpoint_begin_inner(&mut w)?;
             }
-            self.checkpoint_finish_inner()
+            self.checkpoint_finish_inner(&mut w)
         })();
+        drop(w);
         self.poison_on(r)
     }
 
@@ -1341,22 +2228,25 @@ impl<D: Device> Store<D> {
     /// most `max_group_pages` pages.
     pub fn vacuum(&mut self) -> StoreResult<VacuumReport> {
         self.check_usable()?;
-        let r = self.vacuum_inner();
+        let mut w = lock(&self.writer);
+        let r = self.vacuum_inner(&mut w);
+        drop(w);
         self.poison_on(r)
     }
-    fn vacuum_inner(&mut self) -> StoreResult<VacuumReport> {
+    fn vacuum_inner(&self, w: &mut Writer) -> StoreResult<VacuumReport> {
         let mut report = VacuumReport::default();
         let snapshots = self.snapshots();
         let cfg = self.limits.tree();
-        let names: Vec<String> = self.meta.tables.keys().cloned().collect();
+        let names: Vec<String> = self.view().meta.tables.keys().cloned().collect();
         for name in names {
-            let (root, types) = {
-                let t = &self.meta.tables[&name];
-                (t.root, table_types(t))
+            let (root, types, ixs) = {
+                let view = self.view();
+                let t = &view.meta.tables[&name];
+                (t.root, table_types(t), view.indexes_of(&name))
             };
             let mut victims = Vec::new();
             let mut versions: Vec<(Key, bool)> = Vec::new();
-            let r = btree::visit(&mut self.reader(), root, Key::MIN, Key::MAX, &mut |e| {
+            btree::visit(&mut self.reader(), root, Key::MIN, Key::MAX, &mut |e| {
                 if versions
                     .first()
                     .is_some_and(|(k, _)| k.rowid != e.key.rowid)
@@ -1366,8 +2256,7 @@ impl<D: Device> Store<D> {
                 }
                 versions.push((e.key, e.tomb));
                 Ok(true)
-            });
-            r?;
+            })?;
             // Oldest first within each row (`collectable` is newest first):
             // every committed prefix of the groups below must keep the
             // row's logical contents, so a tombstone goes only after every
@@ -1379,14 +2268,31 @@ impl<D: Device> Store<D> {
             let mut done = 0;
             while done < victims.len() {
                 let chunk = &victims[done..(done + per_group).min(victims.len())];
-                let r = self.run_group(0, 0, &mut |st| {
+                let r = self.run_group(w, 0, 0, None, &mut |st| {
                     let mut root = st.meta.tables[&name].root;
+                    let rows: BTreeSet<u64> = chunk.iter().map(|k| k.rowid).collect();
+                    let mut before = Vec::new();
+                    for &rowid in &rows {
+                        for (_, col, _) in &ixs {
+                            before.push(index::row_prefixes(st, root, rowid, *col)?);
+                        }
+                    }
                     for &key in chunk {
                         let (r, found) = btree::remove(st, cfg, &types, root, key)?;
                         if !found {
                             return Err(corrupt("vacuum victim vanished"));
                         }
                         root = r;
+                    }
+                    let mut before = before.iter();
+                    for &rowid in &rows {
+                        for (iname, col, ty) in &ixs {
+                            let b = before.next().expect("one per row and index");
+                            let after = index::row_prefixes(st, root, rowid, *col)?;
+                            let iroot = st.meta.indexes[iname].root;
+                            let iroot = index::apply(st, cfg, *ty, iroot, rowid, b, &after)?;
+                            st.meta.indexes.get_mut(iname).expect("index").root = iroot;
+                        }
                     }
                     st.meta.tables.get_mut(&name).expect("table").root = root;
                     Ok(())
@@ -1402,11 +2308,15 @@ impl<D: Device> Store<D> {
                 report.versions_removed += chunk.len() as u64;
                 report.groups += 1;
             }
-            // Tombstone/heap compaction of leaves with holes.
-            let root = self.meta.tables[&name].root;
+            // Tombstone/heap compaction of leaves with holes, in the table
+            // and its indexes.
+            let view = self.view();
             let mut leaves = Vec::new();
             let mut all = Vec::new();
-            btree::pages(&mut self.reader(), root, &mut all)?;
+            btree::pages(&mut self.reader(), view.meta.tables[&name].root, &mut all)?;
+            for (iname, _, _) in &ixs {
+                btree::pages(&mut self.reader(), view.meta.indexes[iname].root, &mut all)?;
+            }
             for p in all {
                 let b = self.core.copy(p)?;
                 if kind(&b[..]) == KIND_LEAF {
@@ -1417,7 +2327,7 @@ impl<D: Device> Store<D> {
                 }
             }
             for chunk in leaves.chunks(self.limits.max_group_pages - 4) {
-                self.run_group(0, 0, &mut |st| {
+                self.run_group(w, 0, 0, None, &mut |st| {
                     for &p in chunk {
                         let b = st.page_mut(p)?;
                         let lay = layout_of(&b[..])?;
@@ -1429,9 +2339,9 @@ impl<D: Device> Store<D> {
                 report.groups += 1;
             }
         }
-        self.core.log.flush(&mut self.core.dev)?;
+        self.flush_log()?;
         self.refresh_visible();
-        self.versions_collected += report.versions_removed;
+        w.versions_collected += report.versions_removed;
         Ok(report)
     }
 
@@ -1439,8 +2349,9 @@ impl<D: Device> Store<D> {
 
     /// A [`DataSet`] of the named tables as the transaction sees them, rows
     /// in row-id order. Bounded by `limits` like any dataset.
-    pub fn dataset(&mut self, txn: &Txn, tables: &[&str], limits: Limits) -> StoreResult<DataSet> {
-        let mut data = DataSet::new(&self.catalog);
+    pub fn dataset(&self, txn: &Txn, tables: &[&str], limits: Limits) -> StoreResult<DataSet> {
+        let catalog = self.view().catalog.clone();
+        let mut data = DataSet::new(&catalog);
         for &name in tables {
             let rows: Vec<Vec<Value>> = self.scan(txn, name)?.into_iter().map(|(_, r)| r).collect();
             data.set_rows(name, &rows, limits)?;
@@ -1462,21 +2373,22 @@ impl<D: Device> Store<D> {
     /// Prepares `sql` against the durable catalog and runs it (row
     /// executor, optimized plan) over the transaction's snapshot.
     pub fn query(
-        &mut self,
+        &self,
         txn: &Txn,
         sql: &str,
         params: &[ParamDef],
         binds: &BTreeMap<String, Value>,
         limits: Limits,
     ) -> StoreResult<QueryResult> {
-        let q = self.catalog.prepare(sql, params, limits)?.optimized();
+        let catalog = self.view().catalog.clone();
+        let q = catalog.prepare(sql, params, limits)?.optimized();
         let data = self.query_data(txn, q.plan(), limits)?;
-        Ok(q.execute(&self.catalog, &data, binds)?)
+        Ok(q.execute(&catalog, &data, binds)?)
     }
     /// As [`Store::query`], with the vectorized executor (hash joins, column
     /// batches).
     pub fn query_vectorized(
-        &mut self,
+        &self,
         txn: &Txn,
         sql: &str,
         params: &[ParamDef],
@@ -1484,11 +2396,12 @@ impl<D: Device> Store<D> {
         limits: Limits,
         engine: &VectorEngine,
     ) -> StoreResult<QueryResult> {
-        let q = self.catalog.prepare(sql, params, limits)?.optimized();
+        let catalog = self.view().catalog.clone();
+        let q = catalog.prepare(sql, params, limits)?.optimized();
         let data = self.query_data(txn, q.plan(), limits)?;
-        Ok(q.execute_vectorized(&self.catalog, &data, binds, engine)?)
+        Ok(q.execute_vectorized(&catalog, &data, binds, engine)?)
     }
-    fn query_data(&mut self, txn: &Txn, plan: &RelPlan, limits: Limits) -> StoreResult<DataSet> {
+    fn query_data(&self, txn: &Txn, plan: &RelPlan, limits: Limits) -> StoreResult<DataSet> {
         let mut tables = BTreeSet::new();
         Self::plan_tables(plan, &mut tables);
         let names: Vec<&str> = tables.iter().map(String::as_str).collect();
@@ -1497,63 +2410,104 @@ impl<D: Device> Store<D> {
 
     // ---- inspection ----------------------------------------------------
 
-    /// Validates every table tree and that tree pages, free pages and the two
-    /// fixed pages partition the store. Returns each table's shape.
+    /// Validates every table and index tree, that each index holds exactly
+    /// its table's value prefixes, and that tree pages, free pages and the
+    /// two fixed pages partition the store. Returns each tree's shape.
     pub fn check(&mut self) -> StoreResult<BTreeMap<String, TreeShape>> {
         self.check_usable()?;
+        let view = self.view();
+        let free = self.writer().free.clone();
         let mut shapes = BTreeMap::new();
         let mut owned: BTreeSet<u64> = BTreeSet::from([META_PAGE, FSM_PAGE]);
-        let tables: Vec<(String, u64, Vec<ScalarType>)> = self
-            .meta
-            .tables
-            .iter()
-            .map(|(n, t)| (n.clone(), t.root, table_types(t)))
-            .collect();
-        for (name, root, types) in tables {
-            let shape = btree::check(&mut self.reader(), root, &types)?;
+        for (name, t) in &view.meta.tables {
+            let shape = btree::check(&mut self.reader(), t.root, &table_types(t))?;
             let mut all = Vec::new();
-            btree::pages(&mut self.reader(), root, &mut all)?;
+            btree::pages(&mut self.reader(), t.root, &mut all)?;
             for p in all {
-                if !owned.insert(p) || self.free.contains(&p) {
+                if !owned.insert(p) || free.contains(&p) {
                     return Err(corrupt(format!("page {p} is owned twice")));
                 }
             }
-            shapes.insert(name, shape);
+            shapes.insert(name.clone(), shape);
         }
-        let total = owned.len() + self.free.len();
-        if total as u64 != self.meta.page_count {
+        for (name, ix) in &view.meta.indexes {
+            let t = &view.meta.tables[&ix.table];
+            let shape = btree::check(&mut self.reader(), ix.root, &[t.columns[ix.column].ty])?;
+            let mut all = Vec::new();
+            btree::pages(&mut self.reader(), ix.root, &mut all)?;
+            for p in all {
+                if !owned.insert(p) || free.contains(&p) {
+                    return Err(corrupt(format!("page {p} is owned twice")));
+                }
+            }
+            // The index holds exactly the prefixes of the stored versions.
+            let mut want = BTreeSet::new();
+            btree::visit(&mut self.reader(), t.root, Key::MIN, Key::MAX, &mut |e| {
+                if let Some(px) = e.values.get(ix.column).and_then(index::prefix) {
+                    want.insert(index::key(px, e.key.rowid));
+                }
+                Ok(true)
+            })?;
+            let mut have = BTreeSet::new();
+            btree::visit(&mut self.reader(), ix.root, Key::MIN, Key::MAX, &mut |e| {
+                have.insert(e.key);
+                Ok(true)
+            })?;
+            if want != have {
+                return Err(corrupt(format!("index {name} differs from its table")));
+            }
+            shapes.insert(name.clone(), shape);
+        }
+        let total = owned.len() + free.len();
+        if total as u64 != view.meta.page_count {
             return Err(corrupt(format!(
                 "{} pages are owned or free out of {}",
-                total, self.meta.page_count
+                total, view.meta.page_count
             )));
         }
         Ok(shapes)
     }
     pub fn stats(&self) -> StoreStats {
+        let view = self.view();
+        let w = self.writer();
+        let (log_region_used, log_region_bytes, log_flushes, next_lsn, durable_lsn, ev, pw) = {
+            let io = self.core.io();
+            (
+                io.log.region_used(),
+                io.log.region_bytes(),
+                io.log.flushes(),
+                io.log.next_lsn(),
+                io.log.durable_lsn(),
+                io.evictions,
+                io.page_writes,
+            )
+        };
+        let t = self.txns();
         StoreStats {
-            pages: self.meta.page_count,
-            free_pages: self.free.len(),
+            pages: view.meta.page_count,
+            free_pages: w.free.len(),
             resident: self.core.pool.len(),
             dirty: self.core.pool.dirty_pages().len(),
             pinned: self.core.pool.pinned(),
             leaked_pins: self.core.pool.leaked(),
-            log_region_used: self.core.log.region_used(),
-            log_region_bytes: self.core.log.region_bytes(),
-            log_flushes: self.core.log.flushes(),
-            next_lsn: self.core.log.next_lsn(),
-            durable_lsn: self.core.log.durable_lsn(),
-            evictions: self.core.evictions,
-            page_writes: self.core.page_writes,
-            active_txns: self.txns.len(),
-            locks: self.locks.len(),
-            last_ts: self.meta.last_ts,
-            visible_ts: self.visible_ts,
-            pending_commits: self.pending.len(),
-            groups: self.groups,
-            checkpoint_running: self.ckpt.is_some(),
-            checkpoints_begun: self.checkpoints_begun,
-            checkpoints_done: self.checkpoints_done,
-            versions_collected: self.versions_collected,
+            log_region_used,
+            log_region_bytes,
+            log_flushes,
+            next_lsn,
+            durable_lsn,
+            evictions: ev,
+            page_writes: pw,
+            active_txns: t.active.len(),
+            locks: t.locks.len(),
+            last_ts: view.meta.last_ts,
+            visible_ts: t.visible_ts,
+            pending_commits: t.pending.len(),
+            groups: w.groups,
+            checkpoint_running: w.ckpt.is_some(),
+            checkpoints_begun: w.checkpoints_begun,
+            checkpoints_done: w.checkpoints_done,
+            versions_collected: w.versions_collected,
+            ssi_retained: t.done.len(),
         }
     }
     /// Transaction owners dropped without commit or abort.
@@ -1561,7 +2515,7 @@ impl<D: Device> Store<D> {
         self.leaks.load(Ordering::Relaxed)
     }
     pub fn poisoned(&self) -> bool {
-        self.poisoned
+        self.poisoned.load(Ordering::Acquire)
     }
     /// Checkpoints and returns the device (a clean shutdown).
     pub fn close(mut self) -> StoreResult<D> {
@@ -1569,22 +2523,74 @@ impl<D: Device> Store<D> {
         // only the pages dirty at its switch, so a second, full checkpoint
         // then writes back what later commits dirtied.
         self.flush()?;
-        let running = self.ckpt.is_some();
+        let running = self.writer().ckpt.is_some();
         self.checkpoint()?;
         if running {
             self.checkpoint()?;
         }
-        Ok(self.core.dev)
+        Ok(self.into_device())
     }
     /// Returns the device without writing anything (a crash, for tests).
     pub fn into_device(self) -> D {
-        self.core.dev
+        self.core.into_parts().dev
     }
-    pub fn device(&self) -> &D {
-        &self.core.dev
+    pub fn device(&mut self) -> &D {
+        &self
+            .core
+            .io
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .dev
     }
     /// Columns of a durable table.
-    pub fn columns(&self, table: &str) -> StoreResult<&[ColumnDef]> {
-        Ok(&self.table(table)?.columns)
+    pub fn columns(&self, table: &str) -> StoreResult<Vec<ColumnDef>> {
+        Ok(self.view().table(table)?.columns.clone())
+    }
+}
+impl View {
+    fn catalog_for(&self, replace: Option<&HermeticCatalog>) -> HermeticCatalog {
+        replace.cloned().unwrap_or_else(|| self.catalog.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::SimDevice;
+
+    /// A walk paused at its first leaf while commits grow the tree follows
+    /// the new right-sibling links past the page count it started with.
+    #[test]
+    fn a_walk_survives_concurrent_tree_growth() {
+        let limits = StoreLimits {
+            btree_fanout: 3,
+            leaf_max_versions: 2,
+            ..StoreLimits::default()
+        };
+        let (mut s, _) = Store::open(SimDevice::new(), limits).unwrap();
+        s.execute_ddl("CREATE TABLE t (v U64 NOT NULL)").unwrap();
+        let s = s;
+        let fill = |n: u64| {
+            let mut t = s.begin().unwrap();
+            for i in 0..n {
+                s.insert(&mut t, "t", &[Value::U64(i)]).unwrap();
+            }
+            s.commit(t).unwrap();
+        };
+        fill(6);
+        let tid = s.view().table("t").unwrap().id;
+        let pages_before = s.core.page_count();
+        let mut seen = 0u64;
+        s.read_tree(Tree::Table(tid), Key::MIN, Key::MAX, &mut |_| {
+            if seen == 0 {
+                fill(94);
+            }
+            seen += 1;
+            Ok(true)
+        })
+        .unwrap();
+        assert!(s.core.page_count() > 2 * pages_before);
+        assert!(seen > 6, "the walk saw the appended versions too");
+        assert!(!s.poisoned());
     }
 }

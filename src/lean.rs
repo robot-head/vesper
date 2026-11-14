@@ -16,6 +16,11 @@ use vesper_lean_syntax::{
 };
 
 type Statements = Vec<DS>;
+/// Generated fuel binder of total companions; `$` keeps it out of source names.
+const FUEL: &str = "$fuel";
+fn fuel_name(function: &str) -> Result<Name, String> {
+    source_name(&format!("{function}$fuel"))
+}
 fn fixed(s: &str) -> Ident {
     ident(s).expect("fixed compiler identifier")
 }
@@ -313,7 +318,118 @@ fn prelude() -> Result<Vec<Declaration>, String> {
         ),
         kind: DefinitionKind::Def,
     }));
+    declarations.extend(divergence()?);
     Ok(declarations)
+}
+/// Running out of fuel in a total companion is this effect. Models that
+/// prove partial correctness interpret it as `Option.none`.
+fn divergence() -> Result<Vec<Declaration>, String> {
+    let diverge = Term::Ref(
+        Name::qualified([fixed("VesperDiverge"), fixed("diverge")]).map_err(|e| e.to_string())?,
+    );
+    let class = source_ref("VesperDiverge")?;
+    let mut out = vec![Declaration::Type(TypeDeclaration::Class {
+        name: source_name("VesperDiverge")?,
+        parameters: vec![explicit(fixed("m"), monad_ty())],
+        fields: vec![Field {
+            name: fixed("diverge"),
+            ty: Term::Forall {
+                binders: vec![implicit("A", type0())],
+                body: Box::new(app(named("m"), [named("A")])),
+            },
+            default: None,
+        }],
+    })];
+    let monad = app(global(&["Monad"]), [named("m")]);
+    out.push(Declaration::Instance(Instance {
+        name: None,
+        binders: vec![
+            implicit("S", type0()),
+            implicit("O", type0()),
+            implicit("m", monad_ty()),
+            instance(None, monad.clone()),
+            instance(None, app(class.clone(), [named("m")])),
+        ],
+        ty: app(
+            class.clone(),
+            [app(
+                named("HandlerCPS"),
+                [named("S"), named("O"), named("m")],
+            )],
+        ),
+        body: Term::Record {
+            fields: vec![(
+                fixed("diverge"),
+                inferred(vec![fixed("k"), fixed("s")], diverge.clone()),
+            )],
+        },
+    }));
+    out.push(Declaration::Instance(Instance {
+        name: None,
+        binders: vec![],
+        ty: app(class.clone(), [global(&["Option"])]),
+        body: Term::Record {
+            fields: vec![(fixed("diverge"), global(&["Option", "none"]))],
+        },
+    }));
+    out.push(Declaration::Instance(Instance {
+        name: None,
+        binders: vec![
+            implicit("E", type0()),
+            implicit("m", monad_ty()),
+            instance(None, monad),
+            instance(None, app(class.clone(), [named("m")])),
+        ],
+        ty: app(class, [app(global(&["ExceptT"]), [named("E"), named("m")])]),
+        body: Term::Record {
+            fields: vec![(
+                fixed("diverge"),
+                app(global(&["ExceptT", "lift"]), [diverge]),
+            )],
+        },
+    }));
+    Ok(out)
+}
+/// `Fail[E]` evidence for the model monads `Except E` and `ExceptT E m`.
+fn fail_models() -> Result<Vec<Declaration>, String> {
+    let raise = (
+        fixed("raise"),
+        inferred(
+            vec![fixed("e")],
+            app(global(&["MonadExcept", "throw"]), [named("e")]),
+        ),
+    );
+    Ok(vec![
+        Declaration::Instance(Instance {
+            name: None,
+            binders: vec![implicit("E", type0())],
+            ty: app(
+                effect_ref("Fail")?,
+                [named("E"), app(global(&["Except"]), [named("E")])],
+            ),
+            body: Term::Record {
+                fields: vec![raise.clone()],
+            },
+        }),
+        Declaration::Instance(Instance {
+            name: None,
+            binders: vec![
+                implicit("E", type0()),
+                implicit("m", monad_ty()),
+                instance(None, app(global(&["Monad"]), [named("m")])),
+            ],
+            ty: app(
+                effect_ref("Fail")?,
+                [
+                    named("E"),
+                    app(global(&["ExceptT"]), [named("E"), named("m")]),
+                ],
+            ),
+            body: Term::Record {
+                fields: vec![raise],
+            },
+        }),
+    ])
 }
 fn adt_groups(world: &World) -> Vec<Vec<&Adt>> {
     fn dependencies<'a>(t: &'a Type, names: &mut Vec<&'a str>) {
@@ -371,6 +487,11 @@ pub fn extract(world: &World) -> Result<String, String> {
 }
 /// Construct the entire module without rendering or reparsing any Lean text.
 pub fn extract_module(world: &World) -> Result<Module, String> {
+    Ok(extract_report(world).map_err(|e| e.to_string())?.module)
+}
+/// The module plus, per source function, whether the kernel sees a total
+/// definition, and which functions received contract propositions.
+pub fn extract_report(world: &World) -> Result<Extraction, ExtractError> {
     let mut declarations = prelude()?;
     for group in adt_groups(world) {
         let mut types = vec![];
@@ -555,6 +676,13 @@ pub fn extract_module(world: &World) -> Result<Module, String> {
             ),
         }));
     }
+    if world
+        .effects
+        .get("Fail")
+        .is_some_and(|e| e.generics.len() == 1 && e.ops.len() == 1 && e.ops[0].name == "raise")
+    {
+        declarations.extend(fail_models()?);
+    }
     let program = crate::ir::lower_world(world);
     let mut functions = vec![];
     for f in world.functions.values() {
@@ -563,9 +691,13 @@ pub fn extract_module(world: &World) -> Result<Module, String> {
         {
             for node in nodes? {
                 match node {
-                    Declaration::Definition(definition) => functions.push(definition),
+                    Declaration::Definition(definition) => {
+                        functions.push((f.name.clone(), definition))
+                    }
                     _ => {
-                        return Err("Lean CFG extractor returned a non-function declaration".into());
+                        return Err(ExtractError::Unsupported(
+                            "Lean CFG extractor returned a non-function declaration".into(),
+                        ));
                     }
                 }
             }
@@ -582,12 +714,62 @@ pub fn extract_module(world: &World) -> Result<Module, String> {
                 global(&["Id"])
             },
         );
-        functions.push(generator.function(f)?);
+        functions.push((f.name.clone(), generator.function(f)?));
     }
-    if !functions.is_empty() {
-        declarations.push(Declaration::MutualDefinitions(functions));
+    let ordered = order_definitions(functions, DefinitionKind::PartialDef);
+    declarations.extend(ordered.declarations);
+    let family = std::rc::Rc::new(ordered.recursive_reach);
+    let mut companions = BTreeMap::new();
+    let mut totality = BTreeMap::new();
+    for f in world.functions.values() {
+        if !family.contains(&f.name) {
+            totality.insert(f.name.clone(), Totality::Total);
+            continue;
+        }
+        let mut generator = Generator::new(world, named("m"));
+        generator.fuel = Some(family.clone());
+        match generator.function(f) {
+            Ok(definition) => {
+                companions.insert(f.name.clone(), definition);
+            }
+            Err(reason) => {
+                totality.insert(f.name.clone(), Totality::Partial(reason));
+            }
+        }
     }
-    Ok(Module {
+    // A companion that calls a missing companion cannot elaborate; drop it too.
+    loop {
+        let missing = companions.iter().find_map(|(owner, d)| {
+            family
+                .iter()
+                .filter(|n| !companions.contains_key(*n))
+                .find(|n| fuel_name(n).is_ok_and(|name| d.body.references().contains(&name)))
+                .map(|n| (owner.clone(), n.clone()))
+        });
+        let Some((owner, callee)) = missing else {
+            break;
+        };
+        companions.remove(&owner);
+        totality.insert(
+            owner,
+            Totality::Partial(format!(
+                "calls '{callee}', which has no total fuel companion"
+            )),
+        );
+    }
+    for owner in companions.keys() {
+        totality.insert(owner.clone(), Totality::Fuel);
+    }
+    let companions = order_definitions(companions.into_iter().collect(), DefinitionKind::Def);
+    declarations.extend(companions.declarations);
+    let contracts = contracts(world, &totality).map_err(ExtractError::Contract)?;
+    let contract_names = contracts.iter().map(|(n, _)| n.clone()).collect();
+    declarations.extend(
+        contracts
+            .into_iter()
+            .map(|(_, d)| Declaration::Definition(d)),
+    );
+    let module = Module {
         imports: vec![ModuleName::new("Std").map_err(|e| e.to_string())?],
         declarations: vec![
             Declaration::SetOption {
@@ -599,6 +781,366 @@ pub fn extract_module(world: &World) -> Result<Module, String> {
                 declarations,
             },
         ],
+    };
+    Ok(Extraction {
+        module,
+        totality,
+        contracts: contract_names,
+    })
+}
+
+/// How the kernel can reason about one source function's extraction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Totality {
+    /// Every Lean definition of the function is an ordinary `def`, so the
+    /// kernel can unfold it (`simp`, `decide`, `rfl`, induction on its data).
+    Total,
+    /// The function is recursive or calls recursion. The executable
+    /// `partial def` stays opaque; `f$fuel` is its total companion: it is
+    /// structurally recursive on `$fuel : Nat` and performs
+    /// `VesperDiverge.diverge` when the fuel runs out.
+    Fuel,
+    /// Only the opaque `partial def` exists, for the stated reason.
+    Partial(String),
+}
+
+/// A user contract that could not be stated as a Lean proposition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ContractError {
+    /// `requires_f`/`ensures_f` must be pure, non-generic `bool` functions.
+    Predicate { function: String, reason: String },
+    /// The parameters of the predicate do not match the function's.
+    Signature { function: String, reason: String },
+    /// The contracted function's form has no proposition (yet).
+    Unsupported { function: String, reason: String },
+}
+impl std::fmt::Display for ContractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Predicate { function, reason } => {
+                write!(f, "contract predicate for '{function}': {reason}")
+            }
+            Self::Signature { function, reason } => {
+                write!(f, "contract signature for '{function}': {reason}")
+            }
+            Self::Unsupported { function, reason } => {
+                write!(f, "contract for '{function}' is unsupported: {reason}")
+            }
+        }
+    }
+}
+impl std::error::Error for ContractError {}
+
+/// Why a module could not be extracted.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExtractError {
+    /// A `requires_`/`ensures_` contract has no Lean proposition.
+    Contract(ContractError),
+    /// A source form the extractor does not translate.
+    Unsupported(String),
+}
+impl From<String> for ExtractError {
+    fn from(reason: String) -> Self {
+        Self::Unsupported(reason)
+    }
+}
+impl std::fmt::Display for ExtractError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Contract(e) => e.fmt(f),
+            Self::Unsupported(reason) => f.write_str(reason),
+        }
+    }
+}
+impl std::error::Error for ExtractError {}
+
+/// A whole extraction with the facts proof tooling (Lens, tests) needs.
+pub struct Extraction {
+    pub module: Module,
+    pub totality: BTreeMap<String, Totality>,
+    /// Source functions that received a `f$contract : Prop`.
+    pub contracts: Vec<String>,
+}
+
+struct Ordered {
+    declarations: Vec<Declaration>,
+    /// Owners of definitions in, or reaching, a recursive group.
+    recursive_reach: BTreeSet<String>,
+}
+/// Emit definitions callees first: a group without recursion becomes separate
+/// ordinary definitions, a recursive group one `mutual` block of `recursive`.
+fn order_definitions(definitions: Vec<(String, Definition)>, recursive: DefinitionKind) -> Ordered {
+    let index = definitions
+        .iter()
+        .enumerate()
+        .map(|(i, (_, d))| (d.name.clone(), i))
+        .collect::<BTreeMap<_, _>>();
+    let mut graph = petgraph::graphmap::DiGraphMap::<usize, ()>::new();
+    for i in 0..definitions.len() {
+        graph.add_node(i);
+    }
+    for (i, (_, d)) in definitions.iter().enumerate() {
+        let refs = Term::free_references(&d.binders, &d.body);
+        for name in refs {
+            if let Some(&j) = index.get(&name) {
+                graph.add_edge(i, j, ());
+            }
+        }
+    }
+    let mut slots = definitions.into_iter().map(Some).collect::<Vec<_>>();
+    let mut tainted = BTreeSet::new();
+    let mut recursive_reach = BTreeSet::new();
+    let mut declarations = vec![];
+    for mut group in petgraph::algo::tarjan_scc(&graph) {
+        group.sort_unstable();
+        let cyclic = group.len() > 1 || graph.contains_edge(group[0], group[0]);
+        let reaches = cyclic
+            || group
+                .iter()
+                .any(|&i| graph.neighbors(i).any(|j| tainted.contains(&j)));
+        let members = group
+            .iter()
+            .map(|&i| slots[i].take().expect("each definition is in one group"))
+            .collect::<Vec<_>>();
+        if reaches {
+            tainted.extend(group.iter().copied());
+            recursive_reach.extend(members.iter().map(|(o, _)| o.clone()));
+        }
+        if cyclic {
+            declarations.push(Declaration::MutualDefinitions(
+                members
+                    .into_iter()
+                    .map(|(_, d)| Definition {
+                        kind: recursive,
+                        ..d
+                    })
+                    .collect(),
+            ));
+        } else {
+            declarations.extend(members.into_iter().map(|(_, d)| {
+                // CFG blocks are internal: let `simp [f]` see through them.
+                let block = d.name.components()[0].as_str().starts_with("$block_");
+                Declaration::Definition(Definition {
+                    kind: if block {
+                        DefinitionKind::SimpDef
+                    } else {
+                        DefinitionKind::Def
+                    },
+                    ..d
+                })
+            }));
+        }
+    }
+    Ordered {
+        declarations,
+        recursive_reach,
+    }
+}
+
+/// `requires_f(params) -> bool` and `ensures_f(params, result) -> bool` become
+/// `f$contract : Prop`, a partial-correctness statement over the total form.
+fn contracts(
+    world: &World,
+    totality: &BTreeMap<String, Totality>,
+) -> Result<Vec<(String, Definition)>, ContractError> {
+    let mut out = vec![];
+    for f in world.functions.values() {
+        let Some(ensures) = world.functions.get(&format!("ensures_{}", f.name)) else {
+            continue;
+        };
+        let requires = world.functions.get(&format!("requires_{}", f.name));
+        out.push((f.name.clone(), contract(totality, f, requires, ensures)?));
+    }
+    Ok(out)
+}
+fn contract(
+    totality: &BTreeMap<String, Totality>,
+    f: &Function,
+    requires: Option<&Function>,
+    ensures: &Function,
+) -> Result<Definition, ContractError> {
+    let function = f.name.clone();
+    let unsupported = |reason: &str| ContractError::Unsupported {
+        function: function.clone(),
+        reason: reason.into(),
+    };
+    let internal = |e: String| ContractError::Unsupported {
+        function: function.clone(),
+        reason: e,
+    };
+    for predicate in requires.into_iter().chain([ensures]) {
+        let reason = if effectful_function(predicate) {
+            Some("it must have no effects")
+        } else if !predicate.generics.is_empty() {
+            Some("it must not be generic")
+        } else if predicate.result != Type::Named("bool".into(), vec![]) {
+            Some("it must return bool")
+        } else if predicate.params.iter().any(|p| p.pass == Pass::Inout) {
+            Some("it must not take inout parameters")
+        } else if totality.get(&predicate.name) != Some(&Totality::Total) {
+            Some("it must not be recursive")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            return Err(ContractError::Predicate {
+                function: predicate.name.clone(),
+                reason: reason.into(),
+            });
+        }
+    }
+    if !f.generics.is_empty() {
+        return Err(unsupported(
+            "generic functions have no contract proposition",
+        ));
+    }
+    if f.params.iter().any(|p| p.pass == Pass::Inout) {
+        return Err(unsupported(
+            "contracts over inout parameters are not stated; return the updated value instead",
+        ));
+    }
+    let types = f.params.iter().map(|p| &p.ty).collect::<Vec<_>>();
+    let signature = |predicate: &Function, expected: Vec<&Type>| {
+        let actual = predicate.params.iter().map(|p| &p.ty).collect::<Vec<_>>();
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(ContractError::Signature {
+                function: function.clone(),
+                reason: format!(
+                    "'{}' must take {} parameter(s) of the function's types{}",
+                    predicate.name,
+                    expected.len(),
+                    if predicate.name.starts_with("ensures_") {
+                        " followed by its result"
+                    } else {
+                        ""
+                    }
+                ),
+            })
+        }
+    };
+    if let Some(r) = requires {
+        signature(r, types.clone())?;
+    }
+    let mut with_result = types.clone();
+    with_result.push(&f.result);
+    signature(ensures, with_result)?;
+    let fail = match f.effects.instances.as_slice() {
+        _ if f.effects.tail.is_some() => {
+            return Err(unsupported("open effect rows have no model monad"));
+        }
+        [] => None,
+        [e] if e.name == "Fail" && e.label.is_none() && e.args.len() == 1 => {
+            Some(ty(&e.args[0]).map_err(internal)?)
+        }
+        _ => {
+            return Err(unsupported(
+                "only pure and single unlabeled Fail[E] functions have a model monad",
+            ));
+        }
+    };
+    let fuel = match totality.get(&f.name) {
+        Some(Totality::Total) => false,
+        Some(Totality::Fuel) => true,
+        Some(Totality::Partial(reason)) => {
+            return Err(unsupported(&format!("it has no total form: {reason}")));
+        }
+        None => return Err(unsupported("unknown function")),
+    };
+    let mut binders = vec![];
+    let mut args = vec![];
+    for p in &f.params {
+        let name = ident(&format!("{}$arg", p.name)).map_err(internal)?;
+        binders.push(explicit(name.clone(), ty(&p.ty).map_err(internal)?));
+        args.push(reference(&name));
+    }
+    let result = fixed("$result");
+    let result_ty = ty(&f.result).map_err(internal)?;
+    let model = match (&fail, fuel) {
+        (None, false) => None,
+        (None, true) => Some(global(&["Option"])),
+        (Some(e), false) => Some(app(global(&["Except"]), [e.clone()])),
+        (Some(e), true) => Some(app(global(&["ExceptT"]), [e.clone(), global(&["Option"])])),
+    };
+    let mut call_args = vec![];
+    if let Some(model) = &model {
+        call_args.push(Argument::Named {
+            name: fixed("m"),
+            value: model.clone(),
+        });
+    }
+    if fuel {
+        call_args.push(Argument::Named {
+            name: fixed(FUEL),
+            value: named(FUEL),
+        });
+    }
+    call_args.extend(args.iter().cloned().map(Argument::Positional));
+    let call = Term::App {
+        function: Box::new(if fuel {
+            Term::Ref(fuel_name(&f.name).map_err(internal)?)
+        } else {
+            source_ref(&f.name).map_err(internal)?
+        }),
+        arguments: call_args,
+    };
+    let holds = |predicate: &Function, extra: Option<Term>| -> Result<Term, ContractError> {
+        let mut values = args.clone();
+        values.extend(extra);
+        Ok(Term::binary(
+            BinaryOp::Eq,
+            app(source_ref(&predicate.name).map_err(internal)?, values),
+            Term::Bool(true),
+        ))
+    };
+    let post = if model.is_none() {
+        holds(ensures, Some(call))?
+    } else {
+        let observed = match (&fail, fuel) {
+            (None, true) => app(global(&["Option", "some"]), [reference(&result)]),
+            (Some(_), false) => app(global(&["Except", "ok"]), [reference(&result)]),
+            _ => app(
+                global(&["Option", "some"]),
+                [app(global(&["Except", "ok"]), [reference(&result)])],
+            ),
+        };
+        let run = if fail.is_some() && fuel {
+            app(global(&["ExceptT", "run"]), [call])
+        } else {
+            call
+        };
+        let mut quantified = vec![];
+        if fuel {
+            quantified.push(explicit(fixed(FUEL), global(&["Nat"])));
+        }
+        quantified.push(explicit(result.clone(), result_ty));
+        Term::Forall {
+            binders: quantified,
+            body: Box::new(Term::Arrow(
+                Box::new(Term::binary(BinaryOp::Eq, run, observed)),
+                Box::new(holds(ensures, Some(reference(&result)))?),
+            )),
+        }
+    };
+    let body = match requires {
+        Some(r) => Term::Arrow(Box::new(holds(r, None)?), Box::new(post)),
+        None => post,
+    };
+    let body = if binders.is_empty() {
+        body
+    } else {
+        Term::Forall {
+            binders,
+            body: Box::new(body),
+        }
+    };
+    Ok(Definition {
+        name: source_name(&format!("{}$contract", f.name)).map_err(internal)?,
+        binders: vec![],
+        result: Term::Sort(Sort::Prop),
+        body,
+        kind: DefinitionKind::Def,
     })
 }
 
@@ -704,6 +1246,9 @@ struct Generator<'a> {
     clause_aliases: BTreeSet<usize>,
     alias_written: bool,
     unlabeled: BTreeMap<String, CapBinding>,
+    /// Functions whose total fuel companions are being generated. Calls to
+    /// them are monadic and pass the predecessor fuel.
+    fuel: Option<std::rc::Rc<BTreeSet<String>>>,
 }
 struct Saved {
     scope: BTreeMap<String, Local>,
@@ -965,7 +1510,15 @@ impl Generator<'_> {
             clause_aliases: BTreeSet::new(),
             alias_written: false,
             unlabeled: BTreeMap::new(),
+            fuel: None,
         }
+    }
+    fn in_family(&self, n: &str) -> bool {
+        self.fuel.as_ref().is_some_and(|f| f.contains(n))
+    }
+    /// Whether a call to `f` is a monadic action in the current generator.
+    fn callee_effectful(&self, f: &Function) -> bool {
+        effectful_function(f) || self.in_family(&f.name)
     }
     fn save(&self) -> Saved {
         Saved {
@@ -1451,7 +2004,21 @@ impl Generator<'_> {
                 fields,
                 named,
             } => {
-                if *named {
+                if *named
+                    && let Some((adt, variant)) = self.world.constructor(n)
+                    && adt.is_enum
+                {
+                    // Lean's `{ … }` patterns need a structure type, so a
+                    // named enum pattern becomes positional in field order.
+                    let mut arguments = vec![];
+                    for field in &variant.fields {
+                        arguments.push(match fields.iter().find(|(f, _)| *f == field.name) {
+                            Some((_, p)) => self.pat(p, renames)?,
+                            None => LP::Wildcard,
+                        });
+                    }
+                    ctor_pattern(self.constructor_name(n)?, arguments)
+                } else if *named {
                     LP::Record {
                         fields: fields
                             .iter()
@@ -1497,7 +2064,7 @@ impl Generator<'_> {
         Ok(Term::Ref(self.constructor_name(n)?))
     }
     fn function(&mut self, f: &Function) -> Result<Definition, String> {
-        let effectful = effectful_function(f);
+        let effectful = self.callee_effectful(f);
         let polymorphic = self.monad != global(&["Id"]);
         let mut binders = f
             .generics
@@ -1567,6 +2134,45 @@ impl Generator<'_> {
         } else {
             app(global(&["Id", "run"]), [body])
         };
+        if self.in_family(&f.name) {
+            // `f$fuel` is structurally recursive on its fuel; running out of
+            // fuel is the `VesperDiverge` effect, never a fabricated value.
+            let at = binders
+                .iter()
+                .position(|b| b.kind == BinderKind::Instance)
+                .map_or(binders.len(), |i| i + 1);
+            binders.insert(
+                at,
+                instance(None, app(source_ref("VesperDiverge")?, [named("m")])),
+            );
+            binders.insert(at + 1, explicit(fixed(FUEL), global(&["Nat"])));
+            let body = Term::Match {
+                scrutinee: Box::new(named(FUEL)),
+                arms: vec![
+                    MatchArm {
+                        pattern: LP::Nat(0u64.into()),
+                        body: Term::Ref(
+                            Name::qualified([fixed("VesperDiverge"), fixed("diverge")])
+                                .map_err(|e| e.to_string())?,
+                        ),
+                    },
+                    MatchArm {
+                        pattern: ctor_pattern(
+                            fixed_name(&["Nat", "succ"]).rooted(),
+                            vec![LP::Bind(fixed(FUEL))],
+                        ),
+                        body,
+                    },
+                ],
+            };
+            return Ok(Definition {
+                name: fuel_name(&f.name)?,
+                binders,
+                result,
+                body,
+                kind: DefinitionKind::Def,
+            });
+        }
         Ok(Definition {
             name: source_name(&f.name)?,
             binders,
@@ -1605,6 +2211,10 @@ impl Generator<'_> {
                         &local.ty,
                         local.depth,
                     )?
+                } else if self.in_family(n) {
+                    return Err(format!(
+                        "a fuel companion cannot pass the recursive function '{n}' as a value"
+                    ));
                 } else if self
                     .world
                     .functions
@@ -1627,6 +2237,21 @@ impl Generator<'_> {
             ExprKind::Struct { name: n, fields } => {
                 let values =
                     self.operands(&fields.iter().map(|(_, e)| e).collect::<Vec<_>>(), out)?;
+                if let Some((adt, variant)) = self.world.constructor(n)
+                    && adt.is_enum
+                {
+                    // An enum variant literal is its constructor applied in
+                    // declaration order; operands were evaluated in source order.
+                    let mut arguments = vec![];
+                    for field in &variant.fields {
+                        let index = fields
+                            .iter()
+                            .position(|(f, _)| *f == field.name)
+                            .ok_or_else(|| format!("missing field '{}' in {n}", field.name))?;
+                        arguments.push(values[index].clone());
+                    }
+                    return Ok(app(self.constructor(n)?, arguments));
+                }
                 ascribe(
                     Term::Record {
                         fields: fields
@@ -2211,9 +2836,28 @@ impl Generator<'_> {
                 .into_iter()
                 .map(Argument::Positional),
         );
-        let call = Term::App {
-            function: Box::new(source_ref(n)?),
-            arguments,
+        if self.in_family(n) && self.monad == global(&["Id"]) {
+            return Err(format!(
+                "a fuel companion cannot call the recursive function '{n}' inside a pure closure"
+            ));
+        }
+        let call = if self.in_family(n) {
+            arguments.insert(
+                0,
+                Argument::Named {
+                    name: fixed(FUEL),
+                    value: named(FUEL),
+                },
+            );
+            Term::App {
+                function: Box::new(Term::Ref(fuel_name(n)?)),
+                arguments,
+            }
+        } else {
+            Term::App {
+                function: Box::new(source_ref(n)?),
+                arguments,
+            }
         };
         let states = f
             .params
@@ -2223,7 +2867,7 @@ impl Generator<'_> {
             .map(|(p, a)| (p, &a.expr))
             .collect::<Vec<_>>();
         let vars = solved.unwrap_or_default();
-        let result = if effectful_function(f) {
+        let result = if self.callee_effectful(f) {
             self.action(call, out)?
         } else if states.is_empty() {
             return Ok(call);
@@ -2370,7 +3014,13 @@ impl Generator<'_> {
             .map(|(p, a)| (p, &a.expr))
             .collect::<Vec<_>>();
         if states.is_empty() {
-            return Ok(result);
+            // `Never` operations (`Fail::raise`) return `Empty`; eliminate it
+            // so the value fits whatever type the surrounding branch has.
+            return Ok(if sig.result.name() == "Never" {
+                app(global(&["Empty", "elim"]), [result])
+            } else {
+                result
+            });
         }
         self.restore_states(result, &states, &vars, out)
     }
@@ -2667,7 +3317,10 @@ impl Generator<'_> {
                         false
                     }
                     ExprKind::Name(n) => {
-                        self.world.functions.get(n).is_some_and(effectful_function)
+                        self.world
+                            .functions
+                            .get(n)
+                            .is_some_and(|f| self.callee_effectful(f))
                             || self
                                 .world
                                 .types
@@ -2677,7 +3330,7 @@ impl Generator<'_> {
                     ExprKind::Field(base, m) => {
                         !matches!(&base.kind, ExprKind::Name(l) if self.caps.contains_key(l) || lexical.contains(l) || effect.label.as_deref() == Some(l.as_str()))
                             && self.world.functions.iter().any(|(n, f)| {
-                                n.ends_with(&format!("::{m}")) && effectful_function(f)
+                                n.ends_with(&format!("::{m}")) && self.callee_effectful(f)
                             })
                     }
                     _ => true,

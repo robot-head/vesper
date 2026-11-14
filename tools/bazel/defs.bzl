@@ -44,6 +44,9 @@ _NEVER = [
     "**/BUILD.bazel",
     "**/*.pyc",
     "**/__pycache__/**",
+    # Diagnostic outputs must not become changing compile/test inputs.
+    "**/bazel-remote-grpc.log",
+    "**/execution_log.binpb.zst",
     # Personal settings (may hold the BuildBuddy API key) and CI scratch.
     "user.bazelrc",
     ".ci-lean-path",

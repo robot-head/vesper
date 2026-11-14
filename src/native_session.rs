@@ -884,6 +884,7 @@ pub(super) fn compile_session<M: Module>(
                 capabilities.insert(key, identity);
             }
         }
+        let denorm = crate::capability_effects::const_denorm_spans(world);
         let mut c = Codegen {
             b,
             m,
@@ -911,6 +912,7 @@ pub(super) fn compile_session<M: Module>(
                 violation,
                 plan: plan.clone(),
             }),
+            denorm: &denorm,
         };
         let layout = Layout::of(world, &plan.result)?;
         let join = c.b.create_block();
