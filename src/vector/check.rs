@@ -7,7 +7,9 @@ use crate::vector::{Elem, Intrinsic, Kind, Profile, Shape, shape_of};
 
 impl Checker<'_> {
     /// Typecheck a call of a reserved `Vec::`, `Mask::` or `Isa::` path.
+    /// Kept out of line so its locals do not enlarge every `call` frame.
     /// `None` when `name` is not in those namespaces.
+    #[inline(never)]
     pub(super) fn vector_call(
         &mut self,
         name: &str,
