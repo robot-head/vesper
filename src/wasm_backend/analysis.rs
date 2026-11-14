@@ -657,9 +657,10 @@ fn split_at_resumptions(f: &FunctionIr, resume: &str) -> (FunctionIr, Vec<(Value
     let mut points = vec![];
     let mut b = 0;
     while b < f.blocks.len() {
-        let at = f.blocks[b].instructions.iter().position(
-            |i| matches!(&i.op, Op::Indirect { callee, .. } if reads.contains(callee)),
-        );
+        let at = f.blocks[b]
+            .instructions
+            .iter()
+            .position(|i| matches!(&i.op, Op::Indirect { callee, .. } if reads.contains(callee)));
         if let Some(at) = at {
             let dest = f.blocks[b].instructions[at].dest;
             let rest = f.blocks[b].instructions.split_off(at + 1);

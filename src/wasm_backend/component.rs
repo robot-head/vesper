@@ -430,11 +430,14 @@ fn core_scalar(s: Scalar) -> Option<ValType> {
 }
 
 /// Flat core types of `ty` as a parameter (canonical ABI `flatten_type`).
-fn flatten(world: &crate::check::World, ty: &Type, out: &mut Vec<ValType>) -> Result<(), WasmError> {
+fn flatten(
+    world: &crate::check::World,
+    ty: &Type,
+    out: &mut Vec<ValType>,
+) -> Result<(), WasmError> {
     match layout::shape(world, ty)? {
-        Shape::Scalar(s) => out.push(
-            core_scalar(s).ok_or_else(|| export_err(format!("{ty} has no flat parameter")))?,
-        ),
+        Shape::Scalar(s) => out
+            .push(core_scalar(s).ok_or_else(|| export_err(format!("{ty} has no flat parameter")))?),
         Shape::Str => out.extend([ValType::I32, ValType::I32]),
         Shape::Tuple(ts) => {
             for t in &ts {
@@ -636,7 +639,8 @@ fn lift(
 /// `cabi_realloc(old, old_size, align, new_size)`: the bump allocator,
 /// copying the old bytes (8-byte alignment covers every canonical type).
 fn export_realloc(l: &mut Lowerer<'_>) {
-    let idx = l.b.declare("cabi_realloc", &[ValType::I32; 4], &[ValType::I32]);
+    let idx =
+        l.b.declare("cabi_realloc", &[ValType::I32; 4], &[ValType::I32]);
     let p = 4u32;
     let mut f = Function::new([(1, ValType::I64)]);
     for ins in [

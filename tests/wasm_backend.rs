@@ -204,7 +204,10 @@ fn differential(source: &str) -> WasmArtifact {
             .unwrap_or_else(|e| panic!("compile ({effects:?}, {source}): {e}"));
             assert!(art.component.starts_with(b"\0asm"));
             if effects == EffectLowering::Portable {
-                assert!(!art.stack_switching, "portable output uses WasmFX: {source}");
+                assert!(
+                    !art.stack_switching,
+                    "portable output uses WasmFX: {source}"
+                );
             }
             if art.stack_switching && !stack_switching_host() {
                 eprintln!("stack switching unavailable on this host; compiled only: {source}");
@@ -865,9 +868,14 @@ fn wasi_stdout_and_clock_behind_declared_capabilities() {
             wasm_backend::HostCapability::Clock
         ]
     );
-    assert!(art.wit.contains("import wasi:cli/stdout@0.2.0;"), "{}", art.wit);
     assert!(
-        art.wit.contains("import wasi:clocks/monotonic-clock@0.2.0;"),
+        art.wit.contains("import wasi:cli/stdout@0.2.0;"),
+        "{}",
+        art.wit
+    );
+    assert!(
+        art.wit
+            .contains("import wasi:clocks/monotonic-clock@0.2.0;"),
         "{}",
         art.wit
     );
@@ -900,7 +908,10 @@ fn undeclared_or_mismatched_capabilities_are_rejected() {
     ] {
         let w = world(source);
         assert!(
-            matches!(compile(&w, &WasmOptions::default()), Err(WasmError::Entry(_))),
+            matches!(
+                compile(&w, &WasmOptions::default()),
+                Err(WasmError::Entry(_))
+            ),
             "{source}"
         );
     }
@@ -983,8 +994,20 @@ fn aggregate_entry_parameters() {
         "copy enum V { A(u8), B(f64), C(i64, u32), D } fn f(v: V, w: Option[u32]) -> (i64, u32) { let n = match v { V::A(x) => 1, V::B(x) => if x > 1.0 { 2 } else { 20 }, V::C(a, b) => wrapping_add(a, 3), V::D => 4, }; let m = match w { Some(x) => x, None => 0, }; (n, m) }",
         "f",
         &[
-            ("V::A(7), Some(9)", vec![Val::Variant("a".into(), Some(Box::new(Val::U8(7)))), Val::Variant("some".into(), Some(Box::new(Val::U32(9))))]),
-            ("V::B(2.5), None", vec![Val::Variant("b".into(), Some(Box::new(Val::Float64(2.5)))), Val::Variant("none".into(), None)]),
+            (
+                "V::A(7), Some(9)",
+                vec![
+                    Val::Variant("a".into(), Some(Box::new(Val::U8(7)))),
+                    Val::Variant("some".into(), Some(Box::new(Val::U32(9)))),
+                ],
+            ),
+            (
+                "V::B(2.5), None",
+                vec![
+                    Val::Variant("b".into(), Some(Box::new(Val::Float64(2.5)))),
+                    Val::Variant("none".into(), None),
+                ],
+            ),
             (
                 "V::C(-10, 4), None",
                 vec![
@@ -995,16 +1018,31 @@ fn aggregate_entry_parameters() {
                     Val::Variant("none".into(), None),
                 ],
             ),
-            ("V::D, Some(1)", vec![Val::Variant("d".into(), None), Val::Variant("some".into(), Some(Box::new(Val::U32(1))))]),
+            (
+                "V::D, Some(1)",
+                vec![
+                    Val::Variant("d".into(), None),
+                    Val::Variant("some".into(), Some(Box::new(Val::U32(1)))),
+                ],
+            ),
         ],
     );
     entry_differential(
         r#"fn f(sink s: String, sink t: String) -> (bool, String) { (t == "abc", s) }"#,
         "f",
         &[
-            (r#""abc", "abc""#, vec![Val::String("abc".into()), Val::String("abc".into())]),
-            (r#""é😀", "x""#, vec![Val::String("é😀".into()), Val::String("x".into())]),
-            (r#""", """#, vec![Val::String("".into()), Val::String("".into())]),
+            (
+                r#""abc", "abc""#,
+                vec![Val::String("abc".into()), Val::String("abc".into())],
+            ),
+            (
+                r#""é😀", "x""#,
+                vec![Val::String("é😀".into()), Val::String("x".into())],
+            ),
+            (
+                r#""", """#,
+                vec![Val::String("".into()), Val::String("".into())],
+            ),
         ],
     );
 }
@@ -1012,8 +1050,7 @@ fn aggregate_entry_parameters() {
 // ---- rejections --------------------------------------------------------------
 
 #[test]
-fn unsupported_constructs_are_typed_errors() {
-}
+fn unsupported_constructs_are_typed_errors() {}
 
 #[test]
 fn entry_and_limit_errors() {
@@ -1065,8 +1102,10 @@ fn entry_and_limit_errors() {
 
 #[test]
 fn memory_exhaustion_traps() {
+    // Live data grows without bound (a non-tail recursion keeps every
+    // block reachable): the bounded memory traps.
     let w = world(
-        "fn build(n: u64, acc: (u64, u64)) -> u64 { let (a, b) = acc; if n == 0 { a } else { build(wrapping_sub(n, 1), (wrapping_add(a, 1), n)) } } fn main() -> u64 { build(10000000, (0, 0)) }",
+        "fn build(n: u64) -> u64 { if n == 0 { 0 } else { let t = (n, n); let (a, b) = t; wrapping_add(build(wrapping_sub(n, 1)), a) } } fn main() -> u64 { build(100000) }",
     );
     let art = compile(
         &w,
@@ -1078,6 +1117,51 @@ fn memory_exhaustion_traps() {
     .unwrap();
     let e = run(&w, &art).unwrap_err();
     assert!(e.contains("trap"), "{e}");
+}
+
+/// Tail-recursive loops that allocate run in memory bounded by their live
+/// arguments: the heap is reset to the loop's entry mark at every tail call
+/// after evacuating the arguments.
+#[test]
+fn tail_loops_reclaim_their_garbage() {
+    let loops = [
+        // A tuple accumulator rebuilt every iteration (10M iterations would
+        // need about 160 MB without reclamation).
+        (
+            "fn build(n: u64, acc: (u64, u64)) -> u64 { let (a, b) = acc; if n == 0 { a } else { build(wrapping_sub(n, 1), (wrapping_add(a, 1), n)) } } fn main() -> u64 { build(@N@, (0, 0)) }",
+            "@N@",
+        ),
+        // Nested structs, enums and strings in the carried state; garbage
+        // (an intermediate copy) is built each step too.
+        (
+            r#"copy struct S { tag: Option[u64], inner: (u64, f64) } struct St { s: S, name: String } fn step(sink st: St, n: u64) -> u64 { let St { s, name } = st; let S { tag, inner } = s; let (c, f) = inner; let junk = (c, (c, c)); if n == 0 { match tag { Some(t) => wrapping_add(t, c), None => c, } } else { let next = if n % 2 == 0 { "even" } else { "odd" }; step(St { s: S { tag: Some(n), inner: (wrapping_add(c, 1), f * 1.0) }, name: next }, wrapping_sub(n, 1)) } } fn main() -> u64 { step(St { s: S { tag: None, inner: (0, 1.5) }, name: "start" }, @N@) }"#,
+            "@N@",
+        ),
+        // Mutual tail recursion with a checked accumulator under a Fail handler.
+        (
+            "fn ping(n: u64, acc: (u64, u64)) -> u64 eff [Fail[ArithOverflow]] { let (a, b) = acc; if n == 0 { a } else { pong(n - 1, (a + 1, b)) } } fn pong(n: u64, acc: (u64, u64)) -> u64 eff [Fail[ArithOverflow]] { let (a, b) = acc; if n == 0 { b } else { ping(n - 1, (a, b + 2)) } } fn main() -> u64 { handle Fail[ArithOverflow] in { ping(@N@, (0, 0)) } with { return x => x, raise(e, k) => 0, } }",
+            "@N@",
+        ),
+    ];
+    for (source, n) in loops {
+        // Small: the evaluator agrees (both lowerings, with and without
+        // the optimizer).
+        differential(&source.replace(n, "1000"));
+        // Large, in 4 pages (256 KiB) of linear memory.
+        let w = world(&source.replace(n, "2000000"));
+        for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+            let art = compile(
+                &w,
+                &WasmOptions {
+                    max_memory_pages: 4,
+                    effects,
+                    ..WasmOptions::default()
+                },
+            )
+            .unwrap();
+            run_with_fuel(&w, &art, 5_000_000_000).unwrap_or_else(|e| panic!("{source}: {e}"));
+        }
+    }
 }
 
 // ---- component worlds ----------------------------------------------------------

@@ -33,7 +33,6 @@ use wasm_encoder::{
     BlockType, Function, Handle, HeapType, Instruction as I, MemArg, RefType, ValType,
 };
 
-
 /// Temporary `inout` cells and the places they are copied back to.
 type Writebacks = Vec<(u32, crate::check::Place)>;
 
@@ -83,6 +82,8 @@ pub(crate) struct Lowerer<'a> {
     /// The suspension record a [`HandlerMode::Cps`] clause prefix leaves
     /// when it resumes (0 otherwise).
     pub cps: u32,
+    /// The heap mark a reclaiming function passes to its tail callee.
+    pub tail_mark: u32,
     pub env: BTreeMap<String, u32>,
     pub alloc: u32,
     pub dispatch_ty: u32,
@@ -100,6 +101,8 @@ pub(crate) struct Lowerer<'a> {
     helpers: BTreeMap<&'static str, u32>,
     /// Static address of each interned string literal.
     strings: BTreeMap<String, u64>,
+    /// `$copy<T>` evacuation helpers by type.
+    copies: BTreeMap<String, u32>,
     pub arity: usize,
     pub instructions: usize,
     pub max_instructions: usize,
@@ -148,7 +151,14 @@ impl<'a> Lowerer<'a> {
         for c in &plan.host {
             match c {
                 HostCapability::Stdout => {
-                    imp(&mut b, &mut host_imports, "get-stdout", super::host::WASI_STDOUT, &[], &[ValType::I32])?;
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "get-stdout",
+                        super::host::WASI_STDOUT,
+                        &[],
+                        &[ValType::I32],
+                    )?;
                     imp(
                         &mut b,
                         &mut host_imports,
@@ -167,7 +177,14 @@ impl<'a> Lowerer<'a> {
                     )?;
                 }
                 HostCapability::Clock => {
-                    imp(&mut b, &mut host_imports, "now", super::host::WASI_MONOTONIC_CLOCK, &[], &[ValType::I64])?;
+                    imp(
+                        &mut b,
+                        &mut host_imports,
+                        "now",
+                        super::host::WASI_MONOTONIC_CLOCK,
+                        &[],
+                        &[ValType::I64],
+                    )?;
                 }
             }
         }
@@ -175,6 +192,7 @@ impl<'a> Lowerer<'a> {
         b.set_heap_global(heap);
         let abort = b.global(0);
         let cps = b.global(0);
+        let tail_mark = b.global(0);
         let env = plan.keys.iter().map(|k| (k.clone(), b.global(0))).collect();
         let alloc = b.declare("$alloc", &[ValType::I64], &[ValType::I64]);
         let arity = plan.max_arity;
@@ -203,6 +221,7 @@ impl<'a> Lowerer<'a> {
             heap,
             abort,
             cps,
+            tail_mark,
             env,
             alloc,
             dispatch_ty,
@@ -215,6 +234,7 @@ impl<'a> Lowerer<'a> {
             eq_pending: vec![],
             helpers: BTreeMap::new(),
             strings: BTreeMap::new(),
+            copies: BTreeMap::new(),
             arity,
             instructions: 0,
             max_instructions,
@@ -599,6 +619,164 @@ impl<'a> Lowerer<'a> {
         Ok(slot)
     }
 
+    /// `$copy<ty>(v, mark, delta)`: deep-copy the blocks of `v` allocated
+    /// at or above `mark` into fresh heap memory, writing every copied
+    /// pointer (and returning the root) already moved down by `delta`.
+    /// Blocks below the mark (older data, static strings) are shared.
+    pub(crate) fn copy_fn(&mut self, ty: &Type) -> Result<u32, WasmError> {
+        let ty = crate::numeric::default_type(ty);
+        let key = ty.to_string();
+        if let Some(i) = self.copies.get(&key) {
+            return Ok(*i);
+        }
+        let idx = self.b.declare(
+            &format!("$copy<{key}>"),
+            &[ValType::I64; 3],
+            &[ValType::I64],
+        );
+        self.copies.insert(key, idx);
+        let (v, markl, delta, n, x) = (0u32, 1u32, 2u32, 3u32, 4u32);
+        let mut code = vec![
+            I::LocalGet(v),
+            I::LocalGet(markl),
+            I::I64LtU,
+            I::If(BlockType::Empty),
+            I::LocalGet(v),
+            I::Return,
+            I::End,
+        ];
+        let fields = |l: &mut Self,
+                      code: &mut Vec<I<'static>>,
+                      ts: &[Type],
+                      base: u64|
+         -> Result<(), WasmError> {
+            code.extend([
+                I::I64Const(8 * (ts.len() as i64 + base as i64 / 8)),
+                I::Call(l.alloc),
+                I::LocalSet(n),
+            ]);
+            if base > 0 {
+                code.extend([
+                    I::LocalGet(n),
+                    I::I32WrapI64,
+                    I::LocalGet(v),
+                    I::I32WrapI64,
+                    I::I64Load(mem(0)),
+                    I::I64Store(mem(0)),
+                ]);
+            }
+            for (i, t) in ts.iter().enumerate() {
+                let off = base + 8 * i as u64;
+                code.extend([
+                    I::LocalGet(v),
+                    I::I32WrapI64,
+                    I::I64Load(mem(off)),
+                    I::LocalSet(x),
+                ]);
+                if !matches!(layout::shape(l.world, t)?, Shape::Scalar(_)) {
+                    let f = l.copy_fn(t)?;
+                    code.extend([
+                        I::LocalGet(x),
+                        I::LocalGet(markl),
+                        I::LocalGet(delta),
+                        I::Call(f),
+                        I::LocalSet(x),
+                    ]);
+                }
+                code.extend([
+                    I::LocalGet(n),
+                    I::I32WrapI64,
+                    I::LocalGet(x),
+                    I::I64Store(mem(off)),
+                ]);
+            }
+            code.extend([I::LocalGet(n), I::LocalGet(delta), I::I64Sub, I::Return]);
+            Ok(())
+        };
+        match layout::shape(self.world, &ty)? {
+            Shape::Str => code.extend([
+                I::LocalGet(v),
+                I::I32WrapI64,
+                I::I64Load(mem(0)),
+                I::I64Const(8),
+                I::I64Add,
+                I::LocalTee(x),
+                I::Call(self.alloc),
+                I::LocalTee(n),
+                I::I32WrapI64,
+                I::LocalGet(v),
+                I::I32WrapI64,
+                I::LocalGet(x),
+                I::I32WrapI64,
+                I::MemoryCopy {
+                    src_mem: 0,
+                    dst_mem: 0,
+                },
+                I::LocalGet(n),
+                I::LocalGet(delta),
+                I::I64Sub,
+            ]),
+            Shape::Tuple(ts) => {
+                fields(self, &mut code, &ts, 0)?;
+                code.push(I::Unreachable);
+            }
+            Shape::Struct { fields: fs, .. } => {
+                let ts: Vec<Type> = fs.into_iter().map(|(_, t)| t).collect();
+                fields(self, &mut code, &ts, 0)?;
+                code.push(I::Unreachable);
+            }
+            Shape::Enum { variants } => {
+                for (vi, var) in variants.iter().enumerate() {
+                    code.extend([
+                        I::LocalGet(v),
+                        I::I32WrapI64,
+                        I::I64Load(mem(0)),
+                        I::I64Const(vi as i64),
+                        I::I64Eq,
+                        I::If(BlockType::Empty),
+                    ]);
+                    let ts: Vec<Type> = var.fields.iter().map(|(_, t)| t.clone()).collect();
+                    fields(self, &mut code, &ts, 8)?;
+                    code.push(I::End);
+                }
+                code.push(I::Unreachable);
+            }
+            _ => {
+                return Err(WasmError::Invalid(format!("cannot evacuate {ty}")));
+            }
+        }
+        code.push(I::End);
+        let mut f = Function::new([(2, ValType::I64)]);
+        for ins in &code {
+            f.instruction(ins);
+        }
+        self.b.define(idx, f);
+        Ok(idx)
+    }
+
+    /// Whether instance `key` may reset the heap at its tail calls: an
+    /// ordinary function whose effect row holds only `Fail` instances,
+    /// capability effects and host capabilities (none of which can keep a
+    /// pointer to a block it allocates), with no `inout` parameter.
+    pub(crate) fn reclaiming(&self, key: &str) -> bool {
+        if self.plan.roles.get(key) != Some(&Role::Ordinary) {
+            return false;
+        }
+        let Some(inst) = self.plan.instances.get(key) else {
+            return false;
+        };
+        let Some(f) = self.world.functions.get(&inst.base) else {
+            return false;
+        };
+        f.effects.tail.is_none()
+            && f.params.iter().all(|p| p.pass != Pass::Inout)
+            && f.effects.instances.iter().all(|e| {
+                e.name == "Fail"
+                    || crate::capability_effects::is_capability_effect(&e.name)
+                    || self.plan.host.iter().any(|c| c.effect() == e.name)
+            })
+    }
+
     /// The structural-equality helper for `ty`, generated on first use.
     pub(crate) fn eq_fn(&mut self, ty: &Type) -> Result<u32, WasmError> {
         let ty = crate::numeric::default_type(ty);
@@ -742,9 +920,11 @@ impl<'a> Lowerer<'a> {
         if let Some(i) = self.helpers.get(name) {
             return *i;
         }
-        let idx = self
-            .b
-            .declare(&format!("${name}"), &vec![ValType::I64; params], &[ValType::I64]);
+        let idx = self.b.declare(
+            &format!("${name}"),
+            &vec![ValType::I64; params],
+            &[ValType::I64],
+        );
         self.helpers.insert(name, idx);
         let code = body(self);
         let mut f = Function::new([(locals, ValType::I64)]);
@@ -1293,11 +1473,8 @@ impl<'a> Lowerer<'a> {
                         locals.push(ValType::I64);
                         nparams + locals.len() as u32 - 1
                     };
-                    let (r, rec, zero) = (
-                        fresh(&mut locals),
-                        fresh(&mut locals),
-                        fresh(&mut locals),
-                    );
+                    let (r, rec, zero) =
+                        (fresh(&mut locals), fresh(&mut locals), fresh(&mut locals));
                     self.save_env(&mut code, env_save);
                     self.restore_env_frame(&mut code, frame, i);
                     self.call_clause(
@@ -1661,6 +1838,8 @@ struct Emit<'l, 'a> {
     generics: BTreeSet<String>,
     /// Type arguments of this instance.
     vars: super::analysis::Vars,
+    /// The heap pointer at entry, for functions that reclaim at tail calls.
+    mark: Option<u32>,
 }
 
 impl<'l, 'a> Emit<'l, 'a> {
@@ -1697,6 +1876,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                 })
                 .unwrap_or_default(),
             vars,
+            mark: None,
             l,
         };
         let mut mode = None;
@@ -1758,6 +1938,23 @@ impl<'l, 'a> Emit<'l, 'a> {
             _ => {}
         }
         e.nparams = index;
+        if e.reclaiming() {
+            // A reclaiming tail caller hands over its own mark, so a loop
+            // keeps resetting to the mark of its first iteration.
+            let mark = e.local();
+            e.code.extend([
+                I::GlobalGet(e.l.tail_mark),
+                I::LocalTee(mark),
+                I::I64Eqz,
+                I::If(BlockType::Empty),
+                I::GlobalGet(e.l.heap),
+                I::LocalSet(mark),
+                I::End,
+                I::I64Const(0),
+                I::GlobalSet(e.l.tail_mark),
+            ]);
+            e.mark = Some(mark);
+        }
         if e.cps.is_some() {
             let once = e.local();
             e.cps.as_mut().expect("cps").once = once;
@@ -2035,8 +2232,7 @@ impl<'l, 'a> Emit<'l, 'a> {
             }
             let block = &f.blocks[bi];
             let tail_call = block.instructions.last().is_some_and(|last| {
-                self.tail_callable(last)
-                    && super::analysis::flows_to_return(f, bi, last.dest, 0)
+                self.tail_callable(last) && super::analysis::flows_to_return(f, bi, last.dest, 0)
             });
             let n = block.instructions.len();
             for (ii, inst) in block.instructions.iter().enumerate() {
@@ -2047,10 +2243,16 @@ impl<'l, 'a> Emit<'l, 'a> {
                     let key = self.callee_key(inst.dest)?;
                     let params = self.params_of(&key);
                     let (vals, _) = self.call_args(args, &params)?;
+                    self.reclaim_before_tail_call(&params, &vals)?;
                     for x in &vals {
                         self.get(*x);
                     }
-                    self.reclaim_before_tail_call(&key, &vals)?;
+                    if let Some(mark) = self.mark
+                        && self.l.reclaiming(&key)
+                    {
+                        self.code
+                            .extend([I::LocalGet(mark), I::GlobalSet(self.l.tail_mark)]);
+                    }
                     self.push(I::ReturnCall(self.l.funcs[&key]));
                     continue;
                 }
@@ -2105,8 +2307,89 @@ impl<'l, 'a> Emit<'l, 'a> {
     }
 
     /// Region reset before a tail call (see `reclaim`).
-    fn reclaim_before_tail_call(&mut self, _callee: &str, _args: &[u32]) -> Result<(), WasmError> {
+    ///
+    /// When this function is a *reclaiming* one (see `reclaiming`), every
+    /// heap block allocated since its entry (the `mark`) is unreachable
+    /// once it tail-calls, except through the call's arguments: nothing
+    /// else can hold a pointer to it (no `inout` cells, no handler state
+    /// outside, no captured cells). The arguments' new blocks are evacuated
+    /// (deep-copied with their pointers pre-relocated), moved down to the
+    /// mark and the heap is reset, so a tail-recursive loop runs in memory
+    /// bounded by its live arguments instead of by `max_memory_pages`.
+    fn reclaim_before_tail_call(
+        &mut self,
+        params: &[(Pass, Type)],
+        args: &[u32],
+    ) -> Result<(), WasmError> {
+        let Some(mark) = self.mark else {
+            return Ok(());
+        };
+        let mut copies = vec![];
+        for (i, a) in args.iter().enumerate() {
+            let Some((_, ty)) = params.get(i) else {
+                return Ok(());
+            };
+            match layout::shape(self.l.world, ty)? {
+                Shape::Scalar(_) => {}
+                Shape::Str | Shape::Tuple(_) | Shape::Struct { .. } | Shape::Enum { .. }
+                    if evacuable(self.l.world, ty, &mut BTreeSet::new()) =>
+                {
+                    copies.push((*a, self.l.copy_fn(ty)?));
+                }
+                _ => return Ok(()),
+            }
+        }
+        let (start, delta) = (self.local(), self.local());
+        let heap = self.l.heap;
+        self.code.extend([
+            I::GlobalGet(heap),
+            I::LocalGet(mark),
+            I::I64Ne,
+            I::If(BlockType::Empty),
+            I::GlobalGet(heap),
+            I::LocalTee(start),
+            I::LocalGet(mark),
+            I::I64Sub,
+            I::LocalSet(delta),
+        ]);
+        for (a, f) in copies {
+            self.code.extend([
+                I::LocalGet(a),
+                I::LocalGet(mark),
+                I::LocalGet(delta),
+                I::Call(f),
+                I::LocalSet(a),
+            ]);
+        }
+        self.code.extend([
+            // memmove [start, heap) -> mark; heap := mark + size.
+            I::LocalGet(mark),
+            I::I32WrapI64,
+            I::LocalGet(start),
+            I::I32WrapI64,
+            I::GlobalGet(heap),
+            I::LocalGet(start),
+            I::I64Sub,
+            I::I32WrapI64,
+            I::MemoryCopy {
+                src_mem: 0,
+                dst_mem: 0,
+            },
+            I::GlobalGet(heap),
+            I::LocalGet(delta),
+            I::I64Sub,
+            I::GlobalSet(heap),
+            I::End,
+        ]);
         Ok(())
+    }
+
+    /// Whether this function may reset the heap at its tail calls: an
+    /// ordinary function whose effect row holds only `Fail` instances,
+    /// capability effects and host capabilities (none of which can keep a
+    /// pointer to a block it allocates), with no `inout` parameter.
+    fn reclaiming(&self) -> bool {
+        self.l.reclaiming(&self.name)
     }
 
     /// The instance a direct call instruction targets.
@@ -2131,9 +2414,11 @@ impl<'l, 'a> Emit<'l, 'a> {
             && args.iter().all(|a| a.pass != Pass::Inout)
             && self.l.world.functions.get(callee).is_some_and(|w| {
                 w.params.iter().all(|p| p.pass != Pass::Inout)
-                    && !w.effects.instances.iter().any(|e| {
-                        e.label.as_ref().is_some_and(|l| !l.starts_with('$'))
-                    })
+                    && !w
+                        .effects
+                        .instances
+                        .iter()
+                        .any(|e| e.label.as_ref().is_some_and(|l| !l.starts_with('$')))
             })
     }
 
@@ -3056,8 +3341,12 @@ impl<'l, 'a> Emit<'l, 'a> {
                     // The operands are already reinterpreted as f64.
                     self.code.truncate(self.code.len() - 4);
                     let fmod = self.l.fmod();
-                    self.code
-                        .extend([I::LocalGet(x), I::LocalGet(y), I::Call(fmod), I::LocalSet(d)]);
+                    self.code.extend([
+                        I::LocalGet(x),
+                        I::LocalGet(y),
+                        I::Call(fmod),
+                        I::LocalSet(d),
+                    ]);
                     return Ok(d);
                 }
                 _ => return Err(self.err(Unsupported::Operation, format!("f64 '{op}'"))),
@@ -3511,6 +3800,24 @@ impl<'l, 'a> Emit<'l, 'a> {
         }
         self.abort_check();
         Ok(out)
+    }
+}
+
+/// Whether values of `ty` can be deep-copied by type: no function values
+/// or unresolved generic parts anywhere inside.
+fn evacuable(world: &World, ty: &Type, seen: &mut BTreeSet<String>) -> bool {
+    let ty = crate::numeric::default_type(ty);
+    if !seen.insert(ty.to_string()) {
+        return true;
+    }
+    match layout::shape(world, &ty) {
+        Ok(Shape::Scalar(_) | Shape::Str) => true,
+        Ok(Shape::Tuple(ts)) => ts.iter().all(|t| evacuable(world, t, seen)),
+        Ok(Shape::Struct { fields, .. }) => fields.iter().all(|(_, t)| evacuable(world, t, seen)),
+        Ok(Shape::Enum { variants }) => variants
+            .iter()
+            .all(|v| v.fields.iter().all(|(_, t)| evacuable(world, t, seen))),
+        _ => false,
     }
 }
 

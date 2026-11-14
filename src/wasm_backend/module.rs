@@ -3,9 +3,9 @@
 use std::{borrow::Cow, collections::BTreeMap};
 use wasm_encoder::{
     CodeSection, ConstExpr, ContType, DataSection, ElementSection, Elements, EntityType,
-    ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType,
-    ImportSection, MemoryType, Module, RefType, TableSection, TableType, TagKind, TagSection,
-    TagType, TypeSection, ValType,
+    ExportKind, ExportSection, Function, FunctionSection, GlobalSection, GlobalType, ImportSection,
+    MemoryType, Module, RefType, TableSection, TableType, TagKind, TagSection, TagType,
+    TypeSection, ValType,
 };
 
 /// First byte of static data (string literals); the heap follows it.

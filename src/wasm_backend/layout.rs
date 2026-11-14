@@ -8,9 +8,9 @@
 //! variant's fields after it. A `String` is a pointer to its byte length
 //! (one slot) followed by its UTF-8 bytes; literals live in static data. Aggregates are immutable values: a field write
 //! copies the block, so `let b = a; b.x = 1` leaves `a` unchanged.
-use super::{Unsupported, WasmError};
 #[allow(unused_imports)]
 use super::Unsupported as _;
+use super::{Unsupported, WasmError};
 use crate::{ast::*, check::World};
 use std::collections::BTreeMap;
 

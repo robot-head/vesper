@@ -76,7 +76,9 @@ impl HostCapability {
 /// served by the host.
 pub(crate) fn capabilities(world: &World, entry: &str) -> Result<Vec<HostCapability>, WasmError> {
     let Some(f) = world.functions.get(entry) else {
-        return Err(WasmError::Entry(format!("unknown entry function '{entry}'")));
+        return Err(WasmError::Entry(format!(
+            "unknown entry function '{entry}'"
+        )));
     };
     if f.effects.tail.is_some() {
         return Err(WasmError::Entry(
