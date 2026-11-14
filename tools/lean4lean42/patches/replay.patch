@@ -1,8 +1,8 @@
 diff --git a/Main.lean b/Main.lean
-index e23b981..0a57015 100644
+index e23b981..684952b 100644
 --- a/Main.lean
 +++ b/Main.lean
-@@ -2,365 +2,658 @@
+@@ -2,365 +2,661 @@
  Copyright (c) 2023 Scott Morrison. All rights reserved.
  Released under Apache 2.0 license as described in the file LICENSE.
  Authors: Scott Morrison
@@ -376,12 +376,15 @@ index e23b981..0a57015 100644
 +      for owner in quotientIds do
 +        let some e := entries[owner]? | coverageError "quotient ID missing"
 +        if e.form != 7 || e.moduleId != entry.moduleId then coverageError "quotient group form or origin"
++  if target == 3 then
++    for e in entries do
++      if modules[e.moduleId]!.name == targetName target && e.skip != 0 then
++        coverageError "resource projection contains skipped declarations"
 +  let mut required := if target == 3 then Array.mkEmpty targetEligibility[0]! else #[]
 +  if target == 3 then
 +    for i in [:entries.size] do
 +      let e := entries[i]!
 +      if modules[e.moduleId]!.name == targetName target then
-+        if e.skip != 0 then coverageError "resource projection contains skipped declarations"
 +        required := required.push i
 +  else
 +    let roots := if target == 2 then #[controlRoot]

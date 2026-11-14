@@ -151,12 +151,14 @@ retain the existing unrestricted typed wire codec.
 The final production patch additionally uses the required profile-2 greeting,
 makes control tag2 explicit, with unknown target names mapping to anonymous
 instead of falling back to the control module, and reserves resource root
-storage from the actual bounded target-eligible count. Argument parsing rejects all
+storage from the actual bounded target-eligible count. A bounded first scan
+rejects every owned skip before root allocation; a second scan fills the root
+array. Argument parsing rejects all
 unknown tags and invalid mode/tag pairs. Existing tags, old 33/37 roots and all
-94 control definitions are preserved. This final Main is **31,616 bytes**, BLAKE3
-`c81d811d36cbb7e0631e87c1cc9f596970a5b7abbad591e54035a837d414cd98`;
-final replay.patch is **47,413 bytes**, BLAKE3
-`56b5cefd037ce3c922ce73312060483c5f80de0b3b76698c9a964f3f74d149ba`.
+94 control definitions are preserved. This final Main is **31,718 bytes**, BLAKE3
+`2f74d36e685ed3dd8ae40d86bf8d1de22a9660cb588692042a0c364d101c63b4`;
+final replay.patch is **47,518 bytes**, BLAKE3
+`65d5f2c1bf164a3ed140dfe9660474f58d5a9cb32c68530c993f1963d21d6626`.
 The patch applies to the immutable upstream Main and reconstructs those exact
 production Main bytes. `git diff --check` passed.
 
