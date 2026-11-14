@@ -110,9 +110,15 @@ configuration checks pass, while hosted CI is reported separately.
 Separate Kinetic compatibility PR #434 subsequently merged as
 `085a7c9c1bd1aadcdba6ba63d1d3fe7917e7126d`. The coordinator imports that already
 merged change into the proof stack, retaining all proof/test/tool bytes.
-Its two runtime files must exactly match the composite patch used for the
-strict seven-target Clippy check above; no temporary patch remains. The
+Its two runtime files exactly match the composite patch used for the
+strict seven-target Clippy check above; no temporary patch remains. Final
+strict seven-target Clippy passes directly on the updated tree in 11.34
+seconds (11.650 seconds wall time), with no temporary source changes.
+Evidence: `/tmp/lean4lean-comparison42-final-clippy.log`. The
 seven genuine matrix results remain explicitly associated with executed
 revision `788a17a`, before that import. The Kinetic fixed-axis loop change
 has its own complete package and platform validation; it changes no proof,
-auditor, projector or model source.
+auditor, projector or model source. The original already-merged source
+branch was imported without unrelated later main changes. The exact
+post-import source association is retained in
+`/tmp/lean4lean449-merged-kinetic-import.json`.
