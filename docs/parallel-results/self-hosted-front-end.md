@@ -76,11 +76,14 @@ for the input.
 Differential test `tests/self_host_front_end.rs`:
 
 * `differential_over_repository_sources`: every `.ves` file under
-  `examples/`, `tests/fixtures/` and `packages/` (146 files, including the
-  compiler's own five sources) on the evaluator; every sixteenth file (10)
-  also on the Cranelift JIT, which must return the same results. Result:
-  **146/146 token streams identical** (kinds and spans, trivia and EOF
-  included), **78 CSTs identical**, 4 typed `Unsupported` (the trait/model
+  `examples/`, `tests/fixtures/` and `packages/` (170 files, including the
+  compiler's own five sources) on the evaluator; every sixteenth file (11)
+  also on the Cranelift JIT, which must return the same results. Files over
+  6 KB (the compiler's own `lexer`, `cursor`, `types_items` and
+  `expressions`) run on the JIT only, since the evaluator needs about 40 s
+  each in a debug build. Result:
+  **170/170 token streams identical** (kinds and spans, trivia and EOF
+  included), **102 CSTs identical**, 4 typed `Unsupported` (the trait/model
   examples), 64 seed-rejected inputs rejected (all macro-syntax fixtures:
   `source_macro*`, `macro_preview`, `stylus`, one `format_proof`, where the
   batch seed reports "expected a declaration"). Assertion floors: 100
@@ -96,7 +99,7 @@ Differential test `tests/self_host_front_end.rs`:
 Commands and results (cloud host, 4 cores, Rust 1.97; Clippy with 1.100):
 
 ```text
-cargo test --test self_host_front_end            2 passed, 85 s (debug)
+cargo test --test self_host_front_end            2 passed, 156 s (debug)
 cargo fmt --all -- --check                       ok
 cargo +1.100.0 clippy --locked --test self_host_front_end -- -D warnings   ok
 vesper fmt --check packages/vesper-compiler/src/*.ves                      unchanged
@@ -163,8 +166,9 @@ enum, effect rows, checked arithmetic) are what the seed checked.
   the result is a digest and a typed error with an offset.
 * The unsupported subset above, macros (`$`, `macro`), and the editor-only
   CST kinds (BLOCK, ERROR_NODE, INCOMPLETE).
-* Only every sixteenth source runs on the JIT, to keep the debug test under
-  two minutes; AOT executables are not used because native object output of
+* Only every sixteenth source and the four large ones run on the JIT, and
+  the large ones skip the evaluator; the Bazel target has the `long` timeout
+  in the root `BUILD.bazel` because the macOS runner exceeded 300 s; AOT executables are not used because native object output of
   source regions needs a region runtime library.
-* No unsafe code. No new dependencies; no root manifest or Bazel change (the
-  root package owns `packages/` and `tests/`).
+* No unsafe code. No new dependencies; no root manifest change; the only Bazel
+  change is that timeout (the root package owns `packages/` and `tests/`).

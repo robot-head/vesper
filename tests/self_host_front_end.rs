@@ -247,24 +247,35 @@ struct Tally {
     native: usize,
 }
 
-/// Compares one source on the evaluator, returning which way it went.
+/// Sources above this size run on the JIT only: the evaluator needs about
+/// 40 s (debug) for each of the front end's own 10 KB files, which put the
+/// test over Bazel's 300 s timeout on macOS.
+const EVALUATOR_MAX_BYTES: usize = 6 * 1024;
+
+/// Compares one source with the seed: on the evaluator (and also the JIT
+/// when `native`), or on the JIT alone when the source is large.
 fn compare(front_end: &str, name: &str, source: &str, native: bool, tally: &mut Tally) {
     let trace = std::env::var_os("SELF_HOST_TRACE").is_some();
     let started = std::time::Instant::now();
     let program = program(front_end, source.as_bytes());
     let checked = started.elapsed();
-    let lexed = evaluate(&program, "lex_main");
-    let parsed = evaluate(&program, "parse_main");
-    let evaluated = started.elapsed();
-    if native {
-        assert_eq!(jit(&program, "lex_main"), lexed, "{name}: JIT lexer");
-        assert_eq!(jit(&program, "parse_main"), parsed, "{name}: JIT parser");
+    let (lexed, parsed) = if source.len() > EVALUATOR_MAX_BYTES {
         tally.native += 1;
-    }
+        (jit(&program, "lex_main"), jit(&program, "parse_main"))
+    } else {
+        let lexed = evaluate(&program, "lex_main");
+        let parsed = evaluate(&program, "parse_main");
+        if native {
+            assert_eq!(jit(&program, "lex_main"), lexed, "{name}: JIT lexer");
+            assert_eq!(jit(&program, "parse_main"), parsed, "{name}: JIT parser");
+            tally.native += 1;
+        }
+        (lexed, parsed)
+    };
     if trace {
         eprintln!(
-            "{name}: check {checked:?}, evaluator {:?}, total {:?}",
-            evaluated - checked,
+            "{name}: check {checked:?}, run {:?}, total {:?}",
+            started.elapsed() - checked,
             started.elapsed()
         );
     }
@@ -308,7 +319,7 @@ fn compare(front_end: &str, name: &str, source: &str, native: bool, tally: &mut 
 
 /// Every repository source, the front end's own five files included (the
 /// compiler parses itself), on four worker threads; the JIT runs on every
-/// sixteenth source.
+/// sixteenth source and on every source above `EVALUATOR_MAX_BYTES`.
 #[test]
 fn differential_over_repository_sources() {
     let front_end = std::sync::Arc::new(read_front_end());
