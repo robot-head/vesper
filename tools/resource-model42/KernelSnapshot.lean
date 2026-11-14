@@ -254,6 +254,8 @@ def verifyEnvironment (expected : Std.HashMap Name ConstantInfo) (base actual : 
   unless count == expected.size do fail "logical inventory count mismatch"
 
 def snapshot (request : Request) : IO Json := do
+  let actualPrefix ← IO.FS.realPath (← getBuildDir)
+  unless actualPrefix == request.toolchainPrefix do fail "toolchain prefix does not match running Lean"
   let library ← IO.FS.realPath (request.toolchainPrefix / "lib" / "lean")
   if within library request.root || within request.root library ||
       within request.root request.outputRoot || within request.outputRoot request.root ||
@@ -288,6 +290,8 @@ def snapshot (request : Request) : IO Json := do
   let mut owners : Std.HashMap Name Name := {}
   for name in original.header.moduleNames, data in original.header.moduleData do
     if packages.contains name then
+      unless data.constNames == data.constants.map ConstantInfo.name do
+        fail "original redundant constant-name inventory mismatch"
       for info in data.constants do
         checkConstantName info.name
         if base.contains info.name then fail s!"package shadows trusted declaration: {info.name}"
@@ -344,6 +348,9 @@ def snapshot (request : Request) : IO Json := do
     unless name == request.outputModule && path == (← IO.FS.realPath output) do
       fail "projection imports unexpected package artifact"
     unless data.entries.isEmpty && data.extraConstNames.isEmpty do fail "projection contains extensions or IR metadata"
+    unless data.constNames == data.constants.map ConstantInfo.name do
+      fail "projection redundant constant-name inventory mismatch"
+    unless data.imports.map Import.module == trustedNames do fail "projection import inventory changed"
     unless data.constants.size == retained.size do fail "projection raw constant count mismatch"
     for info in data.constants do
       let some expected := retained[info.name]? | fail "projection contains unexpected constant"
