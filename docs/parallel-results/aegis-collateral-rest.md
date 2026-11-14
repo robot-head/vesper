@@ -72,8 +72,8 @@ binding (`cca_vesper_claims`, `verify_tdx_quote`) rejects it with
   without an instance ID, a Processor CA certificate with instance
   entries, duplicated or unknown configuration entries, and other
   issuers are typed errors.
-- Anti-rollback: `TdxCollateralFloor` (minimum
-  `tcbEvaluationDataNumber`, TCB info and QE identity `issueDate`),
+- Anti-rollback: `TdxCollateralFloor` (minimum `tcbEvaluationDataNumber`
+  and `issueDate`, tracked separately for TCB info and QE identity),
   `raised_by` (componentwise maximum; never lowers) and
   `check_tdx_collateral_floor`. Real test: the `dcap-qvl` 0.3.4 quote and
   collateral (FMSPC `B0C06F000000`, number 17) verify on their own and are

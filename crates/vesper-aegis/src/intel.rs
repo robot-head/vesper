@@ -1015,9 +1015,12 @@ fn evaluate_tdx_tcb_svn(
 /// until its `nextUpdate`, which is exactly what a rollback replays).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TdxCollateralFloor {
-    /// Lowest acceptable `tcbEvaluationDataNumber` (TCB info and QE
-    /// identity).
-    pub min_tcb_evaluation_data_number: u32,
+    /// Lowest acceptable TCB info `tcbEvaluationDataNumber`.
+    pub min_tcb_info_evaluation_data_number: u32,
+    /// Lowest acceptable QE identity `tcbEvaluationDataNumber`. Kept apart
+    /// from the TCB info number: the two documents are fetched separately
+    /// and may carry different numbers without either moving backwards.
+    pub min_qe_identity_evaluation_data_number: u32,
     /// Lowest acceptable TCB info `issueDate` (Unix seconds).
     pub min_tcb_info_issue_date: u64,
     /// Lowest acceptable QE identity `issueDate` (Unix seconds).
@@ -1029,9 +1032,11 @@ impl TdxCollateralFloor {
     /// `self` and its collateral, so the floor never moves down.
     pub fn raised_by(&self, verified: &VerifiedTdxQuote) -> TdxCollateralFloor {
         TdxCollateralFloor {
-            min_tcb_evaluation_data_number: self
-                .min_tcb_evaluation_data_number
-                .max(verified.tcb_info.tcb_evaluation_data_number)
+            min_tcb_info_evaluation_data_number: self
+                .min_tcb_info_evaluation_data_number
+                .max(verified.tcb_info.tcb_evaluation_data_number),
+            min_qe_identity_evaluation_data_number: self
+                .min_qe_identity_evaluation_data_number
                 .max(verified.qe_identity.tcb_evaluation_data_number),
             min_tcb_info_issue_date: self
                 .min_tcb_info_issue_date
@@ -1053,12 +1058,12 @@ pub fn check_tdx_collateral_floor(
         (
             "TCB info tcbEvaluationDataNumber",
             u64::from(verified.tcb_info.tcb_evaluation_data_number),
-            u64::from(floor.min_tcb_evaluation_data_number),
+            u64::from(floor.min_tcb_info_evaluation_data_number),
         ),
         (
             "QE identity tcbEvaluationDataNumber",
             u64::from(verified.qe_identity.tcb_evaluation_data_number),
-            u64::from(floor.min_tcb_evaluation_data_number),
+            u64::from(floor.min_qe_identity_evaluation_data_number),
         ),
         (
             "TCB info issueDate",

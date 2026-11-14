@@ -597,8 +597,27 @@ fn intel_collateral_rollback_is_a_typed_error() {
     assert_eq!(old_v.evaluation.fmspc, new_v.evaluation.fmspc);
 
     let floor = TdxCollateralFloor::default().raised_by(&new_v);
-    assert_eq!(floor.min_tcb_evaluation_data_number, 20);
+    assert_eq!(floor.min_tcb_info_evaluation_data_number, 20);
     check_tdx_collateral_floor(&new_v, &floor).unwrap();
+    // TCB info and QE identity keep separate high-water marks: collateral
+    // whose two documents carry different numbers (20 and 19) still passes
+    // the floor it raised.
+    let mut mixed = new_v.clone();
+    mixed.qe_identity.tcb_evaluation_data_number = 19;
+    let mixed_floor = TdxCollateralFloor::default().raised_by(&mixed);
+    assert_eq!(mixed_floor.min_tcb_info_evaluation_data_number, 20);
+    assert_eq!(mixed_floor.min_qe_identity_evaluation_data_number, 19);
+    check_tdx_collateral_floor(&mixed, &mixed_floor).unwrap();
+    let mut qe_rollback = mixed.clone();
+    qe_rollback.qe_identity.tcb_evaluation_data_number = 18;
+    assert!(matches!(
+        check_tdx_collateral_floor(&qe_rollback, &mixed_floor),
+        Err(AttestError::CollateralDowngrade {
+            what: "QE identity tcbEvaluationDataNumber",
+            have: 18,
+            floor: 19
+        })
+    ));
     assert!(matches!(
         check_tdx_collateral_floor(&old_v, &floor),
         Err(AttestError::CollateralDowngrade {

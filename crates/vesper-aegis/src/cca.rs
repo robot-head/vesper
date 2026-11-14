@@ -125,6 +125,33 @@ fn measurement_len_ok(len: usize, algo: RegisterHash) -> bool {
     len == algo.len() || len == CCA_MAX_MEASUREMENT_LEN
 }
 
+/// The digest of a measurement: a 64-byte encoding of a shorter digest
+/// whose padding is all zero is cut to the digest length, so both
+/// encodings of one RIM normalize alike. Other values are returned whole.
+fn unpadded_measurement(m: &[u8], algo: RegisterHash) -> &[u8] {
+    let n = algo.len();
+    if m.len() == CCA_MAX_MEASUREMENT_LEN && n < m.len() && m[n..].iter().all(|&b| b == 0) {
+        &m[..n]
+    } else {
+        m
+    }
+}
+
+/// Compare a reported measurement with an expected digest. A register in
+/// the 64-byte encoding matches when it is the digest followed by zero
+/// padding; any nonzero padding byte is a mismatch.
+fn measurement_eq(reported: &[u8], expected: &[u8]) -> bool {
+    if reported.len() == expected.len() {
+        return ct_eq(reported, expected);
+    }
+    if reported.len() != CCA_MAX_MEASUREMENT_LEN || expected.len() > reported.len() {
+        return false;
+    }
+    let (digest, padding) = reported.split_at(expected.len());
+    let zeros = vec![0u8; padding.len()];
+    ct_eq(digest, expected) & ct_eq(padding, &zeros)
+}
+
 /// The platform token profile (claim 265).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CcaPlatformProfile {
@@ -680,13 +707,13 @@ pub fn cca_vesper_claims(
             what: "realm challenge does not match runtime claims",
         });
     }
-    if !ct_eq(
+    if !measurement_eq(
         &rc.extensible_measurements[2],
         &single_extend(rc.hash_algo, 64, &runtime.loom_lock_blake3),
     ) {
         return Err(AttestError::RegisterReplayMismatch { register: "REM[2]" });
     }
-    if !ct_eq(
+    if !measurement_eq(
         &rc.extensible_measurements[3],
         &single_extend(rc.hash_algo, 64, &runtime.olean_spec_mif),
     ) {
@@ -701,7 +728,10 @@ pub fn cca_vesper_claims(
         TeeArch::ArmCcaRealm,
         0,
         flags,
-        cca_rim_measurement(rc.hash_algo, &rc.initial_measurement),
+        cca_rim_measurement(
+            rc.hash_algo,
+            unpadded_measurement(&rc.initial_measurement, rc.hash_algo),
+        ),
         runtime,
         SupplyChainEvidence::RegisterReplay,
     ))
