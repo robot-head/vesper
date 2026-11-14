@@ -177,6 +177,8 @@ agreement, 100000-program resource campaign or self-hosting is claimed.
 
 - Syntax: NEW lean/ResourceModel42/Syntax.lean and syntax report.
 - Checker: NEW lean/ResourceModel42/Checker.lean and checker report.
+- Checker proof assistance: NEW lean/ResourceModel42/CheckerProofs.lean and
+  checker report; imports Checker, never the reverse.
 - Evaluator: NEW lean/ResourceModel42/Evaluator.lean and evaluator report.
 - Ledger proof assistance: NEW lean/ResourceModel42/LedgerProofs.lean and
   ledger report; imports Evaluator, never the reverse.
