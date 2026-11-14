@@ -181,6 +181,12 @@ The workspace-wide `cargo test --workspace --locked` and Clippy run, and
   differences between the two are which pass computes a value and where it
   is stored. Reassociating rules are tested against tolerances and proved
   only over `Rat`.
+- Composed gains collapse to one multiplier only when the product stays in
+  the normal FP32 range (or is an exact zero); otherwise the stages stay
+  separate inside the same loop, and a gain whose fold into `b0..b2` would
+  leave the range is applied before the cascade. A merged send whose summed
+  gain overflows is `Error::Unsupported`. Cloned graphs get a fresh owner
+  tag, so handles never cross between copies.
 - `dsp::Biquad` keeps public fields for inspection, but every graph entry
   point re-validates it.
 
