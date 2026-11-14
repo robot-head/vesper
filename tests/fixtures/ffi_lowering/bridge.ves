@@ -1,0 +1,188 @@
+// Vesper side of the Bridge lowering test: every call below is a native
+// call of the C library declared in bridge.vsys, gated by eff [Ffi[Bridge]].
+fn scalars() -> u64 eff [Ffi[Bridge]] {
+    Bridge::bridge_report32(1, Bridge::bridge_sum(40, 2));
+    Bridge::bridge_report_signed(2, Bridge::bridge_negative());
+    Bridge::bridge_report32(3, Bridge::bridge_wide());
+    Bridge::bridge_report_signed(4, Bridge::bridge_small());
+    // Two calls of a counter are two calls, never one.
+    let a = Bridge::bridge_tick();
+    let b = Bridge::bridge_tick();
+    wrapping_add(wrapping_mul(a, 10), b)
+}
+
+fn validity() -> u64 eff [Ffi[Bridge]] {
+    let a: u64 = match Bridge::bridge_bool(false) {
+        Ok(b) => if b {
+            10
+        } else {
+            20
+        },
+        Err(e) => wrapping_add(e.raw, 100),
+    };
+    let b: u64 = match Bridge::bridge_bool(true) {
+        Ok(_) => 1000,
+        Err(e) => wrapping_add(e.raw, 200),
+    };
+    let c: u64 = match Bridge::bridge_state(7) {
+        Ok(s) => match s {
+            Ready => 1,
+            Busy => 2,
+        },
+        Err(_) => 0,
+    };
+    let d: u64 = match Bridge::bridge_state(3) {
+        Ok(_) => 50,
+        Err(e) => wrapping_mul(e.raw, 10),
+    };
+    let f: u64 = match Bridge::bridge_next(State::Ready) {
+        Ok(s) => match s {
+            Ready => 100,
+            Busy => 200,
+        },
+        Err(_) => 300,
+    };
+    let g: u64 = match Bridge::bridge_next(State::Busy) {
+        Ok(_) => 1,
+        Err(e) => wrapping_mul(e.raw, 1000),
+    };
+    Bridge::bridge_report(10, a);
+    Bridge::bridge_report(11, b);
+    Bridge::bridge_report(12, c);
+    Bridge::bridge_report(13, d);
+    Bridge::bridge_report(14, f);
+    Bridge::bridge_report(15, g);
+    wrapping_add(wrapping_add(wrapping_add(a, b), wrapping_add(c, d)), wrapping_add(f, g))
+}
+
+fn slices() -> u64 eff [Ffi[Bridge]] {
+    let src: (u8, u8, u8, u8) = (1, 2, 3, 4);
+    let dst: (u8, u8, u8) = (0, 0, 0);
+    let n = Bridge::bridge_copy(in src, inout dst);
+    let (x, y, z) = dst;
+    Bridge::bridge_report8(20, x);
+    Bridge::bridge_report8(21, y);
+    Bridge::bridge_report8(22, z);
+    let crc: u32 = 7;
+    Bridge::bridge_crc_update(inout crc, in src);
+    Bridge::bridge_report32(23, crc);
+    let one: (u8, u8) = (9, 9);
+    Bridge::bridge_crc_update(inout crc, in one);
+    Bridge::bridge_report32(24, crc);
+    n
+}
+
+fn structs() -> u64 eff [Ffi[Bridge]] {
+    let pair = Pair {
+        lo: 0,
+        hi: 0
+    };
+    let ok = Bridge::bridge_split(77309411333, inout pair);
+    Bridge::bridge_report32(30, pair.lo);
+    Bridge::bridge_report32(31, pair.hi);
+    Bridge::bridge_report_signed(32, ok);
+    let h = Hdr {
+        magic: 16909060,
+        version: 5,
+        tag: (1, 2, 3),
+        length: 1000
+    };
+    Bridge::bridge_report(33, Bridge::bridge_hdr_sum(in h));
+    Bridge::bridge_hdr_bump(inout h);
+    Bridge::bridge_report32(34, h.magic);
+    Bridge::bridge_report8(35, h.version);
+    let (t0, t1, t2) = h.tag;
+    Bridge::bridge_report8(36, t0);
+    Bridge::bridge_report8(37, t2);
+    Bridge::bridge_report(38, h.length);
+    Bridge::bridge_hdr_sum(in h)
+}
+
+fn records() -> u64 eff [Ffi[Bridge]] {
+    let recs = (
+        Rec {
+            id: 2,
+            value: 10
+        },
+        Rec {
+            id: 3,
+            value: -4
+        },
+        Rec {
+            id: 5,
+            value: 1
+        }
+    );
+    Bridge::bridge_report_signed(40, Bridge::bridge_rec_total(in recs));
+    Bridge::bridge_rec_scale(inout recs, 3);
+    let (r0, r1, r2) = recs;
+    Bridge::bridge_report_signed(41, r0.value);
+    Bridge::bridge_report_signed(42, r1.value);
+    Bridge::bridge_report_signed(43, r2.value);
+    let single = (
+        Rec {
+            id: 7,
+            value: 6
+        },
+        Rec {
+            id: 1,
+            value: 0
+        }
+    );
+    Bridge::bridge_report_signed(44, Bridge::bridge_rec_total(in single));
+    0
+}
+
+fn nullable() -> u64 eff [Ffi[Bridge]] {
+    let some: Option[(u8, u8, u8)] = Some((1, 2, 3));
+    let none: Option[(u8, u8, u8)] = None;
+    Bridge::bridge_report32(50, Bridge::bridge_opt_len(in some));
+    Bridge::bridge_report32(51, Bridge::bridge_opt_len(in none));
+    let p: Option[u32] = Some(41);
+    let q: Option[u32] = None;
+    Bridge::bridge_report32(52, Bridge::bridge_opt_get(in p));
+    Bridge::bridge_report32(53, Bridge::bridge_opt_get(in q));
+    Bridge::bridge_opt_bump(inout p);
+    Bridge::bridge_opt_bump(inout q);
+    let after: u32 = match p {
+        Some(v) => v,
+        None => 0,
+    };
+    Bridge::bridge_report32(54, after);
+    let gone: u64 = match q {
+        Some(_) => 1,
+        None => 2,
+    };
+    Bridge::bridge_report(55, gone);
+    0
+}
+
+// Recursion through a foreign-capability function compiles once (not inlined).
+fn countdown(n: u64) -> u64 eff [Ffi[Bridge]] {
+    if n == 0 {
+        0
+    } else {
+        Bridge::bridge_report(60, n);
+        countdown(wrapping_sub(n, 1))
+    }
+}
+
+fn bridge_main(scenario: u64) -> u64 eff [Ffi[Bridge]] {
+    if scenario == 1 {
+        scalars()
+    } else if scenario == 2 {
+        validity()
+    } else if scenario == 3 {
+        slices()
+    } else if scenario == 4 {
+        structs()
+    } else if scenario == 5 {
+        records()
+    } else if scenario == 6 {
+        nullable()
+    } else if scenario == 7 {
+        countdown(3)
+    } else {
+        Bridge::bridge_tick()
+    }
+}

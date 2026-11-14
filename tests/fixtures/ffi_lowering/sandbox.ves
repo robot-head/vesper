@@ -1,0 +1,12 @@
+// Calls through the isolated(mpk) handler tier the package grants Sandbox.
+fn sandbox_main(scenario: u64, address: u64) -> u64 eff [Ffi[Sandbox]] {
+    if scenario == 1 {
+        // A stray write into host memory tagged with the package's key.
+        Sandbox::sandbox_poke(address, 99);
+        1
+    } else {
+        // Shared-arena arguments (the Vesper stack) stay accessible.
+        let values: (u64, u64, u64) = (1, 2, 3);
+        wrapping_add(Sandbox::sandbox_add(40, 2), Sandbox::sandbox_sum(in values))
+    }
+}
