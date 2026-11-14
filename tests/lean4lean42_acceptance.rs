@@ -1,4 +1,4 @@
-//! Genuine two-model external replay plus independently authored refusal cases.
+//! Genuine three-model external replay plus independently authored refusal cases.
 //! Synthetic protocol fixtures and transport markers are never replay evidence.
 #[path = "../src/bin/lean4lean42/mod.rs"]
 pub mod driver;
@@ -14,7 +14,7 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     sync::{
         Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -145,57 +145,51 @@ impl Captured {
             .unwrap_or_else(|error| panic!("{error}\n{}", self.text()))
     }
 }
-fn drain(mut pipe: impl Read, overflow: &AtomicBool) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0; 8192];
-    loop {
-        let count = pipe.read(&mut buffer).expect("bounded capture read");
-        if count == 0 {
-            return bytes;
-        }
-        let room = CAPTURE.saturating_sub(bytes.len());
-        bytes.extend_from_slice(&buffer[..count.min(room)]);
-        if count > room {
-            overflow.store(true, Ordering::Relaxed);
-        }
-    }
-}
 fn execute(command: &mut Command, seconds: u64) -> Captured {
     let started = Instant::now();
+    let capture = Directory::new();
+    let stdout_path = capture.0.join("stdout");
+    let stderr_path = capture.0.join("stderr");
+    // Regular files avoid an unbounded pipe-reader join if a descendant keeps
+    // inherited descriptors after the direct CLI child is killed. This is not
+    // descendant-process cancellation evidence; production probes test cleanup.
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(File::create(&stdout_path).unwrap()))
+        .stderr(Stdio::from(File::create(&stderr_path).unwrap()))
         .spawn()
         .unwrap_or_else(|error| panic!("required subprocess {command:?}: {error}"));
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let overflow = AtomicBool::new(false);
-    let (status, stdout, stderr, refused) = thread::scope(|scope| {
-        let out = scope.spawn(|| drain(stdout, &overflow));
-        let err = scope.spawn(|| drain(stderr, &overflow));
-        let mut refused = false;
-        let status = loop {
-            if overflow.load(Ordering::Relaxed) || started.elapsed() > Duration::from_secs(seconds)
-            {
-                refused = true;
-                let _ = child.kill();
-                break child.wait().unwrap();
-            }
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        (status, out.join().unwrap(), err.join().unwrap(), refused)
-    });
+    let mut refused = false;
+    let status = loop {
+        let overflow = [&stdout_path, &stderr_path]
+            .iter()
+            .any(|path| fs::metadata(path).unwrap().len() > CAPTURE as u64);
+        if overflow || started.elapsed() > Duration::from_secs(seconds) {
+            refused = true;
+            let _ = child.kill();
+            break child.wait().unwrap();
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let read = |path: &Path| {
+        let mut bytes = Vec::new();
+        File::open(path)
+            .unwrap()
+            .take((CAPTURE + 1) as u64)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    };
     let output = Captured {
         status,
-        stdout,
-        stderr,
+        stdout: read(&stdout_path),
+        stderr: read(&stderr_path),
     };
     assert!(
-        !refused && !overflow.load(Ordering::Relaxed),
+        !refused && output.stdout.len() <= CAPTURE && output.stderr.len() <= CAPTURE,
         "subprocess deadline/output cap: {command:?}\n{}",
         output.text()
     );
@@ -317,7 +311,7 @@ fn genuine_positive(
     );
     assert!(output.status.success(), "{}", output.text());
     let report = output.json();
-    assert_eq!(report["schema"], 1);
+    assert_eq!(report["schema"], 2);
     assert_eq!(report["status"], "complete");
     assert_eq!(report["scope"], "eligible_fresh_closure");
     assert_eq!(report["axiom_audit"], "not_run");
@@ -327,7 +321,7 @@ fn genuine_positive(
     }
     assert!(report["process_spawns"].as_u64().unwrap() >= 7);
     let tools = &report["tools"];
-    assert_eq!(tools["profile"], "vesper.lean4lean42/1");
+    assert_eq!(tools["profile"], "vesper.lean4lean42/2");
     assert_eq!(tools["lean_release"], receipt["lean_release"]);
     assert_eq!(receipt["lean_release"], "leanprover/lean4:v4.24.0");
     assert_eq!(
@@ -345,6 +339,7 @@ fn genuine_positive(
         "build_output_manifest_blake3",
         "control_inventory_blake3",
         "control_import_manifest_blake3",
+        "resource_bundle_blake3",
     ] {
         assert_eq!(
             tools[field], receipt[field],
@@ -359,16 +354,24 @@ fn genuine_positive(
         digest(&tools["known_fixes_blake3"]),
         *blake3::hash(include_bytes!("../tools/lean4lean42/known-fixes.json")).as_bytes()
     );
+    assert_eq!(
+        digest(&tools["resource_bundle_blake3"]),
+        *blake3::hash(include_bytes!(
+            "../tools/lean4lean42/resource-source-manifest.json"
+        ))
+        .as_bytes()
+    );
     validate_controls(&report, expected);
     let targets = report["targets"].as_array().unwrap();
-    assert_eq!(targets.len(), 2);
+    assert_eq!(targets.len(), 3);
     for (index, target) in targets.iter().enumerate() {
         assert_eq!(
             target["target"],
-            if index == 0 {
-                "rewrite_witness"
-            } else {
-                "arithmetic_oracle"
+            match index {
+                0 => "rewrite_witness",
+                1 => "arithmetic_oracle",
+                2 => "resource_model42_kernel_snapshot",
+                _ => unreachable!(),
             }
         );
         assert_eq!(target["status"], "complete");
@@ -403,7 +406,27 @@ fn genuine_positive(
             let count = coverage[field].as_u64().unwrap();
             assert!(count > 0 && count <= forms[form].as_u64().unwrap());
         }
-        assert_eq!(coverage["required_roots"], if index == 0 { 33 } else { 37 });
+        match index {
+            0 => assert_eq!(coverage["required_roots"], 33),
+            1 => assert_eq!(coverage["required_roots"], 37),
+            2 => {
+                assert_eq!(
+                    coverage["required_roots"],
+                    inventory["target_eligibility"][0]
+                );
+                assert!(
+                    skips
+                        .iter()
+                        .skip(1)
+                        .any(|count| count.as_u64().unwrap() > 0)
+                );
+                assert_eq!(
+                    inventory["target_eligibility"],
+                    json!([inventory["target_eligibility"][0], 0, 0, 0])
+                );
+            }
+            _ => unreachable!(),
+        }
         assert_eq!(
             coverage["required_roots_covered"],
             coverage["required_roots"]
@@ -422,16 +445,42 @@ fn genuine_positive(
         ] {
             assert_ne!(digest(&target[field]), [0; 32]);
         }
-        let source = if index == 0 {
-            include_bytes!("../lean/RewriteWitness.lean").as_slice()
+        if index < 2 {
+            assert!(target["resource"].is_null());
+            let source = if index == 0 {
+                include_bytes!("../lean/RewriteWitness.lean").as_slice()
+            } else {
+                include_bytes!("../lean/ArithmeticOracle.lean").as_slice()
+            };
+            assert_eq!(target["source"]["bytes"], source.len());
+            assert_eq!(
+                digest(&target["source"]["blake3"]),
+                *blake3::hash(source).as_bytes()
+            );
         } else {
-            include_bytes!("../lean/ArithmeticOracle.lean").as_slice()
-        };
-        assert_eq!(target["source"]["bytes"], source.len());
-        assert_eq!(
-            digest(&target["source"]["blake3"]),
-            *blake3::hash(source).as_bytes()
-        );
+            let resource = &target["resource"];
+            assert_eq!(resource["schema"], 1);
+            assert_eq!(resource["scope"], "kernel_logical_projection");
+            assert_eq!(resource["module"], "ResourceModel42Kernel");
+            assert_eq!(
+                resource["resource_bundle_blake3"],
+                tools["resource_bundle_blake3"]
+            );
+            assert_eq!(
+                resource["output_constants"],
+                inventory["target_eligibility"][0]
+            );
+            assert_eq!(
+                resource["output_constants"].as_u64().unwrap(),
+                resource["retained_constants"].as_u64().unwrap()
+                    + resource["proof_aliases"].as_u64().unwrap()
+            );
+            assert!(resource["omitted_constants"].as_u64().unwrap() > 0);
+            assert!(resource["proof_aliases"].as_u64().unwrap() > 0);
+            for field in ["source_manifest_blake3", "original_manifest_blake3"] {
+                assert_ne!(digest(&resource[field]), [0; 32]);
+            }
+        }
     }
     assert_eq!(hash_file(&root.join("setup-receipt.json")), before);
     assert_eq!(
@@ -454,8 +503,20 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
         .collect();
     assert_eq!(roots.len(), 1, "one unique artifact directory");
     let root = roots[0].canonicalize().unwrap();
+    let parent = parent.canonicalize().unwrap();
+    let publication = root
+        .strip_prefix(&parent)
+        .expect("publication remains inside its requested parent");
+    assert_eq!(publication.components().count(), 1);
+    let published_path = |relative: &str| {
+        publication
+            .join(relative)
+            .to_str()
+            .expect("published UTF-8 path")
+            .replace('\\', "/")
+    };
     let files = report["artifacts"].as_array().unwrap();
-    assert!(files.len() <= 16);
+    assert!(files.len() <= Limits::default().artifact_files);
     for file in files {
         let relative = Path::new(file["path"].as_str().unwrap());
         assert!(
@@ -482,6 +543,65 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
         );
         assert_eq!(hash_file(&path), digest(&file["blake3"]));
     }
+    let association = &report["targets"][2]["resource"];
+    let bundle: Value = serde_json::from_slice(include_bytes!(
+        "../tools/lean4lean42/resource-source-manifest.json"
+    ))
+    .unwrap();
+    assert_eq!(bundle["schema"], 1);
+    assert_eq!(
+        bundle["domain"],
+        "vesper.lean4lean42.resource-source-bundle/1"
+    );
+    for source in bundle["files"].as_array().unwrap() {
+        let source_path = source["path"].as_str().unwrap();
+        let retained = if let Some(relative) = source_path.strip_prefix("lean/") {
+            format!("resource/sources/{relative}")
+        } else if source_path == "tools/resource-model42/KernelSnapshot.lean" {
+            "resource/projector/KernelSnapshot.lean".to_owned()
+        } else {
+            assert_eq!(
+                source_path,
+                "docs/rfcs/resource-model42-source-manifest.json"
+            );
+            "resource/historical-source-manifest.json".to_owned()
+        };
+        let observed = files
+            .iter()
+            .find(|file| file["path"] == published_path(&retained))
+            .expect("every frozen resource source remains retained and hashed");
+        assert_eq!(observed["bytes"], source["bytes"]);
+        assert_eq!(observed["blake3"], source["blake3"]);
+    }
+    for field in ["snapshot_tool", "request", "producer_report", "projection"] {
+        let association_file = &association[field];
+        let relative = association_file["path"].as_str().unwrap();
+        let matches = files
+            .iter()
+            .filter(|file| file["path"] == published_path(relative))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            matches.len(),
+            1,
+            "actual retained resource association {field}"
+        );
+        assert_eq!(matches[0]["bytes"], association_file["bytes"]);
+        assert_eq!(matches[0]["blake3"], association_file["blake3"]);
+    }
+    assert_eq!(
+        digest(&association["snapshot_tool"]["blake3"]),
+        *blake3::hash(include_bytes!(
+            "../tools/resource-model42/KernelSnapshot.lean"
+        ))
+        .as_bytes()
+    );
+    assert_eq!(
+        digest(&association["source_manifest_blake3"]),
+        *blake3::hash(include_bytes!(
+            "../docs/rfcs/resource-model42-source-manifest.json"
+        ))
+        .as_bytes()
+    );
 }
 
 fn transport_faults(binary: &Path) {
@@ -610,7 +730,7 @@ fn refresh_header(frames: &mut [Value]) {
     frames[0][6] = json!(bytes);
 }
 fn hello(mode: u8, target: u8) -> Value {
-    json!([1, 0, TOKEN, mode, target, "4.24.0", "vesper.lean4lean42/1"])
+    json!([1, 0, TOKEN, mode, target, "4.24.0", "vesper.lean4lean42/2"])
 }
 fn terminal(mode: u8, target: u8, counters: [u64; 14]) -> Value {
     let mut values = vec![json!(1), json!(9), json!(TOKEN), json!(mode), json!(target)];
@@ -664,10 +784,40 @@ impl NegativeInventory {
                 ]));
             }
         }
-        let namespace = if target == 0 {
-            "RewriteWitness"
-        } else {
-            "ArithmeticOracle"
+        if target == 3 {
+            for root in [
+                "validate",
+                "checkProgram",
+                "validateInvocation",
+                "evalSteps",
+            ] {
+                constants.push(json!([
+                    1,
+                    3,
+                    constants.len(),
+                    name(&["Vesper", "ResourceModel42", root]),
+                    0,
+                    1,
+                    0,
+                    []
+                ]));
+            }
+            constants.push(json!([
+                1,
+                3,
+                constants.len(),
+                name(&["ResourceKernelProofAliases", "realization_0"]),
+                0,
+                2,
+                0,
+                []
+            ]));
+        }
+        let namespace = match target {
+            0 => "RewriteWitness",
+            1 => "ArithmeticOracle",
+            3 => "ResourceModel42",
+            _ => unreachable!(),
         };
         let inductive = constants.len() as u32;
         constants.push(json!([
@@ -737,10 +887,11 @@ impl NegativeInventory {
             1,
             []
         ]));
-        let modules = if target == 0 {
-            vec!["RewriteWitness", "Init"]
-        } else {
-            vec!["ArithmeticOracle", "RewriteWitness", "Init"]
+        let modules = match target {
+            0 => vec!["RewriteWitness", "Init"],
+            1 => vec!["ArithmeticOracle", "RewriteWitness", "Init"],
+            3 => vec!["ResourceModel42Kernel", "RewriteWitness", "Init"],
+            _ => unreachable!(),
         };
         let mut forms = [0u64; 8];
         let mut eligibility = [0u64; 4];
@@ -842,7 +993,7 @@ fn rejected(machine: Machine<'_>, error: Error) {
 }
 
 fn coverage_refusals(limits: &Limits) {
-    for target in [0, 1] {
+    for target in [0, 1, 3] {
         let fixture = NegativeInventory::build(target, limits);
         for which in 0..12 {
             let mut machine = fixture.replay(limits, which != 8);
@@ -909,6 +1060,9 @@ fn coverage_refusals(limits: &Limits) {
                 (0, Some(&fixture.inventory)),
                 (1, Some(&fixture.inventory)),
             ] {
+                if target == 3 && mode == 0 && expected.is_none() && which <= 3 {
+                    continue;
+                }
                 let mut machine = Machine::new(mode, target, TOKEN, limits, &[], expected).unwrap();
                 feed(&mut machine, &hello(mode, target)).unwrap();
                 let error = frames
@@ -918,6 +1072,48 @@ fn coverage_refusals(limits: &Limits) {
                 rejected(machine, error);
             }
         }
+    }
+}
+
+fn resource_route_and_skip_refusals(limits: &Limits, controls: &[ExpectedControl]) {
+    for mode in 0..=4 {
+        for target in 0..=4 {
+            let permitted = matches!((mode, target), (0, 0..=3) | (1, 0 | 1 | 3) | (2 | 3, 2));
+            if !permitted {
+                let error = Machine::new(mode, target, TOKEN, limits, controls, None)
+                    .err()
+                    .expect("unsupported route cannot fall back to control target");
+                assert_eq!(error.kind, ErrorKind::Protocol);
+            }
+        }
+    }
+    for (mode, target) in [(0, 3), (1, 3), (3, 2)] {
+        let fixture = NegativeInventory::build(3, limits);
+        let expected = (mode == 1).then_some(&fixture.inventory);
+        let mut machine = Machine::new(mode, target, TOKEN, limits, controls, expected).unwrap();
+        let mut old = hello(mode, target);
+        old[6] = json!("vesper.lean4lean42/1");
+        let error = feed(&mut machine, &old).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        rejected(machine, error);
+    }
+    let fixture = NegativeInventory::build(3, limits);
+    for skip in [1, 2, 3] {
+        let mut frames = fixture.frames.clone();
+        let owned = frames
+            .iter()
+            .position(|frame| frame[1] == 3 && frame[4] == 0 && frame[5] == 1)
+            .unwrap();
+        frames[owned][6] = json!(skip);
+        refresh_header(&mut frames);
+        let mut machine = Machine::new(0, 3, TOKEN, limits, controls, None).unwrap();
+        feed(&mut machine, &hello(0, 3)).unwrap();
+        let error = frames
+            .iter()
+            .find_map(|frame| feed(&mut machine, frame).err())
+            .expect("projected package skip cannot pass native inventory");
+        assert_eq!(error.kind, ErrorKind::Coverage);
+        rejected(machine, error);
     }
 }
 
@@ -955,17 +1151,17 @@ fn control_and_shape_refusals(limits: &Limits, expected: &[ExpectedControl]) {
         rejected(machine, error);
     }
     for payload in [
-        br#"[2,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[2,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000001",3,2,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[1,0,"00000000000000000000000000000001",3,2,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3.0,2,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[1,0,"00000000000000000000000000000000",3.0,2,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3e0,2,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[1,0,"00000000000000000000000000000000",3e0,2,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3,true,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[1,0,"00000000000000000000000000000000",3,true,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/1",0]"#
+        br#"[1,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/2",0]"#
             .as_slice(),
         b"{}".as_slice(),
         b"[".as_slice(),
@@ -1196,7 +1392,7 @@ fn binding_refusals(root: &Path, receipt: &Value) {
         no_replay(&failure);
         fs::remove_file(path).unwrap();
     }
-    for which in 0..4 {
+    for which in 0..6 {
         let mut altered = receipt.clone();
         match which {
             0 => altered["unrecognized_acceptance_field"] = json!(true),
@@ -1213,6 +1409,11 @@ fn binding_refusals(root: &Path, receipt: &Value) {
                 altered["build_output_manifest_blake3"][0] =
                     json!(altered["build_output_manifest_blake3"][0].as_u64().unwrap() ^ 1)
             }
+            4 => {
+                altered["resource_bundle_blake3"][0] =
+                    json!(altered["resource_bundle_blake3"][0].as_u64().unwrap() ^ 1)
+            }
+            5 => altered["schema"] = json!(1),
             _ => unreachable!(),
         }
         replace_json(&copy.0.join("setup-receipt.json"), &altered);
@@ -1240,6 +1441,257 @@ fn binding_refusals(root: &Path, receipt: &Value) {
     );
 }
 
+fn resource_binding_and_inventory_refusals(root: &Path, receipt: &Value, positive: &Value) {
+    use driver::protocol::Component;
+    let config = configuration(root, receipt);
+    let prepared = driver::artifact::prepare_resource(&config).expect(
+        "genuine fixed source compilation and projection, never a caller-created descriptor",
+    );
+    prepared.revalidate(&config.limits).unwrap();
+    let association = serde_json::to_value(prepared.association()).unwrap();
+    assert_eq!(
+        association["resource_bundle_blake3"],
+        receipt["resource_bundle_blake3"]
+    );
+    assert_eq!(
+        association["projection"]["blake3"],
+        positive["targets"][2]["resource"]["projection"]["blake3"]
+    );
+    let inventory = driver::artifact::resource_inventory(&config, &prepared)
+        .expect("actual production native-inventory route on the newly prepared projection");
+    prepared.validate_inventory(&inventory).unwrap();
+    let owned_module = inventory
+        .modules
+        .iter()
+        .find(|module| module.name.is(&["ResourceModel42Kernel"]))
+        .expect("actual projected module")
+        .id;
+    let aliases = prepared.aliases();
+    let catalog = prepared.catalog();
+    assert!(!aliases.is_empty());
+    assert_eq!(
+        catalog.len(),
+        284,
+        "fixed source theorem catalog includes all 78 semantic assertions"
+    );
+    let alias_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant.name.resource_display().ok().as_deref() == Some(aliases[0].as_str())
+        })
+        .expect("real separately preserved alternate proof");
+    let api_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant
+                    .name
+                    .is(&["Vesper", "ResourceModel42", "evalSteps"])
+        })
+        .expect("actual evaluator API definition");
+    let ordinary_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant.form == 1
+                && !constant
+                    .name
+                    .is(&["Vesper", "ResourceModel42", "evalSteps"])
+        })
+        .expect("ordinary retained declaration, beyond requested theorem roots");
+    let number_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant
+                    .name
+                    .components
+                    .iter()
+                    .any(|component| matches!(component, Component::Number(_)))
+        })
+        .expect("actual private/generated name with numeric component");
+    let module_index = inventory
+        .modules
+        .iter()
+        .position(|module| module.id == owned_module)
+        .unwrap();
+    let producer_bytes = fs::read(prepared.report_path()).unwrap();
+    assert!(producer_bytes.len() <= 16 * 1024 * 1024);
+    let producer: Value = serde_json::from_slice(&producer_bytes).unwrap();
+    let omission_parent = producer["omitted"][0]["parent"].as_str().unwrap();
+    let parent_index = inventory
+        .constants
+        .iter()
+        .position(|constant| {
+            constant.module_id == owned_module
+                && constant.name.resource_display().ok().as_deref() == Some(omission_parent)
+        })
+        .expect("actual retained definition justifying an implementation-helper omission");
+    for which in 0..10 {
+        let mut changed = inventory.clone();
+        match which {
+            0 => changed.constants[alias_index]
+                .name
+                .components
+                .push(Component::String("AcceptanceMissingAlias".into())),
+            1 => changed.constants[ordinary_index]
+                .name
+                .components
+                .push(Component::String("AcceptanceUnexpectedDeclaration".into())),
+            2 => changed.constants[alias_index].form = 1,
+            3 => changed.constants[api_index].form = 2,
+            4 => changed.constants[alias_index].skip = 1,
+            5 => {
+                changed.constants[ordinary_index].name = changed.constants[alias_index].name.clone()
+            }
+            6 => changed.modules[module_index].path.push_str(".substituted"),
+            7 => changed.target = 0,
+            8 => {
+                changed.constants[alias_index].module_id = inventory
+                    .modules
+                    .iter()
+                    .find(|module| module.id != owned_module)
+                    .unwrap()
+                    .id
+            }
+            9 => changed.constants[parent_index].form = 0,
+            _ => unreachable!(),
+        }
+        let error = prepared
+            .validate_inventory(&changed)
+            .expect_err("actual descriptor rejects altered native association");
+        assert_eq!(
+            error.kind,
+            ErrorKind::ToolIdentity,
+            "mutation {which}: {error}"
+        );
+        assert!(!error.detail.is_empty());
+    }
+    for unsupported in ["0", "a.b", "_@bad", "λ"] {
+        let mut changed = inventory.clone();
+        changed.constants[ordinary_index]
+            .name
+            .components
+            .push(Component::String(unsupported.into()));
+        let error = prepared.validate_inventory(&changed).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Coverage);
+        assert_eq!(error.detail, "unsupported resource-owned name component");
+    }
+    let mut number_as_string = inventory.clone();
+    let component = number_as_string.constants[number_index]
+        .name
+        .components
+        .iter_mut()
+        .find(|component| matches!(component, Component::Number(_)))
+        .unwrap();
+    let Component::Number(number) = component else {
+        unreachable!()
+    };
+    *component = Component::String(number.to_string());
+    let error = prepared.validate_inventory(&number_as_string).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::Coverage);
+    assert_eq!(error.detail, "unsupported resource-owned name component");
+    // All mutations above operate on actual observed carrier metadata. They
+    // are refusal evidence; none produces a successful external replay report.
+    prepared.validate_inventory(&inventory).unwrap();
+
+    for path in [
+        prepared.source_path(),
+        prepared.projection_path(),
+        prepared.request_path(),
+        prepared.report_path(),
+        prepared.root().join("originals/MetatheoryFull.olean"),
+        prepared.root().join("projector/KernelSnapshot.lean"),
+    ] {
+        let backup = Directory::new();
+        let original = backup.0.join("actual-bound-bytes");
+        fs::copy(&path, &original).unwrap();
+        replace_from(&original, &path, b"\n");
+        let error = prepared
+            .revalidate(&config.limits)
+            .expect_err("changed source/object/request/report cannot remain bound");
+        assert_eq!(error.kind, ErrorKind::ToolIdentity);
+        replace_from(&original, &path, &[]);
+        prepared.revalidate(&config.limits).unwrap();
+    }
+    let report_path = prepared.report_path();
+    let bytes = fs::read(&report_path).unwrap();
+    assert!(bytes.len() <= 16 * 1024 * 1024);
+    let original: Value = serde_json::from_slice(&bytes).unwrap();
+    for which in 0..3 {
+        let mut altered = original.clone();
+        match which {
+            0 => {
+                altered["proof_aliases"][0]["name"] =
+                    json!("ResourceKernelProofAliases.substituted")
+            }
+            1 => altered["omitted"][0]["parent"] = json!("AcceptanceUnrelatedParent"),
+            2 => altered["occurrences"][0]["module"] = json!("AcceptanceWrongOrigin"),
+            _ => unreachable!(),
+        }
+        replace_json(&report_path, &altered);
+        let error = prepared
+            .revalidate(&config.limits)
+            .expect_err("well-shaped changed producer mappings cannot be rebound");
+        assert_eq!(error.kind, ErrorKind::ToolIdentity);
+        let backup = Directory::new();
+        let file = backup.0.join("producer-report.json");
+        fs::write(&file, &bytes).unwrap();
+        replace_from(&file, &report_path, &[]);
+    }
+    for path in [
+        prepared.projection_path(),
+        prepared.root().join("originals/MetatheoryFull.olean"),
+    ] {
+        let backup = Directory::new();
+        let file = backup.0.join("actual-object");
+        fs::copy(&path, &file).unwrap();
+        fs::remove_file(&path).unwrap();
+        let error = prepared
+            .revalidate(&config.limits)
+            .expect_err("missing bound original/projection cannot remain accepted");
+        assert_eq!(error.kind, ErrorKind::ToolIdentity);
+        replace_from(&file, &path, &[]);
+    }
+    let sidecar = prepared.projection_path().with_extension("olean.private");
+    fs::write(&sidecar, b"unbound projected sidecar").unwrap();
+    let error = prepared
+        .revalidate(&config.limits)
+        .expect_err("unbound sidecar cannot hide behind base-object confinement");
+    assert_eq!(error.kind, ErrorKind::ToolIdentity);
+    fs::remove_file(sidecar).unwrap();
+    prepared.revalidate(&config.limits).unwrap();
+    prepared.validate_inventory(&inventory).unwrap();
+    for limits in [
+        Limits {
+            artifact_files: 1,
+            ..config.limits.clone()
+        },
+        Limits {
+            artifact_bytes: 1,
+            ..config.limits.clone()
+        },
+    ] {
+        let error = prepared
+            .revalidate(&limits)
+            .expect_err("actual prepared envelope must honor smaller configured caps");
+        assert_eq!(error.kind, ErrorKind::OutputLimit);
+        assert!(!error.detail.is_empty());
+    }
+    let mut small_inventory = config.clone();
+    small_inventory.limits.declarations = 1;
+    let error = driver::artifact::resource_inventory(&small_inventory, &prepared)
+        .expect_err("real native header above configured declaration cap cannot allocate or pass");
+    assert_eq!(error.kind, ErrorKind::OutputLimit);
+    assert!(!error.detail.is_empty());
+    prepared.revalidate(&config.limits).unwrap();
+}
+
 #[test]
 // Platform-neutral Lean replay; CI runs it on Linux only (docs/ci-platforms.md),
 // and macOS skips it in BUILD.bazel. `cargo test -- --ignored` still runs it.
@@ -1247,7 +1699,7 @@ fn binding_refusals(root: &Path, receipt: &Value) {
     windows,
     ignore = "long platform-neutral Lean replay; runs on Linux CI (docs/ci-platforms.md)"
 )]
-fn genuine_both_model_replay_and_independent_refusal_matrix() {
+fn genuine_three_model_replay_and_independent_refusal_matrix() {
     let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
     let started = Instant::now();
     let root=std::env::var_os("VESPER_LEAN4LEAN42_ROOT").map(PathBuf::from)
@@ -1265,9 +1717,11 @@ fn genuine_both_model_replay_and_independent_refusal_matrix() {
     let limits = Limits::default();
     transport_faults(&executable);
     coverage_refusals(&limits);
+    resource_route_and_skip_refusals(&limits, &expected);
     control_and_shape_refusals(&limits, &expected);
     preflight_refusals(&executable, &root, &receipt);
-    genuine_positive(&executable, &root, &receipt, &expected);
+    let positive = genuine_positive(&executable, &root, &receipt, &expected);
+    resource_binding_and_inventory_refusals(&root, &receipt, &positive);
     binding_refusals(&root, &receipt);
     eprintln!(
         "lean4lean42 complete serial acceptance wall time {:.2}s",
