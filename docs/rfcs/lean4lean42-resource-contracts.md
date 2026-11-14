@@ -19,7 +19,7 @@ suite alone does not establish support for the broader Lean import closure.
 - #398 acceptance lane: `tests/lean4lean42_acceptance.rs`,
   `src/bin/lean4lean42/fault_peer.rs`, and its new resource acceptance report.
 - Coordinator: this contract, new integration evidence, and
-  `tools/lean4lean42/{pins.json,source-manifest.json,setup.py,README.md}`.
+  `tools/lean4lean42/{pins.json,source-manifest.json,resource-source-manifest.json,setup.py,README.md}`.
   A CLI dispatcher adjustment, if actually required, is limited to
   `src/bin/lean4lean42.rs` under #395.
 
@@ -30,7 +30,7 @@ worktrees; Cargo requires the coordinator's exclusive lease.
 
 ## Version and routes
 
-Use profile `vesper.lean4lean42/2` and report schema 2, with three fixed model
+Use profile `vesper.lean4lean42/2` and report/pins/receipt schema 2, with three fixed model
 reports. Retain RewriteWitness tag 0 and ArithmeticOracle tag 1. Add
 `ResourceModel42KernelSnapshot` tag 3, whose actual module is
 `ResourceModel42Kernel`. Modes 0/1 permit the three model tags; mode 0 also
@@ -57,6 +57,15 @@ derivation. Runtime BLAKE3 source/artifact associations have their own explicit
 domain and field labels. Keep detailed bounded records as retained sidecars
 with report digests instead of replacing them with unbound counts.
 
+The coordinator-owned `resource-source-manifest.json` has schema 1, domain
+`vesper.lean4lean42.resource-source-bundle/1`, `source_commit`,
+`specification_sha256`, and sorted `files: Vec<FileDigest>` covering those
+twelve sources, the projector source and historical #323 source-manifest bytes.
+Its BLAKE3 byte digest is `resource_bundle_blake3` in Pins, Receipt and ToolInfo.
+Source setup preflight, sealing and offline execution must verify this embedded
+bundle against actual embedded bytes. Profile/version changes do not alter the
+wire, known-fixes, upstream source-manifest or setup-input schema 1 layouts.
+
 Validate all producer module, canonical, omission, duplicate, occurrence and
 alternate-proof mappings, including partition equations. The projected owned
 declaration set must equal every retained canonical name plus every actual
@@ -68,6 +77,13 @@ Use an immutable prepared-resource descriptor with a private constructor and
 read-only association access. Expose production revalidation for real file and
 binding mutations, so acceptance can exercise refusals without repeating the
 complete multi-minute replay for every mutation.
+
+`PreparedResource::validate_inventory` owns the exact source catalog, APIs,
+canonical/alias name association and form checks. The orchestration must call
+it immediately after native inventory and before external replay. Protocol
+validation independently enforces zero owned skips, all-owned required IDs,
+native-to-replay equality and full coverage. A standalone Machine transcript
+does not establish the complete artifact pipeline's success.
 
 ## Exact names, roots and coverage
 
