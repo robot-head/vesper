@@ -83,9 +83,12 @@
 //! See `docs/parallel-results/strata-regions.md` for the proposed lowering
 //! contract.
 mod backing;
+mod capability;
 mod error;
 mod region;
 mod slab;
+mod tiled;
+mod virtual_arena;
 
 pub use backing::{ChunkBacking, SystemBacking};
 pub use error::{
@@ -95,9 +98,9 @@ pub use error::{
 pub use region::{
     ArenaError, ArenaId, ArenaInsertError, ArenaKey, CHUNK_ALIGN, FLAT_GROUP_WIDTH, FlatConfig,
     FlatError, FlatInsertError, FlatIter, HARD_MAX_ARENA_ENTRY_BYTES, HARD_MAX_FLAT_GROUP_BYTES,
-    HARD_MAX_FLAT_GROUPS, HARD_MAX_TILE_BYTES, Region, RegionBox, RegionBytes, RegionConfig,
-    RegionFlatTable, RegionId, RegionSlice, RegionSlotArena, RegionStats, RegionStr, RegionString,
-    RegionTiled2, RegionVec, TiledError, Watermark,
+    HARD_MAX_FLAT_GROUPS, HARD_MAX_TILE_BYTES, RefPairError, Region, RegionBox, RegionBytes,
+    RegionConfig, RegionFlatTable, RegionId, RegionRef, RegionSlice, RegionSlotArena, RegionStats,
+    RegionStr, RegionString, RegionTiled2, RegionVec, TiledError, Watermark,
 };
 
 /// Version of the proposed Alloc/Region lowering contract described in
@@ -112,7 +115,18 @@ pub const REGION_LOWERING_CONTRACT_VERSION: u32 = 0;
 /// consumed by the compiler.
 pub const REGION_ACCESS_CONTRACT_VERSION: u32 = 1;
 
+pub use capability::{Alloc, RawBlock};
 pub use slab::{
-    SLAB_BYTES, SLAB_SIZE_CLASSES, ShardSlab, SlabBlock, SlabCloseError, SlabConfig, SlabError,
-    SlabId, SlabKey, SlabOwnerError, SlabStats,
+    MAX_SHARDS, REMOTE_FREE_BATCH, SLAB_BYTES, SLAB_SIZE_CLASSES, Shard, ShardBlock, ShardSlab,
+    ShardedCloseError, ShardedSlab, ShardedSlabConfig, ShardedSlabId, ShardedSlabStats, SlabBlock,
+    SlabCloseError, SlabConfig, SlabError, SlabId, SlabKey, SlabOwnerError, SlabStats,
+    dropped_shard_blocks,
+};
+pub use tiled::{
+    Col, HotColumns, TileMut, TileRef, Tiled, TiledConfig, TiledPushError, TiledRecord,
+    TiledSeqError,
+};
+pub use virtual_arena::{
+    VIRTUAL_PAGE, VirtualArena, VirtualArenaConfig, VirtualArenaError, VirtualArenaStats,
+    VirtualBackingKind, VirtualBytes, VirtualMark, VirtualPushError, VirtualVec,
 };

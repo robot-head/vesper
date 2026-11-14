@@ -17,6 +17,8 @@ pub mod replay;
 pub mod ring;
 pub mod simpulse;
 pub mod timeline;
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+pub mod tracked_arena;
 pub mod wire;
 
 pub use arena::{ArenaCheckpoint, ArenaDelta, ArenaError, ShardArena};
@@ -48,10 +50,11 @@ pub enum Unavailable {
     /// decoders (`ipt`, `ipt_flow`, `ete`) and the gated `capture` module
     /// exist; no hardware trace has been captured or decoded.
     HardwareBranchTrace,
-    /// Kernel-trapped write tracking for VirtualArena shard checkpoints
-    /// (§31.1 item 2): userfaultfd write-protect, `mprotect` fault tracking,
-    /// Mach `vm_copy` and Windows `MEM_RESET` / write watches. `arena`
-    /// tracks writes at its API instead; see [`arena::probe_write_tracking`].
+    /// The kernel write-tracking mechanisms not used (§31.1 item 2):
+    /// userfaultfd write-protect and Mach `vm_copy`. `tracked_arena` tracks
+    /// raw-pointer writes with `mprotect` faults (Linux, macOS) and write
+    /// watches (Windows); `arena::ShardArena` still tracks at its API. See
+    /// [`arena::probe_write_tracking`].
     KernelWriteTracking,
     /// `vesper replay` CLI and Lens DAP surfaces (integration B, #136).
     ReplayCli,
@@ -72,7 +75,7 @@ impl Unavailable {
                 "Intel PT / CoreSight decoding is tested only on independently encoded streams; capture needs an intel_pt, cs_etm or arm_spe PMU, which the development and CI hosts lack"
             }
             Self::KernelWriteTracking => {
-                "byte-image activation checkpoints are implemented for fixed-address fibers; VirtualArena shard checkpoints are copy-on-write at shard granularity with writes tracked by the arena API, because kernel write trapping (userfaultfd, mprotect + SIGSEGV, vm_copy, write watches) needs unsafe code this crate may not contain"
+                "TrackedArena checkpoints see raw-pointer writes through mprotect faults (Linux, macOS) or write watches (Windows), implemented in vesper-fiber-abi's write_watch module; userfaultfd write-protect (needs CAP_SYS_PTRACE or unprivileged_userfaultfd) and Mach vm_copy snapshots are not used, and the copy-on-write ShardArena still tracks writes at its API"
             }
             Self::ReplayCli => "the vesper replay CLI is integration B (#136)",
             Self::EvidenceVectorInterposition => {

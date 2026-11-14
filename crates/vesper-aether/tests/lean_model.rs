@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
-const THEOREMS: [&str; 21] = [
+const THEOREMS: [&str; 25] = [
     "checked_interval_sound",
     "checked_endpoint_exact",
     "separated_no_common_address",
@@ -27,6 +27,10 @@ const THEOREMS: [&str; 21] = [
     "chunks_cover",
     "advance_in_range",
     "advance_wraps_iff",
+    "needEvent_iff_window",
+    "needEvent_empty_window",
+    "closeBatches_cover",
+    "closeBatches_skipped_full",
 ];
 
 fn root() -> PathBuf {

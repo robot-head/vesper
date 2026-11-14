@@ -1,0 +1,5 @@
+// expect: E0200
+// widen_u64 zero-extends unsigned integers only.
+fn main() -> u64 {
+    widen_u64(true)
+}

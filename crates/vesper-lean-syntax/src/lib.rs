@@ -363,12 +363,344 @@ impl Term {
     }
 }
 
+/// Free names of a definition: names its binder types and body mention that
+/// are not bound by its parameters or by a binder, pattern, `let` or `do`
+/// binding in scope. A bound name shadows only single, unrooted components.
+impl Term {
+    pub fn free_references(parameters: &[Binder], body: &Term) -> std::collections::BTreeSet<Name> {
+        let mut out = std::collections::BTreeSet::new();
+        let mut scope = vec![];
+        for b in parameters {
+            b.ty.free(&mut scope, &mut out);
+            scope.extend(b.name.clone());
+        }
+        body.free(&mut scope, &mut out);
+        out
+    }
+    fn free(&self, scope: &mut Vec<Ident>, out: &mut std::collections::BTreeSet<Name>) {
+        fn bound(p: &Pattern, scope: &mut Vec<Ident>) {
+            match p {
+                Pattern::Bind(i) => scope.push(i.clone()),
+                Pattern::Constructor { arguments, .. } | Pattern::Tuple(arguments) => {
+                    for a in arguments {
+                        bound(a, scope);
+                    }
+                }
+                Pattern::Record { fields } => {
+                    for (_, a) in fields {
+                        bound(a, scope);
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn statements(
+            ss: &[DoStatement],
+            result: Option<&Term>,
+            scope: &mut Vec<Ident>,
+            out: &mut std::collections::BTreeSet<Name>,
+        ) {
+            let depth = scope.len();
+            for s in ss {
+                match s {
+                    DoStatement::Let { binding, .. } => {
+                        if let Some(t) = &binding.ty {
+                            t.free(scope, out);
+                        }
+                        binding.value.free(scope, out);
+                        bound(&binding.pattern, scope);
+                    }
+                    DoStatement::Bind { pattern, action } => {
+                        action.free(scope, out);
+                        bound(pattern, scope);
+                    }
+                    DoStatement::BindTyped {
+                        pattern,
+                        ty,
+                        action,
+                    } => {
+                        ty.free(scope, out);
+                        action.free(scope, out);
+                        bound(pattern, scope);
+                    }
+                    DoStatement::Assign { value, .. } => value.free(scope, out),
+                    DoStatement::Expr(t) => t.free(scope, out),
+                    DoStatement::LetInstance { name, ty, value } => {
+                        ty.free(scope, out);
+                        value.free(scope, out);
+                        scope.extend(name.clone());
+                    }
+                    DoStatement::If { condition, yes, no } => {
+                        condition.free(scope, out);
+                        statements(yes, None, scope, out);
+                        if let Some(no) = no {
+                            statements(no, None, scope, out);
+                        }
+                    }
+                    DoStatement::Match { scrutinee, arms } => {
+                        scrutinee.free(scope, out);
+                        for (p, body) in arms {
+                            let depth = scope.len();
+                            bound(p, scope);
+                            statements(body, None, scope, out);
+                            scope.truncate(depth);
+                        }
+                    }
+                }
+            }
+            if let Some(r) = result {
+                r.free(scope, out);
+            }
+            scope.truncate(depth);
+        }
+        match self {
+            Term::Ref(n) => {
+                let local =
+                    matches!(n.components(), [single] if !n.rooted && scope.contains(single));
+                if !local {
+                    out.insert(n.clone());
+                }
+            }
+            Term::Lambda { binders, body } | Term::Forall { binders, body } => {
+                let depth = scope.len();
+                for b in binders {
+                    b.ty.free(scope, out);
+                    scope.extend(b.name.clone());
+                }
+                body.free(scope, out);
+                scope.truncate(depth);
+            }
+            Term::Let { binding, body } => {
+                if let Some(t) = &binding.ty {
+                    t.free(scope, out);
+                }
+                binding.value.free(scope, out);
+                let depth = scope.len();
+                bound(&binding.pattern, scope);
+                body.free(scope, out);
+                scope.truncate(depth);
+            }
+            Term::Match { scrutinee, arms } => {
+                scrutinee.free(scope, out);
+                for arm in arms {
+                    let depth = scope.len();
+                    bound(&arm.pattern, scope);
+                    arm.body.free(scope, out);
+                    scope.truncate(depth);
+                }
+            }
+            Term::Do {
+                statements: ss,
+                result,
+            } => statements(ss, Some(result), scope, out),
+            Term::App {
+                function,
+                arguments,
+            } => {
+                function.free(scope, out);
+                for a in arguments {
+                    match a {
+                        Argument::Positional(t) | Argument::Named { value: t, .. } => {
+                            t.free(scope, out)
+                        }
+                    }
+                }
+            }
+            Term::Arrow(a, b) => {
+                a.free(scope, out);
+                b.free(scope, out);
+            }
+            Term::ProductType(ts) | Term::Tuple(ts) | Term::List(ts) => {
+                for t in ts {
+                    t.free(scope, out);
+                }
+            }
+            Term::If { condition, yes, no } => {
+                condition.free(scope, out);
+                yes.free(scope, out);
+                no.free(scope, out);
+            }
+            Term::Project { base, .. } => base.free(scope, out),
+            Term::Ascribe { value, ty } => {
+                value.free(scope, out);
+                ty.free(scope, out);
+            }
+            Term::Unary { value, .. } | Term::Eliminate { value } => value.free(scope, out),
+            Term::Binary { left, right, .. } => {
+                left.free(scope, out);
+                right.free(scope, out);
+            }
+            Term::Record { fields } => {
+                for (_, t) in fields {
+                    t.free(scope, out);
+                }
+            }
+            Term::Update { base, fields } => {
+                base.free(scope, out);
+                for (_, t) in fields {
+                    t.free(scope, out);
+                }
+            }
+            Term::Infer
+            | Term::Sort(_)
+            | Term::Nat(_)
+            | Term::Bool(_)
+            | Term::String(_)
+            | Term::Char(_)
+            | Term::Rfl
+            | Term::ByDecide => {}
+        }
+    }
+}
+
+/// Every name a term mentions, in any position (heads, arguments, binder
+/// types, patterns' constructor names excluded). Local binders are not
+/// removed, so callers compare against names they know to be global.
+impl Term {
+    pub fn references(&self) -> std::collections::BTreeSet<Name> {
+        let mut out = std::collections::BTreeSet::new();
+        self.collect_references(&mut out);
+        out
+    }
+    fn collect_references(&self, out: &mut std::collections::BTreeSet<Name>) {
+        fn binders(bs: &[Binder], out: &mut std::collections::BTreeSet<Name>) {
+            for b in bs {
+                b.ty.collect_references(out);
+            }
+        }
+        fn statements(ss: &[DoStatement], out: &mut std::collections::BTreeSet<Name>) {
+            for s in ss {
+                match s {
+                    DoStatement::Let { binding, .. } => {
+                        if let Some(t) = &binding.ty {
+                            t.collect_references(out);
+                        }
+                        binding.value.collect_references(out);
+                    }
+                    DoStatement::Bind { action, .. } => action.collect_references(out),
+                    DoStatement::Assign { value, .. } => value.collect_references(out),
+                    DoStatement::Expr(t) => t.collect_references(out),
+                    DoStatement::BindTyped { ty, action, .. } => {
+                        ty.collect_references(out);
+                        action.collect_references(out);
+                    }
+                    DoStatement::LetInstance { ty, value, .. } => {
+                        ty.collect_references(out);
+                        value.collect_references(out);
+                    }
+                    DoStatement::If { condition, yes, no } => {
+                        condition.collect_references(out);
+                        statements(yes, out);
+                        if let Some(no) = no {
+                            statements(no, out);
+                        }
+                    }
+                    DoStatement::Match { scrutinee, arms } => {
+                        scrutinee.collect_references(out);
+                        for (_, body) in arms {
+                            statements(body, out);
+                        }
+                    }
+                }
+            }
+        }
+        match self {
+            Term::Infer
+            | Term::Sort(_)
+            | Term::Nat(_)
+            | Term::Bool(_)
+            | Term::String(_)
+            | Term::Char(_)
+            | Term::Rfl
+            | Term::ByDecide => {}
+            Term::Ref(n) => {
+                out.insert(n.clone());
+            }
+            Term::App {
+                function,
+                arguments,
+            } => {
+                function.collect_references(out);
+                for a in arguments {
+                    match a {
+                        Argument::Positional(t) | Argument::Named { value: t, .. } => {
+                            t.collect_references(out)
+                        }
+                    }
+                }
+            }
+            Term::Lambda { binders: bs, body } | Term::Forall { binders: bs, body } => {
+                binders(bs, out);
+                body.collect_references(out);
+            }
+            Term::Arrow(a, b) => {
+                a.collect_references(out);
+                b.collect_references(out);
+            }
+            Term::ProductType(ts) | Term::Tuple(ts) | Term::List(ts) => {
+                for t in ts {
+                    t.collect_references(out);
+                }
+            }
+            Term::Let { binding, body } => {
+                if let Some(t) = &binding.ty {
+                    t.collect_references(out);
+                }
+                binding.value.collect_references(out);
+                body.collect_references(out);
+            }
+            Term::If { condition, yes, no } => {
+                condition.collect_references(out);
+                yes.collect_references(out);
+                no.collect_references(out);
+            }
+            Term::Match { scrutinee, arms } => {
+                scrutinee.collect_references(out);
+                for arm in arms {
+                    arm.body.collect_references(out);
+                }
+            }
+            Term::Project { base, .. } => base.collect_references(out),
+            Term::Ascribe { value, ty } => {
+                value.collect_references(out);
+                ty.collect_references(out);
+            }
+            Term::Unary { value, .. } => value.collect_references(out),
+            Term::Binary { left, right, .. } => {
+                left.collect_references(out);
+                right.collect_references(out);
+            }
+            Term::Record { fields } => {
+                for (_, t) in fields {
+                    t.collect_references(out);
+                }
+            }
+            Term::Update { base, fields } => {
+                base.collect_references(out);
+                for (_, t) in fields {
+                    t.collect_references(out);
+                }
+            }
+            Term::Do {
+                statements: ss,
+                result,
+            } => {
+                statements(ss, out);
+                result.collect_references(out);
+            }
+            Term::Eliminate { value } => value.collect_references(out),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DefinitionKind {
     Def,
     NoncomputableDef,
     PartialDef,
     Abbrev,
+    /// `@[simp] def`: unfolded by `simp` without being named.
+    SimpDef,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Definition {
@@ -923,6 +1255,7 @@ impl Printer {
                     DefinitionKind::NoncomputableDef => "noncomputable def",
                     DefinitionKind::PartialDef => "partial def",
                     DefinitionKind::Abbrev => "abbrev",
+                    DefinitionKind::SimpDef => "@[simp] def",
                 },
                 Self::name(&value.name),
                 Self::binders(&value.binders)?,

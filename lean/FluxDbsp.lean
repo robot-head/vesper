@@ -176,4 +176,103 @@ theorem copartitioned_join_key {W : Type} [DecidableEq W] (ws : List W) (nodup :
 #print axioms repeated_recovery_eq_uninterrupted
 #print axioms linear_distributes_over_partitions
 #print axioms copartitioned_join_key
+
+/-!
+## Sources, spines, rescaling and unaligned checkpoints (wave seven)
+
+Again statements about models only: `zsum` sums worker-local or batch Z-sets
+modelled as total functions; `restrict r w f` keeps the rows a routing
+function `r` sends to worker `w`; `run` is the deterministic step fold above.
+Nothing here is a theorem about the Rust spine format, the Quarry sink, the
+input log, SimPulse or the cluster protocol.
+-/
+
+theorem zsum_append {α : Type} (xs ys : List (α → Int)) (a : α) :
+    zsum (xs ++ ys) a = zsum xs a + zsum ys a := by
+  induction xs with
+  | nil => simp [zsum]
+  | cons f fs ih =>
+    show f a + zsum (fs ++ ys) a = f a + zsum fs a + zsum ys a
+    rw [ih, Int.add_assoc]
+
+/-- Appending the batch `current - sum spine` makes the spine sum `current`. -/
+theorem spine_append_delta {α : Type} (spine : List (α → Int)) (current : α → Int) (a : α) :
+    zsum (spine ++ [fun x => current x - zsum spine x]) a = current a := by
+  rw [zsum_append]
+  simp only [zsum]
+  omega
+
+/-- Compaction: merging two adjacent batches preserves the spine sum. -/
+theorem spine_merge_preserves_sum {α : Type} (pre post : List (α → Int)) (f g : α → Int)
+    (a : α) :
+    zsum (pre ++ f :: g :: post) a = zsum (pre ++ (fun x => f x + g x) :: post) a := by
+  rw [zsum_append, zsum_append]
+  simp only [zsum]
+  omega
+
+/-- Rows of `f` that `r` routes to worker `w`. -/
+def restrict {α W : Type} [DecidableEq W] (r : α → W) (w : W) (f : α → Int) : α → Int :=
+  fun a => if r a = w then f a else 0
+
+/-- Routing over a duplicate-free worker list that contains every target
+loses and duplicates nothing: the restricted parts sum to the whole. -/
+theorem restrict_parts_sum {α W : Type} [DecidableEq W] (r : α → W) (ws : List W)
+    (nodup : ws.Nodup) (total : ∀ a, r a ∈ ws) (f : α → Int) (a : α) :
+    zsum (ws.map fun w => restrict r w f) a = f a := by
+  have key : ∀ (l : List W), l.Nodup →
+      zsum (l.map fun w => restrict r w f) a = if r a ∈ l then f a else 0 := by
+    intro l hl
+    induction l with
+    | nil => simp [zsum]
+    | cons x xs ih =>
+      have hx : x ∉ xs := (List.nodup_cons.mp hl).1
+      have ih := ih (List.nodup_cons.mp hl).2
+      show restrict r x f a + zsum (xs.map fun w => restrict r w f) a = _
+      rw [ih]
+      by_cases h : r a = x
+      · subst h; simp [restrict, hx]
+      · by_cases hm : r a ∈ xs
+        · simp [restrict, h, hm]
+        · simp [restrict, h, hm]
+  rw [key ws nodup]
+  simp [total a]
+
+/-- Rescaling: whatever the old partition was, routing the sum of the old
+parts with a new routing yields new parts with the same global sum. -/
+theorem rescale_preserves_global {α W : Type} [DecidableEq W] (old : List (α → Int))
+    (r : α → W) (ws : List W) (nodup : ws.Nodup) (total : ∀ a, r a ∈ ws) (a : α) :
+    zsum (ws.map fun w => restrict r w (zsum old)) a = zsum old a :=
+  restrict_parts_sum r ws nodup total (zsum old) a
+
+/-- After an exchange by key, every row a worker holds routes to it. -/
+theorem exchange_places_rows {α W : Type} [DecidableEq W] (r : α → W) (w : W)
+    (f : α → Int) (a : α) (h : restrict r w f a ≠ 0) : r a = w := by
+  by_cases hr : r a = w
+  · exact hr
+  · simp [restrict, hr] at h
+
+/-- Unaligned checkpoint: a snapshot after `k` inputs plus the channel state
+(inputs `k` up to `b`) replays to the state after `b` inputs, and the
+replayed outputs are exactly the ones between the snapshot and the barrier. -/
+theorem channel_replay_reaches_barrier {S I O : Type} (step : S → I → S × O) (s0 : S)
+    (xs : List I) (k b : Nat) (hk : k ≤ b) :
+    run step (run step s0 (xs.take k)).1 ((xs.take b).drop k) =
+      ((run step s0 (xs.take b)).1,
+        (run step s0 (xs.take b)).2.drop (run step s0 (xs.take k)).2.length) := by
+  have split : xs.take b = xs.take k ++ (xs.take b).drop k := by
+    have : xs.take k = (xs.take b).take k := by
+      rw [List.take_take, Nat.min_eq_left hk]
+    rw [this, List.take_append_drop]
+  have h := run_append step s0 (xs.take k) ((xs.take b).drop k)
+  rw [← split] at h
+  rw [h]
+  simp
+
+#print axioms zsum_append
+#print axioms spine_append_delta
+#print axioms spine_merge_preserves_sum
+#print axioms restrict_parts_sum
+#print axioms rescale_preserves_global
+#print axioms exchange_places_rows
+#print axioms channel_replay_reaches_barrier
 end Vesper.FluxDbsp

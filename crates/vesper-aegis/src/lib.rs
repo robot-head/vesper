@@ -1,11 +1,16 @@
 //! Vesper Aegis (design §33): confidential-computing guest libraries.
 //!
-//! - [`tdx`], [`snp`], [`cca`]: bounds-checked parsers and end-to-end
-//!   verifiers for Intel TDX quotes v4 and v5 (TD 1.0, 1.5 and 1.5-ex
-//!   bodies), AMD SEV-SNP attestation reports versions 2–5 (Milan, Genoa,
-//!   Turin) and Arm CCA tokens (tag 399 and CMW tag 907 collections), with
-//!   real ECDSA/COSE verification and certificate paths to a configured
-//!   root or endorsed CCA platform keys.
+//! - [`tdx`], [`sgx`], [`snp`], [`cca`]: bounds-checked parsers and
+//!   end-to-end verifiers for Intel TDX quotes v4 and v5 (TD 1.0, 1.5 and
+//!   1.5-ex bodies), Intel SGX DCAP quotes v3 (enclave report body, SGX
+//!   TCB info v3 and QE identity v2), AMD SEV-SNP attestation reports
+//!   versions 2–6 (Milan, Genoa, Turin; version 6 extended TCBs on Venice)
+//!   and Arm CCA tokens (tag 399 and CMW tag 907 collections), with real
+//!   ECDSA/COSE verification and certificate paths to a configured root or
+//!   endorsed CCA platform keys.
+//! - [`corim`]: CoRIM/CoMID parsing (unsigned tag 501 and COSE-signed),
+//!   and appraisal of CCA platform and realm tokens against the Arm CCA
+//!   endorsement profiles' reference values and attest-key triples.
 //! - [`claims`]: normalized claims, the 128-byte wire struct, report-data
 //!   binding and register replay.
 //! - [`policy`]: the RA-TLS relying-party policy verifier.
@@ -20,7 +25,8 @@
 //!   collateral (KDS cert chains, ARK CRL floor), verified against real
 //!   published samples in `tests/vendor_samples.rs` and
 //!   `tests/vendor_samples_rest.rs`. `lean/AegisCollateral.lean` models the
-//!   TCB evaluation order and proves it monotone (about the model only).
+//!   TCB evaluation order and proves it monotone, and proves reference-value
+//!   appraisal sound (about the model only).
 //!
 //! No TEE hardware is exercised: real vendor samples are verified as data,
 //! negative cases use generated chains, and `attest_channel_binding`
@@ -34,6 +40,7 @@ pub mod amd;
 pub mod cca;
 pub mod chain;
 pub mod claims;
+pub mod corim;
 pub mod error;
 pub mod gate;
 pub mod gpa;
@@ -43,6 +50,7 @@ mod linear;
 pub mod policy;
 mod reader;
 pub mod roots;
+pub mod sgx;
 pub mod snp;
 pub mod tdx;
 pub mod time;
