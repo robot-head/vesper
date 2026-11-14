@@ -136,9 +136,9 @@ itself:
 | `cargo fmt --all -- --check` | clean |
 | `cargo +1.100.0 clippy -p vesper-aether --locked --all-targets -- -D warnings` | clean |
 | `cargo clippy -p vesper-aether --locked --all-targets --target {aarch64-apple-darwin, x86_64-pc-windows-msvc, aarch64-unknown-linux-gnu} --features blake3/pure -- -D warnings` | clean on all three |
-| `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` | see PR |
+| `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` | clean (exit 0) |
 | `VESPER_LEAN=<lean 4.24.0> cargo test -p vesper-aether --locked` | all pass |
-| `cargo test --workspace --locked` | see PR |
+| `cargo test --workspace --locked --no-fail-fast` | 4,490 tests pass. Every Aether test passes. The only failures are outside this lane and come from the environment: the root `vesper` Lean replay tests need `lean` on `PATH` or `VESPER_LEAN4LEAN42_ROOT`, and `vesper-loom-build` needs an `engine_dependencies` fingerprint. Neither crate depends on `vesper-aether`. |
 | `lean lean/AetherMemory.lean` (4.24.0) | no errors; every theorem depends only on `propext`, `Classical.choice`, `Quot.sound` |
 | `python3 tools/bazel/sync_build_files.py` | no changes |
 
