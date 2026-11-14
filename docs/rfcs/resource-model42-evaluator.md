@@ -1,11 +1,11 @@
-# Finite resource evaluator design (#322)
+# Finite resource evaluator (#322)
 
 This lane owns only new `lean/ResourceModel42/Evaluator.lean` and this report.
 The frozen contract is `ddf5d6c`, clarified by `0399d20`, read from the
-coordinator's integration worktree. This checkpoint is a design report: no
-evaluator source, Lean build,
-Cargo execution or semantic validation is claimed. Exact declarations await
-the syntax writer's first coherent API checkpoint.
+coordinator's integration worktree. The first evaluator source checkpoint
+imports compiled syntax `d51a21b` and checker `b9ce0c0`. Its definition module
+compiles with real Lean 4.24; semantic acceptance and downstream proof gates
+remain pending. No Cargo execution is claimed by this lane.
 
 ## Operational representation
 
@@ -95,8 +95,8 @@ literal pair already stored in the initial term is subject to initial admission
 and cannot supply that later-failure evidence. Every refusal identifies an
 actually exceeded configured bound, including when a zero cap deliberately
 refuses the first resource operation. No arbitrary resource-refusal fallback
-may hide an executable transition. The exact exposed guard metadata and helper
-names will follow the coordinated syntax/evaluator API.
+may hide an executable transition. The exposed guard metadata and helper names
+are listed below.
 
 ## Proof interface and release gates
 
@@ -140,5 +140,45 @@ Read actual `MetatheoryFull.Expr`, `subst`, `IsVal`, ANF typing rules, `EC`,
 `Head`, `Step`, `Steps`, finite-store freshness and terminal exhaustion
 definitions, together with the historical resource-model plan and complete
 frozen contract. The syntax, checker and proof planners independently agree on
-the decorated substitution route and right-then-left unpack order. No evaluator
-implementation or build has started at this checkpoint.
+the decorated substitution route and right-then-left unpack order.
+
+The actual first module compiled without diagnostics using:
+
+```sh
+LEAN_PATH=/tmp/resource-model42-checker-api-v1 /home/agent/.local/share/vesper-lean/bin/lean -o /tmp/resource-model42-evaluator-api-v1/ResourceModel42/Evaluator.olean lean/ResourceModel42/Evaluator.lean
+```
+
+Log: `/tmp/resource-model42-evaluator-v1.log`. The first compile identified two
+unavailable `Inhabited` instances for unchecked array indexing; actual input
+validation now uses a total list shape traversal rather than default indexing.
+The second compile passed. `git diff --check` passed. No semantic execution,
+axiom audit, transitive replay, checked soundness or no-invariant theorem is
+claimed from compiling these definitions.
+
+## First coherent evaluator API
+
+- `LedgerEntry { mintSite, live }`, `Config { expr, ledger }`, `Config.live` and
+  `Config.erase` expose the finite tombstone embedding for proofs.
+- `ResourceEvent { action, site, id }` and `PlannedAction` record the actual
+  dynamic mint serial or consumed serial. `PlannedAction.apply` retains all
+  ledger slots, pushes on mint and marks a consumed entry dead.
+- Public `locate`, `prepare`, `Replacement.materialize`,
+  `Replacement.preflight`, and `PlannedAction.preflight` expose the actual
+  focus/planning/checking paths. Substitution preflights both intermediate and
+  final whole-context states before either is materialized.
+- `step limits eventCount config` is an unfoldable proof helper returning
+  terminal, next, measured capacity/resource/event refusal, or invariant error.
+  Resource/event refusals retain their actual requested and configured counts;
+  capacity tags come from the actual syntax preflight helpers, whose metric
+  correspondence remains a proof obligation.
+- `validateInvocation checkedProgram values` is the sole constructor for the
+  opaque `Invocation`. It measures initial values/closure, checks copy-only
+  types, recursive shape and every natural's `[0, 2^64)` range. Its readonly
+  fields retain an actual admission-success equality for proofs.
+- `evalSteps invocation fuel` refuses fuel above the configured cap before
+  starting. `runMachine` is the public unfoldable internal recursion used by
+  proofs; the admitted entry takes only the checked invocation wrapper.
+- `EvalResult` retains status, unchanged failure configuration, reverse event
+  and full-action prefixes. `events`/`actions` expose chronological lists and
+  `residual` exposes actual live serials and original mint sites. Completed may
+  return an owned handle; no empty-ledger guard exists.
