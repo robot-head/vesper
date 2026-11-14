@@ -1,0 +1,13 @@
+// expect: E0700
+// ConstDenorm callees must carry ConstDenorm.
+fn plain(x: f64) -> f64 {
+    x * 0.5
+}
+
+fn filter(x: f64) -> f64 eff [ConstDenorm] {
+    plain(x)
+}
+
+fn main() -> f64 {
+    filter(1.0)
+}

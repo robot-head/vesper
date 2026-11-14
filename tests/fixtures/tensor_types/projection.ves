@@ -1,0 +1,13 @@
+fn project[M: dim, K: dim, N: dim](
+    x: Tensor[F32, [M, K]],
+    w: Tensor[F32, [K, N]],
+    b: Tensor[F32, [N]]
+) -> Tensor[F32, [M, N]] eff [Tensor] {
+    let y = Tensor::matmul(x, w);
+    Tensor::add(y, b)
+}
+fn main[B: dim](x: Tensor[F32, [B, 3]], w: Tensor[F32, [3, 2]], b: Tensor[F32, [2]])
+    -> Tensor[F32, [B, 2]] eff [Tensor] {
+    let flat = Tensor::reshape[[B * 2]](project(x, w, b));
+    Tensor::reshape[[B, 2]](flat)
+}

@@ -12,9 +12,10 @@
 //! (pre-standard, as TF-RMM emits it), `tag:arm.com,2023:cca_platform#1.0.0`
 //! and `tag:arm.com,2024:cca_platform#2.0.0`; realm: absent (pre-standard),
 //! `tag:arm.com,2023:realm#1.0.0` and `tag:arm.com,2024:realm#2.0.0`. Any
-//! other profile is a typed error. Claims the verifier does not use (software
-//! components, verification service, 2024 platform configuration and
-//! attestation-key claims) are ignored; duplicated keys are errors.
+//! other profile is a typed error. Software components (2399) and the
+//! platform configuration (2401) are parsed for CoRIM appraisal
+//! ([`crate::corim`]); other claims the verifier does not use (verification
+//! service, attestation-key claims) are ignored; duplicated keys are errors.
 //!
 //! Platform keys: there is no public Arm CCA root. A platform attestation
 //! key (CPAK, formerly IAK) is either certified by a configured X.509 root
@@ -57,7 +58,24 @@ pub mod keys {
     pub const PLATFORM_LIFECYCLE: i64 = 2395;
     pub const PLATFORM_IMPLEMENTATION_ID: i64 = 2396;
     pub const PLATFORM_HASH_ALGO: i64 = 2402;
+    pub const PLATFORM_SW_COMPONENTS: i64 = 2399;
+    pub const PLATFORM_CONFIG: i64 = 2401;
+    pub const PLATFORM_MANUFACTURING_CONFIG: i64 = 2403;
+    pub const PLATFORM_TBB_ROTPK: i64 = 2405;
+    /// TBB RoTPK entry keys.
+    pub const ROTPK_NAME: i64 = 1;
+    pub const ROTPK_INDEX: i64 = 2;
+    pub const ROTPK_HASH: i64 = 3;
+    /// Software-component map keys (PSA/CCA token).
+    pub const SW_MEASUREMENT_TYPE: i64 = 1;
+    pub const SW_MEASUREMENT_VALUE: i64 = 2;
+    pub const SW_VERSION: i64 = 4;
+    pub const SW_SIGNER_ID: i64 = 5;
+    pub const SW_MEASUREMENT_DESCRIPTION: i64 = 6;
 }
+
+/// Most software components accepted in one platform token.
+pub const MAX_CCA_SW_COMPONENTS: usize = 64;
 
 /// Security lifecycle states `0x3000..=0x30FF` are "secured"; every other
 /// state (including `0x5000` non-recoverable debug) counts as debug.
@@ -85,6 +103,156 @@ pub struct CcaPlatformClaims {
     pub implementation_id: Vec<u8>,
     pub lifecycle: u64,
     pub hash_algo: RegisterHash,
+    /// Claim 2399, in token order (empty when the claim is absent).
+    pub sw_components: Vec<CcaSwComponent>,
+    /// Claim 2401 (platform configuration), when present.
+    pub config: Option<Vec<u8>>,
+    /// Claim 2403 (2024 profile: platform manufacturing configuration).
+    pub manufacturing_config: Option<Vec<u8>>,
+    /// Claim 2405 (2024 profile: hashes of the trusted-board-boot root of
+    /// trust public keys), in token order.
+    pub tbb_rotpks: Vec<CcaTbbRotpk>,
+}
+
+/// One entry of the TBB RoTPK claim (2405).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CcaTbbRotpk {
+    /// `"CM"` (chip manufacturer) or `"DM"` (device manufacturer).
+    pub name: String,
+    pub index: u64,
+    pub hash: Vec<u8>,
+}
+
+impl CcaTbbRotpk {
+    fn from_value(v: &Value) -> Result<Self, ParseError> {
+        use keys::*;
+        let m = ClaimMap::new(v, "TBB RoTPK")?;
+        if m.0.len() != 3 {
+            return Err(cbor_err("TBB RoTPK", "expected name, index and hash"));
+        }
+        let name = m
+            .get(ROTPK_NAME, "TBB RoTPK name")?
+            .as_text()
+            .ok_or_else(|| cbor_err("TBB RoTPK name", "expected text"))?;
+        if name != "CM" && name != "DM" {
+            return Err(cbor_err("TBB RoTPK name", "expected CM or DM"));
+        }
+        let index = m
+            .get(ROTPK_INDEX, "TBB RoTPK index")?
+            .as_integer()
+            .and_then(|i| u64::try_from(i).ok())
+            .filter(|i| *i <= 5)
+            .ok_or_else(|| cbor_err("TBB RoTPK index", "expected 0..=5"))?;
+        let hash = bytes(m.get(ROTPK_HASH, "TBB RoTPK hash")?, "TBB RoTPK hash")?.to_vec();
+        if !matches!(hash.len(), 32 | 48 | 64) {
+            return Err(cbor_err("TBB RoTPK hash", "length is not 32, 48 or 64"));
+        }
+        Ok(CcaTbbRotpk {
+            name: name.to_owned(),
+            index,
+            hash,
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        use keys::*;
+        Value::Map(vec![
+            (ROTPK_NAME.into(), Value::Text(self.name.clone())),
+            (ROTPK_INDEX.into(), Value::Integer(self.index.into())),
+            (ROTPK_HASH.into(), Value::Bytes(self.hash.clone())),
+        ])
+    }
+}
+
+/// One entry of the platform software-components claim (2399).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CcaSwComponent {
+    /// Key 1, e.g. `"BL"` or `"RSE_BL1_2"`.
+    pub measurement_type: Option<String>,
+    /// Key 2: the component digest.
+    pub measurement_value: Vec<u8>,
+    /// Key 4.
+    pub version: Option<String>,
+    /// Key 5: hash of the signing authority's key.
+    pub signer_id: Vec<u8>,
+    /// Key 6: the hash algorithm name, e.g. `"sha-256"`.
+    pub measurement_description: Option<String>,
+}
+
+impl CcaSwComponent {
+    fn from_value(v: &Value) -> Result<Self, ParseError> {
+        use keys::*;
+        let m = ClaimMap::new(v, "software component")?;
+        for (k, _) in &m.0 {
+            if !matches!(
+                *k,
+                SW_MEASUREMENT_TYPE
+                    | SW_MEASUREMENT_VALUE
+                    | SW_VERSION
+                    | SW_SIGNER_ID
+                    | SW_MEASUREMENT_DESCRIPTION
+            ) {
+                return Err(cbor_err("software component", "unknown key"));
+            }
+        }
+        let text = |key, field| -> Result<Option<String>, ParseError> {
+            match m.0.iter().find(|(k, _)| *k == key) {
+                None => Ok(None),
+                Some((_, v)) => v
+                    .as_text()
+                    .map(|t| Some(t.to_owned()))
+                    .ok_or_else(|| cbor_err(field, "expected text")),
+            }
+        };
+        let measurement_value = bytes(
+            m.get(SW_MEASUREMENT_VALUE, "software component measurement value")?,
+            "software component measurement value",
+        )?
+        .to_vec();
+        let signer_id = bytes(
+            m.get(SW_SIGNER_ID, "software component signer ID")?,
+            "software component signer ID",
+        )?
+        .to_vec();
+        for (b, field) in [
+            (&measurement_value, "software component measurement value"),
+            (&signer_id, "software component signer ID"),
+        ] {
+            if !matches!(b.len(), 32 | 48 | 64) {
+                return Err(cbor_err(field, "length is not 32, 48 or 64"));
+            }
+        }
+        Ok(CcaSwComponent {
+            measurement_type: text(SW_MEASUREMENT_TYPE, "software component type")?,
+            measurement_value,
+            version: text(SW_VERSION, "software component version")?,
+            signer_id,
+            measurement_description: text(
+                SW_MEASUREMENT_DESCRIPTION,
+                "software component description",
+            )?,
+        })
+    }
+
+    fn to_value(&self) -> Value {
+        use keys::*;
+        let mut m = Vec::new();
+        if let Some(t) = &self.measurement_type {
+            m.push((SW_MEASUREMENT_TYPE.into(), Value::Text(t.clone())));
+        }
+        m.push((
+            SW_MEASUREMENT_VALUE.into(),
+            Value::Bytes(self.measurement_value.clone()),
+        ));
+        if let Some(t) = &self.version {
+            m.push((SW_VERSION.into(), Value::Text(t.clone())));
+        }
+        m.push((SW_SIGNER_ID.into(), Value::Bytes(self.signer_id.clone())));
+        if let Some(t) = &self.measurement_description {
+            m.push((SW_MEASUREMENT_DESCRIPTION.into(), Value::Text(t.clone())));
+        }
+        Value::Map(m)
+    }
 }
 
 fn algo_name(h: RegisterHash) -> &'static str {
@@ -140,7 +308,7 @@ fn unpadded_measurement(m: &[u8], algo: RegisterHash) -> &[u8] {
 /// Compare a reported measurement with an expected digest. A register in
 /// the 64-byte encoding matches when it is the digest followed by zero
 /// padding; any nonzero padding byte is a mismatch.
-fn measurement_eq(reported: &[u8], expected: &[u8]) -> bool {
+pub(crate) fn measurement_eq(reported: &[u8], expected: &[u8]) -> bool {
     if reported.len() == expected.len() {
         return ct_eq(reported, expected);
     }
@@ -237,7 +405,7 @@ impl<'v> ClaimMap<'v> {
     }
 }
 
-fn decode_value(bytes: &[u8], what: &'static str) -> Result<Value, ParseError> {
+pub(crate) fn decode_value(bytes: &[u8], what: &'static str) -> Result<Value, ParseError> {
     let mut rest = bytes;
     let v: Value =
         coset::cbor::de::from_reader(&mut rest).map_err(|_| cbor_err(what, "malformed CBOR"))?;
@@ -339,7 +507,50 @@ impl CcaPlatformClaims {
             .as_integer()
             .and_then(|i| u64::try_from(i).ok())
             .ok_or_else(|| cbor_err("lifecycle", "expected unsigned integer"))?;
+        let sw_components = match m.0.iter().find(|(k, _)| *k == PLATFORM_SW_COMPONENTS) {
+            None => Vec::new(),
+            Some((_, v)) => {
+                let a = v
+                    .as_array()
+                    .ok_or_else(|| cbor_err("software components", "expected array"))?;
+                if a.len() > MAX_CCA_SW_COMPONENTS {
+                    return Err(cbor_err("software components", "too many components"));
+                }
+                a.iter()
+                    .map(CcaSwComponent::from_value)
+                    .collect::<Result<_, _>>()?
+            }
+        };
+        let opt_bytes = |key, field| -> Result<Option<Vec<u8>>, ParseError> {
+            match m.0.iter().find(|(k, _)| *k == key) {
+                None => Ok(None),
+                Some((_, v)) => Ok(Some(bytes(v, field)?.to_vec())),
+            }
+        };
+        let config = opt_bytes(PLATFORM_CONFIG, "platform config")?;
+        let manufacturing_config = opt_bytes(
+            PLATFORM_MANUFACTURING_CONFIG,
+            "platform manufacturing config",
+        )?;
+        let tbb_rotpks = match m.0.iter().find(|(k, _)| *k == PLATFORM_TBB_ROTPK) {
+            None => Vec::new(),
+            Some((_, v)) => {
+                let a = v
+                    .as_array()
+                    .ok_or_else(|| cbor_err("TBB RoTPK", "expected array"))?;
+                if a.len() > 12 {
+                    return Err(cbor_err("TBB RoTPK", "too many entries"));
+                }
+                a.iter()
+                    .map(CcaTbbRotpk::from_value)
+                    .collect::<Result<_, _>>()?
+            }
+        };
         Ok(CcaPlatformClaims {
+            sw_components,
+            config,
+            manufacturing_config,
+            tbb_rotpks,
             challenge: bytes(
                 m.get(CHALLENGE, "platform challenge")?,
                 "platform challenge",
@@ -363,7 +574,7 @@ impl CcaPlatformClaims {
     pub fn to_cbor(&self) -> Vec<u8> {
         use keys::*;
         let b = |x: &[u8]| Value::Bytes(x.to_vec());
-        encode_value(&Value::Map(vec![
+        let mut m = vec![
             (
                 PROFILE.into(),
                 Value::Text("tag:arm.com,2023:cca_platform#1.0.0".into()),
@@ -382,7 +593,26 @@ impl CcaPlatformClaims {
                 PLATFORM_HASH_ALGO.into(),
                 Value::Text(algo_name(self.hash_algo).into()),
             ),
-        ]))
+        ];
+        if !self.sw_components.is_empty() {
+            m.push((
+                PLATFORM_SW_COMPONENTS.into(),
+                Value::Array(self.sw_components.iter().map(|c| c.to_value()).collect()),
+            ));
+        }
+        if let Some(c) = &self.config {
+            m.push((PLATFORM_CONFIG.into(), b(c)));
+        }
+        if let Some(c) = &self.manufacturing_config {
+            m.push((PLATFORM_MANUFACTURING_CONFIG.into(), b(c)));
+        }
+        if !self.tbb_rotpks.is_empty() {
+            m.push((
+                PLATFORM_TBB_ROTPK.into(),
+                Value::Array(self.tbb_rotpks.iter().map(|r| r.to_value()).collect()),
+            ));
+        }
+        encode_value(&Value::Map(m))
     }
 }
 
@@ -415,7 +645,7 @@ pub struct CcaToken {
     pub realm_claims: CcaRealmClaims,
 }
 
-fn sign1_curve(sign1: &CoseSign1, what: &'static str) -> Result<Curve, AttestError> {
+pub(crate) fn sign1_curve(sign1: &CoseSign1, what: &'static str) -> Result<Curve, AttestError> {
     use coset::{Algorithm, RegisteredLabelWithPrivate};
     match &sign1.protected.header.alg {
         Some(Algorithm::Assigned(iana::Algorithm::ES256)) => Ok(Curve::P256),
@@ -428,7 +658,7 @@ fn sign1_curve(sign1: &CoseSign1, what: &'static str) -> Result<Curve, AttestErr
     }
 }
 
-fn verify_sign1(
+pub(crate) fn verify_sign1(
     sign1: &CoseSign1,
     key: &EcPublicKey,
     what: &'static str,

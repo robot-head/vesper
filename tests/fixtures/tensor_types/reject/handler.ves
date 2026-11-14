@@ -1,0 +1,11 @@
+// expect: E0769
+// at: handle Tensor
+// message: implemented by the host
+fn f(x: Tensor[F32, [4]]) -> Tensor[F32, [4]] {
+    handle Tensor in {
+        Tensor::softmax(x)
+    } with {
+        return value => value,
+        softmax(t, resume) => resume(t),
+    }
+}

@@ -1,0 +1,9 @@
+// An index failure the entry does not handle: an abort on bare metal.
+fn pick(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    let xs = (10, 20, 30);
+    xs[i]
+}
+
+fn main() -> i64 eff [Fail[RuntimeError]] {
+    pick(7)
+}

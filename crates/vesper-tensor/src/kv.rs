@@ -533,6 +533,18 @@ impl KvPool {
         self.slots[slot].epoch = epoch;
         Ok(())
     }
+    /// Rolls `sequence` back to its first `tokens` tokens, as [`Self::rollback`]
+    /// to a checkpoint taken at that length would (bytes cleared, whole pages
+    /// freed, outstanding checkpoints invalidated). `tokens` above the current
+    /// length is a [`KvError::StaleCheckpoint`].
+    pub fn truncate(&mut self, sequence: &mut Sequence, tokens: usize) -> Result<(), KvError> {
+        let mut checkpoint = self.checkpoint(sequence)?;
+        if tokens > checkpoint.tokens {
+            return Err(KvError::StaleCheckpoint);
+        }
+        checkpoint.tokens = tokens;
+        self.rollback(sequence, &checkpoint)
+    }
     fn clear_page(&mut self, page: usize) {
         let start = page * self.page_bytes;
         self.storage[start..start + self.page_bytes].fill(0);
