@@ -274,6 +274,25 @@ fn cli() -> Result<(), String> {
             println!("{}", runtime.run(&entry, vec![])?);
         }
         "jit" => println!("{}", native::jit_with_options(&checked.world, &entry, opt)?),
+        // Wave-seven lane 25: `--target wasm32-wasip2` builds a component.
+        "build" if target.as_deref() == Some(vesper::wasm_backend::TARGET) => {
+            if !verifiers.is_empty() || verifier_policy.is_some() || tee_measure {
+                return Err("--verify and --tee apply to native targets only".into());
+            }
+            let options = vesper::wasm_backend::WasmOptions {
+                optimize: opt,
+                ..Default::default()
+            };
+            let artifact = vesper::wasm_backend::compile(&checked.world, &entry, &options)
+                .map_err(|e| e.to_string())?;
+            let path = output.unwrap_or_else(|| PathBuf::from("a.wasm"));
+            package_commands::atomic_write(&path, &artifact.component)?;
+            println!(
+                "built {} ({} component)",
+                path.display(),
+                vesper::wasm_backend::TARGET
+            );
+        }
         "build" => {
             if entry != "main" {
                 return Err("build currently requires entry 'main'".into());
