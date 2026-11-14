@@ -1,6 +1,7 @@
 import ResourceModel42.ErasureProofs
 import ResourceModel42.LedgerProofs
 import ResourceModel42.CheckerProofs
+import ResourceModel42.EvaluatorProofs
 
 /-! Checked input closure and Full-derived safety for the executable fragment.
 All named theorems are public and included in the model audit catalog.
@@ -172,5 +173,168 @@ theorem invocation_initial_WT (invocation : Invocation) (Sig : Nat → Metatheor
   constructor
   · simpa only [Config.erase, invocation_initial_live] using invocation_initial_hasType invocation Sig
   · exact LedgerProofs.erase_fresh _
+
+
+theorem invocation_initial_erase (invocation : Invocation) :
+    invocation.initial.erase =
+      ⟨invocation.initial.expr.erase, MetatheoryFull.RCtx.empty, 0⟩ := by
+  change (⟨invocation.initial.expr.erase, invocation.initial.live, invocation.initial.ledger.size⟩ :
+    MetatheoryFull.Conf) = _
+  rw [invocation_initial_live]
+  rfl
+
+/-- This equality is obtained from the actual public evaluator call, not a
+caller-supplied execution relation. -/
+theorem evalSteps_result {invocation : Invocation} {fuel : Nat} {result : EvalResult}
+    (ran : evalSteps invocation fuel = .ok result) :
+    result = runMachine invocation.program.program.limits fuel invocation.initial [] [] := by
+  by_cases bound : fuel > invocation.program.program.limits.fuel
+  · simp [evalSteps, bound] at ran
+  · simpa [evalSteps, bound] using ran.symm
+
+theorem evalSteps_prefix (Sig : Nat → MetatheoryFull.EffSig)
+    {invocation : Invocation} {fuel : Nat} {result : EvalResult}
+    (ran : evalSteps invocation fuel = .ok result) :
+    MetatheoryFull.Steps Sig invocation.initial.erase result.actions result.config.erase := by
+  rw [evalSteps_result ran]
+  exact EvaluatorProofs.runMachine_steps Sig _ _ _
+
+theorem evalSteps_trace_actions {invocation : Invocation} {fuel : Nat} {result : EvalResult}
+    (ran : evalSteps invocation fuel = .ok result) :
+    result.events.map EvaluatorProofs.eventAct = result.actions.filter EvaluatorProofs.resourceAction := by
+  rw [evalSteps_result ran]
+  exact EvaluatorProofs.runMachine_trace_actions _ _ _
+
+theorem evalSteps_preservation (Sig : Nat → MetatheoryFull.EffSig)
+    {invocation : Invocation} {fuel : Nat} {result : EvalResult}
+    (ran : evalSteps invocation fuel = .ok result) :
+    MetatheoryFull.WT Sig result.config.erase invocation.program.resultType.erase
+      invocation.program.resultType.kind [] :=
+  (MetatheoryFull.type_safety (evalSteps_prefix Sig ran) (invocation_initial_WT invocation Sig)
+    (fun _ member => by cases member)).1
+
+theorem evalSteps_completed_isVal {invocation : Invocation} {fuel : Nat} {result : EvalResult}
+    {value : RuntimeValue} (ran : evalSteps invocation fuel = .ok result)
+    (completed : result.status = .completed value) : MetatheoryFull.IsVal result.config.expr.erase := by
+  have actual := evalSteps_result ran
+  rw [actual] at completed ⊢
+  exact EvaluatorProofs.runMachine_completed_isVal _ _ _ _ _ _ completed
+
+theorem evalSteps_completed_value {invocation : Invocation} {fuel : Nat} {result : EvalResult}
+    {value : RuntimeValue} (ran : evalSteps invocation fuel = .ok result)
+    (completed : result.status = .completed value) : result.config.expr.erase = value.erase := by
+  have actual := evalSteps_result ran
+  rw [actual] at completed ⊢
+  exact EvaluatorProofs.completed_value_erase _ _ _ _ _ _ completed
+
+theorem evalSteps_noInvariant (Sig : Nat → MetatheoryFull.EffSig)
+    {invocation : Invocation} {fuel : Nat} {result : EvalResult}
+    (ran : evalSteps invocation fuel = .ok result) (error : InvariantError) :
+    result.status ≠ .invariantFailure error := by
+  rw [evalSteps_result ran]
+  exact EvaluatorProofs.runMachine_noInvariant Sig _ _ _ _ _ (invocation_initial_WT invocation Sig) error
+
+theorem evalSteps_reachable_step_noInvariant (Sig : Nat → MetatheoryFull.EffSig)
+    {invocation : Invocation} {fuel : Nat} {result : EvalResult}
+    (ran : evalSteps invocation fuel = .ok result) (count : Nat) (error : InvariantError) :
+    step invocation.program.program.limits count result.config ≠ .invariant error :=
+  EvaluatorProofs.step_noInvariant Sig (evalSteps_preservation Sig ran).1 (fun _ _ h => h) error
+
+theorem runtimeValue_not_abort (value : RuntimeValue) : value.erase ≠ MetatheoryFull.Expr.abort := by
+  cases value <;> simp [RuntimeValue.erase]
+
+theorem runtimeAtom_not_abort (atom : RuntimeAtom) : atom.erase ≠ MetatheoryFull.Expr.abort := by
+  cases atom <;> simp [RuntimeAtom.erase, runtimeValue_not_abort]
+
+theorem runtimeExpr_not_abort (expression : RuntimeExpr) : expression.erase ≠ MetatheoryFull.Expr.abort := by
+  cases expression <;> simp [RuntimeExpr.erase, runtimeAtom_not_abort]
+
+/-- Progress is semantic Full progress. The separate metric/refusal layer
+justifies actual capacity stops rather than claiming a successful next step. -/
+theorem evalSteps_Full_progress (Sig : Nat → MetatheoryFull.EffSig)
+    {invocation : Invocation} {fuel : Nat} {result : EvalResult}
+    (ran : evalSteps invocation fuel = .ok result) :
+    MetatheoryFull.IsVal result.config.expr.erase ∨
+      ∃ action next, MetatheoryFull.Step Sig result.config.erase action next := by
+  have progress := (MetatheoryFull.type_safety (evalSteps_prefix Sig ran)
+    (invocation_initial_WT invocation Sig) (fun _ member => by cases member)).2
+  rcases progress with value | aborted | next
+  · exact Or.inl value
+  · exact False.elim (runtimeExpr_not_abort _ aborted)
+  · exact Or.inr next
+
+theorem evalSteps_completed_copy_discard (Sig : Nat → MetatheoryFull.EffSig)
+    {invocation : Invocation} {fuel : Nat} {result : EvalResult} {value : RuntimeValue}
+    (ran : evalSteps invocation fuel = .ok result) (completed : result.status = .completed value)
+    (copy : invocation.program.resultType.kind = .copy) : MetatheoryFull.DiscardR result.config.live :=
+  MetatheoryFull.terminal_no_linear (evalSteps_preservation Sig ran)
+    (Or.inl ⟨evalSteps_completed_isVal ran completed, copy⟩)
+
+theorem evalSteps_completed_copy_residual (Sig : Nat → MetatheoryFull.EffSig)
+    {invocation : Invocation} {fuel : Nat} {result : EvalResult} {value : RuntimeValue}
+    (ran : evalSteps invocation fuel = .ok result) (completed : result.status = .completed value)
+    (copy : invocation.program.resultType.kind = .copy) : result.residual = [] :=
+  LedgerProofs.discard_residual_nil result (evalSteps_completed_copy_discard Sig ran completed copy)
+
+theorem evalSteps_completed_copy_exact_once (Sig : Nat → MetatheoryFull.EffSig)
+    {invocation : Invocation} {fuel : Nat} {result : EvalResult} {value : RuntimeValue}
+    (ran : evalSteps invocation fuel = .ok result) (completed : result.status = .completed value)
+    (copy : invocation.program.resultType.kind = .copy) (id : Nat)
+    (minted : MetatheoryFull.Act.mint id ∈ result.actions) :
+    MetatheoryFull.relCount id result.actions = 1 := by
+  have typing := invocation_initial_hasType invocation Sig
+  rw [copy] at typing
+  have history := evalSteps_prefix Sig ran
+  rw [invocation_initial_erase] at history
+  exact MetatheoryFull.total_linear_exhaustion typing (fun _ member => by cases member) history
+    (Or.inl (evalSteps_completed_isVal ran completed)) id (Or.inl minted)
+
+def consumeEvent (id : Nat) (event : ResourceEvent) : Bool :=
+  match event.action with | .mint => false | .consume => event.id == id
+
+theorem event_release (id : Nat) (event : ResourceEvent) :
+    MetatheoryFull.isRel id (EvaluatorProofs.eventAct event) = consumeEvent id event := by
+  cases event with
+  | mk action site serial => cases action <;> rfl
+
+theorem release_filter (id : Nat) (actions : List MetatheoryFull.Act) :
+    MetatheoryFull.relCount id (actions.filter EvaluatorProofs.resourceAction) =
+      MetatheoryFull.relCount id actions := by
+  unfold MetatheoryFull.relCount
+  rw [List.countP_filter]
+  congr 1
+  funext action
+  cases action <;> simp [MetatheoryFull.isRel, EvaluatorProofs.resourceAction]
+
+theorem event_consume_count {events : List ResourceEvent} {actions : List MetatheoryFull.Act}
+    (projection : events.map EvaluatorProofs.eventAct = actions.filter EvaluatorProofs.resourceAction)
+    (id : Nat) : events.countP (consumeEvent id) = MetatheoryFull.relCount id actions := by
+  calc
+    events.countP (consumeEvent id) =
+        MetatheoryFull.relCount id (events.map EvaluatorProofs.eventAct) := by
+      simp only [MetatheoryFull.relCount, List.countP_map, Function.comp_def, event_release]
+    _ = MetatheoryFull.relCount id (actions.filter EvaluatorProofs.resourceAction) := by rw [projection]
+    _ = MetatheoryFull.relCount id actions := release_filter id actions
+
+theorem event_mint_member {events : List ResourceEvent} {actions : List MetatheoryFull.Act}
+    (projection : events.map EvaluatorProofs.eventAct = actions.filter EvaluatorProofs.resourceAction)
+    {site id : Nat} (minted : ResourceEvent.mk .mint site id ∈ events) :
+    MetatheoryFull.Act.mint id ∈ actions := by
+  have member : MetatheoryFull.Act.mint id ∈ events.map EvaluatorProofs.eventAct :=
+    List.mem_map.2 ⟨_, minted, rfl⟩
+  rw [projection] at member
+  exact (List.mem_filter.1 member).1
+
+/-- The public ordered resource trace, not only the hidden silent-step list,
+has exactly one consume per observed mint on completed copy-kind roots. -/
+theorem evalSteps_public_trace_exact_once (Sig : Nat → MetatheoryFull.EffSig)
+    {invocation : Invocation} {fuel : Nat} {result : EvalResult} {value : RuntimeValue}
+    (ran : evalSteps invocation fuel = .ok result) (completed : result.status = .completed value)
+    (copy : invocation.program.resultType.kind = .copy) {site id : Nat}
+    (minted : ResourceEvent.mk .mint site id ∈ result.events) :
+    result.events.countP (consumeEvent id) = 1 := by
+  rw [event_consume_count (evalSteps_trace_actions ran)]
+  exact evalSteps_completed_copy_exact_once Sig ran completed copy id
+    (event_mint_member (evalSteps_trace_actions ran) minted)
 
 end Vesper.ResourceModel42.Proofs

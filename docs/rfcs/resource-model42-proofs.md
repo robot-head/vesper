@@ -2,10 +2,14 @@
 
 Design checkpoint against the frozen `resource-model42-contracts.md` at
 `ddf5d6c`, based on main `30de7fef8be040a890e34f26370ee15b1429642e`.
-The generic erasure foundation now has an actual compiled source checkpoint;
-the complete checker/evaluator correspondence remains in progress. The
-planning sections below describe remaining proof obligations, not completed
-results. No complete model audit, run or exhaustion result is claimed here.
+The erasure foundation and all 33 main proof theorems now compile with actual
+pinned Lean. They connect actual accepted checking and invocation data to Full
+typing, actual evaluator runs to Full.Steps, exclude typed invariant failures,
+and derive completed-copy exhaustion and public-trace exact-once consumption.
+The separate measured-refusal layer and complete fresh audit/acceptance remain
+release gates; no full model acceptance or backend result is claimed here.
+The architecture sections below explain the implemented argument and its
+remaining cross-module obligations.
 
 The proof lane owns new `lean/ResourceModel42/ErasureProofs.lean`,
 `lean/ResourceModel42/Proofs.lean` and this report after the coordinator's
@@ -233,3 +237,87 @@ Operational correspondence, checked-run classification, completed-copy
 exhaustion and actual measured-refusal evidence remain pending dependencies or
 main corollaries at this checkpoint. This is not a full model acceptance
 receipt. No Cargo, external Lean4Lean or resource campaign was run by this lane.
+
+
+## Main safety/exhaustion batch: actual compiled result
+
+The final 340-line Main Proofs source compiled with actual pinned Lean 4.24,
+exit 0 and no diagnostics, in 0.80 seconds:
+
+```sh
+LEAN_NUM_THREADS=1 LEAN_PATH=/tmp/resource-model42-final-main-deps-v1 /home/agent/.local/share/vesper-lean/bin/lean -o /tmp/resource-model42-proofs-v1/ResourceModel42/Proofs.olean ResourceModel42/Proofs.lean
+```
+
+The complete private dependency root contains the genuine compiled
+CheckerProofs 9be3eae, LedgerProofs 6ae4905 and EvaluatorProofs
+6e0a5a2/2c0512b, plus the earlier syntax/checker/evaluator/erasure sources.
+The empty final log is `/tmp/resource-model42-proofs-v1/compile-final-second.log`.
+The first batch attempt used a reserved local identifier, corrected before
+this successful compile; no proof statement was weakened.
+
+The public evalSteps success equation yields the actual runMachine result,
+then actual Full.Steps and event/action projection. Preservation and progress
+use existing Full.type_safety. The no-invariant theorems use the genuine
+computed evaluator correspondence and the initial WT theorem, including
+resource inclusion while focusing through let frames. Completed-value proofs
+identify both Full.IsVal and the returned value's actual erasure.
+
+Completed-copy exhaustion is derived from Full.terminal_no_linear and
+Full.total_linear_exhaustion, not from a runtime completion check. It yields
+both empty live residuals and exactly one release per actual mint in the full
+step prefix. The public-trace theorem maps the actual ordered events to the
+resource-action subsequence and proves exactly one consume event per observed
+mint; it does not compare only hidden action counts. Any-kind completed
+results remain legal, and none of these copy-only conclusions is asserted
+for returned linear owners, fuel stops or resource-limit prefixes.
+
+### Exact public theorem catalog owned by this lane
+
+ErasureProofs has the 11 names listed above. Main Proofs has these 33 names,
+all in namespace Vesper.ResourceModel42.Proofs, with no private named helper
+omitted:
+
+```text
+inputContext_nil
+inputContext_cons
+context_get_mem
+checkInputValue_hasType
+checkInputList_typed
+admitInputs_checked
+invocation_inputs_typed
+closeInputList_hasType
+checked_body_hasType
+invocation_initial_hasType
+invocation_initial_live
+invocation_initial_WT
+invocation_initial_erase
+evalSteps_result
+evalSteps_prefix
+evalSteps_trace_actions
+evalSteps_preservation
+evalSteps_completed_isVal
+evalSteps_completed_value
+evalSteps_noInvariant
+evalSteps_reachable_step_noInvariant
+runtimeValue_not_abort
+runtimeAtom_not_abort
+runtimeExpr_not_abort
+evalSteps_Full_progress
+evalSteps_completed_copy_discard
+evalSteps_completed_copy_residual
+evalSteps_completed_copy_exact_once
+event_release
+release_filter
+event_consume_count
+event_mint_member
+evalSteps_public_trace_exact_once
+```
+
+These 44 owned roots each fit a <=128-root request; the final acceptance
+catalog must also include every other module's public manual theorem and
+partition the complete union as needed. This lane has not run that complete
+transitive audit or Cargo acceptance. In particular, evalSteps_Full_progress
+is semantic Full progress, not a proof that every measured refusal is
+legitimate: the separately owned MetricsProofs/EvaluatorProofs composition
+must still identify each actually exceeded configured bound. No missing gate
+is replaced by a theorem name, a status tag or an expected trace.
