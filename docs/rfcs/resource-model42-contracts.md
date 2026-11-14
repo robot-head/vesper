@@ -180,12 +180,21 @@ agreement, 100000-program resource campaign or self-hosting is claimed.
 - Checker proof assistance: NEW lean/ResourceModel42/CheckerProofs.lean and
   checker report; imports Checker, never the reverse.
 - Evaluator: NEW lean/ResourceModel42/Evaluator.lean and evaluator report.
+- Evaluator proof assistance: NEW lean/ResourceModel42/EvaluatorProofs.lean
+  and evaluator report; imports Evaluator, ErasureProofs and LedgerProofs.
 - Ledger proof assistance: NEW lean/ResourceModel42/LedgerProofs.lean and
   ledger report; imports Evaluator, never the reverse.
-- Proofs: NEW lean/ResourceModel42/Proofs.lean and proof report.
+- Proofs: NEW lean/ResourceModel42/ErasureProofs.lean,
+  lean/ResourceModel42/Proofs.lean and proof report. ErasureProofs imports
+  Syntax only; the main proof module combines the independent static,
+  operational and ledger results with input closure and Full corollaries.
 - Independent acceptance: NEW lean/ResourceModel42/Acceptance.lean,
   tests/resource_model42.rs and acceptance report.
 - Coordinator: NEW lean/ResourceModel42.lean, this contract and final report.
+
+The coordinator aggregate imports the production/proof modules, never
+Acceptance. Acceptance finally imports that aggregate so its real artifact
+closure contains every audited production theorem without an import cycle.
 
 Only Syntax starts source implementation before its first coherent API
 checkpoint. Remaining writers import that checkpoint before coding. Lean
