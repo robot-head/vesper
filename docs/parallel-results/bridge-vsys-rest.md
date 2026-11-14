@@ -158,8 +158,8 @@ This VM reports no PKU, so the wave-six isolation tests reported
 | `cargo test --locked -p vesper-ffi` | 48 passed: isolation 5, sys 15, sys_c_abi 1, sys_pointers 10, sys_slices 6, sys_vsys_rest_c 2 (real C), wire 9 |
 | `cargo test --locked -p vesper-migrate` | 44 passed: unit 3, golden 7, nullability 5 (one real C), refusals 14, review 7, shadow 8 |
 | `cargo test --locked --test migrate_cli` | passed |
-| `cargo +1.100.0 clippy --locked --all-targets -p vesper-ffi -p vesper-migrate -- -D warnings` | see PR |
-| `cargo clippy` / `cargo check` of the crates that depend on `vesper-ffi` | see PR |
+| `cargo +1.100.0 clippy --locked --all-targets -p vesper-ffi -p vesper-migrate -p vesper-warp-umem -p vesper-chrono -p vesper-nexus -p vesper-warp-tcp -p vesper-warp -- -D warnings` (every crate that depends on `vesper-ffi`) | clean |
+| `cargo clippy --locked --all-targets -p vesper-ffi -p vesper-migrate -- -D warnings` (1.97) | clean |
 
 `cargo test --workspace --locked` was not run locally (the workspace is
 large); the PR's CI runs the full Bazel suite, Windows Cargo and macOS jobs.
