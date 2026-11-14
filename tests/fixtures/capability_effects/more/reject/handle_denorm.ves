@@ -1,0 +1,9 @@
+// expect: E0701
+// No handler can discharge ConstDenorm.
+fn main() -> u64 {
+    handle ConstDenorm in {
+        1
+    } with {
+        return v => v,
+    }
+}

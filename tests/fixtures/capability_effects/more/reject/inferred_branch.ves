@@ -1,0 +1,28 @@
+// expect: E0702
+// A helper with a public parameter type is checked with the secret its
+// ConstTime caller passes: its branch is secret dependent.
+copy struct Secret[T] {
+    value: T,
+}
+
+fn pick(x: u64) -> u64 eff [ConstTime] {
+    if x == 0 {
+        1
+    } else {
+        2
+    }
+}
+
+fn leak(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = s;
+    Secret {
+        value: pick(value)
+    }
+}
+
+fn main() -> u64 {
+    0
+}
