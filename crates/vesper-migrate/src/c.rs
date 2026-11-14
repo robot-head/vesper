@@ -1309,16 +1309,27 @@ pub fn analyze_header(
             for (index, p) in fd.node.parameters.iter().enumerate() {
                 let mut pc = false;
                 let mut pt = vec![];
+                // `P _Nonnull p` with a pointer typedef `P`: the qualifier is
+                // a declaration specifier and applies to the typedef's pointer.
+                let mut spec_null = Nullability::Unspecified;
                 for s in &p.node.specifiers {
                     match &s.node {
                         DeclarationSpecifier::TypeSpecifier(t) => pt.push(&t.node),
-                        DeclarationSpecifier::TypeQualifier(q) => {
-                            pc |= q.node == TypeQualifier::Const
-                        }
+                        DeclarationSpecifier::TypeQualifier(q) => match q.node {
+                            TypeQualifier::Const => pc = true,
+                            TypeQualifier::Nonnull => spec_null = Nullability::Nonnull,
+                            TypeQualifier::Nullable => spec_null = Nullability::Nullable,
+                            _ => {}
+                        },
                         _ => {}
                     }
                 }
-                let (pbase, pconst) = ctx.base_type(pt, pc, None)?;
+                let (mut pbase, pconst) = ctx.base_type(pt, pc, None)?;
+                if let CType::Pointer { nullability, .. } = &mut pbase
+                    && spec_null != Nullability::Unspecified
+                {
+                    *nullability = spec_null;
+                }
                 let (pname, mut pty) = match &p.node.declarator {
                     Some(decl) => ctx.declarator(&decl.node, pbase, pconst),
                     None => (None, pbase),

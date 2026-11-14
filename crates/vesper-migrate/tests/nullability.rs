@@ -62,7 +62,11 @@ fn c_pointers_are_option_unless_the_header_says_nonnull() {
          __attribute__((nonnull(1))) void leading(struct pair *p);
          const uint32_t *maybe(void);
          const uint32_t *always(void) __attribute__((returns_nonnull));
-         const uint32_t * _Nonnull qualified_return(void);",
+         const uint32_t * _Nonnull qualified_return(void);
+         typedef uint32_t *word_ptr;
+         typedef uint64_t * _Nonnull sure_ptr;
+         void via_typedef(word_ptr _Nonnull a, sure_ptr c);
+         void via_plain_typedef(word_ptr b);",
     );
     let u32p = |nullable| {
         ptr(
@@ -91,6 +95,15 @@ fn c_pointers_are_option_unless_the_header_says_nonnull() {
             false
         )]
     );
+    // Nullability through pointer typedefs: on the use or in the typedef.
+    assert_eq!(
+        params(&m, "via_typedef"),
+        [
+            u32p(false),
+            ptr(SysPointee::Scalar(Scalar::U64), PointerAccess::Inout, false)
+        ]
+    );
+    assert_eq!(params(&m, "via_plain_typedef"), [u32p(true)]);
     let spec = synth::sys_spec(&m, &opts()).unwrap();
     for line in [
         "fn plain(nocapture inout p: Option[u32]) -> ForeignVal[Unit];",
