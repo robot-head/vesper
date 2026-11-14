@@ -1,0 +1,49 @@
+accept i64 value 42 ; captures=1 resumes=0 live_linear=0 steps=15
+accept i64 value 55 ; captures=0 resumes=0 live_linear=0 steps=2831
+accept i64 value 42 ; captures=1 resumes=1 live_linear=0 steps=23
+accept i64 value -2 ; captures=1 resumes=0 live_linear=0 steps=17
+accept i64 value 31 ; captures=1 resumes=1 live_linear=0 steps=19
+accept bool value false ; captures=0 resumes=0 live_linear=0 steps=4
+accept i64 value -1 ; captures=1 resumes=0 live_linear=0 steps=20
+accept i64 value 12 ; captures=2 resumes=2 live_linear=0 steps=23
+accept i64 value 4 ; captures=0 resumes=0 live_linear=0 steps=15
+accept i64 value 3 ; captures=0 resumes=0 live_linear=0 steps=9
+accept i64 value 6 ; captures=0 resumes=0 live_linear=0 steps=9
+accept i64 value 107 ; captures=2 resumes=2 live_linear=0 steps=20
+accept i64 value 5 ; captures=0 resumes=0 live_linear=0 steps=15
+accept i64 value 3 ; captures=0 resumes=0 live_linear=0 steps=16
+accept i64 value 40 ; captures=0 resumes=0 live_linear=0 steps=375
+accept i64 value 0 ; captures=0 resumes=0 live_linear=0 steps=22
+accept i64 value 1 ; captures=1 resumes=1 live_linear=0 steps=12
+accept i64 value -7 ; captures=2 resumes=1 live_linear=0 steps=15
+accept i64 value 11 ; captures=1 resumes=0 live_linear=0 steps=15
+accept i64 value 2 ; captures=0 resumes=0 live_linear=0 steps=12
+accept i64 value 2 ; captures=0 resumes=0 live_linear=0 steps=9
+accept i64 value -2 ; captures=1 resumes=0 live_linear=0 steps=18
+accept i64 value 1 ; captures=0 resumes=0 live_linear=0 steps=5
+accept u64 value 99 ; captures=1 resumes=0 live_linear=0 steps=22
+accept i64 value 3 ; captures=0 resumes=0 live_linear=0 steps=5
+accept i64 value 9 ; captures=0 resumes=0 live_linear=0 steps=10
+accept i64 value 9223372036854775807 ; captures=0 resumes=0 live_linear=0 steps=6
+accept i64 value 3 ; captures=0 resumes=0 live_linear=0 steps=16
+reject E0410
+reject E0402
+reject E0207
+reject E0200
+reject E0401
+reject E0401
+reject E0204
+reject E0401
+reject E0212
+reject E0200
+reject E0401
+reject E0309
+reject E0303
+reject E0200
+reject E0200
+reject E0200
+reject E0401
+reject E0401
+reject E0202
+reject E0201
+reject E0302
