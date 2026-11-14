@@ -503,6 +503,18 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
         .collect();
     assert_eq!(roots.len(), 1, "one unique artifact directory");
     let root = roots[0].canonicalize().unwrap();
+    let parent = parent.canonicalize().unwrap();
+    let publication = root
+        .strip_prefix(&parent)
+        .expect("publication remains inside its requested parent");
+    assert_eq!(publication.components().count(), 1);
+    let published_path = |relative: &str| {
+        publication
+            .join(relative)
+            .to_str()
+            .expect("published UTF-8 path")
+            .replace('\\', "/")
+    };
     let files = report["artifacts"].as_array().unwrap();
     assert!(files.len() <= Limits::default().artifact_files);
     for file in files {
@@ -556,7 +568,7 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
         };
         let observed = files
             .iter()
-            .find(|file| file["path"] == retained)
+            .find(|file| file["path"] == published_path(&retained))
             .expect("every frozen resource source remains retained and hashed");
         assert_eq!(observed["bytes"], source["bytes"]);
         assert_eq!(observed["blake3"], source["blake3"]);
@@ -566,9 +578,7 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
         let relative = association_file["path"].as_str().unwrap();
         let matches = files
             .iter()
-            .filter(|file| {
-                file["path"] == relative || file["path"] == format!("resource/{relative}")
-            })
+            .filter(|file| file["path"] == published_path(relative))
             .collect::<Vec<_>>();
         assert_eq!(
             matches.len(),
