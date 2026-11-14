@@ -565,17 +565,21 @@ fn telemetry_attr(v: &Value) -> Result<PrimaryAttribute, TraceRunError> {
 
 /// Renders spans as an indented forest (see [`TraceRun::tree`]).
 pub fn render_tree(spans: &[ExportedSpan]) -> String {
-    let ids: std::collections::BTreeSet<u64> = spans.iter().map(|s| s.span_id).collect();
-    let mut children: BTreeMap<u64, Vec<&ExportedSpan>> = BTreeMap::new();
+    // Spans are keyed by (trace id, span id): a parent in another trace is
+    // external even when its span id coincides with an exported span.
+    let key = |s: &ExportedSpan| (s.trace_id, s.span_id);
+    let ids: std::collections::BTreeSet<(u128, u64)> = spans.iter().map(key).collect();
+    let mut children: BTreeMap<(u128, u64), Vec<&ExportedSpan>> = BTreeMap::new();
     let mut roots = vec![];
     for s in spans {
-        if ids.contains(&s.parent_span_id) && s.parent_span_id != s.span_id {
-            children.entry(s.parent_span_id).or_default().push(s);
+        let parent = (s.trace_id, s.parent_span_id);
+        if ids.contains(&parent) && s.parent_span_id != s.span_id {
+            children.entry(parent).or_default().push(s);
         } else {
             roots.push(s);
         }
     }
-    roots.sort_by_key(|s| s.span_id);
+    roots.sort_by_key(|s| (s.span_id, s.trace_id));
     children
         .values_mut()
         .for_each(|c| c.sort_by_key(|s| s.span_id));
@@ -585,7 +589,7 @@ pub fn render_tree(spans: &[ExportedSpan]) -> String {
         out.push_str(&"  ".repeat(depth));
         out.push_str(&line(s));
         out.push('\n');
-        if let Some(c) = children.get(&s.span_id) {
+        if let Some(c) = children.get(&key(s)) {
             stack.extend(c.iter().rev().map(|c| (*c, depth + 1)));
         }
     }

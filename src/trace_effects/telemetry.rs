@@ -7,30 +7,35 @@ use super::TELEMETRABLE;
 use crate::ast::*;
 use crate::capability_effects::SECRET_TYPES;
 use crate::check::{Checked, World};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 pub(super) fn check(module: &Module, checked: &Checked) -> Vec<Diagnostic> {
     let world = &checked.world;
     let mut diagnostics = vec![];
-    let mut seen: BTreeMap<String, Span> = BTreeMap::new();
+    let mut seen: Vec<(&Type, &[Generic], Span)> = vec![];
     for item in &module.items {
         let Item::Conformance(c) = item else { continue };
         if c.trait_ref.name != TELEMETRABLE || c.trait_ref.package.is_some() {
             continue;
         }
         let key = c.self_ty.to_string();
-        if let Some(first) = seen.get(&key) {
+        // Instance heads overlap when they unify, treating each instance's
+        // type parameters as variables; named models count too.
+        if let Some((first, _, span)) = seen
+            .iter()
+            .find(|(t, g, _)| overlaps(t, g, &c.self_ty, &c.generics))
+        {
             diagnostics.push(
                 Diagnostic::new(
                     "E0756",
-                    format!("'{key}' already has a Telemetrable instance; a type has exactly one exported encoding"),
+                    format!("'{key}' already has a Telemetrable instance (for '{first}'); a type has exactly one exported encoding"),
                     c.span.clone(),
                 )
-                .with_related(first.clone(), "first instance")
+                .with_related(span.clone(), "overlapping instance")
                 .with_help("remove one instance; telemetry encodings must be coherent per type"),
             );
         } else {
-            seen.insert(key.clone(), c.span.clone());
+            seen.push((&c.self_ty, &c.generics, c.span.clone()));
         }
         if matches!(c.kind, ConformanceKind::Canonical) {
             let generic = matches!(&c.self_ty, Type::Named(n, a) if a.is_empty() && c.generics.iter().any(|g| &g.name == n));
@@ -194,4 +199,23 @@ pub(crate) fn secret_bearing(world: &World, t: &Type) -> bool {
         }
     }
     visit(world, t, &mut BTreeSet::new())
+}
+
+/// Whether two instance heads can describe the same type. A type parameter
+/// of either instance matches anything (repeated parameters are not tracked,
+/// which can only report more overlaps).
+fn overlaps(a: &Type, ga: &[Generic], b: &Type, gb: &[Generic]) -> bool {
+    let var = |t: &Type, g: &[Generic]| matches!(t, Type::Named(n, args) if args.is_empty() && g.iter().any(|x| &x.name == n));
+    if var(a, ga) || var(b, gb) {
+        return true;
+    }
+    match (a, b) {
+        (Type::Named(x, xs), Type::Named(y, ys)) => {
+            x == y && xs.len() == ys.len() && xs.iter().zip(ys).all(|(p, q)| overlaps(p, ga, q, gb))
+        }
+        (Type::Tuple(xs), Type::Tuple(ys)) => {
+            xs.len() == ys.len() && xs.iter().zip(ys).all(|(p, q)| overlaps(p, ga, q, gb))
+        }
+        _ => a == b,
+    }
 }

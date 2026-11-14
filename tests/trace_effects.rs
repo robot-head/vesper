@@ -368,3 +368,66 @@ fn a_handler_that_swallows_a_host_span_is_reported_unclosed() {
         TraceRunError::UnclosedSpans(1)
     );
 }
+
+#[test]
+fn review_cases_spans_through_places_labels_closures_and_return_patterns() {
+    // Assigning through a span's nested field forges its context.
+    let c = checked(
+        "fn main() -> u64 eff [Trace] { let s = Trace::start_span(0, \"a\"); s.ctx.span_id = 99; Trace::emit_ok(s, 0); 0 }",
+    );
+    assert!(codes(&c).contains(&"E0751"), "{:?}", c.diagnostics);
+    // Labeled Trace capabilities start spans like `Trace::`.
+    let c = checked(
+        "fn main() -> u64 eff [t: Trace] { let s = t.start_span(0, \"a\"); t.emit_ok(s, 0); 0 }",
+    );
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    // A closure that captures a span carries it out of the function.
+    let c = checked(
+        "fn main() -> i64 eff [Trace] {
+            let s = Trace::start_span(0, \"a\");
+            let f = ||@linear { Trace::emit_ok(s, 0); 0 };
+            f()
+        }",
+    );
+    assert!(codes(&c).contains(&"E0750"), "{:?}", c.diagnostics);
+    // A handler's return pattern cannot destructure a span.
+    let c = checked(
+        "linear effect Ask { fn ask() -> u64; }
+         fn main() -> u64 eff [Trace] {
+            handle Ask in { Trace::start_span(0, \"a\") } with {
+                return ActiveSpan { ctx, parent_span_id, start_mono_ns, schema_id } => ctx.span_id,
+                ask(resume) => resume(1),
+            }
+        }",
+    );
+    assert!(codes(&c).contains(&"E0752"), "{:?}", c.diagnostics);
+    // A generic canonical impl and a named model for an instance overlap.
+    let c = checked(
+        "copy struct Box[T: mod copy] { v: T }
+         impl [T: mod copy] Telemetrable for Box[T] { fn telemetry_attr(in self) -> TelemetryAttr { TelemetryAttr::NoAttr } }
+         model Exact: Telemetrable for Box[u64] { fn telemetry_attr(in self) -> TelemetryAttr { TelemetryAttr::Count(self.v) } }
+         fn main() -> u64 { 0 }",
+    );
+    assert!(codes(&c).contains(&"E0756"), "{:?}", c.diagnostics);
+}
+
+#[test]
+fn span_trees_keep_trace_boundaries() {
+    use vesper_beacon::{SpanSchema, SpanStatus};
+    let span = |trace_id, span_id, parent_span_id, name: &str| host::ExportedSpan {
+        trace_id,
+        span_id,
+        parent_span_id,
+        flags: 1,
+        name: name.into(),
+        schema: SpanSchema::Request,
+        status: SpanStatus::Ok,
+        message: None,
+        attribute: PrimaryAttribute::None,
+        start_unix_ns: 0,
+        duration_ns: 1,
+    };
+    // `b` names parent span 1 of trace 2, which is not `a` (trace 1).
+    let tree = host::render_tree(&[span(1, 1, 0, "a"), span(2, 5, 1, "b")]);
+    assert_eq!(tree, "a [request] ok\nb [request] ok\n");
+}

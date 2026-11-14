@@ -14,7 +14,7 @@ mainly §22.1 items 1, 2 and 5, §22.2 and §22.4.
 | `Telemetrable` coherence and redaction E0756–E0758 | `src/trace_effects/telemetry.rs` |
 | Evaluator host that records spans through `vesper-beacon` and exports span forests | `src/trace_effects/host.rs` |
 | Hooks: `check::check` adds the prelude and runs the rules; `pub mod trace_effects` | `src/check.rs`, `src/lib.rs` (own commit) |
-| Fixtures (3 accepted with expected span trees, 14 rejected) and 14 tests | `tests/trace_effects.rs`, `tests/fixtures/trace_effects/**` |
+| Fixtures (3 accepted with expected span trees, 14 rejected) and 16 tests | `tests/trace_effects.rs`, `tests/fixtures/trace_effects/**` |
 
 ### The prelude
 
@@ -58,12 +58,12 @@ rows). On top of that, on the checked and elaborated World:
 
 | Code | Rule |
 | --- | --- |
-| E0750 | A span cannot leave the function that started it: no function or closure result, ADT field or wrapped parameter mentions `ActiveSpan`; no expression wraps one (`(span, n)`, `Some(span)`); a call producing an `ActiveSpan` must be `Trace::start_span`/`start_child` (catches generic `id(span)`). |
-| E0751 | An `ActiveSpan` literal, or an assignment into a span, outside a `Trace` handler clause forges a span. |
-| E0752 | Destructuring an `ActiveSpan` outside a handler clause discards it without finishing it. |
+| E0750 | A span cannot leave the function that started it: no function or closure result, ADT field or wrapped parameter mentions `ActiveSpan`; no expression wraps one (`(span, n)`, `Some(span)`); no closure captures one; labeled capabilities (`eff [t: Trace]`, `t.start_span(..)`) count as `Trace` operations; a call producing an `ActiveSpan` must be `Trace::start_span`/`start_child` (catches generic `id(span)`). |
+| E0751 | An `ActiveSpan` literal, or an assignment into a span (including nested places such as `s.ctx.span_id = …`), outside a `Trace` handler clause forges a span. |
+| E0752 | Destructuring an `ActiveSpan` outside a `Trace` operation clause (including a handler's `return` pattern) discards it without finishing it. |
 | E0753 | Dropping a context: a `SpanContext` result as a statement or bound to `_`, or a `SpanContext` binding, parameter, closure parameter or `Trace` handler-clause parameter that is never read. |
 | E0754 | A `handle Trace` installed where `Trace` is already in scope must propagate: its `current_ctx` and `start_span` clauses must perform an outer `Trace` operation or read a `SpanContext` bound outside the handler. A top-level `Trace` handler may start a root. |
-| E0756 | At most one `Telemetrable` instance per type, counting the canonical `impl` and named `model`s together, so a type has one exported encoding. |
+| E0756 | At most one `Telemetrable` instance per type, counting the canonical `impl` and named `model`s together (heads that unify overlap, so `impl [T] … for Box[T]` and `model …: Telemetrable for Box[u64]` conflict), so a type has one exported encoding. |
 | E0757 | No canonical `Telemetrable` impl for a secret type (`capability_effects::SECRET_TYPES` declared as an ADT) or for a bare type parameter (a blanket impl would cover secrets). Secrets need a named redacting model (§22.4's `RedactedTokenTelemetry`). |
 | E0758 | A `Telemetrable` method may not read secret data: an expression whose type contains a secret type (through arguments or fields, the same notion the `ConstTime` checker uses) may only be the base of a projection, so `self.user_id` is fine and `f(self.password)` is not. Reading a secret's payload outside `ConstTime` is already E0707. |
 
@@ -97,7 +97,7 @@ Toolchains: stable 1.97 and 1.100.0 (clippy), x86_64 Linux.
 
 | Command | Result |
 | --- | --- |
-| `cargo test --locked --test trace_effects` | 14 passed |
+| `cargo test --locked --test trace_effects` | 16 passed |
 | `cargo +1.100.0 clippy --locked -p vesper --all-targets -- -D warnings` | clean |
 | `cargo fmt --all -- --check` | clean |
 | `vesper fmt --check tests/fixtures/trace_effects` | all unchanged |
@@ -130,8 +130,9 @@ unclosed); entry and prelude activation rules; generic and blanket escapes.
 
 - No `@pii` attribute (needs §16.4 attribute syntax, held by Codex) and no
   `@span_schema` macro; schema ids are plain integers.
-- E0756 compares self types as written; overlap between a generic and a
-  concrete instance is left to Pact's canonical overlap check (PACT0102).
+- E0756 detects overlap by unifying instance heads with each instance's type
+  parameters as variables; repeated parameters are not tracked, so it can
+  only over-report.
 - E0754 is syntactic: a clause that reads an outer context counts as
   propagating even if it does not use it to parent spans.
 - Secrets that were declassified through a `ConstTime` gate are public by
