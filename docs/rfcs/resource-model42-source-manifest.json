@@ -1,9 +1,10 @@
 {
   "schema_version": 1,
-  "source_snapshot_commit": "fd7480c6a31ea2234dbbfb49ec92fb4ad623e7d9",
+  "source_snapshot_commit": "40c97c636aa1183ed85569203ef0e431a63b600a",
   "specification_sha256": "8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d",
-  "meaning": "Source-byte association for the model and acceptance harness; not a proof of binary derivation or Rust/compiler refinement.",
-  "lean_module_count": 12,
+  "meaning": "Source-byte association for the logical model, kernel-only artifact pipeline, regression controls and acceptance harnesses; not a proof of binary derivation or native implementation equivalence.",
+  "lean_model_module_count": 12,
+  "manual_model_theorem_count": 284,
   "files": [
     {
       "path": "lean/MetatheoryFull.lean",
@@ -67,8 +68,108 @@
     },
     {
       "path": "tests/resource_model42.rs",
-      "bytes": 26783,
-      "sha256": "35de73a2c9bfba6a48cd6426cfe65aa189ff7617029c1487ca7dd7e158ca7c95"
+      "bytes": 53304,
+      "sha256": "1ac7e62a4cf4b2114aeeeb7d6925ecab5d4b4fc8be6e7632927cafd0ed0c5783"
+    },
+    {
+      "path": "tests/proof_audit_private.rs",
+      "bytes": 15440,
+      "sha256": "a990f24f3f59e83503c1ff4d89fbbbb3eba02160804bdd8b9ca88508c6f23659"
+    },
+    {
+      "path": "tests/proof_audit_cli.rs",
+      "bytes": 13259,
+      "sha256": "5747741c6e8019ced3a3413704a0c241a5e24ee751b97f42581e4fca8fd2d1c8"
+    },
+    {
+      "path": "tools/proof-audit/Audit.lean",
+      "bytes": 15928,
+      "sha256": "3e24a84fe1bd851e40730f5c97bbe11633b1e4ebcff0f0e27505773413fd7dae"
+    },
+    {
+      "path": "tools/resource-model42/KernelSnapshot.lean",
+      "bytes": 35773,
+      "sha256": "0bc48f86e7eb1850b52530274a7ee70247508f30ec3d7a031d7e8d26be3f2807"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotAliasAxiom.lean",
+      "bytes": 70,
+      "sha256": "0e4f05250f61128f3219f51360e31ed7cc3a9e562634f5478a204a5988906cfb"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotAliasAxiomA.lean",
+      "bytes": 152,
+      "sha256": "52896bba58ad7bb53d31e19dc298a9eaeafc4631fc8bd9b87adbaa7ad3666ed7"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotAliasAxiomB.lean",
+      "bytes": 256,
+      "sha256": "c51ffb74da0364d1a01c273e64069c3fc9bf57381b6e05e080ab063ab6726542"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotAliasClean.lean",
+      "bytes": 70,
+      "sha256": "340585676ba05c831be679d1fa4e264ae2e6143ccd3b71145150f6bfd063f5ba"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotAliasCleanA.lean",
+      "bytes": 152,
+      "sha256": "f8c1d695ebe1daee524291f7ca90df86bdecba5962b64142c0ccbf2579a2cbd2"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotAliasCleanB.lean",
+      "bytes": 220,
+      "sha256": "e7fb499e0e9efe97767c28705bc674d7bd29a90287816e2b4957ee4a2866f078"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotAxiom.lean",
+      "bytes": 275,
+      "sha256": "4364958b10ea7c0788e131285a0499243d83c86ffb3c96672d3defa7f5819f42"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotFakeHelper.lean",
+      "bytes": 355,
+      "sha256": "d6b11c6ad3b4ca1348da7d75e2be1043d367dffb5e4a38724b5d4e5ae73bfaaf"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotFakeUnsafe.lean",
+      "bytes": 414,
+      "sha256": "e1ff59b181092287f9dbcbcf2d6c5d197af5c56aeeccf12699d26f03b72276d3"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotPartial.lean",
+      "bytes": 358,
+      "sha256": "933f04162a2a34012beb038495d5cb01955f80b4ff622808e27eebe7f37da53f"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotTotal.lean",
+      "bytes": 565,
+      "sha256": "5ec0e2ced3898749f385bea304943308910390567a047383f4750039a4c4be7e"
+    },
+    {
+      "path": "tools/resource-model42/fixtures/ResourceSnapshotUnsafe.lean",
+      "bytes": 305,
+      "sha256": "9f167f62affa77f7fbe982a3d0c28f07a3754afa9e0e47e26b94e2fc12c61eee"
+    },
+    {
+      "path": "tools/proof-audit/fixtures/private-replay/PrivateReplayBoth.lean",
+      "bytes": 51,
+      "sha256": "c78b2d0177c73b81833db7f564b7faa5d4ff5fa77f243ac5c1fad93e9380d34d"
+    },
+    {
+      "path": "tools/proof-audit/fixtures/private-replay/PrivateReplayLeft.lean",
+      "bytes": 151,
+      "sha256": "d65dccad0e28886f2626d5670602376fbbd66e9ceb65c0d029f95643f6295507"
+    },
+    {
+      "path": "tools/proof-audit/fixtures/private-replay/PrivateReplayMetadata.lean",
+      "bytes": 2755,
+      "sha256": "5614759bf5c38854ca431c720f0de5aa9cedf89ef3e6311ce5427795e391a2bd"
+    },
+    {
+      "path": "tools/proof-audit/fixtures/private-replay/PrivateReplayRight.lean",
+      "bytes": 152,
+      "sha256": "98984f668833779c256a547098d7d004f8a3c99045cc20e49715d8f972982ca7"
     }
   ]
 }
