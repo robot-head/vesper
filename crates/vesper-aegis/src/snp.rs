@@ -1,5 +1,17 @@
-//! AMD SEV-SNP `ATTESTATION_REPORT` (versions 2 and 3, 1184 bytes), signed
-//! with ECDSA P-384/SHA-384 by the VCEK.
+//! AMD SEV-SNP `ATTESTATION_REPORT` (1184 bytes), signed with ECDSA
+//! P-384/SHA-384 by the VCEK or VLEK.
+//!
+//! Supported versions (SEV-SNP firmware ABI):
+//!
+//! - 2: the original layout;
+//! - 3 and 4: add CPUID family/model/stepping at `0x188..0x18B` (version 4
+//!   has the version-3 layout, as in AMD's firmware and VirTEE `sev`);
+//! - 5: adds `LAUNCH_MIT_VECTOR` (`0x1F8`) and `CURRENT_MIT_VECTOR`
+//!   (`0x200`).
+//!
+//! Version 6 (Venice extended TCBs) and later, and versions below 2, are
+//! rejected with [`ParseError::UnsupportedValue`]. Every reserved byte of
+//! the version's layout must be zero.
 
 use crate::amd::{SnpCollateral, SnpTcbBaseline, VerifiedSnpReport, verify_snp_collateral};
 use crate::chain::{Curve, TrustRoot, verify_chain};
@@ -13,6 +25,11 @@ use crate::reader::Reader;
 pub const SNP_REPORT_LEN: usize = 0x4A0;
 pub const SNP_SIGNED_LEN: usize = 0x2A0;
 pub const SNP_SIG_ALGO_ECDSA_P384_SHA384: u32 = 1;
+/// Lowest and highest supported report versions.
+pub const SNP_REPORT_MIN_VERSION: u32 = 2;
+pub const SNP_REPORT_MAX_VERSION: u32 = 5;
+/// First version with the mitigation vectors.
+pub const SNP_REPORT_VERSION_MIT_VECTORS: u32 = 5;
 /// Guest policy bit 16: SMT allowed.
 pub const SNP_POLICY_SMT: u64 = 1 << 16;
 /// Guest policy bit 19: debugging allowed.
@@ -46,6 +63,10 @@ pub struct SnpReport {
     pub current_version: [u8; 3],
     pub committed_version: [u8; 3],
     pub launch_tcb: u64,
+    /// Version 5 and later (zero before): mitigation vector at launch and
+    /// now.
+    pub launch_mit_vector: u64,
+    pub current_mit_vector: u64,
     /// Big-endian `r || s` (converted from the report's little-endian,
     /// zero-extended 72-byte components).
     pub signature_r_s: [u8; 96],
@@ -55,7 +76,7 @@ impl SnpReport {
     pub fn parse(bytes: &[u8]) -> Result<Self, ParseError> {
         let mut r = Reader::new(bytes, Format::SnpReport);
         let version = r.u32("version")?;
-        if !(2..=3).contains(&version) {
+        if !(SNP_REPORT_MIN_VERSION..=SNP_REPORT_MAX_VERSION).contains(&version) {
             return Err(unsupported("version", version.into()));
         }
         let guest_svn = r.u32("guest_svn")?;
@@ -97,7 +118,13 @@ impl SnpReport {
         let committed_version: [u8; 3] = r.array("committed_version")?;
         r.reserved(1, "reserved3")?;
         let launch_tcb = r.u64("launch_tcb")?;
-        r.reserved(168, "reserved4")?;
+        let (launch_mit_vector, current_mit_vector) = if version >= SNP_REPORT_VERSION_MIT_VECTORS {
+            (r.u64("launch_mit_vector")?, r.u64("current_mit_vector")?)
+        } else {
+            r.reserved(16, "reserved4 (pre-v5 mitigation vectors)")?;
+            (0, 0)
+        };
+        r.reserved(152, "reserved5")?;
         debug_assert_eq!(r.position(), SNP_SIGNED_LEN);
         let r_le: [u8; 72] = r.array("signature.r")?;
         let s_le: [u8; 72] = r.array("signature.s")?;
@@ -140,6 +167,8 @@ impl SnpReport {
             current_version,
             committed_version,
             launch_tcb,
+            launch_mit_vector,
+            current_mit_vector,
             signature_r_s,
         })
     }
@@ -175,7 +204,9 @@ impl SnpReport {
         o.extend_from_slice(&self.committed_version);
         o.push(0);
         o.extend_from_slice(&self.launch_tcb.to_le_bytes());
-        o.extend_from_slice(&[0; 168]);
+        o.extend_from_slice(&self.launch_mit_vector.to_le_bytes());
+        o.extend_from_slice(&self.current_mit_vector.to_le_bytes());
+        o.extend_from_slice(&[0; 152]);
         o
     }
 
@@ -192,6 +223,25 @@ impl SnpReport {
     /// `SIGNING_KEY` field: 0 = VCEK, 1 = VLEK, 7 = none.
     pub fn signing_key(&self) -> u32 {
         (self.flags >> 2) & 7
+    }
+
+    /// The processor family named by the report's CPUID fields (version 3
+    /// and later), following AMD's KDS "Determining the Product Name":
+    /// family `19h` model `01h` is Milan and model `11h` Genoa; family `1Ah`
+    /// with extended model 0 or 1 is Turin. `None` for version 2 (no CPUID)
+    /// and for any other processor.
+    pub fn product(&self) -> Option<crate::roots::AmdProduct> {
+        use crate::roots::AmdProduct;
+        if self.version < 3 {
+            return None;
+        }
+        let [family, model, _stepping] = self.cpuid;
+        match (family, model) {
+            (0x19, 0x01) => Some(AmdProduct::Milan),
+            (0x19, 0x11) => Some(AmdProduct::Genoa),
+            (0x1A, m) if m >> 4 <= 1 => Some(AmdProduct::Turin),
+            _ => None,
+        }
     }
 }
 

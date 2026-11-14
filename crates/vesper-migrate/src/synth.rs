@@ -34,11 +34,17 @@ enum AliasClass {
 /// check in `prepare_call`).
 pub fn aliasing_pair(params: &[(String, SysParam)]) -> Option<String> {
     let class = |p: &SysParam| match p {
-        SysParam::Slice { element, access } => Some((
-            AliasClass::Scalar(*element),
-            *access == Access::Inout,
-            false,
-        )),
+        SysParam::Slice { .. } | SysParam::ElementSlice { .. } => {
+            let (element, access, _) = p.slice_parts()?;
+            Some((
+                match element {
+                    SysPointee::Scalar(s) => AliasClass::Scalar(s),
+                    SysPointee::Struct(n) => AliasClass::Struct(n),
+                },
+                access == Access::Inout,
+                false,
+            ))
+        }
         SysParam::Pointer {
             pointee, access, ..
         } => Some((
@@ -69,8 +75,8 @@ pub fn aliasing_pair(params: &[(String, SysParam)]) -> Option<String> {
     None
 }
 
-/// Refuse the `.vsys` signature of any function whose single-pointer struct
-/// pointee has no checked wire layout.
+/// Refuse the `.vsys` signature of any function whose struct pointee or
+/// struct slice element has no checked wire layout.
 pub fn check_pointer_pointees(m: &mut Migration) {
     let laid_out: std::collections::BTreeSet<String> = m
         .structs
@@ -84,6 +90,10 @@ pub fn check_pointer_pointees(m: &mut Migration) {
             SysParam::Pointer {
                 pointee: SysPointee::Struct(s),
                 ..
+            }
+            | SysParam::ElementSlice {
+                element: SysPointee::Struct(s),
+                ..
             } if !laid_out.contains(s) => Some((n.clone(), s.clone())),
             _ => None,
         });
@@ -96,7 +106,7 @@ pub fn check_pointer_pointees(m: &mut Migration) {
                 item,
                 RefusalReason::PointerParameter,
                 format!(
-                    "parameter `{param}` points to struct `{s}`, which has no checked wire layout"
+                    "parameter `{param}` points to struct `{s}` (one element or a slice), which has no checked wire layout"
                 ),
             ));
         }
@@ -319,6 +329,20 @@ fn value_matches(rendered: &SysValue, parsed: &ValueType) -> bool {
     }
 }
 
+fn pointee_matches(
+    parsed: &Pointee,
+    rendered: &SysPointee,
+    decls: &std::collections::BTreeMap<&str, &Declaration>,
+) -> bool {
+    match (parsed, rendered) {
+        (Pointee::Scalar(x), SysPointee::Scalar(y)) => x == y,
+        (Pointee::Struct(x), SysPointee::Struct(y)) => {
+            x.name() == y && decls.get(y.as_str()).is_some_and(|d| x.declaration() == *d)
+        }
+        _ => false,
+    }
+}
+
 /// Render the `.vsys` spec for every function that has a C-ABI signature,
 /// parse it with `vesper_ffi::sys::parse`, and check the parsed descriptor
 /// against the migration.
@@ -394,14 +418,25 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                     }
                     format!("{n}: {}", sys_value(v))
                 }
-                SysParam::Slice { element, access } => format!(
-                    "nocapture {} {n}: CSlice[{}]",
-                    match access {
-                        Access::In => "in",
-                        Access::Inout => "inout",
-                    },
-                    element.name()
-                ),
+                SysParam::Slice { .. } | SysParam::ElementSlice { .. } => {
+                    let (element, access, nullable) = p.slice_parts().expect("slice");
+                    if let SysPointee::Struct(st) = &element {
+                        used_structs.insert(st.clone());
+                    }
+                    let slice = format!("CSlice[{}]", element.name());
+                    format!(
+                        "nocapture {} {n}: {}",
+                        match access {
+                            Access::In => "in",
+                            Access::Inout => "inout",
+                        },
+                        if nullable {
+                            format!("Option[{slice}]")
+                        } else {
+                            slice
+                        }
+                    )
+                }
                 SysParam::Pointer {
                     pointee,
                     access,
@@ -506,12 +541,18 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                         && match (p.ty(), s) {
                             (ParameterType::Value(a), SysParam::Value(b)) => value_matches(b, a),
                             (
-                                ParameterType::Slice { element, access },
-                                SysParam::Slice {
-                                    element: e,
-                                    access: a,
+                                ParameterType::Slice {
+                                    element,
+                                    access,
+                                    nullable,
                                 },
-                            ) => element == e && access == a,
+                                SysParam::Slice { .. } | SysParam::ElementSlice { .. },
+                            ) => {
+                                let (e, a, z) = s.slice_parts().expect("slice");
+                                access == &a
+                                    && *nullable == z
+                                    && pointee_matches(element, &e, &decls)
+                            }
                             (
                                 ParameterType::Pointer {
                                     pointee,
@@ -524,18 +565,7 @@ pub fn sys_spec(m: &Migration, options: &SysSpecOptions) -> Result<SysSpec, Migr
                                     nullable: z,
                                 },
                             ) => {
-                                access == a
-                                    && nullable == z
-                                    && match (pointee, e) {
-                                        (Pointee::Scalar(x), SysPointee::Scalar(y)) => x == y,
-                                        (Pointee::Struct(x), SysPointee::Struct(y)) => {
-                                            x.name() == y
-                                                && decls
-                                                    .get(y.as_str())
-                                                    .is_some_and(|d| x.declaration() == *d)
-                                        }
-                                        _ => false,
-                                    }
+                                access == a && nullable == z && pointee_matches(pointee, e, &decls)
                             }
                             _ => false,
                         }

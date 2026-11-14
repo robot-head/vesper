@@ -265,6 +265,42 @@ pub enum SysParam {
         access: PointerAccess,
         nullable: bool,
     },
+    /// A `nocapture` pointer/length slice in its general form: integer or
+    /// wire-struct elements, optionally nullable (`Option[CSlice[T]]`, where
+    /// `(NULL, 0)` is `None`). [`SysParam::Slice`] remains the non-null
+    /// integer form.
+    ElementSlice {
+        element: SysPointee,
+        access: Access,
+        nullable: bool,
+    },
+}
+
+impl SysParam {
+    /// Element, access and nullability of either slice form.
+    pub fn slice_parts(&self) -> Option<(SysPointee, Access, bool)> {
+        match self {
+            Self::Slice { element, access } => Some((SysPointee::Scalar(*element), *access, false)),
+            Self::ElementSlice {
+                element,
+                access,
+                nullable,
+            } => Some((element.clone(), *access, *nullable)),
+            _ => None,
+        }
+    }
+    /// A slice in the canonical variant: the non-null integer form stays
+    /// [`SysParam::Slice`].
+    pub fn slice(element: SysPointee, access: Access, nullable: bool) -> Self {
+        match (element, nullable) {
+            (SysPointee::Scalar(element), false) => Self::Slice { element, access },
+            (element, nullable) => Self::ElementSlice {
+                element,
+                access,
+                nullable,
+            },
+        }
+    }
 }
 
 /// The C-ABI view of one function.

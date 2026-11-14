@@ -7,9 +7,11 @@
 
 mod common;
 
-use common::{GenOptions, Rng, random_packet, random_program};
+use common::{GenOptions, Rng, random_packet, random_program, retarget};
 use std::collections::BTreeMap;
-use vesper_ebpf::interp::{InterpError, XdpEnv, run_xdp};
+use vesper_ebpf::ProgramType;
+use vesper_ebpf::interp::{Env, Input, InterpError, SkbMeta, XdpEnv, run, run_xdp};
+use vesper_ebpf::verifier::PT_REGS_SIZE;
 use vesper_ebpf::{VerifierPolicy, verify};
 
 #[test]
@@ -82,4 +84,73 @@ fn accepted_random_programs_never_fault() {
         rules.len() >= 8,
         "generator reaches too few rules: {rules:?}"
     );
+}
+
+/// The same property for tc, tracepoint and kprobe programs: the random
+/// XDP programs moved to each context layout run over random packets,
+/// records and register files.
+#[test]
+fn accepted_random_programs_never_fault_in_any_program_type() {
+    let n: u64 = std::env::var("VESPER_EBPF_FUZZ_PROGRAMS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4000)
+        / 2;
+    let policy = VerifierPolicy::default();
+    for t in [
+        ProgramType::SchedCls,
+        ProgramType::Tracepoint,
+        ProgramType::Kprobe,
+    ] {
+        if t == ProgramType::Kprobe && PT_REGS_SIZE == 0 {
+            continue;
+        }
+        let mut rng = Rng(0x50_0000 + t.kernel_type() as u64);
+        let (mut accepted, mut runs) = (0, 0);
+        for i in 0..n {
+            let prog = retarget(
+                &random_program(
+                    &mut rng,
+                    GenOptions {
+                        nondeterministic_helpers: true,
+                        ..GenOptions::default()
+                    },
+                ),
+                t,
+            );
+            if verify(&prog, &policy).is_err() {
+                continue;
+            }
+            accepted += 1;
+            let mut env = Env::new(&prog);
+            env.now_ns = i;
+            for _ in 0..8 {
+                let bytes = random_packet(&mut rng);
+                let regs = rng.bytes(PT_REGS_SIZE as usize);
+                let input = match t {
+                    ProgramType::SchedCls => Input::Skb {
+                        packet: &bytes,
+                        meta: SkbMeta {
+                            mark: rng.next() as u32,
+                            ..SkbMeta::test_run(&bytes)
+                        },
+                    },
+                    ProgramType::Tracepoint => Input::Tracepoint(&bytes),
+                    _ => Input::Kprobe(&regs),
+                };
+                match run(&prog, &mut env, input) {
+                    Ok(_) | Err(InterpError::InsnBudget) => runs += 1,
+                    Err(e) => panic!(
+                        "verifier accepted {t:?} program {i} but it faulted: {e}\n{}",
+                        vesper_ebpf::insn::disassemble(&prog.insns)
+                    ),
+                }
+            }
+        }
+        eprintln!("{t:?}: accepted {accepted}/{n}, {runs} fault-free runs");
+        assert!(
+            accepted >= n / 400,
+            "{t:?}: generator too weak ({accepted})"
+        );
+    }
 }

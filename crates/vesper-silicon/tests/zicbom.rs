@@ -5,8 +5,8 @@
 
 use vesper_silicon::Arch;
 use vesper_silicon::dma::{
-    BarrierInst, DmaBuffer, DmaCoherence, DmaEngine, DmaError, DmaPhase, NonCoherentCache,
-    StaticDmaBuf, zicbom_barriers,
+    BarrierInst, Cbie, DmaBuffer, DmaCoherence, DmaEngine, DmaError, DmaPhase, ENVCFG_CBCFE,
+    NonCoherentCache, PrivMode, StaticDmaBuf, ZicbomEnv, zicbom_barriers,
 };
 use vesper_silicon::dtb::Platform;
 use vesper_silicon::ledger::{Ledger, OwnerKind};
@@ -314,6 +314,224 @@ fn randomized_transfers_keep_cpu_and_device_views_consistent() {
                     if rng(&mut seed).is_multiple_of(2) {
                         cache.evict_all();
                     }
+                    cache.device_write(at, &data).unwrap();
+                    if rng(&mut seed).is_multiple_of(2) {
+                        cache.evict_all();
+                    }
+                    dma.device_complete(0, 256, None).unwrap();
+                    let mid = dma.barriers().len();
+                    let _ = dma.poll_complete(x).unwrap();
+                    cache.execute_all(&dma.barriers()[mid..]).unwrap();
+                    assert_eq!(cache.cpu_read(at, 256).unwrap(), data, "seed {seed0}");
+                }
+            }
+        }
+        assert_eq!(ledger.total_leaked(), 0);
+    }
+}
+
+/// `menvcfg`/`senvcfg` value with this CBIE and CBCFE.
+fn envcfg(cbie: Cbie, cbcfe: bool) -> u64 {
+    cbie.bits() | if cbcfe { ENVCFG_CBCFE } else { 0 }
+}
+
+#[test]
+fn menvcfg_cbie_and_cbcfe_decide_what_cbo_does() {
+    let clean = BarrierInst::CboClean(BASE);
+    let flush = BarrierInst::CboFlush(BASE);
+    let inval = BarrierInst::CboInval(BASE);
+    // M-mode is never gated.
+    for i in [&clean, &flush, &inval] {
+        assert_eq!(ZicbomEnv::MACHINE.effective(i).unwrap(), *i);
+    }
+    // S-mode with menvcfg = 0: every CBO traps.
+    let s0 = ZicbomEnv::supervisor(0);
+    for i in [&clean, &flush, &inval] {
+        assert_eq!(
+            s0.effective(i),
+            Err(DmaError::CboIllegal {
+                inst: i.clone(),
+                mode: PrivMode::Supervisor
+            })
+        );
+    }
+    // CBCFE enables clean/flush; CBIE = 01 turns inval into a flush, 11
+    // keeps it, 10 is reserved.
+    let s = |cbie| ZicbomEnv::supervisor(envcfg(cbie, true));
+    assert_eq!(s(Cbie::Illegal).effective(&clean).unwrap(), clean);
+    assert!(s(Cbie::Illegal).effective(&inval).is_err());
+    assert_eq!(s(Cbie::Flush).effective(&inval).unwrap(), flush);
+    assert_eq!(s(Cbie::Invalidate).effective(&inval).unwrap(), inval);
+    assert_eq!(
+        s(Cbie::Reserved).effective(&inval),
+        Err(DmaError::ReservedCbie {
+            register: "menvcfg"
+        })
+    );
+    // Fences are not gated.
+    assert_eq!(
+        s0.effective(&BarrierInst::FenceIorwIorw).unwrap(),
+        BarrierInst::FenceIorwIorw
+    );
+    // U-mode: both registers gate; the weaker setting wins.
+    let m11 = envcfg(Cbie::Invalidate, true);
+    let u = |senv| ZicbomEnv::user(m11, senv);
+    assert_eq!(
+        u(envcfg(Cbie::Invalidate, true)).effective(&inval).unwrap(),
+        inval
+    );
+    assert_eq!(
+        u(envcfg(Cbie::Flush, true)).effective(&inval).unwrap(),
+        flush
+    );
+    assert!(u(envcfg(Cbie::Illegal, true)).effective(&inval).is_err());
+    assert!(
+        u(envcfg(Cbie::Invalidate, false))
+            .effective(&clean)
+            .is_err()
+    );
+    assert!(
+        ZicbomEnv::user(envcfg(Cbie::Flush, false), envcfg(Cbie::Invalidate, true))
+            .effective(&clean)
+            .is_err()
+    );
+    assert_eq!(
+        ZicbomEnv::user(envcfg(Cbie::Flush, true), envcfg(Cbie::Invalidate, true))
+            .effective(&inval)
+            .unwrap(),
+        flush
+    );
+    assert_eq!(
+        ZicbomEnv::user(m11, envcfg(Cbie::Reserved, true)).effective(&inval),
+        Err(DmaError::ReservedCbie {
+            register: "senvcfg"
+        })
+    );
+    assert_eq!(Cbie::of(0x30), Cbie::Invalidate);
+    assert_eq!(Cbie::of(0x10), Cbie::Flush);
+}
+
+#[test]
+fn cbie_flush_is_safe_only_because_the_cpu_does_not_touch_an_owned_buffer() {
+    let data: Vec<u8> = (0..128u32).map(|i| (i * 3) as u8).collect();
+    let before = zicbom_barriers(DmaPhase::BeforeDevice, BASE, 128, 64).unwrap();
+    let after = zicbom_barriers(DmaPhase::AfterDeviceWrite, BASE, 128, 64).unwrap();
+    for cbie in [Cbie::Flush, Cbie::Invalidate] {
+        // The protocol: CPU writes, clean, device writes, then inval (or
+        // inval-as-flush). The clean left the lines clean, so the flush
+        // writes nothing back and the CPU reads the device's data.
+        let mut c = NonCoherentCache::new(BASE, 4096, 64).unwrap();
+        c.set_zicbom_env(ZicbomEnv::supervisor(envcfg(cbie, true)));
+        c.cpu_write(BASE, &[0xee; 128]).unwrap();
+        c.execute_all(&before).unwrap();
+        c.device_write(BASE, &data).unwrap();
+        c.execute_all(&after).unwrap();
+        assert_eq!(c.cpu_read(BASE, 128).unwrap(), data, "{cbie:?}");
+    }
+    // A CPU store into the buffer while the device owns it (what the linear
+    // DmaTransfer rules out): with CBIE = 11 the stray line is discarded,
+    // with CBIE = 01 its flush overwrites the device's data in memory.
+    let stray = |cbie| {
+        let mut c = NonCoherentCache::new(BASE, 4096, 64).unwrap();
+        c.set_zicbom_env(ZicbomEnv::supervisor(envcfg(cbie, true)));
+        c.execute_all(&before).unwrap();
+        c.device_write(BASE, &data).unwrap();
+        c.cpu_write(BASE, &[0x77]).unwrap();
+        c.execute_all(&after).unwrap();
+        c.device_read(BASE, 128).unwrap()
+    };
+    assert_eq!(stray(Cbie::Invalidate), data);
+    assert_ne!(stray(Cbie::Flush), data);
+    // A trapping CBO changes nothing.
+    let mut c = NonCoherentCache::new(BASE, 4096, 64).unwrap();
+    c.set_zicbom_env(ZicbomEnv::supervisor(0));
+    c.cpu_write(BASE, &[1]).unwrap();
+    assert!(c.execute(&BarrierInst::CboClean(BASE)).is_err());
+    assert_eq!(c.device_read(BASE, 1).unwrap(), [0]);
+}
+
+#[test]
+fn engine_refuses_submissions_whose_cbo_would_trap() {
+    let ledger = Ledger::new();
+    let z = DmaCoherence::Zicbom { block_bytes: 64 };
+    let mut dma = DmaEngine::with_coherence(Arch::Riscv64, z, 1, 2, 0, &ledger).unwrap();
+    // S-mode driver without CBCFE: even a transmit's clean traps.
+    dma.set_zicbom_env(ZicbomEnv::supervisor(envcfg(Cbie::Invalidate, false)))
+        .unwrap();
+    let (buf, e) = dma
+        .submit_tx(0, StaticDmaBuf::<128>::new(BASE))
+        .unwrap_err();
+    assert!(matches!(
+        e,
+        DmaError::CboIllegal {
+            inst: BarrierInst::CboClean(_),
+            ..
+        }
+    ));
+    // CBCFE on, CBIE = 00: transmits work, receives are refused up front
+    // because their completion would trap.
+    dma.set_zicbom_env(ZicbomEnv::supervisor(envcfg(Cbie::Illegal, true)))
+        .unwrap();
+    let (buf, e) = dma.submit_rx(0, buf).unwrap_err();
+    assert!(matches!(
+        e,
+        DmaError::CboIllegal {
+            inst: BarrierInst::CboInval(_),
+            ..
+        }
+    ));
+    let tx = dma.submit_tx(0, buf).unwrap();
+    dma.device_complete(0, 128, None).unwrap();
+    let (_, buf) = dma.poll_complete(tx).unwrap();
+    // CBIE = 01 is accepted (the engine records the CBO.INVAL it issues;
+    // the CPU executes it as a flush).
+    dma.set_zicbom_env(ZicbomEnv::supervisor(envcfg(Cbie::Flush, true)))
+        .unwrap();
+    let rx = dma.submit_rx(0, buf).unwrap();
+    // While the receive is outstanding its completion sequence is pinned to
+    // the environment it was validated against.
+    assert_eq!(
+        dma.set_zicbom_env(ZicbomEnv::supervisor(0)),
+        Err(DmaError::TransfersInFlight(1))
+    );
+    dma.device_complete(0, 128, None).unwrap();
+    assert_eq!(
+        dma.set_zicbom_env(ZicbomEnv::supervisor(0)),
+        Err(DmaError::TransfersInFlight(1)),
+        "completed but not yet polled"
+    );
+    let _ = dma.poll_complete(rx).unwrap();
+    assert!(dma.barriers().contains(&BarrierInst::CboInval(BASE)));
+    dma.set_zicbom_env(ZicbomEnv::supervisor(0)).unwrap();
+    assert_eq!(ledger.total_leaked(), 0);
+}
+
+/// The randomized engine test again, with an S-mode driver and
+/// `menvcfg.CBIE = 01`: inval-as-flush keeps both views consistent.
+#[test]
+fn randomized_transfers_stay_consistent_with_cbie_flush() {
+    for seed0 in 1..=32u64 {
+        let mut seed = seed0.wrapping_mul(0x2545_f491_4f6c_dd1d) | 1;
+        let ledger = Ledger::new();
+        let env = ZicbomEnv::supervisor(envcfg(Cbie::Flush, true));
+        let mut cache = NonCoherentCache::new(BASE, 1024, 64).unwrap();
+        cache.set_zicbom_env(env);
+        let z = DmaCoherence::Zicbom { block_bytes: 64 };
+        let mut dma = DmaEngine::with_coherence(Arch::Riscv64, z, 1, 2, 0, &ledger).unwrap();
+        dma.set_zicbom_env(env).unwrap();
+        for _ in 0..150 {
+            let at = BASE + (rng(&mut seed) % 4) * 256;
+            match rng(&mut seed) % 3 {
+                0 => {
+                    let off = rng(&mut seed) % 256;
+                    cache.cpu_write(at + off, &[rng(&mut seed) as u8]).unwrap();
+                }
+                1 => cache.evict_all(),
+                _ => {
+                    let data: Vec<u8> = (0..256).map(|_| rng(&mut seed) as u8).collect();
+                    let start = dma.barriers().len();
+                    let x = dma.submit_rx(0, StaticDmaBuf::<256>::new(at)).unwrap();
+                    cache.execute_all(&dma.barriers()[start..]).unwrap();
                     cache.device_write(at, &data).unwrap();
                     if rng(&mut seed).is_multiple_of(2) {
                         cache.evict_all();
