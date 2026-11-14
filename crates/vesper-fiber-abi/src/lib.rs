@@ -19,6 +19,10 @@
 //!   `vesper_pulse` driver: io_uring or epoll on Linux, kqueue on macOS,
 //!   IOCP on Windows (see `vesper_pulse::select::open`).
 //!
+//! * `write_watch` (Linux, macOS, Windows): page-granular write tracking by
+//!   the MMU (`mprotect` faults, Windows write watches) for checkpointable
+//!   memory written through raw pointers.
+//!
 //! See `docs/rfcs/native-pulse-abi.md` for the ownership, lifetime and
 //! relocation contracts and for what this prototype does not establish.
 pub mod abi;
@@ -43,6 +47,9 @@ pub mod stack;
 #[cfg(vesper_direct_fibers)]
 #[cfg_attr(windows, path = "switch_windows.rs")]
 pub mod switch;
+
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+pub mod write_watch;
 
 #[cfg(vesper_direct_fibers)]
 pub use fiber::{
