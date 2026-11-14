@@ -508,17 +508,18 @@ pub struct TrackingProbe {
 /// back. (Clearing soft-dirty bits is process-wide; nothing else in Vesper
 /// uses them.)
 pub fn probe_write_tracking() -> Vec<TrackingProbe> {
-    let mut out = vec![];
     #[cfg(any(target_os = "linux", target_os = "macos", windows))]
-    out.push(host_tracking());
+    let host = host_tracking();
     #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
-    out.push(TrackingProbe {
+    let host = TrackingProbe {
         mechanism: WriteTracking::MprotectFaults,
         host_permits: None,
         exercised: false,
         used: false,
         detail: "no write-tracking backend for this OS".into(),
-    });
+    };
+    #[allow(unused_mut)]
+    let mut out = vec![host];
     #[cfg(target_os = "linux")]
     {
         out.push(linux::userfaultfd());

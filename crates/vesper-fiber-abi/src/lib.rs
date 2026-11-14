@@ -19,6 +19,8 @@
 //!   `vesper_pulse` driver: io_uring or epoll on Linux, kqueue on macOS,
 //!   IOCP on Windows (see `vesper_pulse::select::open`).
 //!
+//! * `unwind` (direct-fiber targets): DWARF CFI (gimli) register unwinding
+//!   of the generated frames below a parked fiber's switch frame.
 //! * `write_watch` (Linux, macOS, Windows): page-granular write tracking by
 //!   the MMU (`mprotect` faults, Windows write watches) for checkpointable
 //!   memory written through raw pointers.
@@ -48,6 +50,8 @@ pub mod stack;
 #[cfg_attr(windows, path = "switch_windows.rs")]
 pub mod switch;
 
+#[cfg(vesper_direct_fibers)]
+pub mod unwind;
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 pub mod write_watch;
 
