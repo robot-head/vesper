@@ -1,5 +1,5 @@
 //! The only module in this crate that may use `unsafe`: `std::arch` stage 1
-//! kernels for x86_64 (SSE4.2, AVX2) and AArch64 (NEON). Each path is a
+//! kernels for x86_64 (SSE4.2, AVX2, AVX-512BW with VPCLMULQDQ) and AArch64 (NEON). Each path is a
 //! `#[target_feature]` function entered only after run-time detection of every
 //! feature it enables; the remaining `unsafe` blocks are unaligned loads from
 //! `&[u8; 16]`/`&[u8; 64]` references, which are always in bounds.
@@ -120,6 +120,30 @@ pub(super) fn avx2_available() -> bool {
         false
     }
 }
+pub(super) fn avx512_available() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        std::arch::is_x86_feature_detected!("avx512f")
+            && std::arch::is_x86_feature_detected!("avx512bw")
+            && std::arch::is_x86_feature_detected!("vpclmulqdq")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
+}
+/// Whether the CPU reports SVE. There is no SVE path: Rust's SVE intrinsics
+/// are not stable, so SVE hosts run the NEON path and this is reported.
+pub(super) fn sve_reported() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("sve")
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        false
+    }
+}
 pub(super) fn neon_available() -> bool {
     #[cfg(target_arch = "aarch64")]
     {
@@ -149,6 +173,11 @@ pub(super) fn run<R: Recorder>(
         Isa::Avx2 if avx2_available() => {
             // SAFETY: every feature `run_avx2` enables was detected above.
             Some(unsafe { x86::run_avx2(input, sink, rec) })
+        }
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx512 if avx512_available() => {
+            // SAFETY: every feature `run_avx512` enables was detected above.
+            Some(unsafe { x86::run_avx512(input, sink, rec) })
         }
         #[cfg(target_arch = "aarch64")]
         Isa::Neon if neon_available() => {
@@ -480,6 +509,203 @@ mod x86 {
             let m = k.block(&padded_tail(rest), &mut carry);
             rec.record(&m);
             sink.push(&m, base);
+        }
+        RunOutcome {
+            utf8_ok: k.ok(),
+            carry,
+        }
+    }
+
+    // ----- AVX-512BW: one 64-byte register per block, four blocks per step -----
+
+    struct Avx512 {
+        ws: __m512i,
+        op: __m512i,
+        b1h: __m512i,
+        b1l: __m512i,
+        b2h: __m512i,
+        incomplete: __m512i,
+        error: __m512i,
+        prev_input: __m512i,
+        prev_incomplete: __m512i,
+    }
+
+    #[target_feature(enable = "avx512f")]
+    fn broadcast512(t: &[u8; 16]) -> __m512i {
+        _mm512_broadcast_i32x4(load16(t))
+    }
+
+    #[target_feature(enable = "avx512f")]
+    fn load64(t: &[u8; 64]) -> __m512i {
+        // SAFETY: `t` is 64 readable bytes; the load is unaligned.
+        unsafe { _mm512_loadu_si512(t.as_ptr().cast()) }
+    }
+
+    /// Prefix XOR of four 64-bit quote masks with one VPCLMULQDQ: each mask
+    /// sits in the low quadword of its own 128-bit lane and is multiplied,
+    /// carry-less, by all ones.
+    #[target_feature(enable = "avx512f,vpclmulqdq")]
+    fn clmul_prefix_xor4(q: [u64; 4]) -> [u64; 4] {
+        let a = _mm512_set_epi64(
+            0,
+            q[3] as i64,
+            0,
+            q[2] as i64,
+            0,
+            q[1] as i64,
+            0,
+            q[0] as i64,
+        );
+        let r = _mm512_clmulepi64_epi128::<0>(a, _mm512_set1_epi8(-1));
+        let mut out = [0u64; 8];
+        // SAFETY: `out` is 64 writable bytes; the store is unaligned.
+        unsafe { _mm512_storeu_si512(out.as_mut_ptr().cast(), r) };
+        [out[0], out[2], out[4], out[6]]
+    }
+
+    impl Avx512 {
+        #[target_feature(enable = "avx512f,avx512bw")]
+        fn new() -> Self {
+            let mut incomplete = [255u8; 64];
+            incomplete[48..].copy_from_slice(&INCOMPLETE_16);
+            Self {
+                ws: broadcast512(&WS_TABLE),
+                op: broadcast512(&OP_TABLE),
+                b1h: broadcast512(&BYTE_1_HIGH),
+                b1l: broadcast512(&BYTE_1_LOW),
+                b2h: broadcast512(&BYTE_2_HIGH),
+                incomplete: load64(&incomplete),
+                error: _mm512_setzero_si512(),
+                prev_input: _mm512_setzero_si512(),
+                prev_incomplete: _mm512_setzero_si512(),
+            }
+        }
+
+        #[target_feature(enable = "avx512f,avx512bw")]
+        #[inline]
+        fn classify(&self, x: __m512i) -> RawMasks {
+            let control = _mm512_cmple_epu8_mask(x, _mm512_set1_epi8(0x1f));
+            let op = _mm512_cmpeq_epi8_mask(
+                _mm512_shuffle_epi8(self.op, x),
+                _mm512_or_si512(x, _mm512_set1_epi8(0x20)),
+            );
+            RawMasks {
+                backslash: _mm512_cmpeq_epi8_mask(x, _mm512_set1_epi8(b'\\' as i8)),
+                quote: _mm512_cmpeq_epi8_mask(x, _mm512_set1_epi8(b'"' as i8)),
+                op: op & !control,
+                whitespace: _mm512_cmpeq_epi8_mask(_mm512_shuffle_epi8(self.ws, x), x),
+                control,
+            }
+        }
+
+        #[target_feature(enable = "avx512f,avx512bw")]
+        #[inline]
+        fn check(&mut self, input: __m512i, prev_input: __m512i) {
+            // 128-bit lanes [prev.3, in.0, in.1, in.2], so that `alignr`
+            // within each lane sees the bytes just before it.
+            let idx = _mm512_set_epi64(13, 12, 11, 10, 9, 8, 7, 6);
+            let shifted = _mm512_permutex2var_epi64(prev_input, idx, input);
+            let prev1 = _mm512_alignr_epi8::<15>(input, shifted);
+            let prev2 = _mm512_alignr_epi8::<14>(input, shifted);
+            let prev3 = _mm512_alignr_epi8::<13>(input, shifted);
+            let lo4 = _mm512_set1_epi8(0x0f);
+            let b1h = _mm512_shuffle_epi8(
+                self.b1h,
+                _mm512_and_si512(_mm512_srli_epi16::<4>(prev1), lo4),
+            );
+            let b1l = _mm512_shuffle_epi8(self.b1l, _mm512_and_si512(prev1, lo4));
+            let b2h = _mm512_shuffle_epi8(
+                self.b2h,
+                _mm512_and_si512(_mm512_srli_epi16::<4>(input), lo4),
+            );
+            let special = _mm512_and_si512(_mm512_and_si512(b1h, b1l), b2h);
+            let third = _mm512_subs_epu8(prev2, _mm512_set1_epi8(0x60));
+            let fourth = _mm512_subs_epu8(prev3, _mm512_set1_epi8(0x70));
+            let must23 = _mm512_and_si512(
+                _mm512_or_si512(third, fourth),
+                _mm512_set1_epi8(0x80u8 as i8),
+            );
+            self.error = _mm512_or_si512(self.error, _mm512_xor_si512(must23, special));
+        }
+
+        #[target_feature(enable = "avx512f,avx512bw")]
+        #[inline]
+        fn utf8(&mut self, x: __m512i) {
+            if _mm512_movepi8_mask(x) == 0 {
+                self.error = _mm512_or_si512(self.error, self.prev_incomplete);
+                self.prev_incomplete = _mm512_setzero_si512();
+            } else {
+                self.check(x, self.prev_input);
+                self.prev_incomplete = _mm512_subs_epu8(x, self.incomplete);
+            }
+            self.prev_input = x;
+        }
+
+        #[target_feature(enable = "avx512f,avx512bw")]
+        fn ok(&self) -> bool {
+            let e = _mm512_or_si512(self.error, self.prev_incomplete);
+            _mm512_test_epi8_mask(e, e) == 0
+        }
+
+        /// Up to four blocks: classify and validate each, run the escape
+        /// carry chain in order, then one VPCLMULQDQ for all quote parities.
+        #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
+        #[inline]
+        fn blocks<R: Recorder>(
+            &mut self,
+            blocks: &[&[u8; 64]],
+            carry: &mut Carry,
+            sink: &mut Sink<'_>,
+            rec: &mut R,
+            base: &mut u32,
+        ) {
+            let mut raw = [RawMasks::default(); 4];
+            let mut escaped = [0u64; 4];
+            let mut quotes = [0u64; 4];
+            for (k, block) in blocks.iter().enumerate() {
+                let x = load64(block);
+                raw[k] = self.classify(x);
+                self.utf8(x);
+                (escaped[k], quotes[k]) = block_quotes(&raw[k], carry);
+            }
+            let parity = clmul_prefix_xor4(quotes);
+            for k in 0..blocks.len() {
+                let m = block_finish(raw[k], escaped[k], quotes[k], parity[k], carry);
+                rec.record(&m);
+                sink.push(&m, *base);
+                *base = base.wrapping_add(64);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx512f,avx512bw,vpclmulqdq")]
+    pub(super) fn run_avx512<R: Recorder>(
+        input: &[u8],
+        sink: &mut Sink<'_>,
+        rec: &mut R,
+    ) -> RunOutcome {
+        let mut carry = Carry::default();
+        let mut k = Avx512::new();
+        let (blocks, rest) = input.as_chunks::<64>();
+        let mut base = 0u32;
+        let (quads, singles) = blocks.as_chunks::<4>();
+        for quad in quads {
+            let refs = [&quad[0], &quad[1], &quad[2], &quad[3]];
+            k.blocks(&refs, &mut carry, sink, rec, &mut base);
+        }
+        let tail = padded_tail(rest);
+        let mut last: [&[u8; 64]; 4] = [&tail; 4];
+        let mut n = 0;
+        for block in singles {
+            last[n] = block;
+            n += 1;
+        }
+        if !rest.is_empty() {
+            last[n] = &tail;
+            n += 1;
+        }
+        if n > 0 {
+            k.blocks(&last[..n], &mut carry, sink, rec, &mut base);
         }
         RunOutcome {
             utf8_ok: k.ok(),
