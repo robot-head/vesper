@@ -1,8 +1,9 @@
 //! Floating-point control state is owned per context (ABI v2 switch frame).
-#![cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "aarch64")
-))]
+//!
+//! Runs on every direct-fiber target (Linux x86_64/AArch64, macOS AArch64,
+//! Windows x86_64); kernel round trips use whichever `vesper_pulse` driver
+//! the host starts (`select::open`).
+#![cfg(vesper_direct_fibers)]
 use std::any::Any;
 use std::io;
 use std::rc::Rc;
