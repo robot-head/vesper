@@ -51,3 +51,7 @@ The corresponding BUILD selections are pushed in the owned foundation,
 construction, order and map branches; the recursive branch adds its fifth
 entry. Parent #407's hosted retry starts at `5e19c99`. Existing validators
 and proof source-byte associations remain unchanged throughout.
+
+The foundation association retained from the parent report is 49 audited roots,
+356 canonical declarations, and a 5,058,968-byte object with BLAKE3
+`4d1483789427ed0be66c1245852d00c584ffc7d84a673cc4966142ae00459d7e`.

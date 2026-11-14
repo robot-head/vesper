@@ -9,25 +9,29 @@ sys library LegacyCodecAbi (
 ) {
     wire struct batch_header { base_offset: i64, batch_length: i32, leader_epoch: i32, magic: u8, reserved: ByteArray[3], crc: u32 }
     wire struct decoder_stats { last_crc: u32, record_count: i32, last: batch_header }
-    // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
-    // assumed: `out_crc` lifted to a non-null nocapture inout pointer to one `u32`: a C header cannot show non-null, single-element or non-retention
-    // assumed: `out_count` lifted to a non-null nocapture inout pointer to one `i32`: a C header cannot show non-null, single-element or non-retention
+    // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice of `u8`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
+    // assumed: `out_crc` lifted to a nocapture inout pointer to one `u32`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show single-element or non-retention
+    // assumed: `out_count` lifted to a nocapture inout pointer to one `i32`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show single-element or non-retention
     fn legacy_parse_batch_header(nocapture in raw_bytes: CSlice[u8], nocapture inout out_crc: u32, nocapture inout out_count: i32) -> ForeignVal[i32];
-    // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
-    // assumed: `out` + `out_len` lifted to a nocapture unique slice: a C header cannot show that the callee does not retain the pointer
+    // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice of `u8`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
+    // assumed: `out` + `out_len` lifted to a nocapture unique slice of `u32`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
     fn legacy_parse_batch_header_into(nocapture in raw_bytes: CSlice[u8], nocapture inout out: CSlice[u32]) -> ForeignVal[i32];
-    // assumed: `data` + `len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
-    fn legacy_crc32c(nocapture in data: CSlice[u8], seed: u32) -> ForeignVal[u32];
-    // assumed: `src` + `src_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
-    // assumed: `dst` + `dst_len` lifted to a nocapture unique slice: a C header cannot show that the callee does not retain the pointer
-    fn legacy_encode(nocapture in src: CSlice[u8], nocapture inout dst: CSlice[u8]) -> ForeignVal[usize];
+    // assumed: `data` + `len` lifted to a nocapture shared slice of `u8`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show that the callee does not retain the pointer
+    fn legacy_crc32c(nocapture in data: Option[CSlice[u8]], seed: u32) -> ForeignVal[u32];
+    // assumed: `src` + `src_len` lifted to a nocapture shared slice of `u8`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show that the callee does not retain the pointer
+    // assumed: `dst` + `dst_len` lifted to a nocapture unique slice of `u8`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show that the callee does not retain the pointer
+    fn legacy_encode(nocapture in src: Option[CSlice[u8]], nocapture inout dst: Option[CSlice[u8]]) -> ForeignVal[usize];
     fn legacy_status() -> ForeignVal[u32];
     fn legacy_version() -> ForeignVal[u32];
     fn legacy_reset() -> ForeignVal[Unit];
     fn legacy_crc_table() -> ForeignVal[NullablePtr[u32]];
-    // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice: a C header cannot show that the callee does not retain the pointer
-    // assumed: `out_hdr` lifted to a non-null nocapture inout pointer to one `batch_header`: a C header cannot show non-null, single-element or non-retention
+    // assumed: `raw_bytes` + `raw_len` lifted to a nocapture shared slice of `u8`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
+    // assumed: `out_hdr` lifted to a nocapture inout pointer to one `batch_header`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show single-element or non-retention
     fn legacy_read_header(nocapture in raw_bytes: CSlice[u8], nocapture inout out_hdr: batch_header) -> ForeignVal[i32];
-    // assumed: `stats` lifted to a non-null nocapture inout pointer to one `decoder_stats`: a C header cannot show non-null, single-element or non-retention
-    fn legacy_fill(nocapture inout stats: decoder_stats) -> ForeignVal[i32];
+    // assumed: `stats` lifted to a nocapture inout pointer to one `decoder_stats`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show single-element or non-retention
+    fn legacy_fill(nocapture inout stats: Option[decoder_stats]) -> ForeignVal[i32];
+    // assumed: `headers` + `count` lifted to a nocapture shared slice of `batch_header`, non-null as the header declares (`nonnull`/`_Nonnull`); a C header cannot show that the callee does not retain the pointer
+    fn legacy_sum_headers(nocapture in headers: CSlice[batch_header]) -> ForeignVal[i64];
+    // assumed: `headers` + `count` lifted to a nocapture unique slice of `batch_header`, nullable (`Option`) because the header does not declare it `nonnull`; a C header cannot show that the callee does not retain the pointer
+    fn legacy_stamp_headers(nocapture inout headers: Option[CSlice[batch_header]], crc: u32) -> ForeignVal[Unit];
 }

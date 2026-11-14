@@ -6,6 +6,14 @@ pub(crate) const HARD_DEPTH: usize = 128;
 /// has an additional hard ceiling of 128 containers, even if max_depth is larger.
 /// Work units cover UTF-8 scanning, consumed bytes and duplicate-key comparisons;
 /// they are a deterministic resource bound, not elapsed-time measurements.
+///
+/// `max_index_bytes` covers the token tape's reserved capacity *and* the
+/// stage 1 structural index: what is left after the tape pays for 4 bytes
+/// per structural position (operators, quotes, scalar starts) and per escape.
+/// Every engine counts those entries in document order and reports
+/// `AllocationLimit` at the first one that does not fit, so all engines
+/// accept the same documents and report the same error (kind and offset),
+/// whichever limit is hit first.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub max_input_bytes: usize,
@@ -27,6 +35,23 @@ impl Default for Limits {
             max_work: 16 * 1024 * 1024,
             max_index_bytes: 4 * 1024 * 1024,
         }
+    }
+}
+
+/// How `max_index_bytes` is split: the tape's reserved token capacity, then
+/// stage 1 entries (structural and escape positions, 4 bytes each).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct IndexPlan {
+    pub(crate) capacity: usize,
+    pub(crate) entries: usize,
+}
+impl IndexPlan {
+    pub(crate) fn new(len: usize, limits: &Limits) -> Self {
+        let capacity = len
+            .min(limits.max_tokens)
+            .min(limits.max_index_bytes / size_of::<Token>());
+        let entries = (limits.max_index_bytes - capacity * size_of::<Token>()) / size_of::<u32>();
+        Self { capacity, entries }
     }
 }
 
@@ -60,6 +85,8 @@ pub struct IndexedJson<'a> {
     pub(crate) input: &'a str,
     pub(crate) tokens: Vec<Token>,
     pub(crate) work_used: usize,
+    /// Stage 1 entries (structural and escape positions) the document has.
+    pub(crate) index_entries: usize,
 }
 impl<'a> IndexedJson<'a> {
     pub fn parse(input: &'a [u8], limits: Limits) -> Result<Self, Error> {
@@ -71,10 +98,7 @@ impl<'a> IndexedJson<'a> {
         }
         let text = core::str::from_utf8(input)
             .map_err(|e| Error::new(ErrorKind::Utf8, e.valid_up_to()))?;
-        let capacity = input
-            .len()
-            .min(limits.max_tokens)
-            .min(limits.max_index_bytes / size_of::<Token>());
+        let IndexPlan { capacity, entries } = IndexPlan::new(input.len(), &limits);
         let mut tokens = Vec::new();
         tokens
             .try_reserve_exact(capacity)
@@ -87,6 +111,7 @@ impl<'a> IndexedJson<'a> {
             limits,
             work: input.len(),
             string_bytes: 0,
+            entries_left: entries,
         };
         parser.ws()?;
         parser.value(0)?;
@@ -98,6 +123,7 @@ impl<'a> IndexedJson<'a> {
             input: text,
             tokens: parser.tokens,
             work_used: parser.work,
+            index_entries: entries - parser.entries_left,
         })
     }
     pub fn root(&self) -> Node<'_, 'a> {
@@ -116,8 +142,16 @@ impl<'a> IndexedJson<'a> {
     pub fn token_count(&self) -> usize {
         self.tokens.len()
     }
+    /// Bytes reserved for the token tape.
     pub fn index_capacity_bytes(&self) -> usize {
         self.tokens.capacity() * size_of::<Token>()
+    }
+    /// Bytes charged against `max_index_bytes`: the tape's capacity plus 4
+    /// per stage 1 entry (structural or escape position). Identical in
+    /// every engine, including the scalar one, which builds no stage 1
+    /// index but counts the same entries.
+    pub fn index_bytes(&self) -> usize {
+        self.index_capacity_bytes() + self.index_entries * size_of::<u32>()
     }
     pub fn work_used(&self) -> usize {
         self.work_used
@@ -128,6 +162,7 @@ impl<'a> IndexedJson<'a> {
         self.input == other.input
             && self.tokens == other.tokens
             && self.work_used == other.work_used
+            && self.index_entries == other.index_entries
     }
     pub(crate) fn span(&self, start: usize, end: usize) -> &'a str {
         // Token boundaries are ASCII bytes, hence character boundaries.
@@ -190,7 +225,9 @@ impl<'d, 'a> Node<'d, 'a> {
     ///
     /// Conversion may round, including underflow to signed zero. The original
     /// spelling remains available through `raw`; overflow to infinity fails.
-    /// Byte and logical-work admission happen before Rust's scalar conversion.
+    /// Byte and logical-work admission happen before conversion, which is
+    /// Clinger's fast path, then Eisel–Lemire, then `str::parse` as a fallback
+    /// (see [`crate::number`]); the result is always correctly rounded.
     pub fn as_f64(self, limits: FloatLimits) -> Result<f64, Error> {
         let token = self.token();
         if token.kind != Kind::Number {
@@ -200,9 +237,8 @@ impl<'d, 'a> Node<'d, 'a> {
         limits
             .preflight(raw.len())
             .map_err(|e| Error::new(e.kind, token.start))?;
-        let value = raw
-            .parse::<f64>()
-            .map_err(|_| Error::new(ErrorKind::Number, token.start))?;
+        let (value, _) =
+            crate::lemire::decode_f64(raw).ok_or(Error::new(ErrorKind::Number, token.start))?;
         if !value.is_finite() {
             return Err(Error::new(ErrorKind::Number, token.start));
         }
@@ -428,6 +464,17 @@ fn hex4(text: &[u8], pos: &mut usize) -> Result<u32, Error> {
     Ok(n)
 }
 pub(crate) fn escape(text: &[u8], pos: &mut usize) -> Result<char, Error> {
+    escape_with(text, pos, &mut |_| Ok(()))
+}
+
+/// As [`escape`], calling `second` with the position of the backslash that
+/// begins the low half of a surrogate pair, just before it is checked: that
+/// backslash is a stage 1 escape entry of its own.
+pub(crate) fn escape_with(
+    text: &[u8],
+    pos: &mut usize,
+    second: &mut dyn FnMut(usize) -> Result<(), Error>,
+) -> Result<char, Error> {
     let b = *text.get(*pos).ok_or(Error::new(ErrorKind::Escape, *pos))?;
     *pos += 1;
     Ok(match b {
@@ -442,6 +489,9 @@ pub(crate) fn escape(text: &[u8], pos: &mut usize) -> Result<char, Error> {
         b'u' => {
             let hi = hex4(text, pos)?;
             let code = if (0xd800..=0xdbff).contains(&hi) {
+                if text.get(*pos) == Some(&b'\\') {
+                    second(*pos)?;
+                }
                 if text.get(*pos..pos.saturating_add(2)) != Some(b"\\u") {
                     return Err(Error::new(ErrorKind::Escape, *pos));
                 }
@@ -468,8 +518,26 @@ struct Parser<'a> {
     limits: Limits,
     work: usize,
     string_bytes: usize,
+    /// Stage 1 entries still available under `max_index_bytes`.
+    entries_left: usize,
 }
 impl Parser<'_> {
+    /// Charge one stage 1 entry (a structural or escape position) at `pos`.
+    fn entry(&mut self) -> Result<(), Error> {
+        self.entries_left = self
+            .entries_left
+            .checked_sub(1)
+            .ok_or(self.err(ErrorKind::AllocationLimit))?;
+        Ok(())
+    }
+    /// An operator byte: syntax first, then its index entry, then the step.
+    fn op(&mut self, b: u8) -> Result<(), Error> {
+        if self.byte() != Some(b) {
+            return Err(self.err(ErrorKind::Syntax));
+        }
+        self.entry()?;
+        self.step()
+    }
     fn err(&self, kind: ErrorKind) -> Error {
         Error::new(kind, self.pos)
     }
@@ -538,6 +606,7 @@ impl Parser<'_> {
             return Err(self.err(ErrorKind::DepthLimit));
         }
         let index = self.push(kind, depth)?;
+        self.entry()?;
         match kind {
             Kind::Null => self.literal(b"null")?,
             Kind::Bool => {
@@ -605,14 +674,22 @@ impl Parser<'_> {
         loop {
             match self.byte() {
                 Some(b'"') => {
+                    self.entry()?;
                     self.step()?;
                     break;
                 }
                 Some(b'\\') => {
                     escaped = true;
+                    self.entry()?;
                     self.step()?;
                     let old = self.pos;
-                    let ch = escape(self.text.as_bytes(), &mut self.pos)?;
+                    let entries = &mut self.entries_left;
+                    let ch = escape_with(self.text.as_bytes(), &mut self.pos, &mut |at| {
+                        *entries = entries
+                            .checked_sub(1)
+                            .ok_or(Error::new(ErrorKind::AllocationLimit, at))?;
+                        Ok(())
+                    })?;
                     self.tick(self.pos - old)?;
                     decoded_len = decoded_len
                         .checked_add(ch.len_utf8())
@@ -658,7 +735,7 @@ impl Parser<'_> {
         self.ws()?;
         let close = if object { b'}' } else { b']' };
         if self.byte() == Some(close) {
-            return self.step();
+            return self.op(close);
         }
         loop {
             if object {
@@ -669,15 +746,15 @@ impl Parser<'_> {
                 self.value(depth + 1)?;
                 self.duplicate(index + 1, key)?;
                 self.ws()?;
-                self.expect(b':')?;
+                self.op(b':')?;
                 self.ws()?;
             }
             self.value(depth + 1)?;
             self.ws()?;
             if self.byte() == Some(close) {
-                return self.step();
+                return self.op(close);
             }
-            self.expect(b',')?;
+            self.op(b',')?;
             self.ws()?;
         }
     }
