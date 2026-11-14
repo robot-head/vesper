@@ -1,0 +1,6 @@
+// expect: E0766
+// at: a
+// message: must have element type F32, found Bf16
+fn f(a: Tensor[Bf16, [2, 2]], b: Tensor[F32, [2, 2]]) -> Tensor[F32, [2, 2]] eff [Tensor] {
+    Tensor::matmul(a, b)
+}

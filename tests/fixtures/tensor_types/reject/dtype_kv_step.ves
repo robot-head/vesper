@@ -1,0 +1,7 @@
+// expect: E0766
+// at: k
+// message: must be a Bf16 K/V step, found F32
+fn f(inout seq: ActiveKvSeq[2, 4], k: Tensor[F32, [2, 4]])
+    -> Result[Unit, KvOomError] eff [KvCachePool[2, 4]] {
+    KvCachePool::append_kv_step(inout seq, k, k)
+}
