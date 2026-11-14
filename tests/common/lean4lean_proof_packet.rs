@@ -1,4 +1,4 @@
-//! Shared runner for the twelve fixed audited proof packets.
+//! Shared runner for the thirteen fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -25,6 +25,7 @@ pub enum Packet {
     Completion,
     Reconstruction,
     NormalizedCompletion,
+    MapTree,
 }
 
 struct PacketSpec {
@@ -388,6 +389,16 @@ const NORMALIZED_COMPLETION_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.normalize_mapCompletes_WF",
 ];
 
+const MAP_TREE_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.norm_toTree_reify_value",
+    "Vesper.Lean4LeanLevel42.tree_empty_payload_sorted",
+    "Vesper.Lean4LeanLevel42.tree_modify_payload_sorted",
+    "Vesper.Lean4LeanLevel42.tree_modify_payload_frame",
+    "Vesper.Lean4LeanLevel42.tree_modify_payload_mono",
+    "Vesper.Lean4LeanLevel42.tree_modify_payload_lower",
+    "Vesper.Lean4LeanLevel42.tree_modify_payload_upper",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -711,6 +722,40 @@ impl Packet {
                 required: NORMALIZED_COMPLETION_REQUIRED,
                 scope: "audited_normalized_completion_and_wellformedness",
                 marker: "LEAN4LEAN_NORMALIZED_COMPLETION42_EVIDENCE",
+            },
+            Self::MapTree => PacketSpec {
+                label: "lean4lean_map_tree42",
+                module: "Lean4LeanLevel42.MapTreeValueFinal",
+                projected: "Lean4LeanMapTree42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.SortedKeys",
+                    "Lean4LeanLevel42.MapValue",
+                    "Lean4LeanLevel42.LevelSemantics",
+                    "Lean4LeanLevel42.MapAll",
+                    "Lean4LeanLevel42.MapEquality",
+                    "Lean4LeanLevel42.SortedSubset",
+                    "Lean4LeanLevel42.MapAny",
+                    "Lean4LeanLevel42.Addable",
+                    "Lean4LeanLevel42.Completion",
+                    "Lean4LeanLevel42.Feasible",
+                    "Lean4LeanLevel42.ReifyCongruence",
+                    "Lean4LeanLevel42.LexChainCompletion",
+                    "Lean4LeanLevel42.TreeReifyValue",
+                    "Lean4LeanLevel42.TreeStructure",
+                    "Lean4LeanLevel42.TreePathValue",
+                    "Lean4LeanLevel42.MapTreeValue",
+                    "Lean4LeanLevel42.MapTreeValueFinal",
+                ],
+                required: MAP_TREE_REQUIRED,
+                scope: "audited_raw_map_to_tree_denotation",
+                marker: "LEAN4LEAN_MAP_TREE42_EVIDENCE",
             },
         }
     }
