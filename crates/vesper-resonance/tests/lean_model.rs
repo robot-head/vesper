@@ -1,28 +1,68 @@
-//! Checks for `lean/ResonanceSpsc.lean`.
+//! Checks for `lean/ResonanceSpsc.lean` and `lean/ResonanceStability.lean`.
 //!
 //! The static audit always runs. With `VESPER_LEAN` set (as in CI) the file
 //! is compiled, which kernel-checks every proof, and its axiom report is
-//! checked. The theorems are about the Lean models (the SPSC index protocol
-//! and the PDC latency equations), not about this crate's Rust code or
-//! `rtrb`; the Rust tests check the same properties on concrete runs.
+//! checked. The theorems are about the Lean models (the SPSC index protocol,
+//! the PDC latency equations, the SVF over exact rationals and the PID
+//! clamp), not about this crate's Rust code, `f32` arithmetic or `rtrb`; the
+//! Rust tests check the same properties on concrete runs.
 
 use std::path::{Path, PathBuf};
 
-const MODEL_ID: &str = "vesper.resonance.spsc-pdc-model/1";
-const AUDITED_THEOREMS: usize = 11;
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
-const THEOREMS: [&str; 11] = [
-    "theorem spsc_ring_occupancy_bounded",
-    "theorem slot_distinct",
-    "theorem producer_slot_not_readable",
-    "theorem step_preserves",
-    "theorem reachable_inv",
-    "theorem spsc_no_shared_slot",
-    "theorem pdc_equalizes_parallel_branch_latency",
-    "theorem le_maxList",
-    "theorem compiled_is_compensated",
-    "theorem path_latency",
-    "theorem pdc_paths_equal",
+
+struct Model {
+    file: &'static str,
+    namespace: &'static str,
+    id: &'static str,
+    theorems: &'static [&'static str],
+}
+
+const MODELS: [Model; 2] = [
+    Model {
+        file: "ResonanceSpsc",
+        namespace: "Vesper.ResonanceSpsc",
+        id: "vesper.resonance.spsc-pdc-model/1",
+        theorems: &[
+            "spsc_ring_occupancy_bounded",
+            "slot_distinct",
+            "producer_slot_not_readable",
+            "step_preserves",
+            "reachable_inv",
+            "spsc_no_shared_slot",
+            "pdc_equalizes_parallel_branch_latency",
+            "le_maxList",
+            "compiled_is_compensated",
+            "path_latency",
+            "pdc_paths_equal",
+        ],
+    },
+    Model {
+        file: "ResonanceStability",
+        namespace: "Vesper.ResonanceStability",
+        id: "vesper.resonance.stability-model/1",
+        theorems: &[
+            "W_nonneg",
+            "W_coercive",
+            "svf_step_implicit",
+            "svf_energy_identity",
+            "svf_cross_bound",
+            "svf_stretch_identity",
+            "svf_state_from_mid",
+            "svf_lyapunov_combine",
+            "svf_lyapunov_step",
+            "svf_bound_combine",
+            "svf_step_bounded",
+            "svf_bound_mono",
+            "svf_bibo",
+            "svf_state_bounded",
+            "svf_output_bounded",
+            "clamp_mem",
+            "pid_torque_clamped",
+            "pid_integral_clamped",
+            "pid_invariant",
+        ],
+    },
 ];
 
 fn lean_dir() -> PathBuf {
@@ -56,34 +96,49 @@ fn strip_lean_comments(source: &str) -> String {
 
 #[test]
 fn lean_model_source_audit() {
-    let source =
-        std::fs::read_to_string(lean_dir().join("ResonanceSpsc.lean")).expect("read model");
-    assert!(source.contains(&format!("def modelId : String := \"{MODEL_ID}\"")));
-    assert!(source.contains("not a proof about the Rust implementation"));
-    assert_eq!(source.matches("\n#print axioms ").count(), AUDITED_THEOREMS);
-    for theorem in THEOREMS {
-        assert!(source.contains(theorem), "missing {theorem}");
-        let name = theorem.trim_start_matches("theorem ");
+    for model in &MODELS {
+        let source = std::fs::read_to_string(lean_dir().join(format!("{}.lean", model.file)))
+            .expect("read model");
+        assert!(source.contains(&format!("def modelId : String := \"{}\"", model.id)));
+        assert!(source.contains("not a proof about the Rust implementation"));
+        assert_eq!(
+            source.matches("\n#print axioms ").count(),
+            model.theorems.len(),
+            "{}: every theorem's axioms are printed, and nothing else",
+            model.file
+        );
+        for name in model.theorems {
+            let decl = format!("theorem {name}");
+            assert!(
+                source
+                    .match_indices(&decl)
+                    .any(|(i, _)| source[i + decl.len()..].starts_with(char::is_whitespace)),
+                "{}: missing theorem {name}",
+                model.file
+            );
+            assert!(
+                source.contains(&format!("#print axioms {}.{name}\n", model.namespace)),
+                "{}: axioms of {name} not printed",
+                model.file
+            );
+        }
+        let code = strip_lean_comments(&source);
+        assert!(!code.contains("partial ") && !code.contains("unsafe "));
+        for forbidden in [
+            "sorry",
+            "admit",
+            "native_decide",
+            "bv_decide",
+            "ofReduceBool",
+        ] {
+            assert!(!code.contains(forbidden), "{} uses {forbidden}", model.file);
+        }
         assert!(
-            source.contains(&format!("#print axioms Vesper.ResonanceSpsc.{name}\n")),
-            "axioms of {name} not printed"
+            !code.lines().any(|l| l.trim_start().starts_with("axiom ")),
+            "{} declares an axiom",
+            model.file
         );
     }
-    let code = strip_lean_comments(&source);
-    assert!(!code.contains("partial ") && !code.contains("unsafe "));
-    for forbidden in [
-        "sorry",
-        "admit",
-        "native_decide",
-        "bv_decide",
-        "ofReduceBool",
-    ] {
-        assert!(!code.contains(forbidden), "Lean model uses {forbidden}");
-    }
-    assert!(
-        !code.lines().any(|l| l.trim_start().starts_with("axiom ")),
-        "Lean model declares an axiom"
-    );
 }
 
 struct Cleanup(PathBuf);
@@ -93,20 +148,21 @@ impl Drop for Cleanup {
     }
 }
 
-fn compile_model(lean: &str, out: &Path) {
+fn compile_model(lean: &str, out: &Path, model: &Model) {
     // Lean names the module after the path relative to its working
     // directory, so compile from `lean/`.
     let compiled = std::process::Command::new(lean)
         .current_dir(lean_dir())
         .arg("-o")
-        .arg(out.join("ResonanceSpsc.olean"))
-        .arg("ResonanceSpsc.lean")
+        .arg(out.join(format!("{}.olean", model.file)))
+        .arg(format!("{}.lean", model.file))
         .output()
         .expect("spawn Lean");
     let report = String::from_utf8(compiled.stdout).expect("UTF-8 Lean output");
     assert!(
         compiled.status.success(),
-        "Lean model failed: {}\n{report}\n{}",
+        "Lean model {} failed: {}\n{report}\n{}",
+        model.file,
         compiled.status,
         String::from_utf8_lossy(&compiled.stderr)
     );
@@ -124,7 +180,12 @@ fn compile_model(lean: &str, out: &Path) {
         }
         audited += 1;
     }
-    assert_eq!(audited, AUDITED_THEOREMS, "axiom report lines");
+    assert_eq!(
+        audited,
+        model.theorems.len(),
+        "{}: axiom report lines",
+        model.file
+    );
 }
 
 #[test]
@@ -143,5 +204,7 @@ fn lean_model_compiles_with_standard_axioms_only() {
     ));
     std::fs::create_dir(&out).expect("private Lean output directory");
     let _cleanup = Cleanup(out.clone());
-    compile_model(&lean, &out);
+    for model in &MODELS {
+        compile_model(&lean, &out, model);
+    }
 }
