@@ -1014,12 +1014,21 @@ fn main() -> u64 eff [Pulse] {
 #include <stdio.h>
 extern long long run(void);
 static DWORD64 caller_begin;
-static volatile long long result = -7;
 static volatile long long sink;
+static volatile LONG stop = 0, wrong = 0, calls = 0;
 /* The volatile store after the call keeps this a real frame with its own
    .pdata entry: `return run();` may compile to a tail jump. */
 __declspec(noinline) long long call_generated(void) { sink = run(); return sink; }
-static DWORD WINAPI worker(LPVOID p) { (void)p; result = call_generated(); return 0; }
+/* Call the generated code until the sampler has enough samples, so a fast
+   machine cannot finish before it is sampled. */
+static DWORD WINAPI worker(LPVOID p) {
+    (void)p;
+    while (!stop) {
+        if (call_generated() != 5702887) wrong = 1;
+        calls++;
+    }
+    return 0;
+}
 int main(void) {
     DWORD64 base;
     PRUNTIME_FUNCTION f = RtlLookupFunctionEntry((DWORD64)call_generated, &base, NULL);
@@ -1027,7 +1036,7 @@ int main(void) {
     caller_begin = base + f->BeginAddress;
     HANDLE t = CreateThread(NULL, 0, worker, NULL, 0, NULL);
     int samples = 0, generated_samples = 0, max_depth = 0;
-    while (WaitForSingleObject(t, 1) == WAIT_TIMEOUT && samples < 500) {
+    while (WaitForSingleObject(t, 1) == WAIT_TIMEOUT && generated_samples < 200 && samples < 20000) {
         SuspendThread(t);
         CONTEXT c;
         c.ContextFlags = CONTEXT_FULL;
@@ -1049,9 +1058,10 @@ int main(void) {
         }
         samples++;
     }
+    stop = 1;
     WaitForSingleObject(t, INFINITE);
-    printf("result %lld samples %d generated %d depth %d\n", result, samples, generated_samples, max_depth);
-    return generated_samples >= 10 && result == 5702887 ? 0 : 3;
+    printf("calls %ld wrong %ld samples %d generated %d depth %d\n", calls, wrong, samples, generated_samples, max_depth);
+    return generated_samples >= 200 && calls > 0 && !wrong ? 0 : 3;
 }
 "#;
 
@@ -1113,7 +1123,7 @@ fn run() -> i64 {
         let output = std::process::Command::new(&exe).output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{:?}: {stdout}", output.status);
-        assert!(stdout.contains("result 5702887"), "{stdout}");
+        assert!(stdout.contains("wrong 0"), "{stdout}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
