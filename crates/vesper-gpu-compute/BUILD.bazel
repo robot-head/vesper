@@ -1,0 +1,11 @@
+load("//tools/bazel:defs.bzl", "vesper_crate")
+
+vesper_crate(
+    # tests/generation.rs include_bytes! the bundled model, tokenizer and
+    # reference text from vesper-tensor.
+    extra_compile_data = ["//crates/vesper-tensor:files"],
+    # Under Bazel there is usually no Vulkan loader or device, so the device
+    # tests report "GPU unavailable" and only the naga compile tests run. The
+    # differential tests run on Mesa lavapipe in
+    # .github/workflows/gpu-compute.yml with VESPER_GPU_REQUIRE=1.
+)
