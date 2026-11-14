@@ -200,8 +200,11 @@ fn path_mentions(n: &str) -> bool {
             .is_some_and(|(p, _)| RESERVED.contains(&p))
 }
 
+/// Called with each expression, type and pattern of a body.
+type Visitor<'a> = dyn FnMut(Option<&Expr>, Option<&Type>, Option<&Pattern>) + 'a;
+
 /// Visit every type and expression of a function body.
-fn walk(e: &Expr, f: &mut dyn FnMut(Option<&Expr>, Option<&Type>, Option<&Pattern>)) {
+fn walk(e: &Expr, f: &mut Visitor<'_>) {
     f(Some(e), None, None);
     match &e.kind {
         ExprKind::Literal(_) | ExprKind::Name(_) => {}
@@ -293,7 +296,7 @@ fn walk(e: &Expr, f: &mut dyn FnMut(Option<&Expr>, Option<&Type>, Option<&Patter
         }
     }
 }
-fn walk_pattern(p: &Pattern, f: &mut dyn FnMut(Option<&Expr>, Option<&Type>, Option<&Pattern>)) {
+fn walk_pattern(p: &Pattern, f: &mut Visitor<'_>) {
     f(None, None, Some(p));
     match &p.kind {
         PatternKind::Tuple(ps) => ps.iter().for_each(|q| walk_pattern(q, f)),
