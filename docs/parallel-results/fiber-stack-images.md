@@ -89,13 +89,20 @@ two image copies in `fiber.rs`.
    address elements resolve indirect ones, exceptions end the walk at the
    preferred return address. Output reuses `ipt_flow::{FlowTrace, Branch,
    BranchKind}` with timestamp intervals, so `BranchTimeline::steps_from_pt`
-   places ETE flow on the effect timeline too.
+   places ETE flow on the effect timeline too. An indirect branch or
+   exception keeps the timestamp interval of its atom or exception element
+   even when its target address arrives after further timestamps, and a
+   context element reporting AArch32 execution makes further flow a typed
+   `NotA64` error.
 4. **VirtualArena copy-on-write shard checkpoints** (`arena`): `ShardArena`
    shares every shard with a checkpoint (no bytes copied), copies a shard
    on its first write after one, restores, and serialises incremental
    `ArenaDelta`s (only shards written in the epoch, BLAKE3 trailer) that
    `capture_arena_epoch` stores as snapshot epochs and `ArenaDelta::apply`
-   replays. `probe_write_tracking` reports the kernel mechanisms.
+   replays. Every `keyframe_every`-th epoch is stored as a full keyframe,
+   so that after the recorder evicts old snapshot slots `rebuild_arena`
+   still rebuilds the newest state from the newest retained keyframe.
+   `probe_write_tracking` reports the kernel mechanisms.
 
 `Unavailable::NativeActivationCheckpoint` was renamed
 `Unavailable::KernelWriteTracking` (no users outside the crate): byte-image
@@ -125,7 +132,10 @@ Host: cloud x86_64 Linux container (4 vCPU), Rust 1.97 stable and 1.100.0.
 * `VESPER_LEAN=<lean 4.24.0>/bin/lean cargo test -p vesper-chrono --test
   lean_model`: 2/2 (Lean model unchanged; it still compiles and matches the
   Rust lineage).
-* `cargo test --workspace --locked`: see the PR description for the result.
+* `cargo test --workspace --locked`: 694 tests passed before the run
+  stopped at `tests/lean4lean42_acceptance.rs`, which hard-fails without
+  `VESPER_LEAN4LEAN42_ROOT` (a prepared candidate that only CI provides; the
+  test is unrelated to this lane). CI runs the whole workspace.
 
 ## Decisions
 

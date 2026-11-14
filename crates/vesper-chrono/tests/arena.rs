@@ -5,7 +5,7 @@
 
 use vesper_chrono::arena::{
     ARENA_DELTA_MAGIC, ArenaDelta, ArenaError, ShardArena, WriteTracking, capture_arena_epoch,
-    probe_write_tracking,
+    probe_write_tracking, rebuild_arena,
 };
 use vesper_chrono::{
     Bundle, BundleKey, BundleLimits, FlightRecorder, RecorderConfig, RedactionPolicy,
@@ -85,7 +85,7 @@ fn deltas_replay_epochs_onto_a_replica() {
         let bytes = d.encode();
         assert_eq!(&bytes[..8], &ARENA_DELTA_MAGIC);
         // Incremental: only the dirty shards are in the image.
-        assert!(bytes.len() <= 64 + d.shards.len() * (SHARD + 4));
+        assert!(bytes.len() <= 72 + d.shards.len() * (SHARD + 4));
         deltas.push(bytes);
     }
     for bytes in &deltas {
@@ -127,6 +127,7 @@ fn deltas_replay_epochs_onto_a_replica() {
     ));
     // A forged delta naming a shard twice or past the end (valid digest).
     let forged = ArenaDelta {
+        keyframe: false,
         epoch: 1,
         len: (16 * SHARD) as u64,
         shard_len: SHARD as u32,
@@ -159,15 +160,15 @@ fn bad_geometry_is_rejected() {
 #[test]
 fn arena_deltas_are_snapshot_epochs() {
     let mut rec = FlightRecorder::new(RecorderConfig {
-        snapshot_image_bytes: 4 * SHARD,
+        snapshot_image_bytes: 12 * SHARD,
         ..RecorderConfig::small()
     })
     .unwrap();
     let mut a = ShardArena::new(8 * SHARD, SHARD).unwrap();
     a.write(5, b"epoch one").unwrap();
-    let e1 = capture_arena_epoch(&mut rec, 10, &a.checkpoint()).unwrap();
+    let e1 = capture_arena_epoch(&mut rec, 10, &a.checkpoint(), 8).unwrap();
     a.write(3 * SHARD, b"epoch two").unwrap();
-    let e2 = capture_arena_epoch(&mut rec, 20, &a.checkpoint()).unwrap();
+    let e2 = capture_arena_epoch(&mut rec, 20, &a.checkpoint(), 8).unwrap();
     let key = BundleKey::new([9; 32]);
     let bytes = Bundle::export(&rec, &RedactionPolicy::new(), b"", &key).unwrap();
     let bundle = Bundle::open(&bytes, &key, &BundleLimits::default()).unwrap();
@@ -212,4 +213,60 @@ fn kernel_write_tracking_is_probed_and_reported() {
             p.mechanism, p.host_permits, p.exercised, p.detail
         );
     }
+}
+
+#[test]
+fn keyframes_keep_the_newest_state_rebuildable_after_slot_eviction() {
+    const SLOTS: usize = 4;
+    let mut rec = FlightRecorder::new(RecorderConfig {
+        snapshot_slots: SLOTS,
+        snapshot_image_bytes: 16 * SHARD + 4096,
+        ..RecorderConfig::small()
+    })
+    .unwrap();
+    let mut a = ShardArena::new(8 * SHARD, SHARD).unwrap();
+    // Shard 7 is written only in epoch 1, whose image is evicted below.
+    a.write(7 * SHARD, b"only in epoch one").unwrap();
+    let mut ids = Vec::new();
+    for epoch in 1..=11u64 {
+        if epoch > 1 {
+            a.write((epoch as usize % 7) * SHARD + 3, &epoch.to_le_bytes())
+                .unwrap();
+        }
+        let c = a.checkpoint();
+        assert_eq!(c.epoch, epoch);
+        ids.push(capture_arena_epoch(&mut rec, epoch * 10, &c, SLOTS as u64).unwrap());
+    }
+    let key = BundleKey::new([3; 32]);
+    let bytes = Bundle::export(&rec, &RedactionPolicy::new(), b"", &key).unwrap();
+    let bundle = Bundle::open(&bytes, &key, &BundleLimits::default()).unwrap();
+    let mut kept: Vec<_> = bundle.snapshots.iter().collect();
+    kept.sort_by_key(|s| s.epoch_id);
+    assert_eq!(kept.len(), SLOTS, "older images were evicted");
+    let images: Vec<&[u8]> = kept.iter().map(|s| s.image.as_slice()).collect();
+    let rebuilt = rebuild_arena(images.iter().copied(), 8).unwrap();
+    assert_eq!(read(&rebuilt, 0, 8 * SHARD), read(&a, 0, 8 * SHARD));
+    assert_eq!(read(&rebuilt, 7 * SHARD, 17), b"only in epoch one");
+    // Deltas alone, without their keyframe, cannot be rebuilt.
+    let deltas: Vec<&[u8]> = images
+        .iter()
+        .copied()
+        .filter(|b| !ArenaDelta::decode(b, 8).unwrap().keyframe)
+        .collect();
+    assert_eq!(
+        rebuild_arena(deltas.iter().copied(), 8).unwrap_err(),
+        ArenaError::NoKeyframe
+    );
+    let c = a.checkpoint();
+    assert_eq!(
+        capture_arena_epoch(&mut rec, 999, &c, 0).unwrap_err(),
+        ArenaError::NoKeyframe
+    );
+    // A keyframe applies onto an arena at any epoch.
+    let mut other = ShardArena::new(8 * SHARD, SHARD).unwrap();
+    other.write(0, b"stale").unwrap();
+    other.checkpoint();
+    other.checkpoint();
+    c.keyframe().apply(&mut other).unwrap();
+    assert_eq!(read(&other, 0, 8 * SHARD), read(&a, 0, 8 * SHARD));
 }

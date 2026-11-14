@@ -26,7 +26,7 @@ use std::rc::Rc;
 use crate::ring::{FlightRecorder, RecordError};
 
 /// Delta image magic and version.
-pub const ARENA_DELTA_MAGIC: [u8; 8] = *b"VARENA\0\x01";
+pub const ARENA_DELTA_MAGIC: [u8; 8] = *b"VARENA\0\x02";
 const DIGEST_LEN: usize = 32;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +55,9 @@ pub enum ArenaError {
     BadShard(u32),
     TrailingBytes(usize),
     Record(RecordError),
+    /// No keyframe among the images given to [`rebuild_arena`], or a
+    /// keyframe interval of zero.
+    NoKeyframe,
 }
 
 impl fmt::Display for ArenaError {
@@ -116,6 +119,7 @@ impl ArenaCheckpoint {
     /// checkpoint, with their bytes at this one.
     pub fn delta(&self) -> ArenaDelta {
         ArenaDelta {
+            keyframe: false,
             epoch: self.epoch,
             len: self.len as u64,
             shard_len: self.shard_len as u32,
@@ -123,6 +127,22 @@ impl ArenaCheckpoint {
                 .dirty
                 .iter()
                 .map(|&i| (i, self.shards[i as usize].as_ref().clone()))
+                .collect(),
+        }
+    }
+    /// A self-contained image of every shard, which [`ArenaDelta::apply`]
+    /// accepts at any epoch (the base later deltas replay onto).
+    pub fn keyframe(&self) -> ArenaDelta {
+        ArenaDelta {
+            keyframe: true,
+            epoch: self.epoch,
+            len: self.len as u64,
+            shard_len: self.shard_len as u32,
+            shards: self
+                .shards
+                .iter()
+                .enumerate()
+                .map(|(i, s)| (i as u32, s.as_ref().clone()))
                 .collect(),
         }
     }
@@ -268,6 +288,8 @@ impl ShardArena {
 /// The shards written in one checkpoint epoch, with their bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ArenaDelta {
+    /// Every shard, applicable at any epoch, rather than one epoch's writes.
+    pub keyframe: bool,
     pub epoch: u64,
     pub len: u64,
     pub shard_len: u32,
@@ -283,6 +305,7 @@ impl ArenaDelta {
         out.extend_from_slice(&self.epoch.to_le_bytes());
         out.extend_from_slice(&self.len.to_le_bytes());
         out.extend_from_slice(&self.shard_len.to_le_bytes());
+        out.extend_from_slice(&u32::from(self.keyframe).to_le_bytes());
         out.extend_from_slice(&(self.shards.len() as u32).to_le_bytes());
         for (i, bytes) in &self.shards {
             out.extend_from_slice(&i.to_le_bytes());
@@ -296,7 +319,7 @@ impl ArenaDelta {
     /// Parse a delta image. Every shard must lie inside the arena and
     /// appear once; `max_shards` bounds the count before any allocation.
     pub fn decode(bytes: &[u8], max_shards: usize) -> Result<Self, ArenaError> {
-        const HEADER: usize = 8 + 8 + 8 + 4 + 4;
+        const HEADER: usize = 8 + 8 + 8 + 4 + 4 + 4;
         if bytes.len() < HEADER + DIGEST_LEN {
             return Err(ArenaError::Truncated);
         }
@@ -312,7 +335,12 @@ impl ArenaDelta {
         let epoch = u64_at(8);
         let len = u64_at(16);
         let shard_len = u32_at(24);
-        let count = u32_at(28) as usize;
+        let keyframe = match u32_at(28) {
+            0 => false,
+            1 => true,
+            _ => return Err(ArenaError::BadMagic),
+        };
+        let count = u32_at(32) as usize;
         if !shard_len.is_power_of_two() || !(64..=1 << 20).contains(&shard_len) || len == 0 {
             return Err(ArenaError::BadGeometry {
                 len: len as usize,
@@ -320,7 +348,7 @@ impl ArenaDelta {
             });
         }
         let total = len.div_ceil(u64::from(shard_len));
-        if count > max_shards || count as u64 > total {
+        if count > max_shards || count as u64 > total || (keyframe && count as u64 != total) {
             return Err(ArenaError::BadShard(count as u32));
         }
         let entry = 4 + shard_len as usize;
@@ -345,6 +373,7 @@ impl ArenaDelta {
             shards.push((i, body[at + 4..at + entry].to_vec()));
         }
         Ok(Self {
+            keyframe,
             epoch,
             len,
             shard_len,
@@ -352,11 +381,22 @@ impl ArenaDelta {
         })
     }
 
-    /// Replay this delta onto `arena`, which must be at the previous epoch.
-    /// The written shards become dirty in `arena`, as if written there.
+    /// Replay this delta onto `arena`, which must be at the previous epoch
+    /// (a keyframe applies at any epoch and moves `arena` to just before
+    /// its own). The written shards become dirty in `arena`, as if written
+    /// there.
     pub fn apply(&self, arena: &mut ShardArena) -> Result<(), ArenaError> {
         if self.len != arena.len as u64 || self.shard_len as usize != arena.shard_len {
             return Err(ArenaError::ShapeMismatch);
+        }
+        if self.keyframe {
+            if self.epoch == 0 {
+                return Err(ArenaError::EpochMismatch {
+                    expected: 1,
+                    found: 0,
+                });
+            }
+            arena.epoch = self.epoch - 1;
         }
         let expected = arena.epoch + 1;
         if self.epoch != expected {
@@ -375,15 +415,62 @@ impl ArenaDelta {
     }
 }
 
-/// Store `checkpoint`'s delta as a snapshot epoch; returns the epoch id.
+/// Store `checkpoint` as a snapshot epoch; returns the epoch id.
+///
+/// Deltas depend on every image before them, and the recorder overwrites
+/// its oldest snapshot slot once all are used. So every `keyframe_every`-th
+/// arena epoch (epochs 1, 1 + k, 1 + 2k, …) is stored as a full
+/// [`ArenaCheckpoint::keyframe`] instead, and [`rebuild_arena`] rebuilds
+/// the newest state from the newest retained keyframe. A keyframe stays
+/// retained when every arena epoch is captured, `keyframe_every` is at most
+/// the recorder's `snapshot_slots`, and no other snapshots share the
+/// recorder; with other snapshots in the same recorder, lower the interval
+/// accordingly.
 pub fn capture_arena_epoch(
     recorder: &mut FlightRecorder,
     time_ns: u64,
     checkpoint: &ArenaCheckpoint,
+    keyframe_every: u64,
 ) -> Result<u32, ArenaError> {
+    if keyframe_every == 0 {
+        return Err(ArenaError::NoKeyframe);
+    }
+    let image = if checkpoint
+        .epoch
+        .saturating_sub(1)
+        .is_multiple_of(keyframe_every)
+    {
+        checkpoint.keyframe()
+    } else {
+        checkpoint.delta()
+    };
     recorder
-        .capture_snapshot(time_ns, &checkpoint.delta().encode())
+        .capture_snapshot(time_ns, &image.encode())
         .map_err(ArenaError::Record)
+}
+
+/// Rebuild an arena from stored images, oldest first (for example the
+/// arena snapshots of an opened bundle): starts at the newest keyframe and
+/// replays the deltas after it. Images before that keyframe are not needed.
+pub fn rebuild_arena<'a>(
+    images: impl IntoIterator<Item = &'a [u8]>,
+    max_shards: usize,
+) -> Result<ShardArena, ArenaError> {
+    let deltas = images
+        .into_iter()
+        .map(|b| ArenaDelta::decode(b, max_shards))
+        .collect::<Result<Vec<_>, _>>()?;
+    let start = deltas
+        .iter()
+        .rposition(|d| d.keyframe)
+        .ok_or(ArenaError::NoKeyframe)?;
+    let base = &deltas[start];
+    let mut arena = ShardArena::new(base.len as usize, base.shard_len as usize)?;
+    for d in &deltas[start..] {
+        d.apply(&mut arena)?;
+        arena.checkpoint();
+    }
+    Ok(arena)
 }
 
 /// A kernel write-tracking mechanism the design names.
@@ -423,19 +510,18 @@ pub struct TrackingProbe {
 /// back. (Clearing soft-dirty bits is process-wide; nothing else in Vesper
 /// uses them.)
 pub fn probe_write_tracking() -> Vec<TrackingProbe> {
-    let mut out = Vec::new();
-    #[cfg(target_os = "linux")]
-    {
-        out.push(linux::userfaultfd());
-        out.push(linux::soft_dirty());
-    }
-    out.push(TrackingProbe {
+    let mut out = vec![TrackingProbe {
         mechanism: WriteTracking::MprotectFaults,
         host_permits: None,
         exercised: false,
         used: false,
         detail: "needs a SIGSEGV / vectored exception handler and raw mprotect calls, which are unsafe code outside this crate's capture module".into(),
-    });
+    }];
+    #[cfg(target_os = "linux")]
+    {
+        out.push(linux::userfaultfd());
+        out.push(linux::soft_dirty());
+    }
     #[cfg(target_os = "macos")]
     out.push(TrackingProbe {
         mechanism: WriteTracking::MachVmCopy,

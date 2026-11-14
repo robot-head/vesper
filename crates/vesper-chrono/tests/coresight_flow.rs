@@ -352,6 +352,12 @@ impl Ete {
         }
         self
     }
+    /// Context packet (new context): EL1, non-secure, AArch64 or not.
+    fn context(&mut self, sixty_four: bool) -> &mut Self {
+        self.0.push(0x81);
+        self.0.push(1 | (u8::from(sixty_four) << 4) | (1 << 5));
+        self
+    }
     fn overflow(&mut self) -> &mut Self {
         self.0.extend_from_slice(&[0x00, 0x05]);
         self
@@ -623,4 +629,63 @@ fn mismatched_traces_are_typed_errors() {
     t.sync();
     t.0.extend_from_slice(&[0x96, 0x10]);
     assert!(matches!(run(&t), Err(EteFlowError::NotA64 { .. })));
+}
+
+#[test]
+fn pending_indirect_targets_keep_the_atoms_timestamp_interval() {
+    let (main, vector) = program();
+    let mut image = CodeImage::new();
+    image.add(BASE, &main).unwrap();
+    image.add(VECTOR, &vector).unwrap();
+    let mut t = Ete::default();
+    t.sync()
+        .timestamp(100)
+        .addr(BASE + 0x18)
+        .e() // br x1 at 0x1c: taken at time [100, 200)
+        .timestamp(200)
+        .addr(BASE + 0x30)
+        .exception(8, BASE + 0x38) // svc after 200
+        .timestamp(300)
+        .addr(VECTOR)
+        .timestamp(400);
+    let flow = reconstruct(
+        &decode_elements(&t.0).unwrap(),
+        &image,
+        &FlowLimits::default(),
+    )
+    .unwrap();
+    let bounds: Vec<_> = flow
+        .branches
+        .iter()
+        .map(|b| (b.from, b.kind, b.tsc_lo, b.tsc_hi))
+        .collect();
+    assert_eq!(
+        bounds,
+        vec![
+            (BASE + 0x18, BranchKind::Enable, Some(100), Some(200)),
+            (BASE + 0x1c, BranchKind::IndirectJump, Some(100), Some(200)),
+            (BASE + 0x38, BranchKind::Far, Some(200), Some(300)),
+        ]
+    );
+}
+
+#[test]
+fn aarch32_contexts_are_rejected_until_aarch64_returns() {
+    let (main, vector) = program();
+    let mut image = CodeImage::new();
+    image.add(BASE, &main).unwrap();
+    image.add(VECTOR, &vector).unwrap();
+    let run = |t: &Ete| {
+        reconstruct(
+            &decode_elements(&t.0).unwrap(),
+            &image,
+            &FlowLimits::default(),
+        )
+    };
+    let mut t = Ete::default();
+    t.sync().context(false).addr(BASE).e();
+    assert!(matches!(run(&t), Err(EteFlowError::NotA64 { .. })));
+    let mut t = Ete::default();
+    t.sync().context(true).addr(BASE).e();
+    assert_eq!(run(&t).unwrap().branches.len(), 2);
 }

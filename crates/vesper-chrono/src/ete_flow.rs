@@ -19,6 +19,8 @@
 //! * An address element that no branch is waiting for (after sync, trace-on
 //!   or overflow) restarts the walk there.
 //! * Overflow and discard drop the current position until the next address.
+//! * A context element reporting AArch32 execution makes further flow an
+//!   error (`NotA64`) until a context reports AArch64 again.
 //!
 //! Each branch is stamped with the timestamp interval it lies in, as
 //! [`crate::ipt_flow`] does with TSC packets, and is reported with
@@ -122,7 +124,8 @@ pub enum EteFlowError {
         preferred_return: u64,
         element_index: usize,
     },
-    /// A T32 (IS1) address in an A64 trace.
+    /// A T32 (IS1) address, or flow after a context element reporting
+    /// AArch32 execution: only A64 is reconstructed.
     NotA64 {
         element_index: usize,
     },
@@ -160,6 +163,13 @@ struct Walker<'i> {
     waiting: Waiting,
     ts: Option<u64>,
     open_from: usize,
+    /// Timestamp bounds of the transfer in `waiting`, fixed when its atom
+    /// or exception element arrived (its target address may come after
+    /// further timestamps).
+    pending_lo: Option<u64>,
+    pending_hi: Option<u64>,
+    /// The latest context element reported AArch32 execution.
+    aarch32: bool,
     trace: FlowTrace,
 }
 
@@ -240,6 +250,8 @@ impl Walker<'_> {
                     _ => BranchKind::Far,
                 };
                 self.waiting = Waiting::Indirect { from: ip, kind };
+                self.pending_lo = self.ts;
+                self.pending_hi = None;
                 self.pc = None;
             }
         }
@@ -271,6 +283,8 @@ impl Walker<'_> {
         self.waiting = Waiting::Exception {
             from: preferred_return,
         };
+        self.pending_lo = self.ts;
+        self.pending_hi = None;
         self.pc = None;
         Ok(())
     }
@@ -279,14 +293,32 @@ impl Walker<'_> {
             return Err(EteFlowError::NotA64 { element_index: i });
         }
         match std::mem::replace(&mut self.waiting, Waiting::Nothing) {
-            Waiting::Indirect { from, kind } => self.push(from, Some(address), kind, i),
-            Waiting::Exception { from } => self.push(from, Some(address), BranchKind::Far, i),
+            Waiting::Indirect { from, kind } => self.push_pending(from, address, kind, i),
+            Waiting::Exception { from } => self.push_pending(from, address, BranchKind::Far, i),
             // A position the walk would have reached anyway is only a
             // confirmation; anything else restarts the walk there.
             Waiting::Nothing if self.pc == Some(address) => {}
             Waiting::Nothing => self.push(address, Some(address), BranchKind::Enable, i),
         }
         self.pc = Some(address);
+        Ok(())
+    }
+    /// Push a transfer whose target arrived after its atom or exception,
+    /// with the timestamp bounds in effect when that element arrived.
+    fn push_pending(&mut self, from: u64, to: u64, kind: BranchKind, i: usize) {
+        self.push(from, Some(to), kind, i);
+        let b = self.trace.branches.last_mut().expect("just pushed");
+        b.tsc_lo = self.pending_lo;
+        b.tsc_hi = self.pending_hi;
+        if self.pending_hi.is_some() {
+            // Every earlier branch already received that timestamp.
+            self.open_from = self.trace.branches.len();
+        }
+    }
+    fn a64(&self, i: usize) -> Result<(), EteFlowError> {
+        if self.aarch32 {
+            return Err(EteFlowError::NotA64 { element_index: i });
+        }
         Ok(())
     }
     fn lost(&mut self) {
@@ -312,16 +344,32 @@ pub fn reconstruct(
         waiting: Waiting::Nothing,
         ts: None,
         open_from: 0,
+        pending_lo: None,
+        pending_hi: None,
+        aarch32: false,
         trace: FlowTrace::default(),
     };
     for (i, e) in elements.iter().enumerate() {
         match e.element {
-            EteElement::Atom { executed } => w.atom(executed, i)?,
-            EteElement::Address { address, isa } => w.address(address, isa, i)?,
+            EteElement::Atom { executed } => {
+                w.a64(i)?;
+                w.atom(executed, i)?
+            }
+            EteElement::Address { address, isa } => {
+                w.a64(i)?;
+                w.address(address, isa, i)?
+            }
             EteElement::Exception {
                 preferred_return, ..
-            } => w.exception(preferred_return, i)?,
+            } => {
+                w.a64(i)?;
+                w.exception(preferred_return, i)?
+            }
+            EteElement::Context(c) => w.aarch32 = !c.sixty_four,
             EteElement::Timestamp { timestamp, .. } => {
+                if !matches!(w.waiting, Waiting::Nothing) && w.pending_hi.is_none() {
+                    w.pending_hi = Some(timestamp);
+                }
                 for b in &mut w.trace.branches[w.open_from..] {
                     b.tsc_hi = Some(timestamp);
                 }
@@ -334,7 +382,6 @@ pub fn reconstruct(
             }
             EteElement::Discard | EteElement::TraceOn | EteElement::Sync => w.lost(),
             EteElement::TraceInfo { .. }
-            | EteElement::Context(_)
             | EteElement::Event { .. }
             | EteElement::ExceptionReturn => {}
         }
