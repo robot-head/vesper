@@ -176,7 +176,7 @@ inductive Expr : Type where
   | ctor (name : String) (args : List Expr)
   | matchE (scrut : Expr) (arms : List (Pat × Expr))
   /-- `handle eff in { body } with { return retX => ret, op(params.., k) => opBody }` -/
-  | handle (eff : Eff) (body : Expr) (retX : String) (ret : Expr)
+  | handle (eff : Eff) (body : Expr) (retX : String) (ret : Expr) (op : String)
       (opParams : List String) (k : String) (opBody : Expr)
   | perform (eff op : String) (args : List Expr)
   | resume (k : String) (arg : Expr)
@@ -318,6 +318,16 @@ def joinTy : Ty → Ty → Ty
   | .lit _, b => b
   | a, _ => a
 
+/-- `join_types`' representability check: two literals must both fit the
+kind of their join. -/
+def joinCheck : Ty → Ty → CM Unit
+  | .lit x, .lit y =>
+      let n := if max x y > IntK.i64.hi then max x y else if min x y < 0 then min x y else max x y
+      let k := IntK.defaultFor n
+      if k.fits x && k.fits y then pure ()
+      else err "E0200" "branches have no common integer type"
+  | _, _ => pure ()
+
 def lookup (x : String) : CM (Option Binding) := do
   return (← getEnv).find? (·.name == x)
 
@@ -421,7 +431,7 @@ def mentions (x : String) : Expr → Bool
   | .call _ as | .ctor _ as | .perform _ _ as => mentionsList x as
   | .mkStruct _ fs => mentionsFields x fs
   | .matchE s arms => mentions x s || mentionsArms x arms
-  | .handle _ b rx r ps k o =>
+  | .handle _ b rx r _ ps k o =>
       mentions x b || (x != rx && mentions x r) || (!(ps.contains x) && x != k && mentions x o)
   | _ => false
 where
@@ -657,6 +667,7 @@ def inferExpr : Nat → Cx → Expr → Option Ty → CM Out
       setEnv (refine c false env)
       let (e', b, _) ← checkExpr fuel cx el exp
       let right ← getEnv
+      joinCheck a b
       let result := joinTy a b
       expectTy result a
       expectTy result b
@@ -664,8 +675,13 @@ def inferExpr : Nat → Cx → Expr → Option Ty → CM Out
       else if b == .never then setEnv left
       else setEnv (← liftE (mergeEnv left right))
       return (.ite c' t' e', result, none)
-  | .call f args, _ => do
+  | .call f args, exp => do
       match ← lookup f with
+      | some ⟨_, .kont _ _ _ _, _, _, _⟩ =>
+          -- a local holding a continuation (`let j = k; j(v)`) resumes it
+          match args with
+          | [a] => inferExpr fuel cx (.resume f a) exp
+          | _ => err "E0207" s!"'{f}' expects 1 argument, found {args.length}"
       | some _ => err "E0206" s!"'{f}' is not a function"
       | none =>
       match cx.prog.ctorOf f with
@@ -720,7 +736,7 @@ def inferExpr : Nat → Cx → Expr → Option Ty → CM Out
                   setEnv acc
               return (.matchE s' arms', ty, none)
       | _ => err "E0212" "match requires an enum scrutinee in the reference fragment"
-  | .handle eff body rx ret ps k ob, exp => do
+  | .handle eff body rx ret opName ps k ob, exp => do
       -- the handled effect must exist
       let (opTys, opRes, linear) ← (match eff with
         | .fail p =>
@@ -738,7 +754,10 @@ def inferExpr : Nat → Cx → Expr → Option Ty → CM Out
       let bodyObs := (← getObs).filter (· != eff)
       let outer ← getEnv
       -- clauses see only the captured outer bindings, which must be owned copy
-      let captured := outer.filter fun bd => mentions bd.name ret || mentions bd.name ob
+      -- (`clause_free_names`: each clause's own binders are not captures)
+      let captured := outer.filter fun bd =>
+        (bd.name != rx && mentions bd.name ret) ||
+          (!(ps.contains bd.name) && bd.name != k && mentions bd.name ob)
       for bd in captured do
         if bd.ty.isLinear then
           err "E0404" s!"handler clause capture '{bd.name}' must be owned copy"
@@ -754,6 +773,10 @@ def inferExpr : Nat → Cx → Expr → Option Ty → CM Out
       -- the continuation performs what the body and return clause perform
       let resumeEffs := bodyObs ++ retObs.filter (fun e => !bodyObs.contains e)
       -- operation clause
+      let declared := match eff with
+        | .fail _ => "raise"
+        | .user n => (cx.prog.effOf n).map (·.op) |>.getD ""
+      if opName != declared then err "E0405" s!"unknown operation '{opName}'"
       if ps.length != opTys.length then
         err "E0405" s!"operation clause expects {opTys.length + 1} patterns"
       setEnv captured
@@ -767,7 +790,7 @@ def inferExpr : Nat → Cx → Expr → Option Ty → CM Out
       setEnv outer
       let outgoing := resumeEffs ++ opObs.filter (fun e => !resumeEffs.contains e)
       setObs (saved ++ outgoing.filter (fun e => !saved.contains e))
-      return (.handle eff b' rx r' ps k o', out, none)
+      return (.handle eff b' rx r' opName ps k o', out, none)
   | .perform en op args, _ => do
       match cx.prog.effOf en with
       | none => err "E0201" s!"unknown name '{en}::{op}'"
@@ -823,6 +846,7 @@ def checkArms : Nat → Cx → List (Pat × Expr) → Ty → Option Ty → Env �
       popN n
       let armEnv ← getEnv
       let acc' ← if acc == .never then pure bt else do
+        joinCheck acc bt
         let common := joinTy acc bt
         expectTy common acc
         expectTy common bt
@@ -855,6 +879,16 @@ def checkProgram (P : Program) : Except Diag Program := do
   for f in P.fns do
     if names.contains f.name then throw ⟨"E0100", s!"duplicate function '{f.name}'"⟩
     names := f.name :: names
+  let check (t : Ty) : Except Diag Unit :=
+    unless tyWellFormed P t do throw ⟨"E0101", s!"unknown type '{t.render}'"⟩
+  for d in P.structs do
+    for (_, t) in d.fields do check t
+  for d in P.enums do
+    for v in d.variants do
+      for t in v.payload do check t
+  for d in P.effects do
+    for t in d.params do check t
+    check d.res
   let fns ← P.fns.mapM (checkFn P)
   return { P with fns }
 
@@ -869,6 +903,24 @@ inductive Val : Type where
   /-- a one-shot continuation, by store id -/
   | kont (id : Nat)
   deriving Repr, BEq, Inhabited
+
+mutual
+/-- `runtime::equal`: struct fields compare by name, not by position. -/
+def Val.eqv : Val → Val → Bool
+  | .struct a af, .struct b bf => a == b && af.length == bf.length && Val.eqvFields af bf
+  | .variant a xs, .variant b ys => a == b && Val.eqvList xs ys
+  | x, y => x == y
+def Val.eqvFields : List (String × Val) → List (String × Val) → Bool
+  | [], _ => true
+  | (n, a) :: rest, bf =>
+      (match bf.find? (·.1 == n) with
+        | some (_, b) => Val.eqv a b
+        | none => false) && Val.eqvFields rest bf
+def Val.eqvList : List Val → List Val → Bool
+  | [], [] => true
+  | a :: as, b :: bs => Val.eqv a b && Val.eqvList as bs
+  | _, _ => false
+end
 
 abbrev VEnv := List (String × Val)
 
@@ -1009,7 +1061,7 @@ def step (m : Machine) : Outcome ⊕ Machine :=
           | (f, e) :: rest => goto (.eval e env) (.structK n [] f rest env :: m.stack)
       | .field b f => goto (.eval b env) (.fieldK f :: m.stack)
       | .matchE s arms => goto (.eval s env) (.matchK arms env :: m.stack)
-      | .handle eff body rx ret ps k ob =>
+      | .handle eff body rx ret _ ps k ob =>
           goto (.eval body env) (.handleK ⟨eff, rx, ret, ps, k, ob, env⟩ :: m.stack)
       | .resume k a =>
           match env.lookup k with
@@ -1036,8 +1088,8 @@ def step (m : Machine) : Outcome ⊕ Machine :=
           | .binL op k b env => goto (.eval b env) (.binR op k v :: s)
           | .binR op k a =>
               match op, a, v with
-              | .eq, x, y => goto (.ret (.bool (x == y))) s
-              | .ne, x, y => goto (.ret (.bool (x != y))) s
+              | .eq, x, y => goto (.ret (.bool (x.eqv y))) s
+              | .ne, x, y => goto (.ret (.bool (!x.eqv y))) s
               | .lt, .int x, .int y => goto (.ret (.bool (decide (x < y)))) s
               | .le, .int x, .int y => goto (.ret (.bool (decide (x ≤ y)))) s
               | .gt, .int x, .int y => goto (.ret (.bool (decide (x > y)))) s
@@ -1269,9 +1321,9 @@ def parseExpr : Nat → SExp → Except String Expr
           | .list [.atom "arm", pat, body] => do return (← parsePat 8 pat, ← p body)
           | x => .error s!"bad arm {repr x}"
         return .matchE (← p e) as
-    | .list [.atom "handle", eff, body, .atom rx, ret, .list ps, .atom k, ob] => do
+    | .list [.atom "handle", eff, body, .atom rx, ret, .atom op, .list ps, .atom k, ob] => do
         let ps ← ps.mapM atom
-        return .handle (← parseEff eff) (← p body) rx (← p ret) ps k (← p ob)
+        return .handle (← parseEff eff) (← p body) rx (← p ret) op ps k (← p ob)
     | .list (.atom "perform" :: .atom en :: .atom op :: args) => do
         return .perform en op (← args.mapM p)
     | .list [.atom "resume", .atom k, a] => do return .resume k (← p a)

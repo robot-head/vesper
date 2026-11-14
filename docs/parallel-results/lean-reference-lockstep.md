@@ -17,8 +17,10 @@ of the required `ea1ed29`), merged with main before pushing.
 - `tests/lockstep.rs` runs fixtures and a seeded generator through
   `vesper check`, the evaluator (`Runtime::run`) and the native JIT, and
   through the Lean reference, then compares verdicts and results.
-- Results: the CI subset (49 fixtures and 400 generated programs) and a
-  10,000-program nightly run both found **0 disagreements**.
+- Results: the CI subset (55 fixtures and 400 generated programs) found
+  **0 disagreements**. The 10,000-program nightly run found 1: both sides
+  reject the program, but they report a different first diagnostic. It is
+  listed under Findings, with the reason.
 - One imprecision in the Rust checker was found. It is reproduced on purpose
   by the reference and filed as #497.
 
@@ -117,10 +119,11 @@ Appendix A's calculus or would need a translation of the effect rows.
   integers, booleans, a struct `Pt`, an enum `Sh`, a user effect `Ask`,
   helper functions, nested handlers and resumes. It avoids struct literals
   where the parser restricts them: if conditions and match scrutinees.
-  - A third of the seeds apply one of nine mutations: an unbound name,
+  - A third of the seeds apply one of ten mutations: an unbound name,
     `bool` for an integer, an integer for `bool`, a dropped handler, wrong
     arity, a non-exhaustive match, resuming twice or never, an unknown field,
-    and arithmetic inside a resume argument.
+    a clause for an undeclared operation, and arithmetic inside a resume
+    argument.
 - **Comparison.**
   - **Verdicts:** reference and `vesper check` must agree exactly, reject
     codes included.
@@ -134,8 +137,8 @@ Appendix A's calculus or would need a translation of the effect rows.
   - Without `VESPER_LEAN`, CI compares Rust against the goldens.
   - With `VESPER_LEAN`, the live reference must match the goldens too.
   - `VESPER_LOCKSTEP_BLESS=1` rewrites the goldens.
-- **Fixtures.** `tests/fixtures/lockstep/*.ves` holds 46 programs (25
-  accepted and 21 rejected, formatted with `vesper fmt`). The repository's
+- **Fixtures.** `tests/fixtures/lockstep/*.ves` holds 52 programs (28
+  accepted and 24 rejected, formatted with `vesper fmt`). The repository's
   `examples/*.ves` files that fit the fragment are also used. Examples that
   don't fit are listed by name (closures, counter, fail, projections,
   transaction) rather than silently dropped.
@@ -144,7 +147,7 @@ Appendix A's calculus or would need a translation of the effect rows.
 
 | Test | What it checks |
 | --- | --- |
-| `fixtures_agree_with_the_reference` | 49 fixtures (28 accepted, 21 rejected) |
+| `fixtures_agree_with_the_reference` | 55 fixtures (31 accepted, 24 rejected) |
 | `generated_programs_agree_with_the_reference` | seed `0x5eed_0453`, 400 programs, with minimum accepted, rejected and code counts |
 | `nightly_campaign` (skipped unless `VESPER_LOCKSTEP_PROGRAMS` is set) | `VESPER_LOCKSTEP_PROGRAMS` programs from `VESPER_LOCKSTEP_SEED` against the live reference |
 | `soundness_proof_checks_with_standard_axioms_only` | compiles MetatheoryFull and ReferenceEval to `.olean` in a private dir, checks Soundness.lean, audits axioms |
@@ -156,13 +159,17 @@ Appendix A's calculus or would need a translation of the effect rows.
 All Lean runs used Lean 4.24.0 (the release `.zip` on Linux x86_64).
 
 - `VESPER_LEAN=…/bin/lean cargo test --locked --test lockstep`: all tests
-  pass, with 0 disagreements on fixtures (49) and generated programs (400).
+  pass, with 0 disagreements on fixtures (55) and generated programs (400).
 - `VESPER_LEAN=…/bin/lean VESPER_LOCKSTEP_PROGRAMS=10000 <lockstep test binary> nightly --nocapture`:
-  10,000 programs in 451 s, 6005 accepted and 3995 rejected, 0
-  JIT-unsupported and **0 disagreements**.
+  10,000 programs in 463 s, 5961 accepted and 4039 rejected, 0
+  JIT-unsupported, and **1 disagreement** (seed 190735607, described under
+  Findings).
   - Every accepted program completed with a value.
-  - Reject codes: E0200 1120, E0201 606, E0202 9, E0207 44, E0212 75, E0302 51,
-    E0303 37, E0400 1043, E0401 997, E0402 13.
+  - Reject codes: E0200 979, E0201 533, E0202 8, E0207 43, E0212 72, E0302 47,
+    E0303 36, E0400 1052, E0401 989, E0402 12, E0405 268.
+  - The first nightly run, before the review fixes, used the old generator
+    (nine mutations). It checked 10,000 programs in 451 s with 0
+    disagreements.
 - `lean Soundness.lean` with MetatheoryFull and ReferenceEval `.olean`s on
   `LEAN_PATH` finishes in about 10 s with no errors or warnings.
   - `#print axioms` gives `[propext, Classical.choice, Quot.sound]` for
@@ -207,7 +214,40 @@ root package's files as data, so Bazel picks up `//:test/lockstep`, with
   condition or `match` scrutinee, even under parentheses or inside a block.
   This is documented here rather than filed, because it is a deliberate
   grammar restriction. The generator works around it.
-- **JIT gaps:** none were hit on the fragment (0 of 6005 accepted programs).
+- **Review round on #510:** code review found six places where the reference
+  and `src/check.rs` or `src/runtime.rs` differed on programs the harness had
+  not yet generated. Each one was confirmed against `vesper check` or
+  `vesper run`, fixed in the model, and given a fixture:
+  - struct equality compares fields by name (`accept_struct_eq_field_order`);
+  - a handler clause's own binders are not captures
+    (`accept_clause_binder_shadowing`);
+  - joined literals must fit one kind (`reject_literal_join_range`, E0200);
+  - a clause for an undeclared operation is rejected
+    (`reject_unknown_operation`, E0405). The wire format now carries the
+    clause's operation name;
+  - a local alias of a continuation can be called
+    (`accept_continuation_alias`);
+  - types in struct, enum and effect declarations are validated
+    (`reject_unknown_declared_type`, E0101).
+- **Nightly disagreement (listed, not fixed):** seed 190735607 is a mutated
+  program. Its operation clause resumes as `k(q0)` on one branch and as
+  `k((255 + v))` on the other, where `v` is unbound.
+  - `vesper check` reports E0401 first, at `k(q0)`. The reference reports
+    E0201 first, at `v`. Both reject the program.
+  - **Cause:** the Rust checker runs to a fixpoint. A resume's required
+    effects include what the whole handler observed on the previous pass,
+    and that includes the `Fail[ArithOverflow]` of `255 + v`, which Rust
+    still observes after reporting `v` as unknown. The reference has no
+    error recovery: it stops at the first diagnostic, so it never sees that
+    effect.
+  - **Effect on valid programs:** none found. An effect the operation clause
+    observes must already be available there, so it doesn't change whether
+    the program is accepted. The exception would be the E0402/E0410 rules
+    inside nested resume arguments, which the generator has not hit.
+  - **What would remove it:** iterating the operation clause to a fixpoint,
+    plus enough error recovery to keep observing effects after an unknown
+    name.
+- **JIT gaps:** none were hit on the fragment (0 of 5961 accepted programs).
 
 ## Remaining gaps
 

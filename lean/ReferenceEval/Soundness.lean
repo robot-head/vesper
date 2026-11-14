@@ -384,6 +384,9 @@ theorem mergeEnv_names : ∀ {l r m : Env}, mergeEnv l r = Except.ok m → names
             simp only [names, List.map_cons] at this ⊢
             rw [this]
 
+theorem pres_joinCheck (a b : Ty) : Pres (joinCheck a b) := by
+  unfold joinCheck; pres_tac
+
 theorem pure_ok {α : Type} {a : α} {s : St} {r : α × St} (h : (pure a : CM α) s = Except.ok r) :
     names r.2.env = names s.env := pres_pure a s r h
 
@@ -444,7 +447,9 @@ theorem shape_ok {cx : Cx} : ∀ {fuel : Nat} {e : Expr} {exp : Option Ty} {s : 
           obtain ⟨oke, ne⟩ := shape_ok he he'
           obtain ⟨right, s10, h16, h17⟩ := bind_ok h15
           obtain ⟨hr, e10⟩ := getEnv_ok h16
-          obtain ⟨_, s11, h18, h19⟩ := bind_ok h17
+          obtain ⟨_, s10', hj, h17'⟩ := bind_ok h17
+          have _ := pres_joinCheck _ _ _ _ hj
+          obtain ⟨_, s11, h18, h19⟩ := bind_ok h17'
           have n11 := pres_expectTy _ _ _ _ h18
           obtain ⟨_, s12, h20, h21⟩ := bind_ok h19
           have n12 := pres_expectTy _ _ _ _ h20

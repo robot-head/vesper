@@ -141,6 +141,9 @@ enum E {
         body: Box<E>,
         rx: String,
         ret: Box<E>,
+        /// the operation clause's name, kept so the reference can reject a
+        /// wrong one (E0405)
+        op: String,
         params: Vec<String>,
         k: String,
         op_body: Box<E>,
@@ -261,11 +264,12 @@ fn wire(e: &E) -> String {
             body,
             rx,
             ret,
+            op,
             params,
             k,
             op_body,
         } => format!(
-            "(handle {} {} {rx} {} ({}) {k} {})",
+            "(handle {} {} {rx} {} {op} ({}) {k} {})",
             wire_eff(eff),
             wire(body),
             wire(ret),
@@ -428,14 +432,11 @@ fn src(e: &E) -> String {
             body,
             rx,
             ret,
+            op,
             params,
             k,
             op_body,
         } => {
-            let op = match eff {
-                Eff::Fail(_) => "raise".to_string(),
-                Eff::User(n) => n.to_lowercase(),
-            };
             let mut pats = params.clone();
             pats.push(k.clone());
             format!(
@@ -735,6 +736,7 @@ impl Translator {
                     body: Box::new(body),
                     rx: rx.clone(),
                     ret: Box::new(ret_e),
+                    op: op.name.clone(),
                     params: names,
                     k,
                     op_body: Box::new(op_body?),
@@ -1390,6 +1392,7 @@ fn main_body(g: &mut Gen<'_>, result: &Ty) -> E {
             body: Box::new(body),
             rx,
             ret: Box::new(ret),
+            op: d.op.clone(),
             params,
             k,
             op_body: Box::new(op_body),
@@ -1407,6 +1410,7 @@ fn main_body(g: &mut Gen<'_>, result: &Ty) -> E {
                 body: Box::new(body),
                 rx: "v".into(),
                 ret: Box::new(E::Var("v".into())),
+                op: "raise".into(),
                 params: vec!["e".into()],
                 k: "_".into(),
                 op_body: Box::new(failure_value),
@@ -1430,7 +1434,7 @@ fn mutate_prog(p: &mut Prog, rng: &mut Rng) {
 
 fn mutate_once(p: &mut Prog, rng: &mut Rng) {
     let f = rng.below(p.fns.len());
-    let kind = rng.below(9);
+    let kind = rng.below(10);
     let fd = &mut p.fns[f];
     match kind {
         0 => {
@@ -1502,6 +1506,7 @@ fn mutate_once(p: &mut Prog, rng: &mut Rng) {
                         body,
                         rx,
                         ret,
+                        op,
                         params,
                         k,
                         op_body,
@@ -1523,6 +1528,7 @@ fn mutate_once(p: &mut Prog, rng: &mut Rng) {
                         body,
                         rx,
                         ret,
+                        op,
                         params,
                         k,
                         op_body: Box::new(op_body),
@@ -1538,6 +1544,21 @@ fn mutate_once(p: &mut Prog, rng: &mut Rng) {
                 };
                 E::Field(b, "zz".into())
             });
+        }
+        8 => {
+            // a clause for an operation the effect does not declare
+            replace_first(
+                &mut fd.body,
+                rng,
+                &|e| matches!(e, E::Handle { .. }),
+                &|e| {
+                    let mut e = e.clone();
+                    if let E::Handle { op, .. } = &mut e {
+                        *op = "bogus".into();
+                    }
+                    e
+                },
+            );
         }
         _ => {
             // checked arithmetic while the continuation is live
