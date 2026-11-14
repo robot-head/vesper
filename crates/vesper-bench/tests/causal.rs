@@ -1,8 +1,9 @@
 //! Causal profiling on a synthetic program with a known bottleneck.
 //!
 //! Two threads do one round of work each, then meet at a barrier; the round
-//! ends with a progress point. Thread "slow" spins 8 ms per round and thread
-//! "fast" 3 ms, so a round lasts max(8, 3) ms. Truly speeding "slow" up by s
+//! ends with a progress point. Thread "slow" works 8 ms per round and thread
+//! "fast" 3 ms (blocking waits, so the program behaves the same on a
+//! single-CPU host), so a round lasts max(8, 3) ms. Truly speeding "slow" up by s
 //! gives a round of max(8(1-s), 3) ms: 50% predicts 50%, 100% predicts
 //! 1 - 3/8 = 62.5%. Speeding "fast" up changes nothing.
 use std::{
@@ -13,10 +14,12 @@ use std::{
 };
 use vesper_bench::causal::{CausalConfig, CausalProfiler, profile};
 
-fn spin(d: Duration) {
+fn work(d: Duration) {
+    // Off-CPU work: a parallel program on one CPU cannot overlap two
+    // spinning threads, which is not the bottleneck structure under test.
     let start = Instant::now();
-    while start.elapsed() < d {
-        std::hint::spin_loop();
+    while let Some(left) = d.checked_sub(start.elapsed()) {
+        thread::sleep(left);
     }
 }
 
@@ -26,12 +29,12 @@ fn program(p: &CausalProfiler) -> Result<(), Infallible> {
     let slow = p.region("slow").unwrap();
     let fast = p.region("fast").unwrap();
     let done = p.progress_point("round").unwrap();
-    let worker = |region, work, report: bool| {
+    let worker = |region, amount, report: bool| {
         let barrier = Arc::clone(&barrier);
         let mut t = p.thread();
         thread::spawn(move || {
             for _ in 0..ROUNDS {
-                t.region(region, || spin(work));
+                t.region(region, || work(amount));
                 barrier.wait();
                 if report {
                     t.progress(done);

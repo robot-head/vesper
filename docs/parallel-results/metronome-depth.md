@@ -97,7 +97,7 @@ time as elapsed minus inserted delay, and reports the exact predicted
 end-to-end speedup `1 - period_s/period_0` in basis points per region.
 Each experiment run is paired with an adjacent baseline run and the median
 per-pair prediction is reported, so load drift between experiments cancels;
-pauses busy-wait instead of sleeping, because macOS sleeps of a few
+pauses busy-wait (yielding the CPU) instead of sleeping, because macOS sleeps of a few
 milliseconds wake late and bunch delays into long stalls (the second macOS CI
 run, with the test already alone, predicted 2% for a true 50%); any overshoot
 is still credited against later delay, as in Coz. Inserted delay exceeding elapsed time is a typed error, not a
@@ -106,7 +106,8 @@ sharing three cores with other test actions, produced negative predictions for
 every region before these changes.
 
 Known-bottleneck test (`crates/vesper-bench/tests/causal.rs`): two threads per
-round, "slow" spins 8 ms and "fast" 3 ms, then meet at a barrier; the round is a
+round, "slow" works 8 ms and "fast" 3 ms (blocking waits, so the structure
+holds on a single-CPU host), then meet at a barrier; the round is a
 progress point. Theory: slow +50% gives 5000 bp, slow +100% gives
 `1 - 3/8 = 6250` bp, fast gives 0. Three local runs:
 
@@ -191,3 +192,10 @@ fail with `UnknownFingerprint`, unrelated to this lane.
   vectorization evidence, L1/LLC/branch/TMA events, `PmuSampleWire`.
 * Rust ownership in these APIs is not evidence that Vesper's source typing
   rules for linear benchmark inputs are implemented.
+
+Linux CI then failed the causal test too. Pinned to one CPU locally it
+reproduced (slow +100% predicted 3292 bp instead of about 6250): two threads
+spinning for their work cannot overlap on one core. The synthetic workload now
+does off-CPU work and pauses yield; it then passes pinned to 1, 2 and 4 CPUs
+and with four CPU hogs running (slow +50% 4608..4998 bp, fast within
+-133..30 bp).

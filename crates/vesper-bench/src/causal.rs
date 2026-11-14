@@ -183,7 +183,9 @@ fn pause(nanos: u64) -> u64 {
     // pauses and, with threads that meet at barriers, distorts the very
     // speedup being predicted (CI saw ~2% predicted for a true 50%).
     while start.elapsed() < target {
-        std::hint::spin_loop();
+        // Yield so a paused thread never holds the only CPU that the thread
+        // it is waiting on needs.
+        std::thread::yield_now();
     }
     u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX)
 }
