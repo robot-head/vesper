@@ -136,6 +136,12 @@ python3 tools/bazel/sync_build_files.py                     # no BUILD change ne
 * The scheduler's `Driver` trait and the `io_driver` path are kept so that
   `vesper-fiber-abi` (lane 3's path) compiles without edits.
 
+* io_uring: a request whose cancellation was issued and that completes with
+  `EINTR` (io-wq interrupts a blocked worker to cancel it) is reported as
+  `ECANCELED`, like every other driver. This is the only change to the
+  io_uring driver's results; it was found on BuildBuddy CI, where
+  `drain_returns_every_owner_exactly_once` saw `EINTR` for a cancelled pipe read.
+
 ## Remaining gaps
 
 * `vesper-fiber-abi`'s `pulse` adapter and its `tests/lifecycle.rs`,

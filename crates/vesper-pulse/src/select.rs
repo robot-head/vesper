@@ -130,6 +130,9 @@ impl fmt::Display for SelectError {
 impl std::error::Error for SelectError {}
 
 /// Any host driver, chosen at run time.
+// One long-lived driver per scheduler: variant size is irrelevant, and boxing
+// would add an indirection to every submit and poll.
+#[allow(clippy::large_enum_variant)]
 pub enum AnyDriver<T> {
     #[cfg(target_os = "linux")]
     IoUring(crate::uring::IoDriver<T>),

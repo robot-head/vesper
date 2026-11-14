@@ -17,6 +17,9 @@ use std::{
 };
 
 const CANCEL_BIT: u64 = 1 << 63;
+const fn libc_eintr() -> i32 {
+    4 // EINTR on Linux
+}
 /// Shutdown failures return the still-owned driver and every harvested token.
 pub struct ShutdownError<T> {
     pub error: io::Error,
@@ -36,6 +39,10 @@ struct Ledger<T> {
     next: u64,
     requests: BTreeMap<RequestId, Request<T>>,
     cancellations: BTreeSet<RequestId>,
+    /// Requests whose cancellation was issued, until their own CQE. A
+    /// cancelled operation that io-wq was running may complete with `EINTR`
+    /// rather than `ECANCELED`; for these requests both mean "cancelled".
+    cancel_requested: BTreeSet<RequestId>,
 }
 impl<T> Ledger<T> {
     fn new() -> Self {
@@ -43,6 +50,7 @@ impl<T> Ledger<T> {
             next: 1,
             requests: BTreeMap::new(),
             cancellations: BTreeSet::new(),
+            cancel_requested: BTreeSet::new(),
         }
     }
     fn insert(&mut self, request: Request<T>) -> Result<RequestId, (io::Error, Request<T>)> {
@@ -90,7 +98,10 @@ impl<T> Ledger<T> {
             .requests
             .remove(&id)
             .ok_or_else(|| io::Error::other("unknown or duplicate I/O completion"))?;
-        let result = if result < 0 {
+        let interrupted_by_cancel = self.cancel_requested.remove(&id) && result == -libc_eintr();
+        let result = if interrupted_by_cancel {
+            Err(crate::driver::cancelled_error())
+        } else if result < 0 {
             Err(io::Error::from_raw_os_error(-result))
         } else if result as usize > request.buffer.len() {
             Err(io::Error::other("kernel returned an invalid I/O length"))
@@ -199,6 +210,7 @@ impl<T> IoDriver<T> {
             .user_data(id.0 | CANCEL_BIT);
         self.push(&entry)?;
         self.ledger.cancellations.insert(id);
+        self.ledger.cancel_requested.insert(id);
         Ok(true)
     }
     pub fn cancel_all(&mut self) -> io::Result<()> {
@@ -336,6 +348,18 @@ mod tests {
         let completed = ledger.complete(id.0, -125).unwrap().unwrap();
         assert_eq!(completed.request.continuation, 42);
         assert_eq!(completed.result.unwrap_err().raw_os_error(), Some(125));
+    }
+    #[test]
+    fn eintr_after_cancellation_reads_as_cancelled() {
+        let mut ledger = Ledger::new();
+        let a = ledger.insert(request(1)).unwrap_or_else(|_| panic!());
+        let b = ledger.insert(request(2)).unwrap_or_else(|_| panic!());
+        ledger.cancel_requested.insert(a);
+        let a = ledger.complete(a.0, -4).unwrap().unwrap();
+        assert!(crate::driver::is_cancelled(a.result.as_ref().unwrap_err()));
+        // Without a cancellation, EINTR is reported as it is.
+        let b = ledger.complete(b.0, -4).unwrap().unwrap();
+        assert_eq!(b.result.unwrap_err().raw_os_error(), Some(4));
     }
     #[test]
     fn ids_are_not_reused_after_completion() {
