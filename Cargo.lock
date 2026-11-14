@@ -5545,6 +5545,9 @@ dependencies = [
 [[package]]
 name = "vesper-tensor"
 version = "0.1.0"
+dependencies = [
+ "memmap2",
+]
 
 [[package]]
 name = "vesper-vault"
