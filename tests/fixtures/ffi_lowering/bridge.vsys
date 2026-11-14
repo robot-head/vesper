@@ -1,0 +1,31 @@
+sys library Bridge (
+    target = "x86_64-unknown-linux-gnu", abi = "sysv64",
+    link = "static", name = "vesper_bridge", artifact = "blake3:@DIGEST@"
+) {
+    enum State: u32 { Ready = 1, Busy = 7 }
+    wire struct Pair { lo: u32, hi: u32 }
+    wire struct Hdr { magic: u32be, version: u8, tag: ByteArray[3], length: u64 }
+    wire struct Rec { id: u64, value: i64 }
+    fn bridge_report(tag: u64, value: u64) -> ForeignVal[Unit];
+    fn bridge_report8(tag: u64, value: u8) -> ForeignVal[Unit];
+    fn bridge_report32(tag: u64, value: u32) -> ForeignVal[Unit];
+    fn bridge_report_signed(tag: u64, value: i64) -> ForeignVal[Unit];
+    fn bridge_sum(a: u32, b: u32) -> ForeignVal[u32];
+    fn bridge_negative() -> ForeignVal[i32];
+    fn bridge_wide() -> ForeignVal[u16];
+    fn bridge_small() -> ForeignVal[i8];
+    fn bridge_bool(which: bool) -> ForeignVal[bool];
+    fn bridge_state(raw: u32) -> ForeignVal[State];
+    fn bridge_next(state: State) -> ForeignVal[State];
+    fn bridge_tick() -> ForeignVal[u64];
+    fn bridge_copy(nocapture in src: CSlice[u8], nocapture inout dst: CSlice[u8]) -> ForeignVal[usize];
+    fn bridge_crc_update(nocapture inout crc: u32, nocapture in data: CSlice[u8]) -> ForeignVal[Unit];
+    fn bridge_split(value: u64, nocapture out out: Pair) -> ForeignVal[i32];
+    fn bridge_hdr_sum(nocapture in h: Hdr) -> ForeignVal[u64];
+    fn bridge_hdr_bump(nocapture inout h: Hdr) -> ForeignVal[Unit];
+    fn bridge_rec_total(nocapture in recs: CSlice[Rec]) -> ForeignVal[i64];
+    fn bridge_rec_scale(nocapture inout recs: CSlice[Rec], k: u64) -> ForeignVal[Unit];
+    fn bridge_opt_len(nocapture in data: Option[CSlice[u8]]) -> ForeignVal[u32];
+    fn bridge_opt_get(nocapture in p: Option[u32]) -> ForeignVal[u32];
+    fn bridge_opt_bump(nocapture inout p: Option[u32]) -> ForeignVal[Unit];
+}
