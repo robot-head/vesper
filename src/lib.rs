@@ -14,6 +14,7 @@ pub mod capability_effects;
 pub mod check;
 pub mod database;
 pub mod doctest;
+pub mod ebpf_backend;
 pub mod forge_frontend;
 pub mod interface;
 #[cfg(target_os = "linux")]
