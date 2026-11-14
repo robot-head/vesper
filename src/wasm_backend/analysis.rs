@@ -94,6 +94,27 @@ fn captures(
         .collect()
 }
 
+/// The nested IR function of a closure expression and the names it captures.
+pub(crate) fn closure(
+    expr: &Expr,
+    aliases: &BTreeMap<String, String>,
+    outer: &FunctionIr,
+) -> Result<(String, Vec<String>), WasmError> {
+    let ExprKind::Closure { params, body, .. } = &expr.kind else {
+        return Err(WasmError::Invalid(
+            "closure instruction without a closure".into(),
+        ));
+    };
+    let mut names = crate::check::free_names(body);
+    for p in params {
+        names.remove(&p.name);
+    }
+    Ok((
+        nested_name("closure", &body.span),
+        captures(names, aliases, outer),
+    ))
+}
+
 pub(crate) fn plan(
     world: &World,
     program: &Program,
@@ -137,6 +158,18 @@ pub(crate) fn plan(
                 match &inst.op {
                     Op::Call { callee, .. } if program.functions.contains_key(callee) => {
                         queue.push_back((callee.clone(), Role::Ordinary, BTreeSet::new()));
+                    }
+                    Op::Closure { expr, aliases, .. } => {
+                        let (function, caps) = closure(expr, aliases, f)?;
+                        check_prefix(program, &function, &caps)?;
+                        queue.push_back((function, Role::Ordinary, labels.clone()));
+                    }
+                    Op::Read { root, path, .. }
+                        if path.is_empty()
+                            && !f.locals.contains_key(root)
+                            && program.functions.contains_key(root) =>
+                    {
+                        queue.push_back((root.clone(), Role::Ordinary, BTreeSet::new()));
                     }
                     Op::Handle {
                         expr,

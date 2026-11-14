@@ -7,7 +7,8 @@
 //! scalars, `vesper.arith.checked/1` arithmetic with its aborts, tuples,
 //! structs and enums with patterns, direct and recursive calls (a call in tail
 //! position is a Wasm `return_call`), `inout` arguments and the lexical
-//! effects of §4-§6:
+//! effects of §4-§6, and closures and function values (a callable block of
+//! table slot, evidence snapshot and captures, called through a trampoline):
 //!
 //! * `Fail` and every clause that drops its continuation abort to their
 //!   handler through an explicitly propagated abort flag (portable);
@@ -18,7 +19,7 @@
 //!   Wasmtime 50 executes on x86_64 Linux and macOS only. With
 //!   [`EffectLowering::Portable`] such handlers are rejected instead.
 //!
-//! Everything else (closures, function values, strings, `f64` remainder,
+//! Everything else (strings, `f64` remainder,
 //! labelled effect rows of ordinary functions, generic effect instances and
 //! any IR operation this backend does not know) is a typed
 //! [`WasmError::Unsupported`], never a miscompilation.
@@ -92,7 +93,8 @@ impl Default for WasmOptions {
 /// A construct this backend rejects.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unsupported {
-    Closure,
+    /// A function used as a value that the backend did not plan (for
+    /// example an external declaration).
     FunctionValue,
     String,
     FloatRemainder,

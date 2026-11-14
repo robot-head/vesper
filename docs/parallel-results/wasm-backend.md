@@ -20,6 +20,7 @@ wasm32-wasip2 file.ves -o out.wasm` writes that component.
 | Checked arithmetic (`vesper.arith.checked/1`) | `+ - *`, compound assignment and negation raise `Fail[ArithOverflow]`; `/ %` by zero raise `Fail[RuntimeError]` before the overflow check; `i64::MIN / -1` overflows, `i64::MIN % -1` is 0; `wrapping_*` mask narrow kinds | `checked_arithmetic_matches_the_evaluator`: 31 boundary cases, each differential |
 | Aggregates | tuples, structs, enums (incl. `Option`/`Result`), nested patterns, literal patterns, copy-on-write field writes, structural `==`/`!=`, dynamic tuple indexing with `IndexOutOfBounds` | `aggregates`, `structural_equality` |
 | Calls and loops | direct and mutually recursive calls; a direct call in tail position is a `return_call` (10,000,000 iterations in constant stack); `inout` arguments including field places | `calls_and_mutation`, `recursion_and_loops`, `tail_calls_do_not_grow_the_stack` |
+| Closures and function values | captures (snapshots), factories, higher-order and effect-polymorphic callbacks, closures in records and tuples, closures returning closures, `inout` closure parameters, named functions as values; closures keep the evidence where they were built and callables passed to a parameter bind the caller's evidence, as the evaluator does | `closures_and_function_values` (19 programs, including the `tests/backends.rs` closure corpus) |
 | Effects, portable | `Fail` instance selection (exact instance, else by name), `?` on `Result`, clauses that drop the continuation (abort), tail-resumptive clauses with and without handler state, labelled handlers used lexically, clauses that perform outer effects | `failure_selects_its_own_instance`, `tail_resumptive_and_aborting_handlers_are_portable` (15 programs, each also run with `EffectLowering::Portable`) |
 | Effects, WasmFX | any other one-shot clause: the body runs as a continuation (`cont.new`), operations `suspend`, the handler is a `resume` loop; nested handlers forward foreign operations; `Fail` inside a resumed body | `general_one_shot_handlers_use_stack_switching` (5 programs incl. `examples/resumptions.ves`) |
 | Component | `vesper:program/entry@0.1.0` exports `main` typed by the entry (records, variants per instantiation such as `option-u8`, tuples); `wasi:cli/run@0.2.0` for parameterless entries; no imports | `command_component_exports_wasi_cli_run` |
@@ -65,9 +66,17 @@ result, rendered the way the evaluator prints values, with the evaluator's.
   is forwarded with `suspend` and the result resumed back, so nested
   stack-switching handlers compose. `resume` in a clause calls the runner
   again (deep handlers). Continuations are one-shot: Wasmtime traps on reuse.
-* **Unknown IR operations** (and `Op::Closure`) reach a wildcard arm that
-  returns `Unsupported::Operation`/`Closure`, so lane 28's vector operations
-  cannot miscompile this backend.
+* **Closures.** A callable is a block `[table slot, evidence, captures]`.
+  The slot names a trampoline `(c, args...)` that loads the captures and calls
+  the closure's IR function. The evidence block holds one frame per evidence
+  key (0 meaning "the caller's"): a closure snapshots the keys where it is
+  built, and a callable passed to a parameter whose function type has effects
+  is rebound so that keys it did not capture take the call site's frames
+  (the evaluator's `bind_callable_evidence`). The trampoline installs the
+  non-zero frames around the call and restores them after, aborts included.
+* **Unknown IR operations** reach a wildcard arm that returns
+  `Unsupported::Operation`, so lane 28's vector operations cannot miscompile
+  this backend.
 
 ## Decisions
 
@@ -94,7 +103,7 @@ platforms.
 ## Checks
 
 ```sh
-cargo test --test wasm_backend --test wasm_backend_cli   # 21 tests
+cargo test --test wasm_backend --test wasm_backend_cli   # 22 tests
 cargo +1.100.0 clippy -p vesper --locked --all-targets -- -D warnings
 cargo fmt --all -- --check
 vesper fmt --check tests/fixtures/wasm_backend/
@@ -102,9 +111,9 @@ vesper fmt --check tests/fixtures/wasm_backend/
 
 ## Remaining gaps
 
-* **Closures and function values** (`Op::Closure`, `Op::Indirect` on a value,
-  a function name used as a value) are rejected (`Unsupported::Closure`,
-  `FunctionValue`).
+* **Closure evidence binding** applies to callables passed directly as
+  function-typed arguments; callables nested inside an aggregate argument keep
+  only the evidence they captured.
 * **Type-directed operations on generic parameters** (for example `a == b` on
   `T`) are rejected (`GenericOperation`); there is no monomorphization.
   Handlers and operations whose effect arguments mention a generic parameter

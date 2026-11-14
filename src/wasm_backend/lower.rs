@@ -42,6 +42,10 @@ const F_DISPATCH: u64 = 0;
 const F_STATE: u64 = 8;
 const F_ABORT_OP: u64 = 16;
 const F_ARGS: u64 = 24;
+/// A callable block: `[table slot, evidence block or 0, captures block or 0]`.
+/// The evidence block holds one frame (or 0, "the caller's") per evidence key.
+const C_EVIDENCE: u64 = 8;
+const C_CAPTURES: u64 = 16;
 
 pub(crate) struct FxTypes {
     pub ct: u32,
@@ -77,6 +81,8 @@ pub(crate) struct Lowerer<'a> {
     pub fx: Option<FxTypes>,
     pub hfns: Vec<HandlerFns>,
     eq: BTreeMap<String, u32>,
+    /// Table slot of the trampoline of each closure or function value.
+    trampolines: BTreeMap<String, u32>,
     eq_pending: Vec<(u32, Type)>,
     pub arity: usize,
     pub instructions: usize,
@@ -145,6 +151,7 @@ impl<'a> Lowerer<'a> {
             fx,
             hfns: vec![],
             eq: BTreeMap::new(),
+            trampolines: BTreeMap::new(),
             eq_pending: vec![],
             arity,
             instructions: 0,
@@ -324,6 +331,87 @@ impl<'a> Lowerer<'a> {
             f.instruction(&ins);
         }
         self.b.define(self.alloc, f);
+    }
+
+    /// Type of an indirect call with `arity` arguments: (env, args...) -> i64.
+    pub(crate) fn indirect_type(&mut self, arity: usize) -> u32 {
+        self.b
+            .func_type(&vec![ValType::I64; 1 + arity], &[ValType::I64])
+    }
+
+    /// Table slot of `$tramp(c, args...)`, which calls `function` with the
+    /// `captures` slots of the callable block `c` first. When `c` carries an
+    /// evidence block, its non-zero frames replace the caller's evidence for
+    /// the duration of the call (as the evaluator's closure environment
+    /// extends the caller's evidence).
+    pub(crate) fn trampoline(&mut self, function: &str, captures: usize) -> Result<u32, WasmError> {
+        if let Some(s) = self.trampolines.get(function) {
+            return Ok(*s);
+        }
+        let target = *self
+            .funcs
+            .get(function)
+            .ok_or_else(|| WasmError::Invalid(format!("callable {function} was not planned")))?;
+        let total = self.program.functions[function].params.len();
+        let arity = total.checked_sub(captures).ok_or_else(|| {
+            WasmError::Invalid(format!("{function} has fewer parameters than captures"))
+        })?;
+        let ty = self.indirect_type(arity);
+        let idx = self.b.declare_typed(&format!("$tramp<{function}>"), ty);
+        let keys: Vec<u32> = self.env.values().copied().collect();
+        let first = 1 + arity as u32;
+        let (ev, caps, r, saved) = (first, first + 1, first + 2, first + 3);
+        let mut f = Function::new([(3 + keys.len() as u32, ValType::I64)]);
+        let operands = |f: &mut Function| {
+            for c in 0..captures {
+                f.instruction(&I::LocalGet(caps));
+                f.instruction(&I::I32WrapI64);
+                f.instruction(&I::I64Load(mem(8 * c as u64)));
+            }
+            for a in 0..arity {
+                f.instruction(&I::LocalGet(1 + a as u32));
+            }
+        };
+        f.instruction(&I::LocalGet(0));
+        f.instruction(&I::I32WrapI64);
+        f.instruction(&I::I64Load(mem(C_CAPTURES)));
+        f.instruction(&I::LocalSet(caps));
+        f.instruction(&I::LocalGet(0));
+        f.instruction(&I::I32WrapI64);
+        f.instruction(&I::I64Load(mem(C_EVIDENCE)));
+        f.instruction(&I::LocalTee(ev));
+        f.instruction(&I::I64Eqz);
+        f.instruction(&I::If(BlockType::Empty));
+        operands(&mut f);
+        f.instruction(&I::ReturnCall(target));
+        f.instruction(&I::End);
+        for (n, g) in keys.iter().enumerate() {
+            f.instruction(&I::GlobalGet(*g));
+            f.instruction(&I::LocalSet(saved + n as u32));
+            f.instruction(&I::LocalGet(ev));
+            f.instruction(&I::I32WrapI64);
+            f.instruction(&I::I64Load(mem(8 * n as u64)));
+            f.instruction(&I::LocalTee(r));
+            f.instruction(&I::I64Const(0));
+            f.instruction(&I::I64Ne);
+            f.instruction(&I::If(BlockType::Empty));
+            f.instruction(&I::LocalGet(r));
+            f.instruction(&I::GlobalSet(*g));
+            f.instruction(&I::End);
+        }
+        operands(&mut f);
+        f.instruction(&I::Call(target));
+        f.instruction(&I::LocalSet(r));
+        for (n, g) in keys.iter().enumerate() {
+            f.instruction(&I::LocalGet(saved + n as u32));
+            f.instruction(&I::GlobalSet(*g));
+        }
+        f.instruction(&I::LocalGet(r));
+        f.instruction(&I::End);
+        self.b.define(idx, f);
+        let slot = self.b.table_slot(idx);
+        self.trampolines.insert(function.to_owned(), slot);
+        Ok(slot)
     }
 
     /// The structural-equality helper for `ty`, generated on first use.
@@ -1189,8 +1277,9 @@ impl<'l, 'a> Emit<'l, 'a> {
                     let Op::Call { callee, args, .. } = &inst.op else {
                         unreachable!()
                     };
-                    for a in args {
-                        let x = self.value(a.value)?;
+                    let params = self.params_of(callee);
+                    let (vals, _) = self.call_args(args, &params)?;
+                    for x in vals {
                         self.get(x);
                     }
                     self.push(I::ReturnCall(self.l.funcs[callee]));
@@ -1398,6 +1487,14 @@ impl<'l, 'a> Emit<'l, 'a> {
                     return Ok(());
                 }
                 if !self.names.contains_key(root) {
+                    if path.is_empty() && self.l.funcs.contains_key(root) {
+                        // A named function used as a value: a callable block
+                        // without captures.
+                        let slot = self.l.trampoline(root, 0)?;
+                        let block = self.callable(slot, false, None);
+                        self.values.insert(inst.dest, block);
+                        return Ok(());
+                    }
                     return Err(if self.l.world.functions.contains_key(root) {
                         self.err(
                             Unsupported::FunctionValue,
@@ -1407,13 +1504,7 @@ impl<'l, 'a> Emit<'l, 'a> {
                         WasmError::Invalid(format!("{}: unknown name '{root}'", self.name))
                     });
                 }
-                let (v, t) = self.read_place(root, path)?;
-                if matches!(layout::shape(self.l.world, &t)?, Shape::Function) {
-                    return Err(self.err(
-                        Unsupported::FunctionValue,
-                        format!("'{root}' has function type"),
-                    ));
-                }
+                let (v, _) = self.read_place(root, path)?;
                 self.values.insert(inst.dest, v);
             }
             Op::Bind { pattern, value } => {
@@ -1647,11 +1738,47 @@ impl<'l, 'a> Emit<'l, 'a> {
                 let r = self.handle(id, *state_value)?;
                 self.values.insert(inst.dest, r);
             }
-            Op::Closure { .. } => {
-                return Err(self.err(Unsupported::Closure, "closure values"));
+            Op::Closure { expr, aliases, .. } => {
+                let (function, caps) = super::analysis::closure(expr, aliases, self.f)?;
+                let slot = self.l.trampoline(&function, caps.len())?;
+                let mut values = vec![];
+                for c in &caps {
+                    let slot = aliases.get(c).cloned().ok_or_else(|| {
+                        WasmError::Invalid(format!(
+                            "{}: closure capture '{c}' has no slot",
+                            self.name
+                        ))
+                    })?;
+                    values.push(self.read_name(&slot)?);
+                }
+                // A closure captures the evidence in scope where it is built.
+                let block = self.callable(slot, true, Some(&values));
+                self.values.insert(inst.dest, block);
             }
-            Op::Indirect { .. } => {
-                return Err(self.err(Unsupported::Closure, "call through a function value"));
+            Op::Indirect { callee, args } => {
+                let c = self.value(*callee)?;
+                let params = match crate::numeric::default_type(&self.vty(*callee)) {
+                    Type::Function { params, .. } => params,
+                    _ => vec![],
+                };
+                let (vals, cells) = self.call_args(args, &params)?;
+                let ty = self.l.indirect_type(vals.len());
+                self.get(c);
+                for v in &vals {
+                    self.get(*v);
+                }
+                let d = self.dest(inst.dest);
+                self.load(c, 0);
+                self.code.extend([
+                    I::I32WrapI64,
+                    I::CallIndirect {
+                        type_index: ty,
+                        table_index: 0,
+                    },
+                    I::LocalSet(d),
+                ]);
+                self.writeback(cells)?;
+                self.abort_check();
             }
             #[allow(unreachable_patterns)]
             _ => {
@@ -1664,19 +1791,170 @@ impl<'l, 'a> Emit<'l, 'a> {
         Ok(())
     }
 
+    /// A callable block for table `slot`: with `snapshot`, the evidence
+    /// block records every evidence key's current frame.
+    fn callable(&mut self, slot: u32, snapshot: bool, captures: Option<&[u32]>) -> u32 {
+        let block = self.alloc(24);
+        let t = self.local();
+        self.code
+            .extend([I::I64Const(i64::from(slot)), I::LocalSet(t)]);
+        self.store(block, 0, t);
+        let keys: Vec<u32> = self.l.env.values().copied().collect();
+        let ev = if snapshot && !keys.is_empty() {
+            let ev = self.alloc(8 * keys.len() as u64);
+            for (n, g) in keys.iter().enumerate() {
+                self.code.extend([I::GlobalGet(*g), I::LocalSet(t)]);
+                self.store(ev, 8 * n as u64, t);
+            }
+            ev
+        } else {
+            let z = self.local();
+            self.code.extend([I::I64Const(0), I::LocalSet(z)]);
+            z
+        };
+        self.store(block, C_EVIDENCE, ev);
+        let caps = match captures {
+            Some(values) if !values.is_empty() => {
+                let caps = self.alloc(8 * values.len() as u64);
+                for (i, v) in values.iter().enumerate() {
+                    self.store(caps, 8 * i as u64, *v);
+                }
+                caps
+            }
+            _ => {
+                let z = self.local();
+                self.code.extend([I::I64Const(0), I::LocalSet(z)]);
+                z
+            }
+        };
+        self.store(block, C_CAPTURES, caps);
+        block
+    }
+
+    /// Bind a callable passed where `ty` (a function type with effects) is
+    /// expected to the evidence at this call site, for every key the
+    /// callable did not capture itself (the evaluator's
+    /// `bind_callable_evidence` with ambient evidence).
+    fn bind_evidence(&mut self, c: u32, ty: &Type) -> Result<u32, WasmError> {
+        let Type::Function { effects, .. } = crate::numeric::default_type(ty) else {
+            return Ok(c);
+        };
+        let keys: Vec<(String, u32)> = self.l.env.iter().map(|(k, g)| (k.clone(), *g)).collect();
+        let index = |k: &str| keys.iter().position(|(n, _)| n == k);
+        // slot -> (exact key global, fallback global)
+        let mut sources: BTreeMap<usize, (Option<u32>, Option<u32>)> = BTreeMap::new();
+        if effects.tail.is_some() {
+            for (n, (_, g)) in keys.iter().enumerate() {
+                sources.insert(n, (Some(*g), None));
+            }
+        }
+        for e in &effects.instances {
+            if e.args.iter().any(|t| type_mentions(t, &self.generics)) {
+                continue;
+            }
+            let label = e.label.as_ref().filter(|l| !l.starts_with("$latent:"));
+            let exact = crate::numeric::instance_key(&e.name, &e.args);
+            let source = match label {
+                Some(l) => (self.l.env.get(&format!("$label:{l}")).copied(), None),
+                None => (
+                    exact.as_ref().and_then(|k| self.l.env.get(k).copied()),
+                    self.l.env.get(&format!("$effect:{}", e.name)).copied(),
+                ),
+            };
+            if source == (None, None) {
+                continue;
+            }
+            let mut targets = vec![format!("$effect:{}", e.name)];
+            targets.extend(exact);
+            if let Some(l) = label {
+                targets.push(format!("$label:{l}"));
+            }
+            for t in targets {
+                if let Some(n) = index(&t) {
+                    sources.insert(n, source);
+                }
+            }
+        }
+        if sources.is_empty() {
+            return Ok(c);
+        }
+        let (old, ev, t) = (
+            self.local(),
+            self.alloc(8 * keys.len() as u64),
+            self.local(),
+        );
+        self.load(c, C_EVIDENCE);
+        self.push(I::LocalSet(old));
+        for n in 0..keys.len() {
+            self.code.extend([
+                I::LocalGet(old),
+                I::I64Eqz,
+                I::If(BlockType::Result(ValType::I64)),
+                I::I64Const(0),
+                I::Else,
+                I::LocalGet(old),
+                I::I32WrapI64,
+                I::I64Load(mem(8 * n as u64)),
+                I::End,
+                I::LocalSet(t),
+            ]);
+            if let Some((first, fallback)) = sources.get(&n) {
+                self.code
+                    .extend([I::LocalGet(t), I::I64Eqz, I::If(BlockType::Empty)]);
+                match (first, fallback) {
+                    (Some(a), Some(b)) => self.code.extend([
+                        I::GlobalGet(*a),
+                        I::LocalTee(t),
+                        I::I64Eqz,
+                        I::If(BlockType::Empty),
+                        I::GlobalGet(*b),
+                        I::LocalSet(t),
+                        I::End,
+                    ]),
+                    (Some(g), None) | (None, Some(g)) => {
+                        self.code.extend([I::GlobalGet(*g), I::LocalSet(t)])
+                    }
+                    (None, None) => {}
+                }
+                self.push(I::End);
+            }
+            self.store(ev, 8 * n as u64, t);
+        }
+        let block = self.alloc(24);
+        for off in [0, C_CAPTURES] {
+            self.load(c, off);
+            self.push(I::LocalSet(t));
+            self.store(block, off, t);
+        }
+        self.store(block, C_EVIDENCE, ev);
+        Ok(block)
+    }
+
+    fn params_of(&self, callee: &str) -> Vec<(Pass, Type)> {
+        self.l
+            .world
+            .functions
+            .get(callee)
+            .map(|f| f.params.iter().map(|p| (p.pass, p.ty.clone())).collect())
+            .unwrap_or_default()
+    }
+
     /// Arguments for a call: values, or cells for `inout` places.
     fn call_args(
         &mut self,
         args: &[Argument],
-        params: &[Param],
+        params: &[(Pass, Type)],
     ) -> Result<(Vec<u32>, Writebacks), WasmError> {
         let mut out = vec![];
         let mut writeback = vec![];
         for (i, a) in args.iter().enumerate() {
-            let inout =
-                a.pass == Pass::Inout || params.get(i).is_some_and(|p| p.pass == Pass::Inout);
+            let inout = a.pass == Pass::Inout || params.get(i).is_some_and(|p| p.0 == Pass::Inout);
             if !inout {
-                out.push(self.value(a.value)?);
+                let v = self.value(a.value)?;
+                out.push(match params.get(i) {
+                    Some((_, ty)) => self.bind_evidence(v, ty)?,
+                    None => v,
+                });
                 continue;
             }
             let place = a.place.clone().ok_or_else(|| {
@@ -1712,13 +1990,7 @@ impl<'l, 'a> Emit<'l, 'a> {
         callee: &str,
         args: &[Argument],
     ) -> Result<(), WasmError> {
-        let params = self
-            .l
-            .world
-            .functions
-            .get(callee)
-            .map(|f| f.params.clone())
-            .unwrap_or_default();
+        let params = self.params_of(callee);
         let (vals, cells) = self.call_args(args, &params)?;
         for v in &vals {
             self.get(*v);

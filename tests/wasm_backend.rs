@@ -515,18 +515,39 @@ fn handler_modes_are_reported() {
     assert!(!art.stack_switching);
 }
 
+// ---- closures and function values ---------------------------------------------
+
+#[test]
+fn closures_and_function_values() {
+    for source in [
+        "fn main() -> i64 { let x = 40; let f = |y: i64| wrapping_add(x, y); f(2) }",
+        "fn make(sink x: i64) -> fn(i64) -> i64 { |y| wrapping_add(x, y) } fn main() -> i64 { let f = make(40); f(2) }",
+        "fn apply(sink f: fn(i64) -> i64, x: i64) -> i64 { f(x) } fn main() -> i64 { apply(|x| wrapping_add(x, 2), 40) }",
+        "fn main() -> i64 { let f = || 40; let g = || wrapping_add(f(), 2); g() }",
+        "fn main() -> i64 { let x = 0; let f = || { x += 1; x }; wrapping_add(f(), f()) }",
+        "fn main() -> i64 { let x = 40; let f = if true { |y: i64| wrapping_add(x, y) } else { |y: i64| wrapping_sub(x, y) }; f(2) }",
+        "fn main() -> i64 { let inc = |inout x: i64| { x = wrapping_add(x, 1); x }; let x = 40; let y = inc(inout x); wrapping_sub(wrapping_add(x, y), 40) }",
+        "fn answer() -> i64 { 42 } fn main() -> i64 { let f = answer; f() }",
+        "copy struct Callback { f: fn@copy() -> i64 } fn invoke(in c: Callback) -> i64 { c.f() } fn main() -> i64 { let x = 42; let c = Callback { f: || x }; invoke(in c) }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { let f = || eff [Ask] Ask::ask(); f() } with { return x => x, ask(k) => k(42), } }",
+        "linear effect Ask { fn ask() -> i64; } fn apply[r: eff](sink f: fn() -> i64 eff [r]) -> i64 eff [r] { f() } fn main() -> i64 { handle Ask in { apply(|| eff [Ask] Ask::ask()) } with { return x => x, ask(k) => k(42), } }",
+        "linear effect Ask { fn ask() -> i64; } fn make() -> fn() -> i64 eff [Ask] { || eff [Ask] Ask::ask() } fn apply(sink f: fn() -> i64 eff [Ask]) -> i64 eff [Ask] { handle inner: Ask in { f() } with { return x => x, ask(k) => k(2), } } fn main() -> i64 { let f = make(); handle outer: Ask in { apply(sink f) } with { return x => x, ask(k) => k(1), } }",
+        "fn make(sink x: i64) -> fn() -> i64 { || x } fn main() -> i64 { let f = make(20); let g = make(22); wrapping_add(f(), g()) }",
+        "linear struct Ticket { value: i64 } fn main() -> i64 { let ticket = Ticket { value: 42 }; let use = || { let Ticket { value } = ticket; value }; use() }",
+        "fn main() -> i64 { let f = || 40; let callbacks = (f, f); let g = || { let index = 1; wrapping_add(callbacks[index](), 2) }; g() }",
+        "fn main() -> i64 { let factory = || { let x = 42; || x }; let f = factory(); f() }",
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle outer: Ask in { let f = || eff [Ask] Ask::ask(); handle inner: Ask in { wrapping_add(f(), inner.ask()) } with { return x => x, ask(k) => k(2), } } with { return x => x, ask(k) => k(40), } }",
+        "linear effect Ask { fn ask() -> i64; } fn call(sink f: fn() -> i64 eff [Ask]) -> i64 eff [Ask] { f() } fn answer() -> i64 eff [Ask] { Ask::ask() } fn main() -> i64 { handle Ask in { let f = answer; call(sink f) } with { return x => x, ask(k) => k(42), } }",
+        "fn apply(sink f: fn(i64) -> i64 eff [Fail[ArithOverflow]], x: i64) -> i64 eff [Fail[ArithOverflow]] { wrapping_add(f(x), 1) } fn main() -> i64 { handle Fail[ArithOverflow] in { apply(|x| x * 4611686018427387904, 2) } with { return x => x, raise(e, k) => -1, } }",
+    ] {
+        differential(source);
+    }
+}
+
 // ---- rejections --------------------------------------------------------------
 
 #[test]
 fn unsupported_constructs_are_typed_errors() {
-    unsupported(
-        "fn main() -> i64 { let x = 40; let f = |y: i64| wrapping_add(x, y); f(2) }",
-        Unsupported::Closure,
-    );
-    unsupported(
-        "fn answer() -> i64 { 42 } fn main() -> i64 { let f = answer; f() }",
-        Unsupported::FunctionValue,
-    );
     unsupported(
         "fn main() -> f64 { 7.5 % 2.0 }",
         Unsupported::FloatRemainder,
