@@ -1,0 +1,22 @@
+[package]
+name = "vesper-aura-gtk"
+version = "0.1.0"
+edition = "2024"
+description = "GTK 4 retained backend for the Aura transactional view runtime"
+publish = false
+
+[features]
+default = []
+# Links the system GTK 4 (>= 4.0) through gtk4-rs. Off by default so that
+# workspace builds on hosts without GTK (macOS, Windows, hermetic Bazel) keep
+# working; .github/workflows/aura-gtk.yml enables it under Xvfb.
+gtk = ["dep:gtk4"]
+
+[dependencies]
+vesper-aura = { path = "../vesper-aura" }
+gtk4 = { version = "=0.11.5", optional = true }
+
+[[test]]
+name = "gtk_tree"
+harness = false
+required-features = ["gtk"]

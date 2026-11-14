@@ -404,7 +404,14 @@ fn parse_resource_limits_have_real_boundaries() {
         },
         ErrorKind::AllocationLimit,
     );
-    let index_bytes = doc.index_capacity_bytes();
+    // `max_index_bytes` pays for the tape and then 4 bytes per stage 1
+    // entry (structural or escape position), in every engine.
+    let mut stage1 = vesper_serde::simd::StructuralIndex::new();
+    stage1
+        .build(bytes, vesper_serde::simd::Isa::Scalar, Default::default())
+        .unwrap();
+    let entries = stage1.structurals().len() + stage1.escapes().len();
+    let index_bytes = doc.index_capacity_bytes() + 4 * entries;
     let limited = IndexedJson::parse(
         bytes,
         Limits {
@@ -414,6 +421,14 @@ fn parse_resource_limits_have_real_boundaries() {
     )
     .unwrap();
     assert!(limited.index_capacity_bytes() <= index_bytes);
+    kind_error(
+        bytes,
+        Limits {
+            max_index_bytes: index_bytes - 1,
+            ..base
+        },
+        ErrorKind::AllocationLimit,
+    );
     kind_error(
         b"0",
         Limits {

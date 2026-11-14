@@ -14,23 +14,30 @@
 //!   traces and over Cranelift loads/stores.
 //! * [`pac`]: generation of host-side typestate accessor modules (Rust text)
 //!   from the register model.
-//! * [`dtb`]: flattened-devicetree input for memory banks, reservations,
-//!   interrupt controllers (RISC-V hart intc, PLIC, GIC) and DMA coherence,
-//!   feeding the frame, IrqGuard and DMA models.
+//! * [`dtb`]: flattened-devicetree input (versions 16 and 17) for memory
+//!   banks, fixed and dynamic reservations, bus `ranges` translation with up
+//!   to 4 address cells, `interrupt-map` nexus resolution, interrupt
+//!   controllers (RISC-V hart intc, PLIC, CLINT/ACLINT, GIC), ISA extensions
+//!   and DMA coherence, feeding the frame, IrqGuard and DMA models.
+//! * [`intc`]: PLIC and CLINT/ACLINT register-level emulation configured
+//!   from devicetree numbers, delivering interrupts to the IrqGuard `Cpu`
+//!   model of each hart.
 //! * [`mmio`]: access-typed registers and typestate peripheral singletons
 //!   bound at run time from the model, on a software register file.
 //! * [`irq`], [`dma`], [`frames`]: linear `IrqGuard`, `DmaTransfer` and
 //!   `PhysFrame4K`/`PendingTlbShootdown` owners with a leak [`ledger`] and a
 //!   frame-conservation auditor, plus the per-architecture DMA barrier and
 //!   TLB-invalidation instruction sequences, including Zicbom `cbo.*`
-//!   maintenance for non-coherent RISC-V DMA and a software cache model.
+//!   maintenance for non-coherent RISC-V DMA (gated by `menvcfg`/`senvcfg`
+//!   `CBIE`/`CBCFE`) and a software cache model.
 //!
 //! Scope and evidence: there is no freestanding target, no real hardware,
-//! interrupt controller, page table or DMA engine here, and no `@svd_pac`
-//! macro; every hardware object is a software model and validates the
-//! modelled protocol only. The linear owners are host-library discipline
-//! (non-`Clone`, `#[must_use]`, consuming exits, counted leaks); they are not
-//! an implementation of the Vesper source typing rules for `linear` values.
+//! interrupt controller (the PLIC/CLINT are software models), page table or
+//! DMA engine here, and no `@svd_pac` macro; every hardware object is a
+//! software model and validates the modelled protocol only. The linear
+//! owners are host-library discipline (non-`Clone`, `#[must_use]`, consuming
+//! exits, counted leaks); they are not an implementation of the Vesper source
+//! typing rules for `linear` values.
 
 #![forbid(unsafe_code)]
 
@@ -39,6 +46,7 @@ pub mod dma;
 pub mod dtb;
 pub mod frames;
 pub mod hazard;
+pub mod intc;
 pub mod irq;
 pub mod ledger;
 pub mod mmio;
