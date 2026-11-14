@@ -20,8 +20,15 @@
 //! any `___flavor` suffix removed; members match by name, looking through
 //! anonymous structs and unions; member types must be of compatible kinds;
 //! candidates that do not contain the field are dropped; candidates that
-//! disagree are an error. Bitfields, `TYPE_ID_*` and `TYPE_MATCHES` are not
-//! supported and are typed errors.
+//! disagree are an error. Bitfield members get libbpf's load offset, load
+//! size and the two shift amounts that extract them from a 64-bit load
+//! (`FIELD_LSHIFT_U64`, `FIELD_RSHIFT_U64`); `TYPE_ID_LOCAL` and
+//! `TYPE_ID_TARGET` give the type's id in the program's and the target's
+//! BTF; `TYPE_MATCHES` is libbpf's recursive `bpf_core_types_match`.
+//!
+//! Candidates are searched in vmlinux first and, only when vmlinux has
+//! none, in the kernel modules' split BTF ([`apply_with_modules`],
+//! `/sys/kernel/btf/<module>`), as libbpf does.
 
 use crate::btf::{Btf, BtfType};
 use crate::insn::{RawInsn, class};
@@ -58,8 +65,20 @@ pub enum LocalType {
 pub struct LocalMember {
     pub name: String,
     pub ty: LocalType,
-    /// Byte offset in the local layout.
+    /// Byte offset in the local layout (for a bitfield, the byte holding
+    /// its first bit).
     pub offset: u32,
+    /// Set for a bitfield member.
+    pub bitfield: Option<Bitfield>,
+}
+
+/// A bitfield member's position in its struct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Bitfield {
+    /// Bit offset from the start of the struct.
+    pub bit_offset: u32,
+    /// Width in bits (1..=64).
+    pub bits: u32,
 }
 
 impl LocalType {
@@ -83,6 +102,30 @@ impl LocalType {
                     name: n.to_owned(),
                     ty,
                     offset,
+                    bitfield: None,
+                })
+                .collect(),
+        }
+    }
+
+    /// A struct with bitfield members: (name, type, bit offset, bit width;
+    /// width 0 = an ordinary member at that bit offset).
+    pub fn structure_bits(
+        name: &str,
+        size: u32,
+        members: Vec<(&str, LocalType, u32, u32)>,
+    ) -> LocalType {
+        LocalType::Struct {
+            name: name.to_owned(),
+            union: false,
+            size,
+            members: members
+                .into_iter()
+                .map(|(n, ty, bit_offset, bits)| LocalMember {
+                    name: n.to_owned(),
+                    ty,
+                    offset: bit_offset / 8,
+                    bitfield: (bits != 0).then_some(Bitfield { bit_offset, bits }),
                 })
                 .collect(),
         }
@@ -124,10 +167,18 @@ pub enum CoreKind {
     FieldByteSize,
     FieldExists,
     FieldSigned,
+    /// Left shift that puts the field's top bit at bit 63 of a 64-bit
+    /// value loaded with the field's load size (little endian).
+    FieldLshiftU64,
+    /// Right shift that then moves the field to bit 0.
+    FieldRshiftU64,
+    TypeIdLocal,
+    TypeIdTarget,
     TypeExists,
     TypeSize,
     EnumvalExists,
     EnumvalValue,
+    TypeMatches,
 }
 
 impl CoreKind {
@@ -137,10 +188,15 @@ impl CoreKind {
             CoreKind::FieldByteSize => 1,
             CoreKind::FieldExists => 2,
             CoreKind::FieldSigned => 3,
+            CoreKind::FieldLshiftU64 => 4,
+            CoreKind::FieldRshiftU64 => 5,
+            CoreKind::TypeIdLocal => 6,
+            CoreKind::TypeIdTarget => 7,
             CoreKind::TypeExists => 8,
             CoreKind::TypeSize => 9,
             CoreKind::EnumvalExists => 10,
             CoreKind::EnumvalValue => 11,
+            CoreKind::TypeMatches => 12,
         }
     }
 
@@ -150,10 +206,15 @@ impl CoreKind {
             1 => CoreKind::FieldByteSize,
             2 => CoreKind::FieldExists,
             3 => CoreKind::FieldSigned,
+            4 => CoreKind::FieldLshiftU64,
+            5 => CoreKind::FieldRshiftU64,
+            6 => CoreKind::TypeIdLocal,
+            7 => CoreKind::TypeIdTarget,
             8 => CoreKind::TypeExists,
             9 => CoreKind::TypeSize,
             10 => CoreKind::EnumvalExists,
             11 => CoreKind::EnumvalValue,
+            12 => CoreKind::TypeMatches,
             _ => return None,
         })
     }
@@ -165,6 +226,34 @@ impl CoreKind {
                 | CoreKind::FieldByteSize
                 | CoreKind::FieldExists
                 | CoreKind::FieldSigned
+                | CoreKind::FieldLshiftU64
+                | CoreKind::FieldRshiftU64
+        )
+    }
+
+    fn is_type(self) -> bool {
+        matches!(
+            self,
+            CoreKind::TypeIdLocal
+                | CoreKind::TypeIdTarget
+                | CoreKind::TypeExists
+                | CoreKind::TypeSize
+                | CoreKind::TypeMatches
+        )
+    }
+
+    /// The kinds whose value is the program's own type id.
+    pub fn needs_local_id(self) -> bool {
+        matches!(self, CoreKind::TypeIdLocal | CoreKind::TypeIdTarget)
+    }
+
+    fn is_exists(self) -> bool {
+        matches!(
+            self,
+            CoreKind::FieldExists
+                | CoreKind::TypeExists
+                | CoreKind::EnumvalExists
+                | CoreKind::TypeMatches
         )
     }
 
@@ -183,7 +272,8 @@ pub enum CoreError {
     NoMatch(String),
     /// Candidates give different values.
     Ambiguous(String),
-    /// Bitfield members are not supported.
+    /// A bitfield that no load of at most 8 bytes covers, or a shift
+    /// relocation of a member wider than 8 bytes.
     Bitfield(String),
     /// The instruction cannot carry the value.
     BadInstruction { slot: usize, detail: String },
@@ -202,7 +292,7 @@ impl fmt::Display for CoreError {
             CoreError::BadAccess(m) => write!(f, "CO-RE: bad access: {m}"),
             CoreError::NoMatch(m) => write!(f, "CO-RE: no target type matches {m}"),
             CoreError::Ambiguous(m) => write!(f, "CO-RE: candidates disagree for {m}"),
-            CoreError::Bitfield(m) => write!(f, "CO-RE: bitfield {m} is not supported"),
+            CoreError::Bitfield(m) => write!(f, "CO-RE: bitfield {m} cannot be loaded"),
             CoreError::BadInstruction { slot, detail } => {
                 write!(f, "CO-RE: instruction {slot}: {detail}")
             }
@@ -281,7 +371,7 @@ impl CoreSpec {
     }
 
     pub fn of_type(kind: CoreKind, root: LocalType) -> Result<CoreSpec, CoreError> {
-        if !matches!(kind, CoreKind::TypeExists | CoreKind::TypeSize) {
+        if !kind.is_type() {
             return Err(CoreError::BadAccess(format!("{kind:?} is not a type kind")));
         }
         Ok(CoreSpec {
@@ -331,13 +421,15 @@ impl CoreSpec {
         )
     }
 
-    /// The local field reached by the access path: (byte offset, type).
-    fn local_field(&self) -> Result<(u64, &LocalType), CoreError> {
+    /// The local field reached by the access path: (bit offset, bitfield
+    /// width or 0, type).
+    fn local_field(&self) -> Result<(u64, u32, &LocalType), CoreError> {
         let (&first, rest) = self
             .access
             .split_first()
             .ok_or_else(|| CoreError::BadAccess("empty access".into()))?;
-        let mut off = first as u64 * self.root.size();
+        let mut bits = first as u64 * self.root.size() * 8;
+        let mut width = 0;
         let mut cur = &self.root;
         for &i in rest {
             match cur {
@@ -345,31 +437,53 @@ impl CoreSpec {
                     let m = members
                         .get(i as usize)
                         .ok_or_else(|| CoreError::BadAccess(format!("member {i}")))?;
-                    off += m.offset as u64;
+                    match m.bitfield {
+                        Some(b) => {
+                            bits += b.bit_offset as u64;
+                            width = b.bits;
+                        }
+                        None => bits += m.offset as u64 * 8,
+                    }
                     cur = &m.ty;
                 }
                 LocalType::Array { elem, len } if i < *len => {
-                    off += i as u64 * elem.size();
+                    bits += i as u64 * elem.size() * 8;
                     cur = elem;
                 }
                 _ => return Err(CoreError::BadAccess(self.access_string())),
             }
         }
-        Ok((off, cur))
+        Ok((bits, width, cur))
     }
 
     /// The value the instruction holds before relocation (computed from
-    /// the local type, as clang computes it).
+    /// the local type, as clang computes it). The `TYPE_ID_*` kinds need
+    /// the root's id in the program's BTF ([`Self::local_value_with`]).
     pub fn local_value(&self) -> Result<u64, CoreError> {
+        self.local_value_with(None)
+    }
+
+    /// [`Self::local_value`] with the root's id in the program's BTF.
+    pub fn local_value_with(&self, local_id: Option<u32>) -> Result<u64, CoreError> {
+        if self.kind.needs_local_id() {
+            return local_id.map(u64::from).ok_or_else(|| {
+                CoreError::BadAccess(format!(
+                    "{:?} needs the local type id of the program BTF",
+                    self.kind
+                ))
+            });
+        }
         Ok(match self.kind {
-            CoreKind::FieldByteOffset => self.local_field()?.0,
-            CoreKind::FieldByteSize => self.local_field()?.1.size(),
-            CoreKind::FieldExists | CoreKind::TypeExists | CoreKind::EnumvalExists => 1,
-            CoreKind::FieldSigned => match self.local_field()?.1 {
-                LocalType::Int { signed, .. } => *signed as u64,
-                LocalType::Enum { values, .. } => values.iter().any(|v| v.1 < 0) as u64,
-                _ => 0,
-            },
+            k if k.is_field() => {
+                let (bits, width, ty) = self.local_field()?;
+                let signed = match ty {
+                    LocalType::Int { signed, .. } => *signed,
+                    LocalType::Enum { values, .. } => values.iter().any(|v| v.1 < 0),
+                    _ => false,
+                };
+                field_value(k, bits, width, ty.size(), signed, &self.describe())?
+            }
+            CoreKind::TypeExists | CoreKind::EnumvalExists | CoreKind::TypeMatches => 1,
             CoreKind::TypeSize => self.root.size(),
             CoreKind::EnumvalValue => {
                 let LocalType::Enum { values, .. } = &self.root else {
@@ -380,21 +494,31 @@ impl CoreSpec {
                     .ok_or_else(|| CoreError::BadAccess("enumerator index".into()))?
                     .1 as u64
             }
+            _ => unreachable!("every kind is handled above"),
         })
     }
 
-    /// The value for the target kernel described by `target`.
-    pub fn target_value(&self, target: &Btf) -> Result<u64, CoreError> {
-        let essential = essential_name(self.root.name());
-        let mut results: Vec<u64> = Vec::new();
-        let mut any_candidate = false;
-        for &id in target.by_name(essential) {
-            if !kind_compatible(&self.root, target, id) {
-                continue;
-            }
-            any_candidate = true;
+    /// Candidate ids for this relocation's root in `target`: same
+    /// essential name, compatible kind. With `from`, only ids at or above
+    /// it (the module's own types in a split BTF).
+    pub fn candidates(&self, target: &Btf, from: u32) -> Vec<u32> {
+        target
+            .by_name(essential_name(self.root.name()))
+            .iter()
+            .copied()
+            .filter(|&id| id >= from && kind_compatible(&self.root, target, id))
+            .collect()
+    }
+
+    /// The value for the target kernel described by `target`, matching
+    /// only `cands`; `None` when no candidate gives a value.
+    fn value_over(&self, target: &Btf, cands: &[u32]) -> Result<Vec<u64>, CoreError> {
+        let mut results = Vec::new();
+        for &id in cands {
             let r = match self.kind {
                 CoreKind::TypeExists => Some(1),
+                CoreKind::TypeIdTarget => Some(id as u64),
+                CoreKind::TypeMatches => Some(types_match(&self.root, target, id, false, 0) as u64),
                 CoreKind::TypeSize => target.size_of(id),
                 CoreKind::EnumvalExists | CoreKind::EnumvalValue => {
                     let LocalType::Enum { values, .. } = &self.root else {
@@ -419,19 +543,50 @@ impl CoreSpec {
                 results.push(v);
             }
         }
+        Ok(results)
+    }
+
+    fn combine(&self, mut results: Vec<u64>) -> Result<u64, CoreError> {
+        results.sort_unstable();
         results.dedup();
-        let exists_kind = matches!(
-            self.kind,
-            CoreKind::FieldExists | CoreKind::TypeExists | CoreKind::EnumvalExists
-        );
         match results.as_slice() {
-            [] if exists_kind => Ok(0),
-            [] if !any_candidate => Err(CoreError::NoMatch(self.describe())),
+            [] if self.kind.is_exists() => Ok(0),
             [] => Err(CoreError::NoMatch(self.describe())),
             [v] => Ok(*v),
-            _ if exists_kind => Ok(1),
+            // TYPE_MATCHES: some candidate matches
+            _ if self.kind.is_exists() => Ok(1),
             _ => Err(CoreError::Ambiguous(self.describe())),
         }
+    }
+
+    /// The value for the target kernel described by `target`.
+    pub fn target_value(&self, target: &Btf) -> Result<u64, CoreError> {
+        self.target_value_with(target, &[], None)
+    }
+
+    /// The value for vmlinux `vmlinux`, searching `modules` (split BTF on
+    /// top of `vmlinux`, see [`Btf::parse_split`]) only when vmlinux has no
+    /// candidate. `local_id` is needed by `TYPE_ID_LOCAL`.
+    pub fn target_value_with(
+        &self,
+        vmlinux: &Btf,
+        modules: &[&Btf],
+        local_id: Option<u32>,
+    ) -> Result<u64, CoreError> {
+        if self.kind == CoreKind::TypeIdLocal {
+            return self.local_value_with(local_id);
+        }
+        let cands = self.candidates(vmlinux, 0);
+        if !cands.is_empty() || modules.is_empty() {
+            let r = self.value_over(vmlinux, &cands)?;
+            return self.combine(r);
+        }
+        let mut all = Vec::new();
+        for m in modules {
+            let c = self.candidates(m, m.base_len());
+            all.extend(self.value_over(m, &c)?);
+        }
+        self.combine(all)
     }
 
     /// Walk the access path in target type `cand`; `None` when a member is
@@ -445,6 +600,7 @@ impl CoreSpec {
             return Ok(None);
         };
         let mut bits: u64 = first as u64 * root_size * 8;
+        let mut width = 0u32;
         let mut local = &self.root;
         let mut cur = cand;
         for &i in rest {
@@ -456,13 +612,11 @@ impl CoreSpec {
                     let Some((ty, off, bitfield)) = find_member(target, cur, &m.name, 0) else {
                         return Ok(None);
                     };
-                    if bitfield != 0 {
-                        return Err(CoreError::Bitfield(m.name.clone()));
-                    }
                     if !kind_compatible(&m.ty, target, ty) {
                         return Ok(None);
                     }
                     bits += off as u64;
+                    width = bitfield;
                     local = &m.ty;
                     cur = ty;
                 }
@@ -479,31 +633,155 @@ impl CoreSpec {
                         return Ok(None);
                     };
                     bits += i as u64 * es * 8;
+                    width = 0;
                     local = elem;
                     cur = *te;
                 }
                 _ => return Err(CoreError::BadAccess(self.access_string())),
             }
         }
+        let Some(size) = target.size_of(cur) else {
+            return Ok(None);
+        };
+        let signed = match target.get(target.skip_mods(cur)) {
+            Some(BtfType::Int { encoding, .. }) => encoding & crate::btf::INT_SIGNED != 0,
+            Some(BtfType::Enum { signed, .. }) => *signed,
+            _ => false,
+        };
+        field_value(self.kind, bits, width, size, signed, &self.describe()).map(Some)
+    }
+}
+
+/// libbpf's `bpf_core_calc_field_relo` for a field at bit offset `bits`
+/// of width `width` (0 = not a bitfield) whose type is `size` bytes: a
+/// bitfield is loaded with the smallest naturally aligned power-of-two
+/// load (from its type's size up to 8 bytes) that covers it.
+fn field_value(
+    kind: CoreKind,
+    bits: u64,
+    width: u32,
+    size: u64,
+    signed: bool,
+    what: &str,
+) -> Result<u64, CoreError> {
+    let (byte_off, byte_sz, bit_sz) = if width == 0 {
         if !bits.is_multiple_of(8) {
-            return Err(CoreError::Bitfield(self.access_string()));
+            return Err(CoreError::Bitfield(what.to_owned()));
         }
-        Ok(Some(match self.kind {
-            CoreKind::FieldByteOffset => bits / 8,
-            CoreKind::FieldByteSize => match target.size_of(cur) {
-                Some(s) => s,
-                None => return Ok(None),
+        (bits / 8, size, size * 8)
+    } else {
+        let mut sz = size.max(1);
+        let mut off = bits / 8 / sz * sz;
+        while bits + width as u64 - off * 8 > sz * 8 {
+            if sz >= 8 {
+                return Err(CoreError::Bitfield(what.to_owned()));
+            }
+            sz *= 2;
+            off = bits / 8 / sz * sz;
+        }
+        (off, sz, width as u64)
+    };
+    Ok(match kind {
+        CoreKind::FieldByteOffset => byte_off,
+        CoreKind::FieldByteSize => byte_sz,
+        CoreKind::FieldExists => 1,
+        CoreKind::FieldSigned => signed as u64,
+        CoreKind::FieldLshiftU64 | CoreKind::FieldRshiftU64 => {
+            if byte_sz > 8 {
+                return Err(CoreError::Bitfield(what.to_owned()));
+            }
+            if kind == CoreKind::FieldLshiftU64 {
+                64 - (bits + bit_sz - byte_off * 8)
+            } else {
+                64 - bit_sz
+            }
+        }
+        _ => unreachable!("field kinds only"),
+    })
+}
+
+/// libbpf's `bpf_core_names_match`: essential names equal; an anonymous
+/// target matches only an anonymous local.
+fn names_match(local: &str, target: &str) -> bool {
+    if target.is_empty() {
+        return local.is_empty();
+    }
+    essential_name(local) == essential_name(target)
+}
+
+/// libbpf's `__bpf_core_types_match` (`TYPE_MATCHES`): the local type,
+/// with only the members it names, has the same shape in the target.
+/// Behind a pointer, aggregates match by name and kind only (or a
+/// forward declaration of the same kind).
+fn types_match(local: &LocalType, target: &Btf, id: u32, behind_ptr: bool, depth: u32) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    let tid = target.skip_mods(id);
+    let Some(t) = target.get(tid) else {
+        return false;
+    };
+    let tname = target.name(t.name_off());
+    if !names_match(local.name(), tname) {
+        return false;
+    }
+    match (local, t) {
+        (LocalType::Void, BtfType::Void) => true,
+        (
+            LocalType::Int { size, signed, .. },
+            BtfType::Int {
+                size: ts, encoding, ..
             },
-            CoreKind::FieldExists => 1,
-            CoreKind::FieldSigned => match target.get(target.skip_mods(cur)) {
-                Some(BtfType::Int { encoding, .. }) => {
-                    (encoding & crate::btf::INT_SIGNED != 0) as u64
-                }
-                Some(BtfType::Enum { signed, .. }) => *signed as u64,
-                _ => 0,
+        ) => size == ts && *signed == (encoding & crate::btf::INT_SIGNED != 0),
+        (
+            LocalType::Enum { size, values, .. },
+            BtfType::Enum {
+                size: ts,
+                values: tv,
+                ..
             },
-            _ => unreachable!("field kinds only"),
-        }))
+        ) => {
+            size == ts
+                && values.len() <= tv.len()
+                && values
+                    .iter()
+                    .all(|(n, _)| tv.iter().any(|(tn, _)| names_match(n, target.name(*tn))))
+        }
+        (LocalType::Ptr(to), BtfType::Ptr { ty }) => types_match(to, target, *ty, true, depth + 1),
+        (
+            LocalType::Array { elem, len },
+            BtfType::Array {
+                elem: te, len: tl, ..
+            },
+        ) => len == tl && types_match(elem, target, *te, behind_ptr, depth + 1),
+        (LocalType::Struct { union, .. }, BtfType::Fwd { union: tu, .. }) => {
+            behind_ptr && union == tu
+        }
+        (
+            LocalType::Struct { union, members, .. },
+            BtfType::Struct {
+                union: tu,
+                members: tm,
+                ..
+            },
+        ) => {
+            if union != tu {
+                return false;
+            }
+            if behind_ptr {
+                return true;
+            }
+            members.len() <= tm.len()
+                // bitfield widths are not compared (libbpf and the
+                // kernel's bpf_core_composites_match do not either)
+                && members.iter().all(|m| {
+                    tm.iter().any(|t| {
+                        names_match(&m.name, target.name(t.name))
+                            && types_match(&m.ty, target, t.ty, false, depth + 1)
+                    })
+                })
+        }
+        _ => false,
     }
 }
 
@@ -612,10 +890,27 @@ pub fn patch(
 /// Apply every relocation of `prog` for `target`; the result carries the
 /// target values and no relocations.
 pub fn apply(prog: &crate::Program, target: &Btf) -> Result<crate::Program, CoreError> {
+    apply_with_modules(prog, target, &[])
+}
+
+/// [`apply`] with kernel modules: a relocation whose root type has no
+/// candidate in `vmlinux` is resolved against `modules` (split BTF on top
+/// of `vmlinux`, as `/sys/kernel/btf/<module>` is).
+pub fn apply_with_modules(
+    prog: &crate::Program,
+    vmlinux: &Btf,
+    modules: &[&Btf],
+) -> Result<crate::Program, CoreError> {
     let mut out = prog.clone();
-    for r in &prog.core_relos {
-        let local = r.spec.local_value()?;
-        let value = r.spec.target_value(target)?;
+    let ids = if prog.core_relos.iter().any(|r| r.spec.kind.needs_local_id()) {
+        crate::btf_ext::local_root_ids(prog).map_err(|e| CoreError::BadAccess(e.to_string()))?
+    } else {
+        Vec::new()
+    };
+    for (i, r) in prog.core_relos.iter().enumerate() {
+        let id = ids.get(i).copied();
+        let local = r.spec.local_value_with(id)?;
+        let value = r.spec.target_value_with(vmlinux, modules, id)?;
         patch(&mut out.insns, r.slot, local, value)?;
     }
     out.core_relos.clear();

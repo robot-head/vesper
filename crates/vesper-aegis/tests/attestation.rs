@@ -437,3 +437,73 @@ fn supply_chain_digests_use_loom_cas_identities() {
 fn vesper_loom_cas_digest(d: vesper_loom_cas::Domain, b: &[u8]) -> [u8; 32] {
     vesper_loom_cas::blob_id(d, b).digest.0
 }
+
+#[test]
+fn cca_padded_measurements_bind_like_unpadded_ones() {
+    // Realms may report each RIM/REM in the 64-byte encoding: the digest
+    // followed by zero padding. Such a token binds to the same runtime and
+    // normalizes to the same measurement as the unpadded encoding.
+    let iak_chain = chain(Curve::P384, Curve::P256, false);
+    let rak = Signer::generate(Curve::P384);
+    let rt = runtime();
+    let pad = |v: &[u8]| {
+        let mut out = v.to_vec();
+        out.resize(64, 0);
+        out
+    };
+    let sign = |realm: &cca::CcaRealmClaims| {
+        let platform = vesper_aegis::cca::CcaPlatformClaims {
+            challenge: cca::rak_hash(realm.public_key_hash_algo, &realm.public_key),
+            ..CcaToken::parse(&cca_token(&iak_chain.leaf, &rak, &CcaParams::default()))
+                .unwrap()
+                .platform_claims
+        };
+        cca::encode_collection(
+            &cca::build_sign1(Curve::P256, platform.to_cbor(), |d| iak_chain.leaf.sign(d)),
+            &cca::build_sign1(Curve::P384, realm.to_cbor(), |d| rak.sign(d)),
+        )
+    };
+    for hash in [RegisterHash::Sha256, RegisterHash::Sha384] {
+        let p = CcaParams {
+            realm_hash: hash,
+            ..Default::default()
+        };
+        let plain = support::cca_realm_claims(&rak, &p);
+        let mut padded = plain.clone();
+        padded.initial_measurement = pad(&plain.initial_measurement);
+        for r in padded.extensible_measurements.iter_mut() {
+            *r = pad(r);
+        }
+        let want = verify_cca_token(
+            &sign(&plain),
+            &iak_chain.der_chain(),
+            &iak_chain.root,
+            NOW_NS,
+            &rt,
+        )
+        .unwrap();
+        let got = verify_cca_token(
+            &sign(&padded),
+            &iak_chain.der_chain(),
+            &iak_chain.root,
+            NOW_NS,
+            &rt,
+        )
+        .unwrap();
+        assert_eq!(got, want, "{hash:?}");
+
+        // Nonzero padding is not the same register value.
+        let mut dirty = padded.clone();
+        dirty.extensible_measurements[2][63] = 1;
+        assert_eq!(
+            verify_cca_token(
+                &sign(&dirty),
+                &iak_chain.der_chain(),
+                &iak_chain.root,
+                NOW_NS,
+                &rt,
+            ),
+            Err(AttestError::RegisterReplayMismatch { register: "REM[2]" })
+        );
+    }
+}

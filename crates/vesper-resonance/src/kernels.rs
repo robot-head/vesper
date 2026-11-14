@@ -22,6 +22,7 @@ use crate::events::{
     EventError, ParamRamp, ParamTable, RtParamEvent, decode_events, process_with_events,
 };
 use crate::lease::{RtBufferLease, RtOutputPort};
+use crate::simd::{LaneOut, PanLanes, SimdUnavailable, SvfLanes, svf_tick};
 use crate::spsc::{MailboxReceiver, RtRetirementSink, SwapOutcome};
 
 /// Voices per tile.
@@ -80,16 +81,52 @@ pub struct VoicePatchBank {
 }
 
 /// The voice bank: tile state plus per-sample parameter ramps.
+///
+/// Rendering advances the ramps (scalar), then all 16 filter lanes with the
+/// selected [`SvfLanes`] path, then sums the panned voices in voice order.
+/// Every path is bit-identical to [`SvfBank::render_reference`].
 #[derive(Clone, Debug)]
 pub struct SvfBank {
     /// Filter state.
     pub tile: SvfVoiceTile,
     ramps: [[ParamRamp; 3]; LANES],
+    lanes: SvfLanes,
+    pan: PanLanes,
+    scratch: LaneOut,
 }
 
 impl SvfBank {
-    /// A silent bank with every voice at `patch`.
+    /// A silent bank with every voice at `patch`, using the widest SIMD
+    /// path this CPU supports.
     pub fn new(patch: VoicePatch) -> Self {
+        Self::build(patch, SvfLanes::best())
+    }
+
+    /// Like [`SvfBank::new`] with an explicit lane path; a path this CPU
+    /// cannot run is a typed error.
+    pub fn with_lanes(patch: VoicePatch, lanes: SvfLanes) -> Result<Self, SimdUnavailable> {
+        Ok(Self::build(patch, lanes.checked()?))
+    }
+
+    /// The lane path in use.
+    pub fn lanes(&self) -> SvfLanes {
+        self.lanes
+    }
+
+    /// Switch the lane path (state is kept).
+    pub fn set_lanes(&mut self, lanes: SvfLanes) -> Result<(), SimdUnavailable> {
+        self.lanes = lanes.checked()?;
+        Ok(())
+    }
+
+    fn build(patch: VoicePatch, lanes: SvfLanes) -> Self {
+        let mut pan = PanLanes {
+            left: [0.0; LANES],
+            right: [0.0; LANES],
+        };
+        for v in 0..LANES {
+            (pan.left[v], pan.right[v]) = Self::pan(v);
+        }
         let mut bank = SvfBank {
             tile: SvfVoiceTile {
                 ic1eq: [0.0; LANES],
@@ -100,6 +137,9 @@ impl SvfBank {
                 patch_id: [patch.patch_id; LANES],
             },
             ramps: [[ParamRamp::new(0.0); 3]; LANES],
+            lanes,
+            pan,
+            scratch: LaneOut::ZERO,
         };
         bank.apply_patch(&VoicePatchBank {
             voices: [patch; LANES],
@@ -126,8 +166,36 @@ impl SvfBank {
         (1.0 - p, p)
     }
 
-    /// Render frames `[start, end)` of `input` into `left`/`right`.
+    /// Render frames `[start, end)` of `input` into `left`/`right` with the
+    /// selected lane path.
     pub fn render(
+        &mut self,
+        input: &[f32],
+        left: &mut [f32],
+        right: &mut [f32],
+        start: usize,
+        end: usize,
+    ) {
+        for i in start..end {
+            for v in 0..LANES {
+                self.tile.gain[v] = self.ramps[v][param::GAIN as usize].next_value();
+                self.tile.g_coeff[v] = self.ramps[v][param::G as usize].next_value();
+                self.tile.k_damping[v] = self.ramps[v][param::K as usize].next_value();
+            }
+            svf_tick(
+                self.lanes,
+                &mut self.tile,
+                &self.pan,
+                input[i],
+                &mut self.scratch,
+            );
+            (left[i], right[i]) = self.scratch.sum();
+        }
+    }
+
+    /// The original fused scalar loop (wave five), kept as the reference
+    /// every lane path is tested against bit for bit.
+    pub fn render_reference(
         &mut self,
         input: &[f32],
         left: &mut [f32],
@@ -233,6 +301,11 @@ impl SynthEngine {
         &self.bank
     }
 
+    /// Switch the voice bank's SIMD lane path.
+    pub fn set_lanes(&mut self, lanes: SvfLanes) -> Result<(), SimdUnavailable> {
+        self.bank.set_lanes(lanes)
+    }
+
     /// The patch currently loaded.
     pub fn current_patch(&self) -> &VoicePatchBank {
         &self.current_patch
@@ -274,6 +347,53 @@ impl SynthEngine {
         match port.commit(lease) {
             Ok(()) => QuantumOutcome::Rendered { segments, swap },
             Err(lease) => silence(port, lease, EventError::NonFiniteTarget),
+        }
+    }
+}
+
+/// The voice bank as a node of a [`crate::pdc::CompiledGraph`]: input 0 (or
+/// silence when the node has no inputs) excites every voice, and the output
+/// is the left plus right mix. Scratch buffers are allocated in
+/// [`SvfNode::new`], so processing a block does not allocate.
+#[derive(Clone, Debug)]
+pub struct SvfNode {
+    bank: SvfBank,
+    silence: Vec<f32>,
+    left: Vec<f32>,
+    right: Vec<f32>,
+}
+
+impl SvfNode {
+    /// A node for blocks of `block` samples.
+    pub fn new(bank: SvfBank, block: usize) -> Self {
+        SvfNode {
+            bank,
+            silence: vec![0.0; block],
+            left: vec![0.0; block],
+            right: vec![0.0; block],
+        }
+    }
+
+    /// The voice bank.
+    pub fn bank(&self) -> &SvfBank {
+        &self.bank
+    }
+}
+
+impl crate::pdc::DspProcessor for SvfNode {
+    fn process(&mut self, inputs: &crate::pdc::Inputs<'_>, output: &mut [f32]) {
+        let n = output.len().min(self.left.len());
+        let input = if inputs.is_empty() {
+            &self.silence[..n]
+        } else {
+            let x = inputs.get(0);
+            &x[..n.min(x.len())]
+        };
+        let n = input.len();
+        self.bank
+            .render(input, &mut self.left, &mut self.right, 0, n);
+        for (i, y) in output[..n].iter_mut().enumerate() {
+            *y = self.left[i] + self.right[i];
         }
     }
 }
