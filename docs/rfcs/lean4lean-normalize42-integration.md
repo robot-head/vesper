@@ -1,4 +1,4 @@
-# Actual recursive level construction (#424–#430)
+# Actual recursive level construction (#424–#429; PR #432)
 
 All five ordinary matrices and all five actual regular-copy launcher matrices
 pass. The new packet proves exact denotation of the actual unchanged
@@ -91,6 +91,16 @@ under the unchanged standard-three policy; no axiom-free claim is made.
 Strict five-target Clippy passes in 26.90s. Formatting, Bazel BUILD-file
 synchronization, whitespace, exact source associations and independent
 read-only mathematical review pass.
+
+That Clippy result is for the frozen executed source above. Subsequent parent
+integration preserves all 52 owned proof/test/tool file bytes but imports two
+pre-existing Rust 1.99 Kinetic range-loop lints. Separate PR #434 fixes them
+without changing arithmetic order. With exactly its two-file patch applied,
+the integrated tree passes strict five-target Clippy in 19.02s. That temporary
+patch is removed from this proof branch; the compatibility change remains in
+its own PR. Receipts and both the genuine failure and successful composite
+logs are retained under the normalize42 post-parent/kinetic433 evidence names.
+Hosted integration of that dependency remains a separate gate.
 
 ## Confirmed runfiles portability
 
