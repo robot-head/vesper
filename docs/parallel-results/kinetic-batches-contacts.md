@@ -216,7 +216,11 @@ cargo fmt -p vesper-kinetic --check
 cargo +1.100.0 clippy -p vesper-kinetic --all-targets --locked -- -D warnings
 cargo test -p vesper-kinetic --locked            # debug, ~60 s
 cargo test --release -p vesper-kinetic --locked
-cargo test --workspace --locked
 cargo test --release -p vesper-kinetic --test bench_batches -- --ignored --nocapture
 VESPER_FASTMATH_SAMPLES=2000000 cargo test --release -p vesper-kinetic --test fastmath
 ```
+
+A local `cargo test --workspace --locked` could not finish because the
+session's disk allowance ran out while linking the root crate's tests. The
+only root user of this crate (`DetFloatPolicy`, unchanged fields) compiles,
+and the workspace-wide run is CI's `Test all targets`.
