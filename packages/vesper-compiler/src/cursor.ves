@@ -1,0 +1,474 @@
+// @vesper-lang/compiler, part 2 of 5: the digest, the lexer phase, the
+// parser cursor and literal checks. The package is one compilation unit,
+// concatenated in the order listed in ../Loom.toml.
+// Digest: a 64-bit multiply-add fold with a high-bit feedback, mirrored
+// exactly by the differential test.
+fn mix(h: i64, x: i64) -> i64 {
+    let m = wrapping_mul(wrapping_add(h, x), 0x100000001b3);
+    wrapping_add(m, m / 2147483648)
+}
+
+fn mix_token(h: i64, t: Tok) -> i64 eff [Fail[ArithOverflow]] {
+    mix(mix(mix(h, t.kind), t.start), t.end)
+}
+
+fn offset_basis() -> i64 {
+    -3750763034362895579
+}
+
+// Clears the sign bit so that digests never look like error codes.
+fn digest(h: i64) -> i64 {
+    if h < 0 {
+        wrapping_sub(-1, h)
+    } else {
+        h
+    }
+}
+
+// Lexer phase: every token, trivia and the EOF sentinel included. The loop
+// is a balanced doubling recursion, so its depth is logarithmic in the
+// token count on both the evaluator and native stacks.
+fn lex_step(s: Lexer) -> Lexer eff [Fail[Diag], Fail[ArithOverflow]] {
+    if s.done {
+        s
+    } else {
+        let t = lex_at(s.pos);
+        // The seed's budget counts source tokens; EOF is appended outside it.
+        if t.kind != 70 && s.count >= max_tokens() {
+            fail_lexer(Diag::Limit(s.pos))
+        } else {
+            Lexer {
+                pos: t.end,
+                h: mix_token(s.h, t),
+                count: s.count + 1,
+                done: t.kind == 70
+            }
+        }
+    }
+}
+
+fn lex_steps(k: i64, s: Lexer) -> Lexer eff [Fail[Diag], Fail[ArithOverflow]] {
+    if k == 0 || s.done {
+        s
+    } else if k == 1 {
+        lex_step(s)
+    } else {
+        lex_steps(k - k / 2, lex_steps(k / 2, s))
+    }
+}
+
+fn lex_until_eof(k: i64, s: Lexer) -> Lexer eff [Fail[Diag], Fail[ArithOverflow]] {
+    let next = lex_steps(k, s);
+    if next.done {
+        next
+    } else {
+        lex_until_eof(k * 2, next)
+    }
+}
+
+fn lex_digest() -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
+    let s = lex_until_eof(
+        1,
+        Lexer {
+            pos: 0,
+            h: offset_basis(),
+            count: 0,
+            done: false
+        }
+    );
+    digest(mix(s.h, s.count))
+}
+
+// Parser state: the byte cursor after the last consumed token (trivia is
+// consumed with the following token, as in the seed's CST), the CST digest,
+// the no-struct-literal flag, whether a row generic is in scope, whether the
+// latest generics held trait bounds, and the CST nesting depth.
+fn next_sig(i: i64) -> Tok eff [Fail[Diag], Fail[ArithOverflow]] {
+    let t = lex_at(i);
+    if is_trivia(t.kind) {
+        next_sig(t.end)
+    } else {
+        t
+    }
+}
+
+fn nth(p: P, n: i64) -> Tok eff [Fail[Diag], Fail[ArithOverflow]] {
+    if n == 0 || p.cur.kind == 70 {
+        p.cur
+    } else {
+        nth_from(p.cur.end, n - 1)
+    }
+}
+
+fn nth_from(i: i64, n: i64) -> Tok eff [Fail[Diag], Fail[ArithOverflow]] {
+    let t = next_sig(i);
+    if n == 0 || t.kind == 70 {
+        t
+    } else {
+        nth_from(t.end, n - 1)
+    }
+}
+
+fn kind(p: P) -> i64 {
+    p.cur.kind
+}
+
+fn at(p: P, k: i64) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+    kind(p) == k
+}
+
+fn at_end(p: P, k: i64) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+    let c = kind(p);
+    c == k || c == 70
+}
+
+fn text_is(t: Tok, packed: i64) -> bool eff [Fail[ArithOverflow]] {
+    t.kind == 4 && word(t.start, t.end) == packed
+}
+
+fn at_word(p: P, n: i64, packed: i64) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+    text_is(nth(p, n), packed)
+}
+
+// Consumes the current token (and the trivia before it).
+fn advance(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    P {
+        pos: p.cur.end,
+        cur: next_sig(p.cur.end),
+        h: p.h,
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: p.depth
+    }
+}
+
+fn bump(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if p.cur.kind == 70 {
+        fail_p(Diag::Expected(70, p.cur.start))
+    } else {
+        advance(p)
+    }
+}
+
+fn eat(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if at(p, k) {
+        bump(p)
+    } else {
+        p
+    }
+}
+
+fn ate(p: P, q: P) -> bool {
+    q.pos != p.pos
+}
+
+fn expect(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if p.cur.kind == k {
+        advance(p)
+    } else {
+        fail_p(Diag::Expected(k, p.cur.start))
+    }
+}
+
+fn open(p: P, node: i64) -> P eff [Fail[ArithOverflow]] {
+    P {
+        pos: p.pos,
+        cur: p.cur,
+        h: mix(mix(p.h, node + 1000), p.pos),
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: p.depth
+    }
+}
+
+// Descent depth mirrors the seed's guarded `enter()` calls (expr, binary
+// and each binary operator, postfix and each postfix operator, primary,
+// block, if, type, type arguments, pattern, place tree), so an input the
+// seed rejects at its 128-level limit is rejected here too; the bound is a
+// little lower than the seed's to stay on the rejecting side.
+fn enter(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    if p.depth >= max_depth() {
+        fail_p(Diag::Limit(p.pos))
+    } else {
+        P {
+            pos: p.pos,
+            cur: p.cur,
+            h: p.h,
+            nostruct: p.nostruct,
+            rows: p.rows,
+            bounds: p.bounds,
+            depth: p.depth + 1
+        }
+    }
+}
+
+// Restores the depth of `outer` after a guarded descent.
+fn leave(p: P, outer: P) -> P {
+    P {
+        pos: p.pos,
+        cur: p.cur,
+        h: p.h,
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: outer.depth
+    }
+}
+
+fn close(p: P) -> P eff [Fail[ArithOverflow]] {
+    P {
+        pos: p.pos,
+        cur: p.cur,
+        h: mix(mix(p.h, 3000), p.pos),
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: p.depth
+    }
+}
+
+fn with_flags(p: P, nostruct: bool, rows: bool, bounds: bool) -> P {
+    P {
+        pos: p.pos,
+        cur: p.cur,
+        h: p.h,
+        nostruct: nostruct,
+        rows: rows,
+        bounds: bounds,
+        depth: p.depth
+    }
+}
+
+fn ident(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    if k == 4 || k == 3 || k == 22 {
+        bump(p)
+    } else {
+        fail_p(Diag::Expected(4, nth(p, 0).start))
+    }
+}
+
+fn lower(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    if k == 4 || k == 22 {
+        bump(p)
+    } else {
+        fail_p(Diag::Expected(4, nth(p, 0).start))
+    }
+}
+
+fn upper(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    expect(p, 3)
+}
+
+fn mode(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    if k == 14 || k == 15 || k == 16 {
+        bump(p)
+    } else {
+        p
+    }
+}
+
+fn required_mode(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let q = mode(p);
+    if ate(p, q) {
+        q
+    } else {
+        fail_p(Diag::Expected(16, nth(p, 0).start))
+    }
+}
+
+fn pass(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    if k == 19 || k == 20 || k == 21 {
+        bump(p)
+    } else {
+        p
+    }
+}
+
+fn primitive(t: Tok) -> bool eff [Fail[ArithOverflow]] {
+    let primitive_word = match word(t.start, t.end) {
+        0x7538 => true,
+        0x753332 => true,
+        0x753634 => true,
+        0x693634 => true,
+        0x663634 => true,
+        0x626f6f6c => true,
+        _ => false,
+    };
+    t.kind == 4 && primitive_word
+}
+
+// Literals: integer range and JSON string escapes are checked as the seed
+// does; `\u` escapes are rejected as unsupported. Vesper has no u64/i64
+// conversion, so the u64 range check compares digit strings.
+fn max_u64_digit(k: i64) -> i64 {
+    match k {
+        0 => 1,
+        1 => 8,
+        2 => 4,
+        3 => 4,
+        4 => 6,
+        5 => 7,
+        6 => 4,
+        7 => 4,
+        8 => 0,
+        9 => 7,
+        10 => 3,
+        11 => 7,
+        12 => 0,
+        13 => 9,
+        14 => 5,
+        15 => 5,
+        16 => 1,
+        17 => 6,
+        18 => 1,
+        _ => 5,
+    }
+}
+
+// First byte of the significant digits: skips leading zeros and `_`.
+fn first_significant(i: i64, end: i64) -> i64 eff [Fail[ArithOverflow]] {
+    let c = source_byte(i);
+    if i < end && (c == 48 || c == 95) {
+        first_significant(i + 1, end)
+    } else {
+        i
+    }
+}
+
+fn digit_count(i: i64, end: i64, n: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if i >= end {
+        n
+    } else if source_byte(i) == 95 {
+        digit_count(i + 1, end, n)
+    } else {
+        digit_count(i + 1, end, n + 1)
+    }
+}
+
+// Compares twenty decimal digits with u64::MAX: positive when larger.
+fn compare_max(i: i64, end: i64, k: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if i >= end {
+        0
+    } else {
+        let c = source_byte(i);
+        if c == 95 {
+            compare_max(i + 1, end, k)
+        } else {
+            let d = c - 48 - max_u64_digit(k);
+            if d != 0 {
+                d
+            } else {
+                compare_max(i + 1, end, k + 1)
+            }
+        }
+    }
+}
+
+fn is_hex_literal(t: Tok) -> bool eff [Fail[ArithOverflow]] {
+    let x = source_byte(t.start + 1);
+    t.end - t.start > 1 && source_byte(t.start) == 48 && (x == 120 || x == 88)
+}
+
+// The seed rejects literals above u64::MAX and hex literals without digits.
+fn int_over(t: Tok) -> bool eff [Fail[ArithOverflow]] {
+    if is_hex_literal(t) {
+        let first = first_significant(t.start + 2, t.end);
+        let all = digit_count(t.start + 2, t.end, 0);
+        all == 0 || digit_count(first, t.end, 0) > 16
+    } else {
+        let first = first_significant(t.start, t.end);
+        let n = digit_count(first, t.end, 0);
+        n > 20 || n == 20 && compare_max(first, t.end, 0) > 0
+    }
+}
+
+fn hex_digit(c: i64) -> i64 {
+    if c >= 97 {
+        wrapping_sub(c, 87)
+    } else if c >= 65 {
+        wrapping_sub(c, 55)
+    } else {
+        wrapping_sub(c, 48)
+    }
+}
+
+// Value saturated above 2^40, enough for the region-capacity check.
+fn small_value(i: i64, end: i64, base: i64, v: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if i >= end || v > 1099511627776 {
+        v
+    } else {
+        let c = source_byte(i);
+        if c == 95 {
+            small_value(i + 1, end, base, v)
+        } else {
+            small_value(i + 1, end, base, v * base + hex_digit(c))
+        }
+    }
+}
+
+fn int_small(t: Tok) -> i64 eff [Fail[ArithOverflow]] {
+    if is_hex_literal(t) {
+        small_value(t.start + 2, t.end, 16, 0)
+    } else {
+        small_value(t.start, t.end, 10, 0)
+    }
+}
+
+// `\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r` and `\t`.
+fn json_escape(d: i64) -> bool {
+    match d {
+        34 => true,
+        92 => true,
+        47 => true,
+        98 => true,
+        102 => true,
+        110 => true,
+        114 => true,
+        116 => true,
+        _ => false,
+    }
+}
+
+fn check_escapes(start: i64, i: i64, end: i64) -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
+    if i >= end {
+        0
+    } else {
+        let c = source_byte(i);
+        if c < 32 {
+            fail_i(Diag::Invalid(start))
+        } else if c == 92 {
+            let d = source_byte(i + 1);
+            if d == 117 {
+                fail_i(Diag::Unsupported(7, start))
+            } else if json_escape(d) {
+                check_escapes(start, i + 2, end)
+            } else {
+                fail_i(Diag::Invalid(start))
+            }
+        } else {
+            check_escapes(start, i + 1, end)
+        }
+    }
+}
+
+fn at_literal(p: P) -> bool eff [Fail[Diag], Fail[ArithOverflow]] {
+    let k = kind(p);
+    k == 5 || k == 6 || k == 7 || k == 30 || k == 31
+}
+
+fn literal(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    let t = nth(p, 0);
+    if t.kind == 6 && int_over(t) {
+        fail_p(Diag::Invalid(t.start))
+    } else if t.kind == 7 && check_escapes(t.start, t.start + 1, t.end - 1) != 0 {
+        fail_p(Diag::Invalid(t.start))
+    } else {
+        bump(p)
+    }
+}

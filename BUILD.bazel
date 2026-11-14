@@ -63,6 +63,9 @@ vesper_crate(
         "test/replay42_kernel": "long",
         # Fresh model compilation, 285 theorem roots and actual negative controls.
         "test/resource_model42": "long",
+        # Runs the Vesper-source front end on every repository source; about
+        # 2.5 min on a 4-core Linux host, over 300 s on the macOS runner.
+        "test/self_host_front_end": "long",
     },
 )
 # Narrow slices of the root package for members that read them.
