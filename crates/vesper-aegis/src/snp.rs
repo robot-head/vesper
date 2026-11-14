@@ -7,11 +7,18 @@
 //! - 3 and 4: add CPUID family/model/stepping at `0x188..0x18B` (version 4
 //!   has the version-3 layout, as in AMD's firmware and VirTEE `sev`);
 //! - 5: adds `LAUNCH_MIT_VECTOR` (`0x1F8`) and `CURRENT_MIT_VECTOR`
-//!   (`0x200`).
+//!   (`0x200`);
+//! - 6: adds the extended TCBs `CURRENT_ETCB` (`0x220`), `LAUNCH_ETCB`
+//!   (`0x240`) and `COMMITTED_ETCB` (`0x260`), 32 bytes each, which only
+//!   "Venice" processors (family `1Ah`, models `50h..5Fh` and `C0h..CFh`)
+//!   report; on every other processor they must be zero. Each ETCB holds
+//!   fourteen one-byte SVNs (bits 111:0); bits 255:112 are reserved. The
+//!   layout follows AMD's SEV-SNP firmware ABI and VirTEE `sev` 7.x
+//!   (`EtcbVersion`, `ReportVariant::V6`).
 //!
-//! Version 6 (Venice extended TCBs) and later, and versions below 2, are
-//! rejected with [`ParseError::UnsupportedValue`]. Every reserved byte of
-//! the version's layout must be zero.
+//! Versions above 6 and below 2 are rejected with
+//! [`ParseError::UnsupportedValue`]. Every reserved byte of the version's
+//! layout must be zero.
 
 use crate::amd::{SnpCollateral, SnpTcbBaseline, VerifiedSnpReport, verify_snp_collateral};
 use crate::chain::{Curve, TrustRoot, verify_chain};
@@ -27,9 +34,13 @@ pub const SNP_SIGNED_LEN: usize = 0x2A0;
 pub const SNP_SIG_ALGO_ECDSA_P384_SHA384: u32 = 1;
 /// Lowest and highest supported report versions.
 pub const SNP_REPORT_MIN_VERSION: u32 = 2;
-pub const SNP_REPORT_MAX_VERSION: u32 = 5;
+pub const SNP_REPORT_MAX_VERSION: u32 = 6;
 /// First version with the mitigation vectors.
 pub const SNP_REPORT_VERSION_MIT_VECTORS: u32 = 5;
+/// First version with the extended TCBs.
+pub const SNP_REPORT_VERSION_ETCB: u32 = 6;
+/// Length of one `ETCB_VERSION` field.
+pub const SNP_ETCB_LEN: usize = 32;
 /// Guest policy bit 16: SMT allowed.
 pub const SNP_POLICY_SMT: u64 = 1 << 16;
 /// Guest policy bit 19: debugging allowed.
@@ -67,6 +78,11 @@ pub struct SnpReport {
     /// now.
     pub launch_mit_vector: u64,
     pub current_mit_vector: u64,
+    /// Version 6 on Venice only (`None` otherwise, where the bytes are
+    /// zero): extended TCB now, at launch, and committed.
+    pub current_etcb: Option<SnpEtcb>,
+    pub launch_etcb: Option<SnpEtcb>,
+    pub committed_etcb: Option<SnpEtcb>,
     /// Big-endian `r || s` (converted from the report's little-endian,
     /// zero-extended 72-byte components).
     pub signature_r_s: [u8; 96],
@@ -124,7 +140,20 @@ impl SnpReport {
             r.reserved(16, "reserved4 (pre-v5 mitigation vectors)")?;
             (0, 0)
         };
-        r.reserved(152, "reserved5")?;
+        r.reserved(24, "reserved5")?;
+        let venice = version >= 3 && is_venice_cpuid(cpuid);
+        let (current_etcb, launch_etcb, committed_etcb) =
+            if version >= SNP_REPORT_VERSION_ETCB && venice {
+                (
+                    Some(SnpEtcb::parse(r.array("current_etcb")?)?),
+                    Some(SnpEtcb::parse(r.array("launch_etcb")?)?),
+                    Some(SnpEtcb::parse(r.array("committed_etcb")?)?),
+                )
+            } else {
+                r.reserved(3 * SNP_ETCB_LEN, "reserved6 (ETCBs: v6 Venice only)")?;
+                (None, None, None)
+            };
+        r.reserved(32, "reserved7")?;
         debug_assert_eq!(r.position(), SNP_SIGNED_LEN);
         let r_le: [u8; 72] = r.array("signature.r")?;
         let s_le: [u8; 72] = r.array("signature.s")?;
@@ -169,6 +198,9 @@ impl SnpReport {
             launch_tcb,
             launch_mit_vector,
             current_mit_vector,
+            current_etcb,
+            launch_etcb,
+            committed_etcb,
             signature_r_s,
         })
     }
@@ -206,7 +238,11 @@ impl SnpReport {
         o.extend_from_slice(&self.launch_tcb.to_le_bytes());
         o.extend_from_slice(&self.launch_mit_vector.to_le_bytes());
         o.extend_from_slice(&self.current_mit_vector.to_le_bytes());
-        o.extend_from_slice(&[0; 152]);
+        o.extend_from_slice(&[0; 24]);
+        for etcb in [&self.current_etcb, &self.launch_etcb, &self.committed_etcb] {
+            o.extend_from_slice(&etcb.map(SnpEtcb::to_bytes).unwrap_or([0; SNP_ETCB_LEN]));
+        }
+        o.extend_from_slice(&[0; 32]);
         o
     }
 
@@ -218,6 +254,13 @@ impl SnpReport {
         }
         o.extend_from_slice(&[0; 368]);
         o
+    }
+
+    /// Whether the CPUID fields (version 3 and later) name a "Venice"
+    /// processor (family `1Ah`, model `50h..5Fh` or `C0h..CFh`, as in VirTEE
+    /// `sev`'s `Generation::identify_cpu`).
+    pub fn is_venice(&self) -> bool {
+        self.version >= 3 && is_venice_cpuid(self.cpuid)
     }
 
     /// `SIGNING_KEY` field: 0 = VCEK, 1 = VLEK, 7 = none.
@@ -326,6 +369,104 @@ pub fn verify_snp_report_with_collateral(
     let verified = verify_snp_collateral(bytes, collateral, root, now_ns, baseline)?;
     let claims = snp_vesper_claims(&verified.report, runtime)?;
     Ok((claims, verified))
+}
+
+fn is_venice_cpuid(cpuid: [u8; 3]) -> bool {
+    cpuid[0] == 0x1A && matches!(cpuid[1], 0x50..=0x5F | 0xC0..=0xCF)
+}
+
+/// An `ETCB_VERSION` (version-6 reports on Venice): fourteen one-byte SVNs,
+/// little-endian from bit 0, in AMD's order. Bytes 14..32 are reserved and
+/// must be zero.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Hash)]
+pub struct SnpEtcb {
+    /// Bits 7:0, IP Key Manager (ASP) firmware.
+    pub ip_key_manager: u8,
+    /// Bits 15:8, MP1 (power management) firmware.
+    pub mp1: u8,
+    /// Bits 23:16, AMD Root of Trust FMC.
+    pub art_fmc: u8,
+    /// Bits 31:24, AMD Root of Trust runtime.
+    pub art_rt: u8,
+    /// Bits 39:32, High Availability and Debuggability firmware.
+    pub had_driver: u8,
+    /// Bits 47:40, boot driver (ASP).
+    pub boot_driver: u8,
+    /// Bits 55:48, PreEsid driver (ASP).
+    pub pre_esid: u8,
+    /// Bits 63:56, TMPM firmware.
+    pub tmpm: u8,
+    /// Bits 71:64, lowest microcode patch level of all cores.
+    pub microcode: u8,
+    /// Bits 79:72, SoC driver (ASP).
+    pub soc_driver: u8,
+    /// Bits 87:80, ASP OS driver.
+    pub asp_os_driver: u8,
+    /// Bits 95:88, FHP driver (ASP).
+    pub fhp_driver: u8,
+    /// Bits 103:96, DPE driver (ASP).
+    pub dpe_driver: u8,
+    /// Bits 111:104, AMD Root Guest.
+    pub arg: u8,
+}
+
+impl SnpEtcb {
+    pub fn parse(b: [u8; SNP_ETCB_LEN]) -> Result<Self, ParseError> {
+        if b[14..].iter().any(|&x| x != 0) {
+            return Err(ParseError::NonZeroReserved {
+                format: Format::SnpReport,
+                field: "ETCB bits 255:112",
+            });
+        }
+        Ok(SnpEtcb {
+            ip_key_manager: b[0],
+            mp1: b[1],
+            art_fmc: b[2],
+            art_rt: b[3],
+            had_driver: b[4],
+            boot_driver: b[5],
+            pre_esid: b[6],
+            tmpm: b[7],
+            microcode: b[8],
+            soc_driver: b[9],
+            asp_os_driver: b[10],
+            fhp_driver: b[11],
+            dpe_driver: b[12],
+            arg: b[13],
+        })
+    }
+
+    pub fn to_bytes(self) -> [u8; SNP_ETCB_LEN] {
+        let mut b = [0u8; SNP_ETCB_LEN];
+        b[..14].copy_from_slice(&self.svns());
+        b
+    }
+
+    /// The fourteen SVNs in wire order (byte 0 first).
+    pub fn svns(&self) -> [u8; 14] {
+        [
+            self.ip_key_manager,
+            self.mp1,
+            self.art_fmc,
+            self.art_rt,
+            self.had_driver,
+            self.boot_driver,
+            self.pre_esid,
+            self.tmpm,
+            self.microcode,
+            self.soc_driver,
+            self.asp_os_driver,
+            self.fhp_driver,
+            self.dpe_driver,
+            self.arg,
+        ]
+    }
+
+    /// Every component at least `floor`'s (a component-wise, not
+    /// lexicographic, comparison).
+    pub fn at_least(&self, floor: &SnpEtcb) -> bool {
+        self.svns().iter().zip(floor.svns()).all(|(h, f)| *h >= f)
+    }
 }
 
 fn unsupported(field: &'static str, value: u64) -> ParseError {
