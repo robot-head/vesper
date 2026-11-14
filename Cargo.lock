@@ -2406,6 +2406,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "httlib-huffman"
+version = "0.3.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1a9fcbcc408c5526c3ab80d534e5c86e7967c1fb7aa0a8c76abd1edc27deb877"
+
+[[package]]
 name = "http"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3243,6 +3249,12 @@ dependencies = [
  "indexmap",
  "memchr",
 ]
+
+[[package]]
+name = "octets"
+version = "0.3.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4d59d30d3ad7f7e1c9a66e51c9cb71ae1c794b28ffe7053fd785defb0d180069"
 
 [[package]]
 name = "oid-registry"
@@ -4913,6 +4925,7 @@ dependencies = [
  "egglog",
  "getrandom 0.4.3",
  "libc",
+ "object 0.37.3",
  "petgraph",
  "salsa",
  "serde",
@@ -5010,6 +5023,7 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "vesper-aura",
+ "vesper-pulse",
 ]
 
 [[package]]
@@ -5150,6 +5164,7 @@ dependencies = [
  "blake3",
  "tempfile",
  "vesper-loom-cas",
+ "vesper-quarry",
  "vesper-simpulse",
 ]
 
@@ -5381,7 +5396,11 @@ name = "vesper-nexus"
 version = "0.1.0"
 dependencies = [
  "vesper-ffi",
+ "vesper-fmt",
+ "vesper-simpulse",
+ "vesper-syntax",
  "wasmtime",
+ "wit-parser",
 ]
 
 [[package]]
@@ -5421,10 +5440,13 @@ version = "0.1.0"
 name = "vesper-prism-h3"
 version = "0.1.0"
 dependencies = [
+ "bytes",
+ "quinn-proto",
  "vesper-prism",
  "vesper-warp",
  "vesper-warp-shard",
  "vesper-warp-umem",
+ "wtransport-proto",
 ]
 
 [[package]]
@@ -6447,6 +6469,18 @@ name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
+
+[[package]]
+name = "wtransport-proto"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aad9059572c7dbd6901ccef37f3b7321678cd708dcf58a64b1921dbeab7bfede"
+dependencies = [
+ "httlib-huffman",
+ "octets",
+ "thiserror 2.0.21",
+ "url",
+]
 
 [[package]]
 name = "x25519-dalek"
