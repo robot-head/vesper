@@ -287,6 +287,8 @@ pub(crate) struct LibraryPlan {
 pub(crate) struct Plan {
     /// By effect name.
     pub libraries: BTreeMap<String, LibraryPlan>,
+    /// Libraries the object target cannot call, by library name.
+    pub blocked: BTreeMap<String, FfiError>,
 }
 /// One foreign operation as the native hook lowers it.
 pub(crate) struct OpPlan {
@@ -296,11 +298,17 @@ pub(crate) struct OpPlan {
 }
 thread_local! {
     static PLAN: RefCell<Option<Rc<Plan>>> = const { RefCell::new(None) };
+    /// Libraries whose calls the backend actually emitted.
+    static USED: RefCell<BTreeSet<String>> = const { RefCell::new(BTreeSet::new()) };
+    /// The typed error behind a backend failure in [`op_plan`].
+    static FAULT: RefCell<Option<FfiError>> = const { RefCell::new(None) };
 }
 struct PlanGuard;
 impl Drop for PlanGuard {
     fn drop(&mut self) {
         PLAN.with(|p| *p.borrow_mut() = None);
+        USED.with(|u| u.borrow_mut().clear());
+        FAULT.with(|f| *f.borrow_mut() = None);
     }
 }
 /// The plan of foreign operation `op` of effect `effect`, while
@@ -315,6 +323,11 @@ pub(crate) fn op_plan(effect: &str, op: &str) -> Result<OpPlan, String> {
             .libraries
             .get(effect)
             .ok_or_else(|| format!("no imported library for effect '{effect}'"))?;
+        USED.with(|u| u.borrow_mut().insert(library.name.clone()));
+        if let Some(e) = plan.blocked.get(&library.name) {
+            FAULT.with(|f| *f.borrow_mut() = Some(e.clone()));
+            return Err(e.message.clone());
+        }
         let symbol = op.split_once('$').map_or(op, |(s, _)| s);
         let function = library
             .descriptor
@@ -422,44 +435,30 @@ impl ForeignChecked {
                 .map_err(|e| codegen(format!("invalid target: {e}")))?,
             None => target_lexicon::Triple::host(),
         };
-        let used: BTreeSet<&str> = self.calls.iter().map(|c| c.library.as_str()).collect();
+        // Only libraries the entry reaches are linked and checked: the
+        // backend records each library whose call it emits.
+        let mut plan = self.plan.clone();
+        for library in self.plan.libraries.values() {
+            if let Err(e) = target_support(library, &triple) {
+                plan.blocked.insert(library.name.clone(), e);
+            }
+        }
+        PLAN.with(|p| *p.borrow_mut() = Some(Rc::new(plan)));
+        let _guard = PlanGuard;
+        let (bytes, clif) = crate::native::object_for_target(&self.checked.world, entry, target)
+            .map_err(|m| {
+                FAULT
+                    .with(|f| f.borrow_mut().take())
+                    .unwrap_or_else(|| codegen(m))
+            })?;
+        let used = USED.with(|u| u.borrow().clone());
         let mut link = vec![];
         let mut isolation_symbols = vec![];
         for library in self.plan.libraries.values() {
-            if !used.contains(library.name.as_str()) {
+            if !used.contains(&library.name) {
                 continue;
             }
-            let declared: target_lexicon::Triple = library
-                .descriptor
-                .target()
-                .triple()
-                .parse()
-                .map_err(|e| codegen(format!("invalid .vsys target: {e}")))?;
-            if declared.architecture != triple.architecture
-                || declared.operating_system != triple.operating_system
-            {
-                return Err(FfiError::new(
-                    FfiErrorKind::TargetMismatch,
-                    format!(
-                        "library '{}' targets {} but the object targets {triple}",
-                        library.name,
-                        library.descriptor.target().triple()
-                    ),
-                    None,
-                ));
-            }
             if library.handler == Handler::IsolatedMpk {
-                if triple.architecture != target_lexicon::Architecture::X86_64
-                    || triple.operating_system != target_lexicon::OperatingSystem::Linux
-                {
-                    return Err(FfiError::new(
-                        FfiErrorKind::IsolationUnavailable,
-                        format!(
-                            "isolated(mpk) trampolines are generated for Linux x86-64 (WRPKRU) only; {triple} is not supported (AArch64 POE is not implemented)"
-                        ),
-                        None,
-                    ));
-                }
                 isolation_symbols.push(isolation_symbol(&library.name));
             }
             let l = library.descriptor.link();
@@ -471,10 +470,6 @@ impl ForeignChecked {
                 handler: library.handler,
             });
         }
-        PLAN.with(|p| *p.borrow_mut() = Some(Rc::new(self.plan.clone())));
-        let _guard = PlanGuard;
-        let (bytes, clif) = crate::native::object_for_target(&self.checked.world, entry, target)
-            .map_err(codegen)?;
         Ok(ForeignObject {
             bytes,
             clif,
@@ -482,6 +477,44 @@ impl ForeignChecked {
             isolation_symbols,
         })
     }
+}
+
+/// Whether `library` can be called from an object for `triple`.
+fn target_support(library: &LibraryPlan, triple: &target_lexicon::Triple) -> Result<(), FfiError> {
+    let declared: target_lexicon::Triple =
+        library.descriptor.target().triple().parse().map_err(|e| {
+            FfiError::new(
+                FfiErrorKind::TargetMismatch,
+                format!("invalid .vsys target: {e}"),
+                None,
+            )
+        })?;
+    if declared.architecture != triple.architecture
+        || declared.operating_system != triple.operating_system
+    {
+        return Err(FfiError::new(
+            FfiErrorKind::TargetMismatch,
+            format!(
+                "library '{}' targets {} but the object targets {triple}",
+                library.name,
+                library.descriptor.target().triple()
+            ),
+            None,
+        ));
+    }
+    if library.handler == Handler::IsolatedMpk
+        && (triple.architecture != target_lexicon::Architecture::X86_64
+            || triple.operating_system != target_lexicon::OperatingSystem::Linux)
+    {
+        return Err(FfiError::new(
+            FfiErrorKind::IsolationUnavailable,
+            format!(
+                "isolated(mpk) trampolines are generated for Linux x86-64 (WRPKRU) only; {triple} is not supported (AArch64 POE is not implemented)"
+            ),
+            None,
+        ));
+    }
+    Ok(())
 }
 
 /// Parse `source` and check it against `imports`.

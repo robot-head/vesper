@@ -188,6 +188,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         if let Some(t) = abi.result {
             sig.returns.push(abi_param(t, pointer));
         }
+        self.foreign_symbol_free(plan.function.symbol(), Linkage::Import)?;
         let callee = self
             .m
             .declare_function(plan.function.symbol(), Linkage::Import, &sig)
@@ -685,7 +686,7 @@ impl<M: Module> Codegen<'_, '_, M> {
         result: Option<ir::Type>,
         code: &[u8],
     ) -> Result<ir::FuncRef, String> {
-        let defined = self.m.declarations().get_name(name).is_some();
+        let defined = self.foreign_symbol_free(name, Linkage::Local)?;
         let mut sig = self.m.make_signature();
         sig.call_conv = cranelift_codegen::isa::CallConv::SystemV;
         for p in params {
@@ -705,6 +706,24 @@ impl<M: Module> Codegen<'_, '_, M> {
         }
         Ok(self.m.declare_func_in_func(id, self.b.func))
     }
+    /// Whether function symbol `name` is already declared with `linkage`.
+    /// A foreign import must not bind to a Vesper function (for example an
+    /// entry exported under the same name), and a generated helper must not
+    /// bind to a foreign import: both are errors, never a silent rebinding.
+    fn foreign_symbol_free(&self, name: &str, linkage: Linkage) -> Result<bool, String> {
+        let declarations = self.m.declarations();
+        match declarations.get_name(name) {
+            None => Ok(false),
+            Some(cranelift_module::FuncOrDataId::Func(id))
+                if declarations.get_function_decl(id).linkage == linkage =>
+            {
+                Ok(true)
+            }
+            Some(_) => Err(format!(
+                "foreign symbol '{name}' collides with another symbol of this object; rename the Vesper function or the .vsys import"
+            )),
+        }
+    }
     /// Revoke the library's protection key; returns the saved PKRU.
     fn foreign_isolate(&mut self, library: &str) -> Result<ir::Value, String> {
         let isa = self.m.isa();
@@ -714,7 +733,15 @@ impl<M: Module> Codegen<'_, '_, M> {
             return Err("isolated(mpk) trampolines are generated for Linux x86-64 only".into());
         }
         let symbol = ffi::isolation_symbol(library);
-        let defined = self.m.declarations().get_name(&symbol).is_some();
+        let defined = match self.m.declarations().get_name(&symbol) {
+            Some(cranelift_module::FuncOrDataId::Data(_)) => true,
+            Some(_) => {
+                return Err(format!(
+                    "isolation symbol '{symbol}' collides with a function of this object"
+                ));
+            }
+            None => false,
+        };
         let data = self
             .m
             .declare_data(&symbol, Linkage::Export, true, false)

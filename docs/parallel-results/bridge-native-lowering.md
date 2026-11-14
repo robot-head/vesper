@@ -94,7 +94,11 @@ effects (no handler evidence), so a function with `eff [Ffi[Lib]]` compiles
 once instead of being inlined (recursion works); the entry check accepts
 foreign capabilities; `perform` dispatches foreign effects to the new module.
 Without the frontend's plan the backend rejects foreign effects with an error
-(`vesper::native::object` on such a World fails).
+(`vesper::native::object` on such a World fails). A `.vsys` symbol that names
+a function of the object itself (for example an entry exported under the same
+name) is an error, never a silent rebinding. The link inputs and isolation
+symbols list only the libraries whose calls the entry actually reaches;
+unreachable foreign calls are not target-checked.
 
 `ForeignObject` carries the object bytes, CLIF, the link inputs (library,
 mode, artifact name, BLAKE3 digest, handler), a textual manifest
@@ -153,7 +157,12 @@ in the symbol. Only Linux x86-64 targets are accepted; any other target is
 - `vesper fmt --check tests/fixtures/ffi_lowering/*.ves`: unchanged.
 - `cargo +1.100.0 clippy --locked -p vesper --all-targets -- -D warnings`: clean.
 - `cargo test --locked --test ffi_lowering`: 6 passed (PKU exercised).
-- `cargo test --workspace --locked`: see the PR for the result on the final head.
+- `cargo test --workspace --locked --no-fail-fast` (base 1094e64 + this branch):
+  4477 passed, 6 failed. All 6 are Lean-toolchain tests outside this lane
+  (`lean4lean42_acceptance`, `oracle42_acceptance`, `oracle42_runner`,
+  `proof_audit_private`, `replay42_kernel`, `resource_model42`): they need a
+  `lean` binary or `VESPER_LEAN4LEAN42_ROOT`, which this cloud container does
+  not have.
 
 ## Decisions
 

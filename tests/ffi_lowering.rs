@@ -282,6 +282,46 @@ fn objects_check_targets_and_handler_tiers() {
         vec![ffi_lowering::isolation_symbol("Bridge")]
     );
     assert!(object.clif.contains("trapnz"), "{}", object.clif);
+    // A foreign import never binds to a Vesper function of the same name.
+    let clash = ffi_lowering::check_source(
+        "fn bridge_tick() -> u64 eff [Ffi[Bridge]] { Bridge::bridge_tick() }",
+        &bridge_imports(Handler::Direct),
+    )
+    .unwrap();
+    let e = clash
+        .object("bridge_tick", Some("x86_64-unknown-linux-gnu"))
+        .unwrap_err();
+    assert_eq!(e.kind, FfiErrorKind::Codegen, "{e}");
+    assert!(e.message.contains("collides"), "{e}");
+    // Only libraries the entry reaches are linked and target-checked.
+    let mut imports = bridge_imports(Handler::Direct);
+    imports
+        .add(
+            r#"sys library Arm (target = "aarch64-unknown-linux-gnu", abi = "aapcs64", link = "static", name = "arm", artifact = "blake3:0000000000000000000000000000000000000000000000000000000000000000") {
+                fn arm_only() -> ForeignVal[u64];
+            }"#,
+            Handler::IsolatedMpk,
+        )
+        .unwrap();
+    let mixed = ffi_lowering::check_source(
+        "fn entry() -> u64 eff [Ffi[Bridge]] { Bridge::bridge_tick() } fn unused() -> u64 eff [Ffi[Arm]] { Arm::arm_only() } fn other() -> u64 eff [Ffi[Arm]] { unused() }",
+        &imports,
+    )
+    .unwrap();
+    let object = mixed
+        .object("entry", Some("x86_64-unknown-linux-gnu"))
+        .unwrap();
+    assert_eq!(object.link.len(), 1);
+    assert_eq!(object.link[0].library, "Bridge");
+    assert!(object.isolation_symbols.is_empty());
+    let e = mixed
+        .object("other", Some("x86_64-unknown-linux-gnu"))
+        .unwrap_err();
+    assert_eq!(e.kind, FfiErrorKind::TargetMismatch, "{e}");
+    let e = mixed
+        .object("other", Some("aarch64-unknown-linux-gnu"))
+        .unwrap_err();
+    assert_eq!(e.kind, FfiErrorKind::IsolationUnavailable, "{e}");
     // The native backend refuses foreign effects outside this frontend.
     assert!(vesper::native::object(direct.world(), "entry").is_err());
     assert_eq!(ffi_lowering::pkru_revoke_mask(1).unwrap(), 0b1100);
