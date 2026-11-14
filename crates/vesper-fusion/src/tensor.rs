@@ -209,12 +209,25 @@ impl TensorEnv {
 }
 
 /// A tensor dataflow graph.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TensorGraph {
     owner: u64,
     nodes: Vec<NodeInfo>,
     matrices: Vec<MatrixDecl>,
     decls: Decls,
+}
+
+/// A clone is a new graph: it gets a fresh owner tag, so handles of the
+/// original are `InvalidNode` on the copy once the two can diverge.
+impl Clone for TensorGraph {
+    fn clone(&self) -> Self {
+        Self {
+            owner: next_owner(),
+            nodes: self.nodes.clone(),
+            matrices: self.matrices.clone(),
+            decls: self.decls.clone(),
+        }
+    }
 }
 
 impl Default for TensorGraph {

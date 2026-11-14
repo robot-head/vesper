@@ -169,11 +169,23 @@ pub fn pan_gains(p: f32) -> (f32, f32) {
 }
 
 /// A stereo DSP graph.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct DspGraph {
     owner: u64,
     nodes: Vec<Op>,
     params: Params,
+}
+
+/// A clone is a new graph: it gets a fresh owner tag, so handles of the
+/// original are `InvalidNode` on the copy once the two can diverge.
+impl Clone for DspGraph {
+    fn clone(&self) -> Self {
+        Self {
+            owner: next_owner(),
+            nodes: self.nodes.clone(),
+            params: self.params.clone(),
+        }
+    }
 }
 
 impl Default for DspGraph {
@@ -417,7 +429,8 @@ fn map(s: &Stereo, mut f: impl FnMut(f32, f32) -> (f32, f32)) -> Result<Stereo, 
 /// One per-sample stage of a fused loop.
 #[derive(Clone, Debug, PartialEq)]
 enum Stage {
-    Gains(f32, f32),
+    /// Left and right multipliers, each list applied in order.
+    Gains(Vec<f32>, Vec<f32>),
     Cascade(Vec<Biquad>),
 }
 
@@ -480,7 +493,11 @@ impl FusedDsp {
         })
     }
 
-    fn gain(&self, g: usize) -> Result<f32, Error> {
+    /// The multipliers a gain expression applies, in order. A composed
+    /// gain is one multiplier when its product stays in the normal FP32
+    /// range; otherwise the stages stay separate, so composition never turns
+    /// a finite unfused result into an overflow or a flush to zero.
+    fn gain(&self, g: usize) -> Result<Vec<f32>, Error> {
         let t = &self.term;
         let (head, kids) = t.app(g)?;
         let idx = |k: usize| -> Result<usize, Error> {
@@ -488,41 +505,80 @@ impl FusedDsp {
         };
         let missing = || Error::Extraction(format!("unknown {head} parameter"));
         Ok(match head {
-            "GP" => *self.params.gains.get(idx(kids[0])?).ok_or_else(missing)?,
-            "PanL" => pan_gains(*self.params.pans.get(idx(kids[0])?).ok_or_else(missing)?).0,
-            "PanR" => pan_gains(*self.params.pans.get(idx(kids[0])?).ok_or_else(missing)?).1,
-            "GMul" => self.gain(kids[0])? * self.gain(kids[1])?,
-            "GAdd" => self.gain(kids[0])? + self.gain(kids[1])?,
+            "GP" => vec![*self.params.gains.get(idx(kids[0])?).ok_or_else(missing)?],
+            "PanL" => vec![pan_gains(*self.params.pans.get(idx(kids[0])?).ok_or_else(missing)?).0],
+            "PanR" => vec![pan_gains(*self.params.pans.get(idx(kids[0])?).ok_or_else(missing)?).1],
+            "GMul" => {
+                // `(GMul outer inner)`: the inner gain is applied first.
+                let (outer, inner) = (self.gain(kids[0])?, self.gain(kids[1])?);
+                match (outer.as_slice(), inner.as_slice()) {
+                    ([a], [c]) if in_range(a * c, &[*a, *c]) => vec![a * c],
+                    _ => inner.into_iter().chain(outer).collect(),
+                }
+            }
+            "GAdd" => match (
+                self.gain(kids[0])?.as_slice(),
+                self.gain(kids[1])?.as_slice(),
+            ) {
+                ([a], [c]) if (a + c).is_finite() => vec![a + c],
+                _ => {
+                    return Err(Error::Unsupported(
+                        "merged send gains outside the FP32 range",
+                    ));
+                }
+            },
             other => return Err(Error::Extraction(format!("{other} is not a gain"))),
         })
     }
 
-    fn coef(&self, c: usize) -> Result<Biquad, Error> {
+    /// A section and any gain that could not be folded into it; that gain is
+    /// applied before the cascade instead (equivalent from zero state).
+    fn coef(&self, c: usize) -> Result<(Biquad, Vec<f32>), Error> {
         let t = &self.term;
         let (head, kids) = t.app(c)?;
         match head {
             "Coef" => {
                 let i = usize::try_from(t.int(kids[0])?)
                     .map_err(|_| Error::Extraction("negative section".into()))?;
-                self.params
+                let b = self
+                    .params
                     .sections
                     .get(i)
                     .copied()
-                    .ok_or_else(|| Error::Extraction("unknown section".into()))
+                    .ok_or_else(|| Error::Extraction("unknown section".into()))?;
+                Ok((b, Vec::new()))
             }
-            "CScale" => Ok(self.coef(kids[1])?.scaled(self.gain(kids[0])?)),
+            "CScale" => {
+                let (b, mut pre) = self.coef(kids[1])?;
+                let g = self.gain(kids[0])?;
+                if let ([g], true) = (g.as_slice(), pre.is_empty()) {
+                    let scaled = b.scaled(*g);
+                    if scaled
+                        .b
+                        .iter()
+                        .zip(&b.b)
+                        .all(|(s, b)| in_range(*s, &[*b, *g]))
+                    {
+                        return Ok((scaled, pre));
+                    }
+                }
+                pre.extend(g);
+                Ok((b, pre))
+            }
             other => Err(Error::Extraction(format!("{other} is not a section"))),
         }
     }
 
-    fn sections(&self, mut q: usize) -> Result<Vec<Biquad>, Error> {
-        let mut out = Vec::new();
+    fn sections(&self, mut q: usize) -> Result<(Vec<Biquad>, Vec<f32>), Error> {
+        let (mut out, mut pre) = (Vec::new(), Vec::new());
         loop {
             let (head, kids) = self.term.app(q)?;
             match head {
-                "SNil" => return Ok(out),
+                "SNil" => return Ok((out, pre)),
                 "SCons" => {
-                    out.push(self.coef(kids[0])?);
+                    let (b, p) = self.coef(kids[0])?;
+                    out.push(b);
+                    pre.extend(p);
                     q = kids[1];
                 }
                 // QApp never survives extraction (the appended list is
@@ -552,7 +608,13 @@ impl FusedDsp {
                         cur = kids[2];
                     }
                     "Cascade" => {
-                        stages.push(Stage::Cascade(self.sections(kids[0])?));
+                        // Stages are collected outermost first, so the
+                        // unfolded gain (pushed after) runs before the cascade.
+                        let (sections, pre) = self.sections(kids[0])?;
+                        stages.push(Stage::Cascade(sections));
+                        if !pre.is_empty() {
+                            stages.push(Stage::Gains(pre.clone(), pre));
+                        }
                         cur = kids[1];
                     }
                     "Gain" | "Pan" | "Biquad" => {
@@ -562,12 +624,12 @@ impl FusedDsp {
                         stages.push(match head {
                             "Gain" => {
                                 let g = *self.params.gains.get(p).ok_or_else(missing)?;
-                                Stage::Gains(g, g)
+                                Stage::Gains(vec![g], vec![g])
                             }
                             "Pan" => {
                                 let (l, r) =
                                     pan_gains(*self.params.pans.get(p).ok_or_else(missing)?);
-                                Stage::Gains(l, r)
+                                Stage::Gains(vec![l], vec![r])
                             }
                             _ => Stage::Cascade(vec![
                                 *self.params.sections.get(p).ok_or_else(missing)?,
@@ -657,6 +719,12 @@ impl FusedDsp {
     }
 }
 
+/// A product of nonzero factors is usable when it is finite and normal (a
+/// zero factor gives an exact zero).
+fn in_range(p: f32, factors: &[f32]) -> bool {
+    p.is_finite() && (p.is_normal() || (p == 0.0 && factors.contains(&0.0)))
+}
+
 /// One loop over the block; each sample passes through every stage before
 /// the next sample is read.
 fn run_chain(input: &Stereo, stages: &[Stage]) -> Result<Stereo, Error> {
@@ -674,8 +742,12 @@ fn run_chain(input: &Stereo, stages: &[Stage]) -> Result<Stereo, Error> {
         for (stage, state) in stages.iter().zip(&mut state) {
             match stage {
                 Stage::Gains(gl, gr) => {
-                    l *= gl;
-                    r *= gr;
+                    for g in gl {
+                        l *= g;
+                    }
+                    for g in gr {
+                        r *= g;
+                    }
                 }
                 Stage::Cascade(cs) => {
                     for (c, (sl, sr)) in cs.iter().zip(state.iter_mut()) {

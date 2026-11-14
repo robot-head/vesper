@@ -357,3 +357,16 @@ fn long_chains_stay_within_budget() {
         bits(&fused.evaluate(&env).unwrap())
     );
 }
+
+#[test]
+fn cloned_graphs_do_not_share_handles() {
+    let mut a = TensorGraph::new();
+    let x = a.input("x", DType::F32, 4).unwrap();
+    let mut b = a.clone();
+    let y = a.scale_f32(2.0, x).unwrap();
+    assert_eq!(b.scale_f32(3.0, x), Err(Error::InvalidNode));
+    let mut env = TensorEnv::new();
+    env.vector_f32("x", vec![1.0; 4]);
+    assert_eq!(b.evaluate(y, &env), Err(Error::InvalidNode));
+    assert!(matches!(b.fuse(y), Err(Error::InvalidNode)));
+}

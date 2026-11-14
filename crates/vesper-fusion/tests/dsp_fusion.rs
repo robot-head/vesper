@@ -297,3 +297,61 @@ fn malformed_dsp_inputs_are_typed_errors() {
     );
     assert_eq!(fused.evaluate(&env), Err(Error::NonFinite));
 }
+
+#[test]
+fn gain_composition_never_leaves_the_fp32_range() {
+    // Overflowing product: 2^64 * 2^64 is infinite, but the staged result
+    // 2^-120 * 2^64 * 2^64 = 2^8 is finite. Underflowing product:
+    // 1e-30 * 1e-30 flushes to zero, but 1e30 * 1e-30 * 1e-30 is 1e-30.
+    for (g, x) in [(2f32.powi(64), 2f32.powi(-120)), (1e-30, 1e30)] {
+        for with_biquad in [false, true] {
+            let mut g_ = DspGraph::new();
+            let src = g_.source("in").unwrap();
+            let mut cur = src;
+            if with_biquad {
+                cur = g_
+                    .biquad(Biquad::new([1.0, 0.5, 0.25], [-0.5, 0.25]).unwrap(), cur)
+                    .unwrap();
+            }
+            let a = g_.gain(g, cur).unwrap();
+            let root = g_.gain(g, a).unwrap();
+            let fused = g_.fuse(root).unwrap();
+            assert_eq!(fused.report().unwrap().passes_after, 1, "{}", fused.term());
+            let mut env = DspEnv::new();
+            env.source(
+                "in",
+                Stereo {
+                    left: vec![x, -x, 0.0],
+                    right: vec![x; 3],
+                },
+            );
+            let reference = g_.evaluate(root, &env).unwrap();
+            let out = fused.evaluate(&env).unwrap();
+            assert!(peak(&reference) > 0.0);
+            let diff = max_diff(&reference, &out);
+            assert!(
+                diff <= 1e-5 * peak(&reference),
+                "{g} {x} {with_biquad}: {reference:?} vs {out:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn cloned_graphs_do_not_share_handles() {
+    let mut a = DspGraph::new();
+    let s = a.source("in").unwrap();
+    let mut b = a.clone();
+    let x = a.gain(2.0, s).unwrap();
+    b.gain(3.0, s).unwrap_err();
+    assert!(matches!(b.fuse(x), Err(Error::InvalidNode)));
+    let mut env = DspEnv::new();
+    env.source(
+        "in",
+        Stereo {
+            left: vec![1.0],
+            right: vec![1.0],
+        },
+    );
+    assert_eq!(b.evaluate(x, &env), Err(Error::InvalidNode));
+}
