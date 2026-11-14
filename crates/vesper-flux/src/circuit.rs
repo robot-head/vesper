@@ -14,6 +14,13 @@ pub use cluster::{
     Fault, FaultKind, GcReport, LiveMigration, LiveRescale, Recovery, Rescale, run_cluster,
     run_cluster_with,
 };
+#[path = "kafka.rs"]
+mod kafka;
+pub use kafka::{
+    KafkaBinding, KafkaConfig, KafkaConnection, KafkaPosition, KafkaSink, KafkaSinkConfig,
+    KafkaSinkStats, KafkaSource, KafkaSourceLimits, KafkaSourceStats, cdc_value, kafka_record,
+    read_kafka_output,
+};
 #[path = "log.rs"]
 mod log;
 pub use log::{InputLog, LogLimits, LogRecovery};

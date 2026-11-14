@@ -18,9 +18,12 @@ pub use circuit::{
     CdcHeader, CdcPolicy, CheckpointLimits, CheckpointMode, CheckpointPhase, Circuit,
     CircuitBuilder, ClusterConfig, ClusterRun, CommitRecord, CommitSink, CommittedCheckpoint,
     CrashMedium, DurableCheckpointer, DurableReport, DurableRestore, EpochSource, Executor, Fault,
-    FaultKind, Field, GcReport, Ingested, InputLog, LiveMigration, LiveRescale, LogLimits,
-    LogRecovery, MAX_SPINE_LEVELS, MemorySink, NodeId, Predicate, QuarrySink, Recovery, Rescale,
-    SinkRecovery, SourceBinding, TickInput, WeightPolicy, run_cluster, run_cluster_with,
+    FaultKind, Field, GcReport, Ingested, InputLog, KafkaBinding, KafkaConfig, KafkaConnection,
+    KafkaPosition, KafkaSink, KafkaSinkConfig, KafkaSinkStats, KafkaSource, KafkaSourceLimits,
+    KafkaSourceStats, LiveMigration, LiveRescale, LogLimits, LogRecovery, MAX_SPINE_LEVELS,
+    MemorySink, NodeId, Predicate, QuarrySink, Recovery, Rescale, SinkRecovery, SourceBinding,
+    TickInput, WeightPolicy, cdc_value, kafka_record, read_kafka_output, run_cluster,
+    run_cluster_with,
 };
 pub use frontier::{Frontier, FrontierTicket, TicketError};
 pub use zset::{Row, ZSet};
@@ -71,6 +74,9 @@ pub enum Error {
     Partition(&'static str),
     /// Simulated cluster protocol violation or exhausted step budget.
     Cluster(&'static str),
+    /// Kafka broker, transport or topic-content failure (see
+    /// `KafkaConnection::last_error` for the client's message).
+    Kafka(&'static str),
 }
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
