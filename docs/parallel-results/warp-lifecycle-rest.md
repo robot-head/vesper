@@ -223,6 +223,21 @@ not claimed allocation-free beyond what they inherit: `append_short` and
 * Rust ownership is not evidence that Vesper's source-level typing rules
   are implemented; no new linear obligations were added.
 
+## Review follow-ups
+
+Codex review of the first head raised four points, all fixed with tests:
+
+* A server that moves to a preferred address on a different IP now resets
+  congestion state (a port-only change keeps it, as on the client).
+* When a PATH_CHALLENGE had to go out unpadded because of the
+  amplification limit, the path is validated again with a padded probe
+  before it is trusted for full-size datagrams (RFC 9000 §8.2.1);
+  `EndpointStats::mtu_revalidations` counts these.
+* The idle-restart flag is armed when a packet is received, before the
+  lifecycle handlers queue their responses, so a response that is the first
+  ack-eliciting send still restarts the timer.
+* The unknown-server-address filter also runs on the copied receive path.
+
 ## Remaining gaps
 
 * RFC 9000 §19.16's "MAY" (a RETIRE_CONNECTION_ID that names the packet's
@@ -230,8 +245,9 @@ not claimed allocation-free beyond what they inherit: `append_short` and
 * A client moves to the preferred address only after confirmation; it does
   not migrate again on its own, and a server's preferred address is used
   once per connection.
-* Packets from unknown server addresses are discarded on the 1-RTT path
-  only; long-header packets are not filtered by address.
+* Packets from unknown server addresses are discarded for 1-RTT packets
+  (both the zero-copy and the copied receive paths); long-header packets
+  are not filtered by address.
 * 1-RTT data coalescing was not seen against quinn (see Interop).
 * Hardware: no AF_XDP, hardware EDT, RSS or crypto offload exercised.
   SoftNic is lane 3's software model, which validates the modelled protocol

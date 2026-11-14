@@ -525,6 +525,11 @@ pub(crate) struct PathProbe {
     /// Client: a probe of the server's preferred address; on success the
     /// connection moves there (RFC 9000 §9.6.1).
     pub preferred: bool,
+    /// A challenge of this probe left below 1200 bytes (amplification
+    /// limit): its response validates the address, not the MTU.
+    pub unpadded_sent: bool,
+    /// This is the expanded re-validation that follows (RFC 9000 §8.2.3).
+    pub mtu_check: bool,
 }
 
 /// A connection's network path.

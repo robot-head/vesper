@@ -819,4 +819,7 @@ fn a_nat_rebinding_keeps_congestion_state_and_only_the_newest_packet_moves_the_p
     }
     net.transfer(41, 10_000, 10_000);
     assert!(net.events[1].contains(&ConnectionEvent::PathValidated(s)));
+    // §8.2.3: the challenge that validated the address was unpadded, so the
+    // path was validated again with a 1200-byte one.
+    assert_eq!(net.server.stats().mtu_revalidations, 1);
 }

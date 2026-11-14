@@ -686,6 +686,9 @@ pub struct EndpointStats {
     /// Client: datagrams from an address that is not the server's
     /// (RFC 9000 §9.6), dropped.
     pub unknown_server_address_drops: u64,
+    /// Paths validated by an unpadded challenge, then validated again with
+    /// a 1200-byte one (RFC 9000 §8.2.3).
+    pub mtu_revalidations: u64,
 }
 
 /// A connection's non-tile state. The tile (lane 6) holds the hot scalars:
@@ -765,6 +768,9 @@ struct Conn {
     /// Client: the server address the connection started on; packets from
     /// it stay accepted while the server moves (RFC 9000 §9.6.2).
     original_remote: Option<PeerAddr>,
+    /// Server: the local address the connection was accepted on, when the
+    /// caller reports it.
+    original_local: Option<PeerAddr>,
 }
 
 /// A packet waiting for its earliest departure time.
@@ -899,6 +905,8 @@ pub struct WarpEndpoint<B: XskBackend, R: Responder, T: TxTap = ()> {
     /// Destination connection ID of the next packet built, when not the
     /// active one (a preferred-address probe).
     next_dcid: Option<ConnectionId>,
+    /// The last path frame sent went out unpadded (amplification limit).
+    path_frame_unpadded: bool,
 }
 
 fn lease_key(conn: SlotHandle, pn: u64) -> u64 {
@@ -998,6 +1006,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             rx_to: None,
             next_from: None,
             next_dcid: None,
+            path_frame_unpadded: false,
         };
         if config.lifecycle.active_connection_id_limit < 2
             || usize::from(config.lifecycle.active_connection_id_limit) > MAX_ACTIVE_CIDS
@@ -1188,6 +1197,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             idle_restart_armed: false,
             preferred_remote: None,
             original_remote: self.rx_from,
+            original_local: self.rx_to,
         });
         self.closed[handle.index() as usize] = None;
         self.write_tile(handle);
@@ -1400,7 +1410,16 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         };
         if server {
             if probe.local.is_some() && probe.local != c.path.local && probe.addr == c.path.remote {
+                // §9.4: a new local IP is a new path; only a port change
+                // keeps the congestion state.
+                let rebinding = crate::lifecycle::port_only_change(
+                    c.path.local.or(c.original_local),
+                    probe.local,
+                );
                 c.path.local = probe.local;
+                if !rebinding {
+                    let _ = self.reset_cc(slot, now_ns);
+                }
                 self.stats.preferred_address_migrations += 1;
                 self.push_conn_event(ConnectionEvent::MovedToPreferredAddress(slot));
             }
@@ -1553,6 +1572,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             local,
             dcid_seq,
             preferred,
+            unpadded_sent: false,
+            mtu_check: false,
         });
         self.send_challenge(slot, now_ns);
         self.sync_life(slot, now_ns);
@@ -1580,6 +1601,12 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         self.next_dcid = None;
         if sent.is_ok() {
             self.stats.path_challenges_sent += 1;
+            let unpadded = self.path_frame_unpadded;
+            if let Ok(c) = self.conn_mut(slot)
+                && let Some(p) = c.probe.as_mut()
+            {
+                p.unpadded_sent |= unpadded;
+            }
         }
         if let Ok(c) = self.conn_mut(slot)
             && let Some(p) = c.probe.as_mut()
@@ -1601,6 +1628,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if self.conn(slot)?.keys.is_none() {
             return Err(WarpError::KeysUnavailable);
         }
+        self.path_frame_unpadded = false;
         let unpadded = frame.encode(&mut self.app_out)?;
         let mut n = unpadded;
         if pad {
@@ -1624,6 +1652,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.next_from = from;
             self.next_dcid = dcid;
             out = self.send(slot, Source::Fresh, false, unpadded, Kind::Probe, now_ns);
+            if out.is_ok() {
+                self.path_frame_unpadded = true;
+            }
         }
         self.next_to = None;
         out
@@ -1727,9 +1758,31 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 if probe.addr == c.path.remote {
                     c.path.validated = true;
                 }
-                self.stats.paths_validated += 1;
-                self.push_conn_event(ConnectionEvent::PathValidated(slot));
-                self.on_probe_validated(slot, probe, now_ns);
+                if probe.unpadded_sent && !probe.mtu_check {
+                    // RFC 9000 §8.2.3: a challenge sent below 1200 bytes
+                    // (amplification-limited) validated the address but not
+                    // the path's MTU; validate again with an expanded
+                    // challenge, now that the limit is lifted.
+                    self.start_probe_from(
+                        slot,
+                        probe.addr,
+                        probe.fallback,
+                        probe.local,
+                        probe.dcid_seq,
+                        probe.preferred,
+                        now_ns,
+                    );
+                    if let Ok(c) = self.conn_mut(slot)
+                        && let Some(p) = c.probe.as_mut()
+                    {
+                        p.mtu_check = true;
+                    }
+                    self.stats.mtu_revalidations += 1;
+                } else {
+                    self.stats.paths_validated += 1;
+                    self.push_conn_event(ConnectionEvent::PathValidated(slot));
+                    self.on_probe_validated(slot, probe, now_ns);
+                }
             }
         }
         // RFC 9000 §9.3: the server follows a client that sends its
@@ -2355,6 +2408,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             ));
         };
         let fail = |r| (Some(slot), r);
+        if ty == PacketType::OneRtt && self.unknown_server_address(slot) {
+            self.stats.unknown_server_address_drops += 1;
+            return Err(fail(DropReason::UnknownServerAddress));
+        }
         let idx = slot.index() as usize;
         let c = self.conns[idx]
             .as_mut()
@@ -2461,7 +2518,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             return Ok((slot, pn));
         }
         self.after_lifecycle(slot, pn, datagram_len, app_len, now_ns);
-        self.touch_idle(slot, now_ns);
+        // Armed by `scan_bytes`, before the lifecycle handlers could send.
+        self.restart_idle(slot, now_ns);
         self.write_tile(slot);
         if app_len > 0 {
             let _ = self.send(slot, Source::Fresh, true, app_len, Kind::Normal, now_ns);
@@ -4813,7 +4871,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         self.stats.rx_processed += 1;
         let datagram_len = self.xsk.view_frame_bytes(&frame).map_or(0, <[u8]>::len);
         self.after_lifecycle(slot, pn, datagram_len, app_len, now_ns);
-        self.touch_idle(slot, now_ns);
+        // Armed by `scan_bytes`, before the lifecycle handlers could send.
+        self.restart_idle(slot, now_ns);
         self.write_tile(slot);
 
         if !ack_eliciting {
@@ -6180,6 +6239,9 @@ fn scan_bytes<R: Responder>(
         return Err(reason);
     }
     conn.non_probing_rx = non_probing;
+    // RFC 9000 §10.1: the next ack-eliciting send (possibly a PATH_RESPONSE
+    // from the lifecycle handlers right after this) restarts the idle timer.
+    conn.idle_restart_armed = true;
     if let Some(close) = peer_close {
         conn.error = Some(close);
     }
