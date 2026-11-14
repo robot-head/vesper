@@ -1,0 +1,9 @@
+// Division by zero aborts with Fail[RuntimeError].
+fn ratio(a: i64, b: i64) -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    a / b
+}
+
+fn main() -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
+    let zero = ratio(3, 7);
+    ratio(10, zero)
+}
