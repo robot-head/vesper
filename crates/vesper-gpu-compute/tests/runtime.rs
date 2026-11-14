@@ -28,6 +28,42 @@ fn add(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 ";
 
+/// No `ArrayStride` may decorate an array type that a Workgroup pointer
+/// reaches (VUID-StandaloneSpirv-None-10684, reported by recent validation
+/// layers); storage-buffer arrays keep theirs.
+#[test]
+fn workgroup_arrays_carry_no_explicit_layout() {
+    for (entry, source) in tensor::SOURCES.iter().chain(&broadphase::SOURCES) {
+        let words = compile_wgsl(source, entry).unwrap().spirv;
+        let mut at = 5;
+        let (mut arrays, mut strided, mut workgroup) = (Vec::new(), Vec::new(), Vec::new());
+        while at < words.len() {
+            let count = (words[at] >> 16) as usize;
+            let ops = &words[at + 1..at + count];
+            match words[at] & 0xffff {
+                28 => arrays.push(ops[0]),
+                32 if ops[1] == 4 => workgroup.push(ops[2]),
+                71 if ops[1] == 6 => strided.push(ops[0]),
+                _ => {}
+            }
+            at += count;
+        }
+        for t in &workgroup {
+            assert!(
+                !strided.contains(t),
+                "{entry}: workgroup array {t} has ArrayStride"
+            );
+        }
+        assert!(
+            !strided.is_empty(),
+            "{entry}: buffer arrays keep ArrayStride"
+        );
+        if ["rms_norm", "attention", "scan_main"].contains(entry) {
+            assert!(workgroup.iter().any(|t| arrays.contains(t)), "{entry}");
+        }
+    }
+}
+
 #[test]
 fn malformed_shaders_are_typed_errors() {
     assert!(matches!(

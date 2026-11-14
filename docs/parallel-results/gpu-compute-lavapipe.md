@@ -12,7 +12,8 @@ The owner chose a software stand-in for GPU hardware on 2026-11-14. Every
 device result below is from **Mesa lavapipe** (`llvmpipe (LLVM 20.1.2, 256
 bits)`, driver info `Mesa 25.2.8-0ubuntu0.24.04.4 (LLVM 20.1.2)`, Vulkan
 1.4.318, `VkPhysicalDeviceType::CPU`) on the x86_64 cloud host, the same
-packages the new workflow installs on `ubuntu-latest`. lavapipe runs the
+packages the new workflow installs on `ubuntu-latest` (where CI got Mesa
+26.0.8 with LLVM 21.1.8). lavapipe runs the
 SPIR-V on the CPU through LLVM. It validates the kernels, the runtime
 protocol and the Vulkan API usage. It says nothing about GPU performance or
 about any hardware driver, and no performance is claimed. **Runs on a real
@@ -54,7 +55,7 @@ the Vesper source typing rules (linear resources, [T-Let]) are implemented.
 
 ## Tests and evidence
 
-21 integration tests in four files. Device tests call `test_context()`:
+22 integration tests in four files. Device tests call `test_context()`:
 without a Vulkan device they print `GPU unavailable, test not run` and
 return, unless `VESPER_GPU_REQUIRE=1` (set by the new workflow), which turns
 that into a failure, so the differential tests cannot pass vacuously there.
@@ -105,9 +106,11 @@ that into a failure, so the differential tests cannot pass vacuously there.
     same index as the CPU; too many boxes is `CapacityExceeded`; too many
     pairs is `PairOverflow` with `out` cleared; the broadphase is reusable
     afterwards.
-- `tests/runtime.rs` (6):
+- `tests/runtime.rs` (7):
   - Every bundled kernel compiles to SPIR-V (runs everywhere, including the
     Bazel, macOS and Windows jobs, which have no device).
+  - No workgroup-memory array carries an `ArrayStride` decoration (see
+    "Decisions"); buffer arrays keep theirs.
   - Malformed WGSL, a missing or non-compute entry point, a uniform binding,
     a binding gap, group 1, an ill-typed store and oversized source are
     typed `ShaderError`s.
@@ -131,9 +134,9 @@ CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`):
 
 ```sh
 apt-get install mesa-vulkan-drivers vulkan-tools vulkan-validationlayers   # Mesa 25.2.8
-VESPER_GPU_REQUIRE=1 cargo test -p vesper-gpu-compute                       # 21 passed
+VESPER_GPU_REQUIRE=1 cargo test -p vesper-gpu-compute                       # 22 passed
 VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation VESPER_GPU_REQUIRE=1 \
-  cargo test -p vesper-gpu-compute -- --test-threads=1                     # 21 passed, 0 validation messages
+  cargo test -p vesper-gpu-compute -- --test-threads=1                     # 22 passed, 0 validation messages
 VK_ICD_FILENAMES=/nonexistent.json cargo test -p vesper-gpu-compute        # device tests report unavailable; compile tests pass
 VK_ICD_FILENAMES=/nonexistent.json VESPER_GPU_REQUIRE=1 cargo test ...     # fails, as intended
 cargo fmt --all -- --check                                                  # pass
@@ -166,6 +169,15 @@ cargo test --workspace --locked                                             # se
   quantisation also matched bit for bit (WGSL division is not correctly
   rounded). Sort and sweep yields the same pair set with integer-only
   comparisons. The CPU LBVH remains the reference it is compared with.
+- **Workgroup layout fix-up.** naga 30 decorates every array type with
+  `ArrayStride`, including arrays in workgroup memory, which Vulkan forbids
+  without `VK_KHR_workgroup_memory_explicit_layout`. The Ubuntu 24.04
+  validation layer (1.3.275) does not check this; the newer one on the CI
+  runner reported `VUID-StandaloneSpirv-None-10684` for the RMSNorm,
+  attention and scan kernels. `shader::strip_workgroup_layout` replaces
+  those decorations with `OpNop` words after naga emits the module, and
+  refuses a module whose array type is shared between workgroup memory and
+  a buffer. Lane 32 uses the same naga and may need the same pass.
 - **Memory.** All buffers are host-visible and coherent. On lavapipe all
   memory is; on a discrete GPU this would be correct but slow.
 - **Synchronisation.** One queue; a full memory barrier after each dispatch;

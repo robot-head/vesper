@@ -50,6 +50,91 @@ impl std::error::Error for ShaderError {}
 /// Upper bound on WGSL source size accepted (1 MiB).
 pub const MAX_SOURCE_BYTES: usize = 1 << 20;
 
+const OP_TYPE_ARRAY: u32 = 28;
+const OP_TYPE_POINTER: u32 = 32;
+const OP_DECORATE: u32 = 71;
+const OP_NOP: u32 = 0;
+const DECORATION_ARRAY_STRIDE: u32 = 6;
+const STORAGE_CLASS_WORKGROUP: u32 = 4;
+
+/// naga 30 decorates every array type with `ArrayStride`, including arrays
+/// that only live in workgroup memory. Explicit layout on Workgroup storage is
+/// invalid without `VK_KHR_workgroup_memory_explicit_layout`
+/// (`VUID-StandaloneSpirv-None-10684`, reported by recent Khronos validation
+/// layers). This pass removes `ArrayStride` from array types reachable only
+/// from Workgroup pointers, replacing each such `OpDecorate` with `OpNop`
+/// words so no other offset moves. An array type shared with another storage
+/// class is an [`ShaderError::Interface`] error rather than a silent change.
+pub fn strip_workgroup_layout(words: &mut [u32]) -> Result<(), ShaderError> {
+    use std::collections::{HashMap, HashSet};
+    let malformed = || ShaderError::Backend("malformed SPIR-V from naga".into());
+    if words.len() < 5 {
+        return Err(malformed());
+    }
+    // First pass: instruction offsets, array element types, pointer pointees.
+    let mut array_elem: HashMap<u32, u32> = HashMap::new();
+    let mut pointers: Vec<(u32, u32)> = Vec::new(); // (storage class, pointee)
+    let mut decorations: Vec<(usize, u32)> = Vec::new(); // (offset, target)
+    let mut at = 5;
+    while at < words.len() {
+        let count = (words[at] >> 16) as usize;
+        let opcode = words[at] & 0xffff;
+        if count == 0 || at + count > words.len() {
+            return Err(malformed());
+        }
+        let ops = &words[at + 1..at + count];
+        match opcode {
+            OP_TYPE_ARRAY if ops.len() >= 2 => {
+                array_elem.insert(ops[0], ops[1]);
+            }
+            OP_TYPE_POINTER if ops.len() >= 3 => pointers.push((ops[1], ops[2])),
+            OP_DECORATE if ops.len() >= 3 && ops[1] == DECORATION_ARRAY_STRIDE => {
+                decorations.push((at, ops[0]));
+            }
+            _ => {}
+        }
+        at += count;
+    }
+    let reach = |roots: &mut dyn Iterator<Item = u32>| {
+        let mut out = HashSet::new();
+        for mut t in roots {
+            while let Some(&elem) = array_elem.get(&t) {
+                if !out.insert(t) {
+                    break;
+                }
+                t = elem;
+            }
+        }
+        out
+    };
+    let workgroup = reach(
+        &mut pointers
+            .iter()
+            .filter(|(c, _)| *c == STORAGE_CLASS_WORKGROUP)
+            .map(|(_, t)| *t),
+    );
+    let other = reach(
+        &mut pointers
+            .iter()
+            .filter(|(c, _)| *c != STORAGE_CLASS_WORKGROUP)
+            .map(|(_, t)| *t),
+    );
+    if workgroup.iter().any(|t| other.contains(t)) {
+        return Err(ShaderError::Interface(
+            "an array type is used both in workgroup memory and in a buffer".into(),
+        ));
+    }
+    for (offset, target) in decorations {
+        if workgroup.contains(&target) {
+            let count = (words[offset] >> 16) as usize;
+            for w in &mut words[offset..offset + count] {
+                *w = (1 << 16) | OP_NOP;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Compiles the compute entry point `entry` of `source`.
 pub fn compile_wgsl(source: &str, entry: &str) -> Result<Compiled, ShaderError> {
     if source.len() > MAX_SOURCE_BYTES {
@@ -122,8 +207,9 @@ pub fn compile_wgsl(source: &str, entry: &str) -> Result<Compiled, ShaderError> 
         shader_stage: naga::ShaderStage::Compute,
         entry_point: entry.to_owned(),
     };
-    let spirv = spv::write_vec(&module, &info, &options, Some(&pipeline))
+    let mut spirv = spv::write_vec(&module, &info, &options, Some(&pipeline))
         .map_err(|e| ShaderError::Backend(e.to_string()))?;
+    strip_workgroup_layout(&mut spirv)?;
     Ok(Compiled {
         spirv,
         storage_bindings: bindings.len() as u32,
