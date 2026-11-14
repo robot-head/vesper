@@ -149,6 +149,9 @@ def unpackOwners : RawProgram := closed (.letE 0 (.mint 1) (.letE 2 (.mint 3)
       (.consume 13 (.var 14 2)))))))
 def strictInitializer : RawProgram := closed
   (.letE 0 (.letE 1 (.mint 2) (.consume 3 (.var 4 0))) (.atom (.unit 5)))
+def sequentialResources : RawProgram := closed
+  (.letE 0 (.letE 1 (.mint 2) (.consume 3 (.var 4 0)))
+    (.letE 5 (.mint 6) (.consume 7 (.var 8 0))))
 def branchConsumes : RawProgram := closed (.letE 0 (.mint 1)
   (.ifz 2 (.nat 3 0) (.consume 4 (.var 5 0)) (.consume 6 (.var 7 0))))
 def branchMints : RawProgram := ⟨#[.nat], .ifz 0 (.var 1 0) (.mint 2) (.mint 3)⟩
@@ -262,6 +265,10 @@ theorem mint_consume_takes_three_full_steps :
     evaluate mintConsume #[] 3 =
       .ok ⟨.completed .unit,[⟨.mint,1,0⟩,⟨.consume,2,0⟩],[],
         [.mint 0,.silent,.consume 0],.atom (.val .unit)⟩ := by rfl
+theorem moving_to_a_new_slot_neither_remints_nor_consumes :
+    evaluate movedOwner #[] 4 =
+      .ok ⟨.completed .unit,[⟨.mint,1,0⟩,⟨.consume,4,0⟩],[],
+        [.mint 0,.silent,.silent,.consume 0],.atom (.val .unit)⟩ := by rfl
 theorem predecessor_fuel_retains_current_term_and_owner :
     evaluate mintConsume #[] 2 =
       .ok ⟨.fuelExhausted,[⟨.mint,1,0⟩],[(0,⟨1,true⟩)],
@@ -328,6 +335,16 @@ theorem consume_event_refusal_keeps_owner_and_prior_silent_step :
     evaluate mintConsume #[] 3 {events := 1} =
       .ok ⟨.resourceLimit (.events 2 1),[⟨.mint,1,0⟩],[(0,⟨1,true⟩)],
         [.mint 0,.silent],.consume 2 (.val (.hdl 0))⟩ := by rfl
+theorem consumed_serials_are_not_reused_by_later_mints :
+    evaluate sequentialResources #[] 7 {resources := 2,events := 4} =
+      .ok ⟨.completed .unit,[⟨.mint,2,0⟩,⟨.consume,3,0⟩,⟨.mint,6,1⟩,⟨.consume,7,1⟩],[],
+        [.mint 0,.silent,.consume 0,.silent,.mint 1,.silent,.consume 1],
+        .atom (.val .unit)⟩ := by rfl
+theorem resource_cap_counts_consumed_tombstones_without_cleanup :
+    evaluate sequentialResources #[] 7 {resources := 1} =
+      .ok ⟨.resourceLimit (.resources 2 1),[⟨.mint,2,0⟩,⟨.consume,3,0⟩],[],
+        [.mint 0,.silent,.consume 0,.silent],
+        .letE (.mint 6) (.consume 7 (.var 0))⟩ := by rfl
 
 def dynamicGrowth : RawProgram := closed (.letE 0 (.mint 1)
   (.letE 2 (.atom (.nat 3 7))
