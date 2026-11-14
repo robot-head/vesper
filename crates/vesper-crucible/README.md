@@ -43,12 +43,25 @@ println!("{}", cx.tape.to_text()); // save as a regression tape
 - `explore_exhaustive` enumerates every schedule; `explore_dpor` explores at
   least one per Mazurkiewicz trace (persistent-set DPOR with sleep sets over
   declared step footprints). Tests check both find the same outcomes.
+- `ExploreConfig::preemption_bound` limits both explorers to schedules with
+  at most `k` preemptions (bounded DPOR uses conservative block-start and
+  continuation backtracking and no sleep sets), and `explore_cached` adds
+  state caching from a caller-supplied world/fiber key.
+- Fibers can spawn fibers (`StepCx::spawn` + `SimFiber::take_spawned`) and
+  request cancellation (`StepCx::request_cancel`, observed through
+  `StepCx::cancel_requested`); `IoRequest::ExternalChoice` lets the explorer
+  choose an external completion's result from a declared `IoChoices` set.
 - `VirtualArena`: a 64 KiB `vesper-alloc` region reset after every
   execution, with `ArbitraryIn` generators that draw straight into it and a
   reusable source; warmed-up executions do not allocate (counted).
 
 DPOR's reduction is only as sound as the declared footprints (an access
-outside one is a typed error) and is validated differentially, not proved.
+outside one is a typed error) and is validated differentially.
+`lean/CrucibleDpor.lean` proves, for a model of sleep-set exploration over an
+abstract transition system whose independent actions commute, that every
+Mazurkiewicz trace class of maximal executions is visited; it is not a proof
+about this crate's code, and it does not model persistent sets, preemption
+bounding or caching.
 
 Not here: Cranelift instrumentation of Vesper source, the `vesper fuzz` CLI,
 MPK differential shadowing (lane 11 / integration), and the source-level
