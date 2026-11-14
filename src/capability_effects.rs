@@ -439,6 +439,111 @@ fn used_names(e: &Expr, out: &mut BTreeSet<String>) {
     }
 }
 
+/// The source spans that run with subnormals flushed to zero: every
+/// `eff [ConstDenorm]` function and every closure that declares
+/// `ConstDenorm`. Both backends flush the operands (DAZ) and the result
+/// (FTZ) of each `f64` arithmetic operation and comparison whose span lies
+/// in one of them; moving a value does not flush it, as in hardware.
+pub fn const_denorm_spans(world: &World) -> Vec<Span> {
+    fn closures(e: &Expr, out: &mut Vec<Span>) {
+        if let ExprKind::Closure { effects, .. } = &e.kind
+            && capabilities(effects).contains(&Capability::ConstDenorm)
+        {
+            out.push(e.span.clone());
+        }
+        each_child(e, &mut |c| closures(c, out));
+    }
+    let mut out = vec![];
+    for f in world.functions.values() {
+        if capabilities(&f.effects).contains(&Capability::ConstDenorm) {
+            out.push(f.span.clone());
+        } else if let Some(body) = &f.body {
+            closures(body, &mut out);
+        }
+    }
+    out
+}
+
+/// Whether `span` lies inside one of `spans` (see [`const_denorm_spans`]).
+pub fn flushes_subnormals(spans: &[Span], span: &Span) -> bool {
+    spans
+        .iter()
+        .any(|s| s.start <= span.start && span.end <= s.end && span.start < span.end)
+}
+
+/// Flush-to-zero of one `f64`: a subnormal becomes a zero of the same sign.
+pub fn flush_subnormal(x: f64) -> f64 {
+    if x.is_subnormal() {
+        0.0f64.copysign(x)
+    } else {
+        x
+    }
+}
+
+/// Calls `f` on each direct subexpression of `e`.
+fn each_child(e: &Expr, f: &mut dyn FnMut(&Expr)) {
+    match &e.kind {
+        ExprKind::Literal(_) | ExprKind::Name(_) => {}
+        ExprKind::Tuple(es) => {
+            for e in es {
+                f(e);
+            }
+        }
+        ExprKind::Struct { fields, .. } => fields.iter().for_each(|(_, e)| f(e)),
+        ExprKind::Block { statements, tail } => {
+            for s in statements {
+                match s {
+                    Statement::Let { value, .. } => f(value),
+                    Statement::Expr(e) => f(e),
+                }
+            }
+            if let Some(t) = tail {
+                f(t);
+            }
+        }
+        ExprKind::Call { callee, args, .. } => {
+            f(callee);
+            args.iter().for_each(|a| f(&a.expr));
+        }
+        ExprKind::Field(base, _) => f(base),
+        ExprKind::Index(a, b) | ExprKind::Binary(_, a, b) | ExprKind::Assign(_, a, b) => {
+            f(a);
+            f(b);
+        }
+        ExprKind::Try(v) | ExprKind::Unary(_, v) => f(v),
+        ExprKind::If {
+            condition,
+            then,
+            otherwise,
+        } => {
+            f(condition);
+            f(then);
+            if let Some(o) = otherwise {
+                f(o);
+            }
+        }
+        ExprKind::Match { value, arms } => {
+            f(value);
+            arms.iter().for_each(|(_, b)| f(b));
+        }
+        ExprKind::Closure { body, .. } => f(body),
+        ExprKind::Handle {
+            state,
+            body,
+            ret,
+            ops,
+            ..
+        } => {
+            if let Some((_, s)) = state {
+                f(s);
+            }
+            f(body);
+            f(&ret.body);
+            ops.iter().for_each(|op| f(&op.body));
+        }
+    }
+}
+
 /// The operator implemented by a bitwise intrinsic name.
 pub fn bit_intrinsic(name: &str) -> Option<&'static str> {
     BIT_INTRINSICS
@@ -1258,41 +1363,7 @@ impl<'w> Walker<'w> {
                     self.binary(e, op.trim_end_matches('='), place, value, p, p | v);
                 }
                 if v && let Some(root) = place_root(place) {
-                    let public = self.local(&root).is_some_and(|l| l.public_param);
-                    let param_inout = self
-                        .function
-                        .params
-                        .iter()
-                        .any(|q| q.name == root && q.pass == Pass::Inout);
-                    let index = self.function.params.iter().position(|q| q.name == root);
-                    let named = self.world.functions.contains_key(&self.function.name)
-                        && !self.summaries.address_taken.contains(&self.function.name);
-                    if ct
-                        && public
-                        && param_inout
-                        && named
-                        && let Some(i) = index
-                    {
-                        // An inferred output: direct callers see a secret
-                        // in their argument place after the call.
-                        self.found
-                            .outputs
-                            .entry(self.function.name.clone())
-                            .or_default()
-                            .insert(i);
-                    } else if ct && public && param_inout {
-                        self.error(
-                            "E0705",
-                            format!(
-                                "eff [ConstTime] writes a secret-derived value into public inout parameter '{root}'"
-                            ),
-                            e.span.clone(),
-                            "give the parameter a secret type or declassify explicitly",
-                        );
-                    }
-                    if let Some(l) = self.local_mut(&root) {
-                        l.tainted = true;
-                    }
+                    self.secret_into_place(&root, e.span.clone());
                 }
                 false
             }
@@ -1702,6 +1773,48 @@ impl<'w> Walker<'w> {
         }
     }
 
+    /// A secret-derived value lands in the place rooted at `root`. Writing
+    /// into one of this function's public `inout` parameters is an inferred
+    /// output when every caller is a direct call, and E0705 otherwise.
+    fn secret_into_place(&mut self, root: &str, span: Span) {
+        let ct = self.has(Capability::ConstTime);
+        let public = self.local(root).is_some_and(|l| l.public_param);
+        let param_inout = self
+            .function
+            .params
+            .iter()
+            .any(|q| q.name == root && q.pass == Pass::Inout);
+        let index = self.function.params.iter().position(|q| q.name == root);
+        let named = self.world.functions.contains_key(&self.function.name)
+            && !self.summaries.address_taken.contains(&self.function.name);
+        if ct
+            && public
+            && param_inout
+            && named
+            && let Some(i) = index
+        {
+            // An inferred output: direct callers see a secret in their
+            // argument place after the call.
+            self.found
+                .outputs
+                .entry(self.function.name.clone())
+                .or_default()
+                .insert(i);
+        } else if ct && public && param_inout {
+            self.error(
+                "E0705",
+                format!(
+                    "eff [ConstTime] writes a secret-derived value into public inout parameter '{root}'"
+                ),
+                span,
+                "give the parameter a secret type or declassify explicitly",
+            );
+        }
+        if let Some(l) = self.local_mut(root) {
+            l.tainted = true;
+        }
+    }
+
     fn call(&mut self, e: &Expr, callee: &Expr, args: &[Arg]) -> bool {
         let callee_taint = match &callee.kind {
             ExprKind::Field(base, _) => self.expr(base),
@@ -1761,13 +1874,14 @@ impl<'w> Walker<'w> {
                 }
                 // `inout` arguments the callee writes secrets into are
                 // secret afterwards.
-                if let Some(outputs) = self.summaries.outputs.get(&f.name) {
-                    for i in outputs {
+                if let Some(outputs) = self.summaries.outputs.get(&f.name).cloned() {
+                    for i in &outputs {
                         if let Some((_, arg)) = flows.get(*i)
                             && let Some(root) = place_root(arg)
-                            && let Some(l) = self.local_mut(&root)
                         {
-                            l.tainted = true;
+                            // Forwarding the place on: an inout parameter of
+                            // this function becomes an inferred output too.
+                            self.secret_into_place(&root, arg.span.clone());
                         }
                     }
                 }
@@ -1804,6 +1918,13 @@ impl<'w> Walker<'w> {
                     };
                     if value_args.iter().any(|t| *t) {
                         self.found.resumed.insert((effect, op));
+                    }
+                    // Resume arguments still flow into typed positions:
+                    // capability-carrying function values are coerced.
+                    if let Some(Type::Function { params, .. }) = &ty {
+                        for (a, (_, p)) in args.iter().zip(params) {
+                            self.coerce(&a.expr, p);
+                        }
                     }
                     return any || result;
                 }

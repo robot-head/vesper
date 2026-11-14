@@ -512,3 +512,24 @@ fn lean_model_checks_without_axioms_or_sorry() {
     assert!(out.status.success(), "{all}");
     assert!(!all.contains("declaration uses 'sorry'"), "{all}");
 }
+
+#[test]
+fn const_denorm_flushes_subnormals_on_both_backends() {
+    // f64::MIN_POSITIVE * 0.5 is subnormal: ConstDenorm code flushes it to a
+    // zero of the same sign, plain code keeps it.
+    let source = "fn flushed(x: f64) -> f64 eff [ConstDenorm] { x * 0.5 } \
+                  fn negated(x: f64) -> f64 eff [ConstDenorm] { let y: f64 = x; y *= 0.5; -y } \
+                  fn plain(x: f64) -> f64 { x * 0.5 } \
+                  fn main() -> u64 { \
+                    let t: f64 = 2.2250738585072014e-308; \
+                    let a: u64 = if flushed(t) == 0.0 { 1 } else { 0 }; \
+                    let b: u64 = if plain(t) > 0.0 { 2 } else { 0 }; \
+                    let n: f64 = negated(t); \
+                    let c: u64 = if n == 0.0 { if 1.0 / n < 0.0 { 4 } else { 0 } } else { 0 }; \
+                    let d: u64 = if flushed(4.0) == 2.0 { 8 } else { 0 }; \
+                    wrapping_add(wrapping_add(a, b), wrapping_add(c, d)) }";
+    let c = checked(source);
+    assert!(c.diagnostics.is_empty(), "{:?}", c.diagnostics);
+    assert_eq!(evaluate(&c.world), "15");
+    assert_eq!(native::jit(&c.world, "main").unwrap().to_string(), "15");
+}
