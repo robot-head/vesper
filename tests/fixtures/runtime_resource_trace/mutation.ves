@@ -1,0 +1,59 @@
+linear struct Ticket {}
+linear struct Ghost {}
+copy struct Pair {
+    left: Ticket,
+    right: Ticket
+}
+fn close(sink ticket: Ticket) {
+    let Ticket {}
+    = ticket;
+}
+
+fn routing() -> i64 {
+    let first = Ticket {};
+    let second = Ticket {};
+    let pair = Pair {
+        left: first,
+        right: second
+    };
+    let Pair {
+        left,
+        right
+    }
+    = pair;
+    close(left);
+    close(right);
+    42
+}
+
+fn duplicated_return() -> (Ticket, Ticket) {
+    let first = Ticket {};
+    let second = Ticket {};
+    (first, second)
+}
+
+fn batch() {
+    let first = Ticket {};
+    let second = Ticket {};
+    let (Ticket {}, Ticket {}) = (first, second);
+}
+
+fn dead_return() -> Ticket {
+    let first = Ticket {};
+    let second = Ticket {};
+    close(first);
+    second
+}
+
+fn wrong_return() -> (Ticket, Ghost) {
+    let ticket = Ticket {};
+    let ghost = Ghost {};
+    (ticket, ghost)
+}
+
+fn error_after_mint() -> i64 {
+    let ticket = Ticket {};
+    let Ticket {}
+    = ticket;
+    42
+}

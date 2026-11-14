@@ -1,0 +1,43 @@
+linear struct Ticket {}
+linear effect Ask {
+    fn ask() -> i64;
+}
+linear effect Inspect {
+    fn inspect(in ticket: Ticket);
+}
+linear effect Consume {
+    fn consume(sink first: Ticket, sink second: Ticket, expected: bool);
+}
+
+fn handler_return() -> i64 {
+    handle Ask in {
+        Ticket {}
+    } with {
+        return Ticket {}
+        => 42,
+        ask(k) => k(0),
+    }
+}
+
+fn borrowed_handler() -> i64 {
+    let ticket = Ticket {};
+    handle Inspect in {
+        Inspect::inspect(in ticket);
+        let Ticket {}
+        = ticket;
+        42
+    } with {
+        return value => value,
+        inspect(Ticket {}, k) => k(()),
+    }
+}
+
+fn clause_transaction() -> i64 {
+    handle Consume in {
+        Consume::consume(Ticket {}, Ticket {}, false);
+        42
+    } with {
+        return value => value,
+        consume(Ticket {}, Ticket {}, expected, k) => k(()),
+    }
+}

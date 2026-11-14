@@ -1,9 +1,10 @@
 # vesper-serde
 
-Bounded scalar Rust host JSON and binary codec slices from design §20.
-It has no dependencies and forbids unsafe code. It does not provide source
-macros, source Region typing, linear-resource deserialization, SIMD kernels,
-arbitrary object-graph archives, NDJSON/AoSoA ingestion, or
+Bounded Rust host JSON and binary codec slices from design §20. It has no
+runtime dependencies. `unsafe` is denied except in one gated module of
+`std::arch` stage 1 kernels (see "Two-stage SIMD parsing" below). It does not
+provide source macros, source Region typing, the `eff [Isa[P]]` source effect,
+linear-resource deserialization, arbitrary object-graph archives or
 throughput guarantees. The versioned tree archive below is an explicit host
 format, not a generic source-derive archive ABI.
 
@@ -67,6 +68,60 @@ Run the self-checking example with:
 ```sh
 cargo run -p vesper-serde --example bounded_json
 ```
+
+## Two-stage SIMD parsing (§20.3, §20.5)
+
+Stage 1 (`simd::StructuralIndex::build`) reads 64-byte blocks and produces the
+`u32` positions of every operator, opening and closing quote and scalar start
+outside strings, the positions of escape-starting backslashes inside strings,
+and a UTF-8 verdict. Each path classifies bytes with nibble shuffle tables,
+detects odd backslash runs with branchless carry arithmetic, finds string
+interiors with a carry-less-multiply prefix XOR and validates UTF-8 with the
+Keiser–Lemire lookup tables. Paths: `Isa::Avx2` and `Isa::Sse42` (x86_64,
+with PCLMULQDQ), `Isa::Neon` (AArch64, with PMULL) and `Isa::Scalar`, a
+byte-at-a-time reference that is always available. `Isa::detect()` picks the
+fastest at run time. Every path produces bit-identical per-block masks
+(`simd::block_masks`), which the tests check on random and adversarial input.
+
+Stage 2 (`IndexedJson::parse_simd`, `parse_with_isa`, or the reusable
+`SimdParser`) validates the document over the structural index with a bounded
+explicit stack and builds the same subtree-skipping token tape as
+`IndexedJson::parse`. On every input the scalar parser accepts, it produces an
+identical tape and `work_used`; it rejects the same inputs. Nothing is decoded
+during stage 2: numbers are converted and escaped strings unescaped only when
+`Node`/`Cursor` reads them, and unescaped strings borrow the input. Stage 1
+allocates its position vector, bounded by `min(input, 4 * max_tokens + 1)`
+entries, in addition to the token tape; `SimdParser` keeps both buffers between
+documents, so steady-state parsing of no larger documents makes no allocation.
+
+`NdjsonBatch::parse` now indexes records with `ndjson::Engine::detect()` (SIMD
+when available, sharing one stage 1 buffer across records);
+`NdjsonBatch::parse_with(.., Engine::Scalar)` keeps the recursive-descent path.
+Batch statistics and `event_columns` projections are identical either way.
+`tiles::TelemetryIngestor` decodes the §20.5 `TelemetryPoint` schema from
+NDJSON into 16-wide AoSoA tiles (64-byte-aligned hot columns, separate cold
+trace ids), transactionally and, once warm, without heap allocation.
+
+```rust
+use vesper_serde::{IndexedJson, Limits, SimdParser, simd::Isa};
+
+let doc = IndexedJson::parse_simd(br#"{"id":42,"skip":[1,{"a":2}],"t":"x"}"#, Limits::default())?;
+assert_eq!(doc.root().field("id", 1024)?.unwrap().as_u64()?, 42);
+let mut parser = SimdParser::new();
+let t = parser.parse(br#"{"t":"borrowed"}"#, Limits::default(), |d| {
+    d.root().field("t", 1024).map(|n| n.map(|n| n.raw()))
+})??;
+assert_eq!(t, Some("\"borrowed\""));
+assert!(Isa::Scalar.is_available());
+# Ok::<(), vesper_serde::Error>(())
+```
+
+`examples/simd_throughput.rs` measures stage 1, full parsing and tile
+ingestion per path; see `docs/parallel-results/serde-simd-json.md` for numbers
+measured on one machine. `lean/SimdJsonEscape.lean` proves, with `bv_decide`,
+that a Lean model of the branchless escape kernel satisfies the scalar
+reference's recurrence for all 64-bit masks; it is not a proof about the
+compiled Rust code.
 
 ## Finite binary64 JSON
 
