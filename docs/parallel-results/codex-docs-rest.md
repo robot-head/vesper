@@ -107,14 +107,14 @@ failures, never skips (e.g. an ambient effect with no handler).
 ## Measured doc-build time
 
 Linux x86_64 cloud host (4 vCPU), wall time per process including process
-start, 10 runs each, `scripts`-free Python `subprocess` loop; files are the two
-example sources:
+start, 10 runs each, timed with a Python `subprocess` loop; files are the two
+example sources. No release build was timed:
 
-| Command | dev build (`target/debug`) | release build |
-| --- | --- | --- |
-| `vesper doc broker.ves --bundle OUT` | median 14.7 ms (min 13.3, max 58.1) | RELEASE_BUNDLE |
-| `vesper doc ledger.ves` (HTML) | median 12.2 ms (min 10.2, max 14.7) | RELEASE_HTML |
-| `vesper test --doc ledger.ves` (3 examples: compile_fail, JIT, SimPulse) | median 79.7 ms (min 76.8, max 102.2) | RELEASE_TEST |
+| Command | dev build (`target/debug`, unoptimized) |
+| --- | --- |
+| `vesper doc broker.ves --bundle OUT` | median 14.7 ms (min 13.3, max 58.1) |
+| `vesper doc ledger.ves` (HTML) | median 12.2 ms (min 10.2, max 14.7) |
+| `vesper test --doc ledger.ves` (3 examples: compile_fail, JIT, SimPulse) | median 79.7 ms (min 76.8, max 102.2) |
 
 These are measurements of these two small files only, not a general
 sub-100-millisecond claim.
@@ -151,7 +151,21 @@ sub-100-millisecond claim.
 
 ## Checks (local, Linux x86_64)
 
-CHECKS
+```sh
+cargo fmt --all -- --check                                              # clean
+cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings # clean
+cargo test -p vesper-doc                                                # pass
+cargo test -p vesper --test codex_rest_cli --test codex_cli --test doctest_cli --test doc_cli --test doc_links  # pass
+cargo test --workspace --locked --no-fail-fast                          # 537 suites pass; 4 fail
+vesper fmt --check crates/vesper-doc/examples/broker.ves               # unchanged
+```
+
+The four failing suites need a local Lean toolchain or a prepared Lean4Lean
+candidate, which this cloud host lacks, and do not touch this lane's code:
+`lean4lean42_acceptance` (`VESPER_LEAN4LEAN42_ROOT` unset), `oracle42_acceptance`
+and `replay42_kernel` (`lean` not on `PATH`), and `oracle42_runner` (the same
+missing `lean` surfaces as `Io` instead of `UnsupportedProfile`). They run in
+Linux CI, where Lean is installed. The Node parity check ran locally (Node 22).
 
 ## Root patch and other paths
 
