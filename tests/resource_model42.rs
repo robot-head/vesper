@@ -19,6 +19,8 @@ const CAPTURE: usize = 8 * 1024 * 1024;
 const SOURCE_CAP: usize = 4 * 1024 * 1024;
 const SOURCE_COUNT: usize = 24;
 const TOTAL_SECONDS: u64 = 900;
+const SNAPSHOT_MARKER: &str = "VESPER_RESOURCE_KERNEL_SNAPSHOT_V1:";
+const PROJECTED_MODULE: &str = "ResourceModel42Kernel";
 
 struct Captured {
     status: ExitStatus,
@@ -130,6 +132,11 @@ fn execute(command: &mut Command, seconds: u64, target_start: Instant) -> Captur
         stdout,
         stderr,
     };
+    assert!(
+        !captured.diagnostic().contains("PANIC"),
+        "actual Lean panic is never success: {}",
+        captured.diagnostic()
+    );
     assert!(
         !refused && !overflow,
         "real process exceeded finite time/output budget: {command:?}\n{}",
@@ -448,6 +455,68 @@ struct Fixture {
     prefix: PathBuf,
     started: Instant,
 }
+
+type ArtifactHashes = BTreeMap<String, (u64, String)>;
+
+fn artifact_hashes(root: &Path) -> ArtifactHashes {
+    fn visit(root: &Path, directory: &Path, hashes: &mut ArtifactHashes, total: &mut u64) {
+        for entry in fs::read_dir(directory).unwrap() {
+            let entry = entry.unwrap();
+            if entry.file_type().unwrap().is_dir() {
+                visit(root, &entry.path(), hashes, total);
+                continue;
+            }
+            assert!(
+                entry.file_type().unwrap().is_file(),
+                "private artifact must be regular"
+            );
+            assert!(hashes.len() < 4096);
+            let size = entry.metadata().unwrap().len();
+            *total = total.checked_add(size).unwrap();
+            assert!(
+                *total <= 128 * 1024 * 1024,
+                "bounded actual artifact inventory"
+            );
+            let mut hasher = blake3::Hasher::new();
+            let mut file = fs::File::open(entry.path()).unwrap();
+            let mut buffer = [0; 8192];
+            let mut read = 0u64;
+            loop {
+                let count = file.read(&mut buffer).unwrap();
+                if count == 0 {
+                    break;
+                }
+                read += count as u64;
+                assert!(read <= size, "artifact changed while hashing");
+                hasher.update(&buffer[..count]);
+            }
+            assert_eq!(read, size);
+            let relative = entry
+                .path()
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            assert!(
+                hashes
+                    .insert(relative, (size, hasher.finalize().to_hex().to_string()))
+                    .is_none()
+            );
+        }
+    }
+    let mut hashes = BTreeMap::new();
+    visit(root, root, &mut hashes, &mut 0);
+    hashes
+}
+
+struct Projection {
+    fixture: Fixture,
+    module: String,
+    report: Value,
+    original_hashes: ArtifactHashes,
+    projected_hashes: ArtifactHashes,
+    tool_blake3: String,
+}
 impl Fixture {
     fn new(started: Instant) -> Self {
         let launcher = std::env::var_os("VESPER_LEAN").unwrap_or_else(|| "lean".into());
@@ -511,6 +580,203 @@ impl Fixture {
             300,
             self.started,
         )
+    }
+    fn sibling(&self, label: &str, create: bool) -> Self {
+        assert!(valid_name(label));
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "vesper-resource-model42-case-{}-{}-{label}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        assert!(!root.exists());
+        if create {
+            fs::create_dir(&root).unwrap();
+        }
+        Self {
+            root,
+            lean: self.lean.clone(),
+            vesper: self.vesper.clone(),
+            prefix: self.prefix.clone(),
+            started: self.started,
+        }
+    }
+    fn snapshot_attempt(
+        &self,
+        module: &str,
+        output_module: &str,
+    ) -> (Captured, Self, ArtifactHashes, String) {
+        let output = self.sibling("Projection", false);
+        let request_directory = CaptureFiles::new();
+        let request_path = request_directory.root.join("request.json");
+        let request = json!({"schema_version":1,"root":self.root.canonicalize().unwrap(),
+            "toolchain_prefix":self.prefix,"module":module,
+            "output_root":output.root,"output_module":output_module});
+        fs::write(&request_path, serde_json::to_vec(&request).unwrap()).unwrap();
+        let tool = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tools/resource-model42/KernelSnapshot.lean")
+            .canonicalize()
+            .unwrap();
+        let tool_source = read_source(&tool).text;
+        let tool_blake3 = blake3::hash(tool_source.as_bytes()).to_hex().to_string();
+        let before = artifact_hashes(&self.root);
+        let mut command = Command::new(&self.lean);
+        command
+            .env_clear()
+            .current_dir(&request_directory.root)
+            .env("LEAN_PATH", self.prefix.join("lib/lean"))
+            .env("LEAN_NUM_THREADS", "1")
+            .env("LEAN_ABORT_ON_PANIC", "1");
+        windows_environment(&mut command);
+        let captured = execute(
+            command
+                .args(["-j1", "-M4096", "--run"])
+                .arg(&tool)
+                .arg(&request_path),
+            300,
+            self.started,
+        );
+        assert_eq!(
+            before,
+            artifact_hashes(&self.root),
+            "snapshot must not change original input bytes"
+        );
+        assert_eq!(
+            tool_blake3,
+            blake3::hash(read_source(&tool).text.as_bytes())
+                .to_hex()
+                .to_string()
+        );
+        (captured, output, before, tool_blake3)
+    }
+    fn project(
+        &self,
+        module: &str,
+        output_module: &str,
+        expected_modules: &BTreeSet<String>,
+    ) -> Projection {
+        let (captured, fixture, original_hashes, tool_blake3) =
+            self.snapshot_attempt(module, output_module);
+        captured.success();
+        assert!(captured.stderr.is_empty(), "{}", captured.diagnostic());
+        let stdout = String::from_utf8(captured.stdout).unwrap();
+        let lines = stdout.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 1, "exactly one real snapshot success record");
+        let report: Value = serde_json::from_str(
+            lines[0]
+                .strip_prefix(SNAPSHOT_MARKER)
+                .expect("actual snapshot marker"),
+        )
+        .unwrap();
+        assert_eq!(report["schema_version"], 1);
+        assert_eq!(report["scope"], "kernel_logical_projection");
+        assert_eq!(report["original_module"], module);
+        assert_eq!(report["projection_module"], output_module);
+        let artifact = fixture
+            .root
+            .join(module_path(output_module, "olean"))
+            .canonicalize()
+            .unwrap();
+        assert_eq!(
+            PathBuf::from(report["projection_path"].as_str().unwrap())
+                .canonicalize()
+                .unwrap(),
+            artifact
+        );
+        for flag in [
+            "exact_inventory",
+            "constant_info_equal",
+            "kernel_replayed",
+            "reimport_verified",
+            "extensions_empty",
+            "ir_empty",
+        ] {
+            assert_eq!(report[flag], true, "real snapshot flag {flag}");
+        }
+        let original = report["original_constants"].as_u64().unwrap();
+        let retained = report["retained_constants"].as_u64().unwrap();
+        let omitted = report["omitted_constants"].as_u64().unwrap();
+        let occurrences = report["original_constant_occurrences"].as_u64().unwrap();
+        let duplicate_count = report["duplicate_constants"].as_u64().unwrap();
+        assert!(retained > 0 && original == retained + omitted);
+        assert_eq!(occurrences, original.checked_add(duplicate_count).unwrap());
+        assert!(report["logical_expression_nodes"].as_u64().unwrap() > 0);
+        let mut actual_modules = BTreeSet::new();
+        for record in report["original_modules"].as_array().unwrap() {
+            let name = record["name"].as_str().unwrap();
+            assert!(actual_modules.insert(name.to_owned()));
+            let path = PathBuf::from(record["path"].as_str().unwrap())
+                .canonicalize()
+                .unwrap();
+            assert_eq!(
+                path,
+                self.root
+                    .join(module_path(name, "olean"))
+                    .canonicalize()
+                    .unwrap()
+            );
+            let relative = path
+                .strip_prefix(self.root.canonicalize().unwrap())
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            assert!(original_hashes.contains_key(&relative));
+        }
+        assert_eq!(&actual_modules, expected_modules);
+        let duplicates = report["duplicates"].as_array().unwrap();
+        assert_eq!(duplicates.len() as u64, duplicate_count);
+        for record in duplicates {
+            assert!(!record["name"].as_str().unwrap().is_empty());
+            assert_eq!(record["reason"], "identical_safe_theorem_realization");
+            for field in ["first_module", "repeated_module"] {
+                assert!(actual_modules.contains(record[field].as_str().unwrap()));
+            }
+        }
+        let trusted = report["trusted_modules"].as_array().unwrap();
+        assert!(!trusted.is_empty());
+        let mut trusted_names = BTreeSet::new();
+        let library = self.prefix.join("lib/lean").canonicalize().unwrap();
+        for record in trusted {
+            assert!(trusted_names.insert(record["name"].as_str().unwrap()));
+            assert!(
+                PathBuf::from(record["path"].as_str().unwrap())
+                    .canonicalize()
+                    .unwrap()
+                    .starts_with(&library)
+            );
+        }
+        let omissions = report["omitted"].as_array().unwrap();
+        assert_eq!(omissions.len() as u64, omitted);
+        let mut names = BTreeSet::new();
+        for record in omissions {
+            let name = record["name"].as_str().unwrap();
+            let parent = record["parent"].as_str().unwrap();
+            assert!(names.insert(name));
+            assert_eq!(name, format!("{parent}._unsafe_rec"));
+            assert_eq!(record["reason"], "matched_partial_unsafe_rec");
+            assert!(actual_modules.contains(record["module"].as_str().unwrap()));
+        }
+        let projected_hashes = artifact_hashes(&fixture.root);
+        assert_eq!(
+            projected_hashes.len(),
+            1,
+            "standalone projection has no IR/extensions/side artifacts"
+        );
+        assert!(
+            projected_hashes.contains_key(
+                &module_path(output_module, "olean")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            )
+        );
+        Projection {
+            fixture,
+            module: output_module.to_owned(),
+            report,
+            original_hashes,
+            projected_hashes,
+            tool_blake3,
+        }
     }
     fn audit(&self, module: &str, roots: &[String]) -> Captured {
         assert!(!roots.is_empty() && roots.len() <= 128);
@@ -595,17 +861,14 @@ impl Drop for Fixture {
     }
 }
 
-fn assert_audit_error(output: Captured) {
+fn assert_audit_error(output: Captured, module: &str) {
     assert!(!output.status.success());
     let report = output.json();
     assert_eq!(report["schema_version"], 1);
     assert_eq!(report["status"], "error");
     assert_eq!(report["error"]["kind"], "audit_failed");
     let message = report["error"]["message"].as_str().unwrap();
-    assert!(
-        !message.is_empty() && message.contains("Acceptance"),
-        "{message}"
-    );
+    assert!(!message.is_empty() && message.contains(module), "{message}");
     assert!(
         !message.contains("timed out") && !message.contains("output limit"),
         "actual artifact refusal: {message}"
@@ -625,6 +888,163 @@ fn lean_name(name: &str) -> Name {
     .unwrap()
 }
 
+fn positive_audit(fixture: &Fixture, module: &str, roots: &[String]) -> Value {
+    let before = artifact_hashes(&fixture.root);
+    let output = fixture.audit(module, roots);
+    output.success();
+    let report = output.json();
+    assert_eq!(report["schema_version"], 1);
+    assert_eq!(report["status"], "audited");
+    assert_eq!(report["accepted"], true);
+    assert_eq!(report["kernel_replayed"], true);
+    assert_eq!(report["cache_eligible"], false);
+    assert_eq!(report["module"], module);
+    assert_eq!(report["allowed_axioms"], json!(POLICY));
+    assert_eq!(report["forbidden_axioms"], json!([]));
+    assert!(report["checked_constants"].as_u64().unwrap() > 0);
+    assert_eq!(report["lean_binary_blake3"].as_str().unwrap().len(), 64);
+    assert_eq!(report["auditor_blake3"].as_str().unwrap().len(), 64);
+    let artifact_modules = report["imports"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["scope"] == "artifact")
+        .map(|entry| entry["name"].as_str().unwrap().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(artifact_modules, BTreeSet::from([module.to_owned()]));
+    let mut actual = BTreeSet::new();
+    for theorem in report["theorems"].as_array().unwrap() {
+        assert!(actual.insert(theorem["name"].as_str().unwrap().to_owned()));
+        for axiom in theorem["axioms"].as_array().unwrap() {
+            assert!(POLICY.contains(&axiom.as_str().unwrap()), "{theorem}");
+        }
+    }
+    assert_eq!(actual, roots.iter().cloned().collect());
+    let path = module_path(module, "olean")
+        .to_string_lossy()
+        .replace('\\', "/");
+    let file = report["artifact_files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["path"] == path)
+        .expect("actual audited output object");
+    assert_eq!(file["bytes"].as_u64().unwrap(), before[&path].0);
+    assert_eq!(file["blake3"].as_str().unwrap(), before[&path].1);
+    assert_eq!(
+        before,
+        artifact_hashes(&fixture.root),
+        "strict audit is read-only"
+    );
+    report
+}
+
+fn control_fixtures(base: &Fixture) {
+    let directory =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tools/resource-model42/fixtures");
+    for (module, roots, omissions) in [
+        (
+            "ResourceSnapshotTotal",
+            vec![
+                "ResourceSnapshotTotal.total_correct".to_owned(),
+                "ResourceSnapshotTotal.tree_correct".to_owned(),
+            ],
+            2,
+        ),
+        (
+            "ResourceSnapshotFakeHelper",
+            vec!["ResourceSnapshotFakeHelper.safe_suffix_correct".to_owned()],
+            0,
+        ),
+    ] {
+        let original = base.sibling(module, true);
+        original
+            .compile(
+                module,
+                &read_source(&directory.join(format!("{module}.lean"))).text,
+            )
+            .success();
+        if module == "ResourceSnapshotTotal" {
+            let raw = original.audit(module, &roots);
+            assert!(!raw.status.success());
+            let report = raw.json();
+            assert_eq!(report["status"], "error");
+            assert!(
+                report["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("unsupported unsafe or partial artifact declaration")
+            );
+        }
+        let projected = original.project(
+            module,
+            &format!("{module}Kernel"),
+            &BTreeSet::from([module.to_owned()]),
+        );
+        assert_eq!(projected.report["omitted_constants"], omissions);
+        let audited = positive_audit(&projected.fixture, &projected.module, &roots);
+        assert_eq!(
+            audited["checked_constants"],
+            projected.report["retained_constants"]
+        );
+    }
+    for (module, cause) in [
+        ("ResourceSnapshotUnsafe", "explicit unsafe declaration"),
+        ("ResourceSnapshotPartial", "package opaque declaration"),
+        ("ResourceSnapshotFakeUnsafe", "explicit unsafe declaration"),
+    ] {
+        let original = base.sibling(module, true);
+        original
+            .compile(
+                module,
+                &read_source(&directory.join(format!("{module}.lean"))).text,
+            )
+            .success();
+        let (output, projected, _, _) =
+            original.snapshot_attempt(module, &format!("{module}Kernel"));
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(SNAPSHOT_MARKER));
+        let diagnostic = output.diagnostic();
+        assert!(
+            diagnostic.contains("kernel snapshot failed:") && diagnostic.contains(cause),
+            "{diagnostic}"
+        );
+        assert!(
+            !projected
+                .root
+                .join(module_path(&format!("{module}Kernel"), "olean"))
+                .exists()
+        );
+    }
+    let module = "ResourceSnapshotAxiom";
+    let original = base.sibling(module, true);
+    original
+        .compile(
+            module,
+            &read_source(&directory.join(format!("{module}.lean"))).text,
+        )
+        .success();
+    let projected = original.project(
+        module,
+        "ResourceSnapshotAxiomKernel",
+        &BTreeSet::from([module.to_owned()]),
+    );
+    let output = projected.fixture.audit(
+        &projected.module,
+        &["ResourceSnapshotAxiom.exposed".to_owned()],
+    );
+    assert!(!output.status.success());
+    let report = output.json();
+    assert_eq!(report["status"], "audited");
+    assert_eq!(report["accepted"], false);
+    assert_eq!(report["kernel_replayed"], true);
+    assert_eq!(report["cache_eligible"], false);
+    assert_eq!(
+        report["forbidden_axioms"],
+        json!(["ResourceSnapshotAxiom.projectFalse"])
+    );
+}
+
 #[test]
 fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
     let started = Instant::now();
@@ -637,42 +1057,53 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
     }
     let artifact = fixture.root.join(module_path(MODULE, "olean"));
     let before = fs::read(&artifact).unwrap();
+    let projected = fixture.project(MODULE, PROJECTED_MODULE, &sources.keys().cloned().collect());
+    assert!(
+        projected.report["omitted_constants"].as_u64().unwrap() > 0,
+        "production snapshot must exercise actual generated-helper exclusions"
+    );
     let mut actual_roots = BTreeSet::new();
     for partition in roots.chunks(128) {
-        let output = fixture.audit(MODULE, partition);
-        output.success();
-        let report = output.json();
-        assert_eq!(report["schema_version"], 1);
-        assert_eq!(report["status"], "audited");
-        assert_eq!(report["accepted"], true);
-        assert_eq!(report["kernel_replayed"], true);
-        assert_eq!(report["cache_eligible"], false);
-        assert_eq!(report["module"], MODULE);
-        assert_eq!(report["allowed_axioms"], json!(POLICY));
-        assert_eq!(report["forbidden_axioms"], json!([]));
-        assert!(report["checked_constants"].as_u64().unwrap() > 0);
-        assert_eq!(report["lean_binary_blake3"].as_str().unwrap().len(), 64);
-        assert_eq!(report["auditor_blake3"].as_str().unwrap().len(), 64);
-        let mut partition_roots = BTreeSet::new();
+        let report = positive_audit(&projected.fixture, &projected.module, partition);
+        assert_eq!(
+            report["checked_constants"],
+            projected.report["retained_constants"]
+        );
         for theorem in report["theorems"].as_array().unwrap() {
             let root = theorem["name"].as_str().unwrap().to_owned();
-            assert!(partition_roots.insert(root.clone()));
             assert!(actual_roots.insert(root));
-            for axiom in theorem["axioms"].as_array().unwrap() {
-                assert!(POLICY.contains(&axiom.as_str().unwrap()), "{theorem}");
-            }
         }
-        assert_eq!(partition_roots, partition.iter().cloned().collect());
-        assert!(
-            report["artifact_files"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|entry| entry["path"] == "ResourceModel42/Acceptance.olean")
-        );
         assert_eq!(fs::read(&artifact).unwrap(), before);
     }
     assert_eq!(actual_roots, roots.iter().cloned().collect());
+
+    for (label, corrupt) in [("OriginalMissing", false), ("OriginalCorrupt", true)] {
+        let changed = fixture.clone_artifacts(label);
+        let path = changed.root.join(module_path(MODULE, "olean"));
+        if corrupt {
+            fs::write(path, b"not a Lean object\n").unwrap();
+        } else {
+            fs::remove_file(path).unwrap();
+        }
+        let (output, attempted, _, _) = changed.snapshot_attempt(MODULE, PROJECTED_MODULE);
+        assert!(!output.status.success());
+        assert!(!String::from_utf8_lossy(&output.stdout).contains(SNAPSHOT_MARKER));
+        let message = output.diagnostic();
+        assert!(
+            message.contains("kernel snapshot failed:") && message.contains("Acceptance"),
+            "{message}"
+        );
+        assert!(
+            !message.contains("timed out") && !message.contains("limit"),
+            "actual original artifact failure: {message}"
+        );
+        assert!(
+            !attempted
+                .root
+                .join(module_path(PROJECTED_MODULE, "olean"))
+                .exists()
+        );
+    }
 
     for (index, constructor) in [
         "TypeInfo.mk",
@@ -705,7 +1136,7 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
     }
 
     let negative = Module {
-        imports: vec![ModuleName::new("ResourceModel42").unwrap()],
+        imports: vec![ModuleName::new(PROJECTED_MODULE).unwrap()],
         declarations: vec![Declaration::Theorem {
             name: lean_name("Vesper.ResourceModel42Rejected.forbidden"),
             binders: vec![],
@@ -713,10 +1144,11 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
             proof: Term::app(reference("sorryAx"), [reference("True"), Term::Bool(false)]),
         }],
     };
-    fixture
+    projected
+        .fixture
         .compile("ResourceModel42Rejected", &negative.render().unwrap())
         .success();
-    let output = fixture.audit(
+    let output = projected.fixture.audit(
         "ResourceModel42Rejected",
         &["Vesper.ResourceModel42Rejected.forbidden".to_owned()],
     );
@@ -728,17 +1160,31 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
     assert_eq!(denied["cache_eligible"], false);
     assert_eq!(denied["forbidden_axioms"], json!(["sorryAx"]));
 
-    let missing = fixture.clone_artifacts("Missing");
-    fs::remove_file(missing.root.join(module_path(MODULE, "olean"))).unwrap();
-    assert_audit_error(missing.audit(MODULE, &roots[..1]));
-    let corrupt = fixture.clone_artifacts("Corrupt");
+    let missing = projected.fixture.clone_artifacts("Missing");
+    fs::remove_file(missing.root.join(module_path(PROJECTED_MODULE, "olean"))).unwrap();
+    assert_audit_error(
+        missing.audit(PROJECTED_MODULE, &roots[..1]),
+        PROJECTED_MODULE,
+    );
+    let corrupt = projected.fixture.clone_artifacts("Corrupt");
     fs::write(
-        corrupt.root.join(module_path(MODULE, "olean")),
+        corrupt.root.join(module_path(PROJECTED_MODULE, "olean")),
         b"not a Lean object\n",
     )
     .unwrap();
-    assert_audit_error(corrupt.audit(MODULE, &roots[..1]));
+    assert_audit_error(
+        corrupt.audit(PROJECTED_MODULE, &roots[..1]),
+        PROJECTED_MODULE,
+    );
     assert_eq!(fs::read(&artifact).unwrap(), before);
+    control_fixtures(&fixture);
+    let binding = json!({"scope":"kernel_logical_projection_not_native_equivalence",
+        "snapshot_report":projected.report,"original_artifact_hashes":projected.original_hashes,
+        "projected_artifact_hashes":projected.projected_hashes,"tool_source_blake3":projected.tool_blake3,
+        "strict_audited_roots":roots.len(),"strict_partitions":roots.chunks(128).len()});
+    let binding = serde_json::to_string(&binding).unwrap();
+    assert!(binding.len() <= CAPTURE);
+    eprintln!("RESOURCE_MODEL42_KERNEL_BINDING {binding}");
     eprintln!(
         "resource_model42 complete: {} fixed modules, {} explicit theorem roots, {} partitions, {:.2}s target",
         sources.len(),
