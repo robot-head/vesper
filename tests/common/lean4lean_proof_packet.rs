@@ -1,4 +1,4 @@
-//! Shared runner for the four fixed audited proof packets.
+//! Shared runner for the five fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -17,6 +17,7 @@ pub enum Packet {
     Construction,
     Order,
     Map,
+    Normalize,
 }
 
 struct PacketSpec {
@@ -147,6 +148,39 @@ const MAP_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.pathPrimed_extend_example",
 ];
 
+const NORMALIZE_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.levelValue_zero",
+    "Vesper.Lean4LeanLevel42.levelValue_succ",
+    "Vesper.Lean4LeanLevel42.levelValue_max",
+    "Vesper.Lean4LeanLevel42.levelValue_imax",
+    "Vesper.Lean4LeanLevel42.levelValue_param",
+    "Vesper.Lean4LeanLevel42.levelValue_mvar",
+    "Vesper.Lean4LeanLevel42.levelSize_pos",
+    "Vesper.Lean4LeanLevel42.levelSize_imax_max_left",
+    "Vesper.Lean4LeanLevel42.levelSize_imax_max_right",
+    "Vesper.Lean4LeanLevel42.levelSize_imax_imax_left",
+    "Vesper.Lean4LeanLevel42.levelSize_imax_imax_right",
+    "Vesper.Lean4LeanLevel42.nat_imax_zero",
+    "Vesper.Lean4LeanLevel42.nat_imax_succ",
+    "Vesper.Lean4LeanLevel42.nat_imax_max",
+    "Vesper.Lean4LeanLevel42.nat_imax_imax",
+    "Vesper.Lean4LeanLevel42.max_add_offset",
+    "Vesper.Lean4LeanLevel42.nat_imax_add_offset",
+    "Vesper.Lean4LeanLevel42.normalizeAux_preserves_pathPrimed",
+    "Vesper.Lean4LeanLevel42.normalizeAux_preserves_WF",
+    "Vesper.Lean4LeanLevel42.normalizeAux_empty_WF",
+    "Vesper.Lean4LeanLevel42.normalizeAux_value",
+    "Vesper.Lean4LeanLevel42.normalizeAux_empty_value",
+    "Vesper.Lean4LeanLevel42.normalizeAux_imax_max_witness",
+    "Vesper.Lean4LeanLevel42.normalizeAux_imax_imax_witness",
+    "Vesper.Lean4LeanLevel42.normalizeAux_member_zero_witness",
+    "Vesper.Lean4LeanLevel42.normalizeAux_member_positive_witness",
+    "Vesper.Lean4LeanLevel42.normalizeAux_disabled_witness",
+    "Vesper.Lean4LeanLevel42.normalizeAux_retains_old_witness",
+    "Vesper.Lean4LeanLevel42.normalizeAux_primed_duplicate_witness",
+    "Vesper.Lean4LeanLevel42.normalizeAux_succ_mvar_counterexample",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -224,6 +258,30 @@ impl Packet {
                 required: MAP_REQUIRED,
                 scope: "audited_named_map_construction_proofs",
                 marker: "LEAN4LEAN_MAP42_EVIDENCE",
+            },
+            Self::Normalize => PacketSpec {
+                label: "lean4lean_normalize42",
+                module: "Lean4LeanNormalize42",
+                projected: "Lean4LeanNormalize42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.MapValue",
+                    "Lean4LeanLevel42.MapHelpers",
+                    "Lean4LeanLevel42.PathPriming",
+                    "Lean4LeanLevel42.LevelSemantics",
+                    "Lean4LeanLevel42.NormalizeInvariants",
+                    "Lean4LeanLevel42.NormalizeValue",
+                    "Lean4LeanNormalize42",
+                ],
+                required: NORMALIZE_REQUIRED,
+                scope: "audited_pre_subsumption_normalization_proofs",
+                marker: "LEAN4LEAN_NORMALIZE42_EVIDENCE",
             },
         }
     }
