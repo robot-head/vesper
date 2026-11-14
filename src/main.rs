@@ -228,6 +228,13 @@ fn cli() -> Result<(), String> {
     }
     let input = input.ok_or("missing source file; see --help")?;
     let source = fs::read_to_string(&input).map_err(|e| format!("{input}: {e}"))?;
+    if command == "build" && target.as_deref() == Some("bpf") {
+        // Compiler eBPF target (§27): verified BPF ELF object with BTF.
+        let summary =
+            vesper::ebpf_backend::build_command(&input, &source, &entry, output.as_deref())?;
+        print!("{summary}");
+        return Ok(());
+    }
     let mut parsed = parser::parse(&source);
     if command == "emit" && format == "cst" {
         if !parsed.diagnostics.is_empty() {
