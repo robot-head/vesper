@@ -44,6 +44,11 @@ expected trace, semantic hypothesis or physical TreeMap equality.
   validator suffix remain byte-identical. Root owns NEW fixed aggregator,
   test target, narrow BUILD scheduling/copy entries and integration report.
 
+The final theorem module is `Lean4LeanLevel42.ShapeFinal`, matching the
+unchanged collector's fixed proof-module namespace. The projection module
+is `Lean4LeanShape42Kernel`. A top-level module with authored theorems would
+be rejected by required-root inventory and is not used.
+
 The final aggregator combines actual full-normalization sorted keys, sorted
 variable lists and no empty rows for every Level. Actual normalized-map BEq
 implies equal levelValue under the existing structural NoMVars premises.
