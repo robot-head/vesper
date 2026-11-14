@@ -332,9 +332,17 @@ pub(crate) struct PeerCid {
 /// Connection-ID state of one connection.
 #[derive(Debug, Clone)]
 pub(crate) struct Cids {
-    /// Extra IDs we issued (sequence 1 and up); sequence 0 is the
-    /// handshake ID in the connection table.
+    /// Extra IDs we issued, routed through the endpoint's `alt_cids`; the
+    /// one the connection table is keyed by (sequence `table_seq`) is not
+    /// listed here.
     pub local: [Option<LocalCid>; MAX_ACTIVE_CIDS],
+    /// Sequence number of the ID the connection table is keyed by: 0 (the
+    /// handshake ID) until the peer retires it, then the ID that replaced
+    /// it in the table (RFC 9000 §5.1.2).
+    pub table_seq: u64,
+    /// The peer retired the table's ID and no replacement was available
+    /// yet; it still routes until one is.
+    pub table_retired: bool,
     pub next_local_seq: u64,
     /// IDs the peer issued, including the one in use.
     pub peer: [Option<PeerCid>; MAX_ACTIVE_CIDS],
@@ -351,6 +359,8 @@ impl Cids {
     pub fn new() -> Self {
         Self {
             local: [None; MAX_ACTIVE_CIDS],
+            table_seq: 0,
+            table_retired: false,
             next_local_seq: 1,
             peer: [None; MAX_ACTIVE_CIDS],
             active_peer_seq: 0,
@@ -360,7 +370,7 @@ impl Cids {
     }
 
     pub fn active_local(&self) -> usize {
-        1 + self.local.iter().flatten().count()
+        usize::from(!self.table_retired) + self.local.iter().flatten().count()
     }
 
     /// Records a peer ID; `Err` for a RFC 9000 §5.1.1 violation

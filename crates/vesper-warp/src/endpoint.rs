@@ -639,6 +639,21 @@ pub struct EndpointStats {
     pub slots_freed: u64,
     pub zero_rtt_packets_sent: u64,
     pub zero_rtt_packets_received: u64,
+    // Wave seven (issue #330).
+    /// 1-RTT packets coalesced after long-header packets in one datagram.
+    pub short_coalesced_sent: u64,
+    /// The peer retired the connection ID the table was keyed by and the
+    /// table was rekeyed to a live one.
+    pub table_cids_rekeyed: u64,
+    /// Idle-timer restarts on the first ack-eliciting send after a receive
+    /// (RFC 9000 §10.1).
+    pub idle_restarts_on_send: u64,
+    /// Client: migrations to the server's preferred address; server:
+    /// validated paths to its preferred address.
+    pub preferred_address_migrations: u64,
+    /// Client: datagrams from an address that is not the server's
+    /// (RFC 9000 §9.6), dropped.
+    pub unknown_server_address_drops: u64,
 }
 
 /// A connection's non-tile state. The tile (lane 6) holds the hot scalars:
@@ -707,6 +722,10 @@ struct Conn {
     non_probing_rx: bool,
     /// The peer's `disable_active_migration`.
     peer_disables_migration: bool,
+    // Wave seven (issue #330).
+    /// A packet was received and no ack-eliciting packet sent since: the
+    /// next one restarts the idle timer (RFC 9000 §10.1).
+    idle_restart_armed: bool,
 }
 
 /// A packet waiting for its earliest departure time.
@@ -1114,6 +1133,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             zero_rtt_discard_ns: None,
             non_probing_rx: false,
             peer_disables_migration: false,
+            idle_restart_armed: false,
         });
         self.closed[handle.index() as usize] = None;
         self.write_tile(handle);
@@ -1308,6 +1328,40 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
     }
 
+    /// The peer retired the connection ID the connection table is keyed
+    /// by: key the table by one of the connection's live IDs instead, so
+    /// the retired one no longer routes (RFC 9000 §5.1.2). Without a live
+    /// replacement yet, the retired ID keeps routing until one is issued.
+    fn rekey_retired_table_cid(&mut self, slot: SlotHandle) {
+        let Some(Some(c)) = self.conns.get_mut(slot.index() as usize) else {
+            return;
+        };
+        if c.handle != slot || !c.cids.table_retired {
+            return;
+        }
+        let Some(i) = c
+            .cids
+            .local
+            .iter()
+            .enumerate()
+            .filter_map(|(i, l)| l.map(|l| (i, l.seq)))
+            .min_by_key(|&(_, seq)| seq)
+            .map(|(i, _)| i)
+        else {
+            return;
+        };
+        let next = c.cids.local[i].expect("found");
+        if self.table.rekey(slot, &next.cid).is_err() {
+            return;
+        }
+        c.cids.local[i] = None;
+        c.cids.table_seq = next.seq;
+        c.cids.table_retired = false;
+        self.alt_cids
+            .retain(|(id, h)| !(*h == slot && *id == next.cid));
+        self.stats.table_cids_rekeyed += 1;
+    }
+
     /// Starts validating `addr` with a padded PATH_CHALLENGE (RFC 9000
     /// §8.2.1). `fallback` is the path to return to on failure.
     fn start_probe(
@@ -1425,15 +1479,18 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if c.error.is_some() {
             return;
         }
-        // Our connection IDs the peer retired: forget them, issue more.
+        // Our connection IDs the peer retired: forget them, issue more
+        // (RFC 9000 §5.1.2). The one the connection table is keyed by
+        // (sequence 0 at first) is replaced there by a live one.
         let retired = std::mem::replace(&mut c.retired_rx, [None; MAX_ACTIVE_CIDS]);
         let mut gone = [None; MAX_ACTIVE_CIDS];
-        let mut seq0_retired = false;
+        let mut table_retired = false;
         for (i, seq) in retired.into_iter().flatten().enumerate() {
-            if seq == 0 {
-                // The handshake ID stays routable in the connection table
-                // (its tile is keyed by it) until the connection ends.
-                seq0_retired = true;
+            if seq == c.cids.table_seq {
+                if !c.cids.table_retired {
+                    c.cids.table_retired = true;
+                    table_retired = true;
+                }
                 continue;
             }
             for l in &mut c.cids.local {
@@ -1446,8 +1503,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 }
             }
         }
-        let mut any_retired = false;
-        if seq0_retired {
+        let mut any_retired = table_retired;
+        if table_retired {
             self.stats.cids_retired += 1;
         }
         for cid in gone.into_iter().flatten() {
@@ -1455,6 +1512,10 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             self.stats.cids_retired += 1;
             any_retired = true;
         }
+        if any_retired {
+            self.issue_cids(slot);
+        }
+        self.rekey_retired_table_cid(slot);
         let c = self.conns[slot.index() as usize].as_mut().expect("live");
         let switch = std::mem::take(&mut c.peer_cid_retired);
         let token = c.token_rx.take();
@@ -1463,9 +1524,6 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let non_probing = c.non_probing_rx;
         let largest = c.received.largest() == Some(pn);
         let confirmed = c.hs.as_ref().is_none_or(|h| h.tls.is_handshake_confirmed());
-        if any_retired {
-            self.issue_cids(slot);
-        }
         if switch {
             self.switch_peer_cid(slot);
         }
@@ -1579,8 +1637,30 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
     }
 
     /// Refreshes the idle deadline after a received packet (RFC 9000
-    /// §10.1).
+    /// §10.1), and arms the restart on the next ack-eliciting send.
     fn touch_idle(&mut self, slot: SlotHandle, now_ns: u64) {
+        if let Ok(c) = self.conn_mut(slot) {
+            c.idle_restart_armed = true;
+        }
+        self.restart_idle(slot, now_ns);
+    }
+
+    /// RFC 9000 §10.1: "An endpoint also restarts its idle timer when
+    /// sending an ack-eliciting packet if no other ack-eliciting packets
+    /// have been sent since last receiving and processing a packet."
+    /// Called for every ack-eliciting packet sent; acts on the first.
+    fn on_eliciting_sent(&mut self, slot: SlotHandle, now_ns: u64) {
+        let Ok(c) = self.conn_mut(slot) else {
+            return;
+        };
+        if !std::mem::take(&mut c.idle_restart_armed) {
+            return;
+        }
+        self.stats.idle_restarts_on_send += 1;
+        self.restart_idle(slot, now_ns);
+    }
+
+    fn restart_idle(&mut self, slot: SlotHandle, now_ns: u64) {
         let Ok(c) = self.conn(slot) else {
             return;
         };
@@ -3152,11 +3232,14 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             if !initial && !handshake && !zero_rtt {
                 break;
             }
+            // 1-RTT data or ACKs ride in the same datagram (RFC 9000
+            // §12.2), after the long-header packets.
+            let short = !zero_rtt && self.short_wants(slot, now_ns);
             self.dgram_begin();
             let mut stop = false;
             let mut result = Ok(());
             if initial {
-                let last = !handshake && !zero_rtt;
+                let last = !handshake && !zero_rtt && !short;
                 match self.send_long(slot, PnSpace::Initial, LongKind::Normal, last, now_ns) {
                     Ok(_) => sent += 1,
                     Err(WarpError::AmplificationLimited | WarpError::Umem(_)) => stop = true,
@@ -3170,7 +3253,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     slot,
                     PnSpace::Handshake,
                     LongKind::Normal,
-                    !zero_rtt,
+                    !zero_rtt && !short,
                     now_ns,
                 ) {
                     Ok(_) => sent += 1,
@@ -3185,6 +3268,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                     Ok(false) => {}
                     Err(WarpError::Umem(_)) => stop = true,
                     Err(_) => {}
+                }
+            }
+            if !stop && result.is_ok() && short {
+                match self.coalesce_short(slot, now_ns) {
+                    Ok(true) => sent += 1,
+                    Ok(false) => {}
+                    Err(e) => result = Err(e),
                 }
             }
             let empty = self.dgram_len == 0;
@@ -3480,6 +3570,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         }
         self.stats.packets_sent += 1;
         self.stats.handshake_packets_sent += 1;
+        if ack_eliciting {
+            self.on_eliciting_sent(slot, sent.sent_ns);
+        }
         if discard_initial {
             let _ = self.apply_tls_events(slot, now_ns);
         }
@@ -3566,6 +3659,200 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             to,
         };
         self.launch_or_queue(staged, now_ns);
+    }
+
+    /// Whether a 1-RTT packet should follow the long-header packets of the
+    /// datagram being assembled: 1-RTT keys are installed and an ACK is
+    /// owed in the application space, or stream data may go.
+    fn short_wants(&mut self, slot: SlotHandle, now_ns: u64) -> bool {
+        if self.config.stream_mode != StreamMode::Reliable {
+            return false;
+        }
+        let room = self.launch_has_room(slot, now_ns);
+        let Ok(c) = self.conn_mut(slot) else {
+            return false;
+        };
+        c.error.is_none()
+            && c.keys.is_some()
+            && (c.received.ack_deadline().is_some()
+                || (c.streams.has_pending() && c.cc.can_send() && room))
+    }
+
+    /// Fills a 1-RTT packet from the stream layer (with the owed ACK) and
+    /// appends it to the datagram being assembled. Returns whether one was
+    /// added.
+    fn coalesce_short(&mut self, slot: SlotHandle, now_ns: u64) -> Result<bool, WarpError> {
+        if self.dgram_len == 0 || !self.short_wants(slot, now_ns) {
+            return Ok(false);
+        }
+        let exponent = self.config.ack_delay_exponent;
+        let tile = self
+            .table
+            .get(slot)
+            .map_err(|_| WarpError::StaleConnection)?;
+        let room = self.launch_has_room(slot, now_ns);
+        let c = self.conns[slot.index() as usize]
+            .as_mut()
+            .ok_or(WarpError::StaleConnection)?;
+        let with_ack = c.received.ack_deadline().is_some();
+        let mut ack_len = 0;
+        if with_ack && let Ok(Some(ack)) = c.received.ack_frame(now_ns, exponent) {
+            ack_len = Frame::Ack(ack).encode(&mut self.scratch).unwrap_or(0);
+        }
+        let max = usize::from(c.max_datagram).min(self.dgram.len());
+        let fixed = 1 + tile.peer_cid.as_bytes().len() + 4 + TAG_LEN;
+        let budget = max
+            .saturating_sub(self.dgram_len + fixed + ack_len)
+            .min(self.app_out.len());
+        let mut len = 0;
+        if budget > 0 && c.streams.has_pending() && c.cc.can_send() && room {
+            len = c.streams.fill(&mut self.app_out[..budget], &mut self.record);
+        }
+        if len == 0 {
+            self.record.clear();
+            if !with_ack {
+                return Ok(false);
+            }
+        }
+        let sent = self.append_short(slot, with_ack, len, false, now_ns);
+        let settled = match &sent {
+            Ok(Some(pn)) => Ok((*pn, len > 0)),
+            Ok(None) => Err(WarpError::PacketTooLarge { len: fixed }),
+            Err(e) => Err(e.clone()),
+        };
+        if len > 0 {
+            self.settle_record(slot, &settled);
+        }
+        Ok(sent?.is_some())
+    }
+
+    /// Appends one 1-RTT packet carrying an optional ACK and
+    /// `app_out[..data_len]` (CONNECTION_CLOSE when `close`) to the
+    /// datagram being assembled, after its long-header packets: a short
+    /// header has no length, so it is always last (RFC 9000 §12.2). When
+    /// the datagram must reach 1200 bytes (a client Initial or an
+    /// ack-eliciting server Initial, §14.1), the packet carries the
+    /// PADDING. Returns its packet number, or `None` (nothing changed)
+    /// when it does not fit or there are no 1-RTT keys.
+    fn append_short(
+        &mut self,
+        slot: SlotHandle,
+        with_ack: bool,
+        data_len: usize,
+        close: bool,
+        now_ns: u64,
+    ) -> Result<Option<u64>, WarpError> {
+        let tile = self
+            .table
+            .get(slot)
+            .map_err(|_| WarpError::StaleConnection)?;
+        let pn = tile.next_tx_pn;
+        if pn >= MAX_SEND_PN {
+            return Err(WarpError::PacketNumbersExhausted);
+        }
+        {
+            let c = self.conn(slot)?;
+            if c.keys.is_none() {
+                return Ok(None);
+            }
+        }
+        self.maybe_update_keys(slot);
+        let c = self.conn(slot)?;
+        let max = usize::from(c.max_datagram).min(self.dgram.len());
+        let room = max.saturating_sub(self.dgram_len);
+        let target = if self.dgram_pad {
+            MIN_INITIAL_DATAGRAM.saturating_sub(self.dgram_len).min(room)
+        } else {
+            0
+        };
+        // PADDING (zero bytes) after the frames until the datagram reaches
+        // its target; a longer payload can shorten the packet-number
+        // encoding, so this settles within a few rounds.
+        let mut pad = 0;
+        let mut layout = self.write_plaintext(slot, &tile, with_ack, data_len, now_ns);
+        for _ in 0..4 {
+            let Ok((plain_len, _, _)) = layout else {
+                break;
+            };
+            let total = plain_len + TAG_LEN;
+            if total >= target {
+                break;
+            }
+            let more = target - total;
+            if data_len + pad + more > self.app_out.len() {
+                break;
+            }
+            self.app_out[data_len + pad..data_len + pad + more].fill(0);
+            pad += more;
+            layout = self.write_plaintext(slot, &tile, with_ack, data_len + pad, now_ns);
+        }
+        let (plain_len, header_len, has_ack) = match layout {
+            Ok(l) => l,
+            Err(WarpError::PacketTooLarge { .. }) => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let total = plain_len + TAG_LEN;
+        let ack_eliciting = !close && data_len > 0;
+        let in_flight = ack_eliciting || pad > 0;
+        let dgram_len = self.dgram_len;
+        let idx = slot.index() as usize;
+        let c = self.conns[idx].as_mut().ok_or(WarpError::StaleConnection)?;
+        if total > room || !c.path.allows(total as u64) {
+            return Ok(None);
+        }
+        let out = &mut self.dgram[dgram_len..dgram_len + total];
+        out[..plain_len].copy_from_slice(&self.scratch[..plain_len]);
+        let pn_offset = 1 + tile.peer_cid.as_bytes().len();
+        let keys = c.keys.as_mut().ok_or(WarpError::KeysUnavailable)?;
+        let ticket = keys.ticket(pn).map_err(WarpError::Crypto)?;
+        if let Err(err) = keys.seal(ticket, out, pn_offset, plain_len - header_len) {
+            let _ = keys.abandon(err.ticket);
+            return Err(WarpError::Crypto(err.error));
+        }
+        c.sent_under_key += 1;
+        let sent = recovery::SentPacket {
+            pn,
+            sent_ns: now_ns.max(c.last_sent_ns),
+            bytes: total as u32,
+            ack_eliciting,
+            in_flight,
+        };
+        let recorded = c
+            .recovery
+            .on_packet_sent(PnSpace::ApplicationData, sent)
+            .map_err(WarpError::Recovery)
+            .and_then(|()| {
+                c.cc.on_packet_sent(now_ns, sent, false)
+                    .map_err(WarpError::Cc)
+            });
+        c.last_sent_ns = sent.sent_ns;
+        if has_ack {
+            c.received.on_ack_sent();
+        }
+        if let Some(amp) = c.hs.as_mut().and_then(|h| h.amp.as_mut()) {
+            amp.sent += total as u64;
+        }
+        if !c.path.validated {
+            c.path.sent += total as u64;
+        }
+        // The packet number is burned whatever happens next.
+        if let Ok(mut st) = self.table.get(slot) {
+            st.next_tx_pn = pn + 1;
+            let _ = self.table.set(slot, &st);
+        }
+        recorded?;
+        self.dgram_len += total;
+        self.dgram_eliciting |= in_flight;
+        self.stats.packets_sent += 1;
+        self.stats.coalesced_sent += 1;
+        self.stats.short_coalesced_sent += 1;
+        if !ack_eliciting {
+            self.stats.ack_only_sent += 1;
+        } else {
+            self.on_eliciting_sent(slot, sent.sent_ns);
+        }
+        self.write_tile(slot);
+        Ok(Some(pn))
     }
 
     /// Client: whether a 0-RTT packet should go out now.
@@ -3734,6 +4021,7 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         self.settle_record(slot, &Ok((pn, true)));
         self.stats.packets_sent += 1;
         self.stats.zero_rtt_packets_sent += 1;
+        self.on_eliciting_sent(slot, sent.sent_ns);
         Ok(true)
     }
 
@@ -3767,12 +4055,13 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 .is_some_and(|ls| ls.sealer.is_some())
         };
         let spaces = [has(self, PnSpace::Initial), has(self, PnSpace::Handshake)];
+        let one_rtt = self.conn(slot)?.keys.is_some();
         self.dgram_begin();
         for (i, space) in [PnSpace::Initial, PnSpace::Handshake]
             .into_iter()
             .enumerate()
         {
-            let last = i == 1 || !spaces[1];
+            let last = (i == 1 || !spaces[1]) && !one_rtt;
             if spaces[i]
                 && self
                     .send_long(slot, space, long_close, last, now_ns)
@@ -3781,20 +4070,30 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
                 any = true;
             }
         }
-        self.dgram_finish(slot, true, now_ns);
-        if self.conn(slot)?.keys.is_some() {
+        let mut coalesced = false;
+        if one_rtt {
             let n = Frame::ConnectionClose(crate::frame::ConnectionClose {
                 error_code: code,
                 frame_type: (frame_type != APP_CLOSE).then_some(frame_type),
                 reason: b"",
             })
             .encode(&mut self.app_out)?;
-            if self
-                .send(slot, Source::Fresh, false, n, Kind::Close, now_ns)
-                .is_ok()
+            // After long-header closes, the 1-RTT close is the datagram's
+            // last packet (RFC 9000 §10.2.3, §12.2).
+            if self.dgram_len > 0 && matches!(self.append_short(slot, false, n, true, now_ns), Ok(Some(_))) {
+                coalesced = true;
+                any = true;
+            }
+            self.dgram_finish(slot, true, now_ns);
+            if !coalesced
+                && self
+                    .send(slot, Source::Fresh, false, n, Kind::Close, now_ns)
+                    .is_ok()
             {
                 any = true;
             }
+        } else {
+            self.dgram_finish(slot, true, now_ns);
         }
         if any {
             self.stats.closes_sent += 1;
@@ -5169,6 +5468,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         self.stats.packets_sent += 1;
         if !ack_eliciting {
             self.stats.ack_only_sent += 1;
+        } else {
+            self.on_eliciting_sent(slot, sent.sent_ns);
         }
         let to = match self.next_to.take() {
             Some(to) => to,
