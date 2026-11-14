@@ -1,0 +1,69 @@
+// The encoded size of a JSON string (vesper-serde `encoded_size` for
+// `Value::String`), ported from the host encoder to source vectors (§14.3).
+// Each byte costs 1, a quote, backslash, \n, \r, \t, \b or \f costs 2 and any
+// other control byte costs 6 (a \u00XX escape); the quotes add 2.
+// Cost of the chunk of `s` at `offset`, over the lanes inside the string.
+fn chunk_cost16(s: String, offset: u64) -> u64 eff [Isa[Baseline128]] {
+    let bytes = Vec::load_masked[u8, 16](s, offset);
+    let live = Mask::in_bounds[u8, 16](s, offset);
+    let control = Mask::and(Vec::lt(bytes, Vec::splat[u8, 16](32)), live);
+    let short_control = Mask::or(
+        Mask::or(Vec::eq(bytes, Vec::splat[u8, 16](10)), Vec::eq(bytes, Vec::splat[u8, 16](13))),
+        Mask::or(
+            Vec::eq(bytes, Vec::splat[u8, 16](9)),
+            Mask::or(Vec::eq(bytes, Vec::splat[u8, 16](8)), Vec::eq(bytes, Vec::splat[u8, 16](12))),
+        ),
+    );
+    let quoted = Mask::or(
+        Vec::eq(bytes, Vec::splat[u8, 16](34)),
+        Vec::eq(bytes, Vec::splat[u8, 16](92))
+    );
+    let short = Mask::or(quoted, Mask::and(short_control, live));
+    let long = wrapping_sub(Mask::count(control), Mask::count(Mask::and(short_control, live)));
+    wrapping_add(wrapping_add(Mask::count(live), Mask::count(short)), wrapping_mul(long, 5))
+}
+fn cost_from16(s: String, offset: u64, acc: u64) -> u64 eff [Isa[Baseline128]] {
+    if Mask::any(Mask::in_bounds[u8, 16](s, offset)) {
+        cost_from16(s, wrapping_add(offset, 16), wrapping_add(acc, chunk_cost16(s, offset)))
+    } else {
+        acc
+    }
+}
+// The same kernel on 256-bit vectors.
+fn chunk_cost32(s: String, offset: u64) -> u64 eff [Isa[Avx2]] {
+    let bytes = Vec::load_masked[u8, 32](s, offset);
+    let live = Mask::in_bounds[u8, 32](s, offset);
+    let control = Mask::and(Vec::lt(bytes, Vec::splat[u8, 32](32)), live);
+    let short_control = Mask::or(
+        Mask::or(Vec::eq(bytes, Vec::splat[u8, 32](10)), Vec::eq(bytes, Vec::splat[u8, 32](13))),
+        Mask::or(
+            Vec::eq(bytes, Vec::splat[u8, 32](9)),
+            Mask::or(Vec::eq(bytes, Vec::splat[u8, 32](8)), Vec::eq(bytes, Vec::splat[u8, 32](12))),
+        ),
+    );
+    let quoted = Mask::or(
+        Vec::eq(bytes, Vec::splat[u8, 32](34)),
+        Vec::eq(bytes, Vec::splat[u8, 32](92))
+    );
+    let short = Mask::or(quoted, Mask::and(short_control, live));
+    let long = wrapping_sub(Mask::count(control), Mask::count(Mask::and(short_control, live)));
+    wrapping_add(wrapping_add(Mask::count(live), Mask::count(short)), wrapping_mul(long, 5))
+}
+fn cost_from32(s: String, offset: u64, acc: u64) -> u64 eff [Isa[Avx2]] {
+    if Mask::any(Mask::in_bounds[u8, 32](s, offset)) {
+        cost_from32(s, wrapping_add(offset, 32), wrapping_add(acc, chunk_cost32(s, offset)))
+    } else {
+        acc
+    }
+}
+// Checked multiversion dispatch: the widest profile this code generator
+// targets. Baseline128 holds on every x86_64 and AArch64 target.
+fn json_string_size(s: String) -> u64 {
+    if Isa::supported[Avx2]() {
+        wrapping_add(cost_from32(s, 0, 0), 2)
+    } else if Isa::supported[Baseline128]() {
+        wrapping_add(cost_from16(s, 0, 0), 2)
+    } else {
+        0
+    }
+}

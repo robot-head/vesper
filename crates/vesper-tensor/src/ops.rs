@@ -6,6 +6,7 @@
 //! claim of cross-ISA bit equality for `exp`, `powf`, `sin` and `cos`, which
 //! come from the platform math library.
 use crate::quant::Matrix;
+use crate::simd::Kernel;
 use crate::Error;
 
 /// `out[i] = weight[i] * (x[i] / sqrt(mean(x^2) + epsilon))`.
@@ -52,6 +53,30 @@ pub fn rope(x: &mut [f32], head_dim: usize, position: usize, base: f32) -> Resul
     }
     Ok(())
 }
+/// Rotary position embedding on `rotate_half` pairs `(i, i + head_dim / 2)`
+/// of each head (the Hugging Face layout), with the same frequencies as
+/// [`rope`]: pair `i` uses `base^(-2i / head_dim)`.
+pub fn rope_half(x: &mut [f32], head_dim: usize, position: usize, base: f32) -> Result<(), Error> {
+    if head_dim == 0 || !head_dim.is_multiple_of(2) {
+        return Err(Error::Shape("rope head_dim must be positive and even"));
+    }
+    if x.is_empty() || !x.len().is_multiple_of(head_dim) {
+        return Err(Error::Shape("rope needs whole heads"));
+    }
+    if !(base.is_finite() && base > 1.0) {
+        return Err(Error::Shape("rope base"));
+    }
+    let half = head_dim / 2;
+    for head in x.chunks_exact_mut(head_dim) {
+        for i in 0..half {
+            let (fcr, fci) = rope_rotation(2 * i, head_dim, position, base);
+            let (v0, v1) = (head[i], head[i + half]);
+            head[i] = v0 * fcr - v1 * fci;
+            head[i + half] = v0 * fci + v1 * fcr;
+        }
+    }
+    Ok(())
+}
 pub(crate) fn rope_rotation(i: usize, head_dim: usize, position: usize, base: f32) -> (f32, f32) {
     let freq = 1.0 / base.powf(i as f32 / head_dim as f32);
     let angle = position as f32 * freq;
@@ -78,6 +103,17 @@ pub fn swiglu(gate: &mut [f32], up: &[f32]) -> Result<(), Error> {
 /// row, without materializing either projection. Bit-identical to
 /// `w1.matvec`, `w3.matvec`, then [`swiglu`] (same per-row sums, same order).
 pub fn swiglu_matvec(w1: &Matrix, w3: &Matrix, x: &[f32], out: &mut [f32]) -> Result<(), Error> {
+    swiglu_matvec_with(Kernel::Scalar, w1, w3, x, out)
+}
+
+/// [`swiglu_matvec`] with the given dot-product kernel.
+pub fn swiglu_matvec_with(
+    kernel: Kernel,
+    w1: &Matrix,
+    w3: &Matrix,
+    x: &[f32],
+    out: &mut [f32],
+) -> Result<(), Error> {
     if w1.rows() != w3.rows()
         || w1.cols() != w3.cols()
         || x.len() != w1.cols()
@@ -86,8 +122,8 @@ pub fn swiglu_matvec(w1: &Matrix, w3: &Matrix, x: &[f32], out: &mut [f32]) -> Re
         return Err(Error::Shape("swiglu_matvec operand lengths"));
     }
     for (row, out) in out.iter_mut().enumerate() {
-        let gate = w1.row_dot(row, x);
-        let up = w3.row_dot(row, x);
+        let gate = w1.row_dot(kernel, row, x);
+        let up = w3.row_dot(kernel, row, x);
         *out = silu(gate) * up;
     }
     Ok(())

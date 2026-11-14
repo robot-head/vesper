@@ -1,0 +1,9 @@
+// expect: E0765
+// at: rotate(x)
+// message: call of 'rotate' violates its precondition: RoPE head width: 7 must be even
+fn rotate[H: dim, D: dim](x: Tensor[F32, [H, D]]) -> Tensor[F32, [H, D]] eff [Tensor] {
+    Tensor::rope(x, 1)
+}
+fn main(x: Tensor[F32, [1, 7]]) -> Tensor[F32, [1, 7]] eff [Tensor] {
+    rotate(x)
+}

@@ -1,0 +1,27 @@
+// expect: E0720
+// An RtBus operation clause may not allocate: it runs on the realtime thread.
+linear effect RtBus {
+    fn poll_param_events(max_events: u32) -> u32;
+}
+
+linear effect Alloc {
+    fn reserve(bytes: u32) -> u32;
+}
+
+fn callback() -> u32 eff [Realtime, RtBus] {
+    RtBus::poll_param_events(8)
+}
+
+fn main() -> u32 {
+    handle Alloc in {
+        handle RtBus in {
+            callback()
+        } with {
+            return value => value,
+            poll_param_events(max_events, resume) => resume(Alloc::reserve(max_events)),
+        }
+    } with {
+        return value => value,
+        reserve(bytes, resume) => resume(bytes),
+    }
+}

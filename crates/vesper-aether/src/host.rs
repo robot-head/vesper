@@ -33,6 +33,14 @@ pub enum Unavailable {
     },
     /// The kernel lacks a required userfaultfd ioctl or KVM capability.
     MissingFeature(&'static str),
+    /// 2 MiB huge pages are not usable: no hugetlbfs, or the pool
+    /// (`vm.nr_hugepages`) has too few free pages; `free` is
+    /// `HugePages_Free` when readable.
+    HugePages {
+        op: &'static str,
+        errno: i32,
+        free: Option<u64>,
+    },
 }
 
 /// How the userfaultfd descriptor was obtained.

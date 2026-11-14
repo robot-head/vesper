@@ -1,0 +1,108 @@
+// Learning XDP firewall: a source that tries inbound telnet (TCP port 23)
+// is added to the blocklist, and every later IPv4 packet from it is dropped.
+// Drops are counted per source; everything else passes.
+copy enum XdpAction {
+    Aborted,
+    Drop,
+    Pass,
+    Tx,
+    Redirect,
+}
+
+copy enum BpfMapKind {
+    Hash,
+    Array,
+    PerCpuHash,
+    PerCpuArray,
+    LruHash,
+}
+
+copy struct BpfMapSpec {
+    kind: BpfMapKind,
+    max_entries: u32,
+}
+
+effect Packet {
+    fn load_u8(offset: u32) -> Option[u8];
+    fn load_u16be(offset: u32) -> Option[u32];
+    fn load_u32be(offset: u32) -> Option[u32];
+}
+
+// Blocked IPv4 sources (host byte order).
+effect Blocklist {
+    fn lookup(key: u32) -> Option[u8];
+    fn update(key: u32, value: u8) -> Unit;
+}
+
+fn blocklist_map() -> BpfMapSpec {
+    BpfMapSpec {
+        kind: BpfMapKind::Hash,
+        max_entries: 1024
+    }
+}
+
+// Packets dropped per source address.
+effect Drops {
+    fn add(key: u32, delta: u64) -> Unit;
+}
+
+fn drops_map() -> BpfMapSpec {
+    BpfMapSpec {
+        kind: BpfMapKind::LruHash,
+        max_entries: 4096
+    }
+}
+
+fn drop_from(src: u32) -> XdpAction eff [Drops] {
+    Drops::add(src, 1);
+    XdpAction::Drop
+}
+
+fn blocked(src: u32) -> bool eff [Blocklist] {
+    match Blocklist::lookup(src) {
+        Some(_) => true,
+        None => false,
+    }
+}
+
+// TCP destination port 23, behind a fixed 20-byte IPv4 header.
+fn telnet(proto: u8) -> bool eff [Packet] {
+    if proto != 6 {
+        false
+    } else {
+        match Packet::load_u16be(36) {
+            Some(port) => port == 23,
+            None => false,
+        }
+    }
+}
+
+fn ipv4() -> XdpAction eff [Packet, Blocklist, Drops] {
+    match Packet::load_u32be(26) {
+        None => XdpAction::Aborted,
+        Some(src) => if blocked(src) {
+            drop_from(src)
+        } else {
+            match Packet::load_u8(23) {
+                None => XdpAction::Aborted,
+                Some(proto) => if telnet(proto) {
+                    Blocklist::update(src, 1);
+                    drop_from(src)
+                } else {
+                    XdpAction::Pass
+                },
+            }
+        },
+    }
+}
+
+fn main() -> XdpAction eff [Packet, Blocklist, Drops] {
+    match Packet::load_u16be(12) {
+        Some(ether_type) => if ether_type == 2048 {
+            ipv4()
+        } else {
+            XdpAction::Pass
+        },
+        None => XdpAction::Pass,
+    }
+}

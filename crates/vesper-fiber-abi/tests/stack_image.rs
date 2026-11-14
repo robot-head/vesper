@@ -105,12 +105,15 @@ fn stack_image_and_register_frame_describe_the_parked_fiber() {
             assert_eq!(frame.abi, FrameAbi::HOST);
             assert_eq!(Some(&frame), image.register_frame().as_ref());
             assert_ne!(frame.return_address, 0);
-            // A fiber parks from `vesper_fiber_park`, Rust code whose own
-            // frame is on the stack, so the switch returns into this binary.
-            let park = vesper_fiber_abi::fiber::vesper_fiber_park as *const () as u64;
-            assert!(
-                frame.return_address > park && frame.return_address < park + 4096,
-                "{opt:?}: return address {:#x} is not inside vesper_fiber_park at {park:#x}",
+            // `vesper_fiber_park` has no frame of its own (it tail-jumps into
+            // the switch), so the switch returns straight into the generated
+            // code that called it.
+            assert_eq!(
+                jit.cfi()
+                    .function_at(frame.return_address - 1)
+                    .map(|f| f.name.as_str()),
+                Some(vesper_fiber_abi::prototype::PULSE_READ_SYMBOL),
+                "{opt:?}: return address {:#x}",
                 frame.return_address
             );
             match frame.abi {
@@ -420,30 +423,48 @@ fn fixed_stack_bases_are_validated() {
             .kind(),
         std::io::ErrorKind::InvalidInput
     );
-    let base = FiberStack::free_fixed_base(64 * 1024).unwrap();
-    assert_eq!(
-        FiberStack::with_fixed_base(base + 1, 64 * 1024)
-            .err()
-            .unwrap()
-            .kind(),
-        std::io::ErrorKind::InvalidInput
-    );
-    let s = FiberStack::with_fixed_base(base, 64 * 1024).unwrap();
-    assert_eq!(s.reservation_base(), base);
-    assert_eq!(s.len(), 64 * 1024);
-    assert_eq!(s.top(), base + s.reservation_len());
-    assert_eq!(s.context_slot(), Some(base as *mut u8));
-    assert!(s.base() >= base + 2 * page);
-    assert_eq!(
-        FiberStack::with_fixed_base(base, 64 * 1024)
-            .err()
-            .unwrap()
-            .kind(),
-        std::io::ErrorKind::AlreadyExists
-    );
-    drop(s);
-    let again = FiberStack::with_fixed_base(base, 64 * 1024).unwrap();
-    assert_eq!(again.reservation_base(), base);
+    // `free_fixed_base` probes and releases a hole, so another thread of the
+    // test process (libtest workers, allocator arenas) can map into it before
+    // the fixed mapping does. That race surfaces as `AlreadyExists`; it says
+    // nothing about the stack, so restart from a fresh probe.
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        assert!(attempts <= 16, "no stable free fixed base after 16 probes");
+        let base = FiberStack::free_fixed_base(64 * 1024).unwrap();
+        assert_eq!(
+            FiberStack::with_fixed_base(base + 1, 64 * 1024)
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::InvalidInput
+        );
+        let s = match FiberStack::with_fixed_base(base, 64 * 1024) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("fixed stack at a free base: {e}"),
+        };
+        assert_eq!(s.reservation_base(), base);
+        assert_eq!(s.len(), 64 * 1024);
+        assert_eq!(s.top(), base + s.reservation_len());
+        assert_eq!(s.context_slot(), Some(base as *mut u8));
+        assert!(s.base() >= base + 2 * page);
+        assert_eq!(
+            FiberStack::with_fixed_base(base, 64 * 1024)
+                .err()
+                .unwrap()
+                .kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
+        drop(s);
+        let again = match FiberStack::with_fixed_base(base, 64 * 1024) {
+            Ok(again) => again,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => panic!("fixed stack at a released base: {e}"),
+        };
+        assert_eq!(again.reservation_base(), base);
+        break;
+    }
     let floating = FiberStack::new(64 * 1024).unwrap();
     assert_eq!(floating.context_slot(), None);
     assert_eq!(

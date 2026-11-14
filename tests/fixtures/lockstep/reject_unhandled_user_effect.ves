@@ -1,0 +1,9 @@
+linear effect Ask {
+    fn ask() -> i64;
+}
+fn g() -> i64 eff [Ask] {
+    Ask::ask()
+}
+fn main() -> i64 {
+    g()
+}
