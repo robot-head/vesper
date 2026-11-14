@@ -1322,3 +1322,26 @@ fn references_and_simp_definitions() {
         },
     ]));
 }
+
+#[test]
+fn free_references_respect_binders() {
+    let body = Term::Do {
+        statements: vec![DoStatement::Let {
+            binding: LetBinding {
+                pattern: Pattern::Bind(id("g")),
+                ty: None,
+                value: app("f", vec![r("g")]),
+            },
+            mutable: true,
+        }],
+        result: Box::new(app("g", vec![app("h", vec![])])),
+    };
+    let free = Term::free_references(&[b("f", r("Nat"))], &body);
+    // `f` is the parameter; the first `g` is free (before its let), `h` is free.
+    assert!(!free.contains(&name("f")));
+    assert!(free.contains(&name("g")));
+    assert!(free.contains(&name("h")));
+    assert!(free.contains(&name("Nat")));
+    let shadowed = Term::free_references(&[], &body);
+    assert!(shadowed.contains(&name("f")));
+}

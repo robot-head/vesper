@@ -292,3 +292,45 @@ fn non_recursive_functions_are_ordinary_definitions_in_dependency_order() {
     let position = |n: &str| text.find(&format!("def «{n}» ")).unwrap();
     assert!(position("b") < position("a") && position("a") < position("main"));
 }
+
+#[test]
+fn a_parameter_shadowing_a_function_is_not_recursion() {
+    let source = "fn f(f: u64) -> u64 eff [Fail[ArithOverflow]] { f + 1 } fn main() -> u64 { 0 }";
+    let report = lean::extract_report(&world(source)).unwrap();
+    assert_eq!(report.totality["f"], Totality::Total);
+    let text = report.module.render().unwrap();
+    assert!(!text.contains("partial def"), "{text}");
+    compiles(&text);
+}
+
+#[test]
+fn recursion_through_a_pure_closure_stays_partial_and_compiles() {
+    let source = "fn down(n: u64) -> u64 { if n == 0 { 0 } else { let step = |x: u64| down(x); step(wrapping_sub(n, 1)) } } fn main() -> u64 { down(3) }";
+    let report = lean::extract_report(&world(source)).unwrap();
+    assert!(
+        matches!(&report.totality["down"], Totality::Partial(reason) if reason.contains("pure closure")),
+        "{:?}",
+        report.totality["down"]
+    );
+    assert!(matches!(&report.totality["main"], Totality::Partial(_)));
+    compiles(&report.module.render().unwrap());
+}
+
+fn compiles(text: &str) {
+    let Some(compiler) = lean() else {
+        return;
+    };
+    let path = std::env::temp_dir().join(format!(
+        "vesper-lean-extract-{}-{}.lean",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::write(&path, text).unwrap();
+    let result = Command::new(compiler).arg(&path).output().unwrap();
+    let _ = fs::remove_file(&path);
+    assert!(
+        result.status.success(),
+        "{}\n{text}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+}

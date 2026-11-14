@@ -880,10 +880,7 @@ fn order_definitions(definitions: Vec<(String, Definition)>, recursive: Definiti
         graph.add_node(i);
     }
     for (i, (_, d)) in definitions.iter().enumerate() {
-        let mut refs = d.body.references();
-        for b in &d.binders {
-            refs.extend(b.ty.references());
-        }
+        let refs = Term::free_references(&d.binders, &d.body);
         for name in refs {
             if let Some(&j) = index.get(&name) {
                 graph.add_edge(i, j, ());
@@ -2839,6 +2836,11 @@ impl Generator<'_> {
                 .into_iter()
                 .map(Argument::Positional),
         );
+        if self.in_family(n) && self.monad == global(&["Id"]) {
+            return Err(format!(
+                "a fuel companion cannot call the recursive function '{n}' inside a pure closure"
+            ));
+        }
         let call = if self.in_family(n) {
             arguments.insert(
                 0,
