@@ -1,0 +1,7 @@
+// expect: E0100
+// ConstDenorm is built in and reserved.
+copy effect ConstDenorm {}
+
+fn main() -> u64 {
+    0
+}

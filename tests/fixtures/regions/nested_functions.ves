@@ -1,0 +1,36 @@
+// Callees allocate in the caller's region through eff [r: Region].
+copy struct Pair {
+    left: i64,
+    right: i64,
+}
+
+fn make(l: i64, r2: i64) -> RegionBox[r, Pair] eff [r: Region] {
+    r
+        .box(
+        Pair {
+            left: l,
+            right: r2
+        }
+    )
+}
+
+fn sum(b: RegionBox[r, Pair]) -> i64 eff [r: Region] {
+    let p = r.get(b);
+    wrapping_add(p.left, p.right)
+}
+
+fn main() -> i64 {
+    region r {
+        let x = make(20, 1);
+        region inner(64) {
+            let y = inner
+                .box(
+                Pair {
+                    left: 10,
+                    right: 11
+                }
+            );
+            wrapping_add(sum(x), inner.get(y).right)
+        }
+    }
+}

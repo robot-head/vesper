@@ -1,0 +1,7 @@
+// expect: E0200
+// Bitwise intrinsics take two operands of one integer kind.
+fn main() -> u64 {
+    let a: u8 = 1;
+    let b: u64 = 2;
+    bit_xor(a, b)
+}

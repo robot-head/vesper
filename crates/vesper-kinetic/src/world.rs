@@ -56,6 +56,11 @@ pub mod det {
     pub fn max(a: f32, b: f32) -> f32 {
         if a > b { a } else { b }
     }
+    /// `min` with a fixed answer for every input: `b` unless `a < b`.
+    #[inline]
+    pub fn min(a: f32, b: f32) -> f32 {
+        if a < b { a } else { b }
+    }
     /// Three-component dot product, evaluated left to right.
     #[inline]
     pub fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {

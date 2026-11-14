@@ -27,7 +27,15 @@
 //!
 //! This world is separate from [`crate::World`], which keeps the §36.2
 //! `RigidBodyTile` layout (positions without orientation) and its
-//! wave-five golden hash. Joints are not modelled here.
+//! wave-five golden hash.
+//!
+//! Beyond contacts the world has XPBD joints ([`RigidJoint`]: ball, hinge
+//! and prismatic, with limits), an implicit gyroscopic term
+//! ([`RigidWorld::set_gyroscopic`]), sleeping islands
+//! ([`RigidWorld::set_sleeping`]) and conservative-advancement continuous
+//! collision detection ([`RigidWorld::set_ccd`]). Every one of them is off
+//! (or absent) by default, and with all of them off the world steps to the
+//! same bits as before they existed: the pinned golden hash is unchanged.
 
 // `!(x > y)` is deliberate: it is also true when `x` is NaN.
 #![allow(clippy::neg_cmp_op_on_partial_ord)]
@@ -39,6 +47,15 @@ use crate::sap::{SapError, SweepAndPrune};
 use crate::snapshot::{KineticSnapshotWireHdr, WorldHashes};
 use crate::world::det;
 use sha2::Digest;
+
+mod ccd;
+mod gyro;
+mod joints;
+mod sleep;
+
+pub use ccd::CcdConfig;
+pub use joints::{JointKind, RigidJoint};
+pub use sleep::SleepConfig;
 
 /// Most points in one contact manifold.
 pub const MAX_MANIFOLD_POINTS: usize = 4;
@@ -69,6 +86,15 @@ pub enum ColliderShape {
     /// volume).
     ConvexHull {
         vertices: Vec<V3>,
+    },
+    /// A capsule along any body-frame segment: the points from `a` to `b`
+    /// swept by `radius`. [`segment_capsule_inertia`] gives its principal
+    /// moments and the body's inertia frame when the segment is centred on
+    /// the body origin.
+    Segment {
+        a: V3,
+        b: V3,
+        radius: f32,
     },
 }
 
@@ -111,6 +137,11 @@ pub struct RigidBody {
     pub inv_inertia: V3,
     pub collider: u32,
     pub layer_mask: u32,
+    /// Orientation of the principal inertia axes in the body frame (unit
+    /// quaternion; identity for every built-in shape except an off-axis
+    /// [`ColliderShape::Segment`]). `inv_inertia` holds the moments about
+    /// these axes.
+    pub inertia_frame: Q,
 }
 
 impl RigidBody {
@@ -125,9 +156,12 @@ impl RigidBody {
             inv_inertia,
             collider,
             layer_mask: 1,
+            inertia_frame: IDENTITY,
         }
     }
 }
+
+const IDENTITY: Q = [0.0, 0.0, 0.0, 1.0];
 
 /// Inverse inertia of a solid sphere of inverse mass `inv_mass`.
 pub fn sphere_inv_inertia(inv_mass: f32, radius: f32) -> V3 {
@@ -162,6 +196,63 @@ pub fn capsule_inv_inertia(inv_mass: f32, half_height: f32, radius: f32) -> V3 {
         + ms * (2.0 * r * r / 5.0 + hgt * hgt / 4.0 + 3.0 * hgt * r / 8.0);
     let (a, l) = ((1.0 / axial) as f32, (1.0 / lateral) as f32);
     [l, a, l]
+}
+
+/// Principal inverse moments and inertia frame of a solid capsule along the
+/// body-frame segment `a`–`b` with the given radius, which must be centred
+/// on the body origin (the origin is the centre of mass). The frame maps
+/// the body's y axis onto the segment, so the moments are those of
+/// [`capsule_inv_inertia`].
+pub fn segment_capsule_inertia(
+    inv_mass: f32,
+    a: V3,
+    b: V3,
+    radius: f32,
+) -> Result<(V3, Q), RigidError> {
+    let bad = |reason| RigidError::InvalidCollider {
+        collider: usize::MAX,
+        reason,
+    };
+    if !(finite3(a) && finite3(b) && radius.is_finite() && radius > 0.0) {
+        return Err(bad("segment endpoints must be finite and radius positive"));
+    }
+    let mid = scale(add(a, b), 0.5);
+    let d = sub(b, a);
+    let len = length(d);
+    let size = det::max(length(a), length(b));
+    if length(mid) > det::mul(1.0e-5, det::add(size, 1.0)) {
+        return Err(bad("segment must be centred on the body origin"));
+    }
+    let inv = capsule_inv_inertia(inv_mass, det::mul(len, 0.5), radius);
+    if !(len > 0.0) {
+        return Ok((inv, IDENTITY));
+    }
+    Ok((inv, arc([0.0, 1.0, 0.0], scale(d, det::div(1.0, len)))))
+}
+
+/// The shortest-arc unit quaternion rotating unit `from` onto unit `to`.
+fn arc(from: V3, to: V3) -> Q {
+    let c = dot(from, to);
+    if c < -0.999_999 {
+        // Opposite: a half turn about any axis perpendicular to `from`.
+        let p = perpendicular(from);
+        return [p[0], p[1], p[2], 0.0];
+    }
+    let x = cross(from, to);
+    normalize_q([x[0], x[1], x[2], det::add(1.0, c)])
+}
+
+/// A unit vector perpendicular to unit `v` (deterministic choice).
+fn perpendicular(v: V3) -> V3 {
+    let other = if v[0].abs() < 0.57 {
+        [1.0, 0.0, 0.0]
+    } else if v[1].abs() < 0.57 {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let p = cross(v, other);
+    scale(p, det::div(1.0, length(p)))
 }
 
 /// Static ground plane `y = height`.
@@ -247,6 +338,10 @@ pub enum RigidError {
     NonFinite {
         body: usize,
     },
+    InvalidJoint {
+        joint: usize,
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for RigidError {
@@ -269,6 +364,7 @@ impl std::fmt::Display for RigidError {
             Self::SweepAndPrune(e) => write!(f, "sort-and-sweep broadphase: {e}"),
             Self::TickOverflow => write!(f, "tick counter overflow"),
             Self::NonFinite { body } => write!(f, "body {body} left the finite range"),
+            Self::InvalidJoint { joint, reason } => write!(f, "joint {joint}: {reason}"),
         }
     }
 }
@@ -319,6 +415,19 @@ struct State {
     inv_inertia: V3,
     collider: u32,
     layer: u32,
+    /// Principal inertia frame in the body frame (`None`: identity).
+    frame: Option<Q>,
+}
+
+impl State {
+    /// Orientation of the principal axes in world coordinates.
+    #[inline]
+    fn principal(&self) -> Q {
+        match self.frame {
+            None => self.q,
+            Some(f) => qmul(self.q, f),
+        }
+    }
 }
 
 /// A deterministic XPBD rigid-body world.
@@ -344,6 +453,22 @@ pub struct RigidWorld {
     verts_a: Vec<[f64; 3]>,
     verts_b: Vec<[f64; 3]>,
     layers: usize,
+    // Joints and the body pairs they exempt from collision (sorted).
+    joints: Vec<joints::JointState>,
+    connected: Vec<(u32, u32)>,
+    gyroscopic: bool,
+    // Sleeping islands.
+    sleep: Option<SleepConfig>,
+    asleep: Vec<bool>,
+    sleep_ticks: Vec<u32>,
+    saved_asleep: Vec<bool>,
+    saved_sleep_ticks: Vec<u32>,
+    island: Vec<u32>,
+    island_awake: Vec<bool>,
+    deferred: Vec<u32>,
+    // Continuous collision detection.
+    ccd: Option<CcdConfig>,
+    ccd_hits: usize,
 }
 
 // ----- vector and quaternion helpers (binary32, fixed order) -----------------
@@ -447,19 +572,20 @@ fn normalize_q(q: Q) -> Q {
 /// `I⁻¹ x` in world coordinates for a body with orientation `q`.
 #[inline]
 fn inv_inertia_world(s: &State, x: V3) -> V3 {
-    let l = rotate_inv(s.q, x);
+    let q = s.principal();
+    let l = rotate_inv(q, x);
     let l = [
         det::mul(l[0], s.inv_inertia[0]),
         det::mul(l[1], s.inv_inertia[1]),
         det::mul(l[2], s.inv_inertia[2]),
     ];
-    rotate(s.q, l)
+    rotate(q, l)
 }
 
 /// `xᵀ I⁻¹ x` (the rotational part of a generalized inverse mass).
 #[inline]
 fn angular_weight(s: &State, x: V3) -> f32 {
-    let l = rotate_inv(s.q, x);
+    let l = rotate_inv(s.principal(), x);
     det::add(
         det::add(
             det::mul(det::mul(l[0], l[0]), s.inv_inertia[0]),
@@ -519,6 +645,19 @@ fn has_volume(v: &[V3]) -> bool {
         }
     }
     false
+}
+
+/// Rotate `s` by the angular impulse `l` (world): `q += ½ [I⁻¹ l, 0] q`.
+#[inline]
+fn turn(s: &mut State, l: V3) {
+    let dq = inv_inertia_world(s, l);
+    let rot = qmul([dq[0], dq[1], dq[2], 0.0], s.q);
+    s.q = [
+        det::add(s.q[0], det::mul(0.5, rot[0])),
+        det::add(s.q[1], det::mul(0.5, rot[1])),
+        det::add(s.q[2], det::mul(0.5, rot[2])),
+        det::add(s.q[3], det::mul(0.5, rot[3])),
+    ];
 }
 
 // ----- narrowphase geometry (binary64) -----------------------------------------
@@ -598,7 +737,18 @@ fn world_core(shape: &ColliderShape, s: &State, out: &mut Vec<[f64; 3]>) -> f64 
             }
             0.0
         }
+        ColliderShape::Segment { a, b, radius } => {
+            out.push(place(to64(*a)));
+            if a != b {
+                out.push(place(to64(*b)));
+            }
+            f64::from(*radius)
+        }
     }
+}
+
+fn shape_of<'a>(colliders: &'a [RigidCollider], s: &State) -> &'a ColliderShape {
+    &colliders[s.collider as usize].shape
 }
 
 fn gjk_shape(core: &[[f64; 3]], radius: f64) -> Shape<'_> {
@@ -764,6 +914,11 @@ impl RigidWorld {
                         return Err(bad("convex hull is flat"));
                     }
                 }
+                ColliderShape::Segment { a, b, radius } => {
+                    if !(pos(*radius) && finite3(*a) && finite3(*b)) {
+                        return Err(bad("segment endpoints must be finite and radius positive"));
+                    }
+                }
             }
         }
         let mut states = Vec::with_capacity(bodies.len());
@@ -780,6 +935,17 @@ impl RigidWorld {
             }
             if !b.orientation.iter().all(|v| v.is_finite()) {
                 return Err(bad("orientation"));
+            }
+            if !b.inertia_frame.iter().all(|v| v.is_finite()) {
+                return Err(bad("inertia_frame"));
+            }
+            let f2: f64 = b
+                .inertia_frame
+                .iter()
+                .map(|v| f64::from(*v) * f64::from(*v))
+                .sum();
+            if (f2 - 1.0).abs() > 1e-4 {
+                return Err(bad("inertia_frame must be a unit quaternion"));
             }
             let n2: f64 = b
                 .orientation
@@ -805,6 +971,7 @@ impl RigidWorld {
                 inv_inertia: if fixed { [0.0; 3] } else { b.inv_inertia },
                 collider: b.collider,
                 layer: b.layer_mask,
+                frame: (b.inertia_frame != IDENTITY).then(|| normalize_q(b.inertia_frame)),
             });
         }
         let n = bodies.len();
@@ -840,6 +1007,19 @@ impl RigidWorld {
             verts_a: Vec::with_capacity(MAX_HULL_VERTICES),
             verts_b: Vec::with_capacity(MAX_HULL_VERTICES),
             layers: 0,
+            joints: Vec::new(),
+            connected: Vec::new(),
+            gyroscopic: false,
+            sleep: None,
+            asleep: vec![false; n],
+            sleep_ticks: vec![0; n],
+            saved_asleep: vec![false; n],
+            saved_sleep_ticks: vec![0; n],
+            island: vec![0; n],
+            island_awake: vec![false; n],
+            deferred: Vec::with_capacity(max_pairs),
+            ccd: None,
+            ccd_hits: 0,
         })
     }
 
@@ -874,6 +1054,7 @@ impl RigidWorld {
             inv_inertia: s.inv_inertia,
             collider: s.collider,
             layer_mask: s.layer,
+            inertia_frame: s.frame.unwrap_or(IDENTITY),
         })
     }
 
@@ -885,6 +1066,38 @@ impl RigidWorld {
     /// Colours used by the last step.
     pub fn last_layer_count(&self) -> usize {
         self.layers
+    }
+
+    /// Enable or disable the implicit gyroscopic term (off by default,
+    /// which keeps the world's pre-existing golden hash).
+    pub fn set_gyroscopic(&mut self, on: bool) {
+        self.gyroscopic = on;
+    }
+
+    /// Angular momentum `Σ m x × v + R I Rᵀ ω` of the dynamic bodies about
+    /// the origin (binary64).
+    pub fn angular_momentum(&self) -> [f64; 3] {
+        let mut l = [0.0f64; 3];
+        for s in &self.bodies {
+            if s.inv_mass == 0.0 {
+                continue;
+            }
+            let m = 1.0 / f64::from(s.inv_mass);
+            let lin = cross64(to64(s.x), to64(s.v));
+            let q = s.principal();
+            let wl = to64(rotate_inv(q, s.w));
+            let mut il = [0.0f64; 3];
+            for k in 0..3 {
+                if s.inv_inertia[k] > 0.0 {
+                    il[k] = wl[k] / f64::from(s.inv_inertia[k]);
+                }
+            }
+            let iw = rotate64(q, il);
+            for k in 0..3 {
+                l[k] += m * lin[k] + iw[k];
+            }
+        }
+        l
     }
 
     /// Add `dv` to a dynamic body's velocity (and `dw` to its angular
@@ -901,6 +1114,7 @@ impl RigidWorld {
         }
         s.v = v;
         s.w = w;
+        self.wake(body);
         Ok(())
     }
 
@@ -937,6 +1151,25 @@ impl RigidWorld {
             }
             feed(&record);
         }
+        // Extension records, only for state the original world did not
+        // have (so a world without them hashes exactly as before): the
+        // inertia frames that are not the identity, then the sleep state.
+        for (i, s) in self.bodies.iter().enumerate() {
+            if let Some(f) = s.frame {
+                feed(b"frame");
+                feed(&(i as u64).to_le_bytes());
+                for v in f {
+                    feed(&v.to_bits().to_le_bytes());
+                }
+            }
+        }
+        if self.sleep.is_some() {
+            feed(b"sleep");
+            for (a, t) in self.asleep.iter().zip(&self.sleep_ticks) {
+                feed(&[u8::from(*a)]);
+                feed(&t.to_le_bytes());
+            }
+        }
         WorldHashes {
             sha256: sha.finalize().into(),
             blake3: *b3.finalize().as_bytes(),
@@ -952,7 +1185,7 @@ impl RigidWorld {
             }
             let v = to64(s.v);
             e += 0.5 * dot64(v, v) / f64::from(s.inv_mass);
-            let wl = to64(rotate_inv(s.q, s.w));
+            let wl = to64(rotate_inv(s.principal(), s.w));
             for (k, component) in wl.into_iter().enumerate() {
                 if s.inv_inertia[k] > 0.0 {
                     e += 0.5 * component * component / f64::from(s.inv_inertia[k]);
@@ -973,6 +1206,9 @@ impl RigidWorld {
             ColliderShape::Box { half_extents } => length(*half_extents),
             ColliderShape::ConvexHull { vertices } => {
                 vertices.iter().map(|v| length(*v)).fold(0.0, det::max)
+            }
+            ColliderShape::Segment { a, b, radius } => {
+                det::add(det::max(length(*a), length(*b)), *radius)
             }
         }
     }
@@ -1004,10 +1240,18 @@ impl RigidWorld {
         self.saved_manifolds.clear();
         self.saved_manifolds.extend_from_slice(&self.manifolds);
         let layers = self.layers;
+        if self.sleep.is_some() {
+            self.saved_asleep.copy_from_slice(&self.asleep);
+            self.saved_sleep_ticks.copy_from_slice(&self.sleep_ticks);
+        }
         let result = self.step_inner(next_tick);
         if result.is_err() {
             std::mem::swap(&mut self.manifolds, &mut self.saved_manifolds);
             self.layers = layers;
+            if self.sleep.is_some() {
+                self.asleep.copy_from_slice(&self.saved_asleep);
+                self.sleep_ticks.copy_from_slice(&self.saved_sleep_ticks);
+            }
         }
         result
     }
@@ -1018,6 +1262,12 @@ impl RigidWorld {
         for m in &self.manifolds {
             self.constraint_bodies
                 .push(ConstraintBodies { a: m.a, b: m.b });
+        }
+        for j in &self.joints {
+            self.constraint_bodies.push(ConstraintBodies {
+                a: j.joint.a,
+                b: j.joint.b,
+            });
         }
         self.colorer
             .color(&self.constraint_bodies)
@@ -1032,6 +1282,9 @@ impl RigidWorld {
         {
             self.bodies = saved;
             return Err(RigidError::NonFinite { body });
+        }
+        if self.sleep.is_some() {
+            self.update_sleep();
         }
         self.tick = next_tick;
         Ok(self.header())
@@ -1053,6 +1306,7 @@ impl RigidWorld {
         let margin = self.config.contact_margin;
         self.manifolds.clear();
         self.boxes.clear();
+        self.ccd_hits = 0;
         for i in 0..n {
             self.sweeps[i] = self.sweep_of(i);
             if !self.sweeps[i].is_finite() {
@@ -1093,7 +1347,13 @@ impl RigidWorld {
                 && lo[1] - r - f64::from(ground.height)
                     < f64::from(det::add(margin, self.sweeps[i]))
             {
-                self.ground_manifold(i, ground, r)?;
+                match self.ccd_ground(i, ground) {
+                    Some(at) => {
+                        world_core(shape_of(&self.colliders, &at), &at, &mut self.verts_a);
+                        self.ground_manifold(i, at, ground, r)?;
+                    }
+                    None => self.ground_manifold(i, self.bodies[i], ground, r)?,
+                }
             }
         }
         let max_pairs = self.pairs.capacity();
@@ -1113,15 +1373,40 @@ impl RigidWorld {
                     .map_err(RigidError::SweepAndPrune)?;
             }
         }
+        self.deferred.clear();
         for k in 0..self.pairs.len() {
             let (a, b) = self.pairs[k];
             let (sa, sb) = (&self.bodies[a as usize], &self.bodies[b as usize]);
             if (sa.inv_mass == 0.0 && sb.inv_mass == 0.0) || sa.layer & sb.layer == 0 {
                 continue;
             }
+            if !self.connected.is_empty() && self.connected.binary_search(&(a, b)).is_ok() {
+                continue;
+            }
+            if self.sleep.is_some() && !self.active(a) && !self.active(b) {
+                // Both sides asleep (or static): collided only if a waking
+                // island reaches them.
+                self.deferred.push(k as u32);
+                continue;
+            }
             self.pair_manifold(a as usize, b as usize)?;
         }
+        if self.sleep.is_some() {
+            self.wake_islands()?;
+        }
         Ok(())
+    }
+
+    /// Whether body `i` is dynamic and awake.
+    #[inline]
+    fn active(&self, i: u32) -> bool {
+        self.bodies[i as usize].inv_mass > 0.0 && !(self.sleep.is_some() && self.asleep[i as usize])
+    }
+
+    /// Whether a constraint between `a` and `b` has anything to move.
+    #[inline]
+    fn live(&self, a: u32, b: Option<u32>) -> bool {
+        self.active(a) || b.is_some_and(|b| self.active(b))
     }
 
     fn push_manifold(&mut self, m: ContactManifold) -> Result<(), RigidError> {
@@ -1134,13 +1419,16 @@ impl RigidWorld {
         Ok(())
     }
 
+    /// The ground manifold of body `i` with the geometry of pose `s` (the
+    /// current state, or the time-of-impact pose under CCD), whose core
+    /// vertices are in `verts_a`.
     fn ground_manifold(
         &mut self,
         i: usize,
+        s: State,
         ground: GroundPlane,
         radius: f64,
     ) -> Result<(), RigidError> {
-        let s = self.bodies[i];
         let margin = f64::from(det::add(self.config.contact_margin, self.sweeps[i]));
         let h = f64::from(ground.height);
         let mut cands: Vec<Candidate> = Vec::with_capacity(self.verts_a.len());
@@ -1186,6 +1474,22 @@ impl RigidWorld {
 
     fn pair_manifold(&mut self, a: usize, b: usize) -> Result<(), RigidError> {
         let (sa, sb) = (self.bodies[a], self.bodies[b]);
+        if self.ccd.is_some()
+            && let Some((ta, tb)) = self.ccd_pair(a, b)?
+        {
+            return self.pair_manifold_at(a, b, ta, tb);
+        }
+        self.pair_manifold_at(a, b, sa, sb)
+    }
+
+    /// The manifold of `a` and `b` with the geometry of poses `sa`, `sb`.
+    fn pair_manifold_at(
+        &mut self,
+        a: usize,
+        b: usize,
+        sa: State,
+        sb: State,
+    ) -> Result<(), RigidError> {
         let ca = &self.colliders[sa.collider as usize];
         let cb = &self.colliders[sb.collider as usize];
         let ra = world_core(&ca.shape, &sa, &mut self.verts_a);
@@ -1306,27 +1610,37 @@ impl RigidWorld {
     /// Apply the positional impulse `p` at arms `ra` (to `a`) and `rb`
     /// (`-p` to `b`): position and orientation (Müller et al. eq. 6–9).
     fn apply_positional(&mut self, m: &ContactManifold, ra: V3, rb: V3, p: V3) {
-        let turn = |s: &mut State, r: V3, p: V3| {
-            let dq = inv_inertia_world(s, cross(r, p));
-            let rot = qmul([dq[0], dq[1], dq[2], 0.0], s.q);
-            s.q = [
-                det::add(s.q[0], det::mul(0.5, rot[0])),
-                det::add(s.q[1], det::mul(0.5, rot[1])),
-                det::add(s.q[2], det::mul(0.5, rot[2])),
-                det::add(s.q[3], det::mul(0.5, rot[3])),
-            ];
-        };
-        let a = &mut self.bodies[m.a as usize];
+        self.apply_positional_to(m.a, m.b, ra, rb, p);
+    }
+
+    /// [`RigidWorld::apply_positional`] for any body pair.
+    fn apply_positional_to(&mut self, a: u32, b: Option<u32>, ra: V3, rb: V3, p: V3) {
+        let a = &mut self.bodies[a as usize];
         if a.inv_mass > 0.0 {
             a.x = add(a.x, scale(p, a.inv_mass));
-            turn(a, ra, p);
+            turn(a, cross(ra, p));
         }
-        if let Some(b) = m.b {
+        if let Some(b) = b {
             let b = &mut self.bodies[b as usize];
             if b.inv_mass > 0.0 {
                 let np = scale(p, -1.0);
                 b.x = add(b.x, scale(np, b.inv_mass));
-                turn(b, rb, np);
+                turn(b, cross(rb, np));
+            }
+        }
+    }
+
+    /// Apply the angular positional impulse `p` (world) to `a` and `-p` to
+    /// `b`: orientation only (Müller et al. eq. 14–15).
+    fn apply_rotation_to(&mut self, a: u32, b: Option<u32>, p: V3) {
+        let a = &mut self.bodies[a as usize];
+        if a.inv_mass > 0.0 {
+            turn(a, p);
+        }
+        if let Some(b) = b {
+            let b = &mut self.bodies[b as usize];
+            if b.inv_mass > 0.0 {
+                turn(b, scale(p, -1.0));
             }
         }
     }
@@ -1379,11 +1693,16 @@ impl RigidWorld {
         let mut manifolds = std::mem::take(&mut self.manifolds);
         for _ in 0..self.config.substeps {
             // Integrate.
+            let sleeping = self.sleep.is_some();
+            let gyroscopic = self.gyroscopic;
             for (i, s) in self.bodies.iter_mut().enumerate() {
                 self.prev[i] = (s.x, s.q);
                 self.prev_vel[i] = (s.v, s.w);
-                if s.inv_mass == 0.0 {
+                if s.inv_mass == 0.0 || (sleeping && self.asleep[i]) {
                     continue;
+                }
+                if gyroscopic {
+                    gyro::implicit_gyroscopic(s, h);
                 }
                 s.v = add(s.v, scale(g, h));
                 s.x = add(s.x, scale(s.v, h));
@@ -1398,6 +1717,9 @@ impl RigidWorld {
                 self.integrated[i] = (s.x, s.q);
             }
             // Pre-solve normal velocities for restitution.
+            for j in self.joints.iter_mut() {
+                j.reset();
+            }
             for m in manifolds.iter_mut() {
                 for k in 0..m.count {
                     let (_, ra, _, rb) = self.points_of(m, k);
@@ -1407,10 +1729,18 @@ impl RigidWorld {
                 }
             }
             // Positions, colour by colour.
+            let nm = manifolds.len();
             for color in 0..self.colorer.layer_count() {
                 for idx in 0..self.colorer.layer(color).len() {
                     let mi = self.colorer.layer(color)[idx] as usize;
+                    if mi >= nm {
+                        self.project_joint(mi - nm, h);
+                        continue;
+                    }
                     let mut m = manifolds[mi];
+                    if sleeping && !self.live(m.a, m.b) {
+                        continue;
+                    }
                     self.project_manifold(&mut m);
                     manifolds[mi] = m;
                 }
@@ -1420,7 +1750,7 @@ impl RigidWorld {
             // `ω += 2·Δq.xyz/(h·Δq.w)` with `Δq = q·q̄_integrated`), so a body
             // nothing touched keeps its velocities bit for bit.
             for (i, s) in self.bodies.iter_mut().enumerate() {
-                if s.inv_mass == 0.0 {
+                if s.inv_mass == 0.0 || (sleeping && self.asleep[i]) {
                     continue;
                 }
                 let (ix, iq) = self.integrated[i];
@@ -1439,7 +1769,13 @@ impl RigidWorld {
             for color in 0..self.colorer.layer_count() {
                 for idx in 0..self.colorer.layer(color).len() {
                     let mi = self.colorer.layer(color)[idx] as usize;
+                    if mi >= nm {
+                        continue;
+                    }
                     let m = manifolds[mi];
+                    if sleeping && !self.live(m.a, m.b) {
+                        continue;
+                    }
                     self.velocity_manifold(&m, h, bounce_floor);
                 }
             }
