@@ -524,19 +524,10 @@ pub fn link_args(objects: &[PathBuf], output: &Path) -> Vec<OsString> {
     args
 }
 
-/// The executable path `vesper build -o <output>` writes on Windows: the
-/// given path, with `.exe` added when it has no extension.
-pub fn executable_path(output: &Path) -> PathBuf {
-    if output.extension().is_none() {
-        output.with_extension("exe")
-    } else {
-        output.to_path_buf()
-    }
-}
-
-/// Link `object` into a Windows console executable at
-/// [`executable_path`]`(output)`, using `linker` when given and
-/// [`Linker::find`] otherwise. Returns the executable path.
+/// Link `object` into a Windows console executable at exactly `output`
+/// (as on other targets, and as `rustc -o` does: no `.exe` is added, so
+/// pass a `.exe` name for a file Windows will start by name), using
+/// `linker` when given and [`Linker::find`] otherwise. Returns the path.
 pub fn link_executable(
     object: &Path,
     output: &Path,
@@ -556,7 +547,7 @@ pub fn link(
         Some(path) => Linker::explicit(path).with_library_environment(),
         None => Linker::find()?,
     };
-    let output = executable_path(output);
+    let output = output.to_path_buf();
     let result = linker.command(objects, &output).output().map_err(|e| {
         WindowsNativeError::Io(format!(
             "could not invoke native linker '{}': {e}",
@@ -907,11 +898,6 @@ mod tests {
             assert!(args.contains(&lib.to_string()), "{lib}");
         }
         assert_eq!(
-            executable_path(Path::new("out/fib")),
-            PathBuf::from("out/fib.exe")
-        );
-        assert_eq!(executable_path(Path::new("a.out")), PathBuf::from("a.out"));
-        assert_eq!(
             Linker::explicit(Path::new("C:/llvm/bin/lld-link.exe")).flavor,
             LinkerFlavor::LldLink
         );
@@ -1119,7 +1105,7 @@ fn run() -> i64 {
             .status()
             .unwrap();
         assert!(status.success(), "cl.exe failed");
-        let exe = link(&[harness, generated], &dir.join("sampler"), None).unwrap();
+        let exe = link(&[harness, generated], &dir.join("sampler.exe"), None).unwrap();
         let output = std::process::Command::new(&exe).output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(output.status.success(), "{:?}: {stdout}", output.status);
@@ -1141,7 +1127,7 @@ fn run() -> i64 {
             assert_eq!(evaluated, expected.to_string(), "{name}: evaluator");
             let object = dir.join(format!("{name}.vesper.o"));
             std::fs::write(&object, windows_object(source)).unwrap();
-            let exe = link_executable(&object, &dir.join(name), None)
+            let exe = link_executable(&object, &dir.join(format!("{name}.exe")), None)
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
             let status = std::process::Command::new(&exe).status().unwrap();
             assert_eq!(status.code(), Some(expected as i32), "{name}");

@@ -62,16 +62,18 @@ is `claude/project-thread-f5i5r2` (the suggested name was
      libvcruntime.lib kernel32.lib`. The CRT's `mainCRTStartup` calls the
      exported `main`; its result is the process exit code. The executables
      depend on no CRT DLL.
-   - `-o out/fib` writes `out/fib.exe` (an extension is added only when the
-     path has none). A missing linker, a failed spawn and a failed link are
+   - `-o` is written exactly as given, as on the other targets and as with
+     `rustc -o`; name the output `*.exe` for a file Windows starts by name.
+     A missing linker, a failed spawn and a failed link are
      typed errors; the link error carries the linker's output.
    - `vesper build` routes Windows targets (`--target x86_64-pc-windows-msvc`,
      or no target on a Windows host) to this driver in one hunk of
      `src/main.rs`; other targets still run `cc … -lm`.
-3. **CI.** The Windows (x86_64 MSVC) job now runs
-   `scripts/test-native-host.sh`, the same script and example list as the
-   macOS job, against the Cargo-built `target/debug/vesper.exe` (passed to
-   the script through its `VESPER_BAZEL_EXECUTABLES` file). The job's
+3. **CI.** The Windows (x86_64 MSVC) job now has a "Validate host native
+   executables" step. It reads the example list and expected exit codes out
+   of `scripts/test-native-host.sh` (so the list cannot drift from the
+   macOS job's), builds each with the Cargo-built `target/debug/vesper.exe`
+   as `*.exe`, runs it and compares the exit code. The job's
    `cargo test` also runs two Windows-only unit tests (below).
 
 ## Acceptance
@@ -95,8 +97,10 @@ must exit with the same status:
   generated `fib(34)` object through the driver, suspends the worker thread
   at random points and walks its stack with `RtlLookupFunctionEntry` and
   `RtlVirtualUnwind`. Every sample taken in generated code must reach the
-  calling C frame. Under Wine with MinGW the same sampler passed 68 of 68
-  samples (maximum depth 29). With `.pdata`/`.xdata` stripped from the
+  calling C frame. The worker calls the generated code until 200
+  samples have landed in it (a first version that ran `fib(34)` once got
+  only 5 samples on the Windows runner, all of which unwound). Under Wine
+  with MinGW the sampler passed 200 of 200 (maximum depth 30). With `.pdata`/`.xdata` stripped from the
   object (`objcopy --remove-section`), the walk fails, so the check
   discriminates. `llvm-readobj --unwind` decodes the emitted tables
   (`PUSH_NONVOL rbp`, `SET_FPREG rbp`, `SAVE_NONVOL` per callee-saved
@@ -137,8 +141,9 @@ Run on the cloud host (x86_64 Linux, Rust 1.97 stable and 1.100.0):
   a target switch and the emitted code cannot change.
 - The static CRT (`libcmt`) rather than the DLL CRT, so executables run on
   a machine without the Visual C++ redistributable.
-- `-o` without an extension gets `.exe`, matching what Windows looks for
-  when it starts a program by a name without an extension.
+- `-o` is honoured exactly (an earlier revision added `.exe`, which broke
+  the existing `build --tee` test that reads the `-o` path and its
+  `.tee.json` sibling).
 - `is_pic` is unchanged on Windows; the COFF writer's `.refptr` slot keeps
   `fmod` reachable without a GOT.
 

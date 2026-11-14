@@ -149,14 +149,28 @@ jobs:
         env:
           VESPER_LEAN: lean
       - run: scripts/ci/check-lean-models.sh
-      # The examples the Linux and macOS jobs run natively, built by the
-      # Cargo binary as x86_64-pc-windows-msvc COFF objects with unwind
-      # tables and linked by the Visual Studio link.exe (#347). The script
-      # takes its vesper executable from the prebuilt-executables file.
+      # The examples (and expected exit codes) that scripts/test-native-host.sh
+      # runs natively on Linux and macOS, built by the Cargo binary as
+      # x86_64-pc-windows-msvc COFF objects with unwind tables and linked by
+      # the Visual Studio link.exe (#347). `vesper build -o` writes exactly
+      # the path it is given, so the executables are named *.exe here.
       - name: Validate host native executables
         run: |
-          printf '//:bin/vesper %s\n' "$PWD/target/debug/vesper.exe" > "$RUNNER_TEMP/vesper-executables"
-          VESPER_BAZEL_EXECUTABLES="$RUNNER_TEMP/vesper-executables" scripts/test-native-host.sh
+          cases=$(sed -n 's/^for case in \(.*\); do$/\1/p' scripts/test-native-host.sh)
+          test -n "$cases"
+          artifacts=$(mktemp -d)
+          for case in $cases; do
+              source=${case%:*}
+              expected=${case#*:}
+              target/debug/vesper.exe build "examples/$source.ves" -o "$artifacts/$source.exe"
+              actual=0
+              "$artifacts/$source.exe" || actual=$?
+              if [ "$actual" != "$expected" ]; then
+                  printf '%s: expected %s, got %s\n' "$source" "$expected" "$actual" >&2
+                  exit 1
+              fi
+              printf '%s: host exit %s\n' "$source" "$actual"
+          done
       - name: Run proof acceptance against the actual Cargo executable
         run: >-
           python scripts/check-format-proof.py --binary target/debug/vesper.exe
