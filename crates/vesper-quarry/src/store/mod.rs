@@ -1120,7 +1120,8 @@ impl<D: Device> Store<D> {
         let first = {
             let view = self.view.read().unwrap_or_else(|e| e.into_inner());
             let root = view.root(tree)?;
-            self.core.fix_shared(root)?
+            // A root that fails to load poisons the store like any page.
+            self.poison_on(self.core.fix_shared(root))?
         };
         let mut cur = Some(first);
         let r = self.walk(&mut cur, lo, hi, f);
@@ -1143,9 +1144,11 @@ impl<D: Device> Store<D> {
             Leaf(Vec<Entry>, u64),
         }
         let mut expect: Option<u8> = None;
-        let bound = self.core.page_count().saturating_add(1);
+        // A walk visits each page at most once, so more steps than pages
+        // means a cycle. The bound is re-read each step: commits that run
+        // during the walk may allocate pages and link them into the chain.
         let mut steps = 0u64;
-        while steps <= bound {
+        while steps <= self.core.page_count().saturating_add(1) {
             steps += 1;
             let pin = cur.as_ref().expect("a latched page");
             let step = self.core.view(pin, |b| -> StoreResult<Step> {
@@ -1651,6 +1654,12 @@ impl<D: Device> Store<D> {
     /// its versions or locks seen by the read). Returns whether it is
     /// serializable.
     fn siread(&self, txn: &Txn, add: impl FnOnce(&mut Reads)) -> StoreResult<bool> {
+        // A committer runs its predicate check and installs its pages under
+        // the writer mutex. Registering under it too means a committer has
+        // either seen this predicate or installed versions this read will
+        // find newer than its snapshot, never neither (an uninstalled
+        // insert is in no tree and holds no lock a read would meet).
+        let _w = (txn.isolation == Isolation::Serializable).then(|| lock(&self.writer));
         let mut t = self.txns();
         let state = t
             .active
@@ -2541,5 +2550,47 @@ impl<D: Device> Store<D> {
 impl View {
     fn catalog_for(&self, replace: Option<&HermeticCatalog>) -> HermeticCatalog {
         replace.cloned().unwrap_or_else(|| self.catalog.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::device::SimDevice;
+
+    /// A walk paused at its first leaf while commits grow the tree follows
+    /// the new right-sibling links past the page count it started with.
+    #[test]
+    fn a_walk_survives_concurrent_tree_growth() {
+        let limits = StoreLimits {
+            btree_fanout: 3,
+            leaf_max_versions: 2,
+            ..StoreLimits::default()
+        };
+        let (mut s, _) = Store::open(SimDevice::new(), limits).unwrap();
+        s.execute_ddl("CREATE TABLE t (v U64 NOT NULL)").unwrap();
+        let s = s;
+        let fill = |n: u64| {
+            let mut t = s.begin().unwrap();
+            for i in 0..n {
+                s.insert(&mut t, "t", &[Value::U64(i)]).unwrap();
+            }
+            s.commit(t).unwrap();
+        };
+        fill(6);
+        let tid = s.view().table("t").unwrap().id;
+        let pages_before = s.core.page_count();
+        let mut seen = 0u64;
+        s.read_tree(Tree::Table(tid), Key::MIN, Key::MAX, &mut |_| {
+            if seen == 0 {
+                fill(94);
+            }
+            seen += 1;
+            Ok(true)
+        })
+        .unwrap();
+        assert!(s.core.page_count() > 2 * pages_before);
+        assert!(seen > 6, "the walk saw the appended versions too");
+        assert!(!s.poisoned());
     }
 }

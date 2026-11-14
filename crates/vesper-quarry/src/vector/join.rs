@@ -687,17 +687,14 @@ impl Run<'_> {
             return Ok(());
         }
         let n = cand.len();
+        // The batch's byte cost is bounded before any payload is copied.
         let mut bytes = n.saturating_mul(size_of::<Vec<Value>>());
-        let mut cols: Vec<Option<Column>> = vec![None; self.width()];
         for &leaf in members {
             for &sl in &slots[leaf] {
                 let src = rels[leaf].cols[sl].as_ref().expect("bound slot");
-                let mut col = Column::empty(self.ty(sl));
                 for t in cand.iter() {
                     bytes = add(bytes, cell_bytes(src, Some(t[leaf])))?;
-                    col.push_from(src, Some(t[leaf]));
                 }
-                cols[sl] = Some(col);
             }
         }
         bound(
@@ -705,6 +702,17 @@ impl Run<'_> {
             self.query.limits.intermediate_bytes,
             "intermediate byte limit of a candidate-tuple batch",
         )?;
+        let mut cols: Vec<Option<Column>> = vec![None; self.width()];
+        for &leaf in members {
+            for &sl in &slots[leaf] {
+                let src = rels[leaf].cols[sl].as_ref().expect("bound slot");
+                let mut col = Column::empty(self.ty(sl));
+                for t in cand.iter() {
+                    col.push_from(src, Some(t[leaf]));
+                }
+                cols[sl] = Some(col);
+            }
+        }
         let rel = Rel { cols, n };
         self.charge(n.saturating_mul(residual.len() + self.width()))?;
         self.mask(&rel, 0, n, residual)?;
