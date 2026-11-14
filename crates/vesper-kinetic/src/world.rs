@@ -18,6 +18,8 @@
 use crate::coloring::{Colorer, ColoringError, ConstraintBodies};
 use crate::lbvh::{Aabb, Lbvh, LbvhError};
 use crate::morton;
+use crate::sap::{SapError, SweepAndPrune};
+use crate::simd::{self, GroundLanes, PairLanes, SimdBackend, SimdUnavailable};
 use crate::snapshot::{KineticSnapshotWireHdr, hash_world};
 use crate::tile::{Body, TILE_WIDTH, TiledBodies};
 use vesper_alloc::{ChunkBacking, Region, RegionConfig};
@@ -140,6 +142,8 @@ pub enum StepError {
     Broadphase(LbvhError),
     /// A contact material coefficient is out of range.
     InvalidMaterial(&'static str),
+    /// The sort-and-sweep broadphase failed.
+    SweepAndPrune(SapError),
 }
 
 impl std::fmt::Display for StepError {
@@ -163,6 +167,7 @@ impl std::fmt::Display for StepError {
             Self::Arena(e) => write!(f, "step arena: {e}"),
             Self::Broadphase(e) => write!(f, "LBVH broadphase: {e}"),
             Self::InvalidMaterial(what) => write!(f, "invalid contact material: {what}"),
+            Self::SweepAndPrune(e) => write!(f, "sort-and-sweep broadphase: {e}"),
         }
     }
 }
@@ -182,6 +187,144 @@ pub const MAX_SEARCH_RADIUS: i32 = 4;
 
 /// Constraints per batch in [`SolverMode::Batched16`] (one AoSoA tile).
 pub const BATCH_WIDTH: usize = TILE_WIDTH;
+
+/// Default smallest colour that [`World::set_solver_threads`] splits across
+/// threads ([`World::set_parallel_threshold`]); smaller colours are solved on the calling thread (same bits).
+pub const PARALLEL_MIN_CONSTRAINTS: usize = 256;
+
+/// Most solver threads.
+pub const MAX_SOLVER_THREADS: usize = 64;
+
+/// The body and contact-state writes of one solved batch.
+#[derive(Debug, Clone, Copy)]
+struct TileUpdate {
+    writes: usize,
+    body: [u32; 2 * BATCH_WIDTH],
+    pos: [[f32; 3]; 2 * BATCH_WIDTH],
+    states: usize,
+    slot: [u32; BATCH_WIDTH],
+    state: [[f32; 4]; BATCH_WIDTH],
+}
+
+impl TileUpdate {
+    const EMPTY: Self = Self {
+        writes: 0,
+        body: [0; 2 * BATCH_WIDTH],
+        pos: [[0.0; 3]; 2 * BATCH_WIDTH],
+        states: 0,
+        slot: [0; BATCH_WIDTH],
+        state: [[0.0; 4]; BATCH_WIDTH],
+    };
+
+    #[inline]
+    fn push_write(&mut self, body: usize, pos: [f32; 3]) {
+        self.body[self.writes] = body as u32;
+        self.pos[self.writes] = pos;
+        self.writes += 1;
+    }
+
+    #[inline]
+    fn push_state(&mut self, slot: usize, state: [f32; 4]) {
+        self.slot[self.states] = slot as u32;
+        self.state[self.states] = state;
+        self.states += 1;
+    }
+}
+
+/// Wall-clock time of the phases of the last successful step (a
+/// diagnostic; it never influences the simulation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct StepTimings {
+    /// Sweep bounds, broadphase and exact reach tests.
+    pub broadphase: std::time::Duration,
+    /// Constraint colouring and batch planning.
+    pub coloring: std::time::Duration,
+    /// Constraint projection, summed over substeps.
+    pub solve: std::time::Duration,
+    /// The whole step.
+    pub total: std::time::Duration,
+}
+
+/// `BatchPlan::slot` of a joint (no contact state).
+const NO_SLOT: u32 = u32::MAX;
+
+/// One batch of a colour, fixed for a tick: the constraint lanes without
+/// positions (gathered every substep).
+#[derive(Debug, Clone, Copy)]
+struct BatchPlan {
+    ground: bool,
+    count: u8,
+    a: [u32; BATCH_WIDTH],
+    b: [u32; BATCH_WIDTH],
+    slot: [u32; BATCH_WIDTH],
+    lanes: PairLanes,
+}
+
+impl BatchPlan {
+    const EMPTY: Self = Self {
+        ground: false,
+        count: 0,
+        a: [0; BATCH_WIDTH],
+        b: [0; BATCH_WIDTH],
+        slot: [NO_SLOT; BATCH_WIDTH],
+        lanes: PairLanes {
+            pa: [[0.0; BATCH_WIDTH]; 3],
+            pb: [[0.0; BATCH_WIDTH]; 3],
+            wa: [0.0; BATCH_WIDTH],
+            wb: [0.0; BATCH_WIDTH],
+            target: [0.0; BATCH_WIDTH],
+            alpha: [0.0; BATCH_WIDTH],
+            inequality: 0,
+        },
+    };
+}
+
+/// A reusable barrier that spins briefly before yielding: colour phases
+/// last microseconds, shorter than a futex wake-up.
+struct SpinBarrier {
+    threads: usize,
+    arrived: std::sync::atomic::AtomicUsize,
+    generation: std::sync::atomic::AtomicUsize,
+}
+
+impl SpinBarrier {
+    fn new(threads: usize) -> Self {
+        Self {
+            threads,
+            arrived: std::sync::atomic::AtomicUsize::new(0),
+            generation: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    fn wait(&self) {
+        use std::sync::atomic::Ordering::{AcqRel, Acquire, Release};
+        let generation = self.generation.load(Acquire);
+        if self.arrived.fetch_add(1, AcqRel) + 1 == self.threads {
+            self.arrived.store(0, Release);
+            self.generation.fetch_add(1, Release);
+            return;
+        }
+        let mut spins = 0u32;
+        while self.generation.load(Acquire) == generation {
+            if spins < 512 {
+                std::hint::spin_loop();
+                spins += 1;
+            } else {
+                std::thread::yield_now();
+            }
+        }
+    }
+}
+
+#[inline]
+fn apply_update(bodies: &mut TiledBodies, u: &TileUpdate, state: &mut [[f32; 4]]) {
+    for k in 0..u.writes {
+        bodies.set_pos(u.body[k] as usize, u.pos[k]);
+    }
+    for k in 0..u.states {
+        state[u.slot[k] as usize] = u.state[k];
+    }
+}
 
 static NEXT_WORLD_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -206,6 +349,10 @@ pub enum BroadphaseMode {
     MortonCells,
     /// 64-bit Morton LBVH ([`crate::lbvh`]); no search-radius limit.
     Lbvh,
+    /// The data-parallel sort-and-sweep kernels ([`crate::sap`]) over the
+    /// same boxes as [`BroadphaseMode::Lbvh`]: the same pairs, so the same
+    /// bits.
+    SweepAndPrune,
 }
 
 /// Contact material for every contact of a world (XPBD friction after
@@ -240,6 +387,13 @@ pub struct World {
     solver: SolverMode,
     broadphase: BroadphaseMode,
     material: ContactMaterial,
+    simd: SimdBackend,
+    threads: usize,
+    parallel_min: usize,
+    par_out: Vec<Vec<TileUpdate>>,
+    plans: Vec<BatchPlan>,
+    plan_ranges: Vec<(u32, u32)>,
+    timings: StepTimings,
     // Per-step scratch, reserved at construction.
     prev: Vec<[f32; 3]>,
     prev_vel: Vec<[f32; 3]>,
@@ -257,6 +411,7 @@ pub struct World {
 #[derive(Debug)]
 struct LbvhScratch {
     tree: Lbvh,
+    sap: SweepAndPrune,
     boxes: Vec<Aabb>,
     pairs: Vec<(u32, u32)>,
     max_pairs: usize,
@@ -385,6 +540,13 @@ impl World {
             solver: SolverMode::Scalar,
             broadphase: BroadphaseMode::MortonCells,
             material: ContactMaterial::default(),
+            simd: SimdBackend::detect(),
+            threads: 1,
+            parallel_min: PARALLEL_MIN_CONSTRAINTS,
+            par_out: Vec::new(),
+            plans: Vec::new(),
+            plan_ranges: Vec::new(),
+            timings: StepTimings::default(),
             prev: vec![[0.0; 3]; bodies.len()],
             prev_vel: vec![[0.0; 3]; bodies.len()],
             sweep: vec![0.0; bodies.len()],
@@ -414,6 +576,11 @@ impl World {
         &self.config
     }
 
+    /// Phase timings of the last successful step.
+    pub fn last_timings(&self) -> StepTimings {
+        self.timings
+    }
+
     /// Colours used by the last step.
     pub fn last_layer_count(&self) -> usize {
         self.last_layer_count
@@ -427,6 +594,70 @@ impl World {
     /// Choose scalar or 16-lane batched projection (same bits either way).
     pub fn set_solver_mode(&mut self, mode: SolverMode) {
         self.solver = mode;
+        if mode == SolverMode::Batched16 {
+            // Each colour wastes at most one partial pair and one partial
+            // ground plan.
+            let plans =
+                self.colorer_capacity().div_ceil(BATCH_WIDTH) + 2 * crate::coloring::MAX_COLORS + 2;
+            self.plans.reserve(plans.saturating_sub(self.plans.len()));
+            self.plan_ranges.reserve(crate::coloring::MAX_COLORS + 1);
+        }
+    }
+
+    /// The instruction set used by [`SolverMode::Batched16`] (default: the
+    /// widest the host supports, [`SimdBackend::detect`]).
+    pub fn simd_backend(&self) -> SimdBackend {
+        self.simd
+    }
+
+    /// Choose the batch kernel backend. Every backend gives the same bits;
+    /// one the host cannot run is a typed error and changes nothing.
+    pub fn set_simd_backend(&mut self, backend: SimdBackend) -> Result<(), SimdUnavailable> {
+        self.simd = backend.require()?;
+        Ok(())
+    }
+
+    /// Solver threads used by [`SolverMode::Batched16`] for colours of at
+    /// least [`PARALLEL_MIN_CONSTRAINTS`] constraints.
+    pub fn solver_threads(&self) -> usize {
+        self.threads
+    }
+
+    /// Split large colours across `threads` scoped threads (1 = serial,
+    /// at most [`MAX_SOLVER_THREADS`]). The result is bit-identical for
+    /// every thread count. Reserves each thread's output buffer now; the
+    /// threads themselves are spawned per colour, which allocates, so the
+    /// zero-allocation guarantee of [`World::step_in`] holds for one thread
+    /// only. Only the batched solver is parallel.
+    pub fn set_solver_threads(&mut self, threads: usize) -> Result<(), StepError> {
+        if threads == 0 || threads > MAX_SOLVER_THREADS {
+            return Err(StepError::InvalidConfig("solver threads must be in 1..=64"));
+        }
+        let tiles =
+            self.colorer_capacity().div_ceil(BATCH_WIDTH) + 2 * crate::coloring::MAX_COLORS + 2;
+        while self.par_out.len() < threads {
+            self.par_out.push(Vec::with_capacity(tiles));
+        }
+        self.threads = threads;
+        Ok(())
+    }
+
+    /// Smallest colour split across threads (default
+    /// [`PARALLEL_MIN_CONSTRAINTS`]; at least 1). Any value gives the same
+    /// bits; it only trades thread start-up cost against parallel work.
+    pub fn set_parallel_threshold(&mut self, min_constraints: usize) {
+        self.parallel_min = min_constraints.max(1);
+    }
+
+    /// Whether some colour of this tick is large enough to split.
+    fn parallel_worthwhile(&self) -> bool {
+        self.threads > 1
+            && (0..self.colorer.layer_count())
+                .any(|c| self.colorer.layer(c).len() >= self.parallel_min)
+    }
+
+    fn colorer_capacity(&self) -> usize {
+        self.joints.len() + self.config.max_contacts
     }
 
     /// The broadphase.
@@ -440,15 +671,29 @@ impl World {
     /// with [`StepError::Broadphase`].
     pub fn set_broadphase(&mut self, mode: BroadphaseMode) {
         self.broadphase = mode;
-        if mode == BroadphaseMode::Lbvh && self.lbvh.is_none() {
+        if mode != BroadphaseMode::MortonCells && self.lbvh.is_none() {
             let n = self.bodies.len();
             let max_pairs = self.config.max_contacts.saturating_mul(4).saturating_add(n);
             self.lbvh = Some(LbvhScratch {
-                tree: Lbvh::with_capacity(n),
+                tree: Lbvh::with_capacity(if mode == BroadphaseMode::Lbvh { n } else { 0 }),
+                sap: SweepAndPrune::with_capacity(0),
                 boxes: Vec::with_capacity(n),
                 pairs: Vec::with_capacity(max_pairs),
                 max_pairs,
             });
+        }
+        if let Some(scratch) = self.lbvh.as_mut() {
+            let n = self.bodies.len();
+            match mode {
+                BroadphaseMode::Lbvh if scratch.tree.capacity() < n => {
+                    scratch.tree = Lbvh::with_capacity(n)
+                }
+                BroadphaseMode::SweepAndPrune if scratch.sap.capacity() < n => {
+                    scratch.sap = SweepAndPrune::with_capacity(n);
+                    scratch.sap.reserve_pairs(scratch.max_pairs);
+                }
+                _ => {}
+            }
         }
     }
 
@@ -611,7 +856,7 @@ impl World {
             *count += 1;
             Ok(())
         };
-        if self.broadphase == BroadphaseMode::Lbvh {
+        if self.broadphase != BroadphaseMode::MortonCells {
             let mut scratch = self.lbvh.take().expect("reserved by set_broadphase");
             let result: Result<(), StepError> = (|| {
                 scratch.boxes.clear();
@@ -633,14 +878,25 @@ impl World {
                     );
                     scratch.boxes.push(Aabb::around(p, half));
                 }
-                scratch
-                    .tree
-                    .build(&scratch.boxes)
-                    .map_err(StepError::Broadphase)?;
-                scratch
-                    .tree
-                    .overlapping_pairs(&mut scratch.pairs, scratch.max_pairs)
-                    .map_err(StepError::Broadphase)?;
+                if self.broadphase == BroadphaseMode::Lbvh {
+                    scratch
+                        .tree
+                        .build(&scratch.boxes)
+                        .map_err(StepError::Broadphase)?;
+                    scratch
+                        .tree
+                        .overlapping_pairs(&mut scratch.pairs, scratch.max_pairs)
+                        .map_err(StepError::Broadphase)?;
+                } else {
+                    scratch
+                        .sap
+                        .build(&scratch.boxes)
+                        .map_err(StepError::SweepAndPrune)?;
+                    scratch
+                        .sap
+                        .overlapping_pairs(&mut scratch.pairs, scratch.max_pairs)
+                        .map_err(StepError::SweepAndPrune)?;
+                }
                 for &(i, j) in &scratch.pairs {
                     if self.pair_in_reach(i as usize, j as usize) {
                         push([i, j], &mut count)?;
@@ -788,6 +1044,7 @@ impl World {
         state: &mut [[f32; 4]],
     ) -> Result<KineticSnapshotWireHdr, StepError> {
         let next_tick = self.tick.checked_add(1).ok_or(StepError::TickOverflow)?;
+        let t0 = std::time::Instant::now();
         let count = self.detect_contacts(cells, contacts)?;
         let contacts = &contacts[..count];
         let state = &mut state[..count];
@@ -804,10 +1061,16 @@ impl World {
                 b: (c[1] != GROUND).then_some(c[1]),
             });
         }
+        let t1 = std::time::Instant::now();
         self.colorer.color(&self.constraint_bodies)?;
+        if self.solver == SolverMode::Batched16 {
+            self.build_plans(contacts);
+        }
         self.last_layer_count = self.colorer.layer_count();
         self.last_manifolds = count;
 
+        let t2 = std::time::Instant::now();
+        let mut solve = std::time::Duration::ZERO;
         // Bodies are only mutated from here on; nothing below can fail.
         let h = det::div(self.config.dt, self.config.substeps as f32);
         let inv_h = det::div(1.0, h);
@@ -842,20 +1105,27 @@ impl World {
             if restitution {
                 state.fill([0.0; 4]);
             }
-            for color in 0..self.colorer.layer_count() {
-                match self.solver {
-                    SolverMode::Scalar => {
+            let ts = std::time::Instant::now();
+            match self.solver {
+                SolverMode::Scalar => {
+                    for color in 0..self.colorer.layer_count() {
                         let layer_len = self.colorer.layer(color).len();
                         for k in 0..layer_len {
                             let index = self.colorer.layer(color)[k] as usize;
                             self.project(index, inv_h2, contacts, state);
                         }
                     }
-                    SolverMode::Batched16 => {
-                        self.project_color_batched(color, inv_h2, contacts, state)
+                }
+                SolverMode::Batched16 if self.parallel_worthwhile() => {
+                    self.project_colors_parallel(inv_h2, state)
+                }
+                SolverMode::Batched16 => {
+                    for color in 0..self.plan_ranges.len() {
+                        self.project_color_batched(color, inv_h2, state);
                     }
                 }
             }
+            solve += ts.elapsed();
             for i in 0..n {
                 if self.bodies.inv_mass(i) == 0.0 {
                     continue;
@@ -876,6 +1146,12 @@ impl World {
             }
         }
         self.tick = next_tick;
+        self.timings = StepTimings {
+            broadphase: t1 - t0,
+            coloring: t2 - t1,
+            solve,
+            total: t0.elapsed(),
+        };
         Ok(self.header())
     }
 
@@ -1068,230 +1344,237 @@ impl World {
         }
     }
 
-    /// Project one colour in batches of [`BATCH_WIDTH`]: two-body
-    /// constraints and ground contacts are gathered into separate lane
-    /// tiles. The colour's constraints touch disjoint bodies, so the batch
-    /// order does not change any result.
-    fn project_color_batched(
-        &mut self,
-        color: usize,
-        inv_h2: f32,
-        contacts: &[[u32; 2]],
-        state: &mut [[f32; 4]],
-    ) {
-        let mut pairs = [0u32; BATCH_WIDTH];
-        let mut grounds = [0u32; BATCH_WIDTH];
-        let (mut np, mut ng) = (0usize, 0usize);
-        let layer_len = self.colorer.layer(color).len();
+    /// Group every colour's constraints into batch plans of up to
+    /// [`BATCH_WIDTH`] lanes, once per tick: two-body constraints and
+    /// ground contacts go to separate plans. Bodies, targets, compliance,
+    /// inverse masses and contact slots do not change during a tick, so the
+    /// substeps only gather positions.
+    fn build_plans(&mut self, contacts: &[[u32; 2]]) {
+        let mut plans = std::mem::take(&mut self.plans);
+        let mut ranges = std::mem::take(&mut self.plan_ranges);
+        plans.clear();
+        ranges.clear();
         let joints = self.joints.len();
-        for k in 0..layer_len {
-            let index = self.colorer.layer(color)[k];
-            let is_ground =
-                index as usize >= joints && contacts[index as usize - joints][1] == GROUND;
-            if is_ground {
-                grounds[ng] = index;
-                ng += 1;
-                if ng == BATCH_WIDTH {
-                    self.ground_batch(&grounds[..ng], inv_h2, contacts, state);
-                    ng = 0;
-                }
-            } else {
-                pairs[np] = index;
-                np += 1;
-                if np == BATCH_WIDTH {
-                    self.pair_batch(&pairs[..np], inv_h2, contacts, state);
-                    np = 0;
+        for color in 0..self.colorer.layer_count() {
+            let start = plans.len();
+            let (mut pair, mut ground) = (None::<usize>, None::<usize>);
+            for &index in self.colorer.layer(color) {
+                let is_ground =
+                    index as usize >= joints && contacts[index as usize - joints][1] == GROUND;
+                let open = if is_ground { &mut ground } else { &mut pair };
+                let p = match *open {
+                    Some(p) if usize::from(plans[p].count) < BATCH_WIDTH => p,
+                    _ => {
+                        plans.push(BatchPlan::EMPTY);
+                        let p = plans.len() - 1;
+                        plans[p].ground = is_ground;
+                        *open = Some(p);
+                        p
+                    }
+                };
+                let (a, b, target, alpha, inequality, slot) =
+                    self.constraint(index as usize, contacts);
+                let plan = &mut plans[p];
+                let l = usize::from(plan.count);
+                plan.count += 1;
+                plan.a[l] = a as u32;
+                plan.slot[l] = slot.map_or(NO_SLOT, |s| s as u32);
+                plan.lanes.wa[l] = self.bodies.inv_mass(a);
+                plan.lanes.alpha[l] = alpha;
+                match b {
+                    Some(b) => {
+                        plan.b[l] = b as u32;
+                        plan.lanes.wb[l] = self.bodies.inv_mass(b);
+                        plan.lanes.target[l] = target;
+                        plan.lanes.inequality |= u16::from(inequality) << l;
+                    }
+                    // Ground plans keep the radius in `target`.
+                    None => plan.lanes.target[l] = self.radius(a),
                 }
             }
+            ranges.push((start as u32, plans.len() as u32));
         }
-        if np > 0 {
-            self.pair_batch(&pairs[..np], inv_h2, contacts, state);
-        }
-        if ng > 0 {
-            self.ground_batch(&grounds[..ng], inv_h2, contacts, state);
+        self.plans = plans;
+        self.plan_ranges = ranges;
+    }
+
+    /// Project one colour plan by plan on this thread.
+    fn project_color_batched(&mut self, color: usize, inv_h2: f32, state: &mut [[f32; 4]]) {
+        let (lo, hi) = self.plan_ranges[color];
+        let mut u = TileUpdate::EMPTY;
+        for p in lo as usize..hi as usize {
+            self.solve_plan(&self.bodies, &self.plans[p], inv_h2, &mut u);
+            self.apply_update(&u, state);
         }
     }
 
-    /// Sixteen two-body constraints, lane-wise. Each lane performs the
-    /// scalar [`World::project`] operation sequence on its own values.
-    fn pair_batch(
-        &mut self,
-        idx: &[u32],
-        inv_h2: f32,
-        contacts: &[[u32; 2]],
-        state: &mut [[f32; 4]],
-    ) {
-        const N: usize = BATCH_WIDTH;
-        let m = idx.len();
-        let mut a = [0usize; N];
-        let mut b = [0usize; N];
-        let mut target = [0.0f32; N];
-        let mut alpha = [0.0f32; N];
-        let mut ineq = [false; N];
-        let mut slot = [None::<usize>; N];
-        let mut pa = [[0.0f32; N]; 3];
-        let mut pb = [[0.0f32; N]; 3];
-        let mut wa = [0.0f32; N];
-        let mut wb = [0.0f32; N];
-        // Gather into a constraint tile.
-        for l in 0..m {
-            let (ca, cb, t, al, iq, s) = self.constraint(idx[l] as usize, contacts);
-            let cb = cb.expect("pair batch holds two-body constraints");
-            a[l] = ca;
-            b[l] = cb;
-            target[l] = t;
-            alpha[l] = al;
-            ineq[l] = iq;
-            slot[l] = s;
-            let p = self.bodies.pos(ca);
-            let q = self.bodies.pos(cb);
-            for k in 0..3 {
-                pa[k][l] = p[k];
-                pb[k][l] = q[k];
-            }
-            wa[l] = self.bodies.inv_mass(ca);
-            wb[l] = self.bodies.inv_mass(cb);
-        }
-        // Lane-wise solve.
-        let mut d = [[0.0f32; N]; 3];
-        for k in 0..3 {
-            for l in 0..N {
-                d[k][l] = det::sub(pa[k][l], pb[k][l]);
-            }
-        }
-        let mut len = [0.0f32; N];
-        for l in 0..N {
-            len[l] = det::sqrt(det::add(
-                det::add(det::mul(d[0][l], d[0][l]), det::mul(d[1][l], d[1][l])),
-                det::mul(d[2][l], d[2][l]),
-            ));
-        }
-        for l in 0..N {
-            if len[l] <= EPS {
-                len[l] = 0.0;
-                d[0][l] = 0.0;
-                d[1][l] = 1.0;
-                d[2][l] = 0.0;
-            }
-        }
-        let mut c = [0.0f32; N];
-        let mut w = [0.0f32; N];
-        let mut active = [false; N];
-        for l in 0..N {
-            c[l] = det::sub(len[l], target[l]);
-            w[l] = det::add(wa[l], wb[l]);
-            active[l] = l < m && !(ineq[l] && c[l] >= 0.0) && w[l] != 0.0;
-        }
-        let mut d_lambda = [0.0f32; N];
-        for l in 0..N {
-            let alpha_tilde = det::mul(alpha[l], inv_h2);
-            let denom = det::max(det::add(w[l], alpha_tilde), EPS);
-            d_lambda[l] = det::div(det::neg(c[l]), denom);
-        }
-        let mut nrm = [[0.0f32; N]; 3];
-        for l in 0..N {
-            let inv_len = if len[l] == 0.0 {
-                1.0
-            } else {
-                det::div(1.0, len[l])
+    /// Every colour of one substep with the plans of each large colour split
+    /// across `threads` threads. The threads live for the substep; per
+    /// colour they solve their contiguous range of plans against the
+    /// colour's starting state (bodies behind a read lock), and the calling
+    /// thread then applies all updates in plan order under the write lock.
+    /// The plans of a colour touch disjoint bodies, so this is bit-identical
+    /// to the serial solve.
+    fn project_colors_parallel(&mut self, inv_h2: f32, state: &mut [[f32; 4]]) {
+        use std::sync::{Mutex, RwLock};
+        let threads = self.threads;
+        let mut outs = std::mem::take(&mut self.par_out);
+        let bodies = RwLock::new(std::mem::take(&mut self.bodies));
+        {
+            let this = &*self;
+            let colors = this.plan_ranges.len();
+            // The range of plans thread `t` solves in `color`, or nothing if
+            // the colour is small (then the calling thread solves it alone).
+            let range = |color: usize, t: usize| -> (usize, usize) {
+                let (lo, hi) = this.plan_ranges[color];
+                let (lo, hi) = (lo as usize, hi as usize);
+                let constraints: usize = this.plans[lo..hi]
+                    .iter()
+                    .map(|p| usize::from(p.count))
+                    .sum();
+                if constraints < this.parallel_min {
+                    return if t == 0 { (lo, hi) } else { (hi, hi) };
+                }
+                let per = (hi - lo).div_ceil(threads);
+                ((lo + t * per).min(hi), (lo + (t + 1) * per).min(hi))
             };
-            for k in 0..3 {
-                nrm[k][l] = det::mul(d[k][l], inv_len);
-            }
+            let slots: Vec<Mutex<&mut Vec<TileUpdate>>> =
+                outs.iter_mut().take(threads).map(Mutex::new).collect();
+            let barrier = SpinBarrier::new(threads);
+            std::thread::scope(|s| {
+                for t in 1..threads {
+                    let (bodies, barrier, slot) = (&bodies, &barrier, &slots[t]);
+                    s.spawn(move || {
+                        let mut u = TileUpdate::EMPTY;
+                        for color in 0..colors {
+                            barrier.wait();
+                            {
+                                let b = bodies.read().expect("solver lock");
+                                let mut out = slot.lock().expect("solver output");
+                                out.clear();
+                                let (lo, hi) = range(color, t);
+                                for p in lo..hi {
+                                    this.solve_plan(&b, &this.plans[p], inv_h2, &mut u);
+                                    out.push(u);
+                                }
+                            }
+                            barrier.wait();
+                        }
+                    });
+                }
+                let mut u = TileUpdate::EMPTY;
+                for color in 0..colors {
+                    barrier.wait();
+                    let (lo, hi) = range(color, 0);
+                    let mut mine = slots[0].lock().expect("solver output");
+                    mine.clear();
+                    {
+                        let b = bodies.read().expect("solver lock");
+                        for p in lo..hi {
+                            this.solve_plan(&b, &this.plans[p], inv_h2, &mut u);
+                            mine.push(u);
+                        }
+                    }
+                    drop(mine);
+                    barrier.wait();
+                    let mut b = bodies.write().expect("solver lock");
+                    for slot in &slots {
+                        for u in slot.lock().expect("solver output").iter() {
+                            apply_update(&mut b, u, state);
+                        }
+                    }
+                }
+            });
         }
-        let mut sa = [0.0f32; N];
-        let mut sb = [0.0f32; N];
-        for l in 0..N {
-            sa[l] = det::mul(wa[l], d_lambda[l]);
-            sb[l] = det::mul(wb[l], d_lambda[l]);
-        }
-        let mut na = [[0.0f32; N]; 3];
-        let mut nb = [[0.0f32; N]; 3];
-        for k in 0..3 {
-            for l in 0..N {
-                na[k][l] = det::add(pa[k][l], det::mul(sa[l], nrm[k][l]));
-                nb[k][l] = det::sub(pb[k][l], det::mul(sb[l], nrm[k][l]));
-            }
-        }
-        // Friction, contact state and scatter for active lanes only.
+        self.bodies = bodies.into_inner().expect("solver lock");
+        self.par_out = outs;
+    }
+
+    /// Write a tile update back to the bodies and the contact state.
+    #[inline]
+    fn apply_update(&mut self, u: &TileUpdate, state: &mut [[f32; 4]]) {
+        apply_update(&mut self.bodies, u, state);
+    }
+
+    /// Solve one plan against `bodies`: gather positions, run the SIMD
+    /// kernel, apply friction per active lane and collect the writes.
+    fn solve_plan(&self, bodies: &TiledBodies, plan: &BatchPlan, inv_h2: f32, u: &mut TileUpdate) {
+        u.writes = 0;
+        u.states = 0;
+        let m = usize::from(plan.count);
         let friction = self.friction_enabled();
+        if plan.ground {
+            let ground = self.config.ground_y.unwrap_or(0.0);
+            let mut lanes = GroundLanes {
+                radius: plan.lanes.target,
+                wa: plan.lanes.wa,
+                alpha: plan.lanes.alpha,
+                ..GroundLanes::default()
+            };
+            let mut px = [0.0f32; BATCH_WIDTH];
+            let mut pz = [0.0f32; BATCH_WIDTH];
+            for l in 0..m {
+                let q = bodies.pos(plan.a[l] as usize);
+                px[l] = q[0];
+                lanes.py[l] = q[1];
+                pz[l] = q[2];
+            }
+            let solved = simd::solve_ground(self.simd, &lanes, ground, inv_h2);
+            for l in 0..m {
+                if solved.active >> l & 1 == 0 {
+                    continue;
+                }
+                let a = plan.a[l] as usize;
+                let mut na = [px[l], solved.y[l], pz[l]];
+                if friction {
+                    self.apply_friction_ground(&mut na, self.prev[a], solved.corr[l]);
+                }
+                u.push_state(plan.slot[l] as usize, [solved.corr[l], 0.0, 1.0, 0.0]);
+                u.push_write(a, na);
+            }
+            return;
+        }
+        let mut lanes = plan.lanes;
         for l in 0..m {
-            if !active[l] {
+            let p = bodies.pos(plan.a[l] as usize);
+            let q = bodies.pos(plan.b[l] as usize);
+            for k in 0..3 {
+                lanes.pa[k][l] = p[k];
+                lanes.pb[k][l] = q[k];
+            }
+        }
+        let solved = simd::solve_pair(self.simd, &lanes, inv_h2);
+        for l in 0..m {
+            if solved.active >> l & 1 == 0 {
                 continue;
             }
-            let mut pa_l = [na[0][l], na[1][l], na[2][l]];
-            let mut pb_l = [nb[0][l], nb[1][l], nb[2][l]];
-            if let Some(s) = slot[l] {
-                let n_l = [nrm[0][l], nrm[1][l], nrm[2][l]];
-                let corr = det::add(sa[l], sb[l]);
+            let (a, b) = (plan.a[l] as usize, plan.b[l] as usize);
+            let mut pa_l = [solved.na[0][l], solved.na[1][l], solved.na[2][l]];
+            let mut pb_l = [solved.nb[0][l], solved.nb[1][l], solved.nb[2][l]];
+            if plan.slot[l] != NO_SLOT {
+                let n_l = [
+                    solved.normal[0][l],
+                    solved.normal[1][l],
+                    solved.normal[2][l],
+                ];
+                let corr = det::add(solved.sa[l], solved.sb[l]);
                 if friction {
-                    let (qa, qb) = (self.prev[a[l]], self.prev[b[l]]);
                     self.apply_friction_pair(
-                        &mut pa_l, &mut pb_l, qa, qb, n_l, corr, wa[l], wb[l], w[l],
+                        &mut pa_l,
+                        &mut pb_l,
+                        self.prev[a],
+                        self.prev[b],
+                        n_l,
+                        corr,
+                        lanes.wa[l],
+                        lanes.wb[l],
+                        solved.w[l],
                     );
                 }
-                state[s] = [corr, n_l[0], n_l[1], n_l[2]];
+                u.push_state(plan.slot[l] as usize, [corr, n_l[0], n_l[1], n_l[2]]);
             }
-            self.bodies.set_pos(a[l], pa_l);
-            self.bodies.set_pos(b[l], pb_l);
-        }
-    }
-
-    /// Sixteen ground contacts, lane-wise.
-    fn ground_batch(
-        &mut self,
-        idx: &[u32],
-        inv_h2: f32,
-        contacts: &[[u32; 2]],
-        state: &mut [[f32; 4]],
-    ) {
-        const N: usize = BATCH_WIDTH;
-        let m = idx.len();
-        let ground = self.config.ground_y.unwrap_or(0.0);
-        let mut a = [0usize; N];
-        let mut slot = [0usize; N];
-        let mut alpha = [0.0f32; N];
-        let mut radius = [0.0f32; N];
-        let mut p = [[0.0f32; N]; 3];
-        let mut wa = [0.0f32; N];
-        for l in 0..m {
-            let (ca, _, _, al, _, s) = self.constraint(idx[l] as usize, contacts);
-            a[l] = ca;
-            slot[l] = s.expect("ground batch holds contacts");
-            alpha[l] = al;
-            radius[l] = self.radius(ca);
-            let q = self.bodies.pos(ca);
-            for k in 0..3 {
-                p[k][l] = q[k];
-            }
-            wa[l] = self.bodies.inv_mass(ca);
-        }
-        let mut c = [0.0f32; N];
-        let mut active = [false; N];
-        let mut d_lambda = [0.0f32; N];
-        let mut y = [0.0f32; N];
-        let mut corr = [0.0f32; N];
-        for l in 0..N {
-            c[l] = det::sub(det::sub(p[1][l], radius[l]), ground);
-            active[l] = l < m && !(c[l] >= 0.0 || wa[l] == 0.0);
-            let alpha_tilde = det::mul(alpha[l], inv_h2);
-            let denom = det::max(det::add(wa[l], alpha_tilde), EPS);
-            d_lambda[l] = det::div(det::neg(c[l]), denom);
-            y[l] = det::add(p[1][l], det::mul(wa[l], d_lambda[l]));
-            corr[l] = det::mul(wa[l], d_lambda[l]);
-        }
-        let friction = self.friction_enabled();
-        for l in 0..m {
-            if !active[l] {
-                continue;
-            }
-            let mut na = [p[0][l], y[l], p[2][l]];
-            if friction {
-                let qa = self.prev[a[l]];
-                self.apply_friction_ground(&mut na, qa, corr[l]);
-            }
-            state[slot[l]] = [corr[l], 0.0, 1.0, 0.0];
-            self.bodies.set_pos(a[l], na);
+            u.push_write(a, pa_l);
+            u.push_write(b, pb_l);
         }
     }
 
