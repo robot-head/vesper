@@ -184,8 +184,8 @@ cargo test --workspace --locked --no-fail-fast                              # th
   without `VK_KHR_workgroup_memory_explicit_layout`. The Ubuntu 24.04
   validation layer (1.3.275) does not check this; the newer one on the CI
   runner reported `VUID-StandaloneSpirv-None-10684` for the RMSNorm,
-  attention and scan kernels. `shader::strip_workgroup_layout` replaces
-  those decorations with `OpNop` words after naga emits the module, and
+  attention and scan kernels. `shader::strip_workgroup_layout` deletes
+  those decorations after naga emits the module, and
   refuses a module whose array type is shared between workgroup memory and
   a buffer. Lane 32 uses the same naga and may need the same pass.
 - **Memory.** All buffers are host-visible and coherent. On lavapipe all

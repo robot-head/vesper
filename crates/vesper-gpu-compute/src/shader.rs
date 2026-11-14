@@ -53,7 +53,6 @@ pub const MAX_SOURCE_BYTES: usize = 1 << 20;
 const OP_TYPE_ARRAY: u32 = 28;
 const OP_TYPE_POINTER: u32 = 32;
 const OP_DECORATE: u32 = 71;
-const OP_NOP: u32 = 0;
 const DECORATION_ARRAY_STRIDE: u32 = 6;
 const STORAGE_CLASS_WORKGROUP: u32 = 4;
 
@@ -62,10 +61,9 @@ const STORAGE_CLASS_WORKGROUP: u32 = 4;
 /// invalid without `VK_KHR_workgroup_memory_explicit_layout`
 /// (`VUID-StandaloneSpirv-None-10684`, reported by recent Khronos validation
 /// layers). This pass removes `ArrayStride` from array types reachable only
-/// from Workgroup pointers, replacing each such `OpDecorate` with `OpNop`
-/// words so no other offset moves. An array type shared with another storage
+/// from Workgroup pointers by deleting those `OpDecorate` instructions. An array type shared with another storage
 /// class is an [`ShaderError::Interface`] error rather than a silent change.
-pub fn strip_workgroup_layout(words: &mut [u32]) -> Result<(), ShaderError> {
+pub fn strip_workgroup_layout(words: &mut Vec<u32>) -> Result<(), ShaderError> {
     use std::collections::{HashMap, HashSet};
     let malformed = || ShaderError::Backend("malformed SPIR-V from naga".into());
     if words.len() < 5 {
@@ -124,14 +122,17 @@ pub fn strip_workgroup_layout(words: &mut [u32]) -> Result<(), ShaderError> {
             "an array type is used both in workgroup memory and in a buffer".into(),
         ));
     }
+    // Remove the instructions outright: SPIR-V refers to ids, never to word
+    // offsets, and `OpNop` is not allowed outside a block.
+    let mut drop = vec![false; words.len()];
     for (offset, target) in decorations {
         if workgroup.contains(&target) {
             let count = (words[offset] >> 16) as usize;
-            for w in &mut words[offset..offset + count] {
-                *w = (1 << 16) | OP_NOP;
-            }
+            drop[offset..offset + count].fill(true);
         }
     }
+    let mut keep = drop.iter().map(|d| !d);
+    words.retain(|_| keep.next().unwrap_or(true));
     Ok(())
 }
 
