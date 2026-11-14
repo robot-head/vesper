@@ -136,9 +136,18 @@ fn randomized_runs_detect_a_real_algorithmic_difference() {
         operations_per_window: 8,
         ..RunConfig::default()
     };
-    // The candidate does eight times the work: no layout can hide that.
-    let report = run_randomized_layouts(config, 8, 3, &mut Spin(2_000), &mut Spin(16_000)).unwrap();
-    assert_eq!(report.runs.len(), 8);
+    // The candidate does eight times the work: no layout can hide that. Each
+    // window spins long enough (a few hundred microseconds per baseline operation)
+    // that a scheduler preemption on a loaded CI host cannot flip a layout's
+    // totals, and sixteen layouts give a median interval at ranks 4..=13, so
+    // up to three disturbed layouts still leave the verdict intact. With eight
+    // tiny layouts the interval was [min, max] and one preempted microsecond
+    // window turned the verdict into DoesNotSurvive.
+    let report =
+        run_randomized_layouts(config, 16, 3, &mut Spin(25_000), &mut Spin(200_000)).unwrap();
+    assert_eq!(report.runs.len(), 16);
+    let interval = report.survival.analysis.interval.unwrap();
+    assert_eq!((interval.lower_rank, interval.upper_rank), (4, 13));
     for (i, run) in report.runs.iter().enumerate() {
         assert_eq!(run.plan, layout_plan(3, i as u32));
         assert_eq!(run.report.epochs().len(), 6);
