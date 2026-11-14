@@ -1,8 +1,10 @@
 # Kernel-only resource artifacts (#358)
 
 This fixed Lean 4.24 tool exports a logical kernel projection. It leaves the
-existing `tools/proof-audit/Audit.lean`, Rust proof-audit CLI and model semantic
-sources unchanged. It does not verify native implementation equivalence or
+model semantic sources and Rust proof-audit CLI/options unchanged. The separate
+issue #380 corrects the auditor's replay mechanism; its declaration-safety,
+metadata and axiom policies remain strict. The auditor is no longer claimed
+byte-unchanged. It does not verify native implementation equivalence or
 claim that the original executable artifact passed the strict audit.
 
 ## Invocation and data
@@ -41,17 +43,40 @@ failure is not an accepted artifact.
 The report contains schema_version1, scope `kernel_logical_projection`,
 original_module, projection_module and absolute projection_path;
 original_modules/trusted_modules arrays of `{name,path}`; original_constants
-(unique declarations), retained_constants, omitted_constants and full omitted
-records `{name,parent,module,reason:"matched_partial_unsafe_rec"}`. It also
-reports original_constant_occurrences, duplicate_constants and duplicates
-`{name,first_module,repeated_module,reason:"identical_safe_theorem_realization"}`.
+(unique original logical declarations), retained_constants, omitted_constants
+and full omitted records `{name,parent,module,reason:"matched_partial_unsafe_rec"}`.
+It reports original_constant_occurrences, duplicate_constants and duplicates
+`{name,first_module,repeated_module,reason}`. A duplicate reason is
+`identical_safe_theorem_realization` if its full info equals the first raw
+copy, otherwise `safe_theorem_proof_variant`; both require the same full
+non-proof theorem header. This comparison is against the first raw occurrence,
+not necessarily the canonical imported proof body.
+
+The additional alias_scope is `synthetic_theorem_proof_variants`.
+proof_alias_count and proof_aliases identify every additional theorem:
+`{name,original_name,source_module,canonical_module,source_occurrence,original_group,reason:"checked_safe_theorem_variant"}`.
+Names are fresh `ResourceKernelProofAliases.realization_N` identifiers.
+source_occurrence is the zero-based index in that source module's raw
+constants array. canonical_module is the first raw occurrence whose complete
+ConstantInfo actually matches the original imported canonical constant; it
+makes no claim about Lean's internal winner tag when copies are identical.
+The occurrences array maps every raw entry
+`{name,module,index,disposition,alias}`. Indices are module-local; disposition
+is retained_canonical_info, omitted_auxiliary or proof_alias; alias is null or
+its associated fresh theorem name.
+
 Unique originals equal retained plus omitted; raw occurrences equal unique
-originals plus duplicate occurrences. Logical expression traversal work is
-reported as logical_expression_nodes. The flags exact_inventory,
-constant_info_equal, kernel_replayed, reimport_verified, extensions_empty and
-ir_empty refer to checks actually completed; the final two describe output,
-not a claim that importing never deserializes metadata. There are no
-self-asserted cryptographic digests in this Lean report.
+originals plus duplicate occurrences. output_constants equals retained plus
+proof_alias_count and is the required strict-auditor checked-constant count.
+Every proof_alias must also enter that auditor's requested theorem root union,
+under the same axiom policy, partitioned into at most128 roots per request.
+Auditing only canonical source theorem names is insufficient.
+
+Logical expression work is reported as logical_expression_nodes. The flags
+exact_inventory, constant_info_equal, kernel_replayed, reimport_verified,
+extensions_empty and ir_empty describe checks actually completed; the final
+two describe output, not whether input metadata was deserialized. There are
+no self-asserted cryptographic digests in this Lean report.
 
 ## Selection, preservation and verification
 
@@ -79,12 +104,28 @@ narrow exclusion shape, not proof of compiler provenance or native behavior.
 A safe user declaration with the same suffix is retained. An explicitly
 unsafe declaration with a plausible suffix is rejected.
 
-The only accepted repeated raw entries are field-identical safe theorem
-copies; every repeated occurrence is recorded with both module associations.
-Non-theorem duplicates or different theorem ConstantInfos are rejected. A real
-example requiring this narrow rule is RuntimeAtom.subst.eq_2, identically
-realized in both ErasureProofs and MetricsProofs. No different proof bodies are
-silently selected or rewritten under this profile.
+Repeated raw entries may be safe theorem realizations with the identical
+complete non-proof header (name, type, universe parameters and mutual group).
+Every non-theorem, type, universe or group mismatch is rejected. Lean's importer
+can select among different proof bodies for one theorem; the canonical map
+therefore comes from original.find? exactly and must match a real raw occurrence.
+Its complete original ConstantInfo remains unchanged, including the selected
+proof body. Each different raw proof occurrence becomes an additional alias,
+even if it was the first raw occurrence encountered. Identical canonical-body
+copies need no alias. All module associations and occurrence indices remain
+visible in the report.
+
+The entire canonical world is kernel-replayed first. Each alternate raw type,
+universe parameter list and proof body is then copied unchanged into a fresh
+theorem label; only the new name and singleton all=[alias] group differ. Its
+original group is validated, equal to canonical and recorded. The alias is
+kernel-checked against the already proved canonical context and included in
+the final exported/reimported expected inventory. Canonical and alias names
+cannot collide. These additional proof witnesses are not changes to model
+source declarations and do not assert compiler provenance or native behavior.
+They must all be separately requested in the unchanged strict axiom audit:
+kernel typechecking alone does not exclude a forbidden axiom hidden in an
+otherwise unused alternate proof body.
 
 Every retained declaration is a root of complete logical dependency checking,
 including reachable toolchain declarations. The visitor checks safety flags,
@@ -93,14 +134,23 @@ inductive families/constructors, constructor ownership and recursor families,
 constructor names and rule right-hand sides. Missing references or unsafe/
 partial dependencies fail. Free variables and metavariables fail.
 
-All retained ConstantInfos are replayed through the existing Lean kernel at
-trust level zero. The exact full resulting inventory and every ConstantInfo
+All canonical retained ConstantInfos are replayed through the real Lean kernel
+at trust level zero. The shared CheckedKernelReplay block is adapted, with
+Apache2 attribution, from Lean.Replay: it retains dependency ordering, complete
+inductive groups and postponed constructor/recursor checks, but invokes
+Kernel.Environment.addDeclCore directly. Environment.ofKernelEnv reconstructs
+an inspection wrapper; post-replay lookups inspect its checked kernel map.
+It does not call WithoutChecking or use elaborator private-name normalization.
+The snapshot block is byte-identical to the reviewed audit helper block from
+issue #380. Aliases use the same checked kernel primitive. The exact full resulting inventory and every ConstantInfo
 are compared, including regenerated constructor/recursor metadata. The tool
 uses saveModuleData to write only trusted imports and the unchanged retained
-constant array, with no extension entries, extra IR names or IR artifact.
+canonical-plus-alias constant array, with no extension entries, extra IR names
+or IR artifact.
 Fresh reimport under only toolchain plus projection root must preserve the
 exact inventory, constNames, imports, metadata and full ConstantInfos. The
-existing strict CLI then independently replays and audits the projection.
+strict CLI then independently replays and audits the projection under its
+unchanged policies and interface, using the separately corrected replay backend.
 
 The fixed logical envelopes are request65536 bytes, module count8192,
 package declarations65536, duplicate occurrences65536, raw occurrences131072,
@@ -133,13 +183,64 @@ log; an initial summary script mistakenly parsed that combined stream as one
 JSON value. That script failure is not counted as a policy pass; the actual
 JSON records and stderr independently establish the expected rejection.
 
-A genuine larger diagnostic used immutable
-`/tmp/resource-model42-evaluator-proofs-v4`, target
-ResourceModel42.EvaluatorProofs. It predates Repr removal and lacks final Main/
-Acceptance modules, so it is not final-current-model evidence. After identical
-realizations were recognized, the exporter correctly refused
-RuntimeExpr.asValue.eq_3: type, universe and group metadata agree, but proof
-values differ. That broader realization case remains outside this currently
-approved narrow duplicate policy. The full final twelve-source projection,
-complete theorem audit and adversarial acceptance remain pending. No native
-proof, policy relaxation, source rewrite or Cargo command is claimed here.
+The broader theorem-only policy followed concrete diagnostics, not a silent
+relaxation. Immutable `/tmp/resource-model42-evaluator-proofs-v4` predates Repr
+removal and lacks final Main/Acceptance modules. It first exposed identical
+RuntimeAtom.subst.eq_2 copies, then same-header/different-proof
+RuntimeExpr.asValue.eq_3. Independent acceptance reproduced the latter from all
+twelve final sources before the alias amendment was publicly approved.
+
+On actual helper ce116b8, both independently authored universe-polymorphic
+alias fixtures exported successfully: the clean case retained2 canonical
+constants plus1 alias; the forbidden case retained3 plus1 alias. The canonical
+proof is selected from the original imported environment in both cases. The
+unchanged strict CLI accepted the clean canonical-plus-alias roots (3 checked
+constants). In the forbidden fixture it accepted the canonical root alone,
+but rejected the complete canonical-plus-alias union with the explicit project
+axiom `ResourceSnapshotAliasAxiom.forbidden` (4 checked constants, actual kernel
+replay). This is a meaningful negative control for omitted alias coverage.
+Logs and alias-audit-summary.json are under
+`/tmp/resource-kernel42-snapshot-v7`.
+
+The fresh final twelve-source artifact root
+`/tmp/vesper-resource-model42-782806-0`, target ResourceModel42.Acceptance,
+contains the actual compiled final modules and78 semantic equalities. Its
+first projection attempt correctly aborted with LEAN_ABORT_ON_PANIC in the
+old canonical replay wrapper, before any success record. Lean's elaborator
+AsyncConsts normalizes distinct kernel private names: MetricsProofs and
+ErasureProofs private RuntimeContext.plug.match_1.eq_2 declarations collided in
+that table. No name was silently renamed, dropped or treated as trusted.
+
+The separately authorized #380 backend correction preserves those full kernel
+names and performs actual kernel checks. Snapshot db6a433 adopted the exact
+reviewed block920b6ac; followup50fd041 uses checked-kernel-map lookups after
+wrapping the environment. Both compiled successfully with pinned Lean4.24.
+The genuine final twelve-source projection then passed:
+
+| Measured inventory | Count |
+| --- | ---: |
+| Unique original declarations | 3839 |
+| Retained canonical declarations | 3791 |
+| Matched partial compiler auxiliaries omitted | 48 |
+| Raw declaration occurrences | 3853 |
+| Repeated theorem occurrences | 14 |
+| Additional proof aliases | 1 |
+| Exact exported/reimported declarations | 3792 |
+| Logical expression visits | 1313466 |
+
+All twelve package modules participated. Actual replay, full ConstantInfo
+comparison, export and fresh reimport completed without a panic, and both
+private names remain intact. The output is
+`/tmp/resource-kernel42-snapshot-v8/final12-output/ResourceModel42KernelSnapshot.olean`;
+its full report is final12-export.log in that private root. The sole extra root
+is `ResourceKernelProofAliases.realization_0`. Successful compile logs are
+compile.log/compile-v2.log in the same root. Compiler leases were explicitly
+released after commands exited; this lane ran no Cargo command.
+
+The final complete CLI audit still requires a rebuilt executable embedding
+the corrected audit backend, all284 manually catalogued theorem roots plus
+the reported alias, the same standard-three axiom allowlist, fresh associated
+artifact/source hashes and the independently owned adversarial acceptance.
+This successful snapshot alone is not that final policy gate. No native
+implementation proof, full language completion or unreported source rewrite
+is claimed.
