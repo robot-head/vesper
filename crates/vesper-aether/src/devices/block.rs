@@ -281,7 +281,7 @@ impl BlockDevice {
             return ioerr(&mut self.stats);
         }
         let mut spans = Vec::with_capacity(payload.len() / SEGMENT_BYTES);
-        for seg in payload.chunks_exact(SEGMENT_BYTES) {
+        for seg in payload.as_chunks::<SEGMENT_BYTES>().0 {
             let sector = u64::from_le_bytes(seg[0..8].try_into().expect("8 bytes"));
             let count = u32::from_le_bytes(seg[8..12].try_into().expect("4 bytes"));
             let flags = u32::from_le_bytes(seg[12..16].try_into().expect("4 bytes"));

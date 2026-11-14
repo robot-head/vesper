@@ -39,11 +39,16 @@ pub enum HotSetStoreError {
     Snapshot(crate::Error),
     Cas(CasError),
     Tree(TreeError),
-    HotSet { slot_id: u32, error: HotSetError },
+    HotSet {
+        slot_id: u32,
+        error: HotSetError,
+    },
     /// A hot set for a slot the snapshot does not have.
     UnknownSlot(u32),
     /// A hot set whose page count differs from its slot's.
-    PageCount { slot_id: u32 },
+    PageCount {
+        slot_id: u32,
+    },
     /// The bundle id is not an artifact-domain tree.
     NotABundle,
     MissingManifest,
@@ -151,7 +156,12 @@ pub fn persist_hot_sets(
     tree.insert_file(MANIFEST_ENTRY, m.id, m.size, false)?;
     for (slot_id, set) in hot {
         let blob = store.put_blob(Domain::Artifact, &set.encode())?;
-        tree.insert_file(&format!("{HOTSET_PREFIX}{slot_id}"), blob.id, blob.size, false)?;
+        tree.insert_file(
+            &format!("{HOTSET_PREFIX}{slot_id}"),
+            blob.id,
+            blob.size,
+            false,
+        )?;
     }
     let bundle = store.put_tree(&tree)?;
     Ok(PersistedHotSets {

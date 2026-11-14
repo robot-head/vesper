@@ -81,7 +81,10 @@ fn block_discard_and_write_zeroes_segments() {
         let mut t = MmioTransport::new(BlockDevice::new(filled_disk(), false, "z").unwrap(), 2);
         let mut q = DriverQueue::with_format(format, 0, 0x1000, 8);
         let f = base(format) | VIRTIO_BLK_F_DISCARD | VIRTIO_BLK_F_WRITE_ZEROES;
-        assert_eq!(init(&mut t, &mut m, f, &[&q]) & status::DRIVER_OK, status::DRIVER_OK);
+        assert_eq!(
+            init(&mut t, &mut m, f, &[&q]) & status::DRIVER_OK,
+            status::DRIVER_OK
+        );
         // Configuration limits (§5.2.4).
         assert_eq!(config_u32(&mut t, 36), MAX_DISCARD_SECTORS);
         assert_eq!(config_u32(&mut t, 40), MAX_DISCARD_SEG);
@@ -105,7 +108,13 @@ fn block_discard_and_write_zeroes_segments() {
         assert!(zeroed(&t, 3, 2) && zeroed(&t, 10, 1));
         assert_eq!(t.device().disk()[5 * 512], 0xee);
         // An aligned discard.
-        let s = segments_request(&mut t, &mut m, &mut q, VIRTIO_BLK_T_DISCARD, &[seg(16, 8, 0)]);
+        let s = segments_request(
+            &mut t,
+            &mut m,
+            &mut q,
+            VIRTIO_BLK_T_DISCARD,
+            &[seg(16, 8, 0)],
+        );
         assert_eq!(s, VIRTIO_BLK_S_OK);
         assert!(zeroed(&t, 16, 8));
         let before = t.device().disk().to_vec();
@@ -119,12 +128,40 @@ fn block_discard_and_write_zeroes_segments() {
             assert_eq!(t.device().disk(), &before[..], "disk unchanged");
         };
         // UNMAP on a discard, and unknown flag bits, are UNSUPP (§5.2.6.2).
-        check(&mut t, &mut m, &mut q, VIRTIO_BLK_T_DISCARD, &[seg(32, 8, 1)], VIRTIO_BLK_S_UNSUPP);
-        check(&mut t, &mut m, &mut q, VIRTIO_BLK_T_WRITE_ZEROES, &[seg(32, 1, 4)], VIRTIO_BLK_S_UNSUPP);
+        check(
+            &mut t,
+            &mut m,
+            &mut q,
+            VIRTIO_BLK_T_DISCARD,
+            &[seg(32, 8, 1)],
+            VIRTIO_BLK_S_UNSUPP,
+        );
+        check(
+            &mut t,
+            &mut m,
+            &mut q,
+            VIRTIO_BLK_T_WRITE_ZEROES,
+            &[seg(32, 1, 4)],
+            VIRTIO_BLK_S_UNSUPP,
+        );
         // Misaligned discard, out of range, zero sectors, over the per-segment
         // limit: IOERR. A bad later segment stops the good earlier one too.
-        check(&mut t, &mut m, &mut q, VIRTIO_BLK_T_DISCARD, &[seg(33, 8, 0)], VIRTIO_BLK_S_IOERR);
-        check(&mut t, &mut m, &mut q, VIRTIO_BLK_T_DISCARD, &[seg(32, 7, 0)], VIRTIO_BLK_S_IOERR);
+        check(
+            &mut t,
+            &mut m,
+            &mut q,
+            VIRTIO_BLK_T_DISCARD,
+            &[seg(33, 8, 0)],
+            VIRTIO_BLK_S_IOERR,
+        );
+        check(
+            &mut t,
+            &mut m,
+            &mut q,
+            VIRTIO_BLK_T_DISCARD,
+            &[seg(32, 7, 0)],
+            VIRTIO_BLK_S_IOERR,
+        );
         check(
             &mut t,
             &mut m,
@@ -133,7 +170,14 @@ fn block_discard_and_write_zeroes_segments() {
             &[seg(40, 1, 0), seg(255, 2, 0)],
             VIRTIO_BLK_S_IOERR,
         );
-        check(&mut t, &mut m, &mut q, VIRTIO_BLK_T_WRITE_ZEROES, &[seg(40, 0, 0)], VIRTIO_BLK_S_IOERR);
+        check(
+            &mut t,
+            &mut m,
+            &mut q,
+            VIRTIO_BLK_T_WRITE_ZEROES,
+            &[seg(40, 0, 0)],
+            VIRTIO_BLK_S_IOERR,
+        );
         check(
             &mut t,
             &mut m,
@@ -152,10 +196,31 @@ fn block_discard_and_write_zeroes_segments() {
         );
         // More segments than max_write_zeroes_seg; no segments; a partial one.
         let many = vec![seg(40, 1, 0); MAX_WRITE_ZEROES_SEG as usize + 1];
-        check(&mut t, &mut m, &mut q, VIRTIO_BLK_T_WRITE_ZEROES, &many, VIRTIO_BLK_S_IOERR);
-        check(&mut t, &mut m, &mut q, VIRTIO_BLK_T_WRITE_ZEROES, &[], VIRTIO_BLK_S_IOERR);
+        check(
+            &mut t,
+            &mut m,
+            &mut q,
+            VIRTIO_BLK_T_WRITE_ZEROES,
+            &many,
+            VIRTIO_BLK_S_IOERR,
+        );
+        check(
+            &mut t,
+            &mut m,
+            &mut q,
+            VIRTIO_BLK_T_WRITE_ZEROES,
+            &[],
+            VIRTIO_BLK_S_IOERR,
+        );
         m.write(0x1_0000, &req(VIRTIO_BLK_T_WRITE_ZEROES)).unwrap();
-        let id = q.post(&mut m, &[(0x1_0000, 16, false), (0x1_1000, 12, false), (0x1_2000, 1, true)]);
+        let id = q.post(
+            &mut m,
+            &[
+                (0x1_0000, 16, false),
+                (0x1_1000, 12, false),
+                (0x1_2000, 1, true),
+            ],
+        );
         w32(&mut t, &mut m, reg::QUEUE_NOTIFY, 0);
         assert_eq!(q.used(&m), Some((id, 1)));
         let mut s = [0u8];
@@ -173,7 +238,13 @@ fn block_discard_needs_the_feature_and_a_writable_disk() {
     let mut q = DriverQueue::split(0, 0x1000, 8);
     init(&mut t, &mut m, VIRTIO_F_VERSION_1, &[&q]);
     assert_eq!(
-        segments_request(&mut t, &mut m, &mut q, VIRTIO_BLK_T_DISCARD, &[seg(0, 8, 0)]),
+        segments_request(
+            &mut t,
+            &mut m,
+            &mut q,
+            VIRTIO_BLK_T_DISCARD,
+            &[seg(0, 8, 0)]
+        ),
         VIRTIO_BLK_S_UNSUPP
     );
     assert_eq!(t.device().disk()[0], 0xee);
@@ -186,11 +257,17 @@ fn block_discard_needs_the_feature_and_a_writable_disk() {
 #[test]
 fn block_multiqueue_serves_every_queue() {
     assert_eq!(
-        BlockDevice::new(filled_disk(), false, "q").unwrap().with_queues(0).unwrap_err(),
+        BlockDevice::new(filled_disk(), false, "q")
+            .unwrap()
+            .with_queues(0)
+            .unwrap_err(),
         DiskError::QueueCount
     );
     let mut m = ram();
-    let dev = BlockDevice::new(filled_disk(), false, "q").unwrap().with_queues(4).unwrap();
+    let dev = BlockDevice::new(filled_disk(), false, "q")
+        .unwrap()
+        .with_queues(4)
+        .unwrap();
     assert_ne!(dev.device_features() & VIRTIO_BLK_F_MQ, 0);
     let mut t = MmioTransport::new(dev, 2);
     assert_eq!(config_u16(&mut t, 34), 4, "num_queues");
@@ -199,7 +276,10 @@ fn block_multiqueue_serves_every_queue() {
         .collect();
     let refs: Vec<&DriverQueue> = qs.iter().collect();
     let f = VIRTIO_F_VERSION_1 | VIRTIO_BLK_F_MQ | VIRTIO_BLK_F_WRITE_ZEROES;
-    assert_eq!(init(&mut t, &mut m, f, &refs) & status::DRIVER_OK, status::DRIVER_OK);
+    assert_eq!(
+        init(&mut t, &mut m, f, &refs) & status::DRIVER_OK,
+        status::DRIVER_OK
+    );
     for (i, q) in qs.iter_mut().enumerate() {
         let s = segments_request(
             &mut t,
@@ -234,7 +314,10 @@ fn ctrl(
 ) -> u8 {
     m.write(0x6_0000, cmd).unwrap();
     m.write(0x6_1000, &[0xff]).unwrap();
-    let id = q.post(m, &[(0x6_0000, cmd.len() as u32, false), (0x6_1000, 1, true)]);
+    let id = q.post(
+        m,
+        &[(0x6_0000, cmd.len() as u32, false), (0x6_1000, 1, true)],
+    );
     w32(t, m, reg::QUEUE_NOTIFY, q.index);
     assert_eq!(q.used(m), Some((id, 1)));
     let mut a = [0u8];
@@ -258,7 +341,10 @@ fn net_multiqueue_pairs_are_enabled_by_the_control_queue() {
             .collect();
         let refs: Vec<&DriverQueue> = qs.iter().collect();
         let f = base(format) | VIRTIO_NET_F_MQ | VIRTIO_NET_F_CTRL_VQ;
-        assert_eq!(init(&mut t, &mut m, f, &refs) & status::DRIVER_OK, status::DRIVER_OK);
+        assert_eq!(
+            init(&mut t, &mut m, f, &refs) & status::DRIVER_OK,
+            status::DRIVER_OK
+        );
         assert_eq!(t.device().ctrl_queue(), Some(8));
         assert_eq!(t.device().active_pairs(), 1);
         // Pair 3 is not enabled yet.
@@ -271,11 +357,23 @@ fn net_multiqueue_pairs_are_enabled_by_the_control_queue() {
         };
         let (left, right) = qs.split_at_mut(8);
         let cq = &mut right[0];
-        assert_eq!(ctrl(&mut t, &mut m, cq, &set(3)), VIRTIO_NET_OK, "{format:?}");
+        assert_eq!(
+            ctrl(&mut t, &mut m, cq, &set(3)),
+            VIRTIO_NET_OK,
+            "{format:?}"
+        );
         assert_eq!(t.device().active_pairs(), 3);
-        assert_eq!(ctrl(&mut t, &mut m, cq, &set(5)), VIRTIO_NET_ERR, "above max");
+        assert_eq!(
+            ctrl(&mut t, &mut m, cq, &set(5)),
+            VIRTIO_NET_ERR,
+            "above max"
+        );
         assert_eq!(ctrl(&mut t, &mut m, cq, &set(0)), VIRTIO_NET_ERR);
-        assert_eq!(ctrl(&mut t, &mut m, cq, &[0, 0, 1]), VIRTIO_NET_ERR, "CTRL_RX not offered");
+        assert_eq!(
+            ctrl(&mut t, &mut m, cq, &[0, 0, 1]),
+            VIRTIO_NET_ERR,
+            "CTRL_RX not offered"
+        );
         assert_eq!(t.device().active_pairs(), 3);
         // A frame steered to pair 3 arrives on receiveq3 (queue 4).
         let g = frame(80, 0x33);
@@ -290,7 +388,8 @@ fn net_multiqueue_pairs_are_enabled_by_the_control_queue() {
         // Transmit on transmitq3 (queue 5).
         let txq = &mut left[5];
         m.write(0x3_0000, &[0u8; NET_HDR_BYTES]).unwrap();
-        m.write(0x3_0000 + NET_HDR_BYTES as u64, &frame(60, 0x44)).unwrap();
+        m.write(0x3_0000 + NET_HDR_BYTES as u64, &frame(60, 0x44))
+            .unwrap();
         let id = txq.post(&mut m, &[(0x3_0000, (NET_HDR_BYTES + 60) as u32, false)]);
         w32(&mut t, &mut m, reg::QUEUE_NOTIFY, 5);
         assert_eq!(txq.used(&m), Some((id, 0)));
@@ -317,10 +416,17 @@ fn net_control_queue_without_multiqueue_sits_at_index_2() {
     let tx = DriverQueue::split(1, 0x2000, 8);
     let mut cq = DriverQueue::split(2, 0x3000, 8);
     let f = VIRTIO_F_VERSION_1 | VIRTIO_NET_F_CTRL_VQ;
-    assert_eq!(init(&mut t, &mut m, f, &[&rx, &tx, &cq]) & status::DRIVER_OK, status::DRIVER_OK);
+    assert_eq!(
+        init(&mut t, &mut m, f, &[&rx, &tx, &cq]) & status::DRIVER_OK,
+        status::DRIVER_OK
+    );
     assert_eq!(t.device().ctrl_queue(), Some(2));
     let cmd = [VIRTIO_NET_CTRL_MQ, VIRTIO_NET_CTRL_MQ_VQ_PAIRS_SET, 2, 0];
-    assert_eq!(ctrl(&mut t, &mut m, &mut cq, &cmd), VIRTIO_NET_ERR, "MQ not negotiated");
+    assert_eq!(
+        ctrl(&mut t, &mut m, &mut cq, &cmd),
+        VIRTIO_NET_ERR,
+        "MQ not negotiated"
+    );
     assert_eq!(t.device().active_pairs(), 1);
 }
 
@@ -332,7 +438,10 @@ fn net_mergeable_receive_buffers_spread_a_frame_over_chains() {
         let mut rx = DriverQueue::with_format(format, 0, 0x1000, 16);
         let tx = DriverQueue::with_format(format, 1, 0x2000, 16);
         let f = base(format) | VIRTIO_NET_F_MRG_RXBUF;
-        assert_eq!(init(&mut t, &mut m, f, &[&rx, &tx]) & status::DRIVER_OK, status::DRIVER_OK);
+        assert_eq!(
+            init(&mut t, &mut m, f, &[&rx, &tx]) & status::DRIVER_OK,
+            status::DRIVER_OK
+        );
         let big = (0..1514).map(|i| i as u8).collect::<Vec<u8>>();
         assert!(t.with_device(|d| d.inject_rx(&big)));
         // Two 600-byte buffers are not enough for 12 + 1514 bytes: they stay
@@ -351,8 +460,16 @@ fn net_mergeable_receive_buffers_spread_a_frame_over_chains() {
         m.read(0x2_0000, &mut hdr).unwrap();
         assert_eq!(u16::from_le_bytes([hdr[10], hdr[11]]), 3, "num_buffers");
         let mut got = vec![0u8; 1514];
-        m.read(0x2_0000 + NET_HDR_BYTES as u64, &mut got[..600 - NET_HDR_BYTES]).unwrap();
-        m.read(0x2_1000, &mut got[600 - NET_HDR_BYTES..1200 - NET_HDR_BYTES]).unwrap();
+        m.read(
+            0x2_0000 + NET_HDR_BYTES as u64,
+            &mut got[..600 - NET_HDR_BYTES],
+        )
+        .unwrap();
+        m.read(
+            0x2_1000,
+            &mut got[600 - NET_HDR_BYTES..1200 - NET_HDR_BYTES],
+        )
+        .unwrap();
         m.read(0x2_2000, &mut got[1200 - NET_HDR_BYTES..]).unwrap();
         assert_eq!(got, big);
         // A small frame still uses one buffer with num_buffers = 1.
@@ -373,7 +490,12 @@ fn net_mergeable_receive_buffers_spread_a_frame_over_chains() {
 
 // ---------------------------------------------------------------- vsock
 
-type Vsock = (MmioTransport<VsockDevice>, GuestMemory, DriverQueue, DriverQueue);
+type Vsock = (
+    MmioTransport<VsockDevice>,
+    GuestMemory,
+    DriverQueue,
+    DriverQueue,
+);
 
 fn vsock(format: RingFormat, features: u64) -> Vsock {
     let mut m = ram();
@@ -442,30 +564,56 @@ fn vsock_seqpacket_preserves_message_boundaries() {
         send(&mut v, &pkt(TYPE_SEQPACKET, OP_RW, 6000, 0, b"hello "));
         send(&mut v, &pkt(TYPE_SEQPACKET, OP_RW, 6000, 0, b"seq"));
         assert_eq!(v.0.with_device(|d| d.recv_message(key)), Ok(None));
-        send(&mut v, &pkt(TYPE_SEQPACKET, OP_RW, 6000, SEQ_EOM | SEQ_EOR, b"packet"));
-        send(&mut v, &pkt(TYPE_SEQPACKET, OP_RW, 6000, SEQ_EOM, b"second"));
+        send(
+            &mut v,
+            &pkt(TYPE_SEQPACKET, OP_RW, 6000, SEQ_EOM | SEQ_EOR, b"packet"),
+        );
+        send(
+            &mut v,
+            &pkt(TYPE_SEQPACKET, OP_RW, 6000, SEQ_EOM, b"second"),
+        );
         let first = v.0.with_device(|d| d.recv_message(key)).unwrap().unwrap();
-        assert_eq!(first, SeqMessage { data: b"hello seqpacket".to_vec(), eor: true });
+        assert_eq!(
+            first,
+            SeqMessage {
+                data: b"hello seqpacket".to_vec(),
+                eor: true
+            }
+        );
         let second = v.0.with_device(|d| d.recv_message(key)).unwrap().unwrap();
-        assert_eq!(second, SeqMessage { data: b"second".to_vec(), eor: false });
+        assert_eq!(
+            second,
+            SeqMessage {
+                data: b"second".to_vec(),
+                eor: false
+            }
+        );
         assert_eq!(v.0.device().stats().messages_rx, 2);
         // Stream calls on a seqpacket connection are refused.
         assert_eq!(v.0.with_device(|d| d.recv(key)), Err(VsockError::WrongType));
-        assert_eq!(v.0.with_device(|d| d.send(key, b"x")), Err(VsockError::WrongType));
+        assert_eq!(
+            v.0.with_device(|d| d.send(key, b"x")),
+            Err(VsockError::WrongType)
+        );
         // Credit updates for the bytes the host consumed come first.
         while let Some((h, _)) = recv(&mut v, 8192) {
             assert_eq!(h.op, OP_CREDIT_UPDATE);
         }
         // Host to guest: 6000 bytes go as two packets, EOM|EOR on the last.
         let msg: Vec<u8> = (0..6000).map(|i| (i % 251) as u8).collect();
-        v.0.with_device(|d| d.send_message(key, &msg, true)).unwrap();
+        v.0.with_device(|d| d.send_message(key, &msg, true))
+            .unwrap();
         let (h1, p1) = recv(&mut v, 8192).unwrap();
         let (h2, p2) = recv(&mut v, 8192).unwrap();
         assert_eq!((h1.op, h1.flags, p1.len()), (OP_RW, 0, HOST_PACKET_BYTES));
-        assert_eq!((h2.flags, p2.len()), (SEQ_EOM | SEQ_EOR, 6000 - HOST_PACKET_BYTES));
+        assert_eq!(
+            (h2.flags, p2.len()),
+            (SEQ_EOM | SEQ_EOR, 6000 - HOST_PACKET_BYTES)
+        );
         assert_eq!([p1, p2].concat(), msg);
         // A receive buffer that splits a packet keeps the flags on the end.
-        v.0.with_device(|d| d.send_message(key, b"0123456789", false)).unwrap();
+        v.0.with_device(|d| d.send_message(key, b"0123456789", false))
+            .unwrap();
         let (a, pa) = recv(&mut v, (HEADER_BYTES + 4) as u32).unwrap();
         let (b, pb) = recv(&mut v, (HEADER_BYTES + 4) as u32).unwrap();
         let (c, pc) = recv(&mut v, (HEADER_BYTES + 4) as u32).unwrap();
@@ -499,13 +647,17 @@ fn vsock_seqpacket_type_rules_and_credit() {
     resp.src_port = 80;
     resp.buf_alloc = 100;
     send(&mut v, &resp.encode());
-    assert_eq!(v.0.device().connection_state(key), Some(ConnState::Connected));
+    assert_eq!(
+        v.0.device().connection_state(key),
+        Some(ConnState::Connected)
+    );
     assert_eq!(
         v.0.with_device(|d| d.send_message(key, &[0u8; 101], false)),
         Err(VsockError::WouldBlock)
     );
     assert_eq!(v.0.device().outbox_len(), 0);
-    v.0.with_device(|d| d.send_message(key, &[0u8; 100], false)).unwrap();
+    v.0.with_device(|d| d.send_message(key, &[0u8; 100], false))
+        .unwrap();
     assert_eq!(recv(&mut v, 4096).unwrap().0.flags, SEQ_EOM);
 }
 

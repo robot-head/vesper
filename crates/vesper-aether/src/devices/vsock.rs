@@ -318,7 +318,8 @@ impl VsockDevice {
         if self.outbox.len() >= OUTBOX_LIMIT {
             return Err(VsockError::OutboxFull);
         }
-        self.conns.insert(key, Conn::new(kind, ConnState::Connecting));
+        self.conns
+            .insert(key, Conn::new(kind, ConnState::Connecting));
         self.push(key, OP_REQUEST, 0, Vec::new());
         Ok(key)
     }
@@ -369,8 +370,7 @@ impl VsockDevice {
             return Err(VsockError::NotConnected);
         }
         let packets = data.len().div_ceil(HOST_PACKET_BYTES).max(1);
-        if (conn.guest_credit() as usize) < data.len()
-            || self.outbox.len() + packets > OUTBOX_LIMIT
+        if (conn.guest_credit() as usize) < data.len() || self.outbox.len() + packets > OUTBOX_LIMIT
         {
             return Err(VsockError::WouldBlock);
         }

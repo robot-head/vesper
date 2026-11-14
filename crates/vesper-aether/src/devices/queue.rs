@@ -629,7 +629,7 @@ impl VirtQueue {
                 // §2.8.19: the table's entries are used in order; their
                 // buffer ids are reserved and ignored.
                 let table = self.read_table(memory, d)?;
-                for e in table.chunks_exact(DESCRIPTOR_BYTES) {
+                for e in table.as_chunks::<DESCRIPTOR_BYTES>().0 {
                     work.charge()?;
                     let e = decode_packed(e);
                     if e.flags & FLAG_INDIRECT != 0 {

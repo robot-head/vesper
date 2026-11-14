@@ -18,7 +18,9 @@ use vesper_aether::hotset::HotSet;
 const PAGES: usize = 2 * PAGES_PER_HUGE_PAGE;
 
 fn byte(page: usize, offset: usize) -> u8 {
-    (page as u8).wrapping_mul(31).wrapping_add((offset % 253) as u8)
+    (page as u8)
+        .wrapping_mul(31)
+        .wrapping_add((offset % 253) as u8)
 }
 
 fn fill(index: usize, page: &mut [u8; PAGE_BYTES]) -> Result<bool, vesper_aether::Error> {
@@ -78,7 +80,10 @@ fn huge_memfd_is_sealed_and_holds_the_snapshot() {
     assert!(m.is_huge());
     assert_eq!(m.page_count(), PAGES);
     assert_eq!(m.seals().unwrap() & SNAPSHOT_SEALS, SNAPSHOT_SEALS);
-    assert!(m.try_map_shared_writable().is_some(), "no writable shared map");
+    assert!(
+        m.try_map_shared_writable().is_some(),
+        "no writable shared map"
+    );
     for i in [0, 1, 6, 511, 512, 1000, PAGES - 1] {
         let p = m.read_page(i).unwrap();
         assert_eq!(p[0], want(i, 0), "page {i}");
@@ -103,7 +108,7 @@ fn preferring_huge_falls_back_to_small_pages() {
     let m = SealedMemfd::build_preferring_huge(PAGES, fill).unwrap();
     eprintln!(
         "prefer_huge: {} MiB memfd is_huge={} (HugePages_Free now {:?})",
-        PAGES * PAGE_BYTES >> 20,
+        (PAGES * PAGE_BYTES) >> 20,
         m.is_huge(),
         free_huge_pages()
     );
@@ -153,7 +158,9 @@ fn huge_clones_fault_two_mib_at_a_time_and_share_frames() {
         })
         .unwrap();
     assert_eq!((v, s.faults), (0xEE, 0));
-    let (vb, _) = b.serve(4, |t| t.read_u8(5 * PAGE_BYTES + 3).unwrap()).unwrap();
+    let (vb, _) = b
+        .serve(4, |t| t.read_u8(5 * PAGE_BYTES + 3).unwrap())
+        .unwrap();
     assert_eq!(vb, want(5, 3));
     assert_eq!(memfd.read_page(5).unwrap()[3], want(5, 3));
 }
@@ -169,7 +176,10 @@ fn huge_hot_set_prefetch_widens_to_whole_huge_pages() {
     // A hot set inside the second huge page only.
     let hot = HotSet::new(PAGES, &[600, 601, 900]).unwrap();
     let st = r.prefetch(&hot).unwrap();
-    assert_eq!(st.prefetched, PAGES_PER_HUGE_PAGE as u64, "one whole huge page");
+    assert_eq!(
+        st.prefetched, PAGES_PER_HUGE_PAGE as u64,
+        "one whole huge page"
+    );
     let ((), s) = r
         .serve(8, |t| {
             assert_eq!(t.read_u8(600 * PAGE_BYTES), Some(want(600, 0)));

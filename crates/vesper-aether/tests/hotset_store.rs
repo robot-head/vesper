@@ -14,7 +14,9 @@ fn store() -> (tempfile::TempDir, Store) {
 
 /// A two-slot snapshot whose pages live in one 4-page CAS blob.
 fn snapshot(store: &Store, vm: u64, hva: u64) -> Vec<SlotSnapshot> {
-    let blob: Vec<u8> = (0..4 * PAGE_BYTES).map(|i| (i / PAGE_BYTES) as u8 + 1).collect();
+    let blob: Vec<u8> = (0..4 * PAGE_BYTES)
+        .map(|i| (i / PAGE_BYTES) as u8 + 1)
+        .collect();
     let object = store.put_blob(Domain::Artifact, &blob).unwrap().id;
     let cas = |page: u64| CasPage {
         object,
@@ -61,7 +63,10 @@ fn hot_sets_round_trip_through_the_store() {
     hot.insert(0, HotSet::from_fault_order(4, &[3, 0, 3, 2], 16).unwrap());
     hot.insert(1, HotSet::new(2, &[1]).unwrap());
     let p = persist_hot_sets(&store, &slots, &hot).unwrap();
-    assert_eq!((p.bundle.domain, p.bundle.kind), (Domain::Artifact, ObjectKind::Tree));
+    assert_eq!(
+        (p.bundle.domain, p.bundle.kind),
+        (Domain::Artifact, ObjectKind::Tree)
+    );
     assert!(store.contains(&p.manifest).unwrap());
     let back = load_hot_sets(&store, &p.bundle, &slots).unwrap();
     assert_eq!(back, hot);
@@ -81,7 +86,11 @@ fn hot_sets_round_trip_through_the_store() {
     assert_eq!(load_hot_sets(&store, &p.bundle, &slots).unwrap(), hot);
     // No hot sets at all is a valid bundle.
     let empty = persist_hot_sets(&store, &slots, &BTreeMap::new()).unwrap();
-    assert!(load_hot_sets(&store, &empty.bundle, &slots).unwrap().is_empty());
+    assert!(
+        load_hot_sets(&store, &empty.bundle, &slots)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -149,7 +158,9 @@ fn malformed_bundles_and_inputs_are_typed_errors() {
     for name in ["hotset-01", "hotset-x", "notes", "hotset-"] {
         let mut t = Tree::new(Domain::Artifact);
         t.insert_file(MANIFEST_ENTRY, m.id, m.size, false).unwrap();
-        let b = store.put_blob(Domain::Artifact, &HotSet::new(4, &[0]).unwrap().encode()).unwrap();
+        let b = store
+            .put_blob(Domain::Artifact, &HotSet::new(4, &[0]).unwrap().encode())
+            .unwrap();
         t.insert_file(name, b.id, b.size, false).unwrap();
         assert!(
             matches!(
@@ -162,7 +173,9 @@ fn malformed_bundles_and_inputs_are_typed_errors() {
     // A hot set for a slot the snapshot lacks, and a corrupt hot set blob.
     let mut t = Tree::new(Domain::Artifact);
     t.insert_file(MANIFEST_ENTRY, m.id, m.size, false).unwrap();
-    let b = store.put_blob(Domain::Artifact, &HotSet::new(4, &[0]).unwrap().encode()).unwrap();
+    let b = store
+        .put_blob(Domain::Artifact, &HotSet::new(4, &[0]).unwrap().encode())
+        .unwrap();
     t.insert_file("hotset-5", b.id, b.size, false).unwrap();
     assert!(matches!(
         load_hot_sets(&store, &put(&t), &slots),
@@ -171,7 +184,9 @@ fn malformed_bundles_and_inputs_are_typed_errors() {
     let mut t = Tree::new(Domain::Artifact);
     t.insert_file(MANIFEST_ENTRY, m.id, m.size, false).unwrap();
     // Encoded for 4 pages but slot 1 has 2: indices out of range.
-    let b = store.put_blob(Domain::Artifact, &HotSet::new(4, &[3]).unwrap().encode()).unwrap();
+    let b = store
+        .put_blob(Domain::Artifact, &HotSet::new(4, &[3]).unwrap().encode())
+        .unwrap();
     t.insert_file("hotset-1", b.id, b.size, false).unwrap();
     assert!(matches!(
         load_hot_sets(&store, &put(&t), &slots),
@@ -180,7 +195,8 @@ fn malformed_bundles_and_inputs_are_typed_errors() {
     let mut t = Tree::new(Domain::Artifact);
     t.insert_file(MANIFEST_ENTRY, m.id, m.size, false).unwrap();
     let junk = store.put_blob(Domain::Artifact, b"not a hot set").unwrap();
-    t.insert_file("hotset-0", junk.id, junk.size, false).unwrap();
+    t.insert_file("hotset-0", junk.id, junk.size, false)
+        .unwrap();
     assert!(matches!(
         load_hot_sets(&store, &put(&t), &slots),
         Err(HotSetStoreError::HotSet { slot_id: 0, .. })

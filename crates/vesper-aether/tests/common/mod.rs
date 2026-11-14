@@ -193,7 +193,12 @@ impl DriverQueue {
 
     /// Makes one indirect descriptor available whose table (at `table`) holds
     /// `bufs` (§2.7.5.3 split, §2.8.19 packed).
-    pub fn post_indirect(&mut self, m: &mut GuestMemory, table: u64, bufs: &[(u64, u32, bool)]) -> u16 {
+    pub fn post_indirect(
+        &mut self,
+        m: &mut GuestMemory,
+        table: u64,
+        bufs: &[(u64, u32, bool)],
+    ) -> u16 {
         let writable: u32 = bufs.iter().filter(|b| b.2).map(|b| b.1).sum();
         let len = (bufs.len() * 16) as u32;
         match self.format {
@@ -203,8 +208,11 @@ impl DriverQueue {
                     if i + 1 < bufs.len() {
                         flags |= FLAG_NEXT;
                     }
-                    m.write(table + i as u64 * 16, &split_desc(gpa, l, flags, i as u16 + 1))
-                        .unwrap();
+                    m.write(
+                        table + i as u64 * 16,
+                        &split_desc(gpa, l, flags, i as u16 + 1),
+                    )
+                    .unwrap();
                 }
                 let head = self.free_descs.pop().expect("free descriptor");
                 m.write(
@@ -312,8 +320,11 @@ impl DriverQueue {
         match self.format {
             RingFormat::Split => {
                 let ev = self.last_used.wrapping_add(ahead).wrapping_sub(1);
-                m.write(self.driver + 4 + 2 * u64::from(self.size), &ev.to_le_bytes())
-                    .unwrap();
+                m.write(
+                    self.driver + 4 + 2 * u64::from(self.size),
+                    &ev.to_le_bytes(),
+                )
+                .unwrap();
             }
             RingFormat::Packed => {
                 let mut off = u32::from(self.used_next) + u32::from(ahead) - 1;
@@ -373,7 +384,11 @@ impl DriverQueue {
                 if !d.is_used(self.used_wrap) {
                     return None;
                 }
-                assert!(self.by_id.contains_key(&d.buffer_id), "unknown id {}", d.buffer_id);
+                assert!(
+                    self.by_id.contains_key(&d.buffer_id),
+                    "unknown id {}",
+                    d.buffer_id
+                );
                 let slots = if self.in_order {
                     self.retire_through(d.buffer_id, d.byte_len)
                 } else {

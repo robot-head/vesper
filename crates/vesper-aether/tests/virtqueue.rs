@@ -229,7 +229,12 @@ fn malformed_indirect_chains_are_typed_errors() {
             "{format:?}"
         );
         assert_eq!(
-            indirect_error(format, VIRTIO_F_INDIRECT_DESC, table, FLAG_INDIRECT | FLAG_NEXT),
+            indirect_error(
+                format,
+                VIRTIO_F_INDIRECT_DESC,
+                table,
+                FLAG_INDIRECT | FLAG_NEXT
+            ),
             MmioError::Queue(QueueError::IndirectPlacement)
         );
         let nested = [match format {
@@ -243,9 +248,11 @@ fn malformed_indirect_chains_are_typed_errors() {
         let (mut t, mut m, mut q) = block(format, VIRTIO_F_INDIRECT_DESC, 4);
         // A 24-byte table is not whole descriptors.
         match format {
-            RingFormat::Split => {
-                q.post_raw_split(&mut m, &[(0, split_desc(0x7_0000, 24, FLAG_INDIRECT, 0))], 0)
-            }
+            RingFormat::Split => q.post_raw_split(
+                &mut m,
+                &[(0, split_desc(0x7_0000, 24, FLAG_INDIRECT, 0))],
+                0,
+            ),
             RingFormat::Packed => {
                 q.post_indirect(&mut m, 0x7_0000, &[(0x1_0000, 16, false)]);
                 m.write(q.desc + 8, &24u32.to_le_bytes()).unwrap();
@@ -257,14 +264,30 @@ fn malformed_indirect_chains_are_typed_errors() {
         );
     }
     // Split only: an indirect chain whose `next` leaves the table.
-    let bad_next = [split_desc(0x1_0000, 16, FLAG_NEXT, 7), entry(0x2_0000, 21, FLAG_WRITE)];
+    let bad_next = [
+        split_desc(0x1_0000, 16, FLAG_NEXT, 7),
+        entry(0x2_0000, 21, FLAG_WRITE),
+    ];
     assert_eq!(
-        indirect_error(RingFormat::Split, VIRTIO_F_INDIRECT_DESC, &bad_next, FLAG_INDIRECT),
+        indirect_error(
+            RingFormat::Split,
+            VIRTIO_F_INDIRECT_DESC,
+            &bad_next,
+            FLAG_INDIRECT
+        ),
         MmioError::Queue(QueueError::InvalidNext)
     );
-    let looped = [split_desc(0x1_0000, 16, FLAG_NEXT, 1), split_desc(0x1_0000, 16, FLAG_NEXT, 0)];
+    let looped = [
+        split_desc(0x1_0000, 16, FLAG_NEXT, 1),
+        split_desc(0x1_0000, 16, FLAG_NEXT, 0),
+    ];
     assert_eq!(
-        indirect_error(RingFormat::Split, VIRTIO_F_INDIRECT_DESC, &looped, FLAG_INDIRECT),
+        indirect_error(
+            RingFormat::Split,
+            VIRTIO_F_INDIRECT_DESC,
+            &looped,
+            FLAG_INDIRECT
+        ),
         MmioError::Queue(QueueError::ChainLoop)
     );
 }
@@ -402,7 +425,8 @@ fn event_idx_interrupts_only_when_the_used_index_passes_the_event() {
         // An event several entries back (already passed) does not interrupt.
         let behind = q.used_idx(&m).wrapping_sub(2);
         if format == RingFormat::Split {
-            m.write(q.driver + 4 + 2 * 8, &behind.to_le_bytes()).unwrap();
+            m.write(q.driver + 4 + 2 * 8, &behind.to_le_bytes())
+                .unwrap();
             post_read(&mut m, &mut q, 0, 4);
             notify(&mut t, &mut m, 0);
             assert!(!interrupt_and_ack(&mut t, &mut m));
@@ -431,7 +455,9 @@ fn packed_event_desc_without_event_idx_is_treated_as_enable() {
 fn in_order_batches_fully_written_buffers_into_one_used_entry() {
     for format in FORMATS {
         let (mut t, mut m, mut q) = block(format, VIRTIO_F_IN_ORDER, 16);
-        let ids: Vec<u16> = (0..4).map(|k| post_read(&mut m, &mut q, k, k + 10)).collect();
+        let ids: Vec<u16> = (0..4)
+            .map(|k| post_read(&mut m, &mut q, k, k + 10))
+            .collect();
         notify(&mut t, &mut m, 0);
         let st = t.queue_stats(0).unwrap();
         assert_eq!(st.used_entries, 1, "{format:?}: one entry for the batch");
@@ -481,7 +507,10 @@ fn in_order_gives_partially_written_buffers_their_own_entry() {
             .collect();
         notify(&mut t, &mut m, 0);
         let st = t.queue_stats(0).unwrap();
-        assert_eq!(st.used_entries, 3, "{format:?}: partial buffers are not batched");
+        assert_eq!(
+            st.used_entries, 3,
+            "{format:?}: partial buffers are not batched"
+        );
         assert_eq!(st.batched, 0);
         for (k, id) in ids.iter().enumerate() {
             let want = (NET_HDR_BYTES + 60 + k) as u32;
@@ -534,9 +563,19 @@ fn ring_features_can_be_withheld_by_the_embedder() {
     );
     assert_eq!(t.offered_features() & RING_FEATURES, VIRTIO_F_INDIRECT_DESC);
     let q = DriverQueue::split(0, 0x1000, 8);
-    let st = init(&mut t, &mut m, VIRTIO_F_VERSION_1 | VIRTIO_F_RING_PACKED, &[&q]);
+    let st = init(
+        &mut t,
+        &mut m,
+        VIRTIO_F_VERSION_1 | VIRTIO_F_RING_PACKED,
+        &[&q],
+    );
     assert_eq!(st & status::FEATURES_OK, 0, "packed not offered");
-    let st = init(&mut t, &mut m, VIRTIO_F_VERSION_1 | VIRTIO_F_INDIRECT_DESC, &[&q]);
+    let st = init(
+        &mut t,
+        &mut m,
+        VIRTIO_F_VERSION_1 | VIRTIO_F_INDIRECT_DESC,
+        &[&q],
+    );
     assert_eq!(st & status::DRIVER_OK, status::DRIVER_OK);
 }
 

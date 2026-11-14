@@ -427,7 +427,12 @@ fn vmm_thread_child() {
 fn run_vmm_child(mode: &str) -> Option<std::process::Output> {
     let exe = std::env::current_exe().unwrap();
     match std::process::Command::new(exe)
-        .args(["--exact", "vmm_thread_child", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "vmm_thread_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env("VESPER_VMM_CHILD", mode)
         .output()
     {
@@ -456,7 +461,10 @@ fn denied_syscall_kills_the_vmm_thread_and_not_the_process() {
         return;
     };
     if let Some(line) = result_line(&out, "VMM-UNAVAILABLE") {
-        assert!(std::env::var_os("VESPER_REQUIRE_SECCOMP").is_none(), "{line}");
+        assert!(
+            std::env::var_os("VESPER_REQUIRE_SECCOMP").is_none(),
+            "{line}"
+        );
         eprintln!("{line}");
         return;
     }
@@ -494,7 +502,10 @@ fn kill_process_default_takes_the_whole_vmm_down_with_sigsys() {
         return;
     };
     if let Some(line) = result_line(&out, "VMM-UNAVAILABLE") {
-        assert!(std::env::var_os("VESPER_REQUIRE_SECCOMP").is_none(), "{line}");
+        assert!(
+            std::env::var_os("VESPER_REQUIRE_SECCOMP").is_none(),
+            "{line}"
+        );
         return;
     }
     assert!(result_line(&out, "VMM-SURVIVED").is_none());

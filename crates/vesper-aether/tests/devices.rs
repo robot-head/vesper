@@ -6,18 +6,16 @@ use common::*;
 use vesper_aether::devices::block::*;
 use vesper_aether::devices::mmio::*;
 use vesper_aether::devices::net::*;
-use vesper_aether::devices::vsock::*;
 use vesper_aether::devices::queue::{
     RingFormat, VIRTIO_F_EVENT_IDX, VIRTIO_F_IN_ORDER, VIRTIO_F_INDIRECT_DESC,
     VIRTIO_F_NOTIFICATION_DATA,
 };
+use vesper_aether::devices::vsock::*;
 use vesper_aether::virtio::QueueError;
 
 /// The block features a writable disk offers.
-const BLOCK_FEATURES: u64 = VIRTIO_BLK_F_BLK_SIZE
-    | VIRTIO_BLK_F_FLUSH
-    | VIRTIO_BLK_F_DISCARD
-    | VIRTIO_BLK_F_WRITE_ZEROES;
+const BLOCK_FEATURES: u64 =
+    VIRTIO_BLK_F_BLK_SIZE | VIRTIO_BLK_F_FLUSH | VIRTIO_BLK_F_DISCARD | VIRTIO_BLK_F_WRITE_ZEROES;
 
 const BASE: u64 = VIRTIO_F_VERSION_1 | VIRTIO_F_RING_PACKED;
 
@@ -206,7 +204,10 @@ fn queue_registers_are_validated() {
         t.write(&mut m, reg::QUEUE_READY, &1u32.to_le_bytes()),
         Err(MmioError::QueueReadyBeforeFeaturesOk)
     );
-    assert_eq!(init(&mut t, &mut m, BASE, &[]) & status::DRIVER_OK, status::DRIVER_OK);
+    assert_eq!(
+        init(&mut t, &mut m, BASE, &[]) & status::DRIVER_OK,
+        status::DRIVER_OK
+    );
     w32(&mut t, &mut m, reg::QUEUE_SEL, 0);
     assert!(matches!(
         t.write(&mut m, reg::QUEUE_NUM, &257u32.to_le_bytes()),

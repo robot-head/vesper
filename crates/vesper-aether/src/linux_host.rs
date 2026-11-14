@@ -844,6 +844,9 @@ mod uffd {
             .and_then(|v| v.trim().parse().ok())
     }
 
+    /// Fills page `index`; `false` leaves it zero.
+    type PageFill<'a> = dyn FnMut(usize, &mut [u8; PAGE_BYTES]) -> Result<bool, Error> + 'a;
+
     impl SealedMemfd {
         /// Builds the memfd from `fill(index, page)`, which writes page
         /// `index` into the buffer (zeroed beforehand) or fails.
@@ -885,7 +888,7 @@ mod uffd {
         fn build_with(
             pages: usize,
             huge: bool,
-            fill: &mut dyn FnMut(usize, &mut [u8; PAGE_BYTES]) -> Result<bool, Error>,
+            fill: &mut PageFill<'_>,
         ) -> Result<Self, UffdError> {
             if pages == 0
                 || pages > MAX_LAZY_PAGES
@@ -957,8 +960,8 @@ mod uffd {
                 let _unmap = Unmap(base, len as usize);
                 for index in 0..pages {
                     page.fill(0);
-                    let nonzero =
-                        fill(index, &mut page).map_err(|error| UffdError::Source { index, error })?;
+                    let nonzero = fill(index, &mut page)
+                        .map_err(|error| UffdError::Source { index, error })?;
                     if nonzero {
                         // SAFETY: `base + index * PAGE_BYTES .. + PAGE_BYTES`
                         // lies in the live shared mapping of `len` bytes, which
@@ -975,8 +978,8 @@ mod uffd {
             } else {
                 for index in 0..pages {
                     page.fill(0);
-                    let nonzero =
-                        fill(index, &mut page).map_err(|error| UffdError::Source { index, error })?;
+                    let nonzero = fill(index, &mut page)
+                        .map_err(|error| UffdError::Source { index, error })?;
                     if nonzero {
                         file.write_all_at(&page[..], (index * PAGE_BYTES) as u64)
                             .map_err(|e| UffdError::Os {
@@ -1095,7 +1098,11 @@ mod uffd {
         /// pool is an `mmap` error here rather than `SIGBUS` on a later write.
         pub fn map_private(memfd: &Arc<SealedMemfd>) -> Result<Self, UffdError> {
             let (features, flags, granule) = if memfd.huge {
-                (UFFD_FEATURE_MINOR_HUGETLBFS, libc::MAP_PRIVATE, HUGE_PAGE_BYTES)
+                (
+                    UFFD_FEATURE_MINOR_HUGETLBFS,
+                    libc::MAP_PRIVATE,
+                    HUGE_PAGE_BYTES,
+                )
             } else {
                 (
                     UFFD_FEATURE_MINOR_SHMEM,
@@ -1184,8 +1191,11 @@ mod uffd {
                     }
                     Err(e) if e == libc::EEXIST || e == libc::EAGAIN => {
                         for g in (first..end).step_by(per) {
-                            match continue_range(fd, self.reg.page_address(g), self.reg.granule as u64)
-                            {
+                            match continue_range(
+                                fd,
+                                self.reg.page_address(g),
+                                self.reg.granule as u64,
+                            ) {
                                 Ok(()) => {
                                     stats.continued += per as u64;
                                     stats.prefetched += per as u64;
