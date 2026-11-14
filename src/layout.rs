@@ -83,6 +83,28 @@ impl Layout {
                 kind: LayoutKind::Product(fields),
             });
         }
+        // Vectors and masks (§14.3, lane 28) are their packed lane bytes.
+        if let Some(words) = crate::vector::layout_words(ty) {
+            let word = Self {
+                ty: Type::named("u64"),
+                size: 8,
+                kind: LayoutKind::Scalar,
+            };
+            return Ok(Self {
+                ty: ty.clone(),
+                size: words * 8,
+                kind: LayoutKind::Product(
+                    (0..words)
+                        .map(|i| LayoutField {
+                            name: format!("${i}"),
+                            ty: word.ty.clone(),
+                            offset: (i * 8) as i32,
+                            layout: Box::new(word.clone()),
+                        })
+                        .collect(),
+                ),
+            });
+        }
         // Source strings originate from literals. A closed module therefore
         // admits a finite inline representation without a heap owner or GC.
         if ty.name() == "String" {
@@ -201,6 +223,9 @@ pub fn decode(world: &World, ty: &Type, bytes: &[u8]) -> Result<crate::runtime::
         return Err("native result buffer is too short".into());
     }
     let word = || u64::from_ne_bytes(bytes[..8].try_into().unwrap());
+    if let Some(value) = crate::vector::decode(ty, bytes) {
+        return Ok(value);
+    }
     if ty.name() == "String" {
         let length = usize::try_from(word()).map_err(|_| "invalid native string length")?;
         if length > world.string_capacity {
