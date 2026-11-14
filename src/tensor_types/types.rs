@@ -65,6 +65,8 @@ pub enum Ty {
     /// A user ADT or `Option`/`Result`, arguments in declaration order.
     Adt(String, Vec<Arg>),
     Tuple(Vec<Ty>),
+    /// A function value: parameter types and result.
+    Fn(Vec<Ty>, Box<Ty>),
     /// An ordinary type parameter.
     Var(String),
     /// A type without tensor content that the core checker owns.
@@ -88,6 +90,7 @@ impl Ty {
                 Arg::Ty(t) => t.has_tensor(),
             }),
             Self::Tuple(ts) => ts.iter().any(Ty::has_tensor),
+            Self::Fn(ps, r) => ps.iter().any(Ty::has_tensor) || r.has_tensor(),
             _ => false,
         }
     }
@@ -120,6 +123,14 @@ impl fmt::Display for Ty {
                 f,
                 "({})",
                 ts.iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            Self::Fn(ps, r) => write!(
+                f,
+                "fn({}) -> {r}",
+                ps.iter()
                     .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
@@ -371,13 +382,13 @@ impl Scope<'_> {
                 Ty::Base(n.clone())
             }
             Type::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.ty(t)).collect::<Result<_, _>>()?),
-            Type::Function { params, result, .. } => {
-                for (_, p) in params {
-                    self.ty(p)?;
-                }
-                self.ty(result)?;
-                Ty::Unknown
-            }
+            Type::Function { params, result, .. } => Ty::Fn(
+                params
+                    .iter()
+                    .map(|(_, p)| self.ty(p))
+                    .collect::<Result<_, _>>()?,
+                Box::new(self.ty(result)?),
+            ),
             Type::IntLiteral(_) | Type::Infer | Type::Row(_) => Ty::Unknown,
         })
     }

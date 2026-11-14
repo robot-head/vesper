@@ -705,6 +705,10 @@ impl Subst {
                     .collect::<Result<_, String>>()?,
             ),
             Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| self.ty(t)).collect::<Result<_, _>>()?),
+            Ty::Fn(ps, r) => Ty::Fn(
+                ps.iter().map(|t| self.ty(t)).collect::<Result<_, _>>()?,
+                Box::new(self.ty(r)?),
+            ),
             Ty::Var(v) => match self.tys.get(v) {
                 Some(Ty::Var(w)) if w == v => t.clone(),
                 Some(t) => self.ty(t)?,
@@ -828,6 +832,12 @@ impl Subst {
                     self.unify(x, y)?;
                 }
                 Ok(())
+            }
+            (Ty::Fn(a, r1), Ty::Fn(b, r2)) if a.len() == b.len() => {
+                for (x, y) in a.iter().zip(b) {
+                    self.unify(x, y)?;
+                }
+                self.unify(r1, r2)
             }
             (Ty::Var(a), Ty::Var(b)) if a == b => Ok(()),
             (x, y) if !x.has_tensor() && !y.has_tensor() => Ok(()),
@@ -995,7 +1005,10 @@ impl Body<'_> {
                 }
                 .into(),
             ),
-            ExprKind::Name(n) => self.lookup(n).cloned().unwrap_or(Ty::Unknown),
+            ExprKind::Name(n) => match self.lookup(n) {
+                Some(t) => t.clone(),
+                None => self.function_value(n, e),
+            },
             ExprKind::Tuple(es) => {
                 let exp: Vec<Option<Ty>> = match expected {
                     Some(Ty::Tuple(ts)) if ts.len() == es.len() => {
@@ -1119,6 +1132,7 @@ impl Body<'_> {
                 ..
             } => {
                 self.env.push(BTreeMap::new());
+                let mut ps = vec![];
                 for p in params {
                     let t = match self.scope().ty(&p.ty) {
                         Ok(t) => t,
@@ -1127,13 +1141,15 @@ impl Body<'_> {
                             Ty::Unknown
                         }
                     };
-                    self.bind(&p.name, t);
+                    self.bind(&p.name, t.clone());
+                    ps.push(t);
                 }
                 let r = self.scope().ty(result).unwrap_or(Ty::Unknown);
                 let b = self.expr(body, Some(&r));
                 self.expect(&r, &b, body.span.clone(), "closure body");
                 self.env.pop();
-                Ty::Unknown
+                let r = if r == Ty::Unknown { b } else { r };
+                Ty::Fn(ps, Box::new(r))
             }
             ExprKind::Handle {
                 effect,
@@ -1440,6 +1456,66 @@ impl Body<'_> {
     fn args(&mut self, args: &[Arg2<'_>]) -> Vec<Ty> {
         args.iter().map(|a| self.expr(a.0, None)).collect()
     }
+    /// A call through a function value. Its tensor shapes are checked
+    /// against the value's `fn(..) -> ..` type; a callee whose type is not
+    /// known cannot take or return tensors, because erasure would hide a
+    /// mismatch from the core checker.
+    /// A top-level function named as a value: its `fn(..) -> ..` type. A
+    /// generic function is instantiated (and receives hidden dimension
+    /// arguments) at each direct call, so it cannot be a value.
+    fn function_value(&mut self, n: &str, e: &Expr) -> Ty {
+        let Some(sig) = self.cx.sigs.get(n) else {
+            return Ty::Unknown;
+        };
+        let tensorish = sig.params.iter().any(|(_, t)| t.has_tensor()) || sig.result.has_tensor();
+        if !tensorish {
+            return Ty::Unknown;
+        }
+        if !sig.generics.is_empty() {
+            self.error(
+                codes::UNSUPPORTED,
+                format!(
+                    "'{n}' has generic parameters and cannot be used as a value; \
+                     call it directly"
+                ),
+                e.span.clone(),
+            );
+            return Ty::Unknown;
+        }
+        Ty::Fn(
+            sig.params.iter().map(|(_, t)| t.clone()).collect(),
+            Box::new(sig.result.clone()),
+        )
+    }
+    fn indirect(
+        &mut self,
+        e: &Expr,
+        f: &Ty,
+        args: &[crate::ast::Arg],
+        expected: Option<&Ty>,
+    ) -> Ty {
+        if let Ty::Fn(ps, r) = f
+            && ps.len() == args.len()
+        {
+            for (p, a) in ps.iter().zip(args) {
+                let t = self.expr(&a.expr, Some(p));
+                self.expect(p, &t, a.expr.span.clone(), "argument");
+            }
+            return (**r).clone();
+        }
+        let a: Vec<Arg2> = args.iter().map(|a| Arg2(&a.expr)).collect();
+        let tys = self.args(&a);
+        if tys.iter().any(Ty::has_tensor) || expected.is_some_and(Ty::has_tensor) {
+            self.error(
+                codes::UNSUPPORTED,
+                "a call through a function value whose type is not known cannot pass or \
+                 return tensors; annotate the function value with a `fn(..) -> ..` type"
+                    .to_string(),
+                e.span.clone(),
+            );
+        }
+        Ty::Unknown
+    }
     fn call(
         &mut self,
         e: &Expr,
@@ -1449,10 +1525,8 @@ impl Body<'_> {
         expected: Option<&Ty>,
     ) -> Ty {
         let ExprKind::Name(name) = &callee.kind else {
-            self.expr(callee, None);
-            let a: Vec<Arg2> = args.iter().map(|a| Arg2(&a.expr)).collect();
-            self.args(&a);
-            return Ty::Unknown;
+            let f = self.expr(callee, None);
+            return self.indirect(e, &f, args, expected);
         };
         if let Some(op) = name.strip_prefix("Tensor::") {
             return self.tensor_op(e, op, types, args, expected);
@@ -1460,10 +1534,8 @@ impl Body<'_> {
         if let Some(op) = name.strip_prefix("KvCachePool::") {
             return self.pool_op(e, op, args, expected);
         }
-        if self.lookup(name).is_some() {
-            let a: Vec<Arg2> = args.iter().map(|a| Arg2(&a.expr)).collect();
-            self.args(&a);
-            return Ty::Unknown;
+        if let Some(f) = self.lookup(name).cloned() {
+            return self.indirect(e, &f, args, expected);
         }
         match name.as_str() {
             "Some" | "Ok" | "Err" if args.len() == 1 => {
@@ -2302,6 +2374,10 @@ fn strip_flexible(t: &mut Ty) {
             }
         }
         Ty::Tuple(ts) => ts.iter_mut().for_each(strip_flexible),
+        Ty::Fn(ps, r) => {
+            ps.iter_mut().for_each(strip_flexible);
+            strip_flexible(r);
+        }
         _ => {}
     }
 }

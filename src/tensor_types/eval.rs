@@ -228,19 +228,26 @@ fn kv_error(e: KvError) -> Result<Value, EvalError> {
 fn bind_dims(sig: &FnSig, args: &[HostValue]) -> Result<BTreeMap<String, u64>, EvalError> {
     let mut env = BTreeMap::new();
     let mut checks: Vec<(Dim, usize, String)> = vec![];
-    fn visit(
-        t: &Ty,
-        v: &HostValue,
-        what: &str,
-        env: &mut BTreeMap<String, u64>,
-        checks: &mut Vec<(Dim, usize, String)>,
-    ) -> Result<(), EvalError> {
+    let mut dtypes: BTreeMap<String, DType> = BTreeMap::new();
+    struct Env<'a> {
+        dims: &'a mut BTreeMap<String, u64>,
+        dtypes: &'a mut BTreeMap<String, DType>,
+        checks: &'a mut Vec<(Dim, usize, String)>,
+    }
+    fn visit(t: &Ty, v: &HostValue, what: &str, cx: &mut Env<'_>) -> Result<(), EvalError> {
+        let (env, checks) = (&mut *cx.dims, &mut *cx.checks);
         match (t, v) {
             (Ty::Tensor { dtype, shape }, HostValue::Tensor(h)) => {
-                let ok = match (dtype, &h.data) {
-                    (DType::F32, HostData::F32(_)) | (DType::Bf16, HostData::Bf16(_)) => true,
-                    (DType::Block(b), HostData::Quant { block, .. }) => b == block,
-                    _ => false,
+                let found = match &h.data {
+                    HostData::F32(_) => DType::F32,
+                    HostData::Bf16(_) => DType::Bf16,
+                    HostData::Quant { block, .. } => DType::Block(block.clone()),
+                };
+                let ok = match dtype {
+                    // A dtype parameter takes the element type of the first
+                    // tensor that mentions it; later ones must agree.
+                    DType::Var(p) => cx.dtypes.entry(p.clone()).or_insert(found.clone()) == &found,
+                    d => *d == found,
                 };
                 if !ok {
                     return Err(EvalError::Entry(format!(
@@ -266,7 +273,7 @@ fn bind_dims(sig: &FnSig, args: &[HostValue]) -> Result<BTreeMap<String, u64>, E
             }
             (Ty::Tuple(ts), HostValue::Tuple(vs)) if ts.len() == vs.len() => {
                 for (i, (t, v)) in ts.iter().zip(vs).enumerate() {
-                    visit(t, v, &format!("{what}.{i}"), env, checks)?;
+                    visit(t, v, &format!("{what}.{i}"), cx)?;
                 }
                 Ok(())
             }
@@ -282,8 +289,42 @@ fn bind_dims(sig: &FnSig, args: &[HostValue]) -> Result<BTreeMap<String, u64>, E
             args.len()
         )));
     }
+    let mut cx = Env {
+        dims: &mut env,
+        dtypes: &mut dtypes,
+        checks: &mut checks,
+    };
     for (i, ((_, t), v)) in sig.params.iter().zip(args).enumerate() {
-        visit(t, v, &format!("argument {}", i + 1), &mut env, &mut checks)?;
+        visit(t, v, &format!("argument {}", i + 1), &mut cx)?;
+    }
+    // A dimension that occurs only in products (`[1, D * 2]`) is solved once
+    // every other variable of the product is known and the division is exact.
+    loop {
+        let mut progress = false;
+        for (d, n, _) in &checks {
+            let mut unknown = d.variables().filter(|v| !env.contains_key(*v));
+            let (Some(v), None) = (unknown.next().cloned(), unknown.next()) else {
+                continue;
+            };
+            if d.vars.get(&v) != Some(&1) {
+                continue;
+            }
+            let rest = d
+                .variables()
+                .filter(|w| **w != v)
+                .try_fold(d.coeff, |a, w| a.checked_mul(env[w]));
+            if let Some(r) = rest
+                && r != 0
+                && (*n as u64).is_multiple_of(r)
+                && *n as u64 / r > 0
+            {
+                env.insert(v, *n as u64 / r);
+                progress = true;
+            }
+        }
+        if !progress {
+            break;
+        }
     }
     for d in sig.dims() {
         if !env.contains_key(d) {
@@ -435,6 +476,15 @@ impl Host<'_> {
             vec![("id", uint(self.tensors.len() as u64 - 1))],
         ))
     }
+    /// Refuse an output shape over the element limit before allocating it.
+    fn room(&self, shape: &[usize]) -> Result<(), EvalError> {
+        match shape.iter().try_fold(1usize, |a, d| a.checked_mul(*d)) {
+            Some(n) if n <= self.options.max_tensor_elements => Ok(()),
+            _ => Err(EvalError::Limit(format!(
+                "tensor of shape {shape:?} is too large"
+            ))),
+        }
+    }
     fn get(&self, v: &Value) -> Result<&HostTensor, EvalError> {
         let id = field_u64(v, TENSOR, "id")?;
         self.tensors
@@ -548,6 +598,7 @@ impl Host<'_> {
                 if k != k2 {
                     return Err(shape_err(format!("inner dimensions {k} and {k2}")));
                 }
+                self.room(&[m, n])?;
                 // Rows of B^T, so each output row is one host matvec.
                 let mut bt = vec![0.0; k * n];
                 for r in 0..k {
@@ -582,6 +633,7 @@ impl Host<'_> {
                 arity(2)?;
                 let (sa, da) = self.f32s(&a[0], op)?;
                 let (sb, db) = self.f32s(&a[1], op)?;
+                self.room(&broadcast_shape(&sa, &sb).map_err(shape_err)?)?;
                 let (shape, out) =
                     broadcast_apply(
                         &sa,
@@ -908,6 +960,19 @@ fn dims_of(v: &Value) -> Result<Vec<usize>, EvalError> {
 }
 
 /// Right-aligned broadcasting over concrete shapes.
+/// The right-aligned broadcast of two shapes.
+pub fn broadcast_shape(sa: &[usize], sb: &[usize]) -> Result<Vec<usize>, String> {
+    let n = sa.len().max(sb.len());
+    let at = |s: &[usize], i: usize| (i + s.len()).checked_sub(n).map_or(1, |j| s[j]);
+    (0..n)
+        .map(|i| match (at(sa, i), at(sb, i)) {
+            (x, y) if x == y || y == 1 => Ok(x),
+            (1, y) => Ok(y),
+            _ => Err(format!("{sa:?} and {sb:?} do not broadcast")),
+        })
+        .collect()
+}
+
 pub fn broadcast_apply(
     sa: &[usize],
     da: &[f32],
@@ -915,23 +980,14 @@ pub fn broadcast_apply(
     db: &[f32],
     f: impl Fn(f32, f32) -> f32,
 ) -> Result<(Vec<usize>, Vec<f32>), String> {
-    let n = sa.len().max(sb.len());
+    let shape = broadcast_shape(sa, sb)?;
+    let n = shape.len();
     let pad = |s: &[usize]| {
         let mut v = vec![1; n - s.len()];
         v.extend_from_slice(s);
         v
     };
     let (pa, pb) = (pad(sa), pad(sb));
-    let mut shape = vec![];
-    for (x, y) in pa.iter().zip(&pb) {
-        shape.push(if x == y || *y == 1 {
-            *x
-        } else if *x == 1 {
-            *y
-        } else {
-            return Err(format!("{sa:?} and {sb:?} do not broadcast"));
-        });
-    }
     let total: usize = shape.iter().product();
     let strides = |p: &[usize]| {
         let mut s = vec![0; n];

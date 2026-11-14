@@ -493,3 +493,50 @@ fn modules_without_tensor_syntax_are_untouched() {
     assert!(!tensor_types::active(&parsed.module));
     assert!(tensor_types::check(&parsed.module).is_none());
 }
+
+#[test]
+fn function_values_dtype_parameters_and_product_entries() {
+    let a = analyze(include_str!("fixtures/tensor_types/values.ves"));
+    let x = values(2, 70);
+    let out = eval::run(&a, "through", vec![t(&[2], x.clone())], Options::default()).unwrap();
+    let y: Vec<f32> = x.iter().map(|v| ops::silu(*v)).collect();
+    assert_eq!(bits(f32s(&out.value)), bits(&y));
+    // A dtype parameter takes the element type of the argument.
+    let out = eval::run(&a, "same", vec![t(&[2], x.clone())], Options::default()).unwrap();
+    assert_eq!(bits(f32s(&out.value)), bits(&x));
+    let bf = HostValue::Tensor(HostTensor::bf16_from_f32(vec![2], &x));
+    let out = eval::run(&a, "same", vec![bf.clone()], Options::default()).unwrap();
+    assert_eq!(tensor(&out.value), tensor(&bf));
+    // An output over the element limit is refused before it is allocated.
+    let n = 1 << 16;
+    let e = eval::run(
+        &a,
+        "mm",
+        vec![t(&[n, 1], vec![1.0; n]), t(&[1, n], vec![1.0; n])],
+        Options::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(e, eval::EvalError::Limit(_)), "{e:?}");
+    // `D` occurs only in the product `D * 2` and is solved from the shape.
+    let g = analyze(include_str!("fixtures/tensor_types/generic.ves"));
+    let x = values(8, 71);
+    let out = eval::run(
+        &g,
+        "rotate",
+        vec![t(&[1, 8], x.clone())],
+        Options::default(),
+    )
+    .unwrap();
+    let mut y = x;
+    ops::rope(&mut y, 8, 3, eval::ROPE_BASE).unwrap();
+    assert_eq!(bits(f32s(&out.value)), bits(&y));
+    // An odd width has no solution.
+    let e = eval::run(
+        &g,
+        "rotate",
+        vec![t(&[1, 7], values(7, 1))],
+        Options::default(),
+    )
+    .unwrap_err();
+    assert!(matches!(e, eval::EvalError::Entry(_)), "{e:?}");
+}

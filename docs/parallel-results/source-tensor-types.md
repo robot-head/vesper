@@ -47,7 +47,7 @@ Surface (all additive syntax in `crates/vesper-syntax`, own commit):
 | E0767 | Wire struct layout (implicit padding, field types, copy and non-generic), and a dtype that is not a Q4_0/Q8_0 block layout |
 | E0768 | A tensor, lease or sequence is built, destructured or projected; a non-linear type holds a lease |
 | E0769 | A source handler for `Tensor` or `KvCachePool` |
-| E0770 | Unsupported uses: tensor operators, indexing, unknown operations, tensors in impl/trait/effect items |
+| E0770 | Unsupported uses: tensor operators, indexing, unknown operations, tensors in impl/trait/effect items, a generic tensor function used as a value, a tensor passed to or returned from a function value of unknown type |
 | E0771 | A lease or sequence used with another pool instance than the row's `KvCachePool[..]` |
 
 Inside a function its dimension parameters are rigid. At a call they are
@@ -84,17 +84,22 @@ bit:
 - `pages.ves`: a page lease filled to its 16-token limit, then released; the
   out-of-pages path.
 - `generic.ves`: dimension inference through records (`Linear[I, O]`),
-  `Option` branches, product dimensions and RoPE.
+  `Option` branches, product dimensions and RoPE; `rotate[D]` run directly
+  as an entry, solving `D` from `[1, D * 2]`.
+- `values.ves`: tensor functions and closures used as values keep their
+  `fn(..) -> ..` signatures; a dtype parameter bound from the entry
+  argument (F32 and Bf16); a matmul output over the element limit is
+  refused before it is allocated.
 
-`tests/tensor_types_reject.rs` checks 38 rejected fixtures, one or more per
+`tests/tensor_types_reject.rs` checks 40 rejected fixtures, one or more per
 rule, each with the expected code, message and source span.
 
 ## Checks
 
 Run on the cloud host (x86_64 Linux, Rust 1.97 and 1.100):
 
-- `cargo test --test tensor_types --test tensor_types_reject`: 9 + 2 passed.
-- `cargo fmt --all -- --check`: clean. `vesper fmt --check tests/fixtures/tensor_types`: all 44 fixtures canonical.
+- `cargo test --test tensor_types --test tensor_types_reject`: 10 + 2 passed.
+- `cargo fmt --all -- --check`: clean. `vesper fmt --check tests/fixtures/tensor_types`: all 47 fixtures canonical.
 - `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`: clean
   (run with PR #490's fix for main's `Op::Vector` break applied locally).
 - `cargo test --workspace --locked --no-fail-fast`: 4514 passed, 7 ignored,
@@ -135,6 +140,10 @@ Run on the cloud host (x86_64 Linux, Rust 1.97 and 1.100):
   The hook is one call at the top of `check::check`.
 - No CLI command runs the evaluator; `vesper run` stops at the unhandled
   `Tensor` effect.
+- A `wire struct` none of whose fields is wire-only (for example
+  `{ flag: bool }`, or a wrapper of nested wire structs only) is parsed as a
+  plain copy struct and gets no layout check, because the frozen item schema
+  does not record `wire`. Any struct used as a dtype is still layout-checked.
 - Tensors in `impl`, trait and user effect items, closures returning tensors
   through generic positions, and user effects with dimension parameters are
   rejected (E0770 or E0764).
