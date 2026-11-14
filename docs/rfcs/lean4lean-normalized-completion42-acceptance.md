@@ -3,7 +3,8 @@
 The twelfth fixed packet, `Packet::NormalizedCompletion`, is authored.
 This lane ran direct rustfmt, BUILD synchronization and static source/byte
 checks only. It ran no Cargo or Lean compilation, genuine matrix, Clippy or
-Bazel execution. The new genuine matrix remains coordinator integration work.
+Bazel execution. The completed genuine matrix and scoped lint checks are
+recorded in the [integration report](lean4lean-normalized-completion42-integration.md).
 The prior eleven matrices remain historical evidence from frozen source
 `3c526dac65c92e7f4c276b2e7255ca5398142068`; they are not relabeled as
 executions of this additive packet extension.
@@ -139,5 +140,6 @@ is the genuine new 21-module matrix with every control, strict CI-pinned
 Rust 1.100 Clippy of all twelve exact test sources, static preservation of
 the eleven earlier catalogs/specifications and validator, and actual Bazel
 packaging. It does not schedule repeated runtime checks of the eleven earlier
-packets when their selected inputs remain unchanged. New execution, Clippy,
-Bazel and final integrated tool/source/object evidence remain pending.
+packets when their selected inputs remain unchanged. The completed new
+execution, Clippy, Bazel and integrated tool/source/object evidence are
+recorded in the [integration report](lean4lean-normalized-completion42-integration.md).
