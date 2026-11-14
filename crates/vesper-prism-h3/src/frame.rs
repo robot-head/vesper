@@ -28,6 +28,22 @@ pub const STREAM_QPACK_DECODER: u64 = 0x03;
 pub const SETTINGS_QPACK_MAX_TABLE_CAPACITY: u64 = 0x01;
 pub const SETTINGS_MAX_FIELD_SECTION_SIZE: u64 = 0x06;
 pub const SETTINGS_QPACK_BLOCKED_STREAMS: u64 = 0x07;
+/// RFC 9220 §3 (extended CONNECT).
+pub const SETTINGS_ENABLE_CONNECT_PROTOCOL: u64 = 0x08;
+/// RFC 9297 §2.1.1 (HTTP Datagrams).
+pub const SETTINGS_H3_DATAGRAM: u64 = 0x33;
+/// draft-ietf-webtrans-http3: the draft-02 enable flag and the max-sessions
+/// identifiers of drafts 07-08 and 09 and later. All three are sent and any
+/// is accepted, so peers on different drafts interoperate.
+pub const SETTINGS_ENABLE_WEBTRANSPORT: u64 = 0x2b60_3742;
+pub const SETTINGS_WEBTRANSPORT_MAX_SESSIONS_DRAFT07: u64 = 0xc671_706a;
+pub const SETTINGS_WT_MAX_SESSIONS: u64 = 0x14e9_cd29;
+
+/// WEBTRANSPORT_STREAM: the signal at the start of a WebTransport
+/// bidirectional stream (a frame type with a session ID and no length).
+pub const WEBTRANSPORT_STREAM: u64 = 0x41;
+/// The WebTransport unidirectional stream type.
+pub const STREAM_WEBTRANSPORT: u64 = 0x54;
 
 /// HTTP/2 frame types with no HTTP/3 meaning (§7.2.8): receiving one is
 /// H3_FRAME_UNEXPECTED.
@@ -77,6 +93,16 @@ pub struct Settings {
     pub qpack_blocked_streams: u64,
     /// `None`: unlimited (§7.2.4.1).
     pub max_field_section_size: Option<u64>,
+    /// SETTINGS_ENABLE_CONNECT_PROTOCOL = 1 (RFC 9220).
+    pub enable_connect_protocol: bool,
+    /// SETTINGS_H3_DATAGRAM = 1 (RFC 9297). Sent only when the transport
+    /// negotiated QUIC DATAGRAM frames (RFC 9221).
+    pub h3_datagram: bool,
+    /// WebTransport sessions allowed at once; `None`: WebTransport is not
+    /// offered.
+    pub webtransport_max_sessions: Option<u64>,
+    /// SETTINGS_NO_RFC7540_PRIORITIES = 1 (RFC 9218 §2.1).
+    pub no_rfc7540_priorities: bool,
 }
 
 impl Settings {
@@ -96,10 +122,32 @@ impl Settings {
             }
             // Bounded: each pair is at least two bytes of a bounded payload.
             seen.push(id);
+            // Boolean settings other than 0 or 1 are H3_SETTINGS_ERROR
+            // (RFC 9220 §3, RFC 9297 §2.1.1, RFC 9218 §2.1).
+            let flag = |v: u64| match v {
+                0 => Ok(false),
+                1 => Ok(true),
+                _ => Err(FrameError::BadSetting(id)),
+            };
             match id {
                 SETTINGS_QPACK_MAX_TABLE_CAPACITY => s.qpack_max_table_capacity = value,
                 SETTINGS_QPACK_BLOCKED_STREAMS => s.qpack_blocked_streams = value,
                 SETTINGS_MAX_FIELD_SECTION_SIZE => s.max_field_section_size = Some(value),
+                SETTINGS_ENABLE_CONNECT_PROTOCOL => s.enable_connect_protocol = flag(value)?,
+                SETTINGS_H3_DATAGRAM => s.h3_datagram = flag(value)?,
+                crate::priority::SETTINGS_NO_RFC7540_PRIORITIES => {
+                    s.no_rfc7540_priorities = flag(value)?
+                }
+                SETTINGS_ENABLE_WEBTRANSPORT if flag(value)? => {
+                    s.webtransport_max_sessions =
+                        Some(s.webtransport_max_sessions.unwrap_or(0).max(1));
+                }
+                SETTINGS_WEBTRANSPORT_MAX_SESSIONS_DRAFT07 | SETTINGS_WT_MAX_SESSIONS
+                    if value > 0 =>
+                {
+                    s.webtransport_max_sessions =
+                        Some(s.webtransport_max_sessions.unwrap_or(0).max(value));
+                }
                 _ => {}
             }
         }
@@ -119,6 +167,24 @@ impl Settings {
                 Some(self.qpack_blocked_streams),
             ),
             (SETTINGS_MAX_FIELD_SECTION_SIZE, self.max_field_section_size),
+            (
+                SETTINGS_ENABLE_CONNECT_PROTOCOL,
+                self.enable_connect_protocol.then_some(1),
+            ),
+            (SETTINGS_H3_DATAGRAM, self.h3_datagram.then_some(1)),
+            (
+                crate::priority::SETTINGS_NO_RFC7540_PRIORITIES,
+                self.no_rfc7540_priorities.then_some(1),
+            ),
+            (
+                SETTINGS_ENABLE_WEBTRANSPORT,
+                self.webtransport_max_sessions.map(|_| 1),
+            ),
+            (
+                SETTINGS_WEBTRANSPORT_MAX_SESSIONS_DRAFT07,
+                self.webtransport_max_sessions,
+            ),
+            (SETTINGS_WT_MAX_SESSIONS, self.webtransport_max_sessions),
             // A reserved setting exercises the peer's tolerance (§7.2.4.1).
             (0x1f * 7 + 0x21, Some(0)),
         ] {
@@ -170,6 +236,11 @@ pub enum Frame {
     MaxPushId(u64),
     /// PUSH_PROMISE: its payload is not parsed (push is not supported).
     PushPromise,
+    /// PRIORITY_UPDATE (RFC 9218 §7.2).
+    PriorityUpdate(crate::priority::PriorityUpdate),
+    /// WEBTRANSPORT_STREAM with its session ID: everything after it on the
+    /// stream is WebTransport data, not frames.
+    WebTransportStream(u64),
     /// An unknown or reserved frame type; its payload was skipped.
     Unknown(u64),
 }
@@ -184,6 +255,14 @@ impl Frame {
             Self::CancelPush(_) => CANCEL_PUSH,
             Self::MaxPushId(_) => MAX_PUSH_ID,
             Self::PushPromise => PUSH_PROMISE,
+            Self::PriorityUpdate(u) => {
+                if u.push {
+                    crate::priority::PRIORITY_UPDATE_PUSH
+                } else {
+                    crate::priority::PRIORITY_UPDATE_REQUEST
+                }
+            }
+            Self::WebTransportStream(_) => WEBTRANSPORT_STREAM,
             Self::Unknown(t) => *t,
         }
     }
@@ -192,9 +271,18 @@ impl Frame {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum State {
     Header,
-    Data { remaining: u64 },
-    Skip { remaining: u64 },
-    Payload { ty: u64, len: usize },
+    Data {
+        remaining: u64,
+    },
+    Skip {
+        remaining: u64,
+    },
+    Payload {
+        ty: u64,
+        len: usize,
+    },
+    /// After WEBTRANSPORT_STREAM: no more frames.
+    Opaque,
 }
 
 /// Incremental frame decoder for one stream.
@@ -205,6 +293,9 @@ pub struct FrameReader {
     max_payload: usize,
     /// A DATA frame's header was announced (for the caller's state machine).
     data_started: bool,
+    /// Type 0x41 is the WEBTRANSPORT_STREAM signal (WebTransport was
+    /// offered); otherwise it is an unknown frame type like any other.
+    webtransport: bool,
 }
 
 impl FrameReader {
@@ -214,6 +305,15 @@ impl FrameReader {
             state: State::Header,
             max_payload,
             data_started: false,
+            webtransport: false,
+        }
+    }
+
+    /// A reader for a stream that may start with WEBTRANSPORT_STREAM.
+    pub fn with_webtransport(max_payload: usize) -> Self {
+        Self {
+            webtransport: true,
+            ..Self::new(max_payload)
         }
     }
 
@@ -224,6 +324,12 @@ impl FrameReader {
 
     pub fn push(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
+    }
+
+    /// The bytes held after a [`Frame::WebTransportStream`] signal: the
+    /// first stream data, which are not frames.
+    pub fn take_rest(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buf)
     }
 
     /// True between frames: the end of the stream is allowed here (§7.1).
@@ -246,12 +352,25 @@ impl FrameReader {
                     if is_http2_frame(ty) {
                         return Err(FrameError::Http2Frame(ty));
                     }
+                    if ty == WEBTRANSPORT_STREAM && self.webtransport {
+                        // The second varint is a session ID, not a length;
+                        // the rest of the stream is not framed.
+                        self.state = State::Opaque;
+                        return Ok(Some(Frame::WebTransportStream(len)));
+                    }
                     self.state = match ty {
                         DATA => {
                             self.data_started = true;
                             State::Data { remaining: len }
                         }
-                        HEADERS | SETTINGS | GOAWAY | CANCEL_PUSH | MAX_PUSH_ID | PUSH_PROMISE => {
+                        HEADERS
+                        | SETTINGS
+                        | GOAWAY
+                        | CANCEL_PUSH
+                        | MAX_PUSH_ID
+                        | PUSH_PROMISE
+                        | crate::priority::PRIORITY_UPDATE_REQUEST
+                        | crate::priority::PRIORITY_UPDATE_PUSH => {
                             let len = usize::try_from(len)
                                 .ok()
                                 .filter(|l| *l <= self.max_payload)
@@ -295,6 +414,7 @@ impl FrameReader {
                     }
                     self.state = State::Header;
                 }
+                State::Opaque => return Err(FrameError::Malformed),
                 State::Payload { ty, len } => {
                     if self.buf.len() < len {
                         return Ok(None);
@@ -332,6 +452,9 @@ fn parse_payload(ty: u64, payload: Vec<u8>) -> Result<Frame, FrameError> {
         CANCEL_PUSH => Frame::CancelPush(single_varint(&payload)?),
         MAX_PUSH_ID => Frame::MaxPushId(single_varint(&payload)?),
         PUSH_PROMISE => Frame::PushPromise,
+        crate::priority::PRIORITY_UPDATE_REQUEST | crate::priority::PRIORITY_UPDATE_PUSH => {
+            Frame::PriorityUpdate(crate::priority::PriorityUpdate::parse(ty, &payload)?)
+        }
         _ => unreachable!("only buffered types are parsed"),
     })
 }
@@ -352,6 +475,7 @@ mod tests {
             qpack_max_table_capacity: 4096,
             qpack_blocked_streams: 16,
             max_field_section_size: Some(8192),
+            ..Settings::default()
         }
         .encode(&mut wire);
         write_frame(&mut wire, 0x21, b"grease");
