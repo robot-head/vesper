@@ -174,7 +174,13 @@ Toolchain: Rust 1.100.0 (as in Bazel CI), Lean 4.24.0 (GitHub release zip).
 - `cargo +1.100.0 clippy -p vesper-resonance --locked --all-targets -- -D warnings`:
   clean (also with `--target aarch64-unknown-linux-gnu`).
 - `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`:
-  see the PR (recorded below once finished).
+  clean.
+- `VESPER_LEAN=lean cargo +1.100.0 test --workspace --locked --no-fail-fast`:
+  4,012 passed, 17 failed in 545 test binaries. All 17 failures are outside
+  this lane and depend on the host: `vesper --test lean4lean42_acceptance`
+  (1, needs `VESPER_LEAN4LEAN42_ROOT`, the §42 candidate, which does not
+  exist on this host) and `vesper-loom-build --test build` / `--test cli` (16, `UnknownFingerprint { missing: ["engine_dependencies"] }` on this
+  container). This diff touches neither crate.
 - `VESPER_LEAN=lean cargo +1.100.0 test -p vesper-resonance`: 71 passed,
   1 ignored.
 - `cargo +1.100.0 test --release -p vesper-resonance --test simd --test stability --test alloc`: passed.
