@@ -17,8 +17,10 @@
 //!   the previously installed handler (for example the Rust runtime's stack
 //!   overflow handler) or, for the default action, re-raised with it.
 //! * Windows: write watches. The region is allocated with
-//!   `MEM_WRITE_WATCH`; the kernel records written pages and `GetWriteWatch`
-//!   with `WRITE_WATCH_FLAG_RESET` reads and clears them. No handler runs.
+//!   `MEM_WRITE_WATCH` and every page is touched once (the first access to
+//!   a demand-zero page, even a read, is otherwise reported as a write);
+//!   the kernel records written pages and `GetWriteWatch` with
+//!   `WRITE_WATCH_FLAG_RESET` reads and clears them. No handler runs.
 //!
 //! Not used: Linux `userfaultfd` write-protect (needs `CAP_SYS_PTRACE` or
 //! `vm.unprivileged_userfaultfd=1`, which CI runners usually lack, and a
@@ -613,6 +615,14 @@ mod sys {
         };
         if base.is_null() {
             return Err(io::Error::last_os_error());
+        }
+        // Touch every page once now. Windows materialises a demand-zero
+        // page on its first access, a read included, and the write watch
+        // then reports that page as written; pre-faulting keeps later reads
+        // from showing up as writes (`arm` resets the watch afterwards).
+        for p in (0..len).step_by(page) {
+            // SAFETY: inside the committed allocation.
+            unsafe { base.cast::<u8>().add(p).write_volatile(0) };
         }
         Ok(TrackedRegion {
             base: base.cast(),

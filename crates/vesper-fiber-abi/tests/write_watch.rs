@@ -239,3 +239,20 @@ fn concurrent_slot_reuse_keeps_other_regions_tracked() {
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     churn.join().unwrap();
 }
+
+/// Reading pages that were never touched is not a write on any mechanism
+/// (on Windows the first access to a demand-zero page would otherwise be
+/// reported by the write watch).
+#[test]
+fn reading_untouched_pages_is_not_a_write() {
+    let page = page_size();
+    let mut region = TrackedRegion::new(4 * page).unwrap();
+    region.arm().unwrap();
+    let mut all = vec![0u8; 4 * page];
+    region.read(0, &mut all).unwrap();
+    assert!(all.iter().all(|b| *b == 0));
+    assert!(region.take_dirty().unwrap().is_empty());
+    region.write(2 * page, &[1]).unwrap();
+    region.read(0, &mut all).unwrap();
+    assert_eq!(region.take_dirty().unwrap(), vec![2]);
+}
