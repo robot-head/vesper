@@ -6,12 +6,12 @@ namespace Vesper.ResourceModel42
 structure LedgerEntry where
   mintSite : Site
   live : Bool
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 structure Config where
   expr : RuntimeExpr
   ledger : Array LedgerEntry := #[]
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 def Config.live (c : Config) : MetatheoryFull.RCtx := fun id =>
   match c.ledger[id]? with
@@ -23,29 +23,29 @@ def Config.erase (c : Config) : MetatheoryFull.Conf :=
 
 inductive EventAction where
   | mint | consume
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 structure ResourceEvent where
   action : EventAction
   site : Site
   id : Nat
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 inductive InvariantError where
   | openAtom | expectedPair | expectedNat | expectedHandle
   | unknownHandle (id : Nat) | deadHandle (id : Nat)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 inductive ResourceRefusal where
   | capacity (reason : CapacityError)
   | resources (requested cap : Nat)
   | events (requested cap : Nat)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 structure Focus where
   context : RuntimeContext
   redex : RuntimeExpr
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 -- A bounded context search, not a semantic/fuel transition.
 def locate : Nat → RuntimeExpr → Except CapacityError Focus
@@ -66,7 +66,7 @@ inductive Replacement where
   | unpack (left right : RuntimeValue) (body : RuntimeExpr)
   | handle (id : Nat)
   | unit
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 def Replacement.materialize : Replacement → RuntimeExpr
   | .term e => e
@@ -90,12 +90,12 @@ def Replacement.preflight (l : Limits) (context : RuntimeContext) :
 
 inductive PlannedAction where
   | silent | mint (site : Site) | consume (site : Site) (id : Nat)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 structure Prepared where
   replacement : Replacement
   action : PlannedAction
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 def prepare (ledger : Array LedgerEntry) : RuntimeExpr → Except InvariantError Prepared
   | .letE initializer body =>
@@ -147,7 +147,6 @@ inductive StepResult where
   | next (config : Config) (action : MetatheoryFull.Act) (event : Option ResourceEvent)
   | limited (reason : ResourceRefusal)
   | invariant (reason : InvariantError)
-  deriving Repr
 
 -- `step` is an unfoldable proof helper. The admitted public evaluator below
 -- starts only from a checked program and a separately validated invocation.
@@ -176,14 +175,12 @@ inductive EvalStatus where
   | fuelExhausted
   | resourceLimit (reason : ResourceRefusal)
   | invariantFailure (reason : InvariantError)
-  deriving Repr
 
 structure EvalResult where
   status : EvalStatus
   config : Config
   eventsRev : List ResourceEvent
   actionsRev : List MetatheoryFull.Act
-  deriving Repr
 
 def EvalResult.events (r : EvalResult) : List ResourceEvent := r.eventsRev.reverse
 def EvalResult.actions (r : EvalResult) : List MetatheoryFull.Act := r.actionsRev.reverse
@@ -212,14 +209,14 @@ def runMachine (l : Limits) : Nat → Config → List ResourceEvent → List Met
 
 inductive InputError where
   | shape | naturalRange | handle | depth | noncopy
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 inductive InvocationError where
   | inputCount (expected actual : Nat)
   | inputValue (index : Nat) (reason : InputError)
   | capacity (reason : CapacityError)
   | fuelBound (requested cap : Nat)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 
 -- Types and values have independent prior metric bounds; this shape/range
 -- traversal is additionally depth-bounded and never admits resource input IDs.

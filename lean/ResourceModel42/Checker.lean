@@ -10,21 +10,21 @@ abbrev Usage := List Bool
 inductive CheckErrorKind where
   | unknownVariable | typeMismatch | duplicateUse | unusedLinear
   | fieldModality | literalOutOfRange | branchOwnership
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 structure CheckError where
   kind : CheckErrorKind
   site : Site
   slot : Option Nat := none
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 inductive CheckProfile where
   | typeBound (site : Site) (error : TypeError)
   | context (site : Site)
   | affineBranchDemand (site : Site) (slot : Nat)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 inductive CheckFailure where
   | semantic (error : CheckError)
   | profile (reason : CheckProfile)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 structure InferInfo where
   result : TypeInfo
   uses : Usage

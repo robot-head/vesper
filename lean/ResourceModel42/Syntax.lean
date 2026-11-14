@@ -9,14 +9,14 @@ abbrev Site := Nat
 
 inductive Floor where
   | copy | affine
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 def Floor.toMode : Floor → Mode
   | .copy => .copy | .affine => .affine
 
 inductive Ty where
   | unit | nat | ticket
   | pair (floor : Floor) (left : Ty) (leftMode : Mode) (right : Ty) (rightMode : Mode)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 def Ty.erase : Ty → MetatheoryFull.Ty
   | .unit => .unit | .nat => .nat | .ticket => .hdl
   | .pair f a ma b mb => .pair f.toMode a.erase ma b.erase mb
@@ -45,7 +45,7 @@ structure Limits where
   resources : Nat := 64
   events : Nat := 128
   fuel : Nat := 4096
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 instance : Inhabited Limits := ⟨{}⟩
 def Limits.hard : Limits := ⟨1024,256,128,1023,32,1023,32,16384,64,1048576,512,256,512,65536⟩
 def Limits.valid (l : Limits) : Bool :=
@@ -66,7 +66,7 @@ def Limits.valid (l : Limits) : Bool :=
 
 inductive TypeError where
   | nodes | depth | fieldMode
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 structure TypeInfo where
   private mk ::
   ty : Ty
@@ -125,7 +125,7 @@ inductive SourceAtom where
   | unit (site : Site)
   | nat (site : Site) (n : Nat)
   | var (site : Site) (index : Nat)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 def SourceAtom.site : SourceAtom → Site
   | .unit s | .nat s _ | .var s _ => s
 inductive SourceExpr where
@@ -136,7 +136,7 @@ inductive SourceExpr where
   | ifz (site : Site) (a : SourceAtom) (zero nonzero : SourceExpr)
   | mint (site : Site)
   | consume (site : Site) (a : SourceAtom)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 def SourceExpr.site : SourceExpr → Site
   | .atom a => a.site
   | .pair s _ _ _ _ _ | .letE s _ _ | .unpack s _ _ | .ifz s _ _ _
@@ -154,21 +154,20 @@ def SourceExpr.erase : SourceExpr → MetatheoryFull.Expr
 structure RawProgram where
   inputTypes : Array Ty
   body : SourceExpr
-  deriving Repr
 
 inductive ValidationError where
   | invalidLimits | inputCount | noncopyInput (index : Nat)
   | inputType (index : Nat) (error : TypeError)
   | rawNodes | rawDepth | context | site (site : Site) | duplicateSite (site : Site)
   | variableBound (site : Site)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 structure SourceStats where
   nodes : Nat := 0
   depth : Nat := 0
   maxContext : Nat := 0
   mints : Nat := 0
   consumes : Nat := 0
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 structure SourceWalk where
   seen : Array Bool
   stats : SourceStats
@@ -271,10 +270,10 @@ def validate (raw : RawProgram) (l : Limits := {}) : Except ValidationError Vali
 
 inductive RuntimeValue where
   | unit | nat (n : Nat) | hdl (id : Nat) | pair (left right : RuntimeValue)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 inductive RuntimeAtom where
   | var (index : Nat) | val (value : RuntimeValue)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 inductive RuntimeExpr where
   | atom (a : RuntimeAtom)
   | pair (a b : RuntimeAtom)
@@ -283,7 +282,7 @@ inductive RuntimeExpr where
   | ifz (a : RuntimeAtom) (zero nonzero : RuntimeExpr)
   | mint (site : Site)
   | consume (site : Site) (a : RuntimeAtom)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 def RuntimeValue.erase : RuntimeValue → MetatheoryFull.Expr
   | .unit => .unitV | .nat n => .natV n | .hdl r => .hdlV r
   | .pair a b => .pair a.erase b.erase
@@ -322,17 +321,17 @@ def closeInputs (values : Array RuntimeValue) (body : RuntimeExpr) : RuntimeExpr
 structure ValueStats where
   nodes : Nat
   depth : Nat
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 structure ExprStats where
   nodes : Nat
   depth : Nat
   maxValueNodes : Nat
   maxValueDepth : Nat
   value : Option ValueStats
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 inductive CapacityError where
   | expressionNodes | runtimeDepth | valueNodes | valueDepth | initialValues | inputCount
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 def checkValueStats (l : Limits) (s : ValueStats) : Except CapacityError ValueStats := do
   if s.nodes > l.valueNodes then throw .valueNodes
   if s.depth > l.valueDepth then throw .valueDepth
@@ -419,7 +418,7 @@ def RuntimeExpr.preflightUnpack (l : Limits) (left right : RuntimeValue) (body :
 
 inductive RuntimeContext where
   | hole | letC (inner : RuntimeContext) (body : RuntimeExpr)
-  deriving DecidableEq, Repr
+  deriving DecidableEq
 def RuntimeContext.plug : RuntimeContext → RuntimeExpr → RuntimeExpr
   | .hole,e => e | .letC inner body,e => .letE (inner.plug e) body
 def RuntimeContext.erase : RuntimeContext → MetatheoryFull.EC
