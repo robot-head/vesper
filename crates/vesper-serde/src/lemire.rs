@@ -32,6 +32,10 @@ pub enum DecodePath {
     Fallback,
 }
 
+/// Exponent magnitudes are clamped here: 2^62, while a slice holds fewer
+/// than 2^61 digits on any supported target, so `e - digits` keeps its sign
+/// and lies far outside -342..=308.
+const EXP_CAP: i64 = 1 << 62;
 const SMALLEST_POWER_OF_TEN: i64 = -342;
 const LARGEST_POWER_OF_TEN: i64 = 308;
 const MANTISSA_BITS: i32 = 52;
@@ -113,10 +117,12 @@ fn decimal(text: &[u8]) -> Option<Decimal> {
         };
         let exp_start = p;
         while let Some(d) = digit(p) {
-            // Saturate: anything past 10^6 is zero or infinity anyway.
-            if e < 1_000_000 {
-                e = e * 10 + i64::from(d);
-            }
+            // Saturate far beyond any digit count a slice can hold, so the
+            // significand's own scale can never cancel the saturation.
+            e = e
+                .saturating_mul(10)
+                .saturating_add(i64::from(d))
+                .min(EXP_CAP);
             p += 1;
         }
         if p == exp_start {
@@ -133,7 +139,7 @@ fn decimal(text: &[u8]) -> Option<Decimal> {
     let mut d = Decimal {
         negative,
         w,
-        q: e - (frac_end - frac_start) as i64,
+        q: e.saturating_sub((frac_end - frac_start) as i64),
         truncated: false,
     };
     if digits > 19 {
@@ -157,7 +163,7 @@ fn decimal(text: &[u8]) -> Option<Decimal> {
             }
             d.w = w;
             // Every significant digit past the 19th moves the scale by one.
-            d.q += (significant - 19) as i64;
+            d.q = d.q.saturating_add((significant - 19) as i64);
             d.truncated = truncated;
         }
     }

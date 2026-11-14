@@ -290,6 +290,15 @@ fn non_numbers_and_infinities() {
         assert!(decode_f64(text).is_none(), "{text:?}");
     }
     assert!(decode_f64("1e309").unwrap().0.is_infinite());
+    // A long significand must not cancel a saturated exponent.
+    let long = format!("0.{}1e10000000", "0".repeat(999_999));
+    assert!(decode_f64(&long).unwrap().0.is_infinite(), "10^9000000");
+    let long = format!("{}e-10000000", "1".repeat(1_000_001));
+    assert_eq!(decode_f64(&long).unwrap().0, 0.0, "10^-9000000");
+    let huge = format!("1e{}", "9".repeat(40));
+    assert!(decode_f64(&huge).unwrap().0.is_infinite());
+    let tiny = format!("-1e-{}", "9".repeat(40));
+    assert_eq!(decode_f64(&tiny).unwrap().0.to_bits(), (-0.0f64).to_bits());
     assert_eq!(decode_f64("-0").unwrap().0.to_bits(), (-0.0f64).to_bits());
     assert_eq!(
         decode_f64("-1e-999999999999").unwrap().0.to_bits(),
