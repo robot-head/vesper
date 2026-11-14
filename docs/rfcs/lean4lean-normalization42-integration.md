@@ -90,9 +90,32 @@ whole-checker correctness, compiler refinement or native equivalence.
 Evidence explicitly records `whole_checker_verified = false`; the
 implementation's proof-audit status remains unchanged.
 
-At this report's commit, final strict Clippy, repository formatting, Bazel,
-whitespace and source-association validation remain coordinator work; this
-report makes no pass claim for those checks. The separately claimed CI work
-#443 addresses macOS-only duplicate-replay scheduling while preserving the
-Rust/Lean checks, acceptance policy and budgets. Its hosted retry remains
-pending. The coordinator's final validation report follows separately.
+Final coordinator validation passes repository formatting, BUILD-file
+synchronization and whitespace checks. The five older projected objects are
+byte-identical to their prior checkpoints. Independent review found no
+actionable defect. The complete runner from `const POLICY` through EOF and
+all five older required-root catalogs/specification arms remain unchanged.
+
+Strict six-target Clippy passes in 27.65 seconds (27.905 seconds wall time)
+with exactly PR #434's two-file Kinetic compatibility patch temporarily
+applied. The patch preserves the fixed-axis math and is separately owned;
+it is removed after validation and is absent from this proof branch. This
+is a conditional composite-tree check, not a claim that the inherited
+Rust 1.99 range-loop warnings pass without #434. Evidence is retained in
+`/tmp/lean4lean-normalization42-kinetic434-clippy.log` and
+`/tmp/normalization442-kinetic434-validated.patch`.
+
+The separately claimed CI work #443 applies the existing macOS-only
+scheduling policy for long duplicate Lean replays. It preserves every
+Rust/Lean source, acceptance policy and budget. Full packets remain enabled
+on Linux and Windows, with process/path regression coverage on macOS.
+The foundation packet's measured macOS 300.3-second timeout is documented
+separately; sibling timeout measurements and a completed macOS full-packet
+replay are not claimed. The hosted scheduling retry remains pending.
+
+No full local Bazel invocation is claimed: the Bazel executable is absent
+in this environment. BUILD-file synchronization and static scheduling
+validation pass. Prior actual regular-copy launcher evidence is retained in
+the parent runfiles report; a full normalization-packet launcher run has
+not been repeated because all Rust/Lean/control source bytes are unchanged
+by scheduling and its ordinary genuine matrix passes.
