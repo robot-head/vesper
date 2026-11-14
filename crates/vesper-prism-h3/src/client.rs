@@ -291,9 +291,18 @@ impl ClientConnection {
         self.ready_to_send(t)?;
         let mut req = req.clone();
         let first = std::mem::take(&mut req.body);
+        // Checked before the request opens, so a refusal leaves nothing in
+        // flight.
+        if !first.is_empty() && first.len() + 9 > self.core.cfg.max_stream_buffer {
+            return Err(ClientError::BufferFull);
+        }
         let id = self.open_request(t, &req, false)?;
-        if !first.is_empty() {
-            self.send_body(t, id, &first)?;
+        if !first.is_empty()
+            && let Err(e) = self.send_body(t, id, &first)
+        {
+            // The HEADERS could not leave yet: cancel rather than orphan.
+            self.cancel(t, id);
+            return Err(e);
         }
         Ok(id)
     }
@@ -373,11 +382,18 @@ impl ClientConnection {
         code: u32,
         reason: &[u8],
     ) -> Result<(), SessionError> {
-        match self.streams.get_mut(&session) {
-            Some(s) if s.connect && s.sending => s.sending = false,
-            _ => return Err(SessionError::NotEstablished),
+        if !self
+            .streams
+            .get(&session)
+            .is_some_and(|s| s.connect && s.sending)
+        {
+            return Err(SessionError::NotEstablished);
         }
+        // Validated and queued first; the state changes only on success.
         self.core.queue_session_close(session, code, reason)?;
+        if let Some(s) = self.streams.get_mut(&session) {
+            s.sending = false;
+        }
         self.core
             .end_session(t, session, code, Vec::new(), None, false);
         self.core.flush(t);
@@ -511,14 +527,23 @@ impl ClientConnection {
         while let Some(id) = t.accept() {
             if is_uni(id) {
                 self.core.accept_uni(t, id);
-            } else if self.core.sent_settings.webtransport_max_sessions.is_some()
-                && self.sniff.len() < MAX_SNIFFED
-            {
+            } else if self.core.sent_settings.webtransport_max_sessions.is_some() {
                 // A server bidi stream can only be a WebTransport stream.
-                self.sniff.insert(
-                    id,
-                    FrameReader::with_webtransport(self.core.cfg.max_frame_payload),
-                );
+                // Streams whose headers already arrived leave the bound
+                // first; past it, a stream is refused on its own.
+                if self.sniff.len() >= MAX_SNIFFED {
+                    self.read_sniffed(t)?;
+                }
+                if self.sniff.len() < MAX_SNIFFED {
+                    self.sniff.insert(
+                        id,
+                        FrameReader::with_webtransport(self.core.cfg.max_frame_payload),
+                    );
+                } else {
+                    self.core.sessions.stats.streams_rejected += 1;
+                    t.stop_sending(id, Code::WT_BUFFERED_STREAM_REJECTED);
+                    t.reset(id, Code::WT_BUFFERED_STREAM_REJECTED);
+                }
             } else {
                 // Servers cannot open bidirectional streams in HTTP/3.
                 return Err(ConnectionError::StreamCreation { stream_id: id });
@@ -576,7 +601,7 @@ impl ClientConnection {
                     let rest = reader.take_rest();
                     let gone = self.core.session_known_gone(session);
                     self.core
-                        .incoming_wt_stream(t, id, session, true, rest, gone)?;
+                        .incoming_wt_stream_fin(t, id, session, true, rest, gone, r.fin)?;
                 }
                 Ok(None) if !r.fin => {}
                 _ => return Err(ConnectionError::StreamCreation { stream_id: id }),
@@ -848,7 +873,18 @@ impl ClientConnection {
                 Ok(())
             }
             Phase::Tunnel => {
-                // The server ended the session (FIN on the CONNECT stream).
+                // The server ended the session (FIN on the CONNECT stream),
+                // which must not end inside a capsule (RFC 9297 §3.3).
+                let capsules_ok = self
+                    .core
+                    .sessions
+                    .map
+                    .get(&id)
+                    .is_none_or(|s| s.capsules.finish().is_ok());
+                if !capsules_ok {
+                    self.malformed(t, id, Code::MESSAGE_ERROR);
+                    return Ok(());
+                }
                 let sending = rs.sending;
                 self.streams.remove(&id);
                 self.core.end_session(t, id, 0, Vec::new(), None, true);

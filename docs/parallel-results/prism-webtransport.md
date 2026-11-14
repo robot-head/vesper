@@ -122,8 +122,8 @@ New integration suites (all in `crates/vesper-prism-h3/tests`):
 
 | Suite | Tests | What it covers |
 | --- | --- | --- |
-| `webtransport_mem.rs` | 12 | Settings, streams and QUIC datagrams, capsule fallback, tunnel sessions, held streams and their bound, gone sessions, the dropped-session leak, refusals and limits, application error codes, malformed datagrams and capsules, DRAIN and unknown capsules |
-| `priority_bodies.rs` | 9 | Urgency order, incremental sharing, PRIORITY_UPDATE overriding headers, bad updates, streaming bodies under a window, early responses and body errors, budget without deadlock, interim responses, transport defaults |
+| `webtransport_mem.rs` | 17 | Settings, streams and QUIC datagrams, capsule fallback, tunnel sessions, held streams and their bound, gone sessions, the dropped-session leak, refusals and limits, application error codes, malformed datagrams and capsules, DRAIN and unknown capsules |
+| `priority_bodies.rs` | 12 | Urgency order, incremental sharing, PRIORITY_UPDATE overriding headers, bad updates, streaming bodies under a window, early responses and body errors, budget without deadlock, interim responses, transport defaults |
 | `warp_webtransport.rs` | 3 | Over a Warp loopback connection pair: a WebTransport session with streams, flow control and capsule datagrams; a streaming upload held back by the server window under 5% simulated loss; an urgent response finishing before a large non-urgent one |
 | `quinn_datagrams.rs` | 2 | Over quinn-proto 0.11.13 connections (real QUIC handshake, rustls with aws-lc-rs): plain HTTP/3 requests, and WebTransport datagrams carried in QUIC DATAGRAM frames (RFC 9221), checked through quinn-proto's frame counters |
 | `wtransport_interop.rs` | 2 | A WebTransport client whose every byte is produced and parsed by wtransport-proto 0.7.2: its settings, session request (its QPACK), stream headers and datagram codec against our server; our SETTINGS, 200 response, server-opened streams, datagrams and CLOSE_WEBTRANSPORT_SESSION capsule parsed by wtransport-proto; a session ended by FIN |
@@ -184,6 +184,22 @@ Bazel picks up the new dev-dependencies from `Cargo.lock` through
 * **`prism::serve` refuses extended CONNECT with 501.** The `Service` trait
   has no session shape; applications that want WebTransport drive
   `ServerConnection` directly.
+
+## Review follow-ups
+
+Codex review of the first push found eight defects; each now has a
+regression test that failed before its fix:
+
+| Finding | Fix | Test |
+| --- | --- | --- |
+| A uni WT stream's later reads were swallowed after adoption | `read_uni` stops once the session layer owns the stream; a FIN read with the header is passed on (also for bidi streams on both sides) | `large_and_finished_unidirectional_streams_arrive_whole` |
+| An early stream racing its CONNECT in one poll was refused as gone | Unparsed request streams are tracked; their streams are held until HEADERS decide | `an_early_stream_racing_its_connect_in_one_poll_is_held` |
+| Reset whole-body uploads kept their priority entries | `peer_reset` forgets the priority and refuses held streams | `reset_uploads_release_their_priority_entries` |
+| Trailers larger than the body window deadlocked | The window counts unread body bytes only; partial frames are bounded by `max_frame_payload` | `trailers_larger_than_the_body_window_still_arrive` |
+| A server stream burst closed the client connection | Ready headers are processed first, and past the bound a stream is refused alone | `a_burst_of_server_streams_does_not_close_the_connection` |
+| The client accepted a FIN inside a capsule | `CapsuleReader::finish` checked, H3_MESSAGE_ERROR | `a_truncated_capsule_at_the_servers_fin_is_an_error` |
+| A bad close reason left the client session unclosable | State changes after validation | `a_bad_close_reason_leaves_the_client_session_closable` |
+| An over-budget initial upload orphaned its request | Checked before opening; a later failure cancels the stream | `a_refused_initial_upload_leaves_nothing_in_flight` |
 
 ## Remaining gaps
 

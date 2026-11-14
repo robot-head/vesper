@@ -732,3 +732,145 @@ fn drain_and_unknown_capsules() {
     p.step();
     assert_eq!(p.server.open_requests(), 0);
 }
+
+/// Writes everything to a raw stream of the in-memory transport.
+fn write_all(m: &mut Mem, id: u64, mut data: &[u8]) {
+    while !data.is_empty() {
+        let n = m.write(id, data).unwrap();
+        assert!(n > 0, "transport took nothing");
+        data = &data[n..];
+    }
+}
+
+#[test]
+fn large_and_finished_unidirectional_streams_arrive_whole() {
+    let mut p = Pair::new(true);
+    let (sid, session) = p.session();
+    // A payload larger than the connection's read buffer, and a tiny
+    // stream whose FIN arrives in the same read as its header.
+    let big: Vec<u8> = (0..40_000u32).map(|i| i as u8).collect();
+    let mut ids = Vec::new();
+    for payload in [&big[..], b"hi"] {
+        let id = p.c.raw_open(true);
+        let mut w = Vec::new();
+        frame::put_varint(&mut w, frame::STREAM_WEBTRANSPORT);
+        frame::put_varint(&mut w, sid);
+        w.extend_from_slice(payload);
+        write_all(&mut p.c, id, &w);
+        p.c.finish(id).unwrap();
+        ids.push(id);
+    }
+    let ev = p.server_events();
+    for id in &ids {
+        assert!(ev.iter().any(|e| matches!(e,
+            Event::Session(SessionEvent::Stream { stream_id, bidi: false, .. }) if stream_id == id)));
+    }
+    for (id, want) in ids.iter().zip([&big[..], b"hi"]) {
+        let (data, fin) = read_all(&mut |b| p.server.read_stream(&mut p.s, *id, b));
+        assert_eq!(data.len(), want.len());
+        assert_eq!(data, want);
+        assert!(fin);
+    }
+    let _ = session.close(&mut p.server, &mut p.s, 0, b"").unwrap();
+}
+
+#[test]
+fn an_early_stream_racing_its_connect_in_one_poll_is_held() {
+    let mut p = Pair::new(true);
+    let sid = p
+        .client
+        .open_session(
+            &mut p.c,
+            &ClientRequest::connect("prism.test", "/wt", "webtransport"),
+        )
+        .unwrap();
+    // Before the server polls: a stream naming the CONNECT stream.
+    let early = p.c.raw_open(true);
+    let mut w = Vec::new();
+    frame::put_varint(&mut w, frame::STREAM_WEBTRANSPORT);
+    frame::put_varint(&mut w, sid);
+    w.extend_from_slice(b"race");
+    p.c.write(early, &w).unwrap();
+    let ev = p.server_events();
+    let Some(Event::Connect(c)) = ev.into_iter().next() else {
+        panic!()
+    };
+    assert_eq!(p.c.stopped(early), None);
+    let session = c
+        .responder
+        .accept_session(&mut p.server, &mut p.s, Vec::new())
+        .unwrap();
+    let ev = p.server_events();
+    assert!(ev.iter().any(|e| matches!(e,
+        Event::Session(SessionEvent::Stream { stream_id, .. }) if *stream_id == early)));
+    let (data, _) = read_all(&mut |b| p.server.read_stream(&mut p.s, early, b));
+    assert_eq!(data, b"race");
+    let _ = session.close(&mut p.server, &mut p.s, 0, b"").unwrap();
+}
+
+#[test]
+fn a_burst_of_server_streams_does_not_close_the_connection() {
+    let mut p = Pair::new(true);
+    let (sid, session) = p.session();
+    let mut ids = Vec::new();
+    for _ in 0..20 {
+        let id = p.server.open_stream(&mut p.s, &session, true).unwrap();
+        p.server.write_stream(&mut p.s, id, b"x").unwrap();
+        ids.push(id);
+    }
+    let ev = p.client_events();
+    assert_eq!(p.client.error(), None);
+    let opened = ev
+        .iter()
+        .filter(|e| {
+            matches!(e,
+            ClientEvent::Session(SessionEvent::Stream { session, .. }) if *session == sid)
+        })
+        .count();
+    assert_eq!(opened, ids.len());
+    let _ = session.close(&mut p.server, &mut p.s, 0, b"").unwrap();
+}
+
+#[test]
+fn a_truncated_capsule_at_the_servers_fin_is_an_error() {
+    let mut p = Pair::new(false);
+    let (sid, session) = p.session();
+    // DATAGRAM capsule declaring 4 bytes with 2, in a whole DATA frame,
+    // then FIN: written raw, as a misbehaving server would.
+    let mut c = Vec::new();
+    frame::put_varint(&mut c, 0x00);
+    frame::put_varint(&mut c, 4);
+    c.extend_from_slice(b"ab");
+    let mut f = Vec::new();
+    frame::write_frame(&mut f, frame::DATA, &c);
+    p.s.write(sid, &f).unwrap();
+    p.s.finish(sid).unwrap();
+    let ev = p.client_events();
+    assert!(
+        ev.iter().any(|e| matches!(e,
+            ClientEvent::Session(SessionEvent::Closed { session, reset: Some(code), .. })
+                if *session == sid && *code == Code::MESSAGE_ERROR.0)),
+        "{ev:?}"
+    );
+    // The server-side obligation is moot: the stream was ended raw.
+    std::mem::forget(session);
+}
+
+#[test]
+fn a_bad_close_reason_leaves_the_client_session_closable() {
+    let mut p = Pair::new(true);
+    let (sid, session) = p.session();
+    assert_eq!(
+        p.client.close_session(&mut p.c, sid, 1, &[0xff]),
+        Err(SessionError::BadReason)
+    );
+    p.client.close_session(&mut p.c, sid, 1, b"bye").unwrap();
+    let ev = p.server_events();
+    assert!(
+        ev.iter().any(|e| matches!(e,
+            Event::Session(SessionEvent::Closed { session, code: 1, reason, .. })
+                if *session == sid && reason == b"bye")),
+        "{ev:?}"
+    );
+    let _ = session.close(&mut p.server, &mut p.s, 0, b"").unwrap();
+}

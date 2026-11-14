@@ -601,3 +601,94 @@ fn transport_trait_defaults_report_no_datagrams() {
     );
     assert_eq!(b.recv_datagram(), None);
 }
+
+#[test]
+fn reset_uploads_release_their_priority_entries() {
+    // Whole-body requests with a priority header, reset by the client
+    // before FIN: nothing about them may stay behind.
+    let mut p = Pair::with(H3Config::default());
+    for i in 0..200 {
+        let mut r = post(&format!("/u{i}"), Some(1000));
+        r.fields.push(Field::new("priority", "u=1"));
+        let id = p.client.send_request_streaming(&mut p.c, &r).unwrap();
+        p.client.send_body(&mut p.c, id, b"part").unwrap();
+        p.step();
+        p.client.cancel(&mut p.c, id);
+        p.step();
+    }
+    let ev = p.server_events();
+    assert!(
+        ev.iter().all(|e| matches!(e, Event::RequestFailed { .. })),
+        "{ev:?}"
+    );
+    assert_eq!(p.server.open_requests(), 0);
+    assert_eq!(p.server.tracked_priorities(), 0);
+}
+
+#[test]
+fn trailers_larger_than_the_body_window_still_arrive() {
+    let mut p = streaming_pair(32, 1 << 20);
+    let id = p
+        .client
+        .send_request_streaming(&mut p.c, &post("/t", None))
+        .unwrap();
+    // Handed out first, so the body window applies to what follows.
+    let r = streaming(p.server_events()).pop().unwrap();
+    p.client.send_body(&mut p.c, id, b"abc").unwrap();
+    let mut enc = vesper_prism_h3::qpack::Encoder::new(Default::default());
+    let trailers = vec![Field::new("x-checksum", "a".repeat(200))];
+    let block = enc.encode(id, &trailers);
+    assert!(block.len() > 32);
+    let mut w = Vec::new();
+    frame::write_frame(&mut w, frame::HEADERS, &block);
+    p.client.poll(&mut p.c);
+    p.c.write(id, &w).unwrap();
+    p.c.finish(id).unwrap();
+    p.step();
+    let mut got = Vec::new();
+    let mut buf = [0u8; 16];
+    let mut end = false;
+    for _ in 0..20 {
+        let b = p.server.read_body(&mut p.s, id, &mut buf).unwrap();
+        got.extend_from_slice(&buf[..b.len]);
+        if b.end {
+            end = true;
+            break;
+        }
+        p.step();
+    }
+    assert!(
+        end,
+        "stuck with {} buffered",
+        p.server.buffered_request_bytes()
+    );
+    assert_eq!(got, b"abc");
+    assert_eq!(p.server.take_trailers(id), trailers);
+    let _ = r
+        .responder
+        .reset(&mut p.server, &mut p.s, Code::NO_ERROR)
+        .unwrap();
+}
+
+#[test]
+fn a_refused_initial_upload_leaves_nothing_in_flight() {
+    let (c, s) = pair();
+    let mut p = Pair {
+        client: ClientConnection::new(H3Config {
+            max_stream_buffer: 64,
+            ..H3Config::default()
+        }),
+        server: ServerConnection::new(H3Config::default()),
+        c,
+        s,
+    };
+    p.step();
+    let mut r = post("/big", None);
+    r.body = body(128);
+    assert!(matches!(
+        p.client.send_request_streaming(&mut p.c, &r),
+        Err(vesper_prism_h3::client::ClientError::BufferFull)
+    ));
+    assert_eq!(p.client.in_flight(), 0);
+    assert!(p.server_events().is_empty());
+}

@@ -134,6 +134,8 @@ struct Held {
     session: u64,
     bidi: bool,
     rest: Vec<u8>,
+    /// The peer already ended the stream (FIN read with the header).
+    fin: bool,
 }
 
 /// Session bookkeeping for one connection.
@@ -242,7 +244,7 @@ impl Core {
             WtStream {
                 session: h.session,
                 held: h.rest,
-                recv_done: false,
+                recv_done: h.fin,
                 send_done: !h.bidi,
             },
         );
@@ -265,6 +267,22 @@ impl Core {
         rest: Vec<u8>,
         known_gone: bool,
     ) -> Result<(), ConnectionError> {
+        self.incoming_wt_stream_fin(t, id, session, bidi, rest, known_gone, false)
+    }
+
+    /// [`Self::incoming_wt_stream`], when the read that completed the
+    /// header may also have carried the stream's FIN.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn incoming_wt_stream_fin(
+        &mut self,
+        t: &mut impl Transport,
+        id: u64,
+        session: u64,
+        bidi: bool,
+        rest: Vec<u8>,
+        known_gone: bool,
+        fin: bool,
+    ) -> Result<(), ConnectionError> {
         // Session IDs are client-initiated bidirectional stream IDs.
         if !session.is_multiple_of(4) {
             return Err(ConnectionError::BadStreamId(session));
@@ -274,6 +292,7 @@ impl Core {
             session,
             bidi,
             rest,
+            fin,
         };
         match self.sessions.map.get(&session) {
             Some(s) if s.kind == SessionKind::WebTransport && s.established && !s.closed => {
@@ -302,6 +321,7 @@ impl Core {
 
     /// Streams held for session IDs that turned out not to be sessions.
     pub(crate) fn drop_held_for(&mut self, t: &mut impl Transport, session: u64) {
+        self.unparsed.remove(&session);
         let held = std::mem::take(&mut self.sessions.held);
         for h in held {
             if h.session == session {
@@ -643,7 +663,11 @@ impl Core {
             let n = out.len().min(w.held.len());
             out[..n].copy_from_slice(&w.held[..n]);
             w.held.drain(..n);
-            return Ok(ReadOutcome { len: n, fin: false });
+            let fin = w.recv_done && w.held.is_empty();
+            if fin {
+                self.retire_wt(id);
+            }
+            return Ok(ReadOutcome { len: n, fin });
         }
         match t.read(id, out) {
             Ok(r) => {
@@ -700,6 +724,17 @@ impl Core {
         }
         self.retire_wt(id);
         Ok(())
+    }
+
+    /// The peer ended a WebTransport stream whose FIN the connection read
+    /// in the same read that completed its header.
+    pub(crate) fn wt_peer_fin(&mut self, id: u64) {
+        if let Some(w) = self.sessions.streams.get_mut(&id) {
+            w.recv_done = true;
+            self.retire_wt(id);
+        } else if let Some(h) = self.sessions.held.iter_mut().find(|h| h.id == id) {
+            h.fin = true;
+        }
     }
 
     fn retire_wt(&mut self, id: u64) {

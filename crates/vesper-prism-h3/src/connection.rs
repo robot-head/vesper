@@ -220,6 +220,10 @@ pub(crate) struct Core {
     /// The server's next expected request stream ID (session IDs below it
     /// that are not sessions are gone).
     pub(crate) next_peer_bidi: u64,
+    /// Server: request streams whose HEADERS have not been parsed yet, so
+    /// whether they are sessions is not known (bounded by
+    /// `max_concurrent_requests`).
+    pub(crate) unparsed: std::collections::BTreeSet<u64>,
     pub(crate) sessions: Sessions,
     /// RFC 9218 priorities of request streams (server: of responses).
     pub(crate) priorities: BTreeMap<u64, Priority>,
@@ -258,6 +262,7 @@ impl Core {
             sent_settings: s,
             server,
             next_peer_bidi: 0,
+            unparsed: Default::default(),
             sessions: Sessions::default(),
             priorities: BTreeMap::new(),
             priority_updated: Default::default(),
@@ -553,6 +558,14 @@ impl Core {
                     };
                     if r.len > 0 {
                         self.uni_bytes(t, id, &buf[..r.len], server)?;
+                        if !self.uni.contains_key(&id) {
+                            // Handed to the session layer, which owns all
+                            // later reads (and this read's FIN).
+                            if r.fin {
+                                self.wt_peer_fin(id);
+                            }
+                            break;
+                        }
                     }
                     if r.fin {
                         self.uni_closed(id)?;
@@ -676,7 +689,7 @@ impl Core {
         }
         // A client knows every session it opened; a server knows the
         // request streams the client opened so far.
-        !self.server || session < self.next_peer_bidi
+        !self.server || (session < self.next_peer_bidi && !self.unparsed.contains(&session))
     }
 
     fn control_frame(&mut self, id: u64, f: Frame, server: bool) -> Result<(), ConnectionError> {
@@ -1243,6 +1256,11 @@ impl ServerConnection {
     pub fn open_requests(&self) -> usize {
         self.requests.len()
     }
+    /// How many streams have a non-default priority recorded (a bound the
+    /// tests check: entries leave with their streams).
+    pub fn tracked_priorities(&self) -> usize {
+        self.core.priorities.len()
+    }
     /// The RFC 9218 priority the scheduler uses for a request's response.
     pub fn priority(&self, stream_id: u64) -> Priority {
         self.core
@@ -1397,6 +1415,7 @@ impl ServerConnection {
             return Ok(());
         }
         let max = self.core.cfg.max_frame_payload;
+        self.core.unparsed.insert(id);
         self.requests.insert(
             id,
             RequestStream {
@@ -1440,7 +1459,10 @@ impl ServerConnection {
                 .saturating_sub(self.buffered_request_bytes()),
         );
         if rs.phase == Phase::Streaming {
-            n = n.min(cfg.stream_body_window.saturating_sub(rs.held()));
+            // The window counts body bytes the application has not read.
+            // A partial frame in the reader (such as trailer HEADERS) is
+            // bounded by `max_frame_payload` instead, so it can complete.
+            n = n.min(cfg.stream_body_window.saturating_sub(rs.body.len()));
         }
         n
     }
@@ -1475,6 +1497,14 @@ impl ServerConnection {
                     let rs = self.requests.get_mut(&id).expect("present");
                     rs.reader.push(&buf[..r.len]);
                     self.request_frames(t, id)?;
+                    if !self.requests.contains_key(&id) {
+                        // A WebTransport stream now owned by the session
+                        // layer (or a request that was reset).
+                        if r.fin {
+                            self.core.wt_peer_fin(id);
+                        }
+                        return Ok(());
+                    }
                 }
                 if r.fin {
                     self.request_fin(t, id)?;
@@ -1535,6 +1565,8 @@ impl ServerConnection {
                     if first && self.core.sent_settings.webtransport_max_sessions.is_some() =>
                 {
                     let mut rs = self.requests.remove(&id).expect("present");
+                    // Not a session: streams naming it are refused.
+                    self.core.drop_held_for(t, id);
                     let rest = rs.reader.take_rest();
                     let gone = self.core.session_known_gone(session);
                     return self
@@ -1735,6 +1767,7 @@ impl ServerConnection {
                 SessionKind::Tunnel
             };
             self.core.add_session(id, kind);
+            self.core.unparsed.remove(&id);
             let rs = self.requests.get_mut(&id).expect("present");
             rs.phase = Phase::Tunnel;
             self.core.stats.requests += 1;
@@ -1920,6 +1953,7 @@ impl ServerConnection {
         t.reset(id, code);
         self.core.stats.resets_sent += 1;
         self.core.discard(id);
+        self.core.drop_held_for(t, id);
         if let Some(rs) = self.requests.remove(&id) {
             // Cannot happen: whole requests are not parsed after delivery.
             debug_assert!(rs.phase != Phase::Delivered, "malformed after delivery");
@@ -1961,6 +1995,8 @@ impl ServerConnection {
             }
         } else {
             self.requests.remove(&id);
+            self.core.forget_priority(id);
+            self.core.drop_held_for(t, id);
             t.reset(id, Code::REQUEST_CANCELLED);
             self.ready.push_back(Event::RequestFailed {
                 stream_id: id,
