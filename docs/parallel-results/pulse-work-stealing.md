@@ -215,6 +215,15 @@ cargo test --workspace --locked
 python3 tools/bazel/sync_build_files.py                      # no BUILD change needed
 ```
 
+Results: fmt clean; workspace clippy clean on Rust 1.100. `cargo test
+--workspace --locked --no-fail-fast` passed everywhere except eight test
+binaries that need tools this container lacks and do not depend on
+`vesper-pulse`: `lean4lean42_acceptance`, `oracle42_acceptance`,
+`oracle42_runner`, `proof_audit_private`, `replay42_kernel`,
+`resource_model42` (no Lean toolchain installed) and `vesper-loom-build`'s
+`build` and `cli` (`UnknownFingerprint { missing: ["engine_dependencies"] }`
+from the host's build-engine fingerprint). CI runs them with its own setup.
+
 ## Decisions
 
 * One driver per worker, and requests stay in the driver that accepted them.
