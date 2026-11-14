@@ -1,7 +1,5 @@
 //! VirtualArena: contiguous reservation, in-place tip growth, rewind, reset.
-use vesper_alloc::{
-    VIRTUAL_PAGE, VirtualArena, VirtualArenaConfig, VirtualArenaError, VirtualBackingKind,
-};
+use vesper_alloc::{VIRTUAL_PAGE, VirtualArena, VirtualArenaConfig, VirtualArenaError};
 
 fn arena(bytes: usize) -> VirtualArena {
     VirtualArena::new(VirtualArenaConfig::reserve(bytes)).unwrap()
@@ -172,7 +170,7 @@ fn zero_sized_vectors_are_rejected() {
 }
 
 /// Resident set size in pages, from `/proc/self/statm`.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", not(miri)))]
 fn rss_bytes() -> usize {
     let statm = std::fs::read_to_string("/proc/self/statm").unwrap();
     let pages: usize = statm.split_whitespace().nth(1).unwrap().parse().unwrap();
@@ -185,7 +183,7 @@ fn a_large_reservation_is_lazily_backed() {
     const GIB: usize = 1 << 30;
     let before = rss_bytes();
     let mut a = arena(4 * GIB);
-    assert_eq!(a.backing_kind(), VirtualBackingKind::Mmap);
+    assert_eq!(a.backing_kind(), vesper_alloc::VirtualBackingKind::Mmap);
     assert!(
         rss_bytes() < before + 64 * 1024 * 1024,
         "reserve must not commit 4 GiB"
