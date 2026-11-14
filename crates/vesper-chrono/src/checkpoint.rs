@@ -8,22 +8,35 @@
 //! into its own stack, and the journal of every resumption it received so far
 //! together with the data-frame image each resumer left before resuming.
 //!
-//! **What is and is not captured.** The public `vesper-fiber-abi` API exposes
-//! the park request, the data frame, the evidence vector and
-//! `Parked::stack_self_pointers`, but no accessor for the raw stack bytes
-//! between the saved stack pointer and the stack top, nor for the saved
-//! register frame, nor a way to map a fiber stack at a chosen address or to
-//! write a context. This crate may not use `unsafe` outside
-//! [`crate::capture`] and may not edit `vesper-fiber-abi`, so a byte image of
-//! the stack and registers is not taken. Instead a checkpoint is restored by
-//! **deterministic re-execution**: [`ActivationCheckpoint::restore`] starts a
-//! fresh fiber of the same code and argument and replays the journal, checking
-//! at every park that the request and park count match. It then checks that
-//! the rebuilt activation equals the checkpoint: request, generation, data
-//! frame at the park and stack shape (every self-pointing stack word at the same offset,
-//! pointing at the same offset). It then re-applies the deliveries made at
-//! the captured park, and the rebuilt activation resumes to the same result as
-//! the live one.
+//! **Byte images.** When the fiber was created with a fixed stack address
+//! (`vesper_fiber_abi::FiberConfig::fixed_stack_base`), a checkpoint also
+//! carries the fiber's byte image (`vesper_fiber_abi::FiberImage`: the stack
+//! bytes from the saved stack pointer to the top, the saved register frame
+//! among them, the context, park request and data frame).
+//! [`ActivationCheckpoint::restore_image`] copies that image onto a created
+//! template fiber at the same reservation address, once the captured fiber's
+//! reservation has been released: nothing runs again, so direct
+//! (tail-resumptive) handlers are not re-executed and need not be
+//! deterministic. The template must have the captured entry, entry
+//! argument, code owner, evidence vector, data size and stack size; any
+//! difference is rejected as [`CheckpointError::Image`] (a different entry
+//! argument is `ImageError::ArgumentMismatch`, different code
+//! `EntryMismatch` or `CodeMismatch`). Byte images restore only in the
+//! process and thread that captured them: they hold absolute code and
+//! context addresses, and the encoded image is sealed per thread.
+//!
+//! **Re-execution.** A checkpoint of a fiber without a fixed address (or one
+//! decoded elsewhere) is restored by **deterministic re-execution**:
+//! [`ActivationCheckpoint::restore`] starts a fresh fiber of the same code
+//! and argument and replays the journal, checking at every park that the
+//! request and park count match. It then checks that the rebuilt activation
+//! equals the checkpoint: request, generation, data frame at the park and
+//! stack shape (every self-pointing stack word at the same offset, pointing
+//! at the same offset). It then re-applies the deliveries made at the
+//! captured park, and the rebuilt activation resumes to the same result as
+//! the live one. Re-execution cannot see the entry argument or non-pointer
+//! stack words, so it does not detect a fresh fiber with a different
+//! argument; byte images do.
 //!
 //! **Relocation.** A fresh stack is a fresh mapping, so the rebuilt
 //! activation normally sits at a different address. Saved raw stack pointers
@@ -46,7 +59,9 @@ use crate::ring::{FlightRecorder, RecordError};
 
 /// Image magic and format version.
 pub const CHECKPOINT_MAGIC: [u8; 8] = *b"VCHKPT\0\x01";
-pub const CHECKPOINT_VERSION: u16 = 1;
+pub const CHECKPOINT_VERSION: u16 = 2;
+/// Images of this version carry no byte image; still decoded.
+pub const CHECKPOINT_VERSION_1: u16 = 1;
 const DIGEST_LEN: usize = 32;
 
 /// A park request with its evidence slot named by depth.
@@ -134,6 +149,9 @@ pub struct ActivationCheckpoint {
     pub stack: Option<StackShape>,
     /// Every park answered before this one, oldest first.
     pub journal: Vec<JournalEntry>,
+    /// The encoded `vesper_fiber_abi::FiberImage` of a fixed-address fiber
+    /// (sealed by the capturing thread), or `None`.
+    pub image: Option<Vec<u8>>,
 }
 
 /// Decoding bounds for untrusted images.
@@ -142,6 +160,7 @@ pub struct CheckpointLimits {
     pub max_data_bytes: usize,
     pub max_journal: usize,
     pub max_stack_words: usize,
+    pub max_image_bytes: usize,
 }
 
 impl Default for CheckpointLimits {
@@ -150,6 +169,7 @@ impl Default for CheckpointLimits {
             max_data_bytes: 64 * 1024,
             max_journal: 4096,
             max_stack_words: 64 * 1024,
+            max_image_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -219,6 +239,21 @@ pub enum CheckpointError {
     Rejected(String),
     Record(RecordError),
     NoSuchEpoch(u32),
+    /// [`ActivationCheckpoint::restore_image`] on a checkpoint without a
+    /// byte image (the fiber had no fixed stack address).
+    NoImage,
+    /// The byte image does not describe this checkpoint's park.
+    ImageMismatch(&'static str),
+    /// The fiber ABI rejected the image or the template.
+    #[cfg(any(
+        all(
+            target_os = "linux",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "windows", target_arch = "x86_64")
+    ))]
+    Image(vesper_fiber_abi::ImageError),
 }
 
 impl fmt::Display for CheckpointError {
@@ -324,6 +359,14 @@ impl ActivationCheckpoint {
             out.extend_from_slice(&(e.data.len() as u32).to_le_bytes());
             out.extend_from_slice(&e.data);
         }
+        match &self.image {
+            None => out.push(0),
+            Some(image) => {
+                out.push(1);
+                out.extend_from_slice(&(image.len() as u32).to_le_bytes());
+                out.extend_from_slice(image);
+            }
+        }
         let digest = blake3::hash(&out);
         out.extend_from_slice(digest.as_bytes());
         out
@@ -348,7 +391,7 @@ impl ActivationCheckpoint {
         }
         let mut r = Reader { bytes: body, at: 8 };
         let version = r.u16()?;
-        if version != CHECKPOINT_VERSION {
+        if version != CHECKPOINT_VERSION && version != CHECKPOINT_VERSION_1 {
             return Err(CheckpointError::UnsupportedVersion(version));
         }
         if r.u16()? != 0 {
@@ -390,6 +433,18 @@ impl ActivationCheckpoint {
                 value,
             });
         }
+        let image = if version == CHECKPOINT_VERSION_1 {
+            None
+        } else {
+            match r.u8()? {
+                0 => None,
+                1 => {
+                    let n = r.len("image", limits.max_image_bytes)?;
+                    Some(r.take(n)?.to_vec())
+                }
+                b => return Err(CheckpointError::BadFlag(b)),
+            }
+        };
         if r.at != body.len() {
             return Err(CheckpointError::TrailingBytes(body.len() - r.at));
         }
@@ -401,6 +456,7 @@ impl ActivationCheckpoint {
             data,
             stack,
             journal,
+            image,
         })
     }
 }
@@ -437,7 +493,8 @@ pub fn checkpoint_from_bundle(
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
-    all(target_os = "macos", target_arch = "aarch64")
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 pub use native::*;
 
@@ -446,12 +503,15 @@ pub use native::*;
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
-    all(target_os = "macos", target_arch = "aarch64")
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 mod native {
     use super::*;
     use vesper_fiber_abi::abi::{FiberState, ParkRequest};
-    use vesper_fiber_abi::{Exit, Fiber, Outcome, Parked, ResumeError, Resumption};
+    use vesper_fiber_abi::{
+        Exit, Fiber, FiberImage, ImageError, Outcome, Parked, ResumeError, Resumption,
+    };
 
     fn park_point(parked: &Parked) -> Result<ParkPoint, CheckpointError> {
         let r: ParkRequest = parked.request();
@@ -568,6 +628,11 @@ mod native {
                 data: self.parked.data().to_vec(),
                 stack: StackShape::from_pairs(&self.parked.stack_self_pointers()),
                 journal: self.journal.clone(),
+                image: match self.parked.image() {
+                    Ok(image) => Some(image.encode()),
+                    Err(ImageError::NotFixedAddress) => None,
+                    Err(e) => return Err(CheckpointError::Image(e)),
+                },
             })
         }
 
@@ -629,6 +694,44 @@ mod native {
     }
 
     impl ActivationCheckpoint {
+        /// Restore this activation from its byte image onto `template`, a
+        /// created fiber of the same code, argument, evidence vector, data
+        /// size and stack size at the captured fixed stack address (the
+        /// captured fiber's reservation must have been released). Nothing
+        /// is re-executed: direct handlers do not run again. The journal is
+        /// carried over, so the restored activation can be checkpointed
+        /// again. A different argument, entry, code owner or evidence vector
+        /// is [`CheckpointError::Image`]; the template is then dropped
+        /// unstarted.
+        pub fn restore_image(&self, template: Fiber) -> Result<Restored, CheckpointError> {
+            let bytes = self.image.as_ref().ok_or(CheckpointError::NoImage)?;
+            let image = FiberImage::decode(bytes).map_err(CheckpointError::Image)?;
+            if image.fiber_id() != self.fiber_id {
+                return Err(CheckpointError::ImageMismatch("fiber id"));
+            }
+            if image.generation() != self.generation {
+                return Err(CheckpointError::ImageMismatch("generation"));
+            }
+            if image.data() != self.data.as_slice() {
+                return Err(CheckpointError::ImageMismatch("data frame"));
+            }
+            let parked = Fiber::from_image(template, &image).map_err(|r| CheckpointError::Image(r.error))?;
+            let activation = RecordedActivation {
+                parked,
+                data_at_park: self.data_at_park.clone(),
+                journal: self.journal.clone(),
+            };
+            match activation.park_point() {
+                Ok(p) if p == self.park => {}
+                Ok(_) => return Err(cancel(activation, CheckpointError::ImageMismatch("park"))),
+                Err(e) => return Err(cancel(activation, e)),
+            }
+            Ok(Restored {
+                activation,
+                stack_displacement: 0,
+            })
+        }
+
         /// Rebuild this activation on `fresh` (a created fiber of the same
         /// code, argument, data size and evidence shape) by re-executing the
         /// journal, then verify it. On any failure the rebuilt continuation

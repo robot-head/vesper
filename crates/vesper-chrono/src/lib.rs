@@ -44,10 +44,11 @@ pub enum Unavailable {
     /// decoders (`ipt`, `ipt_flow`, `ete`) and the gated `capture` module
     /// exist; no hardware trace has been captured or decoded.
     HardwareBranchTrace,
-    /// Byte-image native activation checkpoints and VirtualArena
-    /// copy-on-write shard checkpoints (§31.1 item 2). `checkpoint` restores
-    /// activations by deterministic re-execution instead.
-    NativeActivationCheckpoint,
+    /// Kernel-trapped write tracking for VirtualArena shard checkpoints
+    /// (§31.1 item 2): userfaultfd write-protect, `mprotect` fault tracking,
+    /// Mach `vm_copy` and Windows `MEM_RESET` / write watches. `arena`
+    /// tracks writes at its API instead; see [`arena::probe_write_tracking`].
+    KernelWriteTracking,
     /// `vesper replay` CLI and Lens DAP surfaces (integration B, #136).
     ReplayCli,
     /// Interposition on the native EvidenceVector (r15/x28) by compiled code.
@@ -57,7 +58,7 @@ pub enum Unavailable {
 impl Unavailable {
     pub const ALL: [Self; 4] = [
         Self::HardwareBranchTrace,
-        Self::NativeActivationCheckpoint,
+        Self::KernelWriteTracking,
         Self::ReplayCli,
         Self::EvidenceVectorInterposition,
     ];
@@ -66,8 +67,8 @@ impl Unavailable {
             Self::HardwareBranchTrace => {
                 "Intel PT / CoreSight decoding is tested only on independently encoded streams; capture needs an intel_pt, cs_etm or arm_spe PMU, which the development and CI hosts lack"
             }
-            Self::NativeActivationCheckpoint => {
-                "vesper-fiber-abi exposes no stack-byte, register-frame or fixed-address stack API, so checkpoints restore by re-executing the resume journal; VirtualArena CoW checkpoints are not implemented"
+            Self::KernelWriteTracking => {
+                "byte-image activation checkpoints are implemented for fixed-address fibers; VirtualArena shard checkpoints are copy-on-write at shard granularity with writes tracked by the arena API, because kernel write trapping (userfaultfd, mprotect + SIGSEGV, vm_copy, write watches) needs unsafe code this crate may not contain"
             }
             Self::ReplayCli => "the vesper replay CLI is integration B (#136)",
             Self::EvidenceVectorInterposition => {
