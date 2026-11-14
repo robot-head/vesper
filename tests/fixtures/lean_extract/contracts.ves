@@ -1,0 +1,40 @@
+// User contracts: requires_f and ensures_f become the Lean proposition f$contract.
+fn clamp(x: u64, hi: u64) -> u64 {
+    if x > hi {
+        hi
+    } else {
+        x
+    }
+}
+
+fn ensures_clamp(x: u64, hi: u64, r: u64) -> bool {
+    r <= hi && r <= x
+}
+
+fn add_small(a: u64, b: u64) -> u64 eff [Fail[ArithOverflow]] {
+    a + b
+}
+
+fn requires_add_small(a: u64, b: u64) -> bool {
+    a < 1000 && b < 1000
+}
+
+fn ensures_add_small(a: u64, b: u64, r: u64) -> bool {
+    r >= a && r < 2000
+}
+
+fn countdown(n: u64) -> u64 {
+    if n == 0 {
+        0
+    } else {
+        countdown(wrapping_sub(n, 1))
+    }
+}
+
+fn ensures_countdown(n: u64, r: u64) -> bool {
+    r == 0
+}
+
+fn main() -> u64 {
+    clamp(9, 4)
+}

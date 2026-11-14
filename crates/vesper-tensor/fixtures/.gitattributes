@@ -1,0 +1,3 @@
+# Byte-exact fixtures written by gguf-py / safetensors: no line-ending conversion.
+*.gguf -text
+*.safetensors -text

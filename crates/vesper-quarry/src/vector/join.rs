@@ -3,6 +3,10 @@
 //! evaluated over candidate-pair batches), vectorized nested-loop joins
 //! when `ON` has no equality between the two sides, and filters, all over
 //! column batches of `engine.batch()` rows with reused scratch buffers.
+//! The probe side streams: candidate pairs are produced, filtered and
+//! emitted one batch at a time. Chains of three or more inner joins are
+//! reordered by a greedy cost model over the measured input sizes and key
+//! distinct counts, and their result is put back into written order.
 //!
 //! Output order equals the row executor's: left-major, matches in right
 //! order, an unmatched left row right after its (absent) matches, unmatched
@@ -12,7 +16,7 @@ use crate::execute::DataSet;
 use crate::parse::Cmp;
 use crate::plan::{ExprNode, JoinKind, PreparedQuery, RelPlan, TypedExpr};
 use crate::{add, bound, Error, ErrorKind, Result, ScalarType, Value};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 /// A materialized intermediate relation: one column per bound slot.
 pub(super) struct Rel {
@@ -170,6 +174,9 @@ pub(super) struct Run<'a> {
     /// the row executor's (`Vec<Value>` per row, `Value` per cell, payload).
     pub bytes: usize,
     pub scratch: Scratch,
+    /// Input orders chosen for inner-join chains (table names in execution
+    /// order), for inspection.
+    pub orders: Vec<Vec<String>>,
 }
 
 /// Bytes one copied cell of `src` adds, accounted like a row `Value`.
@@ -289,6 +296,12 @@ impl Run<'_> {
                 self.filter(input, &[predicate])
             }
             RelPlan::Join { kind, lhs, rhs, on } => {
+                let mut leaves = Vec::new();
+                let mut on_all = Vec::new();
+                flatten_inner(plan, &mut leaves, &mut on_all);
+                if leaves.len() >= 3 {
+                    return self.inner_chain(&leaves, &on_all);
+                }
                 let l = self.rel(lhs)?;
                 let r = self.rel(rhs)?;
                 self.join(*kind, lhs, rhs, on, l, r)
@@ -341,6 +354,12 @@ impl Run<'_> {
         Ok(Rel { cols: out, n: kept })
     }
 
+    /// A two-input join with a streaming probe: the hash table is built on
+    /// the right input, then left rows are probed in order and their
+    /// candidate pairs are produced, filtered by the residual and emitted
+    /// one batch of `engine.batch()` candidates at a time, so no more than
+    /// one batch of candidate pairs is ever held. Outer rows are
+    /// null-extended as the probe passes them.
     fn join(
         &mut self,
         kind: JoinKind,
@@ -351,10 +370,14 @@ impl Run<'_> {
         r: Rel,
     ) -> Result<Rel> {
         let (keys, residual) = equi_keys(on, lhs, rhs);
-        // Candidate pairs, left-major and right-ascending.
-        let mut cand_l: Vec<usize> = Vec::new();
-        let mut cand_r: Vec<usize> = Vec::new();
-        if keys.is_empty() {
+        let lslots = lhs.slots();
+        let rslots = rhs.slots();
+        let mut table: HashMap<Vec<KeyPart>, Vec<usize>> = HashMap::new();
+        let lcols: Vec<&Column> = keys
+            .iter()
+            .map(|&(s, _)| l.cols[s].as_ref().expect("left key slot"))
+            .collect();
+        let every_right: Vec<usize> = if keys.is_empty() {
             let pairs =
                 l.n.checked_mul(r.n)
                     .ok_or_else(|| Error::new(ErrorKind::Overflow, "resource counter overflow"))?;
@@ -364,92 +387,96 @@ impl Run<'_> {
                 self.query.limits.intermediate_rows,
                 "cumulative intermediate row limit",
             )?;
-            for i in 0..l.n {
-                for j in 0..r.n {
-                    cand_l.push(i);
-                    cand_r.push(j);
-                }
-            }
+            (0..r.n).collect()
         } else {
-            let lcols: Vec<&Column> = keys
-                .iter()
-                .map(|&(s, _)| l.cols[s].as_ref().expect("left key slot"))
-                .collect();
             let rcols: Vec<&Column> = keys
                 .iter()
                 .map(|&(_, s)| r.cols[s].as_ref().expect("right key slot"))
                 .collect();
-            let mut table: HashMap<Vec<KeyPart>, Vec<usize>> = HashMap::new();
             for j in 0..r.n {
                 if let Some(k) = row_key(&rcols, j) {
                     table.entry(k).or_default().push(j);
                 }
             }
             self.charge(r.n.saturating_mul(keys.len()))?;
-            for i in 0..l.n {
-                if let Some(k) = row_key(&lcols, i) {
-                    if let Some(js) = table.get(&k) {
-                        self.charge(js.len())?;
-                        self.produced(js.len())?;
-                        cand_l.extend(std::iter::repeat_n(i, js.len()));
-                        cand_r.extend(js.iter().copied());
-                    }
-                }
-            }
             self.charge(l.n.saturating_mul(keys.len()))?;
-        }
-        // Residual predicate over candidate-pair batches.
-        let lslots = lhs.slots();
-        let rslots = rhs.slots();
-        let mut matched_l: Vec<usize> = Vec::with_capacity(cand_l.len());
-        let mut matched_r: Vec<usize> = Vec::with_capacity(cand_r.len());
-        if residual.is_empty() {
-            matched_l = cand_l;
-            matched_r = cand_r;
-        } else {
-            let batch = self.engine.batch;
-            let mut start = 0;
-            while start < cand_l.len() {
-                let end = (start + batch).min(cand_l.len());
-                let pair = self.pairs(
-                    &l,
-                    &r,
-                    &lslots,
-                    &rslots,
-                    &cand_l[start..end],
-                    &cand_r[start..end],
-                )?;
-                self.charge((end - start).saturating_mul(residual.len() + self.width()))?;
-                self.mask(&pair, 0, end - start, &residual)?;
-                for k in 0..end - start {
-                    if self.scratch.selected[k] == 1 {
-                        matched_l.push(cand_l[start + k]);
-                        matched_r.push(cand_r[start + k]);
-                    }
-                }
-                start = end;
-            }
-        }
-        // Assemble in row-executor order, null-extending outer rows.
+            Vec::new()
+        };
+        let outer_left = matches!(kind, JoinKind::Left | JoinKind::Full);
+        let batch = self.engine.batch;
         let mut out_l = std::mem::take(&mut self.scratch.left);
         let mut out_r = std::mem::take(&mut self.scratch.right);
         out_l.clear();
         out_r.clear();
         let mut right_hit = vec![false; r.n];
-        let mut m = 0;
-        for i in 0..l.n {
-            let mut any = false;
-            while m < matched_l.len() && matched_l[m] == i {
-                out_l.push(i);
-                out_r.push(matched_r[m]);
-                right_hit[matched_r[m]] = true;
-                any = true;
-                m += 1;
+        let mut left_hit = vec![false; l.n];
+        let mut cand_l: Vec<usize> = Vec::with_capacity(batch);
+        let mut cand_r: Vec<usize> = Vec::with_capacity(batch);
+        // Probe position: left row `i`, its match list from offset `k`.
+        let (mut i, mut k) = (0usize, 0usize);
+        let mut current: &[usize] = &[];
+        // Left rows below `closed` have all their output emitted.
+        let mut closed = 0usize;
+        loop {
+            cand_l.clear();
+            cand_r.clear();
+            while cand_l.len() < batch && i < l.n {
+                if k == 0 {
+                    current = if keys.is_empty() {
+                        &every_right
+                    } else {
+                        let js = row_key(&lcols, i)
+                            .and_then(|key| table.get(&key))
+                            .map_or(&[][..], Vec::as_slice);
+                        self.charge(js.len())?;
+                        self.produced(js.len())?;
+                        js
+                    };
+                }
+                let take = (batch - cand_l.len()).min(current.len() - k);
+                cand_l.extend(std::iter::repeat_n(i, take));
+                cand_r.extend_from_slice(&current[k..k + take]);
+                k += take;
+                if k == current.len() {
+                    i += 1;
+                    k = 0;
+                }
             }
-            if !any && matches!(kind, JoinKind::Left | JoinKind::Full) {
-                out_l.push(i);
+            if cand_l.is_empty() {
+                break;
+            }
+            let n = cand_l.len();
+            if residual.is_empty() {
+                self.scratch.selected.clear();
+                self.scratch.selected.resize(n, 1);
+            } else {
+                let pair = self.pairs(&l, &r, &lslots, &rslots, &cand_l, &cand_r)?;
+                self.charge(n.saturating_mul(residual.len() + self.width()))?;
+                self.mask(&pair, 0, n, &residual)?;
+            }
+            for c in 0..n {
+                let (li, rj) = (cand_l[c], cand_r[c]);
+                while closed < li {
+                    if outer_left && !left_hit[closed] {
+                        out_l.push(closed);
+                        out_r.push(usize::MAX);
+                    }
+                    closed += 1;
+                }
+                if self.scratch.selected[c] == 1 {
+                    out_l.push(li);
+                    out_r.push(rj);
+                    left_hit[li] = true;
+                    right_hit[rj] = true;
+                }
+            }
+        }
+        while closed < l.n {
+            if outer_left && !left_hit[closed] {
+                out_l.push(closed);
                 out_r.push(usize::MAX);
             }
+            closed += 1;
         }
         if matches!(kind, JoinKind::Right | JoinKind::Full) {
             for (j, hit) in right_hit.iter().enumerate() {
@@ -487,6 +514,276 @@ impl Run<'_> {
         self.scratch.left = out_l;
         self.scratch.right = out_r;
         Ok(Rel { cols, n })
+    }
+
+    /// A chain of three or more inner joins, reordered by cost: every input
+    /// is materialized (filters included), then a greedy order starts from
+    /// the smallest input and repeatedly joins the input with the smallest
+    /// estimated result, preferring inputs connected by an equality
+    /// (estimate `|current| * |input| / distinct keys of the input`; a
+    /// cross product is `|current| * |input|`). Each step is a hash join
+    /// on the equalities between the joined set and the new input, with
+    /// every conjunct whose inputs are now all present as a residual.
+    /// Intermediate results are tuples of input row indexes; the final
+    /// tuples are sorted in the written order's left-major order, so rows
+    /// and order equal the row executor's.
+    fn inner_chain(&mut self, leaves: &[&RelPlan], on: &[&TypedExpr]) -> Result<Rel> {
+        let rels = leaves
+            .iter()
+            .map(|p| self.rel(p))
+            .collect::<Result<Vec<Rel>>>()?;
+        let binds: Vec<BTreeSet<usize>> = leaves.iter().map(|p| p.bindings()).collect();
+        let slots: Vec<Vec<usize>> = leaves.iter().map(|p| p.slots()).collect();
+        let leaf_of = |binding: usize| binds.iter().position(|b| b.contains(&binding));
+        let order = self.join_order(&rels, &binds, on)?;
+        self.orders
+            .push(order.iter().map(|&i| leaf_name(leaves[i])).collect());
+        let m = leaves.len();
+        let mut applied = vec![false; on.len()];
+        let mut joined: BTreeSet<usize> = BTreeSet::new();
+        let mut tuples: Vec<Vec<usize>> = Vec::new();
+        for (step, &c) in order.iter().enumerate() {
+            let mut present: BTreeSet<usize> =
+                joined.iter().flat_map(|&x| binds[x].clone()).collect();
+            // Equalities between the joined inputs and `c` become hash keys.
+            let mut keys: Vec<((usize, usize), usize)> = Vec::new();
+            if step > 0 {
+                for (q, e) in on.iter().enumerate() {
+                    if applied[q] {
+                        continue;
+                    }
+                    if let Some(((sa, ba), (sb, bb))) = column_equality(e) {
+                        match (leaf_of(ba), leaf_of(bb)) {
+                            (Some(la), Some(lb)) if joined.contains(&la) && lb == c => {
+                                keys.push(((la, sa), sb));
+                                applied[q] = true;
+                            }
+                            (Some(la), Some(lb)) if joined.contains(&lb) && la == c => {
+                                keys.push(((lb, sb), sa));
+                                applied[q] = true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            present.extend(binds[c].iter().copied());
+            let residual: Vec<&TypedExpr> = on
+                .iter()
+                .enumerate()
+                .filter(|(q, e)| !applied[*q] && e.dependencies().is_subset(&present))
+                .map(|(_, e)| *e)
+                .collect();
+            for (q, e) in on.iter().enumerate() {
+                if !applied[q] && e.dependencies().is_subset(&present) {
+                    applied[q] = true;
+                }
+            }
+            // Candidates: the first input's rows, or probes of `c`.
+            let mut table: HashMap<Vec<KeyPart>, Vec<usize>> = HashMap::new();
+            let rc = &rels[c];
+            if step > 0 && !keys.is_empty() {
+                let rcols: Vec<&Column> = keys
+                    .iter()
+                    .map(|&(_, s)| rc.cols[s].as_ref().expect("key slot"))
+                    .collect();
+                for j in 0..rc.n {
+                    if let Some(k) = row_key(&rcols, j) {
+                        table.entry(k).or_default().push(j);
+                    }
+                }
+                self.charge(rc.n.saturating_mul(keys.len()))?;
+            }
+            let every: Vec<usize> = (0..rc.n).collect();
+            let mut next: Vec<Vec<usize>> = Vec::new();
+            let mut cand: Vec<Vec<usize>> = Vec::new();
+            let base: Vec<Vec<usize>> = if step == 0 {
+                vec![vec![usize::MAX; m]]
+            } else {
+                std::mem::take(&mut tuples)
+            };
+            let batch = self.engine.batch;
+            let mut members: Vec<usize> = joined.iter().copied().collect();
+            members.push(c);
+            for t in &base {
+                let js: &[usize] = if step == 0 || keys.is_empty() {
+                    if step > 0 {
+                        self.charge(rc.n)?;
+                        self.produced(rc.n)?;
+                    }
+                    &every
+                } else {
+                    let parts: Option<Vec<KeyPart>> = keys
+                        .iter()
+                        .map(|&((leaf, slot), _)| {
+                            key_part(rels[leaf].cols[slot].as_ref().expect("key slot"), t[leaf])
+                        })
+                        .collect();
+                    let js = parts
+                        .and_then(|k| table.get(&k))
+                        .map_or(&[][..], Vec::as_slice);
+                    self.charge(js.len().max(1))?;
+                    self.produced(js.len())?;
+                    js
+                };
+                for &j in js {
+                    let mut nt = t.clone();
+                    nt[c] = j;
+                    cand.push(nt);
+                    if cand.len() >= batch {
+                        self.keep(&rels, &slots, &members, &residual, &mut cand, &mut next)?;
+                    }
+                }
+            }
+            self.keep(&rels, &slots, &members, &residual, &mut cand, &mut next)?;
+            self.produced(next.len())?;
+            tuples = next;
+            joined.insert(c);
+        }
+        // Constant conjuncts (no inputs) were applied at the first step.
+        debug_assert!(applied.iter().all(|&a| a));
+        tuples.sort_unstable();
+        let n = tuples.len();
+        self.charge(n.saturating_mul(self.width()))?;
+        let mut cells = 0usize;
+        for (leaf, ss) in slots.iter().enumerate() {
+            for &sl in ss {
+                let src = rels[leaf].cols[sl].as_ref().expect("bound slot");
+                for t in &tuples {
+                    cells = add(cells, cell_bytes(src, Some(t[leaf])))?;
+                }
+            }
+        }
+        self.materialize(n, cells)?;
+        let mut cols: Vec<Option<Column>> = vec![None; self.width()];
+        for (leaf, ss) in slots.iter().enumerate() {
+            for &sl in ss {
+                let src = rels[leaf].cols[sl].as_ref().expect("bound slot");
+                let mut col = Column::empty(self.ty(sl));
+                for t in &tuples {
+                    col.push_from(src, Some(t[leaf]));
+                }
+                cols[sl] = Some(col);
+            }
+        }
+        Ok(Rel { cols, n })
+    }
+    /// Filters the candidate tuples by `residual` (a batch gathered from
+    /// the inputs in `members`) and moves the survivors to `out`.
+    fn keep(
+        &mut self,
+        rels: &[Rel],
+        slots: &[Vec<usize>],
+        members: &[usize],
+        residual: &[&TypedExpr],
+        cand: &mut Vec<Vec<usize>>,
+        out: &mut Vec<Vec<usize>>,
+    ) -> Result<()> {
+        if cand.is_empty() {
+            return Ok(());
+        }
+        if residual.is_empty() {
+            out.append(cand);
+            return Ok(());
+        }
+        let n = cand.len();
+        // The batch's byte cost is bounded before any payload is copied.
+        let mut bytes = n.saturating_mul(size_of::<Vec<Value>>());
+        for &leaf in members {
+            for &sl in &slots[leaf] {
+                let src = rels[leaf].cols[sl].as_ref().expect("bound slot");
+                for t in cand.iter() {
+                    bytes = add(bytes, cell_bytes(src, Some(t[leaf])))?;
+                }
+            }
+        }
+        bound(
+            bytes,
+            self.query.limits.intermediate_bytes,
+            "intermediate byte limit of a candidate-tuple batch",
+        )?;
+        let mut cols: Vec<Option<Column>> = vec![None; self.width()];
+        for &leaf in members {
+            for &sl in &slots[leaf] {
+                let src = rels[leaf].cols[sl].as_ref().expect("bound slot");
+                let mut col = Column::empty(self.ty(sl));
+                for t in cand.iter() {
+                    col.push_from(src, Some(t[leaf]));
+                }
+                cols[sl] = Some(col);
+            }
+        }
+        let rel = Rel { cols, n };
+        self.charge(n.saturating_mul(residual.len() + self.width()))?;
+        self.mask(&rel, 0, n, residual)?;
+        for (t, &bit) in cand.drain(..).zip(&self.scratch.selected) {
+            if bit == 1 {
+                out.push(t);
+            }
+        }
+        Ok(())
+    }
+    /// The greedy order of [`Run::inner_chain`] (input positions).
+    fn join_order(
+        &mut self,
+        rels: &[Rel],
+        binds: &[BTreeSet<usize>],
+        on: &[&TypedExpr],
+    ) -> Result<Vec<usize>> {
+        let m = rels.len();
+        let leaf_of = |binding: usize| binds.iter().position(|b| b.contains(&binding));
+        let start = (0..m).min_by_key(|&i| (rels[i].n, i)).expect("inputs");
+        let mut order = vec![start];
+        let mut est = rels[start].n as f64;
+        while order.len() < m {
+            let mut best: Option<(bool, f64, usize)> = None;
+            for c in (0..m).filter(|c| !order.contains(c)) {
+                // Key slots of `c` equal to a column of the joined inputs.
+                let mut kslots = Vec::new();
+                for e in on {
+                    if let Some(((sa, ba), (sb, bb))) = column_equality(e) {
+                        match (leaf_of(ba), leaf_of(bb)) {
+                            (Some(la), Some(lb)) if order.contains(&la) && lb == c => {
+                                kslots.push(sb)
+                            }
+                            (Some(la), Some(lb)) if order.contains(&lb) && la == c => {
+                                kslots.push(sa)
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                let size = rels[c].n as f64;
+                let connected = !kslots.is_empty();
+                let e = if connected {
+                    let cols: Vec<&Column> = kslots
+                        .iter()
+                        .map(|&s| rels[c].cols[s].as_ref().expect("key slot"))
+                        .collect();
+                    let mut distinct = std::collections::HashSet::new();
+                    for j in 0..rels[c].n {
+                        if let Some(k) = row_key(&cols, j) {
+                            distinct.insert(k);
+                        }
+                    }
+                    self.charge(rels[c].n.saturating_mul(cols.len()))?;
+                    est * size / (distinct.len().max(1) as f64)
+                } else {
+                    est * size
+                };
+                let better = match best {
+                    None => true,
+                    Some((bc, be, _)) => (connected && !bc) || (connected == bc && e < be),
+                };
+                if better {
+                    best = Some((connected, e, c));
+                }
+            }
+            let (_, e, c) = best.expect("a remaining input");
+            order.push(c);
+            est = e;
+        }
+        Ok(order)
     }
 
     /// The candidate-pair batch: left slots gathered by `li`, right by `ri`.
@@ -559,6 +856,56 @@ impl Run<'_> {
         }
         Ok(())
     }
+}
+
+/// The inputs and `ON` conjuncts of a maximal tree of inner joins, inputs
+/// in written (left-to-right) order.
+fn flatten_inner<'p>(
+    plan: &'p RelPlan,
+    leaves: &mut Vec<&'p RelPlan>,
+    on: &mut Vec<&'p TypedExpr>,
+) {
+    match plan {
+        RelPlan::Join {
+            kind: JoinKind::Inner,
+            lhs,
+            rhs,
+            on: e,
+        } => {
+            flatten_inner(lhs, leaves, on);
+            flatten_inner(rhs, leaves, on);
+            conjuncts(e, on);
+        }
+        other => leaves.push(other),
+    }
+}
+/// A readable name of a join input: its table, or its tables in
+/// parentheses.
+fn leaf_name(plan: &RelPlan) -> String {
+    match plan {
+        RelPlan::Scan { table, .. } => table.clone(),
+        RelPlan::Filter { input, .. } => leaf_name(input),
+        RelPlan::Join { lhs, rhs, .. } => format!("({} {})", leaf_name(lhs), leaf_name(rhs)),
+    }
+}
+/// `a = b` between two columns: ((slot, binding), (slot, binding)).
+fn column_equality(e: &TypedExpr) -> Option<((usize, usize), (usize, usize))> {
+    if let ExprNode::Compare(Cmp::Eq, a, b) = &e.node {
+        if let (
+            ExprNode::Column {
+                slot: sa,
+                binding: ba,
+            },
+            ExprNode::Column {
+                slot: sb,
+                binding: bb,
+            },
+        ) = (&a.node, &b.node)
+        {
+            return Some(((*sa, *ba), (*sb, *bb)));
+        }
+    }
+    None
 }
 
 pub(super) fn has_join(plan: &RelPlan) -> bool {

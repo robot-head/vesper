@@ -187,12 +187,16 @@ fn arena_deltas_are_snapshot_epochs() {
 #[test]
 fn kernel_write_tracking_is_probed_and_reported() {
     let probes = probe_write_tracking();
-    assert!(probes.iter().all(|p| !p.used));
-    assert!(
-        probes
-            .iter()
-            .any(|p| p.mechanism == WriteTracking::MprotectFaults)
-    );
+    // Exactly the host mechanism is used, and it was exercised for real.
+    let used: Vec<_> = probes.iter().filter(|p| p.used).collect();
+    assert_eq!(used.len(), 1, "{probes:?}");
+    assert!(used[0].exercised && used[0].host_permits == Some(true));
+    let host = if cfg!(windows) {
+        WriteTracking::WindowsWriteWatch
+    } else {
+        WriteTracking::MprotectFaults
+    };
+    assert_eq!(used[0].mechanism, host);
     #[cfg(target_os = "linux")]
     {
         let sd = probes

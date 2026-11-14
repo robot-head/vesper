@@ -171,6 +171,7 @@ cranelift-frontend = "0.125"
 getrandom = "0.4"
 libc = "0.2"
 ml-kem = { version = "=0.3.4", default-features = false, features = ["zeroize"] }
+libcrux-ml-kem = { version = "=0.0.11", default-features = false, features = ["mlkem768"] }
 rand_core = "0.10"
 region = "3.0.2"
 shake = "0.1"
@@ -249,6 +250,7 @@ wit-parser = "=0.261.0"
 [dev-dependencies]
 vesper-nexus = { path = "crates/vesper-nexus" }
 wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
+wasmtime-wasi = { version = "50", default-features = false, features = ["p2"] }
 
 [target.'cfg(unix)'.dependencies]
 getrandom = "0.4"
