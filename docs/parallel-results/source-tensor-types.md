@@ -95,7 +95,14 @@ Run on the cloud host (x86_64 Linux, Rust 1.97 and 1.100):
 
 - `cargo test --test tensor_types --test tensor_types_reject`: 9 + 2 passed.
 - `cargo fmt --all -- --check`: clean. `vesper fmt --check tests/fixtures/tensor_types`: all 44 fixtures canonical.
-- See the PR for the workspace test and clippy results.
+- `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`: clean
+  (run with PR #490's fix for main's `Op::Vector` break applied locally).
+- `cargo test --workspace --locked --no-fail-fast`: 4514 passed, 7 ignored,
+  6 failed. All six need a Lean toolchain this host lacks (`lean
+  --print-prefix` not found, or `VESPER_LEAN4LEAN42_ROOT` unset):
+  `lean4lean42_acceptance`, `oracle42_acceptance`, `oracle42_runner`,
+  `proof_audit_private`, `replay42_kernel`, `resource_model42`. None touch
+  this lane's code; CI provides Lean.
 
 ## Decisions
 
