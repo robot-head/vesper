@@ -24,6 +24,9 @@ use std::{cell::RefCell, rc::Rc};
 /// ABI v2 fiber entries that park through `vesper-fiber-abi`.
 #[path = "native_session.rs"]
 pub mod session;
+/// Windows x64 COFF objects with unwind tables, and the MSVC link driver.
+#[path = "native_windows.rs"]
+pub mod windows;
 
 fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
     match t {
@@ -747,6 +750,9 @@ pub fn object_instrumented(
     instrument: Option<Instrument<'_>>,
 ) -> Result<(Vec<u8>, String), String> {
     let isa = object_isa_for(world, target)?;
+    if windows::is_windows(isa.triple()) {
+        return windows::object(world, entry, isa, optimize, observer, instrument);
+    }
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     let mut m = ObjectModule::new(builder);
