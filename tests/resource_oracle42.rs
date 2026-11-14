@@ -200,7 +200,9 @@ fn assert_execution(
 
 #[test]
 fn genuine_worker_static_stages_values_ownership_and_limited_prefixes() {
-    let _lease = GENUINE_SESSION.lock().unwrap();
+    let _lease = GENUINE_SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut matrix = Matrix::new();
     let unit = matrix.evaluation(&request("unit"));
     assert_execution(
@@ -784,11 +786,24 @@ fn symlinked_fixed_source_is_refused_even_with_identical_target_bytes() {
 
 #[test]
 fn changed_executable_object_is_refused_before_any_model_response_or_evidence() {
-    let _lease = GENUINE_SESSION.lock().unwrap();
+    let _lease = GENUINE_SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut session = process::start(&config(PathBuf::from(env!("CARGO_MANIFEST_DIR")))).unwrap();
     let object = session.artifact_root().join("ResourceOracle42.olean");
     let mut bytes = fs::read(&object).unwrap();
     bytes.push(0);
+    // Production seals compiled objects read-only. Deliberately make only
+    // this owned fixture writable before corrupting its actual bytes.
+    let mut permissions = fs::metadata(&object).unwrap().permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(permissions.mode() | 0o200);
+    }
+    #[cfg(windows)]
+    permissions.set_readonly(false);
+    fs::set_permissions(&object, permissions).unwrap();
     fs::write(object, bytes).unwrap();
     let error = session.evaluate(&request("unit")).unwrap_err();
     assert_eq!(error.kind, process::HarnessErrorKind::ArtifactIdentity);
@@ -974,7 +989,9 @@ fn hostile_peers_use_production_process_and_cannot_return_mathematical_evidence(
 
 #[test]
 fn retirement_reserve_is_prepaid_and_unconfirmed_retirement_has_no_evidence() {
-    let _lease = GENUINE_SESSION.lock().unwrap();
+    let _lease = GENUINE_SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let request = request("unit");
     let ready = serde_json::to_vec(&serde_json::json!([
         1,
@@ -1001,7 +1018,9 @@ fn retirement_reserve_is_prepaid_and_unconfirmed_retirement_has_no_evidence() {
 
 #[test]
 fn dropping_genuine_session_records_abandonment_and_never_completed_evidence() {
-    let _lease = GENUINE_SESSION.lock().unwrap();
+    let _lease = GENUINE_SESSION
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let before = process::abandoned_sessions();
     let session = process::start(&config(PathBuf::from(env!("CARGO_MANIFEST_DIR")))).unwrap();
     let private_root = session.artifact_root().to_path_buf();
