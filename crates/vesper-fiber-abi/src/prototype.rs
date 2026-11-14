@@ -770,6 +770,30 @@ impl JitPrototype {
     pub fn nested_entry(&self) -> crate::fiber::EntryFn {
         self.nested
     }
+    /// The owner of this prototype's machine code (what fibers share).
+    pub fn code(&self) -> Rc<dyn std::any::Any> {
+        self.code.clone()
+    }
+    /// [`Self::spawn_pulse_read`] with a caller-chosen configuration (for
+    /// example a fixed stack base); `config.data_bytes` must be at least
+    /// [`DATA_BYTES`].
+    pub fn spawn_pulse_read_with(
+        &self,
+        arg: u64,
+        evidence: Rc<EvidenceVector>,
+        config: crate::fiber::FiberConfig,
+    ) -> std::io::Result<crate::fiber::Fiber> {
+        self.spawn(self.pulse_read, PULSE_READ_EVIDENCE, arg, evidence, config)
+    }
+    /// [`Self::spawn_nested`] with a caller-chosen configuration.
+    pub fn spawn_nested_with(
+        &self,
+        arg: u64,
+        evidence: Rc<EvidenceVector>,
+        config: crate::fiber::FiberConfig,
+    ) -> std::io::Result<crate::fiber::Fiber> {
+        self.spawn(self.nested, NESTED_EVIDENCE, arg, evidence, config)
+    }
     fn spawn(
         &self,
         entry: crate::fiber::EntryFn,

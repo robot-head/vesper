@@ -30,6 +30,7 @@ use crate::abi::{
 };
 use crate::data::DataFrame;
 use crate::evidence::EvidenceVector;
+use crate::image::{FiberImage, ImageError, RegisterFrame, StackImage};
 use crate::stack::FiberStack;
 use crate::switch::{initial_stack, vesper_fiber_switch};
 use std::any::Any;
@@ -126,6 +127,15 @@ unsafe extern "C" fn fiber_main(ctx: *mut FiberContext, _arg: u64) -> ! {
 pub struct FiberConfig {
     pub stack_size: usize,
     pub data_bytes: usize,
+    /// Reserve the stack at exactly this address (see
+    /// [`FiberStack::with_fixed_base`]): the reservation then also holds the
+    /// fiber context, so every address a parked fiber's stack bytes can
+    /// refer to is the same in any fiber created at this base, which is what
+    /// [`Parked::image`] and [`Fiber::from_image`] need. Creation fails with
+    /// [`io::ErrorKind::AlreadyExists`] while anything else occupies the
+    /// range; nothing is ever replaced. `None` (the default) keeps the
+    /// kernel-chosen placement and a heap-allocated context.
+    pub fixed_stack_base: Option<usize>,
 }
 
 impl Default for FiberConfig {
@@ -133,7 +143,19 @@ impl Default for FiberConfig {
         Self {
             stack_size: crate::stack::DEFAULT_STACK_SIZE,
             data_bytes: 64,
+            fixed_stack_base: None,
         }
+    }
+}
+
+impl FiberConfig {
+    /// This configuration at a currently free fixed address (see
+    /// [`FiberStack::free_fixed_base`]).
+    pub fn at_free_fixed_base(self) -> io::Result<Self> {
+        Ok(Self {
+            fixed_stack_base: Some(FiberStack::free_fixed_base(self.stack_size)?),
+            ..self
+        })
     }
 }
 
@@ -144,9 +166,12 @@ pub struct Fiber {
     evidence: Rc<EvidenceVector>,
     /// Keeps the machine code alive while any frame on `stack` may return into
     /// it. Dropped only together with the stack.
-    _code: Rc<dyn Any>,
+    code: Rc<dyn Any>,
     parks: u64,
     cancel_on_drop: bool,
+    /// The context lives in the stack reservation's context page (fixed
+    /// stacks) rather than in its own heap allocation.
+    ctx_in_stack: bool,
 }
 
 impl fmt::Debug for Fiber {
@@ -172,9 +197,12 @@ impl Fiber {
         config: FiberConfig,
     ) -> io::Result<Self> {
         let fiber_id = allocate_fiber_id(&NEXT_FIBER)?;
-        let stack = FiberStack::new(config.stack_size)?;
+        let stack = match config.fixed_stack_base {
+            Some(base) => FiberStack::with_fixed_base(base, config.stack_size)?,
+            None => FiberStack::new(config.stack_size)?,
+        };
         let data = DataFrame::new(config.data_bytes);
-        let ctx = Box::new(FiberContext {
+        let context = FiberContext {
             magic: CONTEXT_MAGIC,
             abi_version: ABI_VERSION,
             state: FiberState::Created as u32,
@@ -194,8 +222,18 @@ impl Fiber {
             result: 0,
             stack_base: stack.base() as u64,
             stack_len: stack.len() as u64,
-        });
-        let ctx = NonNull::new(Box::into_raw(ctx)).unwrap();
+        };
+        let ctx_in_stack = stack.context_slot().is_some();
+        let ctx = match stack.context_slot() {
+            Some(slot) => {
+                let slot = slot.cast::<FiberContext>();
+                // SAFETY: the context page is page-aligned, read/write, at
+                // least one page long and owned by this fiber's stack.
+                unsafe { slot.write(context) };
+                NonNull::new(slot).unwrap()
+            }
+            None => NonNull::new(Box::into_raw(Box::new(context))).unwrap(),
+        };
         // SAFETY: the stack is fresh, aligned and exclusively ours.
         #[cfg(not(windows))]
         let sp = unsafe { initial_stack(stack.top() as u64, ctx.as_ptr(), fiber_main) };
@@ -216,10 +254,130 @@ impl Fiber {
             stack,
             data,
             evidence,
-            _code: code,
+            code,
             parks: 0,
             cancel_on_drop: true,
+            ctx_in_stack,
         })
+    }
+    /// Whether this fiber's stack and context are at a fixed address, so
+    /// that it can be imaged ([`Parked::image`]) and restored.
+    pub fn is_fixed_address(&self) -> bool {
+        self.ctx_in_stack
+    }
+    /// `(start, len)` of the stack reservation (including any context page
+    /// and guard).
+    pub fn reservation(&self) -> (u64, u64) {
+        (
+            self.stack.reservation_base() as u64,
+            self.stack.reservation_len() as u64,
+        )
+    }
+    /// `[base, top)` of the usable stack.
+    pub fn stack_range(&self) -> (u64, u64) {
+        (self.stack.base() as u64, self.stack.top() as u64)
+    }
+
+    /// Restore a parked activation from `image` onto `template`, a created
+    /// fiber of the same entry, argument, code owner, evidence vector, data
+    /// size and stack size, at the image's fixed reservation (normally one
+    /// made from the same [`FiberConfig`] after the captured fiber's
+    /// reservation was released). The stack bytes, generation, park request,
+    /// park count and data frame are copied in; the restored continuation has
+    /// the template's fiber id. Any difference is a typed error that hands
+    /// the template back untouched.
+    ///
+    /// A restored continuation is a new owner of the activation's
+    /// obligations: the image does not discharge or transfer the captured
+    /// fiber's. Rust ownership here is not the Vesper linear typing rules;
+    /// restoring the same image twice re-runs everything after the park
+    /// twice, which is what a checkpoint is for.
+    pub fn from_image(template: Fiber, image: &FiberImage) -> Result<Parked, Box<ImageRejected>> {
+        match template.check_image(image) {
+            Ok(()) => {}
+            Err(error) => return Err(Box::new(ImageRejected { error, template })),
+        }
+        let mut fiber = template;
+        let c = fiber.ctx.as_ptr();
+        let s = &image.stack;
+        // SAFETY: check_image established that [saved_sp, top) lies inside
+        // this fiber's own usable stack, which nothing is running on (it is
+        // Created), and that the context is this fiber's own.
+        unsafe {
+            std::ptr::copy_nonoverlapping(s.bytes.as_ptr(), s.saved_sp as *mut u8, s.bytes.len());
+            (*c).saved_sp = s.saved_sp;
+            (*c).generation = image.generation;
+            (*c).park = image.park;
+            (*c).resume = ResumeSignal::default();
+            (*c).state = FiberState::Parked as u32;
+        }
+        fiber.data.bytes_mut().copy_from_slice(&image.data);
+        fiber.parks = image.parks;
+        Ok(Parked {
+            fiber: Box::new(fiber),
+        })
+    }
+
+    fn check_image(&self, image: &FiberImage) -> Result<(), ImageError> {
+        if self.state() != FiberState::Created {
+            return Err(ImageError::NotFresh);
+        }
+        image.validate()?;
+        let ctx = self.ctx();
+        if ctx.entry != image.entry {
+            return Err(ImageError::EntryMismatch {
+                captured: image.entry,
+                template: ctx.entry,
+            });
+        }
+        if ctx.entry_arg != image.entry_arg {
+            return Err(ImageError::ArgumentMismatch {
+                captured: image.entry_arg,
+                template: ctx.entry_arg,
+            });
+        }
+        let (code, evidence) =
+            crate::image::anchor_matches(image.anchor, &self.code, &self.evidence);
+        if !code {
+            return Err(ImageError::CodeMismatch);
+        }
+        if !evidence || self.evidence.header() as u64 != image.evidence_header {
+            return Err(ImageError::EvidenceMismatch);
+        }
+        let ids: Vec<_> = self.evidence.slots().iter().map(|s| s.identity).collect();
+        if ids != image.evidence {
+            return Err(ImageError::EvidenceMismatch);
+        }
+        if self.data.len() != image.data.len() {
+            return Err(ImageError::DataSize {
+                captured: image.data.len(),
+                template: self.data.len(),
+            });
+        }
+        if !self.ctx_in_stack {
+            return Err(ImageError::NotFixedAddress);
+        }
+        let (base, len) = self.reservation();
+        if base != image.reservation_base {
+            return Err(ImageError::AddressMismatch {
+                captured: image.reservation_base,
+                template: base,
+            });
+        }
+        if len != image.reservation_len || self.stack.top() as u64 != image.stack.top {
+            return Err(ImageError::StackSize {
+                captured: image.reservation_len,
+                template: len,
+            });
+        }
+        if self.ctx.as_ptr() as u64 != image.context
+            || image.stack.saved_sp < self.stack.base() as u64
+        {
+            return Err(ImageError::Malformed(
+                "context or stack pointer outside the template",
+            ));
+        }
+        Ok(())
     }
     fn ctx(&self) -> &FiberContext {
         // SAFETY: owned; no generated code runs while `&self` is observable.
@@ -333,8 +491,12 @@ impl Drop for Fiber {
                 ABANDONED.with(|a| a.set(a.get() + 1));
             }
         }
-        // SAFETY: allocated by Box::into_raw in `new`; not running.
-        drop(unsafe { Box::from_raw(self.ctx.as_ptr()) });
+        if !self.ctx_in_stack {
+            // SAFETY: allocated by Box::into_raw in `new`; not running.
+            drop(unsafe { Box::from_raw(self.ctx.as_ptr()) });
+        }
+        // A fixed-address context lives in the stack's context page and is
+        // released with the stack (FiberContext has no destructor).
     }
 }
 
@@ -433,6 +595,13 @@ impl fmt::Display for ResumeError {
     }
 }
 impl std::error::Error for ResumeError {}
+
+/// A rejected [`Fiber::from_image`] returns the untouched template.
+#[derive(Debug)]
+pub struct ImageRejected {
+    pub error: ImageError,
+    pub template: Fiber,
+}
 
 /// A rejected resume returns ownership of the untouched continuation.
 #[derive(Debug)]
@@ -538,6 +707,59 @@ impl Parked {
             at += 8;
         }
         found
+    }
+    /// The stack bytes `[saved_sp, top)` of the parked fiber, saved switch
+    /// frame first.
+    pub fn stack_image(&self) -> StackImage {
+        let saved_sp = self.fiber.ctx().saved_sp;
+        let top = self.fiber.stack.top() as u64;
+        let len = (top - saved_sp) as usize;
+        let mut bytes = vec![0u8; len];
+        // SAFETY: [saved_sp, top) is initialized, mapped, inside this
+        // fiber's stack, and nothing runs on it while parked.
+        unsafe {
+            std::ptr::copy_nonoverlapping(saved_sp as *const u8, bytes.as_mut_ptr(), len);
+        }
+        StackImage {
+            saved_sp,
+            top,
+            bytes,
+        }
+    }
+    /// The callee-saved registers and floating-point environment the fiber
+    /// resumes with, decoded from its saved switch frame.
+    pub fn register_frame(&self) -> RegisterFrame {
+        self.stack_image()
+            .register_frame()
+            .expect("a parked fiber always holds a full switch frame")
+    }
+    /// A restorable image of this parked fiber. Needs a fixed-address
+    /// stack ([`FiberConfig::fixed_stack_base`]).
+    pub fn image(&self) -> Result<FiberImage, ImageError> {
+        let f = &self.fiber;
+        if !f.ctx_in_stack {
+            return Err(ImageError::NotFixedAddress);
+        }
+        let ctx = f.ctx();
+        let (reservation_base, reservation_len) = f.reservation();
+        let image = FiberImage {
+            stack: self.stack_image(),
+            reservation_base,
+            reservation_len,
+            context: f.ctx.as_ptr() as u64,
+            fiber_id: ctx.fiber_id,
+            generation: ctx.generation,
+            park: ctx.park,
+            parks: f.parks,
+            data: f.data.bytes().to_vec(),
+            entry: ctx.entry,
+            entry_arg: ctx.entry_arg,
+            evidence_header: f.evidence.header() as u64,
+            evidence: f.evidence.slots().iter().map(|s| s.identity).collect(),
+            anchor: crate::image::anchor(&f.code, &f.evidence),
+        };
+        image.validate()?;
+        Ok(image)
     }
     /// Resume exactly once. On rejection the continuation is returned intact.
     pub fn resume(mut self, resumption: Resumption) -> Result<Outcome, Rejected> {

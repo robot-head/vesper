@@ -3,6 +3,8 @@
 //! n-ary choices, fan-out/fan-in, lossy links, abandonment and malformed
 //! peer bytes.
 
+mod common;
+
 use vesper_chorus::session::{
     Branch, Case, ChorusError, End, Fault, LeakAuditor, NetFail, OfferN, Rec, Recv, SelectN, Send,
     Session, Var, Z,
@@ -17,14 +19,17 @@ fn err(f: Fault) -> ChorusError {
 }
 
 fn lossy(nodes: u32, seed: u64) -> WarpNet {
-    WarpNet::new(WarpNetConfig {
-        nodes,
-        seed,
-        loss_ppm: 100_000,
-        reorder_ppm: 50_000,
-        duplicate_ppm: 10_000,
-        ..WarpNetConfig::default()
-    })
+    WarpNet::new(
+        WarpNetConfig {
+            nodes,
+            seed,
+            loss_ppm: 100_000,
+            reorder_ppm: 50_000,
+            duplicate_ppm: 10_000,
+            ..WarpNetConfig::default()
+        },
+        &common::pki(),
+    )
     .unwrap()
 }
 
@@ -432,10 +437,13 @@ fn fan_out_and_fan_in_replicate_slots_over_lossy_warp() {
 
 #[test]
 fn bind_rejects_wrong_nary_and_fan_out_types() {
-    let net = WarpNet::new(WarpNetConfig {
-        nodes: 4,
-        ..WarpNetConfig::default()
-    })
+    let net = WarpNet::new(
+        WarpNetConfig {
+            nodes: 4,
+            ..WarpNetConfig::default()
+        },
+        &common::pki(),
+    )
     .unwrap();
     let a = LeakAuditor::new();
     let kv = parse_choreography(KV).unwrap();
@@ -558,10 +566,13 @@ fn abandoned_peer_is_observed_over_warp() {
 #[test]
 fn unanswered_receive_times_out() {
     let chor = parse_choreography(KV).unwrap();
-    let net = WarpNet::new(WarpNetConfig {
-        max_wait_steps: 50,
-        ..WarpNetConfig::default()
-    })
+    let net = WarpNet::new(
+        WarpNetConfig {
+            max_wait_steps: 50,
+            ..WarpNetConfig::default()
+        },
+        &common::pki(),
+    )
     .unwrap();
     let a = LeakAuditor::new();
     let s = Session::<Rec<ServerLoop>>::bind(&chor, "S", 1, net.transport(1, &[0, 1]).unwrap(), &a)
@@ -591,13 +602,16 @@ fn frames_are_bound_to_the_sending_host() {
     ]
     .concat();
     for (forger, accepted) in [(2, false), (0, true)] {
-        let net = WarpNet::new(WarpNetConfig {
-            nodes: 3,
-            seed: 9,
-            loss_ppm: 50_000,
-            max_wait_steps: 400,
-            ..WarpNetConfig::default()
-        })
+        let net = WarpNet::new(
+            WarpNetConfig {
+                nodes: 3,
+                seed: 9,
+                loss_ppm: 50_000,
+                max_wait_steps: 400,
+                ..WarpNetConfig::default()
+            },
+            &common::pki(),
+        )
         .unwrap();
         let a = LeakAuditor::new();
         // C lives on host 0, S on host 1; host 2 is a bystander.
@@ -756,9 +770,9 @@ fn config_is_validated() {
             ..WarpNetConfig::default()
         },
     ] {
-        assert!(WarpNet::new(cfg).is_err(), "{cfg:?}");
+        assert!(WarpNet::new(cfg, &common::pki()).is_err(), "{cfg:?}");
     }
-    let net = WarpNet::new(WarpNetConfig::default()).unwrap();
+    let net = WarpNet::new(WarpNetConfig::default(), &common::pki()).unwrap();
     assert!(net.transport(2, &[0, 1]).is_err());
     assert!(net.transport(0, &[0, 5]).is_err());
 }

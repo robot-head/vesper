@@ -21,10 +21,12 @@
 //! functions get Vesper declarations and a [`RefusalReason::NotCAbi`] note.
 //!
 //! Raw-pointer annotation (a doc line on the function, valid Rust):
-//! `/// vesper-migrate: <param> in|out|inout [len <len_param>]`. `len` folds
-//! the following `usize` parameter into a slice (`in`/`inout` only); without
-//! it the pointer is a single non-null element, lifted to
-//! `nocapture in|out|inout name: T` for an integer or wire-struct pointee.
+//! `/// vesper-migrate: <param> in|out|inout [len <len_param>] [nullable]`.
+//! `len` folds the following `usize` parameter into a slice (`in`/`inout`
+//! only) of integers or wire structs; without it the pointer is a single
+//! element, lifted to `nocapture in|out|inout name: T` for an integer or
+//! wire-struct pointee. Annotated pointers are non-null unless the annotation
+//! ends in `nullable`, which lifts them to `Option[T]` / `Option[CSlice[T]]`.
 //! Two annotated raw pointers to the same type, one of them written, are
 //! refused as [`RefusalReason::AliasingPointers`]. In C-ABI functions,
 //! `&T`/`&mut T` of an integer or struct lift to `nocapture in|inout`
@@ -840,6 +842,8 @@ impl Scan<'_> {
 struct PtrAnnotation {
     access: PointerAccess,
     len: Option<String>,
+    /// `nullable`: the pointer may be null (`Option[...]` in `.vsys`).
+    nullable: bool,
 }
 
 fn annotations(
@@ -857,12 +861,16 @@ fn annotations(
                 item,
                 RefusalReason::BadAnnotation,
                 format!(
-                    "expected `vesper-migrate: <param> in|out|inout [len <param>]`, got `{}`",
+                    "expected `vesper-migrate: <param> in|out|inout [len <param>] [nullable]`, got `{}`",
                     line.trim()
                 ),
             )
         };
-        let (param, access, len) = match words.as_slice() {
+        let (words, nullable) = match words.split_last() {
+            Some((&"nullable", rest)) => (rest, true),
+            _ => (words.as_slice(), false),
+        };
+        let (param, access, len) = match words {
             [p, a] => (p, a, None),
             [p, a, "len", l] => (p, a, Some(l.to_string())),
             _ => return Err(bad()),
@@ -878,7 +886,14 @@ fn annotations(
             return Err(bad());
         }
         if out
-            .insert(param.to_string(), PtrAnnotation { access, len })
+            .insert(
+                param.to_string(),
+                PtrAnnotation {
+                    access,
+                    len,
+                    nullable,
+                },
+            )
             .is_some()
         {
             return Err(bad());
@@ -1083,14 +1098,14 @@ impl Analyzer {
                     };
                     let pointee = match &**inner {
                         RTy::Scalar(e) => SysPointee::Scalar(*e),
-                        RTy::Named(n) if note.len.is_none() && self.structs.contains_key(n) => {
+                        RTy::Named(n) if self.structs.contains_key(n) => {
                             SysPointee::Struct(n.clone())
                         }
                         _ => {
                             return Err(refuse((
                                 RefusalReason::OpaquePointer,
                                 format!(
-                                    "annotated raw pointer `{}` must point to a fixed-width integer (or, without `len`, a crate struct)",
+                                    "annotated raw pointer `{}` must point to a fixed-width integer or a crate struct",
                                     p.name
                                 ),
                             )));
@@ -1098,9 +1113,6 @@ impl Analyzer {
                     };
                     match &note.len {
                         Some(len) => {
-                            let SysPointee::Scalar(e) = pointee else {
-                                unreachable!("struct pointees are refused with len")
-                            };
                             let next = raw.get(index + 1);
                             if !next.is_some_and(|n| {
                                 &n.name == len && n.ty == RTy::Scalar(Scalar::Usize)
@@ -1115,36 +1127,54 @@ impl Analyzer {
                             }
                             skip_len = Some(len.clone());
                             assumptions.push(format!(
-                                "`{}` + `{len}` form a nocapture slice (from annotation)",
-                                p.name
+                                "`{}` + `{len}` form a nocapture {}slice (from annotation)",
+                                p.name,
+                                if note.nullable { "nullable " } else { "" }
                             ));
-                            let param = SysParam::Slice {
-                                element: e,
-                                access: if note.access == PointerAccess::In {
+                            let element_ty = match &pointee {
+                                SysPointee::Scalar(e) => RTy::Scalar(*e),
+                                SysPointee::Struct(n) => RTy::Named(n.clone()),
+                            };
+                            let param = SysParam::slice(
+                                pointee,
+                                if note.access == PointerAccess::In {
                                     Access::In
                                 } else {
                                     Access::Inout
                                 },
-                            };
+                                note.nullable,
+                            );
                             raw_pointers.push((pname.clone(), param.clone()));
                             sys_params.push((pname.clone(), param));
                             lifted.push(LiftedParam {
                                 name: pname,
                                 mode,
                                 footprint: None,
-                                ty: RTy::Slice(Box::new(RTy::Scalar(e))).vesper(),
+                                ty: {
+                                    let t = RTy::Slice(Box::new(element_ty)).vesper();
+                                    if note.nullable {
+                                        format!("Option[{t}]")
+                                    } else {
+                                        t
+                                    }
+                                },
                             });
                         }
                         None => {
                             assumptions.push(format!(
-                                "`{}` is a non-null nocapture {} element (from annotation)",
+                                "`{}` is a {} nocapture {} element (from annotation)",
                                 p.name,
+                                if note.nullable {
+                                    "nullable"
+                                } else {
+                                    "non-null"
+                                },
                                 note.access.keyword()
                             ));
                             let param = SysParam::Pointer {
                                 pointee: pointee.clone(),
                                 access: note.access,
-                                nullable: false,
+                                nullable: note.nullable,
                             };
                             raw_pointers.push((pname.clone(), param.clone()));
                             sys_params.push((pname.clone(), param));
@@ -1152,7 +1182,11 @@ impl Analyzer {
                                 name: pname,
                                 mode,
                                 footprint: None,
-                                ty: pointee.name().to_owned(),
+                                ty: if note.nullable {
+                                    format!("Option[{}]", pointee.name())
+                                } else {
+                                    pointee.name().to_owned()
+                                },
                             });
                         }
                     }

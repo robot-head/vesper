@@ -916,5 +916,6 @@ pub fn corpus() -> Vec<Case> {
         );
     }
     v.extend(super::depth::cases());
+    v.extend(super::kfuncs::cases());
     v
 }

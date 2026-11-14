@@ -1,4 +1,5 @@
-//! Checks `lean/ChorusQuorum.lean` and `lean/ChorusQuorum/SessionDuality.lean`
+//! Checks `lean/ChorusQuorum.lean`, `lean/ChorusQuorum/SessionDuality.lean`
+//! and `lean/ChorusQuorum/RecursiveDuality.lean`
 //! with the pinned toolchain when `VESPER_LEAN` is set (CI sets it), and
 //! always checks the sources for forbidden constructs. The theorems are
 //! about the Lean models only.
@@ -29,6 +30,23 @@ const DUALITY_THEOREMS: [&str; 7] = [
     "raft_replicate_slot_session_dual",
     "raft_vote_session_dual",
     "fan_out_slot_session_dual",
+];
+const RECURSIVE_FILE: &str = "ChorusQuorum/RecursiveDuality.lean";
+const RECURSIVE_NS: &str = "Vesper.ChorusQuorum.RecursiveDuality";
+const RECURSIVE_THEOREMS: [&str; 13] = [
+    "dual_dual",
+    "merge_dual",
+    "loopView_dual",
+    "proj_dual",
+    "proj_defined_symm",
+    "sessionDual_of_proj",
+    "raft_heartbeat_loop_projection",
+    "raft_heartbeat_loop_session_dual",
+    "commit_notify_client_view",
+    "commit_notify_session_dual",
+    "streaming_loop_session_dual",
+    "absent_loop_projects_to_stop",
+    "send_receive_conflict_is_undefined",
 ];
 const STANDARD_AXIOMS: [&str; 3] = ["propext", "Classical.choice", "Quot.sound"];
 
@@ -92,6 +110,7 @@ fn check_source(file: &str, theorems: &[&str]) {
 fn lean_source_has_no_escape_hatches() {
     check_source("ChorusQuorum.lean", &THEOREMS);
     check_source(DUALITY_FILE, &DUALITY_THEOREMS);
+    check_source(RECURSIVE_FILE, &RECURSIVE_THEOREMS);
 }
 
 /// Runs Lean on `file` and checks the axiom report of every theorem.
@@ -168,4 +187,103 @@ fn rust_projections_of_the_modelled_choreographies_are_dual() {
         let all = project_all(&chor).unwrap();
         assert!(are_dual(RoleId(0), &all[0], RoleId(1), &all[1]), "{src}");
     }
+}
+
+#[test]
+fn lean_recursive_duality_model_checks() {
+    let Ok(lean) = std::env::var("VESPER_LEAN") else {
+        eprintln!("VESPER_LEAN unset; Lean RecursiveDuality check skipped");
+        return;
+    };
+    check_lean(&lean, RECURSIVE_FILE, RECURSIVE_NS, &RECURSIVE_THEOREMS);
+}
+
+/// The Rust projection of the choreographies modelled in
+/// `RecursiveDuality.lean` behaves as the Lean statements say: the loop
+/// projects to dual recursive types, the client's view is the receive-branch
+/// merge (an offer with both labels), a loop the client is absent from ends
+/// for it, and a send/receive conflict is unmergeable.
+#[test]
+fn rust_projection_matches_the_recursive_lean_examples() {
+    use vesper_chorus::{
+        LocalType, ProjectionError, RoleId, are_dual, parse_choreography, project, project_all,
+    };
+    let labels = |t: &LocalType| -> (u16, Vec<String>) {
+        match t {
+            LocalType::Offer { peer, branches } => {
+                (peer.0, branches.iter().map(|b| b.label.clone()).collect())
+            }
+            other => panic!("expected an offer, got {other:?}"),
+        }
+    };
+    // raftHeartbeatLoop.
+    let chor = parse_choreography(
+        "roles Leader, Follower;
+         rec Loop { Leader -> Follower {
+             AppendEntries() { Follower -> Leader: Accept(); continue Loop; }
+             Stop() { }
+         } }",
+    )
+    .unwrap();
+    let all = project_all(&chor).unwrap();
+    assert!(matches!(all[0], LocalType::Rec { .. }), "{:?}", all[0]);
+    assert!(are_dual(RoleId(0), &all[0], RoleId(1), &all[1]));
+    // commitNotify: Coordinator 0, Replica 1, Client 2.
+    let chor = parse_choreography(
+        "roles Coordinator, Replica, Client;
+         Coordinator -> Replica {
+             Commit() { Replica -> Client: Committed(); }
+             Abort() { Replica -> Client: Aborted(); }
+         }",
+    )
+    .unwrap();
+    let c = project(&chor, "Client").unwrap();
+    assert_eq!(labels(&c), (1, vec!["Aborted".into(), "Committed".into()]));
+    // streamingLoop.
+    let chor = parse_choreography(
+        "roles Coordinator, Replica, Client;
+         rec Loop { Coordinator -> Replica {
+             More() { Replica -> Client: Item(); continue Loop; }
+             Fin() { Replica -> Client: Fin(); }
+         } }",
+    )
+    .unwrap();
+    match project(&chor, "Client").unwrap() {
+        LocalType::Rec { body, .. } => {
+            assert_eq!(labels(&body), (1, vec!["Fin".into(), "Item".into()]))
+        }
+        other => panic!("{other:?}"),
+    }
+    // absentLoop (Rust rejects a role that never appears, so the client
+    // hears from the coordinator before the loop): the loop adds nothing
+    // to the client's type. (Had the client been told something after the
+    // loop, its branch views `continue Loop` and that receive would not
+    // merge, in Rust as in the Lean model.)
+    let chor = parse_choreography(
+        "roles Coordinator, Replica, Client;
+         Coordinator -> Client: Done();
+         rec Loop { Coordinator -> Replica { Ping() { continue Loop; } Stop() { } } }",
+    )
+    .unwrap();
+    match project(&chor, "Client").unwrap() {
+        LocalType::Recv {
+            peer, label, next, ..
+        } => {
+            assert_eq!((peer.0, label.as_str(), *next), (0, "Done", LocalType::End))
+        }
+        other => panic!("{other:?}"),
+    }
+    // conflict.
+    let chor = parse_choreography(
+        "roles Coordinator, Replica, Client;
+         Coordinator -> Replica {
+             Commit() { Replica -> Client: Committed(); }
+             Abort() { Client -> Replica: Aborted(); }
+         }",
+    )
+    .unwrap();
+    assert!(matches!(
+        project(&chor, "Client"),
+        Err(ProjectionError::Unmergeable(_))
+    ));
 }

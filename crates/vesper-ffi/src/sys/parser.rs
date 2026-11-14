@@ -500,10 +500,17 @@ impl Parser {
             result,
         })
     }
-    /// The type after `nocapture <access> name:`: a slice, a single pointee
-    /// or an explicitly nullable `Option[pointee]`.
+    /// The type after `nocapture <access> name:`: a slice, a single pointee,
+    /// or an explicitly nullable `Option[...]` of either.
     fn borrowed_type(&mut self, access: PointerAccess) -> Result<RawParameterType, Error> {
-        if self.is_word("CSlice") {
+        let nullable = if self.is_word("Option") {
+            self.bump();
+            self.expect(b'[')?;
+            true
+        } else {
+            false
+        };
+        let ty = if self.is_word("CSlice") {
             let slice_access = match access {
                 PointerAccess::In => Access::In,
                 PointerAccess::Inout => Access::Inout,
@@ -516,67 +523,77 @@ impl Parser {
             };
             self.bump();
             self.expect(b'[')?;
-            let element = scalar(&self.word()?).ok_or_else(|| {
-                self.error(
-                    ErrorKind::Unsupported,
-                    "CSlice requires a total-bit integer element",
-                )
-            })?;
+            let span = self.token().span.clone();
+            let element = self.word()?;
+            match element.as_str() {
+                "Option" | "Ptr" | "NullablePtr" => {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        span,
+                        "slice elements are values; arrays of pointers or nullable elements are unsupported",
+                    ));
+                }
+                "CSlice" | "ForeignVal" => {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        span,
+                        "nested borrowed layouts are unsupported",
+                    ));
+                }
+                _ => {}
+            }
             self.expect(b']')?;
-            return Ok(RawParameterType::Slice {
+            RawParameterType::Slice {
                 element,
+                span,
                 access: slice_access,
-            });
-        }
-        let nullable = if self.is_word("Option") {
-            self.bump();
-            self.expect(b'[')?;
-            true
+                nullable,
+            }
         } else {
-            false
+            let span = self.token().span.clone();
+            let pointee = self.word()?;
+            match pointee.as_str() {
+                "Ptr" | "NullablePtr" if nullable => {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        span,
+                        "pointer-to-pointer parameters are unsupported",
+                    ));
+                }
+                "Ptr" => {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        span,
+                        "pointer-to-pointer parameters are unsupported; a nocapture pointee is one scalar or wire struct",
+                    ));
+                }
+                "NullablePtr" => {
+                    return Err(Error::new(
+                        ErrorKind::Type,
+                        span,
+                        "a nullable single pointer must be declared explicitly as Option[T]; pointer-to-pointer parameters are unsupported",
+                    ));
+                }
+                "Option" | "ForeignVal" => {
+                    return Err(Error::new(
+                        ErrorKind::Unsupported,
+                        span,
+                        "nested borrowed layouts are unsupported",
+                    ));
+                }
+                _ => {}
+            }
+            RawParameterType::Pointer {
+                pointee,
+                span,
+                access,
+                nullable,
+            }
         };
-        let span = self.token().span.clone();
-        let pointee = self.word()?;
-        match pointee.as_str() {
-            "Ptr" | "NullablePtr" if nullable => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    span,
-                    "pointer-to-pointer parameters are unsupported",
-                ));
-            }
-            "Ptr" => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    span,
-                    "pointer-to-pointer parameters are unsupported; a nocapture pointee is one scalar or wire struct",
-                ));
-            }
-            "NullablePtr" => {
-                return Err(Error::new(
-                    ErrorKind::Type,
-                    span,
-                    "a nullable single pointer must be declared explicitly as Option[T]; pointer-to-pointer parameters are unsupported",
-                ));
-            }
-            "CSlice" | "Option" | "ForeignVal" => {
-                return Err(Error::new(
-                    ErrorKind::Unsupported,
-                    span,
-                    "nested borrowed layouts are unsupported",
-                ));
-            }
-            _ => {}
-        }
         if nullable {
             self.expect(b']')?;
         }
-        Ok(RawParameterType::Pointer {
-            pointee,
-            span,
-            access,
-            nullable,
-        })
+        Ok(ty)
     }
 }
 struct RawWireStruct {
@@ -593,8 +610,10 @@ enum RawType {
 enum RawParameterType {
     Value(RawType),
     Slice {
-        element: Scalar,
+        element: String,
+        span: Range<usize>,
         access: Access,
+        nullable: bool,
     },
     Pointer {
         pointee: String,
@@ -679,7 +698,7 @@ fn link_name(n: &str) -> bool {
         && n.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
 }
-fn header(n: &str) -> bool {
+pub(super) fn header(n: &str) -> bool {
     !n.is_empty()
         && n.split('/').all(|part| {
             !part.is_empty()
@@ -857,16 +876,29 @@ pub(super) fn parse(source: &str, limits: Limits) -> Result<LibraryDescriptor, E
                     }
                     ParameterType::Value(t)
                 }
-                RawParameterType::Slice { element, access } => {
-                    ParameterType::Slice { element, access }
-                }
+                RawParameterType::Slice {
+                    element,
+                    span,
+                    access,
+                    nullable,
+                } => ParameterType::Slice {
+                    element: resolve_pointee(
+                        &element,
+                        span,
+                        "slice element",
+                        &enums,
+                        &wire_structs,
+                    )?,
+                    access,
+                    nullable,
+                },
                 RawParameterType::Pointer {
                     pointee,
                     span,
                     access,
                     nullable,
                 } => ParameterType::Pointer {
-                    pointee: resolve_pointee(&pointee, span, &enums, &wire_structs)?,
+                    pointee: resolve_pointee(&pointee, span, "pointee", &enums, &wire_structs)?,
                     access,
                     nullable,
                 },
@@ -955,6 +987,7 @@ fn compile_wire_structs(
 fn resolve_pointee(
     name: &str,
     span: Range<usize>,
+    what: &str,
     enums: &[EnumDescriptor],
     structs: &[WireStructDescriptor],
 ) -> Result<Pointee, Error> {
@@ -966,12 +999,12 @@ fn resolve_pointee(
     }
     let why = if name == "bool" || enums.iter().any(|e| e.name() == name) {
         format!(
-            "pointee `{name}` does not admit every bit pattern foreign code may write; point to its integer carrier"
+            "{what} `{name}` does not admit every bit pattern foreign code may write; use its integer carrier"
         )
     } else if name == "Unit" {
-        "void pointees are opaque and unsupported".to_owned()
+        format!("void {what}s are opaque and unsupported")
     } else {
-        format!("unknown pointee `{name}`; declare it as a wire struct")
+        format!("unknown {what} `{name}`; declare it as a wire struct")
     };
     Err(Error::new(ErrorKind::Type, span, why))
 }

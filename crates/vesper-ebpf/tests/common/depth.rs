@@ -549,18 +549,6 @@ pub fn cases() -> Vec<Case> {
             p,
         );
     }
-    {
-        let mut a = Asm::new();
-        a.call_kfunc("bpf_rcu_read_lock");
-        a.call_kfunc("bpf_rcu_read_unlock");
-        ret(&mut a, 2);
-        add(
-            "reject/kfunc_unmodelled",
-            Some("call.kfunc_unsupported"),
-            Kernel::AcceptsButStricterHere,
-            fin(a, Xdp),
-        );
-    }
 
     // --------------------------------------------- scalar id linking ---
     {

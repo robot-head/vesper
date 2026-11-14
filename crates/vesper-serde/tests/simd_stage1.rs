@@ -55,7 +55,12 @@ fn random_input(rng: &mut Rng, len: usize) -> Vec<u8> {
 #[test]
 fn simd_paths_are_detected_on_simd_architectures() {
     let paths = simd_paths();
-    eprintln!("stage 1 paths: {:?}, detected {:?}", paths, Isa::detect());
+    eprintln!(
+        "stage 1 paths: {:?}, detected {:?}, SVE reported by the CPU (no SVE path): {}",
+        paths,
+        Isa::detect(),
+        Isa::sve_reported()
+    );
     if std::env::var_os("VESPER_ALLOW_SCALAR_ONLY").is_none() {
         if cfg!(target_arch = "x86_64") {
             assert!(paths.contains(&Isa::Sse42), "x86_64 CI must run SSE4.2");
@@ -279,14 +284,16 @@ fn stage1_limits_are_typed_errors() {
     let mut index = StructuralIndex::new();
     let limits = IndexLimits {
         max_input_bytes: 4,
-        max_structurals: 3,
+        max_entries: 3,
     };
     for isa in Isa::available() {
         let err = index.build(b"[1,2]", isa, limits).unwrap_err();
         assert_eq!(err.kind, vesper_serde::ErrorKind::InputLimit);
-        let err = index.build(b"[1,2", isa, limits).unwrap_err();
-        assert_eq!(err.kind, vesper_serde::ErrorKind::TokenLimit);
-        assert!(index.structurals().is_empty());
+        // Four entries, room for three: truncated at the fourth.
+        index.build(b"[1,2", isa, limits).unwrap();
+        assert_eq!(index.structurals(), &[0, 1, 2]);
+        assert_eq!(index.truncated_at(), Some(3));
+        assert!(index.capacity_bytes() <= 3 * 4);
         let err = index.build(b"\"\xff\"", isa, limits).unwrap_err();
         assert_eq!((err.kind, err.offset), (vesper_serde::ErrorKind::Utf8, 1));
         index.build(b"\"ab", isa, limits).unwrap();
