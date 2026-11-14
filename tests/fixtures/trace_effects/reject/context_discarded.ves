@@ -1,0 +1,5 @@
+// expect: E0753
+fn main() -> u64 eff [Trace] {
+    Trace::current_ctx();
+    0
+}

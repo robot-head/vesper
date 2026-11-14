@@ -1,0 +1,42 @@
+// span: login [request] ok count=5
+// span: password [request] ok [REDACTED]
+copy struct Secret[T] {
+    value: T,
+}
+
+copy struct Login {
+    user_id: u64,
+    password: Secret[u64],
+}
+
+// Reads only the public field: the secret one is never exported.
+impl Telemetrable for Login {
+    fn telemetry_attr(in self) -> TelemetryAttr {
+        TelemetryAttr::Count(self.user_id)
+    }
+}
+
+// The one instance for the secret itself is an explicit redacting model.
+model RedactedSecret: Telemetrable for Secret[u64] {
+    fn telemetry_attr(in self) -> TelemetryAttr {
+        TelemetryAttr::Redacted
+    }
+}
+
+fn main() -> u64 eff [Trace] {
+    let l = Login {
+        user_id: 5,
+        password: Secret {
+            value: 9
+        }
+    };
+    let s = Trace::start_span(0, "login");
+    Trace::emit_attr(s, l.telemetry_attr());
+    let p = Trace::start_span(0, "password");
+    let a = {
+        use model RedactedSecret;
+        l.password.telemetry_attr()
+    };
+    Trace::emit_attr(p, a);
+    1
+}

@@ -1,0 +1,10 @@
+// expect: E0750
+fn open() -> ActiveSpan eff [Trace] {
+    Trace::start_span(0, "leaks")
+}
+
+fn main() -> u64 eff [Trace] {
+    let s = open();
+    Trace::emit_ok(s, 0);
+    0
+}

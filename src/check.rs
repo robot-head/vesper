@@ -363,7 +363,10 @@ pub fn check(module: &Module) -> Checked {
     if let Some(checked) = crate::tensor_types::check(module) {
         return checked;
     }
-    crate::pact_frontend::check_module(module)
+    let beacon = crate::trace_effects::with_prelude(module);
+    let mut checked = crate::pact_frontend::check_module(beacon.module());
+    beacon.check(&mut checked);
+    checked
 }
 
 /// Static resolution of trait method calls during the frontend's first
