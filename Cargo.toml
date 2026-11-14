@@ -69,6 +69,7 @@ members = [
     "crates/vesper-kinetic",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
+    "crates/vesper-gpu-compute",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -139,6 +140,7 @@ default-members = [
     "crates/vesper-kinetic",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
+    "crates/vesper-gpu-compute",
     "experiments/native-pulse",
 ]
 
