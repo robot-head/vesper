@@ -4870,6 +4870,7 @@ dependencies = [
  "blake3",
  "tempfile",
  "vesper-loom-cas",
+ "vesper-quarry",
  "vesper-simpulse",
 ]
 
