@@ -1,10 +1,11 @@
-//! Bound, fresh external replay of the two fixed Vesper mathematical models.
+//! Bound, fresh external replay of the three fixed Vesper mathematical models.
 #![forbid(unsafe_code)]
 
 pub mod artifact;
 pub mod fault_peer;
 pub mod process;
 pub mod protocol;
+pub mod resource;
 
 use serde::{Deserialize, Serialize};
 use std::{
@@ -14,12 +15,14 @@ use std::{
 };
 
 pub type Digest = [u8; 32];
-pub const PROFILE: &str = "vesper.lean4lean42/1";
+pub const PROFILE: &str = "vesper.lean4lean42/2";
 pub const LEAN_COMMIT: &str = "797c613eb9b6d4ec95db23e3e00af9ac6657f24b";
 pub const UPSTREAM: &str = "4faf51403bc4cb35cf6666d91fc9c938ae46d3aa";
 pub const BATTERIES: &str = "8da40b72fece29b7d3fe3d768bac4c8910ce9bee";
 pub const PINS: &str = include_str!("../../../tools/lean4lean42/pins.json");
 pub const SOURCE_MANIFEST: &str = include_str!("../../../tools/lean4lean42/source-manifest.json");
+pub const RESOURCE_SOURCE_MANIFEST: &str =
+    include_str!("../../../tools/lean4lean42/resource-source-manifest.json");
 pub const KNOWN_FIXES: &str = include_str!("../../../tools/lean4lean42/known-fixes.json");
 pub const PATCHES: [&[u8]; 3] = [
     include_bytes!("../../../tools/lean4lean42/patches/toolchain.patch"),
@@ -34,18 +37,21 @@ pub const CONTROLS_SOURCE: &[u8] =
 pub enum Target {
     RewriteWitness,
     ArithmeticOracle,
+    ResourceModel42KernelSnapshot,
 }
 impl Target {
     pub fn tag(self) -> u8 {
         match self {
             Self::RewriteWitness => 0,
             Self::ArithmeticOracle => 1,
+            Self::ResourceModel42KernelSnapshot => 3,
         }
     }
     pub fn module(self) -> &'static str {
         match self {
             Self::RewriteWitness => "RewriteWitness",
             Self::ArithmeticOracle => "ArithmeticOracle",
+            Self::ResourceModel42KernelSnapshot => "ResourceModel42Kernel",
         }
     }
 }
@@ -296,6 +302,7 @@ pub struct TargetReport {
     pub target: Target,
     pub status: TargetStatus,
     pub source: Option<FileDigest>,
+    pub resource: Option<resource::ResourceAssociation>,
     pub model_artifacts: Vec<FileDigest>,
     pub import_files: u64,
     pub import_bytes: u64,
@@ -320,6 +327,7 @@ impl TargetReport {
             target,
             status: TargetStatus::NotRun,
             source: None,
+            resource: None,
             model_artifacts: Vec::new(),
             import_files: 0,
             import_bytes: 0,
@@ -355,6 +363,7 @@ pub struct ToolInfo {
     pub pins_blake3: Digest,
     pub known_fixes_blake3: Digest,
     pub source_manifest_blake3: Digest,
+    pub resource_bundle_blake3: Digest,
     pub build_output_manifest_blake3: Digest,
     pub control_inventory_blake3: Digest,
     pub control_import_manifest_blake3: Digest,
@@ -371,7 +380,7 @@ pub struct Report {
     pub tools: Option<ToolInfo>,
     pub controls: Vec<ControlRecord>,
     pub controls_blake3: Option<Digest>,
-    pub targets: [TargetReport; 2],
+    pub targets: [TargetReport; 3],
     pub axiom_audit: AuditStatus,
     pub implementation_proof_audit: AuditStatus,
     pub process_spawns: u64,
@@ -384,7 +393,7 @@ pub struct Report {
 impl Report {
     pub fn new(limits: Limits) -> Self {
         Self {
-            schema: 1,
+            schema: 2,
             status: Status::Failed,
             scope: Scope::EligibleFreshClosure,
             limits,
@@ -394,6 +403,7 @@ impl Report {
             targets: [
                 TargetReport::new(Target::RewriteWitness),
                 TargetReport::new(Target::ArithmeticOracle),
+                TargetReport::new(Target::ResourceModel42KernelSnapshot),
             ],
             axiom_audit: AuditStatus::NotRun,
             implementation_proof_audit: AuditStatus::NotRun,
@@ -439,6 +449,7 @@ pub struct Pins {
     pub controls_overlay: Vec<OverlayPin>,
     pub known_fixes_blake3: Digest,
     pub source_manifest_blake3: Digest,
+    pub resource_bundle_blake3: Digest,
     pub build_argv: Vec<String>,
     pub checker_relative_path: String,
 }
@@ -474,6 +485,7 @@ pub struct Receipt {
     pub patches: Vec<PatchPin>,
     pub source_manifest: Vec<FileDigest>,
     pub source_manifest_blake3: Digest,
+    pub resource_bundle_blake3: Digest,
     pub compiler_path: String,
     pub sysroot: String,
     pub compiler_blake3: Digest,

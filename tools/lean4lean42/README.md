@@ -1,15 +1,29 @@
 # Explicit Lean4Lean 4.24 setup
 
-This developer tool prepares the fixed external checker for the two bundled
+This developer tool prepares the fixed external checker for three bundled
 models. It builds pinned source, asks the genuine Rust driver to validate and
 seal it, then publishes the directory once. It does not install Lean, build
 Vesper, run a floating package update, or establish whole-checker verification.
 
 Python 3.11 or later is required; setup uses only its standard library. Supply
 an already-built genuine `lean4lean42` Rust binary from this checkout and an
-installed Lean/Lake 4.24.0 toolchain. Root-owned `pins.json` and
-`source-manifest.json` must be finalized before setup can run. Missing inputs
+installed Lean/Lake 4.24.0 toolchain. Root-owned `pins.json`,
+`source-manifest.json` and `resource-source-manifest.json` must be finalized
+before setup can run. Missing inputs
 are hard failures, not a successful partial setup.
+
+Profile `vesper.lean4lean42/2` uses pins, receipt and result schema 2. The
+resource-bundle digest binds twelve fixed model sources, the unchanged kernel
+snapshot tool and the historical source manifest. Its SHA256 records remain
+distinct from the new explicitly labelled BLAKE3 source associations. The
+ordinary run freshly compiles that closure and externally checks every
+projected declaration, including alternate proof aliases, alongside the two
+existing models. The wire, known-fixes, upstream source-manifest and setup-input
+formats retain schema 1. Old profile receipts are refused and never relabelled.
+
+External replay checks logical declarations; both audit-status fields remain
+`not_run`. It does not rerun the separate axiom-policy audit, complete the
+checker's implementation proofs, or establish native resource observations.
 
 ```sh
 python3 tools/lean4lean42/setup.py \
