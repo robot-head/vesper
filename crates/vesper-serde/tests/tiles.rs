@@ -178,7 +178,11 @@ fn swar_keys_match_exactly_the_equal_byte_strings() {
             3 => raw.push(alphabet[(next() % 5) as usize]),
             _ => raw.push(0),
         }
-        assert_eq!(compiled.matches_raw(&raw), raw == key.as_bytes(), "{key:?} {raw:?}");
+        assert_eq!(
+            compiled.matches_raw(&raw),
+            raw == key.as_bytes(),
+            "{key:?} {raw:?}"
+        );
     }
     // Escaped spellings decode before comparing.
     let doc = vesper_serde::IndexedJson::parse(br#"{"flags":1}"#, Default::default()).unwrap();

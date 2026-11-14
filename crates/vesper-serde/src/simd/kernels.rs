@@ -546,7 +546,16 @@ mod x86 {
     /// carry-less, by all ones.
     #[target_feature(enable = "avx512f,vpclmulqdq")]
     fn clmul_prefix_xor4(q: [u64; 4]) -> [u64; 4] {
-        let a = _mm512_set_epi64(0, q[3] as i64, 0, q[2] as i64, 0, q[1] as i64, 0, q[0] as i64);
+        let a = _mm512_set_epi64(
+            0,
+            q[3] as i64,
+            0,
+            q[2] as i64,
+            0,
+            q[1] as i64,
+            0,
+            q[0] as i64,
+        );
         let r = _mm512_clmulepi64_epi128::<0>(a, _mm512_set1_epi8(-1));
         let mut out = [0u64; 8];
         // SAFETY: `out` is 64 writable bytes; the store is unaligned.

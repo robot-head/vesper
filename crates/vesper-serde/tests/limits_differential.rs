@@ -78,12 +78,9 @@ fn same_outcome(input: &[u8], limits: Limits) -> Result<(), Error> {
                 assert!(a.same_tape(b), "{isa:?} tape on {:?}", show(input));
                 assert_eq!(a.index_bytes(), b.index_bytes());
             }
-            (Err(a), Err(b)) => assert_eq!(
-                a,
-                b,
-                "{isa:?} error on {:?} with {limits:?}",
-                show(input)
-            ),
+            (Err(a), Err(b)) => {
+                assert_eq!(a, b, "{isa:?} error on {:?} with {limits:?}", show(input))
+            }
             _ => panic!(
                 "{isa:?} acceptance differs on {:?} with {limits:?}: {:?} vs {:?}",
                 show(input),
@@ -113,7 +110,11 @@ fn show(input: &[u8]) -> String {
 fn every_engine_reports_the_first_limit_or_syntax_error_identically() {
     let mut rng = Rng(0x00c0_ffee);
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
-    let cases = if cfg!(debug_assertions) { 60_000 } else { 1_000_000 };
+    let cases = if cfg!(debug_assertions) {
+        60_000
+    } else {
+        1_000_000
+    };
     for n in 0..cases {
         let mut doc = document(&mut rng);
         if n % 2 == 0 {
@@ -143,7 +144,10 @@ fn every_engine_reports_the_first_limit_or_syntax_error_identically() {
         "Syntax",
         "InputLimit",
     ] {
-        assert!(kinds.get(kind).copied().unwrap_or(0) > 0, "{kind} never hit");
+        assert!(
+            kinds.get(kind).copied().unwrap_or(0) > 0,
+            "{kind} never hit"
+        );
     }
 }
 

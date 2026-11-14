@@ -26,10 +26,10 @@ pub mod tiles;
 
 mod encode;
 mod float;
-mod lemire;
-mod pow5;
 mod helpers;
 mod index;
+mod lemire;
+mod pow5;
 mod stage2;
 
 pub use encode::{EncodeLimits, Value, encode_into, encoded_size};

@@ -57,41 +57,47 @@ struct Decimal {
 }
 
 /// Parse the JSON number grammar. `None` if `text` is not a JSON number.
+///
+/// The common case (at most 19 digits) accumulates the significand in one
+/// pass; longer spellings re-read their digits to keep the first 19
+/// significant ones and note whether anything non-zero was dropped.
 fn decimal(text: &[u8]) -> Option<Decimal> {
     let mut p = 0usize;
     let negative = text.first() == Some(&b'-');
     if negative {
         p += 1;
     }
+    let digit = |p: usize| {
+        text.get(p)
+            .and_then(|c| c.checked_sub(b'0'))
+            .filter(|d| *d < 10)
+    };
     let mut w = 0u64;
-    let mut digits = 0usize; // significant digits seen (leading zeros skipped)
-    let mut dropped: i64 = 0; // significant digits not folded into `w`
-    let mut q: i64 = 0;
     let int_start = p;
-    while let Some(&c @ b'0'..=b'9') = text.get(p) {
-        push_digit(c, &mut w, &mut digits, &mut dropped);
+    eight_digits(text, &mut p, &mut w);
+    while let Some(d) = digit(p) {
+        w = w.wrapping_mul(10).wrapping_add(u64::from(d));
         p += 1;
     }
-    let int_len = p - int_start;
-    if int_len == 0 || (int_len > 1 && text[int_start] == b'0') {
+    let int_end = p;
+    if int_end == int_start || (int_end - int_start > 1 && text[int_start] == b'0') {
         return None;
     }
-    q += dropped;
+    let (mut frac_start, mut frac_end) = (p, p);
     if text.get(p) == Some(&b'.') {
         p += 1;
-        let frac_start = p;
-        while let Some(&c @ b'0'..=b'9') = text.get(p) {
-            let before = dropped;
-            push_digit(c, &mut w, &mut digits, &mut dropped);
-            if dropped == before {
-                q -= 1;
-            }
+        frac_start = p;
+        eight_digits(text, &mut p, &mut w);
+        while let Some(d) = digit(p) {
+            w = w.wrapping_mul(10).wrapping_add(u64::from(d));
             p += 1;
         }
-        if p == frac_start {
+        frac_end = p;
+        if frac_end == frac_start {
             return None;
         }
     }
+    let mut e: i64 = 0;
     if matches!(text.get(p), Some(b'e' | b'E')) {
         p += 1;
         let exp_negative = match text.get(p) {
@@ -106,42 +112,76 @@ fn decimal(text: &[u8]) -> Option<Decimal> {
             _ => false,
         };
         let exp_start = p;
-        let mut e: i64 = 0;
-        while let Some(&c @ b'0'..=b'9') = text.get(p) {
+        while let Some(d) = digit(p) {
             // Saturate: anything past 10^6 is zero or infinity anyway.
             if e < 1_000_000 {
-                e = e * 10 + i64::from(c - b'0');
+                e = e * 10 + i64::from(d);
             }
             p += 1;
         }
         if p == exp_start {
             return None;
         }
-        q += if exp_negative { -e } else { e };
+        if exp_negative {
+            e = -e;
+        }
     }
     if p != text.len() {
         return None;
     }
-    Some(Decimal {
+    let digits = (int_end - int_start) + (frac_end - frac_start);
+    let mut d = Decimal {
         negative,
         w,
-        q,
-        truncated: dropped > 0 && digits > 19,
-    })
+        q: e - (frac_end - frac_start) as i64,
+        truncated: false,
+    };
+    if digits > 19 {
+        // Leading zeros do not count; re-read when there are too many
+        // significant digits for `w` to be exact.
+        let all = text[int_start..int_end]
+            .iter()
+            .chain(&text[frac_start..frac_end]);
+        let significant = digits - all.clone().take_while(|c| **c == b'0').count();
+        if significant > 19 {
+            let mut w = 0u64;
+            let mut kept = 0usize;
+            let mut truncated = false;
+            for &c in all.skip_while(|c| **c == b'0') {
+                if kept < 19 {
+                    w = w * 10 + u64::from(c - b'0');
+                    kept += 1;
+                } else if c != b'0' {
+                    truncated = true;
+                }
+            }
+            d.w = w;
+            // Every significant digit past the 19th moves the scale by one.
+            d.q += (significant - 19) as i64;
+            d.truncated = truncated;
+        }
+    }
+    Some(d)
 }
 
+/// Fold runs of eight ASCII digits into `w` a 64-bit word at a time (SWAR,
+/// as in fast_float), leaving any shorter tail to the byte loop.
 #[inline]
-fn push_digit(c: u8, w: &mut u64, digits: &mut usize, dropped: &mut i64) {
-    if *digits == 0 && c == b'0' {
-        return; // leading zero: not significant
-    }
-    *digits += 1;
-    if *digits <= 19 {
-        *w = *w * 10 + u64::from(c - b'0');
-    } else {
-        // Only track whether a dropped digit was non-zero via `truncated`;
-        // the scale still moves by one decimal place per dropped digit.
-        *dropped += 1;
+fn eight_digits(text: &[u8], p: &mut usize, w: &mut u64) {
+    while let Some(chunk) = text.get(*p..*p + 8) {
+        let v = u64::from_le_bytes(chunk.try_into().expect("eight bytes"));
+        // Every byte in 0x30..=0x39: high nibble 3, and adding 6 keeps it 3.
+        let all_digits = ((v & 0xf0f0_f0f0_f0f0_f0f0)
+            | ((v.wrapping_add(0x0606_0606_0606_0606) & 0xf0f0_f0f0_f0f0_f0f0) >> 4))
+            == 0x3333_3333_3333_3333;
+        if !all_digits {
+            return;
+        }
+        let v = (v & 0x0f0f_0f0f_0f0f_0f0f).wrapping_mul(2561) >> 8;
+        let v = (v & 0x00ff_00ff_00ff_00ff).wrapping_mul(6_553_601) >> 16;
+        let v = (v & 0x0000_ffff_0000_ffff).wrapping_mul(42_949_672_960_001) >> 32;
+        *w = w.wrapping_mul(100_000_000).wrapping_add(v);
+        *p += 8;
     }
 }
 

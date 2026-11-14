@@ -55,7 +55,12 @@ fn random_input(rng: &mut Rng, len: usize) -> Vec<u8> {
 #[test]
 fn simd_paths_are_detected_on_simd_architectures() {
     let paths = simd_paths();
-    eprintln!("stage 1 paths: {:?}, detected {:?}", paths, Isa::detect());
+    eprintln!(
+        "stage 1 paths: {:?}, detected {:?}, SVE reported by the CPU (no SVE path): {}",
+        paths,
+        Isa::detect(),
+        Isa::sve_reported()
+    );
     if std::env::var_os("VESPER_ALLOW_SCALAR_ONLY").is_none() {
         if cfg!(target_arch = "x86_64") {
             assert!(paths.contains(&Isa::Sse42), "x86_64 CI must run SSE4.2");

@@ -86,7 +86,12 @@ fn top128_of_quotient(b: usize, d: &Big) -> (u128, usize) {
     }
     let first = q_bits.iter().position(|x| *x).unwrap();
     let q = &q_bits[first..];
-    (q.iter().take(128).fold(0u128, |a, x| (a << 1) | u128::from(*x)), q.len())
+    (
+        q.iter()
+            .take(128)
+            .fold(0u128, |a, x| (a << 1) | u128::from(*x)),
+        q.len(),
+    )
 }
 
 fn expected_entry(q: i64) -> u128 {
@@ -161,7 +166,7 @@ fn digits(rng: &mut Rng, n: usize) -> String {
 #[test]
 fn every_path_is_bit_identical_to_std_on_a_differential_corpus() {
     let mut paths = HashMap::new();
-    let mut rng = Rng(0x1e15_e1);
+    let mut rng = Rng(0x001e_15e1);
     // Round trips of random doubles in shortest and long forms.
     for _ in 0..60_000 {
         let bits = rng.next() ^ (rng.next() << 32);
@@ -229,7 +234,10 @@ fn every_path_is_bit_identical_to_std_on_a_differential_corpus() {
         DecodePath::EiselLemire,
         DecodePath::Fallback,
     ] {
-        assert!(paths.get(&path).copied().unwrap_or(0) > 0, "{path:?} never taken");
+        assert!(
+            paths.get(&path).copied().unwrap_or(0) > 0,
+            "{path:?} never taken"
+        );
     }
 }
 
@@ -276,12 +284,17 @@ fn to_decimal(n: &Big) -> String {
 
 #[test]
 fn non_numbers_and_infinities() {
-    for text in ["", "-", "01", "1.", ".5", "1e", "1e+", "+1", "1x", "--1", "0x10"] {
+    for text in [
+        "", "-", "01", "1.", ".5", "1e", "1e+", "+1", "1x", "--1", "0x10",
+    ] {
         assert!(decode_f64(text).is_none(), "{text:?}");
     }
     assert!(decode_f64("1e309").unwrap().0.is_infinite());
     assert_eq!(decode_f64("-0").unwrap().0.to_bits(), (-0.0f64).to_bits());
-    assert_eq!(decode_f64("-1e-999999999999").unwrap().0.to_bits(), (-0.0f64).to_bits());
+    assert_eq!(
+        decode_f64("-1e-999999999999").unwrap().0.to_bits(),
+        (-0.0f64).to_bits()
+    );
     // `Node::as_f64` uses this decoder and still rejects overflow.
     let doc = IndexedJson::parse(b"[1e309, 0.1]", Limits::default()).unwrap();
     let mut items = doc.root().elements().unwrap();

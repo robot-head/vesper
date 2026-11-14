@@ -34,9 +34,15 @@ pub enum Isa {
 impl Isa {
     pub const ALL: [Isa; 5] = [Isa::Scalar, Isa::Sse42, Isa::Avx2, Isa::Avx512, Isa::Neon];
 
-    /// The fastest path this CPU supports, detected at run time.
+    /// The preferred path this CPU supports, detected at run time. AVX2 is
+    /// preferred over AVX-512: on the only AVX-512 host measured (see
+    /// docs/parallel-results/serde-json-rest.md) the AVX-512 path was
+    /// slower, so it is opt-in through [`IndexedJson::parse_with_isa`] and
+    /// [`SimdParser::with_isa`](crate::SimdParser::with_isa).
+    ///
+    /// [`IndexedJson::parse_with_isa`]: crate::IndexedJson::parse_with_isa
     pub fn detect() -> Self {
-        [Isa::Avx512, Isa::Avx2, Isa::Neon, Isa::Sse42]
+        [Isa::Avx2, Isa::Neon, Isa::Sse42, Isa::Avx512]
             .into_iter()
             .find(|isa| isa.is_available())
             .unwrap_or(Isa::Scalar)
@@ -254,7 +260,10 @@ impl<'s> Sink<'s> {
     fn grow(&mut self, n: usize) -> bool {
         let used = self.structurals + self.escapes;
         let old = self.buf.len();
-        let want = (used + n).max(old.saturating_mul(2)).max(256).min(self.cap_entries);
+        let want = (used + n)
+            .max(old.saturating_mul(2))
+            .max(256)
+            .min(self.cap_entries);
         if want < used + n {
             return false;
         }
@@ -263,7 +272,8 @@ impl<'s> Sink<'s> {
             return false;
         }
         self.buf.resize(want, 0);
-        self.buf.copy_within(old - self.escapes..old, want - self.escapes);
+        self.buf
+            .copy_within(old - self.escapes..old, want - self.escapes);
         true
     }
 
@@ -395,8 +405,11 @@ impl StructuralIndex {
         let mut sink = Sink::new(&mut self.buf, input.len(), limits.max_entries);
         let outcome = run(isa, input, &mut sink, &mut NoRecord)?;
         let (structurals, escapes) = (sink.structurals, sink.escapes);
-        let (alloc_failed, control, truncated) =
-            (sink.alloc_failed, sink.first_string_control, sink.truncated_at);
+        let (alloc_failed, control, truncated) = (
+            sink.alloc_failed,
+            sink.first_string_control,
+            sink.truncated_at,
+        );
         finish(input, &outcome, alloc_failed)?;
         let len = self.buf.len();
         self.buf[len - escapes..].reverse();

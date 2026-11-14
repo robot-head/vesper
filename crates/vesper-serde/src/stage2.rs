@@ -449,6 +449,14 @@ impl Builder<'_, '_> {
         };
         let max = self.limits.max_string_bytes;
         let control = self.control.filter(|&c| c > open && c < bound);
+        let no_escape = self
+            .escapes
+            .get(self.esc)
+            .is_none_or(|&e| e as usize >= bound);
+        if closed && control.is_none() && no_escape && bound - open - 1 <= max {
+            // Common case: a closed string of ordinary bytes within limits.
+            return self.finish_string(token, bound, bound - open - 1, false, i);
+        }
         let mut decoded = 0usize;
         let mut escaped = false;
         let mut at = open + 1;
@@ -501,6 +509,21 @@ impl Builder<'_, '_> {
                 None => self.err(ErrorKind::Syntax, self.input.len()),
             });
         }
+        self.finish_string(token, bound, decoded, escaped, i)
+    }
+
+    /// After the closing quote at `close`: the total string budget, then
+    /// the token's fields.
+    #[inline]
+    fn finish_string(
+        &mut self,
+        token: usize,
+        close: usize,
+        decoded: usize,
+        escaped: bool,
+        i: usize,
+    ) -> Result<usize, Error> {
+        let bound = close;
         self.string_bytes = self
             .string_bytes
             .checked_add(decoded)

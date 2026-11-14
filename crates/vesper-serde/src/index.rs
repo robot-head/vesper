@@ -237,8 +237,8 @@ impl<'d, 'a> Node<'d, 'a> {
         limits
             .preflight(raw.len())
             .map_err(|e| Error::new(e.kind, token.start))?;
-        let (value, _) = crate::lemire::decode_f64(raw)
-            .ok_or(Error::new(ErrorKind::Number, token.start))?;
+        let (value, _) =
+            crate::lemire::decode_f64(raw).ok_or(Error::new(ErrorKind::Number, token.start))?;
         if !value.is_finite() {
             return Err(Error::new(ErrorKind::Number, token.start));
         }
