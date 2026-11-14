@@ -510,15 +510,32 @@ fn call_preparation_checks_exact_abi_arguments_bounds_aliases_and_owners() {
         f.prepare_call(vec![], ()).unwrap_err().error(),
         &ValidationError::ArgumentCount
     );
+    // A non-Option slice is declared non-null even when empty (C forbids
+    // `(NULL, 0)` for many APIs); `(NULL, 0)` needs `Option[CSlice[T]]`.
+    let empty_null = vec![
+        RawArgument::Slice {
+            address: 0,
+            length: 0,
+        },
+        RawArgument::Slice {
+            address: 0,
+            length: 0,
+        },
+        RawArgument::Bits(0),
+    ];
+    assert_eq!(
+        f.prepare_call(empty_null.clone(), ()).unwrap_err().error(),
+        &ValidationError::NullAddress
+    );
     assert!(
         f.prepare_call(
             vec![
                 RawArgument::Slice {
-                    address: 0,
+                    address: 4096,
                     length: 0
                 },
                 RawArgument::Slice {
-                    address: 0,
+                    address: 8192,
                     length: 0
                 },
                 RawArgument::Bits(0)

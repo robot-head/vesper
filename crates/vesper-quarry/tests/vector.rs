@@ -344,9 +344,10 @@ fn joins_stale_inputs_and_limits_are_typed_errors() {
             Limits::default(),
         )
         .unwrap();
+    // Joins run vectorized now (tests/vector_join.rs) and match the rows.
     assert_eq!(
-        join.execute_vectorized(&c, &d, &none, &e).unwrap_err().kind,
-        ErrorKind::Unsupported
+        join.execute_vectorized(&c, &d, &none, &e).unwrap().rows,
+        join.execute(&c, &d, &none).unwrap().rows
     );
     let q = c
         .prepare("SELECT id FROM orders", &[], Limits::default())

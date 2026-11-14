@@ -3,6 +3,7 @@
 
 pub mod check;
 pub mod chor;
+pub mod durable;
 pub mod parse;
 pub mod project;
 pub mod raft;

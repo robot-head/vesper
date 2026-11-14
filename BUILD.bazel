@@ -45,6 +45,13 @@ vesper_crate(
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
+        # Full logical-model replay exceeds 300 s on the Linux executor.
+        # Linux and Windows retain every semantic/audit/control assertion;
+        # proof_audit_private still exercises portability on macOS too.
+        "test/resource_model42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
     },
     # Actual formatter witnesses replay Lean serially; keep every case enabled
     # while allowing the complete target 900 seconds on slower macOS runners.
@@ -54,6 +61,8 @@ vesper_crate(
         "test/lean4lean42_acceptance": "eternal",
         "test/oracle42_acceptance": "long",
         "test/replay42_kernel": "long",
+        # Fresh model compilation, 285 theorem roots and actual negative controls.
+        "test/resource_model42": "long",
     },
 )
 # Narrow slices of the root package for members that read them.

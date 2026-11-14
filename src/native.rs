@@ -20,6 +20,9 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
 
+/// Source Strata region blocks lowered to `vesper_region_*` runtime calls.
+#[path = "regions/native.rs"]
+mod regions;
 /// Checked source entries with declared linear external effects compiled to
 /// ABI v2 fiber entries that park through `vesper-fiber-abi`.
 #[path = "native_session.rs"]
@@ -39,6 +42,8 @@ fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
         }
         Type::Tuple(ts) if ts.is_empty() => Ok(types::I64),
         Type::Infer | Type::Function { .. } => Ok(types::I64),
+        // Region box and watermark handles are one word (§15).
+        Type::Named(n, _) if crate::regions::is_handle_name(n) => Ok(types::I64),
         _ => Err(format!(
             "native backend does not yet lower aggregate type {t}"
         )),
@@ -622,6 +627,7 @@ pub fn jit_with_options(
         .map_err(|e| e.to_string())?;
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.symbol("fmod", native_float_remainder as *const u8);
+    builder.symbols(crate::regions::native_runtime::symbols());
     let mut m = JITModule::new(builder);
     let (ids, _) = compile(&mut m, world, entry, optimize, None, None)?;
     m.finalize_definitions().map_err(|e| e.to_string())?;
@@ -662,6 +668,7 @@ pub fn jit_with_options(
             }
         }
     };
+    crate::regions::native_runtime::finish().map_err(|e| format!("native region fault: {e}"))?;
     Ok(value)
 }
 pub fn object(world: &World, entry: &str) -> Result<(Vec<u8>, String), String> {
@@ -855,6 +862,8 @@ struct Handler {
     capabilities: BTreeMap<String, String>,
     effect: Effect,
     state: Option<Variable>,
+    /// The open region of a region block (its runtime region id).
+    region: Option<Variable>,
     ops: Vec<Clause>,
     captured: BTreeMap<String, Variable>,
     captured_types: BTreeMap<String, Type>,
@@ -2920,12 +2929,14 @@ impl<M: Module> Codegen<'_, '_, M> {
                     self.capabilities
                         .insert(format!("$label:{label}"), identity.clone());
                 }
+                let region = self.region_enter(&effect, ret)?;
                 self.handlers.push(Handler {
                     identity,
                     capabilities: outer_caps.clone(),
                     output_type: output_type.clone(),
                     effect,
                     state,
+                    region,
                     state_type: state_type.clone(),
                     ops: ops.clone(),
                     captured: capture_variables.clone(),
@@ -2934,6 +2945,7 @@ impl<M: Module> Codegen<'_, '_, M> {
                     control: control.clone(),
                 });
                 let body_value = self.shared_control("handler_body", body)?;
+                self.region_exit(region)?;
                 let body_type = self.ty(body);
                 self.handlers.pop();
                 self.capabilities = outer_caps;
@@ -3476,6 +3488,9 @@ impl<M: Module> Codegen<'_, '_, M> {
         op: &str,
         args: &[Arg],
     ) -> Result<ir::Value, String> {
+        if effect == crate::regions::REGION_EFFECT && crate::regions::active(self.world) {
+            return self.region_perform(label, op, args);
+        }
         let signature = self
             .world
             .effects
