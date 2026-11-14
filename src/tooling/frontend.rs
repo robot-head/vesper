@@ -357,7 +357,8 @@ pub fn check_source(
         max_type_nodes: limits.max_type_nodes,
         ..vesper_doc::Limits::default()
     };
-    vesper_doc::source_preflight(source, doc_limits).map_err(guard_failure)?;
+    vesper_doc::source_preflight_with(source, doc_limits, preflight_limits(limits))
+        .map_err(guard_failure)?;
     let parsed = parser::parse_with_limits(
         source,
         parser::ParseLimits {
@@ -426,6 +427,20 @@ pub fn check_source(
     })
 }
 
+/// Lexical preflight scaled by the AST profile that bounds the parse right
+/// after it. The default editor profile keeps the fixed documentation
+/// bounds exactly; a larger profile (Lens) admits proportionally longer
+/// expression runs, more conditionals and more functions.
+fn preflight_limits(limits: AnalysisLimits) -> vesper_doc::PreflightLimits {
+    let fixed = vesper_doc::PreflightLimits::default();
+    vesper_doc::PreflightLimits {
+        max_weighted_segment: (limits.max_ast_nodes / 8).clamp(fixed.max_weighted_segment, 16_384),
+        max_nesting: limits.max_depth.clamp(fixed.max_nesting, 64),
+        max_conditionals: (limits.max_ast_nodes / 32).clamp(fixed.max_conditionals, 4096),
+        max_functions: (limits.max_ast_nodes / 16).clamp(fixed.max_functions, 4096),
+        max_tokens: fixed.max_tokens,
+    }
+}
 fn editor_ast_guard(module: &crate::ast::Module, limits: AnalysisLimits) -> Result<(), String> {
     if module.items.len() > limits.max_ast_nodes {
         return Err("parsed AST node/depth budget exceeded".into());
@@ -531,6 +546,7 @@ fn ast_items_guard(
         }
     }
     let mut has_tuple_growth = false;
+    let mut has_generic_growth = false;
     let mut allowed_closures = BTreeSet::new();
     let mut stack: Vec<_> = items
         .iter()
@@ -713,12 +729,15 @@ fn ast_items_guard(
             Node::Expr(e) => match &e.kind {
                 E::Literal(_) => (),
                 E::Name(name) => {
-                    if generic_values.contains(name) || generic_constructors.contains(name) {
+                    if generic_values.contains(name) {
                         return Err(
                             "generic value/constructor inference is unsupported before checking"
                                 .into(),
                         );
                     }
+                    // Generic constructors infer their arguments locally; the
+                    // growth envelope bounds them before the checker runs.
+                    has_generic_growth |= generic_constructors.contains(name);
                 }
                 E::Tuple(es) => {
                     has_tuple_growth |= !es.is_empty();
@@ -727,11 +746,7 @@ fn ast_items_guard(
                     }
                 }
                 E::Struct { name, fields, .. } => {
-                    if generic_constructors.contains(name) {
-                        return Err(
-                            "generic aggregate construction is unsupported before checking".into(),
-                        );
-                    }
+                    has_generic_growth |= generic_constructors.contains(name);
                     for (_, e) in fields {
                         stack.push((Node::Expr(e), next));
                     }
@@ -835,7 +850,7 @@ fn ast_items_guard(
             },
         }
     }
-    if has_tuple_growth {
+    if has_tuple_growth || has_generic_growth {
         tuple_growth::guard(items, limits)?;
     }
     Ok(())

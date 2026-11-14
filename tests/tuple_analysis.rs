@@ -145,7 +145,6 @@ fn unresolved_calls_higher_order_and_generic_projection_refuse_explicitly() {
     for source in [
         "fn f(){let x=unknown();(x,x)}",
         "fn f(in g:fn()->(i64,i64)){let x=g();(x,x)}",
-        "fn f(in p:Option[(i64,i64)]){(p.value,)}",
         "fn f(){let x=(1,2);(x[0],)}",
         "trait Pair{fn pair(in self)->(i64,i64);} fn f()->(i64,){(1,)}",
         "copy struct P{} impl P{fn pair(in self)->(i64,i64){(1,2)}}",
@@ -157,6 +156,19 @@ fn unresolved_calls_higher_order_and_generic_projection_refuse_explicitly() {
             "{source}: {result:?}"
         );
     }
+}
+#[test]
+fn generic_projection_is_bounded_and_reaches_the_checker() {
+    // Generic nominal fields are bounded by substituting the value's type
+    // arguments, so an unknown field is the checker's diagnostic.
+    let result = check_source(
+        "fn f(in p:Option[(i64,i64)]){(p.value,)}",
+        Default::default(),
+    );
+    assert!(
+        matches!(result, Err(AnalysisFailure::Semantic { ref diagnostics }) if diagnostics[0].code == "E0202"),
+        "{result:?}"
+    );
 }
 #[test]
 fn ill_typed_wrapping_calls_cannot_hide_tuple_growth() {
