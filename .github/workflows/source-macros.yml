@@ -82,7 +82,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      # cargo-fmt hands every workspace target root to one rustfmt command,
+      # which is longer than Windows allows (os error 206). Formatting does
+      # not depend on the host, so the Linux leg checks it for everyone.
       - name: Check formatting
+        if: runner.os == 'Linux'
         run: cargo fmt --all -- --check
       - name: Assert default CLI graph does not require Wasmtime
         run: >-

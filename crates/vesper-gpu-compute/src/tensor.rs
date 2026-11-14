@@ -17,7 +17,7 @@
 //! `position % 16 == 0`, addressed through a per-session page table.
 use vesper_tensor::attention::AttentionShape;
 use vesper_tensor::kv::TOKENS_PER_PAGE;
-use vesper_tensor::llama::{BOS, Config, Model, RMS_EPSILON, ROPE_BASE};
+use vesper_tensor::llama::{BOS, Config, Model, RMS_EPSILON, ROPE_BASE, RopeStyle};
 use vesper_tensor::ops::argmax;
 use vesper_tensor::quant::Matrix;
 
@@ -309,12 +309,9 @@ pub fn rope_frequencies(head_dim: usize, base: f32) -> Result<Vec<f32>, GpuError
 }
 
 fn f32_matrix(m: &Matrix) -> Result<&[f32], GpuError> {
-    match m {
-        Matrix::F32 { data, .. } => Ok(data),
-        _ => Err(GpuError::Unsupported(
-            "GPU decoding takes FP32 weights; Q8_0/Q4_0 kernels are not implemented",
-        )),
-    }
+    m.as_f32().ok_or(GpuError::Unsupported(
+        "GPU decoding takes FP32 weights; quantized kernels are not implemented",
+    ))
 }
 
 #[derive(Debug)]
@@ -367,6 +364,16 @@ impl GpuModel {
         if config.head_dim() > MAX_HEAD_DIM {
             return Err(GpuError::Limit("model head width"));
         }
+        // The kernels hard-code llama2.c's interleaved RoPE, its base and the
+        // RMSNorm epsilon.
+        if config.rope != RopeStyle::Interleaved
+            || config.rope_base != ROPE_BASE
+            || config.rms_epsilon != RMS_EPSILON
+        {
+            return Err(GpuError::Unsupported(
+                "GPU decoding takes interleaved RoPE with base 10000 and RMSNorm epsilon 1e-5",
+            ));
+        }
         let mut layers = Vec::with_capacity(model.layers().len());
         for l in model.layers() {
             layers.push(GpuLayer {
@@ -386,7 +393,7 @@ impl GpuModel {
             kernels: TensorKernels::new(ctx)?,
             config,
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            embedding: model.embedding().to_vec(),
+            embedding: f32_matrix(model.embedding())?.to_vec(),
             layers,
             rms_final: ctx.buffer_from(model.rms_final())?,
             classifier: ctx.buffer_from(f32_matrix(model.classifier())?)?,

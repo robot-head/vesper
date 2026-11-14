@@ -1,0 +1,9 @@
+// A box allocated after a checkpoint is dead after the rewind.
+fn main() -> i64 {
+    region r {
+        let m = r.checkpoint();
+        let b = r.box(1);
+        r.rewind(m);
+        r.get(b)
+    }
+}

@@ -1,0 +1,50 @@
+// Enums are inductive types; named and positional patterns, Fail on overflow.
+enum Shape {
+    Circle {
+        r: u64
+    },
+    Rect {
+        w: u64,
+        h: u64
+    },
+    Empty,
+}
+
+fn area(sink s: Shape) -> u64 eff [Fail[ArithOverflow]] {
+    match s {
+        Shape::Circle {
+            r
+        }
+        => 3 * r * r,
+        Shape::Rect {
+            h,
+            w
+        }
+        => w * h,
+        Shape::Empty => 0,
+    }
+}
+
+fn is_round(sink s: Shape) -> bool {
+    match s {
+        Shape::Circle {
+            r
+        }
+        => true,
+        _ => false,
+    }
+}
+
+fn main() -> u64 {
+    handle Fail[ArithOverflow] in {
+        area(
+            Shape::Rect {
+                w: 6,
+                h: 7
+            }
+        )
+    } with {
+        return value => value,
+        raise(error, resume) => 0,
+    }
+}

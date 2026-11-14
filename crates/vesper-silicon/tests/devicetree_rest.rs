@@ -271,15 +271,18 @@ fn starfive_visionfive2_nested_ranges_and_pcie_intc() {
 }
 
 #[test]
-fn starfive_visionfive1_noncoherent_without_zicbom_is_refused() {
+fn starfive_visionfive1_noncoherent_without_zicbom_uses_the_ccache() {
     // The JH7100 SoC bus is dma-noncoherent and its U74 harts have no
-    // Zicbom (Linux maintains it with the SiFive cache controller's flush
-    // registers, which this model does not cover): a typed refusal.
+    // Zicbom: Linux maintains it with the SiFive cache controller's FLUSH64
+    // register (wave eight lane 26 models it; it used to be a refusal).
     let p = Platform::from_dtb(VF1).unwrap();
-    assert!(matches!(
-        p.dma_coherence("/soc/serial@12440000"),
-        Err(DtbError::NoCacheBlockManagement { .. })
-    ));
+    assert_eq!(
+        p.dma_coherence("/soc/serial@12440000").unwrap(),
+        DmaCoherence::SifiveCcache {
+            flush64: 0x0201_0200,
+            line_bytes: 64,
+        }
+    );
     let srcs: Vec<_> = p.reservations.iter().map(|r| r.range).collect();
     assert_eq!(
         srcs,

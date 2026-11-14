@@ -13,7 +13,7 @@
 //! after its closing period.
 
 use vesper_warp::endpoint::{Responder as WarpResponder, TxTap, WarpEndpoint, WarpError};
-use vesper_warp::stream::{Role, StreamError, stream_id};
+use vesper_warp::stream::{Priority, Role, StreamError, stream_id};
 use vesper_warp_shard::SlotHandle;
 use vesper_warp_umem::XskBackend;
 
@@ -97,6 +97,17 @@ impl<B: XskBackend, R: WarpResponder, T: TxTap> Transport for WarpTransport<'_, 
                 fin: r.fin,
             })
             .map_err(map)
+    }
+
+    fn set_priority(&mut self, stream_id: u64, urgency: u8, incremental: bool) {
+        let _ = self.endpoint.stream_set_priority(
+            self.conn,
+            stream_id,
+            Priority {
+                urgency: urgency.min(7),
+                incremental,
+            },
+        );
     }
 
     fn reset(&mut self, stream_id: u64, code: Code) {

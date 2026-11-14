@@ -1,0 +1,21 @@
+// A bounded loop is a tail-recursive helper over its loop-carried values.
+fn sum_to(i: u64, n: u64, acc: u64) -> u64 eff [Fail[ArithOverflow]] {
+    if i > n {
+        acc
+    } else {
+        sum_to(i + 1, n, acc + i)
+    }
+}
+
+fn triangle(n: u64) -> u64 eff [Fail[ArithOverflow]] {
+    sum_to(1, n, 0)
+}
+
+fn main() -> u64 {
+    handle Fail[ArithOverflow] in {
+        triangle(10)
+    } with {
+        return value => value,
+        raise(error, resume) => 0,
+    }
+}

@@ -31,7 +31,7 @@ pub enum MessageError {
     ContentLengthMismatch,
     /// `:status` not three digits, or an informational status as final.
     InvalidStatus,
-    /// CONNECT and extended CONNECT are not supported.
+    /// Plain CONNECT (without `:protocol`) is not supported.
     UnsupportedConnect,
 }
 
@@ -43,6 +43,10 @@ pub struct RequestHead {
     /// `:authority`, or else the `host` field.
     pub authority: Option<String>,
     pub path: String,
+    /// `:protocol` of an extended CONNECT (RFC 9220); `None` otherwise.
+    /// The connection refuses it unless it sent
+    /// SETTINGS_ENABLE_CONNECT_PROTOCOL.
+    pub protocol: Option<String>,
     /// Regular fields, in order.
     pub fields: Vec<Field>,
     pub content_length: Option<u64>,
@@ -125,14 +129,16 @@ fn split(fields: Vec<Field>) -> Result<(Vec<Field>, Vec<Field>), MessageError> {
 
 pub fn parse_request(fields: Vec<Field>) -> Result<RequestHead, MessageError> {
     let (pseudo, fields) = split(fields)?;
-    let (mut method, mut scheme, mut authority, mut path) = (None, None, None, None);
+    let (mut method, mut scheme, mut authority, mut path, mut protocol) =
+        (None, None, None, None, None);
     for p in pseudo {
         let slot = match &p.name[..] {
             b":method" => &mut method,
             b":scheme" => &mut scheme,
             b":authority" => &mut authority,
             b":path" => &mut path,
-            // Includes :protocol (extended CONNECT, RFC 9220) and :status.
+            b":protocol" => &mut protocol,
+            // Includes :status.
             _ => return Err(MessageError::UnknownPseudoHeader),
         };
         if p.value.iter().any(|&b| b <= b' ' || b == 0x7f) {
@@ -148,8 +154,14 @@ pub fn parse_request(fields: Vec<Field>) -> Result<RequestHead, MessageError> {
     {
         return Err(MessageError::InvalidPseudoHeader);
     }
-    if method == "CONNECT" {
-        return Err(MessageError::UnsupportedConnect);
+    // Extended CONNECT (RFC 9220 §3, RFC 8441 §4) carries :protocol,
+    // :scheme, :path and :authority; :protocol on any other method is
+    // malformed. Plain CONNECT (a TCP tunnel) is not supported.
+    match (method == "CONNECT", &protocol) {
+        (true, None) => return Err(MessageError::UnsupportedConnect),
+        (false, Some(_)) => return Err(MessageError::InvalidPseudoHeader),
+        (true, Some(p)) if p.is_empty() => return Err(MessageError::InvalidPseudoHeader),
+        _ => {}
     }
     let scheme = scheme.ok_or(MessageError::MissingPseudoHeader)?;
     let path = path.ok_or(MessageError::MissingPseudoHeader)?;
@@ -175,11 +187,15 @@ pub fn parse_request(fields: Vec<Field>) -> Result<RequestHead, MessageError> {
         return Err(MessageError::MissingPseudoHeader);
     }
     let content_length = content_length(&fields)?;
+    if protocol.is_some() && authority.as_deref().is_none_or(str::is_empty) {
+        return Err(MessageError::MissingPseudoHeader);
+    }
     Ok(RequestHead {
         method,
         scheme,
         authority,
         path,
+        protocol,
         fields,
         content_length,
     })
@@ -272,7 +288,26 @@ mod tests {
             ),
             (
                 vec![(":protocol", "websocket")],
-                MessageError::UnknownPseudoHeader,
+                MessageError::MissingPseudoHeader,
+            ),
+            (
+                vec![
+                    (":method", "GET"),
+                    (":protocol", "websocket"),
+                    (":scheme", "https"),
+                    (":authority", "a"),
+                    (":path", "/"),
+                ],
+                MessageError::InvalidPseudoHeader,
+            ),
+            (
+                vec![
+                    (":method", "CONNECT"),
+                    (":protocol", "webtransport"),
+                    (":authority", "a"),
+                    (":path", "/"),
+                ],
+                MessageError::MissingPseudoHeader,
             ),
             (
                 vec![(":method", "CONNECT"), (":authority", "a:443")],
