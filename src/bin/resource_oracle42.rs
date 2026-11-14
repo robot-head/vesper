@@ -27,7 +27,9 @@ fn options() -> Result<Option<Options>, String> {
     let mut lean = std::env::var_os("VESPER_LEAN")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("lean"));
-    let mut repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut repo_root = std::env::var_os("BUILD_WORKSPACE_DIRECTORY")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
     let mut request = None;
     let mut artifacts = None;
     while let Some(arg) = args.next() {
@@ -113,6 +115,7 @@ fn main() -> ExitCode {
             println!(
                 "resource_oracle42 --request FILE [--lean PATH] [--repo-root PATH] [--artifacts DIR]\n\
                  Serve one sequence-zero JSON request using the finite resource model.\n\
+                 Source root defaults to the Bazel runtime workspace or current directory.\n\
                  A model refusal is returned as data; transport/build failures exit nonzero.\n\
                  This endpoint does not execute Vesper source or a native backend."
             );
