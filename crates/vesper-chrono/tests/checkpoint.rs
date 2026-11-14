@@ -37,6 +37,7 @@ fn image_round_trips_and_rejects_damage() {
             tag: ResumeTag::Value,
             value: 0,
         }],
+        image: Some(vec![7; 24]),
     };
     let limits = CheckpointLimits::default();
     let bytes = c.encode();
@@ -72,7 +73,8 @@ fn image_round_trips_and_rejects_damage() {
         target_os = "linux",
         any(target_arch = "x86_64", target_arch = "aarch64")
     ),
-    all(target_os = "macos", target_arch = "aarch64")
+    all(target_os = "macos", target_arch = "aarch64"),
+    all(target_os = "windows", target_arch = "x86_64")
 ))]
 mod native {
     use super::*;
