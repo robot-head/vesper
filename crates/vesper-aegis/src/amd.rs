@@ -10,8 +10,20 @@
 //! carries that decision and maps it to [`TcbStatus`]: `UpToDate` at or
 //! above the baseline, `OutOfDate` below it. `Revoked` comes from the CRL
 //! (a revoked ASK/ASVK is an [`AttestError::Revoked`]).
+//!
+//! Report versions 2–5 are accepted (see [`crate::snp`]). From version 3
+//! the report names its processor (CPUID family/model), which must be the
+//! collateral's product: a Genoa report cannot be checked against a Milan
+//! chain even if a certificate happened to verify.
+//!
+//! Anti-rollback: [`VerifiedSnpReport::crl_this_update`] records the ARK
+//! CRL's `thisUpdate`; [`check_snp_crl_floor`] rejects a CRL older than
+//! one already accepted ([`AttestError::CollateralDowngrade`]).
 
-use crate::chain::{Curve, RevocationScope, TrustRoot, verify_chain, verify_chain_with_crls};
+use crate::chain::{
+    Curve, RevocationScope, TrustRoot, crl_this_update, pem_certificates, verify_chain,
+    verify_chain_with_crls,
+};
 use crate::error::AttestError;
 use crate::intel::TcbStatus;
 use crate::roots::{AmdProduct, AmdSigningKey, amd_intermediate};
@@ -165,6 +177,20 @@ fn ext_string(value: &[u8], what: &str) -> Result<String, AttestError> {
         .map_err(|_| ext_err(format!("{what}: not a string")))
 }
 
+fn hw_id_len(product: AmdProduct) -> usize {
+    if product == AmdProduct::Turin { 8 } else { 64 }
+}
+
+/// The hwID extension value: raw chip ID bytes, or a DER `OCTET STRING`
+/// holding them. Any other length is an error (reported by the caller).
+fn hw_id_value(value: &[u8], product: AmdProduct) -> Result<Vec<u8>, AttestError> {
+    let n = hw_id_len(product);
+    if value.len() == n + 2 && value[0] == 0x04 && usize::from(value[1]) == n {
+        return Ok(value[2..].to_vec());
+    }
+    Ok(value.to_vec())
+}
+
 /// Parse the AMD extensions of a VCEK/VLEK certificate (DER).
 pub fn parse_amd_cert_extensions(
     cert_der: &[u8],
@@ -207,8 +233,10 @@ pub fn parse_amd_cert_extensions(
             }
             "3.8" => ucode.replace(ext_u8(e.value, "ucodeSPL")?).is_some(),
             "3.9" => fmc.replace(ext_u8(e.value, "fmcSPL")?).is_some(),
-            // hwID: the raw chip ID is the extension value itself.
-            "4" => hw_id.replace(e.value.to_vec()).is_some(),
+            // hwID: the chip ID, either as the raw extension value (AMD's
+            // KDS certificates) or wrapped in a DER OCTET STRING (as some
+            // later issuers encode it); the two are told apart by length.
+            "4" => hw_id.replace(hw_id_value(e.value, product)?).is_some(),
             "5" => csp_id.replace(ext_string(e.value, "cspID")?).is_some(),
             other => return Err(ext_err(format!("unknown AMD extension .{other}"))),
         };
@@ -230,7 +258,7 @@ pub fn parse_amd_cert_extensions(
         (_, None) => None,
     };
     if let Some(id) = &hw_id {
-        let want = if product == AmdProduct::Turin { 8 } else { 64 };
+        let want = hw_id_len(product);
         if id.len() != want {
             return Err(ext_err(format!(
                 "hwID is {} bytes, expected {want}",
@@ -267,6 +295,38 @@ pub struct SnpCollateral {
     pub crl_der: Option<Vec<u8>>,
 }
 
+impl SnpCollateral {
+    /// Collateral from a KDS `cert_chain` response (`ASK` or `ASVK`, then
+    /// `ARK`, PEM): the chain must hold exactly two certificates, and the
+    /// ARK must be byte-identical to the pinned ARK for `product` (KDS
+    /// serves a copy of the root that path building would otherwise
+    /// ignore). The intermediate is used as served.
+    pub fn from_kds_cert_chain(
+        product: AmdProduct,
+        signing_key: AmdSigningKey,
+        leaf_der: Vec<u8>,
+        cert_chain_pem: &[u8],
+        crl_der: Option<Vec<u8>>,
+    ) -> Result<Self, AttestError> {
+        let certs = pem_certificates(cert_chain_pem)?;
+        let [intermediate, ark] = <[Vec<u8>; 2]>::try_from(certs).map_err(|_| {
+            AttestError::CertificateChain("KDS cert_chain must hold ASK/ASVK and ARK".into())
+        })?;
+        if ark.as_slice() != crate::roots::amd_ark(product).der()? {
+            return Err(AttestError::CertificateChain(
+                "KDS cert_chain ARK is not the pinned ARK".into(),
+            ));
+        }
+        Ok(SnpCollateral {
+            product,
+            signing_key,
+            leaf_der,
+            intermediate_der: Some(intermediate),
+            crl_der,
+        })
+    }
+}
+
 /// An SEV-SNP report whose chain, signature and certificate binding
 /// verified.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -279,6 +339,29 @@ pub struct VerifiedSnpReport {
     /// `None` when no baseline was supplied.
     pub status: Option<TcbStatus>,
     pub revocation_checked: bool,
+    /// The ARK CRL's `thisUpdate` (Unix seconds), when a CRL was checked.
+    pub crl_this_update: Option<u64>,
+}
+
+/// Reject an ARK CRL older than one the verifier already accepted: `floor`
+/// is the latest `thisUpdate` (Unix seconds) seen for the product. A
+/// verification without a CRL passes only when `floor` is `None`.
+pub fn check_snp_crl_floor(
+    verified: &VerifiedSnpReport,
+    floor: Option<u64>,
+) -> Result<(), AttestError> {
+    match (floor, verified.crl_this_update) {
+        (None, _) => Ok(()),
+        (Some(_), None) => Err(AttestError::MissingCollateral {
+            what: "ARK CRL (a newer one was accepted before)",
+        }),
+        (Some(floor), Some(have)) if have < floor => Err(AttestError::CollateralDowngrade {
+            what: "ARK CRL thisUpdate",
+            have,
+            floor,
+        }),
+        _ => Ok(()),
+    }
 }
 
 /// Verify an SEV-SNP report against its VCEK/VLEK, the ASK/ASVK and the
@@ -302,6 +385,25 @@ pub fn verify_snp_collateral(
     baseline: Option<&SnpTcbBaseline>,
 ) -> Result<VerifiedSnpReport, AttestError> {
     let report = SnpReport::parse(bytes)?;
+    if report.version >= 3 {
+        match report.product() {
+            Some(p) if p == collateral.product => {}
+            Some(_) => {
+                return Err(AttestError::CollateralMismatch {
+                    what: "report CPUID product vs collateral product",
+                });
+            }
+            None => {
+                return Err(AttestError::Collateral {
+                    what: "SNP report CPUID",
+                    reason: format!(
+                        "unknown processor family {:#04x} model {:#04x}",
+                        report.cpuid[0], report.cpuid[1]
+                    ),
+                });
+            }
+        }
+    }
     let key = match report.signing_key() {
         0 => AmdSigningKey::Vcek,
         1 => AmdSigningKey::Vlek,
@@ -334,6 +436,11 @@ pub fn verify_snp_collateral(
         )?,
         None => verify_chain(&collateral.leaf_der, &chain, root, now_ns, Curve::P384)?,
     };
+    let crl_this_update = collateral
+        .crl_der
+        .as_deref()
+        .map(crl_this_update)
+        .transpose()?;
     let certificate = parse_amd_cert_extensions(&collateral.leaf_der, collateral.product)?;
     let reported_tcb = AmdTcb::from_raw(collateral.product, report.reported_tcb)?;
     if certificate.tcb != reported_tcb {
@@ -379,5 +486,6 @@ pub fn verify_snp_collateral(
         certificate,
         reported_tcb,
         revocation_checked: collateral.crl_der.is_some(),
+        crl_this_update,
     })
 }
