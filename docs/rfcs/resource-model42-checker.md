@@ -3,9 +3,10 @@
 Implementation checkpoint under [the frozen model contract](resource-model42-contracts.md).
 The checker lane owns only `lean/ResourceModel42/Checker.lean` and this report.
 The compiled Syntax dependency is d51a21b. Checker source checkpoint b9ce0c0
-contains actual type/ownership inference and its opaque checked wrapper. The
-independent Proofs module still owns the substantive typing theorem; compiling
-this checker is not presented as that theorem or as source refinement.
+contains actual type/ownership inference and its opaque checked wrapper. The separately claimed `CheckerProofs.lean` checkpoint9be3eae now proves the
+substantive checker-to-Full typing theorem. Runtime/ledger/substitution/closure
+and operational release proofs remain owned by their separate modules. No
+source/compiler refinement is inferred from this finite model.
 
 The admitted pure ANF fragment contains unit, bounded u64-like naturals,
 de Bruijn locals, strict let, structural binary pair/full unpack, numeric-zero
@@ -73,14 +74,90 @@ inference-success equation, not a substitute for the independently owned
 are available for those proofs to unfold; the real auditor must receive
 semantic theorem roots, not definition names.
 
-Actual validation so far: pinned Lean 4.24 compiled Checker b9ce0c0 successfully
-against immutable compiled Syntax/Full dependencies. The final successful
-compile log `/tmp/resource-model42-checker-v1.log` is empty. Its immutable
-source/object checkpoint is `/tmp/resource-model42-checker-api-v1`. Git diff
-checks passed and two independent source reviewers found no blocker. An
-initial scratch semantic smoke command failed because its temporary helper
-used equality on Except without a DecidableEq instance; that is a test-helper
-failure, not successful semantic evidence. No scratch assertion pass is
-claimed. The helper was corrected without another compilation after the
-explicit compiler-lease handoff. Independent fixed semantic acceptance and
-actual transitive kernel audit remain pending; no Cargo command was run here.
+Actual source and validation:
+
+- Checker b9ce0c0 compiled with pinned Lean 4.24 against immutable Syntax/Full.
+- CheckerProofs9be3eae compiled with the same real compiler, no errors or
+  warnings. `inferAtom_success_sound` and `infer_success_sound` construct actual
+  `Full.HasType` with empty resources/row from inference success and strong
+  ContextFits. `checkedProgram_declared_sound` discharges the context condition
+  from the independently validated copy-only initial declarations, without a
+  caller typing or ownership-mask premise.
+- All 24 fixed handwritten smoke assertions passed after correcting the
+  temporary helper's missing Except equality instance. The earlier helper
+  failure was not counted as a semantic pass. Cases cover copy reuse,
+  noncopy overlap, ownership-return acceptance, linear scope loss, strict
+  unused initializers, full-unpack indices, both branch arms, linear-first
+  mismatch classification, affine-only refusal, field restriction, natural
+  range, finite input usage and inferred copy-pair type expansion.
+- Real Lean `#print axioms` on the atom/inference/checked/declared soundness
+  roots found only propext, Classical.choice and Quot.sound; the inference
+  length root uses only propext. This preliminary query is not a substitute
+  for the independently owned complete kernel replay and axiom audit.
+
+Logs are `/tmp/resource-model42-checker-v1.log`,
+`/tmp/resource-model42-checker-proofs-v1.log`,
+`/tmp/resource-model42-checker-smoke-v2.log` and
+`/tmp/resource-model42-checker-axiom-smoke-v1.log`. The first three successful
+logs are empty. Immutable complete proof sources/objects are at
+`/tmp/resource-model42-checker-proofs-api-v1`. Git diff checks passed; two
+independent source reviews of the checker found no blocker. Compiler leases
+were explicitly released after commands exited. No Cargo command ran here.
+
+## Complete CheckerProofs theorem catalog
+
+All 42 explicit named theorems are public, under the prefix
+`Vesper.ResourceModel42.CheckerProofs.`. Every entry must participate in the
+actual theorem-only audit; none is a definition submitted as a theorem root.
+The checker module's additional root `Vesper.ResourceModel42.CheckedProgram.check_ok`
+remains in the separate catalog above.
+
+```text
+sourceAtom_isAtom
+split_right_all
+frame_empty_row
+contextFits_demand
+contextFits_absent
+mode_discardable_of_ne_linear
+demand_zero
+demand_succ
+zeroUsage_demand
+singletonUsage_demand
+usageUnion_demand
+firstOverlap_none_disjoint
+mergeUsage_disjoint
+mergeUsage_union
+entryFits_split
+contextFits_entry
+contextFits_split
+contextFits_full_binding
+contextFits_unused_binding
+contextFits_zero_discard
+contextFits_singleton_lookup
+contextFits_singleton_rest
+checkBinderUse_linear
+contextFits_extend
+usage_tail_tail
+firstDemandMismatch_none_equal
+mergeBranchUsage_properties
+entryFits_branches
+contextFits_branches
+except_bind_success
+liftType_success
+inferAtom_success_sound
+infer_success_sound
+checkedProgram_success_sound
+contextFits_declared_copy
+checkedProgram_declared_sound
+zeroUsage_length
+singletonUsage_length
+usageUnion_length
+mergeUsage_length
+inferAtom_success_length
+infer_success_length
+```
+
+These are actual constructive checker proofs, not completeness for Full/Rust,
+full diagnostic agreement, execution correspondence, or a resource campaign.
+The separately owned complete model acceptance and transitive kernel audit
+remain required release evidence.
