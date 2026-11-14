@@ -31,19 +31,48 @@
 //! then fail with [`NetFail::Timeout`]. Non-blocking drivers call
 //! [`WarpNet::step`] themselves.
 //!
-//! What this is not: keys come from fixed per-link secrets
-//! ([`WarpEndpoint::open_connection`], "keys from a TLS stack") rather than
-//! from Warp's TLS 1.3 handshake, there is no real NIC or kernel, and the
-//! QUIC stack is exercised only on this software link.
+//! Security: every link is a real QUIC connection opened by Warp's TLS 1.3
+//! handshake (RFC 9001, rustls with aws-lc-rs) with **mutual**
+//! authentication. Each host has a certificate from the [`WarpTls`] PKI;
+//! the lower-numbered host of a pair is the QUIC client, checks that the
+//! server's certificate chains to the PKI roots and is valid for the
+//! server host's name, and presents its own certificate, which the server
+//! checks against the roots and the client host's name. 1-RTT keys come
+//! only from the handshake; there are no caller-supplied secrets. A link
+//! whose handshake fails or does not finish within
+//! [`WarpNetConfig::handshake_steps`] makes [`WarpNet::new`] fail with
+//! [`WarpNetError::Handshake`]. After the handshake, the lifecycle of the
+//! wave-six Warp endpoint applies: [`WarpNet::key_update`] runs an RFC 9001
+//! §6 key update under live session traffic, and [`WarpNet::close_link`]
+//! sends CONNECTION_CLOSE, after which sessions on that link fail with
+//! [`NetFail::Closed`] on both hosts.
+//!
+//! What this is not: there is no real NIC or kernel, and the QUIC stack is
+//! exercised only on this software link. No 0-RTT, Retry or migration is
+//! used.
 
 use crate::chor::RoleId;
 use crate::session::{Frame, NetFail, Transport};
 use crate::simnet::SplitMix;
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 use std::sync::mpsc;
-use vesper_warp::endpoint::{Discard, EndpointConfig, RxOutcome, TxTap, WarpEndpoint};
+use vesper_warp::endpoint::{
+    ConnectionError, Discard, EndpointConfig, RxOutcome, TxTap, WarpEndpoint, WarpError,
+};
+use vesper_warp::handshake::tls::rustls::{
+    self, DigitallySignedStruct, DistinguishedName, RootCertStore, SignatureScheme,
+    client::danger::HandshakeSignatureValid,
+    pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime},
+    server::danger::{ClientCertVerified, ClientCertVerifier},
+    server::{ParsedCertificate, WebPkiClientVerifier},
+};
+use vesper_warp::handshake::tls::{FixedTime, config::provider};
+use vesper_warp::handshake::{
+    CidSource, ClientSetup, ConnectionEvent, HandshakePhase, Listener, ServerSetup,
+};
 use vesper_warp::stream::{Role, StreamConfig, StreamEvent};
-use vesper_warp_crypto::{Cipher, OneRttKeys, TrafficSecret};
+use vesper_warp_crypto::Cipher;
 use vesper_warp_shard::SlotHandle;
 use vesper_warp_umem::{SoftNic, SoftNicMode, UmemConfig};
 
@@ -57,6 +86,60 @@ const TAG_ABANDON: u8 = 2;
 pub const MAX_NAME_LEN: usize = 64;
 /// STOP_SENDING / RESET_STREAM application error code for malformed input.
 pub const ERR_MALFORMED: u64 = 0x5643_0001;
+/// ALPN protocol identifier of Chorus session links.
+pub const ALPN: &[u8] = b"vesper-chorus/1";
+
+/// One host's identity: the DNS name its certificate is valid for, the
+/// certificate chain (end entity first) and the private key.
+#[derive(Debug)]
+pub struct HostCredential {
+    pub name: String,
+    pub chain: Vec<CertificateDer<'static>>,
+    pub key: PrivateKeyDer<'static>,
+}
+
+impl Clone for HostCredential {
+    fn clone(&self) -> Self {
+        Self {
+            name: self.name.clone(),
+            chain: self.chain.clone(),
+            key: self.key.clone_key(),
+        }
+    }
+}
+
+/// The PKI of a [`WarpNet`]: trust anchors and one credential per host.
+#[derive(Clone, Debug)]
+pub struct WarpTls {
+    /// Trust anchors (DER) for both server and client certificates.
+    pub roots: Vec<CertificateDer<'static>>,
+    /// `hosts[i]` is host `i`'s identity; at least `nodes` entries.
+    pub hosts: Vec<HostCredential>,
+    /// Certificate validity is checked at this time (`None`: the system
+    /// clock). Simulations fix it for reproducibility.
+    pub time: Option<UnixTime>,
+}
+
+/// Security state of one link, as both endpoints report it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkInfo {
+    /// Client host (the lower number) and server host.
+    pub client: u32,
+    pub server: u32,
+    /// Handshake phase at the client and at the server.
+    pub phase: [HandshakePhase; 2],
+    /// Negotiated ALPN at the client and the server.
+    pub alpn: [Option<Vec<u8>>; 2],
+    /// The end-entity certificate each side received from its peer.
+    pub peer_certificate: [Option<Vec<u8>>; 2],
+    pub cipher: [Option<Cipher>; 2],
+    /// 1-RTT key generations (send, receive) at each side.
+    pub generations: [(u64, u64); 2],
+    /// Steps of virtual time the handshake took to be confirmed.
+    pub handshake_steps: u32,
+    /// The connection's error at each side, once it closed.
+    pub error: [Option<ConnectionError>; 2],
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WarpNetConfig {
@@ -78,6 +161,9 @@ pub struct WarpNetConfig {
     pub max_streams_uni: u64,
     /// Largest frame body accepted from the wire.
     pub max_body: u32,
+    /// Steps every link's TLS handshake may take before
+    /// [`WarpNet::new`] fails.
+    pub handshake_steps: u32,
 }
 
 impl Default for WarpNetConfig {
@@ -92,6 +178,7 @@ impl Default for WarpNetConfig {
             max_wait_steps: 20_000,
             max_streams_uni: 64,
             max_body: 64 * 1024,
+            handshake_steps: 4_000,
         }
     }
 }
@@ -120,6 +207,15 @@ pub struct WarpNetStats {
     pub stream_bytes_retransmitted: u64,
     /// Stream events the QUIC stack dropped (must stay 0).
     pub events_dropped: u64,
+    /// TLS handshakes confirmed (one per link).
+    pub handshakes: u64,
+    /// Longest handshake, in steps.
+    pub max_handshake_steps: u64,
+    /// Key updates requested with [`WarpNet::key_update`].
+    pub key_updates: u64,
+    /// 1-RTT packets that failed authentication (sum over endpoints; must
+    /// stay 0 on an honest wire).
+    pub authentication_failures: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -127,6 +223,14 @@ pub enum WarpNetError {
     Config(&'static str),
     /// A Warp endpoint failed to build.
     Warp(String),
+    /// The PKI could not be turned into a TLS configuration.
+    Tls(String),
+    /// A link's TLS handshake failed or did not finish in time.
+    Handshake {
+        client: u32,
+        server: u32,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for WarpNetError {
@@ -134,6 +238,12 @@ impl std::fmt::Display for WarpNetError {
         match self {
             Self::Config(m) => write!(f, "invalid WarpNet configuration: {m}"),
             Self::Warp(m) => write!(f, "Warp endpoint: {m}"),
+            Self::Tls(m) => write!(f, "TLS configuration: {m}"),
+            Self::Handshake {
+                client,
+                server,
+                reason,
+            } => write!(f, "TLS handshake {client} -> {server}: {reason}"),
         }
     }
 }
@@ -192,8 +302,9 @@ struct Side {
 
 struct Link {
     sides: [Side; 2],
+    handshake_steps: u32,
     /// Datagrams held back one step, per direction (0 → 1, 1 → 0).
-    held: [Vec<Vec<u8>>; 2],
+    held: Held,
     blocked: [bool; 2],
     failed: Option<String>,
 }
@@ -239,13 +350,188 @@ pub struct WarpNet {
     nodes: u32,
 }
 
-fn secret(seed: u64, link: usize, side: u8) -> Result<TrafficSecret, WarpNetError> {
-    let mut rng = SplitMix(seed ^ (link as u64).wrapping_mul(0x9e37) ^ (u64::from(side) << 56));
-    let mut bytes = [0u8; 32];
-    for chunk in bytes.chunks_mut(8) {
-        chunk.copy_from_slice(&rng.next_u64().to_le_bytes());
+/// Server connection IDs: deterministic per link, so runs are reproducible.
+struct LinkCids {
+    link: u8,
+    next: u8,
+}
+
+impl CidSource for LinkCids {
+    fn next_cid(&mut self, out: &mut [u8]) {
+        self.next = self.next.wrapping_add(1);
+        out.fill(0x53);
+        if let [a, b, ..] = out {
+            *a = self.link;
+            *b = self.next;
+        }
     }
-    TrafficSecret::new(Cipher::Aes128Gcm, &bytes).map_err(|e| WarpNetError::Warp(format!("{e:?}")))
+}
+
+/// Server-side client authentication: the chain must verify against the
+/// PKI roots (rustls's WebPKI verifier, client-auth usage) and the end
+/// entity must be valid for the expected client host's name.
+#[derive(Debug)]
+struct HostClientVerifier {
+    inner: Arc<dyn ClientCertVerifier>,
+    expected: ServerName<'static>,
+}
+
+impl ClientCertVerifier for HostClientVerifier {
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        self.inner.root_hint_subjects()
+    }
+
+    fn verify_client_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        now: UnixTime,
+    ) -> Result<ClientCertVerified, rustls::Error> {
+        let ok = self
+            .inner
+            .verify_client_cert(end_entity, intermediates, now)?;
+        let parsed = ParsedCertificate::try_from(end_entity)?;
+        rustls::client::verify_server_name(&parsed, &self.expected)?;
+        Ok(ok)
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> Result<HandshakeSignatureValid, rustls::Error> {
+        self.inner.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.inner.supported_verify_schemes()
+    }
+}
+
+fn tls_err(e: impl std::fmt::Display) -> WarpNetError {
+    WarpNetError::Tls(e.to_string())
+}
+
+fn time_provider(tls: &WarpTls) -> Arc<dyn rustls::time_provider::TimeProvider> {
+    match tls.time {
+        Some(t) => Arc::new(FixedTime(t)),
+        None => Arc::new(rustls::time_provider::DefaultTimeProvider),
+    }
+}
+
+fn roots(tls: &WarpTls) -> Result<RootCertStore, WarpNetError> {
+    let mut roots = RootCertStore::empty();
+    for r in &tls.roots {
+        roots.add(r.clone()).map_err(tls_err)?;
+    }
+    Ok(roots)
+}
+
+/// Host `me` connecting to another host: trusts the roots, presents its
+/// own certificate.
+fn client_setup(tls: &WarpTls, me: u32) -> Result<ClientSetup, WarpNetError> {
+    let cred = &tls.hosts[me as usize];
+    let config = rustls::ClientConfig::builder_with_details(provider(), time_provider(tls))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(tls_err)?
+        .with_root_certificates(roots(tls)?)
+        .with_client_auth_cert(cred.chain.clone(), cred.key.clone_key())
+        .map_err(tls_err)?;
+    ClientSetup::from_config(config, vec![ALPN.to_vec()]).map_err(tls_err)
+}
+
+/// Host `me` accepting a connection from host `client`.
+fn server_setup(tls: &WarpTls, me: u32, client: u32) -> Result<ServerSetup, WarpNetError> {
+    let cred = &tls.hosts[me as usize];
+    let inner = WebPkiClientVerifier::builder_with_provider(Arc::new(roots(tls)?), provider())
+        .build()
+        .map_err(tls_err)?;
+    let expected = ServerName::try_from(tls.hosts[client as usize].name.clone())
+        .map_err(|_| WarpNetError::Config("a host name is not a valid DNS name"))?;
+    let verifier = HostClientVerifier { inner, expected };
+    let config = rustls::ServerConfig::builder_with_details(provider(), time_provider(tls))
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(tls_err)?
+        .with_client_cert_verifier(Arc::new(verifier))
+        .with_single_cert(cred.chain.clone(), cred.key.clone_key())
+        .map_err(tls_err)?;
+    ServerSetup::from_config(config, vec![ALPN.to_vec()]).map_err(tls_err)
+}
+
+/// Datagrams held back one step, per direction (0 → 1, 1 → 0).
+type Held = [Vec<Vec<u8>>; 2];
+
+/// Carry one step of datagrams across a link in both directions, through
+/// the seeded loss, reordering, duplication and partition model.
+fn carry(
+    eps: [&mut Ep; 2],
+    held: &mut Held,
+    blocked: [bool; 2],
+    cfg: &WarpNetConfig,
+    rng: &mut SplitMix,
+    stats: &mut WarpNetStats,
+) {
+    let [e0, e1] = eps;
+    let mut eps = [e0, e1];
+    let chance =
+        |rng: &mut SplitMix, ppm: u32| ppm > 0 && rng.next_u64() % 1_000_000 < u64::from(ppm);
+    for dir in 0..2 {
+        let fresh: Vec<Vec<u8>> = eps[dir].tap_mut().out.drain(..).collect();
+        let old = std::mem::take(&mut held[dir]);
+        let mut now_out = Vec::new();
+        for d in fresh {
+            stats.datagrams += 1;
+            if blocked[dir] {
+                stats.partitioned += 1;
+            } else if chance(rng, cfg.loss_ppm) {
+                stats.dropped += 1;
+            } else if chance(rng, cfg.reorder_ppm) {
+                stats.reordered += 1;
+                held[dir].push(d);
+            } else {
+                if chance(rng, cfg.duplicate_ppm) {
+                    stats.duplicated += 1;
+                    now_out.push(d.clone());
+                }
+                now_out.push(d);
+            }
+        }
+        now_out.extend(old);
+        let rx = &mut eps[1 - dir];
+        for d in &now_out {
+            match rx.xsk_mut().backend_mut().deliver(d) {
+                vesper_warp_umem::DeliverOutcome::Delivered { .. } => {}
+                _ => stats.nic_dropped += 1,
+            }
+        }
+    }
+}
+
+/// Run both endpoints' receive paths, NICs and timers.
+fn drive(eps: [&mut Ep; 2], now: u64) -> Result<(), WarpError> {
+    let [a, b] = eps;
+    for _ in 0..4096 {
+        let x = a.poll_and_step_quic_rx_one(now)?;
+        let y = b.poll_and_step_quic_rx_one(now)?;
+        if x == RxOutcome::Idle && y == RxOutcome::Idle {
+            break;
+        }
+    }
+    for e in [a, b] {
+        e.xsk_mut().backend_mut().step();
+        e.poll(now)?;
+    }
+    Ok(())
 }
 
 fn validate(cfg: &WarpNetConfig) -> Result<(), WarpNetError> {
@@ -271,7 +557,15 @@ fn validate(cfg: &WarpNetConfig) -> Result<(), WarpNetError> {
     Ok(())
 }
 
-fn build_core(cfg: WarpNetConfig) -> Result<Core, WarpNetError> {
+fn build_core(cfg: WarpNetConfig, tls: WarpTls) -> Result<Core, WarpNetError> {
+    if tls.hosts.len() < cfg.nodes as usize {
+        return Err(WarpNetError::Config(
+            "the PKI needs one credential per host",
+        ));
+    }
+    if tls.roots.is_empty() {
+        return Err(WarpNetError::Config("the PKI has no trust anchor"));
+    }
     let streams = StreamConfig {
         max_streams_bidi: 0,
         max_streams_uni: cfg.max_streams_uni,
@@ -287,9 +581,12 @@ fn build_core(cfg: WarpNetConfig) -> Result<Core, WarpNetError> {
         idle_timeout_ns: u64::MAX / 4,
         ..EndpointConfig::default()
     };
-    let warp = |e: vesper_warp::endpoint::WarpError| WarpNetError::Warp(e.to_string());
+    let warp = |e: WarpError| WarpNetError::Warp(e.to_string());
+    let mut rng = SplitMix(cfg.seed ^ 0x7761_7270_6e65_7421);
+    let mut stats = WarpNetStats::default();
     let mut links = Vec::new();
     let mut index = BTreeMap::new();
+    let mut start = 0u64;
     for a in 0..cfg.nodes {
         for b in a + 1..cfg.nodes {
             let li = links.len();
@@ -306,22 +603,82 @@ fn build_core(cfg: WarpNetConfig) -> Result<Core, WarpNetError> {
             };
             let mut client = mk(Role::Client)?;
             let mut server = mk(Role::Server)?;
+            server
+                .listen(Listener::with_cids(
+                    server_setup(&tls, b, a)?,
+                    Box::new(LinkCids {
+                        link: li as u8,
+                        next: 0,
+                    }),
+                ))
+                .map_err(warp)?;
             let ccid = [b'c', b'h', b'o', b'r', 0, a as u8, b as u8, 1];
-            let scid = [b'c', b'h', b'o', b'r', 0, a as u8, b as u8, 2];
-            let keys = |l, r| -> Result<OneRttKeys, WarpNetError> {
-                OneRttKeys::new(
-                    secret(cfg.seed, li, l)?,
-                    secret(cfg.seed, li, r)?,
-                    100_000_000,
-                )
-                .map_err(|e| WarpNetError::Warp(format!("{e:?}")))
+            // RFC 9000 §7.2: an unpredictable original destination ID.
+            let odcid = rng.next_u64().to_be_bytes();
+            let hs_err = |reason: String| WarpNetError::Handshake {
+                client: a,
+                server: b,
+                reason,
             };
             let c_conn = client
-                .open_connection(&ccid, &scid, keys(0, 1)?, 0)
-                .map_err(warp)?;
-            let s_conn = server
-                .open_connection(&scid, &ccid, keys(1, 0)?, 0)
-                .map_err(warp)?;
+                .connect(
+                    &client_setup(&tls, a)?,
+                    &tls.hosts[b as usize].name,
+                    &ccid,
+                    &odcid,
+                    0,
+                )
+                .map_err(|e| hs_err(e.to_string()))?;
+            // Run the handshake over the lossy wire.
+            let mut held: Held = [Vec::new(), Vec::new()];
+            let mut s_conn = None;
+            let mut now = 0u64;
+            let mut steps = 0u32;
+            loop {
+                let done = client.handshake_phase(c_conn) == Some(HandshakePhase::Confirmed)
+                    && s_conn.is_some_and(|s| {
+                        server.handshake_phase(s) == Some(HandshakePhase::Confirmed)
+                    });
+                if done {
+                    break;
+                }
+                if steps >= cfg.handshake_steps {
+                    return Err(hs_err(format!(
+                        "not confirmed after {steps} steps (client {:?}, server {:?})",
+                        client.handshake_phase(c_conn),
+                        s_conn.and_then(|s| server.handshake_phase(s))
+                    )));
+                }
+                carry(
+                    [&mut client, &mut server],
+                    &mut held,
+                    [false; 2],
+                    &cfg,
+                    &mut rng,
+                    &mut stats,
+                );
+                drive([&mut client, &mut server], now).map_err(|e| hs_err(e.to_string()))?;
+                while let Some(ev) = server.poll_connection_event() {
+                    if let ConnectionEvent::Accepted(h) = ev {
+                        if s_conn.is_some() {
+                            return Err(hs_err("a second connection was accepted".into()));
+                        }
+                        s_conn = Some(h);
+                    }
+                }
+                while client.poll_connection_event().is_some() {}
+                for (ep, conn) in [(&client, Some(c_conn)), (&server, s_conn)] {
+                    if let Some(e) = conn.and_then(|c| ep.connection_error(c)) {
+                        return Err(hs_err(format!("{e:?}")));
+                    }
+                }
+                now += cfg.step_ns;
+                steps += 1;
+            }
+            start = start.max(now);
+            let s_conn = s_conn.expect("confirmed");
+            stats.handshakes += 1;
+            stats.max_handshake_steps = stats.max_handshake_steps.max(u64::from(steps));
             let side = |node, peer, ep, conn, peer_uni_base| Side {
                 node,
                 peer,
@@ -336,7 +693,8 @@ fn build_core(cfg: WarpNetConfig) -> Result<Core, WarpNetError> {
             // Uni stream IDs: client-initiated 2 + 4i, server 3 + 4i.
             links.push(Link {
                 sides: [side(a, b, client, c_conn, 3), side(b, a, server, s_conn, 2)],
-                held: [Vec::new(), Vec::new()],
+                handshake_steps: steps,
+                held,
                 blocked: [false; 2],
                 failed: None,
             });
@@ -345,25 +703,28 @@ fn build_core(cfg: WarpNetConfig) -> Result<Core, WarpNetError> {
     }
     Ok(Core {
         cfg,
-        now: 0,
-        rng: SplitMix(cfg.seed ^ 0x7761_7270_6e65_7421),
+        now: start,
+        rng,
         links,
         index,
         mail: Mail::default(),
-        stats: WarpNetStats::default(),
+        stats,
         scratch: vec![0; 64 * 1024],
     })
 }
 
 impl WarpNet {
-    pub fn new(cfg: WarpNetConfig) -> Result<Self, WarpNetError> {
+    /// Builds the network and runs every link's TLS handshake with the
+    /// credentials of `tls`.
+    pub fn new(cfg: WarpNetConfig, tls: &WarpTls) -> Result<Self, WarpNetError> {
         validate(&cfg)?;
+        let tls = tls.clone();
         let (tx, rx) = mpsc::channel::<Job>();
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
         std::thread::Builder::new()
             .name("chorus-warpnet".into())
             .spawn(move || {
-                let mut core = match build_core(cfg) {
+                let mut core = match build_core(cfg, tls) {
                     Ok(c) => {
                         let _ = ready_tx.send(Ok(()));
                         c
@@ -459,12 +820,86 @@ impl WarpNet {
                         let st = c.streams.stats();
                         s.stream_bytes_retransmitted += st.stream_bytes_retransmitted;
                         s.events_dropped += st.events_dropped;
+                        if let Some(k) = c.keys {
+                            s.authentication_failures += k.authentication_failures();
+                        }
                     }
                 }
             }
             s
         })
         .unwrap_or_default()
+    }
+
+    /// The security state of the link between hosts `a` and `b`.
+    pub fn link_info(&self, a: u32, b: u32) -> Option<LinkInfo> {
+        self.call(move |g| {
+            let li = *g.index.get(&(a.min(b), a.max(b)))?;
+            let link = &g.links[li];
+            let mut info = LinkInfo {
+                client: link.sides[0].node,
+                server: link.sides[1].node,
+                phase: [HandshakePhase::External; 2],
+                alpn: [None, None],
+                peer_certificate: [None, None],
+                cipher: [None, None],
+                generations: [(0, 0); 2],
+                handshake_steps: link.handshake_steps,
+                error: [None, None],
+            };
+            for (i, s) in link.sides.iter().enumerate() {
+                info.error[i] = s.ep.connection_error(s.conn);
+                let Some(c) = s.ep.connection(s.conn) else {
+                    continue;
+                };
+                info.phase[i] = c.phase;
+                if let Some(t) = c.tls {
+                    info.alpn[i] = t.alpn_protocol().map(<[u8]>::to_vec);
+                    info.peer_certificate[i] = t
+                        .peer_certificates()
+                        .and_then(|c| c.first())
+                        .map(|c| c.as_ref().to_vec());
+                }
+                if let Some(k) = c.keys {
+                    info.cipher[i] = Some(k.cipher());
+                    info.generations[i] = (k.send_generation(), k.recv_generation());
+                }
+            }
+            Some(info)
+        })
+        .flatten()
+    }
+
+    /// Host `a` starts an RFC 9001 §6 key update on its connection to host
+    /// `b`; the peer follows when it sees the new key phase.
+    pub fn key_update(&self, a: u32, b: u32) -> Result<(), WarpNetError> {
+        self.call(move |g| {
+            let (li, si) = g
+                .side_of(a, b)
+                .ok_or(WarpNetError::Config("no such link"))?;
+            let s = &mut g.links[li].sides[si];
+            s.ep.initiate_key_update(s.conn)
+                .map_err(|e| WarpNetError::Warp(e.to_string()))?;
+            g.stats.key_updates += 1;
+            Ok(())
+        })
+        .unwrap_or(Err(WarpNetError::Warp("network thread exited".into())))
+    }
+
+    /// Host `a` closes its connection to host `b` with an application
+    /// CONNECTION_CLOSE carrying `error_code`. Sessions using the link fail
+    /// with [`NetFail::Closed`] on both hosts.
+    pub fn close_link(&self, a: u32, b: u32, error_code: u64) -> Result<(), WarpNetError> {
+        self.call(move |g| {
+            let now = g.now;
+            let (li, si) = g
+                .side_of(a, b)
+                .ok_or(WarpNetError::Config("no such link"))?;
+            let s = &mut g.links[li].sides[si];
+            s.ep.close(s.conn, error_code, now)
+                .map_err(|e| WarpNetError::Warp(e.to_string()))
+        })
+        .unwrap_or(Err(WarpNetError::Warp("network thread exited".into())))
     }
 
     /// Block (or unblock) the directed link `src → dst`: every datagram on
@@ -742,74 +1177,42 @@ impl Core {
         let now = self.now;
         self.stats.steps += 1;
         self.flush_writes();
-        // Carry datagrams across each link.
-        for li in 0..self.links.len() {
-            if self.links[li].failed.is_some() {
-                continue;
+        let Core {
+            cfg,
+            rng,
+            stats,
+            links,
+            ..
+        } = self;
+        for link in links.iter_mut() {
+            // A failed link keeps carrying datagrams, so that a
+            // CONNECTION_CLOSE reaches the peer; its streams are not
+            // serviced any more.
+            let [s0, s1] = &mut link.sides;
+            carry(
+                [&mut s0.ep, &mut s1.ep],
+                &mut link.held,
+                link.blocked,
+                cfg,
+                rng,
+                stats,
+            );
+            let r = drive([&mut s0.ep, &mut s1.ep], now);
+            for s in [&mut *s0, &mut *s1] {
+                while s.ep.poll_connection_event().is_some() {}
             }
-            for dir in 0..2 {
-                let fresh: Vec<Vec<u8>> = self.links[li].sides[dir]
-                    .ep
-                    .tap_mut()
-                    .out
-                    .drain(..)
-                    .collect();
-                let old = std::mem::take(&mut self.links[li].held[dir]);
-                let mut now_out = Vec::new();
-                for d in fresh {
-                    self.stats.datagrams += 1;
-                    if self.links[li].blocked[dir] {
-                        self.stats.partitioned += 1;
-                    } else if self.chance(self.cfg.loss_ppm) {
-                        self.stats.dropped += 1;
-                    } else if self.chance(self.cfg.reorder_ppm) {
-                        self.stats.reordered += 1;
-                        self.links[li].held[dir].push(d);
-                    } else {
-                        if self.chance(self.cfg.duplicate_ppm) {
-                            self.stats.duplicated += 1;
-                            now_out.push(d.clone());
-                        }
-                        now_out.push(d);
-                    }
-                }
-                now_out.extend(old);
-                let rx = &mut self.links[li].sides[1 - dir];
-                for d in &now_out {
-                    match rx.ep.xsk_mut().backend_mut().deliver(d) {
-                        vesper_warp_umem::DeliverOutcome::Delivered { .. } => {}
-                        _ => self.stats.nic_dropped += 1,
-                    }
-                }
-            }
-            let link = &mut self.links[li];
-            let r = (|| -> Result<(), vesper_warp::endpoint::WarpError> {
-                for _ in 0..4096 {
-                    let a = link.sides[0].ep.poll_and_step_quic_rx_one(now)?;
-                    let b = link.sides[1].ep.poll_and_step_quic_rx_one(now)?;
-                    if a == RxOutcome::Idle && b == RxOutcome::Idle {
-                        break;
-                    }
-                }
-                for s in link.sides.iter_mut() {
-                    s.ep.xsk_mut().backend_mut().step();
-                    s.ep.poll(now)?;
-                    if let Some(e) = s.ep.connection_error(s.conn) {
-                        return Err(vesper_warp::endpoint::WarpError::ConnectionClosed(e));
-                    }
-                }
-                Ok(())
-            })();
-            if let Err(e) = r {
-                link.failed = Some(e.to_string());
+            if link.failed.is_none() {
+                let err = r.err().map(|e| e.to_string()).or_else(|| {
+                    [&*s0, &*s1].iter().find_map(|s| {
+                        s.ep.connection_error(s.conn)
+                            .map(|e| format!("host {}: {e:?}", s.node))
+                    })
+                });
+                link.failed = err;
             }
         }
         self.flush_reads();
         self.now = self.now.saturating_add(self.cfg.step_ns);
-    }
-
-    fn chance(&mut self, ppm: u32) -> bool {
-        ppm > 0 && self.rng.next_u64() % 1_000_000 < u64::from(ppm)
     }
 
     /// Open waiting streams, write pending bytes, send FINs.
