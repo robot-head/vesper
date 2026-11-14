@@ -4,8 +4,15 @@
 //!
 //! * [`PerfGroup`]: Linux group-read syscalls on little-endian 64-bit
 //!   x86_64/aarch64 (`linux.perf_event_open.group_read`).
-//! * [`RdpmcCounters`]: Linux x86_64 user-space `RDPMC` through the perf mmap
-//!   metadata page, with no syscall per window (`linux.perf_event_mmap.rdpmc`).
+//! * [`RdpmcCounters`]: Linux user-space counter reads through the perf mmap
+//!   metadata page, with no syscall per window (`linux.perf_event_mmap.rdpmc`):
+//!   `RDPMC` on x86_64, `PMCCNTR_EL0`/`PMEVCNTR<n>_EL0` under
+//!   `perf_user_access` on AArch64.
+//!
+//! [`PerfEventSet`] adds L1D/LLC read misses, branch mispredictions,
+//! reference cycles, SIMD operations and Top-Down slots where the kernel or
+//! sysfs exposes them ([`events`]); [`AllocationObserver`] reads the
+//! [`CountingAllocator`] around each window.
 //! * [`KpcCounters`]: macOS AArch64 fixed thread counters through the private
 //!   kperf framework, loaded with `dlopen`; requires root (`macos.kperf.kpc`).
 //!
@@ -55,10 +62,18 @@
         ),
         all(target_os = "macos", target_arch = "aarch64")
     )),
-    forbid(unsafe_code)
+    deny(unsafe_code)
 )]
 
 use std::{fmt, marker::PhantomData, rc::Rc};
+
+pub mod alloc;
+pub mod events;
+pub use alloc::{
+    AllocationCounts, AllocationDelta, AllocationObserver, CountingAllocator,
+    counting_allocator_installed,
+};
+pub use events::HardwareEvent;
 
 /// Structured failure; no fabricated zero count is substituted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -85,6 +100,11 @@ pub enum UnavailableReason {
     Contended,
     /// The kperf framework or one of its symbols could not be loaded.
     LibraryMissing,
+    /// [`CountingAllocator`] is not this process's global allocator.
+    AllocatorNotInstalled,
+    /// The OS exposes no encoding for this event on this PMU (no generic
+    /// perf event and no sysfs alias).
+    EventNotExposed,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unavailable {
@@ -183,7 +203,23 @@ mod linux;
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 ))]
-pub use linux::{PerfGroup, Snapshot};
+pub use linux::{EventSetToken, PerfEventSet, PerfGroup, Snapshot};
+
+/// Per-window extended event counts, one entry per requested event, each a
+/// real delta or the reason it is unavailable. Zero is a valid count here
+/// (for example no LLC misses); unavailability is never a zero.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventDelta {
+    pub values: Vec<(HardwareEvent, Result<u64, Unavailable>)>,
+}
+impl EventDelta {
+    pub fn get(&self, event: HardwareEvent) -> Option<&Result<u64, Unavailable>> {
+        self.values
+            .iter()
+            .find(|(e, _)| *e == event)
+            .map(|(_, r)| r)
+    }
+}
 
 #[cfg(not(all(
     target_os = "linux",
@@ -205,6 +241,48 @@ mod unsupported {
             Err(Unavailable::new(
                 UnavailableReason::UnsupportedPlatform,
                 "perf_event_open",
+            ))
+        }
+    }
+    /// Extended events need Linux perf_event_open.
+    pub struct PerfEventSet {
+        _thread_bound: PhantomData<Rc<()>>,
+    }
+    pub struct EventSetToken {
+        _thread_bound: PhantomData<Rc<()>>,
+    }
+    impl PerfEventSet {
+        pub fn open(_: &[HardwareEvent]) -> Result<Self, Unavailable> {
+            Err(Unavailable::new(
+                UnavailableReason::UnsupportedPlatform,
+                "perf_event_open (extended events)",
+            ))
+        }
+        pub fn opened(&self) -> Vec<(HardwareEvent, String)> {
+            Vec::new()
+        }
+        pub fn unavailable(&self) -> &[(HardwareEvent, Unavailable)] {
+            &[]
+        }
+    }
+    impl WindowObserver for PerfEventSet {
+        type Token = EventSetToken;
+        type Observation = EventDelta;
+        type Error = Unavailable;
+        fn before_window(&mut self, _: Invocation, _: usize) -> Result<EventSetToken, Unavailable> {
+            Err(Unavailable::new(
+                UnavailableReason::UnsupportedPlatform,
+                "before_window",
+            ))
+        }
+        fn after_window(
+            &mut self,
+            _: EventSetToken,
+            _: WindowCompletion,
+        ) -> Result<EventDelta, Unavailable> {
+            Err(Unavailable::new(
+                UnavailableReason::UnsupportedPlatform,
+                "after_window",
             ))
         }
     }
@@ -236,12 +314,17 @@ mod unsupported {
     target_endian = "little",
     any(target_arch = "x86_64", target_arch = "aarch64")
 )))]
-pub use unsupported::{PerfGroup, Snapshot};
+pub use unsupported::{EventSetToken, PerfEventSet, PerfGroup, Snapshot};
 
 // Used by the RDPMC and kpc providers; neither exists on other targets.
 #[cfg_attr(
     not(any(
-        all(target_os = "linux", target_arch = "x86_64"),
+        all(
+            target_os = "linux",
+            target_pointer_width = "64",
+            target_endian = "little",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         all(target_os = "macos", target_arch = "aarch64")
     )),
     allow(dead_code)
@@ -290,6 +373,8 @@ pub struct HostPmuStatus {
     pub cpu_pmu_device: Option<bool>,
     /// `/sys/bus/event_source/devices/cpu/rdpmc`, when present (1 or 2 allow RDPMC).
     pub rdpmc_sysfs: Option<i32>,
+    /// AArch64 `/proc/sys/kernel/perf_user_access` (1 allows EL0 counter reads).
+    pub perf_user_access: Option<i32>,
 }
 pub fn host_pmu_status() -> HostPmuStatus {
     #[cfg(target_os = "linux")]
@@ -311,6 +396,7 @@ pub fn host_pmu_status() -> HostPmuStatus {
             perf_event_paranoid: read("/proc/sys/kernel/perf_event_paranoid"),
             cpu_pmu_device: cpu,
             rdpmc_sysfs: read("/sys/bus/event_source/devices/cpu/rdpmc"),
+            perf_user_access: read("/proc/sys/kernel/perf_user_access"),
         }
     }
     #[cfg(not(target_os = "linux"))]
@@ -319,20 +405,37 @@ pub fn host_pmu_status() -> HostPmuStatus {
             perf_event_paranoid: None,
             cpu_pmu_device: None,
             rdpmc_sysfs: None,
+            perf_user_access: None,
         }
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    target_os = "linux",
+    target_pointer_width = "64",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 mod rdpmc;
-#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+#[cfg(all(
+    target_os = "linux",
+    target_pointer_width = "64",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
 pub use rdpmc::{RdpmcCounters, RdpmcSnapshot};
 
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[cfg(not(all(
+    target_os = "linux",
+    target_pointer_width = "64",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 mod rdpmc_unsupported {
     use super::*;
     use vesper_bench::{Invocation, WindowCompletion, WindowObserver};
-    /// RDPMC is implemented for Linux x86_64 only.
+    /// User-space counter reads are implemented for Linux x86_64 (RDPMC)
+    /// and Linux AArch64 (`perf_user_access`) only.
     pub struct RdpmcCounters {
         _thread_bound: PhantomData<Rc<()>>,
     }
@@ -369,7 +472,12 @@ mod rdpmc_unsupported {
         }
     }
 }
-#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+#[cfg(not(all(
+    target_os = "linux",
+    target_pointer_width = "64",
+    target_endian = "little",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+)))]
 pub use rdpmc_unsupported::{RdpmcCounters, RdpmcSnapshot};
 
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]

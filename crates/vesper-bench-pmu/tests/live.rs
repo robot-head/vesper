@@ -98,8 +98,17 @@ fn rdpmc_is_actual_counters_or_explicit_unavailable_with_a_host_reason() {
         Ok(counters) => exercise("RDPMC", counters),
         Err(error) => {
             eprintln!("LIVE_RDPMC_UNAVAILABLE: {error}; host {status:?}");
-            if cfg!(not(all(target_os = "linux", target_arch = "x86_64"))) {
+            if cfg!(not(all(
+                target_os = "linux",
+                target_pointer_width = "64",
+                target_endian = "little",
+                any(target_arch = "x86_64", target_arch = "aarch64")
+            ))) {
                 assert_eq!(error.reason, UnavailableReason::UnsupportedPlatform);
+            } else {
+                assert_ne!(error.reason, UnavailableReason::UnsupportedPlatform);
+            }
+            if cfg!(not(all(target_os = "linux", target_arch = "x86_64"))) {
             } else if status.cpu_pmu_device == Some(false) {
                 // No hardware PMU device: the kernel reports it missing, or a
                 // sandbox (seccomp in a container executor) refuses the
@@ -132,6 +141,38 @@ fn kpc_is_actual_counters_or_explicit_unavailable() {
                 assert_ne!(error.reason, UnavailableReason::UnsupportedPlatform);
             } else {
                 assert_eq!(error.reason, UnavailableReason::UnsupportedPlatform);
+            }
+        }
+    }
+}
+
+#[test]
+fn extended_events_are_real_counts_or_reported_per_event() {
+    use vesper_bench_pmu::{HardwareEvent, PerfEventSet};
+    let mut set = match PerfEventSet::open(&HardwareEvent::ALL) {
+        Ok(set) => set,
+        Err(error) => {
+            eprintln!("LIVE_EVENTS_UNAVAILABLE: {error}");
+            return;
+        }
+    };
+    for (event, why) in set.unavailable() {
+        eprintln!("LIVE_EVENT_UNAVAILABLE: {} {why}", event.name());
+    }
+    let config = RunConfig {
+        epochs: 1,
+        warmup_epochs: 0,
+        operations_per_window: 8,
+        ..RunConfig::default()
+    };
+    let run = run_abba_observed(config, &mut Work, &mut Work, &mut set).unwrap();
+    for w in run.observations() {
+        // One entry per distinct requested event, each a count or a reason.
+        assert_eq!(w.observation.values.len(), HardwareEvent::ALL.len());
+        for (event, value) in &w.observation.values {
+            match value {
+                Ok(n) => eprintln!("LIVE_EVENT_COUNT: {} {n}", event.name()),
+                Err(e) => eprintln!("LIVE_EVENT_WINDOW_UNAVAILABLE: {} {e}", event.name()),
             }
         }
     }

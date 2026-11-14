@@ -1,4 +1,7 @@
-//! User-space RDPMC through the Linux perf mmap metadata page (x86_64).
+//! User-space counter reads through the Linux perf mmap metadata page:
+//! `RDPMC` on x86_64, and on AArch64 `PMCCNTR_EL0` (page index 32) or
+//! `PMEVCNTR<index-1>_EL0` once `perf_user_access` grants EL0 access (the
+//! events are opened with the `rdpmc` and `long` bits of `config1`).
 //!
 //! Two pinned, enabled, user-only events (cycles leading, instructions as a
 //! member) are opened for the current thread, and the first page of each is
@@ -71,6 +74,9 @@ pub(crate) fn read_page(
             Err(UnavailableReason::RdpmcNotPermitted)
         } else if index == 0 {
             Err(UnavailableReason::NotScheduled)
+        } else if cfg!(target_arch = "aarch64") && index > 32 {
+            // AArch64 has PMEVCNTR0..30_EL0 (indices 1..=31) and PMCCNTR_EL0 (32).
+            Err(UnavailableReason::InvalidMetadata)
         } else if width == 0 || width > 64 {
             Err(UnavailableReason::InvalidMetadata)
         } else {
@@ -152,6 +158,7 @@ fn open(config: u64, leader: Option<RawFd>) -> Result<OwnedFd, Unavailable> {
         // exclude_kernel, exclude_hv; the leader is pinned so the group stays
         // on hardware counters or reports an error state, never multiplexes.
         flags: (1 << 5) | (1 << 6) | if leader.is_none() { 1 << 2 } else { 0 },
+        bp_addr: USER_ACCESS_CONFIG1,
         ..Attr::default()
     };
     // SAFETY: as in the group-read provider: initialized v0 attr, current
@@ -182,6 +189,14 @@ fn open(config: u64, leader: Option<RawFd>) -> Result<OwnedFd, Unavailable> {
     Ok(unsafe { OwnedFd::from_raw_fd(fd as RawFd) })
 }
 
+/// `config1` (the v0 `bp_addr` union member): none on x86_64; on AArch64 the
+/// arm_pmuv3 format bits `long` (config1:0) and `rdpmc` (config1:1).
+#[cfg(target_arch = "x86_64")]
+const USER_ACCESS_CONFIG1: u64 = 0;
+#[cfg(target_arch = "aarch64")]
+const USER_ACCESS_CONFIG1: u64 = 0b11;
+
+#[cfg(target_arch = "x86_64")]
 fn rdpmc(counter: u32) -> u64 {
     let (lo, hi): (u32, u32);
     // RDPMC is not serializing. LFENCE before it waits for earlier
@@ -202,6 +217,57 @@ fn rdpmc(counter: u32) -> u64 {
         );
     }
     (u64::from(hi) << 32) | u64::from(lo)
+}
+
+/// AArch64 counter number `index - 1`: 31 is the cycle counter.
+#[cfg(target_arch = "aarch64")]
+fn rdpmc(counter: u32) -> u64 {
+    macro_rules! event_counter {
+        ($($n:literal),*) => {
+            match counter {
+                $($n => {
+                    let value: u64;
+                    // SAFETY: as for PMCCNTR_EL0 below; the kernel's page
+                    // named this event counter for an event of this thread.
+                    unsafe {
+                        std::arch::asm!(
+                            "isb",
+                            concat!("mrs {v}, pmevcntr", $n, "_el0"),
+                            "isb",
+                            v = out(reg) value,
+                            options(nostack, preserves_flags)
+                        );
+                    }
+                    value
+                })*
+                // read_page rejects page indices above 32 before calling.
+                _ => unreachable!("AArch64 counter index validated by read_page"),
+            }
+        };
+    }
+    if counter == 31 {
+        let value: u64;
+        // ISB before and after keeps the read from drifting across the
+        // window boundary, like LFENCE around RDPMC.
+        // SAFETY: only reached after the kernel page granted cap_user_rdpmc
+        // with a nonzero index for an event of this thread, which happens
+        // only when perf_user_access set PMUSERENR_EL0 for this task.
+        unsafe {
+            std::arch::asm!(
+                "isb",
+                "mrs {v}, pmccntr_el0",
+                "isb",
+                v = out(reg) value,
+                options(nostack, preserves_flags)
+            );
+        }
+        value
+    } else {
+        event_counter!(
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23,
+            24, 25, 26, 27, 28, 29, 30
+        )
+    }
 }
 
 /// Current-thread cycles and instructions read with RDPMC. Not Send/Sync.
@@ -422,6 +488,22 @@ mod tests {
             let err = read_page(&page, |_| panic!("rdpmc must not run")).unwrap_err();
             assert_eq!(err.reason, reason);
         }
+    }
+
+    #[cfg(target_arch = "aarch64")]
+    #[test]
+    fn aarch64_indices_beyond_the_cycle_counter_are_rejected_before_reading() {
+        let page = Scripted::new(33, 0, CAP_USER_RDPMC, 64);
+        let err = read_page(&page, |_| panic!("no counter read")).unwrap_err();
+        assert_eq!(err.reason, UnavailableReason::InvalidMetadata);
+        let page = Scripted::new(32, 5, CAP_USER_RDPMC, 64);
+        let mut asked = None;
+        let r = read_page(&page, |c| {
+            asked = Some(c);
+            10
+        })
+        .unwrap();
+        assert_eq!((asked, r.count), (Some(31), 15));
     }
 
     #[test]
