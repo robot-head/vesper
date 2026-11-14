@@ -1,4 +1,4 @@
-//! Shared runner for the ten fixed audited proof packets.
+//! Shared runner for the eleven fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -23,6 +23,7 @@ pub enum Packet {
     Shape,
     Addability,
     Completion,
+    Reconstruction,
 }
 
 struct PacketSpec {
@@ -341,6 +342,46 @@ const COMPLETION_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.norm_reify_beq_congr",
 ];
 
+const RECONSTRUCTION_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.normalizeAux_completion",
+    "Vesper.Lean4LeanLevel42.normalizeAux_empty_completion",
+    "Vesper.Lean4LeanLevel42.normalizeAux_preserves_completes",
+    "Vesper.Lean4LeanLevel42.admissible_append_iff",
+    "Vesper.Lean4LeanLevel42.completes_last_edge",
+    "Vesper.Lean4LeanLevel42.lexChain_candidate_exists",
+    "Vesper.Lean4LeanLevel42.lexChain_find_some",
+    "Vesper.Lean4LeanLevel42.lexChain_no_nonempty_fallback",
+    "Vesper.Lean4LeanLevel42.lexChain_nonempty_step",
+    "Vesper.Lean4LeanLevel42.lexChain_reverse_admissible",
+    "Vesper.Lean4LeanLevel42.lexChain_length_reverse_admissible",
+    "Vesper.Lean4LeanLevel42.lexChain_reverse_order_witness",
+    "Vesper.Lean4LeanLevel42.levelValue_ofNat",
+    "Vesper.Lean4LeanLevel42.levelValue_addOffsetAux",
+    "Vesper.Lean4LeanLevel42.levelValue_addOffset",
+    "Vesper.Lean4LeanLevel42.reify_mkMax_value",
+    "Vesper.Lean4LeanLevel42.reify_mkChild_value",
+    "Vesper.Lean4LeanLevel42.reify_children_fold_value",
+    "Vesper.Lean4LeanLevel42.reify_vars_fold_value",
+    "Vesper.Lean4LeanLevel42.tree_reify_value",
+    "Vesper.Lean4LeanLevel42.foldr_max_mem_bound",
+    "Vesper.Lean4LeanLevel42.foldr_max_le",
+    "Vesper.Lean4LeanLevel42.tree_reify_const_bound",
+    "Vesper.Lean4LeanLevel42.tree_reify_vars_bound",
+    "Vesper.Lean4LeanLevel42.tree_reify_payload_bound",
+    "Vesper.Lean4LeanLevel42.tree_reify_var_bound",
+    "Vesper.Lean4LeanLevel42.tree_reify_child_bound",
+    "Vesper.Lean4LeanLevel42.tree_reify_edge_bound",
+    "Vesper.Lean4LeanLevel42.tree_reify_leaf_value",
+    "Vesper.Lean4LeanLevel42.tree_reify_le",
+    "Vesper.Lean4LeanLevel42.treeEntriesLookup_cons",
+    "Vesper.Lean4LeanLevel42.treeEntriesLookup_none_of_not_mem",
+    "Vesper.Lean4LeanLevel42.modifyAt_keys",
+    "Vesper.Lean4LeanLevel42.modifyAt_lookup_other",
+    "Vesper.Lean4LeanLevel42.modifyAt_keysSorted",
+    "Vesper.Lean4LeanLevel42.modifyAt_lookup_target",
+    "Vesper.Lean4LeanLevel42.modifyAt_unsorted_target_witness",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -599,6 +640,40 @@ impl Packet {
                 required: COMPLETION_REQUIRED,
                 scope: "audited_completion_prerequisites_and_reconstruction_congruence",
                 marker: "LEAN4LEAN_COMPLETION42_EVIDENCE",
+            },
+            Self::Reconstruction => PacketSpec {
+                label: "lean4lean_reconstruction42",
+                module: "Lean4LeanLevel42.ReconstructionFinal",
+                projected: "Lean4LeanReconstruction42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.SortedKeys",
+                    "Lean4LeanLevel42.MapValue",
+                    "Lean4LeanLevel42.MapHelpers",
+                    "Lean4LeanLevel42.LevelSemantics",
+                    "Lean4LeanLevel42.MapAll",
+                    "Lean4LeanLevel42.MapEquality",
+                    "Lean4LeanLevel42.SortedSubset",
+                    "Lean4LeanLevel42.MapAny",
+                    "Lean4LeanLevel42.Addable",
+                    "Lean4LeanLevel42.Completion",
+                    "Lean4LeanLevel42.Feasible",
+                    "Lean4LeanLevel42.ReifyCongruence",
+                    "Lean4LeanLevel42.ConstructionCompletion",
+                    "Lean4LeanLevel42.LexChainCompletion",
+                    "Lean4LeanLevel42.TreeReifyValue",
+                    "Lean4LeanLevel42.TreeStructure",
+                    "Lean4LeanLevel42.ReconstructionFinal",
+                ],
+                required: RECONSTRUCTION_REQUIRED,
+                scope: "audited_construction_completion_admissible_chains_and_tree_primitives",
+                marker: "LEAN4LEAN_RECONSTRUCTION42_EVIDENCE",
             },
         }
     }
