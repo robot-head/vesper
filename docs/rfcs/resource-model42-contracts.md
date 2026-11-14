@@ -30,7 +30,11 @@ values are separately checked and never become static facts.
 
 Source sites are bounded, unique logical occurrence labels, distinct from
 static variable indices and dynamic resource identities. Event operations keep
-their original labels through substitution. These model labels are not yet a
+their original labels through substitution. Every source site is strictly
+less than the configured raw-occurrence cap; labels are unique across the
+whole raw source AST. An expression wrapping one atom has no additional site.
+Runtime substitution may repeat nonoperation origins without revalidating
+source-label uniqueness. These model labels are not yet a
 binding to parsed Vesper byte spans or an observed backend stream. No expected
 answer, expected trace, acceptance flag, inferred type or ownership mask is
 accepted as authoritative request input.
@@ -62,7 +66,9 @@ usage masks. Copy reuse is allowed; sequential noncopy demands are disjoint.
 Let/unpack enforce use of every owned linear binder. Both arms are checked,
 their result types agree and their linear demands agree. This first checker
 also requires equal affine demand: affine-only disagreement is an explicit
-profile refusal, not a semantic ownership error. Input values never affect it.
+profile refusal, not a semantic ownership error. Check for any linear-demand
+disagreement before classifying affine-only differences, regardless of binding
+order. Input values never affect it.
 Semantic errors, profile/admission refusals, invocation errors, runtime
 invariants, fuel and measured resource limits have distinct categories.
 Only a first structured semantic error is promised; full ordered Rust
@@ -100,6 +106,16 @@ including both branches, enclosing let contexts and intermediate/final unpack
 substitutions, before constructing copies or committing any change. Refusal
 must leave the current term, ledger and event prefix unchanged.
 
+Admission measures all closed value islands already stored in a term,
+including unselected branches. This conservative memory check does not execute
+those branches. Initial admission precedes terminal/fuel checks; a transition
+prepays newly closed value islands before substitution constructs or commits
+them. A pair of already closed atoms is already a Full value, so no invented
+pair transition or late completion guard is used to enforce a value cap. A
+dynamic value-limit test after a mint must instead use variable operands that
+become a closed pair through a later actual substitution. Input-closing let
+wrappers count toward whole-expression nodes and depth.
+
 Starting limits (default / hard maximum) are raw occurrences 256/1024, lexical
 context 64/256, raw depth 64/128, expanded type and per-value nodes 255/1023,
 type/value depth 16/32, aggregate initial copy-value nodes 4096/16384, initial
@@ -112,6 +128,12 @@ earlier genuine mint, preserving that live prefix. These are logical model
 limits, not claims about all Lean/compiler/process allocation or throughput.
 Syntax publishes exact names and coherent definitions in its first source
 checkpoint before dependent writers start; changes need coordinator review.
+Zero caps retain their ordinary numeric meaning: a zero raw-occurrence cap
+admits no expression, zero inputs admits an input-free program, and zero
+resource/event space can admit a program whose first operation later refuses.
+Zero fuel still completes an already admitted value. Every measured refusal
+must identify an actually exceeded configured bound; merely avoiding invariant
+failure is not permission to refuse an otherwise executable step.
 
 ## Required checked properties and acceptance
 
@@ -133,6 +155,10 @@ implemented source, with no omitted private helper theorem. Each actual audit
 request has at most 128 roots; partition a larger catalog explicitly and check
 the complete union. The only allowed transitive axioms are the standard
 `Classical.choice`, `Quot.sound`, `propext` (an allowlist, not required axioms).
+The existing auditor accepts theorem roots only. Computable definitions enter
+its real dependency closure through the corresponding soundness and execution
+theorems; definition names must not be submitted as theorem roots. Dependency
+association alone is not evidence of a semantic property.
 No sorry/admit/project axioms, unsafe/partial definitions or native-decide escape
 is permitted in the model. Fixed handwritten semantic tests and privacy
 controls are allowed. Any generated Lean, including a genuine policy-negative
