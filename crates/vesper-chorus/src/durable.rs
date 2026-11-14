@@ -585,7 +585,7 @@ fn encode_snapshot(index: u64, term: u64, image: &[Entry]) -> Vec<u8> {
 }
 
 fn decode_snapshot(b: &[u8]) -> Result<(u64, u64, Vec<Entry>), StorageError> {
-    if b.len() < 24 || b[..4] != MAGIC_SNAP || (b.len() - 24) % 16 != 0 {
+    if b.len() < 24 || b[..4] != MAGIC_SNAP || !(b.len() - 24).is_multiple_of(16) {
         return Err(corrupt(SNAPSHOT, "bad length or magic"));
     }
     let body = b.len() - 4;
