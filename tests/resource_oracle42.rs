@@ -151,7 +151,7 @@ impl Matrix {
         }
     }
     fn finish(self) {
-        assert_eq!(self.counts[0], self.counts[1..].iter().sum());
+        assert_eq!(self.counts[0], self.counts[1..].iter().sum::<u64>());
         assert!(self.counts[1..].iter().all(|count| *count > 0));
         let evidence = self
             .session
