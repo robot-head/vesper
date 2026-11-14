@@ -145,6 +145,149 @@ pub enum DmaError {
     OutOfWindow {
         addr: u64,
     },
+    /// The `envcfg` registers make this Zicbom instruction raise an
+    /// illegal-instruction exception in `mode`.
+    CboIllegal {
+        inst: BarrierInst,
+        mode: PrivMode,
+    },
+    /// `CBIE = 10` (reserved) in the named register.
+    ReservedCbie {
+        register: &'static str,
+    },
+}
+
+/// The privilege mode executing a Zicbom instruction (without the
+/// hypervisor extension's VS/VU modes, which are not modelled).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrivMode {
+    Machine,
+    Supervisor,
+    User,
+}
+
+/// `xenvcfg.CBIE` (bits 5:4): how `CBO.INVAL` executes in less-privileged
+/// modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cbie {
+    /// `00`: illegal-instruction exception.
+    Illegal,
+    /// `01`: executed as `CBO.FLUSH`.
+    Flush,
+    /// `10`: reserved.
+    Reserved,
+    /// `11`: executed as `CBO.INVAL`.
+    Invalidate,
+}
+
+/// `CBIE` field shift in `menvcfg` / `senvcfg`.
+pub const ENVCFG_CBIE_SHIFT: u32 = 4;
+/// `CBCFE` (bit 6): enables `CBO.CLEAN` / `CBO.FLUSH` in less-privileged
+/// modes.
+pub const ENVCFG_CBCFE: u64 = 1 << 6;
+
+impl Cbie {
+    /// The field of an `envcfg` value.
+    pub fn of(envcfg: u64) -> Self {
+        match (envcfg >> ENVCFG_CBIE_SHIFT) & 3 {
+            0 => Cbie::Illegal,
+            1 => Cbie::Flush,
+            2 => Cbie::Reserved,
+            _ => Cbie::Invalidate,
+        }
+    }
+
+    /// The field value placed in an `envcfg` word.
+    pub fn bits(self) -> u64 {
+        let v = match self {
+            Cbie::Illegal => 0,
+            Cbie::Flush => 1,
+            Cbie::Reserved => 2,
+            Cbie::Invalidate => 3,
+        };
+        v << ENVCFG_CBIE_SHIFT
+    }
+}
+
+/// The `menvcfg` / `senvcfg` state that decides what a Zicbom instruction
+/// does in `mode`, as the RISC-V CMO specification (Zicbom 1.0.1) defines
+/// it:
+///
+/// * M-mode executes every `CBO.*` as written.
+/// * `CBO.CLEAN` / `CBO.FLUSH` in S-mode need `menvcfg.CBCFE = 1`, in
+///   U-mode also `senvcfg.CBCFE = 1`; otherwise illegal instruction.
+/// * `CBO.INVAL` in S-mode follows `menvcfg.CBIE`; in U-mode it is illegal
+///   if either `CBIE` is `00`, a flush if either is `01`, and an invalidate
+///   only if both are `11`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ZicbomEnv {
+    pub mode: PrivMode,
+    pub menvcfg: u64,
+    pub senvcfg: u64,
+}
+
+impl ZicbomEnv {
+    /// M-mode: no gating.
+    pub const MACHINE: Self = Self {
+        mode: PrivMode::Machine,
+        menvcfg: 0,
+        senvcfg: 0,
+    };
+
+    pub fn supervisor(menvcfg: u64) -> Self {
+        Self {
+            mode: PrivMode::Supervisor,
+            menvcfg,
+            senvcfg: 0,
+        }
+    }
+
+    pub fn user(menvcfg: u64, senvcfg: u64) -> Self {
+        Self {
+            mode: PrivMode::User,
+            menvcfg,
+            senvcfg,
+        }
+    }
+
+    /// What `inst` does in this environment: itself, `CBO.INVAL` turned
+    /// into `CBO.FLUSH`, or an error for an instruction that traps. Other
+    /// barriers are returned unchanged.
+    pub fn effective(&self, inst: &BarrierInst) -> Result<BarrierInst, DmaError> {
+        let illegal = || DmaError::CboIllegal {
+            inst: inst.clone(),
+            mode: self.mode,
+        };
+        let regs: &[(&'static str, u64)] = match self.mode {
+            PrivMode::Machine => return Ok(inst.clone()),
+            PrivMode::Supervisor => &[("menvcfg", self.menvcfg)],
+            PrivMode::User => &[("menvcfg", self.menvcfg), ("senvcfg", self.senvcfg)],
+        };
+        match *inst {
+            BarrierInst::CboClean(_) | BarrierInst::CboFlush(_) => {
+                if regs.iter().all(|(_, r)| r & ENVCFG_CBCFE != 0) {
+                    Ok(inst.clone())
+                } else {
+                    Err(illegal())
+                }
+            }
+            BarrierInst::CboInval(a) => {
+                let fields: Vec<(&'static str, Cbie)> =
+                    regs.iter().map(|&(n, r)| (n, Cbie::of(r))).collect();
+                if let Some((register, _)) = fields.iter().find(|f| f.1 == Cbie::Reserved) {
+                    return Err(DmaError::ReservedCbie { register });
+                }
+                if fields.iter().any(|f| f.1 == Cbie::Illegal) {
+                    Err(illegal())
+                } else if fields.iter().any(|f| f.1 == Cbie::Flush) {
+                    Ok(BarrierInst::CboFlush(a))
+                } else {
+                    Ok(inst.clone())
+                }
+            }
+            _ => Ok(inst.clone()),
+        }
+    }
 }
 
 /// How a device's DMA interacts with the CPU caches.
@@ -177,8 +320,9 @@ pub enum BarrierInst {
     CboClean(u64),
     /// RISC-V Zicbom `CBO.FLUSH`: write back if dirty, then invalidate.
     CboFlush(u64),
-    /// RISC-V Zicbom `CBO.INVAL`: discard the block without writing back
-    /// (with `menvcfg.CBIE = 11`; `01` executes it as a flush).
+    /// RISC-V Zicbom `CBO.INVAL`: discard the block without writing back.
+    /// Below M-mode, `xenvcfg.CBIE` may make it a flush or illegal
+    /// ([`ZicbomEnv::effective`]).
     CboInval(u64),
 }
 
@@ -348,6 +492,7 @@ pub struct DmaEngine {
     slot_busy: Vec<bool>,
     next_slot: u16,
     barriers: Vec<BarrierInst>,
+    zicbom_env: ZicbomEnv,
     ledger: Ledger,
 }
 
@@ -397,8 +542,27 @@ impl DmaEngine {
             slot_busy: vec![false; slots],
             next_slot: 0,
             barriers: Vec::new(),
+            zicbom_env: ZicbomEnv::MACHINE,
             ledger: ledger.clone(),
         })
+    }
+
+    /// The privilege and `envcfg` state the driver issuing this engine's
+    /// barriers runs with (M-mode by default). Submissions whose `CBO.*`
+    /// sequence would trap there are refused with
+    /// [`DmaError::CboIllegal`] / [`DmaError::ReservedCbie`] and hand the
+    /// buffer back.
+    pub fn set_zicbom_env(&mut self, env: ZicbomEnv) {
+        self.zicbom_env = env;
+    }
+
+    pub fn zicbom_env(&self) -> ZicbomEnv {
+        self.zicbom_env
+    }
+
+    fn check_env(&self, seq: &[BarrierInst]) -> Result<(), DmaError> {
+        seq.iter()
+            .try_for_each(|i| self.zicbom_env.effective(i).map(drop))
     }
 
     /// Barrier instructions executed so far, in order.
@@ -472,14 +636,20 @@ impl DmaEngine {
             Some(_) => return Err((buf, DmaError::ChannelBusy(channel))),
         }
         let (phys, len) = buf.dma_region();
-        let seq = match self.sequence(DmaPhase::BeforeDevice, phys, len) {
+        let seq = match self
+            .sequence(DmaPhase::BeforeDevice, phys, len)
+            .and_then(|s| self.check_env(&s).map(|()| s))
+        {
             Ok(s) => s,
             Err(e) => return Err((buf, e)),
         };
         // Check the post-receive sequence now, so a buffer that cannot be
-        // invalidated safely is refused before the device owns it.
+        // invalidated safely (or whose invalidation would trap) is refused
+        // before the device owns it.
         if direction == Direction::FromDevice
-            && let Err(e) = self.sequence(DmaPhase::AfterDeviceWrite, phys, len)
+            && let Err(e) = self
+                .sequence(DmaPhase::AfterDeviceWrite, phys, len)
+                .and_then(|s| self.check_env(&s))
         {
             return Err((buf, e));
         }
@@ -592,6 +762,7 @@ pub struct NonCoherentCache {
     block: u64,
     memory: Vec<u8>,
     lines: std::collections::BTreeMap<u64, Line>,
+    env: ZicbomEnv,
 }
 
 impl NonCoherentCache {
@@ -606,7 +777,14 @@ impl NonCoherentCache {
             block: u64::from(block),
             memory: vec![0; size],
             lines: Default::default(),
+            env: ZicbomEnv::MACHINE,
         })
+    }
+
+    /// The mode and `envcfg` state in which the CPU executes `CBO.*`
+    /// (M-mode by default): see [`ZicbomEnv::effective`].
+    pub fn set_zicbom_env(&mut self, env: ZicbomEnv) {
+        self.env = env;
     }
 
     fn index(&self, addr: u64) -> Result<usize, DmaError> {
@@ -680,10 +858,12 @@ impl NonCoherentCache {
 
     /// Executes one barrier or cache-maintenance instruction. Fences and
     /// `DSB` order accesses, which this data-only model does not track.
+    /// `CBO.*` run as [`ZicbomEnv::effective`] says (a trapping one is an
+    /// error and changes nothing).
     pub fn execute(&mut self, inst: &BarrierInst) -> Result<(), DmaError> {
         let mask = !(self.block - 1);
         let tag = |a: u64| a & mask;
-        match *inst {
+        match self.env.effective(inst)? {
             BarrierInst::CboClean(a) | BarrierInst::DcCvac(a) => {
                 self.index(a)?;
                 self.writeback(tag(a));
