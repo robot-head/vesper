@@ -47,10 +47,9 @@ extractor/projector/auditor and Cargo files are unchanged.
 All three new component modules compiled with genuine pinned Lean 4.24.0
 against versioned immutable copies. Equality's eight and subsumption's
 fourteen original-object roots also passed their explicit standard-three
-axiom probes. The combined original proof sources and final composition
-compiled successfully before the final module was moved into the
-inventoried namespace; that move preserved its source bytes exactly.
-Independent read-only composition reviews found no actionable issue.
+axiom probes. The complete Shape matrix freshly compiled all 24 original
+modules, including the final inventoried theorem module. Independent
+read-only composition reviews found no actionable issue.
 
 The first actual fixed-packet attempt failed before compilation because the
 unchanged collector correctly refused to omit five required theorems placed
@@ -78,9 +77,29 @@ comparing shared records found 34 identities unchanged from Normalization
 and 36 unchanged from Comparison, including the exact same sixteen helper
 omissions. Every actual corruption and forbidden-alias control passed.
 
+All seven earlier matrices also passed with their complete negative controls.
+The actual Cargo-built test executables ran with at most two concurrent
+Lean compiler processes. Their executed revision was
+`3bdeba499fefe4d66c7c5a1efd1bc53927eca74a`, differing from the Shape execution
+only in documentation. Every test passed with zero failures or ignored cases.
+
+| Complete matrix | Result | Duration |
+| --- | --- | ---: |
+| Shape | Passed | 205.99 s |
+| Comparison | Passed | 193.239 s |
+| Construction | Passed | 130.534 s |
+| Foundations | Passed | 129.630 s |
+| Map | Passed | 144.935 s |
+| Normalization | Passed | 188.026 s |
+| Normalize, before subsumption | Passed | 172.999 s |
+| Order | Passed | 135.816 s |
+
 Evidence is `/tmp/lean4lean-shape42-shape42-evidence.json`; independent checks
-are `/tmp/lean4lean-shape42-independent-check.json`. Strict targeted Clippy
-for all eight fixed targets passed in 29.26 seconds, and workspace formatting,
-BUILD synchronization and whitespace checks passed. The seven previous full
-matrix replays are still in progress; no all-eight completion is claimed.
+are `/tmp/lean4lean-shape42-independent-check.json`. The seven regression
+results are in `/tmp/lean4lean-shape42-prior-matrices-receipt.json`, with exact
+binary/log identities and actual per-matrix evidence. The source and execution
+association is `/tmp/lean4lean-shape42-root-execution-receipt.json`.
+Strict targeted Clippy for all eight fixed targets passed in 29.26 seconds,
+and workspace formatting, BUILD synchronization and whitespace checks passed.
 Component reports retain their compiler attempts and artifact identities.
+Hosted checks remain pending; no macOS full-matrix run is claimed.
