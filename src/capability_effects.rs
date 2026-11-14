@@ -607,7 +607,10 @@ impl Capability {
 
 /// Whether `name` is a built-in capability effect.
 pub fn is_capability_effect(name: &str) -> bool {
-    Capability::from_name(name).is_some()
+    // `Isa[P]` (§14.2, lane 28) is erased the same way: it has no
+    // operations or handlers and is never requested from the caller's row.
+    // Its own rules live in `crate::vector`, not in this module's discipline.
+    Capability::from_name(name).is_some() || crate::vector::is_isa_effect(name)
 }
 
 /// The capability effects in a row, in canonical order.
@@ -631,6 +634,9 @@ pub(crate) fn reserved_declaration(name: &str, span: Span) -> Diagnostic {
 
 /// Diagnostics for one capability entry of an effect row.
 pub(crate) fn row_entry(effect: &Effect, span: Span) -> Option<Diagnostic> {
+    if crate::vector::is_isa_effect(&effect.name) {
+        return crate::vector::isa_row_entry(effect, span);
+    }
     (!effect.args.is_empty()).then(|| {
         Diagnostic::new(
             "E0400",
