@@ -75,6 +75,11 @@ vesper_crate(
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_map42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
     },
     # Actual formatter witnesses replay Lean serially; keep every case enabled
     # while allowing the complete target 900 seconds on slower macOS runners.
