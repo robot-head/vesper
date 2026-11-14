@@ -1,10 +1,42 @@
 # Completion prerequisites and reconstruction congruence acceptance (#543)
 
-The tenth fixed `Packet::Completion` specification and required catalog are
-authored. This lane ran direct rustfmt and static byte/source checks only.
-It ran no Cargo or Lean command, genuine packet matrix, Clippy or Bazel
-execution. The new packet and all nine earlier complete matrices remain
-coordinator execution work; this report does not claim they passed.
+The final Completion matrix passed at
+`19d0d39380e9376af5fff5e5ece3903be629673a`, both through the exact-source
+Rust 1.100 harness and through the actual uncached Bazel proof target. The
+nine prior packet regressions passed at
+`9f61536f94d4567884b6ed592f0317f8575a06bc`. Their 41 distinct selected Lean
+sources, Rust test sources and common runner are byte-identical at 19d, so
+those results retain their source association. The runs are not described
+as all having executed at 19d. The coordinator ran the tools; this lane
+independently checked source, object, executable, log and report identities
+without running Cargo or Lean.
+
+| Packet and execution | Authored/audited roots | Batches | Observed seconds |
+| --- | ---: | --- | ---: |
+| Foundations, 9f | 49 | 49 | 175.787 |
+| Construction, 9f | 37 | 37 | 172.805 |
+| Order, 9f | 64 | 64 | 175.071 |
+| Map, 9f | 99 | 99 | 179.423 |
+| Normalize, 9f | 131 | 128 + 3 | 229.888 |
+| Normalization, 9f | 173 | 128 + 45 | 231.979 |
+| Comparison, 9f | 191 | 128 + 63 | 241.173 |
+| Shape, 9f | 226 | 128 + 98 | 255.425 |
+| Addability, 9f | 179 | 128 + 51 | 202.524 |
+| Final Completion manual harness, 19d | 203 | 128 + 75 | 238.664 |
+| Final Completion actual Bazel test, 19d | 203 | 128 + 75 | 227.52 |
+
+Manual entries are measured harness-process times. The Bazel entry is the
+actual Rust test time; its enclosing test command took 262.100 seconds.
+Each matrix reported one passed test, zero failed and zero ignored tests,
+including all actual refusal controls. The internal whole-matrix limit
+remained 300 seconds.
+
+Manual execution used exact repository test sources compiled directly by
+CI-pinned Rust 1.100.0 with real dependency artifacts, invoking the archived
+production Bazel-built CLI. These are direct-rustc harnesses, not Cargo-built
+or Bazel-built test binaries. The separate actual Bazel run built and ran
+`//:test/lean4lean_completion42`, with its actual production CLI and regular
+copied source inputs. It was not a cached test result.
 
 The fixed IDs are label `lean4lean_completion42`, source module
 `Lean4LeanLevel42.CompletionFinal`, projection
@@ -125,7 +157,7 @@ controls, changed-source refusal and the forbidden alternate-proof control.
 The cap of 24 sources, 128-root batches, standard-three axiom policy, every
 other cap and finite 300-second whole-matrix budget remain unchanged.
 
-The intended mathematical scope uses independent certificates rather than
+The proved mathematical scope uses independent certificates rather than
 algorithm success or semantic correctness as definitions. EdgeCovered and
 VarSupport retain arbitrary stored offsets. Support transports fixed-key
 certificates, while whole-map MapCompletes transport additionally requires
@@ -149,7 +181,132 @@ normalizeAux completion preservation, actual lexChain admissibility or
 minimality, full tree denotation, normalized reification correctness,
 canonicality, whole-checker/compiler/native equivalence or source-campaign
 completion. Earlier raw-cycle results do not assert that normalization emits
-the cycle. Existing implementation-proof audit status is unchanged. Genuine
-Completion and all nine earlier complete matrices, strict targeted Clippy,
-formatting, BUILD synchronization, actual Bazel packaging and final
-source/object/tool evidence remain coordinator integration work.
+the cycle. Existing implementation-proof audit status is unchanged. The
+observed matrix, lint, format and Bazel results are recorded here; hosted CI
+and stack/PR status remain separate coordinator reports.
+
+
+The final actual source catalog contains 203 authored roots, exactly equal to
+the audited set: 155 existing and 48 new roots (12 Completion, 13 Feasible,
+12 VariableSupport and 11 ReifyCongruence). An independent inventory of every
+selected helper source recovered those same names. The exact new inventory
+is the 41 guards above plus `subsumeVars_var_support`,
+`node_subsumeBy_var_support`, `node_subsume_var_support`,
+`minimize_fold_var_support`, `minimize_vars_erased_support`,
+`node_var_mem_noEmpty` and `subsumption_fold_varSupport`. The imports-only
+final module adds no theorem. All authored definitions and theorem roots
+remain in the canonical projection.
+
+The final definition of Admissible uses the existing `List.foldr`, preserving
+the exact nil and cons equations in the contract. All later core definitions
+and the twelve core proof bodies are unchanged. This removes the additional
+compiler recursion helper from the original environment before projection.
+Fresh Core, Feasible, VariableSupport and Final objects compiled with empty
+successful logs; all 48 original-root axiom probes used only the standard
+three, and the original-environment probe explicitly rejected any presence
+of `Vesper.Lean4LeanLevel42.Admissible._unsafe_rec`. The new fold manifest at
+`/tmp/lean4lean-completion42-fold-v2/fold-identities.json`, SHA-256
+`c1661137e6c549444335b171a4e7e795beb13217a3ee9d4b93ff33acbeeae249`,
+binds fifty immutable files and the five current source/object pairs.
+These objects supersede earlier core/dependent object identities in the
+individual lane reports. The independent ReifyCongruence source is unchanged.
+
+The final twenty-three-module packet contains 46 original source/object
+records. Its 607 original constant occurrences represent 605 distinct
+originals. There are 594 retained occurrences, 592 canonical output constants
+and thirteen omitted generated helpers. The two repeated retained occurrences
+are `Lean.Level.Normalize.NormLevel.feasible.go.eq_1` and `.eq_2`, each
+realized in Feasible and ReifyCongruence with reason
+`identical_safe_theorem_realization`. Both occurrences remain represented;
+there are zero alternate-proof aliases. The complete thirteen omission
+records match the old Map vendor-helper set exactly, all from Lean4Lean.List
+or Lean4Lean.Level. No Vesper-generated helper or authored proof is omitted,
+and no projector/validator rule, source cap or axiom policy was changed.
+
+Evidence reports exact inventory, constant-info equality, empty extensions
+and IR, successful kernel replay and verified reimport. Logical traversal
+visited 1,751,028 expression nodes. The final
+`Lean4LeanCompletion42Kernel.olean` is 7,628,088 bytes, BLAKE3
+`0f471e17baf05fe8616a521af759b045323704397b6d86196b1ae2b6c3ac5725`.
+Both disjoint audit batches, 128 and 75 roots, are accepted with status
+`audited`, successful kernel replay, `cache_eligible = false`, 592 checked
+constants and no forbidden axioms. Each batch's actual theorem axiom union
+is exactly `Classical.choice`, `Quot.sound` and `propext`. Audit artifact
+records match the exact projection, and every authored root occurs in the
+retained canonical partition. The original module is
+`Lean4LeanLevel42.CompletionFinal`; `whole_checker_verified` remains false.
+
+The authoritative final manual evidence and source/build/runtime receipt
+are in `/tmp/lean4lean-completion42-fold-v2-harness/`. Core source SHA-256 is
+`f89ca02776f406b633af9411aae7d0875e4067d927f0629c5d8f81025a678505`.
+The harness binary hash is unchanged because the Rust source and shared
+runner did not change; the harness reads and binds the actual Lean payload
+at runtime. Its selected original source records and guards verify the new
+body. Actual old-original, corrupt-original, missing/corrupt-projection,
+changed-source and forbidden-alias controls completed successfully.
+
+The actual Bazel receipt is `/tmp/vesper-bazel-completion-v1-receipt.json`,
+SHA-256 `f7cf8ee9ed47b2178581edff249734c07d6991abb79a8b55d942466a136d0a7b`.
+Its incremental final-source build passed in 74.514 seconds; the 262.100-second
+test command passed with one real Rust test in 227.52 seconds, zero failures,
+zero ignored tests and no cached test result. The earlier 9f bootstrap build
+is separate from this final-source build/test. All fourteen recorded file
+hashes, actual JUnit result and six proof-audit invocations were independently
+verified. The actual Bazel CLI SHA-256 is
+`6aef5208260f57c715fd879a69de027f43a7fa4670e69b742de969be53c63542`;
+its test binary SHA-256 is
+`501b941fc1ab787d6df93017acd40e98f1956cc25dd7a6abb3e4dabc1c00af8e`.
+The complete manual and actual Bazel evidence agree in all fields except
+twenty-four scratch paths: the 23 original module paths and projection path.
+Their original/projected fingerprints, catalogs, duplicate/omission records
+and full audit reports are identical.
+
+The nine prior results remain at
+`/tmp/lean4lean-completion42-all-matrices-receipt.json`. Independent checks
+verified their executable and log hashes, complete catalogs, all original
+source/object fingerprints and projected fingerprints against the previous
+Addability-wave checkpoints. Every prior audit is accepted, kernel-replayed,
+cache-ineligible and free of forbidden axioms, with complete root coverage
+and actual per-packet standard-three axiom union. Individual batches use only
+that allowed set; the final three-root Normalize batch uses `propext` alone.
+All records shared with final Completion also match. The final new packet
+shares 24 original records with Normalization, 26 with Comparison, 30 with
+Shape and 28 with Addability, with no mismatch.
+
+The manual build receipt is
+`/tmp/lean4lean-completion42-rust100-harnesses-v1/receipt.json`; its actual
+archived production CLI is independently bound by
+`/tmp/vesper-proof-auditor-bazel-d635-v1/receipt.json`, producer
+`d6357113e08805064e438498b81a81fa0dcf1122`, SHA-256
+`8ee12bf3d266b6a0f1a47784ed1b5752b574134138d72444f6d14f46a7a31a32`.
+That archive and the actual Bazel CLI above have different build origins.
+The proof command, embedded Audit.lean and KernelSnapshot sources match the
+parent and executed tree. All runtime log invocations use the corresponding
+real CLI. `auditor_blake3` identifies embedded Audit.lean text; the separate
+receipts bind the executable bytes.
+
+Strict Rust 1.100 Clippy of all ten exact repository test sources passed in
+1.622 seconds through the minimal real-dependency package with
+`--tests -- -D warnings`. The manifest, log and ten source paths were checked
+against `/tmp/vesper-completion-ci-clippy-1.100-v1/receipt.json`. Its Rust
+sources remain unchanged after the fold, preserving that lint association.
+This is targeted harness linting, not whole-workspace validation. Rustfmt,
+BUILD synchronization and whitespace checks passed as recorded by the root;
+no broader hosted result is inferred.
+
+Historical evidence is retained: the 9f Completion run passed in 209.814
+seconds but used the earlier recursive predicate and fourteen omissions,
+including its generated Admissible helper. Its 7,628,368-byte projection,
+BLAKE3 `1400d638c2ebbe189b69ccda1baebd682edce88313375eaf0f06bacea6e8871b`,
+is superseded and is not mixed with the final 19d objects or counts. The
+first fold attempt failed on reserved binder `prefix`; its diagnostics remain
+at `/tmp/lean4lean-completion42-fold-v1-Completion.log` and are not a pass.
+The corrected `prior` binder preserves the same equations, and the new
+original/projection evidence above is authoritative.
+
+Independent source, build, runtime and historical comparisons are retained
+in `/tmp/lean4lean-completion42-fold-independent-check.json`,
+`/tmp/lean4lean-completion42-fold-independent-build-check.json` and
+`/tmp/lean4lean-completion42-bazel-independent-check.json`. This acceptance
+lane made no final runner, proof, tool or BUILD edits and ran no Cargo or Lean
+commands during this independent evidence review.
