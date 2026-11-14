@@ -98,6 +98,13 @@ impl Job {
     pub(crate) fn is_empty(&self) -> bool {
         self.extraction.is_none() && self.models.is_empty()
     }
+    /// The functions whose extraction obligation this job runs.
+    pub(crate) fn extraction_functions(&self) -> &[String] {
+        self.extraction
+            .as_ref()
+            .map(|(_, functions)| functions.as_slice())
+            .unwrap_or_default()
+    }
 }
 
 /// Every outcome a job produced.

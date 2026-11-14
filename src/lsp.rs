@@ -531,6 +531,8 @@ fn handle_work(session: &mut session::Session, item: Work, events: &Sender<Event
             if !messages.is_empty() {
                 let _ = events.send(Event::Messages(messages));
             }
+            // A batch that left obligations behind arms the next one.
+            arm_timers(session, events);
         }
     }
     false

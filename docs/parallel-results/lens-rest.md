@@ -260,8 +260,23 @@ CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0`:
 - `cargo test --locked -p vesper-lsp`: pass, including 2 new crate tests.
 - `cargo test --locked -p vesper --test lsp_cli --test lsp_actions --test lsp_navigation --test diagnostics_cli --test doc_navigation_cli --test forge_parameters_cli --test recovery_cli`:
   pass.
-- `cargo test --workspace --locked --no-fail-fast`: pending (recorded in a follow-up commit)
+- `cargo test --workspace --locked --no-fail-fast` (on the first PR commit):
+  4010 passed, 20 failed, 2 ignored. Every failure is outside this lane's
+  paths and environmental: the §42 Lean tests (`lean4lean42_acceptance`,
+  `oracle42_acceptance`, `oracle42_runner`, `replay42_kernel`) need `lean`
+  on `PATH`, which this VM does not have; `vesper-loom-build` `build` and
+  `cli` fail the same way on main here. No Lens, LSP or `vesper-lsp` test
+  failed.
 - `python3 tools/bazel/sync_build_files.py`: no BUILD changes.
+
+Review fixes (second commit): a function with no parameters and no
+temporaries rendered `∀,` and its bit-vector form ended with a superfluous
+`bv_decide`; a model map built by a cancelled request was cached; and a
+background run stopped after one 64-obligation batch. Each now has a test
+(`answer` in the real-Lean renderings test,
+`background_runs_continue_past_one_batch`). A continuation run is armed
+only when the finished run left none of its own obligations without an
+outcome, so a broken toolchain cannot loop.
 
 ## Decisions
 

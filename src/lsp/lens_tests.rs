@@ -1276,6 +1276,42 @@ fn background_runs_are_debounced_and_publish_status() {
 
 #[cfg(unix)]
 #[test]
+fn background_runs_continue_past_one_batch() {
+    let toolchain = fake_lean::Toolchain::new("background-batches", false, true);
+    let mut config = toolchain.config();
+    config.background = Some(Duration::from_millis(50));
+    let mut client = Client::start(config);
+    let uri = "untitled:background-batches.ves";
+    // More functions than one background run covers.
+    let source: String = (0..70)
+        .map(|i| format!("fn f{i}(x: u8) -> u8 {{\n    x / 2\n}}\n\n"))
+        .collect();
+    client.open(uri, &source);
+    let mut semantic = std::collections::BTreeSet::new();
+    let mut runs = 0;
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while std::time::Instant::now() < deadline && semantic.len() < 70 {
+        let Some(message) = client.next_within(Duration::from_secs(10)) else {
+            break;
+        };
+        if message["method"] == "vesper/proofStatus" {
+            runs += 1;
+            for result in message["params"]["results"].as_array().unwrap() {
+                if result["obligation"] == "semantic" {
+                    assert_eq!(result["status"], "proved", "{result}");
+                    semantic.insert(result["function"].as_str().unwrap().to_owned());
+                }
+            }
+        }
+    }
+    assert_eq!(semantic.len(), 70, "after {runs} runs: {semantic:?}");
+    assert!(runs >= 2, "{runs}");
+    assert_eq!(lens_status(&mut client, uri, "f69").0, "proved");
+    client.close();
+}
+
+#[cfg(unix)]
+#[test]
 fn an_edit_cancels_the_running_background_job() {
     let toolchain = fake_lean::Toolchain::with_compile(
         "background-cancel",

@@ -39,6 +39,8 @@ pub struct LensConfig {
     pub limits: AnalysisLimits,
 }
 /// The spec's Layer 5 idle time before a background proof run (§21.3).
+/// Obligations of each kind one background run covers.
+const BACKGROUND_BATCH: usize = 64;
 pub const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Lens's own analysis profile: the editor profile with larger node and
@@ -479,6 +481,10 @@ impl Session {
             return models.clone();
         }
         let models = Arc::new(proof_model::all(snapshot.checked()));
+        if crate::lsp::request_cancelled() {
+            // An interrupted build holds "cancelled" errors; never keep it.
+            return models;
+        }
         self.lens_models
             .borrow_mut()
             .insert(uri.to_owned(), (hash, models.clone()));
@@ -800,23 +806,9 @@ impl Session {
         let Ok(snapshot) = self.snapshot(uri) else {
             return TimerOutcome::Idle;
         };
-        let hash = snapshot.source_hash();
-        let extraction: Vec<String> = proof_lens::candidates(&snapshot)
-            .map(|(_, functions)| functions)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(name, _)| name)
-            .filter(|name| self.proofs.status(hash, name) == ProofStatus::NotAttempted)
-            .take(64)
-            .collect();
-        let models: Vec<_> = self
-            .models(uri, &snapshot)
-            .values()
-            .filter_map(|m| m.as_ref().ok())
-            .filter(|m| self.model_proofs.status(m.key, &m.function) == ProofStatus::NotAttempted)
-            .take(64)
-            .cloned()
-            .collect();
+        let (mut extraction, mut models) = self.unattempted(uri, &snapshot);
+        extraction.truncate(BACKGROUND_BATCH);
+        models.truncate(BACKGROUND_BATCH);
         let Ok(job) = proof_lens::prepare(&snapshot, &extraction, models, &self.toolchain()) else {
             return TimerOutcome::Idle;
         };
@@ -831,6 +823,55 @@ impl Session {
             generation,
             job: Box::new(job),
             token,
+        }
+    }
+
+    /// Obligations of the current source that have no outcome yet:
+    /// extraction function names and semantic models, in source order.
+    fn unattempted(
+        &self,
+        uri: &str,
+        snapshot: &CheckedSource,
+    ) -> (Vec<String>, Vec<proof_model::Model>) {
+        let hash = snapshot.source_hash();
+        let extraction = proof_lens::candidates(snapshot)
+            .map(|(_, functions)| functions)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| self.proofs.status(hash, name) == ProofStatus::NotAttempted)
+            .collect();
+        let models = self
+            .models(uri, snapshot)
+            .values()
+            .filter_map(|m| m.as_ref().ok())
+            .filter(|m| self.model_proofs.status(m.key, &m.function) == ProofStatus::NotAttempted)
+            .cloned()
+            .collect();
+        (extraction, models)
+    }
+
+    /// After a batch, arm another run while the unchanged source still has
+    /// obligations without an outcome. A run that left one of its own
+    /// obligations without an outcome (a toolchain failure) does not
+    /// continue, so a broken toolchain cannot loop.
+    fn continue_background(&mut self, uri: &str, job: &proof_lens::Job) {
+        let Ok(snapshot) = self.snapshot(uri) else {
+            return;
+        };
+        let (extraction, models) = self.unattempted(uri, &snapshot);
+        if extraction.is_empty() && models.is_empty() {
+            return;
+        }
+        let ran = job.extraction_functions();
+        let stuck = extraction.iter().any(|f| ran.contains(f))
+            || models.iter().any(|m| {
+                job.models
+                    .iter()
+                    .any(|j| j.key == m.key && j.function == m.function)
+            });
+        if !stuck {
+            self.touch_background(uri);
         }
     }
 
@@ -874,6 +915,7 @@ impl Session {
                 "olean_compiled": outcome.compiled,
                 "elapsed_ms": outcome.elapsed.as_millis() as u64}),
         )];
+        self.continue_background(uri, job);
         if self.code_lens_refresh {
             self.refreshes += 1;
             messages.push(Envelope::Request {

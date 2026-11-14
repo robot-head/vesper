@@ -768,11 +768,16 @@ impl<'a> Exact<'a> {
             }
         }
         let (_, fault) = this.emit(term);
-        let mut out = String::from("theorem no_arith_fault : ∀");
-        for binder in &this.binders {
-            out.push_str(&format!(" ({binder} : Int)"));
+        let mut out = String::from("theorem no_arith_fault :");
+        if !this.binders.is_empty() {
+            // `∀,` with no binders is not Lean syntax.
+            out.push_str(" ∀");
+            for binder in &this.binders {
+                out.push_str(&format!(" ({binder} : Int)"));
+            }
+            out.push(',');
         }
-        out.push_str(",\n");
+        out.push('\n');
         for hypothesis in ranges.iter().chain(&this.defs) {
             out.push_str(&format!("    ({hypothesis}) →\n"));
         }
@@ -989,9 +994,15 @@ impl<'a> BitVecs<'a> {
                 format!("  intro {}\n", names.join(" ")),
             )
         };
+        let fault = this.fault(term);
+        // `simp only [fault]` already closes a literally fault-free body.
+        let finish = if fault == "false" {
+            ""
+        } else {
+            "  bv_decide\n"
+        };
         format!(
-            "def fault{binders} : Bool :=\n  {}\ntheorem no_arith_fault_bv : {quantifier}fault {} = false := by\n{intro}  simp only [fault]\n  bv_decide\n",
-            this.fault(term),
+            "def fault{binders} : Bool :=\n  {fault}\ntheorem no_arith_fault_bv : {quantifier}fault {} = false := by\n{intro}  simp only [fault]\n{finish}",
             names.join(" "),
         )
     }
@@ -1238,19 +1249,24 @@ fn counted(x: u32) -> u32 eff [Fail[ArithOverflow]] {
 fn main() -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
     add(inc(3), half(4))
 }
+
+fn answer() -> i64 {
+    42
+}
 ";
 
     #[test]
     fn scalar_functions_get_models_and_others_say_why() {
         let models = models(SOURCE);
         for name in [
-            "inc", "add", "half", "ratio", "both", "negate", "counted", "main",
+            "inc", "add", "half", "ratio", "both", "negate", "counted", "main", "answer",
         ] {
             let model = models[name]
                 .as_ref()
                 .unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(!model.exact_module().contains("∀,"), "{name}");
             assert!(model.exact_module().contains("theorem no_arith_fault"));
-            assert!(model.bitvec_module().contains("bv_decide"));
+            assert!(model.bitvec_module().contains("theorem no_arith_fault_bv"));
             assert!(model.theorem().starts_with("VesperLensModel_"));
         }
         // Calls are inlined, so main's model mentions the callee's checks.
@@ -1359,6 +1375,7 @@ fn main() -> i64 eff [Fail[ArithOverflow], Fail[RuntimeError]] {
             ("negate", false, true),
             ("counted", false, true),
             ("main", true, false),
+            ("answer", true, false),
         ] {
             let model = models[name].as_ref().unwrap();
             let (ok, out) = run(&format!("{name}_exact"), &model.exact_module());
