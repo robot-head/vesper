@@ -14,7 +14,7 @@ use std::{
     process::{Command, ExitStatus, Stdio},
     sync::{
         Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicU64, Ordering},
     },
     thread,
     time::{Duration, Instant},
@@ -145,57 +145,51 @@ impl Captured {
             .unwrap_or_else(|error| panic!("{error}\n{}", self.text()))
     }
 }
-fn drain(mut pipe: impl Read, overflow: &AtomicBool) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    let mut buffer = [0; 8192];
-    loop {
-        let count = pipe.read(&mut buffer).expect("bounded capture read");
-        if count == 0 {
-            return bytes;
-        }
-        let room = CAPTURE.saturating_sub(bytes.len());
-        bytes.extend_from_slice(&buffer[..count.min(room)]);
-        if count > room {
-            overflow.store(true, Ordering::Relaxed);
-        }
-    }
-}
 fn execute(command: &mut Command, seconds: u64) -> Captured {
     let started = Instant::now();
+    let capture = Directory::new();
+    let stdout_path = capture.0.join("stdout");
+    let stderr_path = capture.0.join("stderr");
+    // Regular files avoid an unbounded pipe-reader join if a descendant keeps
+    // inherited descriptors after the direct CLI child is killed. This is not
+    // descendant-process cancellation evidence; production probes test cleanup.
     let mut child = command
         .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdout(Stdio::from(File::create(&stdout_path).unwrap()))
+        .stderr(Stdio::from(File::create(&stderr_path).unwrap()))
         .spawn()
         .unwrap_or_else(|error| panic!("required subprocess {command:?}: {error}"));
-    let stdout = child.stdout.take().unwrap();
-    let stderr = child.stderr.take().unwrap();
-    let overflow = AtomicBool::new(false);
-    let (status, stdout, stderr, refused) = thread::scope(|scope| {
-        let out = scope.spawn(|| drain(stdout, &overflow));
-        let err = scope.spawn(|| drain(stderr, &overflow));
-        let mut refused = false;
-        let status = loop {
-            if overflow.load(Ordering::Relaxed) || started.elapsed() > Duration::from_secs(seconds)
-            {
-                refused = true;
-                let _ = child.kill();
-                break child.wait().unwrap();
-            }
-            if let Some(status) = child.try_wait().unwrap() {
-                break status;
-            }
-            thread::sleep(Duration::from_millis(20));
-        };
-        (status, out.join().unwrap(), err.join().unwrap(), refused)
-    });
+    let mut refused = false;
+    let status = loop {
+        let overflow = [&stdout_path, &stderr_path]
+            .iter()
+            .any(|path| fs::metadata(path).unwrap().len() > CAPTURE as u64);
+        if overflow || started.elapsed() > Duration::from_secs(seconds) {
+            refused = true;
+            let _ = child.kill();
+            break child.wait().unwrap();
+        }
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let read = |path: &Path| {
+        let mut bytes = Vec::new();
+        File::open(path)
+            .unwrap()
+            .take((CAPTURE + 1) as u64)
+            .read_to_end(&mut bytes)
+            .unwrap();
+        bytes
+    };
     let output = Captured {
         status,
-        stdout,
-        stderr,
+        stdout: read(&stdout_path),
+        stderr: read(&stderr_path),
     };
     assert!(
-        !refused && !overflow.load(Ordering::Relaxed),
+        !refused && output.stdout.len() <= CAPTURE && output.stderr.len() <= CAPTURE,
         "subprocess deadline/output cap: {command:?}\n{}",
         output.text()
     );
