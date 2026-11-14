@@ -611,7 +611,15 @@ pub(crate) struct MachineKey {
 
 /// Per fiber: task state, cancellation flag, next wake, I/O and timer
 /// sequence counters, pending timer and its scheduled I/O result.
-type TaskKey = (u8, bool, WakeKey, u32, u32, Option<(u32, u64)>, Option<IoKey>);
+type TaskKey = (
+    u8,
+    bool,
+    WakeKey,
+    u32,
+    u32,
+    Option<(u32, u64)>,
+    Option<IoKey>,
+);
 type IoKey = (u8, u64);
 type WakeKey = (u8, u32, IoKey);
 

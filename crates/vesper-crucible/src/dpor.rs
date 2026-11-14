@@ -23,6 +23,38 @@
 //! fiber failure is found. `tests/dpor.rs` checks this differentially
 //! against [`explore_exhaustive`] (same set of distinct outcomes, fewer
 //! executions).
+//!
+//! Wave-seven extensions:
+//!
+//! * **Preemption bounding** (`ExploreConfig::preemption_bound`): only
+//!   schedules with at most `k` preemptions are explored (Musuvathi and
+//!   Qadeer's iterative context bounding). Bounded DPOR follows Coons,
+//!   Musuvathi and McKinley's bounded POR (OOPSLA 2013): a race is also
+//!   reversed at the start of the scheduling block of its first event, every
+//!   awake member of FG05's candidate set is added, and a node that takes a
+//!   preemption also explores letting the running fiber continue. It runs
+//!   without sleep sets, which are unsound under a bound (the explored member
+//!   of a trace class may need more preemptions than a pruned one). The
+//!   guarantee is relative to the bound: every outcome of a schedule within
+//!   it is found, checked differentially against bounded exhaustive search.
+//! * **State caching** ([`explore_cached`]): a caller-supplied key of the
+//!   world and fibers, together with the machine's own schedule-independent
+//!   state, the failures so far and the preemption state, identifies a
+//!   state. A state whose subtree was fully explored is not explored again.
+//!   Under DPOR a cached state is pruned only if it was explored with a sleep
+//!   set contained in the current one, and every next transition seen in its
+//!   subtree is race-checked against the current prefix (every racing event,
+//!   not only the latest), so the prefix still gets the backtracking points
+//!   the pruned subtree would have added. Bounded DPOR does not prune on
+//!   cache hits: the differential stress found a bounded case it missed, so
+//!   caching applies to exhaustive search (bounded or not) and to unbounded
+//!   DPOR.
+//! * **Spawning, cancellation and chosen I/O results**: a spawned fiber is a
+//!   new process that happens after its spawning step; spawns are mutually
+//!   dependent (one index counter); a cancellation request is dependent with
+//!   every step of its target; each declared result of an external
+//!   completion is its own delivery process, and choosing one adds its
+//!   sibling results as backtracking points.
 
 use crate::explore::{
     ExploreConfig, ExploreError, Machine, MachineKey, Next, Proc, SimFiber, StepError, dependent,
@@ -108,7 +140,7 @@ type StateKey<K> = (MachineKey, Vec<Failure>, Option<usize>, u32, K);
 struct Cached {
     /// The sleep set the state was explored with.
     sleep: BTreeSet<Proc>,
-    /// Every transition executed in its explored subtree.
+    /// Every next transition seen in its explored subtree.
     summary: BTreeSet<(Proc, Next)>,
 }
 
@@ -371,7 +403,7 @@ fn new_node<W, F: SimFiber<W>, K>(
     running: Option<usize>,
     preemptions: u32,
 ) -> Node<K> {
-    Node {
+    let mut node = Node {
         enabled: m.enabled(),
         nexts: m.nexts(),
         backtrack: BTreeSet::new(),
@@ -385,7 +417,11 @@ fn new_node<W, F: SimFiber<W>, K>(
         key: None,
         hit: false,
         summary: BTreeSet::new(),
-    }
+    };
+    // FG05 race-checks every process's next transition at every state,
+    // executed or not, so a cached subtree's summary records them all.
+    node.summary = node.nexts.iter().cloned().collect();
+    node
 }
 
 /// Pick the next unexplored, awake, allowed process at `node`, from its
@@ -602,11 +638,9 @@ where
             child.sleep0.clone_from(&child_sleep);
             child.sleep = child_sleep;
             child.key = state_key(&m, &failures, running, preemptions)?;
-            let hit = child
-                .key
-                .as_ref()
-                .and_then(|k| cache.get(k))
-                .filter(|c| mode == Mode::Exhaustive || c.sleep.is_subset(&child.sleep));
+            let hit = child.key.as_ref().and_then(|k| cache.get(k)).filter(|c| {
+                mode == Mode::Exhaustive || (!bounded && c.sleep.is_subset(&child.sleep))
+            });
             if let Some(cached) = hit {
                 child.hit = true;
                 child.summary = cached.summary.clone();

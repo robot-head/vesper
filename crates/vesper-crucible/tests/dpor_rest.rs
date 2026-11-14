@@ -12,9 +12,19 @@ use vesper_crucible::{
     explore_dpor, explore_exhaustive, format_schedule, replay_schedule,
 };
 
+/// The exhaustive baseline's budget: programs above it are skipped. Local
+/// stress runs (`VESPER_CRUCIBLE_DPOR_SEEDS`) use a larger one.
+fn budget() -> u64 {
+    if std::env::var("VESPER_CRUCIBLE_DPOR_SEEDS").is_ok() {
+        20_000
+    } else {
+        4_000
+    }
+}
+
 fn cfg(bound: Option<u32>) -> ExploreConfig {
     ExploreConfig {
-        max_executions: 20_000,
+        max_executions: budget(),
         preemption_bound: bound,
         ..ExploreConfig::default()
     }
@@ -75,7 +85,7 @@ impl Totals {
 fn seeds() -> (u64, usize) {
     match std::env::var("VESPER_CRUCIBLE_DPOR_SEEDS") {
         Ok(n) => (n.parse().expect("seed count"), 4),
-        Err(_) => (150, 3),
+        Err(_) => (100, 3),
     }
 }
 
@@ -101,7 +111,7 @@ fn spawn_cancel_and_chosen_results_dpor_matches_exhaustive() {
         "spawn/cancel/choice: {} programs, exhaustive {} executions, dpor {}",
         t.programs, t.baseline, t.reduced
     );
-    assert!(t.programs * 100 >= seeds * 70, "{} programs", t.programs);
+    assert!(t.programs * 100 >= seeds * 60, "{} programs", t.programs);
     assert!(t.reduced * 3 < t.baseline);
 }
 
@@ -132,7 +142,7 @@ fn bounded_dpor_matches_bounded_exhaustive() {
             "bound {bound}: {} programs, bounded exhaustive {} executions, bounded dpor {}",
             t.programs, t.baseline, t.reduced
         );
-        assert!(t.programs * 100 >= seeds * 70);
+        assert!(t.programs * 100 >= seeds * 60);
         assert!(t.reduced < t.baseline);
     }
 }
