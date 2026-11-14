@@ -2,9 +2,9 @@
 
 Design §34 (items 4 and 5 of §34.1), continuing the wave-seven
 [sources, recovery and offline rescaling](flux-sources-recovery.md) lane
-(PR #381, which this branch is built on). Base: `1094e64` (main after the
-wave-eight plan, a descendant of the required `ea1ed29`) merged with the
-#381 branch head `6249d66`. Edited `crates/vesper-flux/**`,
+(PR #381, which this branch is built on and which merged as `d6696a8`).
+Work started on `1094e64` (main after the wave-eight plan) merged with the
+#381 branch, and the branch was then merged with main at `d6696a8`. Edited `crates/vesper-flux/**`,
 `lean/FluxDbsp.lean`, this report, plus one new workflow file
 (`.github/workflows/flux-kafka.yml`, which starts the broker in CI) and the
 root `Cargo.lock` patch in its own commit.
