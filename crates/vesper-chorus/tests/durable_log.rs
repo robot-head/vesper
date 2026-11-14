@@ -331,6 +331,22 @@ fn damaged_files_are_typed_errors() {
     corrupt("log", 2); // header
     // A damaged record with valid records after it: not a torn tail.
     corrupt("log", 16 + 32 + 12);
+    // Two consecutive damaged records with valid ones after them.
+    let mut d = build();
+    d.corrupt("log", 16 + 32 + 12, 0x40).unwrap();
+    d.corrupt("log", 16 + 64 + 12, 0x40).unwrap();
+    assert!(matches!(
+        DurableLog::open(d),
+        Err(StorageError::Corrupt { .. })
+    ));
+    // An image too large to recover is refused before anything is written.
+    let (mut big, _) = DurableLog::open(SimDisk::new(2)).unwrap();
+    let image = vec![e(1, 0); (vesper_chorus::durable::MAX_SNAPSHOT_ENTRIES + 1) as usize];
+    assert!(matches!(
+        big.install(image.len() as u64, 1, &image, &[]),
+        Err(StorageError::Invalid(_))
+    ));
+    drop(image);
     // A damaged last record is a torn tail: dropped, the rest kept.
     let mut d = build();
     let len = d.read("log").unwrap().unwrap().len();

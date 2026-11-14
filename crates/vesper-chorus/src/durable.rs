@@ -663,11 +663,18 @@ fn parse_log(b: &[u8]) -> Result<ParsedLog, StorageError> {
         let expect = base + out.len() as u64 + 1;
         let Some(p) = record_at(b, at) else {
             // A torn tail ends the log. Media damage in the middle does
-            // not: a well-formed record for a later index after the bad one
-            // means synced data would be lost, so it is an error.
-            let next = at + RECORD_HEAD + ENTRY_PAYLOAD;
-            if record_at(b, next).is_some_and(|q| be(q, 0) == expect + 1) {
-                return Err(corrupt(LOG, format!("damaged record for index {expect}")));
+            // not: a well-formed record for a later index anywhere after
+            // the bad one (records have a fixed size, so at a record
+            // boundary) means synced data would be lost, so it is an error.
+            // A torn write leaves at most a partial record and under 16
+            // garbage bytes, which never form a whole valid record.
+            const REC: usize = RECORD_HEAD + ENTRY_PAYLOAD;
+            let mut next = at + REC;
+            while next + REC <= b.len() {
+                if record_at(b, next).is_some_and(|q| be(q, 0) > expect) {
+                    return Err(corrupt(LOG, format!("damaged record for index {expect}")));
+                }
+                next += REC;
             }
             break;
         };
@@ -912,6 +919,12 @@ impl<D: Disk> DurableLog<D> {
         image: &[Entry],
         log: &[Entry],
     ) -> Result<(), StorageError> {
+        if index > MAX_SNAPSHOT_ENTRIES {
+            // Recovery rejects larger images; never write one it cannot read.
+            return Err(StorageError::Invalid(
+                "snapshot image exceeds MAX_SNAPSHOT_ENTRIES",
+            ));
+        }
         if image.len() as u64 != index || image.last().map_or(0, |e| e.term) != term {
             return Err(StorageError::Invalid(
                 "the image must end at the snapshot point",

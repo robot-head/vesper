@@ -9,7 +9,7 @@ use common::{CA, HOSTS, NOW_SECS, ROGUE_CA, ROGUE_NODE1, credential, pki};
 use std::time::Duration;
 use vesper_chorus::session::{
     Branch, Case, ChorusError, End, Fault, LeakAuditor, NetFail, OfferN, Rec, SelectN, Session,
-    Var, Z,
+    TryRecv, Var, Z,
 };
 use vesper_chorus::warpnet::{ALPN, WarpNet, WarpNetConfig, WarpNetError, WarpTls};
 use vesper_chorus::{branches, parse_choreography, role, u64_message, unit_message};
@@ -351,6 +351,23 @@ fn connection_close_fails_sessions_on_both_hosts() {
         info.error[1],
         Some(ConnectionError::Application { error_code: 0x77 })
     );
+    // A polling driver sees the closure too (no endless `Empty`).
+    let probe = Session::<Consumer>::bind(
+        &chor,
+        "C",
+        2,
+        net.transport(1, &placement).unwrap(),
+        &auditor,
+    )
+    .unwrap()
+    .enter();
+    match probe.try_offer() {
+        TryRecv::Fault(f) => assert!(
+            matches!(f.into_error(), ChorusError::Net(NetFail::Closed)),
+            "non-blocking receive on a closed link"
+        ),
+        _ => panic!("non-blocking receive on a closed link did not fail"),
+    }
     let e = tx.select(&Item(2)).map(drop).map_err(err).unwrap_err();
     assert!(matches!(e, ChorusError::Net(NetFail::Closed)), "{e:?}");
     assert!(net.link_failure().is_some());

@@ -1433,6 +1433,13 @@ impl Core {
         if self.mail.abandoned.contains(&(node, src, key.0, key.1)) {
             return Err(NetFail::PeerGone);
         }
+        // A closed or failed link delivers nothing more: blocking and
+        // non-blocking receives both fail.
+        if let Some((li, _)) = self.side_of(node, src)
+            && self.links[li].failed.is_some()
+        {
+            return Err(NetFail::Closed);
+        }
         Ok(None)
     }
 }
