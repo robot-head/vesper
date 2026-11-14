@@ -479,12 +479,15 @@ fn compile<M: Module>(
     instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
-    compile_entry(m, world, entry, optimize, observer, instrument, false)
+    compile_entry(
+        m, world, entry, optimize, observer, instrument, options, false,
+    )
 }
 /// [`compile`]; with `fail_entry`, an entry whose only effects are `Fail`
 /// instances is accepted and keeps its hidden failure-record parameter
 /// (lane 27: the freestanding runtime turns an escaping failure into an
 /// abort).
+#[allow(clippy::too_many_arguments)]
 fn compile_entry<M: Module>(
     m: &mut M,
     world: &World,
@@ -492,6 +495,7 @@ fn compile_entry<M: Module>(
     optimize: bool,
     observer: Option<&mut dyn FnMut(EmittedFunction)>,
     instrument: Option<Instrument<'_>>,
+    options: CodegenOptions,
     fail_entry: bool,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
@@ -981,7 +985,16 @@ pub fn object_for_isa(
     let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
         .map_err(|e| e.to_string())?;
     let mut m = ObjectModule::new(builder);
-    let (_, clif) = compile_entry(&mut m, world, entry, optimize, observer, None, true)?;
+    let (_, clif) = compile_entry(
+        &mut m,
+        world,
+        entry,
+        optimize,
+        observer,
+        None,
+        CodegenOptions::default(),
+        true,
+    )?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
 }
