@@ -61,6 +61,7 @@ fn render(world: &World, ty: &Type, v: &Val) -> String {
         (Val::U8(x), _) => x.to_string(),
         (Val::Bool(x), _) => x.to_string(),
         (Val::Float64(x), _) => x.to_string(),
+        (Val::String(x), _) => format!("{x:?}"),
         (Val::Tuple(vs), Type::Tuple(ts)) => format!(
             "({})",
             vs.iter()
@@ -185,26 +186,34 @@ fn compile(world: &World, options: &WasmOptions) -> Result<WasmArtifact, WasmErr
     wasm_backend::compile(world, "main", options)
 }
 
-/// Evaluator and Wasmtime agree; returns the artifact.
+/// Evaluator and Wasmtime agree, with and without the IR optimizer and in
+/// both effect-lowering modes; returns the default artifact.
 fn differential(source: &str) -> WasmArtifact {
     let w = world(source);
     let expected = evaluate(&w).expect("evaluator");
-    for optimize in [false, true] {
-        let art = compile(
-            &w,
-            &WasmOptions {
-                optimize,
-                ..WasmOptions::default()
-            },
-        )
-        .unwrap_or_else(|e| panic!("compile ({source}): {e}"));
-        assert!(art.component.starts_with(b"\0asm"));
-        if art.stack_switching && !stack_switching_host() {
-            eprintln!("stack switching unavailable on this host; compiled only: {source}");
-            continue;
+    for effects in [EffectLowering::StackSwitching, EffectLowering::Portable] {
+        for optimize in [false, true] {
+            let art = compile(
+                &w,
+                &WasmOptions {
+                    optimize,
+                    effects,
+                    ..WasmOptions::default()
+                },
+            )
+            .unwrap_or_else(|e| panic!("compile ({effects:?}, {source}): {e}"));
+            assert!(art.component.starts_with(b"\0asm"));
+            if effects == EffectLowering::Portable {
+                assert!(!art.stack_switching, "portable output uses WasmFX: {source}");
+            }
+            if art.stack_switching && !stack_switching_host() {
+                eprintln!("stack switching unavailable on this host; compiled only: {source}");
+                continue;
+            }
+            let got = run(&w, &art)
+                .unwrap_or_else(|e| panic!("run ({effects:?}, {source}): {e}\n{}", art.wit));
+            assert_eq!(got, expected, "{effects:?}: {source}\n{}", art.wit);
         }
-        let got = run(&w, &art).unwrap_or_else(|e| panic!("run ({source}): {e}\n{}", art.wit));
-        assert_eq!(got, expected, "{source}\n{}", art.wit);
     }
     compile(&w, &WasmOptions::default()).unwrap()
 }
@@ -549,20 +558,100 @@ fn closures_and_function_values() {
     }
 }
 
+// ---- f64 remainder, strings, monomorphization ------------------------------
+
+#[test]
+fn float_remainder_is_exact() {
+    differential(include_str!("fixtures/wasm_backend/remainder.ves"));
+    differential("fn main() -> f64 { let a: f64 = 10.5; a %= 4.0; a }");
+    differential("fn main() -> f64 { let n: f64 = 0.0; let a: f64 = 1.0; a % (n / n) }");
+    differential("fn main() -> f64 { let n: f64 = 0.0; let a: f64 = 1.0; (a / n) % 2.0 }");
+    differential("fn main() -> f64 { let n: f64 = 0.0; let a: f64 = 2.0; a % (1.0 / n) }");
+    differential("fn main() -> f64 { let a: f64 = 5.0; a % 0.0 }");
+    // Every pair of a grid of awkward operands (zeros, subnormals, huge
+    // ratios, exact multiples), compared through the evaluator's display,
+    // which round-trips every finite f64 exactly.
+    let values = [
+        "0.0",
+        "-0.0",
+        "1.0",
+        "-1.0",
+        "0.5",
+        "3.0",
+        "1e-300",
+        "2.5e-308",
+        "5e-324",
+        "3e-320",
+        "1e300",
+        "1.7976931348623157e308",
+        "7.25",
+        "-13.75",
+        "4503599627370497.0",
+        "0.1",
+    ];
+    for x in values {
+        let row: Vec<String> = values
+            .iter()
+            .map(|y| format!("{{ let a: f64 = {x}; let b: f64 = {y}; a % b }}"))
+            .collect();
+        differential(&format!(
+            "fn main() -> ({}) {{ ({}) }}",
+            vec!["f64"; values.len()].join(", "),
+            row.join(", ")
+        ));
+    }
+}
+
+#[test]
+fn strings() {
+    differential(r#"fn main() -> String { "hello, wasm" }"#);
+    differential(r#"fn main() -> String { "" }"#);
+    differential(r#"fn main() -> bool { let a = "abc"; let b = "abd"; a == b }"#);
+    differential(r#"fn main() -> (bool, bool) { ("abc" == "abc", "abc" != "ab") }"#);
+    differential(
+        r#"fn name(n: u8) -> String { match n { 0 => "zero", 1 => "one", _ => "many", } } fn main() -> (String, String, String) { (name(0), name(1), name(7)) }"#,
+    );
+    differential(
+        r#"fn classify(sink s: String) -> i64 { match s { "red" => 1, "green" => 2, _ => 0, } } fn main() -> (i64, i64, i64) { (classify("red"), classify("green"), classify("blue")) }"#,
+    );
+    differential(
+        r#"struct Named { name: String, value: i64 } fn main() -> Named { Named { name: "answer", value: 42 } }"#,
+    );
+    differential(r#"fn main() -> Option[String] { Some("unicode: é😀") }"#);
+    differential(
+        r#"fn main() -> bool { let a: Option[String] = Some("x"); let b: Option[String] = Some("x"); a == b }"#,
+    );
+}
+
+#[test]
+fn generic_functions_are_monomorphized() {
+    differential(
+        "copy struct Pair { x: f64, y: i64 } fn same[T: mod copy](a: T, b: T) -> bool { a == b } fn main() -> bool { let a = Pair { x: 1.0, y: 2 }; same[Pair](a, a) }",
+    );
+    // Inferred type arguments, several instances of one function.
+    differential(
+        "fn same[T: mod copy](a: T, b: T) -> bool { a == b } fn main() -> (bool, bool, bool) { (same(1, 2), same(true, true), same((1, 2.5), (1, 2.5))) }",
+    );
+    differential(
+        r#"fn same[T: mod copy](a: T, b: T) -> bool { a == b } fn twice[T: mod copy](a: T, b: T) -> bool { same(a, b) } fn main() -> (bool, bool) { (twice(7, 7), twice(Some(1), None)) }"#,
+    );
+    // A generic Fail instance resolved per instantiation.
+    differential(
+        "fn fail_with[E](sink e: E) -> i64 eff [Fail[E]] { Fail::raise(e) } fn main() -> i64 { handle Fail[u8] in { handle Fail[bool] in { fail_with(true) } with { return x => x, raise(e, k) => 1, } } with { return x => x, raise(e, k) => 2, } }",
+    );
+    differential(
+        "linear effect Get[T] { fn get() -> T; } fn ask[T]() -> T eff [Get[T]] { Get::get() } fn main() -> (u8, bool) { let a = handle Get[u8] in { ask[u8]() } with { return x => x, get(k) => k(9), }; let b = handle Get[bool] in { ask[bool]() } with { return x => x, get(k) => k(true), }; (a, b) }",
+    );
+    // Closures inside a generic instance see its types.
+    differential(
+        "fn eq_later[T: mod copy](sink a: T, sink b: T) -> bool { let f = || a == b; f() } fn main() -> (bool, bool) { (eq_later(1.5, 1.5), eq_later((1, 2), (2, 1))) }",
+    );
+}
+
 // ---- rejections --------------------------------------------------------------
 
 #[test]
 fn unsupported_constructs_are_typed_errors() {
-    unsupported(
-        "fn main() -> f64 { 7.5 % 2.0 }",
-        Unsupported::FloatRemainder,
-    );
-    // Generic functions are compiled once over the uniform representation,
-    // so type-directed operations on a type parameter are rejected.
-    unsupported(
-        "copy struct Pair { x: f64, y: i64 } fn same[T: mod copy](a: T, b: T) -> bool { a == b } fn main() -> bool { let a = Pair { x: 1.0, y: 2 }; same[Pair](a, a) }",
-        Unsupported::GenericOperation,
-    );
     unsupported(
         "linear effect Inc { fn inc(inout x: i64); } fn main() -> i64 { let x = 40; handle Inc in { Inc::inc(inout x); x } with { return n => n, inc(n, k) => { n = wrapping_add(n, 2); k(()) }, } }",
         Unsupported::InoutEffectArgument,

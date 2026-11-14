@@ -120,6 +120,7 @@ impl Wit {
                     return Err(export_err(format!("{ty} inside an exported aggregate")));
                 }
             },
+            Shape::Str => "string".into(),
             Shape::Tuple(ts) => {
                 let parts = ts
                     .iter()
@@ -202,6 +203,7 @@ fn size_align(world: &crate::check::World, ty: &Type) -> Result<(u64, u64), Wasm
         Shape::Scalar(Scalar::Bool | Scalar::U8) => (1, 1),
         Shape::Scalar(Scalar::U32) => (4, 4),
         Shape::Scalar(Scalar::I64 | Scalar::U64 | Scalar::F64) => (8, 8),
+        Shape::Str => (8, 4),
         Shape::Tuple(ts) => record(world, &ts)?.0,
         Shape::Struct { fields, .. } => {
             record(
@@ -254,6 +256,7 @@ fn discriminant(cases: usize) -> (u64, u32) {
 fn flat_count(world: &crate::check::World, ty: &Type) -> Result<usize, WasmError> {
     Ok(match layout::shape(world, ty)? {
         Shape::Scalar(_) => 1,
+        Shape::Str => 2,
         Shape::Tuple(ts) => ts
             .iter()
             .map(|t| flat_count(world, t))
@@ -320,6 +323,23 @@ fn store(
                 Scalar::U32 => I::I64Store32(m(offset, 2)),
                 _ => I::I64Store(m(offset, 3)),
             });
+        }
+        Shape::Str => {
+            // (pointer to the bytes, byte length), both i32.
+            code.extend([
+                I::LocalGet(base),
+                I::I32WrapI64,
+                I::LocalGet(v),
+                I::I64Const(8),
+                I::I64Add,
+                I::I64Store32(m(offset, 2)),
+                I::LocalGet(base),
+                I::I32WrapI64,
+                I::LocalGet(v),
+                I::I32WrapI64,
+                I::I64Load(m(0, 3)),
+                I::I64Store32(m(offset + 4, 2)),
+            ]);
         }
         Shape::Tuple(ts) => {
             let (_, offs) = record(world, &ts)?;

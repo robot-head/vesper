@@ -32,7 +32,6 @@ use wasm_encoder::{
     BlockType, Function, Handle, HeapType, Instruction as I, MemArg, RefType, ValType,
 };
 
-const HEAP_START: i64 = 16;
 
 /// Temporary `inout` cells and the places they are copied back to.
 type Writebacks = Vec<(u32, crate::check::Place)>;
@@ -84,6 +83,10 @@ pub(crate) struct Lowerer<'a> {
     /// Table slot of the trampoline of each closure or function value.
     trampolines: BTreeMap<String, u32>,
     eq_pending: Vec<(u32, Type)>,
+    /// Runtime helpers generated on first use (`fmod`, `str_eq`, ...).
+    helpers: BTreeMap<&'static str, u32>,
+    /// Static address of each interned string literal.
+    strings: BTreeMap<String, u64>,
     pub arity: usize,
     pub instructions: usize,
     pub max_instructions: usize,
@@ -116,7 +119,8 @@ impl<'a> Lowerer<'a> {
         max_instructions: usize,
     ) -> Result<Self, WasmError> {
         let mut b = Builder::default();
-        let heap = b.global(HEAP_START);
+        let heap = b.global(0);
+        b.set_heap_global(heap);
         let abort = b.global(0);
         let env = plan.keys.iter().map(|k| (k.clone(), b.global(0))).collect();
         let alloc = b.declare("$alloc", &[ValType::I64], &[ValType::I64]);
@@ -153,10 +157,30 @@ impl<'a> Lowerer<'a> {
             eq: BTreeMap::new(),
             trampolines: BTreeMap::new(),
             eq_pending: vec![],
+            helpers: BTreeMap::new(),
+            strings: BTreeMap::new(),
             arity,
             instructions: 0,
             max_instructions,
         })
+    }
+
+    /// The IR function of an instance key.
+    pub(crate) fn ir(&self, key: &str) -> &'a FunctionIr {
+        let base = self
+            .plan
+            .instances
+            .get(key)
+            .map_or(key, |i| i.base.as_str());
+        &self.program.functions[base]
+    }
+    /// The type arguments of an instance key.
+    pub(crate) fn vars(&self, key: &str) -> super::analysis::Vars {
+        self.plan
+            .instances
+            .get(key)
+            .map(|i| i.vars.clone())
+            .unwrap_or_default()
     }
 
     fn k_type(&self) -> ValType {
@@ -168,7 +192,7 @@ impl<'a> Lowerer<'a> {
 
     /// Wasm parameter list of an IR function under its role.
     fn signature(&self, name: &str) -> Vec<ValType> {
-        let f = &self.program.functions[name];
+        let f = self.ir(name);
         let mut params = vec![];
         let (skip, hidden) = match &self.plan.roles[name] {
             Role::OpClause { handler, op } => {
@@ -245,7 +269,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             let body_offset = offset;
-            offset += 8 * self.program.functions[&h.body].params.len() as u64;
+            offset += 8 * self.ir(&h.body).params.len() as u64;
             self.hfns.push(HandlerFns {
                 dispatch_slot,
                 dispatch,
@@ -352,7 +376,7 @@ impl<'a> Lowerer<'a> {
             .funcs
             .get(function)
             .ok_or_else(|| WasmError::Invalid(format!("callable {function} was not planned")))?;
-        let total = self.program.functions[function].params.len();
+        let total = self.ir(function).params.len();
         let arity = total.checked_sub(captures).ok_or_else(|| {
             WasmError::Invalid(format!("{function} has fewer parameters than captures"))
         })?;
@@ -429,6 +453,7 @@ impl<'a> Lowerer<'a> {
                     format!("equality on {ty}"),
                 ));
             }
+            Shape::Str => return Ok(self.str_eq()),
             _ => {}
         }
         let idx = self
@@ -517,6 +542,7 @@ impl<'a> Lowerer<'a> {
                 }
                 code.push(I::Unreachable);
             }
+            Shape::Str => code.extend([I::LocalGet(a), I::LocalGet(b), I::Call(self.str_eq())]),
             Shape::Opaque | Shape::Function => {
                 return Err(WasmError::unsupported(
                     Unsupported::GenericOperation,
@@ -531,6 +557,312 @@ impl<'a> Lowerer<'a> {
             f.instruction(ins);
         }
         Ok(f)
+    }
+
+    /// The static address of string literal `text`.
+    pub(crate) fn string_literal(&mut self, text: &str) -> u64 {
+        if let Some(a) = self.strings.get(text) {
+            return *a;
+        }
+        let mut bytes = (text.len() as u64).to_le_bytes().to_vec();
+        bytes.extend_from_slice(text.as_bytes());
+        let at = self.b.data(&bytes);
+        self.strings.insert(text.to_owned(), at);
+        at
+    }
+
+    fn helper(
+        &mut self,
+        name: &'static str,
+        params: usize,
+        locals: u32,
+        body: impl FnOnce(&Self) -> Vec<I<'static>>,
+    ) -> u32 {
+        if let Some(i) = self.helpers.get(name) {
+            return *i;
+        }
+        let idx = self
+            .b
+            .declare(&format!("${name}"), &vec![ValType::I64; params], &[ValType::I64]);
+        self.helpers.insert(name, idx);
+        let code = body(self);
+        let mut f = Function::new([(locals, ValType::I64)]);
+        for ins in &code {
+            f.instruction(ins);
+        }
+        self.b.define(idx, f);
+        idx
+    }
+
+    /// `$str_eq(a, b)`: byte equality of two strings (0 or 1).
+    pub(crate) fn str_eq(&mut self) -> u32 {
+        self.helper("str_eq", 2, 2, |_| {
+            let (a, b, n, i) = (0, 1, 2, 3);
+            let byte = |p: u32| {
+                [
+                    I::LocalGet(p),
+                    I::LocalGet(i),
+                    I::I64Add,
+                    I::I32WrapI64,
+                    I::I64Load8U(MemArg {
+                        offset: 8,
+                        align: 0,
+                        memory_index: 0,
+                    }),
+                ]
+            };
+            let mut c = vec![
+                I::LocalGet(a),
+                I::LocalGet(b),
+                I::I64Eq,
+                I::If(BlockType::Empty),
+                I::I64Const(1),
+                I::Return,
+                I::End,
+                I::LocalGet(a),
+                I::I32WrapI64,
+                I::I64Load(mem(0)),
+                I::LocalTee(n),
+                I::LocalGet(b),
+                I::I32WrapI64,
+                I::I64Load(mem(0)),
+                I::I64Ne,
+                I::If(BlockType::Empty),
+                I::I64Const(0),
+                I::Return,
+                I::End,
+                I::Loop(BlockType::Empty),
+                I::LocalGet(i),
+                I::LocalGet(n),
+                I::I64GeU,
+                I::If(BlockType::Empty),
+                I::I64Const(1),
+                I::Return,
+                I::End,
+            ];
+            c.extend(byte(a));
+            c.extend(byte(b));
+            c.extend([
+                I::I64Ne,
+                I::If(BlockType::Empty),
+                I::I64Const(0),
+                I::Return,
+                I::End,
+                I::LocalGet(i),
+                I::I64Const(1),
+                I::I64Add,
+                I::LocalSet(i),
+                I::Br(0),
+                I::End,
+                I::Unreachable,
+                I::End,
+            ]);
+            c
+        })
+    }
+
+    /// `$fmod(x, y)`: the exact IEEE remainder truncated toward zero (C
+    /// `fmod`, Rust `%` on `f64`) on the bit patterns, following musl's
+    /// integer algorithm, so it agrees with the evaluator bit for bit.
+    pub(crate) fn fmod(&mut self) -> u32 {
+        self.helper("fmod", 2, 6, |_| {
+            let (x, y, ex, ey, sx, i, sh, ox) = (0u32, 1u32, 2u32, 3u32, 4u32, 5u32, 6u32, 7u32);
+            const ABS: i64 = i64::MAX;
+            const INF: i64 = 0x7ff0_0000_0000_0000;
+            const MANT: i64 = (1 << 52) - 1;
+            const HIDDEN: i64 = 1 << 52;
+            let zero_times_x = [
+                I::F64Const(0.0.into()),
+                I::LocalGet(ox),
+                I::F64ReinterpretI64,
+                I::F64Mul,
+                I::I64ReinterpretF64,
+                I::Return,
+            ];
+            let mut c = vec![
+                I::LocalGet(x),
+                I::LocalSet(ox),
+                I::LocalGet(x),
+                I::I64Const(52),
+                I::I64ShrU,
+                I::I64Const(0x7ff),
+                I::I64And,
+                I::LocalSet(ex),
+                I::LocalGet(y),
+                I::I64Const(52),
+                I::I64ShrU,
+                I::I64Const(0x7ff),
+                I::I64And,
+                I::LocalSet(ey),
+                I::LocalGet(x),
+                I::I64Const(63),
+                I::I64ShrU,
+                I::LocalSet(sx),
+                // y == ±0, y is NaN or x is not finite: NaN.
+                I::LocalGet(y),
+                I::I64Const(1),
+                I::I64Shl,
+                I::I64Eqz,
+                I::LocalGet(y),
+                I::I64Const(ABS),
+                I::I64And,
+                I::I64Const(INF),
+                I::I64GtU,
+                I::I32Or,
+                I::LocalGet(ex),
+                I::I64Const(0x7ff),
+                I::I64Eq,
+                I::I32Or,
+                I::If(BlockType::Empty),
+                I::LocalGet(x),
+                I::F64ReinterpretI64,
+                I::LocalGet(y),
+                I::F64ReinterpretI64,
+                I::F64Mul,
+                I::LocalGet(x),
+                I::F64ReinterpretI64,
+                I::LocalGet(y),
+                I::F64ReinterpretI64,
+                I::F64Mul,
+                I::F64Div,
+                I::I64ReinterpretF64,
+                I::Return,
+                I::End,
+                // |x| <= |y|
+                I::LocalGet(x),
+                I::I64Const(1),
+                I::I64Shl,
+                I::LocalGet(y),
+                I::I64Const(1),
+                I::I64Shl,
+                I::I64LeU,
+                I::If(BlockType::Empty),
+                I::LocalGet(x),
+                I::I64Const(1),
+                I::I64Shl,
+                I::LocalGet(y),
+                I::I64Const(1),
+                I::I64Shl,
+                I::I64Eq,
+                I::If(BlockType::Empty),
+            ];
+            c.extend(zero_times_x.clone());
+            c.extend([I::End, I::LocalGet(x), I::Return, I::End]);
+            // Normalize both operands to an explicit leading bit.
+            for (v, e) in [(x, ex), (y, ey)] {
+                c.extend([
+                    I::LocalGet(e),
+                    I::I64Eqz,
+                    I::If(BlockType::Empty),
+                    I::LocalGet(v),
+                    I::I64Const(12),
+                    I::I64Shl,
+                    I::I64Clz,
+                    I::LocalSet(sh),
+                    I::I64Const(0),
+                    I::LocalGet(sh),
+                    I::I64Sub,
+                    I::LocalSet(e),
+                    I::LocalGet(v),
+                    I::LocalGet(sh),
+                    I::I64Const(1),
+                    I::I64Add,
+                    I::I64Shl,
+                    I::LocalSet(v),
+                    I::Else,
+                    I::LocalGet(v),
+                    I::I64Const(MANT),
+                    I::I64And,
+                    I::I64Const(HIDDEN),
+                    I::I64Or,
+                    I::LocalSet(v),
+                    I::End,
+                ]);
+            }
+            // Long division, one exponent step at a time.
+            let step = |c: &mut Vec<I<'static>>| {
+                c.extend([
+                    I::LocalGet(x),
+                    I::LocalGet(y),
+                    I::I64Sub,
+                    I::LocalTee(i),
+                    I::I64Const(0),
+                    I::I64GeS,
+                    I::If(BlockType::Empty),
+                    I::LocalGet(i),
+                    I::I64Eqz,
+                    I::If(BlockType::Empty),
+                ]);
+                c.extend(zero_times_x.clone());
+                c.extend([I::End, I::LocalGet(i), I::LocalSet(x), I::End]);
+            };
+            c.extend([
+                I::Block(BlockType::Empty),
+                I::Loop(BlockType::Empty),
+                I::LocalGet(ex),
+                I::LocalGet(ey),
+                I::I64LeS,
+                I::BrIf(1),
+            ]);
+            step(&mut c);
+            c.extend([
+                I::LocalGet(x),
+                I::I64Const(1),
+                I::I64Shl,
+                I::LocalSet(x),
+                I::LocalGet(ex),
+                I::I64Const(1),
+                I::I64Sub,
+                I::LocalSet(ex),
+                I::Br(0),
+                I::End,
+                I::End,
+            ]);
+            step(&mut c);
+            c.extend([
+                // Renormalize: shift the leading bit back to bit 52.
+                I::LocalGet(x),
+                I::I64Clz,
+                I::I64Const(11),
+                I::I64Sub,
+                I::LocalSet(sh),
+                I::LocalGet(x),
+                I::LocalGet(sh),
+                I::I64Shl,
+                I::LocalSet(x),
+                I::LocalGet(ex),
+                I::LocalGet(sh),
+                I::I64Sub,
+                I::LocalSet(ex),
+                I::LocalGet(ex),
+                I::I64Const(0),
+                I::I64GtS,
+                I::If(BlockType::Empty),
+                I::LocalGet(x),
+                I::I64Const(HIDDEN),
+                I::I64Sub,
+                I::LocalGet(ex),
+                I::I64Const(52),
+                I::I64Shl,
+                I::I64Or,
+                I::LocalSet(x),
+                I::Else,
+                I::LocalGet(x),
+                I::I64Const(1),
+                I::LocalGet(ex),
+                I::I64Sub,
+                I::I64ShrU,
+                I::LocalSet(x),
+                I::End,
+                I::LocalGet(x),
+                I::LocalGet(sx),
+                I::I64Const(63),
+                I::I64Shl,
+                I::I64Or,
+                I::End,
+            ]);
+            c
+        })
     }
 
     // ---- handler support functions -------------------------------------
@@ -856,7 +1188,7 @@ impl<'a> Lowerer<'a> {
         let frame = 0;
         let mut code = vec![];
         self.install_keys(&mut code, frame, h);
-        let n = self.program.functions[&h.body].params.len();
+        let n = self.ir(&h.body).params.len();
         for j in 0..n {
             code.extend([
                 I::LocalGet(frame),
@@ -1019,11 +1351,15 @@ struct Emit<'l, 'a> {
     clause_handler: Option<usize>,
     labels: BTreeSet<String>,
     generics: BTreeSet<String>,
+    /// Type arguments of this instance.
+    vars: super::analysis::Vars,
 }
 
 impl<'l, 'a> Emit<'l, 'a> {
     fn function(l: &'l mut Lowerer<'a>, name: &str) -> Result<Function, WasmError> {
-        let f = &l.program.functions[name];
+        let f = l.ir(name);
+        let vars = l.vars(name);
+        let base = l.plan.instances[name].base.clone();
         let role = l.plan.roles[name].clone();
         let mut e = Emit {
             f,
@@ -1042,9 +1378,16 @@ impl<'l, 'a> Emit<'l, 'a> {
             generics: l
                 .world
                 .functions
-                .get(name)
-                .map(|w| w.generics.iter().map(|g| g.name.clone()).collect())
+                .get(&base)
+                .map(|w| {
+                    w.generics
+                        .iter()
+                        .map(|g| g.name.clone())
+                        .filter(|g| !vars.contains_key(g))
+                        .collect()
+                })
                 .unwrap_or_default(),
+            vars,
             l,
         };
         let mut mode = None;
@@ -1132,7 +1475,11 @@ impl<'l, 'a> Emit<'l, 'a> {
         x
     }
     fn vty(&self, v: ValueId) -> Type {
-        crate::numeric::default_type(self.f.values.get(&v).unwrap_or(&Type::Infer))
+        self.subst(self.f.values.get(&v).unwrap_or(&Type::Infer))
+    }
+    /// `t` under this instance's type arguments.
+    fn subst(&self, t: &Type) -> Type {
+        crate::numeric::default_type(&substitute(t, &self.vars))
     }
     /// Push the 8-byte slot at `ptr + off`.
     fn load(&mut self, ptr: u32, off: u64) {
@@ -1178,7 +1525,7 @@ impl<'l, 'a> Emit<'l, 'a> {
             .ok_or_else(|| WasmError::Invalid(format!("{}: unknown local '{n}'", self.name)))
     }
     fn local_type(&self, n: &str) -> Type {
-        crate::numeric::default_type(self.f.locals.get(n).unwrap_or(&Type::Infer))
+        self.subst(self.f.locals.get(n).unwrap_or(&Type::Infer))
     }
     /// The current value of named local `n` into a fresh local.
     fn read_name(&mut self, n: &str) -> Result<u32, WasmError> {
@@ -1275,21 +1622,23 @@ impl<'l, 'a> Emit<'l, 'a> {
             }
             let block = &f.blocks[bi];
             let tail_call = block.instructions.last().is_some_and(|last| {
-                self.tail_callable(&last.op)
+                self.tail_callable(last)
                     && super::analysis::flows_to_return(f, bi, last.dest, 0)
             });
             let n = block.instructions.len();
             for (ii, inst) in block.instructions.iter().enumerate() {
                 if tail_call && ii + 1 == n {
-                    let Op::Call { callee, args, .. } = &inst.op else {
+                    let Op::Call { args, .. } = &inst.op else {
                         unreachable!()
                     };
-                    let params = self.params_of(callee);
+                    let key = self.callee_key(inst.dest)?;
+                    let params = self.params_of(&key);
                     let (vals, _) = self.call_args(args, &params)?;
-                    for x in vals {
-                        self.get(x);
+                    for x in &vals {
+                        self.get(*x);
                     }
-                    self.push(I::ReturnCall(self.l.funcs[callee]));
+                    self.reclaim_before_tail_call(&key, &vals)?;
+                    self.push(I::ReturnCall(self.l.funcs[&key]));
                     continue;
                 }
                 self.instruction(inst)?;
@@ -1342,12 +1691,37 @@ impl<'l, 'a> Emit<'l, 'a> {
         Ok(())
     }
 
-    fn tail_callable(&self, op: &Op) -> bool {
-        matches!(op, Op::Call { callee, args, .. }
-            if self.l.funcs.contains_key(callee)
-                && self.l.plan.roles.get(callee) == Some(&Role::Ordinary)
-                && args.iter().all(|a| a.pass != Pass::Inout)
-                && self.l.world.functions.get(callee).is_some_and(|w| w.params.iter().all(|p| p.pass != Pass::Inout)))
+    /// Region reset before a tail call (see `reclaim`).
+    fn reclaim_before_tail_call(&mut self, _callee: &str, _args: &[u32]) -> Result<(), WasmError> {
+        Ok(())
+    }
+
+    /// The instance a direct call instruction targets.
+    fn callee_key(&self, dest: ValueId) -> Result<String, WasmError> {
+        self.l
+            .plan
+            .calls
+            .get(&(self.name.clone(), dest))
+            .cloned()
+            .ok_or_else(|| WasmError::Invalid(format!("{}: unplanned call %{dest}", self.name)))
+    }
+
+    fn tail_callable(&self, inst: &crate::ir::Instruction) -> bool {
+        let Op::Call { callee, args, .. } = &inst.op else {
+            return false;
+        };
+        let Ok(key) = self.callee_key(inst.dest) else {
+            return false;
+        };
+        self.l.funcs.contains_key(&key)
+            && self.l.plan.roles.get(&key) == Some(&Role::Ordinary)
+            && args.iter().all(|a| a.pass != Pass::Inout)
+            && self.l.world.functions.get(callee).is_some_and(|w| {
+                w.params.iter().all(|p| p.pass != Pass::Inout)
+                    && !w.effects.instances.iter().any(|e| {
+                        e.label.as_ref().is_some_and(|l| !l.starts_with('$'))
+                    })
+            })
     }
 
     /// Push an i32 truth value: does `p` match the value in local `v`?
@@ -1362,8 +1736,11 @@ impl<'l, 'a> Emit<'l, 'a> {
                         self.code
                             .extend([I::F64ReinterpretI64, I::F64Const((*x).into()), I::F64Eq])
                     }
-                    (Literal::String(_), _) => {
-                        return Err(self.err(Unsupported::String, "string literal pattern"));
+                    (Literal::String(text), _) => {
+                        let at = self.l.string_literal(text);
+                        let eq = self.l.str_eq();
+                        self.code
+                            .extend([I::I64Const(at as i64), I::Call(eq), I::I32WrapI64]);
                     }
                     _ => {
                         let c = self.constant_bits(l, ty)?;
@@ -1477,8 +1854,13 @@ impl<'l, 'a> Emit<'l, 'a> {
     }
 
     fn instruction(&mut self, inst: &crate::ir::Instruction) -> Result<(), WasmError> {
-        let ty = crate::numeric::default_type(&inst.ty);
+        let ty = self.subst(&inst.ty);
         match &inst.op {
+            Op::Constant(Literal::String(text)) => {
+                let at = self.l.string_literal(text);
+                let d = self.dest(inst.dest);
+                self.code.extend([I::I64Const(at as i64), I::LocalSet(d)]);
+            }
             Op::Constant(l) => {
                 let c = self.constant_bits(l, &ty)?;
                 let d = self.dest(inst.dest);
@@ -1595,7 +1977,10 @@ impl<'l, 'a> Emit<'l, 'a> {
                 let (x, y) = (self.value(*a)?, self.value(*b)?);
                 let (sa, sb) = (self.vty(*a), self.vty(*b));
                 let r = match (op.as_str(), layout::shape(self.l.world, &sa)?) {
-                    ("==" | "!=", Shape::Tuple(_) | Shape::Struct { .. } | Shape::Enum { .. }) => {
+                    (
+                        "==" | "!=",
+                        Shape::Tuple(_) | Shape::Struct { .. } | Shape::Enum { .. } | Shape::Str,
+                    ) => {
                         let eq = self.l.eq_fn(&sa).map_err(|e| e.at(&self.name))?;
                         let d = self.local();
                         self.code
@@ -1697,10 +2082,9 @@ impl<'l, 'a> Emit<'l, 'a> {
                 types,
                 capability,
             } => {
-                if self.l.program.functions.contains_key(callee)
-                    && self.l.funcs.contains_key(callee)
-                {
-                    self.direct_call(inst.dest, callee, args)?;
+                if self.l.program.functions.contains_key(callee) {
+                    let key = self.callee_key(inst.dest)?;
+                    self.direct_call(inst.dest, &key, args)?;
                 } else if let Some((effect, op)) = callee.split_once("::")
                     && self.l.world.effects.contains_key(effect)
                 {
@@ -1752,6 +2136,7 @@ impl<'l, 'a> Emit<'l, 'a> {
             }
             Op::Closure { expr, aliases, .. } => {
                 let (function, caps) = super::analysis::closure(expr, aliases, self.f)?;
+                let function = super::analysis::instance_name(&function, &self.vars);
                 let slot = self.l.trampoline(&function, caps.len())?;
                 let mut values = vec![];
                 for c in &caps {
@@ -1942,12 +2327,25 @@ impl<'l, 'a> Emit<'l, 'a> {
         Ok(block)
     }
 
+    /// Parameter passing modes and types of instance `callee`.
     fn params_of(&self, callee: &str) -> Vec<(Pass, Type)> {
+        let vars = self.l.vars(callee);
+        let base = self
+            .l
+            .plan
+            .instances
+            .get(callee)
+            .map_or(callee, |i| i.base.as_str());
         self.l
             .world
             .functions
-            .get(callee)
-            .map(|f| f.params.iter().map(|p| (p.pass, p.ty.clone())).collect())
+            .get(base)
+            .map(|f| {
+                f.params
+                    .iter()
+                    .map(|p| (p.pass, substitute(&p.ty, &vars)))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -2162,10 +2560,12 @@ impl<'l, 'a> Emit<'l, 'a> {
                 ">" => (I::F64Gt, true),
                 ">=" => (I::F64Ge, true),
                 "%" => {
-                    return Err(self.err(
-                        Unsupported::FloatRemainder,
-                        "f64 '%' (fmod) has no Wasm instruction",
-                    ));
+                    // The operands are already reinterpreted as f64.
+                    self.code.truncate(self.code.len() - 4);
+                    let fmod = self.l.fmod();
+                    self.code
+                        .extend([I::LocalGet(x), I::LocalGet(y), I::Call(fmod), I::LocalSet(d)]);
+                    return Ok(d);
                 }
                 _ => return Err(self.err(Unsupported::Operation, format!("f64 '{op}'"))),
             };
@@ -2467,7 +2867,7 @@ impl<'l, 'a> Emit<'l, 'a> {
             self.store(frame, *off, v);
         }
         // Body captures are cells.
-        let body_params = self.l.program.functions[&h.body].params.clone();
+        let body_params = self.l.ir(&h.body).params.clone();
         let mut cells = vec![];
         let mut body_args = vec![];
         for p in &body_params {

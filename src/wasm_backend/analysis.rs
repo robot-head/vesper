@@ -55,10 +55,33 @@ pub(crate) struct Handler {
     pub aliases: BTreeMap<String, String>,
 }
 
+/// Type arguments of a monomorphized instance.
+pub(crate) type Vars = BTreeMap<String, Type>;
+
+/// One compiled function: an IR function under a type substitution.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Instance {
+    pub base: String,
+    pub vars: Vars,
+}
+
+/// The key of `base` under `vars` (`base` itself when `vars` is empty).
+pub(crate) fn instance_name(base: &str, vars: &Vars) -> String {
+    if vars.is_empty() {
+        return base.to_owned();
+    }
+    let args: Vec<String> = vars.iter().map(|(k, t)| format!("{k}={t}")).collect();
+    format!("{base}<{}>", args.join(","))
+}
+
 #[derive(Default)]
 pub(crate) struct Plan {
-    /// Reachable IR functions in a deterministic order.
+    /// Reachable function instances in a deterministic order.
     pub functions: Vec<String>,
+    /// Instance key -> IR function and type arguments.
+    pub instances: BTreeMap<String, Instance>,
+    /// (caller instance, call instruction) -> callee instance.
+    pub calls: BTreeMap<(String, ValueId), String>,
     pub roles: BTreeMap<String, Role>,
     pub handlers: Vec<Handler>,
     pub handler_at: BTreeMap<(String, ValueId), usize>,
@@ -115,6 +138,66 @@ pub(crate) fn closure(
     ))
 }
 
+/// Labels a function's own effect row binds (`eff [l: E]`).
+pub(crate) fn row_labels(world: &World, base: &str) -> BTreeSet<String> {
+    world
+        .functions
+        .get(base)
+        .map(|f| {
+            f.effects
+                .instances
+                .iter()
+                .filter_map(|e| e.label.clone())
+                .filter(|l| !l.starts_with('$'))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `t` is closed: no generic parameter or inferred part.
+pub(crate) fn concrete(world: &World, t: &Type) -> bool {
+    !mentions_generic(world, t)
+}
+
+/// The type arguments of the call at `span` inside an instance with `outer`
+/// arguments, when all of them are concrete (otherwise the callee is
+/// compiled once over the uniform representation).
+pub(crate) fn call_vars(
+    world: &World,
+    callee: &str,
+    span: &crate::ast::Span,
+    explicit: &[Type],
+    outer: &Vars,
+) -> Vars {
+    let Some(f) = world.functions.get(callee) else {
+        return Vars::new();
+    };
+    if f.generics.iter().all(|g| g.row) {
+        return Vars::new();
+    }
+    let mut vars = Vars::new();
+    if let Some(found) = world.calls.get(&(span.start, span.end)) {
+        for (k, t) in found {
+            vars.insert(k.clone(), substitute(t, outer));
+        }
+    }
+    for (g, t) in f.generics.iter().zip(explicit) {
+        if !g.row && !vars.contains_key(&g.name) {
+            vars.insert(g.name.clone(), substitute(t, outer));
+        }
+    }
+    let mut out = Vars::new();
+    for g in f.generics.iter().filter(|g| !g.row) {
+        match vars.get(&g.name) {
+            Some(t) if concrete(world, t) => {
+                out.insert(g.name.clone(), crate::numeric::default_type(t));
+            }
+            _ => return Vars::new(),
+        }
+    }
+    out
+}
+
 pub(crate) fn plan(
     world: &World,
     program: &Program,
@@ -132,9 +215,18 @@ pub(crate) fn plan(
             .max(1),
         ..Plan::default()
     };
-    let mut queue = VecDeque::from([(entry.to_owned(), Role::Ordinary, BTreeSet::new())]);
+    let root = Instance {
+        base: entry.to_owned(),
+        vars: Vars::new(),
+    };
+    let mut queue = VecDeque::from([(
+        entry.to_owned(),
+        root,
+        Role::Ordinary,
+        row_labels(world, entry),
+    )]);
     let mut seen = BTreeSet::new();
-    while let Some((name, role, labels)) = queue.pop_front() {
+    while let Some((name, inst, role, labels)) = queue.pop_front() {
         if !seen.insert(name.clone()) {
             continue;
         }
@@ -143,33 +235,64 @@ pub(crate) fn plan(
                 "more than {max_functions} reachable functions"
             )));
         }
-        let f = program.functions.get(&name).ok_or_else(|| {
+        let f = program.functions.get(&inst.base).ok_or_else(|| {
             WasmError::unsupported(
                 Unsupported::ExternalFunction,
-                &name,
+                &inst.base,
                 "function has no lowered body",
             )
         })?;
+        let vars = inst.vars.clone();
+        let nested = |base: String| -> (String, Instance) {
+            (
+                instance_name(&base, &vars),
+                Instance {
+                    base,
+                    vars: vars.clone(),
+                },
+            )
+        };
         p.functions.push(name.clone());
+        p.instances.insert(name.clone(), inst.clone());
         p.roles.insert(name.clone(), role);
         p.labels.insert(name.clone(), labels.clone());
         for block in &f.blocks {
-            for inst in &block.instructions {
-                match &inst.op {
-                    Op::Call { callee, .. } if program.functions.contains_key(callee) => {
-                        queue.push_back((callee.clone(), Role::Ordinary, BTreeSet::new()));
+            for i in &block.instructions {
+                match &i.op {
+                    Op::Call { callee, types, .. } if program.functions.contains_key(callee) => {
+                        let cv = call_vars(world, callee, &i.span, types, &vars);
+                        let key = instance_name(callee, &cv);
+                        p.calls.insert((name.clone(), i.dest), key.clone());
+                        queue.push_back((
+                            key,
+                            Instance {
+                                base: callee.clone(),
+                                vars: cv,
+                            },
+                            Role::Ordinary,
+                            row_labels(world, callee),
+                        ));
                     }
                     Op::Closure { expr, aliases, .. } => {
                         let (function, caps) = closure(expr, aliases, f)?;
                         check_prefix(program, &function, &caps)?;
-                        queue.push_back((function, Role::Ordinary, labels.clone()));
+                        let (key, inst) = nested(function);
+                        queue.push_back((key, inst, Role::Ordinary, labels.clone()));
                     }
                     Op::Read { root, path, .. }
                         if path.is_empty()
                             && !f.locals.contains_key(root)
                             && program.functions.contains_key(root) =>
                     {
-                        queue.push_back((root.clone(), Role::Ordinary, BTreeSet::new()));
+                        queue.push_back((
+                            root.clone(),
+                            Instance {
+                                base: root.clone(),
+                                vars: Vars::new(),
+                            },
+                            Role::Ordinary,
+                            row_labels(world, root),
+                        ));
                     }
                     Op::Handle {
                         expr,
@@ -183,7 +306,8 @@ pub(crate) fn plan(
                             program,
                             f,
                             &name,
-                            inst.dest,
+                            &vars,
+                            i.dest,
                             expr,
                             aliases,
                             *state_value,
@@ -193,11 +317,15 @@ pub(crate) fn plan(
                         if let Some(l) = &h.effect.label {
                             inner.insert(l.clone());
                         }
-                        queue.push_back((h.body.clone(), Role::HandlerBody, inner));
-                        queue.push_back((h.ret.clone(), Role::ReturnClause, labels.clone()));
+                        let (k, inst) = nested(h.body.clone());
+                        queue.push_back((k, inst, Role::HandlerBody, inner));
+                        let (k, inst) = nested(h.ret.clone());
+                        queue.push_back((k, inst, Role::ReturnClause, labels.clone()));
                         for c in &h.ops {
+                            let (k, inst) = nested(c.function.clone());
                             queue.push_back((
-                                c.function.clone(),
+                                k,
+                                inst,
                                 Role::OpClause {
                                     handler: id,
                                     op: c.op,
@@ -206,7 +334,7 @@ pub(crate) fn plan(
                             ));
                         }
                         p.keys.extend(h.keys.iter().cloned());
-                        p.handler_at.insert((name.clone(), inst.dest), id);
+                        p.handler_at.insert((name.clone(), i.dest), id);
                         p.handlers.push(h);
                     }
                     _ => {}
@@ -223,6 +351,7 @@ fn handler(
     program: &Program,
     outer: &FunctionIr,
     site: &str,
+    ivars: &Vars,
     dest: ValueId,
     expr: &Expr,
     aliases: &BTreeMap<String, String>,
@@ -240,6 +369,11 @@ fn handler(
         return Err(WasmError::Invalid(
             "handle instruction without a handler".into(),
         ));
+    };
+    let effect = &Effect {
+        label: effect.label.clone(),
+        name: effect.name.clone(),
+        args: effect.args.iter().map(|t| substitute(t, ivars)).collect(),
     };
     let generic_args = effect.args.iter().any(|t| mentions_generic(world, t));
     if generic_args {
@@ -269,13 +403,13 @@ fn handler(
         }
     }
     let state_type = match (state, state_value) {
-        (Some(_), Some(v)) => Some(
+        (Some(_), Some(v)) => Some(substitute(
             outer
                 .values
                 .get(&v)
-                .cloned()
                 .ok_or_else(|| WasmError::Invalid("handler state has no type".into()))?,
-        ),
+            ivars,
+        )),
         (None, _) => None,
         (Some(_), None) => return Err(WasmError::Invalid("handler state was not lowered".into())),
     };
@@ -323,7 +457,7 @@ fn handler(
         }
         clauses.push(OpClause {
             op,
-            function,
+            function: instance_name(&function, ivars),
             mode,
             arg_patterns: clause.pats.iter().take(n).cloned().collect(),
             arg_types: sig
@@ -341,11 +475,9 @@ fn handler(
         keys: handler_keys(effect),
         effect: effect.clone(),
         state: state_type,
-        body: body_fn,
-        body_type: program.functions[&nested_name("handler_body", &body.span)]
-            .result
-            .clone(),
-        ret: ret_fn,
+        body_type: substitute(&program.functions[&body_fn].result, ivars),
+        body: instance_name(&body_fn, ivars),
+        ret: instance_name(&ret_fn, ivars),
         ret_pattern: ret
             .pats
             .first()
