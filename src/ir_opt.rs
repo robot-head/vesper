@@ -227,7 +227,7 @@ fn operands(op: &mut Op, resolve: impl Fn(ValueId) -> ValueId) {
             *a = resolve(*a);
             *b = resolve(*b);
         }
-        Op::Tuple(vs) => {
+        Op::Tuple(vs) | Op::Vector { args: vs, .. } => {
             for v in vs {
                 *v = resolve(*v);
             }
