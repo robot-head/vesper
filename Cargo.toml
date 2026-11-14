@@ -229,6 +229,8 @@ vesper-silicon = { path = "crates/vesper-silicon" }
 vesper-vault = { path = "crates/vesper-vault" }
 # Source Strata regions (wave seven lane 29) run on the host region allocator.
 vesper-alloc = { path = "crates/vesper-alloc" }
+# Source tensor types (wave eight lane 10) evaluate on the host kernels.
+vesper-tensor = { path = "crates/vesper-tensor" }
 ariadne = "0.5"
 petgraph = "0.8"
 egg = "0.10"
