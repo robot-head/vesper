@@ -628,9 +628,14 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
     }
     assert_eq!(actual_roots, roots.iter().cloned().collect());
 
-    for (index, constructor) in ["ValidatedProgram.mk", "CheckedProgram.mk", "Invocation.mk"]
-        .into_iter()
-        .enumerate()
+    for (index, constructor) in [
+        "TypeInfo.mk",
+        "ValidatedProgram.mk",
+        "CheckedProgram.mk",
+        "Invocation.mk",
+    ]
+    .into_iter()
+    .enumerate()
     {
         let module = Module {
             imports: vec![ModuleName::new("ResourceModel42").unwrap()],
