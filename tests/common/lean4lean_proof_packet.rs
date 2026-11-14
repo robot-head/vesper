@@ -1,4 +1,4 @@
-//! Shared runner for the seven fixed audited proof packets.
+//! Shared runner for the eight fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -20,6 +20,7 @@ pub enum Packet {
     Normalize,
     Normalization,
     Comparison,
+    Shape,
 }
 
 struct PacketSpec {
@@ -224,6 +225,35 @@ const COMPARISON_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.geq_split_dominators",
 ];
 
+const SHAPE_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.varNode_beq_iff_eq",
+    "Vesper.Lean4LeanLevel42.varNode_lawfulBEq",
+    "Vesper.Lean4LeanLevel42.node_beq_iff_eq",
+    "Vesper.Lean4LeanLevel42.node_lawfulBEq",
+    "Vesper.Lean4LeanLevel42.nodeOption_beq_iff_eq",
+    "Vesper.Lean4LeanLevel42.norm_beq_iff_lookup_eq",
+    "Vesper.Lean4LeanLevel42.norm_lookup_eq_mapValue",
+    "Vesper.Lean4LeanLevel42.norm_beq_mapValue",
+    "Vesper.Lean4LeanLevel42.map_keysSorted_empty",
+    "Vesper.Lean4LeanLevel42.map_varsSorted_empty",
+    "Vesper.Lean4LeanLevel42.map_addConst_keysSorted",
+    "Vesper.Lean4LeanLevel42.map_addNode_keysSorted",
+    "Vesper.Lean4LeanLevel42.map_addVar_keysSorted",
+    "Vesper.Lean4LeanLevel42.map_addConst_varsSorted",
+    "Vesper.Lean4LeanLevel42.map_addNode_varsSorted",
+    "Vesper.Lean4LeanLevel42.map_addVar_varsSorted",
+    "Vesper.Lean4LeanLevel42.normalizeAux_keysSorted",
+    "Vesper.Lean4LeanLevel42.normalizeAux_varsSorted",
+    "Vesper.Lean4LeanLevel42.subsumption_keysSorted",
+    "Vesper.Lean4LeanLevel42.subsumption_varsSorted",
+    "Vesper.Lean4LeanLevel42.subsumption_noEmpty",
+    "Vesper.Lean4LeanLevel42.normalize_keysSorted",
+    "Vesper.Lean4LeanLevel42.normalize_varsSorted",
+    "Vesper.Lean4LeanLevel42.normalize_noEmpty",
+    "Vesper.Lean4LeanLevel42.normalize_shape",
+    "Vesper.Lean4LeanLevel42.normalized_beq_value",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -386,6 +416,40 @@ impl Packet {
                 required: COMPARISON_REQUIRED,
                 scope: "audited_level_comparison_soundness",
                 marker: "LEAN4LEAN_COMPARISON42_EVIDENCE",
+            },
+            Self::Shape => PacketSpec {
+                label: "lean4lean_shape42",
+                module: "Lean4LeanShape42",
+                projected: "Lean4LeanShape42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.Subsumption",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.SortedKeys",
+                    "Lean4LeanLevel42.MapValue",
+                    "Lean4LeanLevel42.MapHelpers",
+                    "Lean4LeanLevel42.PathPriming",
+                    "Lean4LeanLevel42.LevelSemantics",
+                    "Lean4LeanLevel42.NormalizeInvariants",
+                    "Lean4LeanLevel42.NormalizeValue",
+                    "Lean4LeanLevel42.NodeResidual",
+                    "Lean4LeanLevel42.MapMinimize",
+                    "Lean4LeanLevel42.MapSubsumption",
+                    "Lean4LeanLevel42.MapAll",
+                    "Lean4LeanLevel42.Shape",
+                    "Lean4LeanLevel42.MapEquality",
+                    "Lean4LeanLevel42.ConstructionShape",
+                    "Lean4LeanLevel42.SubsumptionShape",
+                    "Lean4LeanShape42",
+                ],
+                required: SHAPE_REQUIRED,
+                scope: "audited_normalized_map_equality_and_shape",
+                marker: "LEAN4LEAN_SHAPE42_EVIDENCE",
             },
         }
     }
