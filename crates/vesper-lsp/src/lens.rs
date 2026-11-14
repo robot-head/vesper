@@ -13,6 +13,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
+    time::{Duration, Instant},
 };
 
 /// Completion order. Lower tiers sort first.
@@ -119,14 +120,31 @@ pub fn rank_methods(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProofStatus {
     NotAttempted,
-    Proved { detail: String },
-    Failed { stage: String, reason: String },
+    /// A theorem was proved and replayed by the kernel auditor.
+    Proved {
+        detail: String,
+    },
+    /// A decision procedure found the property to hold, but its proof relies
+    /// on native evaluation the kernel auditor does not replay.
+    Checked {
+        detail: String,
+    },
+    /// A concrete counterexample to the property was found.
+    Refuted {
+        counterexample: String,
+    },
+    Failed {
+        stage: String,
+        reason: String,
+    },
 }
 impl ProofStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::NotAttempted => "not_attempted",
             Self::Proved { .. } => "proved",
+            Self::Checked { .. } => "checked_native",
+            Self::Refuted { .. } => "refuted",
             Self::Failed { .. } => "failed",
         }
     }
@@ -189,7 +207,13 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         self.0.load(Ordering::Acquire)
     }
-    fn cancel(&self) {
+    /// A fresh token for a job that is not tied to a request (for example a
+    /// debounced background run).
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// Flag the job. Jobs poll the flag; nothing is interrupted forcibly.
+    pub fn cancel(&self) {
         self.0.store(true, Ordering::Release);
     }
     /// True when both handles belong to the same job.
@@ -252,6 +276,12 @@ impl PendingRequests {
         self.pending.swap_remove(index);
         true
     }
+    /// True when `id` is still pending for this job, without answering it.
+    pub fn is_pending(&self, id: &Id, job: &CancelToken) -> bool {
+        self.pending
+            .iter()
+            .any(|(pending, token)| pending == id && token.same_job(job))
+    }
     /// Cancel every pending request (server exit), returning their IDs.
     pub fn cancel_all(&mut self) -> Vec<Id> {
         self.pending
@@ -271,6 +301,148 @@ impl PendingRequests {
     fn take(&mut self, id: &Id) -> Option<CancelToken> {
         let index = self.pending.iter().position(|(pending, _)| pending == id)?;
         Some(self.pending.swap_remove(index).1)
+    }
+}
+
+/// What the caller must do after an edit or a timer for a debounced document.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TimerAction {
+    /// Arm one timer that fires after this delay.
+    Arm(Duration),
+    /// A timer is already armed or nothing is scheduled; do nothing.
+    Idle,
+    /// The document has been idle for the whole delay: start the run for this
+    /// generation.
+    Fire { generation: u64 },
+}
+
+#[derive(Debug)]
+struct DebounceEntry {
+    generation: u64,
+    deadline: Instant,
+    armed: bool,
+    fired: bool,
+    running: Option<(u64, CancelToken)>,
+}
+
+/// Per-document debounce for background runs (§21.3 Layer 5). Every edit
+/// bumps the document's generation, pushes its deadline back by the delay and
+/// cancels a run started for an older generation. At most one timer is armed
+/// per document, so a burst of keystrokes never queues a burst of runs.
+#[derive(Debug)]
+pub struct Debouncer {
+    delay: Duration,
+    entries: BTreeMap<String, DebounceEntry>,
+    max_entries: usize,
+}
+impl Debouncer {
+    /// `delay` must be at most one minute and `max_entries` between 1 and 4096.
+    pub fn new(delay: Duration, max_entries: usize) -> Result<Self, LensError> {
+        if delay > Duration::from_secs(60) || max_entries == 0 || max_entries > 4096 {
+            return Err(LensError::InvalidLimits);
+        }
+        Ok(Self {
+            delay,
+            entries: BTreeMap::new(),
+            max_entries,
+        })
+    }
+    pub fn delay(&self) -> Duration {
+        self.delay
+    }
+    /// Record an edit at `now`.
+    pub fn touch(&mut self, uri: &str, now: Instant) -> TimerAction {
+        if !self.entries.contains_key(uri) && self.entries.len() >= self.max_entries {
+            // Refuse to track more documents than the bound; nothing runs.
+            return TimerAction::Idle;
+        }
+        let entry = self.entries.entry(uri.to_owned()).or_insert(DebounceEntry {
+            generation: 0,
+            deadline: now,
+            armed: false,
+            fired: false,
+            running: None,
+        });
+        entry.generation += 1;
+        entry.deadline = now + self.delay;
+        entry.fired = false;
+        if let Some((_, token)) = entry.running.take() {
+            token.cancel();
+        }
+        if entry.armed {
+            TimerAction::Idle
+        } else {
+            entry.armed = true;
+            TimerAction::Arm(self.delay)
+        }
+    }
+    /// The armed timer for `uri` fired at `now`.
+    pub fn timer(&mut self, uri: &str, now: Instant) -> TimerAction {
+        let Some(entry) = self.entries.get_mut(uri) else {
+            return TimerAction::Idle;
+        };
+        entry.armed = false;
+        if entry.fired {
+            return TimerAction::Idle;
+        }
+        if now < entry.deadline {
+            entry.armed = true;
+            return TimerAction::Arm(entry.deadline - now);
+        }
+        entry.fired = true;
+        TimerAction::Fire {
+            generation: entry.generation,
+        }
+    }
+    /// Remember the token of the run started for `generation`.
+    pub fn started(&mut self, uri: &str, generation: u64, token: CancelToken) {
+        match self.entries.get_mut(uri) {
+            Some(entry) if entry.generation == generation => {
+                if let Some((_, old)) = entry.running.replace((generation, token)) {
+                    old.cancel();
+                }
+            }
+            _ => token.cancel(),
+        }
+    }
+    /// True when `generation` is still the newest edit of `uri`.
+    pub fn is_current(&self, uri: &str, generation: u64) -> bool {
+        self.entries
+            .get(uri)
+            .is_some_and(|entry| entry.generation == generation)
+    }
+    /// The run for `generation` finished; forget its token.
+    pub fn finished(&mut self, uri: &str, generation: u64) {
+        if let Some(entry) = self.entries.get_mut(uri)
+            && entry
+                .running
+                .as_ref()
+                .is_some_and(|(running, _)| *running == generation)
+        {
+            entry.running = None;
+        }
+    }
+    /// Stop tracking `uri` (closed document) and cancel its run.
+    pub fn forget(&mut self, uri: &str) {
+        if let Some(entry) = self.entries.remove(uri)
+            && let Some((_, token)) = entry.running
+        {
+            token.cancel();
+        }
+    }
+    /// Cancel every run (server exit).
+    pub fn cancel_all(&mut self) {
+        for (_, entry) in std::mem::take(&mut self.entries) {
+            if let Some((_, token)) = entry.running {
+                token.cancel();
+            }
+        }
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 

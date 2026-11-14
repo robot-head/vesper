@@ -15,7 +15,7 @@
 mod common;
 
 use common::{GenOptions, Rng, random_packet, random_program, retarget};
-use vesper_ebpf::interp::{XdpEnv, run_xdp};
+use vesper_ebpf::interp::{Env, SkbMeta, XdpEnv, run_skb, run_xdp};
 use vesper_ebpf::kernel::{self, LoadError};
 use vesper_ebpf::{VerifierPolicy, verify};
 
@@ -141,19 +141,57 @@ fn kernel_accepts_what_we_accept_for_every_program_type() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(600);
     let policy = VerifierPolicy::default();
+    kernel::pin_to_cpu(0).expect("pin to CPU 0");
     for t in [
         ProgramType::SchedCls,
         ProgramType::Tracepoint,
         ProgramType::Kprobe,
     ] {
         let mut rng = Rng(0x7e57_0000 + t.kernel_type() as u64);
-        let (mut both, mut kernel_only, mut neither) = (0, 0, 0);
+        let (mut both, mut kernel_only, mut neither, mut runs) = (0, 0, 0, 0);
         for i in 0..n {
             let prog = retarget(&random_program(&mut rng, GenOptions::default()), t);
             let mine = verify(&prog, &policy);
             let theirs = kernel::load(&prog);
             match (&mine, &theirs) {
-                (Ok(_), Ok(_)) => both += 1,
+                (Ok(_), Ok(loaded)) => {
+                    both += 1;
+                    // tc programs also run: BPF_PROG_TEST_RUN against the
+                    // interpreter, map state evolving in both
+                    if t == ProgramType::SchedCls {
+                        let mut env = Env::new(&prog);
+                        for _ in 0..6 {
+                            let mut pkt = random_packet(&mut rng);
+                            pkt.resize(pkt.len().max(14), 0);
+                            let meta = SkbMeta {
+                                mark: rng.next() as u32,
+                                priority: rng.next() as u32,
+                                ..SkbMeta::test_run(&pkt)
+                            };
+                            let ctx_in = SkbMeta {
+                                mark: meta.mark,
+                                priority: meta.priority,
+                                ..SkbMeta::default()
+                            }
+                            .to_ctx(0);
+                            let k = match kernel::test_run_ctx(&loaded.prog, &pkt, Some(&ctx_in)) {
+                                Ok(k) => k,
+                                // the kernel refuses some short IP packets
+                                Err(LoadError::Invalid(_)) => continue,
+                                Err(e) => panic!("{e}"),
+                            };
+                            let u = run_skb(&prog, &mut env, &pkt, meta)
+                                .expect("interpreter on an accepted program");
+                            assert_eq!(
+                                (k.retval as u64, &k.packet),
+                                (u.ret, &u.packet),
+                                "tc program {i}: kernel and interpreter disagree on {pkt:02x?}\n{}",
+                                vesper_ebpf::insn::disassemble(&prog.insns)
+                            );
+                            runs += 1;
+                        }
+                    }
+                }
                 (Ok(_), Err(LoadError::Rejected { log, .. })) => panic!(
                     "{t:?} program {i}: accepted here, rejected by the kernel:\n{log}\n{}",
                     vesper_ebpf::insn::disassemble(&prog.insns)
@@ -163,7 +201,9 @@ fn kernel_accepts_what_we_accept_for_every_program_type() {
                 (Err(_), Err(_)) => neither += 1,
             }
         }
-        eprintln!("{t:?}: accepted by both {both}, kernel only {kernel_only}, neither {neither}");
+        eprintln!(
+            "{t:?}: accepted by both {both}, kernel only {kernel_only}, neither {neither}; {runs} identical test runs"
+        );
         if t == ProgramType::SchedCls {
             assert!(both >= 30, "{t:?}: too few accepted programs ({both})");
         }

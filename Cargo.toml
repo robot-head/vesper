@@ -68,6 +68,7 @@ members = [
     "crates/vesper-vault",
     "crates/vesper-kinetic",
     "crates/vesper-prism-h3",
+    "crates/vesper-aura-gtk",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -137,6 +138,7 @@ default-members = [
     "crates/vesper-vault",
     "crates/vesper-kinetic",
     "crates/vesper-prism-h3",
+    "crates/vesper-aura-gtk",
     "experiments/native-pulse",
 ]
 
@@ -218,6 +220,8 @@ vesper-migrate = { path = "crates/vesper-migrate" }
 vesper-resonance = { path = "crates/vesper-resonance" }
 vesper-silicon = { path = "crates/vesper-silicon" }
 vesper-vault = { path = "crates/vesper-vault" }
+# Source Strata regions (wave seven lane 29) run on the host region allocator.
+vesper-alloc = { path = "crates/vesper-alloc" }
 ariadne = "0.5"
 petgraph = "0.8"
 egg = "0.10"
@@ -232,6 +236,14 @@ target-lexicon = "0.13"
 serde = { workspace = true }
 serde_json = { workspace = true }
 salsa = "0.24"
+# Wasm target (wave-seven lane 25): the versions Wasmtime 50 already pulls in.
+wasm-encoder = "=0.261.0"
+wit-component = "=0.261.0"
+wit-parser = "=0.261.0"
+
+[dev-dependencies]
+vesper-nexus = { path = "crates/vesper-nexus" }
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 
 [target.'cfg(unix)'.dependencies]
 getrandom = "0.4"

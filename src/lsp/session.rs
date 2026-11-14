@@ -8,8 +8,8 @@ use crate::{
         lint::ConfigProvenance,
     },
 };
-pub(crate) use lens_requests::CommandOutcome;
 pub use lens_requests::LensConfig;
+pub(crate) use lens_requests::{CommandOutcome, TimerOutcome};
 use salsa::Setter;
 use serde_json::{Value, json};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
@@ -84,8 +84,23 @@ pub(crate) struct Session {
     diagnostic_help_data: bool,
     lens_views: RefCell<LensViews>,
     proofs: vesper_lsp::lens::ProofLedger,
+    /// Semantic proof outcomes keyed by exact model identity, so a function
+    /// whose model did not change keeps its outcome across edits.
+    model_proofs: vesper_lsp::lens::ProofLedger,
+    lens_models: RefCell<LensModels>,
     lens_config: LensConfig,
+    background: Option<vesper_lsp::lens::Debouncer>,
+    timers: Vec<(String, std::time::Duration)>,
+    code_lens_refresh: bool,
+    refreshes: u64,
 }
+type LensModels = BTreeMap<
+    String,
+    (
+        [u8; 32],
+        Arc<BTreeMap<String, Result<super::proof_model::Model, String>>>,
+    ),
+>;
 type LensViews = BTreeMap<
     String,
     (
@@ -109,7 +124,13 @@ impl Session {
             diagnostic_help_data: false,
             lens_views: RefCell::new(BTreeMap::new()),
             proofs: vesper_lsp::lens::ProofLedger::new(1024).map_err(|e| e.to_string())?,
+            model_proofs: vesper_lsp::lens::ProofLedger::new(4096).map_err(|e| e.to_string())?,
+            lens_models: RefCell::new(BTreeMap::new()),
             lens_config: LensConfig::default(),
+            background: None,
+            timers: Vec::new(),
+            code_lens_refresh: false,
+            refreshes: 0,
         })
     }
     pub(crate) fn with_config(config: LensConfig) -> Result<Self, String> {
@@ -168,6 +189,7 @@ impl Session {
                             .pointer("/textDocument/codeAction/codeActionLiteralSupport")
                             .is_some_and(Value::is_object)
                 });
+            self.configure_background(initialize);
             let code_actions = if self.code_actions_supported {
                 json!({"codeActionKinds":["quickfix","source.fixAll.vesper"],"resolveProvider":false})
             } else {
@@ -188,7 +210,12 @@ impl Session {
                 "experimental":{
                     "vesperLens":{"version":1,"poisonedRecovery":"VESPER_POISONED_RECOVERY",
                         "completion":"obligation_ranked_members",
-                        "proofLenses":"lean_extraction_axiom_free"},
+                        "proofLenses":[super::proof_lens::EXTRACTION_SCOPE,
+                            super::proof_lens::SEMANTIC_SCOPE],
+                        "backgroundProofs":self.background.as_ref()
+                            .map(|b| json!({"debounceMs": b.delay().as_millis() as u64}))
+                            .unwrap_or(Value::Null),
+                        "asyncCancellation":"all_requests"},
                     "vesperRecoveryStatus":{"scope":"syntax_only","version":1},
                     "vesperMacroPreview":{"version":1,"tier":1,"scope":"expanded_source_only"}
                 }
@@ -357,6 +384,7 @@ impl Session {
                     .open(uri, version, text)
                     .map_err(|e| ServerError::params(e.to_string()))?;
                 self.accepted(uri);
+                self.touch_background(uri);
                 vec![self.diagnostics(uri)?]
             }
             "textDocument/didChange" => {
@@ -394,6 +422,7 @@ impl Session {
                     .change(uri, version, &changes)
                     .map_err(|e| ServerError::params(e.to_string()))?;
                 self.accepted(uri);
+                self.touch_background(uri);
                 vec![self.diagnostics(uri)?]
             }
             "textDocument/didClose" => {
@@ -402,6 +431,7 @@ impl Session {
                 self.documents
                     .close(uri)
                     .map_err(|e| ServerError::params(e.to_string()))?;
+                self.forget_background(uri);
                 self.reset_database();
                 vec![notification(
                     "textDocument/publishDiagnostics",
@@ -543,6 +573,7 @@ impl Session {
         // Cached Lens views hold whole checker states; keep only open buffers
         // reachable, and rebuild them lazily from the new database.
         self.lens_views.borrow_mut().clear();
+        self.lens_models.borrow_mut().clear();
         self.db = Database::default();
         for document in self.documents.iter() {
             self.files.insert(
@@ -617,6 +648,7 @@ impl Session {
             .ok_or_else(|| ServerError::internal("source mirror missing"))?;
         let analysis = database::guarded_analysis(&self.db, file);
         let mut recovery = None;
+        let mut lens_metadata = None;
         let (mut diagnostics, status, kind) = match analysis.checked() {
             Ok(_) => (Vec::new(), "checked", None),
             Err(failure @ AnalysisFailure::Parse { .. }) => match self.recovery_payload(uri) {
@@ -636,7 +668,14 @@ impl Session {
                     diagnostic_payload(uri, document.index(), failure)?
                 }
             },
-            Err(failure) => diagnostic_payload(uri, document.index(), failure)?,
+            Err(failure) => {
+                // Over the editor budgets, Lens still builds its own view
+                // under its raised profile; its facts stay presentation only.
+                if matches!(failure, AnalysisFailure::Resource { .. }) {
+                    lens_metadata = Some(self.poison_payload(uri).1);
+                }
+                diagnostic_payload(uri, document.index(), failure)?
+            }
         };
         // Validation covers every supplied span before optional presentation
         // fields are filtered for the client's publication capabilities.
@@ -658,6 +697,9 @@ impl Session {
             "source_blake3":hash_text(analysis.source_identity().blake3())});
         if let Some(recovery) = recovery {
             metadata["recovery"] = recovery;
+        }
+        if let Some(lens) = lens_metadata {
+            metadata["lens"] = lens;
         }
         Ok(notification(
             "textDocument/publishDiagnostics",

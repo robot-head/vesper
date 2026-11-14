@@ -1,0 +1,47 @@
+// Built with `vesper build --target wasm32-wasip2` by tests/wasm_backend_cli.rs.
+copy enum Shape {
+    Dot,
+    Circle(i64),
+    Rect {
+        w: i64,
+        h: i64
+    }
+}
+
+fn area(s: Shape) -> i64 eff [Fail[ArithOverflow]] {
+    match s {
+        Shape::Dot => 0,
+        Shape::Circle(r) => 3 * r * r,
+        Shape::Rect {
+            w,
+            h
+        }
+        => w * h,
+    }
+}
+
+fn total(n: i64, acc: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if n == 0 {
+        acc
+    } else {
+        total(
+            n - 1,
+            acc
+                + area(
+                Shape::Rect {
+                    w: n,
+                    h: 2
+                }
+            )
+        )
+    }
+}
+
+fn main() -> (i64, i64) {
+    handle Fail[ArithOverflow] in {
+        (area(Shape::Circle(2)), total(10, 0))
+    } with {
+        return value => value,
+        raise(overflow, resume) => (-1, -1),
+    }
+}
