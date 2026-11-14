@@ -17,7 +17,12 @@
 //! * [`explore_random`], [`explore_exhaustive`], [`explore_dpor`]: schedule
 //!   exploration of [`SimFiber`] step machines that drive SimPulse timers,
 //!   scheduled I/O and externally delivered I/O completions; DPOR is
-//!   persistent-set DPOR with sleep sets over declared footprints.
+//!   persistent-set DPOR with sleep sets over declared footprints. Both take
+//!   a preemption bound, [`explore_cached`] adds state caching, fibers can
+//!   spawn fibers and request cancellation, and the explorer chooses
+//!   external I/O results from declared [`IoChoices`] sets.
+//!   `lean/CrucibleDpor.lean` proves, about a model of sleep-set exploration
+//!   only, that every Mazurkiewicz trace class is visited.
 //! * [`VirtualArena`]: a 64 KiB `vesper-alloc` region reset per execution,
 //!   with [`ArbitraryIn`] generators; warmed-up executions do not allocate.
 //! * [`refute`]: counterexample search for a predicate with a minimal
@@ -47,11 +52,12 @@ pub use arena::{
     VIRTUAL_ARENA_BYTES, VIRTUAL_ARENA_MAX_ALLOCATIONS, VirtualArena, draw_region_bytes,
     draw_region_vec,
 };
-pub use dpor::{Exploration, Outcome, explore_dpor, explore_exhaustive};
+pub use dpor::{Exploration, Outcome, Search, explore_cached, explore_dpor, explore_exhaustive};
 pub use exec::{PANIC_KIND, Verdict};
 pub use explore::{
-    Access, EXPLORE_KIND, ExploreConfig, ExploreError, Footprint, IoRequest, ObjId, Proc, SimFiber,
-    SimStep, SimTrace, StepCx, Wake, explore_random, format_schedule, replay_schedule,
+    Access, EXPLORE_KIND, ExploreConfig, ExploreError, Footprint, IoChoices, IoChoicesError,
+    IoRequest, MAX_IO_CHOICES, ObjId, Proc, SimFiber, SimStep, SimTrace, StepCx, Wake,
+    explore_random, format_schedule, replay_schedule,
 };
 pub use fuzz::{Counterexample, FuzzConfig, FuzzReport, NONDETERMINISTIC_KIND, Strategy, fuzz};
 pub use refute::{REFUTED_KIND, Refutation, refute};

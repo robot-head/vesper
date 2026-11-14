@@ -1,0 +1,19 @@
+linear effect Ask {
+    fn ask() -> i64;
+}
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Ask in {
+            Ask::ask() + 1
+        } with {
+            return v => v,
+            ask(k) => {
+                let v = k(9223372036854775807);
+                v * 2
+            },
+        }
+    } with {
+        return v => v,
+        raise(e, _) => -7,
+    }
+}

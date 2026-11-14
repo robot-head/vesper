@@ -1,0 +1,10 @@
+// expect: E0765
+// at: Tensor::qmatvec(w, x)
+// message: 48 must be a multiple of 32
+wire struct Q4Block32Wire {
+    scale_fp16: u16le,
+    packed_nibbles: ByteArray[16],
+}
+fn f(w: Tensor[Q4Block32Wire, [2, 48]], x: Tensor[F32, [48]]) -> Tensor[F32, [2]] eff [Tensor] {
+    Tensor::qmatvec(w, x)
+}

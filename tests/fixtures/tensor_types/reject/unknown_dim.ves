@@ -1,0 +1,6 @@
+// expect: E0761
+// at: x: Tensor[F32, [N]]
+// message: unknown dimension 'N'
+fn f(x: Tensor[F32, [N]]) -> u64 {
+    0
+}

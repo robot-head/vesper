@@ -17,11 +17,20 @@
 //! * [`dtb`]: flattened-devicetree input (versions 16 and 17) for memory
 //!   banks, fixed and dynamic reservations, bus `ranges` translation with up
 //!   to 4 address cells, `interrupt-map` nexus resolution, interrupt
-//!   controllers (RISC-V hart intc, PLIC, CLINT/ACLINT, GIC), ISA extensions
-//!   and DMA coherence, feeding the frame, IrqGuard and DMA models.
-//! * [`intc`]: PLIC and CLINT/ACLINT register-level emulation configured
-//!   from devicetree numbers, delivering interrupts to the IrqGuard `Cpu`
-//!   model of each hart.
+//!   controllers (RISC-V hart intc, one or more PLICs, APLIC, IMSIC,
+//!   CLINT/ACLINT, GIC) with trigger types and `interrupt-map-pass-thru`,
+//!   ISA extensions, DMA coherence and `dma-ranges`, feeding the frame,
+//!   IrqGuard and DMA models.
+//! * [`aia`]: RISC-V AIA register models: APLIC domains (direct delivery
+//!   through IDCs and MSI forwarding, delegation, edge/level/detached source
+//!   modes) and IMSIC interrupt files (`seteipnum`, `eidelivery`,
+//!   `eithreshold`, `eip`/`eie`, `*topei`).
+//! * [`ccache`]: the SiFive L2 cache controller's `FLUSH64`/`FLUSH32` and
+//!   way-enable registers, used for non-coherent DMA on the StarFive JH7100.
+//! * [`intc`]: PLIC, APLIC, IMSIC and CLINT/ACLINT register-level emulation
+//!   configured from devicetree numbers (with M-mode firmware setup of AIA
+//!   MSI addresses and delegation), delivering interrupts to the IrqGuard
+//!   `Cpu` model of each hart.
 //! * [`mmio`]: access-typed registers and typestate peripheral singletons
 //!   bound at run time from the model, on a software register file.
 //! * [`irq`], [`dma`], [`frames`]: linear `IrqGuard`, `DmaTransfer` and
@@ -32,8 +41,8 @@
 //!   `CBIE`/`CBCFE`) and a software cache model.
 //!
 //! Scope and evidence: there is no freestanding target, no real hardware,
-//! interrupt controller (the PLIC/CLINT are software models), page table or
-//! DMA engine here, and no `@svd_pac` macro; every hardware object is a
+//! interrupt controller (the PLIC, APLIC, IMSIC, CLINT and SiFive cache
+//! controller are software models), page table or DMA engine here, and no `@svd_pac` macro; every hardware object is a
 //! software model and validates the modelled protocol only. The linear
 //! owners are host-library discipline (non-`Clone`, `#[must_use]`, consuming
 //! exits, counted leaks); they are not an implementation of the Vesper source
@@ -41,7 +50,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod aia;
 pub mod atomic;
+pub mod ccache;
 pub mod dma;
 pub mod dtb;
 pub mod frames;

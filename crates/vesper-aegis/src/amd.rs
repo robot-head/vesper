@@ -393,6 +393,15 @@ pub fn verify_snp_collateral(
                     what: "report CPUID product vs collateral product",
                 });
             }
+            None if report.is_venice() => {
+                // AMD has not published a Venice ARK/ASK (VirTEE `sev`
+                // 7.x panics "Venice SNP CA chain is not yet implemented"),
+                // and the Venice TCB_VERSION layout drops the bootloader
+                // and microcode SVNs, so there is nothing to pin or bind.
+                return Err(AttestError::MissingCollateral {
+                    what: "pinned AMD Venice ARK and VCEK TCB layout (not published)",
+                });
+            }
             None => {
                 return Err(AttestError::Collateral {
                     what: "SNP report CPUID",

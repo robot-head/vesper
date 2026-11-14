@@ -2,34 +2,50 @@
 //! `native.rs`, so it emits code with the backend's own builder.
 //!
 //! On entry a block calls `vesper_region_open(capacity)`, which opens a fresh
-//! [`vesper_alloc::Region`] and returns its run-time id; the id is kept in a
-//! variable of the block's handler, every operation passes it to
-//! `vesper_region_<op>(id, ...)`, and the normal exit calls
-//! `vesper_region_close(id)`. Operations therefore always reach the exact
-//! activation that lexically encloses them, also after an abort out of an
-//! inner block. A region an abort leaves open is closed by
-//! [`crate::regions::native_runtime::finish`], which the JIT driver calls
-//! after the entry returns. Payloads are single machine words; `f64`
-//! payloads travel as their bit patterns.
+//! region and returns its run-time id; the id is kept in a variable of the
+//! block's handler, every operation passes it to `vesper_region_<op>(id,
+//! ...)`, and the normal exit calls `vesper_region_close(id)`. Operations
+//! therefore always reach the exact activation that lexically encloses them,
+//! also after an abort out of an inner block.
+//!
+//! A payload is its native layout (`crate::layout`): `box` allocates
+//! [`crate::regions::store::slot_bytes`] of it and stores it word by word,
+//! `get` copies it out word by word (into a fresh stack slot for an
+//! aggregate), `set` overwrites it and `take` copies it out and releases it.
+//! Scalars are one word; `f64` travels as its bit pattern.
+//!
+//! The JIT resolves the calls to [`crate::regions::native_runtime`], whose
+//! driver closes regions an abort left open after the entry returns. Object
+//! output (`vesper build`, `vesper emit object`) defines the same symbols in
+//! the object itself ([`aot_runtime`]), so executables need only the C
+//! library.
 use super::*;
 use crate::regions::{self, REGION_EFFECT};
 
+/// The generated region runtime of object output.
+#[path = "aot_runtime.rs"]
+pub(crate) mod aot_runtime;
+
 impl<M: Module> Codegen<'_, '_, M> {
     fn region_call(&mut self, name: &str, args: &[ir::Value]) -> Result<ir::Value, String> {
-        if !std::any::type_name::<M>().contains("JITModule") {
-            return Err(
-                "native object output of source regions needs a region runtime library; run regions with the evaluator or the JIT"
-                    .into(),
-            );
+        let jit = std::any::type_name::<M>().contains("JITModule");
+        if !jit {
+            if self.m.isa().triple().operating_system == target_lexicon::OperatingSystem::None_ {
+                return Err(
+                    "source regions in a freestanding image need a region runtime; the generated one uses the C library".into(),
+                );
+            }
+            aot_runtime::define(self.m)?;
         }
         let mut signature = self.m.make_signature();
         signature
             .params
             .extend(args.iter().map(|_| AbiParam::new(types::I64)));
         signature.returns.push(AbiParam::new(types::I64));
+        let linkage = if jit { Linkage::Import } else { Linkage::Local };
         let id = self
             .m
-            .declare_function(name, Linkage::Import, &signature)
+            .declare_function(name, linkage, &signature)
             .map_err(|e| e.to_string())?;
         let reference = self.m.declare_func_in_func(id, self.b.func);
         let call = self.b.ins().call(reference, args);
@@ -92,71 +108,109 @@ impl<M: Module> Codegen<'_, '_, M> {
                 .map(|(_, p)| p.clone())
                 .ok_or_else(|| format!("native region operation '{op}' expects a RegionBox"))
         };
-        let word = |this: &mut Self, ty: &Type, value: ir::Value| -> Result<ir::Value, String> {
-            if Layout::of(this.world, ty)?.aggregate() {
-                return Err(format!(
-                    "native region payloads must be machine words; {ty} is an aggregate (run it with the evaluator)"
-                ));
-            }
-            Ok(if this.b.func.dfg.value_type(value) == types::F64 {
-                this.b.ins().bitcast(types::I64, ir::MemFlags::new(), value)
-            } else {
-                value
-            })
-        };
         let id = self.b.use_var(region);
-        let mut values = vec![id];
-        let (name, result) = match op {
+        match op {
             "box" => {
                 let ty = self.ty(&args[0].expr);
-                let v = self.expr(&args[0].expr)?;
-                values.push(word(self, &ty, v)?);
-                ("vesper_region_box", None)
+                let layout = Layout::of(self.world, &ty)?;
+                let value = self.expr(&args[0].expr)?;
+                let size = self.b.ins().iconst(types::I64, i64::from(layout.size));
+                let handle = self.region_call("vesper_region_alloc", &[id, size])?;
+                self.region_store_payload(id, handle, &layout, value)?;
+                Ok(handle)
             }
             "get" | "take" => {
                 let ty = payload_of(self, &args[0].expr)?;
-                Layout::of(self.world, &ty)?
-                    .aggregate()
-                    .then(|| Err::<(), _>(format!("native region payloads must be machine words; {ty} is an aggregate (run it with the evaluator)")))
-                    .transpose()?;
-                values.push(self.expr(&args[0].expr)?);
-                (
-                    if op == "get" {
-                        "vesper_region_get"
-                    } else {
-                        "vesper_region_take"
-                    },
-                    Some(ty),
-                )
+                let handle = self.expr(&args[0].expr)?;
+                let value = self.region_load_payload(id, handle, &ty)?;
+                if op == "take" {
+                    self.region_call("vesper_region_release", &[id, handle])?;
+                }
+                Ok(value)
             }
             "set" => {
                 let ty = payload_of(self, &args[0].expr)?;
-                values.push(self.expr(&args[0].expr)?);
-                let v = self.expr(&args[1].expr)?;
-                values.push(word(self, &ty, v)?);
-                ("vesper_region_set", None)
+                let layout = Layout::of(self.world, &ty)?;
+                let handle = self.expr(&args[0].expr)?;
+                let value = self.expr(&args[1].expr)?;
+                self.region_store_payload(id, handle, &layout, value)?;
+                Ok(self.zero())
             }
-            "checkpoint" => ("vesper_region_checkpoint", None),
+            "checkpoint" => self.region_call("vesper_region_checkpoint", &[id]),
             "rewind" | "commit" => {
-                values.push(self.expr(&args[0].expr)?);
-                (
-                    if op == "rewind" {
-                        "vesper_region_rewind"
-                    } else {
-                        "vesper_region_commit"
-                    },
-                    None,
-                )
+                let mark = self.expr(&args[0].expr)?;
+                let name = if op == "rewind" {
+                    "vesper_region_rewind"
+                } else {
+                    "vesper_region_commit"
+                };
+                self.region_call(name, &[id, mark])
             }
-            "used" => ("vesper_region_used", None),
-            _ => return Err(format!("unknown region operation '{op}'")),
+            "used" => self.region_call("vesper_region_used", &[id]),
+            _ => Err(format!("unknown region operation '{op}'")),
+        }
+    }
+
+    /// Writes `value` (a scalar, or the address of an aggregate of
+    /// `layout`) into the payload `handle` word by word.
+    fn region_store_payload(
+        &mut self,
+        id: ir::Value,
+        handle: ir::Value,
+        layout: &Layout,
+        value: ir::Value,
+    ) -> Result<(), String> {
+        let words: Vec<ir::Value> = if layout.aggregate() {
+            (0..layout.size.div_ceil(8))
+                .map(|i| {
+                    self.b
+                        .ins()
+                        .load(types::I64, ir::MemFlags::new(), value, (i * 8) as i32)
+                })
+                .collect()
+        } else {
+            let ty = self.b.func.dfg.value_type(value);
+            vec![if ty == types::F64 {
+                self.b.ins().bitcast(types::I64, ir::MemFlags::new(), value)
+            } else if ty.bits() < 64 {
+                self.b.ins().uextend(types::I64, value)
+            } else {
+                value
+            }]
         };
-        let out = self.region_call(name, &values)?;
-        Ok(match result {
-            Some(ty) if scalar(&ty, &[])? == types::F64 => {
-                self.b.ins().bitcast(types::F64, ir::MemFlags::new(), out)
+        for (i, word) in words.into_iter().enumerate() {
+            let index = self.b.ins().iconst(types::I64, i as i64);
+            self.region_call("vesper_region_store", &[id, handle, index, word])?;
+        }
+        Ok(())
+    }
+
+    /// Reads the payload `handle` of type `ty`: a scalar, or the address of
+    /// a fresh copy of an aggregate.
+    fn region_load_payload(
+        &mut self,
+        id: ir::Value,
+        handle: ir::Value,
+        ty: &Type,
+    ) -> Result<ir::Value, String> {
+        let layout = Layout::of(self.world, ty)?;
+        if layout.aggregate() {
+            let ptr = self.alloc(layout.size);
+            for i in 0..layout.size.div_ceil(8) {
+                let index = self.b.ins().iconst(types::I64, i64::from(i));
+                let word = self.region_call("vesper_region_load", &[id, handle, index])?;
+                self.b
+                    .ins()
+                    .store(ir::MemFlags::new(), word, ptr, (i * 8) as i32);
             }
-            _ => out,
+            return Ok(ptr);
+        }
+        let index = self.zero();
+        let word = self.region_call("vesper_region_load", &[id, handle, index])?;
+        Ok(match scalar(ty, &[])? {
+            types::F64 => self.b.ins().bitcast(types::F64, ir::MemFlags::new(), word),
+            t if t.bits() < 64 => self.b.ins().ireduce(t, word),
+            _ => word,
         })
     }
 }

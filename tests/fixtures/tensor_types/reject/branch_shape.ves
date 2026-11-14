@@ -1,0 +1,10 @@
+// expect: E0763
+// at: b
+// message: the else branch
+fn f(flag: bool, a: Tensor[F32, [4]], b: Tensor[F32, [5]]) -> Tensor[F32, [4]] {
+    if flag {
+        a
+    } else {
+        b
+    }
+}

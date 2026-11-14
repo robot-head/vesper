@@ -1,0 +1,12 @@
+copy enum E {
+    A,
+    B(i64),
+    C(i64, bool)
+}
+fn main() -> i64 {
+    let e = B(4);
+    match e {
+        A => 1,
+        _ => 9,
+    }
+}

@@ -1,6 +1,7 @@
 //! SharedPluginRing: two tenants' filter modules over one ring, records
 //! transformed in place, and a host-side zero-allocation steady state
-//! measured with a counting global allocator.
+//! measured with a counting global allocator, for the shared broker and for
+//! `TenantRings` (one ring per tenant).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -244,6 +245,42 @@ fn host_steady_state_allocates_nothing() {
         "host-side steady state allocated {allocs} times in 10000 calls"
     );
     let (ma, mb) = (b.metrics(A).unwrap(), b.metrics(B).unwrap());
+    assert_eq!(ma.udf_invocations + mb.udf_invocations, 10_064);
+
+    // The same cycle on one ring per tenant. Measured in this test so the
+    // two measurements never overlap on the shared counter.
+    let mut r = vesper_nexus::TenantRings::new().unwrap();
+    r.add_tenant(A, 8, 4096, FILTER_THRESHOLD_WAT.as_bytes(), 1_000_000)
+        .unwrap();
+    r.add_tenant(B, 8, 4096, FILTER_EVEN_DOUBLE_WAT.as_bytes(), 1_000_000)
+        .unwrap();
+    let step = |r: &mut vesper_nexus::TenantRings, i: u64| {
+        let tenant = if i.is_multiple_of(2) { A } else { B };
+        let lease = r.lease(tenant).unwrap();
+        let n = fill(r.payload_mut(tenant, &lease).unwrap(), &records);
+        let w = r.apply(tenant, &lease, n, 0x0201, i).unwrap();
+        let out = r.payload(tenant, &lease, w).unwrap();
+        let first = u64::from_le_bytes(out[..8].try_into().unwrap());
+        r.release(tenant, lease).unwrap();
+        first
+    };
+    for i in 0..64 {
+        step(&mut r, i);
+    }
+    ALLOCS.store(0, Ordering::Relaxed);
+    COUNTING.with(|c| c.set(true));
+    let mut sink = 0u64;
+    for i in 0..10_000 {
+        sink = sink.wrapping_add(step(&mut r, i));
+    }
+    COUNTING.with(|c| c.set(false));
+    let allocs = ALLOCS.load(Ordering::Relaxed);
+    assert!(sink > 0);
+    assert_eq!(
+        allocs, 0,
+        "per-tenant rings allocated {allocs} times in 10000 calls"
+    );
+    let (ma, mb) = (r.metrics(A).unwrap(), r.metrics(B).unwrap());
     assert_eq!(ma.udf_invocations + mb.udf_invocations, 10_064);
 }
 
