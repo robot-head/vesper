@@ -16,12 +16,18 @@ pub mod archive;
 pub mod binary;
 pub mod event_columns;
 pub mod ndjson;
+/// Correctly rounded decimal to binary64 conversion (Eisel–Lemire).
+pub mod number {
+    pub use crate::lemire::{DecodePath, decode_f64};
+}
 pub mod simd;
 pub mod streamvbyte;
 pub mod tiles;
 
 mod encode;
 mod float;
+mod lemire;
+mod pow5;
 mod helpers;
 mod index;
 mod stage2;

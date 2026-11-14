@@ -190,7 +190,9 @@ impl<'d, 'a> Node<'d, 'a> {
     ///
     /// Conversion may round, including underflow to signed zero. The original
     /// spelling remains available through `raw`; overflow to infinity fails.
-    /// Byte and logical-work admission happen before Rust's scalar conversion.
+    /// Byte and logical-work admission happen before conversion, which is
+    /// Clinger's fast path, then Eisel–Lemire, then `str::parse` as a fallback
+    /// (see [`crate::number`]); the result is always correctly rounded.
     pub fn as_f64(self, limits: FloatLimits) -> Result<f64, Error> {
         let token = self.token();
         if token.kind != Kind::Number {
@@ -200,9 +202,8 @@ impl<'d, 'a> Node<'d, 'a> {
         limits
             .preflight(raw.len())
             .map_err(|e| Error::new(e.kind, token.start))?;
-        let value = raw
-            .parse::<f64>()
-            .map_err(|_| Error::new(ErrorKind::Number, token.start))?;
+        let (value, _) = crate::lemire::decode_f64(raw)
+            .ok_or(Error::new(ErrorKind::Number, token.start))?;
         if !value.is_finite() {
             return Err(Error::new(ErrorKind::Number, token.start));
         }
