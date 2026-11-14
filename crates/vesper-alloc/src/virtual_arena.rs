@@ -129,15 +129,25 @@ pub struct VirtualMark {
 
 /// A contiguous `Copy` vector at the tip of a [`VirtualArena`]. Unique owner;
 /// growth extends its byte range in place and never copies elements.
+/// Elements must be `Send + Sync`, because the arena is `Send + Sync` and
+/// hands out element views through `&VirtualArena`:
+///
+/// ```compile_fail
+/// use std::cell::Cell;
+/// use vesper_alloc::{VirtualArena, VirtualArenaConfig};
+/// let mut a = VirtualArena::new(VirtualArenaConfig::reserve(4096)).unwrap();
+/// let cell: &'static Cell<usize> = Box::leak(Box::new(Cell::new(0)));
+/// let mut v = a.vec_with_capacity::<&'static Cell<usize>>(1).unwrap();
+/// ```
 #[must_use = "dropping the owner does not free arena bytes"]
-pub struct VirtualVec<T: Copy + 'static> {
+pub struct VirtualVec<T: Copy + Send + Sync + 'static> {
     bytes: VirtualBytes,
     len: usize,
     cap: usize,
     _elem: PhantomData<fn(T) -> T>,
 }
 
-impl<T: Copy + 'static> fmt::Debug for VirtualVec<T> {
+impl<T: Copy + Send + Sync + 'static> fmt::Debug for VirtualVec<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("VirtualVec")
             .field("len", &self.len)
@@ -540,7 +550,7 @@ impl VirtualArena {
     }
 
     /// New vector with room for `cap` elements, allocated at the tip.
-    pub fn vec_with_capacity<T: Copy + 'static>(
+    pub fn vec_with_capacity<T: Copy + Send + Sync + 'static>(
         &mut self,
         cap: usize,
     ) -> Result<VirtualVec<T>, VirtualArenaError> {
@@ -557,7 +567,7 @@ impl VirtualArena {
         })
     }
 
-    pub fn vec_len<T: Copy + 'static>(
+    pub fn vec_len<T: Copy + Send + Sync + 'static>(
         &self,
         v: &VirtualVec<T>,
     ) -> Result<usize, VirtualArenaError> {
@@ -565,7 +575,7 @@ impl VirtualArena {
         Ok(v.len)
     }
 
-    pub fn vec_capacity<T: Copy + 'static>(
+    pub fn vec_capacity<T: Copy + Send + Sync + 'static>(
         &self,
         v: &VirtualVec<T>,
     ) -> Result<usize, VirtualArenaError> {
@@ -574,14 +584,14 @@ impl VirtualArena {
     }
 
     /// Address of element 0; constant across in-place growth. Inspect only.
-    pub fn vec_addr<T: Copy + 'static>(
+    pub fn vec_addr<T: Copy + Send + Sync + 'static>(
         &self,
         v: &VirtualVec<T>,
     ) -> Result<usize, VirtualArenaError> {
         self.bytes_addr(&v.bytes)
     }
 
-    pub fn vec_as_slice<T: Copy + 'static>(
+    pub fn vec_as_slice<T: Copy + Send + Sync + 'static>(
         &self,
         v: &VirtualVec<T>,
     ) -> Result<&[T], VirtualArenaError> {
@@ -592,7 +602,7 @@ impl VirtualArena {
         Ok(unsafe { std::slice::from_raw_parts(self.base.as_ptr().add(a.start).cast(), v.len) })
     }
 
-    pub fn vec_as_mut_slice<T: Copy + 'static>(
+    pub fn vec_as_mut_slice<T: Copy + Send + Sync + 'static>(
         &mut self,
         v: &VirtualVec<T>,
     ) -> Result<&mut [T], VirtualArenaError> {
@@ -606,7 +616,7 @@ impl VirtualArena {
     }
 
     /// Appends, doubling capacity in place when full. Never copies elements.
-    pub fn vec_push<T: Copy + 'static>(
+    pub fn vec_push<T: Copy + Send + Sync + 'static>(
         &mut self,
         v: &mut VirtualVec<T>,
         value: T,
@@ -635,7 +645,7 @@ impl VirtualArena {
         Ok(())
     }
 
-    pub fn vec_pop<T: Copy + 'static>(
+    pub fn vec_pop<T: Copy + Send + Sync + 'static>(
         &mut self,
         v: &mut VirtualVec<T>,
     ) -> Result<Option<T>, VirtualArenaError> {

@@ -209,9 +209,14 @@ impl LocalShard {
         self.slabs
             .try_reserve(1)
             .map_err(|_| SlabError::OutOfMemory)?;
-        self.classes[class]
-            .free
-            .try_reserve(count)
+        // The free stack must hold every slot of every slab of this class,
+        // including slots currently allocated, so frees never allocate.
+        let class_slabs = self.slabs.iter().filter(|s| s.class == class).count() + 1;
+        let total = class_slabs
+            .checked_mul(count)
+            .ok_or(SlabError::SizeOverflow)?;
+        let free = &mut self.classes[class].free;
+        free.try_reserve(total - free.len())
             .map_err(|_| SlabError::OutOfMemory)?;
         // SAFETY: the layout has a nonzero size.
         let ptr =

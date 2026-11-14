@@ -319,3 +319,26 @@ fn alloc_capability_is_implemented_by_both_slabs() {
     round_trip(&mut local).unwrap();
     assert_eq!(local.stats().unwrap().live_blocks, 0);
 }
+
+#[test]
+fn freeing_every_block_of_a_multi_slab_class_does_not_overflow_the_free_stack() {
+    let h = ShardedSlab::new(ShardedSlabConfig {
+        shards: 1,
+        max_slabs_per_shard: 3,
+        remote_batch: 4,
+    })
+    .unwrap();
+    let mut s = h.claim(0).unwrap();
+    // 16 KiB blocks: four per slab, so twelve blocks span three slabs.
+    let blocks: Vec<_> = (0..12).map(|_| s.allocate(16 * 1024, 8).unwrap()).collect();
+    assert_eq!(s.stats().slabs, 3);
+    for b in blocks {
+        s.free(b).unwrap();
+    }
+    assert_eq!(s.stats().live_blocks, 0);
+    let again: Vec<_> = (0..12).map(|_| s.allocate(16 * 1024, 8).unwrap()).collect();
+    assert_eq!(s.stats().slabs, 3, "freed slots are reused");
+    for b in again {
+        s.free(b).unwrap();
+    }
+}
