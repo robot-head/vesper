@@ -1,6 +1,24 @@
 # vesper-bench-pmu
 
-Opt-in real hardware observations for `vesper-bench::run_abba_observed`.
+Opt-in real hardware observations for `vesper-bench::run_abba_observed`, from
+three providers that all yield the same nonforgeable `CounterDelta`:
+
+| Provider | Mechanism | Targets |
+| --- | --- | --- |
+| `PerfGroup` | `perf_event_open` group, enable/disable/read syscalls per window | Linux LE64 x86_64/aarch64 |
+| `RdpmcCounters` | pinned enabled events, `RDPMC` under the perf mmap page sequence lock (`offset + sign_extend(pmc, pmc_width)`), no syscall per window | Linux x86_64 |
+| `KpcCounters` | kperf fixed thread counters (cycles, instructions) via `dlopen`; root only | macOS AArch64 |
+
+Each returns a typed `Unavailable` otherwise: `NoHardwarePmu` (RDPMC, ENOENT
+from the kernel), `RdpmcNotPermitted` (`cap_user_rdpmc` clear), `NotScheduled`,
+`Contended`, `PermissionDenied` (kpc without root, perf paranoia),
+`LibraryMissing`, `UnsupportedPlatform` and the group-read reasons below.
+`host_pmu_status()` reports `perf_event_paranoid`, whether a `cpu` PMU device
+exists and the `rdpmc` sysfs setting. RDPMC and kpc windows record the
+observer's `Instant` interval as enabled/running time; RDPMC additionally
+requires the page's cumulative enabled and running times to be equal.
+
+The section below describes the group-read provider.
 `PerfGroup::open()` creates one current-thread cycles/instructions perf-event
 group, then the safe `WindowObserver` implementation enables/disables it around
 each actual ABBA window. No external command, privilege adjustment or clock
