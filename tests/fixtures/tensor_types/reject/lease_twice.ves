@@ -1,0 +1,13 @@
+// expect: E0303
+// at: page
+// message: use of moved place 'page'
+fn f() -> u64 eff [KvCachePool[2, 4]] {
+    match KvCachePool::lease_page() {
+        Ok(page) => {
+            KvCachePool::release_page(page);
+            KvCachePool::release_page(page);
+            1
+        },
+        Err(_) => 0
+    }
+}
