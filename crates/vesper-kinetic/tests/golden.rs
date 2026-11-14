@@ -7,7 +7,7 @@
 mod common;
 
 use vesper_alloc::Region;
-use vesper_kinetic::{BroadphaseMode, ContactMaterial, SolverMode, World, hash_world};
+use vesper_kinetic::{BroadphaseMode, ContactMaterial, SimdBackend, SolverMode, World, hash_world};
 
 const TICKS: u64 = 600;
 const GOLDEN_SHA256_TICK_1: &str =
@@ -69,12 +69,16 @@ fn run(mut world: World, ticks: u64, arena: bool) -> (String, String, String) {
     (first, common::hex(&h.sha256), common::hex(&h.blake3))
 }
 
-/// The 16-lane batched solver, the LBVH broadphase and the region-arena
+/// The 16-lane batched solver, the LBVH and sort-and-sweep broadphases and the region-arena
 /// step reproduce the scalar golden bits exactly, in every combination.
 #[test]
 fn batched_solver_lbvh_and_arena_match_the_scalar_golden_hash() {
     for solver in [SolverMode::Scalar, SolverMode::Batched16] {
-        for broadphase in [BroadphaseMode::MortonCells, BroadphaseMode::Lbvh] {
+        for broadphase in [
+            BroadphaseMode::MortonCells,
+            BroadphaseMode::Lbvh,
+            BroadphaseMode::SweepAndPrune,
+        ] {
             for arena in [false, true] {
                 let mut world = common::scene();
                 world.set_solver_mode(solver);
@@ -103,12 +107,16 @@ fn friction_and_restitution_scene_is_bit_identical_across_solvers() {
     };
     let mut hashes = Vec::new();
     for solver in [SolverMode::Scalar, SolverMode::Batched16] {
-        for broadphase in [BroadphaseMode::MortonCells, BroadphaseMode::Lbvh] {
+        for broadphase in [
+            BroadphaseMode::MortonCells,
+            BroadphaseMode::Lbvh,
+            BroadphaseMode::SweepAndPrune,
+        ] {
             let mut world = common::scene();
             world.set_contact_material(material).unwrap();
             world.set_solver_mode(solver);
             world.set_broadphase(broadphase);
-            hashes.push(run(world, 300, broadphase == BroadphaseMode::Lbvh).1);
+            hashes.push(run(world, 300, broadphase != BroadphaseMode::MortonCells).1);
         }
     }
     eprintln!(
@@ -120,4 +128,42 @@ fn friction_and_restitution_scene_is_bit_identical_across_solvers() {
     assert_eq!(hashes[0], GOLDEN_FRICTION_SHA256);
     // Friction changes the outcome (it is not silently ignored).
     assert_ne!(hashes[0], run(common::scene(), 300, false).1);
+}
+
+/// Every SIMD backend this host has, serial or split across threads (every
+/// colour, however small, is parallel here), reproduces the golden bits,
+/// with friction and restitution off and on.
+#[test]
+fn simd_backends_and_threads_match_the_golden_hashes() {
+    let material = ContactMaterial {
+        static_friction: 0.6,
+        dynamic_friction: 0.4,
+        restitution: 0.5,
+    };
+    for backend in SimdBackend::available() {
+        for threads in [1, 2, 3] {
+            let what = format!("{backend:?} threads={threads}");
+            let mut world = common::scene();
+            world.set_solver_mode(SolverMode::Batched16);
+            world.set_simd_backend(backend).unwrap();
+            world.set_solver_threads(threads).unwrap();
+            world.set_parallel_threshold(1);
+            let (first, sha, b3) = run(world, TICKS, false);
+            assert_eq!(first, GOLDEN_SHA256_TICK_1, "{what}");
+            assert_eq!(sha, GOLDEN_SHA256_FINAL, "{what}");
+            assert_eq!(b3, GOLDEN_BLAKE3_FINAL, "{what}");
+
+            let mut world = common::scene();
+            world.set_contact_material(material).unwrap();
+            world.set_solver_mode(SolverMode::Batched16);
+            world.set_simd_backend(backend).unwrap();
+            world.set_solver_threads(threads).unwrap();
+            world.set_parallel_threshold(1);
+            assert_eq!(
+                run(world, 300, true).1,
+                GOLDEN_FRICTION_SHA256,
+                "{what} friction"
+            );
+        }
+    }
 }

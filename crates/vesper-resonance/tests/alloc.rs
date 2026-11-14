@@ -7,13 +7,14 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 use vesper_resonance::events::RtParamEvent;
 use vesper_resonance::kernels::{
-    LANES, PidController, PidGains, QUANTUM_FRAMES, QuantumOutcome, SynthEngine, VoicePatch,
-    VoicePatchBank, param,
+    LANES, PidController, PidGains, QUANTUM_FRAMES, QuantumOutcome, SvfBank, SvfNode, SynthEngine,
+    VoicePatch, VoicePatchBank, param,
 };
 use vesper_resonance::lease::RtOutputPort;
 use vesper_resonance::pdc::{
     CompiledGraph, DspProcessor, Input, LatentMix, MixGain, NodeId, NodeSpec,
 };
+use vesper_resonance::simd::SvfLanes;
 use vesper_resonance::spsc::{mailbox, retirement_channel};
 
 struct Counting;
@@ -248,4 +249,114 @@ fn retirement_on_the_realtime_side_allocates_and_frees_nothing() {
         assert_eq!(n, 8);
         assert_eq!(d, 8, "the janitor is where the boxes are freed");
     }
+}
+
+/// The quantum on every SIMD path this host supports allocates nothing.
+#[test]
+fn synth_quantum_allocates_nothing_on_every_simd_path() {
+    for path in SvfLanes::available() {
+        let (mut tx, rx) = mailbox::<Box<VoicePatchBank>>(4).unwrap();
+        let (sink, mut janitor) = retirement_channel::<Box<VoicePatchBank>>(4).unwrap();
+        let mut engine = SynthEngine::new(Box::new(bank(0)), rx, sink);
+        engine.set_lanes(path).unwrap();
+        assert_eq!(engine.bank().lanes(), path);
+        let mut port = RtOutputPort::new(2, QUANTUM_FRAMES, 4).unwrap();
+        let input = [0.5f32; QUANTUM_FRAMES];
+        let mut out = vec![0.0f32; 2 * QUANTUM_FRAMES];
+        for _ in 0..4 {
+            engine.process_quantum(&input, &[], &mut port);
+            port.complete(&mut out);
+        }
+        tx.send(Box::new(bank(7))).unwrap();
+        let (_, a, d) = count(|| {
+            for _ in 0..200 {
+                engine.process_quantum(&input, &[], &mut port);
+                port.complete(&mut out);
+            }
+        });
+        assert_eq!((a, d), (0, 0), "{path:?}");
+        assert_eq!(engine.current_patch().voices[0].patch_id, 7);
+        janitor.drain();
+    }
+}
+
+/// The audio graph: an SVF voice-bank node (SIMD) feeding a lookahead
+/// branch and a dry branch that the PDC compiler realigns, a 64-input mixer
+/// stage and a delayed feedback send, all in one TiledSeq slab. The warmed-up
+/// steady state allocates and frees nothing.
+#[test]
+fn audio_graph_steady_state_allocates_nothing() {
+    let block = 64;
+    // 0: exciter; 1: SVF bank; 2: lookahead (37 samples); 3..=64: dry taps;
+    // 65: mixer over the lookahead and all taps, with feedback from itself.
+    let mut nodes = vec![
+        NodeSpec {
+            id: NodeId(0),
+            latency: 0,
+            inputs: vec![],
+        },
+        NodeSpec {
+            id: NodeId(1),
+            latency: 0,
+            inputs: vec![Input::Forward(NodeId(0))],
+        },
+        NodeSpec {
+            id: NodeId(2),
+            latency: 37,
+            inputs: vec![Input::Forward(NodeId(1))],
+        },
+    ];
+    for tap in 3..=64 {
+        nodes.push(NodeSpec {
+            id: NodeId(tap),
+            latency: 0,
+            inputs: vec![Input::Forward(NodeId(1))],
+        });
+    }
+    let mut mix_inputs: Vec<Input> = (2..=64).map(|n| Input::Forward(NodeId(n))).collect();
+    mix_inputs.push(Input::Feedback {
+        from: NodeId(65),
+        delay: 128,
+    });
+    nodes.push(NodeSpec {
+        id: NodeId(65),
+        latency: 0,
+        inputs: mix_inputs,
+    });
+    struct Pulse(u32);
+    impl DspProcessor for Pulse {
+        fn process(&mut self, _: &vesper_resonance::pdc::Inputs<'_>, out: &mut [f32]) {
+            for y in out {
+                self.0 = self.0.wrapping_add(1);
+                *y = if self.0.is_multiple_of(97) { 1.0 } else { 0.0 };
+            }
+        }
+    }
+    let mut procs: Vec<Box<dyn DspProcessor>> = vec![
+        Box::new(Pulse(0)),
+        Box::new(SvfNode::new(SvfBank::new(bank(3).voices[0]), block)),
+        Box::new(LatentMix::new(37, block).unwrap()),
+    ];
+    for tap in 3..=64 {
+        procs.push(Box::new(MixGain(1.0 / tap as f32)));
+    }
+    procs.push(Box::new(MixGain(0.01)));
+    let mut g = CompiledGraph::new(&nodes, procs, block).unwrap();
+    assert!(
+        g.slab().fits(48 * 1024),
+        "{} bytes",
+        g.slab().working_set_bytes()
+    );
+    for _ in 0..8 {
+        g.process_block();
+    }
+    let (_, a, d) = count(|| {
+        for _ in 0..2_000 {
+            g.process_block();
+        }
+    });
+    assert_eq!((a, d), (0, 0));
+    let out = g.output(NodeId(65)).unwrap();
+    assert!(out.iter().all(|y| y.is_finite()));
+    assert!(out.iter().any(|&y| y != 0.0), "the graph produced signal");
 }

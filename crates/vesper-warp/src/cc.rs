@@ -388,7 +388,11 @@ impl QuicBbr {
                 self.acked.push(bbr::Delivered {
                     packet: bbr::AckedPacket {
                         pn: packet.pn,
-                        sent_ns: packet.sent_ns,
+                        // A probe leaves at once but is stamped no earlier
+                        // than the last paced packet (recovery needs
+                        // monotone send times), so its ACK can arrive
+                        // "before" its stamp.
+                        sent_ns: packet.sent_ns.min(now_ns),
                         bytes: packet.bytes,
                     },
                     state,

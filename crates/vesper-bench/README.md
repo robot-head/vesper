@@ -92,3 +92,30 @@ Run `cargo run --manifest-path crates/vesper-bench/Cargo.toml --example paired_c
 The example measures actual host kernels, validates body counts and positive
 elapsed data, reports its optional median interval/gate and unavailable hardware
 metrics. Its checks intentionally accept any statistically valid noisy decision.
+
+## Layout randomization (`vesper_bench::layout`)
+
+`layout_plan(seed, run)` draws a heap offset (16-byte multiple below 4 KiB), a
+stack padding (64-byte frames below 4 KiB) and an environment size (below
+4 KiB) per run. `run_randomized_layouts` runs one ABBA comparison per layout
+under a live `HeapShim` block and `with_stack_padding` frames, reduces each run
+to one aggregate `PairedSample` and calls `layout_survival`, which reports
+`CandidateSlower`, `CandidateFaster` (the exact median interval excludes ratio
+1), `DoesNotSurvive` or `InsufficientLayouts` (<6). `OffsetBuffer` places input
+bytes at a chosen page offset. Environment size needs a fresh process; `vesper
+bench --randomize-layout N` spawns one child per layout with
+`VESPER_BENCH_LAYOUT_PAD` set. Machine code, function entries and globals are
+not relocated (unlike Stabilizer), and layouts are treated as independent draws.
+
+## Causal profiling (`vesper_bench::causal`)
+
+A Coz-style virtual-speedup profiler for instrumented host threads.
+`CausalProfiler::new(regions, progress_points)` hands each thread a
+`CausalThread`; `region(id, f)` times a region and, when it is the selected
+region, charges `elapsed * speedup%` of delay to every other thread, which pays
+it at its next region entry, progress point or `delay_point()`. `profile` runs
+baseline experiments and one experiment per (region, speedup), subtracts the
+inserted delay from elapsed time and reports the predicted end-to-end speedup
+in basis points per region. Unlike Coz, regions are explicit calls rather than
+sampled lines, delay accrues when a region ends, and there is no credit for
+delay accrued while a thread was blocked.

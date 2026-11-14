@@ -1,0 +1,75 @@
+//! A message broker used by the Codex heatmap and search goldens.
+
+/// Durable storage.
+effect Storage {
+    fn append(value: u64) -> u64;
+}
+
+/// Delivery counters.
+copy struct Metrics {
+    sent: u64,
+    dropped: u64
+}
+
+/// Broker state: an index, nested metrics and read-mostly configuration.
+copy struct Broker {
+    index: u64,
+    metrics: Metrics,
+    config: u64
+}
+
+/// An open write transaction that must be committed.
+linear struct WriteTxn {
+    slot: u64
+}
+
+/// A commit receipt.
+copy struct Receipt {
+    slot: u64
+}
+
+/// Appends one record: mutates only the index and the sent counter.
+fn publish(inout broker.{index, metrics.sent}: Broker, in config: u64) {
+    broker.index = wrapping_add(broker.index, config);
+    broker.metrics.sent = wrapping_add(broker.metrics.sent, 1);
+}
+
+/// Counts a dropped message.
+fn drop_one(inout broker.{metrics.dropped}: Broker) {
+    broker.metrics.dropped = wrapping_add(broker.metrics.dropped, 1);
+}
+
+/// Reads the configuration.
+fn config_of(in broker.{config}: Broker) -> u64 {
+    broker.config
+}
+
+/// Reads the whole broker.
+fn checksum(in broker: Broker) -> u64 {
+    wrapping_add(broker.index, broker.config)
+}
+
+/// Starts a transaction at the broker's index.
+fn begin(in broker.{index}: Broker) -> WriteTxn {
+    WriteTxn {
+        slot: broker.index
+    }
+}
+
+/// Commits a transaction to storage.
+///
+/// @proof(Codex.Broker.commit_slot)
+fn commit(sink tx: WriteTxn) -> Receipt eff [Storage] {
+    let WriteTxn {
+        slot
+    }
+    = tx;
+    Receipt {
+        slot: Storage::append(slot)
+    }
+}
+
+/// Generic identity: excluded from signature search.
+fn identity[T](sink x: T) -> T {
+    x
+}

@@ -39,7 +39,7 @@ use crate::session::{
     Recv, SelectN, Send, Session,
 };
 use crate::simnet::SplitMix;
-use crate::warpnet::{WarpNet, WarpNetConfig, WarpNetError, WarpNetStats};
+use crate::warpnet::{WarpNet, WarpNetConfig, WarpNetError, WarpNetStats, WarpTls};
 use crate::{branches, role, u64_message};
 use std::collections::BTreeMap;
 
@@ -659,7 +659,9 @@ fn fnv(h: &mut u64, v: u64) {
 }
 
 /// Run one seeded replicated-log scenario (see the module docs).
-pub fn run_replicated_log(cfg: &ReplogConfig) -> Result<ReplogReport, ReplogError> {
+/// Runs the scripted terms over a [`WarpNet`] whose links authenticate with
+/// `tls` (mutual TLS 1.3, one credential per host).
+pub fn run_replicated_log(cfg: &ReplogConfig, tls: &WarpTls) -> Result<ReplogReport, ReplogError> {
     let n = cfg.net.nodes;
     if !(3..=7).contains(&n) {
         return Err(ReplogError::Config("nodes must be in 3..=7"));
@@ -667,7 +669,7 @@ pub fn run_replicated_log(cfg: &ReplogConfig) -> Result<ReplogReport, ReplogErro
     if cfg.max_batch == 0 || cfg.max_batch > MAX_BATCH {
         return Err(ReplogError::Config("max_batch must be in 1..=MAX_BATCH"));
     }
-    let net = WarpNet::new(cfg.net).map_err(ReplogError::Net)?;
+    let net = WarpNet::new(cfg.net, tls).map_err(ReplogError::Net)?;
     let mut run = Run {
         cfg: *cfg,
         n,

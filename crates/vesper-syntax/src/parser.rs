@@ -65,6 +65,17 @@ impl Parse {
 /// Combined guarded descent/AST wrapping depth; additional helper frames are
 /// bounded by this count. This is not a checker/runtime termination guarantee.
 pub const HARD_PARSE_DEPTH: usize = 128;
+
+/// Built-in effect of a lexical Strata region (design §15.2). A source
+/// `region r { body }` block parses to a handler of this effect labelled `r`
+/// whose return clause binds [`REGION_MARKER`]; no source text can spell
+/// that binder, so only region blocks produce it.
+pub const REGION_EFFECT: &str = "Region";
+/// Return-clause binder of a region block. A block with an explicit capacity
+/// (`region r(4096) { ... }`) binds `$region:4096`.
+pub const REGION_MARKER: &str = "$region";
+/// Largest explicit region capacity in bytes accepted by the parser (1 GiB).
+pub const MAX_REGION_CAPACITY: u64 = 1 << 30;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ParseLimits {
     pub max_source_bytes: usize,
@@ -1456,6 +1467,13 @@ impl Parser<'_> {
         self.builder.start_node(EXPR);
         let e = match self.kind() {
             K::Handle => self.handle(),
+            K::Lower
+                if self.at_word(0, "region")
+                    && self.nth(1) == K::Lower
+                    && matches!(self.nth(2), K::LBrace | K::LParen) =>
+            {
+                self.region()
+            }
             K::Match => self.match_expr(),
             K::If => self.if_expr(),
             K::Pipe | K::Or => self.closure(),
@@ -1624,6 +1642,60 @@ impl Parser<'_> {
                 ops,
             },
             span: start..self.end(),
+        }
+    }
+    /// `region r { body }` or `region r(capacity) { body }` (design §15.2):
+    /// a lexical region capability `r`, encoded as a handler of the built-in
+    /// [`REGION_EFFECT`] with a reserved return binder and no clauses.
+    fn region(&mut self) -> Expr {
+        let start = self.start();
+        self.bump();
+        let label = self.lower();
+        let mut marker = REGION_MARKER.to_owned();
+        if self.eat(K::LParen) {
+            let capacity = if self.at(K::Int) {
+                match self.literal() {
+                    Some(Literal::Int(n)) if n > 0 && n <= MAX_REGION_CAPACITY as i128 => n,
+                    _ => {
+                        self.error("region capacity must be between 1 byte and 1 GiB");
+                        1
+                    }
+                }
+            } else {
+                self.error("expected an integer region capacity in bytes");
+                1
+            };
+            self.expect(K::RParen);
+            marker = format!("{REGION_MARKER}:{capacity}");
+        }
+        let body = Box::new(self.block());
+        let span = start..self.end();
+        // The closing brace: no other expression or pattern starts there.
+        let at = body.span.end.saturating_sub(1)..body.span.end;
+        let ret = Box::new(Clause {
+            name: "return".into(),
+            pats: vec![Pattern {
+                kind: PatternKind::Bind(marker.clone()),
+                span: at.clone(),
+            }],
+            body: Expr {
+                kind: ExprKind::Name(marker),
+                span: at,
+            },
+        });
+        Expr {
+            kind: ExprKind::Handle {
+                effect: Effect {
+                    label: Some(label),
+                    name: REGION_EFFECT.into(),
+                    args: vec![],
+                },
+                state: None,
+                body,
+                ret,
+                ops: vec![],
+            },
+            span,
         }
     }
     fn binary(&mut self, min: u8) -> Expr {

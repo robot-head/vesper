@@ -271,7 +271,7 @@ fn actual_stats_are_aggregate_and_all_exact_boundaries_are_admitted() {
     let one = IndexedJson::parse(b"0", Limits::default()).unwrap();
     assert_eq!(stats.records, 3);
     assert_eq!(stats.tokens, one.token_count() * 3);
-    assert_eq!(stats.index_bytes, one.index_capacity_bytes() * 3);
+    assert_eq!(stats.index_bytes, one.index_bytes() * 3);
     assert!(stats.metadata_bytes > 0);
     assert_eq!(
         stats.work,
@@ -370,7 +370,7 @@ fn individually_valid_records_cannot_replenish_index_token_or_work_allowances() 
         NdjsonBatch::parse(
             input,
             BatchLimits {
-                max_index_bytes: one.index_capacity_bytes(),
+                max_index_bytes: one.index_bytes(),
                 ..Default::default()
             }
         )
@@ -454,7 +454,7 @@ fn per_record_input_depth_string_token_index_and_work_guards_are_kept() {
             Limits {
                 max_index_bytes: IndexedJson::parse(b"0", Limits::default())
                     .unwrap()
-                    .index_capacity_bytes(),
+                    .index_bytes(),
                 ..Default::default()
             },
         ),
