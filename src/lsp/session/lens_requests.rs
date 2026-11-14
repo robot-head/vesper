@@ -165,14 +165,27 @@ impl Session {
             .get(uri)
             .ok_or_else(|| ServerError::internal("open source mirror is missing"))?;
         let analysis = database::guarded_analysis(&self.db, file);
+        // A query boundary: the analysis is memoized, the view is not yet
+        // built (for a large buffer, a second check under Lens's profile).
+        cancellation_point()?;
         let view = match analysis.checked_arc() {
             Ok(snapshot) => View::checked(snapshot),
             Err(AnalysisFailure::Parse { .. }) => match self.recovery_snapshot(uri) {
                 Ok((syntax, _, _)) => View::recovered(syntax, self.lens_config.limits),
                 Err(error) => return Err(error),
             },
-            // Semantic errors, and buffers over the editor profile's budgets,
-            // get a view under Lens's own (raised) profile.
+            // A buffer over the editor profile's budgets that checks under
+            // Lens's profile reuses that one checked snapshot.
+            Err(AnalysisFailure::Resource { .. })
+                if matches!(self.large_checked(uri), Some(Ok(_))) =>
+            {
+                match self.large_checked(uri) {
+                    Some(Ok(snapshot)) => View::checked(snapshot),
+                    _ => Err(Unavailable::Guard),
+                }
+            }
+            // Semantic errors, and other buffers over the editor profile's
+            // budgets, get a view under Lens's own (raised) profile.
             Err(AnalysisFailure::Semantic { .. } | AnalysisFailure::Resource { .. }) => {
                 View::semantic(document.text(), self.lens_config.limits)
             }
@@ -181,7 +194,7 @@ impl Session {
         .map(Arc::new);
         if view.as_ref().err() == Some(&Unavailable::Cancelled) {
             // Never cache a traversal the client abandoned.
-            return Err(ServerError::new(-32800, "Request cancelled"));
+            return Err(cancelled_error());
         }
         self.lens_views
             .borrow_mut()
@@ -280,7 +293,8 @@ impl Session {
         };
         let view = self.lens_view(uri)?;
         let name = &document.text()[receiver.clone()];
-        let Some((binding, ranked)) = view.complete_member(name, receiver.start) else {
+        let ceiling = self.manifests.ceiling_for(uri);
+        let Some((binding, ranked)) = view.complete_member(name, receiver.start, ceiling) else {
             return Ok(empty);
         };
         let live = view
@@ -298,12 +312,16 @@ impl Session {
                     "sortText": format!("{}{i:04}", item.tier as u8),
                     "data": {"vesper": {"tier": item.tier.as_str(), "receiver": name,
                         "receiver_type": binding.ty.to_string(),
-                        "receiver_live_linear": live, "scope": view.scope()}}
+                        "receiver_live_linear": live, "scope": view.scope(),
+                        "capability_ceiling": ceiling}}
                 });
                 if let Some(badge) = &item.badge {
                     value["labelDetails"] = json!({"description": badge});
                 }
-                if item.tier == CompletionTier::BlockedByFrame {
+                if matches!(
+                    item.tier,
+                    CompletionTier::BlockedByFrame | CompletionTier::ExceedsCeiling
+                ) {
                     value["tags"] = json!([1]);
                 }
                 value
@@ -959,4 +977,18 @@ fn semantic_value(function: &str, key: Option<&[u8; 32]>, status: &ProofStatus) 
     }
     status_fields(&mut value, status);
     value
+}
+
+pub(super) fn cancelled_error() -> ServerError {
+    ServerError::new(-32800, "Request cancelled")
+}
+
+/// Stop a cancelled request between salsa queries. Each query runs to
+/// completion (its result stays memoized and valid); what is skipped is the
+/// remaining work of the abandoned request.
+pub(super) fn cancellation_point() -> Result<(), ServerError> {
+    if crate::lsp::request_cancelled() {
+        return Err(cancelled_error());
+    }
+    Ok(())
 }

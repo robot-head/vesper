@@ -1,14 +1,18 @@
 //! Bounded stdio language server over open in-memory buffers.
 //!
 //! Three kinds of threads cooperate. One reader thread frames client input.
-//! The dispatcher (the calling thread) owns the writer and the table of
-//! pending requests. One session thread owns the editor state and handles
-//! requests and notifications strictly in arrival order. Because the
-//! dispatcher never waits for the session, `$/cancelRequest` is handled as
-//! soon as it is read, for every request: a request still queued is answered
-//! with `RequestCancelled` and never runs, a running one is answered at once
-//! and its late result is dropped, and Lens traversals poll the request's
-//! token so they stop early. Proof audits run on worker threads.
+//! The dispatcher (the calling thread) parses frames and answers
+//! cancellations. One session thread owns the editor state, handles requests
+//! and notifications strictly in arrival order and writes its own responses
+//! and notifications. The writer and the table of pending requests are
+//! shared behind locks; a response is written only while its request is
+//! still pending, under the table's lock, so every request is answered
+//! exactly once. Because the dispatcher never waits for the session,
+//! `$/cancelRequest` is handled as soon as it is read, for every request: a
+//! request still queued is answered with `RequestCancelled` and never runs, a
+//! running one is answered at once and its late result is dropped, and Lens
+//! traversals poll the request's token so they stop early. Proof audits run
+//! on worker threads.
 pub mod actions;
 mod lens;
 #[cfg(test)]
@@ -25,7 +29,10 @@ pub use session::LensConfig;
 use std::{
     cell::RefCell,
     io::{BufRead, Write},
-    sync::mpsc::{self, Receiver, Sender, SyncSender},
+    sync::{
+        Mutex, MutexGuard,
+        mpsc::{self, Receiver, Sender, SyncSender},
+    },
     thread,
     time::Duration,
 };
@@ -63,14 +70,8 @@ enum Event {
     Frame(Vec<u8>),
     Fatal(String),
     Eof,
-    /// The session answered a request.
-    Reply {
-        id: Id,
-        token: CancelToken,
-        payload: ResponsePayload,
-    },
-    /// Notifications (diagnostics, logs, proof status) from the session.
-    Messages(Vec<Envelope>),
+    /// The session could not write to the client.
+    WriteFailed(String),
     Exit {
         clean: bool,
     },
@@ -131,59 +132,112 @@ enum Work {
 /// Serve framed JSON-RPC without treating document URIs as filesystem access.
 /// Framing errors terminate the stream; a rejected body has a known boundary
 /// and receives a bounded error before the next frame is read.
-pub fn serve<R: BufRead + Send + 'static>(reader: R, writer: impl Write) -> Result<(), String> {
+pub fn serve<R: BufRead + Send + 'static>(
+    reader: R,
+    writer: impl Write + Send,
+) -> Result<(), String> {
     serve_with(reader, writer, LensConfig::default())
+}
+
+/// The writer and the pending-request table, shared by the dispatcher and
+/// the session thread. Lock order: `pending` before `writer`.
+struct Shared<W> {
+    pending: Mutex<PendingRequests>,
+    writer: Mutex<W>,
+    limits: ProtocolLimits,
+}
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    // A panicking holder leaves consistent data: frames are written whole.
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+impl<W: Write> Shared<W> {
+    fn write(&self, message: Envelope) -> Result<(), String> {
+        send(&mut *lock(&self.writer), message, self.limits)
+    }
+    /// Answer a request unless it was cancelled (and so already answered).
+    fn answer(&self, id: Id, token: &CancelToken, payload: ResponsePayload) -> Result<(), String> {
+        let mut pending = lock(&self.pending);
+        if pending.finish(&id, token) {
+            self.write(Envelope::Response {
+                id: Some(id),
+                payload,
+            })?;
+        }
+        Ok(())
+    }
 }
 
 /// [`serve`] with explicit server-side Lens configuration.
 pub fn serve_with<R: BufRead + Send + 'static>(
     mut reader: R,
-    mut writer: impl Write,
+    writer: impl Write + Send,
     config: LensConfig,
 ) -> Result<(), String> {
     let limits = ProtocolLimits::default();
-    let mut pending = PendingRequests::new(MAX_PENDING).map_err(|e| e.to_string())?;
+    let shared = Shared {
+        pending: Mutex::new(PendingRequests::new(MAX_PENDING).map_err(|e| e.to_string())?),
+        writer: Mutex::new(writer),
+        limits,
+    };
     let (events, inbox) = mpsc::channel::<Event>();
     let (credit, credits) = mpsc::sync_channel::<()>(READ_AHEAD);
     for _ in 0..READ_AHEAD {
         credit.try_send(()).map_err(|_| "read-ahead credits")?;
     }
-
-    // The session lives on its own thread; it reports readiness first.
-    let (work, queue) = mpsc::channel::<(Work, bool)>();
-    let (ready_tx, ready) = mpsc::sync_channel(1);
-    {
-        let events = events.clone();
-        let credit = credit.clone();
-        thread::spawn(move || session_thread(config, queue, events, credit, ready_tx));
-    }
-    ready
-        .recv()
-        .map_err(|_| "Lens session thread failed to start".to_owned())??;
-
     let input = events.clone();
     // Detached: a blocked read must not keep `exit` from returning.
-    thread::spawn(move || {
-        loop {
-            if credits.recv().is_err() {
-                return;
+    let start_reader = move || {
+        thread::spawn(move || {
+            loop {
+                if credits.recv().is_err() {
+                    return;
+                }
+                let event = match read_frame(&mut reader, limits) {
+                    Ok(Some(body)) => Event::Frame(body),
+                    Ok(None) => Event::Eof,
+                    Err(error) => Event::Fatal(error.to_string()),
+                };
+                let last = !matches!(event, Event::Frame(_));
+                if input.send(event).is_err() || last {
+                    return;
+                }
             }
-            let event = match read_frame(&mut reader, limits) {
-                Ok(Some(body)) => Event::Frame(body),
-                Ok(None) => Event::Eof,
-                Err(error) => Event::Fatal(error.to_string()),
-            };
-            let last = !matches!(event, Event::Frame(_));
-            if input.send(event).is_err() || last {
-                return;
-            }
+        });
+    };
+    // The session borrows the writer, so it runs on a scoped thread; the
+    // scope ends once the session has stopped (its queue closes when the
+    // dispatcher returns).
+    thread::scope(|scope| {
+        let (work, queue) = mpsc::channel::<(Work, bool)>();
+        let (ready_tx, ready) = mpsc::sync_channel(1);
+        {
+            let events = events.clone();
+            let credit = credit.clone();
+            let shared = &shared;
+            scope.spawn(move || session_thread(config, queue, events, credit, ready_tx, shared));
         }
-    });
+        ready
+            .recv()
+            .map_err(|_| "Lens session thread failed to start".to_owned())??;
+        start_reader();
+        dispatch(&shared, &inbox, &work, &credit)
+    })
+}
+
+/// The dispatcher loop: frames, cancellations and worker events.
+fn dispatch<W: Write>(
+    shared: &Shared<W>,
+    inbox: &Receiver<Event>,
+    work: &Sender<(Work, bool)>,
+    credit: &SyncSender<()>,
+) -> Result<(), String> {
     let give_back = || {
         let _ = credit.try_send(());
     };
-    let finish = |pending: &mut PendingRequests| {
-        for id in pending.cancel_all() {
+    let finish = || {
+        for id in lock(&shared.pending).cancel_all() {
             drop(id);
         }
     };
@@ -201,31 +255,15 @@ pub fn serve_with<R: BufRead + Send + 'static>(
                 continue;
             }
             Event::Drained(error) => {
-                finish(&mut pending);
+                finish();
                 return error.map_or(Ok(()), Err);
             }
-            Event::Reply { id, token, payload } => {
-                // A cancelled request was already answered: drop its result.
-                if pending.finish(&id, &token) {
-                    send(
-                        &mut writer,
-                        Envelope::Response {
-                            id: Some(id),
-                            payload,
-                        },
-                        limits,
-                    )?;
-                }
-                continue;
-            }
-            Event::Messages(messages) => {
-                for message in messages {
-                    send(&mut writer, message, limits)?;
-                }
-                continue;
+            Event::WriteFailed(error) => {
+                finish();
+                return Err(error);
             }
             Event::Exit { clean } => {
-                finish(&mut pending);
+                finish();
                 return if clean {
                     Ok(())
                 } else {
@@ -240,7 +278,7 @@ pub fn serve_with<R: BufRead + Send + 'static>(
             } => {
                 match outcome {
                     // The session records the outcome and renders the answer.
-                    Some(outcome) if pending.is_pending(&id, &token) => {
+                    Some(outcome) if lock(&shared.pending).is_pending(&id, &token) => {
                         let _ = work.send((
                             Work::ProofDone {
                                 id,
@@ -280,77 +318,69 @@ pub fn serve_with<R: BufRead + Send + 'static>(
                 continue;
             }
         };
-        let message = match parse_envelope(&body, limits) {
+        let message = match parse_envelope(&body, shared.limits) {
             Ok(message) => message,
             Err(error) => {
                 let code = match error.kind {
                     ProtocolErrorKind::Utf8 | ProtocolErrorKind::Json => -32700,
                     _ => -32600,
                 };
-                send(
-                    &mut writer,
-                    Envelope::Response {
-                        id: None,
-                        payload: ResponsePayload::Error {
-                            code,
-                            message: error.to_string(),
-                            data: None,
-                        },
+                shared.write(Envelope::Response {
+                    id: None,
+                    payload: ResponsePayload::Error {
+                        code,
+                        message: error.to_string(),
+                        data: None,
                     },
-                    limits,
-                )?;
+                })?;
                 give_back();
                 continue;
             }
         };
         match message {
-            Envelope::Request { id, method, params } => match pending.begin(id.clone()) {
-                Ok(token) => {
-                    if work
-                        .send((
-                            Work::Request {
-                                id,
-                                method,
-                                params,
-                                token,
-                            },
-                            true,
-                        ))
-                        .is_err()
-                    {
-                        return Err("Lens session thread stopped".into());
+            Envelope::Request { id, method, params } => {
+                let begun = lock(&shared.pending).begin(id.clone());
+                match begun {
+                    Ok(token) => {
+                        if work
+                            .send((
+                                Work::Request {
+                                    id,
+                                    method,
+                                    params,
+                                    token,
+                                },
+                                true,
+                            ))
+                            .is_err()
+                        {
+                            return Err("Lens session thread stopped".into());
+                        }
                     }
-                }
-                Err(error) => {
-                    send(
-                        &mut writer,
-                        Envelope::Response {
+                    Err(error) => {
+                        shared.write(Envelope::Response {
                             id: Some(id),
                             payload: ResponsePayload::Error {
                                 code: -32600,
                                 message: error.to_string(),
                                 data: None,
                             },
-                        },
-                        limits,
-                    )?;
-                    give_back();
+                        })?;
+                        give_back();
+                    }
                 }
-            },
+            }
             Envelope::Notification { method, params } if method == "$/cancelRequest" => {
                 // An answered or unknown ID is ignored, as the protocol allows.
                 // A queued request never runs; a running one stops polling.
-                if let Ok(id) = cancel_params(params.as_ref())
-                    && pending.cancel(&id)
-                {
-                    send(
-                        &mut writer,
-                        Envelope::Response {
+                if let Ok(id) = cancel_params(params.as_ref()) {
+                    let mut pending = lock(&shared.pending);
+                    if pending.cancel(&id) {
+                        shared.write(Envelope::Response {
                             id: Some(id),
                             payload: cancelled(),
-                        },
-                        limits,
-                    )?;
+                        })?;
+                    }
                 }
                 give_back();
             }
@@ -370,12 +400,13 @@ pub fn serve_with<R: BufRead + Send + 'static>(
     Ok(())
 }
 
-fn session_thread(
+fn session_thread<W: Write>(
     config: LensConfig,
     queue: Receiver<(Work, bool)>,
     events: Sender<Event>,
     credit: SyncSender<()>,
     ready: SyncSender<Result<(), String>>,
+    shared: &Shared<W>,
 ) {
     let mut session = match session::Session::with_config(config) {
         Ok(session) => {
@@ -388,7 +419,13 @@ fn session_thread(
         }
     };
     while let Ok((item, frame)) = queue.recv() {
-        let exit = handle_work(&mut session, item, &events);
+        let exit = match handle_work(&mut session, item, &events, shared) {
+            Ok(exit) => exit,
+            Err(error) => {
+                let _ = events.send(Event::WriteFailed(error));
+                true
+            }
+        };
         if frame {
             let _ = credit.try_send(());
         }
@@ -399,8 +436,14 @@ fn session_thread(
     session.stop_background();
 }
 
-/// Handle one unit of work. True when the server must exit.
-fn handle_work(session: &mut session::Session, item: Work, events: &Sender<Event>) -> bool {
+/// Handle one unit of work, writing its answers directly. True when the
+/// server must exit.
+fn handle_work<W: Write>(
+    session: &mut session::Session,
+    item: Work,
+    events: &Sender<Event>,
+    shared: &Shared<W>,
+) -> Result<bool, String> {
     match item {
         Work::Request {
             id,
@@ -410,7 +453,7 @@ fn handle_work(session: &mut session::Session, item: Work, events: &Sender<Event
         } => {
             // A request cancelled while it waited in the queue never runs.
             if token.is_cancelled() {
-                return false;
+                return Ok(false);
             }
             ACTIVE.with(|active| *active.borrow_mut() = Some(token.clone()));
             #[cfg(test)]
@@ -422,12 +465,8 @@ fn handle_work(session: &mut session::Session, item: Work, events: &Sender<Event
                     thread::sleep(Duration::from_millis(5));
                 }
                 ACTIVE.with(|active| *active.borrow_mut() = None);
-                let _ = events.send(Event::Reply {
-                    id,
-                    token,
-                    payload: ResponsePayload::Result(json!("finished")),
-                });
-                return false;
+                shared.answer(id, &token, ResponsePayload::Result(json!("finished")))?;
+                return Ok(false);
             }
             let result = if method == "workspace/executeCommand" {
                 match session.execute_command(params) {
@@ -455,33 +494,33 @@ fn handle_work(session: &mut session::Session, item: Work, events: &Sender<Event
             ACTIVE.with(|active| *active.borrow_mut() = None);
             let payload = match result {
                 Ok(Some(value)) => ResponsePayload::Result(value),
-                Ok(None) => return false,
+                Ok(None) => return Ok(false),
                 Err(error) => ResponsePayload::Error {
                     code: error.code,
                     message: error.message,
                     data: error.data,
                 },
             };
-            let _ = events.send(Event::Reply { id, token, payload });
+            shared.answer(id, &token, payload)?;
         }
         Work::Notification { method, params } => match session.notification(&method, params) {
             Ok(session::NotificationOutcome::Continue(messages)) => {
-                if !messages.is_empty() {
-                    let _ = events.send(Event::Messages(messages));
+                for message in messages {
+                    shared.write(message)?;
                 }
                 arm_timers(session, events);
             }
             Ok(session::NotificationOutcome::Exit { clean }) => {
                 let _ = events.send(Event::Exit { clean });
-                return true;
+                return Ok(true);
             }
             Err(error) => {
                 // A notification never receives a JSON-RPC response.
                 let message: String = error.message.chars().take(4096).collect();
-                let _ = events.send(Event::Messages(vec![Envelope::Notification {
+                shared.write(Envelope::Notification {
                     method: "window/logMessage".into(),
                     params: Some(json!({"type": 2, "message": message})),
-                }]));
+                })?;
             }
         },
         Work::ProofDone {
@@ -491,11 +530,7 @@ fn handle_work(session: &mut session::Session, item: Work, events: &Sender<Event
             outcome,
         } => {
             let value = session.finish_proof(&job, outcome);
-            let _ = events.send(Event::Reply {
-                id,
-                token,
-                payload: ResponsePayload::Result(value),
-            });
+            shared.answer(id, &token, ResponsePayload::Result(value))?;
         }
         Work::Timer { uri } => match session.timer_fired(&uri) {
             session::TimerOutcome::Rearm(delay) => arm(events, uri, delay),
@@ -519,7 +554,7 @@ fn handle_work(session: &mut session::Session, item: Work, events: &Sender<Event
         },
         Work::Drain(error) => {
             let _ = events.send(Event::Drained(error));
-            return true;
+            return Ok(true);
         }
         Work::BackgroundDone {
             uri,
@@ -528,14 +563,14 @@ fn handle_work(session: &mut session::Session, item: Work, events: &Sender<Event
             outcome,
         } => {
             let messages = session.finish_background(&uri, generation, &job, outcome);
-            if !messages.is_empty() {
-                let _ = events.send(Event::Messages(messages));
+            for message in messages {
+                shared.write(message)?;
             }
             // A batch that left obligations behind arms the next one.
             arm_timers(session, events);
         }
     }
-    false
+    Ok(false)
 }
 
 fn arm_timers(session: &mut session::Session, events: &Sender<Event>) {

@@ -140,7 +140,7 @@ fn cli() -> Result<(), String> {
         return package_commands::semver(args.collect());
     }
     if command == "lsp" {
-        return lsp::serve(io::BufReader::new(io::stdin()), io::stdout().lock());
+        return lsp::serve(io::BufReader::new(io::stdin()), io::stdout());
     }
     if !matches!(command.as_str(), "check" | "run" | "jit" | "build" | "emit") {
         return Err(format!("unknown command '{command}'; see --help"));

@@ -17,7 +17,7 @@ use crate::{
     tooling::frontend::{self, AnalysisFailure, AnalysisLimits, CheckedSource},
 };
 use std::{collections::BTreeMap, sync::Arc};
-use vesper_lsp::lens::{CandidateMethod, RankedCompletion, ReceiverPass, rank_methods};
+use vesper_lsp::lens::{CandidateMethod, RankedCompletion, ReceiverPass, rank_methods_within};
 use vesper_syntax::recovery::{DeclarationKind as D, DeclarationStatus as S, RecoverySyntax};
 
 /// Finite traversal budget for one view (expressions, bindings and events).
@@ -318,10 +318,13 @@ impl View {
     }
 
     /// Ranked member completions for a receiver binding at `at`.
+    /// Member completions for `receiver`, ranked under the Loom.toml
+    /// capability ceiling that applies to the document, if any.
     pub(crate) fn complete_member(
         &self,
         receiver: &str,
         at: usize,
+        ceiling: Option<&std::collections::BTreeSet<String>>,
     ) -> Option<(&Binding, Vec<RankedCompletion>)> {
         let (binding, at) = self.binding(receiver, at)?;
         let world = self.world();
@@ -349,6 +352,7 @@ impl View {
                         .filter(|e| world.effects.get(&e.name).is_some_and(|decl| !decl.linear))
                         .map(|e| e.name.clone())
                         .collect(),
+                    effects: f.effects.instances.iter().map(render_effect).collect(),
                     detail: signature(f),
                 })
             })
@@ -360,7 +364,20 @@ impl View {
             .filter(|b| b.origin != binding.origin)
             .map(|b| format!("'{}'", b.name))
             .collect();
-        Some((binding, rank_methods(receiver_live, &others, &methods)))
+        Some((
+            binding,
+            rank_methods_within(receiver_live, &others, &methods, ceiling),
+        ))
+    }
+}
+
+/// `Name`, or `Name[A, B]` with the effect's type arguments.
+fn render_effect(e: &crate::ast::Effect) -> String {
+    if e.args.is_empty() {
+        e.name.clone()
+    } else {
+        let args: Vec<String> = e.args.iter().map(ToString::to_string).collect();
+        format!("{}[{}]", e.name, args.join(", "))
     }
 }
 

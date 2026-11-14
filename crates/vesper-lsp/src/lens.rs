@@ -7,7 +7,7 @@
 //! that a program is well typed or verified.
 use crate::Id;
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{
         Arc,
@@ -25,6 +25,9 @@ pub enum CompletionTier {
     ValidFrameCompatible = 1,
     /// A method whose abortable effect would discard a live linear value.
     BlockedByFrame = 2,
+    /// A method whose effect row exceeds the package's Loom.toml
+    /// `capability_ceiling`: calling it is a package-level violation.
+    ExceedsCeiling = 3,
 }
 impl CompletionTier {
     pub fn as_str(self) -> &'static str {
@@ -32,6 +35,7 @@ impl CompletionTier {
             Self::DischargesLiveLinear => "discharges_live_linear",
             Self::ValidFrameCompatible => "valid_frame_compatible",
             Self::BlockedByFrame => "blocked_by_frame",
+            Self::ExceedsCeiling => "exceeds_capability_ceiling",
         }
     }
 }
@@ -51,6 +55,8 @@ pub struct CandidateMethod {
     pub receiver: ReceiverPass,
     /// Names of the method's potentially abortable (non-linear) effects.
     pub abortable_effects: Vec<String>,
+    /// Every effect in the method's row, rendered `Name` or `Name[Args]`.
+    pub effects: Vec<String>,
     /// Caller-rendered signature text.
     pub detail: String,
 }
@@ -75,9 +81,53 @@ pub fn rank_methods(
     other_live_linears: &[String],
     methods: &[CandidateMethod],
 ) -> Vec<RankedCompletion> {
+    rank_methods_within(receiver_is_live_linear, other_live_linears, methods, None)
+}
+
+/// Whether a ceiling grants an effect: by its name (`"Storage"` grants every
+/// `Storage[..]`) or by its exact rendering (`"Ffi[LibLz4]"`).
+pub fn ceiling_grants(ceiling: &BTreeSet<String>, effect: &str) -> bool {
+    // Manifest capabilities never contain whitespace; rendered effect
+    // arguments may (`Access[Key, Value]`), so compare without it.
+    let canonical: String = effect.chars().filter(|c| !c.is_whitespace()).collect();
+    ceiling.contains(&canonical)
+        || effect
+            .split_once('[')
+            .is_some_and(|(name, _)| ceiling.contains(name))
+}
+
+/// [`rank_methods`] under a Loom.toml `capability_ceiling`. A method that
+/// needs an effect the ceiling does not grant ranks last, after methods the
+/// frame blocks, and its badge names the missing effects. `None` means no
+/// manifest applies, and ranks exactly as [`rank_methods`].
+pub fn rank_methods_within(
+    receiver_is_live_linear: bool,
+    other_live_linears: &[String],
+    methods: &[CandidateMethod],
+    ceiling: Option<&BTreeSet<String>>,
+) -> Vec<RankedCompletion> {
     let mut ranked: Vec<_> = methods
         .iter()
         .map(|method| {
+            if let Some(ceiling) = ceiling {
+                let outside: Vec<&str> = method
+                    .effects
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|e| !ceiling_grants(ceiling, e))
+                    .collect();
+                if !outside.is_empty() {
+                    return RankedCompletion {
+                        tier: CompletionTier::ExceedsCeiling,
+                        label: method.name.clone(),
+                        detail: method.detail.clone(),
+                        badge: Some(format!(
+                            "exceeds Loom.toml capability ceiling: {}",
+                            outside.join(", ")
+                        )),
+                    };
+                }
+            }
             let consumes = method.receiver == ReceiverPass::Sink;
             let mut stranded: Vec<&str> = other_live_linears.iter().map(String::as_str).collect();
             if receiver_is_live_linear && !consumes {

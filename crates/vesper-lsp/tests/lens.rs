@@ -1,9 +1,10 @@
 use serde_json::json;
+use std::collections::BTreeSet;
 use vesper_lsp::{
     Id,
     lens::{
         CandidateMethod, CompletionTier, LensError, PendingRequests, ProofLedger, ProofStatus,
-        ReceiverPass, cancel_params, rank_methods,
+        ReceiverPass, cancel_params, ceiling_grants, rank_methods, rank_methods_within,
     },
 };
 
@@ -12,8 +13,71 @@ fn method(name: &str, receiver: ReceiverPass, abortable: &[&str]) -> CandidateMe
         name: name.into(),
         receiver,
         abortable_effects: abortable.iter().map(|e| (*e).to_owned()).collect(),
+        effects: abortable.iter().map(|e| (*e).to_owned()).collect(),
         detail: format!("fn {name}"),
     }
+}
+
+#[test]
+fn methods_outside_the_capability_ceiling_rank_last_with_the_missing_effects() {
+    let mut net = method("send", ReceiverPass::Sink, &[]);
+    net.effects = vec!["Net".into(), "Storage".into()];
+    let mut ffi = method("compress", ReceiverPass::In, &[]);
+    ffi.effects = vec!["Ffi[LibLz4]".into()];
+    let mut store = method("flush", ReceiverPass::Inout, &[]);
+    store.effects = vec!["Storage[Wal]".into()];
+    let methods = [
+        net,
+        ffi,
+        store,
+        method("commit", ReceiverPass::Sink, &[]),
+        method("log", ReceiverPass::In, &["Fail"]),
+    ];
+    let ceiling: BTreeSet<String> = ["Storage".to_owned(), "Fail".to_owned()].into();
+    let ranked = rank_methods_within(true, &[], &methods, Some(&ceiling));
+    let order: Vec<_> = ranked.iter().map(|r| (r.label.as_str(), r.tier)).collect();
+    assert_eq!(
+        order,
+        [
+            ("commit", CompletionTier::DischargesLiveLinear),
+            ("flush", CompletionTier::ValidFrameCompatible),
+            ("log", CompletionTier::BlockedByFrame),
+            ("compress", CompletionTier::ExceedsCeiling),
+            ("send", CompletionTier::ExceedsCeiling),
+        ]
+    );
+    assert_eq!(
+        ranked[4].badge.as_deref(),
+        Some("exceeds Loom.toml capability ceiling: Net")
+    );
+    assert_eq!(
+        CompletionTier::ExceedsCeiling.as_str(),
+        "exceeds_capability_ceiling"
+    );
+    // An exact rendering grants only itself; a bare name grants every instance.
+    let exact: BTreeSet<String> = ["Ffi[LibLz4]".to_owned()].into();
+    assert!(ceiling_grants(&exact, "Ffi[LibLz4]"));
+    assert!(!ceiling_grants(&exact, "Ffi[LibZstd]"));
+    assert!(ceiling_grants(&ceiling, "Storage[Wal]"));
+    // Rendered arguments are spaced; manifest entries cannot be.
+    let multi: BTreeSet<String> = ["Access[Key,Map[K,V]]".to_owned()].into();
+    assert!(ceiling_grants(&multi, "Access[Key, Map[K, V]]"));
+    assert!(!ceiling_grants(&multi, "Access[Key, Value]"));
+    // No manifest: exactly the unconstrained ranking.
+    assert_eq!(
+        rank_methods_within(true, &[], &methods, None),
+        rank_methods(true, &[], &methods)
+    );
+    // An empty ceiling (a pure package) refuses every effectful method.
+    let pure = BTreeSet::new();
+    let ranked = rank_methods_within(false, &[], &methods, Some(&pure));
+    assert_eq!(
+        ranked
+            .iter()
+            .filter(|r| r.tier == CompletionTier::ExceedsCeiling)
+            .count(),
+        4
+    );
 }
 
 #[test]
