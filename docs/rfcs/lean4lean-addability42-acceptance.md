@@ -169,9 +169,11 @@ fallback unreachability, canonicality, reification correctness on normalized
 maps, reflection of opaque native Level.beq, whole-checker correctness,
 compiler/native equivalence or a successful source campaign. Existing
 implementation-proof audit status is unchanged. All nine completed matrices
-and the observed checks are recorded here. The actual Bazel proof-target
-build is pending separately at this report's commit; no successful Bazel
-proof-target deployment or hosted CI result is claimed.
+and the observed checks are recorded here. The subsequent actual Bazel
+proof-target build and test passed on the same source revision; their separate
+execution and artifact associations are recorded in
+[the integration report](lean4lean-addability42-integration.md). Hosted CI
+results remain separate.
 
 
 Independent inspection of
@@ -268,5 +270,5 @@ nine repository source paths/hashes were independently checked against
 `--edition 2024 --check` passed for the new test and common runner; BUILD
 synchronization and whitespace checks passed. These checks do not relabel the
 runtime matrices as Cargo-built or Bazel-built test executions. The archived
-production CLI's successful Bazel build and the separately pending proof
-target build have distinct scopes.
+production CLI's successful Bazel build and the subsequent actual proof
+target build/test have distinct scopes, recorded in the integration report.
