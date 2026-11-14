@@ -71,7 +71,7 @@ pub const SKB_DATA: i32 = 76;
 pub const SKB_DATA_END: i32 = 80;
 /// `struct __sk_buff` fields a tc program may read (all `u32`; narrower
 /// loads are rejected here although the kernel allows some).
-const SKB_READ: &[i32] = &[
+pub(crate) const SKB_READ: &[i32] = &[
     0,  // len
     4,  // pkt_type
     8,  // mark
@@ -89,7 +89,7 @@ const SKB_READ: &[i32] = &[
 ];
 /// Fields a tc program may write (`tc_cls_act_is_valid_access`, minus
 /// `queue_mapping` and `tstamp`).
-const SKB_WRITE: &[i32] = &[8, 32, 44, 48, 52, 56, 60, 64, 72];
+pub(crate) const SKB_WRITE: &[i32] = &[8, 32, 44, 48, 52, 56, 60, 64, 72];
 /// `bpf_loop`'s callback must return 0 (continue) or 1 (stop).
 const LOOP_CALLBACK_MAX_RET: u64 = 1;
 

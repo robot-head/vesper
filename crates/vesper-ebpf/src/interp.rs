@@ -5,18 +5,21 @@
 //! released reference and any reference still held at exit is an
 //! [`InterpError`]. An accepted program that faults here is a verifier bug.
 //!
-//! Single-CPU model: per-CPU maps hold the value of CPU [`XdpEnv::cpu`].
-//! No real clock is read; `bpf_ktime_get_ns` returns [`XdpEnv::now_ns`].
+//! Single-CPU model: per-CPU maps hold the value of CPU [`Env::cpu`].
+//! No real clock is read; `bpf_ktime_get_ns` returns [`Env::now_ns`].
 
 use crate::helpers as h;
 use crate::insn::{
     AluOp, AtomicOp, CallTarget, Endian, Imm64, Insn, JmpOp, Operand, Reg, Size, decode_all,
 };
-use crate::program::{MapDef, MapKind, Program};
+use crate::program::{MapDef, MapKind, Program, ProgramType};
 use crate::scalar::sext_const;
-use crate::verifier::XDP_MD_SIZE;
+use crate::verifier::{
+    PERF_MAX_TRACE_SIZE, PT_REGS_SIZE, SK_BUFF_SIZE, SKB_DATA, SKB_DATA_END, SKB_WRITE, XDP_MD_SIZE,
+};
 use std::collections::HashMap;
 use std::fmt;
+use std::sync::Arc;
 
 /// Concrete ALU semantics (RFC 9669 §4.1) on 64-bit register values; for
 /// 32-bit ops the operands are truncated and the result zero-extended.
@@ -130,15 +133,39 @@ pub fn endian(kind: Endian, bits: u8, v: u64) -> u64 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InterpError {
     Decode(String),
-    UninitRegister { pc: usize, reg: u8 },
-    InvalidAccess { pc: usize, detail: String },
-    UninitStackRead { pc: usize, off: i64 },
-    BadHelperArg { pc: usize, detail: String },
-    UnsupportedInsn { pc: usize },
-    ReferenceLeak { pc: usize, count: usize },
+    /// The input does not fit the program type (wrong variant, record or
+    /// `pt_regs` of the wrong size).
+    BadInput(String),
+    UninitRegister {
+        pc: usize,
+        reg: u8,
+    },
+    InvalidAccess {
+        pc: usize,
+        detail: String,
+    },
+    UninitStackRead {
+        pc: usize,
+        off: i64,
+    },
+    BadHelperArg {
+        pc: usize,
+        detail: String,
+    },
+    UnsupportedInsn {
+        pc: usize,
+    },
+    ReferenceLeak {
+        pc: usize,
+        count: usize,
+    },
     InsnBudget,
-    CallDepth { pc: usize },
-    PcOutOfRange { pc: usize },
+    CallDepth {
+        pc: usize,
+    },
+    PcOutOfRange {
+        pc: usize,
+    },
 }
 
 impl fmt::Display for InterpError {
@@ -342,16 +369,239 @@ impl<'a> RingBufReader<'a> {
     }
 }
 
-/// Everything outside the program: maps, the CPU, the virtual clock and
-/// the sockets `bpf_sk_lookup_tcp` can find.
+/// The calling task as the tracing helpers (`bpf_get_current_pid_tgid`,
+/// `bpf_get_current_uid_gid`, `bpf_get_current_comm`) see it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Task {
+    pub pid: u32,
+    pub tgid: u32,
+    pub uid: u32,
+    pub gid: u32,
+    /// `task->comm`: NUL-terminated within its 16 bytes.
+    pub comm: [u8; 16],
+}
+
+impl Task {
+    /// A task named `comm` (truncated to 15 bytes).
+    pub fn named(comm: &str, pid: u32, tgid: u32) -> Task {
+        let mut c = [0u8; 16];
+        for (d, s) in c.iter_mut().zip(comm.bytes().take(15)) {
+            *d = s;
+        }
+        Task {
+            pid,
+            tgid,
+            uid: 0,
+            gid: 0,
+            comm: c,
+        }
+    }
+}
+
+impl Default for Task {
+    fn default() -> Self {
+        Task::named("vesper", 1000, 1000)
+    }
+}
+
+/// The `struct __sk_buff` fields of a tc (`BPF_PROG_TYPE_SCHED_CLS`)
+/// context that are not derived from the packet itself. `len`, `data` and
+/// `data_end` come from the packet.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SkbMeta {
+    pub pkt_type: u32,
+    pub mark: u32,
+    pub queue_mapping: u32,
+    /// `skb->protocol` as the 16-bit network-order value (`0x0800` for
+    /// IPv4); the context field holds its two bytes as they are in memory.
+    pub protocol: u16,
+    pub vlan_tci: u32,
+    pub vlan_proto: u32,
+    pub priority: u32,
+    pub ingress_ifindex: u32,
+    pub ifindex: u32,
+    pub tc_index: u32,
+    pub cb: [u32; 5],
+    pub hash: u32,
+    pub tc_classid: u32,
+}
+
+/// `PACKET_HOST` .. `PACKET_OTHERHOST` (`linux/if_packet.h`).
+pub const PACKET_HOST: u32 = 0;
+pub const PACKET_BROADCAST: u32 = 1;
+pub const PACKET_MULTICAST: u32 = 2;
+pub const PACKET_OTHERHOST: u32 = 3;
+/// Interface index of `lo`, the device `BPF_PROG_TEST_RUN` uses.
+pub const LOOPBACK_IFINDEX: u32 = 1;
+
+impl SkbMeta {
+    /// What `BPF_PROG_TEST_RUN` derives for `packet` on the loopback
+    /// device (`bpf_prog_test_run_skb`, `eth_type_trans`): the packet type
+    /// from the destination MAC against lo's all-zero address (never
+    /// [`PACKET_BROADCAST`]: lo has no broadcast address), the
+    /// protocol from the EtherType (802.3 length fields become
+    /// `ETH_P_802_3` or `ETH_P_802_2`), `ifindex` of lo, everything else
+    /// zero. `ctx_in` fields (mark, priority, cb) are set by the caller.
+    pub fn test_run(packet: &[u8]) -> SkbMeta {
+        let mut m = SkbMeta {
+            ifindex: LOOPBACK_IFINDEX,
+            ..SkbMeta::default()
+        };
+        if packet.len() < 14 {
+            return m;
+        }
+        let dst = &packet[..6];
+        // lo has no broadcast address (`dev->broadcast` is all zero, which
+        // is not a multicast address), so ff:ff:ff:ff:ff:ff is multicast
+        // there: checked against Linux 6.18
+        m.pkt_type = if dst[0] & 1 != 0 {
+            PACKET_MULTICAST
+        } else if dst.iter().any(|&b| b != 0) {
+            PACKET_OTHERHOST
+        } else {
+            PACKET_HOST
+        };
+        let ty = u16::from_be_bytes([packet[12], packet[13]]);
+        m.protocol = if ty >= 0x600 {
+            ty
+        } else if packet.len() >= 16 && packet[14] == 0xff && packet[15] == 0xff {
+            0x0001 // ETH_P_802_3
+        } else {
+            0x0004 // ETH_P_802_2
+        };
+        m
+    }
+
+    /// The 192-byte `struct __sk_buff` for a packet of `len` bytes, with
+    /// the pointer fields (`data`, `data_end`, ...) zero.
+    pub fn to_ctx(&self, len: u32) -> Vec<u8> {
+        let mut c = vec![0u8; SK_BUFF_SIZE as usize];
+        let mut put = |at: usize, v: u32| c[at..at + 4].copy_from_slice(&v.to_le_bytes());
+        put(0, len);
+        put(4, self.pkt_type);
+        put(8, self.mark);
+        put(12, self.queue_mapping);
+        put(16, u16::from_ne_bytes(self.protocol.to_be_bytes()) as u32);
+        put(24, self.vlan_tci);
+        put(28, self.vlan_proto);
+        put(32, self.priority);
+        put(36, self.ingress_ifindex);
+        put(40, self.ifindex);
+        put(44, self.tc_index);
+        for (i, v) in self.cb.iter().enumerate() {
+            put(48 + 4 * i, *v);
+        }
+        put(68, self.hash);
+        put(72, self.tc_classid);
+        c
+    }
+}
+
+/// The context a run starts from, one variant per [`ProgramType`].
 #[derive(Clone, Debug)]
-pub struct XdpEnv {
+pub enum Input<'a> {
+    /// XDP: the packet (`struct xdp_md` is synthesised, with 256 bytes of
+    /// headroom for `bpf_xdp_adjust_head`).
+    Xdp(&'a [u8]),
+    /// tc: the packet from its Ethernet header, and the `__sk_buff`
+    /// metadata.
+    Skb { packet: &'a [u8], meta: SkbMeta },
+    /// Tracepoint: the raw record, common fields (8 bytes) first, at most
+    /// `PERF_MAX_TRACE_SIZE` bytes. The kernel lets a program read up to
+    /// that size whatever the record's length; in this model the bytes
+    /// past the record read as zero.
+    Tracepoint(&'a [u8]),
+    /// Kprobe: the `struct pt_regs` bytes of the host architecture
+    /// (exactly `PT_REGS_SIZE`).
+    Kprobe(&'a [u8]),
+}
+
+impl Input<'_> {
+    pub fn prog_type(&self) -> ProgramType {
+        match self {
+            Input::Xdp(_) => ProgramType::Xdp,
+            Input::Skb { .. } => ProgramType::SchedCls,
+            Input::Tracepoint(_) => ProgramType::Tracepoint,
+            Input::Kprobe(_) => ProgramType::Kprobe,
+        }
+    }
+}
+
+/// Why a tail-call target cannot be installed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TailCallError {
+    /// The map is not a `BPF_MAP_TYPE_PROG_ARRAY` of this environment.
+    NotProgArray {
+        map: usize,
+    },
+    IndexOutOfRange {
+        index: u32,
+        max_entries: u32,
+    },
+    /// The kernel only accepts targets of the owner's program type.
+    TypeMismatch {
+        owner: ProgramType,
+        target: ProgramType,
+    },
+    /// The target references a map this environment does not have (maps
+    /// are matched by their full definition, name included).
+    MissingMap {
+        name: String,
+    },
+    Decode(String),
+}
+
+impl fmt::Display for TailCallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+
+impl std::error::Error for TailCallError {}
+
+/// Decoded instructions of one program, with its map indices translated to
+/// the environment's.
+#[derive(Debug)]
+struct Code {
+    prog_type: ProgramType,
+    insns: Vec<Option<Insn>>,
+    kfuncs: Vec<(usize, String)>,
+    maps: Vec<usize>,
+}
+
+impl Code {
+    fn new(prog: &Program, maps: Vec<usize>) -> Result<Code, String> {
+        Ok(Code {
+            prog_type: prog.prog_type,
+            insns: decode_all(&prog.insns).map_err(|e| e.to_string())?,
+            kfuncs: prog
+                .kfuncs
+                .iter()
+                .map(|k| (k.slot, k.name.clone()))
+                .collect(),
+            maps,
+        })
+    }
+}
+
+/// `MAX_TAIL_CALL_CNT`.
+pub const MAX_TAIL_CALL_CNT: u32 = 33;
+
+/// Everything outside the program: maps, the CPU, the virtual clock, the
+/// calling task, the sockets `bpf_sk_lookup_tcp` can find and the programs
+/// installed in program arrays.
+#[derive(Clone, Debug)]
+pub struct Env {
     pub maps: Vec<MapState>,
     pub cpu: u32,
     pub now_ns: u64,
     pub prandom_state: u64,
     pub sockets: Vec<ListeningSocket>,
+    pub task: Task,
     pub insn_budget: u64,
+    defs: Vec<MapDef>,
+    prog_type: ProgramType,
+    tail: HashMap<(usize, u32), Arc<Code>>,
     regions: Vec<Region>,
     next_base: u64,
     persistent: usize,
@@ -363,15 +613,22 @@ pub struct XdpEnv {
     pkt_start: usize,
 }
 
-impl XdpEnv {
+/// The name this environment had when it ran XDP programs only.
+pub type XdpEnv = Env;
+
+impl Env {
     pub fn new(prog: &Program) -> Self {
-        let mut env = XdpEnv {
+        let mut env = Env {
             maps: Vec::new(),
             cpu: 0,
             now_ns: 0,
             prandom_state: 0x5eed,
             sockets: Vec::new(),
+            task: Task::default(),
             insn_budget: 1_000_000,
+            defs: prog.maps.clone(),
+            prog_type: prog.prog_type,
+            tail: HashMap::new(),
             regions: Vec::new(),
             next_base: 0x1000_0000,
             persistent: 0,
@@ -392,7 +649,9 @@ impl XdpEnv {
             let MapState::Kv { def, .. } = &env.maps[m] else {
                 continue;
             };
-            if def.kind.is_array() {
+            // program arrays hold programs, installed with
+            // `install_tail_call`, not values
+            if def.kind.is_array() && def.kind != MapKind::ProgArray {
                 let (n, vs) = (def.max_entries, def.value_size as usize);
                 for k in 0..n {
                     let rid = env.alloc(Kind::MapValue, vec![0; vs], true);
@@ -404,6 +663,51 @@ impl XdpEnv {
         }
         env.persistent = env.regions.len();
         env
+    }
+
+    /// Install `target` at `index` of program array `map`, as a loader's
+    /// `bpf_map_update_elem(prog_array, &index, &prog_fd)` does. The
+    /// target shares this environment's maps: each map it references must
+    /// be defined identically (name included) in the program the
+    /// environment was made for.
+    pub fn install_tail_call(
+        &mut self,
+        map: usize,
+        index: u32,
+        target: &Program,
+    ) -> Result<(), TailCallError> {
+        let Some(def) = self.defs.get(map).filter(|d| d.kind == MapKind::ProgArray) else {
+            return Err(TailCallError::NotProgArray { map });
+        };
+        if index >= def.max_entries {
+            return Err(TailCallError::IndexOutOfRange {
+                index,
+                max_entries: def.max_entries,
+            });
+        }
+        if target.prog_type != self.prog_type {
+            return Err(TailCallError::TypeMismatch {
+                owner: self.prog_type,
+                target: target.prog_type,
+            });
+        }
+        let mut maps = Vec::new();
+        for d in &target.maps {
+            let Some(i) = self.defs.iter().position(|e| e == d) else {
+                return Err(TailCallError::MissingMap {
+                    name: d.name.clone(),
+                });
+            };
+            maps.push(i);
+        }
+        let code = Code::new(target, maps).map_err(TailCallError::Decode)?;
+        self.tail.insert((map, index), Arc::new(code));
+        Ok(())
+    }
+
+    /// Empty slot `index` of program array `map` (`bpf_map_delete_elem`).
+    pub fn remove_tail_call(&mut self, map: usize, index: u32) -> bool {
+        self.tail.remove(&(map, index)).is_some()
     }
 
     fn alloc(&mut self, kind: Kind, bytes: Vec<u8>, init: bool) -> RegionId {
@@ -471,8 +775,14 @@ impl XdpEnv {
 pub struct RunResult {
     pub ret: u64,
     pub insns: u64,
-    /// The packet after the run (programs may write it).
+    /// The packet after the run (programs may write it); empty for
+    /// tracing programs.
     pub packet: Vec<u8>,
+    /// The context bytes after the run: a tc program's writes to `mark`,
+    /// `priority`, `cb[]`, ... (pointer fields read as zero).
+    pub ctx: Vec<u8>,
+    /// Tail calls taken.
+    pub tail_calls: u32,
 }
 
 struct Frame {
@@ -498,27 +808,86 @@ const E2BIG: u64 = 7;
 const HEADROOM: usize = 256;
 
 /// Execute an XDP program over `packet`.
-pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunResult, InterpError> {
-    let insns = decode_all(&prog.insns).map_err(|e| InterpError::Decode(e.to_string()))?;
-    let mut buf = vec![0u8; HEADROOM];
-    buf.extend_from_slice(packet);
-    let pkt = env.alloc(Kind::Packet, buf, true);
-    let mut data_off = HEADROOM;
+pub fn run_xdp(prog: &Program, env: &mut Env, packet: &[u8]) -> Result<RunResult, InterpError> {
+    run(prog, env, Input::Xdp(packet))
+}
+
+/// Execute a tc program over `packet` with `__sk_buff` metadata `meta`.
+pub fn run_skb(
+    prog: &Program,
+    env: &mut Env,
+    packet: &[u8],
+    meta: SkbMeta,
+) -> Result<RunResult, InterpError> {
+    run(prog, env, Input::Skb { packet, meta })
+}
+
+/// Execute `prog` once from `input`, which must match its program type.
+pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult, InterpError> {
+    if input.prog_type() != prog.prog_type {
+        return Err(InterpError::BadInput(format!(
+            "a {:?} program cannot run on {:?} input",
+            prog.prog_type,
+            input.prog_type()
+        )));
+    }
+    let code = Code::new(prog, (0..prog.maps.len()).collect()).map_err(InterpError::Decode)?;
+    let ptype = prog.prog_type;
     env.pkt_start = HEADROOM;
-    let ctx = env.alloc(Kind::Ctx, vec![0; XDP_MD_SIZE as usize], true);
-    let new_stack = |env: &mut XdpEnv| {
+    let (pkt, ctx_bytes) = match input {
+        Input::Xdp(p) => {
+            let mut buf = vec![0u8; HEADROOM];
+            buf.extend_from_slice(p);
+            (
+                Some(env.alloc(Kind::Packet, buf, true)),
+                vec![0; XDP_MD_SIZE as usize],
+            )
+        }
+        Input::Skb { packet, meta } => {
+            let len = u32::try_from(packet.len())
+                .map_err(|_| InterpError::BadInput("packet too long".into()))?;
+            let mut buf = vec![0u8; HEADROOM];
+            buf.extend_from_slice(packet);
+            (Some(env.alloc(Kind::Packet, buf, true)), meta.to_ctx(len))
+        }
+        Input::Tracepoint(rec) => {
+            if rec.len() > PERF_MAX_TRACE_SIZE as usize {
+                return Err(InterpError::BadInput(format!(
+                    "tracepoint record of {} bytes exceeds {PERF_MAX_TRACE_SIZE}",
+                    rec.len()
+                )));
+            }
+            let mut b = rec.to_vec();
+            b.resize(PERF_MAX_TRACE_SIZE as usize, 0);
+            (None, b)
+        }
+        Input::Kprobe(regs) => {
+            if PT_REGS_SIZE == 0 || regs.len() != PT_REGS_SIZE as usize {
+                return Err(InterpError::BadInput(format!(
+                    "pt_regs must be {PT_REGS_SIZE} bytes on this architecture, got {}",
+                    regs.len()
+                )));
+            }
+            (None, regs.to_vec())
+        }
+    };
+    let mut data_off = HEADROOM;
+    let ctx = env.alloc(Kind::Ctx, ctx_bytes, true);
+    let ctx_ptr = Value {
+        v: env.regions[ctx as usize].base,
+        prov: Some(ctx),
+    };
+    let new_stack = |env: &mut Env| {
         let r = env.alloc(Kind::Stack, vec![0; 512], false);
         Value {
             v: env.regions[r as usize].base + 512,
             prov: Some(r),
         }
     };
+    let mut code = Arc::new(code);
     let mut regs = [Value::scalar(0); 11];
     let mut init = [false; 11];
-    regs[1] = Value {
-        v: env.regions[ctx as usize].base,
-        prov: Some(ctx),
-    };
+    regs[1] = ctx_ptr;
     init[1] = true;
     regs[10] = new_stack(env);
     init[10] = true;
@@ -526,12 +895,14 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
     let mut held: Vec<RegionId> = Vec::new();
     let mut pc = 0usize;
     let mut count = 0u64;
+    let mut tail_calls = 0u32;
+    let mut tail_taken = 0u32;
     let result = loop {
         count += 1;
         if count > env.insn_budget {
             break Err(InterpError::InsnBudget);
         }
-        let Some(Some(insn)) = insns.get(pc).copied() else {
+        let Some(Some(insn)) = code.insns.get(pc).copied() else {
             break Err(InterpError::PcOutOfRange { pc });
         };
         let next = pc + insn.slots();
@@ -618,8 +989,17 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
             }
             Insn::LdImm64 { dst, imm } => match imm {
                 Imm64::Value(v) => set!(dst, Value::scalar(v)),
-                // map "pointers" are tagged scalars: the map index
-                Imm64::MapFd(i) => set!(dst, Value::scalar(MAP_TAG | i as u32 as u64)),
+                // map "pointers" are tagged scalars: the environment's map
+                // index
+                Imm64::MapFd(i) => match code.maps.get(i as usize) {
+                    Some(&m) => set!(dst, Value::scalar(MAP_TAG | m as u64)),
+                    None => {
+                        break Err(InterpError::BadHelperArg {
+                            pc,
+                            detail: format!("map index {i} out of range"),
+                        });
+                    }
+                },
                 // callback "pointers" are tagged scalars: the entry slot
                 Imm64::Pseudo {
                     src: crate::insn::pseudo::FUNC,
@@ -643,27 +1023,12 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                 let (rid, at) = tri!(resolve(env, pc, p, off, n));
                 let mut v = {
                     let r = &env.regions[rid as usize];
-                    if let Kind::Ctx = r.kind {
-                        // xdp_md: data, data_end, data_meta, ifindex, rxq, egress
-                        let pr = &env.regions[pkt as usize];
-                        match at {
-                            0 => Value {
-                                v: pr.base + data_off as u64,
-                                prov: Some(pkt),
-                            },
-                            4 => Value {
-                                v: pr.base + pr.bytes.len() as u64,
-                                prov: Some(pkt),
-                            },
-                            12 => Value::scalar(1),
-                            16 => Value::scalar(0),
-                            _ => {
-                                break Err(InterpError::InvalidAccess {
-                                    pc,
-                                    detail: format!("ctx field {at}"),
-                                });
-                            }
-                        }
+                    let ctx_ptr = match r.kind {
+                        Kind::Ctx => tri!(ctx_read(env, pc, ptype, pkt, data_off, at, n)),
+                        _ => None,
+                    };
+                    if let Some(v) = ctx_ptr {
+                        v
                     } else {
                         if r.init[at..at + n].iter().any(|b| !b) {
                             break Err(InterpError::UninitStackRead {
@@ -697,6 +1062,7 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                 tri!(store(
                     env,
                     pc,
+                    ptype,
                     p,
                     off,
                     size,
@@ -711,7 +1077,7 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
             } => {
                 let p = get!(dst);
                 let v = get!(src);
-                tri!(store(env, pc, p, off, size, v));
+                tri!(store(env, pc, ptype, p, off, size, v));
             }
             Insn::Atomic {
                 size,
@@ -726,6 +1092,12 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                 let (rid, at) = tri!(resolve(env, pc, p, off, n));
                 let old = {
                     let r = &env.regions[rid as usize];
+                    if matches!(r.kind, Kind::Ctx | Kind::Packet) {
+                        break Err(InterpError::InvalidAccess {
+                            pc,
+                            detail: "atomic on the context or packet".into(),
+                        });
+                    }
                     if r.init[at..at + n].iter().any(|b| !b) {
                         break Err(InterpError::UninitStackRead { pc, off: at as i64 });
                     }
@@ -814,31 +1186,82 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                     continue;
                 }
             }
-            Insn::Call(CallTarget::Kfunc(_))
-                if prog
+            Insn::Call(CallTarget::Helper(h::TAIL_CALL)) => {
+                // `___bpf_prog_run` JMP_TAIL_CALL: index check, then the
+                // count check, then the count is bumped, then an empty slot
+                // falls through. On success the target starts over at its
+                // first instruction with r1 = ctx and a fresh stack.
+                let m = tri!(map_of(env, pc, get!(Reg::R2)));
+                let index = get!(Reg::R3).v as u32;
+                let Some(def) = env.defs.get(m).filter(|d| d.kind == MapKind::ProgArray) else {
+                    break Err(InterpError::BadHelperArg {
+                        pc,
+                        detail: "bpf_tail_call needs a program array".into(),
+                    });
+                };
+                let max = def.max_entries;
+                init[0..=5].fill(false);
+                if index >= max || tail_calls >= MAX_TAIL_CALL_CNT {
+                    pc = next;
+                    continue;
+                }
+                tail_calls += 1;
+                let Some(target) = env.tail.get(&(m, index)).cloned() else {
+                    pc = next;
+                    continue;
+                };
+                if !frames.is_empty() {
+                    break Err(InterpError::BadHelperArg {
+                        pc,
+                        detail: "tail call from a subprogram or callback".into(),
+                    });
+                }
+                if !held.is_empty() {
+                    break Err(InterpError::ReferenceLeak {
+                        pc,
+                        count: held.len(),
+                    });
+                }
+                if let Some(p) = regs[10].prov {
+                    env.regions[p as usize].live = false;
+                }
+                tail_taken += 1;
+                code = target;
+                init.fill(false);
+                set!(Reg::R1, ctx_ptr);
+                regs[10] = new_stack(env);
+                init[10] = true;
+                pc = 0;
+                continue;
+            }
+            Insn::Call(CallTarget::Kfunc(_)) => {
+                let name = code
                     .kfuncs
                     .iter()
-                    .any(|k| k.slot == pc && crate::helpers::KFUNCS.contains(&k.name.as_str())) =>
-            {
-                // bpf_preempt_disable/enable: no observable effect here
-                init[0..=5].fill(false);
+                    .find(|(slot, _)| *slot == pc)
+                    .map(|(_, n)| n.as_str());
+                match name {
+                    // preemption and RCU read-side regions have no
+                    // observable effect on one simulated CPU
+                    Some(n) if crate::helpers::KFUNCS.contains(&n) => {
+                        init[0..=5].fill(false);
+                    }
+                    _ => break Err(InterpError::UnsupportedInsn { pc }),
+                }
             }
             Insn::Call(CallTarget::Helper(id)) => {
+                if !h::allowed(code.prog_type, id) {
+                    break Err(InterpError::BadHelperArg {
+                        pc,
+                        detail: format!("helper {id} is not available to {:?}", code.prog_type),
+                    });
+                }
                 let a: [Value; 5] = [regs[1], regs[2], regs[3], regs[4], regs[5]];
-                let r = tri!(call_helper(
-                    env,
-                    pc,
-                    id,
-                    &a,
-                    ctx,
-                    pkt,
-                    &mut data_off,
-                    &mut held
-                ));
+                let r = tri!(call_helper(env, pc, id, &a, pkt, &mut data_off, &mut held));
                 set!(Reg::R0, r);
                 init[1..=5].fill(false);
             }
-            Insn::Call(CallTarget::Kfunc(_)) | Insn::LdLegacy { .. } => {
+            Insn::LdLegacy { .. } => {
                 break Err(InterpError::UnsupportedInsn { pc });
             }
             Insn::Exit => {
@@ -890,11 +1313,16 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
                                 count: held.len(),
                             });
                         }
-                        let r = &env.regions[pkt as usize];
+                        let packet = match pkt {
+                            Some(p) => env.regions[p as usize].bytes[data_off..].to_vec(),
+                            None => Vec::new(),
+                        };
                         break Ok(RunResult {
                             ret: r0.v,
                             insns: count,
-                            packet: r.bytes[data_off..].to_vec(),
+                            packet,
+                            ctx: env.regions[ctx as usize].bytes.clone(),
+                            tail_calls: tail_taken,
                         });
                     }
                 }
@@ -906,6 +1334,56 @@ pub fn run_xdp(prog: &Program, env: &mut XdpEnv, packet: &[u8]) -> Result<RunRes
     result
 }
 
+/// A context load: `Some` for the pointer fields, `None` for a plain field
+/// read from the context bytes; offsets the program type does not expose
+/// are faults.
+fn ctx_read(
+    env: &Env,
+    pc: usize,
+    t: ProgramType,
+    pkt: Option<RegionId>,
+    data_off: usize,
+    at: usize,
+    n: usize,
+) -> Result<Option<Value>, InterpError> {
+    let bad = || InterpError::InvalidAccess {
+        pc,
+        detail: format!("{t:?} ctx field {at} size {n}"),
+    };
+    let packet_ptr = |end: bool| {
+        let p = pkt.expect("packet program");
+        let pr = &env.regions[p as usize];
+        Value {
+            v: pr.base
+                + if end {
+                    pr.bytes.len() as u64
+                } else {
+                    data_off as u64
+                },
+            prov: Some(p),
+        }
+    };
+    match t {
+        // xdp_md: data, data_end, data_meta, ifindex, rxq, egress
+        ProgramType::Xdp => match at {
+            0 => Ok(Some(packet_ptr(false))),
+            4 => Ok(Some(packet_ptr(true))),
+            12 => Ok(Some(Value::scalar(1))),
+            16 => Ok(Some(Value::scalar(0))),
+            _ => Err(bad()),
+        },
+        ProgramType::SchedCls => match at as i32 {
+            SKB_DATA if n == 4 => Ok(Some(packet_ptr(false))),
+            SKB_DATA_END if n == 4 => Ok(Some(packet_ptr(true))),
+            o if o < SKB_DATA => Ok(None),
+            _ => Err(bad()),
+        },
+        // the first 8 bytes are the common fields, not readable
+        ProgramType::Tracepoint if at < 8 => Err(bad()),
+        ProgramType::Tracepoint | ProgramType::Kprobe => Ok(None),
+    }
+}
+
 const BPF_NOEXIST: u64 = 1;
 const BPF_EXIST: u64 = 2;
 
@@ -913,7 +1391,7 @@ const MAP_TAG: u64 = 0xbbf0_0000_0000_0000;
 const FUNC_TAG: u64 = 0xbbf1_0000_0000_0000;
 
 fn resolve(
-    env: &XdpEnv,
+    env: &Env,
     pc: usize,
     p: Value,
     off: i16,
@@ -958,9 +1436,11 @@ fn resolve(
     Ok((rid, at as usize))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn store(
-    env: &mut XdpEnv,
+    env: &mut Env,
     pc: usize,
+    t: ProgramType,
     p: Value,
     off: i16,
     size: Size,
@@ -970,10 +1450,17 @@ fn store(
     let (rid, at) = resolve(env, pc, p, off, n)?;
     let r = &mut env.regions[rid as usize];
     if matches!(r.kind, Kind::Ctx) {
-        return Err(InterpError::InvalidAccess {
-            pc,
-            detail: "ctx write".into(),
-        });
+        // tc programs may write a few u32 `__sk_buff` fields (scalars)
+        let writable = t == ProgramType::SchedCls
+            && n == 4
+            && SKB_WRITE.contains(&(at as i32))
+            && v.prov.is_none();
+        if !writable {
+            return Err(InterpError::InvalidAccess {
+                pc,
+                detail: format!("{t:?} ctx write at {at} size {n}"),
+            });
+        }
     }
     r.bytes[at..at + n].copy_from_slice(&v.v.to_le_bytes()[..n]);
     for b in &mut r.init[at..at + n] {
@@ -993,7 +1480,7 @@ fn store(
     Ok(())
 }
 
-fn read_mem(env: &XdpEnv, pc: usize, p: Value, n: usize) -> Result<Vec<u8>, InterpError> {
+fn read_mem(env: &Env, pc: usize, p: Value, n: usize) -> Result<Vec<u8>, InterpError> {
     let (rid, at) = resolve(env, pc, p, 0, n)?;
     let r = &env.regions[rid as usize];
     if r.init[at..at + n].iter().any(|b| !b) {
@@ -1002,7 +1489,7 @@ fn read_mem(env: &XdpEnv, pc: usize, p: Value, n: usize) -> Result<Vec<u8>, Inte
     Ok(r.bytes[at..at + n].to_vec())
 }
 
-fn map_of(env: &XdpEnv, pc: usize, v: Value) -> Result<usize, InterpError> {
+fn map_of(env: &Env, pc: usize, v: Value) -> Result<usize, InterpError> {
     if v.prov.is_none() && v.v & 0xffff_ffff_0000_0000 == MAP_TAG {
         let i = (v.v & 0xffff_ffff) as usize;
         if i < env.maps.len() {
@@ -1017,12 +1504,11 @@ fn map_of(env: &XdpEnv, pc: usize, v: Value) -> Result<usize, InterpError> {
 
 #[allow(clippy::too_many_arguments)]
 fn call_helper(
-    env: &mut XdpEnv,
+    env: &mut Env,
     pc: usize,
     id: i32,
     a: &[Value; 5],
-    _ctx: RegionId,
-    pkt: RegionId,
+    pkt: Option<RegionId>,
     data_off: &mut usize,
     held: &mut Vec<RegionId>,
 ) -> Result<Value, InterpError> {
@@ -1115,6 +1601,7 @@ fn call_helper(
         h::GET_SMP_PROCESSOR_ID => Ok(Value::scalar(env.cpu as u64)),
         h::XDP_ADJUST_HEAD => {
             let delta = a[1].v as i64 as i32 as i64;
+            let pkt = pkt.ok_or_else(|| bad("no packet"))?;
             let len = env.regions[pkt as usize].bytes.len() as i64;
             let new = *data_off as i64 + delta;
             // keep at least an Ethernet header, as the kernel does
@@ -1222,15 +1709,32 @@ fn call_helper(
             env.regions[r as usize].live = false;
             Ok(Value::scalar(0))
         }
-        h::TAIL_CALL => {
-            let m = map_of(env, pc, a[1])?;
-            match &env.maps[m] {
-                // the interpreter installs no programs: every slot is empty
-                // and the call falls through, as the kernel's does for an
-                // empty slot
-                MapState::Kv { def, .. } if def.kind == MapKind::ProgArray => Ok(Value::scalar(0)),
-                _ => Err(bad("bpf_tail_call needs a program array")),
+        h::GET_CURRENT_PID_TGID => Ok(Value::scalar(
+            (env.task.tgid as u64) << 32 | env.task.pid as u64,
+        )),
+        h::GET_CURRENT_UID_GID => Ok(Value::scalar(
+            (env.task.gid as u64) << 32 | env.task.uid as u64,
+        )),
+        h::GET_CURRENT_COMM => {
+            // `strscpy_pad(buf, task->comm, size)`: at most size - 1 bytes
+            // of the name, then NUL padding; the helper returns 0
+            let size = a[1].v as usize;
+            if size == 0 {
+                return Err(bad("bpf_get_current_comm with size 0"));
             }
+            let (rid, at) = resolve(env, pc, a[0], 0, size)?;
+            let name_len = env.task.comm.iter().position(|&b| b == 0).unwrap_or(16);
+            let keep = name_len.min(size - 1);
+            let mut out = vec![0u8; size];
+            out[..keep].copy_from_slice(&env.task.comm[..keep]);
+            let r = &mut env.regions[rid as usize];
+            if !matches!(r.kind, Kind::Stack | Kind::MapValue) {
+                return Err(bad("bpf_get_current_comm buffer"));
+            }
+            r.bytes[at..at + size].copy_from_slice(&out);
+            r.init[at..at + size].fill(true);
+            r.spills.retain(|&s, _| s + 8 <= at || s >= at + size);
+            Ok(Value::scalar(0))
         }
         _ => Err(bad("unsupported helper")),
     }

@@ -17,6 +17,7 @@ use std::fmt;
 
 const BPF_MAP_CREATE: libc::c_long = 0;
 const BPF_MAP_LOOKUP_ELEM: libc::c_long = 1;
+const BPF_MAP_UPDATE_ELEM: libc::c_long = 2;
 const BPF_PROG_LOAD: libc::c_long = 5;
 const BPF_PROG_TEST_RUN: libc::c_long = 10;
 const BPF_OBJ_GET_INFO_BY_FD: libc::c_long = 15;
@@ -193,14 +194,47 @@ pub fn prepare(prog: &Program) -> Result<Program, LoadError> {
 /// resolved here, as a loader does.
 pub fn load_with_ext(prog: &Program) -> Result<Loaded, LoadError> {
     probe()?;
-    load_inner(prog, true)
+    load_inner(prog, true, None)
 }
 
 fn load_unprobed(prog: &Program) -> Result<Loaded, LoadError> {
-    load_inner(prog, false)
+    load_inner(prog, false, None)
 }
 
-fn load_inner(prog: &Program, kernel_ext: bool) -> Result<Loaded, LoadError> {
+/// Load `prog` referencing existing maps: `maps[i]` is the descriptor for
+/// `prog.maps[i]` (as a loader shares maps between a tail-call owner and
+/// its targets). The returned [`Loaded::maps`] is empty.
+pub fn load_using(prog: &Program, maps: &[&Fd]) -> Result<Loaded, LoadError> {
+    probe()?;
+    if maps.len() != prog.maps.len() {
+        return Err(LoadError::Invalid(format!(
+            "{} map descriptors for {} maps",
+            maps.len(),
+            prog.maps.len()
+        )));
+    }
+    let fds: Vec<i32> = maps.iter().map(|f| f.raw()).collect();
+    load_inner(prog, false, Some(&fds))
+}
+
+/// `BPF_MAP_UPDATE_ELEM` with `BPF_ANY` (for a program array, `value` is
+/// the target program's descriptor as a native-endian `u32`).
+pub fn update(map: &Fd, key: &[u8], value: &[u8]) -> Result<(), LoadError> {
+    let mut a = [0u8; ATTR_SIZE];
+    put_u32(&mut a, 0, map.raw() as u32);
+    put_u64(&mut a, 8, key.as_ptr() as u64);
+    put_u64(&mut a, 16, value.as_ptr() as u64);
+    match bpf(BPF_MAP_UPDATE_ELEM, &mut a) {
+        Ok(_) => Ok(()),
+        Err(e) => Err(LoadError::Invalid(format!("map update failed: errno {e}"))),
+    }
+}
+
+fn load_inner(
+    prog: &Program,
+    kernel_ext: bool,
+    existing: Option<&[i32]>,
+) -> Result<Loaded, LoadError> {
     let prepared = if kernel_ext {
         if prog.kfuncs.is_empty() {
             prog.clone()
@@ -213,10 +247,15 @@ fn load_inner(prog: &Program, kernel_ext: bool) -> Result<Loaded, LoadError> {
     };
     let prog = &prepared;
     let mut maps = Vec::new();
-    for def in &prog.maps {
-        maps.push(create_map(def)?);
-    }
-    let fds: Vec<i32> = maps.iter().map(Fd::raw).collect();
+    let fds: Vec<i32> = match existing {
+        Some(f) => f.to_vec(),
+        None => {
+            for def in &prog.maps {
+                maps.push(create_map(def)?);
+            }
+            maps.iter().map(Fd::raw).collect()
+        }
+    };
     let insns = relocate(prog, &fds)?;
     let bytes = crate::insn::slots_to_bytes(&insns);
     let mut license = prog.license.clone().into_bytes();
@@ -335,12 +374,24 @@ pub fn probe() -> Result<(), LoadError> {
 pub struct TestRun {
     pub retval: u32,
     pub packet: Vec<u8>,
+    /// `ctx_out` (the `struct __sk_buff` the kernel copies back for tc
+    /// programs); empty when no context was passed.
+    pub ctx: Vec<u8>,
 }
 
 /// Run a loaded XDP program once over `packet` in the kernel
 /// (`BPF_PROG_TEST_RUN`), on the calling CPU.
 pub fn test_run(prog: &Fd, packet: &[u8]) -> Result<TestRun, LoadError> {
+    test_run_ctx(prog, packet, None)
+}
+
+/// [`test_run`] with a context: for tc programs `ctx_in` is a `struct
+/// __sk_buff` (the kernel accepts only `mark`, `priority`,
+/// `ingress_ifindex`, `ifindex`, `cb[]` and a few timestamp and GSO
+/// fields non-zero) and the context the program leaves is returned.
+pub fn test_run_ctx(prog: &Fd, packet: &[u8], ctx_in: Option<&[u8]>) -> Result<TestRun, LoadError> {
     let mut out = vec![0u8; packet.len() + 512];
+    let mut ctx_out = vec![0u8; ctx_in.map_or(0, <[u8]>::len)];
     let mut a = [0u8; ATTR_SIZE];
     put_u32(&mut a, 0, prog.raw() as u32);
     put_u32(&mut a, 8, packet.len() as u32);
@@ -348,14 +399,23 @@ pub fn test_run(prog: &Fd, packet: &[u8]) -> Result<TestRun, LoadError> {
     put_u64(&mut a, 16, packet.as_ptr() as u64);
     put_u64(&mut a, 24, out.as_mut_ptr() as u64);
     put_u32(&mut a, 32, 1);
+    if let Some(c) = ctx_in {
+        put_u32(&mut a, 40, c.len() as u32);
+        put_u32(&mut a, 44, ctx_out.len() as u32);
+        put_u64(&mut a, 48, c.as_ptr() as u64);
+        put_u64(&mut a, 56, ctx_out.as_mut_ptr() as u64);
+    }
     match bpf(BPF_PROG_TEST_RUN, &mut a) {
         Ok(_) => {
             let retval = u32::from_ne_bytes(a[4..8].try_into().expect("4 bytes"));
             let n = u32::from_ne_bytes(a[12..16].try_into().expect("4 bytes")) as usize;
             out.truncate(n.min(out.len()));
+            let cn = u32::from_ne_bytes(a[44..48].try_into().expect("4 bytes")) as usize;
+            ctx_out.truncate(cn.min(ctx_out.len()));
             Ok(TestRun {
                 retval,
                 packet: out,
+                ctx: ctx_out,
             })
         }
         Err(e) if unavailable(e) => Err(LoadError::Unavailable { errno: e }),
