@@ -153,7 +153,7 @@ match Bazel CI.
 | --- | --- |
 | `cargo fmt --all -- --check` | clean |
 | `cargo +1.100.0 clippy -p vesper-silicon --locked --all-targets -- -D warnings` | clean |
-| `cargo test -p vesper-silicon --locked` | 134 passed, 0 failed (includes the 4 live-QEMU tests and the Lean test) |
+| `cargo test -p vesper-silicon --locked` | 136 passed, 0 failed (includes the 4 live-QEMU tests and the Lean test) |
 | `env PATH=/nonexistent .../aia_qemu-*` | 4 passed (recorded output only) |
 | `cargo test -p vesper-silicon --test aia_qemu` with QEMU 8.2.2 on `PATH` | 4 passed (live) |
 | `python3 tools/bazel/sync_build_files.py` | no diff |

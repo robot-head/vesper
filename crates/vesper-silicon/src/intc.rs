@@ -1750,6 +1750,9 @@ impl RiscvIntc {
                         imsic: imsic_path.clone(),
                         detail: format!("file {file_addr:#x} is not reachable from {}", info.path),
                     })?;
+            // Replacing a route retires the identity the source had, so
+            // reinstalling never leaks identities.
+            self.retire_msi_route(d, src)?;
             let id = self.allocate_identity(b, k, hart, priority)?;
             h.write32(base, APLIC_DOMAINCFG_IE | APLIC_DOMAINCFG_DM)?;
             h.write32(base + 4 * u64::from(src), mode.bits())?;
@@ -1787,6 +1790,37 @@ impl RiscvIntc {
                 .borrow_mut()
                 .insert((Ctl::Aplic(d), src), Box::new(handler));
             h.write32(base + 0x1edc, src)?;
+        }
+        Ok(())
+    }
+
+    /// Frees the IMSIC identity (and its handler, enable and pending bits)
+    /// that APLIC domain `d` source `src` forwards to, if it has one.
+    fn retire_msi_route(&self, d: usize, src: u32) -> Result<(), IntcError> {
+        let old: Vec<(usize, usize, u32)> = {
+            let st = self.handle.state.borrow();
+            st.msi_sources
+                .iter()
+                .filter(|(_, v)| **v == (d, src))
+                .map(|(key, _)| *key)
+                .collect()
+        };
+        for (b, k, id) in old {
+            {
+                let mut st = self.handle.state.borrow_mut();
+                st.msi_sources.remove(&(b, k, id));
+                st.imsics[b].used[k].remove(&id);
+                let f = &mut st.imsics[b].files[k][0];
+                let bit = 1u64 << (id % 64);
+                for isel in [
+                    crate::aia::ISEL_EIE0 + 2 * (id / 64),
+                    crate::aia::ISEL_EIP0 + 2 * (id / 64),
+                ] {
+                    let v = f.csr_read(isel)?;
+                    f.csr_write(isel, v & !bit)?;
+                }
+            }
+            self.isrs.borrow_mut().remove(&(Ctl::Imsic(b, k), id));
         }
         Ok(())
     }

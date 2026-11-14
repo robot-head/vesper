@@ -958,6 +958,12 @@ impl DeviceTree {
         let mut out = ws
             .into_iter()
             .map(|(d, a, s)| {
+                // Both ends of the window must lie in the 64-bit address
+                // space, so translation inside it cannot overflow.
+                let top = |x: u128| x.checked_add(s).is_none_or(|e| e > 1u128 << 64);
+                if top(d) || top(a) {
+                    return Err(overflow());
+                }
                 Ok(DmaWindow {
                     dma_addr: u64::try_from(d).map_err(|_| overflow())?,
                     cpu_addr: u64::try_from(a).map_err(|_| overflow())?,
@@ -2092,7 +2098,7 @@ impl Platform {
             .find(|w| {
                 phys >= w.cpu_addr && end.is_some_and(|e| e <= w.cpu_addr.saturating_add(w.size))
             })
-            .map(|w| w.dma_addr + (phys - w.cpu_addr))
+            .and_then(|w| w.dma_addr.checked_add(phys - w.cpu_addr))
             .ok_or(DtbError::NotDmaAddressable {
                 node: self.tree.path(id),
                 addr: phys,
@@ -2111,7 +2117,7 @@ impl Platform {
             .find(|w| {
                 dma >= w.dma_addr && end.is_some_and(|e| e <= w.dma_addr.saturating_add(w.size))
             })
-            .map(|w| w.cpu_addr + (dma - w.dma_addr))
+            .and_then(|w| w.cpu_addr.checked_add(dma - w.dma_addr))
             .ok_or(DtbError::NotDmaAddressable {
                 node: self.tree.path(id),
                 addr: dma,

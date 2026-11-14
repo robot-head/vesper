@@ -281,3 +281,45 @@ fn ccache_registers() {
         })
     );
 }
+
+/// A window whose bus end passes 2^64 is refused when the tree is read, and
+/// a hand-built one cannot make translation overflow.
+#[test]
+fn windows_that_pass_the_64_bit_address_space_are_refused() {
+    // Patch /soc's `dma-ranges` (bus 0 -> DRAM 0x8000_0000, 1 GiB) so the
+    // bus base is 0xffff_ffff_ffff_f000.
+    let cells: [u32; 6] = [0, 0, 0, 0x8000_0000, 0, 0x4000_0000];
+    let old: Vec<u8> = cells.iter().flat_map(|c| c.to_be_bytes()).collect();
+    let mut new = old.clone();
+    new[..8].copy_from_slice(&0xffff_ffff_ffff_f000u64.to_be_bytes());
+    let at = EDGE
+        .windows(old.len())
+        .position(|x| x == old.as_slice())
+        .unwrap();
+    assert_eq!(
+        EDGE.windows(old.len())
+            .filter(|x| *x == old.as_slice())
+            .count(),
+        1
+    );
+    let mut dtb = EDGE.to_vec();
+    dtb[at..at + old.len()].copy_from_slice(&new);
+    let p = Platform::from_dtb(&dtb).unwrap();
+    assert!(matches!(
+        p.dma_windows("/soc/nic@20004000"),
+        Err(DtbError::AddressOverflow { .. })
+    ));
+    assert!(matches!(
+        p.dma_address("/soc/nic@20004000", 0x8000_2000, 64),
+        Err(DtbError::AddressOverflow { .. })
+    ));
+
+    let ledger = Ledger::new();
+    let mut e = DmaEngine::new(Arch::Riscv64, 2, 4, 64, &ledger).unwrap();
+    e.set_dma_windows(vec![w(0xffff_ffff_ffff_f000, 0x8000_0000, 0x4000_0000)])
+        .unwrap();
+    assert_eq!(
+        e.bus_address(0x8000_2000, 64),
+        Err(DmaError::RegionOverflow)
+    );
+}

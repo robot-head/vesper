@@ -871,3 +871,30 @@ fn random_register_traffic_never_panics() {
         }
     }
 }
+
+/// Reinstalling an ISR for an APLIC source in MSI mode reuses the identity
+/// space: the old identity is freed, so routing never runs out of identities
+/// and only the newest handler runs.
+#[test]
+fn reinstalling_an_msi_routed_isr_frees_the_old_identity() {
+    let p = Platform::from_dtb(IMSIC).unwrap();
+    let ledger = Ledger::new();
+    let mut intc = RiscvIntc::new(&p, Privilege::Supervisor, &ledger).unwrap();
+    let stale = Seen::default();
+    for _ in 0..300 {
+        intc.install_isr(&p, UART, 0, 7, acking(&stale, &p, UART))
+            .unwrap();
+    }
+    let seen = Seen::default();
+    intc.install_isr(&p, UART, 0, 7, acking(&seen, &p, UART))
+        .unwrap();
+    let id = intc.read32(S_DOMAIN + 0x3000 + 4 * 10).unwrap() & 0x7ff;
+    assert_eq!(
+        intc.imsic_csr_read(0, Privilege::Supervisor, ISEL_EIE0)
+            .unwrap(),
+        1 << id
+    );
+    intc.set_device_line(&p, UART, true).unwrap();
+    assert_eq!(*seen.borrow(), [(0, SEIP, 10)]);
+    assert!(stale.borrow().is_empty());
+}

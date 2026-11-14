@@ -635,8 +635,12 @@ impl DmaEngine {
             .ok_or(DmaError::RegionOverflow)?;
         ws.iter()
             .find(|w| phys >= w.cpu_addr && end <= w.cpu_addr.saturating_add(w.size))
-            .map(|w| w.dma_addr + (phys - w.cpu_addr))
-            .ok_or(DmaError::NotDmaAddressable { phys, len })
+            .map(|w| {
+                w.dma_addr
+                    .checked_add(phys - w.cpu_addr)
+                    .ok_or(DmaError::RegionOverflow)
+            })
+            .unwrap_or(Err(DmaError::NotDmaAddressable { phys, len }))
     }
 
     /// The privilege and `envcfg` state the driver issuing this engine's
