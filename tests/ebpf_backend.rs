@@ -639,3 +639,36 @@ fn malformed_and_unusual_inputs_never_panic() {
         }
     }
 }
+
+#[test]
+fn option_equality_compares_payloads() {
+    // Some(a) == Some(b) only when a == b; None == None; Some != None.
+    let src = format!(
+        "{PRELUDE}fn main() -> XdpAction eff [Packet] {{
+             if Packet::load_u8(0) == Packet::load_u8(1) {{ XdpAction::Pass }} else {{ XdpAction::Drop }}
+         }}"
+    );
+    let c = compile_source(&src, &Options::default()).unwrap();
+    let mut env = XdpEnv::new(&c.program);
+    assert_eq!(run(&c.program, &mut env, &[7, 7, 0]), XDP_PASS);
+    assert_eq!(run(&c.program, &mut env, &[1, 2, 0]), XDP_DROP);
+    // load_u8(0) is Some, load_u8(1) is None.
+    assert_eq!(run(&c.program, &mut env, &[1]), XDP_DROP);
+    let ne = src.replace("==", "!=");
+    let c = compile_source(&ne, &Options::default()).unwrap();
+    let mut env = XdpEnv::new(&c.program);
+    assert_eq!(run(&c.program, &mut env, &[7, 7, 0]), XDP_DROP);
+    assert_eq!(run(&c.program, &mut env, &[1, 2, 0]), XDP_PASS);
+}
+
+#[test]
+fn hash_add_inserts_with_noexist_and_retries() {
+    // The miss path inserts with BPF_NOEXIST and, if another CPU won the
+    // race, re-looks up and adds atomically instead of overwriting.
+    let fw = compile("firewall");
+    let slots = &fw.program.insns;
+    let noexist = slots.windows(2).any(|w| {
+        w[0].code == 0xb7 && w[0].dst == 4 && w[0].imm == 1 && w[1].code == 0x85 && w[1].imm == 2
+    });
+    assert!(noexist, "update with BPF_NOEXIST");
+}

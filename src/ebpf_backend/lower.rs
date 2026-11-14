@@ -27,6 +27,9 @@ use vesper_ebpf::{
 const MAX_PACKET_OFF: i32 = 0xffff;
 /// Parameter registers after `r1` (the context).
 const ARG_REGS: [Reg; 4] = [Reg::R2, Reg::R3, Reg::R4, Reg::R5];
+/// `bpf_map_update_elem` flags.
+const BPF_ANY: i32 = 0;
+const BPF_NOEXIST: i32 = 1;
 
 pub(crate) struct Lowered {
     pub program: Program,
@@ -933,7 +936,33 @@ impl<'a, 'b> FnLower<'a, 'b> {
                     .unwrap_or(self.reprs[&i.dest]);
                 self.ld(Reg::R1, *a, 0, span)?;
                 self.ld(Reg::R2, *b, 0, span)?;
-                if let Some(cmp) = compare(op, operand) {
+                if let (Repr::Opt(_), "==" | "!=") = (operand, op.as_str()) {
+                    // Structural equality: equal tags, and equal payloads
+                    // when both are Some.
+                    let done = self.asm.label();
+                    let equal = self.asm.label();
+                    self.ld(Reg::R3, *a, 1, span)?;
+                    self.ld(Reg::R4, *b, 1, span)?;
+                    self.asm.mov64(Reg::R0, 0);
+                    self.asm.jmp(JmpOp::Ne, Reg::R1, Reg::R2, done);
+                    self.asm.jmp(JmpOp::Eq, Reg::R1, 0, equal);
+                    self.asm.jmp(JmpOp::Ne, Reg::R3, Reg::R4, done);
+                    self.bind_label(equal)?;
+                    self.asm.mov64(Reg::R0, 1);
+                    self.bind_label(done)?;
+                    if op == "!=" {
+                        self.asm.alu64(AluOp::Xor, Reg::R0, 1);
+                    }
+                    if let Some(d) = d {
+                        self.st(d, Reg::R0);
+                    }
+                } else if let (Repr::Opt(_), _) = (operand, op.as_str()) {
+                    return Err(self.err(
+                        rules::OPERATION,
+                        Some(span),
+                        format!("`{op}` on an Option"),
+                    ));
+                } else if let Some(cmp) = compare(op, operand) {
                     let done = self.asm.label();
                     self.asm.mov64(Reg::R0, 1);
                     self.asm.jmp(cmp, Reg::R1, Reg::R2, done);
@@ -1364,10 +1393,26 @@ impl<'a, 'b> FnLower<'a, 'b> {
                         self.asm.ja(done);
                         self.bind_label(miss)?;
                         if !kind.is_array() {
-                            // First sighting: insert the delta.
+                            // First sighting: insert the delta only if
+                            // the key is still absent (BPF_NOEXIST). If
+                            // another CPU inserted it meanwhile, look it up
+                            // again and add atomically, so no count is lost.
                             self.ld(Reg::R1, args[1].value, 0, span)?;
                             self.st(self.val_slot, Reg::R1);
-                            self.update(map);
+                            self.update_with(map, BPF_NOEXIST);
+                            self.asm.jmp(JmpOp::Eq, Reg::R0, 0, done);
+                            self.asm.ld_map(Reg::R1, map);
+                            self.key_ptr(Reg::R2);
+                            self.asm.call(vesper_ebpf::helpers::MAP_LOOKUP_ELEM);
+                            self.asm.jmp(JmpOp::Eq, Reg::R0, 0, done);
+                            self.ld(Reg::R1, args[1].value, 0, span)?;
+                            self.asm.atomic(
+                                vsize,
+                                AtomicOp::Add { fetch: false },
+                                Reg::R0,
+                                0,
+                                Reg::R1,
+                            );
                         }
                         self.bind_label(done)?;
                     }
@@ -1379,10 +1424,14 @@ impl<'a, 'b> FnLower<'a, 'b> {
     }
 
     fn update(&mut self, map: usize) {
+        self.update_with(map, BPF_ANY);
+    }
+
+    fn update_with(&mut self, map: usize, flags: i32) {
         self.asm.ld_map(Reg::R1, map);
         self.key_ptr(Reg::R2);
         self.val_ptr(Reg::R3);
-        self.asm.mov64(Reg::R4, 0);
+        self.asm.mov64(Reg::R4, flags);
         self.asm.call(vesper_ebpf::helpers::MAP_UPDATE_ELEM);
     }
 }
