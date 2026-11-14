@@ -34,8 +34,12 @@ fn indexes_follow_commits_snapshots_and_reopen() {
     s.execute_ddl(DDL).unwrap();
     let mut t = s.begin().unwrap();
     // Names share an eight-byte prefix: the recheck separates them.
-    let a = s.insert(&mut t, "p", &person("alexander", Some(30), 1.5)).unwrap();
-    let b = s.insert(&mut t, "p", &person("alexandra", Some(-4), -0.0)).unwrap();
+    let a = s
+        .insert(&mut t, "p", &person("alexander", Some(30), 1.5))
+        .unwrap();
+    let b = s
+        .insert(&mut t, "p", &person("alexandra", Some(-4), -0.0))
+        .unwrap();
     let c = s.insert(&mut t, "p", &person("bo", None, 0.0)).unwrap();
     s.commit(t).unwrap();
     // Built from the stored versions.
@@ -46,13 +50,20 @@ fn indexes_follow_commits_snapshots_and_reopen() {
 
     let t = s.begin().unwrap();
     let name = |v: &str| Value::Text(v.into());
-    assert_eq!(ids(&s.lookup(&t, "p_name", &name("alexandra")).unwrap()), [b]);
     assert_eq!(
-        ids(&s.lookup_range(&t, "p_name", &name("alex"), &name("alexz")).unwrap()),
+        ids(&s.lookup(&t, "p_name", &name("alexandra")).unwrap()),
+        [b]
+    );
+    assert_eq!(
+        ids(&s
+            .lookup_range(&t, "p_name", &name("alex"), &name("alexz"))
+            .unwrap()),
         [a, b]
     );
     assert_eq!(
-        ids(&s.lookup_range(&t, "p_age", &Value::I64(-10), &Value::I64(30)).unwrap()),
+        ids(&s
+            .lookup_range(&t, "p_age", &Value::I64(-10), &Value::I64(30))
+            .unwrap()),
         [a, b],
         "negative integers order before positive ones; NULL is not indexed"
     );
@@ -67,19 +78,35 @@ fn indexes_follow_commits_snapshots_and_reopen() {
     // moved row; the transaction sees its own uncommitted write.
     let old = s.begin().unwrap();
     let mut w = s.begin().unwrap();
-    s.update(&mut w, "p", a, &person("zed", Some(31), 2.0)).unwrap();
+    s.update(&mut w, "p", a, &person("zed", Some(31), 2.0))
+        .unwrap();
     assert_eq!(ids(&s.lookup(&w, "p_name", &name("zed")).unwrap()), [a]);
-    assert!(s.lookup(&w, "p_name", &name("alexander")).unwrap().is_empty());
+    assert!(s
+        .lookup(&w, "p_name", &name("alexander"))
+        .unwrap()
+        .is_empty());
     s.delete(&mut w, "p", c).unwrap();
     s.commit(w).unwrap();
     s.check().unwrap();
-    assert_eq!(ids(&s.lookup(&old, "p_name", &name("alexander")).unwrap()), [a]);
+    assert_eq!(
+        ids(&s.lookup(&old, "p_name", &name("alexander")).unwrap()),
+        [a]
+    );
     assert!(s.lookup(&old, "p_name", &name("zed")).unwrap().is_empty());
-    assert_eq!(ids(&s.lookup(&old, "p_score", &Value::F64(0.0)).unwrap()), [b, c]);
+    assert_eq!(
+        ids(&s.lookup(&old, "p_score", &Value::F64(0.0)).unwrap()),
+        [b, c]
+    );
     s.commit(old).unwrap();
     let t = s.begin().unwrap();
-    assert!(s.lookup(&t, "p_name", &name("alexander")).unwrap().is_empty());
-    assert_eq!(ids(&s.lookup(&t, "p_score", &Value::F64(0.0)).unwrap()), [b]);
+    assert!(s
+        .lookup(&t, "p_name", &name("alexander"))
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        ids(&s.lookup(&t, "p_score", &Value::F64(0.0)).unwrap()),
+        [b]
+    );
     s.commit(t).unwrap();
 
     // Vacuum collects the old versions and their index entries.
@@ -96,7 +123,10 @@ fn indexes_follow_commits_snapshots_and_reopen() {
     let e = s.lookup(&t, "nope", &Value::U64(1)).unwrap_err();
     assert_eq!(e.kind, StoreErrorKind::NotFound);
     s.commit(t).unwrap();
-    assert!(s.create_index("p_name", "p", "age").is_err(), "duplicate name");
+    assert!(
+        s.create_index("p_name", "p", "age").is_err(),
+        "duplicate name"
+    );
     assert!(s.create_index("p", "p", "age").is_err(), "a table's name");
     assert_eq!(
         s.create_index("x", "p", "nope").unwrap_err().kind,
@@ -108,7 +138,9 @@ fn indexes_follow_commits_snapshots_and_reopen() {
         StoreErrorKind::State
     );
     s.abort(busy).unwrap();
-    assert!(s.execute_ddl("CREATE TABLE p_age (x U64 NOT NULL)").is_err());
+    assert!(s
+        .execute_ddl("CREATE TABLE p_age (x U64 NOT NULL)")
+        .is_err());
 
     // Reopen: indexes persist (meta format 2) and still agree.
     let dev = s.close().unwrap();
@@ -198,7 +230,8 @@ fn random_workload_lookups_equal_filtered_scans() {
                 .filter(|(_, r)| r[0] == Value::Text("name-1".into()))
                 .collect();
             assert_eq!(
-                s.lookup(&h, "p_name", &Value::Text("name-1".into())).unwrap(),
+                s.lookup(&h, "p_name", &Value::Text("name-1".into()))
+                    .unwrap(),
                 want,
                 "old snapshot, step {step}"
             );

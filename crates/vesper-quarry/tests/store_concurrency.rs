@@ -166,7 +166,12 @@ fn readers_see_exact_snapshots_while_a_writer_splits_and_merges() {
                     let t = s.begin().unwrap();
                     let rows = s.scan(&t, "acct").unwrap();
                     let total: u64 = rows.iter().map(|(_, row)| balance(row)).sum();
-                    assert_eq!(total, TOTAL, "snapshot {} conserves the total", t.snapshot());
+                    assert_eq!(
+                        total,
+                        TOTAL,
+                        "snapshot {} conserves the total",
+                        t.snapshot()
+                    );
                     // Point reads through the same tree agree with the scan.
                     for _ in 0..4 {
                         let (id, row) = &rows[rng.below(rows.len() as u64) as usize];
@@ -193,9 +198,19 @@ fn readers_see_exact_snapshots_while_a_writer_splits_and_merges() {
     let st = s.stats();
     assert_eq!(st.pinned, 0);
     assert_eq!(st.leaked_pins, 0);
-    assert!(checked.load(Ordering::Relaxed) > 0, "readers checked snapshots");
-    assert!(st.evictions > 0, "the eight-frame pool evicted while readers ran");
-    assert!(shapes["acct"].height >= 3, "a deep tree: {:?}", shapes["acct"]);
+    assert!(
+        checked.load(Ordering::Relaxed) > 0,
+        "readers checked snapshots"
+    );
+    assert!(
+        st.evictions > 0,
+        "the eight-frame pool evicted while readers ran"
+    );
+    assert!(
+        shapes["acct"].height >= 3,
+        "a deep tree: {:?}",
+        shapes["acct"]
+    );
     eprintln!(
         "{} reader snapshots checked; {:?}; {} evictions, {} checkpoints",
         checked.load(Ordering::Relaxed),

@@ -70,7 +70,8 @@ fn write_skew_on_call_doctors_is_rejected() {
         let mut t1 = s.begin().unwrap();
         let mut t2 = s.begin().unwrap();
         assert_eq!((count(&t1), count(&t2)), (2, 2));
-        s.update(&mut t1, "doc", alice, &doc("alice", false)).unwrap();
+        s.update(&mut t1, "doc", alice, &doc("alice", false))
+            .unwrap();
         s.update(&mut t2, "doc", bob, &doc("bob", false)).unwrap();
         s.commit(t1).unwrap();
         s.commit(t2).unwrap();
@@ -90,7 +91,8 @@ fn write_skew_on_call_doctors_is_rejected() {
         let mut t1 = ser(&s);
         let mut t2 = ser(&s);
         assert_eq!((count(&t1), count(&t2)), (2, 2));
-        s.update(&mut t1, "doc", alice, &doc("alice", false)).unwrap();
+        s.update(&mut t1, "doc", alice, &doc("alice", false))
+            .unwrap();
         s.update(&mut t2, "doc", bob, &doc("bob", false)).unwrap();
         s.commit(t1).unwrap();
         let e = s.commit(t2).unwrap_err();
@@ -152,10 +154,18 @@ fn read_only_anomaly_is_rejected() {
     let s = open("CREATE TABLE acct (kind TEXT NOT NULL, bal I64 NOT NULL)");
     let mut t = s.begin().unwrap();
     let x = s
-        .insert(&mut t, "acct", &[Value::Text("checking".into()), Value::I64(0)])
+        .insert(
+            &mut t,
+            "acct",
+            &[Value::Text("checking".into()), Value::I64(0)],
+        )
         .unwrap();
     let y = s
-        .insert(&mut t, "acct", &[Value::Text("savings".into()), Value::I64(0)])
+        .insert(
+            &mut t,
+            "acct",
+            &[Value::Text("savings".into()), Value::I64(0)],
+        )
         .unwrap();
     s.commit(t).unwrap();
     let bal = |t: &Txn, id| match s.get(t, "acct", id).unwrap().unwrap()[1] {
@@ -166,15 +176,25 @@ fn read_only_anomaly_is_rejected() {
     assert_eq!(bal(&t2, x) + bal(&t2, y), 0);
     let mut t1 = ser(&s);
     let y1 = bal(&t1, y);
-    s.update(&mut t1, "acct", y, &[Value::Text("savings".into()), Value::I64(y1 + 20)])
-        .unwrap();
+    s.update(
+        &mut t1,
+        "acct",
+        y,
+        &[Value::Text("savings".into()), Value::I64(y1 + 20)],
+    )
+    .unwrap();
     s.commit(t1).unwrap();
     let t3 = ser(&s);
     assert_eq!((bal(&t3, x), bal(&t3, y)), (0, 20));
     s.commit(t3).unwrap();
     // T2 withdraws 10 and, seeing a total of 0, charges a penalty of 1.
-    s.update(&mut t2, "acct", x, &[Value::Text("checking".into()), Value::I64(-11)])
-        .unwrap();
+    s.update(
+        &mut t2,
+        "acct",
+        x,
+        &[Value::Text("checking".into()), Value::I64(-11)],
+    )
+    .unwrap();
     assert!(is_serialization(&s.commit(t2).unwrap_err()));
 }
 
@@ -186,7 +206,8 @@ fn disjoint_serializable_work_commits_and_levels_mix() {
     let mut t2 = ser(&s);
     assert!(s.get(&t1, "doc", alice).unwrap().is_some());
     assert!(s.get(&t2, "doc", bob).unwrap().is_some());
-    s.update(&mut t1, "doc", alice, &doc("alice", false)).unwrap();
+    s.update(&mut t1, "doc", alice, &doc("alice", false))
+        .unwrap();
     s.update(&mut t2, "doc", bob, &doc("bob", false)).unwrap();
     s.commit(t1).unwrap();
     s.commit(t2).unwrap();
@@ -196,7 +217,8 @@ fn disjoint_serializable_work_commits_and_levels_mix() {
     let mut t2 = ser(&s);
     assert_eq!(on_call_by_get(&s, &t1, [alice, bob]), 2);
     assert_eq!(on_call_by_get(&s, &t2, [alice, bob]), 2);
-    s.update(&mut t1, "doc", alice, &doc("alice", false)).unwrap();
+    s.update(&mut t1, "doc", alice, &doc("alice", false))
+        .unwrap();
     s.update(&mut t2, "doc", bob, &doc("bob", false)).unwrap();
     s.commit(t1).unwrap();
     s.commit(t2).unwrap();
@@ -204,8 +226,11 @@ fn disjoint_serializable_work_commits_and_levels_mix() {
     let (s, alice, _) = doctors();
     let mut t1 = ser(&s);
     let mut t2 = ser(&s);
-    s.update(&mut t1, "doc", alice, &doc("alice", false)).unwrap();
-    let e = s.update(&mut t2, "doc", alice, &doc("alice", false)).unwrap_err();
+    s.update(&mut t1, "doc", alice, &doc("alice", false))
+        .unwrap();
+    let e = s
+        .update(&mut t2, "doc", alice, &doc("alice", false))
+        .unwrap_err();
     assert_eq!(e.kind, StoreErrorKind::Conflict);
     s.commit(t1).unwrap();
     s.abort(t2).unwrap();
@@ -221,7 +246,8 @@ fn threads_keep_an_invariant_that_write_skew_breaks() {
     let s = open(DOCTORS);
     let mut t = s.begin().unwrap();
     for i in 0..3 {
-        s.insert(&mut t, "doc", &doc(&format!("d{i}"), true)).unwrap();
+        s.insert(&mut t, "doc", &doc(&format!("d{i}"), true))
+            .unwrap();
     }
     s.commit(t).unwrap();
     let (committed, retried) = (AtomicU64::new(0), AtomicU64::new(0));
@@ -238,7 +264,10 @@ fn threads_keep_an_invariant_that_write_skew_breaks() {
                     let mut t = s.begin_with(Isolation::Serializable).unwrap();
                     let r = (|| -> Result<(), StoreError> {
                         let rows = s.scan(&t, "doc")?;
-                        let on: Vec<_> = rows.iter().filter(|(_, r)| r[1] == Value::Bool(true)).collect();
+                        let on: Vec<_> = rows
+                            .iter()
+                            .filter(|(_, r)| r[1] == Value::Bool(true))
+                            .collect();
                         assert!(!on.is_empty(), "invariant in a snapshot");
                         let (id, row) = &rows[(x % rows.len() as u64) as usize];
                         let flip = row[1] == Value::Bool(false) || on.len() >= 2;

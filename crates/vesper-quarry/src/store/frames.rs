@@ -381,7 +381,8 @@ impl<D: Device> Core<D> {
     /// page that is not resident gets a frame latched from creation, so no
     /// reader can see it before its bytes are written.
     pub fn install_group(&self, pages: &[(u64, Option<(&Page, u64)>)]) -> StoreResult<()> {
-        let mut held: Vec<(u64, Arc<Frame>, Option<(&Page, u64)>)> = Vec::new();
+        type Held<'p> = (u64, Arc<Frame>, Option<(&'p Page, u64)>);
+        let mut held: Vec<Held<'_>> = Vec::new();
         let result = (|| {
             for &(page, install) in pages {
                 let (frame, latched) = {

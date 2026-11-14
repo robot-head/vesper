@@ -543,7 +543,8 @@ impl Run<'_> {
         let mut joined: BTreeSet<usize> = BTreeSet::new();
         let mut tuples: Vec<Vec<usize>> = Vec::new();
         for (step, &c) in order.iter().enumerate() {
-            let mut present: BTreeSet<usize> = joined.iter().flat_map(|&x| binds[x].clone()).collect();
+            let mut present: BTreeSet<usize> =
+                joined.iter().flat_map(|&x| binds[x].clone()).collect();
             // Equalities between the joined inputs and `c` become hash keys.
             let mut keys: Vec<((usize, usize), usize)> = Vec::new();
             if step > 0 {
@@ -851,7 +852,11 @@ impl Run<'_> {
 
 /// The inputs and `ON` conjuncts of a maximal tree of inner joins, inputs
 /// in written (left-to-right) order.
-fn flatten_inner<'p>(plan: &'p RelPlan, leaves: &mut Vec<&'p RelPlan>, on: &mut Vec<&'p TypedExpr>) {
+fn flatten_inner<'p>(
+    plan: &'p RelPlan,
+    leaves: &mut Vec<&'p RelPlan>,
+    on: &mut Vec<&'p TypedExpr>,
+) {
     match plan {
         RelPlan::Join {
             kind: JoinKind::Inner,

@@ -249,7 +249,9 @@ fn rebalance_leaf(
     leaf: u64,
     n: usize,
 ) -> StoreResult<u64> {
-    let &(pid, i) = path.last().ok_or_else(|| tree_corrupt("leaf without parent"))?;
+    let &(pid, i) = path
+        .last()
+        .ok_or_else(|| tree_corrupt("leaf without parent"))?;
     let pc = count(p.page(pid)?);
     if pc == 0 {
         // A parent with one child (only a tree damaged outside this code

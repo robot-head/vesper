@@ -278,7 +278,13 @@ fn recover_and_check(medium: &mut SimDevice, obs: &Observed, what: &str) -> Stor
     let t = s.begin().unwrap();
     let ix = s.indexes();
     for (name, table, col, lo, hi) in [
-        ("a_v", "a", 1, Value::Text(String::new()), Value::Text("{".into())),
+        (
+            "a_v",
+            "a",
+            1,
+            Value::Text(String::new()),
+            Value::Text("{".into()),
+        ),
         ("b_k", "b", 0, Value::I64(i64::MIN), Value::I64(i64::MAX)),
     ] {
         if !ix.contains_key(name) {
@@ -290,7 +296,11 @@ fn recover_and_check(medium: &mut SimDevice, obs: &Observed, what: &str) -> Stor
             .into_iter()
             .filter(|(_, r)| r[col] != Value::Null)
             .collect();
-        assert_eq!(s.lookup_range(&t, name, &lo, &hi).unwrap(), want, "{what}: {name}");
+        assert_eq!(
+            s.lookup_range(&t, name, &lo, &hi).unwrap(),
+            want,
+            "{what}: {name}"
+        );
     }
     s.commit(t).unwrap();
     assert_eq!(s.stats().pinned, 0);

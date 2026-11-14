@@ -58,8 +58,8 @@ use frames::{lock, Core, Io, SharedFrame};
 use log::StoreLog;
 use pages::{
     check_structure, decode_fsm, encode_fsm, format, kind, layout_of, leaf_compact, leaf_garbage,
-    new_page, page_lsn, Entry, IndexMeta, Key, Meta, Page, TableMeta, FSM_CAPACITY, FSM_PAGE, INTERNAL_CAP,
-    KIND_FSM, KIND_INTERNAL, KIND_LEAF, KIND_META, META_PAGE,
+    new_page, page_lsn, Entry, IndexMeta, Key, Meta, Page, TableMeta, FSM_CAPACITY, FSM_PAGE,
+    INTERNAL_CAP, KIND_FSM, KIND_INTERNAL, KIND_LEAF, KIND_META, META_PAGE,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -960,7 +960,11 @@ impl<D: Device> Store<D> {
         Ok(())
     }
 
-    fn redo(&self, records: Vec<(u64, StoreRecord)>, report: &mut StoreRecovery) -> StoreResult<()> {
+    fn redo(
+        &self,
+        records: Vec<(u64, StoreRecord)>,
+        report: &mut StoreRecovery,
+    ) -> StoreResult<()> {
         let complete = records
             .iter()
             .rposition(|(_, r)| matches!(r, StoreRecord::Commit { .. }))
@@ -2522,7 +2526,12 @@ impl<D: Device> Store<D> {
         self.core.into_parts().dev
     }
     pub fn device(&mut self) -> &D {
-        &self.core.io.get_mut().unwrap_or_else(|e| e.into_inner()).dev
+        &self
+            .core
+            .io
+            .get_mut()
+            .unwrap_or_else(|e| e.into_inner())
+            .dev
     }
     /// Columns of a durable table.
     pub fn columns(&self, table: &str) -> StoreResult<Vec<ColumnDef>> {

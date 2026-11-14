@@ -407,5 +407,8 @@ fn cost_based_order_prefers_connected_inputs() {
     // product with a comes last.
     assert_eq!(orders, vec![vec!["m", "r", "l"]], "{orders:?}");
     let expect = q.execute(&c, &d, &none).unwrap();
-    assert_eq!(q.execute_vectorized(&c, &d, &none, &e).unwrap().rows, expect.rows);
+    assert_eq!(
+        q.execute_vectorized(&c, &d, &none, &e).unwrap().rows,
+        expect.rows
+    );
 }
