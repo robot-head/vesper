@@ -1361,14 +1361,18 @@ impl<D: Device> Store<D> {
                     .first()
                     .is_some_and(|(k, _)| k.rowid != e.key.rowid)
                 {
-                    victims.extend(collectable(&versions, &snapshots));
+                    victims.extend(collectable(&versions, &snapshots).into_iter().rev());
                     versions.clear();
                 }
                 versions.push((e.key, e.tomb));
                 Ok(true)
             });
             r?;
-            victims.extend(collectable(&versions, &snapshots));
+            // Oldest first within each row (`collectable` is newest first):
+            // every committed prefix of the groups below must keep the
+            // row's logical contents, so a tombstone goes only after every
+            // older version it hides.
+            victims.extend(collectable(&versions, &snapshots).into_iter().rev());
             // Bounded groups: halve the batch when a group would touch more
             // than `max_group_pages` pages.
             let mut per_group = (self.limits.max_group_pages / 4).max(1);
@@ -1561,7 +1565,15 @@ impl<D: Device> Store<D> {
     }
     /// Checkpoints and returns the device (a clean shutdown).
     pub fn close(mut self) -> StoreResult<D> {
+        // Deferred commits first. Finishing a running checkpoint writes back
+        // only the pages dirty at its switch, so a second, full checkpoint
+        // then writes back what later commits dirtied.
+        self.flush()?;
+        let running = self.ckpt.is_some();
         self.checkpoint()?;
+        if running {
+            self.checkpoint()?;
+        }
         Ok(self.core.dev)
     }
     /// Returns the device without writing anything (a crash, for tests).

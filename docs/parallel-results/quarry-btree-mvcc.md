@@ -72,7 +72,7 @@ All run on this branch in the cloud container (Linux x86_64, Rust 1.97 and
 | `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` | clean |
 | `cargo clippy --workspace --locked --all-targets -- -D warnings` | clean |
 | `VESPER_LEAN=… cargo test --workspace --locked --no-fail-fast` (`CARGO_PROFILE_*_DEBUG=0` for disk space) | 4,034 passed, 1 failed, 2 ignored. The failure is the root package's `lean4lean42_acceptance::genuine_both_model_replay_and_independent_refusal_matrix`, which requires `VESPER_LEAN4LEAN42_ROOT` (prepared only in CI) and is untouched by this lane |
-| `cargo test -p vesper-quarry --locked` | 76 passed |
+| `cargo test -p vesper-quarry --locked` | 79 passed (after the review fixes below) |
 
 `tests/vector.rs::joins_stale_inputs_and_limits_are_typed_errors` asserted the
 old `Unsupported` result for a join; it now asserts the vectorized join equals
@@ -102,6 +102,26 @@ commits, 40 log syncs in one run; the test asserts only fewer syncs than
 commits, since the count depends on scheduling. No throughput or latency was
 measured, and no zero-allocation claim is made: tile reuse is asserted through
 `allocated_tiles` and `arena_capacity`, not a counting allocator.
+
+## Review fixes
+
+Codex review of the first push found three real bugs; each now has a test
+that fails on the old code and passes on the fix.
+
+* Joins did not charge `intermediate_bytes`, so one wide value repeated by
+  many matches could materialize far past the budget. Join and filter outputs
+  are now charged cumulatively before copying, like the row executor, and each
+  candidate-pair batch is bounded on its own
+  (`vector_join::join_intermediate_bytes_are_bounded`).
+* `vacuum` removed a deleted row's tombstone before its older values, so a
+  crash keeping only an early vacuum group could resurrect the row. Removals
+  now go oldest first within each row
+  (`store::vacuum_crashes_never_resurrect_deleted_rows`, a crash at every
+  vacuum device operation under three crash choices).
+* `close` during a running checkpoint could drop a deferred commit whose
+  pages had already been written back. `close` now flushes first and, when a
+  checkpoint was running, finishes it and runs one full checkpoint
+  (`store::close_keeps_deferred_commits_during_a_running_checkpoint`).
 
 ## Decisions
 

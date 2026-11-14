@@ -647,6 +647,7 @@ impl PreparedQuery {
                 engine,
                 work: 0,
                 rows: 0,
+                bytes: 0,
                 scratch: join::Scratch::default(),
             };
             let rel = run.rel(&self.plan)?;

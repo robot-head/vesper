@@ -166,7 +166,20 @@ pub(super) struct Run<'a> {
     pub engine: &'a VectorEngine,
     pub work: usize,
     pub rows: usize,
+    /// Cumulative bytes of materialized intermediate rows, accounted like
+    /// the row executor's (`Vec<Value>` per row, `Value` per cell, payload).
+    pub bytes: usize,
     pub scratch: Scratch,
+}
+
+/// Bytes one copied cell of `src` adds, accounted like a row `Value`.
+fn cell_bytes(src: &Column, i: Option<usize>) -> usize {
+    let payload = match (i, &src.data) {
+        (Some(i), Data::Text(x)) if src.nulls[i] == 0 => x[i].len(),
+        (Some(i), Data::Bytes(x)) if src.nulls[i] == 0 => x[i].len(),
+        _ => 0,
+    };
+    size_of::<Value>() + payload
 }
 impl Run<'_> {
     fn charge(&mut self, cells: usize) -> Result<()> {
@@ -179,6 +192,17 @@ impl Run<'_> {
             self.rows,
             self.query.limits.intermediate_rows,
             "cumulative intermediate row limit",
+        )
+    }
+    /// Charges `rows` rows of `cells` bytes (from [`cell_bytes`]) against
+    /// the cumulative intermediate byte budget, before they are copied.
+    fn materialize(&mut self, rows: usize, cells: usize) -> Result<()> {
+        let row = rows.saturating_mul(size_of::<Vec<Value>>());
+        self.bytes = add(self.bytes, add(row, cells)?)?;
+        bound(
+            self.bytes,
+            self.query.limits.intermediate_bytes,
+            "cumulative intermediate byte limit",
         )
     }
     fn ty(&self, slot: usize) -> ScalarType {
@@ -291,17 +315,25 @@ impl Run<'_> {
             self.charge((end - start).saturating_mul(preds.len()))?;
             self.mask(&rel, start, end, preds)?;
             if self.engine.count_ones(&self.scratch.selected) > 0 {
+                let selected = std::mem::take(&mut self.scratch.selected);
                 for (i, _) in (0..end - start)
-                    .zip(&self.scratch.selected)
+                    .zip(&selected)
                     .filter(|&(_, &bit)| bit == 1)
                 {
                     kept += 1;
+                    let cells = rel
+                        .cols
+                        .iter()
+                        .flatten()
+                        .try_fold(0, |n, src| add(n, cell_bytes(src, Some(start + i))))?;
+                    self.materialize(1, cells)?;
                     for (slot, c) in out.iter_mut().enumerate() {
                         if let (Some(dst), Some(src)) = (c, &rel.cols[slot]) {
                             dst.push_from(src, Some(start + i));
                         }
                     }
                 }
+                self.scratch.selected = selected;
             }
             start = end;
         }
@@ -386,7 +418,7 @@ impl Run<'_> {
                     &rslots,
                     &cand_l[start..end],
                     &cand_r[start..end],
-                );
+                )?;
                 self.charge((end - start).saturating_mul(residual.len() + self.width()))?;
                 self.mask(&pair, 0, end - start, &residual)?;
                 for k in 0..end - start {
@@ -430,6 +462,16 @@ impl Run<'_> {
         self.produced(out_l.len())?;
         self.charge(out_l.len().saturating_mul(self.width()))?;
         let opt = |x: usize| (x != usize::MAX).then_some(x);
+        let mut cells = 0usize;
+        for (slots, side, idx) in [(&lslots, &l, &out_l), (&rslots, &r, &out_r)] {
+            for &s in slots.iter() {
+                let src = side.cols[s].as_ref().expect("bound slot");
+                for &x in idx.iter() {
+                    cells = add(cells, cell_bytes(src, opt(x)))?;
+                }
+            }
+        }
+        self.materialize(out_l.len(), cells)?;
         let mut cols: Vec<Option<Column>> = vec![None; self.width()];
         for (slots, side, idx) in [(&lslots, &l, &out_l), (&rslots, &r, &out_r)] {
             for &s in slots.iter() {
@@ -456,7 +498,23 @@ impl Run<'_> {
         rslots: &[usize],
         li: &[usize],
         ri: &[usize],
-    ) -> Rel {
+    ) -> Result<Rel> {
+        // A transient batch, reused per batch: bounded on its own by the
+        // intermediate byte budget, since repeated wide cells multiply.
+        let mut bytes = li.len().saturating_mul(size_of::<Vec<Value>>());
+        for (slots, side, idx) in [(lslots, l, li), (rslots, r, ri)] {
+            for &s in slots {
+                let src = side.cols[s].as_ref().expect("bound slot");
+                for &x in idx {
+                    bytes = add(bytes, cell_bytes(src, Some(x)))?;
+                }
+            }
+        }
+        bound(
+            bytes,
+            self.query.limits.intermediate_bytes,
+            "intermediate byte limit of a candidate-pair batch",
+        )?;
         let mut cols: Vec<Option<Column>> = vec![None; self.width()];
         for (slots, side, idx) in [(lslots, l, li), (rslots, r, ri)] {
             for &s in slots {
@@ -468,7 +526,7 @@ impl Run<'_> {
                 cols[s] = Some(c);
             }
         }
-        Rel { cols, n: li.len() }
+        Ok(Rel { cols, n: li.len() })
     }
 
     /// Streams projected batches of the materialized plan to `sink`.

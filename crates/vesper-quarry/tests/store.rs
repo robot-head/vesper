@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
-use vesper_quarry::device::{FileId, FsDevice, SimDevice};
+use vesper_quarry::device::{CrashChoice, FileId, FsDevice, SimDevice};
 use vesper_quarry::store::{SharedStore, Store, StoreErrorKind, StoreLimits};
 use vesper_quarry::vector::VectorEngine;
 use vesper_quarry::{Limits, ParamDef, ScalarType, Value};
@@ -579,4 +579,101 @@ fn file_device_store_round_trips() {
     s.commit(t).unwrap();
     drop(s);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A vacuum that collects deleted rows' tombstones and old values runs in
+/// several bounded groups. A crash at every device operation of it, under
+/// each crash choice, recovers the same logical contents: no deleted row
+/// comes back from a committed prefix of the groups.
+#[test]
+fn vacuum_crashes_never_resurrect_deleted_rows() {
+    let limits = StoreLimits {
+        max_group_pages: 8,
+        ..small()
+    };
+    // Built with the default group size; only the vacuum runs with 8 pages.
+    let mut s = store(small());
+    let mut t = s.begin().unwrap();
+    let ids: Vec<u64> = (0..12)
+        .map(|i| s.insert(&mut t, "t", &row(i, "orig")).unwrap())
+        .collect();
+    s.commit(t).unwrap();
+    // An open snapshot keeps the old values and the tombstones past commit
+    // time, so the vacuum below collects them.
+    let old = s.begin().unwrap();
+    let mut t = s.begin().unwrap();
+    for (i, &id) in ids.iter().enumerate() {
+        if i % 2 == 0 {
+            s.update(&mut t, "t", id, &row(i as u64, "new")).unwrap();
+        } else {
+            s.delete(&mut t, "t", id).unwrap();
+        }
+    }
+    s.commit(t).unwrap();
+    s.abort(old).unwrap();
+    let r = s.begin().unwrap();
+    let expect = s.scan(&r, "t").unwrap();
+    s.abort(r).unwrap();
+    assert_eq!(expect.len(), 6);
+    let base = s.into_device();
+    let start = base.stats().ops;
+    let (mut s, _) = Store::open(base.clone(), limits).unwrap();
+    let opened = s.device().stats().ops - start;
+    let rep = s.vacuum().unwrap();
+    assert!(rep.groups >= 3 && rep.versions_removed >= 12, "{rep:?}");
+    let total = s.device().stats().ops - start;
+    let mut recoveries = 0;
+    for n in opened..total {
+        let mut dev = base.clone();
+        dev.crash_after(n);
+        let (mut s, _) = Store::open(dev, limits).unwrap();
+        assert!(s.vacuum().is_err(), "crash point {n} is inside the vacuum");
+        let crashed = s.into_device();
+        for choice in [
+            CrashChoice::LoseUnsynced,
+            CrashChoice::KeepUnsynced,
+            CrashChoice::Subset { seed: n },
+        ] {
+            let (mut s, _) = Store::open(crashed.crash(choice), limits).unwrap();
+            let r = s.begin().unwrap();
+            assert_eq!(
+                s.scan(&r, "t").unwrap(),
+                expect,
+                "crash at vacuum operation {n}, {choice:?}"
+            );
+            s.abort(r).unwrap();
+            s.check().unwrap();
+            recoveries += 1;
+        }
+    }
+    assert!(recoveries >= 30, "{recoveries} recoveries");
+}
+
+/// `close` during a running fuzzy checkpoint keeps a deferred commit whose
+/// pages the checkpoint already wrote back.
+#[test]
+fn close_keeps_deferred_commits_during_a_running_checkpoint() {
+    // A pool large enough that no eviction flushes the log on the way.
+    let limits = StoreLimits {
+        btree_fanout: 3,
+        leaf_max_versions: 4,
+        ..StoreLimits::default()
+    };
+    let mut s = store(limits);
+    let mut t = s.begin().unwrap();
+    let ids: Vec<u64> = (0..40)
+        .map(|i| s.insert(&mut t, "t", &row(i, "orig")).unwrap())
+        .collect();
+    s.commit(t).unwrap();
+    s.checkpoint_begin().unwrap();
+    s.checkpoint_step(3).unwrap();
+    let mut t = s.begin().unwrap();
+    s.update(&mut t, "t", ids[1], &row(1, "late")).unwrap();
+    assert!(!s.commit_deferred(t).unwrap().durable);
+    let dev = s.close().unwrap();
+    let (mut s, _) = Store::open(dev.crash(CrashChoice::LoseUnsynced), limits).unwrap();
+    let r = s.begin().unwrap();
+    assert_eq!(s.get(&r, "t", ids[1]).unwrap(), Some(row(1, "late")));
+    assert_eq!(s.scan(&r, "t").unwrap().len(), 40);
+    s.abort(r).unwrap();
 }

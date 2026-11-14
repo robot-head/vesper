@@ -260,3 +260,56 @@ fn join_budgets_are_enforced() {
         vesper_quarry::ErrorKind::Limit
     );
 }
+
+/// A wide value repeated by a join is charged against the intermediate byte
+/// budget before it is copied, as in the row executor.
+#[test]
+fn join_intermediate_bytes_are_bounded() {
+    let c = catalog();
+    let wide = "x".repeat(100_000);
+    let l = vec![vec![
+        Value::I64(0),
+        Value::U64(1),
+        Value::Null,
+        Value::Text(wide),
+    ]];
+    let r: Vec<Vec<Value>> = (0..200)
+        .map(|i| {
+            vec![
+                Value::I64(i),
+                Value::U64(1),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+            ]
+        })
+        .collect();
+    let mut d = DataSet::new(&c);
+    d.set_rows("l", &l, Limits::default()).unwrap();
+    d.set_rows("r", &r, Limits::default()).unwrap();
+    d.set_rows("m", &[], Limits::default()).unwrap();
+    let none = BTreeMap::new();
+    for on in ["a.k = b.k", "a.k = b.k AND b.id >= 0", "a.k <= b.k"] {
+        let sql = format!("SELECT a.id FROM l a JOIN r b ON {on}");
+        let q = c.prepare(&sql, &[], Limits::default()).unwrap();
+        let row = q.execute(&c, &d, &none).unwrap_err().kind;
+        assert_eq!(row, vesper_quarry::ErrorKind::Limit, "{sql}");
+        for e in [
+            VectorEngine::detect(),
+            VectorEngine::portable().with_batch(7).unwrap(),
+        ] {
+            let got = q.execute_vectorized(&c, &d, &none, &e).unwrap_err();
+            assert_eq!(got.kind, vesper_quarry::ErrorKind::Limit, "{sql}: {got:?}");
+        }
+        // Within budget once the wide value is small.
+        let mut small = d.clone();
+        let mut l2 = l.clone();
+        l2[0][3] = Value::Text("x".into());
+        small.set_rows("l", &l2, Limits::default()).unwrap();
+        let expect = q.execute(&c, &small, &none).unwrap();
+        let got = q
+            .execute_vectorized(&c, &small, &none, &VectorEngine::detect())
+            .unwrap();
+        assert_eq!(got.rows, expect.rows, "{sql}");
+    }
+}
