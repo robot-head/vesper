@@ -223,7 +223,10 @@ environment with necessary Windows system variables. Do not substitute a
 kernel projection. Manifest every actual source/object/companion needed by
 execution, byte counts/BLAKE3, compiler/version/commit, paths, commands/exits
 and direction+length+payload transcript hashes. Verify identities before and
-after. Finite compiler output and artifact limits are mandatory. Record the
+after. This inventory covers project artifacts and the compiler executable;
+standard libraries/shared libraries come from the pinned toolchain prefix
+and are not individually attested by the production runner. Finite compiler
+output and artifact limits are mandatory. Record the
 worker as transport code, not an externally verified implementation proof.
 
 Root CLI accepts one bounded complete request JSON (sequence zero), a Lean
