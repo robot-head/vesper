@@ -2474,6 +2474,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let b = self.b.ins().icmp_imm(IntCC::Equal, v, 0);
                         self.b.ins().uextend(types::I64, b)
                     }
+                    // Place-IR form of `widen_u64`: unsigned values are
+                    // already zero-extended in I64.
+                    (crate::capability_effects::WIDEN_INTRINSIC, false) => v,
                     _ => return Err("invalid native unary op".into()),
                 }
             }
@@ -2526,6 +2529,10 @@ impl<M: Module> Codegen<'_, '_, M> {
                             .contains(&(e.span.start, e.span.end))
                     {
                         self.checked_arithmetic(op, kind, av, bv)
+                    } else if crate::capability_effects::bit_intrinsic(op).is_some() {
+                        // Place-IR form of a bitwise intrinsic call.
+                        let v = self.bitwise(op, kind, av, bv)?;
+                        Ok(self.coerce(v, Some(&ty)))
                     } else {
                         self.binary(op, av, bv, unsigned)
                     }?
@@ -2693,6 +2700,22 @@ impl<M: Module> Codegen<'_, '_, M> {
                         let b = self.expr(&args[1].expr)?;
                         let v = self.binary(n, a, b, false)?;
                         return Ok(self.coerce(v, Some(&self.ty(e))));
+                    }
+                    // Bitwise intrinsics of the secret operations
+                    // (`capability_effects`).
+                    if !self.world.functions.contains_key(n) {
+                        if crate::capability_effects::bit_intrinsic(n).is_some() && args.len() == 2
+                        {
+                            let kind = crate::numeric::IntegerKind::from_type(&self.ty(e));
+                            let a = self.expr(&args[0].expr)?;
+                            let b = self.expr(&args[1].expr)?;
+                            let v = self.bitwise(n, kind, a, b)?;
+                            return Ok(self.coerce(v, Some(&self.ty(e))));
+                        }
+                        if n == crate::capability_effects::WIDEN_INTRINSIC && args.len() == 1 {
+                            // Unsigned values are kept zero-extended in I64.
+                            return self.expr(&args[0].expr);
+                        }
                     }
                     if self.world.constructor(n).is_some() {
                         self.data(
@@ -3050,6 +3073,43 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.jump(good, &[]);
         self.b.switch_to_block(good);
         Ok(())
+    }
+    /// A bitwise intrinsic on 64-bit lanes holding `kind` values. Shift
+    /// amounts are taken modulo the kind's width; callers reduce narrow
+    /// results with `coerce`.
+    fn bitwise(
+        &mut self,
+        name: &str,
+        kind: Option<crate::numeric::IntegerKind>,
+        a: ir::Value,
+        b: ir::Value,
+    ) -> Result<ir::Value, String> {
+        let kind = kind.ok_or("native bitwise intrinsic on a non-integer type")?;
+        if self.b.func.dfg.value_type(a) != types::I64
+            || self.b.func.dfg.value_type(b) != types::I64
+        {
+            return Err("native bitwise intrinsic on a non-integer value".into());
+        }
+        let op = crate::capability_effects::bit_intrinsic(name)
+            .ok_or_else(|| format!("unknown native bitwise intrinsic '{name}'"))?;
+        let amount = |s: &mut Self| s.b.ins().band_imm(b, i64::from(kind.bits()) - 1);
+        Ok(match op {
+            "&" => self.b.ins().band(a, b),
+            "|" => self.b.ins().bor(a, b),
+            "^" => self.b.ins().bxor(a, b),
+            "<<" => {
+                let n = amount(self);
+                self.b.ins().ishl(a, n)
+            }
+            _ => {
+                let n = amount(self);
+                if kind.unsigned() {
+                    self.b.ins().ushr(a, n)
+                } else {
+                    self.b.ins().sshr(a, n)
+                }
+            }
+        })
     }
     fn binary(
         &mut self,

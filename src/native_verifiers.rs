@@ -786,17 +786,19 @@ pub fn capability_verifiers(world: &World) -> BTreeSet<NativeVerifier> {
     for f in world.functions.values() {
         let mut caps = capabilities(&f.effects);
         caps.extend(crate::native::closure_capabilities(f));
-        out.extend(caps.into_iter().map(cap_verifier));
+        out.extend(caps.into_iter().filter_map(cap_verifier));
     }
     out
 }
 
-fn cap_verifier(c: crate::capability_effects::Capability) -> NativeVerifier {
+/// `ConstDenorm` has no Stage 5 verifier: it is a hardware FPU mode.
+fn cap_verifier(c: crate::capability_effects::Capability) -> Option<NativeVerifier> {
     use crate::capability_effects::Capability;
     match c {
-        Capability::ConstTime => NativeVerifier::ConstTime,
-        Capability::Realtime => NativeVerifier::Realtime,
-        Capability::DetFloat => NativeVerifier::DetFloat,
+        Capability::ConstTime => Some(NativeVerifier::ConstTime),
+        Capability::Realtime => Some(NativeVerifier::Realtime),
+        Capability::DetFloat => Some(NativeVerifier::DetFloat),
+        Capability::ConstDenorm => None,
     }
 }
 
@@ -994,6 +996,9 @@ fn derive_policy(
         for f in world.functions.values() {
             let own = capabilities(&f.effects);
             for cap in crate::native::closure_capabilities(f) {
+                let Some(verifier) = cap_verifier(cap) else {
+                    continue;
+                };
                 if own.contains(&cap) {
                     continue;
                 }
@@ -1001,7 +1006,7 @@ fn derive_policy(
                 if instances.is_empty() {
                     notes.push(format!(
                         "{}: a closure in {}",
-                        cap_verifier(cap).name(),
+                        verifier.name(),
                         not_emitted(world, &f.name)
                     ));
                     continue;
@@ -1036,6 +1041,7 @@ fn derive_policy(
                         ));
                         det.extend(instances.iter().map(|i| i.key.clone()));
                     }
+                    Capability::ConstDenorm => {}
                 }
             }
         }

@@ -2426,6 +2426,10 @@ fn unary(op: &str, v: Value) -> Result<Value, Fault> {
     Ok(match (op, v) {
         ("-", Value::Float(n)) => Value::Float(-n),
         ("!", Value::Bool(b)) => Value::Bool(!b),
+        (crate::capability_effects::WIDEN_INTRINSIC, v) => {
+            let (_, n) = value_kind(&v).ok_or("invalid unary operands")?;
+            Value::UInt(n as u64, 64)
+        }
         ("-", v) => {
             let (kind, n) = value_kind(&v).ok_or("invalid unary operands")?;
             integer_value(
@@ -2453,6 +2457,10 @@ fn binary(op: &str, a: Value, b: Value) -> Result<Value, Fault> {
             _ if crate::numeric::wrapping_intrinsic(op).is_some() => integer_value(
                 kind,
                 kind.wrapping(crate::numeric::wrapping_intrinsic(op).unwrap(), x, y),
+            ),
+            _ if crate::capability_effects::bit_intrinsic(op).is_some() => integer_value(
+                kind,
+                crate::capability_effects::bitwise(op, kind, x, y).unwrap_or_default(),
             ),
             "==" => Value::Bool(x == y),
             "!=" => Value::Bool(x != y),

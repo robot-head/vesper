@@ -928,6 +928,21 @@ impl Lower<'_> {
                         let b = self.expr(&args[1].expr);
                         return self.emit(Op::Binary(name, a, b), e, false);
                     }
+                    // Bitwise intrinsics of the secret operations
+                    // (`capability_effects`) are total operators too.
+                    if !self.world.functions.contains_key(&name) {
+                        if crate::capability_effects::bit_intrinsic(&name).is_some()
+                            && args.len() == 2
+                        {
+                            let a = self.expr(&args[0].expr);
+                            let b = self.expr(&args[1].expr);
+                            return self.emit(Op::Binary(name, a, b), e, false);
+                        }
+                        if name == crate::capability_effects::WIDEN_INTRINSIC && args.len() == 1 {
+                            let a = self.expr(&args[0].expr);
+                            return self.emit(Op::Unary(name, a), e, false);
+                        }
+                    }
                     if self.world.constructor(&name).is_some() {
                         let fields = args
                             .iter()
