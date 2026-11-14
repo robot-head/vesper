@@ -699,7 +699,8 @@ theorem inputLoop_spec (l : Limits) (values : List RuntimeValue) (body : Runtime
           | error reason =>
             rw [hr] at spec
             cases reason <;>
-              simpa [InputLoopResult,InputsOver,initialNodes_cons,closeList_cons,Nat.add_assoc] using spec
+              simp [InputLoopResult,InputsOver,initialNodes_cons,closeList_cons,Nat.add_assoc] at spec ⊢
+            all_goals exact spec
           | ok state =>
             rw [hr] at spec
             obtain ⟨exactStats,exactWithin,exactTotal,totalWithin⟩ := spec
@@ -729,16 +730,20 @@ theorem preflightInputs_spec (l : Limits) (values : Array RuntimeValue) (body : 
     | error reason =>
       have actual := closeList_over (measureExpr_error hb) values.toList
       cases reason <;>
-        simpa [InitialResult,InitialExceeds,closeInputs,closeList,ExprExceeds,ExprOverAt] using actual
+        simp [InitialResult,InitialExceeds,closeInputs,closeList,ExprExceeds,ExprOverAt] at actual ⊢
+      all_goals exact actual
     | ok stats =>
       obtain ⟨rfl,bounded⟩ := measureExpr_ok hb
       have spec := inputLoop_spec l values.toList body 0 bounded (by omega)
-      simp only [bind,Except.bind]
+      change InitialResult l values body (do
+        let state ← inputLoop l values.toList ⟨exprMetrics body,0⟩
+        pure state.fst)
       cases hi : inputLoop l values.toList ⟨exprMetrics body,0⟩ with
       | error reason =>
         rw [hi] at spec
         cases reason <;>
-          simpa [InitialResult,InitialExceeds,InputLoopResult,InputsOver,closeInputs,closeList,hi,bind,Except.bind] using spec
+          simp [InitialResult,InitialExceeds,InputLoopResult,InputsOver,closeInputs,closeList] at spec ⊢
+        all_goals exact spec
       | ok result =>
         rw [hi] at spec
         obtain ⟨exactStats,exactWithin,exactTotal,totalWithin⟩ := spec
@@ -759,5 +764,78 @@ theorem preflightInputs_error {l values body reason}
   have spec := preflightInputs_spec l values body
   rw [h] at spec
   exact spec
+
+/-- Independent admissible metrics exclude every corresponding refusal. -/
+theorem valueWithin_not_exceeds {l v reason} (h : ValueWithin l (valueMetrics v)) :
+    ¬ ValueExceeds l v reason := by
+  cases reason <;> simp_all [ValueExceeds,ValueOverAt,ValueWithin] <;> omega
+
+theorem within_not_exceeds {l e reason} (h : Within l (exprMetrics e)) :
+    ¬ ExprExceeds l e reason := by
+  cases reason <;> simp_all [ExprExceeds,ExprOverAt,Within] <;> omega
+
+theorem measureValue_complete {l v} (within : ValueWithin l (valueMetrics v)) :
+    RuntimeValue.measure l v = .ok (valueMetrics v) := by
+  cases h : RuntimeValue.measure l v with
+  | error reason => exact False.elim (valueWithin_not_exceeds within (measureValue_error h))
+  | ok stats => exact congrArg Except.ok (measureValue_ok h).1
+
+theorem measureExpr_complete {l e} (within : Within l (exprMetrics e)) :
+    RuntimeExpr.measure l e = .ok (exprMetrics e) := by
+  cases h : RuntimeExpr.measure l e with
+  | error reason => exact False.elim (within_not_exceeds within (measureExpr_error h))
+  | ok stats => exact congrArg Except.ok (measureExpr_ok h).1
+
+theorem preflightSubst_complete {l k v e}
+    (incoming : ValueWithin l (valueMetrics v)) (candidate : Within l (exprMetrics (e.subst k v))) :
+    RuntimeExpr.preflightSubst l k v e = .ok (exprMetrics (e.subst k v)) := by
+  cases h : RuntimeExpr.preflightSubst l k v e with
+  | error reason =>
+    rcases preflightSubst_error h with hv | he
+    · exact False.elim (valueWithin_not_exceeds incoming hv)
+    · exact False.elim (within_not_exceeds candidate he)
+  | ok stats => exact congrArg Except.ok (preflightSubst_ok h).1
+
+theorem preflightUnpack_complete {l left right body}
+    (leftWithin : ValueWithin l (valueMetrics left)) (rightWithin : ValueWithin l (valueMetrics right))
+    (intermediate : Within l (exprMetrics (body.subst 0 right)))
+    (candidate : Within l (exprMetrics ((body.subst 0 right).subst 0 left))) :
+    RuntimeExpr.preflightUnpack l left right body =
+      .ok (exprMetrics (body.subst 0 right),exprMetrics ((body.subst 0 right).subst 0 left)) := by
+  cases h : RuntimeExpr.preflightUnpack l left right body with
+  | error reason =>
+    rcases preflightUnpack_error h with hr | hl | hm | hf
+    · exact False.elim (valueWithin_not_exceeds rightWithin hr)
+    · exact False.elim (valueWithin_not_exceeds leftWithin hl)
+    · exact False.elim (within_not_exceeds intermediate hm)
+    · exact False.elim (within_not_exceeds candidate hf)
+  | ok pair =>
+    obtain ⟨a,b⟩ := pair
+    obtain ⟨ha,_,hb,_⟩ := preflightUnpack_ok h
+    cases ha
+    cases hb
+    rfl
+
+theorem preflightPlug_complete {l context hole}
+    (within : Within l (exprMetrics (context.plug hole))) :
+    RuntimeContext.preflightPlug l context (exprMetrics hole) = .ok (exprMetrics (context.plug hole)) := by
+  cases h : RuntimeContext.preflightPlug l context (exprMetrics hole) with
+  | error reason => exact False.elim (within_not_exceeds within (preflightPlug_error h))
+  | ok stats => exact congrArg Except.ok (preflightPlug_ok h).1
+
+theorem preflightInputs_complete {l values body}
+    (count : values.size ≤ l.inputs)
+    (aggregate : initialNodes values.toList ≤ l.initialValueNodes)
+    (within : Within l (exprMetrics (closeInputs values body))) :
+    preflightInputs l values body = .ok (exprMetrics (closeInputs values body)) := by
+  cases h : preflightInputs l values body with
+  | error reason =>
+    have actual := preflightInputs_error h
+    cases reason with
+    | inputCount => simp only [InitialExceeds] at actual; omega
+    | initialValues => simp only [InitialExceeds] at actual; omega
+    | expressionNodes | runtimeDepth | valueNodes | valueDepth =>
+      exact False.elim (within_not_exceeds within actual)
+  | ok stats => exact congrArg Except.ok (preflightInputs_ok h).1
 
 end Vesper.ResourceModel42.MetricsProofs
