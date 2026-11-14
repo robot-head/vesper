@@ -263,7 +263,7 @@ and the exact complete inventory. No package declaration is permitted to appear
 silently or be dropped merely because no requested theorem references it. -/
 def verifyEnvironment (expected : Std.HashMap Name ConstantInfo) (base actual : Environment) : IO Unit := do
   for (name,info) in expected.toList do
-    let some observed := actual.find? name | fail s!"missing logical declaration: {name}"
+    let some observed := actual.toKernelEnv.find? name | fail s!"missing logical declaration: {name}"
     unless sameInfo info observed do fail s!"logical ConstantInfo changed: {name}"
   let count ← actual.constants.foldM (init := 0) fun count name info => do
     if let some trusted := base.find? name then
