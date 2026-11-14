@@ -52,10 +52,58 @@ impl Limits {
         Ok(())
     }
 }
+/// Lexical preflight bounds. `Default` is the fixed profile that
+/// [`source_preflight`] has always applied; editor callers that bound the
+/// parsed AST afterwards may raise them with [`source_preflight_with`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PreflightLimits {
+    /// Peak weighted token run of one expression/signature segment.
+    pub max_weighted_segment: usize,
+    pub max_nesting: usize,
+    pub max_conditionals: usize,
+    pub max_functions: usize,
+    pub max_tokens: usize,
+}
+impl Default for PreflightLimits {
+    fn default() -> Self {
+        Self {
+            max_weighted_segment: 256,
+            max_nesting: 48,
+            max_conditionals: 64,
+            max_functions: 128,
+            max_tokens: 16_384,
+        }
+    }
+}
+impl PreflightLimits {
+    pub fn validate(self) -> Result<(), String> {
+        for (value, hard) in [
+            (self.max_weighted_segment, 16_384),
+            (self.max_nesting, 64),
+            (self.max_conditionals, 4096),
+            (self.max_functions, 4096),
+            (self.max_tokens, 65_536),
+        ] {
+            if value == 0 || value > hard {
+                return Err("source preflight limit configuration unsupported".into());
+            }
+        }
+        Ok(())
+    }
+}
 /// Bounded lexical preflight before the facade invokes the existing parser.
 /// Conservative expression runs are limited as well as delimiter nesting.
 pub fn source_preflight(source: &str, limits: Limits) -> Result<(), String> {
+    source_preflight_with(source, limits, PreflightLimits::default())
+}
+/// [`source_preflight`] with explicit, validated lexical bounds.
+pub fn source_preflight_with(
+    source: &str,
+    limits: Limits,
+    preflight: PreflightLimits,
+) -> Result<(), String> {
     limits.validate()?;
+    preflight.validate()?;
     if source.len() > limits.max_source_bytes {
         return Err("source byte limit exceeded".into());
     }
@@ -69,7 +117,7 @@ pub fn source_preflight(source: &str, limits: Limits) -> Result<(), String> {
     let mut segments = vec![(0usize, 0usize)];
     let mut functions = 0usize;
     let mut conditionals = 0usize;
-    if tokens.len() > 16_384 {
+    if tokens.len() > preflight.max_tokens {
         return Err("source token limit exceeded".into());
     }
     for token in tokens {
@@ -79,7 +127,7 @@ pub fn source_preflight(source: &str, limits: Limits) -> Result<(), String> {
         match token.kind {
             K::LBrace | K::LParen | K::LBracket => {
                 depth += 1;
-                if depth > 48 {
+                if depth > preflight.max_nesting {
                     return Err("source nesting limit exceeded".into());
                 }
             }
@@ -88,13 +136,13 @@ pub fn source_preflight(source: &str, limits: Limits) -> Result<(), String> {
         }
         if token.kind == K::If {
             conditionals += 1;
-            if conditionals > 64 {
+            if conditionals > preflight.max_conditionals {
                 return Err("source conditional-chain limit exceeded".into());
             }
         }
         if token.kind == K::Fn {
             functions += 1;
-            if functions > 128 {
+            if functions > preflight.max_functions {
                 return Err("source function-token limit exceeded".into());
             }
         }
@@ -121,7 +169,7 @@ pub fn source_preflight(source: &str, limits: Limits) -> Result<(), String> {
                 current.1 = current.1.max(current.0);
             }
         }
-        if segments.last().copied().unwrap_or((0, 0)).1 > 256 {
+        if segments.last().copied().unwrap_or((0, 0)).1 > preflight.max_weighted_segment {
             return Err("source weighted expression/signature limit exceeded".into());
         }
     }
