@@ -49,6 +49,16 @@ variable lists and no empty rows for every Level. Actual normalized-map BEq
 implies equal levelValue under the existing structural NoMVars premises.
 Neither theorem describes whole-checker/compiler verification.
 
+The new packet uses its minimal actual dependency closure of 24 modules,
+preserving the existing hard source-count bound. `Shape` imports SortedKeys,
+NormalizeValue and MapSubsumption. The final semantic bridge composes the
+existing normalizeAux and subsumption denotation theorems directly. It does
+not import the redundant NormalizeFinal, Comparison or older aggregators.
+All seven earlier fixed packets and their complete root catalogs remain
+unchanged and are verified separately. Root's final public API is
+`normalize_keysSorted`, `normalize_varsSorted`, `normalize_noEmpty`,
+`normalize_shape` and `normalized_beq_value`.
+
 No existing proof, model/metatheory, runtime/native/compiler, kernel/profile,
 extractor/auditor/projector or Cargo source changes. New sources use no sorry,
 admit, project axioms, unsafe, partial or native_decide. Fixed handwritten

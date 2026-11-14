@@ -1,5 +1,6 @@
 import Lean4LeanLevel42.SortedKeys
-import Lean4LeanLevel42.MapComparison
+import Lean4LeanLevel42.NormalizeValue
+import Lean4LeanLevel42.MapSubsumption
 
 /-! Shape predicates for the actual finite normalizer maps. These are separate
 from row well-formedness and impose no semantic valuation assumptions. -/
