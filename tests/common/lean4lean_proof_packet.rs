@@ -1,4 +1,4 @@
-//! Shared runner for the nine fixed audited proof packets.
+//! Shared runner for the ten fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -22,6 +22,7 @@ pub enum Packet {
     Comparison,
     Shape,
     Addability,
+    Completion,
 }
 
 struct PacketSpec {
@@ -296,6 +297,50 @@ const ADDABILITY_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.reifyCycle_counterexample",
 ];
 
+const COMPLETION_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.varSupport_refl",
+    "Vesper.Lean4LeanLevel42.varSupport_trans",
+    "Vesper.Lean4LeanLevel42.edgeCovered_acc_mono",
+    "Vesper.Lean4LeanLevel42.edgeCovered_acc_congr",
+    "Vesper.Lean4LeanLevel42.admissible_acc_mono",
+    "Vesper.Lean4LeanLevel42.completes_acc_mono",
+    "Vesper.Lean4LeanLevel42.edgeCovered_support",
+    "Vesper.Lean4LeanLevel42.admissible_support",
+    "Vesper.Lean4LeanLevel42.completes_support",
+    "Vesper.Lean4LeanLevel42.mapCompletes_support",
+    "Vesper.Lean4LeanLevel42.completes_nil",
+    "Vesper.Lean4LeanLevel42.mapCompletes_empty",
+    "Vesper.Lean4LeanLevel42.addable_edgeCovered",
+    "Vesper.Lean4LeanLevel42.addable_iff_edgeCovered",
+    "Vesper.Lean4LeanLevel42.feasible_insert_getD_mem",
+    "Vesper.Lean4LeanLevel42.feasible_insert_getD_sorted",
+    "Vesper.Lean4LeanLevel42.admissible_erase",
+    "Vesper.Lean4LeanLevel42.completes_erase",
+    "Vesper.Lean4LeanLevel42.completes_nonempty_edge",
+    "Vesper.Lean4LeanLevel42.feasible_go_sound",
+    "Vesper.Lean4LeanLevel42.feasible_go_complete",
+    "Vesper.Lean4LeanLevel42.feasible_sound",
+    "Vesper.Lean4LeanLevel42.feasible_complete",
+    "Vesper.Lean4LeanLevel42.feasible_iff_completes",
+    "Vesper.Lean4LeanLevel42.feasible_duplicate_present_witness",
+    "Vesper.Lean4LeanLevel42.minimizeEntry_varSupport",
+    "Vesper.Lean4LeanLevel42.minimizeEntry_key_origin",
+    "Vesper.Lean4LeanLevel42.subsumption_varSupport",
+    "Vesper.Lean4LeanLevel42.subsumption_key_origin",
+    "Vesper.Lean4LeanLevel42.subsumption_mapCompletes",
+    "Vesper.Lean4LeanLevel42.feasible_go_lookup_congr",
+    "Vesper.Lean4LeanLevel42.feasible_lookup_congr",
+    "Vesper.Lean4LeanLevel42.lexChain_lookup_congr",
+    "Vesper.Lean4LeanLevel42.lexChain_perm",
+    "Vesper.Lean4LeanLevel42.norm_toList_lookup_congr",
+    "Vesper.Lean4LeanLevel42.norm_toTree_lookup_congr",
+    "Vesper.Lean4LeanLevel42.norm_reify_lookup_congr",
+    "Vesper.Lean4LeanLevel42.feasible_beq_congr",
+    "Vesper.Lean4LeanLevel42.lexChain_beq_congr",
+    "Vesper.Lean4LeanLevel42.norm_toTree_beq_congr",
+    "Vesper.Lean4LeanLevel42.norm_reify_beq_congr",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -521,6 +566,39 @@ impl Packet {
                 required: ADDABILITY_REQUIRED,
                 scope: "audited_addability_foundations_and_raw_reification_boundary",
                 marker: "LEAN4LEAN_ADDABILITY42_EVIDENCE",
+            },
+            Self::Completion => PacketSpec {
+                label: "lean4lean_completion42",
+                module: "Lean4LeanLevel42.CompletionFinal",
+                projected: "Lean4LeanCompletion42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.Subsumption",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.SortedKeys",
+                    "Lean4LeanLevel42.MapValue",
+                    "Lean4LeanLevel42.MapAll",
+                    "Lean4LeanLevel42.MapEquality",
+                    "Lean4LeanLevel42.SortedSubset",
+                    "Lean4LeanLevel42.MapAny",
+                    "Lean4LeanLevel42.Addable",
+                    "Lean4LeanLevel42.NodeResidual",
+                    "Lean4LeanLevel42.MapMinimize",
+                    "Lean4LeanLevel42.MapSubsumption",
+                    "Lean4LeanLevel42.Completion",
+                    "Lean4LeanLevel42.Feasible",
+                    "Lean4LeanLevel42.VariableSupport",
+                    "Lean4LeanLevel42.ReifyCongruence",
+                    "Lean4LeanLevel42.CompletionFinal",
+                ],
+                required: COMPLETION_REQUIRED,
+                scope: "audited_completion_prerequisites_and_reconstruction_congruence",
+                marker: "LEAN4LEAN_COMPLETION42_EVIDENCE",
             },
         }
     }
