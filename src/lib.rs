@@ -38,4 +38,5 @@ pub mod stack_bound;
 pub mod tooling;
 pub mod trace_effects;
 pub mod vector;
+pub mod verified_codegen;
 pub mod wasm_backend;

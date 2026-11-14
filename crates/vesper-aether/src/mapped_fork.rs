@@ -53,15 +53,30 @@ pub struct SealedSnapshot {
 
 impl SealedSnapshot {
     pub fn seal(image: &SnapshotImage) -> Result<Self, MappedForkError> {
-        let memfd = SealedMemfd::build(image.page_count(), |i, page| {
-            match image.page_bytes(i).ok_or(Error::UnknownFault)? {
-                Some(bytes) => {
-                    page.copy_from_slice(bytes);
-                    Ok(true)
-                }
-                None => Ok(false),
+        Self::seal_with(image, false)
+    }
+    /// [`SealedSnapshot::seal`] on 2 MiB huge pages where the host allows it
+    /// (a whole number of huge pages and enough free pages in the pool),
+    /// 4 KiB pages otherwise; [`SealedMemfd::is_huge`] says which.
+    pub fn seal_preferring_huge(image: &SnapshotImage) -> Result<Self, MappedForkError> {
+        Self::seal_with(image, true)
+    }
+    fn seal_with(image: &SnapshotImage, prefer_huge: bool) -> Result<Self, MappedForkError> {
+        let fill = |i: usize, page: &mut [u8; crate::PAGE_BYTES]| match image
+            .page_bytes(i)
+            .ok_or(Error::UnknownFault)?
+        {
+            Some(bytes) => {
+                page.copy_from_slice(bytes);
+                Ok(true)
             }
-        })?;
+            None => Ok(false),
+        };
+        let memfd = if prefer_huge {
+            SealedMemfd::build_preferring_huge(image.page_count(), fill)?
+        } else {
+            SealedMemfd::build(image.page_count(), fill)?
+        };
         Ok(Self {
             image: image.clone(),
             memfd: Arc::new(memfd),

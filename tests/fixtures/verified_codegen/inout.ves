@@ -1,0 +1,25 @@
+copy struct Counter {
+    hits: u32,
+    total: u64
+}
+
+fn record(inout c: Counter, amount: u64) {
+    c.hits = wrapping_add(c.hits, 1);
+    c.total = wrapping_add(c.total, amount);
+}
+
+fn bump(inout x: i64) {
+    x = wrapping_mul(x, 3);
+}
+
+fn main() -> (u32, u64, i64) {
+    let c = Counter {
+        hits: 0,
+        total: 10
+    };
+    record(inout c, 5);
+    record(inout c, 7);
+    let y = 14;
+    bump(inout y);
+    (c.hits, c.total, y)
+}

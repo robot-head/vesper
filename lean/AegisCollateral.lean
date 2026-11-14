@@ -36,7 +36,14 @@ Proved about this model:
    `evaluate_revoked_module`); the first missing level, in evaluation
    order, is the reported error (`evaluate_module_first`);
 4. the anti-rollback floor only moves up, accepts what raised it, and
-   rejects anything older afterwards.
+   rejects anything older afterwards;
+5. CoRIM reference-value appraisal is sound (an accepted measurement is a
+   reference value), monotone in the reference set, and rejects any
+   measurement no reference value lists.
+
+The SGX quote v3 evaluation (`evaluate_sgx_tcb`) is this model with no
+TDX components and no module identity: the platform level, then the QE
+identity level, converged.
 
 These are theorems about this model, not about the Rust code. The Rust
 test `tests/lean_model.rs` compares the printed `converge` table with
@@ -367,6 +374,51 @@ theorem accepts_antitone (f g n : Nat) (hfg : f ≤ g) (h : accepts g n = true) 
   simp only [accepts, Nat.ble_eq] at h ⊢
   omega
 
+/-! ## CoRIM reference-value appraisal (`corim.rs`)
+
+A CCA platform token's software components, configuration and RoTPKs are
+appraised against CoRIM reference values (`appraise_cca`): every value
+the evidence reports must equal some reference value of the same kind
+(digest algorithm and bytes, plus name, version and signer ID when the
+reference gives them). A measurement here is the tuple of compared fields,
+abstracted to a value with decidable equality. -/
+
+/-- One evidence measurement is matched by some reference value. -/
+def refMatches {α : Type} [DecidableEq α] (refs : List α) (m : α) : Bool :=
+  refs.any fun r => decide (r = m)
+
+/-- The appraisal accepts when every reported measurement is matched. -/
+def appraise {α : Type} [DecidableEq α] (refs ev : List α) : Bool :=
+  ev.all (refMatches refs)
+
+/-- Soundness: an accepted measurement is literally a reference value. -/
+theorem appraise_sound {α : Type} [DecidableEq α] (refs ev : List α)
+    (h : appraise refs ev = true) : ∀ m, m ∈ ev → m ∈ refs := by
+  intro m hm
+  simp only [appraise, List.all_eq_true] at h
+  have := h m hm
+  simp only [refMatches, List.any_eq_true, decide_eq_true_eq] at this
+  obtain ⟨r, hr, rfl⟩ := this
+  exact hr
+
+/-- Dropping reference values never turns a rejection into acceptance. -/
+theorem appraise_refs_mono {α : Type} [DecidableEq α] (refs refs' ev : List α)
+    (hsub : ∀ r, r ∈ refs → r ∈ refs') (h : appraise refs ev = true) :
+    appraise refs' ev = true := by
+  simp only [appraise, List.all_eq_true, refMatches, List.any_eq_true,
+    decide_eq_true_eq] at h ⊢
+  intro m hm
+  obtain ⟨r, hr, he⟩ := h m hm
+  exact ⟨r, hsub r hr, he⟩
+
+/-- A measurement that matches no reference value rejects the token,
+whatever else it reports. -/
+theorem appraise_rejects_unknown {α : Type} [DecidableEq α] (refs ev : List α)
+    (m : α) (hm : m ∈ ev) (hn : m ∉ refs) : appraise refs ev = false := by
+  cases h : appraise refs ev
+  · rfl
+  · exact absurd (appraise_sound refs ev h m hm) hn
+
 /-! ## Differential fixture -/
 
 def Status.name : Status → String
@@ -403,5 +455,8 @@ def convergeTable : String :=
 #print axioms raise_accepts_its_input
 #print axioms rollback_rejected
 #print axioms accepts_antitone
+#print axioms appraise_sound
+#print axioms appraise_refs_mono
+#print axioms appraise_rejects_unknown
 
 end AegisCollateral

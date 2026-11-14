@@ -28,6 +28,12 @@
 //! hosts without GTK (macOS, Windows, hermetic Bazel); the backend itself needs
 //! the `gtk` feature and a system GTK 4.
 //!
+//! With the `gtk` feature, [`GtkHost`] adds keyed layouts ([`Layout`]), CSS
+//! classes, virtual lists and the close-button-to-`request_close` wiring;
+//! `mainloop` integrates the GLib main loop with [`dispatch`] and Vesper
+//! Pulse; `atspi` reads the accessibility tree over AT-SPI; [`image`]
+//! compares screenshots with goldens under a stated tolerance.
+//!
 //! WinUI 3 and SwiftUI backends remain deferred.
 
 #![forbid(unsafe_code)]
@@ -35,15 +41,28 @@
 use vesper_aura::{BackendError, Kind, Patch, SubscriptionId, Transaction, Value};
 
 #[cfg(feature = "gtk")]
+pub mod atspi;
+#[cfg(feature = "gtk")]
 mod backend;
+pub mod dispatch;
+#[cfg(feature = "gtk")]
+mod host;
+pub mod image;
+#[cfg(feature = "gtk")]
+pub mod mainloop;
+pub mod style;
 #[cfg(feature = "gtk")]
 pub use backend::{
-    FOCUS_CONTROLLER_NAME, GtkBackend, GtkCloseFailure, NativeNode, TeardownReport,
-    dropped_while_mounted,
+    FOCUS_CONTROLLER_NAME, GTK_INTRINSIC_CLASSES, GtkBackend, GtkCloseFailure, MAX_CSS_BYTES,
+    MAX_VIRTUAL_ROWS, NativeLayout, NativeNode, RowText, TeardownReport, VIRTUAL_LIST_NAME,
+    VirtualListStats, dropped_while_mounted,
 };
 /// The gtk4-rs version this backend links, for hosts that drive its widgets.
 #[cfg(feature = "gtk")]
 pub use gtk4;
+#[cfg(feature = "gtk")]
+pub use host::{GtkHost, HostError, HostEvents};
+pub use style::{Layout, Style};
 
 /// Typed failures of the GTK backend. None of them leaves a partially applied
 /// transaction behind except [`GtkError::Desynchronized`], which poisons it.
@@ -69,6 +88,11 @@ pub enum GtkError {
     StaleWidget,
     /// The backend still holds a mounted tree; unmount through the session.
     StillMounted,
+    /// GTK rejected a stylesheet; one message per parse error. Nothing from
+    /// that stylesheet stays loaded.
+    Css(Vec<String>),
+    /// A bounded wait (for a frame, for a main-loop condition) expired.
+    Timeout(&'static str),
 }
 
 impl From<BackendError> for GtkError {

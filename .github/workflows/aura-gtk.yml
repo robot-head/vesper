@@ -2,7 +2,10 @@ name: Aura GTK 4 under Xvfb
 # crates/vesper-aura-gtk links the system GTK 4, which hermetic Bazel and the
 # macOS/Windows lanes do not have, so its GTK code is behind the crate's `gtk`
 # feature (off in every other build). This workflow installs GTK 4 from the
-# Ubuntu archive and runs the crate's real-widget tests headless under Xvfb.
+# Ubuntu archive and runs the crate's real-widget tests headless under Xvfb,
+# inside a private D-Bus session so that at-spi2-core's accessibility bus is
+# available for the AT-SPI tree checks. Screenshot goldens live in
+# crates/vesper-aura-gtk/tests/goldens (tolerance stated in tests/gtk_depth.rs).
 
 on:
   workflow_dispatch:
@@ -11,6 +14,7 @@ on:
     paths:
       - 'crates/vesper-aura-gtk/**'
       - 'crates/vesper-aura/**'
+      - 'crates/vesper-pulse/**'
       - '.github/workflows/aura-gtk.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -18,6 +22,7 @@ on:
     paths:
       - 'crates/vesper-aura-gtk/**'
       - 'crates/vesper-aura/**'
+      - 'crates/vesper-pulse/**'
       - '.github/workflows/aura-gtk.yml'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -39,13 +44,16 @@ jobs:
       # Xvfb has no GPU; render with Cairo instead of probing GL/Vulkan.
       GSK_RENDERER: cairo
       GDK_BACKEND: x11
+      # Fail (instead of skipping) if the AT-SPI bus cannot be reached.
+      VESPER_REQUIRE_ATSPI: 1
     steps:
       - uses: actions/checkout@v4
-      - name: Install GTK 4 and Xvfb
+      - name: Install GTK 4, Xvfb and at-spi2-core
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libgtk-4-dev xvfb xauth dbus-x11
+          sudo apt-get install -y --no-install-recommends libgtk-4-dev xvfb xauth dbus-x11 dbus-daemon at-spi2-core
           pkg-config --modversion gtk4
+          dpkg-query -W at-spi2-core
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -54,5 +62,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt -p vesper-aura-gtk -- --check
       - run: cargo clippy -p vesper-aura-gtk --features gtk --locked --all-targets -- -D warnings
-      - name: Test against GTK 4 under Xvfb
-        run: xvfb-run -a --server-args="-screen 0 1280x800x24" cargo test -p vesper-aura-gtk --features gtk --locked
+      - name: Test against GTK 4 under Xvfb with AT-SPI
+        run: dbus-run-session -- xvfb-run -a --server-args="-screen 0 1280x800x24" cargo test -p vesper-aura-gtk --features gtk --locked
+      - name: Upload screenshots that missed their goldens
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aura-gtk-actual-screenshots
+          path: /tmp/actual-*.png
+          if-no-files-found: ignore
