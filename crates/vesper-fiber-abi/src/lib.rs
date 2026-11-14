@@ -14,9 +14,10 @@
 //!   decoded register frame) and restoring them at the same fixed address.
 //! * `fpenv` (same targets): the floating-point control state each switch
 //!   preserves.
-//! * `pulse` (Linux only): `vesper_pulse::scheduler::Resume` adapter and the
-//!   owned cancellation/shutdown/drain runtime. Direct fibers on macOS do not
-//!   make the io_uring driver or that scheduler portable.
+//! * `pulse` (same targets): `vesper_pulse::scheduler::Resume` adapter and the
+//!   owned cancellation/shutdown/drain runtime. It runs on any
+//!   `vesper_pulse` driver: io_uring or epoll on Linux, kqueue on macOS,
+//!   IOCP on Windows (see `vesper_pulse::select::open`).
 //!
 //! See `docs/rfcs/native-pulse-abi.md` for the ownership, lifetime and
 //! relocation contracts and for what this prototype does not establish.
@@ -34,7 +35,7 @@ pub mod fiber;
 pub mod fpenv;
 #[cfg(vesper_direct_fibers)]
 pub mod image;
-#[cfg(all(vesper_direct_fibers, target_os = "linux"))]
+#[cfg(vesper_direct_fibers)]
 pub mod pulse;
 #[cfg(vesper_direct_fibers)]
 #[cfg_attr(windows, path = "stack_windows.rs")]
