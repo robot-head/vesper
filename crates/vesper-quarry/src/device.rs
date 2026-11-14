@@ -294,6 +294,54 @@ impl SimDevice {
             ..SimDevice::default()
         }
     }
+    /// The last unsynced write of `file`: (offset, bytes).
+    pub fn last_pending_write(&self, file: FileId) -> Option<(u64, &[u8])> {
+        self.files[file.index()]
+            .pending
+            .iter()
+            .rev()
+            .find_map(|op| match op {
+                PendingOp::Write { offset, data } => Some((*offset, data.as_slice())),
+                PendingOp::SetLen(_) => None,
+            })
+    }
+    /// The medium after a crash in which every unsynced operation of `file`
+    /// reached it in order except that its last write stopped after `keep`
+    /// bytes, and no unsynced operation of the other file did. Lets a test
+    /// cut the log at an exact frame boundary.
+    pub fn crash_tearing(&self, file: FileId, keep: usize) -> SimDevice {
+        let files = std::array::from_fn(|i| {
+            let f = &self.files[i];
+            let mut medium = f.durable.clone();
+            if i == file.index() {
+                let last = f
+                    .pending
+                    .iter()
+                    .rposition(|op| matches!(op, PendingOp::Write { .. }));
+                for (j, op) in f.pending.iter().enumerate() {
+                    match op {
+                        PendingOp::Write { offset, data } if Some(j) == last => apply(
+                            &mut medium,
+                            &PendingOp::Write {
+                                offset: *offset,
+                                data: data[..keep.min(data.len())].to_vec(),
+                            },
+                        ),
+                        _ => apply(&mut medium, op),
+                    }
+                }
+            }
+            SimFile {
+                durable: medium.clone(),
+                visible: medium,
+                pending: Vec::new(),
+            }
+        });
+        SimDevice {
+            files,
+            ..SimDevice::default()
+        }
+    }
     /// Test hook: flips bits of durable and visible bytes in place (bit rot).
     pub fn corrupt(&mut self, file: FileId, offset: u64, xor: u8) {
         let f = &mut self.files[file.index()];

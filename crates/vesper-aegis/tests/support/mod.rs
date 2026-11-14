@@ -212,6 +212,8 @@ pub fn tdx_quote_struct(pck: &TestChain, att_key: &Signer, p: &TdxParams) -> Tdx
     let mut quote = TdxQuote {
         header,
         body,
+        td15: None,
+        td15_ex: None,
         quote_signature: [0; 64],
         attestation_key,
         qe_report,
@@ -278,6 +280,8 @@ pub fn snp_report_struct(vcek: &Signer, p: &SnpParams) -> SnpReport {
         current_version: [1, 55, 1],
         committed_version: [1, 55, 1],
         launch_tcb: p.reported_tcb,
+        launch_mit_vector: 0,
+        current_mit_vector: 0,
         signature_r_s: [0; 96],
     };
     r.signature_r_s = vcek.sign(&r.signed_bytes()).try_into().unwrap();
