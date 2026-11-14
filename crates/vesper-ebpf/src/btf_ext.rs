@@ -96,7 +96,7 @@ impl Types<'_> {
                 members,
             } => {
                 let tys: Vec<u32> = members.iter().map(|m| self.local(&m.ty)).collect();
-                if !*union && members.iter().any(|m| m.bitfield.is_some()) {
+                if members.iter().any(|m| m.bitfield.is_some()) {
                     let ms: Vec<(&str, u32, u32, u32)> = members
                         .iter()
                         .zip(&tys)
@@ -105,7 +105,7 @@ impl Types<'_> {
                             None => (m.name.as_str(), t, m.offset * 8, 0),
                         })
                         .collect();
-                    self.b.structure_bits(name, *size, &ms)
+                    self.b.aggregate_bits(name, *union, *size, &ms)
                 } else {
                     let ms: Vec<(&str, u32, u32)> = members
                         .iter()
@@ -255,6 +255,27 @@ pub fn local_root_ids(prog: &Program) -> Result<Vec<u32>, BtfError> {
         .iter()
         .map(|r| r[1])
         .collect())
+}
+
+/// Write each `TYPE_ID_*` relocation's local id ([`local_root_ids`]) into
+/// its instruction, so the program agrees with the BTF this crate emits
+/// for it. Used by `Asm::finish` and when reading an object, whose own BTF
+/// may number its types differently.
+pub(crate) fn assign_local_ids(prog: &mut Program) -> Result<(), BtfError> {
+    if !prog.core_relos.iter().any(|r| r.spec.kind.needs_local_id()) {
+        return Ok(());
+    }
+    let ids = local_root_ids(prog)?;
+    for (r, id) in prog.core_relos.iter().zip(ids) {
+        if r.spec.kind.needs_local_id() {
+            let i = prog
+                .insns
+                .get_mut(r.slot)
+                .ok_or_else(|| bad(format!("CO-RE relocation past the end at {}", r.slot)))?;
+            i.imm = id as i32;
+        }
+    }
+    Ok(())
 }
 
 /// What [`parse_ext`] reads back from `.BTF.ext` for one section.

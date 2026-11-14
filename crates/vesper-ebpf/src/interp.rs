@@ -1838,7 +1838,9 @@ fn call_helper(
             let mut out = vec![0u8; size];
             out[..keep].copy_from_slice(&env.task.comm[..keep]);
             let r = &mut env.regions[rid as usize];
-            if !matches!(r.kind, Kind::Stack | Kind::MapValue) {
+            // stack, map value or a live ring-buffer record (`resolve`
+            // rejects released and dead memory)
+            if !matches!(r.kind, Kind::Stack | Kind::MapValue | Kind::Ring { .. }) {
                 return Err(bad("bpf_get_current_comm buffer"));
             }
             r.bytes[at..at + size].copy_from_slice(&out);

@@ -621,9 +621,21 @@ impl BtfBuilder {
         size: u32,
         members: &[(&str, u32, u32, u32)],
     ) -> u32 {
+        self.aggregate_bits(name, false, size, members)
+    }
+
+    /// [`Self::structure_bits`] for a struct or a union.
+    pub fn aggregate_bits(
+        &mut self,
+        name: &str,
+        union: bool,
+        size: u32,
+        members: &[(&str, u32, u32, u32)],
+    ) -> u32 {
         let names: Vec<u32> = members.iter().map(|m| self.str(m.0)).collect();
         let n = self.str(name);
-        let t = self.header(n, KIND_STRUCT, members.len() as u32, true, size);
+        let kind = if union { KIND_UNION } else { KIND_STRUCT };
+        let t = self.header(n, kind, members.len() as u32, true, size);
         for (m, nm) in members.iter().zip(names) {
             self.word(nm);
             self.word(m.1);

@@ -106,6 +106,17 @@ filter theorems are unchanged; `AUDITED_THEOREMS` is now 10.
   base), as the kernel's module BTF is always split on vmlinux.
 - Bitfield `TYPE_MATCHES` ignores widths, following the kernel (see the
   evidence above).
+- Review fixes (Codex review of the first push): a `next()` pointer
+  carries its iterator's id and dies when that iterator is destroyed (the
+  kernel turns it into a scalar; both reject a load through it, checked on
+  the host); an iterator revisit bounds a loop only when it is the same
+  iterator instance as the earlier visit. The kernel accepts
+  `new; next; destroy; new; goto next`, which never terminates (checked
+  on the host); this verifier rejects it (`loop.unbounded`), a deliberate
+  stricter point. Union bitfields keep their widths in emitted BTF, an
+  imported object's `TYPE_ID_*` immediates are renumbered for the BTF this
+  crate emits, and `bpf_get_current_comm` may fill a reserved ring-buffer
+  record in the interpreter.
 
 ## Tests
 

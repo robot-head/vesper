@@ -624,3 +624,35 @@ mod kernel {
         }
     }
 }
+
+#[test]
+fn get_current_comm_fills_a_reserved_ring_record() {
+    let mut a = Asm::new();
+    let rb = a.map(MapDef::ringbuf("events", 4096)).unwrap();
+    let out = a.label();
+    a.ld_map(Reg::R1, rb);
+    a.mov64(Reg::R2, 16);
+    a.mov64(Reg::R3, 0);
+    a.call(h::RINGBUF_RESERVE);
+    a.jmp(JmpOp::Eq, Reg::R0, 0, out);
+    a.mov64(Reg::R6, Reg::R0);
+    a.mov64(Reg::R1, Reg::R6);
+    a.mov64(Reg::R2, 16);
+    a.call(h::GET_CURRENT_COMM);
+    a.mov64(Reg::R1, Reg::R6);
+    a.mov64(Reg::R2, 0);
+    a.call(h::RINGBUF_SUBMIT);
+    a.bind(out).unwrap();
+    a.mov64(Reg::R0, 0);
+    a.exit();
+    let p = verified(a.finish("comm_event", ProgramType::Tracepoint).unwrap());
+    let mut env = Env::new(&p);
+    env.task = Task::named("vesperd", 5, 5);
+    run(&p, &mut env, Input::Tracepoint(&[0; 16])).unwrap();
+    let ring = env.ring(0).expect("ring");
+    let mut rd =
+        vesper_ebpf::interp::RingBufReader::new(&ring.data, ring.consumer, ring.producer).unwrap();
+    let mut want = b"vesperd".to_vec();
+    want.resize(16, 0);
+    assert_eq!(rd.next_record().unwrap(), Some(want));
+}

@@ -603,3 +603,42 @@ fn kernel_relocates_bitfields_ids_and_matches_like_us() {
         }
     }
 }
+
+#[test]
+fn union_bitfields_survive_the_object_round_trip() {
+    let local = LocalType::Struct {
+        name: "vu".into(),
+        union: true,
+        size: 4,
+        members: vec![vesper_ebpf::core::LocalMember {
+            name: "f".into(),
+            ty: u32t(),
+            offset: 0,
+            bitfield: Some(vesper_ebpf::core::Bitfield {
+                bit_offset: 0,
+                bits: 3,
+            }),
+        }],
+    };
+    let p = value_prog(field(CoreKind::FieldRshiftU64, local.clone(), &["f"]));
+    assert_eq!(p.insns[0].imm, 61);
+    let back = read_object(&write_object(&p).unwrap()).unwrap();
+    assert_eq!(back.core_relos, p.core_relos);
+    let ob = vesper_ebpf::btf_ext::build(&p, "xdp").unwrap();
+    let own = Btf::parse(&ob.btf).unwrap();
+    let id = vesper_ebpf::btf_ext::local_root_ids(&p).unwrap()[0];
+    assert_eq!(vesper_ebpf::btf_ext::local_type(&own, id).unwrap(), local);
+}
+
+#[test]
+fn imported_type_ids_are_renumbered_for_our_btf() {
+    // an object whose BTF numbers the root differently: its TYPE_ID
+    // immediates are rewritten to the ids of the BTF we emit
+    let mut p = value_prog(CoreSpec::of_type(CoreKind::TypeIdLocal, local_vflags()).unwrap());
+    let ours = p.insns[0].imm;
+    p.insns[0].imm = 22;
+    let back = read_object(&write_object(&p).unwrap()).unwrap();
+    assert_eq!(back.insns[0].imm, ours);
+    let t = bitfield_target();
+    assert_eq!(apply(&back, &t).unwrap().insns[0].imm, ours);
+}

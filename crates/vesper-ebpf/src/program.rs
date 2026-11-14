@@ -632,14 +632,7 @@ impl Asm {
                 l
             },
         };
-        if prog.core_relos.iter().any(|r| r.spec.kind.needs_local_id()) {
-            let ids = crate::btf_ext::local_root_ids(&prog).map_err(|e| AsmError::Btf(e.0))?;
-            for (r, id) in prog.core_relos.iter().zip(ids) {
-                if r.spec.kind.needs_local_id() {
-                    prog.insns[r.slot].imm = id as i32;
-                }
-            }
-        }
+        crate::btf_ext::assign_local_ids(&mut prog).map_err(|e| AsmError::Btf(e.0))?;
         Ok(prog)
     }
 }

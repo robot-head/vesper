@@ -161,3 +161,117 @@ fn kernel_runs_iterators_and_widened_loops_identically() {
         other => panic!("precise index counter: {other:?}"),
     }
 }
+
+fn fp8(a: &mut Asm) {
+    a.mov64(Reg::R1, Reg::R10);
+    a.add64(Reg::R1, -8);
+}
+
+fn iter_new(a: &mut Asm, start: i32, end: i32) {
+    fp8(a);
+    a.mov64(Reg::R2, start);
+    a.mov64(Reg::R3, end);
+    a.call_kfunc("bpf_iter_num_new");
+}
+
+fn iter_call(a: &mut Asm, kfunc: &str) {
+    fp8(a);
+    a.call_kfunc(kfunc);
+}
+
+/// A `next()` result kept past `destroy()`: in the same frame, or
+/// returned from the subprogram whose stack held the iterator.
+fn dangling(in_subprogram: bool) -> Program {
+    let mut a = Asm::new();
+    let f = a.label();
+    let out = a.label();
+    if in_subprogram {
+        a.call_local(f);
+        a.jmp(JmpOp::Eq, Reg::R0, 0, out);
+        a.ldx(Size::W, Reg::R0, Reg::R0, 0);
+        a.bind(out).unwrap();
+        a.mov64(Reg::R0, 2);
+        a.exit();
+        a.bind(f).unwrap();
+    }
+    let null = a.label();
+    iter_new(&mut a, 0, 1);
+    iter_call(&mut a, "bpf_iter_num_next");
+    a.mov64(Reg::R6, Reg::R0);
+    iter_call(&mut a, "bpf_iter_num_destroy");
+    if in_subprogram {
+        a.mov64(Reg::R0, Reg::R6);
+        a.exit();
+    } else {
+        a.jmp(JmpOp::Eq, Reg::R6, 0, null);
+        a.ldx(Size::W, Reg::R0, Reg::R6, 0);
+        a.bind(null).unwrap();
+        a.mov64(Reg::R0, 2);
+        a.exit();
+    }
+    let mut p = a.finish("dangling", ProgramType::Xdp).unwrap();
+    p.license = "GPL".into();
+    p
+}
+
+/// `new(0, 1); next(); destroy(); new(0, 1); goto next`: every `next()`
+/// returns a value and the loop never ends; the revisit of `next()` is on
+/// a new iterator, not progress on the old one.
+fn recreated_iterator() -> Program {
+    let mut a = Asm::new();
+    let head = a.label();
+    iter_new(&mut a, 0, 1);
+    a.bind(head).unwrap();
+    iter_call(&mut a, "bpf_iter_num_next");
+    a.mov64(Reg::R6, Reg::R0);
+    iter_call(&mut a, "bpf_iter_num_destroy");
+    iter_new(&mut a, 0, 1);
+    a.ja(head);
+    let mut p = a.finish("recreated", ProgramType::Xdp).unwrap();
+    p.license = "GPL".into();
+    p
+}
+
+#[test]
+fn iterator_pointers_die_with_their_iterator() {
+    for sub in [false, true] {
+        let p = dangling(sub);
+        let e = verify(&p, &VerifierPolicy::default()).expect_err("dangling pointer");
+        assert!(
+            e.rule.starts_with("mem.") || e.rule.starts_with("reg."),
+            "subprogram {sub}: {e}"
+        );
+    }
+}
+
+#[test]
+fn a_recreated_iterator_does_not_bound_its_loop() {
+    let p = recreated_iterator();
+    let e = verify(&p, &VerifierPolicy::default()).expect_err("never terminates");
+    assert!(
+        matches!(e.rule, "loop.unbounded" | "complexity.limit"),
+        "{e}"
+    );
+}
+/// The kernel turns pointers into a destroyed iterator into scalars (so
+/// both loads above are rejected there too), but accepts the recreated
+/// iterator loop: a program that never terminates. This verifier is
+/// stricter there, as it must be to keep "accepted programs terminate".
+#[cfg(target_os = "linux")]
+#[test]
+fn kernel_rejects_dangling_iterator_pointers_and_accepts_the_recreated_loop() {
+    use vesper_ebpf::kernel;
+    if let Err(e) = kernel::probe() {
+        eprintln!("kernel BPF evidence unavailable on this host: {e}");
+        return;
+    }
+    for sub in [false, true] {
+        match kernel::load(&dangling(sub)) {
+            Err(kernel::LoadError::Rejected { log, .. }) => {
+                assert!(log.contains("invalid mem access 'scalar'"), "{log}")
+            }
+            other => panic!("dangling({sub}): {:?}", other.map(|_| ())),
+        }
+    }
+    kernel::load(&recreated_iterator()).expect("the kernel accepts the recreated loop");
+}

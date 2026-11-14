@@ -236,6 +236,9 @@ pub enum RegType {
     RdonlyMem {
         size: u32,
         off: i32,
+        /// The iterator (its [`Slot::Iter`] id) whose state it points
+        /// into: destroying the iterator invalidates the pointer.
+        iter: u32,
     },
     /// `PTR_TO_SOCKET` holding acquired reference `ref_id`.
     Socket {
@@ -583,7 +586,18 @@ fn reg_includes(old: &RegType, cur: &RegType, so: &State, sc: &State, ids: &mut 
             },
         ) => zo == zc && ids.check(io, ic) && ids.check(ro, rc),
         (Socket { ref_id: ro }, Socket { ref_id: rc }) => ids.check(ro, rc),
-        (RdonlyMem { size: zo, off: oo }, RdonlyMem { size: zc, off: oc }) => zo == zc && oo == oc,
+        (
+            RdonlyMem {
+                size: zo,
+                off: oo,
+                iter: io,
+            },
+            RdonlyMem {
+                size: zc,
+                off: oc,
+                iter: ic,
+            },
+        ) => zo == zc && oo == oc && ids.check(io, ic),
         (SocketOrNull { id: io, ref_id: ro }, SocketOrNull { id: ic, ref_id: rc }) => {
             ids.check(io, ic) && ids.check(ro, rc)
         }
@@ -1094,7 +1108,7 @@ impl<'a> Verifier<'a> {
 
     /// Whether `st`, at a loop head (callback entry or `bpf_iter_num_next`
     /// call), is an iteration whose count the kernel bounds at run time.
-    fn bounded_iteration(&self, pc: usize, st: &State) -> bool {
+    fn bounded_iteration(&self, pc: usize, old: &State, st: &State) -> bool {
         if self.callback_entry[pc] && st.cb_entry && st.cur().callback.is_some() {
             return true;
         }
@@ -1110,7 +1124,18 @@ impl<'a> Verifier<'a> {
                     && (-(BPF_MAX_STACK_BYTES as i32)..0).contains(&off) =>
             {
                 let at = ((off + BPF_MAX_STACK_BYTES as i32) / 8) as usize;
-                matches!(st.cur().stack[at], Slot::Iter { drained: false, .. })
+                // and the same iterator instance that the earlier visit
+                // used: one destroyed and created again restarts its count,
+                // so the revisit is not progress
+                match (st.cur().stack[at], old.cur().stack.get(at)) {
+                    (
+                        Slot::Iter {
+                            id, drained: false, ..
+                        },
+                        Some(Slot::Iter { id: old_id, .. }),
+                    ) => id == *old_id,
+                    _ => false,
+                }
             }
             _ => false,
         }
@@ -1135,7 +1160,7 @@ impl<'a> Verifier<'a> {
                     // in-progress earlier visit covers: the iterations from
                     // here are a subset of what that visit explores (the
                     // kernel bounds the iteration count at run time).
-                    if self.bounded_iteration(pc, &path.state) {
+                    if self.bounded_iteration(pc, &rec.state, &path.state) {
                         return Ok(true);
                     }
                     // the same state again, but an iterator advanced in
@@ -1153,7 +1178,7 @@ impl<'a> Verifier<'a> {
                 } else if self.widen
                     && rec.branches > 0
                     && self.is_ancestor(rid, path.parent)
-                    && self.bounded_iteration(pc, &path.state)
+                    && self.bounded_iteration(pc, &rec.state, &path.state)
                 {
                     widen_from = Some(rid);
                 }
@@ -1953,7 +1978,9 @@ impl<'a> Verifier<'a> {
                 }
                 Ok(Target::Scalar(size))
             }
-            RegType::RdonlyMem { size: msz, off: mo } => {
+            RegType::RdonlyMem {
+                size: msz, off: mo, ..
+            } => {
                 if write {
                     return Err(err(pc, "mem.rdonly_write", "write into read-only memory"));
                 }
@@ -2169,7 +2196,7 @@ impl<'a> Verifier<'a> {
             // the spill (if any) is now an unknown value
             let slot = &mut st.frames[frame as usize].stack[at / 8];
             if let Slot::Spill(_) = slot {
-                *slot = Slot::Bytes(0xff);
+                *slot = Slot::Bytes(0);
             }
         }
         let fetched = RegType::Scalar(if size == Size::W {
@@ -2664,7 +2691,14 @@ impl<'a> Verifier<'a> {
                     drained: false,
                     depth: depth.saturating_add(1),
                 };
-                self.clobber_call(st, RegType::RdonlyMem { size: 4, off: 0 });
+                self.clobber_call(
+                    st,
+                    RegType::RdonlyMem {
+                        size: 4,
+                        off: 0,
+                        iter: id,
+                    },
+                );
                 return Ok(Step::Fork {
                     taken: (next, done),
                     fall: next,
@@ -2672,14 +2706,30 @@ impl<'a> Verifier<'a> {
             }
             "bpf_iter_num_destroy" => {
                 let (frame, at) = self.kfunc_slot(pc, st, "bpf_iter_num_destroy")?;
-                if !matches!(st.frames[frame].stack[at], Slot::Iter { .. }) {
+                let Slot::Iter { id, .. } = st.frames[frame].stack[at] else {
                     return Err(err(
                         pc,
                         "kfunc.arg_type",
                         "expected an initialized iter_num as arg #0",
                     ));
-                }
+                };
                 st.frames[frame].stack[at] = Slot::Bytes(0);
+                // pointers into the destroyed iterator's state die with it
+                let dead =
+                    |r: &RegType| matches!(r, RegType::RdonlyMem { iter, .. } if *iter == id);
+                for f in &mut st.frames {
+                    for (i, r) in f.regs.iter_mut().enumerate() {
+                        if dead(r) {
+                            *r = RegType::NotInit;
+                            f.links[i] = 0;
+                        }
+                    }
+                    for slot in &mut f.stack {
+                        if matches!(slot, Slot::Spill(r) if dead(r)) {
+                            *slot = Slot::Bytes(0);
+                        }
+                    }
+                }
             }
             other => {
                 return Err(err(
