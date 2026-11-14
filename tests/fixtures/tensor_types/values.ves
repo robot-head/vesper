@@ -1,0 +1,23 @@
+// Function values keep their tensor signatures, a dtype parameter is bound
+// from the entry arguments, and a generic matmul runs at any size.
+fn identity(x: Tensor[F32, [2]]) -> Tensor[F32, [2]] {
+    x
+}
+fn apply(sink f: fn(Tensor[F32, [2]]) -> Tensor[F32, [2]], x: Tensor[F32, [2]])
+    -> Tensor[F32, [2]] {
+    f(x)
+}
+fn through(x: Tensor[F32, [2]]) -> Tensor[F32, [2]] eff [Tensor] {
+    let f = identity;
+    let g = | t: Tensor[F32, [2]] | -> Tensor[F32, [2]] {
+        t
+    };
+    Tensor::silu(apply(g, f(x)))
+}
+fn same[T](x: Tensor[T, [2]]) -> Tensor[T, [2]] {
+    x
+}
+fn mm[M: dim, K: dim, N: dim](a: Tensor[F32, [M, K]], b: Tensor[F32, [K, N]])
+    -> Tensor[F32, [M, N]] eff [Tensor] {
+    Tensor::matmul(a, b)
+}

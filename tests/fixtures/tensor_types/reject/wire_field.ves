@@ -1,0 +1,10 @@
+// expect: E0767
+// at: wire struct Bad
+// message: not 'f64'
+wire struct Bad {
+    scale: u16le,
+    value: f64,
+}
+fn main() -> u64 {
+    0
+}

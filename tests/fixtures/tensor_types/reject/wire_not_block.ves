@@ -1,0 +1,10 @@
+// expect: E0767
+// at: w
+// message: is not a quantized block layout
+wire struct Q4Big {
+    scale: u16be,
+    packed: ByteArray[16],
+}
+fn f(w: Tensor[Q4Big, [2, 32]], x: Tensor[F32, [32]]) -> Tensor[F32, [2]] eff [Tensor] {
+    Tensor::qmatvec(w, x)
+}
