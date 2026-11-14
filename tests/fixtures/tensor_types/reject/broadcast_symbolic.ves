@@ -1,0 +1,6 @@
+// expect: E0763
+// at: Tensor::mul(a, b)
+// message: axis 0 has M and N
+fn f[M: dim, N: dim](a: Tensor[F32, [M]], b: Tensor[F32, [N]]) -> Tensor[F32, [M]] eff [Tensor] {
+    Tensor::mul(a, b)
+}

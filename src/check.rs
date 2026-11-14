@@ -358,6 +358,11 @@ pub struct Checked {
 /// [`crate::pact_frontend`] into ordinary core functions and calls first;
 /// the returned World then contains only the existing core schema.
 pub fn check(module: &Module) -> Checked {
+    // Source tensor types (§28.2): a module that uses them is checked and
+    // elaborated by `tensor_types`, which runs the core checker itself.
+    if let Some(checked) = crate::tensor_types::check(module) {
+        return checked;
+    }
     crate::pact_frontend::check_module(module)
 }
 

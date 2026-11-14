@@ -1,0 +1,10 @@
+// expect: E0768
+// at: KvPageLease {
+// message: cannot construct one
+fn f() -> u64 eff [KvCachePool[2, 4]] {
+    let page = KvPageLease {
+        lease: 1
+    };
+    KvCachePool::release_page(page);
+    0
+}
