@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 # Bazel
 /bazel-*
+bazel-remote-grpc.log
+execution_log.binpb.zst
 /user.bazelrc
 # Not committed: rules_rs records Cargo.lock facts here, and concurrent lanes
 # change Cargo.lock constantly. Bazel regenerates it locally.
