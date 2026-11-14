@@ -105,7 +105,10 @@ fn tc_as_xdp_for_interpreter(prog: &Program) -> Program {
     p
 }
 
-const FIREWALL_TRACE: &[(&str, fn() -> Vec<u8>, u64)] = &[
+/// (what, packet builder, expected verdict).
+type Case = (&'static str, fn() -> Vec<u8>, u64);
+
+const FIREWALL_TRACE: &[Case] = &[
     ("ARP passes", arp, XDP_PASS),
     ("truncated Ethernet passes", || vec![0u8; 10], XDP_PASS),
     (

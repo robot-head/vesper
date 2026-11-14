@@ -964,14 +964,14 @@ impl<'a, 'b> FnLower<'a, 'b> {
                     self.effect(e, i, args)?;
                 } else if self.tail.contains(&i.dest) {
                     // Tail self-call: assign the parameters, jump back.
-                    let mut k = 0;
-                    for p in &self.f.params {
+                    // The arguments already live in value slots, so no
+                    // parameter is overwritten before it is read.
+                    for (p, a) in self.f.params.iter().zip(args) {
                         let (slot, r) = self.locals[&p.name];
                         if r != Repr::Unit {
-                            self.ld(Reg::R1, args[k].value, 0, span)?;
+                            self.ld(Reg::R1, a.value, 0, span)?;
                             self.st(slot, Reg::R1);
                         }
-                        k += 1;
                     }
                     self.asm.ja(self.loop_head);
                     return Ok(true);
