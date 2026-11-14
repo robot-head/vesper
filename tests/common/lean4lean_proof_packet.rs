@@ -419,7 +419,7 @@ impl Packet {
             },
             Self::Shape => PacketSpec {
                 label: "lean4lean_shape42",
-                module: "Lean4LeanShape42",
+                module: "Lean4LeanLevel42.ShapeFinal",
                 projected: "Lean4LeanShape42Kernel",
                 source_modules: &[
                     "Lean4Lean.List",
@@ -445,7 +445,7 @@ impl Packet {
                     "Lean4LeanLevel42.MapEquality",
                     "Lean4LeanLevel42.ConstructionShape",
                     "Lean4LeanLevel42.SubsumptionShape",
-                    "Lean4LeanShape42",
+                    "Lean4LeanLevel42.ShapeFinal",
                 ],
                 required: SHAPE_REQUIRED,
                 scope: "audited_normalized_map_equality_and_shape",

@@ -6,8 +6,8 @@ It ran no Cargo or Lean command, genuine matrix, Clippy or Bazel execution.
 All eight genuine matrices and final integrated validation remain coordinator
 work; this report does not claim they passed.
 
-The fixed specification uses label `lean4lean_shape42`, aggregate
-`Lean4LeanShape42`, projection `Lean4LeanShape42Kernel`, scope
+The fixed specification uses label `lean4lean_shape42`, module
+`Lean4LeanLevel42.ShapeFinal`, projection `Lean4LeanShape42Kernel`, scope
 `audited_normalized_map_equality_and_shape` and marker
 `LEAN4LEAN_SHAPE42_EVIDENCE`. The coordinator owns the new aggregate, test
 entry point, BUILD copy/scheduling entries and integration report. The closed
@@ -39,7 +39,7 @@ Its exact minimal twenty-four-module source order is:
 21. `Lean4LeanLevel42.MapEquality`
 22. `Lean4LeanLevel42.ConstructionShape`
 23. `Lean4LeanLevel42.SubsumptionShape`
-24. `Lean4LeanShape42`
+24. `Lean4LeanLevel42.ShapeFinal`
 
 This actual dependency closure fits the unchanged hard `SOURCE_COUNT = 24`
 bound. `Shape` imports SortedKeys, NormalizeValue and MapSubsumption. The
@@ -49,6 +49,20 @@ fold/geq modules and previous aggregates are outside this new closure; their
 seven earlier packets remain unchanged and are verified separately. The
 unchanged import-closure check requires every selected source to enter the
 replayed artifact closure.
+
+The coordinator's first genuine Shape attempt is retained at
+`/tmp/lean4lean-shape42-root-shape-v1.log`. It correctly failed the required
+root check for `Vesper.Lean4LeanLevel42.normalize_keysSorted` before any
+packet compilation. The five final proofs were initially placed in a
+top-level aggregate whose module name lies outside the frozen authored-root
+collector's `Lean4LeanLevel42`/`Lean4LeanNames42` module prefixes. Prior
+original-module compilation did not establish inclusion in that catalog.
+The coordinator moved the proofs to the new `Lean4LeanLevel42.ShapeFinal`
+module. This correction changes only Shape's fixed target module and final
+source-list entry, preserving its twenty-four-module size, all guards and
+other identifiers. The collector and validator are unchanged. All eight
+complete post-correction genuine matrices remain pending.
+
 
 The 26 unique required theorem guards use the proof authors' frozen public
 names in namespace `Vesper.Lean4LeanLevel42`:
@@ -66,7 +80,7 @@ names in namespace `Vesper.Lean4LeanLevel42`:
   `normalizeAux_varsSorted`.
 - Actual outer pruning fold: `subsumption_keysSorted`,
   `subsumption_varsSorted`, `subsumption_noEmpty`.
-- Final aggregate: `normalize_keysSorted`, `normalize_varsSorted`,
+- Final module: `normalize_keysSorted`, `normalize_varsSorted`,
   `normalize_noEmpty`, `normalize_shape`, `normalized_beq_value`.
 
 These guards only require presence. The unchanged source-command extractor
