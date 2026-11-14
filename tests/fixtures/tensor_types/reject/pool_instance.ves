@@ -1,0 +1,6 @@
+// expect: E0771
+// at: page
+// message: belongs to KvCachePool[2, 4] but the function's row has KvCachePool[2, 8]
+fn f(page: KvPageLease[2, 4]) -> Unit eff [KvCachePool[2, 8]] {
+    KvCachePool::release_page(page)
+}

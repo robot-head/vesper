@@ -1,0 +1,6 @@
+// expect: E0761
+// at: fn f
+// message: used both as a tensor dimension or dtype and as a type
+fn f[N](x: Tensor[F32, [N]], y: N) -> u64 {
+    0
+}

@@ -28,20 +28,20 @@
 //!   SYNs pass (fail open); counts are never reset by the program (user
 //!   space owns the measurement window).
 //!
-//! The program is hand-assembled; the release of the ring reservation on
-//! every path is checked by the verifier's `ref.leak` rule, not by a typed
-//! builder (see the lane report).
+//! The packet/counter prefix is assembled with `Asm`; the ring reservation
+//! uses `BpfRingSlot`. Checked builder finalization verifies the whole program.
 //!
 //! [`EthIpv4TcpWire`]: crate::wire::EthIpv4TcpWire
 //! [`SynDropAlertWire`]: crate::wire::SynDropAlertWire
 
 use crate::helpers as h;
-use crate::insn::{AluOp, Endian, JmpOp, Reg, Size};
-use crate::program::{Asm, AsmError, MapDef, MapKind, Program, ProgramType};
+use crate::insn::{AluOp, Endian, Insn, JmpOp, Reg, Size};
+use crate::program::{Asm, MapDef, MapKind, Program, ProgramType};
 use crate::wire::{
     ETH_P_IPV4, EthIpv4TcpWire, IPPROTO_TCP, SynDropAlertWire, TCP_FLAG_ACK, TCP_FLAG_SYN,
     WireFrame, XdpAction, eth_ipv4_tcp as o, syn_drop_alert as a,
 };
+use crate::{BpfBuilder, BuildError, RingbufWakeup};
 
 /// Offsets inside the TCP header, which starts `14 + IHL * 4` bytes into
 /// the frame (IPv4 options shift it).
@@ -77,7 +77,7 @@ impl Default for MitigatorConfig {
 }
 
 /// Assemble the mitigator.
-pub fn build(cfg: &MitigatorConfig) -> Result<Program, AsmError> {
+pub fn build(cfg: &MitigatorConfig) -> Result<Program, BuildError> {
     let mut asm = Asm::new();
     let counts = asm.map(MapDef::new(
         "syn_counts",
@@ -90,7 +90,6 @@ pub fn build(cfg: &MitigatorConfig) -> Result<Program, AsmError> {
     debug_assert_eq!((counts, alerts), (COUNTS_MAP, ALERTS_MAP));
 
     let pass = asm.label();
-    let drop = asm.label();
     let have_count = asm.label();
 
     // r2 = data, r3 = data_end
@@ -158,28 +157,35 @@ pub fn build(cfg: &MitigatorConfig) -> Result<Program, AsmError> {
     // if count <= threshold: pass
     asm.ld_imm64(Reg::R1, cfg.pps_threshold);
     asm.jmp(JmpOp::Le, Reg::R9, Reg::R1, pass);
-    // reserve an alert record
-    asm.ld_map(Reg::R1, alerts);
-    asm.mov64(Reg::R2, SynDropAlertWire::SIZE as i32);
-    asm.mov64(Reg::R3, 0);
-    asm.call(h::RINGBUF_RESERVE);
-    asm.jmp(JmpOp::Eq, Reg::R0, 0, drop);
-    asm.stx(Size::W, Reg::R0, a::SRC_IPV4 as i16, Reg::R6);
-    asm.stx(Size::H, Reg::R0, a::DST_PORT as i16, Reg::R8);
-    asm.endian(Endian::ToBe, 16, Reg::R7);
-    asm.stx(Size::H, Reg::R0, a::TCP_FLAGS as i16, Reg::R7);
+    let mut builder = BpfBuilder::from_asm(asm);
+    let mut slot = builder.reserve_ringbuf(alerts, SynDropAlertWire::SIZE as u32, Reg::R0)?;
+    slot.store(Size::W, a::SRC_IPV4 as i16, Reg::R6)?;
+    slot.store(Size::H, a::DST_PORT as i16, Reg::R8)?;
+    slot.emit(Insn::Endian {
+        kind: Endian::ToBe,
+        bits: 16,
+        dst: Reg::R7,
+    });
+    slot.store(Size::H, a::TCP_FLAGS as i16, Reg::R7)?;
     // observed_pps is little-endian on the wire (the BPF target is LE)
-    asm.stx(Size::DW, Reg::R0, a::OBSERVED_PPS as i16, Reg::R9);
-    asm.mov64(Reg::R1, Reg::R0);
-    asm.mov64(Reg::R2, 0);
-    asm.call(h::RINGBUF_SUBMIT);
-    asm.bind(drop)?;
-    asm.mov64(Reg::R0, XdpAction::Drop as i32);
-    asm.exit();
-    asm.bind(pass)?;
-    asm.mov64(Reg::R0, XdpAction::Pass as i32);
-    asm.exit();
-    asm.finish("mitigate_syn_flood", ProgramType::Xdp)
+    slot.store(Size::DW, a::OBSERVED_PPS as i16, Reg::R9)?;
+    slot.submit(RingbufWakeup::Adaptive);
+    builder.emit(Insn::Alu {
+        wide: true,
+        op: AluOp::Mov,
+        dst: Reg::R0,
+        src: (XdpAction::Drop as i32).into(),
+    });
+    builder.emit(Insn::Exit);
+    builder.bind(pass)?;
+    builder.emit(Insn::Alu {
+        wide: true,
+        op: AluOp::Mov,
+        dst: Reg::R0,
+        src: (XdpAction::Pass as i32).into(),
+    });
+    builder.emit(Insn::Exit);
+    builder.finish("mitigate_syn_flood", ProgramType::Xdp)
 }
 
 /// Reference model of the program over a packet and the counter of its

@@ -1,0 +1,10 @@
+// expect: E0770
+// at: rotate
+// message: cannot be used as a value
+fn rotate[D: dim](x: Tensor[F32, [1, D * 2]]) -> Tensor[F32, [1, D * 2]] eff [Tensor] {
+    Tensor::rope(x, 3)
+}
+fn f(x: Tensor[F32, [1, 4]]) -> Tensor[F32, [1, 4]] eff [Tensor] {
+    let g = rotate;
+    g(x)
+}

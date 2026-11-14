@@ -1,0 +1,14 @@
+[package]
+name = "vesper-ignis-vulkan"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Ignis Vulkan 1.3 backend (synchronization2, timeline semaphores, WGSL via naga), tested on Mesa lavapipe (design section 19)"
+publish = false
+
+[dependencies]
+# `loaded` resolves libvulkan at run time, so the crate builds without the
+# Vulkan SDK or loader (hermetic Bazel, macOS, Windows) and reports the device
+# as unavailable there.
+ash = { version = "=0.38.0", default-features = false, features = ["loaded", "debug", "std"] }
+naga = { version = "=30.0.2", default-features = false, features = ["wgsl-in", "spv-out"] }
+vesper-ignis = { path = "../vesper-ignis" }

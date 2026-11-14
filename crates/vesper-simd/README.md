@@ -40,8 +40,9 @@ consumers must also bind implementation identity. The exported raw C ABI and
 foreign-caller obligations are documented on `ObjectArtifact`.
 
 `profile_support` and `compile_profile` reject Avx2, Avx512, Sve2, and Rvv1 with
-`UnsupportedProfile`, even on hardware that supports them. This milestone does
-not implement 256/512-bit or scalable vectors, generic vector operations,
+`UnsupportedProfile`, even on hardware that supports them: the Cranelift JIT and
+object paths are Baseline128 only. Scalable vectors live in `vesper_simd::vvec`
+(below). This crate does not implement 256/512-bit fixed vectors,
 source-language `eff [Isa[P]]` typing or lowering, egglog vectorization, float
 FMA rewrites, wire-layout integration, or Lean SIMD proofs. It makes no
 performance, zero-allocation, or compiler-correctness claim.
@@ -61,3 +62,41 @@ mint capabilities, actual ELF architecture/symbols, and inaccessible guard pages
 on Unix. Native tests explicitly report unavailable Baseline128 hosts rather
 than executing unsupported instructions. AArch64 object generation is tested
 on x86_64; AArch64 native Rust execution requires a separate target runner.
+
+## Scalable vectors (`vvec`)
+
+`vesper_simd::vvec` implements §14.3's length-agnostic strip-mined predication
+for `u8` lanes. A profile fixes the lanes per vector: `Scalar::new(lanes)` (any
+1..=256, the portable reference), `Sve::detect()` (AArch64 SVE, `cntb` bytes) or
+`Rvv::detect()` (RVV 1.0, `vlenb` bytes at `e8, m1`). Hardware tokens have
+private fields, exist only after run-time detection and are `!Send` (the SVE
+vector length is per-thread state).
+
+```rust
+use vesper_simd::vvec::{IsaProfile, Scalar, VVec, scan_record_delimiters};
+
+let p = Scalar::new(48).unwrap();
+let data = b"a,b,c";
+let mask = p.active_mask(0, data.len()); // whilelo / vsetvli
+let v = VVec::load_masked(data, 0, &mask, 0).unwrap();
+assert_eq!(v.simd_eq(&VVec::splat(p, b',')).and(mask).count_ones(), 2);
+assert_eq!(scan_record_delimiters(p, data, b','), (2, data.iter().fold(0, |a, b| a ^ b)));
+```
+
+`active_mask(offset, total_len)` is the governing predicate of a strip;
+`load_masked`/`store_masked` touch only active lanes (SVE `ld1b`/`st1b` under a
+predicate, RVV `vle8.v`/`vse8.v` under `v0.t`), so a strip may run past the end
+of a slice, and an active lane past it is `VvecError::OutOfBounds`. A Unix guard
+page test checks that inactive lanes are never read. Lane operations are
+`simd_eq`, `simd_lt`, `bit_xor`/`and`/`or`, `wrapping_add` and `reduce_xor`;
+masks are bit sets with `and`, `or`, `xor`, `and_not`, `!`, `count_ones`.
+`vvec::kernels::scan` runs the whole scanner loop in one `asm!` block.
+
+Rust's SVE and RVV intrinsics are unstable, so the backends are stable `asm!`
+in `src/vvec/sve.rs` and `src/vvec/rvv.rs`, each with a register and memory
+contract. Vector values cross operations through memory, so the per-op API is
+a reference shape, not a fast path. The tests (`tests/vvec.rs`) compare every
+operation and both scanners with the scalar reference at the profile's own
+length; `.github/workflows/scalable-vectors.yml` runs them under QEMU user mode
+at SVE 128/256/384/512/2048 bits and RVV VLEN 128/256/512/1024. QEMU runs show
+functional behaviour only; no performance is claimed.
