@@ -610,6 +610,18 @@ impl Flow<'_> {
                     self.consume(s, *v, &i.span)
                 }
             }
+            Op::Vector { args, .. } => {
+                // Operands are `in` reads (lanes are copy, a string is a
+                // shared borrow): the operation releases their loans.
+                for v in args {
+                    if let Some(x) = s.values.get_mut(v) {
+                        x.consumed = true;
+                        x.loan = None;
+                    } else {
+                        self.consume(s, *v, &i.span)
+                    }
+                }
+            }
             Op::Data(_, fs) => {
                 for (_, v) in fs {
                     self.consume(s, *v, &i.span)

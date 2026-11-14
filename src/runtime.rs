@@ -1050,6 +1050,10 @@ impl<'a> Runtime<'a> {
             Op::Tuple(ids) => {
                 Value::Tuple(ids.into_iter().map(get).collect::<Result<Vec<_>, _>>()?)
             }
+            Op::Vector { op, args } => crate::vector::evaluate(
+                &op,
+                &args.into_iter().map(get).collect::<Result<Vec<_>, _>>()?,
+            )?,
             Op::Data(name, fields) => {
                 let (a, v) = self
                     .world
