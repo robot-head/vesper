@@ -4586,7 +4586,11 @@ name = "vesper-nexus"
 version = "0.1.0"
 dependencies = [
  "vesper-ffi",
+ "vesper-fmt",
+ "vesper-simpulse",
+ "vesper-syntax",
  "wasmtime",
+ "wit-parser",
 ]
 
 [[package]]
