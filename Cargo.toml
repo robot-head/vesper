@@ -171,6 +171,7 @@ cranelift-frontend = "0.125"
 getrandom = "0.4"
 libc = "0.2"
 ml-kem = { version = "=0.3.4", default-features = false, features = ["zeroize"] }
+libcrux-ml-kem = { version = "=0.0.11", default-features = false, features = ["mlkem768"] }
 rand_core = "0.10"
 region = "3.0.2"
 shake = "0.1"
