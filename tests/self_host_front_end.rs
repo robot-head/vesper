@@ -403,6 +403,25 @@ fn check_case(front_end: &str, source: &str, expect: Expect) {
     }
 }
 
+/// `fn f(x: i64) -> bool { <prefix * n><atom> }`.
+fn deep(prefix: &str, n: usize, atom: &str) -> String {
+    format!("fn f(x: i64) -> bool {{ {}{atom} }}", prefix.repeat(n))
+}
+
+/// `fn f(x: i64) -> i64 { ((...1...)) }` with `n` parentheses.
+fn deep_parens(n: usize) -> String {
+    format!(
+        "fn f(x: i64) -> i64 {{ {}1{} }}",
+        "(".repeat(n),
+        ")".repeat(n)
+    )
+}
+
+/// `fn f(x: i64) -> i64 { <head><tail * n> }`.
+fn chain(head: &str, tail: &str, n: usize) -> String {
+    format!("fn f(x: i64) -> i64 {{ {head}{} }}", tail.repeat(n))
+}
+
 /// Lexical edge cases, literal checks, typed errors and the unsupported
 /// subset, each against the seed.
 #[test]
@@ -478,6 +497,14 @@ fn edge_cases_and_typed_errors() {
                 "fn f() { a::b @@ @ -> => == $ }",
                 Expect::ParseError(CODE_EXPECTED),
             ),
+            // Nesting the seed accepts, and nesting past its 128-level
+            // descent limit, which must be a typed Limit here.
+            (&deep("!", 40, "true"), Expect::Seed),
+            (&deep("!", 200, "true"), Expect::ParseError(CODE_LIMIT)),
+            (&chain("1", " + 1", 200), Expect::ParseError(CODE_LIMIT)),
+            (&chain("x", ".y", 200), Expect::ParseError(CODE_LIMIT)),
+            (&deep_parens(60), Expect::ParseError(CODE_LIMIT)),
+            (&deep_parens(20), Expect::Seed),
             // Lexical errors carry the offending offset.
             ("fn f() { & }", Expect::LexError(9)),
             ("fn f() { \"open }", Expect::LexError(9)),

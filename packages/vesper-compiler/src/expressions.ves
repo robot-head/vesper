@@ -1,7 +1,7 @@
 // @vesper-lang/compiler, part 4 of 5: blocks, expressions and patterns.
 // Blocks and statements.
 fn block(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    expect(statements(expect(p, 34)), 35)
+    leave(expect(statements(expect(enter(p), 34)), 35), p)
 }
 
 fn statements(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
@@ -34,7 +34,7 @@ fn statements(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 
 // Expressions.
 fn expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    close(expr_inner(open(p, 202)))
+    leave(close(expr_inner(open(enter(p), 202))), p)
 }
 
 fn expr_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
@@ -66,6 +66,10 @@ fn restricted(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 fn if_expr(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    leave(if_inner(enter(p)), p)
+}
+
+fn if_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     let q = block(restricted(expect(p, 28)));
     let e = eat(q, 29);
     if ate(q, e) {
@@ -192,13 +196,14 @@ fn precedence(k: i64) -> i64 {
 }
 
 fn binary(p: P, min: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    let k = kind(p);
+    let q = enter(p);
+    let k = kind(q);
     let lhs = if k == 55 || k == 67 {
-        binary(bump(p), 12)
+        binary(bump(q), 12)
     } else {
-        postfix(primary(p))
+        leave(postfix(primary(enter(q))), q)
     };
-    binary_rest(lhs, min)
+    leave(binary_rest(lhs, min), p)
 }
 
 fn binary_rest(p: P, min: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
@@ -206,7 +211,7 @@ fn binary_rest(p: P, min: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     if prec == 0 || prec < min {
         p
     } else {
-        let q = bump(p);
+        let q = bump(enter(p));
         let r = if prec == 1 {
             expr(q)
         } else {
@@ -216,8 +221,17 @@ fn binary_rest(p: P, min: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
+// The operator loop of a postfix expression; each operator deepens it.
 fn postfix(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
+    if k == 32 || k == 36 || k == 42 || k == 43 {
+        postfix_op(enter(p), k)
+    } else {
+        p
+    }
+}
+
+fn postfix_op(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     if k == 32 {
         postfix(expect(args(bump(p)), 33))
     } else if k == 36 {
@@ -255,6 +269,10 @@ fn args(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 fn primary(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    leave(primary_inner(enter(p)), p)
+}
+
+fn primary_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     let k = kind(p);
     if at_literal(p) {
         literal(p)
@@ -318,7 +336,7 @@ fn tuple_values(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 
 // Patterns.
 fn pattern(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    close(pattern_inner(open(p, 203)))
+    leave(close(pattern_inner(open(enter(p), 203))), p)
 }
 
 fn pattern_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {

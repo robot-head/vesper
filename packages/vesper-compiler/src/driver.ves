@@ -10,6 +10,9 @@ fn items(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 fn parse_digest() -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
+    // The seed rejects over-budget token streams before parsing; the lexer
+    // phase enforces the same budget and its lexical errors come first.
+    let lexed = lex_digest();
     let p = items(
         open(
             P {

@@ -1,7 +1,7 @@
 // @vesper-lang/compiler, part 3 of 5: types, generics and items.
 // Types.
 fn ty(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    close(ty_inner(open(p, 204)))
+    leave(close(ty_inner(open(enter(p), 204))), p)
 }
 
 fn ty_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
@@ -63,9 +63,10 @@ fn ty_list(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 fn type_args(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
-    let q = eat(p, 36);
-    if ate(p, q) {
-        expect(type_arg_list(q), 37)
+    let d = enter(p);
+    let q = eat(d, 36);
+    if ate(d, q) {
+        leave(expect(type_arg_list(q), 37), p)
     } else {
         p
     }
@@ -376,6 +377,10 @@ fn params(p: P, end: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
 }
 
 fn place_tree(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+    leave(place_inner(enter(p)), p)
+}
+
+fn place_inner(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     let q = eat(p, 34);
     if ate(p, q) {
         expect(place_list(q), 35)

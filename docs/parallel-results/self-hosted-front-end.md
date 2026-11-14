@@ -52,7 +52,13 @@ for the input.
   recursion (`lex_steps(k - k/2, lex_steps(k/2, s))`), so its depth is
   logarithmic in the token count on both engines. Parser recursion depth is
   bounded by nesting and by the number of items, statements and list
-  elements; CST depth is capped at 96 (`Diag::Limit`).
+  elements. Descent depth is counted at the same guarded calls as the
+  seed's `enter()` (expr, binary and each binary operator, postfix and each
+  postfix operator, primary, block, if, type, type arguments, pattern, place
+  tree) and capped at 120, below the seed's 128, so input the seed rejects
+  for depth is a typed `Diag::Limit`, never a tree. The parse phase runs the
+  lexer phase first, so the seed's 65 536-token budget (EOF excluded) applies
+  to both.
 * **Errors.** Every failure is a typed `Fail[Diag]`: `Lex(offset)`,
   `Expected(kind, offset)`, `Invalid(offset)` (literal checks the seed does
   after lexing: u64 range, hex without digits, JSON string escapes, region
@@ -79,12 +85,13 @@ Differential test `tests/self_host_front_end.rs`:
   `source_macro*`, `macro_preview`, `stylus`, one `format_proof`, where the
   batch seed reports "expected a declaration"). Assertion floors: 100
   sources, 100 token matches, 50 CST matches, 8 JIT runs.
-* `edge_cases_and_typed_errors`: 31 hand-written inputs against the seed:
+* `edge_cases_and_typed_errors`: 37 hand-written inputs against the seed:
   number longest-match cases, nested comments, all trivia bytes, compound
   operators, keyword prefixes, escapes, region capacity bounds, literal
   overflow, invalid escapes, raw newlines in strings, syntax errors, lexical
   errors with exact offsets (`&`, unterminated string and comment, escaped
-  newline, non-ASCII), and each unsupported construct with its code.
+  newline, non-ASCII), nesting below and past the depth limit (unary,
+  binary and postfix chains, parentheses), and each unsupported construct with its code.
 
 Commands and results (cloud host, 4 cores, Rust 1.97; Clippy with 1.100):
 

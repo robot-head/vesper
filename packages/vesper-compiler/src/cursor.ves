@@ -31,15 +31,18 @@ fn digest(h: i64) -> i64 {
 fn lex_step(s: Lexer) -> Lexer eff [Fail[Diag], Fail[ArithOverflow]] {
     if s.done {
         s
-    } else if s.count >= max_tokens() {
-        fail_lexer(Diag::Limit(s.pos))
     } else {
         let t = lex_at(s.pos);
-        Lexer {
-            pos: t.end,
-            h: mix_token(s.h, t),
-            count: s.count + 1,
-            done: t.kind == 70
+        // The seed's budget counts source tokens; EOF is appended outside it.
+        if t.kind != 70 && s.count >= max_tokens() {
+            fail_lexer(Diag::Limit(s.pos))
+        } else {
+            Lexer {
+                pos: t.end,
+                h: mix_token(s.h, t),
+                count: s.count + 1,
+                done: t.kind == 70
+            }
         }
     }
 }
@@ -168,19 +171,49 @@ fn expect(p: P, k: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     }
 }
 
-fn open(p: P, node: i64) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
+fn open(p: P, node: i64) -> P eff [Fail[ArithOverflow]] {
+    P {
+        pos: p.pos,
+        cur: p.cur,
+        h: mix(mix(p.h, node + 1000), p.pos),
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: p.depth
+    }
+}
+
+// Descent depth mirrors the seed's guarded `enter()` calls (expr, binary
+// and each binary operator, postfix and each postfix operator, primary,
+// block, if, type, type arguments, pattern, place tree), so an input the
+// seed rejects at its 128-level limit is rejected here too; the bound is a
+// little lower than the seed's to stay on the rejecting side.
+fn enter(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
     if p.depth >= max_depth() {
         fail_p(Diag::Limit(p.pos))
     } else {
         P {
             pos: p.pos,
             cur: p.cur,
-            h: mix(mix(p.h, node + 1000), p.pos),
+            h: p.h,
             nostruct: p.nostruct,
             rows: p.rows,
             bounds: p.bounds,
             depth: p.depth + 1
         }
+    }
+}
+
+// Restores the depth of `outer` after a guarded descent.
+fn leave(p: P, outer: P) -> P {
+    P {
+        pos: p.pos,
+        cur: p.cur,
+        h: p.h,
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: outer.depth
     }
 }
 
@@ -192,7 +225,7 @@ fn close(p: P) -> P eff [Fail[ArithOverflow]] {
         nostruct: p.nostruct,
         rows: p.rows,
         bounds: p.bounds,
-        depth: p.depth - 1
+        depth: p.depth
     }
 }
 

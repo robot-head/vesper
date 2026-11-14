@@ -55,7 +55,7 @@ copy enum Diag {
 // 5 associated-type projection, 6 call or index after a row generic is in
 // scope, 7 \u escape, 8 package trait reference.
 fn max_depth() -> i64 {
-    96
+    120
 }
 
 fn max_tokens() -> i64 {
