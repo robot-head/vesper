@@ -36,7 +36,7 @@ impl Default for CheckpointLimits {
     }
 }
 impl CheckpointLimits {
-    fn validate(self) -> Result<(), Error> {
+    pub(crate) fn validate(self) -> Result<(), Error> {
         if self.max_bytes < 64
             || self.max_bytes > 64 * 1024 * 1024
             || self.max_total_rows > 1_000_000
@@ -50,7 +50,7 @@ impl CheckpointLimits {
         }
         Ok(())
     }
-    fn budget(self, circuit: &Circuit) -> Budget {
+    pub(crate) fn budget(self, circuit: &Circuit) -> Budget {
         Budget::new(Limits {
             max_work: self.max_work.min(circuit.limits.max_work),
             ..circuit.limits
@@ -230,11 +230,16 @@ impl Identity<'_> {
                 self.usize(*ka)?;
                 self.usize(*kb)?;
             }
+            Op::Exchange { a, key } => {
+                self.u64(5)?;
+                self.usize(*a)?;
+                self.usize(*key)?;
+            }
         }
         Ok(())
     }
 }
-pub(super) fn identity(
+pub(crate) fn identity(
     c: &Circuit,
     source: Option<&SourceState>,
     limits: CheckpointLimits,
@@ -325,7 +330,7 @@ pub(super) fn identity(
     }
     Ok(*h.hash.finalize().as_bytes())
 }
-fn count_rows(prior: &[ZSet], limits: CheckpointLimits) -> Result<(), Error> {
+pub(crate) fn count_rows(prior: &[ZSet], limits: CheckpointLimits) -> Result<(), Error> {
     let mut rows = 0usize;
     let mut cells = 0usize;
     for set in prior {
@@ -370,7 +375,7 @@ fn parse_work(prior: &[ZSet], source: Option<&SourceState>) -> Result<usize, Err
     }
     Ok(work)
 }
-fn validate_state(
+pub(crate) fn validate_state(
     c: &Circuit,
     prior: &[ZSet],
     ticks: u64,
@@ -415,7 +420,11 @@ fn validate_state(
         if prior[i].width != n.width || prior[i].len() > c.limits.max_rows {
             return Err(Error::Checkpoint("schema"));
         }
-        if !matches!(n.op, Op::Input(_)) && apply(&n.op, prior, eval_limits, budget)? != prior[i] {
+        // Input and exchange integrals are received, not derived: on a
+        // cluster worker an exchange holds the rows routed to it.
+        if !matches!(n.op, Op::Input(_) | Op::Exchange { .. })
+            && apply(&n.op, prior, eval_limits, budget)? != prior[i]
+        {
             return Err(Error::Checkpoint("inconsistent integral"));
         }
     }

@@ -4637,6 +4637,7 @@ dependencies = [
  "find-msvc-tools",
  "getrandom 0.4.3",
  "libc",
+ "object 0.37.3",
  "petgraph",
  "salsa",
  "serde",
@@ -4734,6 +4735,7 @@ version = "0.1.0"
 dependencies = [
  "gtk4",
  "vesper-aura",
+ "vesper-pulse",
 ]
 
 [[package]]
@@ -4870,6 +4872,7 @@ dependencies = [
  "blake3",
  "tempfile",
  "vesper-loom-cas",
+ "vesper-quarry",
  "vesper-simpulse",
 ]
 
@@ -5101,7 +5104,11 @@ name = "vesper-nexus"
 version = "0.1.0"
 dependencies = [
  "vesper-ffi",
+ "vesper-fmt",
+ "vesper-simpulse",
+ "vesper-syntax",
  "wasmtime",
+ "wit-parser",
 ]
 
 [[package]]
