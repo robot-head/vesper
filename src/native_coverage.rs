@@ -33,11 +33,23 @@
 //! which owns the buffer; [`object_with_coverage`] emits object bytes that
 //! are never executed in-process.
 //!
-//! Limits: native code runs without a fuel bound, so a target that does not
-//! terminate hangs the campaign (the evaluator cross-check never starts);
-//! effects other than unlabeled `Fail[..]` are rejected; instrumentation of
-//! an object file is for code-generation validation only, because the
-//! buffer address is a host address.
+//! * **Fuel and stack bound** (lane 23, #346). Every instrumented block
+//!   also decrements a fuel word, and every function entry compares the
+//!   stack pointer with a host-chosen limit. When either runs out the
+//!   function stores an "exhausted" flag and returns zeros; every block it
+//!   reaches afterwards does the same, so the run ends after at most the
+//!   rest of the current block, and [`NativeCoverage::run`] reports
+//!   [`NativeOutcome::Exhausted`] instead of hanging or overflowing the
+//!   stack. Results of an exhausted run are discarded.
+//! * **`select` and `br_table`** conditions and indices are logged as
+//!   comparison records too, because they hide branches from edge coverage.
+//! * **Source locations.** Comparison and edge sites carry the source byte
+//!   offset the backend attached to their instruction
+//!   ([`crate::native::source_offset`]).
+//!
+//! Limits: effects other than unlabeled `Fail[..]` are rejected;
+//! instrumentation of an object file is for code-generation validation
+//! only, because the buffer address is a host address.
 use crate::{
     ast::{Function, Type},
     check::{self, World},
@@ -60,9 +72,19 @@ pub const MAX_CMP_LOG: usize = 1024;
 /// Most target parameters.
 pub const MAX_ARGS: usize = 32;
 
+/// Default fuel: instrumented block entries per run.
+pub const DEFAULT_FUEL: u64 = 1_000_000;
+/// Default stack budget per run, below the stack pointer at the call.
+pub const DEFAULT_STACK_BUDGET: u64 = 512 * 1024;
+
 const PREV: usize = 0;
 const CMP_COUNT: usize = 1;
-const ARGS: usize = 2;
+const FUEL: usize = 2;
+const EXHAUSTED: usize = 3;
+const STACK_HIT: usize = 4;
+const STACK_LIMIT: usize = 5;
+const RESULT: usize = 6;
+const ARGS: usize = 7;
 const CMP_LOG: usize = ARGS + MAX_ARGS;
 /// Words per comparison record: site, lhs, rhs.
 const RECORD: usize = 3;
@@ -97,13 +119,34 @@ impl CoverageBuffer {
     pub fn base(&self) -> i64 {
         self.words.as_ptr() as i64
     }
-    /// Clear edges, `prev` and the comparison log before a run.
+    /// Clear edges, `prev`, the comparison log, the exhaustion flags and
+    /// the result before a run.
     pub fn reset(&self) {
-        self.words[PREV].store(0, Ordering::Relaxed);
-        self.words[CMP_COUNT].store(0, Ordering::Relaxed);
+        for w in [PREV, CMP_COUNT, EXHAUSTED, STACK_HIT, RESULT] {
+            self.words[w].store(0, Ordering::Relaxed);
+        }
         for w in &self.words[EDGES..] {
             w.store(0, Ordering::Relaxed);
         }
+    }
+    /// Arm the fuel bound and the lowest stack address code may run at.
+    fn arm(&self, fuel: u64, stack_limit: u64) {
+        self.words[FUEL].store(fuel, Ordering::Relaxed);
+        self.words[STACK_LIMIT].store(stack_limit, Ordering::Relaxed);
+    }
+    /// Fuel left after the last run.
+    pub fn fuel_left(&self) -> u64 {
+        self.words[FUEL].load(Ordering::Relaxed)
+    }
+    /// Whether the last run ran out of fuel or stack.
+    pub fn exhausted(&self) -> bool {
+        self.words[EXHAUSTED].load(Ordering::Relaxed) != 0
+    }
+    fn stack_hit(&self) -> bool {
+        self.words[STACK_HIT].load(Ordering::Relaxed) != 0
+    }
+    fn result(&self) -> u64 {
+        self.words[RESULT].load(Ordering::Relaxed)
     }
     fn set_arg(&self, i: usize, value: u64) {
         self.words[ARGS + i].store(value, Ordering::Relaxed);
@@ -139,6 +182,18 @@ impl CoverageBuffer {
     }
 }
 
+/// The instruction a comparison site logs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SiteOp {
+    /// `icmp`/`icmp_imm`: both operands.
+    Compare,
+    /// `select c, x, y`: the condition against zero (`Ne`).
+    Select,
+    /// `br_table index, table`: the index against the table length (`Lt`);
+    /// [`NativeCoverage::feed`] also reports `index == k` for each case.
+    BranchTable { cases: u32 },
+}
+
 /// What one instrumented comparison site compares.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CmpSite {
@@ -148,6 +203,45 @@ pub struct CmpSite {
     pub signed: bool,
     /// Operand width in bits.
     pub bits: u32,
+    pub op: SiteOp,
+    /// Source byte offset of the instruction, when the backend attached one.
+    pub location: Option<usize>,
+}
+
+/// One instrumented block: its edge-map label and source location.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EdgeSite {
+    /// Instance key of the function containing the block.
+    pub function: String,
+    /// Block index in layout order.
+    pub block: usize,
+    /// The block's 13-bit label (`cur` in the edge update).
+    pub label: u32,
+    /// Source byte offset of the block's first original instruction.
+    pub location: Option<usize>,
+}
+
+/// Map the outcome of a signed ordering comparison onto
+/// [`CmpKind`]'s unsigned evaluation. Operands are zero-extended from
+/// `bits`; when their sign bits agree, signed and unsigned order agree, and
+/// when they differ the unsigned order is reversed, so `Lt` becomes `Gt`
+/// and `Le` becomes `Ge` (and back). The operands are unchanged, so the
+/// input-to-state solver still sees the values the code compared.
+pub fn unsigned_view(kind: CmpKind, signed: bool, bits: u32, lhs: u64, rhs: u64) -> CmpKind {
+    if !signed || bits == 0 || bits > 64 {
+        return kind;
+    }
+    let sign = 1u64 << (bits - 1);
+    if (lhs & sign) == (rhs & sign) {
+        return kind;
+    }
+    match kind {
+        CmpKind::Lt => CmpKind::Gt,
+        CmpKind::Le => CmpKind::Ge,
+        CmpKind::Gt => CmpKind::Lt,
+        CmpKind::Ge => CmpKind::Le,
+        other => other,
+    }
 }
 
 /// Counts of what [`Instrumenter`] inserted.
@@ -157,6 +251,13 @@ pub struct InstrumentStats {
     pub edges: usize,
     pub comparisons: usize,
     pub stubs: usize,
+    /// Result sinks replaced (0 or 1).
+    pub sinks: usize,
+    /// `select` and `br_table` sites (also counted in `comparisons`).
+    pub selects: usize,
+    pub branch_tables: usize,
+    /// Blocks guarded by the fuel check.
+    pub fuel_checks: usize,
 }
 
 /// The rewrite applied through [`crate::native::Instrument`].
@@ -164,7 +265,10 @@ pub struct Instrumenter {
     base: i64,
     /// Argument stub key -> argument index.
     stubs: BTreeMap<String, usize>,
+    /// Result sink key (its argument is stored in the result word).
+    sink: Option<String>,
     sites: Vec<CmpSite>,
+    edge_sites: Vec<EdgeSite>,
     stats: InstrumentStats,
 }
 
@@ -203,9 +307,20 @@ impl Instrumenter {
         Self {
             base,
             stubs: BTreeMap::new(),
+            sink: None,
             sites: Vec::new(),
+            edge_sites: Vec::new(),
             stats: InstrumentStats::default(),
         }
+    }
+    /// Replace the body of `key`, a `fn(T) -> i64` with one scalar
+    /// parameter, with a store of that parameter to the result word.
+    pub fn with_result_sink(mut self, key: &str) -> Self {
+        self.sink = Some(key.to_string());
+        self
+    }
+    pub fn edge_sites(&self) -> &[EdgeSite] {
+        &self.edge_sites
     }
     /// Also replace the body of argument stub `key` with a load of argument
     /// `index` from the buffer.
@@ -226,42 +341,112 @@ impl Instrumenter {
             self.stats.stubs += 1;
             return self.replace_stub(func, index);
         }
+        if self.sink.as_deref() == Some(key) {
+            self.stats.sinks += 1;
+            return self.replace_sink(func);
+        }
         self.stats.functions += 1;
         let blocks: Vec<ir::Block> = func.layout.blocks().collect();
-        let mut compares = Vec::new();
+        let mut original = Vec::new();
         for &block in &blocks {
             for inst in func.layout.block_insts(block) {
-                compares.push(inst);
+                original.push(inst);
             }
         }
+        let firsts: Vec<Option<ir::Inst>> =
+            blocks.iter().map(|&b| func.layout.first_inst(b)).collect();
         let mut pos = FuncCursor::new(func);
-        for inst in compares {
-            let (cond, lhs, rhs_imm, rhs) = match pos.func.dfg.insts[inst] {
+        for inst in original {
+            let location = crate::native::source_offset(pos.func, inst);
+            // (kind, signed, op, lhs, rhs immediate, rhs value, width)
+            let (kind, signed, op, lhs, rhs_imm, rhs, ty) = match pos.func.dfg.insts[inst] {
                 InstructionData::IntCompare {
                     opcode: Opcode::Icmp,
                     args,
                     cond,
-                } => (cond, args[0], None, Some(args[1])),
+                } => {
+                    let (kind, signed) = cmp_kind(cond);
+                    let ty = pos.func.dfg.value_type(args[0]);
+                    (
+                        kind,
+                        signed,
+                        SiteOp::Compare,
+                        args[0],
+                        None,
+                        Some(args[1]),
+                        ty,
+                    )
+                }
                 InstructionData::IntCompareImm {
                     opcode: Opcode::IcmpImm,
                     arg,
                     cond,
                     imm,
-                } => (cond, arg, Some(imm.bits()), None),
+                } => {
+                    let (kind, signed) = cmp_kind(cond);
+                    let ty = pos.func.dfg.value_type(arg);
+                    (
+                        kind,
+                        signed,
+                        SiteOp::Compare,
+                        arg,
+                        Some(imm.bits()),
+                        None,
+                        ty,
+                    )
+                }
+                InstructionData::Ternary {
+                    opcode: Opcode::Select,
+                    args,
+                } => {
+                    let ty = pos.func.dfg.value_type(args[0]);
+                    (
+                        CmpKind::Ne,
+                        false,
+                        SiteOp::Select,
+                        args[0],
+                        Some(0),
+                        None,
+                        ty,
+                    )
+                }
+                InstructionData::BranchTable {
+                    opcode: Opcode::BrTable,
+                    arg,
+                    table,
+                } => {
+                    let cases = pos.func.stencil.dfg.jump_tables[table].as_slice().len();
+                    let cases = u32::try_from(cases).map_err(|_| "jump table too large")?;
+                    let ty = pos.func.dfg.value_type(arg);
+                    (
+                        CmpKind::Lt,
+                        false,
+                        SiteOp::BranchTable { cases },
+                        arg,
+                        Some(i64::from(cases)),
+                        None,
+                        ty,
+                    )
+                }
                 _ => continue,
             };
-            let ty = pos.func.dfg.value_type(lhs);
             if !ty.is_int() || ty.bits() > 64 {
                 continue;
             }
             let site = u32::try_from(self.sites.len()).map_err(|_| "too many comparison sites")?;
-            let (kind, signed) = cmp_kind(cond);
             self.sites.push(CmpSite {
                 function: key.to_string(),
                 kind,
                 signed,
                 bits: ty.bits(),
+                op,
+                location,
             });
+            match op {
+                SiteOp::Compare => {}
+                SiteOp::Select => self.stats.selects += 1,
+                SiteOp::BranchTable { .. } => self.stats.branch_tables += 1,
+            }
             pos.goto_inst(inst);
             let widen = |pos: &mut FuncCursor, v: ir::Value| {
                 if ty == types::I64 {
@@ -298,8 +483,16 @@ impl Instrumenter {
             pos.ins().store(flags, next, base, word(CMP_COUNT));
             self.stats.comparisons += 1;
         }
-        for (index, block) in blocks.into_iter().enumerate() {
+        let entry = blocks.first().copied();
+        let mut exhausted = None;
+        for (index, (block, first)) in blocks.into_iter().zip(firsts).enumerate() {
             let cur = block_label(key, index);
+            self.edge_sites.push(EdgeSite {
+                function: key.to_string(),
+                block: index,
+                label: cur as u32,
+                location: first.and_then(|i| crate::native::source_offset(pos.func, i)),
+            });
             pos.goto_first_insertion_point(block);
             let flags = MemFlags::trusted();
             let base = pos.ins().iconst(types::I64, self.base);
@@ -313,7 +506,96 @@ impl Instrumenter {
             let shifted = pos.ins().iconst(types::I64, cur >> 1);
             pos.ins().store(flags, shifted, base, word(PREV));
             self.stats.edges += 1;
+            // Fuel: `ok = fuel != 0`, and at a function entry also
+            // `sp >= limit`; `fuel = ok ? fuel - 1 : 0`; continue only if ok.
+            let Some(first) = first else { continue };
+            let fuel = pos.ins().load(types::I64, flags, base, word(FUEL));
+            let mut ok = pos.ins().icmp_imm(IntCC::NotEqual, fuel, 0);
+            if Some(block) == entry {
+                let sp = pos.ins().get_stack_pointer(types::I64);
+                let limit = pos.ins().load(types::I64, flags, base, word(STACK_LIMIT));
+                let deep = pos.ins().icmp(IntCC::UnsignedLessThan, sp, limit);
+                let deep64 = pos.ins().uextend(types::I64, deep);
+                let hit = pos.ins().load(types::I64, flags, base, word(STACK_HIT));
+                let hit = pos.ins().bor(hit, deep64);
+                pos.ins().store(flags, hit, base, word(STACK_HIT));
+                let room = pos.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, sp, limit);
+                ok = pos.ins().band(ok, room);
+            }
+            let less = pos.ins().iadd_imm(fuel, -1);
+            let zero = pos.ins().iconst(types::I64, 0);
+            let left = pos.ins().select(ok, less, zero);
+            pos.ins().store(flags, left, base, word(FUEL));
+            let rest = pos.func.dfg.make_block();
+            pos.func.layout.split_block(rest, first);
+            let out = match exhausted {
+                Some(b) => b,
+                None => {
+                    let b = pos.func.dfg.make_block();
+                    pos.func.layout.append_block(b);
+                    exhausted = Some(b);
+                    b
+                }
+            };
+            pos.goto_bottom(block);
+            pos.ins().brif(ok, rest, &[], out, &[]);
+            self.stats.fuel_checks += 1;
         }
+        if let Some(out) = exhausted {
+            let returns: Vec<ir::Type> = pos
+                .func
+                .signature
+                .returns
+                .iter()
+                .map(|r| r.value_type)
+                .collect();
+            pos.goto_bottom(out);
+            let flags = MemFlags::trusted();
+            let base = pos.ins().iconst(types::I64, self.base);
+            let one = pos.ins().iconst(types::I64, 1);
+            pos.ins().store(flags, one, base, word(EXHAUSTED));
+            let mut values = Vec::new();
+            for ty in returns {
+                values.push(match ty {
+                    types::F64 => pos.ins().f64const(0.0),
+                    types::F32 => pos.ins().f32const(0.0),
+                    t if t.is_int() && t.bits() <= 64 => pos.ins().iconst(t, 0),
+                    t => {
+                        return Err(format!("fuel exit cannot return a placeholder of type {t}"));
+                    }
+                });
+            }
+            pos.ins().return_(&values);
+        }
+        Ok(())
+    }
+
+    fn replace_sink(&self, func: &mut ir::Function) -> Result<(), String> {
+        let signature = func.signature.clone();
+        if signature.params.len() != 1
+            || signature.params[0].value_type != types::I64
+            || signature.returns.len() != 1
+            || signature.returns[0].value_type != types::I64
+        {
+            return Err("result sink must be `fn(T) -> i64` with a scalar T".into());
+        }
+        let mut sink = ir::Function::with_name_signature(func.name.clone(), signature);
+        let mut context = FunctionBuilderContext::new();
+        {
+            let mut b = FunctionBuilder::new(&mut sink, &mut context);
+            let block = b.create_block();
+            b.append_block_params_for_function_params(block);
+            b.switch_to_block(block);
+            b.seal_block(block);
+            let value = b.block_params(block)[0];
+            let base = b.ins().iconst(types::I64, self.base);
+            b.ins()
+                .store(MemFlags::trusted(), value, base, word(RESULT));
+            let zero = b.ins().iconst(types::I64, 0);
+            b.ins().return_(&[zero]);
+            b.finalize();
+        }
+        *func = sink;
         Ok(())
     }
 
@@ -412,7 +694,23 @@ pub enum NativeOutcome {
     Failed {
         effect: String,
     },
+    /// The run used up its fuel ([`NativeCoverage::set_fuel`]) or its
+    /// stack budget ([`NativeCoverage::set_stack_budget`]) and was stopped;
+    /// its result and coverage past that point are meaningless.
+    Exhausted {
+        /// The stack budget, not the fuel, ran out.
+        stack: bool,
+    },
 }
+
+/// Result sink of the wrapper: its argument is the target's scalar result.
+const SINK: &str = "__vesper_fuzz_result";
+/// Site-label bit of the per-case `br_table` records.
+const CASE_SITE: u32 = 0x4000_0000;
+/// Site-label bit of the zigzag records.
+const ZIGZAG_SITE: u32 = 0x8000_0000;
+/// Site-label bit and edge offset of a shadow target ([`NativeCoverage::feed_shadow`]).
+const SHADOW_SITE: u32 = 0x2000_0000;
 
 /// A fuzz target compiled once with coverage instrumentation.
 pub struct NativeCoverage {
@@ -420,9 +718,13 @@ pub struct NativeCoverage {
     jit: InstrumentedJit,
     buffer: Box<CoverageBuffer>,
     params: Vec<NativeParam>,
+    result: Option<NativeParam>,
     fails: Vec<String>,
     sites: Vec<CmpSite>,
+    edge_sites: Vec<EdgeSite>,
     stats: InstrumentStats,
+    fuel: u64,
+    stack_budget: u64,
 }
 
 fn check_source(source: &str) -> Result<World, String> {
@@ -450,7 +752,9 @@ impl NativeCoverage {
     /// Compile `target` of the checked module `source` with coverage
     /// instrumentation. The target must be non-generic, take only `i64`,
     /// `u64`, `u32`, `u8` or `bool` by value, and declare only unlabeled
-    /// `Fail[..]` effects.
+    /// `Fail[..]` effects. When its result is one of those types too, the
+    /// wrapper passes it to a result sink and [`Self::last_result`] returns
+    /// it after a run.
     pub fn compile(source: &str, world: &World, target: &str) -> Result<Self, String> {
         let f: &Function = world
             .functions
@@ -512,11 +816,23 @@ impl NativeCoverage {
                 p.stub_body()
             ));
         }
+        let result = NativeParam::of(&f.result);
+        if let Some(r) = result {
+            wrapper.push_str(&format!(
+                "\nfn {SINK}(value: {}) -> i64 {{\n    0\n}}\n",
+                r.source_type()
+            ));
+        }
         let call = (0..params.len())
             .map(|i| format!("{STUB_PREFIX}arg_{i}()"))
             .collect::<Vec<_>>()
             .join(", ");
-        let mut body = format!("{{\n    let _result = {target}({call});\n    0\n}}");
+        let call = if result.is_some() {
+            format!("{SINK}({target}({call}))")
+        } else {
+            format!("{target}({call})")
+        };
+        let mut body = format!("{{\n    let _result = {call};\n    0\n}}");
         for (k, fail) in fails.iter().enumerate() {
             body = format!(
                 "{{\n    handle {fail} in {body} with {{\n        return value => value,\n        raise(error, resume) => {},\n    }}\n}}",
@@ -532,6 +848,9 @@ impl NativeCoverage {
         for i in 0..params.len() {
             instrumenter = instrumenter.with_arg_stub(&format!("{STUB_PREFIX}arg_{i}"), i);
         }
+        if result.is_some() {
+            instrumenter = instrumenter.with_result_sink(SINK);
+        }
         let mut hook = |key: &str, func: &mut ir::Function| instrumenter.rewrite(key, func);
         // SAFETY: the instrumentation only loads and stores whole words
         // inside `buffer` (fixed offsets below `WORDS`, edge slots masked
@@ -541,17 +860,57 @@ impl NativeCoverage {
         // words are atomics, so the host only touches them atomically.
         let jit = unsafe { InstrumentedJit::compile(&wrapped, CASE, &mut hook) }
             .map_err(|e| format!("--native-coverage: '{target}' does not compile natively: {e}"))?;
-        if instrumenter.stats().stubs != params.len() {
+        if instrumenter.stats().stubs != params.len()
+            || instrumenter.stats().sinks != usize::from(result.is_some())
+        {
             return Err("--native-coverage: an argument stub was not emitted".into());
         }
         Ok(Self {
             jit,
             buffer,
             params,
+            result,
             fails,
             sites: instrumenter.sites().to_vec(),
+            edge_sites: instrumenter.edge_sites().to_vec(),
             stats: instrumenter.stats(),
+            fuel: DEFAULT_FUEL,
+            stack_budget: DEFAULT_STACK_BUDGET,
         })
+    }
+
+    /// Instrumented block entries a run may execute ([`DEFAULT_FUEL`]).
+    pub fn set_fuel(&mut self, fuel: u64) {
+        self.fuel = fuel;
+    }
+    /// Bytes of stack below the caller's frame a run may use
+    /// ([`DEFAULT_STACK_BUDGET`]). The caller must have at least this much
+    /// stack left (plus the frame of one instrumented function).
+    pub fn set_stack_budget(&mut self, bytes: u64) {
+        self.stack_budget = bytes;
+    }
+    /// The target's result in the last run that returned, as a machine
+    /// value ([`Self::run`]'s encoding), when its type is a supported
+    /// scalar.
+    pub fn last_result(&self) -> Option<u64> {
+        self.result.map(|r| {
+            let v = self.buffer.result();
+            match r {
+                NativeParam::Bool => u64::from(v != 0),
+                NativeParam::U8 => v & 0xff,
+                NativeParam::U32 => v & 0xffff_ffff,
+                NativeParam::I64 | NativeParam::U64 => v,
+            }
+        })
+    }
+    /// Result type of the target, when [`Self::last_result`] reports it.
+    pub fn result_type(&self) -> Option<NativeParam> {
+        self.result
+    }
+    /// Blocks of every instrumented function with their labels and source
+    /// locations.
+    pub fn edge_sites(&self) -> &[EdgeSite] {
+        &self.edge_sites
     }
 
     pub fn params(&self) -> &[NativeParam] {
@@ -593,7 +952,17 @@ impl NativeCoverage {
             self.buffer.set_arg(i, a);
         }
         self.buffer.reset();
+        let marker = 0u8;
+        let here = std::ptr::addr_of!(marker) as u64;
+        self.buffer
+            .arm(self.fuel, here.saturating_sub(self.stack_budget));
         let code = self.jit.run();
+        std::hint::black_box(&marker);
+        if self.buffer.exhausted() {
+            return Ok(NativeOutcome::Exhausted {
+                stack: self.buffer.stack_hit(),
+            });
+        }
         match code {
             0 => Ok(NativeOutcome::Returned),
             k if k >= 1 && (k as usize) <= self.fails.len() => Ok(NativeOutcome::Failed {
@@ -607,11 +976,26 @@ impl NativeCoverage {
     /// probe edge with its hit count (capped at 128, the top hit-count
     /// bucket), and each logged comparison with its raw operands plus, when
     /// the target has an `i64` parameter, the zigzag tape encoding of the
-    /// sign-extended operands (site label with the top bit set).
+    /// sign-extended operands (site label with the top bit set). Signed
+    /// ordering comparisons are reported through [`unsigned_view`], so their
+    /// taken bit is the one the code computed; a `br_table` index is also
+    /// reported as `index == k` for each of its first 256 cases.
     pub fn feed(&self, probe: &mut Probe) {
+        self.feed_labelled(probe, 0, 0);
+    }
+
+    /// [`Self::feed`] for a second target in the same campaign (the shadow
+    /// of a differential run): its edges are offset past the edge map and
+    /// its site labels carry a separate bit, so the two targets' features
+    /// stay distinct.
+    pub fn feed_shadow(&self, probe: &mut Probe) {
+        self.feed_labelled(probe, EDGE_SLOTS as u32, SHADOW_SITE);
+    }
+
+    fn feed_labelled(&self, probe: &mut Probe, edge_offset: u32, site_bit: u32) {
         for (slot, hits) in self.buffer.edges() {
             for _ in 0..hits.min(128) {
-                probe.edge(slot);
+                probe.edge(slot + edge_offset);
             }
         }
         let zigzag = self.params.contains(&NativeParam::I64);
@@ -619,7 +1003,19 @@ impl NativeCoverage {
             let Some(info) = self.sites.get(site as usize) else {
                 continue;
             };
-            probe.cmp(site, info.kind, lhs, rhs);
+            let label = site | site_bit;
+            let kind = unsigned_view(info.kind, info.signed, info.bits, lhs, rhs);
+            probe.cmp(label, kind, lhs, rhs);
+            if let SiteOp::BranchTable { cases } = info.op {
+                for k in 0..cases.min(256) {
+                    probe.cmp(
+                        CASE_SITE | site_bit | ((site & 0x3f_ffff) << 8) | k,
+                        CmpKind::Eq,
+                        lhs,
+                        u64::from(k),
+                    );
+                }
+            }
             if zigzag {
                 let extend = |v: u64| {
                     if info.bits < 64 && info.signed {
@@ -635,7 +1031,7 @@ impl NativeCoverage {
                     _ => CmpKind::Eq,
                 };
                 probe.cmp(
-                    site | 0x8000_0000,
+                    label | ZIGZAG_SITE,
                     kind,
                     encode(extend(lhs)),
                     encode(extend(rhs)),

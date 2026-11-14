@@ -1,0 +1,85 @@
+// tc classifier: record when each IPv4 source was last seen, and shoot DNS
+// queries (UDP port 53) that do not come from 10.0.0.0/8.
+copy enum TcAction {
+    Ok,
+    Reclassify,
+    Shot,
+    Pipe,
+    Stolen,
+    Queued,
+    Repeat,
+    Redirect,
+}
+
+copy enum BpfMapKind {
+    Hash,
+    Array,
+    PerCpuHash,
+    PerCpuArray,
+    LruHash,
+}
+
+copy struct BpfMapSpec {
+    kind: BpfMapKind,
+    max_entries: u32,
+}
+
+effect Packet {
+    fn load_u8(offset: u32) -> Option[u8];
+    fn load_u16be(offset: u32) -> Option[u32];
+    fn load_u32be(offset: u32) -> Option[u32];
+}
+
+effect Bpf {
+    fn ktime_get_ns() -> u64;
+}
+
+effect LastSeen {
+    fn update(key: u32, value: u64) -> Unit;
+}
+
+fn last_seen_map() -> BpfMapSpec {
+    BpfMapSpec {
+        kind: BpfMapKind::Hash,
+        max_entries: 256
+    }
+}
+
+fn dns_guard() -> TcAction eff [Packet] {
+    match Packet::load_u8(23) {
+        Some(proto) => if proto != 17 {
+            TcAction::Ok
+        } else {
+            match Packet::load_u16be(36) {
+                Some(port) => if port == 53 {
+                    TcAction::Shot
+                } else {
+                    TcAction::Ok
+                },
+                None => TcAction::Shot,
+            }
+        },
+        None => TcAction::Shot,
+    }
+}
+
+fn main() -> TcAction eff [Packet, Bpf, LastSeen] {
+    match Packet::load_u16be(12) {
+        Some(ether_type) => if ether_type != 2048 {
+            TcAction::Ok
+        } else {
+            match Packet::load_u32be(26) {
+                Some(src) => {
+                    LastSeen::update(src, Bpf::ktime_get_ns());
+                    if src / 16777216 == 10 {
+                        TcAction::Ok
+                    } else {
+                        dns_guard()
+                    }
+                },
+                None => TcAction::Shot,
+            }
+        },
+        None => TcAction::Ok,
+    }
+}

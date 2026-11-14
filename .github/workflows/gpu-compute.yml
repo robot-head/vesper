@@ -1,0 +1,82 @@
+name: GPU compute on lavapipe
+
+# Differential tests of crates/vesper-gpu-compute against the CPU Tensor and
+# Kinetic references on Mesa lavapipe (llvmpipe), Vulkan's software
+# implementation. Bazel and the other platform jobs build the crate and run
+# its naga compile tests, but have no Vulkan device; this job is where the
+# device tests actually run (VESPER_GPU_REQUIRE=1 makes a missing device a
+# failure instead of a skip). No performance is measured here.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'crates/vesper-gpu-compute/**'
+      - 'crates/vesper-tensor/**'
+      - 'crates/vesper-kinetic/**'
+      - 'crates/vesper-alloc/**'
+      - '.github/workflows/gpu-compute.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  pull_request:
+    paths:
+      - 'crates/vesper-gpu-compute/**'
+      - 'crates/vesper-tensor/**'
+      - 'crates/vesper-kinetic/**'
+      - 'crates/vesper-alloc/**'
+      - '.github/workflows/gpu-compute.yml'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gpu-compute-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: 2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  lavapipe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VESPER_GPU_REQUIRE: '1'
+      VESPER_GPU_DEVICE: llvmpipe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Mesa lavapipe and the Vulkan validation layers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers libvulkan1 vulkan-tools vulkan-validationlayers
+      - name: Show the Vulkan device
+        run: |
+          dpkg -l mesa-vulkan-drivers libvulkan1 | tail -n 2
+          vulkaninfo --summary
+      - name: Check formatting
+        run: cargo fmt -p vesper-gpu-compute -- --check
+      - name: Clippy
+        run: cargo clippy --locked -p vesper-gpu-compute --all-targets -- -D warnings
+      - name: Differential tests on lavapipe
+        run: cargo test --locked -p vesper-gpu-compute -- --nocapture
+      - name: Same tests under the Khronos validation layer
+        env:
+          VK_INSTANCE_LAYERS: VK_LAYER_KHRONOS_validation
+        run: |
+          set -o pipefail
+          cargo test --locked -p vesper-gpu-compute -- --nocapture --test-threads=1 2>&1 | tee validation.log
+          if grep -q "Validation Error" validation.log; then
+            echo "::error::the Vulkan validation layer reported errors"
+            exit 1
+          fi
