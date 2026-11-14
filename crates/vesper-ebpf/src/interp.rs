@@ -1240,13 +1240,15 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
                     .iter()
                     .find(|(slot, _)| *slot == pc)
                     .map(|(_, n)| n.as_str());
-                match name {
-                    // preemption and RCU read-side regions have no
-                    // observable effect on one simulated CPU
-                    Some(n) if crate::helpers::KFUNCS.contains(&n) => {
-                        init[0..=5].fill(false);
-                    }
-                    _ => break Err(InterpError::UnsupportedInsn { pc }),
+                let Some(name) = name.filter(|n| crate::helpers::KFUNCS.contains(n)) else {
+                    break Err(InterpError::UnsupportedInsn { pc });
+                };
+                let r1 = regs[1];
+                let args = [r1, regs[2], regs[3]];
+                let r0 = tri!(call_kfunc(env, pc, name, &args, &init));
+                init[0..=5].fill(false);
+                if let Some(v) = r0 {
+                    set!(Reg::R0, v);
                 }
             }
             Insn::Call(CallTarget::Helper(id)) => {
@@ -1332,6 +1334,105 @@ pub fn run(prog: &Program, env: &mut Env, input: Input<'_>) -> Result<RunResult,
     };
     env.reset_transient();
     result
+}
+
+/// The value `bpf_local_irq_save` stores in its flag word here (x86
+/// `EFLAGS` with `IF` set); the program cannot read it.
+const IRQ_FLAGS: u64 = 0x246;
+const EINVAL: u64 = 22;
+
+/// The modelled kfuncs. Preemption, RCU read-side and irq-disabled
+/// regions have no observable effect on one simulated CPU; `bpf_iter_num`
+/// keeps `struct bpf_iter_num_kern { int cur; int end; }` in its stack
+/// slot exactly as `kernel/bpf/bpf_iter.c` does.
+fn call_kfunc(
+    env: &mut Env,
+    pc: usize,
+    name: &str,
+    a: &[Value; 3],
+    init: &[bool; 11],
+) -> Result<Option<Value>, InterpError> {
+    let arg = |i: usize| -> Result<Value, InterpError> {
+        if init[i + 1] {
+            Ok(a[i])
+        } else {
+            Err(InterpError::UninitRegister {
+                pc,
+                reg: i as u8 + 1,
+            })
+        }
+    };
+    let slot = |env: &Env| -> Result<(RegionId, usize), InterpError> {
+        let p = arg(0)?;
+        let (rid, at) = resolve(env, pc, p, 0, 8)?;
+        if !matches!(env.regions[rid as usize].kind, Kind::Stack) {
+            return Err(InterpError::BadHelperArg {
+                pc,
+                detail: format!("{name}: arg #0 is not on the stack"),
+            });
+        }
+        Ok((rid, at))
+    };
+    let write = |env: &mut Env, rid: RegionId, at: usize, v: u64| {
+        let r = &mut env.regions[rid as usize];
+        r.bytes[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        r.init[at..at + 8].fill(true);
+        r.spills.remove(&at);
+    };
+    let iter = |env: &Env, rid: RegionId, at: usize| {
+        let b = &env.regions[rid as usize].bytes[at..at + 8];
+        (
+            i32::from_le_bytes(b[..4].try_into().expect("4 bytes")),
+            i32::from_le_bytes(b[4..].try_into().expect("4 bytes")),
+        )
+    };
+    let pack = |cur: i32, end: i32| (cur as u32 as u64) | ((end as u32 as u64) << 32);
+    Ok(match name {
+        "bpf_local_irq_save" => {
+            let (rid, at) = slot(env)?;
+            write(env, rid, at, IRQ_FLAGS);
+            None
+        }
+        "bpf_local_irq_restore" => {
+            slot(env)?;
+            None
+        }
+        "bpf_iter_num_new" => {
+            let (rid, at) = slot(env)?;
+            let start = arg(1)?.v as i32;
+            let end = arg(2)?.v as i32;
+            let (state, ret) = if start > end {
+                (pack(0, 0), EINVAL.wrapping_neg())
+            } else if end as i64 - start as i64 > BPF_MAX_LOOPS as i64 {
+                (pack(0, 0), E2BIG.wrapping_neg())
+            } else {
+                (pack(start.wrapping_sub(1), end), 0)
+            };
+            write(env, rid, at, state);
+            Some(Value::scalar(ret as u32 as u64))
+        }
+        "bpf_iter_num_next" => {
+            let (rid, at) = slot(env)?;
+            let (cur, end) = iter(env, rid, at);
+            if cur as i64 + 1 >= end as i64 {
+                write(env, rid, at, pack(0, 0));
+                Some(Value::scalar(0))
+            } else {
+                write(env, rid, at, pack(cur + 1, end));
+                let r = &env.regions[rid as usize];
+                Some(Value {
+                    v: r.base + at as u64,
+                    prov: Some(rid),
+                })
+            }
+        }
+        "bpf_iter_num_destroy" => {
+            let (rid, at) = slot(env)?;
+            write(env, rid, at, pack(0, 0));
+            None
+        }
+        _ => None,
+    })
 }
 
 /// A context load: `Some` for the pointer fields, `None` for a plain field
