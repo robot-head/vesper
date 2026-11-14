@@ -1389,3 +1389,32 @@ mod host {
         }
     }
 }
+
+#[cfg(test)]
+mod nan_tests {
+    use super::isa_flags;
+
+    fn world(source: &str) -> crate::check::World {
+        let parsed = crate::parser::parse(source);
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = crate::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        checked.world
+    }
+
+    #[test]
+    fn detfloat_sessions_canonicalize_nans() {
+        let det = world(
+            "fn half(x: f64) -> f64 eff [DetFloat] {\n    x / 2.0\n}\n\nfn main() -> f64 {\n    half(3.0)\n}\n",
+        );
+        let plain = world("fn main() -> f64 {\n    1.5\n}\n");
+        for pic in [false, true] {
+            assert!(isa_flags(&det, pic).unwrap().enable_nan_canonicalization());
+            assert!(
+                !isa_flags(&plain, pic)
+                    .unwrap()
+                    .enable_nan_canonicalization()
+            );
+        }
+    }
+}

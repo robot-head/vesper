@@ -389,7 +389,14 @@ fn preflight_ir(
                 "native batch rejects ambient/foreign import {name}"
             ));
         }
-        if !f.generics.is_empty() || !f.effects.instances.is_empty() || f.effects.tail.is_some() {
+        // Capability effects (ConstTime, Realtime, DetFloat) have no
+        // operations; such functions compile like pure ones (lane 23).
+        if !f.generics.is_empty()
+            || !f.effects.instances.iter().all(|e| {
+                crate::capability_effects::is_capability_effect(&e.name) && e.args.is_empty()
+            })
+            || f.effects.tail.is_some()
+        {
             return Err(format!(
                 "native batch requires pure ordinary monomorphic function {name}"
             ));

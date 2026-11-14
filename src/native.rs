@@ -611,6 +611,7 @@ fn define_instances<M: Module>(
         CodegenOptions::default(),
     )
 }
+#[allow(clippy::too_many_arguments)]
 fn define_instances_observed<M: Module>(
     m: &mut M,
     world: &World,
