@@ -1,0 +1,10 @@
+// expect: E0401
+fn work(n: u64) -> u64 eff [Trace] {
+    let span = Trace::start_span(1, "work");
+    Trace::emit_ok(span, n);
+    n
+}
+
+fn main() -> u64 {
+    work(3)
+}

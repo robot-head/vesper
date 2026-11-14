@@ -1,0 +1,12 @@
+// expect: E0752
+fn main() -> u64 eff [Trace] {
+    let s = Trace::start_span(0, "dropped");
+    let ActiveSpan {
+        ctx,
+        parent_span_id,
+        start_mono_ns,
+        schema_id
+    }
+    = s;
+    ctx.span_id
+}
