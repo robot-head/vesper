@@ -375,6 +375,7 @@ fn request(method: &str, path: &str, headers: &[(&str, &str)], body: &[u8]) -> C
         scheme: "https".into(),
         authority: "prism.test".into(),
         path: path.into(),
+        protocol: None,
         fields: headers.iter().map(|(n, v)| Field::new(*n, *v)).collect(),
         body: body.to_vec(),
     }

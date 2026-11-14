@@ -28,7 +28,9 @@ pub(crate) enum Role {
 #[derive(Clone, Debug)]
 pub(crate) struct OpClause {
     pub op: usize,
+    /// Instance key of the clause function, and its IR function.
     pub function: String,
+    pub base: String,
     pub mode: HandlerMode,
     pub arg_patterns: Vec<Pattern>,
     pub arg_types: Vec<Type>,
@@ -44,9 +46,12 @@ pub(crate) struct Handler {
     pub effect: Effect,
     pub keys: Vec<String>,
     pub state: Option<Type>,
+    /// Instance keys of the body and return clause, and their IR functions.
     pub body: String,
+    pub body_base: String,
     pub body_type: Type,
     pub ret: String,
+    pub ret_base: String,
     pub ret_pattern: Pattern,
     pub ret_captures: Vec<String>,
     pub ops: Vec<OpClause>,
@@ -55,10 +60,37 @@ pub(crate) struct Handler {
     pub aliases: BTreeMap<String, String>,
 }
 
+/// Type arguments of a monomorphized instance.
+pub(crate) type Vars = BTreeMap<String, Type>;
+
+/// One compiled function: an IR function under a type substitution.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Instance {
+    pub base: String,
+    pub vars: Vars,
+}
+
+/// The key of `base` under `vars` (`base` itself when `vars` is empty).
+pub(crate) fn instance_name(base: &str, vars: &Vars) -> String {
+    if vars.is_empty() {
+        return base.to_owned();
+    }
+    let args: Vec<String> = vars.iter().map(|(k, t)| format!("{k}={t}")).collect();
+    format!("{base}<{}>", args.join(","))
+}
+
 #[derive(Default)]
 pub(crate) struct Plan {
-    /// Reachable IR functions in a deterministic order.
+    /// Clause instances lowered with [`HandlerMode::Cps`], with their blocks
+    /// split after every resumption, and the resumption points:
+    /// `(call value, block that continues after it)`.
+    pub split: BTreeMap<String, (FunctionIr, Vec<(ValueId, usize)>)>,
+    /// Reachable function instances in a deterministic order.
     pub functions: Vec<String>,
+    /// Instance key -> IR function and type arguments.
+    pub instances: BTreeMap<String, Instance>,
+    /// (caller instance, call instruction) -> callee instance.
+    pub calls: BTreeMap<(String, ValueId), String>,
     pub roles: BTreeMap<String, Role>,
     pub handlers: Vec<Handler>,
     pub handler_at: BTreeMap<(String, ValueId), usize>,
@@ -68,6 +100,8 @@ pub(crate) struct Plan {
     pub keys: BTreeSet<String>,
     /// Largest operation arity among the program's effects.
     pub max_arity: usize,
+    /// Host capabilities the entry declares (WASI imports).
+    pub host: Vec<super::host::HostCapability>,
 }
 
 pub(crate) fn handler_keys(effect: &Effect) -> Vec<String> {
@@ -115,6 +149,66 @@ pub(crate) fn closure(
     ))
 }
 
+/// Labels a function's own effect row binds (`eff [l: E]`).
+pub(crate) fn row_labels(world: &World, base: &str) -> BTreeSet<String> {
+    world
+        .functions
+        .get(base)
+        .map(|f| {
+            f.effects
+                .instances
+                .iter()
+                .filter_map(|e| e.label.clone())
+                .filter(|l| !l.starts_with('$'))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `t` is closed: no generic parameter or inferred part.
+pub(crate) fn concrete(world: &World, t: &Type) -> bool {
+    !mentions_generic(world, t)
+}
+
+/// The type arguments of the call at `span` inside an instance with `outer`
+/// arguments, when all of them are concrete (otherwise the callee is
+/// compiled once over the uniform representation).
+pub(crate) fn call_vars(
+    world: &World,
+    callee: &str,
+    span: &crate::ast::Span,
+    explicit: &[Type],
+    outer: &Vars,
+) -> Vars {
+    let Some(f) = world.functions.get(callee) else {
+        return Vars::new();
+    };
+    if f.generics.iter().all(|g| g.row) {
+        return Vars::new();
+    }
+    let mut vars = Vars::new();
+    if let Some(found) = world.calls.get(&(span.start, span.end)) {
+        for (k, t) in found {
+            vars.insert(k.clone(), substitute(t, outer));
+        }
+    }
+    for (g, t) in f.generics.iter().zip(explicit) {
+        if !g.row && !vars.contains_key(&g.name) {
+            vars.insert(g.name.clone(), substitute(t, outer));
+        }
+    }
+    let mut out = Vars::new();
+    for g in f.generics.iter().filter(|g| !g.row) {
+        match vars.get(&g.name) {
+            Some(t) if concrete(world, t) => {
+                out.insert(g.name.clone(), crate::numeric::default_type(t));
+            }
+            _ => return Vars::new(),
+        }
+    }
+    out
+}
+
 pub(crate) fn plan(
     world: &World,
     program: &Program,
@@ -130,11 +224,24 @@ pub(crate) fn plan(
             .max()
             .unwrap_or(0)
             .max(1),
+        host: super::host::capabilities(world, entry)?,
         ..Plan::default()
     };
-    let mut queue = VecDeque::from([(entry.to_owned(), Role::Ordinary, BTreeSet::new())]);
+    for c in &p.host {
+        p.keys.insert(format!("$effect:{}", c.effect()));
+    }
+    let root = Instance {
+        base: entry.to_owned(),
+        vars: Vars::new(),
+    };
+    let mut queue = VecDeque::from([(
+        entry.to_owned(),
+        root,
+        Role::Ordinary,
+        row_labels(world, entry),
+    )]);
     let mut seen = BTreeSet::new();
-    while let Some((name, role, labels)) = queue.pop_front() {
+    while let Some((name, inst, role, labels)) = queue.pop_front() {
         if !seen.insert(name.clone()) {
             continue;
         }
@@ -143,33 +250,64 @@ pub(crate) fn plan(
                 "more than {max_functions} reachable functions"
             )));
         }
-        let f = program.functions.get(&name).ok_or_else(|| {
+        let f = program.functions.get(&inst.base).ok_or_else(|| {
             WasmError::unsupported(
                 Unsupported::ExternalFunction,
-                &name,
+                &inst.base,
                 "function has no lowered body",
             )
         })?;
+        let vars = inst.vars.clone();
+        let nested = |base: String| -> (String, Instance) {
+            (
+                instance_name(&base, &vars),
+                Instance {
+                    base,
+                    vars: vars.clone(),
+                },
+            )
+        };
         p.functions.push(name.clone());
+        p.instances.insert(name.clone(), inst.clone());
         p.roles.insert(name.clone(), role);
         p.labels.insert(name.clone(), labels.clone());
         for block in &f.blocks {
-            for inst in &block.instructions {
-                match &inst.op {
-                    Op::Call { callee, .. } if program.functions.contains_key(callee) => {
-                        queue.push_back((callee.clone(), Role::Ordinary, BTreeSet::new()));
+            for i in &block.instructions {
+                match &i.op {
+                    Op::Call { callee, types, .. } if program.functions.contains_key(callee) => {
+                        let cv = call_vars(world, callee, &i.span, types, &vars);
+                        let key = instance_name(callee, &cv);
+                        p.calls.insert((name.clone(), i.dest), key.clone());
+                        queue.push_back((
+                            key,
+                            Instance {
+                                base: callee.clone(),
+                                vars: cv,
+                            },
+                            Role::Ordinary,
+                            row_labels(world, callee),
+                        ));
                     }
                     Op::Closure { expr, aliases, .. } => {
                         let (function, caps) = closure(expr, aliases, f)?;
                         check_prefix(program, &function, &caps)?;
-                        queue.push_back((function, Role::Ordinary, labels.clone()));
+                        let (key, inst) = nested(function);
+                        queue.push_back((key, inst, Role::Ordinary, labels.clone()));
                     }
                     Op::Read { root, path, .. }
                         if path.is_empty()
                             && !f.locals.contains_key(root)
                             && program.functions.contains_key(root) =>
                     {
-                        queue.push_back((root.clone(), Role::Ordinary, BTreeSet::new()));
+                        queue.push_back((
+                            root.clone(),
+                            Instance {
+                                base: root.clone(),
+                                vars: Vars::new(),
+                            },
+                            Role::Ordinary,
+                            row_labels(world, root),
+                        ));
                     }
                     Op::Handle {
                         expr,
@@ -183,7 +321,8 @@ pub(crate) fn plan(
                             program,
                             f,
                             &name,
-                            inst.dest,
+                            &vars,
+                            i.dest,
                             expr,
                             aliases,
                             *state_value,
@@ -193,11 +332,23 @@ pub(crate) fn plan(
                         if let Some(l) = &h.effect.label {
                             inner.insert(l.clone());
                         }
-                        queue.push_back((h.body.clone(), Role::HandlerBody, inner));
-                        queue.push_back((h.ret.clone(), Role::ReturnClause, labels.clone()));
+                        let (k, inst) = nested(h.body_base.clone());
+                        queue.push_back((k, inst, Role::HandlerBody, inner));
+                        let (k, inst) = nested(h.ret_base.clone());
+                        queue.push_back((k, inst, Role::ReturnClause, labels.clone()));
                         for c in &h.ops {
+                            if c.mode == HandlerMode::Cps
+                                && let Some(resume) = &c.resume
+                            {
+                                let split =
+                                    split_at_resumptions(&program.functions[&c.base], resume);
+                                p.split.insert(c.function.clone(), split);
+                            }
+                            let base = c.base.clone();
+                            let (k, inst) = nested(base);
                             queue.push_back((
-                                c.function.clone(),
+                                k,
+                                inst,
                                 Role::OpClause {
                                     handler: id,
                                     op: c.op,
@@ -206,7 +357,7 @@ pub(crate) fn plan(
                             ));
                         }
                         p.keys.extend(h.keys.iter().cloned());
-                        p.handler_at.insert((name.clone(), inst.dest), id);
+                        p.handler_at.insert((name.clone(), i.dest), id);
                         p.handlers.push(h);
                     }
                     _ => {}
@@ -223,6 +374,7 @@ fn handler(
     program: &Program,
     outer: &FunctionIr,
     site: &str,
+    ivars: &Vars,
     dest: ValueId,
     expr: &Expr,
     aliases: &BTreeMap<String, String>,
@@ -240,6 +392,11 @@ fn handler(
         return Err(WasmError::Invalid(
             "handle instruction without a handler".into(),
         ));
+    };
+    let effect = &Effect {
+        label: effect.label.clone(),
+        name: effect.name.clone(),
+        args: effect.args.iter().map(|t| substitute(t, ivars)).collect(),
     };
     let generic_args = effect.args.iter().any(|t| mentions_generic(world, t));
     if generic_args {
@@ -269,13 +426,13 @@ fn handler(
         }
     }
     let state_type = match (state, state_value) {
-        (Some(_), Some(v)) => Some(
+        (Some(_), Some(v)) => Some(substitute(
             outer
                 .values
                 .get(&v)
-                .cloned()
                 .ok_or_else(|| WasmError::Invalid("handler state has no type".into()))?,
-        ),
+            ivars,
+        )),
         (None, _) => None,
         (Some(_), None) => return Err(WasmError::Invalid("handler state was not lowered".into())),
     };
@@ -290,13 +447,6 @@ fn handler(
             )));
         };
         let sig = &decl.ops[op];
-        if sig.params.iter().any(|p| p.pass == Pass::Inout) {
-            return Err(WasmError::unsupported(
-                Unsupported::InoutEffectArgument,
-                site,
-                format!("{}::{} takes an inout argument", effect.name, sig.name),
-            ));
-        }
         let function = nested_name("handler_clause", &clause.body.span);
         let ir = program.functions.get(&function).ok_or_else(|| {
             WasmError::Invalid(format!("handler clause {function} was not lowered"))
@@ -311,19 +461,37 @@ fn handler(
         let caps = captures(crate::check::clause_free_names(clause), aliases, outer);
         check_prefix(program, &function, &caps)?;
         let mode = clause_mode(ir, resume.as_deref(), &function)?;
-        if mode == HandlerMode::StackSwitching && !stack_switching {
-            return Err(WasmError::unsupported(
-                Unsupported::NonTailResumptiveHandler,
-                site,
-                format!(
-                    "clause '{}' of {} uses its continuation before returning; portable lowering supports aborting and tail-resumptive clauses only",
-                    clause.name, effect.name
-                ),
-            ));
+        // An `inout` operation argument is a cell copied back when the
+        // operation returns: only a clause that resumes in tail position
+        // makes all its writes before that.
+        for (i, p) in sig.params.iter().enumerate() {
+            if p.pass != Pass::Inout {
+                continue;
+            }
+            let bound = matches!(
+                clause.pats.get(i).map(|p| &p.kind),
+                Some(PatternKind::Bind(_) | PatternKind::Wild)
+            );
+            if mode != HandlerMode::Tail || !bound {
+                return Err(WasmError::unsupported(
+                    Unsupported::InoutEffectArgument,
+                    site,
+                    format!(
+                        "{}::{} takes an inout argument; only a clause that binds it by name and resumes in tail position is supported",
+                        effect.name, sig.name
+                    ),
+                ));
+            }
         }
+        let mode = if mode == HandlerMode::StackSwitching && !stack_switching {
+            HandlerMode::Cps
+        } else {
+            mode
+        };
         clauses.push(OpClause {
             op,
-            function,
+            function: instance_name(&function, ivars),
+            base: function.clone(),
             mode,
             arg_patterns: clause.pats.iter().take(n).cloned().collect(),
             arg_types: sig
@@ -341,11 +509,11 @@ fn handler(
         keys: handler_keys(effect),
         effect: effect.clone(),
         state: state_type,
-        body: body_fn,
-        body_type: program.functions[&nested_name("handler_body", &body.span)]
-            .result
-            .clone(),
-        ret: ret_fn,
+        body_type: substitute(&program.functions[&body_fn].result, ivars),
+        body: instance_name(&body_fn, ivars),
+        ret: instance_name(&ret_fn, ivars),
+        body_base: body_fn.clone(),
+        ret_base: ret_fn.clone(),
         ret_pattern: ret
             .pats
             .first()
@@ -423,6 +591,22 @@ fn clause_mode(f: &FunctionIr, resume: Option<&str>, name: &str) -> Result<Handl
                     }
                     calls.insert(i.dest);
                 }
+                // A closure or nested handler that names the continuation
+                // captures it as a value.
+                Op::Closure { expr, aliases, .. } | Op::Handle { expr, aliases, .. } => {
+                    let mut names = crate::check::free_names(expr);
+                    if let ExprKind::Closure { params, .. } = &expr.kind {
+                        for p in params {
+                            names.remove(&p.name);
+                        }
+                    }
+                    if names
+                        .iter()
+                        .any(|n| n == resume || aliases.get(n).is_some_and(|s| s == resume))
+                    {
+                        return Err(first_class(name));
+                    }
+                }
                 _ => {
                     if used.iter().any(|v| reads.contains(v)) {
                         return Err(first_class(name));
@@ -469,6 +653,48 @@ fn clause_mode(f: &FunctionIr, resume: Option<&str>, name: &str) -> Result<Handl
     } else {
         Ok(HandlerMode::StackSwitching)
     }
+}
+
+/// Split every block of clause `f` after each call of its continuation
+/// `resume`, so that each resumption ends a block and the code after it
+/// starts one. Returns the new function and `(call value, continuation
+/// block)` for each resumption.
+fn split_at_resumptions(f: &FunctionIr, resume: &str) -> (FunctionIr, Vec<(ValueId, usize)>) {
+    let mut f = f.clone();
+    let reads: BTreeSet<ValueId> = f
+        .blocks
+        .iter()
+        .flat_map(|b| &b.instructions)
+        .filter_map(|i| match &i.op {
+            Op::Read { root, .. } if root == resume => Some(i.dest),
+            _ => None,
+        })
+        .collect();
+    let mut points = vec![];
+    let mut b = 0;
+    while b < f.blocks.len() {
+        let at = f.blocks[b]
+            .instructions
+            .iter()
+            .position(|i| matches!(&i.op, Op::Indirect { callee, .. } if reads.contains(callee)));
+        if let Some(at) = at {
+            let dest = f.blocks[b].instructions[at].dest;
+            let rest = f.blocks[b].instructions.split_off(at + 1);
+            let next = f.blocks.len();
+            let mut tail = f.blocks[b].clone();
+            tail.params = vec![];
+            tail.instructions = rest;
+            tail.incoming_tokens = vec![];
+            f.blocks[b].terminator = Terminator::Jump {
+                block: next,
+                args: vec![],
+            };
+            f.blocks.push(tail);
+            points.push((dest, next));
+        }
+        b += 1;
+    }
+    (f, points)
 }
 
 fn first_class(name: &str) -> WasmError {
@@ -544,7 +770,7 @@ pub(crate) fn operands(op: &Op) -> Vec<ValueId> {
         Op::Constant(_) | Op::Unit | Op::Read { .. } | Op::Closure { .. } => vec![],
         Op::Bind { value, .. } | Op::Write { value, .. } | Op::Unary(_, value) => vec![*value],
         Op::Binary(_, a, b) | Op::Index(a, b) => vec![*a, *b],
-        Op::Tuple(vs) => vs.clone(),
+        Op::Tuple(vs) | Op::Vector { args: vs, .. } => vs.clone(),
         Op::Data(_, fs) => fs.iter().map(|(_, v)| *v).collect(),
         Op::Project(v, _) | Op::Try(v) => vec![*v],
         Op::Call { args, .. } => args.iter().map(|a| a.value).collect(),

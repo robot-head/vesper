@@ -1,0 +1,53 @@
+// Copy structs and enums in a region: get, set and match on payloads.
+copy struct Point {
+    x: i64,
+    y: i64,
+}
+
+copy enum Shape {
+    Dot,
+    Segment(Point, Point),
+}
+
+fn length(s: Shape) -> i64 {
+    match s {
+        Shape::Dot => 0,
+        Shape::Segment(a, b) => wrapping_add(wrapping_sub(b.x, a.x), wrapping_sub(b.y, a.y)),
+    }
+}
+
+fn main() -> i64 {
+    region r(512) {
+        let p = r
+            .box(
+            Point {
+                x: 1,
+                y: 2
+            }
+        );
+        let s = r
+            .box(
+            Shape::Segment(
+                Point {
+                    x: 0,
+                    y: 0
+                },
+                Point {
+                    x: 3,
+                    y: 4
+                }
+            )
+        );
+        let d = r.box(Shape::Dot);
+        r
+            .set(
+            p,
+            Point {
+                x: 30,
+                y: 2
+            }
+        );
+        let q = r.get(p);
+        wrapping_add(wrapping_add(q.x, q.y), wrapping_add(length(r.get(s)), length(r.get(d))))
+    }
+}

@@ -1,0 +1,36 @@
+// The bitwise intrinsics are ordinary total integer operations: same kind in
+// and out, shift amounts modulo the width, logical shifts on unsigned kinds
+// and an arithmetic right shift on i64.
+fn mixed() -> u64 {
+    let a: u64 = bit_xor(240, 15);
+    let b: u64 = bit_and(a, 60);
+    let c: u64 = bit_or(b, 1);
+    let d: u64 = bit_shl(c, 65);
+    let e: u64 = bit_shr(18446744073709551615, 60);
+    let w: u8 = bit_shl(200, 9);
+    wrapping_add(wrapping_add(d, e), widen_u64(w))
+}
+
+fn signed() -> i64 {
+    bit_shr(-16, 2)
+}
+
+fn narrow() -> u8 {
+    let x: u8 = bit_shl(129, 1);
+    let y: u32 = bit_shr(4294967295, 28);
+    let z: u64 = wrapping_add(widen_u64(x), widen_u64(y));
+    if z == 17 {
+        bit_xor(x, 255)
+    } else {
+        0
+    }
+}
+
+fn main() -> u64 {
+    let s = signed();
+    if s == -4 {
+        wrapping_add(mixed(), widen_u64(narrow()))
+    } else {
+        0
+    }
+}

@@ -1,7 +1,12 @@
 //! A one-shot completion scheduler. Every queue transition moves its owned
 //! continuation, file and buffer. Driver failures retain all pending owners.
 //! Native continuation code generation supplies implementations of `Resume`.
-use crate::io_driver::{IoDriver, Request};
+//!
+//! The scheduler depends only on the backend-neutral [`Driver`] protocol.
+//! Every [`CompletionDriver`] (io_uring, epoll, kqueue, IOCP, or the runtime
+//! choice [`AnyDriver`](crate::select::AnyDriver)) implements it.
+use crate::driver::{Completion, CompletionDriver};
+pub use crate::driver::{Operation, Request};
 use std::{collections::VecDeque, fs::File, io};
 
 pub struct IoEvent {
@@ -40,34 +45,49 @@ pub trait Driver<C> {
     fn pending(&self) -> usize;
     fn cancel_all(&mut self) -> io::Result<()>;
 }
-impl<C> Driver<C> for IoDriver<C> {
-    fn submit(&mut self, request: Request<C>) -> Result<(), (io::Error, Request<C>)> {
-        IoDriver::submit(self, request).map(|_| ())
-    }
-    fn poll(&mut self, wait: bool) -> Result<Vec<Finished<C>>, PollError<C>> {
-        fn convert<C>(events: Vec<crate::io_driver::Completion<C>>) -> Vec<Finished<C>> {
-            events
-                .into_iter()
-                .map(|e| Finished {
-                    request: e.request,
-                    result: e.result,
-                })
-                .collect()
-        }
-        IoDriver::poll(self, wait)
-            .map(convert)
-            .map_err(|e| PollError {
-                error: e.error,
-                completed: convert(e.completed),
-            })
-    }
-    fn pending(&self) -> usize {
-        IoDriver::pending(self)
-    }
-    fn cancel_all(&mut self) -> io::Result<()> {
-        IoDriver::cancel_all(self)
-    }
+fn finished<C>(events: Vec<Completion<C>>) -> Vec<Finished<C>> {
+    events
+        .into_iter()
+        .map(|e| Finished {
+            request: e.request,
+            result: e.result,
+        })
+        .collect()
 }
+/// Adapt a [`CompletionDriver`] to the scheduler's [`Driver`] protocol.
+macro_rules! completion_driver {
+    ($($(#[$cfg:meta])* $ty:ty),* $(,)?) => {$(
+        $(#[$cfg])*
+        impl<C> Driver<C> for $ty {
+            fn submit(&mut self, request: Request<C>) -> Result<(), (io::Error, Request<C>)> {
+                CompletionDriver::submit(self, request).map(|_| ())
+            }
+            fn poll(&mut self, wait: bool) -> Result<Vec<Finished<C>>, PollError<C>> {
+                CompletionDriver::poll(self, wait).map(finished).map_err(|e| PollError {
+                    error: e.error,
+                    completed: finished(e.completed),
+                })
+            }
+            fn pending(&self) -> usize {
+                CompletionDriver::pending(self)
+            }
+            fn cancel_all(&mut self) -> io::Result<()> {
+                CompletionDriver::cancel_all(self)
+            }
+        }
+    )*};
+}
+completion_driver!(
+    #[cfg(target_os = "linux")]
+    crate::uring::IoDriver<C>,
+    #[cfg(target_os = "linux")]
+    crate::epoll::EpollDriver<C>,
+    #[cfg(target_os = "macos")]
+    crate::kqueue::KqueueDriver<C>,
+    #[cfg(windows)]
+    crate::iocp::IocpDriver<C>,
+    crate::select::AnyDriver<C>,
+);
 /// The driver remains accessible after errors, so callers can retry polling or
 /// perform its explicit cancellation/shutdown protocol without losing fibers.
 pub struct Scheduler<C, D> {
@@ -166,16 +186,8 @@ impl<C: Resume, D: Driver<C>> Scheduler<C, D> {
         Ok(true)
     }
     /// Resume CQEs returned by explicit driver shutdown, including ECANCELED.
-    pub fn accept_completions(&mut self, completed: Vec<crate::io_driver::Completion<C>>) {
-        self.enqueue(
-            completed
-                .into_iter()
-                .map(|e| Finished {
-                    request: e.request,
-                    result: e.result,
-                })
-                .collect(),
-        );
+    pub fn accept_completions(&mut self, completed: Vec<Completion<C>>) {
+        self.enqueue(finished(completed));
     }
 }
 
@@ -235,11 +247,13 @@ impl<C: Resume, D: Driver<C>> Nursery<C, D> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::io_driver::Operation;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    fn null_file() -> File {
+        File::open(if cfg!(windows) { "NUL" } else { "/dev/null" }).unwrap()
+    }
     struct Counter {
         resumed: Arc<AtomicUsize>,
         stage: usize,
@@ -261,7 +275,7 @@ mod tests {
                 (1, Event::Yield) => {
                     self.stage = 2;
                     Step::Io(Request {
-                        file: File::open("/dev/null").unwrap(),
+                        file: null_file(),
                         buffer: vec![42],
                         continuation: self,
                         operation: Operation::Read,

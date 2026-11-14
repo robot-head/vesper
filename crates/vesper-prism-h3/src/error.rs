@@ -25,7 +25,16 @@ impl Code {
     pub const MESSAGE_ERROR: Self = Self(0x10e);
     pub const CONNECT_ERROR: Self = Self(0x10f);
     pub const VERSION_FALLBACK: Self = Self(0x110);
+    /// RFC 9297 §2.1.1: a malformed HTTP Datagram or DATAGRAM capsule.
+    pub const DATAGRAM_ERROR: Self = Self(0x33);
     pub const QPACK_DECOMPRESSION_FAILED: Self = Self(0x200);
+    /// draft-ietf-webtrans-http3 §9.5: a stream for a session that is
+    /// unknown and could not be buffered.
+    pub const WT_BUFFERED_STREAM_REJECTED: Self = Self(0x3994_bd84);
+    /// draft-ietf-webtrans-http3 §9.5: the stream's session is gone.
+    pub const WT_SESSION_GONE: Self = Self(0x170d_7b68);
+    /// The first code of the WebTransport application range (§4.4).
+    pub const WT_APPLICATION_FIRST: u64 = 0x52e4_a40f_a8db;
     pub const QPACK_ENCODER_STREAM_ERROR: Self = Self(0x201);
     pub const QPACK_DECODER_STREAM_ERROR: Self = Self(0x202);
 
@@ -49,11 +58,33 @@ impl Code {
             0x10e => "H3_MESSAGE_ERROR",
             0x10f => "H3_CONNECT_ERROR",
             0x110 => "H3_VERSION_FALLBACK",
+            0x33 => "H3_DATAGRAM_ERROR",
+            0x3994_bd84 => "WT_BUFFERED_STREAM_REJECTED",
+            0x170d_7b68 => "WT_SESSION_GONE",
             0x200 => "QPACK_DECOMPRESSION_FAILED",
             0x201 => "QPACK_ENCODER_STREAM_ERROR",
             0x202 => "QPACK_DECODER_STREAM_ERROR",
             _ => return None,
         })
+    }
+
+    /// The HTTP/3 code that carries WebTransport application error `n` on
+    /// RESET_STREAM and STOP_SENDING (draft-ietf-webtrans-http3 §4.4):
+    /// `first + n + floor(n / 0x1e)`, skipping the reserved grease codes.
+    pub const fn webtransport(n: u32) -> Self {
+        let n = n as u64;
+        Self(Self::WT_APPLICATION_FIRST + n + n / 0x1e)
+    }
+
+    /// The WebTransport application error a code carries, if it is in the
+    /// WebTransport range and not a reserved code.
+    pub const fn webtransport_code(self) -> Option<u32> {
+        let last = Self::webtransport(u32::MAX).0;
+        if self.0 < Self::WT_APPLICATION_FIRST || self.0 > last || self.is_reserved() {
+            return None;
+        }
+        let shifted = self.0 - Self::WT_APPLICATION_FIRST;
+        Some((shifted - shifted / 0x1f) as u32)
     }
 
     /// Reserved "grease" codes `0x1f * N + 0x21` (RFC 9114 §8.1).
@@ -67,6 +98,31 @@ impl fmt::Display for Code {
         match self.name() {
             Some(name) => f.write_str(name),
             None => write!(f, "0x{:x}", self.0),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn webtransport_codes_skip_grease() {
+        for n in [0u32, 1, 0x1d, 0x1e, 0x1f, 1000, u32::MAX - 1, u32::MAX] {
+            let c = Code::webtransport(n);
+            assert!(!c.is_reserved(), "{n}");
+            assert_eq!(c.webtransport_code(), Some(n), "{n}");
+        }
+        assert_eq!(Code::webtransport(0).0, 0x52e4_a40f_a8db);
+        assert_eq!(Code::webtransport(u32::MAX).0, 0x52e5_ac98_3162);
+        assert_eq!(Code::NO_ERROR.webtransport_code(), None);
+        // Every code in the range is either reserved or maps back.
+        for c in 0x52e4_a40f_a8db..0x52e4_a40f_a8db + 200 {
+            let code = Code(c);
+            match code.webtransport_code() {
+                Some(n) => assert_eq!(Code::webtransport(n), code),
+                None => assert!(code.is_reserved()),
+            }
         }
     }
 }

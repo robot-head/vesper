@@ -1,0 +1,9 @@
+fn main() -> i64 {
+    let x = 5;
+    let y = if x == 0 {
+        1
+    } else {
+        2
+    };
+    x + 1
+}

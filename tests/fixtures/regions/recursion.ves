@@ -1,0 +1,16 @@
+// Every activation opens its own region; payloads are tuples.
+fn depth(n: i64) -> i64 {
+    region r(128) {
+        let b = r.box((n, wrapping_mul(n, 2)));
+        if n == 0 {
+            0
+        } else {
+            let (x, y) = r.get(b);
+            wrapping_add(depth(wrapping_sub(n, 1)), wrapping_add(x, y))
+        }
+    }
+}
+
+fn main() -> i64 {
+    depth(10)
+}
