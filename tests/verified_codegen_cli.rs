@@ -1,6 +1,7 @@
 //! `vesper build --codegen verified` end to end.
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use vesper::verified_codegen::Target;
 
 fn vesper() -> Command {
@@ -11,22 +12,28 @@ fn fixture(name: &str) -> PathBuf {
         .join("tests/fixtures/verified_codegen")
         .join(name)
 }
-fn scratch() -> PathBuf {
+/// A fresh scratch directory per call. The tests run in parallel and macOS
+/// `SystemTime` has only microsecond resolution, so the name also carries the
+/// test's tag and a process-wide counter; `create_dir` makes a collision fail
+/// instead of two tests sharing (and one deleting) the same directory.
+fn scratch(tag: &str) -> PathBuf {
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "vesper-verified-codegen-cli-{}-{nanos}",
-        std::process::id()
+        "vesper-verified-codegen-cli-{tag}-{}-{nanos}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
     ));
-    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::create_dir(&dir).unwrap();
     dir
 }
 
 #[test]
 fn builds_and_runs_on_the_host() {
-    let dir = scratch();
+    let dir = scratch("run");
     let exe = dir.join("fib");
     let host = Target::host();
     let mut cmd = vesper();
@@ -73,7 +80,7 @@ fn builds_and_runs_on_the_host() {
 
 #[test]
 fn rejects_bad_flags_and_unsupported_programs() {
-    let dir = scratch();
+    let dir = scratch("reject");
     for args in [
         vec!["build", "--codegen", "cranelift"],
         vec!["run", "--codegen", "verified"],
