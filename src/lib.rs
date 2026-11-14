@@ -35,5 +35,6 @@ pub mod pact_frontend;
 pub mod regions;
 pub mod runtime;
 pub mod stack_bound;
+pub mod tensor_types;
 pub mod tooling;
 pub mod wasm_backend;

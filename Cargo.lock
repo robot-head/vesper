@@ -4679,6 +4679,7 @@ dependencies = [
  "vesper-simd",
  "vesper-span",
  "vesper-syntax",
+ "vesper-tensor",
  "vesper-vault",
  "wasm-encoder 0.261.0",
  "wasmtime",
