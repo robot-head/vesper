@@ -1,6 +1,6 @@
 # Self-hosting Stage 1: a Vesper-source lexer and parser (§42.3, §38)
 
-Wave eight, lane 3. Claim: #452. Base: `1094e64` (descendant of the required
+Wave eight, lane 3. Claim: #452. Base: `1094e64`, merged with `bbdf225` (descendant of the required
 baseline `ea1ed29`). Branch: `claude/project-thread-a203g6`.
 
 ## What was built
@@ -41,6 +41,8 @@ for the input.
   seed's `TokenKind` discriminants. The parser keeps no token buffer: its
   state caches the next significant token and re-lexes only for the second
   and third lookahead.
+* **Vector lane counts.** `Vec[u8, 16]` (merged from #379 while this lane
+  ran) is supported: an integer type argument is one TYPE node, as in the seed.
 * **CST.** The parser mirrors the seed's batch parser node for node (MODULE,
   ITEM, EXPR, PATTERN, TYPE, with trivia attached as rowan attaches it). With
   no byte buffer to hold the flat CST, it is emitted as a preorder event
@@ -68,11 +70,11 @@ for the input.
 Differential test `tests/self_host_front_end.rs`:
 
 * `differential_over_repository_sources`: every `.ves` file under
-  `examples/`, `tests/fixtures/` and `packages/` (145 files, including the
+  `examples/`, `tests/fixtures/` and `packages/` (146 files, including the
   compiler's own five sources) on the evaluator; every sixteenth file (10)
   also on the Cranelift JIT, which must return the same results. Result:
-  **145/145 token streams identical** (kinds and spans, trivia and EOF
-  included), **77 CSTs identical**, 4 typed `Unsupported` (the trait/model
+  **146/146 token streams identical** (kinds and spans, trivia and EOF
+  included), **78 CSTs identical**, 4 typed `Unsupported` (the trait/model
   examples), 64 seed-rejected inputs rejected (all macro-syntax fixtures:
   `source_macro*`, `macro_preview`, `stylus`, one `format_proof`, where the
   batch seed reports "expected a declaration"). Assertion floors: 100

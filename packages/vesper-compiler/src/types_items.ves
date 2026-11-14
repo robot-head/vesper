@@ -101,6 +101,9 @@ fn type_arg(p: P) -> P eff [Fail[Diag], Fail[ArithOverflow]] {
         } else {
             r
         }
+    } else if t.kind == 6 {
+        // A decimal lane count, as in `Vec[u8, 16]` (§14.3): one TYPE node.
+        close(bump(open(p, 204)))
     } else {
         let named = t.kind == 3 || t.kind == 4 || t.kind == 22;
         let q = ty(p);
