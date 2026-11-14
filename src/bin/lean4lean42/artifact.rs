@@ -75,7 +75,7 @@ fn is_reparse(m: &fs::Metadata) -> bool {
         false
     }
 }
-fn regular_meta(path: &Path) -> Result<fs::Metadata, Error> {
+pub(super) fn regular_meta(path: &Path) -> Result<fs::Metadata, Error> {
     let m = fs::symlink_metadata(path)?;
     if m.file_type().is_symlink() || is_reparse(&m) {
         return Err(identity("symlink/reparse point in regular input"));
@@ -208,7 +208,7 @@ fn present(path: &Path) -> Result<bool, Error> {
         Err(e) => Err(e.into()),
     }
 }
-fn manifest_hash(domain: &[u8], files: &[FileDigest]) -> Digest {
+pub(super) fn manifest_hash(domain: &[u8], files: &[FileDigest]) -> Digest {
     let mut h = blake3::Hasher::new();
     h.update(domain);
     h.update(&1u16.to_le_bytes());
@@ -227,7 +227,7 @@ struct Inputs {
 }
 fn inputs() -> Result<Inputs, Error> {
     let pins: Pins = bounded_json(PINS.as_bytes(), 4 * MIB)?;
-    if pins.schema != 1
+    if pins.schema != 2
         || pins.profile != PROFILE
         || pins.upstream_commit != UPSTREAM
         || pins.batteries_commit != BATTERIES
@@ -240,6 +240,9 @@ fn inputs() -> Result<Inputs, Error> {
             ErrorKind::UnsupportedCandidate,
             "unassembled or incompatible embedded profile",
         ));
+    }
+    if resource::verify_bundle()? != pins.resource_bundle_blake3 {
+        return Err(identity("embedded resource bundle association"));
     }
     let paths = [
         "tools/lean4lean42/patches/toolchain.patch",
@@ -394,6 +397,7 @@ struct FileScan<'a> {
     files: Vec<FileDigest>,
     bytes: u64,
     entries: u64,
+    allowed_dirs: Option<BTreeSet<PathBuf>>,
 }
 impl<'a> FileScan<'a> {
     fn new(root: &'a Path, max_files: usize, max_bytes: u64, end: Instant, sources: bool) -> Self {
@@ -406,6 +410,7 @@ impl<'a> FileScan<'a> {
             files: Vec::new(),
             bytes: 0,
             entries: 0,
+            allowed_dirs: None,
         }
     }
     fn walk(&mut self, dir: &Path, depth: usize) -> Result<(), Error> {
@@ -433,6 +438,13 @@ impl<'a> FileScan<'a> {
             }
             let m = regular_meta(&path)?;
             if m.is_dir() {
+                if self
+                    .allowed_dirs
+                    .as_ref()
+                    .is_some_and(|dirs| !dirs.contains(&path))
+                {
+                    return Err(identity("unexpected resource directory"));
+                }
                 self.walk(&path, depth + 1)?
             } else if m.is_file() {
                 if self.files.len() >= self.max_files {
@@ -906,8 +918,8 @@ fn fresh_token() -> Result<String, Error> {
         .map(|b| format!("{b:02x}"))
         .collect())
 }
-struct Workspace {
-    path: PathBuf,
+pub(super) struct Workspace {
+    pub(super) path: PathBuf,
     retained: bool,
 }
 impl Workspace {
@@ -1064,7 +1076,10 @@ fn import_envelope(
             return Err(identity("module path component"));
         }
         let first = parts[0];
-        let base = if module.name.is(&["RewriteWitness"]) || module.name.is(&["ArithmeticOracle"]) {
+        let base = if module.name.is(&["RewriteWitness"])
+            || module.name.is(&["ArithmeticOracle"])
+            || (inv.target == 3 && module.name.is(&[resource::MODULE]))
+        {
             models.to_owned()
         } else if ["Init", "Std", "Lean", "Lake"].contains(&first) {
             sysroot.join("lib/lean")
@@ -1150,12 +1165,13 @@ fn validate_receipt(
     i: &Inputs,
     limits: &Limits,
 ) -> Result<(PathBuf, PathBuf), Error> {
-    if r.schema != 1
+    if r.schema != 2
         || r.profile != i.pins.profile
         || r.upstream_commit != UPSTREAM
         || r.batteries_commit != BATTERIES
         || r.lean_release != i.pins.lean_release
         || r.lean_commit != LEAN_COMMIT
+        || r.resource_bundle_blake3 != i.pins.resource_bundle_blake3
         || r.pins_blake3 != digest(PINS.as_bytes())
         || r.known_fixes_blake3 != i.pins.known_fixes_blake3
         || r.patches != i.pins.patches
@@ -1273,12 +1289,13 @@ pub fn seal(root: &Path) -> Result<Receipt, Error> {
         return Err(identity("control baseline changed during controls"));
     }
     let receipt = Receipt {
-        schema: 1,
+        schema: 2,
         profile: i.pins.profile.clone(),
         upstream_commit: UPSTREAM.into(),
         batteries_commit: BATTERIES.into(),
         lean_release: i.pins.lean_release.clone(),
         lean_commit: LEAN_COMMIT.into(),
+        resource_bundle_blake3: i.pins.resource_bundle_blake3,
         pins_blake3: digest(PINS.as_bytes()),
         known_fixes_blake3: i.pins.known_fixes_blake3,
         patches: i.pins.patches.clone(),
@@ -1409,7 +1426,12 @@ fn publish_evidence(
             names.insert(name.into());
         }
     }
-    if names.len() + 1 > 16 {
+    if present(&models.join("resource"))? {
+        for file in resource_files(&models.join("resource"), &config.limits)? {
+            names.insert(format!("resource/{}", file.path));
+        }
+    }
+    if names.len() + 1 > config.limits.artifact_files {
         return Err(Error::new(
             ErrorKind::Artifact,
             "retained evidence file count",
@@ -1450,6 +1472,9 @@ fn publish_evidence(
     let mut published = Vec::new();
     reserve(&mut published, files.len())?;
     for mut f in files {
+        if let Some(parent) = publication.path.join(&f.path).parent() {
+            fs::create_dir_all(parent)?;
+        }
         copy_evidence(
             &models.join(&f.path),
             &publication.path.join(&f.path),
@@ -1569,6 +1594,7 @@ pub fn execute(
             checker_blake3: r.checker_blake3,
             compiler_blake3: r.compiler_blake3,
             compiler_runtime_manifest_blake3: r.compiler_runtime_manifest_blake3,
+            resource_bundle_blake3: r.resource_bundle_blake3,
             receipt_blake3: digest(&receipt_bytes),
             pins_blake3: r.pins_blake3,
             known_fixes_blake3: r.known_fixes_blake3,
@@ -1669,26 +1695,75 @@ pub fn execute(
                 target_files(&models.path, target, &config.limits)?;
             report.targets[index].status = TargetStatus::Compiled;
         }
-        for index in 0..2 {
+        let prepared = prepare_resource_with(
+            &root,
+            &lean,
+            &sysroot,
+            &receipt_bytes,
+            &config.limits,
+            Some(report),
+        )?;
+        report.targets[2].source = Some(file_digest(
+            prepared.root(),
+            &prepared.source_path(),
+            4 * MIB as u64,
+            until(config.limits.inventory_timeout_ms),
+        )?);
+        if let Some(source) = &mut report.targets[2].source {
+            source.path = format!("resource/{}", source.path);
+        }
+        report.targets[2].resource = Some(prepared.association().clone());
+        if let Some(association) = &mut report.targets[2].resource {
+            for file in [
+                &mut association.snapshot_tool,
+                &mut association.request,
+                &mut association.producer_report,
+                &mut association.projection,
+            ] {
+                file.path = format!("resource/{}", file.path);
+            }
+        }
+        report.targets[2].model_artifacts = vec![FileDigest {
+            path: "resource/projection/ResourceModel42Kernel.olean".into(),
+            ..prepared.association().projection.clone()
+        }];
+        report.targets[2].status = TargetStatus::Compiled;
+        for index in 0..3 {
             let target = report.targets[index].target;
-            let (native, _) = match context.run(0, target.tag(), None, Some(report), Some(index)) {
-                Ok(v) => v,
-                Err(e) => {
-                    report.targets[index].status = TargetStatus::Failed;
-                    return Err(e);
-                }
+            let resource_context = MachineContext {
+                models: &prepared.projection_root(),
+                ..context
             };
+            let target_context = if index == 2 {
+                &resource_context
+            } else {
+                &context
+            };
+            if index == 2 {
+                prepared.revalidate(&config.limits)?;
+            }
+            let (native, _) =
+                match target_context.run(0, target.tag(), None, Some(report), Some(index)) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.targets[index].status = TargetStatus::Failed;
+                        return Err(e);
+                    }
+                };
             let native = native
                 .inventory
                 .ok_or_else(|| identity("missing native target inventory"))?;
-            let before = import_envelope(
-                &native,
-                &root,
-                &models.path,
-                &sysroot,
-                false,
-                &config.limits,
-            )?;
+            if index == 2 {
+                prepared.validate_inventory(&native)?;
+                prepared.revalidate(&config.limits)?;
+            }
+            let model_root = if index == 2 {
+                prepared.projection_root()
+            } else {
+                models.path.clone()
+            };
+            let before =
+                import_envelope(&native, &root, &model_root, &sysroot, false, &config.limits)?;
             report.targets[index].status = TargetStatus::Inventoried;
             report.targets[index].inventory = Some(native.totals.clone());
             report.targets[index].inventory_blake3 = Some(native.blake3);
@@ -1696,7 +1771,8 @@ pub fn execute(
             report.targets[index].import_bytes = before.bytes;
             report.targets[index].import_manifest_blake3 = Some(before.hash);
             let (replayed, _) =
-                match context.run(1, target.tag(), Some(&native), Some(report), Some(index)) {
+                match target_context.run(1, target.tag(), Some(&native), Some(report), Some(index))
+                {
                     Ok(v) => v,
                     Err(e) => {
                         report.targets[index].status = TargetStatus::Failed;
@@ -1705,20 +1781,15 @@ pub fn execute(
                 };
             report.targets[index].coverage = replayed.coverage;
             report.targets[index].coverage_blake3 = replayed.coverage_blake3;
-            if import_envelope(
-                &native,
-                &root,
-                &models.path,
-                &sysroot,
-                false,
-                &config.limits,
-            )?
-            .hash
+            if import_envelope(&native, &root, &model_root, &sysroot, false, &config.limits)?.hash
                 != before.hash
             {
                 return Err(identity(
                     "model import envelope changed during external replay",
                 ));
+            }
+            if index == 2 {
+                prepared.revalidate(&config.limits)?;
             }
             report.targets[index].status = TargetStatus::Complete;
         }
@@ -1726,7 +1797,7 @@ pub fn execute(
         if read_bytes(&root.join("setup-receipt.json"), 4 * MIB)? != receipt_bytes {
             return Err(identity("setup receipt bytes changed during run"));
         }
-        for t in &report.targets {
+        for t in &report.targets[..2] {
             let name = format!("{}.lean", t.target.module());
             if Some(file_digest(
                 &models.path,
@@ -1741,6 +1812,23 @@ pub fn execute(
                 ));
             }
         }
+        if config.artifacts.is_some() {
+            let destination = models.path.join("resource");
+            fs::create_dir(&destination)?;
+            for file in prepared.files() {
+                let to = destination.join(&file.path);
+                if let Some(parent) = to.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                copy_evidence(
+                    &prepared.root().join(&file.path),
+                    &to,
+                    file,
+                    until(config.limits.inventory_timeout_ms),
+                )?;
+            }
+            prepared.revalidate(&config.limits)?;
+        }
         Ok(())
     })();
     if config.artifacts.is_some() {
@@ -1754,6 +1842,249 @@ pub fn execute(
     }
     *artifact_directory = publish_evidence(config, &models.path, report)?;
     result
+}
+
+/// Full finite private tree, including unknown entries; publication uses this same scan.
+pub(super) fn resource_files(root: &Path, limits: &Limits) -> Result<Vec<FileDigest>, Error> {
+    let mut scan = FileScan::new(
+        root,
+        limits.artifact_files.min(128),
+        limits.artifact_bytes,
+        until(limits.inventory_timeout_ms),
+        false,
+    );
+    let mut dirs = BTreeSet::new();
+    for base in ["sources", "originals"] {
+        dirs.insert(root.join(base));
+        for (module, _) in resource::SOURCES {
+            let path = root.join(base).join(resource::module_path(module, "olean"));
+            let mut parent = path.parent();
+            while let Some(p) = parent {
+                if p == root {
+                    break;
+                }
+                dirs.insert(p.to_owned());
+                parent = p.parent();
+            }
+        }
+    }
+    dirs.insert(root.join("projector"));
+    dirs.insert(root.join("projection"));
+    scan.allowed_dirs = Some(dirs);
+    scan.walk(root, 0)?;
+    Ok(scan.finish())
+}
+
+pub(super) fn validate_resource_tool(
+    prepared: &resource::PreparedResource,
+    limits: &Limits,
+) -> Result<(), Error> {
+    let i = inputs()?;
+    let receipt: Receipt = bounded_json(prepared.receipt(), 4 * MIB)?;
+    if read_bytes(&prepared.tool_root().join("setup-receipt.json"), 4 * MIB)? != prepared.receipt()
+    {
+        return Err(identity("resource preparation receipt changed"));
+    }
+    let (_, sysroot) = validate_receipt(prepared.tool_root(), &receipt, &i, limits)?;
+    if sysroot != prepared.sysroot() {
+        return Err(identity("resource compiler sysroot changed"));
+    }
+    Ok(())
+}
+
+/// Genuine preparation-only entry point for bounded binding refusals. No external result is manufactured.
+pub fn prepare_resource(config: &Config) -> Result<resource::PreparedResource, Error> {
+    config.limits.validate()?;
+    regular_meta(&config.tool_root)?;
+    let root = fs::canonicalize(&config.tool_root)?;
+    let i = inputs()?;
+    let bytes = read_bytes(&root.join("setup-receipt.json"), 4 * MIB)?;
+    let receipt: Receipt = bounded_json(&bytes, 4 * MIB)?;
+    let (lean, sysroot) = validate_receipt(&root, &receipt, &i, &config.limits)?;
+    if !same_invocation(&config.lean, &lean)? {
+        return Err(identity("preparation compiler override mismatch"));
+    }
+    prepare_resource_with(&root, &lean, &sysroot, &bytes, &config.limits, None)
+}
+
+/// Observe the actual native inventory of a genuine immutable preparation, without external replay.
+pub fn resource_inventory(
+    config: &Config,
+    prepared: &resource::PreparedResource,
+) -> Result<Inventory, Error> {
+    if fs::canonicalize(&config.tool_root)? != prepared.tool_root() {
+        return Err(identity("resource preparation tool root mismatch"));
+    }
+    prepared.revalidate(&config.limits)?;
+    let i = inputs()?;
+    let receipt: Receipt = bounded_json(prepared.receipt(), 4 * MIB)?;
+    let (lean, sysroot) = validate_receipt(prepared.tool_root(), &receipt, &i, &config.limits)?;
+    if !same_invocation(&config.lean, &lean)? {
+        return Err(identity("resource inventory compiler override"));
+    }
+    let projection = prepared.projection_root();
+    let context = MachineContext {
+        root: prepared.tool_root(),
+        models: &projection,
+        sysroot: &sysroot,
+        inputs: &i,
+        limits: &config.limits,
+    };
+    let (result, _) = context.run(0, 3, None, None, None)?;
+    let inventory = result
+        .inventory
+        .ok_or_else(|| identity("missing actual resource inventory"))?;
+    prepared.validate_inventory(&inventory)?;
+    prepared.revalidate(&config.limits)?;
+    Ok(inventory)
+}
+
+fn prepare_resource_with(
+    root: &Path,
+    lean: &Path,
+    sysroot: &Path,
+    receipt: &[u8],
+    limits: &Limits,
+    mut report: Option<&mut Report>,
+) -> Result<resource::PreparedResource, Error> {
+    resource::verify_bundle()?;
+    let workspace = Workspace::new(None)?;
+    let sources = workspace.path.join("sources");
+    let originals = workspace.path.join("originals");
+    let projector = workspace.path.join("projector");
+    for path in [&sources, &originals, &projector] {
+        fs::create_dir(path)?;
+    }
+    create_file(
+        &workspace.path.join("resource-source-manifest.json"),
+        resource::bundle_bytes(),
+    )?;
+    create_file(
+        &workspace.path.join("historical-source-manifest.json"),
+        resource::HISTORICAL,
+    )?;
+    create_file(&projector.join("KernelSnapshot.lean"), resource::TOOL)?;
+    // All source bytes are embedded and immutable; every actual compiled object is subsequently bound.
+    for (module, bytes) in resource::SOURCES {
+        let source = sources.join(resource::module_path(module, "lean"));
+        let output = originals.join(resource::module_path(module, "olean"));
+        fs::create_dir_all(
+            source
+                .parent()
+                .ok_or_else(|| identity("resource source parent"))?,
+        )?;
+        fs::create_dir_all(
+            output
+                .parent()
+                .ok_or_else(|| identity("resource object parent"))?,
+        )?;
+        create_file(&source, bytes)?;
+        let mut c = command(
+            lean,
+            &sources,
+            Some(sysroot),
+            &[originals.clone(), sysroot.join("lib/lean")],
+        )?;
+        c.env("LEAN_NUM_THREADS", "1")
+            .env("LEAN_ABORT_ON_PANIC", "1")
+            .args(["-j1", "-M4096", "-o"])
+            .arg(&output)
+            .arg(resource::module_path(module, "lean"));
+        let mut observer_error = None;
+        let result = process::capture_observed(c, limits.compile_timeout_ms, limits, 65536, |o| {
+            if let Some(r) = report.as_deref_mut() {
+                let previous = r.targets[2].compile_ms;
+                if let Err(e) = observed(r, Some(2), 0, o) {
+                    observer_error = Some(e);
+                }
+                match checked(previous, o.elapsed_ms) {
+                    Ok(ms) => r.targets[2].compile_ms = ms,
+                    Err(e) => observer_error = Some(e),
+                }
+            }
+        });
+        let result = result?;
+        if let Some(e) = observer_error {
+            return Err(e);
+        }
+        if result.process.exit != 0 {
+            return Err(Error::new(
+                ErrorKind::Compile,
+                format!("fixed resource module failed compilation: {module}"),
+            ));
+        }
+    }
+    let before = resource_files(&workspace.path, limits)?;
+    let projection = workspace.path.join("projection"); // Exporter requires fresh, nonexistent output root.
+    let request=serde_json::to_vec(&serde_json::json!({"schema_version":1,"root":text(&originals)?,"toolchain_prefix":text(sysroot)?,"module":resource::ORIGINAL,"output_root":text(&projection)?,"output_module":resource::MODULE})).map_err(|_|identity("resource request serialization"))?;
+    create_file(&workspace.path.join("request.json"), &request)?;
+    let mut c = command(lean, &projector, Some(sysroot), &[sysroot.join("lib/lean")])?;
+    c.env("LEAN_NUM_THREADS", "1")
+        .env("LEAN_ABORT_ON_PANIC", "1")
+        .args(["-j1", "-M4096", "--run"])
+        .arg(projector.join("KernelSnapshot.lean"))
+        .arg(workspace.path.join("request.json"));
+    let mut observer_error = None;
+    let result = process::capture_observed(c, limits.compile_timeout_ms, limits, 16 * MIB, |o| {
+        if let Some(r) = report.as_deref_mut() {
+            let previous = r.targets[2].compile_ms;
+            if let Err(e) = observed(r, Some(2), 0, o) {
+                observer_error = Some(e);
+            }
+            match checked(previous, o.elapsed_ms) {
+                Ok(ms) => r.targets[2].compile_ms = ms,
+                Err(e) => observer_error = Some(e),
+            }
+        }
+    });
+    let result = result?;
+    if let Some(e) = observer_error {
+        return Err(e);
+    }
+    if result.process.exit != 0 {
+        return Err(Error::new(
+            ErrorKind::Compile,
+            "fixed resource kernel projection failed",
+        ));
+    }
+    let line = result.stdout.strip_suffix(b"\n").unwrap_or(&result.stdout);
+    let bytes = line
+        .strip_prefix(resource::MARKER)
+        .ok_or_else(|| identity("missing exact kernel projection marker"))?;
+    if bytes.contains(&b'\n') {
+        return Err(identity("unexpected kernel projection output"));
+    }
+    // Bound parsing + retained maps conservatively before decoding producer metadata.
+    if bytes
+        .len()
+        .checked_mul(32)
+        .and_then(|n| n.checked_add(2 * MIB))
+        .is_none_or(|n| n > limits.inventory_bytes)
+    {
+        return Err(limit("resource producer metadata envelope"));
+    }
+    for file in &before {
+        if file_digest(
+            &workspace.path,
+            &workspace.path.join(&file.path),
+            file.bytes,
+            until(limits.inventory_timeout_ms),
+        )? != *file
+        {
+            return Err(identity("resource compiler inputs changed during snapshot"));
+        }
+    }
+    create_file(&workspace.path.join("producer-report.json"), bytes)?;
+    let prepared = resource::bind(
+        workspace,
+        root.to_owned(),
+        sysroot.to_owned(),
+        receipt.to_vec(),
+        bytes,
+        limits,
+    )?;
+    prepared.revalidate(limits)?;
+    Ok(prepared)
 }
 
 #[cfg(test)]
