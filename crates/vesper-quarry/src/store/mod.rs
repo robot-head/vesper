@@ -34,6 +34,7 @@
 mod btree;
 mod error;
 mod frames;
+mod index;
 mod log;
 mod pages;
 mod shared;
@@ -57,7 +58,7 @@ use frames::{lock, Core, Io, SharedFrame};
 use log::StoreLog;
 use pages::{
     check_structure, decode_fsm, encode_fsm, format, kind, layout_of, leaf_compact, leaf_garbage,
-    new_page, page_lsn, Entry, Key, Meta, Page, TableMeta, FSM_CAPACITY, FSM_PAGE, INTERNAL_CAP,
+    new_page, page_lsn, Entry, IndexMeta, Key, Meta, Page, TableMeta, FSM_CAPACITY, FSM_PAGE, INTERNAL_CAP,
     KIND_FSM, KIND_INTERNAL, KIND_LEAF, KIND_META, META_PAGE,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -312,6 +313,7 @@ impl<D: Device> fmt::Debug for Store<D> {
 #[derive(Clone, Copy, Debug)]
 enum Tree {
     Table(u32),
+    Index(u32),
 }
 impl View {
     fn root(&self, tree: Tree) -> StoreResult<u64> {
@@ -323,7 +325,33 @@ impl View {
                 .find(|t| t.id == tid)
                 .map(|t| t.root)
                 .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, "table dropped")),
+            Tree::Index(iid) => self
+                .meta
+                .indexes
+                .values()
+                .find(|i| i.id == iid)
+                .map(|i| i.root)
+                .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, "index dropped")),
         }
+    }
+    fn index(&self, name: &str) -> StoreResult<&IndexMeta> {
+        let name = identifier(name)?;
+        self.meta
+            .indexes
+            .get(&name)
+            .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, format!("index {name}")))
+    }
+    /// (index name, column, column type) of every index on a table.
+    fn indexes_of(&self, table: &str) -> Vec<(String, usize, ScalarType)> {
+        let Some(t) = self.meta.tables.get(table) else {
+            return Vec::new();
+        };
+        self.meta
+            .indexes
+            .iter()
+            .filter(|(_, i)| i.table == table)
+            .map(|(n, i)| (n.clone(), i.column, t.columns[i.column].ty))
+            .collect()
     }
     fn table(&self, name: &str) -> StoreResult<&TableMeta> {
         let name = identifier(name)?;
@@ -1008,6 +1036,17 @@ impl<D: Device> Store<D> {
         }
         let mut next = self.view().catalog.clone();
         let changes = next.apply_ddl_changes(sql, Limits::default())?;
+        let indexes = self.view().meta.indexes.clone();
+        for change in &changes {
+            if let DdlChange::Create(name, _) = change {
+                if indexes.contains_key(name) {
+                    return Err(StoreError::new(
+                        StoreErrorKind::Sql(crate::ErrorKind::Duplicate),
+                        format!("{name} already names an index"),
+                    ));
+                }
+            }
+        }
         let cfg = self.limits.tree();
         let revision = next.revision();
         let mut w = lock(&self.writer);
@@ -1036,6 +1075,17 @@ impl<D: Device> Store<D> {
                         })?;
                         let mut all = Vec::new();
                         btree::pages(st, t.root, &mut all)?;
+                        let gone: Vec<String> = st
+                            .meta
+                            .indexes
+                            .iter()
+                            .filter(|(_, i)| &i.table == name)
+                            .map(|(n, _)| n.clone())
+                            .collect();
+                        for n in gone {
+                            let ix = st.meta.indexes.remove(&n).expect("index");
+                            btree::pages(st, ix.root, &mut all)?;
+                        }
                         for p in all {
                             st.free(p)?;
                         }
@@ -1059,6 +1109,108 @@ impl<D: Device> Store<D> {
             .collect();
         Ok(())
     }
+    /// Creates a secondary index on `table.column`, filled from every stored
+    /// version, in one synced system group. Requires no active transaction.
+    /// NULLs are not indexed.
+    pub fn create_index(&mut self, name: &str, table: &str, column: &str) -> StoreResult<()> {
+        self.check_usable()?;
+        if !self.txns().active.is_empty() {
+            return Err(state_error("DDL requires no active transactions"));
+        }
+        let view = self.view();
+        let name = identifier(name)?;
+        if view.meta.tables.contains_key(&name) || view.meta.indexes.contains_key(&name) {
+            return Err(StoreError::new(
+                StoreErrorKind::Sql(crate::ErrorKind::Duplicate),
+                format!("{name} already names a table or index"),
+            ));
+        }
+        let t = view.table(table)?.clone();
+        let table = identifier(table)?;
+        let column = identifier(column)?;
+        let col = t
+            .columns
+            .iter()
+            .position(|c| c.name == column)
+            .ok_or_else(|| StoreError::new(StoreErrorKind::NotFound, format!("column {column}")))?;
+        let ty = t.columns[col].ty;
+        let cfg = self.limits.tree();
+        let mut w = lock(&self.writer);
+        let r = self.run_group(&mut w, 0, 0, None, &mut |st| {
+            let mut entries: BTreeMap<Key, Value> = BTreeMap::new();
+            btree::visit(st, t.root, Key::MIN, Key::MAX, &mut |e| {
+                if let Some(px) = e.values.get(col).and_then(index::prefix) {
+                    entries
+                        .entry(index::key(px, e.key.rowid))
+                        .or_insert_with(|| e.values[col].clone());
+                }
+                Ok(true)
+            })?;
+            let mut root = btree::new_leaf(st, &[ty], cfg)?;
+            for (key, v) in entries {
+                let e = Entry {
+                    key,
+                    tomb: false,
+                    values: vec![v],
+                };
+                root = btree::insert(st, cfg, &[ty], root, e)?;
+            }
+            let id = st.meta.next_table_id;
+            st.meta.next_table_id = id.checked_add(1).ok_or_else(|| overflow("index ids"))?;
+            st.meta.indexes.insert(
+                name.clone(),
+                IndexMeta {
+                    id,
+                    table: table.clone(),
+                    column: col,
+                    root,
+                },
+            );
+            Ok(())
+        });
+        drop(w);
+        let r = r.and_then(|_| self.flush_log());
+        let r = self.poison_on(r);
+        self.refresh_visible();
+        r
+    }
+    /// Drops a secondary index and frees its pages (one synced group).
+    pub fn drop_index(&mut self, name: &str) -> StoreResult<()> {
+        self.check_usable()?;
+        if !self.txns().active.is_empty() {
+            return Err(state_error("DDL requires no active transactions"));
+        }
+        let name = identifier(name)?;
+        self.view().index(&name)?;
+        let mut w = lock(&self.writer);
+        let r = self.run_group(&mut w, 0, 0, None, &mut |st| {
+            let ix = st.meta.indexes.remove(&name).expect("index");
+            let mut all = Vec::new();
+            btree::pages(st, ix.root, &mut all)?;
+            for p in all {
+                st.free(p)?;
+            }
+            Ok(())
+        });
+        drop(w);
+        let r = r.and_then(|_| self.flush_log());
+        let r = self.poison_on(r);
+        self.refresh_visible();
+        r
+    }
+    /// Secondary indexes: name -> (table, column).
+    pub fn indexes(&self) -> BTreeMap<String, (String, String)> {
+        let view = self.view();
+        view.meta
+            .indexes
+            .iter()
+            .map(|(n, i)| {
+                let col = view.meta.tables[&i.table].columns[i.column].name.clone();
+                (n.clone(), (i.table.clone(), col))
+            })
+            .collect()
+    }
+
     fn flush_log(&self) -> StoreResult<()> {
         let mut io = self.core.io();
         let Io { dev, log, .. } = &mut *io;
@@ -1333,6 +1485,98 @@ impl<D: Device> Store<D> {
         Ok(rows.into_iter().collect())
     }
 
+    /// Rows the transaction sees whose indexed column equals `value`.
+    pub fn lookup(
+        &self,
+        txn: &Txn,
+        index: &str,
+        value: &Value,
+    ) -> StoreResult<Vec<(u64, Vec<Value>)>> {
+        self.lookup_range(txn, index, value, value)
+    }
+    /// Rows the transaction sees with `lo <= column <= hi`, by row id, found
+    /// through the secondary index: candidate row ids from the index key
+    /// range, each rechecked against the version this snapshot sees, plus
+    /// the transaction's own writes.
+    pub fn lookup_range(
+        &self,
+        txn: &Txn,
+        index: &str,
+        lo: &Value,
+        hi: &Value,
+    ) -> StoreResult<Vec<(u64, Vec<Value>)>> {
+        self.check_usable()?;
+        self.check_store(txn)?;
+        let view = self.view();
+        let ix = view.index(index)?;
+        let t = &view.meta.tables[&ix.table];
+        let (iid, tid, col) = (ix.id, t.id, ix.column);
+        let ty = t.columns[col].ty;
+        let (Some(plo), Some(phi)) = (index::prefix(lo), index::prefix(hi)) else {
+            return Err(StoreError::new(
+                StoreErrorKind::Data,
+                "index bounds must be non-null",
+            ));
+        };
+        if lo.scalar_type() != Some(ty) || hi.scalar_type() != Some(ty) {
+            return Err(StoreError::new(
+                StoreErrorKind::Data,
+                "index bounds must have the column type",
+            ));
+        }
+        if !self.txns().active.contains_key(&txn.id) {
+            return Err(state_error("transaction is not active"));
+        }
+        let mut candidates = BTreeSet::new();
+        if plo <= phi {
+            self.read_tree(
+                Tree::Index(iid),
+                index::key(plo, 0),
+                index::key(phi, u64::MAX),
+                &mut |e| {
+                    candidates.insert(e.key.inv_ts);
+                    Ok(true)
+                },
+            )?;
+        }
+        let snapshot = txn.snapshot;
+        let mut rows = BTreeMap::new();
+        for rowid in candidates {
+            let mut found = None;
+            self.read_tree(
+                Tree::Table(tid),
+                Key::version(rowid, snapshot),
+                Key {
+                    rowid,
+                    inv_ts: u64::MAX,
+                },
+                &mut |e| {
+                    found = Some(e);
+                    Ok(false)
+                },
+            )?;
+            if let Some(e) = found.filter(|e| !e.tomb) {
+                if index::within(&e.values[col], lo, hi) {
+                    rows.insert(rowid, e.values);
+                }
+            }
+        }
+        let g = self.txns();
+        let state = g
+            .active
+            .get(&txn.id)
+            .ok_or_else(|| state_error("transaction is not active"))?;
+        for (&(_, rowid), w) in state.writes.range((tid, 0)..=(tid, u64::MAX)) {
+            rows.remove(&rowid);
+            if let Some(row) = w {
+                if index::within(&row[col], lo, hi) {
+                    rows.insert(rowid, row.clone());
+                }
+            }
+        }
+        Ok(rows.into_iter().collect())
+    }
+
     /// Discards the transaction's writes and releases its locks.
     pub fn abort(&self, mut txn: Txn) -> StoreResult<()> {
         self.check_usable()?;
@@ -1419,12 +1663,23 @@ impl<D: Device> Store<D> {
             .iter()
             .map(|(n, t)| (t.id, (n.clone(), table_types(t))))
             .collect();
+        let indexes: BTreeMap<u32, Vec<(String, usize, ScalarType)>> = view
+            .meta
+            .tables
+            .iter()
+            .map(|(n, t)| (t.id, view.indexes_of(n)))
+            .collect();
         let mut collected = 0u64;
         let lsn = self.run_group(w, txn, ts, None, &mut |st| {
             collected = 0;
             for (&(tid, rowid), row) in &state.writes {
                 let (name, types) = &tables[&tid];
                 let root = st.meta.tables[name].root;
+                let ixs = &indexes[&tid];
+                let mut before = Vec::with_capacity(ixs.len());
+                for (_, col, _) in ixs {
+                    before.push(index::row_prefixes(st, root, rowid, *col)?);
+                }
                 let entry = Entry {
                     key: Key::version(rowid, ts),
                     tomb: row.is_none(),
@@ -1439,6 +1694,12 @@ impl<D: Device> Store<D> {
                     }
                     root = r;
                     collected += 1;
+                }
+                for ((iname, col, ty), before) in ixs.iter().zip(&before) {
+                    let after = index::row_prefixes(st, root, rowid, *col)?;
+                    let iroot = st.meta.indexes[iname].root;
+                    let iroot = index::apply(st, cfg, *ty, iroot, rowid, before, &after)?;
+                    st.meta.indexes.get_mut(iname).expect("index").root = iroot;
                 }
                 let t = st.meta.tables.get_mut(name).expect("table");
                 t.root = root;
@@ -1666,10 +1927,10 @@ impl<D: Device> Store<D> {
         let cfg = self.limits.tree();
         let names: Vec<String> = self.view().meta.tables.keys().cloned().collect();
         for name in names {
-            let (root, types) = {
+            let (root, types, ixs) = {
                 let view = self.view();
                 let t = &view.meta.tables[&name];
-                (t.root, table_types(t))
+                (t.root, table_types(t), view.indexes_of(&name))
             };
             let mut victims = Vec::new();
             let mut versions: Vec<(Key, bool)> = Vec::new();
@@ -1697,12 +1958,29 @@ impl<D: Device> Store<D> {
                 let chunk = &victims[done..(done + per_group).min(victims.len())];
                 let r = self.run_group(w, 0, 0, None, &mut |st| {
                     let mut root = st.meta.tables[&name].root;
+                    let rows: BTreeSet<u64> = chunk.iter().map(|k| k.rowid).collect();
+                    let mut before = Vec::new();
+                    for &rowid in &rows {
+                        for (_, col, _) in &ixs {
+                            before.push(index::row_prefixes(st, root, rowid, *col)?);
+                        }
+                    }
                     for &key in chunk {
                         let (r, found) = btree::remove(st, cfg, &types, root, key)?;
                         if !found {
                             return Err(corrupt("vacuum victim vanished"));
                         }
                         root = r;
+                    }
+                    let mut before = before.iter();
+                    for &rowid in &rows {
+                        for (iname, col, ty) in &ixs {
+                            let b = before.next().expect("one per row and index");
+                            let after = index::row_prefixes(st, root, rowid, *col)?;
+                            let iroot = st.meta.indexes[iname].root;
+                            let iroot = index::apply(st, cfg, *ty, iroot, rowid, b, &after)?;
+                            st.meta.indexes.get_mut(iname).expect("index").root = iroot;
+                        }
                     }
                     st.meta.tables.get_mut(&name).expect("table").root = root;
                     Ok(())
@@ -1718,11 +1996,15 @@ impl<D: Device> Store<D> {
                 report.versions_removed += chunk.len() as u64;
                 report.groups += 1;
             }
-            // Tombstone/heap compaction of leaves with holes.
-            let root = self.view().meta.tables[&name].root;
+            // Tombstone/heap compaction of leaves with holes, in the table
+            // and its indexes.
+            let view = self.view();
             let mut leaves = Vec::new();
             let mut all = Vec::new();
-            btree::pages(&mut self.reader(), root, &mut all)?;
+            btree::pages(&mut self.reader(), view.meta.tables[&name].root, &mut all)?;
+            for (iname, _, _) in &ixs {
+                btree::pages(&mut self.reader(), view.meta.indexes[iname].root, &mut all)?;
+            }
             for p in all {
                 let b = self.core.copy(p)?;
                 if kind(&b[..]) == KIND_LEAF {
@@ -1816,8 +2098,9 @@ impl<D: Device> Store<D> {
 
     // ---- inspection ----------------------------------------------------
 
-    /// Validates every table tree and that tree pages, free pages and the two
-    /// fixed pages partition the store. Returns each table's shape.
+    /// Validates every table and index tree, that each index holds exactly
+    /// its table's value prefixes, and that tree pages, free pages and the
+    /// two fixed pages partition the store. Returns each tree's shape.
     pub fn check(&mut self) -> StoreResult<BTreeMap<String, TreeShape>> {
         self.check_usable()?;
         let view = self.view();
@@ -1832,6 +2115,34 @@ impl<D: Device> Store<D> {
                 if !owned.insert(p) || free.contains(&p) {
                     return Err(corrupt(format!("page {p} is owned twice")));
                 }
+            }
+            shapes.insert(name.clone(), shape);
+        }
+        for (name, ix) in &view.meta.indexes {
+            let t = &view.meta.tables[&ix.table];
+            let shape = btree::check(&mut self.reader(), ix.root, &[t.columns[ix.column].ty])?;
+            let mut all = Vec::new();
+            btree::pages(&mut self.reader(), ix.root, &mut all)?;
+            for p in all {
+                if !owned.insert(p) || free.contains(&p) {
+                    return Err(corrupt(format!("page {p} is owned twice")));
+                }
+            }
+            // The index holds exactly the prefixes of the stored versions.
+            let mut want = BTreeSet::new();
+            btree::visit(&mut self.reader(), t.root, Key::MIN, Key::MAX, &mut |e| {
+                if let Some(px) = e.values.get(ix.column).and_then(index::prefix) {
+                    want.insert(index::key(px, e.key.rowid));
+                }
+                Ok(true)
+            })?;
+            let mut have = BTreeSet::new();
+            btree::visit(&mut self.reader(), ix.root, Key::MIN, Key::MAX, &mut |e| {
+                have.insert(e.key);
+                Ok(true)
+            })?;
+            if want != have {
+                return Err(corrupt(format!("index {name} differs from its table")));
             }
             shapes.insert(name.clone(), shape);
         }

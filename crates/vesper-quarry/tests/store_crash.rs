@@ -1,7 +1,7 @@
 //! Crash recovery of the table store under the `SimDevice` crash model.
 //!
 //! A seeded workload (two interleaved transactions, inserts/updates/deletes
-//! of rows up to 1.2 KiB over two tables, synced and deferred commits,
+//! of rows up to 1.2 KiB over two tables with a secondary index each, synced and deferred commits,
 //! aborts, write conflicts, fuzzy checkpoints started and stepped while
 //! commits continue, vacuum, a small pool forcing evictions, a fanout-3
 //! B+Tree forcing splits and leaf removal, and small log regions forcing
@@ -9,7 +9,8 @@
 //! every WAL record boundary of every log write. Each crash is recovered
 //! and must equal the committed state at some timestamp between the last
 //! acknowledged-durable commit and the last appended one, with valid trees
-//! and an exact page partition.
+//! and an exact page partition, indexes that hold exactly their tables'
+//! value prefixes, and index lookups equal to filtered scans.
 use std::collections::BTreeMap;
 use vesper_quarry::device::{CrashChoice, FileId, SimDevice};
 use vesper_quarry::store::{Store, StoreErrorKind, StoreLimits, StoreRecovery, Txn};
@@ -20,7 +21,7 @@ type State = BTreeMap<(String, u64), Vec<Value>>;
 fn limits() -> StoreLimits {
     StoreLimits {
         pool_frames: 6,
-        log_region_bytes: 256 << 10,
+        log_region_bytes: 512 << 10,
         btree_fanout: 3,
         leaf_max_versions: 4,
         checkpoint_step_pages: 2,
@@ -104,6 +105,10 @@ fn workload(dev: &mut SimDevice, seed: u64, steps: usize, obs: &mut Observed) {
     )
     .is_err()
     {
+        return;
+    }
+    // Secondary indexes are maintained in the same commit groups.
+    if s.create_index("a_v", "a", "v").is_err() || s.create_index("b_k", "b", "k").is_err() {
         return;
     }
     let mut rng = Rng(seed);
@@ -269,6 +274,25 @@ fn recover_and_check(medium: &mut SimDevice, obs: &Observed, what: &str) -> Stor
     );
     let got = contents(&mut s);
     assert_eq!(&got, &obs.states[&ts], "{what}: contents at ts {ts}");
+    // Index lookups over the whole domain equal filtered scans.
+    let t = s.begin().unwrap();
+    let ix = s.indexes();
+    for (name, table, col, lo, hi) in [
+        ("a_v", "a", 1, Value::Text(String::new()), Value::Text("{".into())),
+        ("b_k", "b", 0, Value::I64(i64::MIN), Value::I64(i64::MAX)),
+    ] {
+        if !ix.contains_key(name) {
+            continue;
+        }
+        let want: Vec<_> = s
+            .scan(&t, table)
+            .unwrap()
+            .into_iter()
+            .filter(|(_, r)| r[col] != Value::Null)
+            .collect();
+        assert_eq!(s.lookup_range(&t, name, &lo, &hi).unwrap(), want, "{what}: {name}");
+    }
+    s.commit(t).unwrap();
     assert_eq!(s.stats().pinned, 0);
     drop(s);
     report
