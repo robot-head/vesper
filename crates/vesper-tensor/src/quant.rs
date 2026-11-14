@@ -313,6 +313,14 @@ impl Matrix {
     pub fn is_file_mapped(&self) -> bool {
         matches!(&self.storage, Storage::Bytes(b) if b.is_file_mapped())
     }
+    /// The row-major values of an owned FP32 matrix (`None` for byte-backed
+    /// formats).
+    pub fn as_f32(&self) -> Option<&[f32]> {
+        match &self.storage {
+            Storage::F32(data) => Some(data),
+            Storage::Bytes(_) => None,
+        }
+    }
     /// The raw payload bytes of a byte-backed matrix (`None` for owned FP32).
     pub fn raw_bytes(&self) -> Option<&[u8]> {
         match &self.storage {
