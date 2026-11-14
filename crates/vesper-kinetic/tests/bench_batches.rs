@@ -103,3 +103,68 @@ fn world_step_time() {
         }
     }
 }
+
+#[test]
+#[ignore = "timing run for the report"]
+fn transcendental_speed() {
+    use vesper_kinetic::{crmath, fastmath};
+    let xs: Vec<f64> = (0..4096).map(|i| (i as f64 - 2048.0) * 0.0137).collect();
+    type F = (&'static str, fn(f64) -> f64);
+    let sets: [(&str, [F; 3]); 4] = [
+        (
+            "sin",
+            [
+                ("fast", fastmath::sin),
+                ("crmath", crmath::sin),
+                ("std", f64::sin),
+            ],
+        ),
+        (
+            "cos",
+            [
+                ("fast", fastmath::cos),
+                ("crmath", crmath::cos),
+                ("std", f64::cos),
+            ],
+        ),
+        (
+            "exp",
+            [
+                ("fast", fastmath::exp),
+                ("crmath", crmath::exp),
+                ("std", f64::exp),
+            ],
+        ),
+        (
+            "log",
+            [
+                ("fast", |x: f64| fastmath::log(x.abs())),
+                ("crmath", |x: f64| crmath::log(x.abs())),
+                ("std", |x: f64| x.abs().ln()),
+            ],
+        ),
+    ];
+    for (name, impls) in sets {
+        for (which, f) in impls {
+            let reps = if which == "crmath" { 1 } else { 200 };
+            let start = Instant::now();
+            for _ in 0..reps {
+                for &x in &xs {
+                    black_box(f(black_box(x)));
+                }
+            }
+            let ns = start.elapsed().as_secs_f64() * 1e9 / (reps * xs.len()) as f64;
+            println!("{name} {which}: {ns:.1} ns/call");
+        }
+    }
+    let start = Instant::now();
+    for _ in 0..200 {
+        for &x in &xs {
+            black_box(fastmath::atan2(black_box(x), 0.7));
+        }
+    }
+    println!(
+        "atan2 fast: {:.1} ns/call",
+        start.elapsed().as_secs_f64() * 1e9 / (200.0 * 4096.0)
+    );
+}

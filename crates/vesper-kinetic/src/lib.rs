@@ -27,6 +27,7 @@ pub mod coloring;
 pub mod crmath;
 pub mod detfloat;
 pub mod diff;
+pub mod fastmath;
 pub mod gjk;
 pub mod lbvh;
 pub mod morton;
