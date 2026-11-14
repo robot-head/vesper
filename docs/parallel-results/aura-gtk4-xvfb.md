@@ -106,8 +106,14 @@ cargo +1.100.0 clippy -p vesper-aura-gtk --features gtk --locked --all-targets -
 cargo +1.100.0 clippy -p vesper-aura-gtk --locked --all-targets -- -D warnings                  # clean
 cargo fmt --all -- --check                                                    # ok
 cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings       # ok
-cargo test --workspace --locked                                               # WORKSPACE_TEST
+cargo test --workspace --locked                                               # 694 passed, 1 failed (see below)
 ```
+
+The one workspace failure is `tests/lean4lean42_acceptance.rs`
+(`genuine_both_model_replay_and_independent_refusal_matrix`). It hard-fails by
+design when `VESPER_LEAN4LEAN42_ROOT` does not name a checker prepared by
+`scripts/ci/prepare-lean4lean42.sh`, which this host did not have; it is
+unrelated to this crate, and CI prepares the checker.
 
 Bazel was not run locally (the Bazel download is blocked in this cloud host);
 BuildBuddy CI runs `bazel test //...`. Under Bazel the `gtk` feature is off,
