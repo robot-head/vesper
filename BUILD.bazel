@@ -14,6 +14,7 @@ vesper_crate(
         "test/lean4lean_order42",
         "test/lean4lean_map42",
         "test/lean4lean_normalize42",
+        "test/lean4lean_normalization42",
     ],
     extra_compile_data = ["//crates/vesper-doc:files"],
     extra_test_data = [
