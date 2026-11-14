@@ -1,4 +1,4 @@
-//! Genuine two-model external replay plus independently authored refusal cases.
+//! Genuine three-model external replay plus independently authored refusal cases.
 //! Synthetic protocol fixtures and transport markers are never replay evidence.
 #[path = "../src/bin/lean4lean42/mod.rs"]
 pub mod driver;
@@ -317,7 +317,7 @@ fn genuine_positive(
     );
     assert!(output.status.success(), "{}", output.text());
     let report = output.json();
-    assert_eq!(report["schema"], 1);
+    assert_eq!(report["schema"], 2);
     assert_eq!(report["status"], "complete");
     assert_eq!(report["scope"], "eligible_fresh_closure");
     assert_eq!(report["axiom_audit"], "not_run");
@@ -327,7 +327,7 @@ fn genuine_positive(
     }
     assert!(report["process_spawns"].as_u64().unwrap() >= 7);
     let tools = &report["tools"];
-    assert_eq!(tools["profile"], "vesper.lean4lean42/1");
+    assert_eq!(tools["profile"], "vesper.lean4lean42/2");
     assert_eq!(tools["lean_release"], receipt["lean_release"]);
     assert_eq!(receipt["lean_release"], "leanprover/lean4:v4.24.0");
     assert_eq!(
@@ -345,6 +345,7 @@ fn genuine_positive(
         "build_output_manifest_blake3",
         "control_inventory_blake3",
         "control_import_manifest_blake3",
+        "resource_bundle_blake3",
     ] {
         assert_eq!(
             tools[field], receipt[field],
@@ -361,14 +362,15 @@ fn genuine_positive(
     );
     validate_controls(&report, expected);
     let targets = report["targets"].as_array().unwrap();
-    assert_eq!(targets.len(), 2);
+    assert_eq!(targets.len(), 3);
     for (index, target) in targets.iter().enumerate() {
         assert_eq!(
             target["target"],
-            if index == 0 {
-                "rewrite_witness"
-            } else {
-                "arithmetic_oracle"
+            match index {
+                0 => "rewrite_witness",
+                1 => "arithmetic_oracle",
+                2 => "resource_model42_kernel_snapshot",
+                _ => unreachable!(),
             }
         );
         assert_eq!(target["status"], "complete");
@@ -403,7 +405,27 @@ fn genuine_positive(
             let count = coverage[field].as_u64().unwrap();
             assert!(count > 0 && count <= forms[form].as_u64().unwrap());
         }
-        assert_eq!(coverage["required_roots"], if index == 0 { 33 } else { 37 });
+        match index {
+            0 => assert_eq!(coverage["required_roots"], 33),
+            1 => assert_eq!(coverage["required_roots"], 37),
+            2 => {
+                assert_eq!(
+                    coverage["required_roots"],
+                    inventory["target_eligibility"][0]
+                );
+                assert!(
+                    skips
+                        .iter()
+                        .skip(1)
+                        .any(|count| count.as_u64().unwrap() > 0)
+                );
+                assert_eq!(
+                    inventory["target_eligibility"],
+                    json!([inventory["target_eligibility"][0], 0, 0, 0])
+                );
+            }
+            _ => unreachable!(),
+        }
         assert_eq!(
             coverage["required_roots_covered"],
             coverage["required_roots"]
@@ -422,16 +444,42 @@ fn genuine_positive(
         ] {
             assert_ne!(digest(&target[field]), [0; 32]);
         }
-        let source = if index == 0 {
-            include_bytes!("../lean/RewriteWitness.lean").as_slice()
+        if index < 2 {
+            assert!(target["resource"].is_null());
+            let source = if index == 0 {
+                include_bytes!("../lean/RewriteWitness.lean").as_slice()
+            } else {
+                include_bytes!("../lean/ArithmeticOracle.lean").as_slice()
+            };
+            assert_eq!(target["source"]["bytes"], source.len());
+            assert_eq!(
+                digest(&target["source"]["blake3"]),
+                *blake3::hash(source).as_bytes()
+            );
         } else {
-            include_bytes!("../lean/ArithmeticOracle.lean").as_slice()
-        };
-        assert_eq!(target["source"]["bytes"], source.len());
-        assert_eq!(
-            digest(&target["source"]["blake3"]),
-            *blake3::hash(source).as_bytes()
-        );
+            let resource = &target["resource"];
+            assert_eq!(resource["schema"], 1);
+            assert_eq!(resource["scope"], "kernel_logical_projection");
+            assert_eq!(resource["module"], "ResourceModel42Kernel");
+            assert_eq!(
+                resource["resource_bundle_blake3"],
+                tools["resource_bundle_blake3"]
+            );
+            assert_eq!(
+                resource["output_constants"],
+                inventory["target_eligibility"][0]
+            );
+            assert_eq!(
+                resource["output_constants"].as_u64().unwrap(),
+                resource["retained_constants"].as_u64().unwrap()
+                    + resource["proof_aliases"].as_u64().unwrap()
+            );
+            assert!(resource["omitted_constants"].as_u64().unwrap() > 0);
+            assert!(resource["proof_aliases"].as_u64().unwrap() > 0);
+            for field in ["source_manifest_blake3", "original_manifest_blake3"] {
+                assert_ne!(digest(&resource[field]), [0; 32]);
+            }
+        }
     }
     assert_eq!(hash_file(&root.join("setup-receipt.json")), before);
     assert_eq!(
@@ -455,7 +503,7 @@ fn inspect_artifacts(parent: &Path, report: &Value) {
     assert_eq!(roots.len(), 1, "one unique artifact directory");
     let root = roots[0].canonicalize().unwrap();
     let files = report["artifacts"].as_array().unwrap();
-    assert!(files.len() <= 16);
+    assert!(files.len() <= Limits::default().artifact_files);
     for file in files {
         let relative = Path::new(file["path"].as_str().unwrap());
         assert!(
@@ -610,7 +658,7 @@ fn refresh_header(frames: &mut [Value]) {
     frames[0][6] = json!(bytes);
 }
 fn hello(mode: u8, target: u8) -> Value {
-    json!([1, 0, TOKEN, mode, target, "4.24.0", "vesper.lean4lean42/1"])
+    json!([1, 0, TOKEN, mode, target, "4.24.0", "vesper.lean4lean42/2"])
 }
 fn terminal(mode: u8, target: u8, counters: [u64; 14]) -> Value {
     let mut values = vec![json!(1), json!(9), json!(TOKEN), json!(mode), json!(target)];
@@ -664,10 +712,40 @@ impl NegativeInventory {
                 ]));
             }
         }
-        let namespace = if target == 0 {
-            "RewriteWitness"
-        } else {
-            "ArithmeticOracle"
+        if target == 3 {
+            for root in [
+                "validate",
+                "checkProgram",
+                "validateInvocation",
+                "evalSteps",
+            ] {
+                constants.push(json!([
+                    1,
+                    3,
+                    constants.len(),
+                    name(&["Vesper", "ResourceModel42", root]),
+                    0,
+                    1,
+                    0,
+                    []
+                ]));
+            }
+            constants.push(json!([
+                1,
+                3,
+                constants.len(),
+                name(&["ResourceKernelProofAliases", "realization_0"]),
+                0,
+                2,
+                0,
+                []
+            ]));
+        }
+        let namespace = match target {
+            0 => "RewriteWitness",
+            1 => "ArithmeticOracle",
+            3 => "ResourceModel42",
+            _ => unreachable!(),
         };
         let inductive = constants.len() as u32;
         constants.push(json!([
@@ -737,10 +815,11 @@ impl NegativeInventory {
             1,
             []
         ]));
-        let modules = if target == 0 {
-            vec!["RewriteWitness", "Init"]
-        } else {
-            vec!["ArithmeticOracle", "RewriteWitness", "Init"]
+        let modules = match target {
+            0 => vec!["RewriteWitness", "Init"],
+            1 => vec!["ArithmeticOracle", "RewriteWitness", "Init"],
+            3 => vec!["ResourceModel42Kernel", "RewriteWitness", "Init"],
+            _ => unreachable!(),
         };
         let mut forms = [0u64; 8];
         let mut eligibility = [0u64; 4];
@@ -842,7 +921,7 @@ fn rejected(machine: Machine<'_>, error: Error) {
 }
 
 fn coverage_refusals(limits: &Limits) {
-    for target in [0, 1] {
+    for target in [0, 1, 3] {
         let fixture = NegativeInventory::build(target, limits);
         for which in 0..12 {
             let mut machine = fixture.replay(limits, which != 8);
@@ -909,6 +988,9 @@ fn coverage_refusals(limits: &Limits) {
                 (0, Some(&fixture.inventory)),
                 (1, Some(&fixture.inventory)),
             ] {
+                if target == 3 && mode == 0 && expected.is_none() && which <= 3 {
+                    continue;
+                }
                 let mut machine = Machine::new(mode, target, TOKEN, limits, &[], expected).unwrap();
                 feed(&mut machine, &hello(mode, target)).unwrap();
                 let error = frames
@@ -918,6 +1000,48 @@ fn coverage_refusals(limits: &Limits) {
                 rejected(machine, error);
             }
         }
+    }
+}
+
+fn resource_route_and_skip_refusals(limits: &Limits, controls: &[ExpectedControl]) {
+    for mode in 0..=4 {
+        for target in 0..=4 {
+            let permitted = matches!((mode, target), (0, 0..=3) | (1, 0 | 1 | 3) | (2 | 3, 2));
+            if !permitted {
+                let error = Machine::new(mode, target, TOKEN, limits, controls, None)
+                    .err()
+                    .expect("unsupported route cannot fall back to control target");
+                assert_eq!(error.kind, ErrorKind::Protocol);
+            }
+        }
+    }
+    for (mode, target) in [(0, 3), (1, 3), (3, 2)] {
+        let fixture = NegativeInventory::build(3, limits);
+        let expected = (mode == 1).then_some(&fixture.inventory);
+        let mut machine = Machine::new(mode, target, TOKEN, limits, controls, expected).unwrap();
+        let mut old = hello(mode, target);
+        old[6] = json!("vesper.lean4lean42/1");
+        let error = feed(&mut machine, &old).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Protocol);
+        rejected(machine, error);
+    }
+    let fixture = NegativeInventory::build(3, limits);
+    for skip in [1, 2, 3] {
+        let mut frames = fixture.frames.clone();
+        let owned = frames
+            .iter()
+            .position(|frame| frame[1] == 3 && frame[4] == 0 && frame[5] == 1)
+            .unwrap();
+        frames[owned][6] = json!(skip);
+        refresh_header(&mut frames);
+        let mut machine = Machine::new(0, 3, TOKEN, limits, controls, None).unwrap();
+        feed(&mut machine, &hello(0, 3)).unwrap();
+        let error = frames
+            .iter()
+            .find_map(|frame| feed(&mut machine, frame).err())
+            .expect("projected package skip cannot pass native inventory");
+        assert_eq!(error.kind, ErrorKind::Coverage);
+        rejected(machine, error);
     }
 }
 
@@ -955,17 +1079,17 @@ fn control_and_shape_refusals(limits: &Limits, expected: &[ExpectedControl]) {
         rejected(machine, error);
     }
     for payload in [
-        br#"[2,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[2,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000001",3,2,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[1,0,"00000000000000000000000000000001",3,2,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3.0,2,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[1,0,"00000000000000000000000000000000",3.0,2,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3e0,2,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[1,0,"00000000000000000000000000000000",3e0,2,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3,true,"4.24.0","vesper.lean4lean42/1"]"#
+        br#"[1,0,"00000000000000000000000000000000",3,true,"4.24.0","vesper.lean4lean42/2"]"#
             .as_slice(),
-        br#"[1,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/1",0]"#
+        br#"[1,0,"00000000000000000000000000000000",3,2,"4.24.0","vesper.lean4lean42/2",0]"#
             .as_slice(),
         b"{}".as_slice(),
         b"[".as_slice(),
@@ -1247,7 +1371,7 @@ fn binding_refusals(root: &Path, receipt: &Value) {
     windows,
     ignore = "long platform-neutral Lean replay; runs on Linux CI (docs/ci-platforms.md)"
 )]
-fn genuine_both_model_replay_and_independent_refusal_matrix() {
+fn genuine_three_model_replay_and_independent_refusal_matrix() {
     let _serial = SERIAL.lock().unwrap_or_else(|poison| poison.into_inner());
     let started = Instant::now();
     let root=std::env::var_os("VESPER_LEAN4LEAN42_ROOT").map(PathBuf::from)
@@ -1265,6 +1389,7 @@ fn genuine_both_model_replay_and_independent_refusal_matrix() {
     let limits = Limits::default();
     transport_faults(&executable);
     coverage_refusals(&limits);
+    resource_route_and_skip_refusals(&limits, &expected);
     control_and_shape_refusals(&limits, &expected);
     preflight_refusals(&executable, &root, &receipt);
     genuine_positive(&executable, &root, &receipt, &expected);
