@@ -953,9 +953,9 @@ impl RigidWorld {
             let v = to64(s.v);
             e += 0.5 * dot64(v, v) / f64::from(s.inv_mass);
             let wl = to64(rotate_inv(s.q, s.w));
-            for k in 0..3 {
+            for (k, component) in wl.into_iter().enumerate() {
                 if s.inv_inertia[k] > 0.0 {
-                    e += 0.5 * wl[k] * wl[k] / f64::from(s.inv_inertia[k]);
+                    e += 0.5 * component * component / f64::from(s.inv_inertia[k]);
                 }
             }
         }
