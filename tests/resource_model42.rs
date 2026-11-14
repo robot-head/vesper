@@ -857,6 +857,13 @@ fn resolve_vesper() -> PathBuf {
 }
 impl Drop for Fixture {
     fn drop(&mut self) {
+        if std::thread::panicking() && self.root.exists() {
+            eprintln!(
+                "resource_model42 retained failed artifact root: {}",
+                self.root.display()
+            );
+            return;
+        }
         let _ = fs::remove_dir_all(&self.root);
     }
 }
