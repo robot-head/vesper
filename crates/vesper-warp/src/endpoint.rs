@@ -80,11 +80,22 @@
 //! addresses with [`WarpEndpoint::set_rx_source`]; the [`TxTap`] reports
 //! destinations.
 //!
-//! What this is not: 1-RTT packets are not coalesced after long-header
-//! packets on send; the sequence-0 connection ID stays in the shard table
-//! until the connection closes; the idle timer restarts only on receive,
-//! not on the first ack-eliciting send after it (RFC 9000 §10.1); the
-//! server never migrates itself (no preferred_address); and no hardware
+//! Wave seven (issue #330; `docs/parallel-results/warp-lifecycle-rest.md`):
+//! 1-RTT packets (stream data, ACKs, CONNECTION_CLOSE) ride last in a
+//! datagram of long-header packets, carrying the PADDING when a client
+//! Initial needs 1200 bytes; a retired connection ID, sequence 0 included,
+//! leaves the shard table (the table is rekeyed to a live one); the idle
+//! timer also restarts on the first ack-eliciting send after a receive
+//! (RFC 9000 §10.1); servers advertise a `preferred_address`
+//! ([`LifecycleConfig::preferred_address`]) and move there once the path is
+//! validated, clients probe and follow it, and discard 1-RTT packets from
+//! unknown server addresses; a PATH_CHALLENGE on an amplification-limited
+//! path (a NAT rebinding seen in a small packet) is sent unpadded rather
+//! than not at all. The caller reports the local address a datagram
+//! arrived at with [`WarpEndpoint::set_rx_destination`]; the [`TxTap`]
+//! reports the source with [`TxTap::on_transmit_via`].
+//!
+//! What this is not: no hardware
 //! EDT, RSS or crypto offload. With
 //! [`SoftNic`](vesper_warp_umem::SoftNic) the "NIC" is lane 3's
 //! deterministic model; with lane 3's gated AF_XDP backend it is a real
@@ -2685,7 +2696,8 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             if let Some(id) = preferred_cid
                 && let Ok(tls_cid) = vesper_warp_tls::ConnectionId::new(id.as_bytes())
             {
-                params.preferred_address = Some(pa.encode(tls_cid, self.reset_key.token(id.as_bytes())));
+                params.preferred_address =
+                    Some(pa.encode(tls_cid, self.reset_key.token(id.as_bytes())));
             } else {
                 preferred_cid = None;
             }
@@ -3942,7 +3954,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             .min(self.app_out.len());
         let mut len = 0;
         if budget > 0 && c.streams.has_pending() && c.cc.can_send() && room {
-            len = c.streams.fill(&mut self.app_out[..budget], &mut self.record);
+            len = c
+                .streams
+                .fill(&mut self.app_out[..budget], &mut self.record);
         }
         if len == 0 {
             self.record.clear();
@@ -3997,7 +4011,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         let max = usize::from(c.max_datagram).min(self.dgram.len());
         let room = max.saturating_sub(self.dgram_len);
         let target = if self.dgram_pad {
-            MIN_INITIAL_DATAGRAM.saturating_sub(self.dgram_len).min(room)
+            MIN_INITIAL_DATAGRAM
+                .saturating_sub(self.dgram_len)
+                .min(room)
         } else {
             0
         };
@@ -4316,7 +4332,9 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
             .encode(&mut self.app_out)?;
             // After long-header closes, the 1-RTT close is the datagram's
             // last packet (RFC 9000 §10.2.3, §12.2).
-            if self.dgram_len > 0 && matches!(self.append_short(slot, false, n, true, now_ns), Ok(Some(_))) {
+            if self.dgram_len > 0
+                && matches!(self.append_short(slot, false, n, true, now_ns), Ok(Some(_)))
+            {
                 coalesced = true;
                 any = true;
             }

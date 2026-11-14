@@ -344,7 +344,10 @@ impl Net {
                 up_fin = r.fin;
             }
             if up_fin && down_sent < down.len() {
-                down_sent += self.server.stream_write(s, sid, &down[down_sent..]).unwrap();
+                down_sent += self
+                    .server
+                    .stream_write(s, sid, &down[down_sent..])
+                    .unwrap();
                 if down_sent == down.len() {
                     self.server.stream_finish(s, sid).unwrap();
                 }
@@ -429,7 +432,9 @@ fn resumed_request() -> (Net, [Vec<Vec<u8>>; 2]) {
     net.steps(10);
     net.reconnect();
     let sid = net.client.open_stream(net.c_conn, false).unwrap();
-    net.client.stream_write(net.c_conn, sid, b"request").unwrap();
+    net.client
+        .stream_write(net.c_conn, sid, b"request")
+        .unwrap();
     net.client.stream_finish(net.c_conn, sid).unwrap();
     net.seen.log = [Vec::new(), Vec::new()];
     net.steps(20);
@@ -528,7 +533,10 @@ fn retired_connection_ids_including_sequence_zero_leave_the_table() {
         let keyed = net.server.table().local_cid(s).unwrap();
         // The client's new path uses a fresh server ID and retires the
         // one in use (sequence 0 the first time).
-        net.client_addr = SocketAddr::V4(SocketAddrV4::new([192, 0, 2, 50 + round as u8].into(), 5000));
+        net.client_addr = SocketAddr::V4(SocketAddrV4::new(
+            [192, 0, 2, 50 + round as u8].into(),
+            5000,
+        ));
         net.client.migrate(net.c_conn, net.now).unwrap();
         net.transfer(10 + round, 8_000, 8_000);
         net.steps(10);
@@ -564,7 +572,13 @@ fn the_idle_timer_restarts_on_the_first_ack_eliciting_send_after_a_receive() {
         net.client.poll(now).unwrap();
         net.client.tap_mut().out.clear();
     }
-    let deadline = |net: &Net| net.client.connection(net.c_conn).unwrap().tile.idle_deadline_ns;
+    let deadline = |net: &Net| {
+        net.client
+            .connection(net.c_conn)
+            .unwrap()
+            .tile
+            .idle_deadline_ns
+    };
     let d0 = deadline(&net);
     let restarts0 = net.client.stats().idle_restarts_on_send;
     let sid = net.client.open_stream(net.c_conn, false).unwrap();
@@ -726,11 +740,24 @@ fn a_client_discards_packets_from_unknown_server_addresses() {
     assert!(!out.is_empty());
     let now = net.now;
     for (d, _, _) in &out {
-        Net::deliver_one(&mut net.client, d, addr("203.0.113.200:443"), net.client_addr, now);
+        Net::deliver_one(
+            &mut net.client,
+            d,
+            addr("203.0.113.200:443"),
+            net.client_addr,
+            now,
+        );
     }
-    assert_eq!(net.client.stats().unknown_server_address_drops, out.len() as u64);
+    assert_eq!(
+        net.client.stats().unknown_server_address_drops,
+        out.len() as u64
+    );
     let mut buf = [0u8; 64];
-    assert!(net.client.stream_read(net.c_conn, stream, &mut buf).is_err());
+    assert!(
+        net.client
+            .stream_read(net.c_conn, stream, &mut buf)
+            .is_err()
+    );
     // From the real address the data arrives (the server retransmits).
     for _ in 0..100 {
         net.step();
@@ -770,11 +797,19 @@ fn a_nat_rebinding_keeps_congestion_state_and_only_the_newest_packet_moves_the_p
     for (d, _, to) in &second {
         Net::deliver_one(&mut net.server, d, rebound, to.unwrap(), now);
     }
-    assert_eq!(net.server.stats().migrations, 1, "the newest packet moved the path");
+    assert_eq!(
+        net.server.stats().migrations,
+        1,
+        "the newest packet moved the path"
+    );
     for (d, _, to) in &first {
         Net::deliver_one(&mut net.server, d, old, to.unwrap(), now);
     }
-    assert_eq!(net.server.stats().migrations, 1, "an older packet does not move it back");
+    assert_eq!(
+        net.server.stats().migrations,
+        1,
+        "an older packet does not move it back"
+    );
     // §9.4: a port-only change keeps the congestion controller.
     assert!(cwnd(&net) >= grown, "congestion state kept on a rebinding");
     net.client_addr = rebound;
