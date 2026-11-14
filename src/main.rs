@@ -371,6 +371,18 @@ fn cli() -> Result<(), String> {
                 (&input, &source),
             )?;
             fs::write(&object, bytes).map_err(|e| e.to_string())?;
+            // Windows targets link with link.exe/lld-link (lane 24, #347);
+            // the default `cc` there means "find the MSVC linker".
+            if native::windows::is_windows_target(target.as_deref()) {
+                let explicit = (linker != "cc").then(|| PathBuf::from(&linker));
+                let path = native::windows::link_executable(&object, &path, explicit.as_deref())?;
+                fs::remove_file(&object).map_err(|e| e.to_string())?;
+                println!("built {}", path.display());
+                if tee_measure {
+                    tee_commands::measure_executable(&path)?;
+                }
+                return Ok(());
+            }
             let status = Command::new(&linker)
                 .arg(&object)
                 .arg("-o")

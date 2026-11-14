@@ -1137,6 +1137,12 @@ pub fn object(
     let isa = builder
         .finish(isa_flags(world, true)?)
         .map_err(|e| e.to_string())?;
+    // Windows x64 COFF with unwind tables (lane 24, #347).
+    if super::windows::is_windows(isa.triple()) {
+        return super::windows::emit_with(isa, "vesper-session", |m| {
+            Ok(compile_session(m, world, &plan, true)?.1)
+        });
+    }
     let builder = cranelift_object::ObjectBuilder::new(
         isa,
         "vesper-session",
