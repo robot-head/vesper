@@ -1,9 +1,11 @@
 # Finite resource checker (#322)
 
-Design checkpoint under [the frozen model contract](resource-model42-contracts.md).
+Implementation checkpoint under [the frozen model contract](resource-model42-contracts.md).
 The checker lane owns only `lean/ResourceModel42/Checker.lean` and this report.
-Syntax must publish its coherent API before checker implementation begins.
-No checker source or proof has been implemented or executed at this checkpoint.
+The compiled Syntax dependency is d51a21b. Checker source checkpoint b9ce0c0
+contains actual type/ownership inference and its opaque checked wrapper. The
+independent Proofs module still owns the substantive typing theorem; compiling
+this checker is not presented as that theorem or as source refinement.
 
 The admitted pure ANF fragment contains unit, bounded u64-like naturals,
 de Bruijn locals, strict let, structural binary pair/full unpack, numeric-zero
@@ -12,7 +14,7 @@ affine; component kinds must be below their field modalities. There are no
 caller-supplied inferred kinds, ownership masks, typing proofs, accepted flags,
 invocation values or static facts. Initial declared inputs are copy-only.
 
-The proposed actual inference computes a result type, bounded expanded type
+Actual inference computes a result type, bounded expanded type
 metrics and one Boolean demand per declared local. Bits record all references,
 including copy references. Sequential composition permits overlapping demand
 only for copy locals and unions those bits. Noncopy overlap fails. Let and
@@ -46,8 +48,39 @@ invariant, fuel and measured runtime limits remain distinct. No complete Rust
 diagnostic correspondence, backend trace agreement, source refinement, native
 observer, 100000-program campaign or full section 42 completion is claimed.
 
-Validation at this checkpoint: read-only review of actual Full typing/context
-rules and the historical model plan; coordination with Syntax, evaluator,
-proof and independent acceptance owners; no Lean or Cargo builds. Exact
-implemented APIs, public theorem catalog and executed evidence will replace
-this design-only checkpoint after source authorization and execution.
+The exact public inference seam is `inferAtom limits context atom` and
+`infer limits context expression`, where `Context = List TypeInfo`,
+`Usage = List Bool`, and `InferInfo` contains `result : TypeInfo` and `uses`.
+The smart pair constructor prepays expanded type metrics; even a variable info
+created under a larger configuration is checked against the current bound.
+`checkProgram : ValidatedProgram → Except CheckFailure CheckedProgram` runs
+actual inference. The private checked wrapper exposes `.program`, `.info`,
+`.resultType`, `.uses` and a genuine inference-success equality `.check_ok`.
+No invocation values occur in any of these checking signatures.
+
+Structured failures are `CheckFailure.semantic CheckError` and
+`CheckFailure.profile CheckProfile`. Semantic error kinds are unknownVariable,
+typeMismatch, duplicateUse, unusedLinear, fieldModality, literalOutOfRange and
+branchOwnership. Blame carries `site` and optional de Bruijn `slot`; these are
+logical model labels, not Rust byte spans. Profiles distinguish type-bound,
+context-bound and affine-only branch-demand refusals. Linear-demand mismatch
+has global priority over an earlier affine slot within the branch comparison.
+
+Explicit named checker theorem catalog:
+`Vesper.ResourceModel42.CheckedProgram.check_ok`. This is the wrapper's actual
+inference-success equation, not a substitute for the independently owned
+`Full.HasType` and execution correspondence proofs. Public helper definitions
+are available for those proofs to unfold; the real auditor must receive
+semantic theorem roots, not definition names.
+
+Actual validation so far: pinned Lean 4.24 compiled Checker b9ce0c0 successfully
+against immutable compiled Syntax/Full dependencies. The final successful
+compile log `/tmp/resource-model42-checker-v1.log` is empty. Its immutable
+source/object checkpoint is `/tmp/resource-model42-checker-api-v1`. Git diff
+checks passed and two independent source reviewers found no blocker. An
+initial scratch semantic smoke command failed because its temporary helper
+used equality on Except without a DecidableEq instance; that is a test-helper
+failure, not successful semantic evidence. No scratch assertion pass is
+claimed. The helper was corrected without another compilation after the
+explicit compiler-lease handoff. Independent fixed semantic acceptance and
+actual transitive kernel audit remain pending; no Cargo command was run here.
