@@ -1,7 +1,10 @@
 //! Vesper eBPF (design §27): an eBPF instruction codec and assembler, the
-//! §27.5 pre-flight abstract verifier, BPF ELF emission, a concrete
-//! userspace interpreter, the §27.3 XDP SYN-flood mitigator, and (Linux
-//! only, the one `unsafe` module) kernel load and test-run evidence.
+//! §27.5 pre-flight abstract verifier, BPF ELF emission, BTF with CO-RE
+//! relocation (field offsets and bitfields, type ids, sizes, existence,
+//! `TYPE_MATCHES`, enumerators; vmlinux then module BTF), a concrete
+//! userspace interpreter for XDP, tc, tracepoint and kprobe programs, the
+//! §27.3 XDP SYN-flood mitigator, and (Linux only, the one `unsafe`
+//! module) kernel load and test-run evidence.
 //!
 //! Not in this crate: a compiler eBPF backend from Vesper source, and the
 //! linear `BpfRingSlot`/`BpfSocketRef` host-side builders of the lane

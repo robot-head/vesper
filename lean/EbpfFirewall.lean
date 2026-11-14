@@ -29,6 +29,11 @@ What is proved, about this model only:
   ACK flag set always passes, whatever the counters, threshold or payload.
 * `only_syn_only_packets_are_counted` and `count_increments_by_one`.
 
+A second part (namespace `Bounds`) models the verifier's packet-bounds
+tracking for one program class, straight-line XDP programs, and proves
+that the programs it accepts never read outside the packet; see that
+section.
+
 Counts are natural numbers here; the BPF program uses a 64-bit counter
 that would wrap after 2^64 SYNs from one source, which the model ignores.
 This is not a theorem about the Rust code or the emitted bytecode. A Rust
@@ -307,5 +312,281 @@ def runFixture : List Nat :=
     (acc.1 ++ [a.code], c')) ([], fun _ => none)).1
 
 #eval s!"fixture: {runFixture}"
+
+/-! ## Packet-bounds tracking (a model of the verifier, XDP)
+
+A model of how the verifier (`crates/vesper-ebpf/src/verifier.rs`, and
+the kernel's `find_good_pkt_pointers`/`check_packet_access`) tracks
+packet bounds for straight-line XDP programs: each register is an
+unknown, a scalar with an upper bound, `pkt_end`, or a packet pointer
+`data + c + off` with a hidden variable part `c ≤ vmax` and a `range`
+(the bytes from `data + c` that a bounds check has shown lie before
+`data_end`). Adding a scalar to a pointer resets its range, as in the
+kernel. `exitIfPast p n q` is the bounds-check idiom
+`tmp = p + n; if tmp > q goto exit`; the model raises the range of `p`
+only (the kernel also raises it for every register with `p`'s id, which
+the model leaves out, so it accepts fewer programs). Arithmetic is on
+natural numbers: the 64-bit wrap the kernel excludes with
+`MAX_PACKET_OFF` is not modelled.
+
+* `step_sound`: one accepted instruction keeps every register inside its
+  abstract value, or leaves the program through a bounds check.
+* `run_sound` and `accepted_in_bounds`: a
+  program the model accepts never reads a byte outside
+  `[data, data_end)`, for every packet and every initial register file.
+
+`boundsPrograms` are checked by the Rust test against the real verifier
+(and the kernel's, where the host loads programs), which must give the
+same verdicts. -/
+
+namespace Bounds
+
+inductive AVal where
+  | unknown
+  | scalar (umax : Nat)
+  | pkt (off vmax range : Nat)
+  | pktEnd
+
+inductive Insn where
+  | ldData (dst : Nat)
+  | ldDataEnd (dst : Nat)
+  | movImm (dst k : Nat)
+  | mov (dst src : Nat)
+  | addImm (dst k : Nat)
+  | andImm (dst m : Nat)
+  | mulImm (dst k : Nat)
+  | addReg (dst src : Nat)
+  | exitIfPast (ptr n endReg : Nat)
+  | ldxb (dst src k : Nat)
+
+structure Pkt where
+  data : Nat
+  dend : Nat
+  mem : Nat → Nat
+  byte : ∀ i, mem i ≤ 255
+
+def upd {α : Type} (f : Nat → α) (i : Nat) (v : α) : Nat → α :=
+  fun j => if j = i then v else f j
+
+inductive Out where
+  | cont (regs : Nat → Nat)
+  | exit
+  | fault
+
+def cstep (e : Pkt) (r : Nat → Nat) : Insn → Out
+  | .ldData d => .cont (upd r d e.data)
+  | .ldDataEnd d => .cont (upd r d e.dend)
+  | .movImm d k => .cont (upd r d k)
+  | .mov d s => .cont (upd r d (r s))
+  | .addImm d k => .cont (upd r d (r d + k))
+  | .andImm d m => .cont (upd r d (r d &&& m))
+  | .mulImm d k => .cont (upd r d (r d * k))
+  | .addReg d s => .cont (upd r d (r d + r s))
+  | .exitIfPast p n q => if r p + n > r q then .exit else .cont r
+  | .ldxb d s k =>
+    if e.data ≤ r s + k ∧ r s + k < e.dend then .cont (upd r d (e.mem (r s + k)))
+    else .fault
+
+def crun (e : Pkt) (r : Nat → Nat) : List Insn → Out
+  | [] => .cont r
+  | i :: is =>
+    match cstep e r i with
+    | .cont r' => crun e r' is
+    | o => o
+
+def astep (a : Nat → AVal) : Insn → Option (Nat → AVal)
+  | .ldData d => some (upd a d (.pkt 0 0 0))
+  | .ldDataEnd d => some (upd a d .pktEnd)
+  | .movImm d k => some (upd a d (.scalar k))
+  | .mov d s => some (upd a d (a s))
+  | .addImm d k =>
+    match a d with
+    | .scalar u => some (upd a d (.scalar (u + k)))
+    | .pkt o v g => some (upd a d (.pkt (o + k) v g))
+    | _ => none
+  | .andImm d m =>
+    match a d with
+    | .scalar u => some (upd a d (.scalar (min u m)))
+    | _ => none
+  | .mulImm d k =>
+    match a d with
+    | .scalar u => some (upd a d (.scalar (u * k)))
+    | _ => none
+  | .addReg d s =>
+    match a d, a s with
+    | .scalar u, .scalar w => some (upd a d (.scalar (u + w)))
+    | .pkt o v _, .scalar w => some (upd a d (.pkt o (v + w) 0))
+    | _, _ => none
+  | .exitIfPast p n q =>
+    match a p, a q with
+    | .pkt o v g, .pktEnd => some (upd a p (.pkt o v (max g (o + n))))
+    | _, _ => none
+  | .ldxb d s k =>
+    match a s with
+    | .pkt o _ g => if o + k + 1 ≤ g then some (upd a d (.scalar 255)) else none
+    | _ => none
+
+def verify (a : Nat → AVal) : List Insn → Bool
+  | [] => true
+  | i :: is =>
+    match astep a i with
+    | some a' => verify a' is
+    | none => false
+
+def conc (e : Pkt) : AVal → Nat → Prop
+  | .unknown, _ => True
+  | .scalar u, x => x ≤ u
+  | .pkt o v g, x => ∃ c, c ≤ v ∧ x = e.data + c + o ∧ (g = 0 ∨ e.data + c + g ≤ e.dend)
+  | .pktEnd, x => x = e.dend
+
+def Agree (e : Pkt) (a : Nat → AVal) (r : Nat → Nat) : Prop := ∀ i, conc e (a i) (r i)
+
+theorem agree_upd {e : Pkt} {a : Nat → AVal} {r : Nat → Nat} (h : Agree e a r) (d : Nat)
+    {av : AVal} {x : Nat} (hx : conc e av x) : Agree e (upd a d av) (upd r d x) := by
+  intro i
+  simp only [upd]
+  by_cases hi : i = d
+  · rw [if_pos hi, if_pos hi]; exact hx
+  · rw [if_neg hi, if_neg hi]; exact h i
+
+theorem upd_self (r : Nat → Nat) (p : Nat) : upd r p (r p) = r := by
+  funext j
+  simp only [upd]
+  by_cases hj : j = p
+  · rw [if_pos hj, hj]
+  · rw [if_neg hj]
+
+theorem step_sound (e : Pkt) (a a' : Nat → AVal) (r : Nat → Nat) (i : Insn)
+    (h : Agree e a r) (hs : astep a i = some a') :
+    cstep e r i = .exit ∨ ∃ r', cstep e r i = .cont r' ∧ Agree e a' r' := by
+  cases i with
+  | ldData d =>
+    simp only [astep, Option.some.injEq] at hs; subst hs
+    exact Or.inr ⟨_, rfl, agree_upd h d ⟨0, Nat.le_refl 0, by omega, Or.inl rfl⟩⟩
+  | ldDataEnd d =>
+    simp only [astep, Option.some.injEq] at hs; subst hs
+    exact Or.inr ⟨_, rfl, agree_upd h d (show e.dend = e.dend from rfl)⟩
+  | movImm d k =>
+    simp only [astep, Option.some.injEq] at hs; subst hs
+    exact Or.inr ⟨_, rfl, agree_upd h d (show k ≤ k from Nat.le_refl k)⟩
+  | mov d s =>
+    simp only [astep, Option.some.injEq] at hs; subst hs
+    exact Or.inr ⟨_, rfl, agree_upd h d (h s)⟩
+  | addImm d k =>
+    have hd := h d
+    simp only [astep] at hs
+    cases had : a d with
+    | scalar u =>
+      rw [had] at hs hd; simp only [Option.some.injEq] at hs; subst hs
+      exact Or.inr ⟨_, rfl, agree_upd h d (show r d + k ≤ u + k by simp only [conc] at hd; omega)⟩
+    | pkt o v g =>
+      rw [had] at hs hd; simp only [Option.some.injEq] at hs; subst hs
+      obtain ⟨c, hc, hx, hg⟩ := hd
+      exact Or.inr ⟨_, rfl, agree_upd h d ⟨c, hc, by omega, hg⟩⟩
+    | unknown => rw [had] at hs; simp at hs
+    | pktEnd => rw [had] at hs; simp at hs
+  | andImm d m =>
+    have hd := h d
+    simp only [astep] at hs
+    cases had : a d with
+    | scalar u =>
+      rw [had] at hs hd; simp only [Option.some.injEq] at hs; subst hs
+      exact Or.inr ⟨_, rfl, agree_upd h d (show r d &&& m ≤ min u m from
+        Nat.le_min.mpr ⟨Nat.le_trans Nat.and_le_left hd, Nat.and_le_right⟩)⟩
+    | unknown => rw [had] at hs; simp at hs
+    | pkt => rw [had] at hs; simp at hs
+    | pktEnd => rw [had] at hs; simp at hs
+  | mulImm d k =>
+    have hd := h d
+    simp only [astep] at hs
+    cases had : a d with
+    | scalar u =>
+      rw [had] at hs hd; simp only [Option.some.injEq] at hs; subst hs
+      exact Or.inr ⟨_, rfl, agree_upd h d (show r d * k ≤ u * k from Nat.mul_le_mul_right k hd)⟩
+    | unknown => rw [had] at hs; simp at hs
+    | pkt => rw [had] at hs; simp at hs
+    | pktEnd => rw [had] at hs; simp at hs
+  | addReg d s =>
+    have hd := h d
+    have hs' := h s
+    simp only [astep] at hs
+    cases had : a d <;> cases has : a s <;> rw [had, has] at hs <;> simp at hs
+    · rw [had] at hd; rw [has] at hs'; subst hs
+      exact Or.inr ⟨_, rfl, agree_upd h d (show r d + r s ≤ _ + _ from Nat.add_le_add hd hs')⟩
+    · rw [had] at hd; rw [has] at hs'; subst hs
+      obtain ⟨c, hc, hx, _⟩ := hd
+      refine Or.inr ⟨_, rfl, agree_upd h d ⟨c + r s, ?_, ?_, Or.inl rfl⟩⟩
+      · simp only [conc] at hs'; omega
+      · omega
+  | exitIfPast p n q =>
+    have hp := h p
+    have hq := h q
+    simp only [astep] at hs
+    cases hap : a p <;> cases haq : a q <;> rw [hap, haq] at hs <;> simp at hs
+    rw [hap] at hp; rw [haq] at hq; subst hs
+    rename_i o v g
+    simp only [conc] at hq
+    by_cases hc : r p + n > r q
+    · left; simp only [cstep]; rw [if_pos hc]
+    · right
+      refine ⟨r, by simp only [cstep]; rw [if_neg hc], ?_⟩
+      have := agree_upd h p (av := .pkt o v (max g (o + n))) (x := r p) ?_
+      · rwa [upd_self] at this
+      · obtain ⟨c, hcv, hx, hg⟩ := hp
+        refine ⟨c, hcv, hx, Or.inr ?_⟩
+        rcases hg with hg | hg <;> simp only [Nat.max_def] <;> split <;> omega
+  | ldxb d s k =>
+    have hs' := h s
+    simp only [astep] at hs
+    cases has : a s with
+    | pkt o v g =>
+      rw [has] at hs hs'
+      by_cases hk : o + k + 1 ≤ g
+      · simp only [hk, if_true, Option.some.injEq] at hs; subst hs
+        obtain ⟨c, _, hx, hg⟩ := hs'
+        have hin : e.data ≤ r s + k ∧ r s + k < e.dend := by
+          rcases hg with hg | hg <;> omega
+        refine Or.inr ⟨_, by simp only [cstep]; rw [if_pos hin], agree_upd h d (e.byte _)⟩
+      · simp [hk] at hs
+    | unknown => rw [has] at hs; simp at hs
+    | scalar => rw [has] at hs; simp at hs
+    | pktEnd => rw [has] at hs; simp at hs
+
+theorem run_sound (e : Pkt) : ∀ (p : List Insn) (a : Nat → AVal) (r : Nat → Nat),
+    Agree e a r → verify a p = true → crun e r p ≠ .fault
+  | [], _, _, _, _ => by simp [crun]
+  | i :: is, a, r, h, hv => by
+    simp only [verify] at hv
+    cases hs : astep a i with
+    | none => rw [hs] at hv; simp at hv
+    | some a' =>
+      rw [hs] at hv
+      rcases step_sound e a a' r i h hs with hx | ⟨r', hc, h'⟩
+      · simp [crun, hx]
+      · simp only [crun, hc]; exact run_sound e is a' r' h' hv
+
+def init : Nat → AVal := fun _ => .unknown
+
+theorem accepted_in_bounds (e : Pkt) (p : List Insn)
+    (r : Nat → Nat) (hv : verify init p = true) : crun e r p ≠ .fault :=
+  run_sound e p init r (fun _ => trivial) hv
+
+def boundsPrograms : List (List Insn) :=
+  [ [.ldData 2, .ldDataEnd 3, .exitIfPast 2 34 3, .ldxb 5 2 14, .andImm 5 15, .mulImm 5 4, .mov 4 2, .addReg 4 5, .exitIfPast 4 34 3, .ldxb 6 4 27],
+    [.ldData 2, .ldDataEnd 3, .ldxb 5 2 14],
+    [.ldData 2, .ldDataEnd 3, .exitIfPast 2 14 3, .ldxb 5 2 14],
+    [.ldData 2, .ldDataEnd 3, .exitIfPast 2 15 3, .ldxb 5 2 14],
+    [.ldData 2, .ldDataEnd 3, .exitIfPast 2 34 3, .ldxb 5 2 14, .andImm 5 15, .mulImm 5 4, .mov 4 2, .addReg 4 5, .ldxb 6 4 27],
+    [.ldData 2, .ldDataEnd 3, .exitIfPast 2 64 3, .ldxb 5 3 0],
+    [.ldData 2, .ldDataEnd 3, .mov 4 2, .addImm 4 20, .exitIfPast 4 4 3, .ldxb 5 4 3] ]
+
+example : boundsPrograms.map (verify init) = [true, false, false, true, false, false, true] := by decide
+
+#eval s!"bounds: {boundsPrograms.map (verify init)}"
+
+#print axioms step_sound
+#print axioms run_sound
+#print axioms accepted_in_bounds
+end Bounds
 
 end Vesper.EbpfFirewall

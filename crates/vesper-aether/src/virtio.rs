@@ -218,6 +218,31 @@ impl GuestAuthorization {
         }
         Ok(Self { vm_id, regions })
     }
+    /// Authorizes device read/write access to exactly the RAM of a VMM-owned
+    /// [`crate::guest_mem::GuestMemory`] (whose regions are already validated,
+    /// page aligned and disjoint). Every buffer must still fit one region.
+    pub fn for_guest_ram(
+        vm_id: u64,
+        memory: &crate::guest_mem::GuestMemory,
+        limits: QueueLimits,
+    ) -> Result<Self, QueueError> {
+        limits.validate()?;
+        let layout = memory.layout();
+        if layout.is_empty() || layout.len() > limits.max_authorized_ranges {
+            return Err(QueueError::Limit);
+        }
+        let regions = layout
+            .into_iter()
+            .map(|(start, len)| {
+                Ok(Region {
+                    start,
+                    end: start.checked_add(len).ok_or(QueueError::Overflow)?,
+                    access: DeviceAccess::ReadWrite,
+                })
+            })
+            .collect::<Result<Vec<_>, QueueError>>()?;
+        Ok(Self { vm_id, regions })
+    }
     pub fn vm_id(&self) -> u64 {
         self.vm_id
     }

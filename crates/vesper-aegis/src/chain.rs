@@ -217,6 +217,18 @@ pub fn verify_chain_with_crls(
     leaf_ec_key(leaf, curve)
 }
 
+/// `thisUpdate` of a DER CRL, in Unix seconds (signature not checked: use
+/// it only on a CRL that [`verify_chain_with_crls`] accepted).
+pub fn crl_this_update(der: &[u8]) -> Result<u64, AttestError> {
+    let (rest, crl) =
+        x509_parser::parse_x509_crl(der).map_err(|e| AttestError::Crl(format!("{e}")))?;
+    if !rest.is_empty() {
+        return Err(AttestError::Crl("trailing bytes".into()));
+    }
+    u64::try_from(crl.last_update().timestamp())
+        .map_err(|_| AttestError::Crl("thisUpdate before 1970".into()))
+}
+
 /// Path validation only; returns nothing about the leaf key. Used for RSA
 /// leaves (AMD intermediates) and by the typed wrappers above.
 pub fn verify_path(
