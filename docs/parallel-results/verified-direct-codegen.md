@@ -95,7 +95,12 @@ These were run locally on Linux x86-64 with Rust 1.100.0 and Lean 4.24.0 from th
   - **AArch64 Linux** ran under `qemu-aarch64-static` (QEMU 8.2 from Ubuntu). This validates the program under QEMU's AArch64 model only.
   - **AArch64 macOS** reported unavailable locally, because the Mach-O output can only be linked and run on a Mac. The macOS (AArch64) CI job runs it there.
   - When the runner for a target is missing, the test prints `unavailable` and does not pass silently.
-- **Workspace.** `cargo fmt --all -- --check`, `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` and `cargo test --workspace --locked` were run on the merged tree. Their results are recorded in the PR.
+- **Workspace.** These ran on `83872e5` plus the #490 fix, which is identical to the merged tree at `bbdf225`.
+  - `cargo fmt --all -- --check` passed.
+  - `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings` passed.
+  - `cargo test --workspace --locked --no-fail-fast` gave 4504 passed and 17 failed. None of the failures is in this lane's code:
+    - `lean4lean42_acceptance` needs `VESPER_LEAN4LEAN42_ROOT`, which only CI prepares.
+    - 16 `vesper-loom-build` tests fail with `UnknownFingerprint { missing: ["engine_dependencies"] }`. That crate does not depend on the root package.
 
 ## Decisions
 
