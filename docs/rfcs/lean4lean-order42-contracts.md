@@ -34,8 +34,9 @@ interchangeable. Required public APIs:
 - `name_cmp_eq_iff (a b : Name) : Name.cmp a b = .eq ↔ a = b`.
 - `name_cmp_lt_trans`: two `.lt` comparisons imply the third.
 - `name_cmp_lt_irrefl (a : Name) : Name.cmp a a ≠ .lt`.
-- Named instances `nameCmpTrans : Std.TransCmp Name.cmp` and
-  `nameCmpLawfulEq : Std.LawfulEqCmp Name.cmp` using proved facts.
+- Public theorem class bridges `nameCmpTrans : Std.TransCmp Name.cmp` and
+  `nameCmpLawfulEq : Std.LawfulEqCmp Name.cmp`, then registered with
+  `attribute [instance]`, so both are direct audited theorem roots.
 - `path_cmp_trans : Std.TransCmp (List.compareLex Name.cmp)` and
   `path_cmp_lawfulEq : Std.LawfulEqCmp (List.compareLex Name.cmp)` via existing
   pinned core lifting, not a duplicated list-order implementation.
