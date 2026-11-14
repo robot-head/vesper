@@ -28,6 +28,7 @@
 //! ([`PdcError::FeedbackShorterThanBlock`]); shorter feedback needs
 //! per-sample evaluation, which this slice does not provide.
 
+use crate::slab::{SlabError, SlabRead, TiledSlab};
 use std::collections::BTreeSet;
 use std::fmt;
 
@@ -188,6 +189,10 @@ pub enum PdcError {
     LatencyOverflow(NodeId),
     /// A delay line would exceed [`MAX_DELAY_SAMPLES`].
     DelayTooLong(u32),
+    /// The buffer slab could not be allocated.
+    Slab(SlabError),
+    /// Internal invariant: an op would read the buffer it writes.
+    OutputAliasesInput(NodeId),
     /// Processor count does not match node count.
     ProcessorCount {
         /// Nodes in the spec.
@@ -459,7 +464,7 @@ pub trait DspProcessor: Send {
 
 /// Read-only view of a node's inputs for one block.
 pub struct Inputs<'a> {
-    buffers: &'a [Vec<f32>],
+    buffers: SlabRead<'a>,
     which: &'a [InputSource],
 }
 
@@ -474,17 +479,20 @@ impl Inputs<'_> {
         self.which.is_empty()
     }
 
-    /// The k-th input block.
+    /// The k-th input block. Panics if `k >= len()`; every input buffer is
+    /// distinct from the node's output buffer (checked when the graph is
+    /// built), so in range it always exists.
     pub fn get(&self, k: usize) -> &[f32] {
-        &self.buffers[self.which[k].read_buffer()]
+        self.buffers.get(self.which[k].read_buffer()).unwrap_or(&[])
     }
 }
 
-/// A compiled graph with preallocated buffers, ready to run blocks.
+/// A compiled graph with preallocated buffers, ready to run blocks. Every
+/// block buffer lives in one [`TiledSlab`].
 pub struct CompiledGraph {
     schedule: Schedule,
     processors: Vec<Box<dyn DspProcessor>>,
-    buffers: Vec<Vec<f32>>,
+    buffers: TiledSlab,
     lines: Vec<DelayLine>,
     block: usize,
 }
@@ -526,7 +534,16 @@ impl CompiledGraph {
             .iter()
             .map(|l| DelayLine::new(l.delay, block))
             .collect::<Result<Vec<_>, _>>()?;
-        let buffers = vec![vec![0.0f32; block]; schedule.buffer_count];
+        for op in &schedule.ops {
+            let aliased = op.inputs.iter().any(|i| {
+                i.read_buffer() == op.output
+                    || matches!(*i, InputSource::Forward { buffer, line: Some(_), .. } if buffer == op.output)
+            });
+            if aliased {
+                return Err(PdcError::OutputAliasesInput(op.node));
+            }
+        }
+        let buffers = TiledSlab::new(schedule.buffer_count, block).map_err(PdcError::Slab)?;
         Ok(CompiledGraph {
             schedule,
             processors,
@@ -546,6 +563,11 @@ impl CompiledGraph {
         self.block
     }
 
+    /// The buffer slab (layout and working-set size).
+    pub fn slab(&self) -> &TiledSlab {
+        &self.buffers
+    }
+
     /// Run one block. Does not allocate.
     pub fn process_block(&mut self) {
         for op in &self.schedule.ops {
@@ -556,29 +578,32 @@ impl CompiledGraph {
                         line: Some((line, scratch)),
                         ..
                     } => {
-                        self.lines[line].write(&self.buffers[buffer]);
-                        let mut tmp = std::mem::take(&mut self.buffers[scratch]);
-                        self.lines[line].read(&mut tmp);
-                        self.buffers[scratch] = tmp;
+                        if let Some(src) = self.buffers.buffer(buffer) {
+                            self.lines[line].write(src);
+                        }
+                        if let Some(dst) = self.buffers.buffer_mut(scratch) {
+                            self.lines[line].read(dst);
+                        }
                     }
                     InputSource::Feedback { line, buffer, .. } => {
-                        let mut tmp = std::mem::take(&mut self.buffers[buffer]);
-                        self.lines[line].read(&mut tmp);
-                        self.buffers[buffer] = tmp;
+                        if let Some(dst) = self.buffers.buffer_mut(buffer) {
+                            self.lines[line].read(dst);
+                        }
                     }
                     InputSource::Forward { line: None, .. } => {}
                 }
             }
-            let mut out = std::mem::take(&mut self.buffers[op.output]);
-            let inputs = Inputs {
-                buffers: &self.buffers,
-                which: &op.inputs,
-            };
-            self.processors[op.spec_index].process(&inputs, &mut out);
-            for &line in &op.feeds {
-                self.lines[line].write(&out);
+            // `op.output < buffer_count` by construction of the schedule.
+            if let Some((read, out)) = self.buffers.split_out(op.output) {
+                let inputs = Inputs {
+                    buffers: read,
+                    which: &op.inputs,
+                };
+                self.processors[op.spec_index].process(&inputs, out);
+                for &line in &op.feeds {
+                    self.lines[line].write(out);
+                }
             }
-            self.buffers[op.output] = out;
         }
         for line in &mut self.lines {
             line.advance(self.block);
@@ -591,7 +616,7 @@ impl CompiledGraph {
     pub fn output(&self, node: NodeId) -> Option<&[f32]> {
         self.schedule
             .op(node)
-            .map(|op| self.buffers[op.output].as_slice())
+            .and_then(|op| self.buffers.buffer(op.output))
     }
 }
 
