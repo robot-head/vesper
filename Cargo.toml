@@ -232,6 +232,14 @@ target-lexicon = "0.13"
 serde = { workspace = true }
 serde_json = { workspace = true }
 salsa = "0.24"
+# Wasm target (wave-seven lane 25): the versions Wasmtime 50 already pulls in.
+wasm-encoder = "=0.261.0"
+wit-component = "=0.261.0"
+wit-parser = "=0.261.0"
+
+[dev-dependencies]
+vesper-nexus = { path = "crates/vesper-nexus" }
+wasmtime = { version = "50", default-features = false, features = ["cranelift", "component-model", "runtime", "std", "stack-switching", "gc", "gc-null"] }
 
 [target.'cfg(unix)'.dependencies]
 getrandom = "0.4"
