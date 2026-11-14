@@ -1,5 +1,6 @@
 import ResourceModel42.Syntax
 import ResourceModel42.Checker
+import ResourceModel42.CheckerProofs
 import ResourceModel42.Evaluator
 import ResourceModel42.ErasureProofs
 import ResourceModel42.LedgerProofs
