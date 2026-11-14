@@ -457,6 +457,8 @@ type NativeResult = Result<Option<u64>, String>;
 /// One `--native-coverage` execution: run the instrumented native code,
 /// feed its edges and comparison operands to Crucible, and cross-check the
 /// outcome class and, for scalar results, the value against the evaluator.
+/// Returns the native result and the evaluator's outcome, which a
+/// differential campaign compares for results native code does not report.
 /// Native fuel or stack exhaustion is an invalid run, like evaluator fuel.
 fn native_coverage_run(
     coverage: &mut vesper::native_coverage::NativeCoverage,
@@ -465,7 +467,7 @@ fn native_coverage_run(
     args: &[Value],
     src: &mut Source,
     shadow: bool,
-) -> Result<NativeResult, PropError> {
+) -> Result<(NativeResult, Result<Value, String>), PropError> {
     use vesper::native_coverage::NativeOutcome;
     let machine: Vec<u64> = args.iter().map(machine_value).collect();
     let outcome = coverage
@@ -489,7 +491,7 @@ fn native_coverage_run(
         (NativeOutcome::Returned, Ok(v)) => {
             let native = coverage.last_result();
             if let Some(n) = native
-                && tape_value(&v).is_some()
+                && matches!(v, Value::Int(_) | Value::UInt(..) | Value::Bool(_))
                 && machine_value(&v) != n
             {
                 return Err(PropError::fail(
@@ -497,9 +499,9 @@ fn native_coverage_run(
                     format!("{name}: native code returned {n:#x}, evaluator returned {v}"),
                 ));
             }
-            Ok(Ok(native))
+            Ok((Ok(native), Ok(v)))
         }
-        (NativeOutcome::Failed { effect }, Err(_)) => Ok(Err(effect)),
+        (NativeOutcome::Failed { effect }, Err(e)) => Ok((Err(effect), Err(e))),
         (NativeOutcome::Returned, Err(e)) => Err(PropError::fail(
             "native-divergence",
             format!("{name}: native code returned, evaluator failed: {e}"),
@@ -769,7 +771,8 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
     let mut property = |src: &mut Source| -> Result<(), PropError> {
         let args = draw_args(&target.carriers, src)?;
         if let Some(coverage) = coverage.as_mut() {
-            let ours = native_coverage_run(coverage, &evaluator, &name, &args, src, false)?;
+            let (ours, our_value) =
+                native_coverage_run(coverage, &evaluator, &name, &args, src, false)?;
             let (Some(other), Some(s)) = (shadow_coverage.as_mut(), &shadow) else {
                 return match ours {
                     Ok(_) => Ok(()),
@@ -779,15 +782,21 @@ pub fn fuzz(args: Vec<String>) -> Result<(), String> {
                     )),
                 };
             };
-            let theirs = native_coverage_run(other, &evaluator, &s.name, &args, src, true)?;
-            if ours != theirs {
+            let (theirs, their_value) =
+                native_coverage_run(other, &evaluator, &s.name, &args, src, true)?;
+            // Native code reports scalar results only; the evaluator's
+            // outcomes (already cross-checked against native code) decide
+            // for floats, aggregates and Unit.
+            if ours != theirs || !same_outcome(&our_value, &their_value) {
                 return Err(PropError::fail(
                     "divergence",
                     format!(
-                        "{name} {}, shadow {} {} (both native)",
+                        "{name} {} ({}), shadow {} {} ({}) (both native)",
                         native_result_text(&ours),
+                        outcome_text(&our_value),
                         s.name,
-                        native_result_text(&theirs)
+                        native_result_text(&theirs),
+                        outcome_text(&their_value)
                     ),
                 ));
             }

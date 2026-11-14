@@ -92,8 +92,9 @@ fn instance_key(name: &str, vars: &BTreeMap<String, Type>) -> String {
 /// substitution ignores these entries.
 const FN_ARG: &str = "$fn:";
 /// The function-value parameters of an instance bound to top-level
-/// functions, `param -> function`.
-fn function_arguments(vars: &BTreeMap<String, Type>) -> BTreeMap<String, String> {
+/// functions, `param -> function` (empty for other instances; pass
+/// [`EmittedFunction::vars`]).
+pub fn function_arguments(vars: &BTreeMap<String, Type>) -> BTreeMap<String, String> {
     vars.iter()
         .filter_map(|(k, t)| Some((k.strip_prefix(FN_ARG)?.to_string(), t.name().to_string())))
         .collect()

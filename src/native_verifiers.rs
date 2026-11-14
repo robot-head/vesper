@@ -969,12 +969,33 @@ fn derive_policy(
             {
                 continue;
             }
+            // A function-value instance calls its bound functions directly.
+            // The source walk sees those calls as calls through a parameter,
+            // so it lists none of them; trust the bound ConstTime functions
+            // the same way as direct ConstTime callees (declassification
+            // gates as declassify).
+            let mut declassify = ct.declassify_callees.clone();
+            let mut trusted = ct.constant_time_callees.clone();
+            for bound in crate::native::function_arguments(&f.vars).into_values() {
+                let constant_time = world.functions.get(&bound).is_some_and(|b| {
+                    crate::capability_effects::capabilities(&b.effects)
+                        .contains(&crate::capability_effects::Capability::ConstTime)
+                });
+                if !constant_time {
+                    continue;
+                }
+                if crate::capability_effects::is_declassify_gate(&bound) {
+                    declassify.push(bound);
+                } else {
+                    trusted.push(bound);
+                }
+            }
             policy.const_time.insert(
                 f.key.clone(),
                 ConstTimeEntry {
                     secret: secret.clone(),
-                    declassify: keep_emitted(&ct.declassify_callees),
-                    constant_time_callees: keep_emitted(&ct.constant_time_callees),
+                    declassify: keep_emitted(&declassify),
+                    constant_time_callees: keep_emitted(&trusted),
                 },
             );
         }

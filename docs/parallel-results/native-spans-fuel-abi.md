@@ -186,7 +186,7 @@ On the cloud host (Linux x86_64):
 - `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`:
   clean. The only output is the existing unused-`serde_json` manifest
   warning in `vesper-pact`.
-- `cargo test -p vesper --locked --test native_spans`: 16 passed.
+- `cargo test -p vesper --locked --test native_spans`: 18 passed.
 - `cargo test -p vesper --locked --test capability_verifiers --test native_verifiers_cli --test capability_effects --test native_batch --test source_native_suspension --test native_suspend_abi --test native_coverage_cli --test fuzz_cli`:
   all pass.
 - `cargo test --workspace --locked`: see the PR. Locally, tests that need

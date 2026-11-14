@@ -888,3 +888,100 @@ fn native_coverage_cross_checks_results_with_the_evaluator() {
     assert_eq!(safe.last_result(), Some(1));
     let _ = object_with_coverage(&world, "main", Some(TARGETS[1]), true, 0x1000_0000).unwrap();
 }
+
+#[test]
+fn native_differential_compares_results_native_code_does_not_report() {
+    // f64 results have no native result word; the evaluator's outcomes
+    // (cross-checked against native code) still decide the comparison.
+    let source = "fn fa(x: u64) -> f64 {
+    1.0
+}
+
+fn fb(x: u64) -> f64 {
+    2.0
+}
+
+fn main() -> u64 {
+    0
+}
+";
+    let temp = Temp::new();
+    let file = temp.write("floats.ves", source);
+    let o = vesper(&[
+        "fuzz",
+        &file,
+        "--target",
+        "fa",
+        "--differential",
+        "fb",
+        "--native-coverage",
+        "--execs",
+        "50",
+    ]);
+    let t = text(&o);
+    assert!(t.contains("failure [divergence]"), "{t}");
+    assert!(!o.status.success(), "{t}");
+}
+
+#[test]
+fn bound_consttime_functions_are_trusted_callees_of_their_instance() {
+    let source = "copy struct Secret[T] {
+    value: T,
+}
+
+fn keep(s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    s
+}
+
+fn apply(sink f: fn(Secret[u64]) -> Secret[u64] eff [ConstTime], sink s: Secret[u64]) -> Secret[u64] eff [ConstTime] {
+    f(s)
+}
+
+fn declassify_u64(s: Secret[u64]) -> u64 eff [ConstTime] {
+    let Secret {
+        value
+    }
+    = apply(keep, s);
+    value
+}
+
+fn main() -> u64 {
+    let s: Secret[u64] = Secret {
+        value: 4
+    };
+    declassify_u64(s)
+}
+";
+    let world = checked(source);
+    for target in TARGETS {
+        let (_, _, functions) = emit_and_collect(&world, "main", Some(target), true).unwrap();
+        let key = "apply$fn[f=keep]";
+        assert!(functions.iter().any(|f| f.key == key));
+        let derived = policy_from_capabilities(
+            &world,
+            &functions,
+            &NativeVerifierPolicy {
+                schema: POLICY_SCHEMA.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            derived.policy.const_time[key].constant_time_callees,
+            ["keep"]
+        );
+        let (_, _, report) = verify_native_with_capabilities(
+            &world,
+            "main",
+            Some(target),
+            true,
+            &BTreeSet::new(),
+            &NativeVerifierPolicy {
+                schema: POLICY_SCHEMA.into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(report.findings.is_empty(), "{:?}", report.findings);
+    }
+}
