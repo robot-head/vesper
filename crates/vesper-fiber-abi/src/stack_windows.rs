@@ -142,7 +142,7 @@ impl FiberStack {
     /// otherwise round it down to one.
     pub fn with_fixed_base(reservation_base: usize, size: usize) -> io::Result<Self> {
         crate::fault::install();
-        if reservation_base == 0 || reservation_base % allocation_granularity() != 0 {
+        if reservation_base == 0 || !reservation_base.is_multiple_of(allocation_granularity()) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "fixed stack base must be a non-null multiple of the allocation granularity",

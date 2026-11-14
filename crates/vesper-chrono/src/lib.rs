@@ -1,10 +1,13 @@
 #![doc = include_str!("../README.md")]
 #![deny(unsafe_code)]
 
+pub mod arena;
 pub mod bundle;
 pub mod capture;
 pub mod checkpoint;
 pub mod ete;
+pub mod ete_flow;
+pub mod formatter;
 pub mod hwpath;
 pub mod ipt;
 pub mod ipt_flow;
@@ -16,6 +19,7 @@ pub mod simpulse;
 pub mod timeline;
 pub mod wire;
 
+pub use arena::{ArenaCheckpoint, ArenaDelta, ArenaError, ShardArena};
 pub use bundle::{Bundle, BundleError, BundleKey, BundleLimits, RecordedEvent, RecordedSnapshot};
 pub use checkpoint::{
     ActivationCheckpoint, AddressPolicy, CheckpointError, CheckpointLimits, JournalEntry,

@@ -715,7 +715,8 @@ mod native {
             if image.data() != self.data.as_slice() {
                 return Err(CheckpointError::ImageMismatch("data frame"));
             }
-            let parked = Fiber::from_image(template, &image).map_err(|r| CheckpointError::Image(r.error))?;
+            let parked =
+                Fiber::from_image(template, &image).map_err(|r| CheckpointError::Image(r.error))?;
             let activation = RecordedActivation {
                 parked,
                 data_at_park: self.data_at_park.clone(),

@@ -147,9 +147,7 @@ mod native {
 
             // Re-execution of the same checkpoint does run it again, which
             // is the difference byte images remove.
-            let r = c2
-                .restore(spawn(ARG), AddressPolicy::Reexecuted)
-                .unwrap();
+            let r = c2.restore(spawn(ARG), AddressPolicy::Reexecuted).unwrap();
             assert_eq!(unsafe { *clock }, 2);
             assert_ne!(finish_read(r.activation), expected);
         }
@@ -164,16 +162,19 @@ mod native {
         let other = JitPrototype::new(OptLevel::None).unwrap();
         let (ev, _) = evidence();
         let config = fixed();
-        let a = parked(RecordedActivation::start(
-            jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap(),
-        )
-        .unwrap());
+        let a = parked(
+            RecordedActivation::start(jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap())
+                .unwrap(),
+        );
         let a = parked(resume_value(a, 0));
         let c = a.checkpoint().unwrap();
         let expected = finish_read(a);
 
         let err = c
-            .restore_image(jit.spawn_pulse_read_with(ARG + 1, ev.clone(), config).unwrap())
+            .restore_image(
+                jit.spawn_pulse_read_with(ARG + 1, ev.clone(), config)
+                    .unwrap(),
+            )
             .unwrap_err();
         assert_eq!(
             err,
@@ -183,10 +184,17 @@ mod native {
             })
         );
         let err = c
-            .restore_image(other.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap())
+            .restore_image(
+                other
+                    .spawn_pulse_read_with(ARG, ev.clone(), config)
+                    .unwrap(),
+            )
             .unwrap_err();
         assert!(
-            matches!(err, CheckpointError::Image(ImageError::EntryMismatch { .. })),
+            matches!(
+                err,
+                CheckpointError::Image(ImageError::EntryMismatch { .. })
+            ),
             "{err:?}"
         );
         let mut registry = EvidenceRegistry::new();
@@ -195,7 +203,10 @@ mod native {
             .restore_image(jit.spawn_nested_with(ARG, nested, config).unwrap())
             .unwrap_err();
         assert!(
-            matches!(err, CheckpointError::Image(ImageError::EntryMismatch { .. })),
+            matches!(
+                err,
+                CheckpointError::Image(ImageError::EntryMismatch { .. })
+            ),
             "{err:?}"
         );
         let (other_ev, _) = evidence();
@@ -208,10 +219,16 @@ mod native {
         let elsewhere = fixed();
         drop(holder);
         let err = c
-            .restore_image(jit.spawn_pulse_read_with(ARG, ev.clone(), elsewhere).unwrap())
+            .restore_image(
+                jit.spawn_pulse_read_with(ARG, ev.clone(), elsewhere)
+                    .unwrap(),
+            )
             .unwrap_err();
         assert!(
-            matches!(err, CheckpointError::Image(ImageError::AddressMismatch { .. })),
+            matches!(
+                err,
+                CheckpointError::Image(ImageError::AddressMismatch { .. })
+            ),
             "{err:?}"
         );
 
@@ -246,10 +263,13 @@ mod native {
         // (The template is mapped first: the floating stack could otherwise
         // take the released fixed range.)
         let template = jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap();
-        let a = parked(RecordedActivation::start(
-            jit.spawn_pulse_read_with(ARG, ev.clone(), floating).unwrap(),
-        )
-        .unwrap());
+        let a = parked(
+            RecordedActivation::start(
+                jit.spawn_pulse_read_with(ARG, ev.clone(), floating)
+                    .unwrap(),
+            )
+            .unwrap(),
+        );
         let c = a.checkpoint().unwrap();
         assert_eq!(c.image, None);
         let err = c.restore_image(template).unwrap_err();
@@ -270,10 +290,10 @@ mod native {
         .unwrap();
         let (ev, clock) = evidence();
         let config = fixed();
-        let a = parked(RecordedActivation::start(
-            jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap(),
-        )
-        .unwrap());
+        let a = parked(
+            RecordedActivation::start(jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap())
+                .unwrap(),
+        );
         let a = parked(resume_value(a, 0));
         let c = a.checkpoint().unwrap();
         let expected = finish_read(a);

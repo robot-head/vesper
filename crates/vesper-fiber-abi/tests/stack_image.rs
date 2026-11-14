@@ -115,8 +115,12 @@ fn stack_image_and_register_frame_describe_the_parked_fiber() {
             );
             match frame.abi {
                 FrameAbi::SysVX86_64 | FrameAbi::WindowsX64 => {
-                    assert_eq!(frame.get("mxcsr").unwrap() & 0xffc0, 0x1f80);
-                    assert_eq!(frame.get("x87_cw"), Some(0x37f));
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        let env = vesper_fiber_abi::fpenv::FpEnv::DEFAULT;
+                        assert_eq!(frame.get("mxcsr").unwrap() & 0xffc0, u64::from(env.mxcsr));
+                        assert_eq!(frame.get("x87_cw"), Some(u64::from(env.x87_control)));
+                    }
                 }
                 FrameAbi::Aarch64 => {
                     assert_eq!(frame.get("fpcr"), Some(0));
@@ -128,7 +132,10 @@ fn stack_image_and_register_frame_describe_the_parked_fiber() {
                 assert_eq!(frame.get("stack_base"), Some(top));
                 assert_eq!(frame.get("stack_limit"), Some(base));
             }
-            assert_eq!(k.fiber().is_fixed_address(), config.fixed_stack_base.is_some());
+            assert_eq!(
+                k.fiber().is_fixed_address(),
+                config.fixed_stack_base.is_some()
+            );
             assert_eq!(finish(k), prototype::expected_pulse_read(ARG, 1001, &INBOX));
         }
     }
@@ -151,13 +158,18 @@ fn image_restores_at_the_same_address_without_re_execution() {
         assert_eq!(image.generation(), k.token().generation);
         assert_eq!(image.park(), k.request());
         assert_eq!(image.parks(), 2);
-        assert_eq!(&image.data()[prototype::INBOX..prototype::INBOX + 8], &INBOX);
+        assert_eq!(
+            &image.data()[prototype::INBOX..prototype::INBOX + 8],
+            &INBOX
+        );
         assert_eq!(image.entry_arg(), ARG);
         assert_eq!(image.stack(), &k.stack_image());
 
         // While the original is parked its reservation is in use: a template
         // at the same base cannot be created, and nothing is replaced.
-        let err = jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap_err();
+        let err = jit
+            .spawn_pulse_read_with(ARG, ev.clone(), config)
+            .unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists, "{err}");
 
         // The live run finishes; the Clock handler ran once.
@@ -241,7 +253,11 @@ fn mismatched_templates_are_rejected_and_handed_back() {
     };
 
     // A different entry argument (the case re-execution could not detect).
-    let e = reject(jit.spawn_pulse_read_with(ARG + 1, ev.clone(), config).unwrap()).0;
+    let e = reject(
+        jit.spawn_pulse_read_with(ARG + 1, ev.clone(), config)
+            .unwrap(),
+    )
+    .0;
     assert_eq!(
         e,
         ImageError::ArgumentMismatch {
@@ -263,7 +279,12 @@ fn mismatched_templates_are_rejected_and_handed_back() {
         Fiber::new(jit.pulse_read_entry(), ARG, ev.clone(), other_owner, config).unwrap()
     };
     assert_eq!(reject(foreign).0, ImageError::CodeMismatch);
-    let e = reject(other_jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap()).0;
+    let e = reject(
+        other_jit
+            .spawn_pulse_read_with(ARG, ev.clone(), config)
+            .unwrap(),
+    )
+    .0;
     assert!(matches!(e, ImageError::EntryMismatch { .. }), "{e:?}");
 
     // A different (equally shaped) evidence vector.
@@ -281,20 +302,32 @@ fn mismatched_templates_are_rejected_and_handed_back() {
         stack_size: config.stack_size / 2,
         ..config
     };
-    let e = reject(jit.spawn_pulse_read_with(ARG, ev.clone(), smaller_stack).unwrap()).0;
+    let e = reject(
+        jit.spawn_pulse_read_with(ARG, ev.clone(), smaller_stack)
+            .unwrap(),
+    )
+    .0;
     assert!(matches!(e, ImageError::StackSize { .. }), "{e:?}");
     // Hold the captured range so that the other base is elsewhere.
     let holder = jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap();
     let elsewhere = fixed();
     drop(holder);
     assert_ne!(elsewhere.fixed_stack_base, config.fixed_stack_base);
-    let e = reject(jit.spawn_pulse_read_with(ARG, ev.clone(), elsewhere).unwrap()).0;
+    let e = reject(
+        jit.spawn_pulse_read_with(ARG, ev.clone(), elsewhere)
+            .unwrap(),
+    )
+    .0;
     assert!(matches!(e, ImageError::AddressMismatch { .. }), "{e:?}");
     let floating = FiberConfig {
         fixed_stack_base: None,
         ..config
     };
-    let e = reject(jit.spawn_pulse_read_with(ARG, ev.clone(), floating).unwrap()).0;
+    let e = reject(
+        jit.spawn_pulse_read_with(ARG, ev.clone(), floating)
+            .unwrap(),
+    )
+    .0;
     assert_eq!(e, ImageError::NotFixedAddress);
 
     // A fiber without a fixed address cannot be imaged.
@@ -304,19 +337,32 @@ fn mismatched_templates_are_rejected_and_handed_back() {
 
     // After all those rejections the matching template still restores.
     let template = jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap();
-    assert_eq!(finish(Fiber::from_image(template, &image).unwrap()), expected);
+    assert_eq!(
+        finish(Fiber::from_image(template, &image).unwrap()),
+        expected
+    );
 
     // Once the code is gone, a new module cannot stand in for it even if
     // its allocations land at the old addresses.
+    // (A bare reservation holds the range while the new module maps.)
+    let hold = vesper_fiber_abi::stack::FiberStack::with_fixed_base(
+        config.fixed_stack_base.unwrap(),
+        config.stack_size,
+    )
+    .unwrap();
     drop(jit);
     let jit = JitPrototype::new(OptLevel::Speed).unwrap();
+    drop(hold);
     let e = *Fiber::from_image(
         jit.spawn_pulse_read_with(ARG, ev.clone(), config).unwrap(),
         &image,
     )
     .unwrap_err();
     assert!(
-        matches!(e.error, ImageError::CodeMismatch | ImageError::EntryMismatch { .. }),
+        matches!(
+            e.error,
+            ImageError::CodeMismatch | ImageError::EntryMismatch { .. }
+        ),
         "{:?}",
         e.error
     );
@@ -356,7 +402,10 @@ fn encoded_images_round_trip_and_reject_damage_and_foreign_threads() {
         .unwrap();
     assert_eq!(foreign, ImageError::BadSeal);
     // The decoded image restores like the captured one.
-    assert_eq!(finish(Fiber::from_image(template, &decoded).unwrap()), expected);
+    assert_eq!(
+        finish(Fiber::from_image(template, &decoded).unwrap()),
+        expected
+    );
 }
 
 #[test]
@@ -365,7 +414,10 @@ fn fixed_stack_bases_are_validated() {
     use vesper_fiber_abi::stack::FiberStack;
     let page = FiberStack::page_size();
     assert_eq!(
-        FiberStack::with_fixed_base(0, 64 * 1024).err().unwrap().kind(),
+        FiberStack::with_fixed_base(0, 64 * 1024)
+            .err()
+            .unwrap()
+            .kind(),
         std::io::ErrorKind::InvalidInput
     );
     let base = FiberStack::free_fixed_base(64 * 1024).unwrap();
@@ -394,6 +446,9 @@ fn fixed_stack_bases_are_validated() {
     assert_eq!(again.reservation_base(), base);
     let floating = FiberStack::new(64 * 1024).unwrap();
     assert_eq!(floating.context_slot(), None);
-    assert_eq!(floating.reservation_base() + floating.guard_len(), floating.base());
+    assert_eq!(
+        floating.reservation_base() + floating.guard_len(),
+        floating.base()
+    );
     assert!(FiberStack::with_fixed_base(usize::MAX & !(page - 1), 64 * 1024).is_err());
 }

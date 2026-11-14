@@ -292,10 +292,7 @@ impl Fiber {
     /// fiber's. Rust ownership here is not the Vesper linear typing rules;
     /// restoring the same image twice re-runs everything after the park
     /// twice, which is what a checkpoint is for.
-    pub fn from_image(
-        template: Fiber,
-        image: &FiberImage,
-    ) -> Result<Parked, Box<ImageRejected>> {
+    pub fn from_image(template: Fiber, image: &FiberImage) -> Result<Parked, Box<ImageRejected>> {
         match template.check_image(image) {
             Ok(()) => {}
             Err(error) => return Err(Box::new(ImageRejected { error, template })),
@@ -339,7 +336,8 @@ impl Fiber {
                 template: ctx.entry_arg,
             });
         }
-        let (code, evidence) = crate::image::anchor_matches(image.anchor, &self.code, &self.evidence);
+        let (code, evidence) =
+            crate::image::anchor_matches(image.anchor, &self.code, &self.evidence);
         if !code {
             return Err(ImageError::CodeMismatch);
         }
@@ -372,8 +370,12 @@ impl Fiber {
                 template: len,
             });
         }
-        if self.ctx.as_ptr() as u64 != image.context || image.stack.saved_sp < self.stack.base() as u64 {
-            return Err(ImageError::Malformed("context or stack pointer outside the template"));
+        if self.ctx.as_ptr() as u64 != image.context
+            || image.stack.saved_sp < self.stack.base() as u64
+        {
+            return Err(ImageError::Malformed(
+                "context or stack pointer outside the template",
+            ));
         }
         Ok(())
     }

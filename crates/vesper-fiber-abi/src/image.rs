@@ -163,8 +163,14 @@ impl RegisterFrame {
         }
         let x86_env = |b: &[u8]| {
             vec![
-                ("mxcsr", u64::from(u32::from_le_bytes(b[0..4].try_into().unwrap()))),
-                ("x87_cw", u64::from(u16::from_le_bytes(b[4..6].try_into().unwrap()))),
+                (
+                    "mxcsr",
+                    u64::from(u32::from_le_bytes(b[0..4].try_into().unwrap())),
+                ),
+                (
+                    "x87_cw",
+                    u64::from(u16::from_le_bytes(b[4..6].try_into().unwrap())),
+                ),
             ]
         };
         Some(match abi {
@@ -408,7 +414,10 @@ impl fmt::Debug for FiberImage {
         f.debug_struct("FiberImage")
             .field("fiber_id", &self.fiber_id)
             .field("generation", &self.generation)
-            .field("reservation_base", &format_args!("{:#x}", self.reservation_base))
+            .field(
+                "reservation_base",
+                &format_args!("{:#x}", self.reservation_base),
+            )
             .field("stack", &self.stack)
             .field("entry", &format_args!("{:#x}", self.entry))
             .field("entry_arg", &self.entry_arg)
@@ -620,7 +629,7 @@ impl FiberImage {
         if s.top != end || s.saved_sp >= s.top || s.saved_sp < self.reservation_base {
             return Err(ImageError::Malformed("stack range outside the reservation"));
         }
-        if s.saved_sp % 16 != 0 || s.top % 16 != 0 {
+        if !s.saved_sp.is_multiple_of(16) || !s.top.is_multiple_of(16) {
             return Err(ImageError::Malformed("misaligned stack pointer"));
         }
         if s.top - s.saved_sp != s.bytes.len() as u64 || s.bytes.len() < SWITCH_FRAME_BYTES {

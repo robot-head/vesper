@@ -89,7 +89,7 @@ impl FiberStack {
     /// too, which the same check catches.
     pub fn with_fixed_base(reservation_base: usize, size: usize) -> io::Result<Self> {
         let page = page_size();
-        if reservation_base == 0 || reservation_base % page != 0 {
+        if reservation_base == 0 || !reservation_base.is_multiple_of(page) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "fixed stack base must be a non-null multiple of the page size",
