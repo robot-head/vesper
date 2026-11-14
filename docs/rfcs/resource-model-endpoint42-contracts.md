@@ -65,8 +65,10 @@ stacks consume children once, with exact arities, bounded depth and exactly
 one final value. No node-index DAGs or hidden expansion. Do not silently clamp
 zero/over-hard MODEL limits or reject representable semantic negatives here.
 Transport bounds are separate from model admission. Before evaluating a
-request, prepay its complete frame plus one maximum response against the
-remaining session wire budget. Output overflow is fatal, never truncation.
+request, prepay its complete frame plus one maximum response and a 512-byte
+complete BYE-frame reserve against the remaining session wire budget. The
+reserve is a fixed schema constant, not a second maximum response. Output
+overflow is fatal, never truncation.
 
 ## Request and constructor codes
 
@@ -111,7 +113,8 @@ READY is emitted once:
 
 `bounds12` is the table's first nine bounds (request through control), then
 natural digits, requests/session, total framed bytes. Other-string limit 128
-is fixed by this schema and omitted from that vector.
+and the 512-byte BYE-frame reserve are fixed by this schema and omitted from
+that vector.
 
 Every actual response is `[1,"result",sequence,stage,payload]`.
 
@@ -132,7 +135,8 @@ maxValueDepth,valueStats]`, where valueStats is `[]` for none or `[nodes,depth]`
 All diagnostic enum values are arrays `["constructor",payloads...]`, using
 the EXACT existing Lean constructor spelling and declaration-order payloads.
 Nested enum arguments use this same encoding; no extra type-name wrapper.
-CheckError is `["kind",site,slot]`, with slot `[]` or `[index]`. Its closed
+CheckError is `["kind",site,slot]`, where the first string is the actual kind
+constructor (not the literal `kind`), with slot `[]` or `[index]`. Its closed
 kind set is unknownVariable/typeMismatch/duplicateUse/unusedLinear/
 fieldModality/literalOutOfRange/branchOwnership. TypeError, ValidationError,
 CheckProfile, InputError, InvocationError, CapacityError, ResourceRefusal and
