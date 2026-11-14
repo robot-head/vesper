@@ -7,6 +7,10 @@ description = "Bounded checked host DBSP circuits, owned frontier holds, LSM-spi
 
 [dependencies]
 blake3 = "1.8"
+# Pure-Rust Kafka wire client (no librdkafka). Compression codecs are off:
+# the Flux codec writes uncompressed record batches.
+rskafka = { version = "=0.6.0", default-features = false }
+tokio = { version = "1", default-features = false, features = ["rt", "time"] }
 vesper-loom-cas = { path = "../vesper-loom-cas" }
 vesper-quarry = { path = "../vesper-quarry" }
 vesper-simpulse = { path = "../vesper-simpulse" }
