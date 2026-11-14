@@ -1259,6 +1259,13 @@ impl<'l, 'a> Emit<'l, 'a> {
         })?;
         let position: BTreeMap<usize, usize> =
             order.iter().enumerate().map(|(p, b)| (*b, p)).collect();
+        // Block parameters get their locals up front: a join whose every
+        // predecessor became a tail call is still emitted (unreachable).
+        for b in &f.blocks {
+            for p in &b.params {
+                self.dest(*p);
+            }
+        }
         for _ in 1..order.len() {
             self.push(I::Block(BlockType::Empty));
         }
@@ -1606,6 +1613,11 @@ impl<'l, 'a> Emit<'l, 'a> {
                     }
                 };
                 self.values.insert(inst.dest, r);
+            }
+            Op::Tuple(ids) if ids.is_empty() => {
+                // `()` is the scalar Unit, like `Op::Unit`.
+                let d = self.dest(inst.dest);
+                self.code.extend([I::I64Const(0), I::LocalSet(d)]);
             }
             Op::Tuple(ids) => {
                 let block = self.alloc(8 * ids.len() as u64);

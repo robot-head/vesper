@@ -439,6 +439,14 @@ pub(crate) fn exports(
     let mut params = vec![];
     let mut core_params = vec![];
     let mut scalars = vec![];
+    // The canonical ABI passes more than 16 flat parameters through memory;
+    // the export wrapper takes them flat only.
+    if f.params.len() > 16 {
+        return Err(WasmError::Entry(format!(
+            "entry has {} parameters; at most 16 are supported",
+            f.params.len()
+        )));
+    }
     for p in &f.params {
         if p.pass == Pass::Inout {
             return Err(WasmError::Entry("entry parameters cannot be inout".into()));

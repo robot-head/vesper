@@ -350,6 +350,7 @@ fn aggregates() {
 
 #[test]
 fn structural_equality() {
+    differential("fn main() -> bool { () == {} }");
     differential(
         "copy struct Pair { x: f64, y: i64 } fn main() -> (bool, bool) { let a = Pair { x: 1.0, y: 2 }; let b = Pair { x: 1.0, y: 3 }; (a == b, a != b) }",
     );
@@ -363,6 +364,10 @@ fn structural_equality() {
 
 #[test]
 fn calls_and_mutation() {
+    // Every predecessor of the join is a tail call.
+    differential(
+        "fn a() -> i64 { 1 } fn b() -> i64 { 2 } fn main() -> i64 { if true { a() } else { b() } }",
+    );
     differential(
         "fn inc(inout x: i64) { x = wrapping_add(x, 1); } fn main() -> i64 { let x = 41; inc(inout x); x }",
     );
@@ -570,6 +575,12 @@ fn unsupported_constructs_are_typed_errors() {
 
 #[test]
 fn entry_and_limit_errors() {
+    let params: Vec<String> = (0..17).map(|i| format!("p{i}: u8")).collect();
+    let many = world(&format!("fn many({}) -> i64 {{ 1 }}", params.join(", ")));
+    assert!(matches!(
+        wasm_backend::compile(&many, "many", &WasmOptions::default()),
+        Err(WasmError::Entry(_))
+    ));
     let w = world("fn main() -> i64 { 1 }");
     assert!(matches!(
         wasm_backend::compile(&w, "missing", &WasmOptions::default()),
