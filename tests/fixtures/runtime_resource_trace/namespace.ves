@@ -1,0 +1,9 @@
+linear struct Ticket {}
+copy enum Other {
+    Ticket
+}
+fn same_basename() -> i64 {
+    let other = Other::Ticket;
+    let Other::Ticket = other;
+    42
+}

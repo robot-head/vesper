@@ -1,0 +1,105 @@
+{
+  "kind": "source-byte-association-only",
+  "executed_worktree_head": "dd364f6adb0f920be0176c0fa3c6f5189e3a5462",
+  "coordinator_source_head": "1b094fac9ad8163e5e015890c2d3759df5b011c1",
+  "validation_checkpoints": {
+    "full_package": {
+      "head": "dfa472aa17f6a1a5844d20688031bcfd5afd5859",
+      "passed": 1069,
+      "failed": 0,
+      "ignored": 0,
+      "filtered": 0,
+      "result_records": 90,
+      "private_tests": 4
+    },
+    "subsequent_test_only_swap_control": {
+      "passed_private_tests": 5,
+      "handoff_scenarios": 24,
+      "failed": 0,
+      "ignored": 0,
+      "other_library_tests_filtered": 91
+    },
+    "final_strict_clippy_packages": [
+      "vesper",
+      "vesper-sim-session"
+    ],
+    "final_strict_clippy_all_targets": true
+  },
+  "identical_source_files": [
+    {
+      "path": "src/runtime.rs",
+      "sha256": "48f6b43d90e8679dfcfce0189a89c7f68c32a22fb1994c9df13e3ae3872e8964",
+      "bytes": 103707
+    },
+    {
+      "path": "src/runtime/resource_trace.rs",
+      "sha256": "fec1946fc36d7dda12dc0a57374544f4c4d8d7b8f05c9b55290a04a39d7abb2a",
+      "bytes": 44858
+    },
+    {
+      "path": "src/runtime/resource_trace_acceptance.rs",
+      "sha256": "88989c94247d44595d05da7848edc5b66b71f6f8a552e2ae340932e33934c9f7",
+      "bytes": 11068
+    },
+    {
+      "path": "tests/runtime_resource_trace.rs",
+      "sha256": "43186fe92e842bbeebaab68e8533448b218e4d70b9aec7fe1f977ad5c0035f73",
+      "bytes": 37507
+    },
+    {
+      "path": "src/layout.rs",
+      "sha256": "169833859a948ecdea38fde9dbde2ed78fbf12a8fe76bba33178c94462e978f2",
+      "bytes": 9224
+    },
+    {
+      "path": "src/io_session.rs",
+      "sha256": "cac8262d538cb5be7d47cc2016f3e009b1f54298475f4a031add3bcd483a58b9",
+      "bytes": 9872
+    },
+    {
+      "path": "tests/source_native_suspension.rs",
+      "sha256": "9321283aca6b200ec64dc1709c86f51b4d051c8e7b8a1e38932574d4d1bb4492",
+      "bytes": 30372
+    },
+    {
+      "path": "crates/vesper-sim-session/src/value.rs",
+      "sha256": "3f46cf81c6c239f5821cd6f178c4d224feb744f67ad427c89b94e687d68cf318",
+      "bytes": 13147
+    },
+    {
+      "path": "crates/vesper-sim-session/tests/simulation.rs",
+      "sha256": "a42c56323af4635cd98fd0bcc156ee15bcc4d4c2ad14739b0ef698d21417434e",
+      "bytes": 32871
+    },
+    {
+      "path": "tests/fixtures/runtime_resource_trace/capacity.ves",
+      "sha256": "e8f130e4f5f63c33657ae6a7217992bde20086ee518bd9c5e6165b106c927289",
+      "bytes": 288
+    },
+    {
+      "path": "tests/fixtures/runtime_resource_trace/handlers.ves",
+      "sha256": "67a471da912a1e23f1fe0f74ac26e64d4bd8b9832c67b49a4db87fac5fa80572",
+      "bytes": 881
+    },
+    {
+      "path": "tests/fixtures/runtime_resource_trace/lifecycle.ves",
+      "sha256": "f9c7c77914180138a3be1246f777979397f10419db028ed183451a4467ed8164",
+      "bytes": 2010
+    },
+    {
+      "path": "tests/fixtures/runtime_resource_trace/match_probe.ves",
+      "sha256": "3f3b6cd72ccb1d1db168af85033edbd5c5fbec6d2a5749de1ff9d397b17a4ef9",
+      "bytes": 171
+    },
+    {
+      "path": "tests/fixtures/runtime_resource_trace/mutation.ves",
+      "sha256": "48496295dedb052c8ce823341abbab07403c34910ef7bbd61204c91db656bb1f",
+      "bytes": 1002
+    },
+    {
+      "path": "tests/fixtures/runtime_resource_trace/namespace.ves",
+      "sha256": "8dc15544e2387739f2b8b0f548492d9f38b61361b17b8997e41b3b667fa0b0c2",
+      "bytes": 154
+    }
+  ]
+}

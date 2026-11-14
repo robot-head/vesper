@@ -11,6 +11,37 @@ use vesper_simpulse::{IoResult, TraceEvent};
 const PIPELINE: &str = include_str!("../fixtures/pipeline.ves");
 const PIPELINE_SCENARIO: &str = include_str!("../fixtures/pipeline.json");
 
+#[test]
+fn actual_observed_resource_cannot_be_erased_by_json_encoding() {
+    use vesper::{
+        ast::Type,
+        check, parser,
+        runtime::resource_trace::{ResourceTraceConfig, ResourceTraceLimits, ResourceTraceStatus},
+    };
+    let source = "linear struct Ticket{} copy struct Wrap{ticket:Ticket} fn make()->Wrap{Wrap{ticket:Ticket{}}}";
+    let parsed = parser::parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let checked = check::check(&parsed.module);
+    assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+    let config =
+        ResourceTraceConfig::new(&checked.world, &["Ticket"], ResourceTraceLimits::default())
+            .unwrap();
+    let mut runtime = Runtime::new(&checked.world);
+    let observer = runtime.observe_resources(config).unwrap();
+    let tracked = runtime.run("make", vec![]).unwrap();
+    let report = observer.snapshot().unwrap();
+    assert_eq!(report.status(), ResourceTraceStatus::Completed);
+    assert_eq!(report.events().len(), 1);
+    assert_eq!(report.live().len(), 1);
+    let error = vesper_sim_session::value::encode(&checked.world, &Type::named("Wrap"), &tracked)
+        .unwrap_err();
+    assert!(error.contains("tracked resource identity"), "{error}");
+    let ordinary = Runtime::new(&checked.world).run("make", vec![]).unwrap();
+    assert!(
+        vesper_sim_session::value::encode(&checked.world, &Type::named("Wrap"), &ordinary).is_ok()
+    );
+}
+
 fn program(source: &str) -> CheckedProgram {
     CheckedProgram::new(source).unwrap_or_else(|e| panic!("{e}"))
 }
@@ -231,6 +262,7 @@ fn script_mismatches_stop_before_resuming_and_return_a_usable_owner() {
         ty: "Result".into(),
         constructor: "Ok".into(),
         fields: [("0".into(), Value::UInt(5, 64))].into(),
+        resource_identity: None,
     };
     let value = finish_by_hand(continuation.resume(ok).unwrap());
     assert!(value.to_string().contains("Report"), "{value}");

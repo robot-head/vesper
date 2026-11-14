@@ -1,0 +1,16 @@
+linear struct Ticket {}
+fn simple() {
+    let Ticket {}
+    = Ticket {};
+}
+fn together() {
+    let first = Ticket {};
+    let second = Ticket {};
+    let (Ticket {}, Ticket {}) = (first, second);
+}
+fn sequential() {
+    let Ticket {}
+    = Ticket {};
+    let Ticket {}
+    = Ticket {};
+}
