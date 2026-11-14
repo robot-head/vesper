@@ -1,0 +1,42 @@
+// Shape-generic decoder pieces: RMSNorm, RoPE, a SwiGLU MLP and softmax.
+fn norm_rope[H: dim, D: dim](x: Tensor[F32, [H, D]], w: Tensor[F32, [H * D]], pos: u64)
+    -> Tensor[F32, [H, D]] eff [Tensor] {
+    let flat = Tensor::reshape[[H * D]](x);
+    let normed = Tensor::rms_norm(flat, w, 0.00001);
+    Tensor::rope(Tensor::reshape[[H, D]](normed), pos)
+}
+fn mlp[N: dim, F: dim](
+    x: Tensor[F32, [N]],
+    w1: Tensor[F32, [F, N]],
+    w3: Tensor[F32, [F, N]],
+    w2: Tensor[F32, [N, F]],
+) -> Tensor[F32, [N]] eff [Tensor] {
+    let gate = Tensor::matvec(w1, x);
+    let up = Tensor::matvec(w3, x);
+    Tensor::matvec(w2, Tensor::swiglu(gate, up))
+}
+fn layer[H: dim, D: dim, F: dim](
+    x: Tensor[F32, [H, D]],
+    w: Tensor[F32, [H * D]],
+    w1: Tensor[F32, [F, H * D]],
+    w3: Tensor[F32, [F, H * D]],
+    w2: Tensor[F32, [D * H, F]],
+    pos: u64,
+) -> (Tensor[F32, [H * D]], u64) eff [Tensor] {
+    let r = norm_rope(x, w, pos);
+    let h = mlp(Tensor::reshape[[H * D]](r), w1, w3, w2);
+    let p = Tensor::softmax(h);
+    (h, Tensor::argmax(p))
+}
+fn elementwise[R: dim, C: dim](
+    a: Tensor[F32, [R, C]],
+    row: Tensor[F32, [1, C]],
+    col: Tensor[F32, [R, 1]],
+) -> Tensor[F32, [C, R]] eff [Tensor] {
+    let s = Tensor::add(a, row);
+    let m = Tensor::mul(s, col);
+    let g = Tensor::silu(m);
+    let b = Tensor::to_f32(Tensor::to_bf16(g));
+    let filled = Tensor::fill[[C, R]](0.5);
+    Tensor::add(Tensor::transpose(b), filled)
+}

@@ -1,0 +1,10 @@
+// expect: E0767
+// at: linear struct Block
+// message: must be a non-generic copy struct
+linear struct Block {
+    scale: u16le,
+    packed: ByteArray[16],
+}
+fn main() -> u64 {
+    0
+}
