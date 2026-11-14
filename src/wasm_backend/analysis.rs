@@ -591,6 +591,22 @@ fn clause_mode(f: &FunctionIr, resume: Option<&str>, name: &str) -> Result<Handl
                     }
                     calls.insert(i.dest);
                 }
+                // A closure or nested handler that names the continuation
+                // captures it as a value.
+                Op::Closure { expr, aliases, .. } | Op::Handle { expr, aliases, .. } => {
+                    let mut names = crate::check::free_names(expr);
+                    if let ExprKind::Closure { params, .. } = &expr.kind {
+                        for p in params {
+                            names.remove(&p.name);
+                        }
+                    }
+                    if names
+                        .iter()
+                        .any(|n| n == resume || aliases.get(n).is_some_and(|s| s == resume))
+                    {
+                        return Err(first_class(name));
+                    }
+                }
                 _ => {
                     if used.iter().any(|v| reads.contains(v)) {
                         return Err(first_class(name));

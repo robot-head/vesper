@@ -1050,7 +1050,13 @@ fn aggregate_entry_parameters() {
 // ---- rejections --------------------------------------------------------------
 
 #[test]
-fn unsupported_constructs_are_typed_errors() {}
+fn unsupported_constructs_are_typed_errors() {
+    // The continuation escapes into a closure instead of being called.
+    unsupported(
+        "linear effect Ask { fn ask() -> i64; } fn main() -> i64 { handle Ask in { Ask::ask() } with { return x => x, ask(k) => { let f = || k(1); f() }, } }",
+        Unsupported::FirstClassContinuation,
+    );
+}
 
 #[test]
 fn entry_and_limit_errors() {

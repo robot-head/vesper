@@ -93,7 +93,7 @@ impl Builder {
     pub(crate) fn data(&mut self, bytes: &[u8]) -> u64 {
         let at = DATA_START + self.data.len() as u64;
         self.data.extend_from_slice(bytes);
-        while self.data.len() % 8 != 0 {
+        while !self.data.len().is_multiple_of(8) {
             self.data.push(0);
         }
         at
