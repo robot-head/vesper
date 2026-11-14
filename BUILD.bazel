@@ -15,6 +15,10 @@ vesper_crate(
         "//crates/vesper-grammar:files",
         "//crates/vesper-loom-trust:files",
     ],
+    # One Lean -M4096 stage plus estimated wrapper/runtime overhead; see #537.
+    test_tags = {
+        "test/lean4lean_foundations42": ["resources:memory:5120", "resources:cpu:1"],
+    },
     # Long, platform-neutral Lean replays run on Linux (BuildBuddy) only; see
     # "Linux-only suites" in docs/ci-platforms.md.
     test_target_compatible_with = {
