@@ -549,8 +549,15 @@ impl Session {
         {
             return Some(result.clone());
         }
-        let result =
-            crate::tooling::frontend::check_source(text, self.lens_config.limits).map(Arc::new);
+        // Larger analysis budgets, but the editor's own diagnostic budgets:
+        // a batch too large to publish stays an explicit refusal.
+        let editor = crate::tooling::frontend::AnalysisLimits::default();
+        let limits = crate::tooling::frontend::AnalysisLimits {
+            max_diagnostics: editor.max_diagnostics,
+            max_diagnostic_bytes: editor.max_diagnostic_bytes,
+            ..self.lens_config.limits
+        };
+        let result = crate::tooling::frontend::check_source(text, limits).map(Arc::new);
         self.large
             .borrow_mut()
             .insert(uri.to_owned(), (hash, result.clone()));
