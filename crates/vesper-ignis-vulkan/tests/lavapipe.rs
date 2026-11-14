@@ -681,14 +681,11 @@ fn missing_declaration_is_caught_by_synchronization_validation() {
         eprintln!("skipped: synchronization validation not loaded");
         return;
     }
-    // The dispatch writes `out` right after the fill, but its pass does not
-    // declare the buffer, so the planner (correctly, for the declared graph)
-    // emits no barrier between them: a write-after-write in one command
-    // buffer. The validation layer must report it, which proves the layer is
-    // active, so the clean runs above are meaningful.
-    const STORE: &str = "@group(0) @binding(0) var<storage, read_write> d: array<u32>;\n\
-        @compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {\n\
-        d[id.x] = id.x;\n}";
+    // A second fill writes `out` right after the first, but its pass does
+    // not declare the buffer, so the planner (correctly, for the declared
+    // graph) emits no barrier between them: a transfer write-after-write in
+    // one command buffer. The validation layer must report it, which proves
+    // the layer is active, so the clean runs above are meaningful.
     let mut g = RenderGraph::new();
     let direct = g.add_queue(QueueKind::Direct);
     let out = g
@@ -707,28 +704,13 @@ fn missing_declaration_is_caught_by_synchronization_validation() {
         .unwrap();
     let write = g.add_pass(PassDesc::new("undeclared", direct)).unwrap();
     let rt = runtime(&device, &[QueueKind::Direct]);
-    let cs = compile_wgsl(STORE, Stage::Compute, "main").unwrap();
     let mut r = FrameResources::new();
     r.bind_buffer(out, device.create_buffer(BYTES).unwrap())
         .unwrap();
-    let store = r
-        .add_pipeline(
-            device
-                .create_compute_pipeline(&cs, &[BindingKind::StorageBuffer])
-                .unwrap(),
-        )
-        .unwrap();
     r.set_pass(fill, PassWork::FillBuffer { dst: out, value: 7 })
         .unwrap();
-    r.set_pass(
-        write,
-        PassWork::Dispatch {
-            pipeline: store,
-            bindings: vec![Bind::StorageBuffer(out)],
-            groups: [(W * H) / 64, 1, 1],
-        },
-    )
-    .unwrap();
+    r.set_pass(write, PassWork::FillBuffer { dst: out, value: 9 })
+        .unwrap();
     let alloc = device.create_command_allocator(QueueKind::Direct).unwrap();
     let batch = BatchInputs {
         plan: PreparedPlan::from_graph(&g).unwrap(),

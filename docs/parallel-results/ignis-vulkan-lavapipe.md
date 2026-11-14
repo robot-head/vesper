@@ -109,16 +109,16 @@ that the validation layer reported no error.
 - `subresource_barriers_are_accepted_by_validation`: a 2-mip texture with
   per-mip barriers (mip 0 render target → shader resource, mip 1 copy dest →
   shader resource); tracked layouts and compute output checked.
-- `missing_declaration_is_caught_by_synchronization_validation`: a fill and
-  then a dispatch that writes the same buffer, with the dispatch's pass not
-  declaring it, so no barrier separates the two writes in one command buffer;
-  the layer must report a hazard error. This shows the layer is active, so the
-  clean runs mean something. (It also shows the backend trusts the graph's
-  declarations for buffers: it cannot see which bytes a shader touches.) An
-  earlier version put a layout-changing image barrier (widened to
-  `ALL_COMMANDS`) between the writes; validation layers 1.3.275 flagged that
-  case but 1.4.341 on ubuntu-latest did not, so the test now has no barrier at
-  all between the writes.
+- `missing_declaration_is_caught_by_synchronization_validation`: two buffer
+  fills of the same buffer, the second in a pass that does not declare it, so
+  no barrier separates the writes in one command buffer; the layer must report
+  a hazard error. This shows the layer is active, so the clean runs mean
+  something, and that the backend trusts the graph's buffer declarations (it
+  cannot see which bytes a command or shader touches). Earlier versions of the
+  test used an undeclared compute-shader write instead; validation layers
+  1.3.275 flagged it but 1.4.341 (ubuntu-latest) did not, so the test now uses
+  a transfer write-after-write, which both versions report. The whole suite was
+  run locally against both layer versions.
 - `lost_device_is_a_typed_error_and_pending_owners_stay_held`: after
   `Device::inject_device_lost`, polls report `DeviceLost`, object creation fails
   with `DeviceLost`, and shutdown is `Incomplete` with the frame pending.
