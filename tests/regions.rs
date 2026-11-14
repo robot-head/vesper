@@ -476,3 +476,17 @@ fn used_bytes_agree_across_backends() {
         "8"
     );
 }
+
+#[test]
+fn a_failing_callee_region_does_not_capture_the_callers_handles() {
+    let source =
+        "fn risky() -> i64 eff [Fail[i64]] { region r { let _ = r.box(99); Fail::raise(7) } }
+fn main() -> i64 {
+    region r {
+        let a = r.box(42);
+        let e = handle Fail[i64] in { risky() } with { return x => x, raise(e, k) => e, };
+        wrapping_add(e, r.get(a))
+    }
+}";
+    assert_eq!(both_allowing_aborts(source), "49");
+}

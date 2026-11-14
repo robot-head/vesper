@@ -124,7 +124,7 @@ All additive; each is explained here and kept small.
 
 Commands run on the branch (Linux x86_64, local Rust 1.97 and 1.100):
 
-* `cargo test --test regions` — 33 passed: positive programs run on the
+* `cargo test --test regions` — 34 passed: positive programs run on the
   evaluator and the JIT with equal results (allocation, functions taking and
   returning boxes, copy aliasing with `set`, rewind reclaiming bytes, commit,
   nested regions with `f64` and `bool` payloads, one region per recursive
