@@ -69,6 +69,7 @@ members = [
     "crates/vesper-kinetic",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
+    "crates/vesper-gpu-compute",
     "crates/vesper-ignis-vulkan",
     "experiments/native-pulse",
 ]
@@ -140,6 +141,7 @@ default-members = [
     "crates/vesper-kinetic",
     "crates/vesper-prism-h3",
     "crates/vesper-aura-gtk",
+    "crates/vesper-gpu-compute",
     "crates/vesper-ignis-vulkan",
     "experiments/native-pulse",
 ]
