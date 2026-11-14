@@ -143,8 +143,19 @@ GSK_RENDERER=cairo GDK_BACKEND=x11 VESPER_REQUIRE_ATSPI=1 dbus-run-session -- \
 cargo test -p vesper-aura-gtk                            # without GTK: 7 unit + 1 doctest, ok
 cargo +1.100.0 clippy -p vesper-aura-gtk --features gtk --locked --all-targets -- -D warnings   # clean
 cargo +1.100.0 clippy -p vesper-aura-gtk --locked --all-targets -- -D warnings                  # clean
-WORKSPACE_RESULTS
+cargo fmt --all -- --check                               # ok
+cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings   # ok
+cargo test --workspace --locked --no-fail-fast           # 4 460 passed, 22 failed (see below)
+VLB_CARGO_LOCK=$PWD/Cargo.lock cargo test -p vesper-loom-build --locked  # ok (26)
 ```
+
+The 22 workspace failures are environmental and unrelated to this crate:
+`lean4lean42_acceptance`, `oracle42_acceptance`, `oracle42_runner`,
+`proof_audit_private`, `replay42_kernel` and `resource_model42` need a `lean`
+binary or a prepared `VESPER_LEAN4LEAN42_ROOT`, which this host lacks (CI
+provides both). `vesper-loom-build` locates `Cargo.lock` by walking up from
+the target directory, which was outside the checkout here; with
+`VLB_CARGO_LOCK` set it passes.
 
 Bazel was not run locally (the Bazel download is blocked in this cloud host).
 Under Bazel the `gtk` feature is off: the library, its unit tests, doctests,
