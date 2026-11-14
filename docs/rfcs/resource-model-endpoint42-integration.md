@@ -53,6 +53,11 @@ runtime/compiler/native providers, Cargo files and workflows are unchanged.
 
 ## Validation status
 
+The [Bazel follow-up](resource-model-endpoint42-bazel.md) records actual
+repository-pinned Bazel build, integration-test, root Clippy and CLI passes.
+It fixes the CLI's default source-root selection at runtime while preserving
+the existing reproducibility guard and all source/model checks.
+
 The [transport portability follow-up](resource-model-endpoint42-portability.md)
 replaces the initial Rust negative-peer fixture with a fixed Python peer.
 It removes an undeclared runtime Rust compiler dependency without changing
