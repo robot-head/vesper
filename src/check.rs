@@ -1,6 +1,8 @@
 //! Bidirectional type/mode inference and path-sensitive place capability checking.
 use crate::ast::*;
 use std::collections::{BTreeMap, BTreeSet};
+#[path = "vector/check.rs"]
+mod vector_check;
 
 #[path = "regions/check.rs"]
 mod region_rules;
@@ -173,6 +175,9 @@ impl World {
                 Type::Named(n, args) => {
                     if let Some(m) = bounds.get(n) {
                         return *m;
+                    }
+                    if crate::vector::shape_of(ty).is_some() {
+                        return Mode::Copy;
                     }
                     if matches!(
                         n.as_str(),
@@ -448,6 +453,7 @@ pub(crate) fn check_core(
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::capability_effects::check_world(&world));
+        diagnostics.extend(crate::vector::check_world(&world));
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::regions::check_world(&world));
@@ -575,6 +581,12 @@ impl Checker<'_> {
         }
     }
     fn valid_type(&mut self, t: &Type, g: &[Generic], span: Span) {
+        if crate::vector::is_vector_spelling(t) {
+            if let Some(message) = crate::vector::type_error(t) {
+                self.error("E1401", message, span);
+            }
+            return;
+        }
         if crate::regions::active(self.world)
             && let Some(errors) = crate::regions::validate_type(t, span.clone())
         {
@@ -1758,6 +1770,11 @@ impl Checker<'_> {
             }
             if crate::numeric::wrapping_intrinsic(name).is_some() {
                 return self.wrapping_call(name, types, args, env, span, expected);
+            }
+            if !self.world.functions.contains_key(name)
+                && let Some(t) = self.vector_call(name, types, args, env, span.clone(), expected)
+            {
+                return t;
             }
             if let Some(f) = self.world.functions.get(name) {
                 return self.apply(f, types, args, None, env, span, expected);
