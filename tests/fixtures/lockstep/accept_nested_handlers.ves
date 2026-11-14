@@ -1,0 +1,16 @@
+linear effect Ask {
+    fn ask() -> i64;
+}
+fn main() -> i64 {
+    handle Ask in {
+        handle Ask in {
+            Ask::ask()
+        } with {
+            return v => wrapping_add(v, 100),
+            ask(k) => k(Ask::ask()),
+        }
+    } with {
+        return v => v,
+        ask(k) => k(7),
+    }
+}

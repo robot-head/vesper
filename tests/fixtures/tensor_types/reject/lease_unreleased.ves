@@ -1,0 +1,9 @@
+// expect: E0302
+// at: seq
+// message: linear
+fn f() -> u64 eff [KvCachePool[2, 4]] {
+    match KvCachePool::begin_sequence(1) {
+        Ok(seq) => KvCachePool::tokens(seq),
+        Err(_) => 0
+    }
+}

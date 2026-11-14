@@ -1,0 +1,10 @@
+// expect: E0763
+// at: y
+// message: argument
+fn identity(x: Tensor[F32, [2]]) -> Tensor[F32, [2]] {
+    x
+}
+fn f(y: Tensor[F32, [3]]) -> Tensor[F32, [2]] {
+    let g = identity;
+    g(y)
+}

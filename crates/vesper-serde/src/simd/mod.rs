@@ -14,6 +14,7 @@
 use crate::{Error, ErrorKind};
 
 mod kernels;
+pub mod scalable;
 
 /// Supported instruction-set paths for stage 1.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

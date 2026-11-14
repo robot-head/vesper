@@ -50,8 +50,9 @@ caller declassification, zeroize payloads, or fence hardware memory.
   interval ends at `u64::MAX`. There is no clamping.
 - The estimate is the lower endpoint. For nonzero v, `(v-estimate)/v < 1/8`
   (a conservative 12.5% bound); zero is exact. It does not promise <2%.
-- 496 counters + 496 optional nonzero exemplar IDs + a total occupy 7,944 bytes,
-  tested with `size_of`. No 2 KiB or L1 residency claim is made.
+- 496 counters + 496 optional nonzero exemplar IDs + a total, a u128 sum and
+  u64 min/max occupy 7,984 bytes, tested with `size_of`. `sum()`, `min()` and
+  `max()` cover recorded values only. No 2 KiB or L1 residency claim is made.
 - Bucket and total increments are checked before any mutation; overflow leaves
   all counters/exemplars unchanged. A zero exemplar ID is unrepresentable.
 
