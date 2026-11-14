@@ -4695,6 +4695,7 @@ dependencies = [
  "vesper-vault",
  "wasm-encoder 0.261.0",
  "wasmtime",
+ "wasmtime-wasi",
  "wit-component",
  "wit-parser",
 ]

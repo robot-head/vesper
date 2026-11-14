@@ -17,7 +17,8 @@
 //! * any other one-shot clause captures the continuation with the WasmFX
 //!   stack-switching proposal (`cont.new`/`suspend`/`resume`), which
 //!   Wasmtime 50 executes on x86_64 Linux and macOS only. With
-//!   [`EffectLowering::Portable`] such handlers are rejected instead.
+//!   [`EffectLowering::Portable`] such clauses are split at the resumption
+//!   instead ([`HandlerMode::Cps`]), so the output runs on any Wasmtime.
 //!
 //! Everything else (strings, `f64` remainder,
 //! labelled effect rows of ordinary functions, generic effect instances and
@@ -29,17 +30,20 @@
 //! entries without parameters ([`WasmWorld::Command`]); or the root function
 //! `run(scenario: u32, arg: u64) -> s64` of the Nexus plugin world
 //! ([`WasmWorld::NexusPlugin`], `vesper_nexus::PLUGIN_WIT`). It imports
-//! nothing.
+//! only the WASI interfaces of the host capabilities the entry declares
+//! (see [`HostCapability`]).
 use crate::{ast::Type, check::World};
 use std::fmt;
 
 mod analysis;
 mod component;
+mod host;
 mod layout;
 mod lower;
 mod module;
 
 pub use component::{ENTRY_INTERFACE, WASI_RUN};
+pub use host::{HostCapability, WASI_MONOTONIC_CLOCK, WASI_STDOUT, WASI_STREAMS};
 
 /// The target triple routed to this backend by `vesper build --target`.
 pub const TARGET: &str = "wasm32-wasip2";
@@ -62,7 +66,8 @@ pub enum EffectLowering {
     /// Capture continuations with WasmFX stack switching.
     #[default]
     StackSwitching,
-    /// Reject them, so the output runs on every Wasmtime platform.
+    /// Split such clauses at their resumption ([`HandlerMode::Cps`]), so
+    /// the output runs on every Wasmtime platform.
     Portable,
 }
 
@@ -189,6 +194,12 @@ pub enum HandlerMode {
     Tail,
     /// The clause captures its continuation with WasmFX.
     StackSwitching,
+    /// Portable one-shot lowering of a clause that resumes before
+    /// returning: the clause is split at the resumption, its prefix runs at
+    /// the operation and returns the resumed value to the body, and its
+    /// suffix (the clause's continuation after `resume`) runs at the handler
+    /// once the body has produced the handler's result.
+    Cps,
 }
 
 /// One lowered handler, for reports and tests.
@@ -217,6 +228,8 @@ pub struct WasmArtifact {
     pub result: Type,
     /// Whether the module uses the stack-switching proposal.
     pub stack_switching: bool,
+    /// Host capabilities the entry declares, imported from WASI.
+    pub imports: Vec<HostCapability>,
     pub handlers: Vec<HandlerLowering>,
     pub functions: usize,
 }
@@ -273,6 +286,7 @@ pub fn compile(
         params: f.params.iter().map(|p| p.ty.clone()).collect(),
         result: crate::numeric::default_type(&f.result),
         stack_switching: uses_fx,
+        imports: plan.host.clone(),
         handlers: plan
             .handlers
             .iter()
