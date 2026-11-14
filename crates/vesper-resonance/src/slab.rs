@@ -48,7 +48,7 @@ impl std::error::Error for SlabError {}
 
 /// One allocation holding `buffers` cache-line-aligned blocks of `block`
 /// samples.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct TiledSlab {
     data: Vec<f32>,
     base: usize,
@@ -158,6 +158,20 @@ impl TiledSlab {
     /// Addresses of every buffer start, for layout tests.
     pub fn buffer_addresses(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.buffers).map(|i| self.data[self.start(i)..].as_ptr() as usize)
+    }
+}
+
+impl Clone for TiledSlab {
+    /// A new allocation re-aligned to 64 bytes (a plain `Vec` clone could
+    /// land at a different offset modulo 64), with every buffer copied.
+    fn clone(&self) -> Self {
+        let mut copy = TiledSlab::new(self.buffers, self.block)
+            .expect("an existing slab's geometry is valid and alignable");
+        for i in 0..self.buffers {
+            let (src, dst) = (self.start(i), copy.start(i));
+            copy.data[dst..dst + self.block].copy_from_slice(&self.data[src..src + self.block]);
+        }
+        copy
     }
 }
 

@@ -115,7 +115,7 @@ of §32.1 item 4 is not done.
 
 ## Tests
 
-`crates/vesper-resonance/tests/` now has 70 tests (57 before) plus one
+`crates/vesper-resonance/tests/` now has 71 tests (57 before) plus one
 ignored throughput probe.
 
 - `simd.rs` (5 + 1 ignored): host path report and typed refusal of
@@ -133,7 +133,7 @@ ignored throughput probe.
   200,000 PID steps with adversarial inputs (NaN, ±∞, ±MAX, random bit
   patterns): every command finite and within `torque_limit`, integrator
   within `integral_limit`, fault path exercised.
-- `slab.rs` (4): every buffer 64-byte aligned, exactly one stride apart in
+- `slab.rs` (5): clones are re-aligned to 64 bytes (Codex review); every buffer 64-byte aligned, exactly one stride apart in
   one allocation, for block sizes 1–128; `split_out` hands out the right
   buffers and refuses the output index and out-of-range; writes never touch
   neighbours; oversize requests are typed errors; a 64-input mixer at
@@ -175,7 +175,7 @@ Toolchain: Rust 1.100.0 (as in Bazel CI), Lean 4.24.0 (GitHub release zip).
   clean (also with `--target aarch64-unknown-linux-gnu`).
 - `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`:
   see the PR (recorded below once finished).
-- `VESPER_LEAN=lean cargo +1.100.0 test -p vesper-resonance`: 70 passed,
+- `VESPER_LEAN=lean cargo +1.100.0 test -p vesper-resonance`: 71 passed,
   1 ignored.
 - `cargo +1.100.0 test --release -p vesper-resonance --test simd --test stability --test alloc`: passed.
 - `cargo +1.100.0 test -p vesper-resonance --target aarch64-unknown-linux-gnu`

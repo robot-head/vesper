@@ -116,3 +116,19 @@ fn sixty_four_channel_mixer_fits_l1() {
     assert_eq!(out.len(), block);
     assert!(out.iter().all(|&y| (y - expected).abs() < 1e-5), "{out:?}");
 }
+
+#[test]
+fn clones_are_realigned_and_hold_the_same_samples() {
+    let mut slab = TiledSlab::new(9, 64).unwrap();
+    for i in 0..9 {
+        slab.buffer_mut(i).unwrap().fill(i as f32 + 0.5);
+    }
+    // Keep every clone alive so the allocator hands out varied addresses.
+    let clones: Vec<TiledSlab> = (0..64).map(|_| slab.clone()).collect();
+    for c in &clones {
+        assert!(c.buffer_addresses().all(|a| a % TILE_BYTES == 0));
+        for i in 0..9 {
+            assert_eq!(c.buffer(i).unwrap(), slab.buffer(i).unwrap());
+        }
+    }
+}
