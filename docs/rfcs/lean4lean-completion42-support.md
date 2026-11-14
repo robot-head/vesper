@@ -1,5 +1,9 @@
 # Actual variable support through subsumption (#541)
 
+The final packet replay and subsequent predicate-fold source/object identities
+are recorded in [the integration report](lean4lean-completion42-integration.md).
+The individual compilation identities below retain their original scope.
+
 This lane owns only `lean/Lean4LeanLevel42/VariableSupport.lean` and this
 report. It imports Completion and MapSubsumption, with no MapHelpers or heavy
 normalization/reification modules added to the actual dependency closure.

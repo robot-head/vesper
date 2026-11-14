@@ -1,5 +1,9 @@
 # Actual feasibility and independent completion certificates (#540)
 
+The final packet replay and subsequent predicate-fold source/object identities
+are recorded in [the integration report](lean4lean-completion42-integration.md).
+The individual compilation identities below retain their original scope.
+
 `lean/Lean4LeanLevel42/Feasible.lean` imports only Completion and Addable.
 It proves facts about the actual unchanged `NormLevel.addable`,
 `NormLevel.feasible.go`, `NormLevel.feasible` and orderedInsert/getD/erase

@@ -90,3 +90,7 @@ actual lexChain admissibility/minimality, full tree denotation, normalized
 reification correctness, canonicality, whole-checker/compiler/native equivalence
 and source-campaign completion remain separate. Existing raw-cycle results
 do not assert that normalization produces the cycle.
+
+Final implementation note: the same Admissible nil/cons equations are realized
+through the existing List.foldr at 19d0d39. No additional generated recursion
+helper is introduced or omitted; public interfaces and proof premises remain.

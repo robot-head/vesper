@@ -1,5 +1,9 @@
 # Actual reconstruction congruence (#542)
 
+The final packet replay and subsequent predicate-fold source/object identities
+are recorded in [the integration report](lean4lean-completion42-integration.md).
+The individual compilation identities below retain their original scope.
+
 This lane owns only `Lean4LeanLevel42/ReifyCongruence.lean` and this report,
 from base `3e0a98b`, after reading the frozen completion contract. The module
 imports Addable and MapEquality. It adds no definitions or replacement
