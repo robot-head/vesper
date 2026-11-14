@@ -706,6 +706,13 @@ impl Fixture {
         let duplicate_count = report["duplicate_constants"].as_u64().unwrap();
         assert!(retained > 0 && original == retained + omitted);
         assert_eq!(occurrences, original.checked_add(duplicate_count).unwrap());
+        assert_eq!(report["alias_scope"], "synthetic_theorem_proof_variants");
+        let alias_count = report["proof_alias_count"].as_u64().unwrap();
+        assert_eq!(
+            report["output_constants"].as_u64().unwrap(),
+            retained.checked_add(alias_count).unwrap()
+        );
+        assert!(alias_count <= duplicate_count);
         assert!(report["logical_expression_nodes"].as_u64().unwrap() > 0);
         let mut actual_modules = BTreeSet::new();
         for record in report["original_modules"].as_array().unwrap() {
@@ -733,7 +740,10 @@ impl Fixture {
         assert_eq!(duplicates.len() as u64, duplicate_count);
         for record in duplicates {
             assert!(!record["name"].as_str().unwrap().is_empty());
-            assert_eq!(record["reason"], "identical_safe_theorem_realization");
+            assert!(matches!(
+                record["reason"].as_str().unwrap(),
+                "identical_safe_theorem_realization" | "safe_theorem_proof_variant"
+            ));
             for field in ["first_module", "repeated_module"] {
                 assert!(actual_modules.contains(record[field].as_str().unwrap()));
             }
@@ -762,6 +772,71 @@ impl Fixture {
             assert_eq!(record["reason"], "matched_partial_unsafe_rec");
             assert!(actual_modules.contains(record["module"].as_str().unwrap()));
         }
+        let aliases = report["proof_aliases"].as_array().unwrap();
+        assert_eq!(aliases.len() as u64, alias_count);
+        let mut alias_names = BTreeSet::new();
+        for alias in aliases {
+            let name = alias["name"].as_str().unwrap();
+            let ordinal = name
+                .strip_prefix("ResourceKernelProofAliases.realization_")
+                .expect("isolated synthetic theorem namespace");
+            assert!(!ordinal.is_empty() && ordinal.bytes().all(|byte| byte.is_ascii_digit()));
+            assert!(alias_names.insert(name));
+            assert_eq!(alias["reason"], "checked_safe_theorem_variant");
+            assert!(!alias["original_name"].as_str().unwrap().is_empty());
+            for field in ["source_module", "canonical_module"] {
+                assert!(actual_modules.contains(alias[field].as_str().unwrap()));
+            }
+            let _ = alias["source_occurrence"].as_u64().unwrap();
+            let group = alias["original_group"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|member| member.as_str().unwrap())
+                .collect::<BTreeSet<_>>();
+            assert_eq!(
+                group.len(),
+                alias["original_group"].as_array().unwrap().len()
+            );
+            assert!(group.contains(alias["original_name"].as_str().unwrap()));
+        }
+        let records = report["occurrences"].as_array().unwrap();
+        assert_eq!(records.len() as u64, occurrences);
+        let mut positions = BTreeSet::new();
+        let mut original_names = BTreeSet::new();
+        let mut aliased_occurrences = BTreeSet::new();
+        let mut omitted_occurrences = BTreeSet::new();
+        for record in records {
+            let name = record["name"].as_str().unwrap();
+            let module = record["module"].as_str().unwrap();
+            let index = record["index"].as_u64().unwrap();
+            assert!(actual_modules.contains(module));
+            assert!(positions.insert((module, index)));
+            original_names.insert(name);
+            match record["disposition"].as_str().unwrap() {
+                "retained_canonical_info" => assert!(record["alias"].is_null()),
+                "omitted_auxiliary" => {
+                    assert!(record["alias"].is_null());
+                    assert!(names.contains(name));
+                    assert!(omitted_occurrences.insert(name));
+                }
+                "proof_alias" => {
+                    let alias_name = record["alias"].as_str().unwrap();
+                    assert!(aliased_occurrences.insert(alias_name));
+                    let alias = aliases
+                        .iter()
+                        .find(|alias| alias["name"] == alias_name)
+                        .expect("every alternate occurrence maps to one actual alias");
+                    assert_eq!(alias["original_name"], name);
+                    assert_eq!(alias["source_module"], module);
+                    assert_eq!(alias["source_occurrence"], index);
+                }
+                other => panic!("unexpected original occurrence disposition {other}"),
+            }
+        }
+        assert_eq!(original_names.len() as u64, original);
+        assert_eq!(omitted_occurrences, names);
+        assert_eq!(aliased_occurrences, alias_names);
         let projected_hashes = artifact_hashes(&fixture.root);
         assert_eq!(
             projected_hashes.len(),
@@ -901,6 +976,19 @@ fn lean_name(name: &str) -> Name {
     .unwrap()
 }
 
+fn all_projection_roots(projected: &Projection, manual: &[String]) -> Vec<String> {
+    let mut roots = manual.iter().cloned().collect::<BTreeSet<_>>();
+    assert_eq!(roots.len(), manual.len());
+    for alias in projected.report["proof_aliases"].as_array().unwrap() {
+        assert!(roots.insert(alias["name"].as_str().unwrap().to_owned()));
+    }
+    assert_eq!(
+        roots.len(),
+        manual.len() + projected.report["proof_alias_count"].as_u64().unwrap() as usize
+    );
+    roots.into_iter().collect()
+}
+
 fn positive_audit(fixture: &Fixture, module: &str, roots: &[String]) -> Value {
     let before = artifact_hashes(&fixture.root);
     let output = fixture.audit(module, roots);
@@ -995,10 +1083,11 @@ fn control_fixtures(base: &Fixture) {
             &BTreeSet::from([module.to_owned()]),
         );
         assert_eq!(projected.report["omitted_constants"], omissions);
-        let audited = positive_audit(&projected.fixture, &projected.module, &roots);
+        let all_roots = all_projection_roots(&projected, &roots);
+        let audited = positive_audit(&projected.fixture, &projected.module, &all_roots);
         assert_eq!(
             audited["checked_constants"],
-            projected.report["retained_constants"]
+            projected.report["output_constants"]
         );
     }
     for (module, cause) in [
@@ -1093,12 +1182,13 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
         projected.report["omitted_constants"].as_u64().unwrap() > 0,
         "production snapshot must exercise actual generated-helper exclusions"
     );
+    let audited_roots = all_projection_roots(&projected, &roots);
     let mut actual_roots = BTreeSet::new();
-    for partition in roots.chunks(128) {
+    for partition in audited_roots.chunks(128) {
         let report = positive_audit(&projected.fixture, &projected.module, partition);
         assert_eq!(
             report["checked_constants"],
-            projected.report["retained_constants"]
+            projected.report["output_constants"]
         );
         for theorem in report["theorems"].as_array().unwrap() {
             let root = theorem["name"].as_str().unwrap().to_owned();
@@ -1106,7 +1196,7 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
         }
         assert_eq!(fs::read(&artifact).unwrap(), before);
     }
-    assert_eq!(actual_roots, roots.iter().cloned().collect());
+    assert_eq!(actual_roots, audited_roots.iter().cloned().collect());
 
     for (label, corrupt) in [("OriginalMissing", false), ("OriginalCorrupt", true)] {
         let changed = fixture.clone_artifacts(label);
@@ -1212,15 +1302,17 @@ fn actual_fixed_model_semantics_kernel_replay_and_complete_axiom_policy() {
     let binding = json!({"scope":"kernel_logical_projection_not_native_equivalence",
         "snapshot_report":projected.report,"original_artifact_hashes":projected.original_hashes,
         "projected_artifact_hashes":projected.projected_hashes,"tool_source_blake3":projected.tool_blake3,
-        "strict_audited_roots":roots.len(),"strict_partitions":roots.chunks(128).len()});
+        "manual_roots":roots.len(),"strict_audited_roots":audited_roots.len(),
+        "strict_partitions":audited_roots.chunks(128).len()});
     let binding = serde_json::to_string(&binding).unwrap();
     assert!(binding.len() <= CAPTURE);
     eprintln!("RESOURCE_MODEL42_KERNEL_BINDING {binding}");
     eprintln!(
-        "resource_model42 complete: {} fixed modules, {} explicit theorem roots, {} partitions, {:.2}s target",
+        "resource_model42 complete: {} fixed modules, {} manual roots plus {} aliases, {} partitions, {:.2}s target",
         sources.len(),
         roots.len(),
-        roots.chunks(128).len(),
+        audited_roots.len() - roots.len(),
+        audited_roots.chunks(128).len(),
         started.elapsed().as_secs_f64()
     );
 }
