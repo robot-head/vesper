@@ -21,10 +21,11 @@ theorem subsumeBy_removed_const_le_vars (ρ : Valuation) (same : Bool) (n1 n2 : 
     simp [hn, hcomp] at hg
   have hbound := offset_bound ρ n2.var hne hp
   have hconst : n1.const ≤ n2.var.foldl (fun a v => max a v.offset) 0 + 1 := by
-    by_contra hn
-    have hlt : n2.var.foldl (fun a v => max a v.offset) 0 + 1 < n1.const :=
-      Nat.lt_of_not_ge hn
-    simp [hcomp, hlt] at hg
+    by_cases hn : n1.const ≤ n2.var.foldl (fun a v => max a v.offset) 0 + 1
+    · exact hn
+    · have hlt : n2.var.foldl (fun a v => max a v.offset) 0 + 1 < n1.const :=
+        Nat.lt_of_not_ge hn
+      simp [hcomp, hlt] at hg
   exact Nat.le_trans hconst hbound
 
 /-- The constant test only discards constants covered by the other node. -/
@@ -50,7 +51,7 @@ theorem node_subsumeBy_const_union (ρ : Valuation) (same : Bool) (n1 n2 : Node)
   next hg => split <;> rfl
   next hg =>
     have hb := subsumeBy_removed_const_bound ρ same n1 n2 hp
-      (Bool.eq_false_of_not_eq_true hg)
+      (eq_false_of_ne_true hg)
     split <;> simp only <;> omega
 
 /-- Variable filtering uses the actual subsumeVars helper, with no sorting premise. -/
@@ -77,7 +78,7 @@ theorem node_subsumeBy_union (ρ : Valuation) (same : Bool)
     have hv := node_subsumeBy_vars_union ρ same n1 n2
     simp only [nodeValue, he, he2, ite_true]
     omega
-  · have hf := Bool.eq_false_of_not_eq_true he
+  · have hf := eq_false_of_ne_true he
     simp [nodeValue, hf]
 
 /-- The public wrapper's actual subset test supplies the semantic inclusion. -/
@@ -88,6 +89,7 @@ theorem node_subsume_union (ρ : Valuation) (p1 p2 : List Name) (n1 n2 : Node)
   unfold Node.subsume
   split
   next hs =>
+    change subset Name.cmp p2 p1 = true at hs
     exact node_subsumeBy_union ρ (p1.length == p2.length) p1 p2 n1 n2
       (subset_sound hs) hw
   next => rfl
@@ -104,10 +106,10 @@ theorem node_subsumeBy_self (ρ : Valuation) (p : List Name) (n : Node)
     next hg => rfl
     next hg =>
       have hb := subsumeBy_removed_const_le_vars ρ true n n hp (Or.inl rfl)
-        (Bool.eq_false_of_not_eq_true hg)
+        (eq_false_of_ne_true hg)
       simp only [Bool.true_or, ite_true]
       omega
-  · simp [nodeValue, Bool.eq_false_of_not_eq_true he]
+  · simp [nodeValue, eq_false_of_ne_true he]
 
 /-- The public self wrapper also preserves a well-formed node exactly. -/
 theorem node_subsume_self (ρ : Valuation) (p : List Name) (n : Node)
@@ -133,8 +135,8 @@ theorem invalid_wf_counterexample :
   constructor
   · intro h
     have hb := h ⟨.str .anonymous "u", 0⟩ (by simp)
-    simpa using hb
-  · decide
+    simp at hb
+  · simp [nodeValue, enabled, varsValue, Node.subsume, Node.subsumeBy, subsumeVars, subset]
 
 /-- An enabled, well-formed variable dominator really erases both the
 constant and the variable from the larger-key node. -/
@@ -154,7 +156,19 @@ theorem enabled_variable_removal :
   dsimp only
   constructor
   · simp [NodeWF]
-  · decide
+  · let u : Name := .str .anonymous "u"
+    let v : Name := .str .anonymous "v"
+    have hs : subset Name.cmp [u] [u, v] = true := rfl
+    have hc : Name.cmp u u = .eq := rfl
+    have hout : Node.subsume [u, v] { const := 2, var := [⟨u, 1⟩] }
+        [u] { var := [⟨u, 1⟩] } = ({} : Node) := by
+      change (if subset Name.cmp [u] [u, v] then
+        Node.subsumeBy false { const := 2, var := [⟨u, 1⟩] } { var := [⟨u, 1⟩] }
+        else { const := 2, var := [⟨u, 1⟩] }) = {}
+      rw [hs]
+      simp [Node.subsumeBy, subsumeVars, hc]
+    dsimp [u, v] at hout
+    simp [hout, nodeValue, enabled, varsValue]
 
 /-- A larger constant at the smaller key actually removes the old constant. -/
 theorem larger_constant_removal :
@@ -171,7 +185,7 @@ theorem larger_constant_removal :
   dsimp only
   constructor
   · simp [NodeWF]
-  · decide
+  · exact ⟨rfl, rfl, rfl, rfl⟩
 
 /-- The larger condition set may be disabled while the smaller one remains
 active; the real removal step still preserves the union. -/
@@ -189,7 +203,7 @@ theorem disabled_larger_key :
   dsimp only
   constructor
   · simp [NodeWF]
-  · decide
+  · exact ⟨rfl, rfl, rfl, rfl, rfl⟩
 
 /-- At the same key the constant really disappears, while the variable is
 retained and the node's own value is preserved. -/
@@ -207,6 +221,6 @@ theorem valid_self_same_removal :
   dsimp only
   constructor
   · simp [NodeWF]
-  · decide
+  · exact ⟨rfl, rfl, rfl, rfl, rfl, rfl⟩
 
 end Vesper.Lean4LeanLevel42

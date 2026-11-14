@@ -45,14 +45,35 @@ Five public computational theorems exercise actual output fields and values:
 All 13 named proofs are public ASCII `theorem` declarations. There are no
 `private`, `local`, `lemma`, `sorry`, `admit`, project axioms, `unsafe`, `partial`
 or `native_decide` declarations. Computational witnesses use kernel reduction
-through ordinary `decide`.
+through definitional equality (`rfl`) and simplification with the actual helper
+equations. The enabled-variable case explicitly unfolds the wrapper through
+`subset Name.cmp`; it rewrites the actual well-founded `subsumeVars` equations
+rather than relying on native evaluation.
 
 ## Validation status
 
-Source proof implementation is complete; fresh Lean 4.24 compilation and the
-separate unchanged-snapshot/public-theorem acceptance audit are pending. This
-report will record genuine results when those runs finish. No compiler or Cargo
-lease has been used by this lane at this checkpoint.
+All 13 public theorems freshly compiled with zero errors or warnings using the
+actual pinned compiler `/home/agent/.local/share/vesper-lean/bin/lean`: Lean
+4.24.0, commit `797c613eb9b6d4ec95db23e3e00af9ac6657f24b`, Release. The compile
+used the granted exclusive lane lease, `LEAN_NUM_THREADS=1`, `-j1 -M4096`,
+`-R lean`, and the immutable semantic dependency root
+`/tmp/lean4lean-foundations42-semantics-v2`. Before compiling, all eight published
+source/object BLAKE3 identities and both authored dependency sources were
+checked against the v2 manifest and worktree copies.
+
+The immutable complete consumer root is
+`/tmp/lean4lean-foundations42-subsumption-v1`; its `identities.json` records the
+unchanged v2 dependencies plus these two files:
+
+| File | Bytes | BLAKE3 |
+| --- | ---: | --- |
+| `Lean4LeanLevel42/Subsumption.lean` | 9294 | `aa8a7ff62128bad3c2e7198bfa2f72497b5243b5137b2c5a50e0c4e126a53dc1` |
+| `Lean4LeanLevel42/Subsumption.olean` | 1532768 | `a91b926684ab62b7d848d74f876df94645a096b5e50774d30b002f51821bb106` |
+
+`git diff --check` also passed. The compiler lease was released after the
+successful compile; no Cargo command was run by this lane. The separate
+unchanged-snapshot/public-theorem acceptance audit remains pending and belongs
+to the integration lane.
 
 These results do not establish normalization, map minimization or checker
 correctness, whole-checker self-verification, native equivalence or compiler
