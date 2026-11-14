@@ -1,4 +1,4 @@
-//! Shared runner for the eight fixed audited proof packets.
+//! Shared runner for the nine fixed audited proof packets.
 //! These are logical foundation lemmas, not whole-checker verification.
 use serde_json::{Value, json};
 use std::{
@@ -21,6 +21,7 @@ pub enum Packet {
     Normalization,
     Comparison,
     Shape,
+    Addability,
 }
 
 struct PacketSpec {
@@ -254,6 +255,47 @@ const SHAPE_REQUIRED: &[&str] = &[
     "Vesper.Lean4LeanLevel42.normalized_beq_value",
 ];
 
+const ADDABILITY_REQUIRED: &[&str] = &[
+    "Vesper.Lean4LeanLevel42.subset_sublist",
+    "Vesper.Lean4LeanLevel42.keySorted_erase",
+    "Vesper.Lean4LeanLevel42.subset_complete",
+    "Vesper.Lean4LeanLevel42.subset_eq_true_iff",
+    "Vesper.Lean4LeanLevel42.erase_subset_iff_subset_cons",
+    "Vesper.Lean4LeanLevel42.subset_needs_left_sorted",
+    "Vesper.Lean4LeanLevel42.subset_needs_right_sorted",
+    "Vesper.Lean4LeanLevel42.subset_duplicate_left_counterexample",
+    "Vesper.Lean4LeanLevel42.erase_subset_needs_nodup_counterexample",
+    "Vesper.Lean4LeanLevel42.norm_any_eq_toList_any",
+    "Vesper.Lean4LeanLevel42.norm_any_eq_true_iff",
+    "Vesper.Lean4LeanLevel42.norm_any_witness",
+    "Vesper.Lean4LeanLevel42.norm_any_of_lookup",
+    "Vesper.Lean4LeanLevel42.norm_any_congr_lookup",
+    "Vesper.Lean4LeanLevel42.addable_iff_witness",
+    "Vesper.Lean4LeanLevel42.addable_iff_subset",
+    "Vesper.Lean4LeanLevel42.addable_mono_sorted_acc",
+    "Vesper.Lean4LeanLevel42.addable_mono_keys",
+    "Vesper.Lean4LeanLevel42.addable_orderedInsert",
+    "Vesper.Lean4LeanLevel42.addable_lookup_congr",
+    "Vesper.Lean4LeanLevel42.addable_beq_congr",
+    "Vesper.Lean4LeanLevel42.addable_needs_sorted_target",
+    "Vesper.Lean4LeanLevel42.addable_needs_sorted_keys",
+    "Vesper.Lean4LeanLevel42.addable_nonzero_offset_witness",
+    "Vesper.Lean4LeanLevel42.reifyCycle_lookup",
+    "Vesper.Lean4LeanLevel42.reifyCycle_WF",
+    "Vesper.Lean4LeanLevel42.reifyCycle_keysSorted",
+    "Vesper.Lean4LeanLevel42.reifyCycle_varsSorted",
+    "Vesper.Lean4LeanLevel42.reifyCycle_noEmpty",
+    "Vesper.Lean4LeanLevel42.reifyCycle_pathPrimed",
+    "Vesper.Lean4LeanLevel42.reifyCycle_addable_a",
+    "Vesper.Lean4LeanLevel42.reifyCycle_addable_b",
+    "Vesper.Lean4LeanLevel42.reifyCycle_feasible",
+    "Vesper.Lean4LeanLevel42.reifyCycle_lexChain",
+    "Vesper.Lean4LeanLevel42.reifyCycle_toTree_reify",
+    "Vesper.Lean4LeanLevel42.reifyCycle_mapValue",
+    "Vesper.Lean4LeanLevel42.reifyCycle_reifiedValue",
+    "Vesper.Lean4LeanLevel42.reifyCycle_counterexample",
+];
+
 impl Packet {
     fn spec(self) -> PacketSpec {
         match self {
@@ -450,6 +492,35 @@ impl Packet {
                 required: SHAPE_REQUIRED,
                 scope: "audited_normalized_map_equality_and_shape",
                 marker: "LEAN4LEAN_SHAPE42_EVIDENCE",
+            },
+            Self::Addability => PacketSpec {
+                label: "lean4lean_addability42",
+                module: "Lean4LeanLevel42.AddabilityFinal",
+                projected: "Lean4LeanAddability42Kernel",
+                source_modules: &[
+                    "Lean4Lean.List",
+                    "Lean4Lean.Level",
+                    "Lean4LeanLevel42.Semantics",
+                    "Lean4LeanLevel42.ListProofs",
+                    "Lean4LeanLevel42.OrderedInsert",
+                    "Lean4LeanLevel42.VarInsert",
+                    "Lean4LeanLevel42.NameOrder",
+                    "Lean4LeanLevel42.SortedKeys",
+                    "Lean4LeanLevel42.MapValue",
+                    "Lean4LeanLevel42.MapHelpers",
+                    "Lean4LeanLevel42.PathPriming",
+                    "Lean4LeanLevel42.LevelSemantics",
+                    "Lean4LeanLevel42.MapAll",
+                    "Lean4LeanLevel42.MapEquality",
+                    "Lean4LeanLevel42.SortedSubset",
+                    "Lean4LeanLevel42.MapAny",
+                    "Lean4LeanLevel42.Addable",
+                    "Lean4LeanLevel42.ReifyCycle",
+                    "Lean4LeanLevel42.AddabilityFinal",
+                ],
+                required: ADDABILITY_REQUIRED,
+                scope: "audited_addability_foundations_and_raw_reification_boundary",
+                marker: "LEAN4LEAN_ADDABILITY42_EVIDENCE",
             },
         }
     }
