@@ -20,6 +20,9 @@ use cranelift_object::{ObjectBuilder, ObjectModule};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{cell::RefCell, rc::Rc};
 
+/// Lane 27: bare-metal RISC-V and AArch64 images with no runtime.
+#[path = "native_freestanding.rs"]
+pub mod freestanding;
 /// Cranelift SIMD lowering of `Op::Vector` (lane 28).
 #[path = "native_vector.rs"]
 mod native_vector;
@@ -479,8 +482,29 @@ fn compile<M: Module>(
     instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
+    compile_entry(
+        m, world, entry, optimize, observer, instrument, options, false,
+    )
+}
+/// [`compile`]; with `fail_entry`, an entry whose only effects are `Fail`
+/// instances is accepted and keeps its hidden failure-record parameter
+/// (lane 27: the freestanding runtime turns an escaping failure into an
+/// abort).
+#[allow(clippy::too_many_arguments)]
+fn compile_entry<M: Module>(
+    m: &mut M,
+    world: &World,
+    entry: &str,
+    optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+    instrument: Option<Instrument<'_>>,
+    options: CodegenOptions,
+    fail_entry: bool,
+) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
-    if !entry_fn.effects.instances.is_empty() || entry_fn.effects.tail.is_some() {
+    if (!entry_fn.effects.instances.is_empty() || entry_fn.effects.tail.is_some())
+        && !(fail_entry && fail_only(world, entry_fn))
+    {
         return Err("native entry must handle all effects".into());
     }
     if contains_function(world, &entry_fn.result)
@@ -947,6 +971,35 @@ pub fn object_with_observer(
     observer: Option<&mut dyn FnMut(EmittedFunction)>,
 ) -> Result<(Vec<u8>, String), String> {
     object_instrumented(world, entry, target, optimize, observer, None)
+}
+/// Lane 27: [`object_with_observer`] with a caller-built ISA, so
+/// [`freestanding`] can emit `riscv64imac-unknown-none-elf` and
+/// `aarch64-unknown-none` objects without widening [`object_isa`]'s hosted
+/// target check. The caller owns every flag of `isa`. An entry whose only
+/// effects are `Fail` instances is accepted and takes the hidden
+/// failure-record pointer as its last parameter.
+pub fn object_for_isa(
+    world: &World,
+    entry: &str,
+    isa: std::sync::Arc<dyn cranelift_codegen::isa::TargetIsa>,
+    optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+) -> Result<(Vec<u8>, String), String> {
+    let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
+        .map_err(|e| e.to_string())?;
+    let mut m = ObjectModule::new(builder);
+    let (_, clif) = compile_entry(
+        &mut m,
+        world,
+        entry,
+        optimize,
+        observer,
+        None,
+        CodegenOptions::default(),
+        true,
+    )?;
+    let bytes = m.finish().emit().map_err(|e| e.to_string())?;
+    Ok((bytes, clif))
 }
 /// [`object_with_observer`] with the lane-23 [`Instrument`] hook. With
 /// `instrument: None` it is exactly `object_with_observer`.

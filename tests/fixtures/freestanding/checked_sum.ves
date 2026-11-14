@@ -1,0 +1,40 @@
+// Records, enums, a lexical Fail handler and checked u64 arithmetic.
+copy struct Pair {
+    x: u64,
+    y: u64
+}
+
+fn scale(in p: Pair, k: u64) -> u64 eff [Fail[ArithOverflow]] {
+    p.x * k + p.y
+}
+
+fn classify(v: u64) -> Option[u64] {
+    if v > 100 {
+        Some(v)
+    } else {
+        None
+    }
+}
+
+fn main() -> u64 {
+    let p = Pair {
+        x: 6,
+        y: 7
+    };
+    let big = handle Fail[ArithOverflow] in {
+        scale(in p, 18446744073709551615)
+    } with {
+        return x => x,
+        raise(e, k) => 1000,
+    };
+    let small = handle Fail[ArithOverflow] in {
+        scale(in p, 7)
+    } with {
+        return x => x,
+        raise(e, k) => 0,
+    };
+    match classify(big) {
+        Some(v) => wrapping_add(v, small),
+        None => small,
+    }
+}

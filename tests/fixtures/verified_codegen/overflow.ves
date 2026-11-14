@@ -1,0 +1,13 @@
+// The checked addition overflows: the executable aborts with
+// Fail[ArithOverflow].
+fn grow(x: u32, steps: u32) -> u32 eff [Fail[ArithOverflow]] {
+    if steps == 0 {
+        x
+    } else {
+        grow(x * 2, steps - 1)
+    }
+}
+
+fn main() -> u32 eff [Fail[ArithOverflow]] {
+    grow(3, 40)
+}
