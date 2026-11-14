@@ -4939,7 +4939,22 @@ impl<B: XskBackend, R: Responder, T: TxTap> WarpEndpoint<B, R, T> {
         if from_streams {
             self.settle_record(slot, &sent);
         }
-        sent?;
+        match sent {
+            Ok(_) => {}
+            // RFC 9000 §9.3/§8.1: a migrated path not yet validated took
+            // its 3x budget. Nothing was taken (no packet number, no
+            // frames; the stream data is requeued and the received frame
+            // recycled), so the ACK stays owed and goes out once the path
+            // validates or more bytes arrive. Not an error of the receive.
+            Err(WarpError::AmplificationLimited) => {
+                return Ok(RxOutcome::Processed {
+                    conn: slot,
+                    pn,
+                    replied: false,
+                });
+            }
+            Err(e) => return Err(e),
+        }
         Ok(RxOutcome::Processed {
             conn: slot,
             pn,

@@ -465,6 +465,18 @@ fn coalesced_short(types: &[Vec<u8>]) -> Vec<Vec<u8>> {
 #[test]
 fn client_data_rides_behind_its_handshake_finished() {
     let (mut net, types) = resumed_request();
+    if types[0].iter().any(|t| t.contains(&1)) {
+        // A post-quantum key share splits the ClientHello over two
+        // Initials (rustls's `prefer-post-quantum`, on when the whole
+        // workspace is built). The client then has a send before its 1-RTT
+        // keys and the request rightly leaves in 0-RTT, so nothing is left
+        // to ride behind its Finished: the server must still have read it.
+        // The close test below covers 1-RTT coalescing in both layouts.
+        assert!(net.client.stats().zero_rtt_packets_sent >= 1);
+        net.handshake();
+        net.transfer(2, 20_000, 20_000);
+        return;
+    }
     // The client's first datagram with 1-RTT keys: its Initial ACK and
     // Handshake Finished, then the request in 1-RTT, padded to 1200 bytes
     // inside the 1-RTT packet.

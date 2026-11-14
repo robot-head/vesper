@@ -238,6 +238,23 @@ Codex review of the first head raised four points, all fixed with tests:
   ack-eliciting send still restarts the timer.
 * The unknown-server-address filter also runs on the copied receive path.
 
+Bazel CI builds with workspace-wide features, which turn on rustls's
+`prefer-post-quantum`: the ClientHello then spans two Initials and the
+server's flight two datagrams. Two tests that only ran with the
+single-Initial layout under `cargo test -p vesper-warp` failed there, and
+both are now checked in both layouts (`cargo test --workspace --test ...`):
+
+* The NAT-rebinding test found a real bug: a reply (ACK plus stream data) to
+  a migrated, not yet validated address that exceeded the 3x budget
+  returned `AmplificationLimited` out of the receive call. The receive now
+  succeeds without a reply; nothing was taken, so the ACK stays owed and the
+  stream data is requeued.
+* With a two-Initial ClientHello, a resumed client has a send before its
+  1-RTT keys, so its early request rightly leaves in 0-RTT and nothing is
+  left to coalesce behind its Finished. The test checks that path instead;
+  1-RTT coalescing in that layout is covered by the close test and the
+  quinn close test.
+
 ## Remaining gaps
 
 * RFC 9000 §19.16's "MAY" (a RETIRE_CONNECTION_ID that names the packet's
