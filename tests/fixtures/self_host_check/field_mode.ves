@@ -1,0 +1,4 @@
+linear struct Ticket {}
+copy struct Hidden {
+    ticket: Ticket @@copy
+}

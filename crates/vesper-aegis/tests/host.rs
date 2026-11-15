@@ -87,8 +87,148 @@ fn mmap_validator_rejects_overlap_and_invalid_replies() {
             "{addr:#x}+{len:#x}"
         );
     }
-    t.unmap(a);
+    t.unmap(a).unwrap();
     t.accept_mmap(m(0x1000_3000, 0x2000), 0x2000).unwrap();
+}
+
+#[test]
+fn malformed_or_untracked_unmaps_never_release_tracked_pages() {
+    const BASE: u64 = 0x1000_0000;
+    const PAGE: u64 = 4096;
+    let bad = [
+        (BASE, 0, false),
+        (BASE + 1, PAGE, false),
+        (BASE, PAGE - 1, false),
+        (!(PAGE - 1), PAGE * 2, false),
+        (BASE - PAGE, PAGE * 2, false),
+        (BASE + PAGE * 15, PAGE * 2, false),
+        (BASE + PAGE * 3, PAGE * 2, true),
+        (BASE + PAGE * 8, PAGE, true),
+    ];
+    for (addr, len, untracked) in bad {
+        let mut table = HostMappingTable::new(BASE, BASE + PAGE * 16);
+        table
+            .accept_mmap(
+                UntrustedHostVal::from_host(HostMmapReply {
+                    addr: BASE,
+                    len: PAGE * 4,
+                }),
+                PAGE * 4,
+            )
+            .unwrap();
+        let expected = if untracked {
+            TeeError::HostMmapUntracked { addr, len }
+        } else {
+            TeeError::HostMmapInvalid { addr, len }
+        };
+        assert_eq!(
+            table.unmap(HostMmapReply { addr, len }),
+            Err(expected),
+            "{addr:#x}+{len:#x}"
+        );
+        // Test each original page through the public overlap check, rather
+        // than inspecting the tracker's private interval representation.
+        for page in 0..4 {
+            let addr = BASE + PAGE * page;
+            assert_eq!(
+                table.accept_mmap(
+                    UntrustedHostVal::from_host(HostMmapReply { addr, len: PAGE }),
+                    PAGE
+                ),
+                Err(TeeError::HostMmapOverlap { addr, len: PAGE })
+            );
+        }
+    }
+}
+
+#[test]
+fn partial_unmaps_preserve_neighbors_and_reject_holes() {
+    const BASE: u64 = 0x2000_0000;
+    const PAGE: u64 = 4096;
+    let mut table = HostMappingTable::new(BASE, BASE + PAGE * 8);
+    let mapping = HostMmapReply {
+        addr: BASE,
+        len: PAGE * 4,
+    };
+    table
+        .accept_mmap(UntrustedHostVal::from_host(mapping), mapping.len)
+        .unwrap();
+    let middle = HostMmapReply {
+        addr: BASE + PAGE,
+        len: PAGE * 2,
+    };
+    table.unmap(middle).unwrap();
+    assert_eq!(
+        table.unmap(middle),
+        Err(TeeError::HostMmapUntracked {
+            addr: middle.addr,
+            len: middle.len
+        })
+    );
+    assert_eq!(
+        table.unmap(mapping),
+        Err(TeeError::HostMmapUntracked {
+            addr: mapping.addr,
+            len: mapping.len
+        })
+    );
+    for addr in [BASE, BASE + PAGE * 3] {
+        assert_eq!(
+            table.accept_mmap(
+                UntrustedHostVal::from_host(HostMmapReply { addr, len: PAGE }),
+                PAGE
+            ),
+            Err(TeeError::HostMmapOverlap { addr, len: PAGE })
+        );
+    }
+    // Only the actually removed middle range may be accepted again.
+    assert_eq!(
+        table.accept_mmap(UntrustedHostVal::from_host(middle), middle.len),
+        Ok(middle)
+    );
+    assert_eq!(
+        table.accept_mmap(UntrustedHostVal::from_host(mapping), mapping.len),
+        Err(TeeError::HostMmapOverlap {
+            addr: mapping.addr,
+            len: mapping.len
+        })
+    );
+}
+
+#[test]
+fn aligned_unmap_can_span_adjacent_tracked_mappings() {
+    const BASE: u64 = 0x3000_0000;
+    const PAGE: u64 = 4096;
+    let mut table = HostMappingTable::new(BASE, BASE + PAGE * 8);
+    for addr in [BASE, BASE + PAGE * 2] {
+        table
+            .accept_mmap(
+                UntrustedHostVal::from_host(HostMmapReply {
+                    addr,
+                    len: PAGE * 2,
+                }),
+                PAGE * 2,
+            )
+            .unwrap();
+    }
+    let middle = HostMmapReply {
+        addr: BASE + PAGE,
+        len: PAGE * 2,
+    };
+    table.unmap(middle).unwrap();
+    for addr in [BASE, BASE + PAGE * 3] {
+        assert_eq!(
+            table.accept_mmap(
+                UntrustedHostVal::from_host(HostMmapReply { addr, len: PAGE }),
+                PAGE
+            ),
+            Err(TeeError::HostMmapOverlap { addr, len: PAGE })
+        );
+    }
+    assert_eq!(
+        table.accept_mmap(UntrustedHostVal::from_host(middle), middle.len),
+        Ok(middle)
+    );
 }
 
 #[test]

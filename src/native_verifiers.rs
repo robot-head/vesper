@@ -1168,3 +1168,94 @@ pub fn verify_native_with_capabilities(
     report.findings.splice(0..0, derived.findings);
     Ok((bytes, clif, report))
 }
+
+/// Validate `target` (or resolve the host target when `None`) for WCSD stack
+/// measurement and return the canonical target triple string.
+pub fn validate_wcsd_target(target: Option<&str>) -> Result<String, String> {
+    let isa = crate::native::object_isa(target)?;
+    Ok(isa.triple().to_string())
+}
+
+/// Compile `function` standalone for `target` (host when `None`), decode its
+/// emitted Cranelift prologues across its reachable call graph, and return its
+/// worst-case stack depth (WCSD) bound or an explicit unavailability reason.
+///
+/// Errors only if `target` itself is invalid/unsupported; per-function compile
+/// or unbounded-call limitations are reported in [`WcsdStackBound::unavailable_reason`].
+pub fn measure_realtime_wcsd(
+    world: &World,
+    function: &str,
+    target: Option<&str>,
+) -> Result<vesper_doc::capabilities::WcsdStackBound, String> {
+    let resolved_target = validate_wcsd_target(target)?;
+    let unavailable = |reason: String| vesper_doc::capabilities::WcsdStackBound {
+        target: resolved_target.clone(),
+        worst_case_bytes: None,
+        worst_path: Vec::new(),
+        unavailable_reason: Some(reason),
+    };
+    let Some(func) = world.functions.get(function) else {
+        return Ok(unavailable(format!("unknown function '{function}'")));
+    };
+    if func.effects.tail.is_some() {
+        return Ok(unavailable(
+            "open effect row cannot be compiled standalone".into(),
+        ));
+    }
+    if !func.generics.is_empty() {
+        return Ok(unavailable(
+            "generic function requires concrete type arguments".into(),
+        ));
+    }
+    let mut emitted = Vec::new();
+    if let Err(reason) =
+        crate::native::emit_capability_entry(world, function, target, true, &mut |f| {
+            emitted.push(f)
+        })
+    {
+        return Ok(unavailable(reason));
+    }
+    let names = Names::new(&emitted);
+    let measured = match measure_emitted(world, &emitted, target) {
+        Ok(graph) => graph,
+        Err(reason) => return Ok(unavailable(reason)),
+    };
+    let mut graph = stack_bound::StackGraph::from(&measured);
+    for f in &mut graph.functions {
+        f.name = names.source(&f.name);
+    }
+    for e in &mut graph.external {
+        e.symbol = names.source(&e.symbol);
+    }
+    let bound = match stack_bound::stack_bound_report(
+        &graph,
+        &stack_bound::StackBoundPolicy {
+            roots: vec![stack_bound::StackBudget {
+                function: function.to_string(),
+                budget_bytes: u32::MAX,
+            }],
+            external_bounds: BTreeMap::new(),
+            indirect_targets: BTreeMap::new(),
+        },
+    ) {
+        Ok(report) => report,
+        Err(reason) => return Ok(unavailable(reason)),
+    };
+    if let Some(root) = bound.roots.first()
+        && let Some(bytes) = root.worst_case_bytes
+    {
+        return Ok(vesper_doc::capabilities::WcsdStackBound {
+            target: resolved_target,
+            worst_case_bytes: Some(bytes),
+            worst_path: root.worst_path.clone(),
+            unavailable_reason: None,
+        });
+    }
+    let reason = bound
+        .findings
+        .iter()
+        .find(|f| f.rule != vesper_silicon::stack::RULE_BUDGET)
+        .map(|f| format!("{}: {}", f.function, f.message))
+        .unwrap_or_else(|| "worst-case stack depth is unbounded".into());
+    Ok(unavailable(reason))
+}

@@ -1,0 +1,513 @@
+// Modal kinding, owned bindings, path joins and the Fail frame condition.
+fn c_max(a: i64, b: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
+fn c_mode(ty: CType, depth: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    c_kind_walk(ty, 0, 0, depth).mode
+}
+// Kinds are joins of reachable nominal floors and function modes. A visited
+// declaration contributes zero on subsequent visits because join is idempotent.
+// Carry the visited set across siblings to avoid exponential work on ADT DAGs.
+fn c_decl_index(wanted: i64, at: i64, index: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_token(at).start == wanted {
+        index
+    } else if index >= 16 || c_kind(at) == 70 {
+        c_limit(at)
+    } else {
+        c_decl_index(wanted, c_decl(at).end, index + 1)
+    }
+}
+fn c_kind_walk(ty: CType, seen: i64, active: i64, depth: i64)
+    -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if depth > 24 {
+        let unsupported = c_unsupported(9, ty.at);
+        CKind {
+            mode: 0,
+            seen: seen
+        }
+    } else if ty.tag == 3 {
+        let at = c_find(c_token(ty.at), 0, 0);
+        let valid = if at < 0 {
+            c_error(101, ty.at, c_next(ty.at))
+        } else {
+            0
+        };
+        let bit = c_power(c_decl_index(at, 0, 0));
+        let valid = if c_div(active, bit) % 2 == 1 {
+            c_unsupported(9, ty.at)
+        } else {
+            0
+        };
+        if c_div(seen, bit) % 2 == 1 {
+            CKind {
+                mode: 0,
+                seen: seen
+            }
+        } else {
+            let d = c_decl(at);
+            let result = if d.kind == 8 {
+                c_kind_fields(c_next(d.body), true, seen + bit, active + bit, depth + 1)
+            } else {
+                c_kind_variants(c_next(d.body), seen + bit, active + bit, depth + 1)
+            };
+            CKind {
+                mode: c_max(d.mode, result.mode),
+                seen: result.seen
+            }
+        }
+    } else if ty.tag == 4 {
+        let mode = if c_kind(c_next(ty.at)) == 4 {
+            0
+        } else if c_kind(c_next(ty.at)) == 44 {
+            c_kind(c_next(c_next(ty.at))) - 14
+        } else {
+            1
+        };
+        CKind {
+            mode: mode,
+            seen: seen
+        }
+    } else {
+        CKind {
+            mode: 0,
+            seen: seen
+        }
+    }
+}
+fn c_kind_fields(at: i64, named: bool, seen: i64, active: i64, depth: i64)
+    -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 || c_kind(at) == 33 {
+        CKind {
+            mode: 0,
+            seen: seen
+        }
+    } else {
+        let ty = c_type(
+            if named {
+                c_take(c_next(at), 40)
+            } else {
+                at
+            },
+            0
+        );
+        let head = c_kind_walk(ty.ty, seen, active, depth);
+        let next = if c_kind(ty.next) == 45 {
+            c_next(c_next(ty.next))
+        } else {
+            ty.next
+        };
+        let tail = if c_kind(next) == 38 {
+            c_kind_fields(c_next(next), named, head.seen, active, depth)
+        } else {
+            CKind {
+                mode: 0,
+                seen: head.seen
+            }
+        };
+        CKind {
+            mode: c_max(head.mode, tail.mode),
+            seen: tail.seen
+        }
+    }
+}
+fn c_kind_variants(at: i64, seen: i64, active: i64, depth: i64)
+    -> CKind eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 {
+        CKind {
+            mode: 0,
+            seen: seen
+        }
+    } else {
+        let next = c_next(at);
+        let k = c_kind(next);
+        let head = if k == 32 || k == 34 {
+            c_kind_fields(c_next(next), k == 34, seen, active, depth)
+        } else {
+            CKind {
+                mode: 0,
+                seen: seen
+            }
+        };
+        let tail = c_kind_variants(c_variant_next(at), head.seen, active, depth);
+        CKind {
+            mode: c_max(head.mode, tail.mode),
+            seen: tail.seen
+        }
+    }
+}
+fn c_variant_next(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let next = c_next(at);
+    let k = c_kind(next);
+    let next = if k == 32 || k == 34 {
+        c_group(next, 0)
+    } else {
+        next
+    };
+    if c_kind(next) == 38 {
+        c_next(next)
+    } else {
+        next
+    }
+}
+fn c_validate_fields(at: i64, named: bool, d: CDecl)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 || c_kind(at) == 33 {
+        0
+    } else {
+        let duplicate = if named {
+            c_duplicate_field(c_token(at), c_field_next(at, named), named)
+        } else {
+            false
+        };
+        let valid = if duplicate {
+            c_error(100, d.start, d.end)
+        } else {
+            0
+        };
+        let ty = c_type(
+            if named {
+                c_take(c_next(at), 40)
+            } else {
+                at
+            },
+            0
+        );
+        let valid = c_valid_type(ty.ty, d.start, d.end, 0);
+        let mode = c_mode(ty.ty, 0);
+        let override = c_kind(ty.next) == 45;
+        let modality = if override {
+            c_kind(c_next(ty.next)) - 14
+        } else {
+            2
+        };
+        let valid = if mode > modality {
+            c_error(105, d.start, d.end)
+        } else {
+            0
+        };
+        let next = if override {
+            c_next(c_next(ty.next))
+        } else {
+            ty.next
+        };
+        if c_kind(next) == 38 {
+            c_validate_fields(c_next(next), named, d)
+        } else {
+            0
+        }
+    }
+}
+fn c_validate_variants(at: i64, d: CDecl)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 {
+        0
+    } else {
+        let duplicate = c_find_variant(c_token(at), c_variant_next(at));
+        let valid = if duplicate >= 0 {
+            c_error(100, d.start, d.end)
+        } else {
+            0
+        };
+        let next = c_next(at);
+        let k = c_kind(next);
+        let valid = if k == 32 || k == 34 {
+            c_validate_fields(c_next(next), k == 34, d)
+        } else {
+            0
+        };
+        c_validate_variants(c_variant_next(at), d)
+    }
+}
+fn c_validate_decls(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 70 {
+        0
+    } else {
+        let d = c_decl(at);
+        let reserved = c_reserved_decl(d);
+        let duplicate = c_find(
+            d.name,
+            if d.kind == 8 || d.kind == 9 {
+                0
+            } else {
+                d.kind
+            },
+            d.end
+        );
+        let valid = if duplicate >= 0 {
+            let other = c_decl(duplicate);
+            c_error(100, other.start, other.end)
+        } else {
+            0
+        };
+
+        c_validate_decls(d.end)
+    }
+}
+fn c_bind_name(env: CEnv, name: Tok, ty: CType, pass: i64)
+    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let old = c_lookup(env, name, env.count);
+    let valid = if old
+        >= 0
+        && c_slot(env, old)
+        .pass
+        == 2
+        && !c_moved(env, old)
+        && c_mode(c_slot(env, old).ty, 0)
+        == 2 {
+        c_error(302, name.start, name.end)
+    } else {
+        0
+    };
+    if c_word(name.start, 0x5f) {
+        let valid = if pass == 2 && c_mode(ty, 0) == 2 {
+            c_error(302, name.start, name.end)
+        } else {
+            0
+        };
+        env
+    } else {
+        c_push(
+            env,
+            CBinding {
+                name: name,
+                ty: ty,
+                pass: pass
+            }
+        )
+    }
+}
+fn c_exhaust(env: CEnv, low: i64, n: i64, start: i64, end: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if n <= low {
+        0
+    } else {
+        let b = c_slot(env, n - 1);
+        let valid = if c_lookup(env, b.name, env.count)
+            == n
+            - 1
+            && b
+            .pass
+            == 2
+            && !c_moved(env, n - 1)
+            && c_mode(b.ty, 0)
+            == 2 {
+            c_error(302, start, end)
+        } else {
+            0
+        };
+        c_exhaust(env, low, n - 1, start, end)
+    }
+}
+fn c_truncate(env: CEnv, n: i64) -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    CEnv {
+        slots: env.slots,
+        count: n,
+        moved: c_mod(env.moved, c_power(n))
+    }
+}
+fn c_join(base: CEnv, a: CEnv, b: CEnv, n: i64, start: i64, end: i64)
+    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if n == base.count {
+        base
+    } else {
+        let valid = if c_mode(c_slot(base, n).ty, 0) == 2 && c_moved(a, n) != c_moved(b, n) {
+            c_error(309, start, end)
+        } else {
+            0
+        };
+        c_join(
+            if c_moved(a, n) || c_moved(b, n) {
+                c_move(base, n)
+            } else {
+                base
+            },
+            a,
+            b,
+            n + 1,
+            start,
+            end
+        )
+    }
+}
+fn c_check_loans(loans: CEnv, i: i64, slot: i64, usage: i64, is_copy: bool, start: i64, end: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if i == loans.count {
+        0
+    } else {
+        let old = c_slot(loans, i);
+        let exclusive = old.pass != 2 && (old.pass != 0 || usage == 1 || usage == 2 && !is_copy);
+        let valid = if old.ty.at == slot && exclusive {
+            c_error(301, start, end)
+        } else {
+            0
+        };
+        c_check_loans(loans, i + 1, slot, usage, is_copy, start, end)
+    }
+}
+fn c_use(env: CEnv, slot: i64, usage: i64, loans: CEnv, start: i64, end: i64)
+    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let b = c_slot(env, slot);
+    let m = c_mode(b.ty, 0);
+    let valid = if c_moved(env, slot) {
+        c_error(303, start, end)
+    } else {
+        0
+    };
+    let valid = c_check_loans(loans, 0, slot, usage, m == 0, start, end);
+    let valid = if usage == 2 && m != 0 && b.pass != 2 {
+        c_error(305, start, end)
+    } else if usage == 1 && b.pass == 0 {
+        c_error(307, start, end)
+    } else {
+        0
+    };
+    if usage == 2 && m != 0 {
+        c_move(env, slot)
+    } else {
+        env
+    }
+}
+fn c_abort_frame(env: CEnv, i: i64, start: i64, end: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if i == env.count {
+        0
+    } else {
+        let b = c_slot(env, i);
+        let live = c_lookup(env, b.name, env.count) == i;
+        let valid = if live
+            && (b.pass == 1 || b.pass == 2 && !c_moved(env, i) && c_mode(b.ty, 0) == 2) {
+            c_error(402, start, end)
+        } else {
+            0
+        };
+        c_abort_frame(env, i + 1, start, end)
+    }
+}
+fn c_require_row(needed: i64, allowed: i64, env: CEnv, loans: CEnv, start: i64, end: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if needed < 0 || c_kind(needed) == 37 {
+        0
+    } else {
+        let ty = c_type(c_take(c_next(needed), 36), 0);
+        let valid = if !c_row_satisfies(allowed, ty.ty) {
+            c_error(
+                if allowed >= 0 && c_kind(allowed) != 37 {
+                    400
+                } else {
+                    401
+                },
+                start,
+                end
+            )
+        } else {
+            0
+        };
+        let valid = c_abort_loans(loans, 0, start, end);
+        let valid = c_abort_frame(env, 0, start, end);
+        let next = c_take(ty.next, 37);
+        if c_kind(next) == 38 {
+            c_require_row(c_next(next), allowed, env, loans, start, end)
+        } else {
+            0
+        }
+    }
+}
+
+fn c_duplicate_field(name: Tok, at: i64, named: bool)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 || c_kind(at) == 33 {
+        false
+    } else if c_name(name, c_token(at)) {
+        true
+    } else {
+        c_duplicate_field(name, c_field_next(at, named), named)
+    }
+}
+
+fn c_live_loans(loans: CEnv, i: i64, active: CEnv)
+    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if i == loans.count {
+        active
+    } else {
+        let b = c_slot(loans, i);
+        c_live_loans(
+            loans,
+            i + 1,
+            if b.pass == 2 {
+                active
+            } else {
+                c_push(active, b)
+            }
+        )
+    }
+}
+fn c_abort_loans(loans: CEnv, i: i64, start: i64, end: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if i == loans.count {
+        0
+    } else if c_slot(loans, i).pass == 1 {
+        c_error(402, start, end)
+    } else {
+        c_abort_loans(loans, i + 1, start, end)
+    }
+}
+
+fn c_literal_name(t: Tok, length: i64, first: i64, second: i64, third: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    t
+        .end
+        - t
+        .start
+        == length
+        && word(
+        t.start,
+        if length > 6 {
+            t.start + 6
+        } else {
+            t.end
+        }
+    )
+        == first
+        && (
+        length
+            <= 6
+            || word(
+            t.start + 6,
+            if length > 12 {
+                t.start + 12
+            } else {
+                t.end
+            }
+        )
+            == second
+    )
+        && (length <= 12 || word(t.start + 12, t.end) == third)
+}
+fn c_reserved_decl(d: CDecl) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let n = d.name;
+    let reserved = if d.kind == 8 || d.kind == 9 {
+        c_literal_name(n, 4, 1433299316, 0, 0)
+            || c_literal_name(n, 5, 336709707122, 0, 0)
+            || c_literal_name(n, 6, 91759600823911, 0, 0)
+            || c_literal_name(n, 6, 87344407998318, 0, 0)
+            || c_literal_name(n, 6, 90595682249844, 0, 0)
+            || c_literal_name(n, 12, 90664317774189, 111348947251058, 0)
+            || c_literal_name(n, 13, 71959651313743, 130178083089519, 119)
+    } else if d.kind == 12 {
+        c_literal_name(n, 12, 131333144735849, 121390260905060, 0)
+            || c_literal_name(n, 12, 131333144735849, 121390262089058, 0)
+            || c_literal_name(n, 12, 131333144735849, 121390261695852, 0)
+    } else {
+        false
+    };
+    if reserved {
+        c_error(100, d.start, d.end)
+    } else {
+        0
+    }
+}
