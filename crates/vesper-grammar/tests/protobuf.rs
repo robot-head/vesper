@@ -128,6 +128,72 @@ fn singular_presence_and_defaults_are_actual_distinct_logical_values() {
     }
     assert_eq!(encoded(&schema, &absent), []);
 }
+
+#[test]
+fn signed_fixed_width_values_use_little_endian_and_packed_boundaries() {
+    let defs = [M {
+        fields: vec![
+            f(1, K::Sfixed32, false),
+            f(2, K::Sfixed64, false),
+            f(3, K::Sfixed32, true),
+            f(4, K::Sfixed64, true),
+        ],
+    }];
+    let schema = Schema::validate(&defs, 0, Limits::default()).unwrap();
+    let cases = [
+        (1, Value::Sfixed32(i32::MIN), "0d 00 00 00 80"),
+        (1, Value::Sfixed32(i32::MAX), "0d ff ff ff 7f"),
+        (1, Value::Sfixed32(-1), "0d ff ff ff ff"),
+        (2, Value::Sfixed64(i64::MIN), "11 00 00 00 00 00 00 00 80"),
+        (2, Value::Sfixed64(i64::MAX), "11 ff ff ff ff ff ff ff 7f"),
+        (2, Value::Sfixed64(-1), "11 ff ff ff ff ff ff ff ff"),
+    ];
+    for (number, val, bytes) in cases {
+        let value = Message {
+            fields: vec![v(number, val)],
+        };
+        let wire = hex(bytes);
+        assert_eq!(encoded(&schema, &value), wire);
+        assert_eq!(schema.parse_exact(&wire).unwrap(), value);
+    }
+    let wire =
+        hex("1a 08 ff ff ff ff 00 00 00 80 22 10 ff ff ff ff ff ff ff ff 00 00 00 00 00 00 00 80");
+    let value = Message {
+        fields: vec![
+            v(3, Value::Sfixed32(-1)),
+            v(3, Value::Sfixed32(i32::MIN)),
+            v(4, Value::Sfixed64(-1)),
+            v(4, Value::Sfixed64(i64::MIN)),
+        ],
+    };
+    assert_eq!(schema.parse_exact(&wire).unwrap(), value);
+    assert_eq!(encoded(&schema, &value), wire);
+    assert_eq!(
+        schema.parse_exact(&hex("1a 03 00 00 00")).unwrap_err().kind,
+        ErrorKind::Truncated
+    );
+    assert_eq!(
+        schema
+            .parse_exact(&hex("22 07 00 00 00 00 00 00 00"))
+            .unwrap_err()
+            .kind,
+        ErrorKind::Truncated
+    );
+    let mut output = [0xa5; 8];
+    assert_eq!(
+        schema.encode_into(&value, &mut output).unwrap_err().kind,
+        ErrorKind::OutputTooSmall
+    );
+    assert_eq!(output, [0xa5; 8]);
+    let wrong = Message {
+        fields: vec![v(1, Value::Fixed32(0))],
+    };
+    assert_eq!(
+        schema.encode_into(&wrong, &mut output).unwrap_err().kind,
+        ErrorKind::TypeMismatch
+    );
+    assert_eq!(output, [0xa5; 8]);
+}
 #[test]
 fn all_supported_numeric_scalar_boundaries_roundtrip_and_zigzag_vectors() {
     let defs = [M {

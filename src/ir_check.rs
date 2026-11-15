@@ -622,6 +622,16 @@ impl Flow<'_> {
                     }
                 }
             }
+            Op::Tiled { args, .. } => {
+                for a in args {
+                    if a.pass == Pass::Sink {
+                        self.consume(s, a.value, &i.span);
+                    } else if let Some(v) = s.values.get_mut(&a.value) {
+                        v.consumed = true;
+                        v.loan = None;
+                    }
+                }
+            }
             Op::Data(_, fs) => {
                 for (_, v) in fs {
                     self.consume(s, *v, &i.span)

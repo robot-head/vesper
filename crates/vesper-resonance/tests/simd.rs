@@ -6,9 +6,13 @@
 //! sample-accurate events, extreme values and the `ConstDenorm` scope.
 
 use vesper_resonance::denorm::with_const_denorm;
-use vesper_resonance::events::{RtParamEvent, process_with_events};
+use vesper_resonance::events::{
+    ParamRamp, RAMP_LANES, RampTile, RtParamEvent, process_with_events,
+};
 use vesper_resonance::kernels::{LANES, SvfBank, SvfVoiceTile, VoicePatch, VoicePatchBank};
-use vesper_resonance::simd::{LaneOut, PanLanes, SvfLanes, svf_tick, tick_scalar};
+use vesper_resonance::simd::{
+    LaneOut, PanLanes, SvfLanes, ramp_tick, ramp_tick_scalar, svf_tick, tick_scalar,
+};
 
 /// xorshift64*: deterministic, no dependencies.
 struct Rng(u64);
@@ -325,5 +329,163 @@ fn throughput() {
             dt.as_nanos() as f64 / f64::from(ticks),
             f64::from(ticks) * 16.0 / dt.as_secs_f64() / 1e6
         );
+    }
+}
+
+fn assert_ramp_tile_matches(path: SvfLanes, tile: &RampTile, ramps: &[ParamRamp; RAMP_LANES]) {
+    for (lane, scalar) in ramps.iter().enumerate() {
+        assert_eq!(
+            tile.remaining[lane],
+            scalar.remaining(),
+            "{path:?} lane {lane} remaining"
+        );
+        let a = tile.current[lane];
+        let b = scalar.value();
+        assert!(
+            same(a, b),
+            "{path:?} lane {lane} current bits {:#010x} ({a:e}) vs scalar {:#010x} ({b:e})",
+            a.to_bits(),
+            b.to_bits()
+        );
+    }
+}
+
+#[test]
+fn ramp_tile_layout_and_alignment() {
+    assert_eq!(std::mem::align_of::<RampTile>(), 64);
+    assert_eq!(std::mem::size_of::<RampTile>(), 256);
+    let tile = RampTile::splat(1.25);
+    assert_eq!((&tile as *const RampTile as usize) % 64, 0);
+    assert_eq!((tile.current.as_ptr() as usize) % 64, 0);
+    assert_eq!((tile.target.as_ptr() as usize) % 64, 0);
+    assert_eq!((tile.step.as_ptr() as usize) % 64, 0);
+    assert_eq!((tile.remaining.as_ptr() as usize) % 64, 0);
+}
+
+#[test]
+fn ramp_tick_is_bit_identical_to_scalar() {
+    let rem_cases: &[u32] = &[
+        0,
+        1,
+        2,
+        3,
+        17,
+        63,
+        0x7fff_ffff,
+        0x8000_0000,
+        0x8000_0005,
+        u32::MAX,
+    ];
+    let mut rng = Rng(0x7a39_0005);
+
+    for path in SvfLanes::available() {
+        // Explicit edge matrix: -0.0, +/-Inf, NaN, subnormals, and rem >= 2^31.
+        for _ in 0..1_000 {
+            let mut tile = RampTile::splat(0.0);
+            let mut ramps = [ParamRamp::new(0.0); RAMP_LANES];
+            let mut scalar_tile = RampTile::splat(0.0);
+
+            for lane in 0..RAMP_LANES {
+                tile.current[lane] = if lane == 0 { -0.0 } else { rng.wild() };
+                tile.target[lane] = if lane == 1 { -0.0 } else { rng.wild() };
+                tile.step[lane] = rng.wild();
+                tile.remaining[lane] = rem_cases[(rng.next() as usize + lane) % rem_cases.len()];
+                let r = tile.lane(lane);
+                scalar_tile.set_lane_ramp(lane, r);
+                ramps[lane] = r;
+            }
+
+            ramp_tick(path, &mut tile);
+            ramp_tick_scalar(&mut scalar_tile);
+            for r in &mut ramps {
+                r.next_value();
+            }
+
+            assert_ramp_tile_matches(path, &tile, &ramps);
+            assert_ramp_tile_matches(SvfLanes::Scalar, &scalar_tile, &ramps);
+            assert_eq!(tile.remaining, scalar_tile.remaining, "{path:?}");
+        }
+    }
+}
+
+#[test]
+fn ramp_tick_mid_ramp_retargeting() {
+    let mut rng = Rng(0x7a39_0006);
+    for path in SvfLanes::available() {
+        for _ in 0..50 {
+            let mut tile = RampTile::splat(0.25);
+            let mut ramps = [ParamRamp::new(0.25); RAMP_LANES];
+
+            for tick in 0..200 {
+                if tick % 13 == 0 {
+                    for (lane, ramp) in ramps.iter_mut().enumerate() {
+                        if rng.next().is_multiple_of(3) {
+                            let target = rng.range(-2.0, 2.0);
+                            let samples = match rng.next() % 5 {
+                                0 => 0,
+                                1 => 1,
+                                2 => 2,
+                                _ => (rng.next() % 80) as u32,
+                            };
+                            tile.set_lane(lane, target, samples);
+                            ramp.set(target, samples);
+                        }
+                    }
+                }
+                ramp_tick(path, &mut tile);
+                for r in &mut ramps {
+                    r.next_value();
+                }
+                assert_ramp_tile_matches(path, &tile, &ramps);
+            }
+        }
+    }
+}
+
+#[test]
+fn ramp_tick_is_bit_identical_inside_const_denorm() {
+    let mut rng = Rng(0x7a39_0007);
+    let rem_cases = [0u32, 1, 2, 5, 0x8000_0001];
+    let checked = with_const_denorm(|| {
+        let mut count = 0usize;
+        for path in SvfLanes::available() {
+            for _ in 0..1_000 {
+                let mut tile = RampTile::splat(0.0);
+                let mut ramps = [ParamRamp::new(0.0); RAMP_LANES];
+                for lane in 0..RAMP_LANES {
+                    let sub_a = f32::from_bits(((rng.next() as u32) & 0x007f_ffff) | 1);
+                    let sub_b = -f32::from_bits(((rng.next() as u32) & 0x007f_ffff) | 1);
+                    tile.current[lane] = if rng.next().is_multiple_of(2) {
+                        sub_a
+                    } else {
+                        rng.range(-1.0, 1.0)
+                    };
+                    tile.target[lane] = if rng.next().is_multiple_of(2) {
+                        sub_b
+                    } else {
+                        rng.range(-1.0, 1.0)
+                    };
+                    tile.step[lane] = if rng.next().is_multiple_of(2) {
+                        sub_b
+                    } else {
+                        rng.range(-0.1, 0.1)
+                    };
+                    tile.remaining[lane] =
+                        rem_cases[(rng.next() as usize + lane) % rem_cases.len()];
+                    ramps[lane] = tile.lane(lane);
+                }
+                ramp_tick(path, &mut tile);
+                for r in &mut ramps {
+                    r.next_value();
+                }
+                assert_ramp_tile_matches(path, &tile, &ramps);
+                count += 1;
+            }
+        }
+        count
+    });
+    match checked {
+        Ok(n) => assert!(n >= 1_000),
+        Err(e) => eprintln!("ConstDenorm unavailable, skipped: {e}"),
     }
 }

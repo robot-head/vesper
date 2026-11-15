@@ -166,3 +166,48 @@ fn tied_sign_assignments_have_at_least_nominal_coverage() {
     }
     assert!(covered * 100 >= 64 * 95);
 }
+
+#[test]
+fn confidence_gate_classifies_real_tied_and_unbounded_sets() {
+    use vesper_bench::{Decision, SignedRankGateInconclusive, gate_signed_rank_confidence};
+    let singleton = gate_signed_rank_confidence(&[7; 6], 7).unwrap();
+    assert_eq!(singleton.decision, Decision::Pass);
+    assert_eq!(singleton.reason, None);
+    assert_eq!(
+        singleton.segments,
+        signed_rank_confidence_set(&[7; 6]).unwrap()
+    );
+    assert_eq!(
+        gate_signed_rank_confidence(&[7; 6], 6).unwrap().decision,
+        Decision::Regression
+    );
+    let finite = [1, 2, 4, 8, 16, 32];
+    assert_eq!(
+        gate_signed_rank_confidence(&finite, 32).unwrap().decision,
+        Decision::Pass
+    );
+    assert_eq!(
+        gate_signed_rank_confidence(&finite, 0).unwrap().decision,
+        Decision::Regression
+    );
+    let touching = gate_signed_rank_confidence(&finite, 1).unwrap();
+    assert_eq!(touching.decision, Decision::Inconclusive);
+    assert_eq!(
+        touching.reason,
+        Some(SignedRankGateInconclusive::ThresholdNotSeparated)
+    );
+    let unbounded = gate_signed_rank_confidence(&[1, 2], i64::MAX).unwrap();
+    assert_eq!(unbounded.decision, Decision::Inconclusive);
+    assert_eq!(
+        unbounded.reason,
+        Some(SignedRankGateInconclusive::ThresholdNotSeparated)
+    );
+    assert_eq!(
+        gate_signed_rank_confidence(&[], 0),
+        Err(SignedRankConfidenceError::EmptyEvidence)
+    );
+    assert_eq!(
+        gate_signed_rank_confidence(&[0; MAX_SIGNED_RANK_CONFIDENCE_PAIRS + 1], 0),
+        Err(SignedRankConfidenceError::TooManyPairs)
+    );
+}

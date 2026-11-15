@@ -199,3 +199,16 @@ fn failed_fast_attempt_and_fallback_share_one_work_allowance() {
         "the fast/fallback work profile was reset instead of composed"
     );
 }
+
+#[test]
+fn public_function_body_edit_matches_full_recovery() {
+    let source = "pub fn first()->u64{1}\nfn later()->u64{2}";
+    let mut document = SyntaxDocument::open(source, Limits::default()).unwrap();
+    let old = Arc::clone(document.snapshot());
+    assert_eq!(
+        document.update(&source.replace("{1}", "{123}")).unwrap(),
+        UpdateKind::BodyReparse
+    );
+    oracle(&document);
+    assert!(shared(&item(&old, 1), &item(document.snapshot(), 1)));
+}
