@@ -149,3 +149,11 @@ by `endpoint_denominator()` to obtain the per-operation location. Different
 operation counts and total differences outside `i64` are rejected, not rounded.
 The caller must establish common measurement units, provenance, and the same
 conditional-sign assumptions.
+
+`gate_paired_sample_confidence` compares that complete set with an integer
+per-operation maximum using exact arithmetic. It passes when every retained
+location is at or below the maximum, reports a regression when every location
+is strictly above it, and is inconclusive for an empty set or one that does
+not separate the threshold. Open and unbounded endpoints are respected. The
+result retains the confidence set and inherits its input requirements and
+caller-established assumptions.
