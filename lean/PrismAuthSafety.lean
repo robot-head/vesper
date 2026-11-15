@@ -105,12 +105,12 @@ theorem ingest_event_never_writes_unauthorized_org
   | some g' =>
       rw [trace_ingest_some authOracle org req shard cfg hauth] at hop
       by_cases hlen : req.payload.length ≤ cfg.maxPayloadBytes
-      · rw [if_pos hlen] at hop
+      · rw [ite_eq_left hlen] at hop
         simp only [List.mem_singleton] at hop
         rcases hop with rfl
         cases heq
         exact h_sound org _ hauth
-      · rw [if_neg hlen] at hop
+      · rw [ite_eq_right hlen] at hop
         simp only [List.mem_singleton] at hop
         rcases hop with rfl
         cases heq
@@ -134,12 +134,12 @@ theorem ingest_event_payload_bounded
   | some g' =>
       rw [trace_ingest_some authOracle org req shard cfg hauth] at hop
       by_cases hlen : req.payload.length ≤ cfg.maxPayloadBytes
-      · rw [if_pos hlen] at hop
+      · rw [ite_eq_left hlen] at hop
         simp only [List.mem_singleton] at hop
         rcases hop with rfl
         cases heq
         exact hlen
-      · rw [if_neg hlen] at hop
+      · rw [ite_eq_right hlen] at hop
         simp only [List.mem_singleton] at hop
         rcases hop with rfl
         cases heq
