@@ -2,9 +2,10 @@
 
 Issue #581. Base `eb97e086f5486abea4db38acf930477b52661a72`, a descendant
 of the required `37f7b8b`. Branch `codex/issue-581-self-hosted-checker`.
-Synced with main `d204923a47675a95fbc74750a0cf054ebed3975e` before delivery.
-No new dependencies, shared compiler edits, root patch, unsafe code, or changes
-to other lanes' files.
+Synced with main `d76067cb885d74d561dccc8007861052327025c9` after review.
+No new dependencies, shared compiler edits, or unsafe code. The isolated root
+BUILD patch declares the complete corpus and the checker test's measured
+runtime; implementation files stay within this lane.
 
 ## Delivered slice
 
@@ -207,6 +208,41 @@ The complete baseline workspace outcome is tracked in the validation notes of
 `1df87348`; the reviewed Vesper checker has the separate focused and front-end
 validation above. Rust compiler/runtime and Lean proof source bytes are unchanged
 by the review fixes.
+
+## Main refresh and CI repair
+
+Main commit `9b06602b` made the manuscript the sole specification and retired
+the duplicate snapshot, its Python checker and its CI invocation together.
+The supplied Native/acceptance log still invoked the deleted checker. Merging
+current main brings that coordinated removal into this branch; no replacement
+snapshot or conditional skip is introduced.
+
+macOS job `132749653497` also showed this lane's new test hitting Bazel's
+default 300-second timeout after its acceptance and limit tests passed. The
+isolated BUILD patch gives `test/self_host_check` the existing `long` class
+(900 seconds). It also declares the bootstrap and cross-crate corpus data
+needed by this target. Pinned Bazel 9.3.1 queries confirm the timeout and show
+that its declared corpus contains all **443 tracked `.ves` files**, with no
+missing source. The source checker, fuel limits, fixtures and assertions are
+unchanged by this CI patch.
+
+Validation after merging main:
+
+- `cargo test --locked -p vesper --test self_host_check -- --nocapture`:
+  **4 passed**, zero failures, 282.94 seconds while Clippy ran concurrently.
+  Differential counts: **30 accepted, 64 rejected, 349 unsupported/limited**;
+  all 94 supported results agree on first diagnostic code and exact span.
+- Strict Rust 1.100 full-workspace Clippy and workspace Rustfmt: passed.
+- BUILD synchronization, whitespace, CI workflow Python tests (50 run, one
+  existing platform skip), all tracked Vesper formatting (432 canonical,
+  11 existing exclusions), and doc-link acceptance (49 commands): passed.
+- The earlier complete workspace run with genuine Lean4Lean remains
+  **5,257 passed, zero failed, eight ignored** at baseline `1df87348`.
+  That baseline result is separate from the merged-head checks above.
+
+The same macOS log reports the independent retired-README benchmark-help
+regression. Issue #632 and PR #633 own that repair; this lane does not duplicate
+their changes. Fresh hosted checks remain the final integration gate.
 
 ## Missing language features, ranked
 
