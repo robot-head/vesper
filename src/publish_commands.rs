@@ -94,6 +94,61 @@ fn fail(json_out: bool, kind: &str, message: String, extra: Option<Value>) -> Re
     Err(message)
 }
 
+fn format_effect_capability(effect: &vesper::ast::Effect) -> String {
+    if effect.args.is_empty() {
+        effect.name.clone()
+    } else {
+        let args = effect
+            .args
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{}[{args}]", effect.name)
+    }
+}
+
+fn effect_permitted_by_ceiling(
+    effect: &vesper::ast::Effect,
+    ceiling: &std::collections::BTreeSet<String>,
+) -> bool {
+    let full = format_effect_capability(effect);
+    ceiling.contains(&full) || ceiling.contains(&effect.name)
+}
+
+fn is_foreign_effect_name(name: &str) -> bool {
+    let base = name.split('[').next().unwrap_or(name);
+    matches!(base, "Ffi" | "UnsafeFfi" | "UnsafeFFI")
+}
+
+fn published_source_tree_id(
+    source_path: &str,
+    source_id: ObjectId,
+    size: u64,
+) -> Result<ObjectId, String> {
+    let file_name = Path::new(source_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("{source_path}: source path must have a UTF-8 file name"))?;
+    let executable = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::metadata(source_path)
+                .map(|m| m.permissions().mode() & 0o111 != 0)
+                .unwrap_or(false)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
+    };
+    let mut tree = vesper_loom_cas::Tree::new(Domain::Source);
+    tree.insert_file(file_name, source_id, size, executable)
+        .map_err(|e| format!("{source_path}: {e}"))?;
+    Ok(tree.id())
+}
+
 #[derive(Default)]
 struct Options {
     source: Option<String>,
@@ -348,22 +403,52 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             Some(json!({"count": checked.diagnostics.len()})),
         );
     }
-    if manifest.package.forbid_unsafe_ffi
-        && checked.world.functions.values().any(|f| {
-            f.effects
-                .instances
-                .iter()
-                .any(|inst| inst.name == "UnsafeFFI")
-        })
-    {
+    if manifest.package.forbid_unsafe_ffi {
+        let mut bad_ffi = Vec::new();
+        for cap in &manifest.package.capability_ceiling {
+            if is_foreign_effect_name(cap) {
+                bad_ffi.push(format!("manifest capability_ceiling ({cap})"));
+            }
+        }
+        for (fn_name, func) in &checked.world.functions {
+            for inst in &func.effects.instances {
+                if is_foreign_effect_name(&inst.name) {
+                    bad_ffi.push(format!("{fn_name} ({})", format_effect_capability(inst)));
+                }
+            }
+        }
+        if !bad_ffi.is_empty() {
+            return fail(
+                opts.json,
+                "capability_violation",
+                format!(
+                    "{}: forbid_unsafe_ffi = true blocks foreign authority: {}",
+                    manifest.package.name.as_str(),
+                    bad_ffi.join(", ")
+                ),
+                Some(json!({ "violations": bad_ffi })),
+            );
+        }
+    }
+
+    let mut ceiling_violations = Vec::new();
+    for (fn_name, func) in &checked.world.functions {
+        for inst in &func.effects.instances {
+            if !effect_permitted_by_ceiling(inst, &manifest.package.capability_ceiling) {
+                ceiling_violations.push(format!("{fn_name} ({})", format_effect_capability(inst)));
+            }
+        }
+    }
+    if !ceiling_violations.is_empty() {
         return fail(
             opts.json,
             "capability_violation",
             format!(
-                "{}: forbid_unsafe_ffi = true blocks exported UnsafeFFI functions",
-                manifest.package.name.as_str()
+                "{}: checked source exceeds package capability_ceiling: {}",
+                manifest.package.name.as_str(),
+                ceiling_violations.join(", ")
             ),
-            None,
+            Some(json!({ "violations": ceiling_violations })),
         );
     }
 
@@ -430,7 +515,12 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             .graph
             .as_ref()
             .ok_or("solution validation produced no graph")?;
+        let root_selection = solution
+            .packages
+            .iter()
+            .find(|sel| sel.manifest.package.name == manifest.package.name);
         if !graph.roots.contains(&manifest.package.name)
+            || root_selection.is_none_or(|sel| sel.manifest != manifest)
             || graph
                 .packages
                 .get(&manifest.package.name)
@@ -440,7 +530,7 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                 opts.json,
                 "solution_root_mismatch",
                 format!(
-                    "{solution_path}: root package/version does not match manifest {} {}",
+                    "{solution_path}: root manifest does not match release manifest {} {}",
                     manifest.package.name.as_str(),
                     manifest.package.version
                 ),
@@ -546,6 +636,18 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
                     exp.version,
                     manifest.package.name.as_str(),
                     pkg_version
+                ),
+                None,
+            );
+        }
+        let source_tree_id = published_source_tree_id(source_path, source_id, source.len() as u64)?;
+        if exp.source_tree != source_tree_id.to_string() {
+            return fail(
+                opts.json,
+                "attestation_source_mismatch",
+                format!(
+                    "expected source tree {} does not match published source tree {source_tree_id}",
+                    exp.source_tree
                 ),
                 None,
             );

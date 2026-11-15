@@ -79,7 +79,7 @@ fn parse_json(output: &Output) -> Value {
 fn publish_initial_with_sbom_audit_attestation_and_cas_succeeds() {
     let f = Fixture::new();
     f.write_str("Loom.toml", &manifest_toml("@test/package", "1.2.3+source"));
-    f.write_str("lib.ves", "fn id(x: i64) -> i64 {\n    x\n}\n");
+    f.write_str("main.ves", "fn answer() -> i64 { 42 }\n");
     f.write_json(
         "Loom.lock",
         &json!({
@@ -119,7 +119,7 @@ fn publish_initial_with_sbom_audit_attestation_and_cas_succeeds() {
     );
 
     let out = f.run(&[
-        "lib.ves",
+        "main.ves",
         "--initial",
         "--manifest",
         "Loom.toml",
@@ -260,4 +260,131 @@ fn publish_rejects_sorry_axiom_allow_flag() {
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(stderr.contains("sorryAx"), "stderr was: {stderr}");
+}
+
+#[test]
+fn publish_enforces_capability_ceiling_and_canonical_ffi_names() {
+    let f = Fixture::new();
+    f.write_str("Loom.toml", &manifest_toml("@test/package", "0.1.0"));
+    f.write_str(
+        "fail.ves",
+        "fn oops(x: i64) -> i64 eff [Fail[ArithOverflow]] {\n    x\n}\n",
+    );
+    let out = f.run(&["fail.ves", "--initial", "--json"]);
+    assert!(!out.status.success());
+    let report = parse_json(&out);
+    assert_eq!(report["error"]["kind"], "capability_violation");
+
+    for src in [
+        "effect Ffi[L] { fn call() -> i64; }\nfn foreign() -> i64 eff [Ffi[LibA]] { 1 }\n",
+        "effect UnsafeFfi { fn call() -> i64; }\nfn unsafe_foreign() -> i64 eff [UnsafeFfi] { 1 }\n",
+    ] {
+        f.write_str("ffi.ves", src);
+        let out = f.run(&["ffi.ves", "--initial", "--json"]);
+        assert!(!out.status.success());
+        let report = parse_json(&out);
+        assert_eq!(report["error"]["kind"], "capability_violation");
+    }
+
+    // Allowing the declared capability lets non-FFI effects publish cleanly.
+    f.write_str(
+        "Loom.toml",
+        "[package]\nname = \"@test/package\"\nversion = \"0.1.0\"\nedition = \"2026\"\nlicense = \"Apache-2.0\"\ncapability_ceiling = [\"Fail[ArithOverflow]\"]\nforbid_unsafe_ffi = true\n",
+    );
+    let ok = f.run(&["fail.ves", "--initial", "--json"]);
+    assert!(
+        ok.status.success(),
+        "{}",
+        String::from_utf8_lossy(&ok.stderr)
+    );
+}
+
+#[test]
+fn publish_rejects_stale_solution_when_root_manifest_differs() {
+    let f = Fixture::new();
+    f.write_str(
+        "Loom.toml",
+        r#"[package]
+name = "@test/package"
+version = "1.2.3+source"
+edition = "2026"
+license = "Apache-2.0"
+capability_ceiling = ["Net"]
+forbid_unsafe_ffi = true
+
+[dependencies."@other/dep"]
+version = "^1.0"
+effects = ["Net"]
+"#,
+    );
+    f.write_str("main.ves", "fn answer() -> i64 { 42 }\n");
+    // Stale lockfile matches name/version but omits @other/dep and Net ceiling.
+    f.write_json(
+        "Loom.lock",
+        &json!({
+            "schema_version": 1,
+            "roots": [{"name": "@test/package", "version": "^1"}],
+            "packages": [{
+                "manifest": {
+                    "package": {
+                        "name": "@test/package",
+                        "version": "1.2.3+source",
+                        "edition": "2026",
+                        "license": "Apache-2.0",
+                        "capability_ceiling": []
+                    },
+                    "dependencies": {}
+                }
+            }],
+            "system_packages": []
+        }),
+    );
+
+    let out = f.run(&[
+        "main.ves",
+        "--initial",
+        "--manifest",
+        "Loom.toml",
+        "--solution",
+        "Loom.lock",
+        "--store",
+        "cas-store",
+        "--json",
+    ]);
+    assert!(!out.status.success());
+    let report = parse_json(&out);
+    assert_eq!(report["error"]["kind"], "solution_root_mismatch");
+    assert!(!f.0.join("cas-store").exists());
+}
+
+#[test]
+fn publish_rejects_attestation_bundle_when_source_differs_from_source_tree() {
+    let f = Fixture::new();
+    f.write_str("Loom.toml", &manifest_toml("@test/package", "1.2.3+source"));
+    // Different source bytes than the attested `fn answer() -> i64 { 42 }\n`.
+    f.write_str("main.ves", "fn answer() -> i64 { 99 }\n");
+
+    let out = f.run(&[
+        "main.ves",
+        "--initial",
+        "--manifest",
+        "Loom.toml",
+        "--expected",
+        "identity.json",
+        "--policy",
+        "policy.json",
+        "--bundle",
+        "bundle.json",
+        "--artifact",
+        "artifact.bin",
+        "--at",
+        "150",
+        "--store",
+        "cas-store",
+        "--json",
+    ]);
+    assert!(!out.status.success());
+    let report = parse_json(&out);
+    assert_eq!(report["error"]["kind"], "attestation_source_mismatch");
+    assert!(!f.0.join("cas-store").exists());
 }
