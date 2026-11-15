@@ -48,6 +48,14 @@ continuous differences symmetric about their population location. The API
 does not establish those assumptions or convert benchmark measurements into
 differences. It is separate from the ratio-based regression gate below.
 
+`gate_paired_difference` compares those unrounded interval bounds against a
+maximum candidate-minus-baseline difference in the same units. It passes only
+when the upper bound is at or below the threshold, reports a regression only
+when the lower bound is above it, and otherwise returns an inconclusive result.
+It retains the estimate and interval and uses the same assumptions and input
+restrictions; it does not establish measurement provenance or operate the
+existing ratio gate.
+
 ## Optional population-median confidence gate
 
 `analyze_pairs(samples, max_regression_bp)` targets the population median of the
