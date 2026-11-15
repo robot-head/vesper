@@ -233,10 +233,9 @@ jobs:
     if: ${{ always() && !cancelled() }}
     name: Windows (x86_64 MSVC)${{ needs.plan.outputs.profile == 'full' && ' (full)' || '' }}
     runs-on: windows-latest
-    # A healthy run takes about 70 min, `cargo test` about 60 of them. The
-    # limits make a hung or pathologically slow test fail the required check
-    # within two hours instead of holding the runner for 6 h (#616).
-    timeout-minutes: 130
+    # Broad PRs select multiple expensive test groups. Keep a finite job
+    # deadline with room for those groups and the remaining validation steps.
+    timeout-minutes: 220
     env:
       TEST_PROFILE: ${{ needs.plan.outputs.profile }}
       TEST_GROUPS: ${{ needs.plan.outputs.groups }}
@@ -285,7 +284,7 @@ jobs:
           python scripts/ci/test-platform-profile.py --backend cargo
           --profile "$TEST_PROFILE" --groups "$TEST_GROUPS"
           --jobs 2 --test-threads 2 --summary "$RUNNER_TEMP/platform-tests.json"
-        timeout-minutes: 100
+        timeout-minutes: 180
         env:
           VESPER_LEAN: lean
       - run: scripts/ci/check-lean-models.sh

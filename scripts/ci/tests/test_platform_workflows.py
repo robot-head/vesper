@@ -39,7 +39,10 @@ class PlatformWorkflowTests(unittest.TestCase):
             self.assertEqual(checkout["with"]["ref"], "${{ needs.plan.outputs.sha }}")
             self.assertTrue(any(s.get("name") == "Verify exact checkout" for s in job["steps"]))
         self.assertEqual(mac["timeout-minutes"], "75")
-        self.assertEqual(windows["timeout-minutes"], "130")
+        self.assertEqual(windows["timeout-minutes"], "220")
+        platform_tests = next(s for s in windows["steps"]
+                              if s.get("name") == "Run selected platform tests")
+        self.assertEqual(platform_tests["timeout-minutes"], "180")
 
     def test_plan_failure_fails_required_jobs(self):
         for result in ("failure", "cancelled", "skipped", ""):
