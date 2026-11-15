@@ -1,0 +1,627 @@
+// Expressions in adapter v1: literals, names, calls, nominal constructors,
+// lexical blocks, if/match, comparisons and copy-place assignment.
+fn c_expr(at: i64, env: CEnv, usage: i64, row: i64, loans: CEnv, depth: i64, restricted: bool)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if depth > 48 {
+        let limit = c_limit(at);
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            at,
+            env,
+            at,
+            at,
+            -1
+        )
+    } else {
+        let k = c_kind(at);
+        if k == 34 {
+            c_block(at, env, row, loans, depth + 1)
+        } else if k == 28 {
+            c_if(at, env, row, loans, depth + 1)
+        } else if k == 27 {
+            c_match(at, env, row, loans, depth + 1)
+        } else if k == 4 && c_kind(c_next(at)) == 48 {
+            c_assign(at, env, row, loans, depth + 1)
+        } else {
+            c_compare(
+                c_order(
+                    c_postfix(
+                        c_primary(
+                            at,
+                            env,
+                            c_callee_usage(at, usage),
+                            row,
+                            loans,
+                            depth + 1,
+                            restricted
+                        ),
+                        row,
+                        loans,
+                        depth + 1
+                    ),
+                    row,
+                    loans,
+                    depth + 1
+                ),
+                row,
+                loans,
+                depth + 1
+            )
+        }
+    }
+}
+fn c_primary(at: i64, env: CEnv, usage: i64, row: i64, loans: CEnv, depth: i64, restricted: bool)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let k = c_kind(at);
+    if k == 4 {
+        c_name_primary(at, env, usage, row, loans, depth, restricted)
+    } else if k == 3 {
+        c_nominal_primary(at, env, usage, row, loans, depth, restricted)
+    } else {
+        c_literal_primary(at, env, usage, row, loans, depth, restricted)
+    }
+}
+fn c_literal_primary(
+    at: i64,
+    env: CEnv,
+    usage: i64,
+    row: i64,
+    loans: CEnv,
+    depth: i64,
+    restricted: bool
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let t = c_token(at);
+    if t.kind == 6 {
+        let valid = if int_small(t) > 1099511627776 {
+            c_unsupported(2, at)
+        } else {
+            0
+        };
+        c_result(
+            CType {
+                tag: 2,
+                at: 0
+            },
+            t.end,
+            env,
+            t.start,
+            t.end,
+            -1
+        )
+    } else if t.kind == 30 || t.kind == 31 {
+        c_result(
+            CType {
+                tag: 1,
+                at: 0
+            },
+            t.end,
+            env,
+            t.start,
+            t.end,
+            -1
+        )
+    } else if t.kind == 32 && c_kind(t.end) == 33 {
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            c_next(t.end),
+            env,
+            t.start,
+            c_next(t.end),
+            -1
+        )
+    } else if t.kind == 32 {
+        let value = c_expr(t.end, env, usage, row, loans, depth + 1, false);
+        let end = c_take(value.next, 33);
+        c_result(value.ty, end, value.env, t.start, end, value.place)
+    } else if t.kind == 55 && c_kind(t.end) == 6 {
+        let valid = if int_small(c_token(t.end)) > 1099511627776 {
+            c_unsupported(2, at)
+        } else {
+            0
+        };
+        c_result(
+            CType {
+                tag: 2,
+                at: 0
+            },
+            c_next(t.end),
+            env,
+            t.start,
+            c_next(t.end),
+            -1
+        )
+    } else if t.kind == 67 {
+        let value = c_postfix(
+            c_primary(t.end, env, 2, row, loans, depth + 1, restricted),
+            row,
+            loans,
+            depth + 1
+        );
+        let valid = c_expect_type(
+            CType {
+                tag: 1,
+                at: 0
+            },
+            value.ty,
+            t.start,
+            value.end
+        );
+        c_result(value.ty, value.next, value.env, t.start, value.end, -1)
+    } else {
+        let unsupported = c_unsupported(4, at);
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            at,
+            env,
+            at,
+            at,
+            -1
+        )
+    }
+}
+fn c_name_primary(
+    at: i64,
+    env: CEnv,
+    usage: i64,
+    row: i64,
+    loans: CEnv,
+    depth: i64,
+    restricted: bool
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let t = c_token(at);
+    let special = c_word(at, 0x726567696f6e)
+        || (t.end - t.start >= 6 && word(t.start, t.start + 6) == 0x777261707069);
+    let valid = if special {
+        c_unsupported(4, at)
+    } else {
+        0
+    };
+    let slot = c_lookup(env, t, env.count);
+    if slot >= 0 {
+        c_result(
+            c_slot(env, slot).ty,
+            t.end,
+            c_use(env, slot, usage, loans, t.start, t.end),
+            t.start,
+            t.end,
+            slot
+        )
+    } else {
+        let f = c_find(t, 12, 0);
+        if f < 0 {
+            let error = c_error(201, t.start, t.end);
+            c_result(
+                CType {
+                    tag: 0,
+                    at: 0
+                },
+                t.end,
+                env,
+                t.start,
+                t.end,
+                -1
+            )
+        } else {
+            c_result(
+                CType {
+                    tag: 4,
+                    at: c_fn_at(f)
+                },
+                t.end,
+                env,
+                t.start,
+                t.end,
+                -1
+            )
+        }
+    }
+}
+fn c_nominal_primary(
+    at: i64,
+    env: CEnv,
+    usage: i64,
+    row: i64,
+    loans: CEnv,
+    depth: i64,
+    restricted: bool
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let t = c_token(at);
+    let special = c_word(at, 0x4f6b)
+        || c_word(at, 0x457272)
+        || c_word(at, 0x536f6d65)
+        || c_word(at, 0x4e6f6e65);
+    let valid = if special {
+        c_unsupported(8, at)
+    } else {
+        0
+    };
+    let qualified = c_kind(t.end) == 41;
+    let variant = if qualified {
+        c_token(c_next(t.end))
+    } else {
+        t
+    };
+    let ctor = c_ctor_find(t, variant, qualified, 0);
+    let next = if qualified {
+        variant.end
+    } else {
+        t.end
+    };
+    let ty = CType {
+        tag: 3,
+        at: ctor.adt.name.start
+    };
+    if ctor.fields < 0 && c_kind(next) == 32 {
+        let end = c_group(next, 0);
+        let valid = if c_kind(c_next(next)) != 33 {
+            c_error(204, t.start, end)
+        } else {
+            0
+        };
+        c_result(ty, end, env, t.start, end, -1)
+    } else if ctor.fields < 0 {
+        c_result(ty, next, env, t.start, next, -1)
+    } else if (restricted && ctor.named || c_kind(next) != c_kind(ctor.fields))
+        && (c_kind(c_next(ctor.fields)) == 35 || c_kind(c_next(ctor.fields)) == 33) {
+        c_result(ty, next, env, t.start, next, -1)
+    } else if restricted && ctor.named || c_kind(next) != c_kind(ctor.fields) {
+        let error = c_error(203, t.start, next);
+        c_result(ty, next, env, t.start, next, -1)
+    } else {
+        let end = c_group(next, 0);
+        let value = c_init(
+            c_next(next),
+            c_next(ctor.fields),
+            ctor.named,
+            env,
+            row,
+            loans,
+            depth + 1,
+            t.start,
+            end
+        );
+        c_result(ty, value.next, value.env, t.start, end, -1)
+    }
+}
+fn c_compare(left: CExpr, row: i64, loans: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let op = c_kind(left.next);
+    if op == 59 || op == 60 {
+        let right = c_order(
+            c_postfix(
+                c_primary(c_next(left.next), left.env, 2, row, loans, depth + 1, false),
+                row,
+                loans,
+                depth + 1
+            ),
+            row,
+            loans,
+            depth + 1
+        );
+        let valid = c_expect_type(left.ty, right.ty, left.start, right.end);
+        let valid = if c_mode(left.ty, 0) == 2 {
+            c_error(302, left.start, right.end)
+        } else {
+            0
+        };
+        c_compare(
+            c_result(
+                CType {
+                    tag: 1,
+                    at: 0
+                },
+                right.next,
+                right.env,
+                left.start,
+                right.end,
+                -1
+            ),
+            row,
+            loans,
+            depth
+        )
+    } else {
+        left
+    }
+}
+fn c_order(left: CExpr, row: i64, loans: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let op = c_kind(left.next);
+    if op >= 61 && op <= 64 {
+        let right = c_postfix(
+            c_primary(c_next(left.next), left.env, 2, row, loans, depth + 1, false),
+            row,
+            loans,
+            depth + 1
+        );
+        let valid = c_expect_type(left.ty, right.ty, left.start, right.end);
+        let valid = if op >= 61 && left.ty.tag != 2 {
+            c_error(200, left.start, right.end)
+        } else {
+            0
+        };
+        c_order(
+            c_result(
+                CType {
+                    tag: 1,
+                    at: 0
+                },
+                right.next,
+                right.env,
+                left.start,
+                right.end,
+                -1
+            ),
+            row,
+            loans,
+            depth
+        )
+    } else {
+        left
+    }
+}
+fn c_postfix(value: CExpr, row: i64, loans: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let k = c_kind(value.next);
+    if k == 42 || k == 43 || k == 36 {
+        let unsupported = c_unsupported(
+            if k == 42 {
+                6
+            } else {
+                4
+            },
+            value.next
+        );
+        value
+    } else if k == 32 {
+        let end = c_group(value.next, 0);
+        let valid = if value.ty.tag != 4 {
+            c_error(206, value.start, end)
+        } else {
+            0
+        };
+        let named = c_kind(c_next(value.ty.at)) == 4;
+        let sig = c_signature(value.ty.at, named, 0);
+        let count = c_arg_count(c_next(value.next));
+        let expected = c_param_count(sig.params, named);
+        let valid = if count != expected {
+            c_error(207, value.start, end)
+        } else {
+            0
+        };
+        let args = c_args(
+            c_next(value.next),
+            sig.params,
+            named,
+            value.env,
+            row,
+            c_live_loans(loans, 0, c_empty()),
+            depth + 1
+        );
+        let effects = c_require_row(sig.effects, row, args.env, loans, value.start, end);
+        c_postfix(
+            c_result(sig.result, args.next, args.env, value.start, end, -1),
+            row,
+            loans,
+            depth + 1
+        )
+    } else {
+        value
+    }
+}
+fn c_arg_count(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 33 {
+        0
+    } else {
+        c_arg_count_tail(at, 0)
+    }
+}
+fn c_arg_count_tail(at: i64, n: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let k = c_kind(at);
+    if k == 33 {
+        n + 1
+    } else if k == 38 {
+        if c_kind(c_next(at)) == 33 {
+            n + 1
+        } else {
+            c_arg_count_tail(c_next(at), n + 1)
+        }
+    } else {
+        c_arg_count_tail(c_group(at, 0), n)
+    }
+}
+fn c_param_count(at: i64, named: bool)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 33 {
+        0
+    } else {
+        let p = c_param(at, named, 0);
+        1
+            + (
+            if c_kind(p.next) == 38 {
+                c_param_count(c_next(p.next), named)
+            } else {
+                0
+            }
+        )
+    }
+}
+fn c_args(at: i64, param: i64, named: bool, env: CEnv, row: i64, loans: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 33 {
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            c_next(at),
+            env,
+            at,
+            c_next(at),
+            -1
+        )
+    } else {
+        let p = c_param(param, named, 0);
+        let k = c_kind(at);
+        let explicit = k == 19 || k == 20 || k == 21;
+        let arg = c_pass_next(at);
+        let arg_end = c_argument_end(arg, 0);
+        let valid = if explicit && c_pass(at) != p.pass {
+            c_error(308, c_token(arg).start, arg_end)
+        } else {
+            0
+        };
+        let valid = if p.pass == 1 && !c_place_shape(arg, arg_end) {
+            c_error(300, c_token(arg).start, arg_end)
+        } else {
+            0
+        };
+        let value = c_expr(arg, env, p.pass, row, loans, depth + 1, false);
+        let valid = if p.pass == 1 && value.place < 0 {
+            c_error(300, value.start, value.end)
+        } else {
+            0
+        };
+        let valid = if p.pass == 1 && !c_compatible(value.ty, p.ty, 0) {
+            c_error(403, value.start, value.end)
+        } else {
+            0
+        };
+        let valid = if c_type_has_effects(value.ty, 0) {
+            c_unsupported(7, value.start)
+        } else {
+            0
+        };
+        let valid = c_expect_type(p.ty, value.ty, value.start, value.end);
+        let valid = if p.pass != 2 && value.place < 0 && c_mode(value.ty, 0) == 2 {
+            c_error(302, value.start, value.end)
+        } else {
+            0
+        };
+        let valid = if value.place >= 0 {
+            c_arg_overlap(loans, 0, value.place, p.pass, value.start, value.end)
+        } else {
+            0
+        };
+        let loans = if value.place < 0 {
+            loans
+        } else {
+            c_push(
+                loans,
+                CBinding {
+                    name: c_token(value.start),
+                    ty: CType {
+                        tag: 0,
+                        at: value.place
+                    },
+                    pass: p.pass
+                }
+            )
+        };
+        let next = if c_kind(value.next) == 38 {
+            c_next(value.next)
+        } else {
+            value.next
+        };
+        let next_param = if c_kind(p.next) == 38 {
+            c_next(p.next)
+        } else {
+            p.next
+        };
+        c_args(next, next_param, named, value.env, row, loans, depth)
+    }
+}
+fn c_argument_end(at: i64, last: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let k = c_kind(at);
+    if k == 38 || k == 33 {
+        last
+    } else {
+        let next = c_group(at, 0);
+        c_argument_end(next, next)
+    }
+}
+fn c_arg_overlap(loans: CEnv, i: i64, slot: i64, pass: i64, start: i64, end: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if i == loans.count {
+        0
+    } else {
+        let b = c_slot(loans, i);
+        let valid = if b.ty.at == slot && (pass != 0 || b.pass != 0) {
+            c_error(301, start, end)
+        } else {
+            0
+        };
+        c_arg_overlap(loans, i + 1, slot, pass, start, end)
+    }
+}
+fn c_assign(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let name = c_token(at);
+    let slot = c_lookup(env, name, env.count);
+    let valid = if slot < 0 {
+        c_error(201, name.start, name.end)
+    } else {
+        0
+    };
+    let env = c_use(env, slot, 1, loans, name.start, name.end);
+    let ty = c_slot(env, slot).ty;
+    let value = c_expr(c_next(c_next(at)), env, 2, row, loans, depth + 1, false);
+    let valid = c_expect_type(ty, value.ty, value.start, value.end);
+    let valid = if c_mode(ty, 0) == 2 {
+        c_error(302, name.start, name.end)
+    } else {
+        0
+    };
+    let valid = if c_mode(ty, 0) != 0 {
+        c_unsupported(4, at)
+    } else {
+        0
+    };
+    c_result(
+        CType {
+            tag: 0,
+            at: 0
+        },
+        value.next,
+        value.env,
+        name.start,
+        value.end,
+        -1
+    )
+}
+
+fn c_place_shape(at: i64, end: i64)
+    -> bool eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let t = c_token(at);
+    if t.kind == 4 {
+        t.end == end
+    } else if t.kind == 32 && c_group(at, 0) == end {
+        c_place_shape(t.end, c_argument_end(t.end, 0))
+    } else {
+        false
+    }
+}
+
+// Calling a function owns the callee, independently of the result's usage.
+fn c_callee_usage(at: i64, usage: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let t = c_token(at);
+    if t.kind == 4 && c_kind(t.end) == 32 {
+        2
+    } else if t.kind == 32 && c_kind(c_group(at, 0)) == 32 {
+        2
+    } else {
+        usage
+    }
+}

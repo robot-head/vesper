@@ -1,0 +1,6 @@
+fn bool_value() -> bool {
+    true
+}
+fn main() -> bool {
+    !bool_value()
+}
