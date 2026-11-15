@@ -145,3 +145,9 @@ directly and ranks candidate-minus-baseline differences per operation as exact
 rational values. Equivalent fractions tie without rounding. It uses the same
 zero convention and statistical assumptions; callers must establish common
 units and provenance.
+
+`vesper bench FILE --signed-rank` optionally includes this exact paired
+signed-rank report for the selected measured metric. It supports up to 32
+measured epochs, or up to 32 aggregate randomized-layout samples; it excludes
+deterministic mode. All-zero differences report unavailable. The report does
+not add a gate and explicitly states the conditional-sign assumption.

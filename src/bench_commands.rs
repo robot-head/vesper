@@ -15,7 +15,7 @@ use vesper::{
 use vesper_bench::{
     Analysis, Arm, BenchCase, BodyStatus, ClockStatus, Decision, Invocation, ObservedRunError,
     ObservedWindow, PairedSample, RunConfig, RunError, RunReport, WindowCompletion, WindowObserver,
-    analyze_pairs, run_abba, run_abba_observed,
+    analyze_pairs, run_abba, run_abba_observed, signed_rank_exact_paired_samples,
 };
 
 use vesper_bench::layout::{
@@ -62,6 +62,7 @@ The default baseline is a separately compiled copy of FILE.
   --metric time|cycles|instructions
                            Selected metric (default: time); counters imply --pmu
   --max-regression-bp N     Gate the SELECTED metric with the paired-median 95% CI
+  --signed-rank            Report exact paired signed-rank evidence (no gate)
   --randomize-layout N     Stabilizer-style: run N (6..32) child processes, each
                            with its own heap offset, stack padding and
                            environment size, and report whether the A/B
@@ -140,6 +141,7 @@ struct Options {
     baseline_entry: String,
     config: RunConfig,
     threshold: Option<i64>,
+    signed_rank: bool,
     metric: Metric,
     pmu: bool,
     provider: Provider,
@@ -182,6 +184,7 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
     let mut baseline_entry = None;
     let mut config = RunConfig::default();
     let mut threshold = None;
+    let mut signed_rank = false;
     let mut metric = Metric::Time;
     let mut pmu = false;
     let mut compare = None;
@@ -213,6 +216,7 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
                 forwarded.extend([arg, value]);
             }
             "--deterministic" => deterministic = true,
+            "--signed-rank" => signed_rank = true,
             "--asm" => asm = true,
             "--expect-vectorized" => expect_vectorized = true,
             "--expect-zero-alloc" => expect_zero_alloc = true,
@@ -324,6 +328,11 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
     if store.is_some() && compare.is_none() {
         return Err("--store requires --compare".into());
     }
+    if deterministic && signed_rank {
+        return Err(
+            "--signed-rank requires measured paired epochs; it excludes --deterministic".into(),
+        );
+    }
     if deterministic
         && (pmu
             || provider.is_some()
@@ -351,6 +360,9 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
     {
         return Err("bench samples/warmup/iterations exceed the documented limits".into());
     }
+    if signed_rank && (layouts.is_none() || layout_run.is_some()) && config.epochs > 32 {
+        return Err("--signed-rank supports at most 32 measured epochs".into());
+    }
     let calls = config
         .epochs
         .checked_add(config.warmup_epochs)
@@ -368,6 +380,7 @@ fn options(args: Vec<String>) -> Result<Option<Options>, String> {
         entry,
         config,
         threshold,
+        signed_rank,
         metric,
         pmu: pmu || provider.is_some() || metric != Metric::Time,
         provider: provider.unwrap_or_else(default_provider),
@@ -1404,6 +1417,50 @@ struct Outcome {
     text: String,
     gate_failure: Option<String>,
 }
+
+fn signed_rank_report(samples: &[PairedSample], metric: Metric, source: &str) -> (Json, String) {
+    let assumption = "independent, equiprobable signs conditional on nonzero magnitudes and zero pattern; ABBA does not establish this assumption";
+    match signed_rank_exact_paired_samples(samples) {
+        Ok(rank) => {
+            let data = json!({
+                "status": "available",
+                "method": "exact two-sided paired signed-rank sign randomization; doubled smaller inclusive tail",
+                "difference": "candidate minus baseline per operation, compared exactly as rational values",
+                "source": source,
+                "unit": metric.unit(),
+                "nonzero_pairs": rank.nonzero_pairs,
+                "discarded_zero_pairs": rank.discarded_zero_pairs,
+                "tied_magnitude_groups": rank.tied_magnitude_groups,
+                "twice_w_positive": rank.twice_w_positive,
+                "probability": {"numerator": rank.numerator.to_string(), "denominator": rank.denominator.to_string()},
+                "assumption": assumption,
+                "gate": "none",
+            });
+            let text = format!(
+                "paired signed-rank probability: {}/{} ({} nonzero pairs, {} zero pairs discarded, {} tied groups); no gate\nassumption: {assumption}\n",
+                rank.numerator,
+                rank.denominator,
+                rank.nonzero_pairs,
+                rank.discarded_zero_pairs,
+                rank.tied_magnitude_groups,
+            );
+            (data, text)
+        }
+        Err(error) => {
+            let data = json!({
+                "status": "unavailable", "reason": format!("{error:?}"),
+                "discarded_zero_pairs": (error == vesper_bench::SignedRankError::NoNonzeroDifferences).then_some(samples.len()),
+                "source": source, "unit": metric.unit(), "assumption": assumption, "gate": "none",
+            });
+            (
+                data,
+                format!(
+                    "paired signed-rank evidence unavailable: {error}; no gate\nassumption: {assumption}\n"
+                ),
+            )
+        }
+    }
+}
 /// The core cycles/instructions provider `--pmu-provider` selected.
 enum CoreCounters {
     Group(PerfGroup),
@@ -1801,7 +1858,7 @@ fn randomize_layouts(
             _ => "",
         },
     );
-    Ok(Outcome {
+    let mut outcome = Outcome {
         data: json!({"schema":"vesper.bench/1","status":"layout_randomized","metric":options.metric.name(),
             "provider":options.metric.provider(options.provider),"unit":options.metric.unit(),
             "candidate":{"path":options.path,"entry":options.entry},"baseline":{"path":options.baseline,"entry":options.baseline_entry},
@@ -1812,7 +1869,13 @@ fn randomize_layouts(
             "analysis":analysis_json(&analysis, options.threshold, options.metric)}),
         text,
         gate_failure,
-    })
+    };
+    if options.signed_rank {
+        let (data, text) = signed_rank_report(&samples, options.metric, "randomized layouts");
+        outcome.data["signed_rank"] = data;
+        outcome.text.push_str(&text);
+    }
+    Ok(outcome)
 }
 /// Static evidence and CAS provenance shared by every report shape.
 struct Extras {
@@ -2005,6 +2068,9 @@ fn measure(options: Options) -> Result<Option<Outcome>, String> {
         "evidence": {"hardware_pmu": "unavailable", "zero_allocation": "unavailable", "vectorization": "unavailable"},
         "scope": "unoptimized finite scalar JIT kernels; measured windows include Rust dispatch/loop/output storage; no hard deadline or sandbox guarantee",
     });
+    let signed_rank = options
+        .signed_rank
+        .then(|| signed_rank_report(selected, options.metric, "measured epochs"));
     let text = if let Some(pmu) = pmu {
         data["clock"] = json!({"provider":report.provider().as_str(),"unit":report.unit().as_str(),"elapsed_run_ns":report.elapsed_run_nanos().to_string(),
             "pairs":report.pairs().iter().copied().map(|p|pair_json(p,Metric::Time)).collect::<Vec<_>>()});
@@ -2035,6 +2101,10 @@ fn measure(options: Options) -> Result<Option<Outcome>, String> {
         text,
         gate_failure,
     };
+    if let Some((data, text)) = signed_rank {
+        outcome.data["signed_rank"] = data;
+        outcome.text.push_str(&text);
+    }
     if options.expect_zero_alloc {
         match alloc_unavailable {
             Some(e) => {
@@ -2259,6 +2329,7 @@ mod metronome_tests {
     fn help_names_supported_measurement_mechanisms() {
         for mechanism in [
             "--max-regression-bp",
+            "--signed-rank",
             "--pmu-provider",
             "rdpmc",
             "kpc",
@@ -2311,6 +2382,16 @@ mod metronome_tests {
         let child = parse(&["c.ves", "--randomize-layout", "8", "--layout-run", "9:3"]);
         assert_eq!((child.layouts, child.layout_run), (None, Some((9, 3))));
         assert_eq!(parse(&["c.ves"]).provider, default_provider());
+        let signed = parse(&[
+            "c.ves",
+            "--signed-rank",
+            "--samples",
+            "33",
+            "--randomize-layout",
+            "6",
+        ]);
+        assert!(signed.signed_rank);
+        assert!(!signed.forwarded.iter().any(|arg| arg == "--signed-rank"));
         for bad in [
             vec!["c.ves", "--randomize-layout", "5"],
             vec!["c.ves", "--randomize-layout", "33"],
@@ -2318,6 +2399,8 @@ mod metronome_tests {
             vec!["c.ves", "--layout-run", "1"],
             vec!["c.ves", "--layout-run", "1:64"],
             vec!["c.ves", "--layout-seed", "-1"],
+            vec!["c.ves", "--signed-rank", "--samples", "33"],
+            vec!["c.ves", "--signed-rank", "--deterministic"],
         ] {
             assert!(options(bad.iter().map(|s| s.to_string()).collect()).is_err());
         }
@@ -2327,6 +2410,52 @@ mod metronome_tests {
             "layout":{"run":plan.run,"observed_env_padding_bytes":env_padding_value(plan.env_padding_bytes).len()},
             "pairs":[pair_json(PairedSample::new(baseline, candidate, 4).unwrap(), Metric::Time),
                      pair_json(PairedSample::new(baseline, candidate, 4).unwrap(), Metric::Time)]})
+    }
+
+    #[test]
+    fn signed_rank_report_is_exact_and_explicitly_non_gating() {
+        let samples = [
+            PairedSample::new(100, 101, 2).unwrap(),
+            PairedSample::new(100, 98, 4).unwrap(),
+            PairedSample::new(100, 99, 3).unwrap(),
+            PairedSample::new(100, 100, 7).unwrap(),
+        ];
+        let (report, text) = signed_rank_report(&samples, Metric::Cycles, "measured epochs");
+        assert_eq!(report["status"], "available");
+        assert_eq!(report["unit"], "cycles");
+        assert_eq!(report["source"], "measured epochs");
+        assert_eq!(report["gate"], "none");
+        assert_eq!(report["nonzero_pairs"], 3);
+        assert_eq!(report["discarded_zero_pairs"], 1);
+        assert_eq!(report["tied_magnitude_groups"], 1);
+        assert_eq!(report["twice_w_positive"], 5);
+        assert_eq!(report["probability"]["numerator"], "8");
+        assert_eq!(report["probability"]["denominator"], "8");
+        assert!(text.contains("ABBA does not establish"));
+        let (unavailable, text) = signed_rank_report(
+            &[PairedSample::new(1, 1, 1).unwrap()],
+            Metric::Time,
+            "measured epochs",
+        );
+        assert_eq!(unavailable["status"], "unavailable");
+        assert_eq!(unavailable["reason"], "NoNonzeroDifferences");
+        assert_eq!(unavailable["discarded_zero_pairs"], 1);
+        assert_eq!(unavailable["gate"], "none");
+        assert!(text.contains("ABBA does not establish"));
+    }
+
+    #[test]
+    fn randomized_layout_signed_rank_uses_aggregated_selected_pairs() {
+        let options = parse(&["c.ves", "--randomize-layout", "6", "--signed-rank"]);
+        let outcome = randomize_layouts(&options, 6, |plan| Ok(child(plan, 100, 150))).unwrap();
+        assert_eq!(outcome.data["signed_rank"]["source"], "randomized layouts");
+        assert_eq!(outcome.data["signed_rank"]["nonzero_pairs"], 6);
+        assert_eq!(outcome.data["signed_rank"]["probability"]["numerator"], "2");
+        assert_eq!(
+            outcome.data["signed_rank"]["probability"]["denominator"],
+            "64"
+        );
+        assert!(outcome.gate_failure.is_none());
     }
     #[test]
     fn layout_driver_aggregates_children_and_tests_survival() {
