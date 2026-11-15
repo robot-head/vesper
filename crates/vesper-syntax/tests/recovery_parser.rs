@@ -3,6 +3,26 @@ use vesper_syntax::{
     recovery::{DeclarationStatus as DS, Limits, SiteKind},
 };
 #[test]
+fn public_fields_preserve_tiled_temperature() {
+    let source = "tiled(8) struct Particle { pub hot x: u64, pub cold y: u64, pub: u64 }";
+    let parsed = parser::parse(source);
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert_eq!(parsed.syntax().text().to_string(), source);
+    let vesper_syntax::ast::Item::Adt(adt) = &parsed.module.items[0] else {
+        panic!()
+    };
+    let fields = &adt.variants[0].fields;
+    assert_eq!(
+        fields[0].temperature,
+        Some(vesper_syntax::ast::FieldTemperature::Hot)
+    );
+    assert_eq!(
+        fields[1].temperature,
+        Some(vesper_syntax::ast::FieldTemperature::Cold)
+    );
+    assert_eq!(fields[2].name, "pub");
+}
+#[test]
 fn compound_bitwise_assignments_are_lossless_single_tokens() {
     use vesper_syntax::lexer::{TokenKind, lex};
 

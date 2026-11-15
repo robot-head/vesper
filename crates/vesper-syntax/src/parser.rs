@@ -601,7 +601,8 @@ impl Parser<'_> {
             if self.at_word(0, "pub")
                 && ((self.nth(1) == K::Lower && self.nth(2) == K::Colon)
                     || ((self.at_word(1, "hot") || self.at_word(1, "cold"))
-                        && self.nth(2) == K::Lower && self.nth(3) == K::Colon))
+                        && self.nth(2) == K::Lower
+                        && self.nth(3) == K::Colon))
             {
                 self.bump();
             }
