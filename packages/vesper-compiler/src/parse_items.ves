@@ -38,6 +38,9 @@ fn item(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
                 function(q, false)
             } else if k == 11 {
                 impl_item(q)
+            } else if q.pos != p.pos && k == 70 {
+                // A consumed modifier is not a complete declaration.
+                syntax_issue(q, 6)
             } else {
                 q
             }

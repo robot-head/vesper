@@ -51,7 +51,11 @@ change, backend edit, dependency or unsafe code was required.
 
 The CST mirrors `vesper_syntax::parser::parse`, including its trivia attachment
 and empty nodes. It does not insert the editor-only wrappers from
-`parse_recovery`. Diagnostics retain the seed's literal-error spans even where
+`parse_recovery`. One explicit malformed-input guard rejects a dangling
+`copy`, `affine` or `linear` at EOF with E0002. The current Rust seed accepts
+these incomplete declarations because its progress guard sees the modifier;
+the self-hosted parser preserves their CST but retains its earlier rejection
+behavior rather than certifying an incomplete item as success. Diagnostics retain the seed's literal-error spans even where
 they point after a consumed literal. Limits return typed errors and never
 certify incomplete buffers as successful syntax.
 
@@ -75,8 +79,9 @@ Rust 1.100 debug test profile, isolated `/workspace/target-issue580`. Build sett
   tests took 24.34 s. The final grouped-callee follow-up also passes all five
   focused tests (34.86 s), including `(xs)[e]`, nested grouping and tuple versus
   name disambiguation.
-- `cargo test --locked --test self_host_parse -- --nocapture`: five tests pass;
-  recovery, prefix, region adapter, byte layout and bounds cases are covered.
+- `cargo +1.100.0 test --locked --test self_host_parse -- --nocapture`:
+  **six tests pass in 35.59 s** after the review fix. Recovery, prefixes, region
+  storage, byte layout, bounds and dangling-modifier rejection are covered.
 - `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`:
   passed (Cargo emits an existing unused manifest-dependency warning for
   `vesper-pact`; the Clippy command exits successfully).

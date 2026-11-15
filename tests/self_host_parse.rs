@@ -257,3 +257,37 @@ fn bad_byte() -> i64 eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] { synta
         }
     });
 }
+
+#[test]
+fn dangling_modifiers_are_not_successful_declarations() {
+    on_big_stack(|| {
+        let front = read_front_end();
+        for source in [
+            "copy",
+            "affine",
+            "linear",
+            "fn f() {} copy",
+            "copy // awaiting declaration",
+            "copy affine linear",
+        ] {
+            let program = program(&front, source.as_bytes());
+            let (outcome, cells) = transport(&program);
+            assert_eq!(
+                decode(&outcome),
+                Outcome::Error {
+                    code: 2,
+                    at: source.len() as i64
+                },
+                "{source}"
+            );
+            assert_eq!(cells[2], 1, "{source}");
+            let d = &cells[1000000..1000006];
+            assert_eq!(d[0], 2);
+            assert_eq!(text(&program, d[1], d[4], d[5]), "expected a declaration");
+            assert_eq!((d[2], d[3]), (source.len() as i64, source.len() as i64));
+            // The seed currently accepts this malformed input. Its preserved
+            // CST still agrees, while the self-hosted outcome must be an error.
+            assert_flat(source, &cells);
+        }
+    });
+}

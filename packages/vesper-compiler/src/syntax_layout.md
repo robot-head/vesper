@@ -68,7 +68,10 @@ The compatibility return remains a nonnegative CST digest on success, or
 arithmetic overflow 3, literal error 4, limit 5. `Diag::Unsupported` remains
 reserved. A limit is a typed failure, not a successful partial tree. Buffers
 from a failed or interrupted phase must not be treated as checked syntax;
-ordinary syntax errors retain recovered records and diagnostic text.
+ordinary syntax errors retain recovered records and diagnostic text. A dangling
+`copy`, `affine` or `linear` modifier at EOF reports E0002; this deliberately
+rejects an incomplete declaration that the seed's batch progress guard currently
+accepts. Its lossless CST is still retained.
 
 The source ceiling is 1 MiB, the raw token ceiling 65,536 excluding EOF, the
 seed descent ceiling 128, and the diagnostic ceiling 128. Node, name, generic
