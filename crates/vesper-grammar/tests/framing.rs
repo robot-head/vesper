@@ -279,3 +279,123 @@ fn every_frame_truncation_split_and_output_limit_preserves_buffers() {
         payload
     );
 }
+
+#[test]
+fn capnp_stream_segments_are_borrowed_and_framing_is_exact() {
+    use vesper_grammar::capnp;
+    // Two segments: one word and two words. Padding has no prescribed value.
+    let mut input = vec![1, 0, 0, 0, 1, 0, 0, 0, 2, 0, 0, 0, 0xab, 0xcd, 0xef, 0x12];
+    input.extend(0u8..24);
+    input.extend_from_slice(b"tail");
+    let (message, tail) = capnp::parse_prefix(&input, capnp::Limits::default()).unwrap();
+    assert_eq!(message.segment_count(), 2);
+    let mut segments = message.segments();
+    assert_eq!(segments.len(), 2);
+    let first = segments.next().unwrap();
+    assert_eq!(first, &input[16..24]);
+    assert_eq!(first.as_ptr(), input[16..].as_ptr());
+    assert_eq!(segments.len(), 1);
+    assert_eq!(segments.next().unwrap(), &input[24..40]);
+    assert_eq!(segments.next(), None);
+    assert_eq!(tail, b"tail");
+    assert_eq!(
+        capnp::parse_exact(&input, capnp::Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::TrailingBytes
+    );
+    assert_eq!(
+        capnp::parse_exact(&input[..40], capnp::Limits::default())
+            .unwrap()
+            .segments()
+            .count(),
+        2
+    );
+    let empty = [0u8; 8];
+    let empty_message = capnp::parse_exact(&empty, capnp::Limits::default()).unwrap();
+    assert_eq!(empty_message.segments().collect::<Vec<_>>(), vec![&b""[..]]);
+
+    // Three segments need no table padding; the middle one may be empty.
+    let mut three = vec![2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0];
+    three.extend(0u8..16);
+    let segments: Vec<_> = capnp::parse_exact(&three, capnp::Limits::default())
+        .unwrap()
+        .segments()
+        .collect();
+    assert_eq!(
+        segments,
+        vec![&three[16..24], &three[24..24], &three[24..32]]
+    );
+}
+
+#[test]
+fn capnp_framing_rejects_truncation_and_prepays_limits() {
+    use vesper_grammar::capnp;
+    let input = [
+        1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8,
+    ];
+    for end in 0..input.len() {
+        let error = capnp::parse_exact(&input[..end], capnp::Limits::default()).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::UnexpectedEof, "prefix {end}");
+        assert_eq!(error.offset, end);
+    }
+    let limits = capnp::Limits::default();
+    assert_eq!(
+        capnp::parse_exact(
+            &input,
+            capnp::Limits {
+                max_segments: 1,
+                ..limits
+            }
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::CountLimit
+    );
+    assert_eq!(
+        capnp::parse_exact(
+            &input,
+            capnp::Limits {
+                max_work: 2,
+                ..limits
+            }
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::WorkLimit
+    );
+    assert_eq!(
+        capnp::parse_exact(
+            &input,
+            capnp::Limits {
+                max_words: 0,
+                ..limits
+            }
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::PayloadLimit
+    );
+    assert_eq!(
+        capnp::parse_exact(
+            &input,
+            capnp::Limits {
+                max_input_bytes: 23,
+                ..limits
+            }
+        )
+        .unwrap_err()
+        .kind,
+        ErrorKind::InputLimit
+    );
+    let huge_count = [255, 255, 255, 255];
+    assert!(matches!(
+        capnp::parse_exact(&huge_count, limits).unwrap_err().kind,
+        ErrorKind::CountLimit | ErrorKind::Overflow
+    ));
+    let huge_segment = [0, 0, 0, 0, 255, 255, 255, 255];
+    assert_eq!(
+        capnp::parse_exact(&huge_segment, limits).unwrap_err().kind,
+        ErrorKind::PayloadLimit
+    );
+}
