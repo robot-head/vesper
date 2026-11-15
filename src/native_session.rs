@@ -855,7 +855,7 @@ fn compile_session_with_linkage<M: Module>(
         crate::ir_opt::optimize(world, &mut program)?;
     }
     let ids = super::declare_instances(m, world, &plan.entry, &instances, linkage)?;
-    let mut text = super::define_instances(m, world, &instances, &ids, &program)?;
+    let mut text = super::define_instances(m, world, &instances, &ids, &program, linkage)?;
     let ptr = m.target_config().pointer_type();
     let call_conv = m.isa().default_call_conv();
     let sig = clif::entry_signature(call_conv, ptr);
@@ -943,6 +943,7 @@ fn compile_session_with_linkage<M: Module>(
         c.b.finalize();
         (context, park)
     };
+    linkage.normalize_references(&mut ctx.func);
     check_data_base_freshness(&ctx.func, context, park)?;
     text.push_str(&format!("; {name}\n{}\n", ctx.func.display()));
     m.define_function(id, &mut ctx)

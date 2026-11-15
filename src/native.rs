@@ -567,7 +567,7 @@ fn compile_entry<M: Module>(
     }
     let ids = declare_instances(m, world, entry, &instances, linkage)?;
     let clif = define_instances_observed(
-        m, world, &instances, &ids, &program, observer, instrument, options,
+        m, world, &instances, &ids, &program, observer, instrument, options, linkage,
     )?;
     let mut abi = Vec::new();
     for (key, (name, vars)) in &instances {
@@ -645,6 +645,21 @@ enum DefinitionLinkage {
     Jit,
 }
 impl DefinitionLinkage {
+    /// JIT code, generated helper bodies and data need not share an allocation.
+    /// Apply after instrumentation and before observers or machine-code lowering.
+    fn normalize_references(self, function: &mut ir::Function) {
+        if matches!(self, Self::Object) {
+            return;
+        }
+        for target in function.dfg.ext_funcs.values_mut() {
+            target.colocated = false;
+        }
+        for global in function.global_values.values_mut() {
+            if let ir::GlobalValueData::Symbol { colocated, .. } = global {
+                *colocated = false;
+            }
+        }
+    }
     fn function(self, entry: bool) -> Linkage {
         match self {
             Self::Object if entry => Linkage::Export,
@@ -692,6 +707,7 @@ fn define_instances<M: Module>(
     instances: &InstanceMap,
     ids: &BTreeMap<String, FuncId>,
     program: &crate::ir::Program,
+    linkage: DefinitionLinkage,
 ) -> Result<String, String> {
     define_instances_observed(
         m,
@@ -702,6 +718,7 @@ fn define_instances<M: Module>(
         None,
         None,
         CodegenOptions::default(),
+        linkage,
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -714,6 +731,7 @@ fn define_instances_observed<M: Module>(
     mut observer: Option<&mut dyn FnMut(EmittedFunction)>,
     mut instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
+    linkage: DefinitionLinkage,
 ) -> Result<String, String> {
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
@@ -838,6 +856,7 @@ fn define_instances_observed<M: Module>(
         if let Some(rewrite) = instrument.as_mut() {
             rewrite(key, &mut ctx.func)?;
         }
+        linkage.normalize_references(&mut ctx.func);
         clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
         if let Some(observe) = observer.as_mut() {
             let id = ids[key];
@@ -4237,6 +4256,7 @@ mod far_call_tests {
         page: usize,
         used: usize,
         reverse: bool,
+        data: bool,
     }
 
     // SAFETY: this uniquely owned reservation moves with its JIT module. No
@@ -4266,6 +4286,7 @@ mod far_call_tests {
                 page,
                 used: 0,
                 reverse,
+                data: false,
             }
         }
 
@@ -4296,7 +4317,10 @@ mod far_call_tests {
 
     impl JITMemoryProvider for FarPages {
         fn allocate_readexec(&mut self, size: usize, align: u64) -> io::Result<*mut u8> {
-            if self.used == 2 || size > self.page || align > self.page as u64 {
+            if self.used == (if self.data { 1 } else { 2 })
+                || size > self.page
+                || align > self.page as u64
+            {
                 return Err(io::Error::other(
                     "far-call fixture needs two tiny functions",
                 ));
@@ -4316,8 +4340,18 @@ mod far_call_tests {
             Err(io::Error::other("far-call fixture has no writable data"))
         }
 
-        fn allocate_readonly(&mut self, _: usize, _: u64) -> io::Result<*mut u8> {
-            Err(io::Error::other("far-call fixture has no readonly data"))
+        fn allocate_readonly(&mut self, size: usize, align: u64) -> io::Result<*mut u8> {
+            assert_eq!(self.used, 0);
+            assert!(!self.data && size <= self.page && align <= self.page as u64);
+            let at = self.address(1);
+            // SAFETY: committing the opposite owned page, before any code allocation.
+            if unsafe { libc::mprotect(at.cast(), self.page, libc::PROT_READ | libc::PROT_WRITE) }
+                != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            self.data = true;
+            Ok(at)
         }
 
         unsafe fn free_memory(&mut self) {
@@ -4327,7 +4361,7 @@ mod far_call_tests {
 
         fn finalize(&mut self, protection: BranchProtection) -> ModuleResult<()> {
             assert_eq!(protection, BranchProtection::None);
-            assert_eq!(self.used, 2);
+            assert_eq!(self.used + usize::from(self.data), 2);
             for slot in 0..2 {
                 // SAFETY: both pages are owned code allocations; x86 instruction
                 // caches are coherent. No call occurs before this finalization.
@@ -4335,7 +4369,11 @@ mod far_call_tests {
                     libc::mprotect(
                         self.address(slot).cast(),
                         self.page,
-                        libc::PROT_READ | libc::PROT_EXEC,
+                        if self.data && slot == 1 {
+                            libc::PROT_READ
+                        } else {
+                            libc::PROT_READ | libc::PROT_EXEC
+                        },
                     )
                 } != 0
                 {
@@ -4478,6 +4516,129 @@ mod far_call_tests {
             );
             // SAFETY: the only code call returned, and no function pointer escapes.
             unsafe { fixed.free_memory() };
+        }
+    }
+
+    /// Generated Local helpers and Export data keep their declarations; only
+    /// the JIT IR references must stop assuming nearby allocations.
+    #[test]
+    fn generated_local_helpers_and_data_execute_across_four_gib() {
+        for reverse in [false, true] {
+            for data in [false, true] {
+                for normalize in [false, true] {
+                    let (mut m, isa) = module(reverse);
+                    let mut sig = m.make_signature();
+                    sig.returns.push(AbiParam::new(types::I64));
+                    let helper = if data {
+                        None
+                    } else {
+                        let id = m
+                            .declare_function("foreign_leaf", Linkage::Local, &sig)
+                            .unwrap();
+                        let mut ctx = m.make_context();
+                        ctx.func.signature = sig.clone();
+                        let mut fb = FunctionBuilderContext::new();
+                        let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
+                        let block = b.create_block();
+                        b.switch_to_block(block);
+                        let value = b.ins().iconst(types::I64, 42);
+                        b.ins().return_(&[value]);
+                        b.seal_all_blocks();
+                        b.finalize();
+                        m.define_function(id, &mut ctx).unwrap();
+                        Some(id)
+                    };
+                    let datum = if data {
+                        let id = m
+                            .declare_data("mask_data", Linkage::Export, false, false)
+                            .unwrap();
+                        let mut description = cranelift_module::DataDescription::new();
+                        description.define(42i64.to_le_bytes().to_vec().into_boxed_slice());
+                        description.set_align(8);
+                        m.define_data(id, &description).unwrap();
+                        Some(id)
+                    } else {
+                        None
+                    };
+                    let entry = m.declare_function("caller", Linkage::Local, &sig).unwrap();
+                    let mut ctx = m.make_context();
+                    ctx.func.signature = sig;
+                    let mut fb = FunctionBuilderContext::new();
+                    let mut b = FunctionBuilder::new(&mut ctx.func, &mut fb);
+                    let block = b.create_block();
+                    b.switch_to_block(block);
+                    let value = if let Some(id) = datum {
+                        let symbol = m.declare_data_in_func(id, b.func);
+                        let address = b.ins().symbol_value(types::I64, symbol);
+                        b.ins().load(types::I64, ir::MemFlags::new(), address, 0)
+                    } else {
+                        let target = m.declare_func_in_func(helper.unwrap(), b.func);
+                        let call = b.ins().call(target, &[]);
+                        b.inst_results(call)[0]
+                    };
+                    b.ins().return_(&[value]);
+                    b.seal_all_blocks();
+                    b.finalize();
+                    let before = ctx.func.to_string();
+                    let mode = if normalize {
+                        DefinitionLinkage::Jit
+                    } else {
+                        DefinitionLinkage::Object
+                    };
+                    mode.normalize_references(&mut ctx.func);
+                    if !normalize {
+                        assert_eq!(before, ctx.func.to_string());
+                    }
+                    let mut inspect = Context::for_function(ctx.func.clone());
+                    inspect
+                        .compile(isa.as_ref(), &mut ControlPlane::default())
+                        .unwrap();
+                    let relocs: Vec<_> = inspect
+                        .compiled_code()
+                        .unwrap()
+                        .buffer
+                        .relocs()
+                        .iter()
+                        .map(|r| r.kind)
+                        .collect();
+                    if normalize {
+                        assert!(relocs.contains(&Reloc::Abs8), "{relocs:?}");
+                        assert!(
+                            !relocs.contains(&Reloc::X86PCRel4)
+                                && !relocs.contains(&Reloc::X86CallPCRel4),
+                            "{relocs:?}"
+                        );
+                    } else {
+                        assert!(
+                            relocs.contains(&Reloc::X86PCRel4)
+                                || relocs.contains(&Reloc::X86CallPCRel4),
+                            "{relocs:?}"
+                        );
+                    }
+                    m.define_function(entry, &mut ctx).unwrap();
+                    if normalize {
+                        m.finalize_definitions().unwrap();
+                        // SAFETY: the test constructed fn() -> i64 and owns all code/data until it returns.
+                        let call: unsafe extern "C" fn() -> i64 =
+                            unsafe { std::mem::transmute(m.get_finalized_function(entry)) };
+                        // SAFETY: checked signature and finalized live mappings above.
+                        assert_eq!(unsafe { call() }, 42);
+                        eprintln!(
+                            "normalized local/data reference reverse={reverse} data={data}: {relocs:?}, result=42"
+                        );
+                        // SAFETY: the call returned, and no pointer escapes.
+                        unsafe { m.free_memory() };
+                    } else {
+                        let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                            m.finalize_definitions().map_err(|e| e.to_string())
+                        }));
+                        assert!(
+                            panic.is_err(),
+                            "near reference must overflow reverse={reverse} data={data}"
+                        );
+                    }
+                }
+            }
         }
     }
 

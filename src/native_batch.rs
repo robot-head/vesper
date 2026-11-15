@@ -164,7 +164,14 @@ impl NativeBatch {
             &instances,
             DefinitionLinkage::Jit,
         )?;
-        define_instances(module, world, &instances, &ids, &program)?;
+        define_instances(
+            module,
+            world,
+            &instances,
+            &ids,
+            &program,
+            DefinitionLinkage::Jit,
+        )?;
         module.finalize_definitions().map_err(|e| e.to_string())?;
         let mut compiled = BTreeMap::new();
         for name in entries {
