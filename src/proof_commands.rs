@@ -30,7 +30,7 @@ struct Options {
     json: bool,
 }
 
-fn name_valid(name: &str) -> bool {
+pub(crate) fn name_valid(name: &str) -> bool {
     name.len() <= 1024
         && name.split('.').all(|part| {
             !part.is_empty()
@@ -473,23 +473,47 @@ pub(crate) fn audit_generated(
     lean: &str,
     timeout: u64,
 ) -> Result<serde_json::Value, String> {
+    audit_generated_with_policy(root, module, theorems, &[], lean, timeout)
+}
+
+/// Kernel-replay a freshly generated module under an explicit allowed-axiom
+/// whitelist. `sorryAx` and compiler-trust escapes are always forbidden.
+pub(crate) fn audit_generated_with_policy(
+    root: &Path,
+    module: &str,
+    theorems: &[&str],
+    allowed_axioms: &[&str],
+    lean: &str,
+    timeout: u64,
+) -> Result<serde_json::Value, String> {
     if !name_valid(module)
         || theorems.is_empty()
         || theorems.len() > 128
         || theorems.iter().any(|name| !name_valid(name))
+        || allowed_axioms.iter().any(|name| {
+            !name_valid(name)
+                || matches!(
+                    *name,
+                    "sorryAx" | "Lean.ofReduceBool" | "Lean.trustCompiler"
+                )
+        })
         || !(1..=300).contains(&timeout)
     {
         return Err("invalid generated proof audit request".into());
     }
     let options = Options {
         theorems: theorems.iter().map(|name| (*name).to_owned()).collect(),
+        allowed: allowed_axioms
+            .iter()
+            .map(|name| (*name).to_owned())
+            .collect(),
         lean: Some(lean.to_owned()),
         timeout: Some(timeout),
         ..Options::default()
     };
     let report = audit(&options, root, module)?;
     if !report.accepted || !report.kernel_replayed || !report.forbidden_axioms.is_empty() {
-        return Err("generated theorem failed the empty-axiom kernel audit".into());
+        return Err("generated theorem failed the kernel axiom policy".into());
     }
     serde_json::to_value(report).map_err(|error| error.to_string())
 }

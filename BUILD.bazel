@@ -80,6 +80,11 @@ vesper_crate(
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
+        # Same serial Std kernel-replay pattern as proof_audit_cli and format_proof_cli.
+        "test/verify_extract_cli": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
         "test/oracle42_acceptance": select({
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
@@ -167,6 +172,7 @@ vesper_crate(
     # while allowing the complete target 900 seconds on slower macOS runners.
     test_timeouts = {
         "test/format_proof_cli": "long",
+        "test/verify_extract_cli": "long",
         # Fresh replay covers both complete model import closures.
         "test/logos42_acceptance": "eternal",
         "test/oracle42_acceptance": "long",
