@@ -126,3 +126,13 @@ inserted delay from elapsed time and reports the predicted end-to-end speedup
 in basis points per region. Unlike Coz, regions are explicit calls rather than
 sampled lines, delay accrues when a region ends, and there is no credit for
 delay accrued while a thread was blocked.
+
+## Tied Walsh point estimates
+
+`walsh_pseudomedian` returns the Hodges–Lehmann point estimate for up to 32
+caller-provided integer paired differences, retaining zeros and tied Walsh
+averages with their full multiplicity. The result is scaled by four so even
+medians and half-unit Walsh averages are exact. It uses bounded stack storage
+and returns an explicit error for empty or oversized input. It does not return a
+confidence interval or regression decision and does not establish measurement
+provenance.

@@ -16,10 +16,12 @@ pub mod causal;
 mod execution;
 pub mod layout;
 mod statistics;
+mod walsh;
 pub mod wire;
 pub use arithmetic::*;
 pub use execution::*;
 pub use statistics::*;
+pub use walsh::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Error {
