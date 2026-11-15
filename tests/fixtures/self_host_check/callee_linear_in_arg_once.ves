@@ -1,0 +1,4 @@
+fn take(x: i64) {}
+fn good(sink f: fn @linear () -> i64) {
+    take(f());
+}

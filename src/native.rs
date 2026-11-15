@@ -36,6 +36,9 @@ mod regions;
 /// ABI v2 fiber entries that park through `vesper-fiber-abi`.
 #[path = "native_session.rs"]
 pub mod session;
+/// AoSoA `tiled(N) struct` and `TiledSeq[T]` native lowering (§12.5).
+#[path = "tiled/native.rs"]
+mod tiled;
 /// Windows x64 COFF objects with unwind tables, and the MSVC link driver.
 #[path = "native_windows.rs"]
 pub mod windows;
@@ -54,8 +57,9 @@ fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
         }
         Type::Tuple(ts) if ts.is_empty() => Ok(types::I64),
         Type::Infer | Type::Function { .. } => Ok(types::I64),
-        // Region box and watermark handles are one word (§15).
+        // Region box, watermark, and TiledSeq handles are one word (§12.5, §15).
         Type::Named(n, _) if crate::regions::is_handle_name(n) => Ok(types::I64),
+        t if crate::tiled::is_seq_type(t) => Ok(types::I64),
         _ => Err(format!(
             "native backend does not yet lower aggregate type {t}"
         )),
@@ -500,6 +504,7 @@ fn compile<M: Module>(
         instrument,
         options,
         false,
+        false,
         DefinitionLinkage::Object,
     )
 }
@@ -521,13 +526,16 @@ fn compile_jit(
         instrument,
         options,
         false,
+        false,
         DefinitionLinkage::Jit,
     )
 }
 /// [`compile`]; with `fail_entry`, an entry whose only effects are `Fail`
 /// instances is accepted and keeps its hidden failure-record parameter
 /// (lane 27: the freestanding runtime turns an escaping failure into an
-/// abort).
+/// abort). With `capability_entry`, an entry whose effects are closed built-in
+/// capability effects (`Realtime`, `ConstTime`, `DetFloat`, `ConstDenorm`) is
+/// accepted for offline verification and WCSD stack measurement.
 #[allow(clippy::too_many_arguments)]
 fn compile_entry<M: Module>(
     m: &mut M,
@@ -538,6 +546,7 @@ fn compile_entry<M: Module>(
     instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
     fail_entry: bool,
+    capability_entry: bool,
     linkage: DefinitionLinkage,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
@@ -549,6 +558,7 @@ fn compile_entry<M: Module>(
         .any(|e| !crate::ffi_lowering::is_foreign_effect(&e.name))
         || entry_fn.effects.tail.is_some())
         && !(fail_entry && fail_only(world, entry_fn))
+        && !(capability_entry && entry_fn.effects.tail.is_none() && capability_only(entry_fn))
     {
         return Err("native entry must handle all effects".into());
     }
@@ -928,6 +938,7 @@ pub fn jit_with_options(
     let mut builder = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
     builder.symbol("fmod", native_float_remainder as *const u8);
     builder.symbols(crate::regions::native_runtime::symbols());
+    builder.symbols(crate::tiled::native_runtime::symbols());
     let mut m = JITModule::new(builder);
     let (ids, _) = compile_jit(
         &mut m,
@@ -977,6 +988,7 @@ pub fn jit_with_options(
         }
     };
     crate::regions::native_runtime::finish().map_err(|e| format!("native region fault: {e}"))?;
+    crate::tiled::native_runtime::finish().map_err(|e| format!("native tiled fault: {e}"))?;
     Ok(value)
 }
 pub fn object(world: &World, entry: &str) -> Result<(Vec<u8>, String), String> {
@@ -1078,10 +1090,39 @@ pub fn object_for_isa(
         None,
         CodegenOptions::default(),
         true,
+        false,
         DefinitionLinkage::Object,
     )?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
+}
+/// Compile a standalone entry whose effects are closed built-in capabilities
+/// (or `Fail` + capabilities) and emit its finalized Cranelift functions to
+/// `observer` without linking/finishing an executable object.
+pub fn emit_capability_entry(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    observer: &mut dyn FnMut(EmittedFunction),
+) -> Result<(), String> {
+    let isa = object_isa_for(world, target)?;
+    let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
+        .map_err(|e| e.to_string())?;
+    let mut m = ObjectModule::new(builder);
+    let _ = compile_entry(
+        &mut m,
+        world,
+        entry,
+        optimize,
+        Some(observer),
+        None,
+        CodegenOptions::default(),
+        true,
+        true,
+        DefinitionLinkage::Object,
+    )?;
+    Ok(())
 }
 /// [`object_with_observer`] with the lane-23 [`Instrument`] hook. With
 /// `instrument: None` it is exactly `object_with_observer`.
@@ -2290,6 +2331,21 @@ impl<M: Module> Codegen<'_, '_, M> {
                             .collect::<Result<Vec<_>, String>>()?;
                         self.vector_op(op, &operands)?
                     }
+                    Op::Tiled {
+                        op,
+                        args,
+                        capability,
+                    } => {
+                        let operands = args
+                            .iter()
+                            .map(|a| {
+                                values.get(&a.value).copied().ok_or_else(|| {
+                                    format!("undefined native IR value %{}", a.value)
+                                })
+                            })
+                            .collect::<Result<Vec<_>, String>>()?;
+                        self.tiled_op(op, &operands, capability.as_deref())?
+                    }
                     Op::Closure { expr, aliases, .. } | Op::Handle { expr, aliases, .. } => {
                         let old_vars = self.vars.clone();
                         let old_types = self.local_types.clone();
@@ -3202,6 +3258,9 @@ impl<M: Module> Codegen<'_, '_, M> {
                 args,
                 types: instance,
             } => {
+                if let Some(result) = self.tiled_ast_call(callee, instance, args, e) {
+                    return result;
+                }
                 if let ExprKind::Name(n) = &callee.kind {
                     if let Some(var) = self.vars.get(n) {
                         let tag = self.use_var(*var);
