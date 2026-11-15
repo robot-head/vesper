@@ -636,25 +636,80 @@ literal = '''# [ { . text } ]'''
     assert_eq!(f.text(), POLICY_SOURCE);
 }
 #[test]
-fn absent_explicit_config_keeps_builtin_warn_defaults_and_never_discovers_adjacent_loom() {
+fn discovers_package_policy_and_rejects_invalid_manifest() {
     let f = Fixture::new(POLICY_SOURCE);
     fs::write(
         f.dir.join("Loom.toml"),
         "[lints.vesper]\nunused_effect_capability='deny'",
     )
     .unwrap();
-    let r = f.json(&["--json"]);
-    assert_eq!(r["status"], "checked");
-    assert_eq!(r["diagnostics"][0]["severity"], "warn");
-    assert_eq!(r["policy"]["provenance"]["kind"], "default");
+    let out = f.run(&["--json"]);
+    assert!(!out.status.success());
+    let r = policy_report(&out);
+    assert_eq!(r["status"], "denied");
+    assert_eq!(r["diagnostics"][0]["severity"], "deny");
+    assert_eq!(r["policy"]["provenance"]["kind"], "discovered");
     fs::write(f.dir.join("Loom.toml"), "invalid {{{}").unwrap();
-    assert_eq!(f.json(&["--json"])["status"], "checked");
+    let out = f.run(&["--json"]);
+    assert!(!out.status.success());
+    assert_eq!(policy_report(&out)["status"], "invalid");
     let out = f.run(&["--config", "--json"]);
     assert!(!out.status.success());
     let out = f.run(&["--config", "missing.toml", "--json"]);
     assert!(!out.status.success());
     assert_eq!(policy_report(&out)["status"], "invalid");
     assert_eq!(f.text(), POLICY_SOURCE);
+}
+#[test]
+fn nearest_manifest_applies_to_file_and_package_and_explicit_config_wins() {
+    let f = Fixture::new(POLICY_SOURCE);
+    fs::write(
+        f.dir.join("Loom.toml"),
+        "[lints.vesper]\nunused_effect_capability='deny'\n",
+    )
+    .unwrap();
+    let nested = f.dir.join("nested");
+    fs::create_dir(&nested).unwrap();
+    fs::write(
+        nested.join("Loom.toml"),
+        "[lints.vesper]\nunused_effect_capability='allow'\n",
+    )
+    .unwrap();
+    let source = nested.join("nested.ves");
+    fs::write(&source, POLICY_SOURCE).unwrap();
+    for path in [&source, &nested] {
+        let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+            .arg("lint")
+            .arg(path)
+            .arg("--json")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+        let report: Value = serde_json::from_slice(&out.stdout).unwrap();
+        let report = if path == &nested {
+            &report["files"][0]["report"]
+        } else {
+            &report
+        };
+        assert_eq!(report["policy"]["provenance"]["kind"], "discovered");
+        assert!(findings(report, "L0102").is_empty());
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_vesper"))
+        .arg("lint")
+        .arg(&source)
+        .arg("--json")
+        .arg("--config")
+        .arg(f.dir.join("Loom.toml"))
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let report = policy_report(&out);
+    assert_eq!(report["status"], "denied");
+    assert_eq!(report["policy"]["provenance"]["kind"], "explicit");
 }
 #[test]
 fn denied_rule_cannot_pass_on_conservatively_skipped_source_analysis() {

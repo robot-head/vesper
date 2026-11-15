@@ -634,3 +634,62 @@ fn rust_single_pointers_annotations_and_aliasing() {
     // `c_void` is not a lifted type at all.
     assert_eq!(reason(&m, "fn opaque"), RefusalReason::UnsupportedType);
 }
+
+#[test]
+fn rust_bounded_and_aliased_static_borrows_never_gain_nocapture_contracts() {
+    let m = crate_src(
+        r#"
+        pub type StaticRef = &'static u32;
+        pub type Nested = StaticRef;
+        pub type Parenthesized = (Nested);
+        #[repr(C)] pub struct Holder { pub value: u32 }
+        impl Holder {
+            pub extern "C" fn receiver<'a: 'static>(&'a self) {}
+        }
+        #[no_mangle] pub extern "C" fn direct(p: &'static u32) {}
+        #[no_mangle] pub extern "C" fn alias(p: Nested) {}
+        #[no_mangle] pub extern "C" fn paren(p: Parenthesized) {}
+        #[no_mangle] pub extern "C" fn bounded<'a: 'static>(p: &'a u32) {}
+        #[no_mangle] pub extern "C" fn chain<'a: 'b, 'b: 'static>(p: &'a u32) {}
+        #[no_mangle] pub extern "C" fn conservative<'a: 'b, 'b>(p: &'a u32) {}
+        #[no_mangle] pub extern "C" fn free<'a>(p: &'a u32) {}
+        #[no_mangle] pub extern "C" fn elided<'a: 'static>(p: &u32) {}
+    "#,
+    );
+    for name in [
+        "direct",
+        "alias",
+        "paren",
+        "bounded",
+        "chain",
+        "conservative",
+    ] {
+        assert_eq!(
+            reason(&m, &format!("fn {name}: vsys")),
+            RefusalReason::PointerParameter,
+            "{name}"
+        );
+        assert!(
+            m.function(name).is_some(),
+            "Vesper-only declaration retained: {name}"
+        );
+    }
+    assert!(m.function("free").is_some_and(|f| f.sys.is_ok()));
+    assert!(m.function("elided").is_some_and(|f| f.sys.is_ok()));
+    assert_eq!(
+        reason(&m, "fn Holder::receiver: vsys"),
+        RefusalReason::NotCAbi
+    );
+    let spec = synth::sys_spec(&m, &opts()).unwrap();
+    for name in [
+        "direct",
+        "alias",
+        "paren",
+        "bounded",
+        "chain",
+        "conservative",
+    ] {
+        assert!(!spec.text.contains(&format!("fn {name}(")), "{}", spec.text);
+    }
+    assert!(spec.text.contains("fn free(nocapture in p: u32)"));
+}
