@@ -87,6 +87,11 @@ pub enum Type {
     Primitive {
         name: Primitive,
     },
+    /// The inclusive subset of i64 values between these constant bounds.
+    I64Range {
+        min: i64,
+        max: i64,
+    },
     Parameter {
         index: usize,
     },
@@ -501,6 +506,11 @@ impl Checker<'_> {
         }
         match t {
             Type::Primitive { .. } => (),
+            Type::I64Range { min, max } => {
+                if min > max {
+                    self.unsupported(path, "invalid i64 refinement range");
+                }
+            }
             Type::Parameter { index } => {
                 if !matches!(generics.get(*index), Some(Generic::Type { .. })) {
                     self.unsupported(path, "unbound or non-type generic parameter");
@@ -697,6 +707,21 @@ impl Checker<'_> {
                 _,
             ) => true,
             (Type::Unsupported { .. }, _) | (_, Type::Unsupported { .. }) => false,
+            (Type::I64Range { min: a, max: b }, Type::I64Range { min: c, max: d }) => {
+                c <= a && b <= d
+            }
+            (
+                Type::I64Range { .. },
+                Type::Primitive {
+                    name: Primitive::I64,
+                },
+            ) => true,
+            (
+                Type::Primitive {
+                    name: Primitive::I64,
+                },
+                Type::I64Range { min, max },
+            ) => *min == i64::MIN && *max == i64::MAX,
             (Type::Function { signature: a }, Type::Function { signature: b }) => {
                 let before = (self.issues.len(), self.adapters.len());
                 // A value of a must be usable at b, so a is the candidate.
@@ -873,7 +898,7 @@ fn type_mode_at(
         Type::Primitive {
             name: Primitive::String,
         } => Some(Mode::Affine),
-        Type::Primitive { .. } => Some(Mode::Copy),
+        Type::Primitive { .. } | Type::I64Range { .. } => Some(Mode::Copy),
         Type::Parameter { index } => match generics.get(*index)? {
             Generic::Type { bound } => Some(*bound),
             _ => None,

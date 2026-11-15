@@ -516,3 +516,91 @@ fn an_already_affine_row_does_not_mask_a_changed_capability_contract() {
     new.effects.capabilities[1].resumption = Resumption::Affine;
     assert_eq!(check(old, new).classification, Classification::Major);
 }
+
+fn i64_range(min: i64, max: i64) -> Type {
+    Type::I64Range { min, max }
+}
+
+#[test]
+fn i64_refinements_follow_parameter_and_result_variance() {
+    let ranges = [(-10, 10), (-5, 5), (0, 20), (i64::MIN, i64::MAX), (0, 0)];
+    for (old_min, old_max) in ranges {
+        for (new_min, new_max) in ranges {
+            let old_type = i64_range(old_min, old_max);
+            let new_type = i64_range(new_min, new_max);
+            let mut old = function();
+            let mut new = old.clone();
+            old.parameters[0].ty = old_type.clone();
+            new.parameters[0].ty = new_type.clone();
+            assert_eq!(
+                check(old, new).is_compatible(),
+                new_min <= old_min && old_max <= new_max
+            );
+            let mut old = function();
+            let mut new = old.clone();
+            old.result = old_type;
+            new.result = new_type;
+            assert_eq!(
+                check(old, new).is_compatible(),
+                old_min <= new_min && new_max <= old_max
+            );
+        }
+    }
+}
+
+#[test]
+fn i64_refinements_handle_full_domain_and_reject_other_primitives() {
+    let full = i64_range(i64::MIN, i64::MAX);
+    let mut a = function();
+    let mut b = a.clone();
+    a.result = int();
+    b.result = full.clone();
+    assert!(check(a.clone(), b.clone()).is_compatible());
+    assert!(check(b.clone(), a.clone()).is_compatible());
+    b.result = i64_range(-1, 1);
+    assert!(check(a.clone(), b.clone()).is_compatible());
+    assert!(!check(b.clone(), a.clone()).is_compatible());
+    a.result = Type::Primitive {
+        name: Primitive::U64,
+    };
+    assert!(!check(a, b).is_compatible());
+}
+
+#[test]
+fn i64_refinements_round_trip_and_invalid_ranges_fail_closed() {
+    let mut f = function();
+    f.result = i64_range(i64::MIN, i64::MAX);
+    let original = interface(f.clone());
+    let json = serde_json::to_string(&original).unwrap();
+    let decoded: Interface = serde_json::from_str(&json).unwrap();
+    assert_eq!(original, decoded);
+    assert_eq!(
+        compare(&original, &decoded).classification,
+        Classification::Patch
+    );
+    f.result = i64_range(1, 0);
+    let invalid = interface(f);
+    assert_eq!(
+        compare(&invalid, &invalid).classification,
+        Classification::Unknown
+    );
+    assert_eq!(
+        compare(&original, &invalid).classification,
+        Classification::Unknown
+    );
+    assert_eq!(
+        compare(&invalid, &original).classification,
+        Classification::Unknown
+    );
+}
+
+#[test]
+fn mutable_parameters_keep_invariant_refinements() {
+    let mut old = function();
+    old.parameters[0].pass = Pass::Inout;
+    old.parameters[0].ty = i64_range(0, 10);
+    let mut new = old.clone();
+    new.parameters[0].ty = i64_range(0, 20);
+    assert!(!check(old.clone(), new.clone()).is_compatible());
+    assert!(!check(new, old).is_compatible());
+}
