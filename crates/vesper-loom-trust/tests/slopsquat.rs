@@ -65,10 +65,25 @@ fn sample_catalog() -> Vec<CatalogEntry> {
 fn admits_vetted_mature_package() {
     let catalog = sample_catalog();
     let policy = QuarantinePolicy::default();
-    let report =
-        screen_package_admission(&pkg("@vesper-core/bytes"), &catalog, &policy, 10_000_000);
+    let report = screen_package_admission(
+        &pkg("@vesper-io/uring-reactor"),
+        &catalog,
+        &policy,
+        10_000_000,
+    );
     assert_eq!(report.decision, QuarantineDecision::Admit);
     assert!(report.findings.is_empty());
+
+    // When the catalog has no lookalike siblings, @vesper-core/bytes is admitted.
+    let clean_catalog = vec![catalog[0].clone(), catalog[1].clone(), catalog[2].clone()];
+    let clean_report = screen_package_admission(
+        &pkg("@vesper-core/bytes"),
+        &clean_catalog,
+        &policy,
+        10_000_000,
+    );
+    assert_eq!(clean_report.decision, QuarantineDecision::Admit);
+    assert!(clean_report.findings.is_empty());
 }
 
 #[test]
@@ -163,5 +178,104 @@ fn enforces_namespace_age_trust_cost_and_oidc_provenance() {
             .findings
             .iter()
             .any(|f| f.reason == QuarantineReason::MissingFromCatalog)
+    );
+}
+
+#[test]
+fn does_not_exempt_similar_packages_by_namespace_creation_order() {
+    // Attacker holds an older namespace (@acm3 / @acm4) than @acme, with mature age and OIDC.
+    let catalog = vec![
+        CatalogEntry {
+            package: pkg("@acme/bytes"),
+            org_created_at: 10_000_000,
+            trust_cost: 5,
+            attested_oidc: true,
+        },
+        CatalogEntry {
+            package: pkg("@acm3/bytes"),
+            org_created_at: 1_000,
+            trust_cost: 5,
+            attested_oidc: true,
+        },
+        CatalogEntry {
+            package: pkg("@acm4/bytes"),
+            org_created_at: 1_000,
+            trust_cost: 5,
+            attested_oidc: true,
+        },
+    ];
+    let mut policy = QuarantinePolicy::default();
+
+    let conflated = screen_package_admission(&pkg("@acm3/bytes"), &catalog, &policy, 20_000_000);
+    assert_eq!(conflated.decision, QuarantineDecision::Quarantined);
+    assert!(
+        conflated
+            .findings
+            .iter()
+            .any(|f| f.reason == QuarantineReason::IdentifierConflation)
+    );
+
+    let typosquat = screen_package_admission(&pkg("@acm4/bytes"), &catalog, &policy, 20_000_000);
+    assert_eq!(typosquat.decision, QuarantineDecision::Quarantined);
+    assert!(
+        typosquat
+            .findings
+            .iter()
+            .any(|f| f.reason == QuarantineReason::EditDistanceTyposquat
+                && f.edit_distance == Some(1))
+    );
+
+    policy.agent_mode = true;
+    let agent_conflated =
+        screen_package_admission(&pkg("@acm3/bytes"), &catalog, &policy, 20_000_000);
+    assert_eq!(agent_conflated.decision, QuarantineDecision::Rejected);
+}
+
+#[test]
+fn bounds_oversized_names_without_quadratic_allocation() {
+    let long_a = pkg(&format!("@org/{}", "a".repeat(10_000)));
+    let long_b = pkg(&format!("@org/{}b", "a".repeat(9_999)));
+    let catalog = vec![CatalogEntry {
+        package: long_b.clone(),
+        org_created_at: 1_000,
+        trust_cost: 5,
+        attested_oidc: true,
+    }];
+    let policy = QuarantinePolicy::default();
+
+    // MissingFromCatalog oversized candidate is immediately rejected without quadratic DP allocation.
+    let missing_long = screen_package_admission(&long_a, &catalog, &policy, 20_000_000);
+    assert_eq!(missing_long.decision, QuarantineDecision::Rejected);
+    assert!(
+        missing_long
+            .findings
+            .iter()
+            .any(|f| f.reason == QuarantineReason::OversizedPackageName)
+    );
+    assert!(
+        missing_long
+            .findings
+            .iter()
+            .any(|f| f.reason == QuarantineReason::MissingFromCatalog)
+    );
+
+    // Cataloged oversized entry is also rejected.
+    let present_long = screen_package_admission(&long_b, &catalog, &policy, 20_000_000);
+    assert_eq!(present_long.decision, QuarantineDecision::Rejected);
+    assert!(
+        present_long
+            .findings
+            .iter()
+            .any(|f| f.reason == QuarantineReason::OversizedPackageName)
+    );
+
+    // Rolling-row damerau_levenshtein preserves exact OSA distances.
+    assert_eq!(damerau_levenshtein("", "abc"), 3);
+    assert_eq!(damerau_levenshtein("abc", ""), 3);
+    assert_eq!(damerau_levenshtein("ca", "abc"), 3);
+    assert_eq!(damerau_levenshtein("ab", "ba"), 1);
+    assert_eq!(
+        damerau_levenshtein(&"x".repeat(1_000), &format!("{}y", "x".repeat(999))),
+        1
     );
 }

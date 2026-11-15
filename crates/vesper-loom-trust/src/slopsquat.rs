@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use vesper_loom_calculus::PackageName;
 
 pub const SLOPSQUAT_SCHEMA_VERSION: u32 = 1;
+pub const MAX_PACKAGE_NAME_LEN: usize = 256;
 
 /// Catalog metadata evaluated when admitting a dependency into `Loom.toml`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -48,6 +49,7 @@ impl Default for QuarantinePolicy {
 #[serde(rename_all = "snake_case")]
 pub enum QuarantineReason {
     MissingFromCatalog,
+    OversizedPackageName,
     EditDistanceTyposquat,
     IdentifierConflation,
     StdNamespaceImpersonation,
@@ -109,41 +111,64 @@ pub fn canonical_conflation_key(text: &str) -> String {
     out
 }
 
-/// Computes optimal string alignment (restricted Damerau-Levenshtein) distance over ASCII package strings.
+/// Computes optimal string alignment (restricted Damerau-Levenshtein) distance over ASCII package strings
+/// using O(min(|a|, |b|)) memory.
 pub fn damerau_levenshtein(a: &str, b: &str) -> usize {
-    let a = a.as_bytes();
-    let b = b.as_bytes();
+    damerau_levenshtein_inner(a, b, None).expect("unbounded distance always returns Some")
+}
+
+fn bounded_damerau_levenshtein(a: &str, b: &str, max_dist: usize) -> Option<usize> {
+    if a.len().abs_diff(b.len()) > max_dist {
+        return None;
+    }
+    damerau_levenshtein_inner(a, b, Some(max_dist))
+}
+
+fn damerau_levenshtein_inner(a: &str, b: &str, max_dist: Option<usize>) -> Option<usize> {
+    let mut a = a.as_bytes();
+    let mut b = b.as_bytes();
+    if a.len() < b.len() {
+        std::mem::swap(&mut a, &mut b);
+    }
     let n = a.len();
     let m = b.len();
-    if n == 0 {
-        return m;
-    }
     if m == 0 {
-        return n;
+        return max_dist.map_or(Some(n), |limit| (n <= limit).then_some(n));
     }
     let width = m + 1;
-    let mut dp = vec![0usize; (n + 1) * width];
-    for i in 0..=n {
-        dp[i * width] = i;
-    }
-    for (j, cell) in dp[..width].iter_mut().enumerate() {
-        *cell = j;
-    }
+    let mut prev2 = vec![0usize; width];
+    let mut prev = (0..width).collect::<Vec<_>>();
+    let mut curr = vec![0usize; width];
+    let mut prev_row_min = 0usize;
+
     for i in 1..=n {
+        curr[0] = i;
+        let mut row_min = i;
         for j in 1..=m {
             let cost = usize::from(a[i - 1] != b[j - 1]);
-            let del = dp[(i - 1) * width + j] + 1;
-            let ins = dp[i * width + (j - 1)] + 1;
-            let sub = dp[(i - 1) * width + (j - 1)] + cost;
+            let del = prev[j] + 1;
+            let ins = curr[j - 1] + 1;
+            let sub = prev[j - 1] + cost;
             let mut best = del.min(ins).min(sub);
             if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
-                let trans = dp[(i - 2) * width + (j - 2)] + 1;
+                let trans = prev2[j - 2] + 1;
                 best = best.min(trans);
             }
-            dp[i * width + j] = best;
+            curr[j] = best;
+            row_min = row_min.min(best);
         }
+        if let Some(limit) = max_dist
+            && row_min > limit
+            && prev_row_min > limit
+        {
+            return None;
+        }
+        prev_row_min = row_min;
+        std::mem::swap(&mut prev2, &mut prev);
+        std::mem::swap(&mut prev, &mut curr);
     }
-    dp[n * width + m]
+    let dist = prev[m];
+    max_dist.map_or(Some(dist), |limit| (dist <= limit).then_some(dist))
 }
 
 fn is_std_impersonation(org: &str, candidate: &PackageName) -> bool {
@@ -166,10 +191,20 @@ pub fn screen_package_admission(
 ) -> QuarantineReport {
     let mut findings = Vec::new();
     let (cand_org, cand_pkg) = split_package(candidate);
-    let cand_full = format!("{cand_org}/{cand_pkg}");
-    let cand_full_key = canonical_conflation_key(&cand_full);
-    let cand_org_key = canonical_conflation_key(cand_org);
-    let cand_pkg_key = canonical_conflation_key(cand_pkg);
+    let candidate_oversized = candidate.as_str().len() > MAX_PACKAGE_NAME_LEN;
+    if candidate_oversized {
+        findings.push(QuarantineFinding {
+            reason: QuarantineReason::OversizedPackageName,
+            similar_to: None,
+            edit_distance: None,
+            message: format!(
+                "package name '{}' ({} bytes) exceeds maximum supported length {}",
+                candidate.as_str(),
+                candidate.as_str().len(),
+                MAX_PACKAGE_NAME_LEN
+            ),
+        });
+    }
 
     let exact_entry = catalog.iter().find(|e| &e.package == candidate);
     if exact_entry.is_none() {
@@ -195,63 +230,81 @@ pub fn screen_package_admission(
         });
     }
 
-    for other in catalog {
-        if &other.package == candidate {
-            continue;
-        }
-        if let Some(entry) = exact_entry
-            && entry.org_created_at < other.org_created_at
-        {
-            continue;
-        }
-        let (other_org, other_pkg) = split_package(&other.package);
-        let other_full = format!("{other_org}/{other_pkg}");
-        let other_full_key = canonical_conflation_key(&other_full);
-        let other_org_key = canonical_conflation_key(other_org);
-        let other_pkg_key = canonical_conflation_key(other_pkg);
+    if !candidate_oversized {
+        let cand_full = format!("{cand_org}/{cand_pkg}");
+        let cand_full_key = canonical_conflation_key(&cand_full);
+        let cand_org_key = canonical_conflation_key(cand_org);
+        let cand_pkg_key = canonical_conflation_key(cand_pkg);
 
-        let conflated = (cand_full_key == other_full_key && cand_full != other_full)
-            || (cand_pkg_key == other_pkg_key
-                && cand_org_key == other_org_key
-                && cand_full != other_full)
-            || (cand_pkg == other_pkg && cand_org_key == other_org_key && cand_org != other_org);
-        if conflated {
-            findings.push(QuarantineFinding {
-                reason: QuarantineReason::IdentifierConflation,
-                similar_to: Some(other.package.clone()),
-                edit_distance: Some(damerau_levenshtein(&cand_full, &other_full)),
-                message: format!(
-                    "candidate '{}' conflates delimiter or lookalike characters with '{}'",
-                    candidate.as_str(),
-                    other.package.as_str()
-                ),
-            });
-            continue;
-        }
+        for other in catalog {
+            if &other.package == candidate || other.package.as_str().len() > MAX_PACKAGE_NAME_LEN {
+                continue;
+            }
+            let (other_org, other_pkg) = split_package(&other.package);
+            let other_full = format!("{other_org}/{other_pkg}");
+            let other_full_key = canonical_conflation_key(&other_full);
+            let other_org_key = canonical_conflation_key(other_org);
+            let other_pkg_key = canonical_conflation_key(other_pkg);
 
-        let pkg_dist = damerau_levenshtein(cand_pkg, other_pkg);
-        let org_dist = damerau_levenshtein(cand_org, other_org);
-        let full_dist = damerau_levenshtein(&cand_full, &other_full);
-        let near_match =
-            (cand_org == other_org && pkg_dist > 0 && pkg_dist <= policy.max_edit_distance)
-                || (cand_pkg == other_pkg && org_dist > 0 && org_dist <= policy.max_edit_distance)
-                || (full_dist > 0 && full_dist <= policy.max_edit_distance);
-        if near_match {
-            let reported = if cand_org == other_org {
-                pkg_dist
+            let conflated = (cand_full_key == other_full_key && cand_full != other_full)
+                || (cand_pkg_key == other_pkg_key
+                    && cand_org_key == other_org_key
+                    && cand_full != other_full)
+                || (cand_pkg == other_pkg
+                    && cand_org_key == other_org_key
+                    && cand_org != other_org);
+            if conflated {
+                findings.push(QuarantineFinding {
+                    reason: QuarantineReason::IdentifierConflation,
+                    similar_to: Some(other.package.clone()),
+                    edit_distance: Some(damerau_levenshtein(&cand_full, &other_full)),
+                    message: format!(
+                        "candidate '{}' conflates delimiter or lookalike characters with '{}'",
+                        candidate.as_str(),
+                        other.package.as_str()
+                    ),
+                });
+                continue;
+            }
+
+            let pkg_dist = if cand_org == other_org {
+                bounded_damerau_levenshtein(cand_pkg, other_pkg, policy.max_edit_distance)
             } else {
-                full_dist
+                None
             };
-            findings.push(QuarantineFinding {
-                reason: QuarantineReason::EditDistanceTyposquat,
-                similar_to: Some(other.package.clone()),
-                edit_distance: Some(reported),
-                message: format!(
-                    "candidate '{}' is within edit distance {reported} of existing package '{}'",
-                    candidate.as_str(),
-                    other.package.as_str()
-                ),
-            });
+            let org_dist = if cand_pkg == other_pkg {
+                bounded_damerau_levenshtein(cand_org, other_org, policy.max_edit_distance)
+            } else {
+                None
+            };
+            let full_dist =
+                bounded_damerau_levenshtein(&cand_full, &other_full, policy.max_edit_distance);
+            let near_match = pkg_dist.is_some_and(|d| d > 0)
+                || org_dist.is_some_and(|d| d > 0)
+                || full_dist.is_some_and(|d| d > 0);
+            if near_match {
+                let reported = if cand_org == other_org {
+                    pkg_dist
+                        .filter(|&d| d > 0)
+                        .or(full_dist)
+                        .unwrap_or_default()
+                } else {
+                    full_dist
+                        .filter(|&d| d > 0)
+                        .or(org_dist)
+                        .unwrap_or_default()
+                };
+                findings.push(QuarantineFinding {
+                    reason: QuarantineReason::EditDistanceTyposquat,
+                    similar_to: Some(other.package.clone()),
+                    edit_distance: Some(reported),
+                    message: format!(
+                        "candidate '{}' is within edit distance {reported} of existing package '{}'",
+                        candidate.as_str(),
+                        other.package.as_str()
+                    ),
+                });
+            }
         }
     }
 
@@ -298,7 +351,9 @@ pub fn screen_package_admission(
     let hard_reject = findings.iter().any(|f| {
         matches!(
             f.reason,
-            QuarantineReason::MissingFromCatalog | QuarantineReason::MissingOidcProvenance
+            QuarantineReason::MissingFromCatalog
+                | QuarantineReason::OversizedPackageName
+                | QuarantineReason::MissingOidcProvenance
         )
     });
     let decision = if findings.is_empty() {
