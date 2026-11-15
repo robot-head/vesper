@@ -17,7 +17,7 @@ const MAX_INPUT_BYTES: u64 = 128 * 1024 * 1024;
 const MAX_FILES: usize = 4096;
 const MAX_CAPTURE: usize = 8 * 1024 * 1024;
 const MARKER: &str = "VESPER_PROOF_AUDIT_V1:";
-const HELP: &str = "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--json]\n\nReplay existing local Lean 4.24.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx is always forbidden.\n";
+const HELP: &str = "Usage: vesper proof-audit <Module> --root <artifact-directory> --theorem <Qualified.name> [--theorem ...] [--allow-axiom <Name>] [--lean <path>] [--timeout <seconds>] [--json]\n\nReplay existing local Lean 4.35.0 artifacts through the kernel and audit named theorems.\nArtifact imports disable package environment extensions and plugins.\nThe selected Lean toolchain and artifact parser remain trusted; this is not an OS sandbox, provenance certificate or reusable proof-cache approval.\nThe default axiom policy is empty; sorryAx is always forbidden.\n";
 
 #[derive(Default)]
 struct Options {
@@ -454,8 +454,8 @@ pub(crate) fn lean_toolchain(launcher: &str) -> Result<LeanToolchain, String> {
         .map_err(|e| e.to_string())?
         .trim()
         .to_string();
-    if !version.contains("version 4.24.0,") {
-        return Err(format!("proof-audit requires Lean 4.24.0; found {version}"));
+    if !version.contains("version 4.35.0,") {
+        return Err(format!("proof-audit requires Lean 4.35.0; found {version}"));
     }
     Ok(LeanToolchain {
         prefix,
@@ -545,7 +545,9 @@ fn audit(options: &Options, root: &Path, module: &str) -> Result<AuditReport, St
     }
     let output = execute(
         command
-            .args(["-j1", "-M4096", "--run"])
+            // Lean 4.35 full-library artifacts require independently loaded
+            // imported and trusted environments during kernel replay.
+            .args(["-j1", "-M8192", "--run"])
             .arg(helper)
             .arg(request),
         Duration::from_secs(options.timeout.unwrap_or(30)),

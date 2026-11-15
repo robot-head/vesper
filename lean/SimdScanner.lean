@@ -161,9 +161,9 @@ theorem runLoop_succ {σ : Type} (guard : σ → Bool) (body : σ → σ) (fuel 
   unfold runLoop
   rw [repeat_succ']
   by_cases h : guard s
-  · simp only [loopStep, h, if_true]
+  · simp only [loopStep, h, ite_true]
   · have hf : guard s = false := by simpa using h
-    simp only [loopStep, hf, Bool.false_eq_true, if_false, repeat_exited]
+    simp only [loopStep, hf, Bool.false_eq_true, ite_false, repeat_exited]
 
 def vecLoop (mem : Mem) (input : Word) (needle : Vec16) (full : Word) :
     Nat → VState → Option VState :=
@@ -243,12 +243,12 @@ theorem fullLen_toNat (len : Word) : (fullLen len).toNat = len.toNat / 16 * 16 :
 /-- Per-lane mask conversion: `uextend(band(0xff, 1)) = 1`, `uextend(band(0, 1)) = 0`. -/
 theorem mask_lane_bit (p : Prop) [Decidable p] :
     uextend64 ((if p then BitVec.allOnes 8 else 0#8) &&& 1#8) = if p then 1#64 else 0#64 := by
-  by_cases h : p <;> simp only [h, if_true, if_false] <;> decide
+  by_cases h : p <;> simp only [h, ite_true, ite_false] <;> decide
 
 theorem scalar_eq_bit (x y : Byte) :
     uextend64 (icmpEqByte x y) = if x = y then 1#64 else 0#64 := by
   unfold icmpEqByte
-  by_cases h : x = y <;> simp only [h, if_true, if_false] <;> decide
+  by_cases h : x = y <;> simp only [h, ite_true, ite_false] <;> decide
 
 theorem toNat_add_of_lt {a b : Word} (h : a.toNat + b.toNat < 2 ^ 64) :
     (a + b).toNat = a.toNat + b.toNat := by
@@ -275,7 +275,7 @@ theorem refCount_append (a b : List Byte) (d : Byte) :
 
 theorem take_succ_of_lt {l : List Byte} {i : Nat} (h : i < l.length) :
     l.take (i + 1) = l.take i ++ [l[i]] := by
-  rw [List.take_succ, List.getElem?_eq_getElem h]; rfl
+  rw [List.take_add_one, List.getElem?_eq_getElem h]; rfl
 
 theorem refCount_single (b d : Byte) : refCount [b] d = if b = d then 1 else 0 := by
   unfold refCount; by_cases h : b = d <;> simp [h]
@@ -445,7 +445,7 @@ theorem vecLoop_spec {mem : Mem} {input len : Word} {data : List Byte} {d : Byte
     by_cases hmore : 16 * j < len.toNat / 16 * 16
     · have hu : s.off.ult (fullLen len) = true := by
         rw [ult_iff_toNat, fullLen_toNat, inv.off]; exact hmore
-      simp only [vecLoop, runLoop_succ, hu, if_true]
+      simp only [vecLoop, runLoop_succ, hu, ite_true]
       exact ih (j + 1) _ (vecBody_inv hm inv hmore) (by omega)
     · have hj : j = len.toNat / 16 := by have := inv.bound; omega
       subst hj
@@ -512,7 +512,7 @@ theorem scalarLoop_spec {mem : Mem} {input len : Word} {data : List Byte} {d : B
     intro k s inv hf
     by_cases hmore : k < len.toNat % 16
     · have hu : s.off.ult len = true := by rw [ult_iff_toNat, inv.off]; omega
-      simp only [scalarLoop, runLoop_succ, hu, if_true]
+      simp only [scalarLoop, runLoop_succ, hu, ite_true]
       exact ih (k + 1) _ (scalarBody_inv hm inv hmore) (by omega)
     · have hk : k = len.toNat % 16 := by have := inv.bound; omega
       subst hk
@@ -585,7 +585,7 @@ theorem vecLoop_insufficient_fuel {mem : Mem} {input len : Word} {data : List By
     have hmore : 16 * j < len.toNat / 16 * 16 := by omega
     have hu : s.off.ult (fullLen len) = true := by
       rw [ult_iff_toNat, fullLen_toNat, inv.off]; exact hmore
-    simp only [vecLoop, runLoop_succ, hu, if_true]
+    simp only [vecLoop, runLoop_succ, hu, ite_true]
     exact ih (j + 1) _ (vecBody_inv hm inv hmore) (by omega)
 
 /-! ## Concrete bounds lemmas -/

@@ -91,14 +91,14 @@ fn lean() -> Option<PathBuf> {
         .unwrap_or_else(|| PathBuf::from(selected));
     let version = Command::new(&binary).arg("--version").output();
     let available = version.as_ref().is_ok_and(|v| {
-        v.status.success() && String::from_utf8_lossy(&v.stdout).contains("version 4.24.0,")
+        v.status.success() && String::from_utf8_lossy(&v.stdout).contains("version 4.35.0,")
     });
     if !available {
         assert!(
             configured.is_none(),
-            "configured actual Lean4.24.0 unavailable: {version:?}"
+            "configured actual Lean4.35.0 unavailable: {version:?}"
         );
-        eprintln!("Lean4.24.0 unavailable; configure VESPER_LEAN for actual kernel acceptance");
+        eprintln!("Lean4.35.0 unavailable; configure VESPER_LEAN for actual kernel acceptance");
         return None;
     }
     Some(binary)
@@ -169,7 +169,7 @@ impl Fixture {
         );
         assert_eq!(value["input_bytes"], self.original.len());
         assert!(value["document_nodes"].as_u64().unwrap() > 0);
-        assert!(value["lean_version"].as_str().unwrap().contains("4.24.0"));
+        assert!(value["lean_version"].as_str().unwrap().contains("4.35.0"));
         let audit = &value["audit"];
         assert_eq!(audit["accepted"], true);
         assert_eq!(audit["kernel_replayed"], true);

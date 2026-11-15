@@ -51,7 +51,7 @@ theorem node_subsumeBy_const_union (ρ : Valuation) (same : Bool) (n1 n2 : Node)
   next hg => split <;> rfl
   next hg =>
     have hb := subsumeBy_removed_const_bound ρ same n1 n2 hp
-      (eq_false_of_ne_true hg)
+      (Bool.eq_false_of_ne_true hg)
     split <;> simp only <;> omega
 
 /-- Variable filtering uses the actual subsumeVars helper, with no sorting premise. -/
@@ -78,7 +78,7 @@ theorem node_subsumeBy_union (ρ : Valuation) (same : Bool)
     have hv := node_subsumeBy_vars_union ρ same n1 n2
     simp only [nodeValue, he, he2, ite_true]
     omega
-  · have hf := eq_false_of_ne_true he
+  · have hf := Bool.eq_false_of_ne_true he
     simp [nodeValue, hf]
 
 /-- The public wrapper's actual subset test supplies the semantic inclusion. -/
@@ -106,10 +106,10 @@ theorem node_subsumeBy_self (ρ : Valuation) (p : List Name) (n : Node)
     next hg => rfl
     next hg =>
       have hb := subsumeBy_removed_const_le_vars ρ true n n hp (Or.inl rfl)
-        (eq_false_of_ne_true hg)
+        (Bool.eq_false_of_ne_true hg)
       simp only [Bool.true_or, ite_true]
       omega
-  · simp [nodeValue, eq_false_of_ne_true he]
+  · simp [nodeValue, Bool.eq_false_of_ne_true he]
 
 /-- The public self wrapper also preserves a well-formed node exactly. -/
 theorem node_subsume_self (ρ : Valuation) (p : List Name) (n : Node)

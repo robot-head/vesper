@@ -2,6 +2,13 @@
 
 `compare(old, new)` conservatively classifies the supported source-interface fragment as patch, minor, major or unknown. Its compatibility result remains independent of package version numbers. See [package workflows](../../docs/package-workflows.md) for the interface fragment and its limits.
 
+Resolved interface DTOs can also represent an inclusive constant `i64` range as
+`{"kind":"i64_range","min":0,"max":10}`. Range inclusion supports
+contravariant input and covariant result comparisons; `inout` and other
+invariant positions remain invariant. Reversed bounds produce an unknown
+comparison. Source interface export does not yet emit these refinements, and
+this fragment does not decide general predicates or synthesize SMT witnesses.
+
 Resolved interface DTOs may attach a constant `ceiling` to an effect capability.
 For the same capability, lowering the ceiling is compatible and raising it is
 breaking. Comparing a ceiling to an absent ceiling is unknown. Source export

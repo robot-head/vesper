@@ -49,10 +49,11 @@ theorem prepare_sound (Sig : Nat → MetatheoryFull.EffSig) (c : Config)
       | some value =>
           simp [prepare, hv] at h
           subst plan
-          simpa [Replacement.materialize, PlannedAction.full, PlannedAction.apply,
-            Config.live, RuntimeExpr.erase, asValue_erase hv, runtimeExpr_erase_subst] using
-            (MetatheoryFull.Head.letV (Sig := Sig) (L := c.live)
-              (n := c.ledger.size) (e2 := body.erase) (runtimeValue_isVal value))
+          have result := MetatheoryFull.Head.letV (Sig := Sig) (L := c.live)
+            (n := c.ledger.size) (e2 := body.erase) (runtimeValue_isVal value)
+          simp [Replacement.materialize, PlannedAction.full, PlannedAction.apply,
+            RuntimeExpr.erase, asValue_erase hv, runtimeExpr_erase_subst] at result ⊢
+          exact result
   | unpack a body =>
       cases a with
       | var _ => simp [prepare] at h
@@ -64,12 +65,13 @@ theorem prepare_sound (Sig : Nat → MetatheoryFull.EffSig) (c : Config)
           | pair left right =>
               simp [prepare] at h
               subst plan
-              simpa [Replacement.materialize, PlannedAction.full, PlannedAction.apply,
-                Config.live, RuntimeExpr.erase, RuntimeAtom.erase, RuntimeValue.erase,
-                runtimeExpr_erase_unpack_subst] using
-                (MetatheoryFull.Head.letPairV (Sig := Sig) (L := c.live)
-                  (n := c.ledger.size) (e := body.erase)
-                  (runtimeValue_isVal left) (runtimeValue_isVal right))
+              have result := MetatheoryFull.Head.letPairV (Sig := Sig) (L := c.live)
+                (n := c.ledger.size) (e := body.erase)
+                (runtimeValue_isVal left) (runtimeValue_isVal right)
+              simp [Replacement.materialize, PlannedAction.full, PlannedAction.apply,
+                RuntimeExpr.erase, RuntimeAtom.erase, RuntimeValue.erase,
+                runtimeExpr_erase_unpack_subst] at result ⊢
+              exact result
   | ifz a zero nonzero =>
       cases a with
       | var _ => simp [prepare] at h
@@ -141,7 +143,8 @@ theorem step_sound (Sig : Nat → MetatheoryFull.EffSig) {l : Limits} {count : N
                       rw [runtimeContext_erase_plug] at source
                       have head := prepare_sound Sig c hp
                       have result := MetatheoryFull.Step.ctx focus.context.erase head
-                      simpa [Config.erase, ← source, runtimeContext_erase_plug, Config.live] using result
+                      simp [Config.erase, ← source, runtimeContext_erase_plug] at result ⊢
+                      exact result
 
 theorem terminal_isVal {l : Limits} {count : Nat} {c : Config} {value : RuntimeValue}
     (h : step l count c = .terminal value) : MetatheoryFull.IsVal c.expr.erase := by
@@ -284,7 +287,7 @@ def resourceAction (action : MetatheoryFull.Act) : Bool := action != .silent
 
 theorem planned_event_projection (size : Nat) (action : PlannedAction) :
     (action.event size).toList.map eventAct = [action.full size].filter resourceAction := by
-  cases action <;> simp [PlannedAction.event, PlannedAction.full, eventAct, resourceAction]
+  cases action <;> rfl
 
 theorem step_event_projection {l : Limits} {count : Nat} {c next : Config}
     {action : MetatheoryFull.Act} {event : Option ResourceEvent}
@@ -628,11 +631,11 @@ theorem action_preflight_error {l : Limits} {ledgerSize eventCount : Nat}
       by_cases hr : l.resources < ledgerSize + 1 <;>
         by_cases he : l.events < eventCount + 1 <;>
           simp_all [PlannedAction.preflight, ActionExceeds, bind, Except.bind,
-            pure, Except.pure] <;> subst reason <;> simp_all
+            pure, Except.pure,throw,throwThe,MonadExceptOf.throw] <;> subst reason <;> simp_all
   | consume site id =>
       by_cases he : l.events < eventCount + 1 <;>
         simp_all [PlannedAction.preflight, ActionExceeds, bind, Except.bind,
-          pure, Except.pure] <;> subst reason <;> simp_all
+          pure, Except.pure,throw,throwThe,MonadExceptOf.throw] <;> subst reason <;> simp_all
 
 theorem locate_error_exceeds {fuel : Nat} {e : RuntimeExpr} {reason : CapacityError}
     (h : locate fuel e = .error reason) :

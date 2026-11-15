@@ -138,7 +138,7 @@ theorem redo_skips (p : Nat) :
   | r :: a, pg, h => by
     have hr : redoPage p pg r = pg := by
       unfold redoPage
-      rw [if_neg]
+      rw [ite_eq_right]
       intro ⟨hp, hl⟩
       have := h r (by simp) hp
       omega
@@ -156,9 +156,9 @@ theorem forward_mono (p : Nat) :
     · have h1 := h r (by simp) hp
       have h2 := forward_mono p b ⟨r.lsn, r.val⟩ ho.2
         (fun r' hm _ => Nat.le_of_lt (ho.1 r' hm))
-      simp only [pageStep, hp, if_true]
+      simp only [pageStep, hp, ite_true]
       exact Nat.le_trans h1 h2
-    · simp only [pageStep, hp, if_false]
+    · simp only [pageStep, hp, ite_false]
       exact forward_mono p b pg ho.2 (fun r' hm => h r' (by simp [hm]))
 
 theorem forward_bounds (p : Nat) :
@@ -363,7 +363,7 @@ theorem undo_commutes (loser : Nat → Bool) (k v : Nat) :
           have := h a (by simp) e
           rw [hl] at this
           exact Bool.noConfusion this
-        simp only [if_true]
+        simp only [ite_true]
         exact set_comm s a.key k a.before v hk
     simp only [List.foldl_cons]
     rw [step]
@@ -413,7 +413,7 @@ theorem undo_restores_winners (loser : Nat → Bool) (s0 : Table) (log : List Wr
           pre.filter (fun w => !loser w.txn) := by
         simp [List.filter_append, hl]
       have hstep : undoStep loser (set (forward s0 pre) w.key w.after) w = forward s0 pre := by
-        simp only [undoStep, hl, if_true]
+        simp only [undoStep, hl, ite_true]
         rw [set_set, hb, set_self]
       rw [hstep, hfilt]
       exact ih hcp hsp

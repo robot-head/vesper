@@ -107,6 +107,15 @@ def sameInfo (left right : ConstantInfo) : Bool :=
         | _,_ => false
   | _,_ => false
 
+/-- Toolchain modules may realize the same theorem with different proof bodies.
+Package shadowing is rejected from raw module entries before this comparison;
+only trusted theorem headers may vary in their proof, and replay uses the
+independently imported base. Package declarations retain exact comparisons. -/
+def sameTrustedInfo (left right : ConstantInfo) : Bool :=
+  match left, right with
+  | .thmInfo a, .thmInfo b => a.toConstantVal == b.toConstantVal && a.all == b.all
+  | _, _ => sameInfo left right
+
 def load (names : Array Name) : IO Environment :=
   importModules (names.map fun name => {module := name}) {} 0 (plugins := #[]) (loadExts := false)
 
@@ -267,7 +276,7 @@ def verifyEnvironment (expected : Std.HashMap Name ConstantInfo) (base actual : 
     unless sameInfo info observed do fail s!"logical ConstantInfo changed: {name}"
   let count ← actual.constants.foldM (init := 0) fun count name info => do
     if let some trusted := base.find? name then
-      unless sameInfo trusted info do fail "trusted constant changed"
+      unless sameTrustedInfo trusted info do fail "trusted constant changed"
       pure count
     else
       unless expected.contains name do fail s!"unexpected logical declaration: {name}"
@@ -353,7 +362,7 @@ def isTodo (name : Name) : M Bool := do
   return false
 
 def addChecked (declaration : Declaration) : M Unit := do
-  match (← get).env.addDeclCore 0 declaration none with
+  match (← get).env.addDeclCore 0 0 declaration none with
   | .ok env => modify fun state => { state with env }
   | .error error =>
     throw <| IO.userError <| (← error.toMessageData {} |>.toString)
@@ -480,8 +489,13 @@ def snapshot (request : Request) : IO Json := do
       originalModules := originalModules.push ⟨name,path⟩
     else fail "import escaped artifact/toolchain roots"
   unless packages.contains request.moduleName do fail "original module is not a package artifact"
-  trusted := trusted.insert `Lean |>.insert `Std |>.insert `Lean.Replay
-  let trustedNames := trusted.toArray.qsort Name.lt
+  let mut trustedImports : NameSet := {}
+  for name in original.header.moduleNames, data in original.header.moduleData do
+    if packages.contains name then
+      for dependency in data.imports do
+        if trusted.contains dependency.module then
+          trustedImports := trustedImports.insert dependency.module
+  let trustedNames := trustedImports.toArray.qsort Name.lt
   searchPathRef.set [library]
   let base ← load trustedNames
   let mut trustedModules : Array ModuleRecord := #[]
@@ -538,7 +552,7 @@ def snapshot (request : Request) : IO Json := do
     fail "canonical ConstantInfo does not match an actual raw occurrence"
   let rawCount ← original.constants.foldM (init := 0) fun count name info => do
     if let some trustedInfo := base.find? name then
-      unless sameInfo trustedInfo info do fail "trusted declaration changed in original import"
+      unless sameTrustedInfo trustedInfo info do fail "trusted declaration changed in original import"
       pure count
     else
       let some expected := canonical[name]? | fail "original import has unassociated package declaration"
@@ -597,7 +611,7 @@ def snapshot (request : Request) : IO Json := do
         let aliasValue : TheoremVal := {value with name := aliasName, all := [aliasName]}
         unless aliasValue.type == value.type && aliasValue.levelParams == value.levelParams &&
             aliasValue.value == value.value do fail "alternate proof body association changed"
-        match checkedAliases.toKernelEnv.addDeclCore 0 (.thmDecl aliasValue) none with
+        match checkedAliases.toKernelEnv.addDeclCore 0 0 (.thmDecl aliasValue) none with
         | .error _ => fail s!"kernel rejected alternate proof alias: {aliasName}"
         | .ok checked => checkedAliases := Environment.ofKernelEnv checked
         exported := exported.insert aliasName (.thmInfo aliasValue)

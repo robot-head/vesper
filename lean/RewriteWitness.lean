@@ -56,16 +56,16 @@ def literalValue (k : Kind) (n : Int) (h : Fits k n) : Value k :=
   ⟨BitVec.ofInt k.width n⟩
 
 -- Work directly over Nat here. Some Std signed-bound helpers, and omega
--- applied to an unsplit conjunction, introduce Classical.choice in Lean 4.24.
+-- applied to an unsplit conjunction, introduce Classical.choice in Lean 4.35.
 private theorem signedNatBounds (n : Nat) (h : n < 18446744073709551616) :
     -9223372036854775808 ≤
       (if 2 * n < 18446744073709551616 then (n : Int) else (n : Int) - 18446744073709551616) ∧
     (if 2 * n < 18446744073709551616 then (n : Int) else (n : Int) - 18446744073709551616)
       ≤ 9223372036854775807 := by
   by_cases hc : 2 * n < 18446744073709551616
-  · simp only [if_pos hc]
+  · simp only [ite_eq_left hc]
     constructor <;> omega
-  · simp only [if_neg hc]
+  · simp only [ite_eq_right hc]
     constructor <;> omega
 
 theorem value_fits {k : Kind} (v : Value k) : Fits k (toInt v) := by
@@ -205,7 +205,7 @@ private theorem oneBits (k : Kind) : (oneValue k).bits = BitVec.ofNat k.width 1 
 private theorem checkedExact {k : Kind} (op : IntOp) (a b : Value k) (n : Int)
     (hn : Fits k n) (h : exactInt op (toInt a) (toInt b) = n) :
     checkedValue op a b = some (literalValue k n hn) := by
-  simp only [checkedValue, h, dif_pos hn]
+  simp only [checkedValue, h, dite_eq_left hn]
 
 private theorem cAddZero {k : Kind} (a : Value k) :
     checkedValue .add a (zeroValue k) = some a := by

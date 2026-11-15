@@ -31,7 +31,7 @@ theorem treeEntriesLookup_none_of_not_mem {α : Type u} (n : Name)
     have ht : n ∉ xs.map Prod.fst := by
       intro hm
       exact hn (by simp [hm])
-    rw [treeEntriesLookup_cons, if_neg hne]
+    rw [treeEntriesLookup_cons, ite_eq_right hne]
     exact ih ht
 
 /-- Key projection agrees with the actual ordered insertion even on raw lists. -/
@@ -111,7 +111,7 @@ theorem modifyAt_lookup_target {α : Type u} [Inhabited α] (f : α → α) (n :
         intro he
         subst n
         simp [name_cmp_refl] at hc
-      simp only [Normalize.modifyAt, hc, treeEntriesLookup_cons, if_neg hne]
+      simp only [Normalize.modifyAt, hc, treeEntriesLookup_cons, ite_eq_right hne]
       exact ih ht
 
 /-- The real unsorted updater inserts a fresh default-derived entry before a

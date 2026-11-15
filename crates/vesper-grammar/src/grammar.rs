@@ -26,6 +26,8 @@ pub enum Rule {
     Blob,
     /// Canonical length + exact child-rule payload, enabling bounded nesting.
     Frame(usize),
+    /// Three-byte big-endian length plus an exact child-rule payload.
+    U24Frame(usize),
     Sequence(Vec<usize>),
     Choice(Vec<Branch>),
     /// Exactly `count` child parses; no count bytes are present on the wire.
@@ -113,7 +115,9 @@ impl<'g> Grammar<'g> {
         let mut literals = 0;
         for (id, rule) in rules.iter().enumerate() {
             let (single, sequence, branches): (Option<usize>, &[usize], &[Branch]) = match rule {
-                Rule::Frame(child) | Rule::Counted(child) => (Some(*child), &[], &[]),
+                Rule::Frame(child) | Rule::U24Frame(child) | Rule::Counted(child) => {
+                    (Some(*child), &[], &[])
+                }
                 Rule::Repeat { rule, count } => {
                     if *count > limits.max_repetitions {
                         return Err(Error::new(ErrorKind::CountLimit, id));
@@ -255,7 +259,7 @@ fn build(
             }
         }
         Rule::Uleb128 | Rule::Blob => result.first = [u64::MAX; 4],
-        Rule::Frame(child) => {
+        Rule::Frame(child) | Rule::U24Frame(child) => {
             let child = build(*child, rules, meta, work, max_depth, depth + 1)?;
             result.first = [u64::MAX; 4];
             result.height = add(child.height, 1)?;
@@ -308,6 +312,19 @@ fn build(
     bound(result.height, max_depth, ErrorKind::DepthLimit)?;
     meta[id] = result;
     Ok(result)
+}
+
+// Decode within the caller's current frame and charge every header byte.
+fn decode_u24(input: &[u8], work: &mut usize) -> Result<(u64, usize)> {
+    let mut value = 0u64;
+    for i in 0..3 {
+        charge(work, 1)?;
+        let byte = *input
+            .get(i)
+            .ok_or(Error::new(ErrorKind::UnexpectedEof, i))?;
+        value = (value << 8) | u64::from(byte);
+    }
+    Ok((value, 3))
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -363,8 +380,20 @@ impl Run<'_, '_, '_> {
             Rule::Uleb128 => {
                 self.captures[event].number = Some(self.number()?);
             }
-            Rule::Blob | Rule::Frame(_) => {
-                let len = self.number()?;
+            Rule::Blob | Rule::Frame(_) | Rule::U24Frame(_) => {
+                let len = if matches!(self.grammar.rules[id], Rule::U24Frame(_)) {
+                    let (value, bytes) =
+                        decode_u24(&self.input[self.pos..self.end], &mut self.work).map_err(
+                            |mut e| {
+                                e.offset += self.pos;
+                                e
+                            },
+                        )?;
+                    self.pos += bytes;
+                    value
+                } else {
+                    self.number()?
+                };
                 let len =
                     usize::try_from(len).map_err(|_| Error::new(ErrorKind::Overflow, self.pos))?;
                 bound(
@@ -378,7 +407,7 @@ impl Run<'_, '_, '_> {
                     return Err(Error::new(ErrorKind::UnexpectedEof, self.end));
                 }
                 self.captures[event].payload = Some(start..end);
-                if let Rule::Frame(child) = &self.grammar.rules[id] {
+                if let Rule::Frame(child) | Rule::U24Frame(child) = &self.grammar.rules[id] {
                     let previous_end = self.end;
                     self.end = end;
                     self.rule(*child, depth + 1)?;

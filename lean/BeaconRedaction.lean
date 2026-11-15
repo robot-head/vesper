@@ -217,9 +217,9 @@ theorem delta_strings (cap : Nat) (d : List String) (fields : List Nat) (strs : 
     (s : String) (h : s ∈ (encodeBatch cap d fields strs).2.delta) : s ∈ d ∨ s ∈ strs := by
   unfold encodeBatch at h
   by_cases hc : (strs.foldl intern d).length ≤ cap
-  · rw [if_pos hc] at h
+  · rw [ite_eq_left hc] at h
     exact mem_foldl_intern strs d s (List.mem_of_mem_drop h)
-  · rw [if_neg hc] at h
+  · rw [ite_eq_right hc] at h
     rcases mem_foldl_intern strs [] s h with h | h
     · simp at h
     · exact Or.inr h
@@ -228,9 +228,9 @@ theorem dict_strings (cap : Nat) (d : List String) (fields : List Nat) (strs : L
     (s : String) (h : s ∈ (encodeBatch cap d fields strs).1) : s ∈ d ∨ s ∈ strs := by
   unfold encodeBatch at h
   by_cases hc : (strs.foldl intern d).length ≤ cap
-  · rw [if_pos hc] at h
+  · rw [ite_eq_left hc] at h
     exact mem_foldl_intern strs d s h
-  · rw [if_neg hc] at h
+  · rw [ite_eq_right hc] at h
     rcases mem_foldl_intern strs [] s h with h | h
     · simp at h
     · exact Or.inr h

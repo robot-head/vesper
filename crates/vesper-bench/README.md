@@ -56,6 +56,13 @@ It retains the estimate and interval and uses the same assumptions and input
 restrictions; it does not establish measurement provenance or operate the
 existing ratio gate.
 
+`mann_whitney_ranks(first, second)` separately computes exact Mann–Whitney U
+rank counts for two bounded `u64` samples. Counts are doubled to represent tied
+pairs without rounding. It returns no p-value, confidence interval or gate
+decision. Independent-sample inference requires appropriate independence and
+distribution assumptions; ABBA epoch measurements are paired and do not
+automatically satisfy those assumptions.
+
 ## Optional population-median confidence gate
 
 `analyze_pairs(samples, max_regression_bp)` targets the population median of the
