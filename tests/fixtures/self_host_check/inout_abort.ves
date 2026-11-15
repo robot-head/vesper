@@ -1,0 +1,4 @@
+fn effectful() eff [Fail[i64]] {}
+fn bad(inout x: i64) eff [Fail[i64]] {
+    effectful();
+}

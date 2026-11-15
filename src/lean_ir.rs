@@ -133,6 +133,15 @@ fn uses_defs(world: &World, op: &Op) -> (BTreeSet<Local>, BTreeSet<Local>) {
                 }
             }
         }
+        Op::Tiled { args, .. } => {
+            uses.extend(args.iter().map(|a| Local::Value(a.value)));
+            for arg in args.iter().filter(|a| a.pass == Pass::Inout) {
+                if let Some(p) = &arg.place {
+                    uses.insert(Local::Slot(p.root.clone()));
+                    defs.insert(Local::Slot(p.root.clone()));
+                }
+            }
+        }
         _ => {}
     }
     (uses, defs)
@@ -885,6 +894,28 @@ impl Emitter<'_> {
                         }
                     }
                     return Ok(());
+                }
+            }
+            Op::Tiled { op, args, .. } => {
+                let arg_terms = args
+                    .iter()
+                    .map(|a| value(a.value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                let (mutates, term) = nodes::tiled_op_term(op, &arg_terms)?;
+                if mutates {
+                    let place = args
+                        .iter()
+                        .find(|a| a.pass == Pass::Inout)
+                        .and_then(|a| a.place.as_ref())
+                        .ok_or("mutable TiledSeq argument requires a place")?;
+                    out.push(let_value(
+                        syntax::Pattern::Bind(nodes::ident(&place.root)?),
+                        None,
+                        nodes::update_place(place, term)?,
+                    ));
+                    Term::Tuple(vec![])
+                } else {
+                    term
                 }
             }
             _ => return Err("unsupported operation in Lean CFG extraction".into()),
