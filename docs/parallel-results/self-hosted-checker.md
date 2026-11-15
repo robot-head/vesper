@@ -76,7 +76,13 @@ closures, lexical handlers/state/continuations, `?`, projections/partial moves,
 regions, capability labels, open rows, and recursive modal kinds. Constructor
 and pattern field order must follow the declaration; reordering is explicitly
 unsupported. Literal/wildcard match patterns and refutable nested payload patterns are outside
-the constructor-match slice. There is no elaboration or code-generation output.
+the constructor-match slice. Ambiguous unqualified constructors return
+`Unsupported(8)`; qualified constructors remain supported. Function joins need
+identical parameter shapes and a common type already represented by one of the
+source signatures. Incomparable rows/results return `Unsupported(2)`. Passing
+function values whose signatures contain effects (including nested arrows), and
+binding those parameter types under an enclosing nonempty Fail row, return
+`Unsupported(7)` until lexical capability identities are represented. There is no elaboration or code-generation output.
 
 Bounds are 32,767 source bytes, 512 significant tokens, 16 top-level
 declarations, 16 simultaneously recorded bindings (shadow history included),
@@ -93,7 +99,7 @@ metatheoretic soundness, or bootstrap/DDC claim follows from these tests.
 
 ## Validation
 
-On the integrated main baseline above:
+Initial delivery validation at `1df87348ff281dde8671e2563724d6591031b896`:
 
 - `cargo test --locked -p vesper --test self_host_check -- --nocapture`:
   **4 passed**, 0 failed, 176.37 seconds. The 58 acceptance fixtures pin
@@ -142,6 +148,65 @@ negative counts. Unsupported and limit outcomes are counted separately.
 Acceptance fixtures pin expected negative codes independently of the oracle.
 Native tests compare representative success, failure and branch ownership
 programs with the same oracle.
+
+## Lean environment and review follow-up
+
+The previously missing environment is now installed outside the repository:
+
+- Lean/Lake: `/workspace/toolchains/lean-4.24.0-linux`, exact Lean commit
+  `797c613eb9b6d4ec95db23e3e00af9ac6657f24b` (release 4.24.0).
+- Official release ZIP SHA256:
+  `8f2ce2aa6de5ede5847a3e9517a930ede3d6954444f44535155da3250ac7f2fc`.
+- Prepared checker: `/workspace/toolchains/lean4lean42-4faf514-v2`, built by
+  the unchanged `tools/lean4lean42/setup.py` with the genuine Cargo-built
+  `lean4lean42` driver, pinned Lean4Lean `4faf51403bc4cb35cf6666d91fc9c938ae46d3aa`
+  and Batteries `8da40b72fece29b7d3fe3d768bac4c8910ce9bee`.
+- Setup completed all 55 Lake jobs; all 94 controls matched. The genuine
+  schema-2 `vesper.lean4lean42/2` receipt has SHA256
+  `4e55bfe71c0f6595b0ae4f75d1820cffbe1a83f445b02125c8ad8ee1ce81ac2d`.
+- Reusable shell configuration:
+  `source /workspace/.vesper-setup/lean4lean-env.sh`. This also supplies the
+  actual `VLB_CARGO_LOCK` required by the existing build-identity code when
+  the Cargo target directory is outside the checkout.
+- `scripts/ci/check-lean-models.sh`: passed with the installed pinned toolchain.
+- `cargo test --workspace --locked --no-fail-fast` runs against the frozen
+  initial delivery revision with both `VESPER_LEAN` and
+  `VESPER_LEAN4LEAN42_ROOT`. The formerly blocked acceptance target now passes
+  **16/16**, including genuine three-model replay, in 836.83 seconds. The
+  remaining workspace results are tracked in the PR validation notes.
+
+The review fixes are developed in an isolated checkout while that baseline
+suite runs, so its source and fixture inputs remain unchanged. Regressions cover
+callee ownership under shared arguments, common function-result types across
+match/if branches, modes and innermost selection for function Fail payloads,
+reserved builtin declarations, ambiguous constructors, and captured capability
+scope. Existing source handles are retained for representable joins; cases
+requiring synthesized joins or capability identities are explicit typed
+unsupported results, as specified above.
+
+The reviewed checker passes all four focused tests (386.09 seconds while
+running alongside the baseline proof suite and the parser differential test).
+Its corpus contains **442 sources**: **30 accepted, 63 rejected, 349 explicitly
+unsupported/limited**, with exact first-code/span agreement on all 93 supported
+results. There are 79 semantic acceptance fixtures and four explicit unsupported
+regressions, plus the inline malformed/limit controls. Five evaluator/full-unit/
+JIT comparisons pass. Strict Rust 1.100 focused Clippy, workspace Rustfmt,
+canonical formatting of all 90 new `.ves` files, BUILD synchronization and
+whitespace checks pass.
+
+The existing self-hosted front-end target also passes both tests on a 413-source
+snapshot (691.18 seconds under the same concurrent load): all token streams
+match, with 341 CST matches, eight typed unsupported inputs, 64 seed-rejected
+inputs, and 37 native executions. The one fixture added after enumeration,
+`unsupported/function_param_join.ves`, is separately checked through `parse_main`
+and the seed's CST: both produce digest `7736908835817788439`. These timings are
+loaded local acceptance runs, not benchmark or hosted CI claims.
+
+The complete baseline workspace outcome is tracked in the validation notes of
+[PR #624](https://github.com/robot-head/vesper/pull/624). Its tested revision is
+`1df87348`; the reviewed Vesper checker has the separate focused and front-end
+validation above. Rust compiler/runtime and Lean proof source bytes are unchanged
+by the review fixes.
 
 ## Missing language features, ranked
 
