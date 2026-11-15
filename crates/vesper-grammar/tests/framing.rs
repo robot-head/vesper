@@ -279,3 +279,103 @@ fn every_frame_truncation_split_and_output_limit_preserves_buffers() {
         payload
     );
 }
+
+#[test]
+fn u24_big_endian_frames_roundtrip_and_preserve_remainder() {
+    let bytes = b"\x00\x00\x03abc\x00\x00\x02de";
+    let first = framing::parse_u24_frame(bytes, Limits::default()).unwrap();
+    assert_eq!(first.payload, b"abc");
+    assert_eq!(first.tail.offset(), 6);
+    let fail = first
+        .tail
+        .next_u24_frame(Limits {
+            max_work: 2,
+            ..Limits::default()
+        })
+        .unwrap_err();
+    assert_eq!(fail.error.kind, ErrorKind::WorkLimit);
+    assert_eq!(fail.tail.offset(), 6);
+    let second = fail.tail.next_u24_frame(Limits::default()).unwrap();
+    assert_eq!(second.payload, b"de");
+    second.tail.assert_exact_eof().unwrap();
+    assert_eq!(
+        framing::parse_u24_frame_exact(bytes, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::TrailingBytes
+    );
+    assert_eq!(
+        framing::parse_u24_frame_exact(b"\0\0\0", Limits::default()).unwrap(),
+        b""
+    );
+    let mut out = [0xaa; 9];
+    assert_eq!(
+        framing::encode_u24_frame_into(b"abc", &mut out, Limits::default()).unwrap(),
+        6
+    );
+    assert_eq!(&out, b"\0\0\x03abc\xaa\xaa\xaa");
+}
+
+#[test]
+fn u24_boundaries_fail_transactionally() {
+    for input in [&b""[..], &b"\0"[..], &b"\0\0"[..], &b"\0\0\x02x"[..]] {
+        assert_eq!(
+            framing::parse_u24_frame_exact(input, Limits::default())
+                .unwrap_err()
+                .kind,
+            ErrorKind::UnexpectedEof
+        );
+    }
+    let payload = vec![7; 0x10000];
+    let mut output = vec![0xaa; payload.len() + 3];
+    let limits = Limits {
+        max_payload_bytes: payload.len(),
+        max_output_bytes: output.len(),
+        max_work: output.len(),
+        ..Limits::default()
+    };
+    assert_eq!(
+        framing::encode_u24_frame_into(&payload, &mut output, limits).unwrap(),
+        output.len()
+    );
+    assert_eq!(&output[..3], &[1, 0, 0]);
+    assert_eq!(
+        framing::parse_u24_frame_exact(&output, limits).unwrap(),
+        payload
+    );
+    for limits in [
+        Limits {
+            max_payload_bytes: 2,
+            ..Limits::default()
+        },
+        Limits {
+            max_output_bytes: 5,
+            ..Limits::default()
+        },
+        Limits {
+            max_work: 5,
+            ..Limits::default()
+        },
+    ] {
+        let mut out = [0x5a; 10];
+        assert!(framing::encode_u24_frame_into(b"abc", &mut out, limits).is_err());
+        assert_eq!(out, [0x5a; 10]);
+    }
+    let mut short = [0x5a; 5];
+    assert_eq!(
+        framing::encode_u24_frame_into(b"abc", &mut short, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::OutputTooSmall
+    );
+    assert_eq!(short, [0x5a; 5]);
+    let too_large = vec![0; framing::MAX_U24_PAYLOAD + 1];
+    let mut sentinel = [0x5a; 1];
+    assert_eq!(
+        framing::encode_u24_frame_into(&too_large, &mut sentinel, Limits::default())
+            .unwrap_err()
+            .kind,
+        ErrorKind::Overflow
+    );
+    assert_eq!(sentinel, [0x5a; 1]);
+}

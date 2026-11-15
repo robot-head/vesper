@@ -1,0 +1,4 @@
+fn accept(sink f: fn() eff [Fail[i64]]) {}
+fn bad(sink f: fn() eff [Fail[i64]]) eff [Fail[i64]] {
+    accept(sink f);
+}
