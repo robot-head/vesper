@@ -48,6 +48,12 @@ twice the smaller inclusive tail, capped at one; it is not rounded. Its null
 interpretation requires exchangeable observations, and it is not a paired ABBA
 test or a confidence interval. It does not participate in the regression gate.
 
+`mann_whitney_exact_with_ties(first, second)` also supports repeated values,
+using pooled midranks and counting all physical label assignments. It calculates
+both inclusive tails separately before doubling the smaller one, because ties
+can produce an asymmetric permutation distribution. It uses the same sample
+limits and exchangeability assumption and likewise does not operate the gate.
+
 ## Optional population-median confidence gate
 
 `analyze_pairs(samples, max_regression_bp)` targets the population median of the
