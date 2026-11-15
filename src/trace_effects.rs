@@ -167,14 +167,117 @@ pub fn with_prelude(module: &Module) -> BeaconModule<'_> {
     }
 }
 
-/// Whether the World's Beacon declarations are the built-in ones.
+/// Whether the World's Beacon declarations match the built-in ABI.
 pub fn active(world: &crate::check::World) -> bool {
-    world.effects.get(TRACE).is_some_and(|d| {
-        d.linear && d.generics.is_empty() && d.ops.iter().map(|f| f.name.as_str()).eq(OPERATIONS)
-    }) && world
-        .adts
-        .get(ACTIVE_SPAN)
-        .is_some_and(|a| a.mode == Mode::Linear)
+    fn same_type(a: &Type, b: &Type) -> bool {
+        let is_unit = |t: &Type| {
+            *t == Type::unit()
+                || matches!(t, Type::Named(n, args) if n == "Unit" && args.is_empty())
+        };
+        if is_unit(a) && is_unit(b) {
+            return true;
+        }
+        match (a, b) {
+            (Type::IntLiteral(x), Type::IntLiteral(y)) => x == y,
+            (Type::Named(na, aa), Type::Named(nb, ab)) => {
+                na == nb && aa.len() == ab.len() && aa.iter().zip(ab).all(|(x, y)| same_type(x, y))
+            }
+            (Type::Tuple(ta), Type::Tuple(tb)) => {
+                ta.len() == tb.len() && ta.iter().zip(tb).all(|(x, y)| same_type(x, y))
+            }
+            (
+                Type::Function {
+                    params: pa,
+                    result: ra,
+                    effects: ea,
+                    mode: ma,
+                },
+                Type::Function {
+                    params: pb,
+                    result: rb,
+                    effects: eb,
+                    mode: mb,
+                },
+            ) => {
+                ma == mb
+                    && ea == eb
+                    && pa.len() == pb.len()
+                    && pa
+                        .iter()
+                        .zip(pb)
+                        .all(|((psa, ta), (psb, tb))| psa == psb && same_type(ta, tb))
+                    && same_type(ra, rb)
+            }
+            (Type::Row(ea), Type::Row(eb)) => ea == eb,
+            (Type::Infer, Type::Infer) => true,
+            _ => false,
+        }
+    }
+    fn same_adt(a: &Adt, b: &Adt) -> bool {
+        a.name == b.name
+            && a.mode == b.mode
+            && a.generics == b.generics
+            && a.is_enum == b.is_enum
+            && a.variants.len() == b.variants.len()
+            && a.variants.iter().zip(&b.variants).all(|(va, vb)| {
+                va.name == vb.name
+                    && va.named == vb.named
+                    && va.fields.len() == vb.fields.len()
+                    && va.fields.iter().zip(&vb.fields).all(|(fa, fb)| {
+                        fa.name == fb.name
+                            && fa.modality == fb.modality
+                            && same_type(&fa.ty, &fb.ty)
+                    })
+            })
+    }
+    fn same_effect(a: &EffectDecl, b: &EffectDecl) -> bool {
+        a.name == b.name
+            && a.linear == b.linear
+            && a.generics == b.generics
+            && a.ops.len() == b.ops.len()
+            && a.ops.iter().zip(&b.ops).all(|(oa, ob)| {
+                oa.name == ob.name
+                    && oa.generics == ob.generics
+                    && oa.effects == ob.effects
+                    && oa.params.len() == ob.params.len()
+                    && oa.params.iter().zip(&ob.params).all(|(pa, pb)| {
+                        pa.pass == pb.pass
+                            && pa.projections == pb.projections
+                            && same_type(&pa.ty, &pb.ty)
+                    })
+                    && same_type(&oa.result, &ob.result)
+            })
+    }
+
+    let prelude = crate::parser::parse(PRELUDE).module;
+    let mut adt_count = 0usize;
+    let mut effect_count = 0usize;
+    for item in &prelude.items {
+        match item {
+            Item::Adt(expected) => {
+                adt_count += 1;
+                if !world
+                    .adts
+                    .get(&expected.name)
+                    .is_some_and(|actual| same_adt(actual, expected))
+                {
+                    return false;
+                }
+            }
+            Item::Effect(expected) => {
+                effect_count += 1;
+                if !world
+                    .effects
+                    .get(&expected.name)
+                    .is_some_and(|actual| same_effect(actual, expected))
+                {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    adt_count == 3 && effect_count == 1
 }
 
 /// Whether `t` mentions `name` in a data position (function types are not

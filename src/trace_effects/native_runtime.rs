@@ -291,6 +291,11 @@ pub unsafe extern "C" fn vesper_trace_emit_attr(span_ptr: *const u64, attr_ptr: 
     }
 }
 
+/// Whether the active native trace client on this thread has observed a host failure.
+pub fn has_failed() -> bool {
+    ACTIVE.with(|cell| cell.borrow().as_ref().is_some_and(|c| c.failed))
+}
+
 /// Executes `f` while serving `vesper_trace_*` callbacks against a live
 /// [`BeaconHost`] on a scoped host thread.
 pub fn with_traced<T>(
@@ -310,6 +315,9 @@ pub fn with_traced<T>(
     });
 
     std::thread::scope(|scope| {
+        // Ensure ACTIVE is cleared (closing cmd_tx) even if `f()` panics,
+        // before `scope` joins `host_thread` waiting in `cmd_rx.recv()`.
+        let _inner_guard = ResetGuard;
         let host_thread = scope.spawn(move || -> Result<Vec<ExportedSpan>, TraceRunError> {
             let pool = SpanPool::<ACTIVE_SPANS>::new(config.trace_id, first, config.flags)
                 .map_err(|_| TraceRunError::InvalidContext)?;

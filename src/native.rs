@@ -61,7 +61,18 @@ fn scalar(t: &Type, generics: &[Generic]) -> Result<ir::Type, String> {
         )),
     }
 }
+fn uses_trace_fail(world: &World, trace_host: bool, key: &str, entry: &str, f: &Function) -> bool {
+    trace_host && (key == entry || trace_host_direct(world, f))
+}
 fn signature<M: Module>(m: &M, world: &World, f: &Function) -> Result<ir::Signature, String> {
+    signature_with_trace(m, world, f, false)
+}
+fn signature_with_trace<M: Module>(
+    m: &M,
+    world: &World,
+    f: &Function,
+    trace_fail: bool,
+) -> Result<ir::Signature, String> {
     let mut sig = m.make_signature();
     let result = Layout::of(world, &f.result)?;
     if result.aggregate() {
@@ -78,7 +89,7 @@ fn signature<M: Module>(m: &M, world: &World, f: &Function) -> Result<ir::Signat
             },
         ));
     }
-    if fail_only(world, f) {
+    if fail_only(world, f) || trace_fail {
         sig.params
             .push(AbiParam::new(m.target_config().pointer_type()));
     }
@@ -601,9 +612,21 @@ fn compile_entry<M: Module>(
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
     }
-    let ids = declare_instances(m, world, entry, &instances, linkage)?;
-    let clif = define_instances_observed(
-        m, world, &instances, &ids, &program, observer, instrument, options, linkage, trace_ok,
+    let (ids, trace_entry_id) =
+        declare_instances_with_trace(m, world, entry, &instances, linkage, trace_ok)?;
+    let trace_entry = trace_entry_id.map(|id| (entry, id));
+    let clif = define_instances_observed_with_trace(
+        m,
+        world,
+        &instances,
+        &ids,
+        &program,
+        observer,
+        instrument,
+        options,
+        linkage,
+        trace_ok,
+        trace_entry,
     )?;
     let mut abi = Vec::new();
     for (key, (name, vars)) in &instances {
@@ -717,24 +740,52 @@ fn declare_instances<M: Module>(
     instances: &InstanceMap,
     linkage: DefinitionLinkage,
 ) -> Result<BTreeMap<String, FuncId>, String> {
+    let (ids, _) = declare_instances_with_trace(m, world, entry, instances, linkage, false)?;
+    Ok(ids)
+}
+fn declare_instances_with_trace<M: Module>(
+    m: &mut M,
+    world: &World,
+    entry: &str,
+    instances: &InstanceMap,
+    linkage: DefinitionLinkage,
+    trace_host: bool,
+) -> Result<(BTreeMap<String, FuncId>, Option<FuncId>), String> {
     let mut ids = BTreeMap::new();
+    let mut trace_entry_id = None;
     for (i, (key, (name, vars))) in instances.iter().enumerate() {
         let f = concrete(world, name, vars)?;
-        let symbol = if key == entry {
-            entry.to_owned()
+        if trace_host && key == entry {
+            let public_id = m
+                .declare_function(entry, linkage.function(true), &signature(m, world, &f)?)
+                .map_err(|e| e.to_string())?;
+            let internal_id = m
+                .declare_function(
+                    &format!("__vesper_trace_entry_{i}"),
+                    linkage.function(false),
+                    &signature_with_trace(m, world, &f, true)?,
+                )
+                .map_err(|e| e.to_string())?;
+            ids.insert(key.clone(), public_id);
+            trace_entry_id = Some(internal_id);
         } else {
-            format!("vesper_function_{i}")
-        };
-        let id = m
-            .declare_function(
-                &symbol,
-                linkage.function(key == entry),
-                &signature(m, world, &f)?,
-            )
-            .map_err(|e| e.to_string())?;
-        ids.insert(key.clone(), id);
+            let pass_trace = uses_trace_fail(world, trace_host, key, entry, &f);
+            let symbol = if key == entry {
+                entry.to_owned()
+            } else {
+                format!("vesper_function_{i}")
+            };
+            let id = m
+                .declare_function(
+                    &symbol,
+                    linkage.function(key == entry),
+                    &signature_with_trace(m, world, &f, pass_trace)?,
+                )
+                .map_err(|e| e.to_string())?;
+            ids.insert(key.clone(), id);
+        }
     }
-    Ok(ids)
+    Ok((ids, trace_entry_id))
 }
 /// Define the bodies of the instances declared by [`declare_instances`].
 fn define_instances<M: Module>(
@@ -745,7 +796,7 @@ fn define_instances<M: Module>(
     program: &crate::ir::Program,
     linkage: DefinitionLinkage,
 ) -> Result<String, String> {
-    define_instances_observed(
+    define_instances_observed_with_trace(
         m,
         world,
         instances,
@@ -756,10 +807,11 @@ fn define_instances<M: Module>(
         CodegenOptions::default(),
         linkage,
         false,
+        None,
     )
 }
 #[allow(clippy::too_many_arguments)]
-fn define_instances_observed<M: Module>(
+fn define_instances_observed_with_trace<M: Module>(
     m: &mut M,
     world: &World,
     instances: &InstanceMap,
@@ -770,13 +822,23 @@ fn define_instances_observed<M: Module>(
     options: CodegenOptions,
     linkage: DefinitionLinkage,
     trace_host: bool,
+    trace_entry: Option<(&str, FuncId)>,
 ) -> Result<String, String> {
     let mut clif = String::new();
     let denorm = crate::capability_effects::const_denorm_spans(world);
     for (key, (name, generic_vars)) in instances {
         let f = concrete(world, name, generic_vars)?;
+        let entry_name = trace_entry.map(|(e, _)| e).unwrap_or("");
+        let pass_trace = uses_trace_fail(world, trace_host, key, entry_name, &f);
+        let define_id = if let Some((entry_name, internal_id)) = trace_entry
+            && key == entry_name
+        {
+            internal_id
+        } else {
+            ids[key]
+        };
         let mut ctx = m.make_context();
-        ctx.func.signature = signature(m, world, &f)?;
+        ctx.func.signature = signature_with_trace(m, world, &f, pass_trace)?;
         let mut fbctx = FunctionBuilderContext::new();
         {
             let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
@@ -784,6 +846,7 @@ fn define_instances_observed<M: Module>(
             b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
             let mut values = b.block_params(entry).to_vec();
+            let trace_fail = if pass_trace { values.pop() } else { None };
             let fail_record = if fail_only(world, &f) {
                 values.pop()
             } else {
@@ -841,6 +904,8 @@ fn define_instances_observed<M: Module>(
                         fail_instances(&f).map(|e| e.args[0].clone()).collect(),
                     )
                 }),
+                trace_fail,
+                trace_entry: trace_entry.map(|(e, id)| (e.to_owned(), id)),
                 session: None,
                 denorm: &denorm,
                 source_locations: options.source_locations,
@@ -911,9 +976,8 @@ fn define_instances_observed<M: Module>(
         linkage.normalize_references(&mut ctx.func);
         clif.push_str(&format!("; {key}\n{}\n", ctx.func.display()));
         if let Some(observe) = observer.as_mut() {
-            let id = ids[key];
             let mut function = ctx.func.clone();
-            function.name = ir::UserFuncName::user(0, id.as_u32());
+            function.name = ir::UserFuncName::user(0, define_id.as_u32());
             let declarations = m.declarations();
             let callees = function
                 .params
@@ -936,17 +1000,56 @@ fn define_instances_observed<M: Module>(
                 source: name.clone(),
                 symbol: m
                     .declarations()
-                    .get_function_decl(id)
-                    .linkage_name(id)
+                    .get_function_decl(define_id)
+                    .linkage_name(define_id)
                     .into_owned(),
-                func_id: id.as_u32(),
+                func_id: define_id.as_u32(),
                 function,
                 callees,
                 vars: generic_vars.clone(),
             });
         }
-        m.define_function(ids[key], &mut ctx)
+        m.define_function(define_id, &mut ctx)
             .map_err(|e| format!("native codegen '{name}': {e}"))?;
+        m.clear_context(&mut ctx);
+    }
+    if let Some((entry_name, internal_id)) = trace_entry {
+        let f = world.functions.get(entry_name).ok_or("unknown entry")?;
+        let public_id = ids[entry_name];
+        let mut ctx = m.make_context();
+        ctx.func.signature = signature(m, world, f)?;
+        let mut fbctx = FunctionBuilderContext::new();
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fbctx);
+            let block = b.create_block();
+            b.append_block_params_for_function_params(block);
+            b.switch_to_block(block);
+            let mut args = b.block_params(block).to_vec();
+            let slot = b.create_sized_stack_slot(ir::StackSlotData::new(
+                ir::StackSlotKind::ExplicitSlot,
+                8,
+                3,
+            ));
+            let zero = b.ins().iconst(types::I64, 0);
+            b.ins().stack_store(zero, slot, 0);
+            let flag = b
+                .ins()
+                .stack_addr(m.target_config().pointer_type(), slot, 0);
+            args.push(flag);
+            let callee = m.declare_func_in_func(internal_id, b.func);
+            let call = b.ins().call(callee, &args);
+            let result = b.inst_results(call)[0];
+            b.ins().return_(&[result]);
+            b.seal_all_blocks();
+            b.finalize();
+        }
+        linkage.normalize_references(&mut ctx.func);
+        clif.push_str(&format!(
+            "; {entry_name} (trace wrapper)\n{}\n",
+            ctx.func.display()
+        ));
+        m.define_function(public_id, &mut ctx)
+            .map_err(|e| format!("native codegen '{entry_name}': {e}"))?;
         m.clear_context(&mut ctx);
     }
     Ok(clif)
@@ -1022,11 +1125,17 @@ fn jit_run_entry(
             let mut result = vec![0u64; layout.size as usize / 8];
             let call: unsafe extern "C" fn(*mut u64) -> i64 = std::mem::transmute(code);
             call(result.as_mut_ptr());
-            crate::layout::decode(
-                world,
-                &f.result,
-                std::slice::from_raw_parts(result.as_ptr().cast::<u8>(), layout.size as usize),
-            )?
+            if entry_effects == EntryEffects::TraceHost
+                && crate::trace_effects::native_runtime::has_failed()
+            {
+                crate::runtime::Value::Tuple(vec![])
+            } else {
+                crate::layout::decode(
+                    world,
+                    &f.result,
+                    std::slice::from_raw_parts(result.as_ptr().cast::<u8>(), layout.size as usize),
+                )?
+            }
         } else if f.result.name() == "f64" {
             let call: unsafe extern "C" fn() -> f64 = std::mem::transmute(code);
             crate::runtime::Value::Float(call())
@@ -1407,6 +1516,8 @@ struct Codegen<'a, 'b, M: Module> {
     /// The failure-record pointer of a `fail_only` function being compiled,
     /// with the error type of each of its `Fail` instances.
     fail_record: Option<(ir::Value, Vec<Type>)>,
+    trace_fail: Option<ir::Value>,
+    trace_entry: Option<(String, FuncId)>,
     /// Present only while compiling a suspending session entry: external
     /// operations park instead of resolving to a lexical handler.
     session: Option<session::SessionCodegen>,
@@ -3900,12 +4011,17 @@ impl<M: Module> Codegen<'_, '_, M> {
             None => (f, vars, values),
         };
         let call_key = instance_key(name, &vars);
+        let trace_entry_name = self
+            .trace_entry
+            .as_ref()
+            .map(|(e, _)| e.as_str())
+            .unwrap_or("");
         let direct_trace = self
             .capabilities
             .get(&format!("$effect:{}", crate::trace_effects::TRACE))
             .is_some_and(|id| id == "native-trace-host")
             && self.ids.contains_key(&call_key)
-            && trace_host_direct(self.world, &f);
+            && (trace_host_direct(self.world, &f) || call_key == trace_entry_name);
         let result = if specialized_function(self.world, &f) && !direct_trace {
             if self.inline_depth >= 64 {
                 return Err("recursive effect specialization exceeds 64 inline frames".into());
@@ -3980,10 +4096,13 @@ impl<M: Module> Codegen<'_, '_, M> {
             result?
         } else {
             let key = instance_key(name, &vars);
-            let id = *self
-                .ids
-                .get(&key)
-                .ok_or_else(|| format!("missing monomorphized function '{key}'"))?;
+            let id = match &self.trace_entry {
+                Some((entry_name, internal_id)) if &key == entry_name => *internal_id,
+                _ => *self
+                    .ids
+                    .get(&key)
+                    .ok_or_else(|| format!("missing monomorphized function '{key}'"))?,
+            };
             let output = if result_layout.aggregate() {
                 Some(self.alloc(result_layout.size))
             } else {
@@ -3999,6 +4118,19 @@ impl<M: Module> Codegen<'_, '_, M> {
             } else {
                 None
             };
+            let pass_trace = uses_trace_fail(
+                self.world,
+                self.trace_fail.is_some(),
+                &key,
+                self.trace_entry
+                    .as_ref()
+                    .map(|(e, _)| e.as_str())
+                    .unwrap_or(""),
+                &f,
+            );
+            if pass_trace {
+                values.push(self.trace_fail.ok_or("missing native trace failure slot")?);
+            }
             let fun = self.m.declare_func_in_func(id, self.b.func);
             let sig = self.b.func.dfg.ext_funcs[fun].signature;
             let params = &self.b.func.dfg.signatures[sig].params;
@@ -4012,6 +4144,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             }
             let call = self.b.ins().call(fun, &values);
             let result = output.unwrap_or_else(|| self.b.inst_results(call)[0]);
+            if pass_trace {
+                self.check_trace_failed();
+            }
             if let Some(record) = record {
                 self.reraise(&f, record)?;
             }
@@ -4320,6 +4455,40 @@ impl<M: Module> Codegen<'_, '_, M> {
         self.capabilities = old_capabilities;
         Ok(result)
     }
+    fn return_trace_placeholder(&mut self) {
+        let returns = self.b.func.signature.returns[0].value_type;
+        let placeholder = if returns == types::F64 {
+            self.b.ins().f64const(0.0)
+        } else {
+            self.b.ins().iconst(returns, 0)
+        };
+        self.b.ins().return_(&[placeholder]);
+    }
+    fn abort_on_nonzero_status(&mut self, status: ir::Value) {
+        let failed = self.b.ins().icmp_imm(IntCC::NotEqual, status, 0);
+        let bad = self.b.create_block();
+        let good = self.b.create_block();
+        self.branch(failed, bad, &[], good, &[]);
+        self.b.switch_to_block(bad);
+        if let Some(flag) = self.trace_fail {
+            let one = self.b.ins().iconst(types::I64, 1);
+            self.b.ins().store(ir::MemFlags::new(), one, flag, 0);
+        }
+        self.return_trace_placeholder();
+        self.b.switch_to_block(good);
+    }
+    fn check_trace_failed(&mut self) {
+        if let Some(flag) = self.trace_fail {
+            let flagged = self.b.ins().load(types::I64, ir::MemFlags::new(), flag, 0);
+            let cond = self.b.ins().icmp_imm(IntCC::NotEqual, flagged, 0);
+            let bad = self.b.create_block();
+            let good = self.b.create_block();
+            self.branch(cond, bad, &[], good, &[]);
+            self.b.switch_to_block(bad);
+            self.return_trace_placeholder();
+            self.b.switch_to_block(good);
+        }
+    }
     fn trace_call(&mut self, symbol: &str, args: &[ir::Value]) -> Result<ir::Value, String> {
         let mut signature = self.m.make_signature();
         for arg in args {
@@ -4334,7 +4503,9 @@ impl<M: Module> Codegen<'_, '_, M> {
             .map_err(|e| e.to_string())?;
         let reference = self.m.declare_func_in_func(id, self.b.func);
         let call = self.b.ins().call(reference, args);
-        Ok(self.b.inst_results(call)[0])
+        let status = self.b.inst_results(call)[0];
+        self.abort_on_nonzero_status(status);
+        Ok(status)
     }
     fn trace_perform(&mut self, op: &str, values: &[ir::Value]) -> Result<ir::Value, String> {
         match (op, values) {

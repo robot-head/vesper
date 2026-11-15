@@ -557,3 +557,118 @@ fn native_traced_reports_host_errors_without_crashing() {
         Err(TraceRunError::Entry(_))
     ));
 }
+
+#[test]
+fn review_findings_abi_abort_and_panic_unwind() {
+    use trace_effects::native_runtime::{run_traced_native, with_traced};
+
+    // P1: A custom Trace effect reusing the six operation names and a smaller
+    // linear ActiveSpan (8 bytes vs 56 bytes) must fail complete ABI validation.
+    let spoofed_layout = checked(
+        "copy struct SpanContext { trace_id_hi: u64, trace_id_lo: u64, span_id: u64, flags: u8 }
+         linear struct ActiveSpan { x: u64 }
+         copy enum TelemetryAttr { NoAttr, Count(u64), Bytes(u64), Redacted }
+         linear effect Trace {
+             fn current_ctx() -> SpanContext;
+             fn start_span(schema_id: u32, name: String) -> ActiveSpan;
+             fn start_child(parent: SpanContext, schema_id: u32, name: String) -> ActiveSpan;
+             fn emit_ok(sink span: ActiveSpan, attr_u64: u64) -> Unit;
+             fn emit_err(sink span: ActiveSpan, err_code: u32, msg: String) -> Unit;
+             fn emit_attr(sink span: ActiveSpan, attr: TelemetryAttr) -> Unit;
+         }
+         fn main() -> u64 eff [Trace] {
+             let s = Trace::start_span(0, \"spoof\");
+             Trace::emit_ok(s, 0);
+             0
+         }",
+    );
+    assert!(
+        spoofed_layout.diagnostics.is_empty(),
+        "{:?}",
+        spoofed_layout.diagnostics
+    );
+    assert!(!trace_effects::active(&spoofed_layout.world));
+    assert_eq!(
+        run_traced_native(&spoofed_layout, "main", TraceConfig::default()).unwrap_err(),
+        TraceRunError::NotBeacon
+    );
+    assert!(vesper::native::jit_traced_with_options(&spoofed_layout.world, "main", true).is_err());
+
+    // P1: Matching struct layouts with mismatched Trace operation signatures must also be rejected.
+    let spoofed_op_sig = checked(
+        "copy struct SpanContext { trace_id_hi: u64, trace_id_lo: u64, span_id: u64, flags: u8 }
+         linear struct ActiveSpan { ctx: SpanContext, parent_span_id: u64, start_mono_ns: u64, schema_id: u32 }
+         copy enum TelemetryAttr { NoAttr, Count(u64), Bytes(u64), Redacted }
+         linear effect Trace {
+             fn current_ctx() -> SpanContext;
+             fn start_span(schema_id: u64, name: String) -> ActiveSpan;
+             fn start_child(parent: SpanContext, schema_id: u32, name: String) -> ActiveSpan;
+             fn emit_ok(sink span: ActiveSpan, attr_u64: u64) -> Unit;
+             fn emit_err(sink span: ActiveSpan, err_code: u32, msg: String) -> Unit;
+             fn emit_attr(sink span: ActiveSpan, attr: TelemetryAttr) -> Unit;
+         }
+         fn main() -> u64 eff [Trace] { 0 }",
+    );
+    assert!(
+        spoofed_op_sig.diagnostics.is_empty(),
+        "{:?}",
+        spoofed_op_sig.diagnostics
+    );
+    assert!(!trace_effects::active(&spoofed_op_sig.world));
+
+    // P2: Callback failure must abort native execution immediately before running
+    // subsequent code (including across recursive helper call frames).
+    let direct_abort = checked(
+        "fn spin(n: u64) -> u64 { spin(n) }
+         fn main() -> u64 eff [Trace] {
+             let s = Trace::start_span(9, \"x\");
+             Trace::emit_ok(s, 0);
+             spin(0)
+         }",
+    );
+    assert!(
+        direct_abort.diagnostics.is_empty(),
+        "{:?}",
+        direct_abort.diagnostics
+    );
+    assert_eq!(
+        run_traced_native(&direct_abort, "main", TraceConfig::default()).unwrap_err(),
+        TraceRunError::UnknownSchema(9)
+    );
+
+    let recursive_abort = checked(
+        "fn spin(n: u64) -> u64 { spin(n) }
+         fn walk(n: u64) -> u64 eff [Trace] {
+             if n == 0 {
+                 let s = Trace::start_span(9, \"x\");
+                 Trace::emit_ok(s, 0);
+                 spin(0)
+             } else {
+                 let v = walk(wrapping_sub(n, 1));
+                 spin(v)
+             }
+         }
+         fn main() -> u64 eff [Trace] { walk(2) }",
+    );
+    assert!(
+        recursive_abort.diagnostics.is_empty(),
+        "{:?}",
+        recursive_abort.diagnostics
+    );
+    assert_eq!(
+        run_traced_native(&recursive_abort, "main", TraceConfig::default()).unwrap_err(),
+        TraceRunError::UnknownSchema(9)
+    );
+
+    // P2: A panic inside with_traced clears ACTIVE before thread::scope joins.
+    let caught = std::panic::catch_unwind(|| {
+        with_traced(TraceConfig::default(), || -> u64 {
+            panic!("unwind inside traced closure")
+        })
+    });
+    assert!(caught.is_err());
+    assert!(!trace_effects::native_runtime::has_failed());
+    let (v, spans) = with_traced(TraceConfig::default(), || 42u64).unwrap();
+    assert_eq!(v, 42);
+    assert!(spans.is_empty());
+}
