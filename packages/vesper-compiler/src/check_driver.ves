@@ -1,0 +1,216 @@
+// Public entry: check_main() -> i64. 0 is success. A failure is encoded as
+// -1 - (code * 2^32 + start * 2^16 + end), with exact byte spans.
+// Semantic codes are the seed's decimal E-code suffix. 9001..9009 are
+// typed Unsupported(rule), 9900 is Limit, and 9800.. are parser diagnostics.
+fn c_fn_at(at: i64) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let k = c_kind(at);
+    if k == 14 || k == 15 || k == 16 {
+        c_next(at)
+    } else {
+        at
+    }
+}
+fn c_next_decl(last: Tok, kind: i64, at: i64, best: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 70 {
+        best
+    } else {
+        let d = c_decl(at);
+        let eligible = d.kind == kind || kind == 0 && (d.kind == 8 || d.kind == 9);
+        let later = last.kind == 70 || c_less(last, d.name);
+        let better = if best < 0 {
+            true
+        } else {
+            c_less(d.name, c_decl(best).name)
+        };
+        c_next_decl(
+            last,
+            kind,
+            d.end,
+            if eligible && later && better {
+                d.start
+            } else {
+                best
+            }
+        )
+    }
+}
+fn c_validate_adts(last: Tok) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let at = c_next_decl(last, 0, 0, -1);
+    if at < 0 {
+        0
+    } else {
+        let d = c_decl(at);
+        let valid = if d.kind == 8 {
+            c_validate_fields(c_next(d.body), true, d)
+        } else {
+            c_validate_variants(c_next(d.body), d)
+        };
+        c_validate_adts(d.name)
+    }
+}
+fn c_bind_params(at: i64, env: CEnv)
+    -> CEnv eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 33 {
+        env
+    } else {
+        let p = c_param(at, true, 0);
+        let start = c_token(at).start;
+        let valid = c_valid_type(p.ty, start, p.next, 0);
+        let valid = if c_lookup(env, p.name, env.count) >= 0 {
+            c_error(100, start, p.next)
+        } else {
+            0
+        };
+        let next = if c_kind(p.next) == 38 {
+            c_next(p.next)
+        } else {
+            p.next
+        };
+        c_bind_params(
+            next,
+            c_push(
+                env,
+                CBinding {
+                    name: p.name,
+                    ty: p.ty,
+                    pass: p.pass
+                }
+            )
+        )
+    }
+}
+fn c_valid_row(row: i64, start: i64, end: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if row < 0 || c_kind(row) == 37 {
+        0
+    } else {
+        let t = c_type(c_take(c_next(row), 36), 0);
+        let valid = c_valid_type(t.ty, start, end, 0);
+        let next = c_take(t.next, 37);
+        if c_kind(next) == 38 {
+            c_valid_row(c_next(next), start, end)
+        } else {
+            0
+        }
+    }
+}
+fn c_function(d: CDecl) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let sig = c_signature(c_fn_at(d.start), true, 0);
+    let valid = c_valid_type(sig.result, d.start, d.end, 0);
+    let env = c_bind_params(sig.params, c_empty());
+    let valid = c_valid_row(sig.effects, d.start, d.end);
+    let body = c_block(sig.body, env, sig.effects, c_empty(), 0);
+    let valid = c_expect_type(sig.result, body.ty, body.value_start, body.value_end);
+    c_exhaust(body.env, 0, body.env.count, body.start, body.end)
+}
+fn c_functions(last: Tok) -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let at = c_next_decl(last, 12, 0, -1);
+    if at < 0 {
+        0
+    } else {
+        let d = c_decl(at);
+        let valid = c_function(d);
+        c_functions(d.name)
+    }
+}
+fn c_check() -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if source_len() > 32767 {
+        c_limit(0)
+    } else {
+        let budget = c_budget(0, 0, 0, 0);
+        let declarations = c_validate_decls(0);
+        let adts = c_validate_adts(
+            Tok {
+                kind: 70,
+                start: 0,
+                end: 0
+            }
+        );
+        let functions = c_functions(
+            Tok {
+                kind: 70,
+                start: 0,
+                end: 0
+            }
+        );
+        let syntax = parse_digest();
+        0
+    }
+}
+fn c_encode(code: i64, start: i64, end: i64) -> i64 eff [Fail[ArithOverflow]] {
+    -1 - (code * 4294967296 + start * 65536 + end)
+}
+fn c_encode_error(error: CheckError) -> i64 eff [Fail[ArithOverflow]] {
+    match error {
+        CheckError::Semantic(code, start, end) => c_encode(code, start, end),
+        CheckError::Unsupported(rule, start, end) => c_encode(9000 + rule, start, end),
+        CheckError::Limit(at) => c_encode(9900, at, at),
+    }
+}
+fn check_main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Fail[Diag] in {
+            handle Fail[CheckError] in {
+                region checker_arena(4096) {
+                    c_check()
+                }
+            } with {
+                return value => value,
+                raise(error, resume) => c_finish_error(error),
+            }
+        } with {
+            return value => value,
+            raise(error, resume) => match error {
+                Diag::Lex(at) => c_encode(9801, at, at),
+                Diag::Expected(k, at) => c_encode(9802, at, at),
+                Diag::Unsupported(rule, at) => c_encode(9000 + rule, at, at),
+                Diag::Invalid(at) => c_encode(9804, at, at),
+                Diag::Limit(at) => c_encode(9900, at, at),
+            },
+        }
+    } with {
+        return value => value,
+        raise(error, resume) => -1 - 9900 * 4294967296,
+    }
+}
+
+// Unsupported syntax returns immediately. A semantic result (success or
+// diagnostic) is validated by the existing self-hosted parser first.
+fn c_finish_error(error: CheckError) -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
+    match error {
+        CheckError::Semantic(code, start, end) => {
+            let syntax = parse_digest();
+            c_encode(code, start, end)
+        },
+        CheckError::Unsupported(rule, start, end) => c_encode(9000 + rule, start, end),
+        CheckError::Limit(at) => c_encode(9900, at, at),
+    }
+}
+
+// The source-token adapter has no token buffer yet. Bound repeated scans
+// before resolution, rather than spending unbounded work on a large unit.
+fn c_budget(at: i64, tokens: i64, decls: i64, depth: i64)
+    -> i64 eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let t = c_token(at);
+    let k = t.kind;
+    if k == 70 {
+        0
+    } else if tokens >= 512 || decls > 16 || depth > 64 {
+        c_limit(t.start)
+    } else {
+        let level = if k == 32 || k == 34 || k == 36 {
+            depth + 1
+        } else if k == 33 || k == 35 || k == 37 {
+            depth - 1
+        } else {
+            depth
+        };
+        let items = if depth == 0 && (k == 8 || k == 9 || k == 12 || k == 10 || k == 11) {
+            decls + 1
+        } else {
+            decls
+        };
+        c_budget(t.end, tokens + 1, items, level)
+    }
+}

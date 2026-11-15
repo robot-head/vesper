@@ -1,0 +1,10 @@
+copy enum Flag {
+    Off,
+    On
+}
+fn f(flag: Flag) -> i64 {
+    match flag {
+        Flag::Off => 0,
+        Flag::On => 1,
+    }
+}
