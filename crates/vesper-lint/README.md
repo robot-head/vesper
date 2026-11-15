@@ -43,7 +43,7 @@ Projection changes are **diagnostic-only**: no broken function arity, duplicate
 parameter name, or unreviewed caller rewrite is synthesized. The analyzer never
 infers arena escape freedom from a return type/name set. Mode relaxation, arena
 demotion, FIP, Cancel/secret hygiene, egglog simplification, severity/plugin packs,
-Loom configuration, LSP scheduling, and formal proof generation are unimplemented.
+LSP scheduling and formal proof generation are unimplemented.
 No general zero-false-positive or completeness claim applies.
 
 Handlers, closures, indirect calls, unresolved instances/signatures, open or
@@ -87,6 +87,8 @@ No error is reported after a successful rename. No directory-fsync/durable commi
 hardlink preservation, full Windows ACL cloning, hostile-parent-directory defense,
 or atomic compare-and-swap against concurrent editors is claimed; the final
 read/rename race requires ordinary cooperative filesystem use.
+
+The CLI discovers the nearest package `Loom.toml` for its lint policy; `--config PATH` overrides it. Invalid discovered policies fail the run. Without a package manifest, built-in defaults apply.
 
 Warnings return success; parser/checker/unsupported-fix/compatibility/I/O failures
 return nonzero. `--json` emits schema-version-1 reports or a structured failure.

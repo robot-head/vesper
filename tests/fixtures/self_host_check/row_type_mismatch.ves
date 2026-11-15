@@ -1,0 +1,4 @@
+fn effectful() eff [Fail[bool]] {}
+fn main() eff [Fail[i64]] {
+    effectful();
+}
