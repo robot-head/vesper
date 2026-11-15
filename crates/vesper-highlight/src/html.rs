@@ -2,10 +2,11 @@
 //! the `vesper-chroma.css` custom properties.
 //!
 //! Source text appears in document order, HTML-escaped and otherwise
-//! unchanged. Line numbers are `vc-gutter` elements, which the sheet marks
-//! `user-select: none` and which are `aria-hidden`, so selecting and copying
-//! the block yields the source bytes exactly. Hover rows become `title`
-//! attributes (attribute text is not copied with a selection).
+//! unchanged, with carriage returns represented by character references so
+//! HTML input newline normalization does not turn them into line feeds. Line
+//! numbers are `vc-gutter` elements marked `user-select: none` and
+//! `aria-hidden`. Clipboard newline conventions depend on the browser and OS.
+//! Hover rows become `title` attributes (not copied with a selection).
 use crate::{Highlight, css::class_name};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -24,7 +25,7 @@ impl Default for HtmlOptions {
     }
 }
 
-/// Appends `text` HTML-escaped (`&`, `<`, `>`, `"`).
+/// Appends `text` HTML-escaped (`&`, `<`, `>`, `"`, and carriage return).
 pub fn escape_into(text: &str, out: &mut String) {
     let mut last = 0;
     for (i, b) in text.bytes().enumerate() {
@@ -33,6 +34,7 @@ pub fn escape_into(text: &str, out: &mut String) {
             b'<' => "&lt;",
             b'>' => "&gt;",
             b'"' => "&quot;",
+            b'\r' => "&#13;",
             _ => continue,
         };
         out.push_str(&text[last..i]);
@@ -45,7 +47,14 @@ pub fn escape_into(text: &str, out: &mut String) {
 /// Renders a `<pre class="vc">` block. `src` must be the text `h` was
 /// computed from.
 pub fn render(src: &str, h: &Highlight, opts: &HtmlOptions) -> String {
-    let lines = src.bytes().filter(|b| *b == b'\n').count() + 1;
+    let mut lines = 1usize;
+    let mut previous_cr = false;
+    for byte in src.bytes() {
+        if byte == b'\r' || (byte == b'\n' && !previous_cr) {
+            lines += 1;
+        }
+        previous_cr = byte == b'\r';
+    }
     let width = lines.to_string().len();
     let mut out = String::with_capacity(src.len() * 4 + 64);
     out.push_str("<pre class=\"vc\"");
@@ -92,12 +101,14 @@ pub fn render(src: &str, h: &Highlight, opts: &HtmlOptions) -> String {
             tag
         });
         let mut rest = text;
+        let mut offset = sp.start;
         while !rest.is_empty() {
-            let (segment, newline) = match rest.find('\n') {
-                Some(i) => (&rest[..=i], true),
-                None => (rest, false),
+            let (segment, terminator) = match rest.find(['\r', '\n']) {
+                Some(i) => (&rest[..=i], Some(rest.as_bytes()[i])),
+                None => (rest, None),
             };
             rest = &rest[segment.len()..];
+            offset += segment.len();
             if let Some(open) = &open {
                 out.push_str(open);
                 escape_into(segment, &mut out);
@@ -105,9 +116,16 @@ pub fn render(src: &str, h: &Highlight, opts: &HtmlOptions) -> String {
             } else {
                 escape_into(segment, &mut out);
             }
-            if newline {
+            // A CRLF is one terminator even when the two bytes belong to
+            // different highlight spans. Defer its gutter until after LF.
+            let line_end = match terminator {
+                Some(b'\n') => true,
+                Some(b'\r') => src.as_bytes().get(offset) != Some(&b'\n'),
+                _ => false,
+            };
+            if line_end {
                 line += 1;
-                if sp.end < src.len() || !rest.is_empty() {
+                if offset < src.len() {
                     gutter(line, &mut out);
                 }
             }
