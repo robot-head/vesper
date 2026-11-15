@@ -241,7 +241,7 @@ fn operands(op: &mut Op, resolve: impl Fn(ValueId) -> ValueId) {
             state_value: Some(value),
             ..
         } => *value = resolve(*value),
-        Op::Call { args, .. } => {
+        Op::Call { args, .. } | Op::Tiled { args, .. } => {
             for a in args {
                 a.value = resolve(a.value);
             }

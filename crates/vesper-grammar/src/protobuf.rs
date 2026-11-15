@@ -67,6 +67,8 @@ pub enum Kind {
     Bool,
     Fixed32,
     Fixed64,
+    Sfixed32,
+    Sfixed64,
     String,
     Bytes,
     Message(usize),
@@ -77,9 +79,9 @@ impl Kind {
     }
     fn wire(self) -> u8 {
         match self {
-            Self::Fixed64 => 1,
+            Self::Fixed64 | Self::Sfixed64 => 1,
             Self::String | Self::Bytes | Self::Message(_) => 2,
-            Self::Fixed32 => 5,
+            Self::Fixed32 | Self::Sfixed32 => 5,
             _ => 0,
         }
     }
@@ -114,6 +116,8 @@ pub enum Value<'a> {
     Bool(bool),
     Fixed32(u32),
     Fixed64(u64),
+    Sfixed32(i32),
+    Sfixed64(i64),
     String(&'a str),
     Bytes(&'a [u8]),
     Message(Message<'a>),
@@ -572,8 +576,15 @@ impl<'a> Parser<'_, '_, 'a> {
         Ok(Message { fields })
     }
     fn scalar(&mut self, kind: Kind, end: usize) -> Result<Value<'a>> {
-        if matches!(kind, Kind::Fixed32 | Kind::Fixed64) {
-            let len = if kind == Kind::Fixed32 { 4 } else { 8 };
+        if matches!(
+            kind,
+            Kind::Fixed32 | Kind::Fixed64 | Kind::Sfixed32 | Kind::Sfixed64
+        ) {
+            let len = if matches!(kind, Kind::Fixed32 | Kind::Sfixed32) {
+                4
+            } else {
+                8
+            };
             let next = add(self.pos, len)?;
             if next > end {
                 return Err(Error::at(ErrorKind::Truncated, end));
@@ -581,10 +592,20 @@ impl<'a> Parser<'_, '_, 'a> {
             let bytes = &self.input[self.pos..next];
             self.budget.work(len)?;
             self.pos = next;
-            return Ok(if kind == Kind::Fixed32 {
-                Value::Fixed32(u32::from_le_bytes(bytes.try_into().expect("fixed32")))
-            } else {
-                Value::Fixed64(u64::from_le_bytes(bytes.try_into().expect("fixed64")))
+            return Ok(match kind {
+                Kind::Fixed32 => {
+                    Value::Fixed32(u32::from_le_bytes(bytes.try_into().expect("fixed32")))
+                }
+                Kind::Fixed64 => {
+                    Value::Fixed64(u64::from_le_bytes(bytes.try_into().expect("fixed64")))
+                }
+                Kind::Sfixed32 => {
+                    Value::Sfixed32(i32::from_le_bytes(bytes.try_into().expect("sfixed32")))
+                }
+                Kind::Sfixed64 => {
+                    Value::Sfixed64(i64::from_le_bytes(bytes.try_into().expect("sfixed64")))
+                }
+                _ => unreachable!(),
             });
         }
         let at = self.pos;
@@ -627,6 +648,8 @@ fn scalar_size(kind: Kind, value: &Value<'_>) -> Result<usize> {
         (Kind::Bool, Value::Bool(_)) => 1,
         (Kind::Fixed32, Value::Fixed32(_)) => 4,
         (Kind::Fixed64, Value::Fixed64(_)) => 8,
+        (Kind::Sfixed32, Value::Sfixed32(_)) => 4,
+        (Kind::Sfixed64, Value::Sfixed64(_)) => 8,
         _ => return Err(Error::at(ErrorKind::TypeMismatch, 0)),
     })
 }
@@ -870,6 +893,8 @@ impl Writer<'_, '_, '_> {
             Value::Bool(b) => self.var(u64::from(*b)),
             Value::Fixed32(n) => self.bytes(&n.to_le_bytes()),
             Value::Fixed64(n) => self.bytes(&n.to_le_bytes()),
+            Value::Sfixed32(n) => self.bytes(&n.to_le_bytes()),
+            Value::Sfixed64(n) => self.bytes(&n.to_le_bytes()),
             _ => unreachable!("validated scalar"),
         }
     }
