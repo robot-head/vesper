@@ -142,7 +142,9 @@ fn handle_expr(p: P) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     let q = type_args(upper(q));
     let s = eat(q, 24);
     let q = if ate(q, s) {
-        expr(expect(pattern(s), 48))
+        let parsed_state = pattern(s);
+        let parsed_state = syntax_heads(parsed_state, parsed_state.row_head, p.value_head);
+        expr(expect(parsed_state, 48))
     } else {
         q
     };
