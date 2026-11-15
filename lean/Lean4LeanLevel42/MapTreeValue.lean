@@ -48,7 +48,7 @@ theorem edgeCovered_enabled_le_mapValue (ρ : Valuation) (s : NormLevel)
       change ρ a + k ≤ varsValue ρ n.var at hv
       omega
     · omega
-  · simp [eq_false_of_ne_true hq]
+  · simp [Bool.eq_false_of_ne_true hq]
 
 theorem admissible_prefix_enabled_bound (ρ : Valuation) (s : NormLevel)
     (r : List Name) (h : Admissible s [] r) :
@@ -69,7 +69,7 @@ theorem enabled_subset_gate_le (ρ : Valuation) (p q : List Name) (z : Nat)
   by_cases hq : enabled ρ q = true
   · have hp := enabled_of_subset h hq
     simp [hq, hp]
-  · simp [eq_false_of_ne_true hq]
+  · simp [Bool.eq_false_of_ne_true hq]
 
 theorem subsumeVars_zero_node_union (ρ : Valuation) (p : List Name)
     (n : Node) (a : Name) :
@@ -81,7 +81,7 @@ theorem subsumeVars_zero_node_union (ρ : Valuation) (p : List Name)
     simp only [varsValue_cons, varsValue_nil, Nat.add_zero, Nat.max_zero] at hv
     simp only [nodeValue, hp, ↓reduceIte]
     omega
-  · simp [nodeValue, eq_false_of_ne_true hp]
+  · simp [nodeValue, Bool.eq_false_of_ne_true hp]
 
 theorem map_tree_row_update_bounds (ρ : Valuation) (s : NormLevel)
     (p : List Name) (n : Node) (t : Tree)

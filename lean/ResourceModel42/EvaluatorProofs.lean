@@ -52,7 +52,7 @@ theorem prepare_sound (Sig : Nat → MetatheoryFull.EffSig) (c : Config)
           have result := MetatheoryFull.Head.letV (Sig := Sig) (L := c.live)
             (n := c.ledger.size) (e2 := body.erase) (runtimeValue_isVal value)
           simp [Replacement.materialize, PlannedAction.full, PlannedAction.apply,
-            Config.live, RuntimeExpr.erase, asValue_erase hv, runtimeExpr_erase_subst] at result ⊢
+            RuntimeExpr.erase, asValue_erase hv, runtimeExpr_erase_subst] at result ⊢
           exact result
   | unpack a body =>
       cases a with
@@ -69,7 +69,7 @@ theorem prepare_sound (Sig : Nat → MetatheoryFull.EffSig) (c : Config)
                 (n := c.ledger.size) (e := body.erase)
                 (runtimeValue_isVal left) (runtimeValue_isVal right)
               simp [Replacement.materialize, PlannedAction.full, PlannedAction.apply,
-                Config.live, RuntimeExpr.erase, RuntimeAtom.erase, RuntimeValue.erase,
+                RuntimeExpr.erase, RuntimeAtom.erase, RuntimeValue.erase,
                 runtimeExpr_erase_unpack_subst] at result ⊢
               exact result
   | ifz a zero nonzero =>
@@ -143,7 +143,7 @@ theorem step_sound (Sig : Nat → MetatheoryFull.EffSig) {l : Limits} {count : N
                       rw [runtimeContext_erase_plug] at source
                       have head := prepare_sound Sig c hp
                       have result := MetatheoryFull.Step.ctx focus.context.erase head
-                      simp [Config.erase, ← source, runtimeContext_erase_plug, Config.live] at result ⊢
+                      simp [Config.erase, ← source, runtimeContext_erase_plug] at result ⊢
                       exact result
 
 theorem terminal_isVal {l : Limits} {count : Nat} {c : Config} {value : RuntimeValue}
@@ -541,31 +541,31 @@ theorem replacement_preflight_error {l : Limits} {context : RuntimeContext}
   | term term =>
       cases hm : term.measure l with
       | error error =>
-          simp [Replacement.preflight, hm, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
           subst reason
           exact plug_exceeds context (measureExpr_error hm)
       | ok stats =>
           have eq := (measureExpr_ok hm).1
-          simp only [Replacement.preflight, hm, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp only [Replacement.preflight, hm, bind, Except.bind] at h
           rw [eq] at h
           exact preflightPlug_error h
   | substitute value body =>
       cases hm : body.preflightSubst l 0 value with
       | error error =>
-          simp [Replacement.preflight, hm, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
           subst reason
           rcases preflightSubst_error hm with incoming | candidate
           · exact Or.inl incoming
           · exact Or.inr (plug_exceeds context candidate)
       | ok stats =>
           have eq := (preflightSubst_ok hm).1
-          simp only [Replacement.preflight, hm, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp only [Replacement.preflight, hm, bind, Except.bind] at h
           rw [eq] at h
           exact Or.inr (preflightPlug_error h)
   | unpack left right body =>
       cases hm : body.preflightUnpack l left right with
       | error error =>
-          simp [Replacement.preflight, hm, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
           subst reason
           rcases preflightUnpack_error hm with incomingRight | incomingLeft | temporary | candidate
           · exact Or.inl incomingRight
@@ -577,38 +577,38 @@ theorem replacement_preflight_error {l : Limits} {context : RuntimeContext}
           obtain ⟨eqTemporary, _, eqFinal, _⟩ := preflightUnpack_ok hm
           cases ht : context.preflightPlug l temporary with
           | error error =>
-              simp [Replacement.preflight, hm, ht, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+              simp [Replacement.preflight, hm, ht, bind, Except.bind] at h
               subst reason
               rw [eqTemporary] at ht
               exact Or.inr (Or.inr (Or.inl (preflightPlug_error ht)))
           | ok ignored =>
-              simp only [Replacement.preflight, hm, ht, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+              simp only [Replacement.preflight, hm, ht, bind, Except.bind] at h
               rw [eqFinal] at h
               exact Or.inr (Or.inr (Or.inr (preflightPlug_error h)))
   | handle id =>
       cases hm : checkExprStats l (valueExprStats ⟨1, 1⟩) with
       | error error =>
-          simp [Replacement.preflight, hm, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
           subst reason
           apply plug_exceeds context
           simpa [ExprExceeds, exprMetrics, atomMetrics, valueExpr, valueMetrics, valueExprStats] using
             checkExprStats_error hm l.runtimeDepth
       | ok stats =>
           have eq := (checkExprStats_ok hm).1
-          simp only [Replacement.preflight, hm, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp only [Replacement.preflight, hm, bind, Except.bind] at h
           rw [eq] at h
           exact preflightPlug_error h
   | unit =>
       cases hm : checkExprStats l (valueExprStats ⟨1, 1⟩) with
       | error error =>
-          simp [Replacement.preflight, hm, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp [Replacement.preflight, hm, bind, Except.bind] at h
           subst reason
           apply plug_exceeds context
           simpa [ExprExceeds, exprMetrics, atomMetrics, valueExpr, valueMetrics, valueExprStats] using
             checkExprStats_error hm l.runtimeDepth
       | ok stats =>
           have eq := (checkExprStats_ok hm).1
-          simp only [Replacement.preflight, hm, bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp only [Replacement.preflight, hm, bind, Except.bind] at h
           rw [eq] at h
           exact preflightPlug_error h
 
@@ -631,11 +631,11 @@ theorem action_preflight_error {l : Limits} {ledgerSize eventCount : Nat}
       by_cases hr : l.resources < ledgerSize + 1 <;>
         by_cases he : l.events < eventCount + 1 <;>
           simp_all [PlannedAction.preflight, ActionExceeds, bind, Except.bind,
-            pure, Except.pure,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] <;> subst reason <;> simp_all
+            pure, Except.pure,throw,throwThe,MonadExceptOf.throw] <;> subst reason <;> simp_all
   | consume site id =>
       by_cases he : l.events < eventCount + 1 <;>
         simp_all [PlannedAction.preflight, ActionExceeds, bind, Except.bind,
-          pure, Except.pure,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] <;> subst reason <;> simp_all
+          pure, Except.pure,throw,throwThe,MonadExceptOf.throw] <;> subst reason <;> simp_all
 
 theorem locate_error_exceeds {fuel : Nat} {e : RuntimeExpr} {reason : CapacityError}
     (h : locate fuel e = .error reason) :

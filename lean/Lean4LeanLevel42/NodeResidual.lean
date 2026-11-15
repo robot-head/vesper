@@ -20,13 +20,13 @@ theorem subsumeVars_sublist (xs ys : List VarNode) :
       cases hc : Name.cmp x.var y.var with
       | lt =>
         simpa only [Normalize.subsumeVars, hc] using
-          (subsumeVars_sublist xs (y :: ys)).cons₂ x
+          (subsumeVars_sublist xs (y :: ys)).cons_cons x
       | eq =>
         by_cases ho : x.offset ≤ y.offset
-        · simpa only [Normalize.subsumeVars, hc, if_pos ho] using
+        · simpa only [Normalize.subsumeVars, hc, ite_eq_left ho] using
             (subsumeVars_sublist xs ys).cons x
-        · simpa only [Normalize.subsumeVars, hc, if_neg ho] using
-            (subsumeVars_sublist xs ys).cons₂ x
+        · simpa only [Normalize.subsumeVars, hc, ite_eq_right ho] using
+            (subsumeVars_sublist xs ys).cons_cons x
       | gt =>
         simpa only [Normalize.subsumeVars, hc] using
           subsumeVars_sublist (x :: xs) ys
@@ -73,7 +73,7 @@ theorem node_subsume_vars_union (ρ : Valuation) (p1 p2 : List Name)
       have hv := node_subsumeBy_vars_union ρ (p1.length == p2.length) n1 n2
       simp only [nodeVarsValue, nodeValue, he, he2, ite_true]
       omega
-    · simp [nodeVarsValue, eq_false_of_ne_true he]
+    · simp [nodeVarsValue, Bool.eq_false_of_ne_true he]
   next => rfl
 
 /-- At a self row, the old variables may discharge a residual constant only
@@ -92,10 +92,10 @@ theorem node_subsumeBy_same_context (ρ : Valuation) (p : List Name)
     next => rfl
     next hg =>
       have hb := subsumeBy_removed_const_le_vars ρ true r original hp (Or.inl rfl)
-        (eq_false_of_ne_true hg)
+        (Bool.eq_false_of_ne_true hg)
       simp only [Bool.true_or, ite_true]
       omega
-  · simp [nodeValue, eq_false_of_ne_true he]
+  · simp [nodeValue, Bool.eq_false_of_ne_true he]
 
 theorem node_subsume_same_context (ρ : Valuation) (p : List Name)
     (original r : Node) (C : Nat) (hw : NodeWF p original)

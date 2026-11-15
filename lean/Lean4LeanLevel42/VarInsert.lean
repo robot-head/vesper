@@ -65,7 +65,7 @@ theorem node_addVar_value (ρ : Valuation) (p : List Name) (n : Node) (v : Name)
   · simp only [nodeValue, he, ite_true]
     rw [addVar_value]
     omega
-  · simp [nodeValue, eq_false_of_ne_true he]
+  · simp [nodeValue, Bool.eq_false_of_ne_true he]
 
 /-- The exact inner record update preserves the node's condition invariant. -/
 theorem node_addVar_WF (p : List Name) (n : Node) (v : Name) (k : Nat)

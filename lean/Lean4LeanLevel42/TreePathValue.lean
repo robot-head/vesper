@@ -84,7 +84,7 @@ theorem tree_entries_lookup_of_mem {a : Name} {u : Tree} {xs : List (Name × Tre
         subst m
         have hf := hm a (List.mem_map.mpr ⟨(a, u), hrest, rfl⟩)
         simp [name_cmp_refl] at hf
-      rw [treeEntriesLookup_cons, if_neg hne]
+      rw [treeEntriesLookup_cons, ite_eq_right hne]
       exact ih ht hrest
 
 theorem tree_children_sorted_root (t : Tree) (hs : TreeChildrenSorted t) :

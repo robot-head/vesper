@@ -116,7 +116,7 @@ theorem mapValue_insert (ρ : Valuation) (s : NormLevel) (p : List Name) (n : No
       exact Nat.le_max_right _ _
     next he =>
       have hmem : (s.erase p).get? q = some m := by
-        rw [map_get_erase, if_neg he]
+        rw [map_get_erase, ite_eq_right he]
         exact hm
       exact Nat.le_trans (nodeValue_le_mapValue hmem) (Nat.le_max_left _ _)
   · apply Nat.max_le.mpr
@@ -128,10 +128,10 @@ theorem mapValue_insert (ρ : Valuation) (s : NormLevel) (p : List Name) (n : No
       · contradiction
       next he =>
         refine ⟨m, ?_, Nat.le_refl _⟩
-        rw [map_get_insert, if_neg he]
+        rw [map_get_insert, ite_eq_right he]
         exact hm
     · apply nodeValue_le_mapValue
-      rw [map_get_insert, if_pos rfl]
+      rw [map_get_insert, ite_eq_left rfl]
 
 theorem mapValue_decompose (ρ : Valuation) (s : NormLevel) (p : List Name) :
     mapValue ρ s = max (mapValue ρ (s.erase p))
@@ -144,7 +144,7 @@ theorem mapValue_decompose (ρ : Valuation) (s : NormLevel) (p : List Name) :
       rw [hn]
       exact Nat.le_max_right _ _
     · have hmem : (s.erase p).get? q = some n := by
-        rw [map_get_erase, if_neg he]
+        rw [map_get_erase, ite_eq_right he]
         exact hn
       exact Nat.le_trans (nodeValue_le_mapValue hmem) (Nat.le_max_left _ _)
   · apply Nat.max_le.mpr

@@ -73,47 +73,47 @@ theorem expr_depth_positive (e : RuntimeExpr) : 0 < (exprMetrics e).depth := by
 theorem checkValueStats_ok {l s result} (h : checkValueStats l s = .ok result) :
     result = s ∧ ValueWithin l s := by
   by_cases hn : l.valueNodes < s.nodes <;> by_cases hd : l.valueDepth < s.depth <;>
-    simp_all [checkValueStats, ValueWithin, bind, pure, throw, Except.pure, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+    simp_all [checkValueStats, ValueWithin, bind, pure, throw, Except.pure, bind, Except.bind,throwThe,MonadExceptOf.throw]
 
 theorem checkValueStats_error {l s reason} (h : checkValueStats l s = .error reason)
     (fuel : Nat) : ValueOverAt l fuel s reason := by
   by_cases hn : s.nodes > l.valueNodes
-  · simp [checkValueStats, hn, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+  · simp [checkValueStats, hn, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw] at h
     cases h
     exact hn
   · by_cases hd : s.depth > l.valueDepth
-    · simp [checkValueStats, hn, hd, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+    · simp [checkValueStats, hn, hd, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw] at h
       cases h
       simp only [ValueOverAt]
       omega
-    · simp [checkValueStats, hn, hd, bind, pure, throw, Except.pure, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+    · simp [checkValueStats, hn, hd, pure, Except.pure] at h
 
 theorem checkExprStats_ok {l s result} (h : checkExprStats l s = .ok result) :
     result = s ∧ Within l s := by
   by_cases hn : l.expressionNodes < s.nodes <;> by_cases hd : l.runtimeDepth < s.depth <;>
     by_cases hvn : l.valueNodes < s.maxValueNodes <;> by_cases hvd : l.valueDepth < s.maxValueDepth <;>
-    simp_all [checkExprStats, Within, bind, pure, throw, Except.pure, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+    simp_all [checkExprStats, Within, bind, pure, throw, Except.pure, bind, Except.bind,throwThe,MonadExceptOf.throw]
 
 theorem checkExprStats_error {l s reason} (h : checkExprStats l s = .error reason)
     (fuel : Nat) : ExprOverAt l fuel s reason := by
   by_cases hn : s.nodes > l.expressionNodes
-  · simp [checkExprStats, hn, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+  · simp [checkExprStats, hn, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw] at h
     cases h
     exact hn
   · by_cases hd : s.depth > l.runtimeDepth
-    · simp [checkExprStats, hn, hd, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+    · simp [checkExprStats, hn, hd, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw] at h
       cases h
       simp only [ExprOverAt]
       omega
     · by_cases hvn : s.maxValueNodes > l.valueNodes
-      · simp [checkExprStats, hn, hd, hvn, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+      · simp [checkExprStats, hn, hd, hvn, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw] at h
         cases h
         exact hvn
       · by_cases hvd : s.maxValueDepth > l.valueDepth
-        · simp [checkExprStats, hn, hd, hvn, hvd, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+        · simp [checkExprStats, hn, hd, hvn, hvd, bind, throw, bind, Except.bind,throwThe,MonadExceptOf.throw] at h
           cases h
           exact hvd
-        · simp [checkExprStats, hn, hd, hvn, hvd, bind, pure, throw, Except.pure, bind, Except.bind,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+        · simp [checkExprStats, hn, hd, hvn, hvd, pure, Except.pure] at h
 
 theorem value_pair_left_over {l fuel a b reason}
     (h : ValueOverAt l fuel (valueMetrics a) reason) :
@@ -162,7 +162,7 @@ theorem measureValue_spec (l : Limits) (fuel : Nat) (v : RuntimeValue) :
         | ok sb =>
           simp only [hmb,ValueResult] at hb
           obtain ⟨rfl,hwb,hdb⟩ := hb
-          simp only [measureValue,hma,hmb,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+          simp only [measureValue,hma,hmb,bind, Except.bind]
           cases hc : checkValueStats l
               ⟨1+(valueMetrics a).nodes+(valueMetrics b).nodes,
                 1+max (valueMetrics a).depth (valueMetrics b).depth⟩ with
@@ -304,7 +304,7 @@ theorem measureAtom_spec (l : Limits) (fuel : Nat) (plan : ValuePlan) (a : Runti
       simpa [hv,bind, Except.bind,AtomResult,applyAtomPlan_val,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] using over
     | ok stats =>
       obtain ⟨rfl,within⟩ := measureValue_ok hv
-      simp only [bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+      simp only [bind, Except.bind]
       cases hc : checkExprStats l (valueExprStats (valueMetrics v)) with
       | error reason =>
         simpa [AtomResult,applyAtomPlan_val,atomMetrics,valueExpr,valueExprStats]
@@ -451,12 +451,12 @@ theorem preflightSubst_ok {l k v e result}
     result = exprMetrics (e.subst k v) ∧ Within l result := by
   unfold RuntimeExpr.preflightSubst at h
   cases hv : RuntimeValue.measure l v with
-  | error reason => simp [hv,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+  | error reason => simp [hv,bind, Except.bind] at h
   | ok stats =>
     obtain ⟨rfl,_⟩ := measureValue_ok hv
     have spec := measureExpr_spec l l.runtimeDepth [(k,v)] e
     simp only [metricsPlan,List.map_cons,List.map_nil] at spec
-    simp only [hv,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+    simp only [hv,bind, Except.bind] at h
     rw [h] at spec
     exact spec
 
@@ -466,14 +466,14 @@ theorem preflightSubst_error {l k v e reason}
   unfold RuntimeExpr.preflightSubst at h
   cases hv : RuntimeValue.measure l v with
   | error r =>
-    simp only [hv,bind, Except.bind,Except.error.injEq,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+    simp only [hv,bind, Except.bind,Except.error.injEq] at h
     subst reason
     exact .inl (measureValue_error hv)
   | ok stats =>
     obtain ⟨rfl,_⟩ := measureValue_ok hv
     have spec := measureExpr_spec l l.runtimeDepth [(k,v)] e
     simp only [metricsPlan,List.map_cons,List.map_nil] at spec
-    simp only [hv,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+    simp only [hv,bind, Except.bind] at h
     rw [h] at spec
     exact .inr spec
 
@@ -483,25 +483,25 @@ theorem preflightUnpack_ok {l left right body intermediate result}
     result = exprMetrics ((body.subst 0 right).subst 0 left) ∧ Within l result := by
   unfold RuntimeExpr.preflightUnpack at h
   cases hr : RuntimeValue.measure l right with
-  | error reason => simp [hr,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+  | error reason => simp [hr,bind, Except.bind] at h
   | ok sr =>
     obtain ⟨rfl,_⟩ := measureValue_ok hr
     cases hl : RuntimeValue.measure l left with
-    | error reason => simp [hr,hl,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+    | error reason => simp [hr,hl,bind, Except.bind] at h
     | ok sl =>
       obtain ⟨rfl,_⟩ := measureValue_ok hl
       have mid := measureExpr_spec l l.runtimeDepth [(0,right)] body
       have final := measureExpr_spec l l.runtimeDepth [(0,right),(0,left)] body
       simp only [metricsPlan,List.map_cons,List.map_nil] at mid final
       cases hm : measureExpr l l.runtimeDepth [(0,valueMetrics right)] body with
-      | error reason => simp [hr,hl,hm,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+      | error reason => simp [hr,hl,hm,bind, Except.bind] at h
       | ok sm =>
         rw [hm] at mid
         cases hf : measureExpr l l.runtimeDepth [(0,valueMetrics right),(0,valueMetrics left)] body with
-        | error reason => simp [hr,hl,hm,hf,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+        | error reason => simp [hr,hl,hm,hf,bind, Except.bind] at h
         | ok sf =>
           rw [hf] at final
-          simp [hr,hl,hm,hf,bind, Except.bind,pure,Except.pure,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp [hr,hl,hm,hf,bind, Except.bind,pure,Except.pure] at h
           obtain ⟨rfl,rfl⟩ := h
           exact ⟨mid.1,mid.2,final.1,final.2⟩
 
@@ -513,14 +513,14 @@ theorem preflightUnpack_error {l left right body reason}
   unfold RuntimeExpr.preflightUnpack at h
   cases hr : RuntimeValue.measure l right with
   | error r =>
-    simp only [hr,bind, Except.bind,Except.error.injEq,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+    simp only [hr,bind, Except.bind,Except.error.injEq] at h
     subst reason
     exact .inl (measureValue_error hr)
   | ok sr =>
     obtain ⟨rfl,_⟩ := measureValue_ok hr
     cases hl : RuntimeValue.measure l left with
     | error r =>
-      simp only [hr,hl,bind, Except.bind,Except.error.injEq,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+      simp only [hr,hl,bind, Except.bind,Except.error.injEq] at h
       subst reason
       exact .inr (.inl (measureValue_error hl))
     | ok sl =>
@@ -531,17 +531,17 @@ theorem preflightUnpack_error {l left right body reason}
       cases hm : measureExpr l l.runtimeDepth [(0,valueMetrics right)] body with
       | error r =>
         rw [hm] at mid
-        simp only [hr,hl,hm,bind, Except.bind,Except.error.injEq,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+        simp only [hr,hl,hm,bind, Except.bind,Except.error.injEq] at h
         subst reason
         exact .inr (.inr (.inl mid))
       | ok sm =>
         cases hf : measureExpr l l.runtimeDepth [(0,valueMetrics right),(0,valueMetrics left)] body with
         | error r =>
           rw [hf] at final
-          simp only [hr,hl,hm,hf,bind, Except.bind,Except.error.injEq,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+          simp only [hr,hl,hm,hf,bind, Except.bind,Except.error.injEq] at h
           subst reason
           exact .inr (.inr (.inr final))
-        | ok sf => simp [hr,hl,hm,hf,bind, Except.bind,pure,Except.pure,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] at h
+        | ok sf => simp [hr,hl,hm,hf,bind, Except.bind,pure,Except.pure] at h
 
 theorem configured_over_at {l e reason} (h : ExprExceeds l e reason) (fuel : Nat) :
     ExprOverAt l fuel (exprMetrics e) reason := by
@@ -622,11 +622,11 @@ theorem input_forIn (l : Limits) (values : List RuntimeValue) (state : Prod Expr
   | cons value rest ih =>
     simp only [List.forIn_cons,inputStep,inputLoop]
     cases hv : RuntimeValue.measure l value with
-    | error reason => simp [bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+    | error reason => simp [bind, Except.bind]
     | ok stats =>
       by_cases over : l.initialValueNodes < state.snd+stats.nodes
-      · simp [over,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
-      · simp only [over,↓reduceIte,bind, Except.bind,pure,Except.pure,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+      · simp [over,bind, Except.bind,throw,throwThe,MonadExceptOf.throw]
+      · simp only [over,↓reduceIte,bind, Except.bind,pure,Except.pure]
         cases hb : binaryStats l (valueExprStats stats) state.fst with
         | error reason => simp
         | ok result => simpa [hb,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept] using ih (Prod.mk result _)
@@ -647,10 +647,10 @@ theorem input_preflight_eq (l : Limits) (values : Array RuntimeValue) (body : Ru
       pure (ForInStep.yield (Prod.mk result total))) = inputStep l := by
     funext value state
     cases hv : RuntimeValue.measure l value with
-    | error reason => simp [inputStep,hv,bind, Except.bind,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+    | error reason => simp [inputStep,hv,bind, Except.bind]
     | ok stats =>
       by_cases over : l.initialValueNodes < state.snd+stats.nodes <;>
-        simp [inputStep,hv,over,bind, Except.bind,pure,Except.pure,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+        simp [inputStep,hv,over,bind, Except.bind,pure,Except.pure,throw,throwThe,MonadExceptOf.throw]
   simp only [same,← Array.forIn_toList,input_forIn]
 
 theorem closeList_cons (v : RuntimeValue) (vs : List RuntimeValue) (body : RuntimeExpr) :
@@ -699,10 +699,10 @@ theorem inputLoop_spec (l : Limits) (values : List RuntimeValue) (body : Runtime
     | ok stats =>
       obtain ⟨rfl,_⟩ := measureValue_ok hv
       by_cases over : l.initialValueNodes < total+(valueMetrics v).nodes
-      · simp only [inputLoop,hv,over,↓reduceIte,bind, Except.bind,InputLoopResult,InputsOver,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+      · simp only [inputLoop,hv,over,↓reduceIte,bind, Except.bind,InputLoopResult,InputsOver,throw,throwThe,MonadExceptOf.throw]
         simp only [initialNodes_cons]
         omega
-      · simp only [inputLoop,hv,over,↓reduceIte,bind, Except.bind,pure,Except.pure,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+      · simp only [inputLoop,hv,over,↓reduceIte,bind, Except.bind]
         cases hb : binaryStats l (valueExprStats (valueMetrics v)) (exprMetrics body) with
         | error reason =>
           have excess := checkExprStats_error hb l.runtimeDepth
@@ -745,8 +745,8 @@ theorem preflightInputs_spec (l : Limits) (values : Array RuntimeValue) (body : 
     InitialResult l values body (preflightInputs l values body) := by
   rw [input_preflight_eq]
   by_cases count : l.inputs < values.size
-  · simp [count,bind, Except.bind,InitialResult,InitialExceeds,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
-  · simp only [count,↓reduceIte,bind, Except.bind,pure,Except.pure,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+  · simp [count,bind, Except.bind,InitialResult,InitialExceeds,throw,throwThe,MonadExceptOf.throw]
+  · simp only [count,↓reduceIte,bind, Except.bind,pure,Except.pure]
     cases hb : RuntimeExpr.measure l body with
     | error reason =>
       have actual := closeList_over (measureExpr_error hb) values.toList
@@ -768,7 +768,7 @@ theorem preflightInputs_spec (l : Limits) (values : Array RuntimeValue) (body : 
       | ok result =>
         rw [hi] at spec
         obtain ⟨exactStats,exactWithin,exactTotal,totalWithin⟩ := spec
-        simp only [bind, Except.bind,InitialResult,throw,throwThe,MonadExceptOf.throw,instMonadExceptOfExcept]
+        simp only [bind, Except.bind,InitialResult]
         exact ⟨exactStats,exactWithin,by omega,by omega⟩
 
 theorem preflightInputs_ok {l values body result}
