@@ -17,7 +17,7 @@ pub const DEFAULT_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 
 /// Every lexer token kind, in discriminant order (the CST stores tokens as
 /// `SyntaxKind(TokenKind as u16)`).
-const TOKEN_KINDS: [K; 74] = [
+const TOKEN_KINDS: [K; 75] = [
     K::Whitespace,
     K::Comment,
     K::BlockComment,
@@ -90,10 +90,9 @@ const TOKEN_KINDS: [K; 74] = [
     K::Error,
     K::Eof,
     K::Dollar,
-    // Padding entries are never produced: `token_kind` checks the
-    // discriminant, so a future token kind decodes as `Error`.
-    K::Error,
-    K::Error,
+    K::Tilde,
+    K::PipeEq,
+    K::AmpEq,
 ];
 
 fn token_kind(raw: SyntaxKind) -> K {
@@ -494,8 +493,9 @@ mod tests {
 
     #[test]
     fn token_table_matches_discriminants() {
-        for (i, kind) in TOKEN_KINDS.iter().enumerate().take(72) {
+        for (i, kind) in TOKEN_KINDS.iter().enumerate() {
             assert_eq!(*kind as usize, i, "{kind:?}");
+            assert_eq!(token_kind(SyntaxKind(i as u16)), *kind);
         }
         assert_eq!(token_kind(SyntaxKind(500)), K::Error);
     }
