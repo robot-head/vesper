@@ -163,6 +163,91 @@ fn all_supported_numeric_scalar_boundaries_roundtrip_and_zigzag_vectors() {
         assert_eq!(encoded(&schema, &value), [0x18, wire]);
     }
 }
+
+#[test]
+fn signed_twos_complement_varints_are_canonical_in_singular_and_packed_fields() {
+    let defs = [M {
+        fields: vec![
+            f(1, K::Int32, false),
+            f(2, K::Int64, false),
+            f(3, K::Int32, true),
+            f(4, K::Int64, true),
+        ],
+    }];
+    let schema = Schema::validate(&defs, 0, Limits::default()).unwrap();
+    for (number, value, bytes) in [
+        (1, Value::Int32(0), "08 00"),
+        (1, Value::Int32(i32::MAX), "08 ff ff ff ff 07"),
+        (
+            1,
+            Value::Int32(i32::MIN),
+            "08 80 80 80 80 f8 ff ff ff ff 01",
+        ),
+        (1, Value::Int32(-1), "08 ff ff ff ff ff ff ff ff ff 01"),
+        (2, Value::Int64(i64::MAX), "10 ff ff ff ff ff ff ff ff 7f"),
+        (
+            2,
+            Value::Int64(i64::MIN),
+            "10 80 80 80 80 80 80 80 80 80 01",
+        ),
+        (2, Value::Int64(-1), "10 ff ff ff ff ff ff ff ff ff 01"),
+    ] {
+        let msg = Message {
+            fields: vec![v(number, value)],
+        };
+        let wire = hex(bytes);
+        assert_eq!(encoded(&schema, &msg), wire);
+        assert_eq!(schema.parse_exact(&wire).unwrap(), msg);
+    }
+    let packed =
+        hex("1a 0c 00 ff ff ff ff ff ff ff ff ff 01 01 22 0b ff ff ff ff ff ff ff ff ff 01 00");
+    let value = Message {
+        fields: vec![
+            v(3, Value::Int32(0)),
+            v(3, Value::Int32(-1)),
+            v(3, Value::Int32(1)),
+            v(4, Value::Int64(-1)),
+            v(4, Value::Int64(0)),
+        ],
+    };
+    assert_eq!(schema.parse_exact(&packed).unwrap(), value);
+    assert_eq!(encoded(&schema, &value), packed);
+
+    // A five-byte zero-extended negative int32 and out-of-range positive
+    // values are alternate representations, even if a permissive decoder truncates.
+    for wire in [
+        "08 ff ff ff ff 0f",
+        "08 80 80 80 80 08",
+        "08 80 00",
+        "1a 05 ff ff ff ff 0f",
+    ] {
+        assert_eq!(
+            schema.parse_exact(&hex(wire)).unwrap_err().kind,
+            ErrorKind::NonCanonical
+        );
+    }
+    for end in 2..11 {
+        assert!(
+            schema
+                .parse_exact(&hex("08 ff ff ff ff ff ff ff ff ff 01")[..end])
+                .is_err()
+        );
+    }
+    let mut output = [0xa5; 2];
+    assert_eq!(
+        schema.encode_into(&value, &mut output).unwrap_err().kind,
+        ErrorKind::OutputTooSmall
+    );
+    assert_eq!(output, [0xa5; 2]);
+    let mismatch = Message {
+        fields: vec![v(1, Value::Int64(-1))],
+    };
+    assert_eq!(
+        schema.encode_into(&mismatch, &mut output).unwrap_err().kind,
+        ErrorKind::TypeMismatch
+    );
+    assert_eq!(output, [0xa5; 2]);
+}
 #[test]
 fn repeated_scalars_packed_policy_and_non_numeric_occurrence_order() {
     let defs = [
