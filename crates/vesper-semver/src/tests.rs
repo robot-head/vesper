@@ -634,3 +634,65 @@ fn mutable_parameters_keep_invariant_refinements() {
     assert!(!check(old.clone(), new.clone()).is_compatible());
     assert!(!check(new, old).is_compatible());
 }
+
+#[test]
+fn range_witness_values_explain_each_direction_and_extreme() {
+    for (sub, sup, value) in [
+        (i64_range(-10, 10), i64_range(0, 10), -10),
+        (i64_range(-10, 10), i64_range(-10, 0), 10),
+        (int(), i64_range(i64::MIN + 1, i64::MAX), i64::MIN),
+        (int(), i64_range(i64::MIN, i64::MAX - 1), i64::MAX),
+    ] {
+        let mut old = function();
+        let mut new = old.clone();
+        old.parameters[0].ty = sub.clone();
+        new.parameters[0].ty = sup.clone();
+        let report = check(old, new);
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.message == "parameter type is incompatible")
+            .unwrap();
+        assert!(
+            issue.caller_witness.contains(&format!("Pass {value}: i64")),
+            "{issue:?}"
+        );
+        let mut old = function();
+        let mut new = old.clone();
+        old.result = sup;
+        new.result = sub;
+        let report = check(old, new);
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.message == "return type is incompatible")
+            .unwrap();
+        assert!(
+            issue
+                .caller_witness
+                .contains(&format!("admits {value}: i64")),
+            "{issue:?}"
+        );
+    }
+}
+
+#[test]
+fn range_witness_does_not_misrepresent_invariant_or_invalid_types() {
+    let mut old = function();
+    old.parameters[0].pass = Pass::Inout;
+    old.parameters[0].ty = i64_range(0, 10);
+    let mut new = old.clone();
+    new.parameters[0].ty = i64_range(0, 20);
+    let report = check(old, new);
+    let issue = report
+        .issues
+        .iter()
+        .find(|i| i.message == "parameter type is incompatible")
+        .unwrap();
+    assert!(issue.caller_witness.contains("mutable places"));
+    assert_eq!(i64_counterexample(&i64_range(1, 0), &int()), None);
+    assert_eq!(
+        i64_counterexample(&i64_range(0, 10), &i64_range(-1, 11)),
+        None
+    );
+}

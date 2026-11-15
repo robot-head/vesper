@@ -8,6 +8,8 @@ contravariant input and covariant result comparisons; `inout` and other
 invariant positions remain invariant. Reversed bounds produce an unknown
 comparison. Source interface export does not yet emit these refinements, and
 this fragment does not decide general predicates or synthesize SMT witnesses.
+Incompatible direct input or result ranges include a concrete distinguishing
+`i64` value in the human-readable witness; it is not a checked caller program.
 
 Resolved interface DTOs may attach a constant `ceiling` to an effect capability.
 For the same capability, lowering the ceiling is compatible and raising it is
