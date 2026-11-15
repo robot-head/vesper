@@ -17,7 +17,7 @@ pub const DEFAULT_MAX_SOURCE_BYTES: usize = 1024 * 1024;
 
 /// Every lexer token kind, in discriminant order (the CST stores tokens as
 /// `SyntaxKind(TokenKind as u16)`).
-const TOKEN_KINDS: [K; 74] = [
+const TOKEN_KINDS: [K; 75] = [
     K::Whitespace,
     K::Comment,
     K::BlockComment,
@@ -90,10 +90,9 @@ const TOKEN_KINDS: [K; 74] = [
     K::Error,
     K::Eof,
     K::Dollar,
-    // Padding entries are never produced: `token_kind` checks the
-    // discriminant, so a future token kind decodes as `Error`.
-    K::Error,
-    K::Error,
+    K::Tilde,
+    K::PipeEq,
+    K::AmpEq,
 ];
 
 fn token_kind(raw: SyntaxKind) -> K {
@@ -406,6 +405,25 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
                 let word = text(t);
                 let after = next(i).map(|n| n.kind);
                 let before = prev(i).map(|p| p.kind);
+                let p = sig_pos[i];
+                let lookahead = |offset: usize| -> Option<K> {
+                    (p != usize::MAX)
+                        .then(|| sig.get(p + offset).map(|&j| toks[j].kind))
+                        .flatten()
+                };
+                let is_tiled_decl = word == "tiled"
+                    && before != Some(K::Fn)
+                    && lookahead(1) == Some(K::LParen)
+                    && lookahead(2) == Some(K::Int)
+                    && lookahead(3) == Some(K::RParen)
+                    && matches!(
+                        lookahead(4),
+                        Some(K::Struct | K::Copy | K::Affine | K::Linear | K::Mod)
+                    );
+                let is_field_temp = matches!(word, "hot" | "cold")
+                    && before.is_some_and(|b| matches!(b, K::LBrace | K::Comma))
+                    && after == Some(K::Lower)
+                    && lookahead(2) == Some(K::Colon);
                 if projection.is_some()
                     && before.is_some_and(|b| matches!(b, K::Dot | K::LBrace | K::Comma))
                 {
@@ -414,6 +432,8 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
                     C::WireEndianScalar
                 } else if before == Some(K::At) && word == "proof" {
                     C::DocProofAnchor
+                } else if is_tiled_decl || is_field_temp {
+                    C::KeywordControl
                 } else if before == Some(K::Fn) || after == Some(K::LParen) {
                     C::FunctionIdent
                 } else if CONTEXTUAL_DECL.contains(&word)
@@ -494,8 +514,9 @@ mod tests {
 
     #[test]
     fn token_table_matches_discriminants() {
-        for (i, kind) in TOKEN_KINDS.iter().enumerate().take(72) {
+        for (i, kind) in TOKEN_KINDS.iter().enumerate() {
             assert_eq!(*kind as usize, i, "{kind:?}");
+            assert_eq!(token_kind(SyntaxKind(i as u16)), *kind);
         }
         assert_eq!(token_kind(SyntaxKind(500)), K::Error);
     }

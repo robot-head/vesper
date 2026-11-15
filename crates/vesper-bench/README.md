@@ -63,6 +63,13 @@ decision. Independent-sample inference requires appropriate independence and
 distribution assumptions; ABBA epoch measurements are paired and do not
 automatically satisfy those assumptions.
 
+`mann_whitney_exact(first, second)` computes the exact untied permutation
+probability for two nonempty samples of at most 32 observations each. It rejects
+repeated values anywhere in the combined samples. The returned fraction uses
+twice the smaller inclusive tail, capped at one; it is not rounded. Its null
+interpretation requires exchangeable observations, and it is not a paired ABBA
+test or a confidence interval. It does not participate in the regression gate.
+
 ## Optional population-median confidence gate
 
 `analyze_pairs(samples, max_regression_bp)` targets the population median of the
@@ -148,3 +155,13 @@ inserted delay from elapsed time and reports the predicted end-to-end speedup
 in basis points per region. Unlike Coz, regions are explicit calls rather than
 sampled lines, delay accrues when a region ends, and there is no credit for
 delay accrued while a thread was blocked.
+
+## Tied Walsh point estimates
+
+`walsh_pseudomedian` returns the Hodges–Lehmann point estimate for up to 32
+caller-provided integer paired differences, retaining zeros and tied Walsh
+averages with their full multiplicity. The result is scaled by four so even
+medians and half-unit Walsh averages are exact. It uses bounded stack storage
+and returns an explicit error for empty or oversized input. It does not return a
+confidence interval or regression decision and does not establish measurement
+provenance.

@@ -2,7 +2,7 @@
 //! secret/constant-time parser, or a generic ASN.1 schema compiler.
 //!
 //! Supported: primitive BOOLEAN, arbitrary minimal signed two's-complement
-//! INTEGER bytes, BIT STRING (preserving bit length), OCTET STRING, NULL, OID,
+//! INTEGER bytes, BIT STRING (preserving bit length), OCTET STRING, UTF8String, NULL, OID,
 //! SEQUENCE, and explicitly schema-typed SET OF. [`Schema::Any`] never infers
 //! SET OF from tag 17; ASN.1 SET is unsupported. All non-universal tags and
 //! unimplemented universal strings/times/types return an explicit unsupported
@@ -99,6 +99,7 @@ pub enum ErrorKind {
     Integer,
     BitString,
     ObjectIdentifier,
+    Utf8String,
     Null,
     SetOrder,
     SchemaMismatch,
@@ -170,6 +171,7 @@ pub enum Schema<'s> {
     OctetString,
     Null,
     ObjectIdentifier,
+    Utf8String,
     Sequence(&'s [Schema<'s>]),
     SequenceOf(&'s Schema<'s>),
     SetOf(&'s Schema<'s>),
@@ -217,6 +219,7 @@ pub enum Kind {
     OctetString,
     Null,
     ObjectIdentifier,
+    Utf8String,
     Sequence,
     SetOf,
 }
@@ -229,6 +232,7 @@ impl Kind {
             Self::OctetString => 4,
             Self::Null => 5,
             Self::ObjectIdentifier => 6,
+            Self::Utf8String => 12,
             Self::Sequence => 0x30,
             Self::SetOf => 0x31,
         }
@@ -243,6 +247,7 @@ fn matches_schema(kind: Kind, schema: &Schema<'_>) -> bool {
             | (Kind::OctetString, Schema::OctetString)
             | (Kind::Null, Schema::Null)
             | (Kind::ObjectIdentifier, Schema::ObjectIdentifier)
+            | (Kind::Utf8String, Schema::Utf8String)
             | (Kind::Sequence, Schema::Sequence(_) | Schema::SequenceOf(_))
             | (Kind::SetOf, Schema::SetOf(_))
     ) || matches!(schema, Schema::Any) && kind != Kind::SetOf
@@ -331,6 +336,10 @@ impl<'d, 'a> Node<'d, 'a> {
     }
     pub fn octets(self) -> Option<&'a [u8]> {
         (self.kind() == Kind::OctetString).then(|| self.content())
+    }
+    pub fn utf8_string(self) -> Option<&'a str> {
+        (self.kind() == Kind::Utf8String)
+            .then(|| core::str::from_utf8(self.content()).expect("validated UTF8String"))
     }
     pub fn oid_bytes(self) -> Option<&'a [u8]> {
         (self.kind() == Kind::ObjectIdentifier).then(|| self.content())
@@ -444,6 +453,7 @@ fn header(
         4 => Kind::OctetString,
         5 => Kind::Null,
         6 => Kind::ObjectIdentifier,
+        12 => Kind::Utf8String,
         16 => Kind::Sequence,
         17 => Kind::SetOf,
         _ => return Err(error(ErrorKind::UnsupportedTag { class, number }, start)),
@@ -477,6 +487,7 @@ fn primitive(kind: Kind, content: &[u8], offset: usize, meter: &mut Meter) -> Re
         }
         Kind::Null => !content.is_empty(),
         Kind::OctetString => false,
+        Kind::Utf8String => core::str::from_utf8(content).is_err(),
         Kind::ObjectIdentifier => {
             if content.is_empty() {
                 true
@@ -510,6 +521,7 @@ fn primitive(kind: Kind, content: &[u8], offset: usize, meter: &mut Meter) -> Re
                 Kind::Integer => ErrorKind::Integer,
                 Kind::BitString => ErrorKind::BitString,
                 Kind::ObjectIdentifier => ErrorKind::ObjectIdentifier,
+                Kind::Utf8String => ErrorKind::Utf8String,
                 Kind::Null => ErrorKind::Null,
                 _ => ErrorKind::SchemaMismatch,
             },
@@ -658,6 +670,7 @@ pub enum Value<'a> {
     OctetString(&'a [u8]),
     Null,
     ObjectIdentifier(&'a [u8]),
+    Utf8String(&'a str),
     Sequence(&'a [Value<'a>]),
     SetOf(&'a [Value<'a>]),
 }
@@ -670,6 +683,7 @@ impl Value<'_> {
             Self::OctetString(_) => Kind::OctetString,
             Self::Null => Kind::Null,
             Self::ObjectIdentifier(_) => Kind::ObjectIdentifier,
+            Self::Utf8String(_) => Kind::Utf8String,
             Self::Sequence(_) => Kind::Sequence,
             Self::SetOf(_) => Kind::SetOf,
         }
@@ -715,6 +729,10 @@ fn measure(
         Value::Integer(bytes) | Value::ObjectIdentifier(bytes) | Value::OctetString(bytes) => {
             primitive(kind, bytes, 0, meter)?;
             bytes.len()
+        }
+        Value::Utf8String(text) => {
+            primitive(kind, text.as_bytes(), 0, meter)?;
+            text.len()
         }
         Value::Null => 0,
         Value::BitString { unused_bits, bytes } => {
@@ -830,6 +848,7 @@ fn build(value: &Value<'_>) -> Result<Vec<u8>> {
     let content = match value {
         Value::Boolean(_) => 1,
         Value::Integer(b) | Value::ObjectIdentifier(b) | Value::OctetString(b) => b.len(),
+        Value::Utf8String(text) => text.len(),
         Value::Null => 0,
         Value::BitString { bytes, .. } => add(bytes.len(), 1)?,
         _ => children.iter().try_fold(0, |n, c| add(n, c.len()))?,
@@ -841,6 +860,7 @@ fn build(value: &Value<'_>) -> Result<Vec<u8>> {
         Value::Integer(b) | Value::ObjectIdentifier(b) | Value::OctetString(b) => {
             out.extend_from_slice(b)
         }
+        Value::Utf8String(text) => out.extend_from_slice(text.as_bytes()),
         Value::Null => {}
         Value::BitString { unused_bits, bytes } => {
             out.push(*unused_bits);
