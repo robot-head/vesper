@@ -36,7 +36,37 @@ fn cap(name: &str, q: Resumption) -> Capability {
         effect: name.into(),
         arguments: vec![],
         resumption: q,
+        ceiling: None,
     }
+}
+#[test]
+fn constant_resource_ceilings_are_covariant_and_missing_is_unknown() {
+    let mut old = function();
+    let mut resource = cap("Stack", Resumption::Linear);
+    resource.ceiling = Some(384);
+    old.effects.capabilities.push(resource);
+    let mut new = old.clone();
+    new.effects.capabilities[0].ceiling = Some(256);
+    assert_eq!(
+        check(old.clone(), new.clone()).classification,
+        Classification::Minor
+    );
+    let report = check(new, old.clone());
+    assert_eq!(report.classification, Classification::Major);
+    assert!(report.issues.iter().any(|i| i.rule == "SV-Grade"));
+    let mut ungraded = old.clone();
+    ungraded.effects.capabilities[0].ceiling = None;
+    assert_eq!(
+        check(old.clone(), ungraded.clone()).classification,
+        Classification::Unknown
+    );
+    assert_eq!(
+        check(ungraded, old.clone()).classification,
+        Classification::Unknown
+    );
+    let json = serde_json::to_string(&interface(old.clone())).unwrap();
+    let decoded: Interface = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, interface(old));
 }
 fn paths(names: &[&str]) -> Projection {
     Projection::Paths {

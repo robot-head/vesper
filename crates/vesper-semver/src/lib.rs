@@ -168,6 +168,10 @@ pub struct Capability {
     pub effect: String,
     pub arguments: Vec<Type>,
     pub resumption: Resumption,
+    /// Constant resource ceiling, when supplied by a resolved interface.
+    /// None denotes an ungraded capability, not a zero ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling: Option<u64>,
 }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -684,6 +688,27 @@ impl Checker<'_> {
                 "function requires new capabilities/rows or a weaker capability contract",
                 "A caller grants exactly the old capability ceiling.",
             );
+        }
+        for new in &b.effects.capabilities {
+            if let Some(old) = a.effects.capabilities.iter().find(|old| {
+                old.identity == new.identity
+                    && old.effect == new.effect
+                    && old.arguments == new.arguments
+            }) {
+                match (old.ceiling, new.ceiling) {
+                    (Some(old), Some(new)) if new > old => self.breaking(
+                        path,
+                        "SV-Grade",
+                        "resource ceiling increased",
+                        "Call under the old resource ceiling.",
+                    ),
+                    (None, Some(_)) | (Some(_), None) => self.unsupported(
+                        path,
+                        "cannot compare a graded capability with an ungraded capability",
+                    ),
+                    _ => {}
+                }
+            }
         }
         if resumption(&b.effects, &b.generics) < resumption(&a.effects, &a.generics) {
             self.breaking(
