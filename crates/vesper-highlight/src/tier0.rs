@@ -406,6 +406,25 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
                 let word = text(t);
                 let after = next(i).map(|n| n.kind);
                 let before = prev(i).map(|p| p.kind);
+                let p = sig_pos[i];
+                let lookahead = |offset: usize| -> Option<K> {
+                    (p != usize::MAX)
+                        .then(|| sig.get(p + offset).map(|&j| toks[j].kind))
+                        .flatten()
+                };
+                let is_tiled_decl = word == "tiled"
+                    && before != Some(K::Fn)
+                    && lookahead(1) == Some(K::LParen)
+                    && lookahead(2) == Some(K::Int)
+                    && lookahead(3) == Some(K::RParen)
+                    && matches!(
+                        lookahead(4),
+                        Some(K::Struct | K::Copy | K::Affine | K::Linear | K::Mod)
+                    );
+                let is_field_temp = matches!(word, "hot" | "cold")
+                    && before.is_some_and(|b| matches!(b, K::LBrace | K::Comma))
+                    && after == Some(K::Lower)
+                    && lookahead(2) == Some(K::Colon);
                 if projection.is_some()
                     && before.is_some_and(|b| matches!(b, K::Dot | K::LBrace | K::Comma))
                 {
@@ -414,6 +433,8 @@ fn classify(src: &str, toks: &[Tok], token_mode: bool) -> Vec<HighlightSpan> {
                     C::WireEndianScalar
                 } else if before == Some(K::At) && word == "proof" {
                     C::DocProofAnchor
+                } else if is_tiled_decl || is_field_temp {
+                    C::KeywordControl
                 } else if before == Some(K::Fn) || after == Some(K::LParen) {
                     C::FunctionIdent
                 } else if CONTEXTUAL_DECL.contains(&word)

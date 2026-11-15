@@ -471,7 +471,8 @@ fn preflight_ir(
                     | Op::Project(_, _)
                     | Op::Index(_, _)
                     | Op::Try(_)
-                    | Op::Vector { .. } => {
+                    | Op::Vector { .. }
+                    | Op::Tiled { .. } => {
                         return Err(
                             "native batch unsupported aggregate/indirect/handler operation".into(),
                         );

@@ -492,7 +492,7 @@ fn build_document(
     let limitations = vec![
         "Checked source metadata; proof badges come only from supplied proof-audit reports, otherwise unverified".into(),
         "Search matches generic functions by instantiation; row binders, open rows, unresolved and function-typed contracts are excluded".into(),
-        "Struct layouts describe the native eight-byte ABI; wire layouts come only from compiled Bridge declarations; no tiled layouts".into(),
+        "Struct layouts describe the native ABI (including tiled(N) AoSoA hot/cold slabs); wire layouts come only from compiled Bridge declarations".into(),
         "A terminal path is not an all-path ownership or termination proof".into(),
         "Local intra-doc links cover documented source declarations; package, generic, Self and trait-method links are unsupported".into(),
         "No doctest, JIT, WASM or semver-diff execution; .olean certificates are linked only from an explicit Loom store and prove content identity, not provenance".into(),
