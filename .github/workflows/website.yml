@@ -3,9 +3,9 @@ name: Website
 on:
   push:
     branches: [main]
-    paths: ['website/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves']
+    paths: ['website/**', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves']
   pull_request:
-    paths: ['website/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves']
+    paths: ['website/**', 'docs/manuscript/**', '.github/workflows/website.yml', 'examples/transaction.ves', 'examples/projections.ves', 'examples/checked_math.ves']
   workflow_dispatch:
 
 permissions:
@@ -27,6 +27,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
+      - uses: typst-community/setup-typst@00ad6338f0b34724ea002136bfb701a6c18585b0 # v5.3.2
+        with:
+          typst-version: '0.15.1'
+      - name: Typeset the language manuscript
+        run: typst compile --ignore-system-fonts --root .. ../docs/manuscript/main.typ vesper-specification.pdf
       - run: npm run build
       - run: npm run check
       - uses: actions/upload-pages-artifact@v3

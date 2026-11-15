@@ -11,3 +11,8 @@ execution_log.binpb.zst
 /MODULE.bazel.lock
 /.ci-lean-path
 /.ci-bazel-executables
+
+# Local manuscript tooling, render checks and delivered copy
+/.tools/
+/tmp/pdfs/
+/output/pdf/

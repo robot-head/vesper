@@ -3,7 +3,7 @@ Brand: Appendix B's Vesper Dusk and Dawn; Space Grotesk / Inter / JetBrains Mono
 
 Voice: the engineer; direct, specific, technical where useful. Present the intended end state from the supplied Vesper Language Design & Formal Specification. Real examples are included from the repository. No invented releases, benchmark results, customers or testimonials.
 
-Primary action: Read the design, linking to the public specification in GitHub.
+Primary action: Read the design, opening the published Typst manuscript at vesper-specification.pdf.
 
 Fact sheet: zero-GC systems language; copy/affine/linear modes; exact-once consumption; lexical effects; in/inout/sink projections; Cranelift native/JIT; Lean 4 extraction; Loom capability ceilings and sandboxed builds; unified CLI; native UI, networking, compute and storage ecosystem. The supplied design is the authority for the intended architecture, rather than an implementation-coverage audit.
 

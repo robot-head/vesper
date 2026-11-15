@@ -10,6 +10,12 @@ exports_files([
 vesper_crate(
     copy_test_cwd = [
         "test/lean4lean_foundations42",
+        "test/lean4lean_construction42",
+        "test/lean4lean_order42",
+        "test/lean4lean_map42",
+        "test/lean4lean_normalize42",
+        "test/lean4lean_normalization42",
+        "test/lean4lean_comparison42",
         "test/resource_oracle42",
     ],
     extra_compile_data = ["//crates/vesper-doc:files"],
@@ -21,6 +27,12 @@ vesper_crate(
     # One Lean -M4096 stage plus estimated wrapper/runtime overhead; see #537.
     test_tags = {
         "test/lean4lean_foundations42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_construction42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_order42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_map42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_normalize42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_normalization42": ["resources:memory:5120", "resources:cpu:1"],
+        "test/lean4lean_comparison42": ["resources:memory:5120", "resources:cpu:1"],
         # Serial Lean -j1/-M4096 stages plus estimated wrapper overhead (#615).
         "test/resource_oracle42": ["resources:memory:5120", "resources:cpu:1"],
         # Four actual corpus workers; memory is an estimate, not an RSS cap.
@@ -71,6 +83,36 @@ vesper_crate(
             "@platforms//os:macos": ["@platforms//:incompatible"],
             "//conditions:default": [],
         }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_construction42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_order42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_map42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_normalize42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_normalization42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
+        # Same fixed logical replay and complete controls; see #443.
+        "test/lean4lean_comparison42": select({
+            "@platforms//os:macos": ["@platforms//:incompatible"],
+            "//conditions:default": [],
+        }),
     },
     # Actual formatter witnesses replay Lean serially; keep every case enabled
     # while allowing the complete target 900 seconds on slower macOS runners.
@@ -82,8 +124,6 @@ vesper_crate(
         "test/replay42_kernel": "long",
         # Fresh model compilation, 285 theorem roots and actual negative controls.
         "test/resource_model42": "long",
-        # Four serialized fresh Lean compilation sessions plus endpoint controls.
-        "test/resource_oracle42": "long",
         # Runs the Vesper-source front end on every repository source; about
         # 2.5 min on a 4-core Linux host, over 300 s on the macOS runner.
         "test/self_host_front_end": "long",

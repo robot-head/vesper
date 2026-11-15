@@ -32,7 +32,7 @@ for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
 }
 if (/<!-- source:/.test(html)) throw new Error('Unresolved source inclusion');
 await writeFile(resolve(out, 'index.html'), html);
-for (const path of ['assets', 'brand', 'site.css', 'site.js', 'favicon.svg', 'CNAME', 'robots.txt', 'sitemap.xml']) {
+for (const path of ['assets', 'brand', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt', 'sitemap.xml']) {
   await cp(resolve(root, path), resolve(out, path), { recursive: true });
 }
 try { await cp(resolve(root, 'share.jpg'), resolve(out, 'share.jpg')); } catch (e) { if (e.code !== 'ENOENT') throw e; }

@@ -46,3 +46,8 @@ Actual text pairings meet WCAG AA: Dusk token text is at least 8.84:1; Dawn ambe
 No assumed facts, invented name, stock photographs, generated logo, stand-in art, client media slots, forms or `.example` contacts. No release hashes, simulated execution presented as real, installer endpoint or benchmark telemetry from the reference was published. The real source-build guide and repository examples remain available. The canonical domain is https://vesper-lang.org/.
 
 The final gate is the conclusive desktop/phone consistency result; the earlier five-width full report describes an earlier iteration, not a claim of a fresh exhaustive five-width consistency run after every edit. The final independent five-width layout review did run after the last layout changes.
+
+
+## Published language manuscript
+
+The design actions now open the 233-page Typst PDF instead of the raw specification text. It includes Section 44 and appendices A/B. Site build checks cover all three PDF links and the PDF file header. GitHub Pages compiles the committed manuscript with pinned Typst 0.15.1 and bundled fonts. Full publication checks are recorded in `docs/manuscript/VALIDATION.md`.
