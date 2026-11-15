@@ -97,13 +97,17 @@ fn statement_anchors_continue_after_missing_member_without_exposing_partial_ast(
     assert!(parser::parse_complete_items(&r, &[0], Limits::default()).is_err());
 }
 #[test]
-fn unsupported_pub_function_prefix_stays_an_explicit_opaque_context() {
-    let r = parser::parse_recovery("pub fn f(){} fn g(){}", Limits::default()).unwrap();
-    assert_eq!(r.declarations()[0].status, DS::Opaque);
+fn public_function_is_a_complete_recoverable_declaration() {
+    let source = "pub fn f(){} fn g(){}";
+    let r = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(r.syntax().text().to_string(), source);
+    assert_eq!(r.declarations()[0].status, DS::Complete);
     assert_eq!(
         r.declarations()[0].kind,
-        vesper_syntax::recovery::DeclarationKind::Other
+        vesper_syntax::recovery::DeclarationKind::Function
     );
+    assert_eq!(&source[r.declarations()[0].span.clone()], "pub fn f(){}");
+    assert!(parser::parse_complete_items(&r, &[0], Limits::default()).is_ok());
 }
 #[test]
 fn mode_prefixed_types_and_unambiguous_function_siblings_have_valid_inventory() {
@@ -316,4 +320,26 @@ fn every_original_prefix_of_contextual_sources_remains_lossless() {
             assert_eq!(r.syntax().text().to_string(), prefix);
         }
     }
+}
+
+#[test]
+fn public_functions_parse_losslessly_and_recover_after_damage() {
+    let source =
+        "pub /* visibility */ fn first(x: u64)->u64 { x }\npub fn broken(){tx.}\nfn last(){1}";
+    let batch = parser::parse("pub /* visibility */ fn first(x: u64)->u64 { x }");
+    assert!(batch.diagnostics.is_empty(), "{:?}", batch.diagnostics);
+    let vesper_syntax::ast::Item::Function(f) = &batch.module.items[0] else {
+        panic!()
+    };
+    assert_eq!(f.span.start, 0);
+    assert_eq!(
+        batch.syntax().text().to_string(),
+        "pub /* visibility */ fn first(x: u64)->u64 { x }"
+    );
+    let recovered = parser::parse_recovery(source, Limits::default()).unwrap();
+    assert_eq!(recovered.syntax().text().to_string(), source);
+    assert_eq!(recovered.declarations().len(), 3);
+    assert_eq!(recovered.declarations()[0].status, DS::Complete);
+    assert_eq!(recovered.declarations()[1].status, DS::Recovered);
+    assert_eq!(recovered.declarations()[2].status, DS::Complete);
 }

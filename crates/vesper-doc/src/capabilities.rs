@@ -17,7 +17,9 @@
 //! - **Constant-Time Verified**: `ConstTime` in the row; the checker's
 //!   secret-flow rules hold for the body (not a machine-code proof).
 //! - **Hard-Realtime Safe**: `Realtime` in the row; the checker's realtime
-//!   discipline holds for the body. No WCSD stack byte bound is computed.
+//!   discipline holds for the body. Without `--wcsd-stack`, no WCSD stack byte
+//!   bound is computed; when `--wcsd-stack` is supplied, Cranelift prologue
+//!   measurement attaches the exact bound or unavailability reason.
 //! - **Deterministic Float**: `DetFloat` in the row.
 //!
 //! An open row (`eff [..r]`) gets no badge: what it may perform is not known.
@@ -27,7 +29,7 @@
 //! `capability_ceiling`, the effects outside it.
 use crate::{FunctionDoc, Mode, Pass, footprints::MayUseReport, visual::escape};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -69,6 +71,18 @@ pub struct CapabilityBadge {
     pub evidence: String,
 }
 
+/// Optional worst-case stack depth measurement for a Hard-Realtime function.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WcsdStackBound {
+    pub target: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worst_case_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worst_path: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemCapabilities {
     pub item: String,
@@ -78,6 +92,9 @@ pub struct ItemCapabilities {
     /// Why no badge could be derived (open rows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub undetermined: Option<String>,
+    /// Optional WCSD stack depth bound from `--wcsd-stack`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wcsd_stack: Option<WcsdStackBound>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -120,6 +137,7 @@ pub fn item(f: &FunctionDoc, inferred: Option<&MayUseReport>) -> ItemCapabilitie
         effects: names.iter().cloned().collect(),
         badges: vec![],
         undetermined: None,
+        wcsd_stack: None,
     };
     if f.effects.tail.is_some() {
         out.undetermined = Some("open effect row: capabilities need a closed row".into());
@@ -215,6 +233,40 @@ pub fn capabilities(functions: &[FunctionDoc], inferred: Option<&MayUseReport>) 
     Capabilities { items }
 }
 
+/// Attach computed WCSD stack bounds to matching items and update their
+/// `Hard-Realtime Safe` badge evidence strings.
+pub fn attach_wcsd(caps: &mut Capabilities, bounds: &BTreeMap<String, WcsdStackBound>) {
+    for item in &mut caps.items {
+        let Some(bound) = bounds.get(&item.item) else {
+            continue;
+        };
+        item.wcsd_stack = Some(bound.clone());
+        let evidence = if let Some(bytes) = bound.worst_case_bytes {
+            let path = if bound.worst_path.is_empty() {
+                String::new()
+            } else {
+                format!(" via {}", bound.worst_path.join(" -> "))
+            };
+            format!(
+                "the checker's Realtime discipline holds for the body; worst-case stack depth {bytes} bytes on {}{path}",
+                bound.target
+            )
+        } else if let Some(reason) = &bound.unavailable_reason {
+            format!(
+                "the checker's Realtime discipline holds for the body; WCSD stack bound unavailable on {}: {reason}",
+                bound.target
+            )
+        } else {
+            continue;
+        };
+        for badge in &mut item.badges {
+            if badge.capability == Capability::HardRealtime {
+                badge.evidence = evidence.clone();
+            }
+        }
+    }
+}
+
 /// Package summary over (qualified name, capabilities) pairs.
 pub fn package(items: &[ItemCapabilities], ceiling: Option<&[String]>) -> PackageCapabilities {
     let mut out = PackageCapabilities {
@@ -272,6 +324,35 @@ fn chips(badges: &[CapabilityBadge]) -> String {
         .collect()
 }
 
+fn wcsd_pill(bound: Option<&WcsdStackBound>) -> String {
+    let Some(bound) = bound else {
+        return String::new();
+    };
+    if let Some(bytes) = bound.worst_case_bytes {
+        let title = if bound.worst_path.is_empty() {
+            format!("target: {}", bound.target)
+        } else {
+            format!(
+                "target: {}; path: {}",
+                bound.target,
+                bound.worst_path.join(" -> ")
+            )
+        };
+        format!(
+            "<span class=\"wcsd-bound\" title=\"{}\" style=\"display:inline-block;margin:0 .3em .3em 0;padding:0 .4em;border:1px solid #357;border-radius:.6em;font-size:13px\">WCSD {bytes} B</span>",
+            escape(&title)
+        )
+    } else if let Some(reason) = &bound.unavailable_reason {
+        let title = format!("target: {}: {reason}", bound.target);
+        format!(
+            "<span class=\"wcsd-bound wcsd-unavailable\" title=\"{}\" style=\"display:inline-block;margin:0 .3em .3em 0;padding:0 .4em;border:1px solid #963;border-radius:.6em;font-size:13px\">WCSD unavailable</span>",
+            escape(&title)
+        )
+    } else {
+        String::new()
+    }
+}
+
 /// Static HTML for item badges and, when given, the package summary.
 pub fn render(caps: &Capabilities, package: Option<&PackageCapabilities>) -> String {
     let mut out = String::from(
@@ -283,10 +364,11 @@ pub fn render(caps: &Capabilities, package: Option<&PackageCapabilities>) -> Str
     out.push_str("<table><tr><th style=\"text-align:left\">Function</th><th style=\"text-align:left\">Row</th><th style=\"text-align:left\">Badges</th></tr>");
     for item in &caps.items {
         out.push_str(&format!(
-            "<tr id=\"caps-{0}\"><td><code>{0}</code></td><td><code>eff [{1}]</code></td><td>{2}{3}</td></tr>",
+            "<tr id=\"caps-{0}\"><td><code>{0}</code></td><td><code>eff [{1}]</code></td><td>{2}{3}{4}</td></tr>",
             escape(&item.item),
             escape(&item.effects.join(", ")),
             chips(&item.badges),
+            wcsd_pill(item.wcsd_stack.as_ref()),
             item.undetermined
                 .as_deref()
                 .map(|r| format!("<em>{}</em>", escape(r)))
@@ -419,5 +501,51 @@ mod tests {
         let p = package(&with_open, None);
         assert!(p.badges.is_empty());
         assert_eq!(p.undetermined, ["o"]);
+    }
+
+    #[test]
+    fn attach_wcsd_updates_evidence_and_renders_pill() {
+        let mut caps = capabilities(
+            &[
+                f("rt_ok", &["Realtime"], &[None], false),
+                f("rt_gen", &["Realtime"], &[None], false),
+            ],
+            None,
+        );
+        let mut bounds = BTreeMap::new();
+        bounds.insert(
+            "rt_ok".into(),
+            WcsdStackBound {
+                target: "x86_64-unknown-linux-gnu".into(),
+                worst_case_bytes: Some(48),
+                worst_path: vec!["rt_ok".into(), "helper".into()],
+                unavailable_reason: None,
+            },
+        );
+        bounds.insert(
+            "rt_gen".into(),
+            WcsdStackBound {
+                target: "x86_64-unknown-linux-gnu".into(),
+                worst_case_bytes: None,
+                worst_path: Vec::new(),
+                unavailable_reason: Some(
+                    "generic function requires concrete type arguments".into(),
+                ),
+            },
+        );
+        attach_wcsd(&mut caps, &bounds);
+        let ok = caps.items.iter().find(|i| i.item == "rt_ok").unwrap();
+        assert_eq!(ok.wcsd_stack.as_ref().unwrap().worst_case_bytes, Some(48));
+        assert!(
+            ok.badges
+                .iter()
+                .find(|b| b.capability == Capability::HardRealtime)
+                .unwrap()
+                .evidence
+                .contains("48 bytes on x86_64-unknown-linux-gnu via rt_ok -> helper")
+        );
+        let html = render(&caps, None);
+        assert!(html.contains("WCSD 48 B"));
+        assert!(html.contains("WCSD unavailable"));
     }
 }

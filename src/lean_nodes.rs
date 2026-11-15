@@ -73,10 +73,13 @@ fn typed(value: &Type, monad: Option<&Term>) -> Result<Term, String> {
                 "String" => global(&["String"]),
                 "Option" => global(&["Option"]),
                 "Result" => global(&["Except"]),
+                "TiledSeq" => global(&["Array"]),
                 _ => source_ref(name)?,
             };
             let ordered = if name == "Result" && arguments.len() == 2 {
                 vec![&arguments[1], &arguments[0]]
+            } else if name == "TiledSeq" && !arguments.is_empty() {
+                vec![&arguments[0]]
             } else {
                 arguments.iter().collect()
             };
@@ -292,4 +295,100 @@ pub(crate) fn update_place(place: &Place, value: Term) -> Result<Term, String> {
         })
     }
     update(source_ref(&place.root)?, &place.path, value)
+}
+
+pub(crate) fn tiled_op_term(
+    op: &crate::tiled::TiledOp,
+    args: &[Term],
+) -> Result<(bool, Term), String> {
+    use crate::tiled::TiledOp;
+    Ok(match op {
+        TiledOp::New { .. } => (
+            false,
+            Term::app(
+                global(&["Array", "emptyWithCapacity"]),
+                [Term::Nat(0u64.into())],
+            ),
+        ),
+        TiledOp::WithCapacity { .. } | TiledOp::WithRegion { .. } => (
+            false,
+            Term::app(
+                global(&["Array", "emptyWithCapacity"]),
+                [project(args[0].clone(), "toNat")],
+            ),
+        ),
+        TiledOp::Len => (
+            false,
+            Term::app(
+                global(&["Nat", "toUInt64"]),
+                [Term::app(global(&["Array", "size"]), [args[0].clone()])],
+            ),
+        ),
+        TiledOp::TileCount { tile_width } => {
+            let w = u64::from(*tile_width);
+            let size = Term::app(global(&["Array", "size"]), [args[0].clone()]);
+            let num = Term::binary(BinaryOp::Add, size, Term::Nat((w - 1).into()));
+            let tiles = Term::binary(BinaryOp::Div, num, Term::Nat(w.into()));
+            (false, Term::app(global(&["Nat", "toUInt64"]), [tiles]))
+        }
+        TiledOp::Get { .. } => (
+            false,
+            Term::app(
+                global(&["GetElem?", "getElem!"]),
+                [args[0].clone(), project(args[1].clone(), "toNat")],
+            ),
+        ),
+        TiledOp::ColGet { field, .. } => {
+            let row = Term::app(
+                global(&["GetElem?", "getElem!"]),
+                [args[0].clone(), project(args[1].clone(), "toNat")],
+            );
+            (
+                false,
+                Term::Project {
+                    base: Box::new(row),
+                    projection: Projection::Field(ident(field)?),
+                },
+            )
+        }
+        TiledOp::Push { .. } => (
+            true,
+            Term::app(
+                global(&["Array", "push"]),
+                [args[0].clone(), args[1].clone()],
+            ),
+        ),
+        TiledOp::Set { .. } => (
+            true,
+            Term::app(
+                global(&["Array", "setIfInBounds"]),
+                [
+                    args[0].clone(),
+                    project(args[1].clone(), "toNat"),
+                    args[2].clone(),
+                ],
+            ),
+        ),
+        TiledOp::ColSet { field, .. } => {
+            let idx = project(args[1].clone(), "toNat");
+            let cur = Term::app(
+                global(&["GetElem?", "getElem!"]),
+                [args[0].clone(), idx.clone()],
+            );
+            let updated = Term::Update {
+                base: Box::new(cur),
+                fields: vec![(ident(field)?, args[2].clone())],
+            };
+            (
+                true,
+                Term::app(
+                    global(&["Array", "setIfInBounds"]),
+                    [args[0].clone(), idx, updated],
+                ),
+            )
+        }
+        TiledOp::LoadTileVec { .. } => {
+            return Err("Lean extraction does not lower SIMD load_tile_vec".into());
+        }
+    })
 }

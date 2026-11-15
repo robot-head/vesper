@@ -8,8 +8,11 @@ use vesper::{
     tooling::doc::sources::{SourceLimits, discover},
 };
 
-const USAGE: &str = "usage: vesper test --doc [FILE|DIR] [--json]";
-const HELP: &str = "Usage: vesper test --doc [FILE|DIR] [--json]\n\nExtract actual Vesper doc-comment fences, fully check examples, and run supported finite scalar entries in one shared JIT module per file;\nexamples outside the native subset run on the reference evaluator instead, and each result names its engine.\nWith no path (or a directory), run every .ves source of the package that has doc examples: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-* and nested-package\ndirectories are skipped and symlinks are not followed. Files without examples are listed, not run; a package\nwith no examples at all fails. Each file's examples are checked against that file; the runnable examples of all\nfiles then share ONE package module and ONE JIT module when the files' top-level names are disjoint, otherwise\neach file runs in its own module and the report says why.\ncompile_fail(E...) must match exact example diagnostics; base errors and unsupported execution never count as success.\n`vesper,sim(seed=N,clock,net,disk)` fences run on the reference evaluator under a seeded SimPulse kernel with\nsimulated clock, network and disk effects, twice: the second run replays the first run's journal.\nSource/check/module budgets apply; this is not an OS sandbox or a hard deadline.\n";
+#[path = "test_runner.rs"]
+mod test_runner;
+
+const USAGE: &str = test_runner::USAGE;
+const HELP: &str = "Usage: vesper test --doc [FILE|DIR] [--json]\n       vesper test <FILE|DIR> [--mutate] [--filter <PAT>] [--max-mutants <N>] [--fuel <N>] [--json]\n\nUnit & Mutation Tests (`vesper test <FILE|DIR>`):\n  Discover zero-argument `test_*` functions and `// @test` functions in a `.ves` file or package,\n  execute them in a shared JIT module (falling back to the reference evaluator when outside the\n  native subset), and optionally run `--mutate` over non-test functions to fail if any mutant survives.\n\nDoctests (`vesper test --doc [FILE|DIR]`):\nExtract actual Vesper doc-comment fences, fully check examples, and run supported finite scalar entries in one shared JIT module per file;\nexamples outside the native subset run on the reference evaluator instead, and each result names its engine.\nWith no path (or a directory), run every .ves source of the package that has doc examples: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-* and nested-package\ndirectories are skipped and symlinks are not followed. Files without examples are listed, not run; a package\nwith no examples at all fails. Each file's examples are checked against that file; the runnable examples of all\nfiles then share ONE package module and ONE JIT module when the files' top-level names are disjoint, otherwise\neach file runs in its own module and the report says why.\ncompile_fail(E...) must match exact example diagnostics; base errors and unsupported execution never count as success.\n`vesper,sim(seed=N,clock,net,disk)` fences run on the reference evaluator under a seeded SimPulse kernel with\nsimulated clock, network and disk effects, twice: the second run replays the first run's journal.\nSource/check/module budgets apply; this is not an OS sandbox or a hard deadline.\n";
 
 fn read_source(file: &Path, limits: DocTestLimits) -> Result<String, String> {
     let name = file.display();
@@ -244,6 +247,9 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
     if args.iter().any(|arg| arg == "--help" || arg == "-h") {
         print!("{HELP}");
         return Ok(());
+    }
+    if !args.iter().any(|arg| arg == "--doc") {
+        return test_runner::run(args);
     }
     let requested_json = args.iter().any(|arg| arg == "--json");
     let (file, json) = match parse(args) {
