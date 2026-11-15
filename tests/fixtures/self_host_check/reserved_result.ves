@@ -1,0 +1,3 @@
+copy enum Result {
+    Value
+}

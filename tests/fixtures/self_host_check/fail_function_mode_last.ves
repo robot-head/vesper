@@ -1,0 +1,4 @@
+fn effectful() eff [Fail[fn @linear ()]] {}
+fn main() eff [Fail[fn @linear ()], Fail[fn @copy ()]] {
+    effectful();
+}

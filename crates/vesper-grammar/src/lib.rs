@@ -4,6 +4,7 @@
 #![doc = include_str!("../README.md")]
 
 pub mod arrow;
+pub mod capnp_packed;
 pub mod der;
 pub mod framing;
 pub mod grammar;

@@ -25,6 +25,7 @@
 #![deny(unsafe_code)]
 
 pub mod ansi;
+pub mod brand;
 pub mod color;
 pub mod css;
 mod facts;

@@ -1,0 +1,13 @@
+copy enum C {
+    A,
+    B
+}
+fn a() eff [Fail[i64]] {}
+fn b() eff [Fail[bool]] {}
+fn f(c: C) {
+    let h = match c {
+        C::A => a,
+        C::B => b,
+    };
+    h();
+}
