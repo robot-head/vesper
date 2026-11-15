@@ -1,0 +1,17 @@
+copy struct Counter {
+    hits: u64,
+    total: u64
+}
+
+fn bump(inout x: u64) {
+    x = wrapping_add(x, 1);
+}
+
+fn main() -> u64 {
+    let c = Counter {
+        hits: 0,
+        total: 10
+    };
+    bump(c.hits);
+    c.total
+}

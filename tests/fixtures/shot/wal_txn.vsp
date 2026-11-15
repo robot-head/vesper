@@ -1,0 +1,21 @@
+@shot(title = 'wal_txn.vsp — Disjoint Projections & Linear Exhaustion', theme = 'vesper-dusk', dpi = 4)
+fn append_verified_batch(
+    inout broker.{index, metrics}: Broker,
+    in config: BrokerConfig,
+    sink batch: RecordBatch,
+) -> CommitReceipt eff [Storage, Fail[IoError]] {
+    let tx: WriteTxn = Storage::begin_txn(config.max_batch_bytes);
+    //  ^? WriteTxn : mod linear (underlined in solar-amber until commit or abort)
+    match validate_crc(in batch) {
+        Ok(()) => {
+            broker.index.insert_in_place(sink batch);
+            broker.metrics.batches_written += 1;
+            tx.commit() //^! Discharges linear tx across uncancellable Storage + Fail
+        }
+        Err(err) => {
+            Storage::recycle_batch(sink batch);
+            tx.abort(); //^! Mandatory linear cleanup on Err branch (enforced by [T-Let])
+            Fail::raise(err)
+        }
+    }
+}

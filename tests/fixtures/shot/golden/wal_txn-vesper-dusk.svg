@@ -1,0 +1,156 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="796" height="622" viewBox="0 0 796 622" role="img" aria-label="wal_txn.vsp — Disjoint Projections &amp; Linear Exhaustion" font-family="'JetBrains Mono', ui-monospace, monospace" xml:space="preserve" data-vesper-theme="vesper-dusk">
+<title>wal_txn.vsp — Disjoint Projections &amp; Linear Exhaustion</title>
+<style>text{white-space:pre;font-kerning:none;font-variant-ligatures:common-ligatures contextual}</style>
+<rect x="0" y="0" width="796" height="622" fill="#0B0E17"/>
+<rect x="16" y="26" width="764" height="590" rx="28" fill="#000000" fill-opacity="0.05"/>
+<rect x="18" y="28" width="760" height="586" rx="26" fill="#000000" fill-opacity="0.05"/>
+<rect x="20" y="30" width="756" height="582" rx="24" fill="#000000" fill-opacity="0.05"/>
+<rect x="22" y="32" width="752" height="578" rx="22" fill="#000000" fill-opacity="0.05"/>
+<rect x="24" y="34" width="748" height="574" rx="20" fill="#000000" fill-opacity="0.05"/>
+<rect x="26" y="36" width="744" height="570" rx="18" fill="#000000" fill-opacity="0.05"/>
+<rect x="28" y="38" width="740" height="566" rx="16" fill="#000000" fill-opacity="0.05"/>
+<rect x="30" y="40" width="736" height="562" rx="14" fill="#000000" fill-opacity="0.05"/>
+<rect x="32" y="32" width="732" height="558" rx="12" fill="#111625"/>
+<circle cx="52" cy="52" r="6" fill="#FF8F9C"/>
+<circle cx="70" cy="52" r="6" fill="#FFB454"/>
+<circle cx="88" cy="52" r="6" fill="#6EE7B7"/>
+<text x="187.4" y="56.68" font-size="13" textLength="421.2" lengthAdjust="spacingAndGlyphs" fill="#8B97B3">wal_txn.vsp — Disjoint Projections &amp; Linear Exhaustion</text>
+<rect x="32" y="71" width="732" height="1" fill="#E2E8F5" fill-opacity="0.08"/>
+<text x="60" y="106.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#FF8F9C" data-class="0">fn</text>
+<text x="85.2" y="106.04" font-size="14" textLength="176.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="12">append_verified_batch</text>
+<text x="261.6" y="106.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="93.6" y="128.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#5CCFE6" data-class="3">inout</text>
+<text x="144" y="128.04" font-size="14" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">broker</text>
+<text x="194.4" y="128.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">.</text>
+<text x="202.8" y="128.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">{</text>
+<text x="211.2" y="128.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#5CCFE6" data-class="6">index</text>
+<text x="253.2" y="128.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">,</text>
+<text x="270" y="128.04" font-size="14" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#5CCFE6" data-class="6">metrics</text>
+<text x="328.8" y="128.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">}</text>
+<text x="337.2" y="128.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">:</text>
+<text x="354" y="128.04" font-size="14" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="10">Broker</text>
+<text x="404.4" y="128.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">,</text>
+<text x="93.6" y="150.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">in</text>
+<text x="118.8" y="150.04" font-size="14" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">config</text>
+<text x="169.2" y="150.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">:</text>
+<text x="186" y="150.04" font-size="14" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="10">BrokerConfig</text>
+<text x="286.8" y="150.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">,</text>
+<text x="93.6" y="172.04" font-size="14" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#FFB454" data-class="4">sink</text>
+<text x="135.6" y="172.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">batch</text>
+<text x="177.6" y="172.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">:</text>
+<text x="194.4" y="172.04" font-size="14" textLength="92.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="10">RecordBatch</text>
+<text x="286.8" y="172.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">,</text>
+<text x="60" y="194.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="76.8" y="194.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15" data-ligature="1">-&gt;</text>
+<text x="102" y="194.04" font-size="14" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="10">CommitReceipt</text>
+<text x="219.6" y="194.04" font-size="14" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#FF8F9C" data-class="0">eff</text>
+<text x="253.2" y="194.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">[</text>
+<text x="261.6" y="194.04" font-size="14" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#D2A6FF" data-class="9">Storage</text>
+<text x="320.4" y="194.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">,</text>
+<text x="337.2" y="194.04" font-size="14" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#D2A6FF" data-class="9">Fail</text>
+<text x="370.8" y="194.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">[</text>
+<text x="379.2" y="194.04" font-size="14" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="10">IoError</text>
+<text x="438" y="194.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">]</text>
+<text x="446.4" y="194.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">]</text>
+<text x="463.2" y="194.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">{</text>
+<text x="93.6" y="216.04" font-size="14" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#FF8F9C" data-class="0">let</text>
+<text x="127.2" y="216.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">tx</text>
+<text x="144" y="216.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">:</text>
+<text x="160.8" y="216.04" font-size="14" textLength="67.2" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="10">WriteTxn</text>
+<text x="236.4" y="216.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">=</text>
+<text x="253.2" y="216.04" font-size="14" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#D2A6FF" data-class="9">Storage</text>
+<text x="312" y="216.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15" data-ligature="1">::</text>
+<text x="328.8" y="216.04" font-size="14" textLength="75.6" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="12">begin_txn</text>
+<text x="404.4" y="216.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="412.8" y="216.04" font-size="14" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">config</text>
+<text x="463.2" y="216.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">.</text>
+<text x="471.6" y="216.04" font-size="14" textLength="126" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">max_batch_bytes</text>
+<text x="597.6" y="216.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="606" y="216.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">;</text>
+<text x="93.6" y="268.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#FF8F9C" data-class="0">match</text>
+<text x="144" y="268.04" font-size="14" textLength="100.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="12">validate_crc</text>
+<text x="244.8" y="268.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="253.2" y="268.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">in</text>
+<text x="278.4" y="268.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">batch</text>
+<text x="320.4" y="268.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="337.2" y="268.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">{</text>
+<text x="127.2" y="290.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="10">Ok</text>
+<text x="144" y="290.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="152.4" y="290.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="160.8" y="290.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="169.2" y="290.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="186" y="290.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15" data-ligature="1">=&gt;</text>
+<text x="211.2" y="290.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">{</text>
+<text x="160.8" y="312.04" font-size="14" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">broker</text>
+<text x="211.2" y="312.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">.</text>
+<text x="219.6" y="312.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">index</text>
+<text x="261.6" y="312.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">.</text>
+<text x="270" y="312.04" font-size="14" textLength="126" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="12">insert_in_place</text>
+<text x="396" y="312.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="404.4" y="312.04" font-size="14" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#FFB454" data-class="4">sink</text>
+<text x="446.4" y="312.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">batch</text>
+<text x="488.4" y="312.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="496.8" y="312.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">;</text>
+<text x="160.8" y="334.04" font-size="14" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">broker</text>
+<text x="211.2" y="334.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">.</text>
+<text x="219.6" y="334.04" font-size="14" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">metrics</text>
+<text x="278.4" y="334.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">.</text>
+<text x="286.8" y="334.04" font-size="14" textLength="126" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">batches_written</text>
+<text x="421.2" y="334.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">+=</text>
+<text x="446.4" y="334.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="13">1</text>
+<text x="454.8" y="334.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">;</text>
+<text x="160.8" y="356.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">tx</text>
+<text x="177.6" y="356.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">.</text>
+<text x="186" y="356.04" font-size="14" textLength="50.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="12">commit</text>
+<text x="236.4" y="356.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="244.8" y="356.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="127.2" y="378.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">}</text>
+<text x="127.2" y="400.04" font-size="14" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="10">Err</text>
+<text x="152.4" y="400.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="160.8" y="400.04" font-size="14" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">err</text>
+<text x="186" y="400.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="202.8" y="400.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15" data-ligature="1">=&gt;</text>
+<text x="228" y="400.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">{</text>
+<text x="160.8" y="422.04" font-size="14" textLength="58.8" lengthAdjust="spacingAndGlyphs" fill="#D2A6FF" data-class="9">Storage</text>
+<text x="219.6" y="422.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15" data-ligature="1">::</text>
+<text x="236.4" y="422.04" font-size="14" textLength="109.2" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="12">recycle_batch</text>
+<text x="345.6" y="422.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="354" y="422.04" font-size="14" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#FFB454" data-class="4">sink</text>
+<text x="396" y="422.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">batch</text>
+<text x="438" y="422.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="446.4" y="422.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">;</text>
+<text x="160.8" y="444.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">tx</text>
+<text x="177.6" y="444.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">.</text>
+<text x="186" y="444.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="12">abort</text>
+<text x="228" y="444.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="236.4" y="444.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="244.8" y="444.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">;</text>
+<text x="160.8" y="466.04" font-size="14" textLength="33.6" lengthAdjust="spacingAndGlyphs" fill="#D2A6FF" data-class="9">Fail</text>
+<text x="194.4" y="466.04" font-size="14" textLength="16.8" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15" data-ligature="1">::</text>
+<text x="211.2" y="466.04" font-size="14" textLength="42" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="12">raise</text>
+<text x="253.2" y="466.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">(</text>
+<text x="261.6" y="466.04" font-size="14" textLength="25.2" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="2">err</text>
+<text x="286.8" y="466.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">)</text>
+<text x="127.2" y="488.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">}</text>
+<text x="93.6" y="510.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">}</text>
+<text x="60" y="532.04" font-size="14" textLength="8.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5" data-class="15">}</text>
+<path d="M130.6 229 L140.6 229 L135.6 224Z" fill="#E2E8F5"/>
+<rect x="119.2" y="229" width="106.4" height="20" rx="5" fill="#E2E8F5"/>
+<rect x="120.2" y="230" width="104.4" height="18" rx="4" fill="#0B0E17"/>
+<text x="129.2" y="243.32" font-size="12" textLength="86.4" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5">tx : (query)</text>
+<rect x="273.2" y="341" width="433.2" height="20" rx="10" fill="#0B0E17"/>
+<circle cx="284.2" cy="351" r="3.5" fill="#D2A6FF"/>
+<text x="293.2" y="355.32" font-size="12" textLength="403.2" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5">Discharges linear tx across uncancellable Storage + Fail</text>
+<rect x="273.2" y="429" width="462" height="20" rx="10" fill="#0B0E17"/>
+<circle cx="284.2" cy="439" r="3.5" fill="#D2A6FF"/>
+<text x="293.2" y="443.32" font-size="12" textLength="432" lengthAdjust="spacingAndGlyphs" fill="#E2E8F5">Mandatory linear cleanup on Err branch (enforced by [T-Let])</text>
+<rect x="561.6" y="560" width="61.6" height="18" rx="9" fill="#FFB454" fill-opacity="0.14"/>
+<circle cx="570.6" cy="569" r="3" fill="#FFB454"/>
+<text x="577.6" y="572.96" font-size="11" textLength="39.6" lengthAdjust="spacingAndGlyphs" fill="#FFB454">linear</text>
+<rect x="631.2" y="560" width="55" height="18" rx="9" fill="#5CCFE6" fill-opacity="0.14"/>
+<circle cx="640.2" cy="569" r="3" fill="#5CCFE6"/>
+<text x="647.2" y="572.96" font-size="11" textLength="33" lengthAdjust="spacingAndGlyphs" fill="#5CCFE6">inout</text>
+<rect x="694.2" y="560" width="41.8" height="18" rx="9" fill="#D2A6FF" fill-opacity="0.14"/>
+<circle cx="703.2" cy="569" r="3" fill="#D2A6FF"/>
+<text x="710.2" y="572.96" font-size="11" textLength="19.8" lengthAdjust="spacingAndGlyphs" fill="#D2A6FF">eff</text>
+</svg>

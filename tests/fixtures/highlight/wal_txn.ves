@@ -1,0 +1,49 @@
+// Tier 1 fixture: a linear transaction, inout projections and effects.
+linear effect Storage {
+    fn begin_txn(in max_bytes: u64) -> WriteTxn;
+}
+
+linear struct WriteTxn {
+    slot: u64
+}
+
+impl WriteTxn {
+    fn commit(sink self) -> u64 {
+        let WriteTxn {
+            slot
+        }
+        = self;
+        slot
+    }
+    fn abort(sink self) {
+        let WriteTxn {
+            slot
+        }
+        = self;
+    }
+}
+
+copy struct Broker {
+    index: u64,
+    metrics: u64,
+    config: u64
+}
+
+copy struct BrokerConfig {
+    max_batch_bytes: u64
+}
+
+fn record(inout broker.{index, metrics}: Broker, in config: BrokerConfig) {
+    broker.index = wrapping_add(broker.index, config.max_batch_bytes);
+    broker.metrics = wrapping_add(broker.metrics, 1);
+}
+
+fn append_verified_batch(in config: BrokerConfig) -> u64 eff [Storage, Fail[u64]] {
+    let tx: WriteTxn = Storage::begin_txn(config.max_batch_bytes);
+    if config.max_batch_bytes == 0 {
+        tx.abort();
+        Fail::raise(0)
+    } else {
+        tx.commit()
+    }
+}
