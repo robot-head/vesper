@@ -131,10 +131,73 @@ fn real_source_arms_compile_once_then_execute_exact_counts() {
         data["baseline"]["source_blake3"]
     );
     assert_eq!(data["evidence"]["hardware_pmu"], "unavailable");
+    assert!(data.get("signed_rank").is_none());
     assert!(data["analysis"]["gate_decision"].is_null());
     assert!(data["pairs"][0]["regression_basis_points"]["floor"].is_string());
     assert_eq!(fs::read(&candidate).unwrap(), candidate_text.as_bytes());
     assert_eq!(fs::read(&baseline).unwrap(), baseline_text.as_bytes());
+}
+
+#[test]
+fn signed_rank_reports_the_actual_measured_pairs_without_changing_the_gate() {
+    let fixture = Fixture::new();
+    let source = fixture.source("signed-rank.ves", "fn main()->u64{42}");
+    let output = run(&[
+        path(&source),
+        "--samples",
+        "6",
+        "--warmup",
+        "0",
+        "--iterations",
+        "128",
+        "--signed-rank",
+        "--json",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let data = report(&output);
+    assert_eq!(data["status"], "measured");
+    assert!(data["analysis"]["gate_decision"].is_null());
+    let rank = &data["signed_rank"];
+    assert_eq!(rank["source"], "measured epochs");
+    assert_eq!(rank["unit"], "nanoseconds");
+    assert_eq!(rank["gate"], "none");
+    let samples: Vec<_> = data["pairs"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|pair| {
+            let baseline = pair["baseline_total_ns"].as_str().unwrap().parse().unwrap();
+            let candidate = pair["candidate_total_ns"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let operations = pair["operations_per_arm"].as_u64().unwrap();
+            vesper_bench::PairedSample::new(baseline, candidate, operations).unwrap()
+        })
+        .collect();
+    match vesper_bench::signed_rank_exact_paired_samples(&samples) {
+        Ok(expected) => {
+            assert_eq!(rank["status"], "available");
+            assert_eq!(
+                rank["probability"]["numerator"],
+                expected.numerator.to_string()
+            );
+            assert_eq!(
+                rank["probability"]["denominator"],
+                expected.denominator.to_string()
+            );
+        }
+        Err(vesper_bench::SignedRankError::NoNonzeroDifferences) => {
+            assert_eq!(rank["status"], "unavailable");
+            assert_eq!(rank["reason"], "NoNonzeroDifferences");
+        }
+        Err(error) => panic!("unexpected rank error: {error}"),
+    }
 }
 
 #[test]
