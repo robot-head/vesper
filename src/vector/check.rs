@@ -234,7 +234,7 @@ impl Checker<'_> {
         }
         Some(result)
     }
-    fn arity(&mut self, name: &str, args: &[Arg], n: usize, span: Span) -> bool {
+    pub(super) fn arity(&mut self, name: &str, args: &[Arg], n: usize, span: Span) -> bool {
         if args.len() == n {
             return true;
         }
