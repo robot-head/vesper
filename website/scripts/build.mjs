@@ -10,7 +10,7 @@ function highlight(source) {
   let html = '', end = 0;
   for (const m of source.matchAll(token)) {
     html += escape(source.slice(end, m.index));
-    const kind = m[0].startsWith('//') ? 'comment' : /^\d/.test(m[0]) ? 'number' : /^(linear|sink)$/.test(m[0]) ? 'linear' : /^(inout|in)$/.test(m[0]) ? 'place' : /^[A-Z]|^[ui]\d/.test(m[0]) ? 'type' : 'keyword';
+    const kind = m[0].startsWith('//') ? 'comment' : /^\d/.test(m[0]) ? 'number' : /^(linear|sink)$/.test(m[0]) ? 'linear' : m[0] === 'inout' ? 'place' : /^(in|eff|handle|with)$/.test(m[0]) ? 'effect' : /^[A-Z]|^[ui]\d/.test(m[0]) ? 'type' : 'keyword';
     html += `<span class="tok-${kind}">${escape(m[0])}</span>`;
     end = m.index + m[0].length;
   }
@@ -32,7 +32,7 @@ for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
 }
 if (/<!-- source:/.test(html)) throw new Error('Unresolved source inclusion');
 await writeFile(resolve(out, 'index.html'), html);
-for (const path of ['assets', 'site.css', 'site.js', 'favicon.svg', 'CNAME', 'robots.txt', 'sitemap.xml']) {
+for (const path of ['assets', 'brand', 'site.css', 'site.js', 'favicon.svg', 'vesper-specification.pdf', 'CNAME', 'robots.txt', 'sitemap.xml']) {
   await cp(resolve(root, path), resolve(out, path), { recursive: true });
 }
 try { await cp(resolve(root, 'share.jpg'), resolve(out, 'share.jpg')); } catch (e) { if (e.code !== 'ENOENT') throw e; }

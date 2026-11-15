@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" fill="none">
+  <!-- Upper Aggregate Root Struct Chevron -->
+  <polygon points="30,34 87,34 128,75 169,34 226,34 206,74 128,113 50,74" fill="#1B2030"/>
+  <!-- Port Blade: Mode::Linear & sink Ownership Transfer -->
+  <polygon points="59.33,92.67 101,113.5 101,176" fill="#B85200"/>
+  <!-- Center Apex Blade: Disjoint inout FieldTree Projection -->
+  <polygon points="128,127 143,119.5 143,200 128,230 113,200 113,119.5" fill="#006B80"/>
+  <!-- Starboard Blade: Shared in Views & One-Shot eff [...] Capabilities -->
+  <polygon points="196.67,92.67 155,113.5 155,176" fill="#6B2FD6"/>
+</svg>

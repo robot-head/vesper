@@ -1,2 +1,6 @@
 # GitHub fallback until Vesper has an upstream Linguist language and grammar.
 *.ves linguist-language=Rust
+
+# Keep the published manuscript byte-exact and its editable sources portable.
+website/*.pdf binary
+docs/manuscript/*.typ text eol=lf

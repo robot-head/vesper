@@ -1,0 +1,60 @@
+{
+  "title": "Vesper: Language Design and Formal Specification",
+  "edition_date": "2026-11-14",
+  "part_count": 8,
+  "chapter_count": 41,
+  "appendices": [
+    "A",
+    "B"
+  ],
+  "main_document": {
+    "url": "https://docs.google.com/document/d/1zO7boUVwNTHRA-1ZNL4bDYi68OjQZBCimLWkETH6bso",
+    "revision": "AHj4eMRwxY3mNLJdDRhc1gLCaipYpxRbGIYJ1b8mG4EIMBxxKa8LEUeq_tcHvj5FWdi5lsQz4Jixu-dicyjUCsy7N8yIMk9vxL5l6Wd9YCM",
+    "modified_utc": "2026-11-15T00:30:29.595Z"
+  },
+  "supplements": [
+    {
+      "section": "44",
+      "url": "https://drive.google.com/file/d/1td8Tw2W9pU8alI9QtQG6m3dMdzkQsHSU/view"
+    },
+    {
+      "appendix": "B",
+      "url": "https://drive.google.com/file/d/1QGefoudw60U8k-4xUjNnrRE1L8yplqWp/view"
+    }
+  ],
+  "typesetting_tools": {
+    "typst": "0.15.1"
+  },
+  "content_sha256": "cff94e6323579e6e1346139309a1fe19edf2d8a093cb45d67b7d1ee3f72e7230",
+  "template_sha256": "172c58d5ec44dafd5a2e6acecb4cc15f7735ca3b8e9e13d1e0aac2762d21d039",
+  "source_hash_normalization": "UTF-8 with LF line endings",
+  "transformations": [
+    "Reorganized organically grown Sections 1–44 and Appendices A–B into a unified 8-Part, 41-Chapter + Appendices A–B monograph.",
+    "Folded Section 44 (four-axis ModeVec, @0 ghost linearity, out destinations, liquid refinements, pomonoid resource grades, clocks, quotients, and vesper-refine) directly into Part I (Chapters 2–5), Part II (Chapters 7 and 11), and Appendix A.",
+    "Removed Pandoc #strong/#emph wrappers, HTML entities, undefined #divider calls, evolutionary crate-count/roadmap seams, and mid-stream 42-crate workspace manifest.",
+    "Reunited stranded Ignis multi-backend subsections (19.8–19.11) into Chapter 38, vesper-lint into Chapter 18, and WireStructLayout (vesper-ffi) into Chapter 15.",
+    "Recovered exact indented source listings for Chapters 19 (Codex), 26 (Aether), 30 (Grammar), and 39 (Kinetic), and restored dropped subsystem/toolkit spans.",
+    "Resolved 273 unique document labels and 416 internal cross-references; retained external scholarly hyperlinks.",
+    "Corrected unsupported Typst symbol names and TeX-style math escapes, split two wide inference-rule premises, and tightened four listing continuations without changing any source-code block."
+  ],
+  "revision_patch": {
+    "filename": "0001-manuscript-unify-end-state-specification.patch",
+    "sha256": "0c32ac5e9908b5479a0ae5c90879fd15808e156256bc01cab506c8032f724679",
+    "applied_commit": "8471e7b41a595018aeae313b9eca516fd1e79b48"
+  },
+  "publication": {
+    "pages": 228,
+    "parts": 8,
+    "chapters": 41,
+    "appendices": [
+      "A",
+      "B"
+    ],
+    "bookmarks": 280,
+    "links": 534,
+    "code_blocks_preserved": 157,
+    "embedded_font_subsets": 7,
+    "pdf_bytes": 3782075,
+    "pdf_sha256": "94a2f89fe8ac4284c594047440a07a2eef79ea191af8216a51de9b1f9895f9b8"
+  }
+}

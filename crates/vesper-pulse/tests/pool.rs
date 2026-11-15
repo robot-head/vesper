@@ -4,9 +4,13 @@
 //! it ran so CI logs record which job exercised which driver.
 use std::{
     fs::{File, OpenOptions},
-    io,
+    io::{self, Write},
     path::PathBuf,
-    sync::atomic::{AtomicU64, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
 use vesper_pulse::driver::{DriverKind, Operation, Request, is_cancelled};
 use vesper_pulse::pool::{Pool, PoolConfig, PoolOutput, Spawner, Task};
@@ -400,20 +404,40 @@ fn seeded_runs_finish_the_same_workload_on_every_host_driver() {
 /// Readers parked on empty pipes on every worker are cancelled by a fiber on
 /// another worker; each completes exactly once with the cancellation error.
 enum Cancel {
-    Read(Option<File>),
+    Read(Option<File>, Option<Arc<AtomicUsize>>),
     Parked,
-    Trigger(Spawner<Cancel>, u32),
+    Trigger(Spawner<Cancel>, CancelWhen, DriverKind),
+}
+
+enum CancelWhen {
+    Yields(u32),
+    Started {
+        count: Arc<AtomicUsize>,
+        total: usize,
+        deadline: Instant,
+    },
+}
+
+fn cancel_phase(kind: DriverKind, phase: &str) {
+    // Direct stderr bypasses libtest's per-test capture, including when a
+    // hung test is terminated before libtest can print its captured output.
+    let _ = writeln!(io::stderr().lock(), "pool cancellation {kind}: {phase}");
 }
 impl Resume for Cancel {
     fn resume(self, event: Event) -> Step<Self> {
         match (self, event) {
-            (Cancel::Read(f), Event::Start) => Step::Io(io(
-                f.unwrap(),
-                Operation::Read,
-                vec![0; 8],
-                0,
-                Cancel::Parked,
-            )),
+            (Cancel::Read(f, count), Event::Start) => {
+                if let Some(count) = count {
+                    count.fetch_add(1, Ordering::Release);
+                }
+                Step::Io(io(
+                    f.unwrap(),
+                    Operation::Read,
+                    vec![0; 8],
+                    0,
+                    Cancel::Parked,
+                ))
+            }
             (Cancel::Parked, Event::Cancelled(inner)) => match *inner {
                 Event::Io(e) => match e.result {
                     Err(err) if is_cancelled(&err) => Step::Complete(b"cancelled".to_vec()),
@@ -422,14 +446,46 @@ impl Resume for Cancel {
                 _ => Step::Failed("cancelled without its read".into()),
             },
             // Cancelled before its worker started it: also exactly once.
-            (Cancel::Read(_), Event::Cancelled(inner)) if matches!(*inner, Event::Start) => {
+            (Cancel::Read(_, _), Event::Cancelled(inner)) if matches!(*inner, Event::Start) => {
                 Step::Complete(b"never started".to_vec())
             }
-            (Cancel::Trigger(s, n), Event::Start | Event::Yield) if n > 0 => {
-                Step::Yield(Cancel::Trigger(s, n - 1))
+            (Cancel::Trigger(s, CancelWhen::Yields(n), kind), Event::Start | Event::Yield)
+                if n > 0 =>
+            {
+                Step::Yield(Cancel::Trigger(s, CancelWhen::Yields(n - 1), kind))
             }
-            (Cancel::Trigger(s, _), _) => {
+            (
+                Cancel::Trigger(
+                    s,
+                    CancelWhen::Started {
+                        count,
+                        total,
+                        deadline,
+                    },
+                    kind,
+                ),
+                Event::Start | Event::Yield,
+            ) if count.load(Ordering::Acquire) < total => {
+                if Instant::now() >= deadline {
+                    cancel_phase(kind, "read-start deadline reached; cancelling");
+                    s.cancel();
+                    Step::Failed("not every read reached submission".into())
+                } else {
+                    Step::Yield(Cancel::Trigger(
+                        s,
+                        CancelWhen::Started {
+                            count,
+                            total,
+                            deadline,
+                        },
+                        kind,
+                    ))
+                }
+            }
+            (Cancel::Trigger(s, _, kind), _) => {
+                cancel_phase(kind, "trigger entering cancel");
                 s.cancel();
+                cancel_phase(kind, "trigger returned from cancel");
                 Step::Complete(b"trigger".to_vec())
             }
             _ => Step::Failed("wrong event".into()),
@@ -446,14 +502,19 @@ fn cancelling_the_pool_completes_parked_reads_on_every_worker() {
         for w in 0..workers * 2 {
             let (r, keep) = stream();
             writers.push(keep);
-            pool.spawn_pinned(w % workers, Cancel::Read(Some(r)))
+            pool.spawn_pinned(w % workers, Cancel::Read(Some(r), None))
                 .map_err(|_| ())
                 .unwrap();
         }
-        pool.spawn_pinned(0, Cancel::Trigger(pool.spawner(), 20))
-            .map_err(|_| ())
-            .unwrap();
+        pool.spawn_pinned(
+            0,
+            Cancel::Trigger(pool.spawner(), CancelWhen::Yields(20), kind),
+        )
+        .map_err(|_| ())
+        .unwrap();
+        cancel_phase(kind, "baseline run entering");
         let out = pool.run(start(kind)).unwrap();
+        cancel_phase(kind, "baseline run returned");
         assert!(out.failures.is_empty(), "{kind}: {:?}", out.failures);
         assert_eq!(out.completed.len(), workers * 2 + 1);
         let parked = out
@@ -465,5 +526,75 @@ fn cancelling_the_pool_completes_parked_reads_on_every_worker() {
             "{kind}: cancelled {parked} parked reads and {} unstarted readers",
             workers * 2 - parked
         );
+    }
+}
+
+#[test]
+fn cancellation_covers_submitted_reads_and_queued_reads() {
+    for kind in kinds() {
+        for submitted in [false, true] {
+            let workers = 3;
+            let pool = Pool::new(PoolConfig::new(workers)).unwrap();
+            let started = Arc::new(AtomicUsize::new(0));
+            let mut writers = vec![];
+            for w in 0..workers * 2 {
+                let (r, keep) = stream();
+                writers.push(keep);
+                pool.spawn_pinned(
+                    w % workers,
+                    Cancel::Read(Some(r), Some(Arc::clone(&started))),
+                )
+                .map_err(|_| ())
+                .unwrap();
+            }
+            let when = if submitted {
+                CancelWhen::Started {
+                    count: Arc::clone(&started),
+                    total: workers * 2,
+                    deadline: Instant::now() + Duration::from_secs(30),
+                }
+            } else {
+                pool.cancel();
+                CancelWhen::Yields(20)
+            };
+            pool.spawn_pinned(0, Cancel::Trigger(pool.spawner(), when, kind))
+                .map_err(|_| ())
+                .unwrap();
+            cancel_phase(
+                kind,
+                if submitted {
+                    "submitted-read run entering"
+                } else {
+                    "queued-read run entering"
+                },
+            );
+            let out = pool.run(start(kind)).unwrap();
+            cancel_phase(
+                kind,
+                if submitted {
+                    "submitted-read run returned"
+                } else {
+                    "queued-read run returned"
+                },
+            );
+            assert!(out.failures.is_empty(), "{kind}: {:?}", out.failures);
+            assert_eq!(out.completed.len(), workers * 2 + 1);
+            let expected = if submitted {
+                b"cancelled".as_slice()
+            } else {
+                b"never started".as_slice()
+            };
+            assert_eq!(
+                out.completed.iter().filter(|(_, v)| v == expected).count(),
+                workers * 2
+            );
+            assert_eq!(
+                started.load(Ordering::Acquire),
+                if submitted { workers * 2 } else { 0 }
+            );
+            for worker in &out.workers {
+                assert_eq!(worker.submitted, if submitted { 2 } else { 0 });
+            }
+        }
     }
 }

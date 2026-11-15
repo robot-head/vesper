@@ -216,7 +216,7 @@ pub struct Stranded<C> {
 
 /// A run that did not finish cleanly.
 pub enum RunError<C> {
-    /// A worker's driver or wake pipe could not be built. No fiber ran; the
+    /// A worker's thread, driver or wake pipe could not be built. No fiber ran; the
     /// pool comes back with every spawned fiber still queued.
     Setup {
         worker: usize,
@@ -314,6 +314,48 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     // the queue itself is still consistent (every operation is one push or
     // pop), and the panic is re-raised by `run`.
     m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// A one-shot startup barrier that can release the workers already created
+/// when a later OS thread cannot be spawned. No worker runs fibers until all
+/// `expected` factories have reached the gate.
+struct StartupGate {
+    expected: usize,
+    state: Mutex<StartupState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct StartupState {
+    arrived: usize,
+    aborted: bool,
+}
+
+impl StartupGate {
+    fn new(expected: usize) -> Self {
+        Self {
+            expected,
+            state: Mutex::new(StartupState::default()),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn wait(&self) -> bool {
+        let mut state = lock(&self.state);
+        state.arrived += 1;
+        if state.arrived == self.expected {
+            self.changed.notify_all();
+        }
+        while !state.aborted && state.arrived < self.expected {
+            state = self.changed.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        !state.aborted
+    }
+
+    fn abort(&self) {
+        lock(&self.state).aborted = true;
+        self.changed.notify_all();
+    }
 }
 
 thread_local! {
@@ -1189,7 +1231,7 @@ impl<C: Resume> Pool<C> {
         let shared = &self.shared;
         let wakeup = self.config.driver_wakeup;
         let seed = self.config.seed;
-        let barrier = std::sync::Barrier::new(n);
+        let startup = StartupGate::new(n);
         let setup: Mutex<Option<(usize, io::Error)>> = Mutex::new(None);
         shared.active.store(n, SeqCst);
         shared.started.store(true, SeqCst);
@@ -1197,74 +1239,80 @@ impl<C: Resume> Pool<C> {
             shared.done.store(true, SeqCst);
         }
         let results: Vec<_> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..n)
-                .map(|i| {
-                    let barrier = &barrier;
-                    let setup = &setup;
-                    let factory = &factory;
-                    std::thread::Builder::new()
-                        .name(format!("pulse-worker-{i}"))
-                        .spawn_scoped(scope, move || {
-                            // A panicking factory must still reach the
-                            // barrier, or its siblings would wait forever.
-                            let built = panic::catch_unwind(AssertUnwindSafe(|| {
-                                factory(i).and_then(|driver| {
-                                    let reader = if wakeup {
-                                        let (r, w) = wake_pipe()?;
-                                        *lock(&shared.workers[i].wake) = Some(w);
-                                        Some(r)
-                                    } else {
-                                        None
-                                    };
-                                    Ok((driver, reader))
-                                })
-                            }));
-                            let (built, panicked) = match built {
-                                Ok(Ok(b)) => (Some(b), None),
-                                Ok(Err(e)) => {
-                                    lock(setup).get_or_insert((i, e));
-                                    (None, None)
-                                }
-                                Err(payload) => {
-                                    lock(setup).get_or_insert((
-                                        i,
-                                        io::Error::other("the driver factory panicked"),
-                                    ));
-                                    (None, Some(payload))
-                                }
-                            };
-                            barrier.wait();
-                            if lock(setup).is_some() {
-                                *lock(&shared.workers[i].wake) = None;
-                                drop(built);
-                                if let Some(payload) = panicked {
-                                    panic::resume_unwind(payload);
-                                }
-                                return None;
+            let mut handles = Vec::with_capacity(n);
+            for i in 0..n {
+                let startup = &startup;
+                let setup = &setup;
+                let factory = &factory;
+                let spawned = std::thread::Builder::new()
+                    .name(format!("pulse-worker-{i}"))
+                    .spawn_scoped(scope, move || {
+                        // A panicking factory must still reach the gate
+                        // so the other factories can finish setup.
+                        let built = panic::catch_unwind(AssertUnwindSafe(|| {
+                            factory(i).and_then(|driver| {
+                                let reader = if wakeup {
+                                    let (r, w) = wake_pipe()?;
+                                    *lock(&shared.workers[i].wake) = Some(w);
+                                    Some(r)
+                                } else {
+                                    None
+                                };
+                                Ok((driver, reader))
+                            })
+                        }));
+                        let (built, panicked) = match built {
+                            Ok(Ok(b)) => (Some(b), None),
+                            Ok(Err(e)) => {
+                                lock(setup).get_or_insert((i, e));
+                                (None, None)
                             }
-                            let (driver, reader) = built?;
-                            let mut worker = Worker::new(i, driver, seed, false);
-                            worker.wake_reader = reader;
-                            let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
-                                while !shared.done.load(SeqCst) && !worker.gave_up {
-                                    if !worker.step(shared) && !shared.done.load(SeqCst) {
-                                        worker.park(shared, wakeup);
-                                    }
-                                }
-                            }));
-                            if let Err(payload) = outcome {
-                                shared.done.store(true, SeqCst);
-                                shared.wake_all();
-                                // Let the driver's own Drop protocol release
-                                // what it still owns.
-                                drop(worker);
+                            Err(payload) => {
+                                lock(setup).get_or_insert((
+                                    i,
+                                    io::Error::other("the driver factory panicked"),
+                                ));
+                                (None, Some(payload))
+                            }
+                        };
+                        let ready = startup.wait();
+                        if !ready || lock(setup).is_some() {
+                            *lock(&shared.workers[i].wake) = None;
+                            drop(built);
+                            if let Some(payload) = panicked {
                                 panic::resume_unwind(payload);
                             }
-                            Some(worker.close(shared))
-                        })
-                        .expect("spawn a pulse worker thread")
-                })
-                .collect();
+                            return None;
+                        }
+                        let (driver, reader) = built?;
+                        let mut worker = Worker::new(i, driver, seed, false);
+                        worker.wake_reader = reader;
+                        let outcome = panic::catch_unwind(AssertUnwindSafe(|| {
+                            while !shared.done.load(SeqCst) && !worker.gave_up {
+                                if !worker.step(shared) && !shared.done.load(SeqCst) {
+                                    worker.park(shared, wakeup);
+                                }
+                            }
+                        }));
+                        if let Err(payload) = outcome {
+                            shared.done.store(true, SeqCst);
+                            shared.wake_all();
+                            // Let the driver's own Drop protocol release
+                            // what it still owns.
+                            drop(worker);
+                            panic::resume_unwind(payload);
+                        }
+                        Some(worker.close(shared))
+                    });
+                match spawned {
+                    Ok(handle) => handles.push(handle),
+                    Err(error) => {
+                        lock(setup).get_or_insert((i, error));
+                        startup.abort();
+                        break;
+                    }
+                }
+            }
             handles.into_iter().map(|h| h.join()).collect::<Vec<_>>()
         });
         let mut workers = vec![];
@@ -1379,6 +1427,35 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn a_startup_abort_releases_workers_waiting_for_unspawned_siblings() {
+        let gate = Arc::new(StartupGate::new(3));
+        let worker_gate = Arc::clone(&gate);
+        let (released, result) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            released.send(worker_gate.wait()).unwrap();
+        });
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        // Observing the count under the same mutex means the worker has
+        // released that mutex in Condvar::wait, rather than merely starting.
+        while lock(&gate.state).arrived != 1 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not reach startup"
+            );
+            std::thread::yield_now();
+        }
+        assert!(matches!(
+            result.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        gate.abort();
+        assert!(!result.recv_timeout(Duration::from_secs(2)).unwrap());
+        worker.join().unwrap();
+        // A factory that finishes after the abort must not wait either.
+        assert!(!gate.wait());
+    }
 
     fn null_file() -> File {
         File::open(if cfg!(windows) { "NUL" } else { "/dev/null" }).unwrap()

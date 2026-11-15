@@ -13,7 +13,7 @@ use vesper_fiber_abi::prototype::{
     DEEP_LEAF_WORDS, DEEP_MID_SECRET, DEEP_MID_SYMBOL, DEEP_MID_WORDS, JitPrototype, OptLevel,
 };
 use vesper_fiber_abi::unwind::{Stop, UnwindError, unwind};
-use vesper_fiber_abi::{Parked, Resumption};
+use vesper_fiber_abi::{Fiber, Parked, Resumption};
 
 const FP: &str = if cfg!(target_arch = "aarch64") {
     "x29"
@@ -33,18 +33,8 @@ fn word(k: &Parked, index: usize) -> u64 {
 const ENTRY_SECRET: u64 = 0x5ec0_0000_e1e1_0001;
 const MID_SECRET: u64 = 0x5ec0_0000_d1d1_0002;
 
-/// Spawn the deep fixture with its secrets filled in, and park it.
-fn park_deep(
-    jit: &JitPrototype,
-    arg: u64,
-    config: Option<vesper_fiber_abi::FiberConfig>,
-) -> Parked {
-    let evidence = evidence();
-    let mut fiber = match config {
-        Some(c) => jit.spawn_deep_with(arg, evidence, c),
-        None => jit.spawn_deep(arg, evidence),
-    }
-    .unwrap();
+/// Fill in the deep fixture's secrets and park it.
+fn park_deep(mut fiber: Fiber) -> Parked {
     let data = fiber.data_mut();
     data[DEEP_ENTRY_SECRET * 8..][..8].copy_from_slice(&ENTRY_SECRET.to_le_bytes());
     data[DEEP_MID_SECRET * 8..][..8].copy_from_slice(&MID_SECRET.to_le_bytes());
@@ -55,7 +45,7 @@ fn park_deep(
 fn parked_fiber_unwinds_through_every_generated_frame() {
     for opt in [OptLevel::None, OptLevel::Speed] {
         let jit = JitPrototype::new(opt).unwrap();
-        let k = park_deep(&jit, 7, None);
+        let k = park_deep(jit.spawn_deep(7, evidence()).unwrap());
         let stack = k.stack_image();
         let frame = k.register_frame();
         // The park entry has no frame: the switch returns straight into the
@@ -143,14 +133,42 @@ fn parked_fiber_unwinds_through_every_generated_frame() {
 #[test]
 fn an_encoded_image_unwinds_like_the_live_fiber_and_limits_hold() {
     let jit = JitPrototype::new(OptLevel::Speed).unwrap();
+    // Prepare the evidence before probing: a probe releases its mapping.
+    let evidence = evidence();
     // Images need a fixed-address stack.
     let config = vesper_fiber_abi::FiberConfig {
         data_bytes: prototype::DEEP_DATA_BYTES,
         ..Default::default()
+    };
+    // Exercise a real collision before the successful image/unwind path.
+    // This mapping stays live; no spawned fiber uses floating placement.
+    let occupied = vesper_fiber_abi::stack::FiberStack::new(config.stack_size).unwrap();
+    let mut spawned = None;
+    let mut collisions = 0;
+    for attempt in 0..16 {
+        let candidate = if attempt == 0 {
+            vesper_fiber_abi::FiberConfig {
+                fixed_stack_base: Some(occupied.reservation_base()),
+                ..config
+            }
+        } else {
+            // Another thread can claim a released probe before the fixed
+            // spawn. Only that collision justifies a fresh probe/retry.
+            config.at_free_fixed_base().unwrap()
+        };
+        match jit.spawn_deep_with(3, Rc::clone(&evidence), candidate) {
+            Ok(fiber) => {
+                spawned = Some(fiber);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                collisions += 1;
+            }
+            Err(error) => panic!("fixed deep fixture: {error}"),
+        }
     }
-    .at_free_fixed_base()
-    .unwrap();
-    let k = park_deep(&jit, 3, Some(config));
+    assert!(collisions > 0, "the occupied first candidate must collide");
+    let k = park_deep(spawned.expect("no stable fixed stack after 16 attempts"));
     let live = unwind(&k.stack_image(), &k.register_frame(), jit.cfi(), 16).unwrap();
     let image = FiberImage::decode(&k.image().unwrap().encode()).unwrap();
     let decoded = unwind(

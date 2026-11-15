@@ -23,4 +23,9 @@ for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
 assert.equal((await readFile(resolve(dist, 'CNAME'), 'utf8')).trim(), 'vesper-lang.org');
 assert(html.includes('https://vesper-lang.org/'), 'Canonical domain missing');
 assert(!/<!-- source:|href="#"/.test(html), 'Unresolved content');
-console.log('PASS: local links, asset paths, unique IDs, tab references, source examples, and custom domain.');
+assert(!html.includes('docs/specification.txt'), 'The design links must open the typeset PDF');
+const designActions = [...html.matchAll(/<a\b[^>]*href="([^"]+)"[^>]*>Read the design<\/a>/g)];
+assert(designActions.length > 0 && designActions.every(([, url]) => url === 'vesper-specification.pdf'), 'Every design action must open the manuscript');
+const specification = await readFile(resolve(dist, 'vesper-specification.pdf'));
+assert(specification.subarray(0, 5).equals(Buffer.from('%PDF-')), 'Specification is not a PDF');
+console.log('PASS: local links, assets, unique IDs, tabs, source examples, PDF specification actions, and custom domain.');

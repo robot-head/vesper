@@ -73,6 +73,7 @@ members = [
     "crates/vesper-ignis-vulkan",
     "crates/vesper-codegen-verified",
     "crates/vesper-highlight",
+    "crates/vesper-fusion",
     "experiments/native-pulse",
 ]
 # Preserve the pre-extraction `cargo test` coverage of moved unit tests.
@@ -147,6 +148,7 @@ default-members = [
     "crates/vesper-ignis-vulkan",
     "crates/vesper-codegen-verified",
     "crates/vesper-highlight",
+    "crates/vesper-fusion",
     "experiments/native-pulse",
 ]
 
