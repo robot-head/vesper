@@ -7,6 +7,9 @@ mod vector_check;
 #[path = "regions/check.rs"]
 mod region_rules;
 
+#[path = "tiled/check.rs"]
+mod tiled_rules;
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct World {
     pub adts: BTreeMap<String, Adt>,
@@ -206,6 +209,13 @@ impl World {
                             .get(1)
                             .map_or(Mode::Linear, |t| visit(w, t, bounds, seen));
                     }
+                    // TiledSeq[T] is an affine AoSoA sequence container (§12.5).
+                    if n == crate::tiled::TILED_SEQ_TYPE {
+                        return args
+                            .first()
+                            .map_or(Mode::Affine, |t| visit(w, t, bounds, seen))
+                            .join(Mode::Affine);
+                    }
                     let Some(a) = w.adts.get(n) else {
                         return Mode::Linear;
                     };
@@ -238,6 +248,24 @@ impl World {
         let mut ty = ty.clone();
         for name in path {
             ty = match &ty {
+                Type::Named(n, args) if n == crate::tiled::TILED_SEQ_TYPE => {
+                    let Type::Named(elem_name, elem_args) = args.first()? else {
+                        return None;
+                    };
+                    let a = self.adts.get(elem_name)?;
+                    if a.is_enum || a.tile_width.is_none() {
+                        return None;
+                    }
+                    let f = a.variants[0].fields.iter().find(|f| &f.name == name)?;
+                    substitute(
+                        &f.ty,
+                        &a.generics
+                            .iter()
+                            .zip(elem_args)
+                            .map(|(p, t)| (p.name.clone(), t.clone()))
+                            .collect(),
+                    )
+                }
                 Type::Named(n, args) => {
                     let a = self.adts.get(n)?;
                     if a.is_enum {
@@ -471,6 +499,7 @@ pub(crate) fn check_core(
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::capability_effects::check_world(&world));
         diagnostics.extend(crate::vector::check_world(&world));
+        diagnostics.extend(crate::tiled::check_world_adts(&world));
     }
     if diagnostics.is_empty() && traits.is_none() {
         diagnostics.extend(crate::regions::check_world(&world));
@@ -609,14 +638,41 @@ impl Checker<'_> {
         {
             self.diagnostics.extend(errors);
             // The capability argument is checked by `validate_type` itself.
-            if let Type::Named(_, args) = t {
-                for a in args.iter().skip(1) {
-                    self.valid_type(a, g, span.clone());
+            if let Type::Named(n, args) = t {
+                if n == crate::tiled::TILED_SEQ_TYPE {
+                    if let Some(elem) = args.first() {
+                        self.valid_type(elem, g, span.clone());
+                        self.check_tiled_record_type(elem, span);
+                    }
+                } else {
+                    for a in args.iter().skip(1) {
+                        self.valid_type(a, g, span.clone());
+                    }
                 }
             }
             return;
         }
         match t {
+            Type::Named(n, args) if n == crate::tiled::TILED_SEQ_TYPE => {
+                if !matches!(args.len(), 1 | 2) {
+                    self.error(
+                        "E0101",
+                        format!("{n} expects 1 or 2 type arguments, found {}", args.len()),
+                        span.clone(),
+                    );
+                }
+                if args.len() == 2 {
+                    self.error(
+                        "E0797",
+                        format!("{n}[T, r] requires a region capability in scope"),
+                        span.clone(),
+                    );
+                }
+                if let Some(elem) = args.first() {
+                    self.valid_type(elem, g, span.clone());
+                    self.check_tiled_record_type(elem, span);
+                }
+            }
             Type::Named(n, args) => {
                 let expected = self
                     .world
@@ -1131,12 +1187,22 @@ impl Checker<'_> {
                 expected,
             ),
             ExprKind::Field(_, _) => {
-                if let Some(p) = Place::from_expr(e) {
+                let ExprKind::Field(base, f) = &e.kind else {
+                    unreachable!()
+                };
+                if crate::tiled::is_seq_type(&self.peek_type(base, env)) {
+                    self.error(
+                        "E0202",
+                        format!(
+                            "cannot access TiledSeq column '{f}' directly; use col_get[{f}], col_set[{f}], or load_tile_vec[{f}]"
+                        ),
+                        e.span.clone(),
+                    );
+                    self.expr(base, env, usage);
+                    Type::Infer
+                } else if let Some(p) = Place::from_expr(e) {
                     self.place(&p, env, usage, e.span.clone())
                 } else {
-                    let ExprKind::Field(base, f) = &e.kind else {
-                        unreachable!()
-                    };
                     let t = self.expr(base, env, Usage::Own);
                     if self.mode(&t) == Mode::Linear {
                         self.error(
@@ -1400,6 +1466,19 @@ impl Checker<'_> {
                     self.error("E0300", "assignment requires a place", l.span.clone());
                     return Type::Infer;
                 };
+                if let ExprKind::Field(base, f) = &l.kind
+                    && crate::tiled::is_seq_type(&self.peek_type(base, env))
+                {
+                    self.error(
+                        "E0202",
+                        format!(
+                            "cannot assign TiledSeq column '{f}' directly; use col_set[{f}](index, value)"
+                        ),
+                        l.span.clone(),
+                    );
+                    self.expr(r, env, Usage::Own);
+                    return Type::unit();
+                }
                 let expected = self.place(&p, env, Usage::Borrow(Pass::Inout), l.span.clone());
                 self.types
                     .insert((l.span.start, l.span.end), expected.clone());
@@ -1796,6 +1875,11 @@ impl Checker<'_> {
             {
                 return t;
             }
+            if !self.world.functions.contains_key(name)
+                && let Some(t) = self.tiled_call(name, types, args, env, span.clone(), expected)
+            {
+                return t;
+            }
             if let Some(f) = self.world.functions.get(name) {
                 return self.apply(f, types, args, None, env, span, expected);
             }
@@ -1908,6 +1992,11 @@ impl Checker<'_> {
                     self.apply_args(&f, &effect.args, args, None, env, span.clone(), &mut vars);
                 self.require_effect(&effect, env, span);
                 return result;
+            }
+            if let Some(t) =
+                self.tiled_method_call(base, method, types, args, env, span.clone(), expected)
+            {
+                return t;
             }
             let t = self.peek_type(base, env);
             let name = format!("{}::{method}", t.name());

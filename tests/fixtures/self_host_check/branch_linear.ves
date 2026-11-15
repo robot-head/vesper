@@ -1,0 +1,10 @@
+linear struct Ticket {}
+fn consume(sink ticket: Ticket) {
+    let Ticket {}
+    = ticket;
+}
+fn bad(sink ticket: Ticket, b: bool) {
+    if b {
+        consume(sink ticket);
+    } else {}
+}

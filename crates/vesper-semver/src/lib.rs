@@ -92,6 +92,11 @@ pub enum Type {
         min: i64,
         max: i64,
     },
+    /// The inclusive subset of u64 values between these constant bounds.
+    U64Range {
+        min: u64,
+        max: u64,
+    },
     Parameter {
         index: usize,
     },
@@ -515,6 +520,11 @@ impl Checker<'_> {
                     self.unsupported(path, "invalid i64 refinement range");
                 }
             }
+            Type::U64Range { min, max } => {
+                if min > max {
+                    self.unsupported(path, "invalid u64 refinement range");
+                }
+            }
             Type::Parameter { index } => {
                 if !matches!(generics.get(*index), Some(Generic::Type { .. })) {
                     self.unsupported(path, "unbound or non-type generic parameter");
@@ -747,6 +757,21 @@ impl Checker<'_> {
                 },
                 Type::I64Range { min, max },
             ) => *min == i64::MIN && *max == i64::MAX,
+            (Type::U64Range { min: a, max: b }, Type::U64Range { min: c, max: d }) => {
+                c <= a && b <= d
+            }
+            (
+                Type::U64Range { .. },
+                Type::Primitive {
+                    name: Primitive::U64,
+                },
+            ) => true,
+            (
+                Type::Primitive {
+                    name: Primitive::U64,
+                },
+                Type::U64Range { min, max },
+            ) => *min == 0 && *max == u64::MAX,
             (Type::Function { signature: a }, Type::Function { signature: b }) => {
                 let before = (self.issues.len(), self.adapters.len());
                 // A value of a must be usable at b, so a is the candidate.
@@ -923,7 +948,7 @@ fn type_mode_at(
         Type::Primitive {
             name: Primitive::String,
         } => Some(Mode::Affine),
-        Type::Primitive { .. } | Type::I64Range { .. } => Some(Mode::Copy),
+        Type::Primitive { .. } | Type::I64Range { .. } | Type::U64Range { .. } => Some(Mode::Copy),
         Type::Parameter { index } => match generics.get(*index)? {
             Generic::Type { bound } => Some(*bound),
             _ => None,

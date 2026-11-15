@@ -111,6 +111,41 @@ impl ModeVec {
         }
     }
 
+    /// Returns `true` when values at this mode may cross fiber/thread shards.
+    #[inline]
+    pub const fn is_portable(self) -> bool {
+        (self.0 & 4) == 0
+    }
+
+    /// Returns `true` when shared views require atomic/contended synchronization.
+    #[inline]
+    pub const fn is_contended(self) -> bool {
+        (self.0 & 8) != 0
+    }
+
+    /// Returns `true` when linear discharge must follow strict LIFO stack order.
+    #[inline]
+    pub const fn is_lifo(self) -> bool {
+        (self.0 & 16) != 0
+    }
+
+    /// Shifts a shared `in` view across a thread boundary (`[M-ContendStrip]`, §4.5, §7.4).
+    #[inline]
+    pub const fn as_contended(self) -> Self {
+        Self(self.0 | (1 << 3))
+    }
+
+    /// Seals an unaliased (`sink`) `uncontended` graph into a `portable`
+    /// `Capsule[T]` (§3.3, §7.4), returning `None` if already `Contended`.
+    #[inline]
+    pub const fn try_seal_capsule(self) -> Option<Self> {
+        if !self.is_contended() {
+            Some(Self(self.0 & !(1 << 2)))
+        } else {
+            None
+        }
+    }
+
     /// Componentwise order: each axis is no more restrictive than `other`.
     pub const fn leq(self, other: Self) -> bool {
         (self.0 & 3) <= (other.0 & 3) && (self.0 & 0x1c) & !(other.0 & 0x1c) == 0
@@ -144,6 +179,15 @@ mod tests {
             if let Some(value) = value {
                 count += 1;
                 assert_eq!(value.bits(), bits);
+                assert_eq!(
+                    value.is_portable(),
+                    value.portability() == Portability::Portable
+                );
+                assert_eq!(
+                    value.is_contended(),
+                    value.contention() == Contention::Contended
+                );
+                assert_eq!(value.is_lifo(), value.order() == Order::Lifo);
                 assert_eq!(
                     ModeVec::new(
                         value.usage(),
@@ -196,5 +240,47 @@ mod tests {
         let affine = ModeVec::NOMINAL_DEFAULT;
         assert!(affine.bits() < pinned.bits());
         assert!(!affine.leq(pinned) && !pinned.leq(affine));
+    }
+
+    #[test]
+    fn contention_shift_and_capsule_sealing_obey_lattice_laws() {
+        let all: Vec<_> = (0..32).filter_map(ModeVec::from_bits).collect();
+        for &m in &all {
+            let contended = m.as_contended();
+            assert!(contended.is_contended());
+            assert!(m.leq(contended));
+            assert_eq!(contended.usage(), m.usage());
+            assert_eq!(contended.portability(), m.portability());
+            assert_eq!(contended.order(), m.order());
+            assert_eq!(contended.as_contended(), contended);
+            assert!(contended.try_seal_capsule().is_none());
+
+            if !m.is_contended() {
+                let sealed = m.try_seal_capsule().expect("uncontended graph seals");
+                assert!(sealed.is_portable());
+                assert!(!sealed.is_contended());
+                assert!(sealed.leq(m));
+                assert_eq!(sealed.usage(), m.usage());
+                assert_eq!(sealed.order(), m.order());
+                assert_eq!(sealed.try_seal_capsule(), Some(sealed));
+            }
+        }
+
+        let pinned_arena = ModeVec::new(
+            Usage::Linear,
+            Portability::Pinned,
+            Contention::Uncontended,
+            Order::Lifo,
+        );
+        let capsule = pinned_arena.try_seal_capsule().unwrap();
+        assert_eq!(
+            capsule,
+            ModeVec::new(
+                Usage::Linear,
+                Portability::Portable,
+                Contention::Uncontended,
+                Order::Lifo,
+            )
+        );
     }
 }

@@ -1,0 +1,5 @@
+fn plain() {}
+fn accept(sink callback: fn() eff [Fail[i64]]) {}
+fn main() {
+    accept(plain);
+}

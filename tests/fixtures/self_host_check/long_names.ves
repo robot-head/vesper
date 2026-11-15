@@ -1,0 +1,6 @@
+fn identity_long_name(long_parameter_name: i64) -> i64 {
+    long_parameter_name
+}
+fn main() -> i64 {
+    identity_long_name(1)
+}

@@ -1,0 +1,7 @@
+copy enum Maybe {
+    Some(i64),
+    None
+}
+fn main() {
+    Maybe::Some;
+}

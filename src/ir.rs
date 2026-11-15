@@ -84,6 +84,12 @@ pub enum Op {
         op: crate::vector::VectorOp,
         args: Vec<ValueId>,
     },
+    /// Cache-conscious AoSoA tiled sequence operation (§12.5).
+    Tiled {
+        op: crate::tiled::TiledOp,
+        args: Vec<Argument>,
+        capability: Option<String>,
+    },
 }
 #[derive(Debug, Clone, Serialize)]
 pub enum Terminator {
@@ -282,6 +288,7 @@ pub fn state_action(i: &Instruction) -> bool {
             | Op::Handle { .. }
             | Op::Closure { .. }
             | Op::Index(..)
+            | Op::Tiled { .. }
     ) || i.fallible
         || matches!(&i.op, Op::Binary(op, ..) if matches!(op.as_str(), "/" | "%"))
 }
@@ -926,7 +933,9 @@ impl Lower<'_> {
                             .cloned()
                             .unwrap_or(Type::Infer);
                         let method_name = format!("{}::{method}", t.name());
-                        if self.world.functions.contains_key(&method_name) {
+                        if crate::tiled::is_seq_type(&t)
+                            || self.world.functions.contains_key(&method_name)
+                        {
                             receiver = Some(base.as_ref());
                             Some(method_name)
                         } else if let ExprKind::Name(label) = &base.kind {
@@ -943,6 +952,68 @@ impl Lower<'_> {
                     _ => None,
                 };
                 if let Some(name) = name {
+                    if let Some((tiled_op, cap)) = crate::tiled::resolve_ir_call(
+                        self.world,
+                        self.types,
+                        &self.capabilities,
+                        &name,
+                        receiver,
+                        types,
+                        args,
+                        e,
+                    ) {
+                        let (recv_pass, recv_projs) = match &tiled_op {
+                            crate::tiled::TiledOp::Push { .. }
+                            | crate::tiled::TiledOp::Set { .. } => (Pass::Inout, vec![]),
+                            crate::tiled::TiledOp::ColSet { field, .. } => {
+                                (Pass::Inout, vec![vec![field.clone()]])
+                            }
+                            crate::tiled::TiledOp::ColGet { field, .. }
+                            | crate::tiled::TiledOp::LoadTileVec { field, .. } => {
+                                (Pass::In, vec![vec![field.clone()]])
+                            }
+                            _ => (Pass::In, vec![]),
+                        };
+                        let mut operands = Vec::new();
+                        if let Some(recv) = receiver {
+                            operands.push(self.argument(recv, recv_pass, recv_projs));
+                            for a in args {
+                                operands.push(self.argument(&a.expr, Pass::Sink, vec![]));
+                            }
+                        } else {
+                            let skip_first =
+                                matches!(tiled_op, crate::tiled::TiledOp::WithRegion { .. });
+                            let is_recv_first = !matches!(
+                                tiled_op,
+                                crate::tiled::TiledOp::New { .. }
+                                    | crate::tiled::TiledOp::WithCapacity { .. }
+                                    | crate::tiled::TiledOp::WithRegion { .. }
+                            );
+                            for (i, a) in args.iter().enumerate() {
+                                if skip_first && i == 0 {
+                                    continue;
+                                }
+                                if is_recv_first && i == 0 {
+                                    operands.push(self.argument(
+                                        &a.expr,
+                                        recv_pass,
+                                        recv_projs.clone(),
+                                    ));
+                                } else {
+                                    operands.push(self.argument(&a.expr, Pass::Sink, vec![]));
+                                }
+                            }
+                        }
+                        return self.emit(
+                            Op::Tiled {
+                                op: tiled_op,
+                                args: operands,
+                                capability: cap,
+                            },
+                            e,
+                            true,
+                        );
+                    }
                     if receiver.is_none()
                         && !self.world.functions.contains_key(&name)
                         && let Some(op) = self.vector_op(&name, types, args, e)
