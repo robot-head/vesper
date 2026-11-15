@@ -552,6 +552,9 @@ impl<'a> Admission<'a> {
         Ok(found)
     }
     fn constructor(&mut self, name: &str) -> Result<Option<Ctor<'a>>, String> {
+        if name.matches("::").count() > 1 {
+            return Err(UNCERTAIN.into());
+        }
         let short = name.rsplit("::").next().ok_or(UNCERTAIN)?;
         let builtin = match short {
             "Some" | "None" if name == short || name.starts_with("Option::") => Some(("Option", 1)),

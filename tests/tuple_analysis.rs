@@ -261,10 +261,10 @@ fn malformed_nominal_contexts_never_clone_wide_expected_types_in_checker() {
         "copy enum Capsule[T]{Empty} fn f(){let x=Capsule::Extra::Empty;(x,x)}",
         "fn f(){let x=Option::Extra::None;(x,x)}",
     ] {
-        assert!(matches!(
-            check_source(source, Default::default()),
-            Err(AnalysisFailure::Parse { .. })
-        ));
+        let parsed = parser::parse(source);
+        assert!(parsed.diagnostics.is_empty());
+        assert!(!check::check(&parsed.module).diagnostics.is_empty());
+        assert!(check_source(source, Default::default()).is_err());
     }
     // String payload length never changes the actual scalar String type.
     accepted(&format!("fn f()->(String,){{(\"{}\",)}}", "λ".repeat(1000)));
