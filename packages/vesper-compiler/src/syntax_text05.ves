@@ -1,0 +1,49 @@
+// Seed diagnostic text and TokenKind debug names, as UTF-8 bytes.
+fn syntax_text_139(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (83, 101, 109, 105)[i]
+}
+fn syntax_text_140(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (67, 111, 108, 111, 110)[i]
+}
+fn syntax_text_141(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (67, 111, 108, 111, 110, 67, 111, 108, 111, 110)[i]
+}
+fn syntax_text_142(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (68, 111, 116)[i]
+}
+fn syntax_text_143(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (81, 117, 101, 115, 116, 105, 111, 110)[i]
+}
+fn syntax_text_144(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (65, 116)[i]
+}
+fn syntax_text_145(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (65, 116, 65, 116)[i]
+}
+fn syntax_text_146(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (65, 114, 114, 111, 119)[i]
+}
+fn syntax_text_147(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (70, 97, 116, 65, 114, 114, 111, 119)[i]
+}
+fn syntax_text_148(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (69, 113)[i]
+}
+fn syntax_text_149(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (80, 108, 117, 115, 69, 113)[i]
+}
+fn syntax_text_150(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (83, 116, 97, 114, 69, 113)[i]
+}
+fn syntax_text_151(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (83, 108, 97, 115, 104, 69, 113)[i]
+}
+fn syntax_text_152(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (80, 101, 114, 99, 101, 110, 116, 69, 113)[i]
+}
+fn syntax_text_153(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (77, 105, 110, 117, 115, 69, 113)[i]
+}
+fn syntax_text_154(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (80, 108, 117, 115)[i]
+}

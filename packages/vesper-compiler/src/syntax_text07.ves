@@ -1,0 +1,4 @@
+// Seed diagnostic text and TokenKind debug names, as UTF-8 bytes.
+fn syntax_text_171(i: i64) -> i64 eff [Fail[RuntimeError]] {
+    (68, 111, 108, 108, 97, 114)[i]
+}
