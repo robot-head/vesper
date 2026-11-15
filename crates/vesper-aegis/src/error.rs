@@ -225,8 +225,10 @@ pub enum TeeError {
     ForeignGrant,
     /// Host mapping reply overlaps an existing mapping.
     HostMmapOverlap { addr: u64, len: u64 },
-    /// Host mapping reply is unaligned, empty, overflows or leaves the window.
+    /// Mapping or unmapping range is unaligned, empty, overflows or leaves the window.
     HostMmapInvalid { addr: u64, len: u64 },
+    /// A guest-requested unmap is not fully covered by tracked mappings.
+    HostMmapUntracked { addr: u64, len: u64 },
     /// Host clock went backwards.
     HostTimeNonMonotonic { previous: u64, reported: u64 },
     /// Host clock jumped further than the configured bound.

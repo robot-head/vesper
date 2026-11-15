@@ -1,0 +1,10 @@
+fn effectful() eff [Fail[i64]] {}
+fn pure() {}
+fn bad(b: bool) {
+    let h = if b {
+        pure
+    } else {
+        effectful
+    };
+    h();
+}
