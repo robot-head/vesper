@@ -500,6 +500,7 @@ fn compile<M: Module>(
         instrument,
         options,
         false,
+        false,
         DefinitionLinkage::Object,
     )
 }
@@ -521,13 +522,16 @@ fn compile_jit(
         instrument,
         options,
         false,
+        false,
         DefinitionLinkage::Jit,
     )
 }
 /// [`compile`]; with `fail_entry`, an entry whose only effects are `Fail`
 /// instances is accepted and keeps its hidden failure-record parameter
 /// (lane 27: the freestanding runtime turns an escaping failure into an
-/// abort).
+/// abort). With `capability_entry`, an entry whose effects are closed built-in
+/// capability effects (`Realtime`, `ConstTime`, `DetFloat`, `ConstDenorm`) is
+/// accepted for offline verification and WCSD stack measurement.
 #[allow(clippy::too_many_arguments)]
 fn compile_entry<M: Module>(
     m: &mut M,
@@ -538,6 +542,7 @@ fn compile_entry<M: Module>(
     instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
     fail_entry: bool,
+    capability_entry: bool,
     linkage: DefinitionLinkage,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
@@ -549,6 +554,7 @@ fn compile_entry<M: Module>(
         .any(|e| !crate::ffi_lowering::is_foreign_effect(&e.name))
         || entry_fn.effects.tail.is_some())
         && !(fail_entry && fail_only(world, entry_fn))
+        && !(capability_entry && entry_fn.effects.tail.is_none() && capability_only(entry_fn))
     {
         return Err("native entry must handle all effects".into());
     }
@@ -1078,10 +1084,39 @@ pub fn object_for_isa(
         None,
         CodegenOptions::default(),
         true,
+        false,
         DefinitionLinkage::Object,
     )?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
+}
+/// Compile a standalone entry whose effects are closed built-in capabilities
+/// (or `Fail` + capabilities) and emit its finalized Cranelift functions to
+/// `observer` without linking/finishing an executable object.
+pub fn emit_capability_entry(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    observer: &mut dyn FnMut(EmittedFunction),
+) -> Result<(), String> {
+    let isa = object_isa_for(world, target)?;
+    let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
+        .map_err(|e| e.to_string())?;
+    let mut m = ObjectModule::new(builder);
+    let _ = compile_entry(
+        &mut m,
+        world,
+        entry,
+        optimize,
+        Some(observer),
+        None,
+        CodegenOptions::default(),
+        true,
+        true,
+        DefinitionLinkage::Object,
+    )?;
+    Ok(())
 }
 /// [`object_with_observer`] with the lane-23 [`Instrument`] hook. With
 /// `instrument: None` it is exactly `object_with_observer`.
