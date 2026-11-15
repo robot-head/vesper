@@ -37,6 +37,37 @@ impl Drop for Fixture {
 fn schema() -> &'static str {
     r#"{"profile":"vesper.protobuf.explicit-presence/1","root":0,"messages":[{"fields":[{"number":1,"kind":"u64"},{"number":2,"kind":"string"}]}]}"#
 }
+#[test]
+fn protobuf_signed_varints_are_visible_in_the_cli_projection() {
+    let f = Fixture::new();
+    let schema = f.file("schema.json", r#"{"profile":"vesper.protobuf.explicit-presence/1","root":0,"messages":[{"fields":[{"number":1,"kind":"int32"},{"number":2,"kind":"int64"}]}]}"#);
+    let input = f.file(
+        "data.pb",
+        [
+            8, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1, 16, 42,
+        ],
+    );
+    let data = report(
+        &invoke(&[
+            "check",
+            "protobuf",
+            path(&input),
+            "--schema",
+            path(&schema),
+            "--json",
+        ]),
+        true,
+    );
+    let fields = &data["result"]["projection"]["fields"];
+    assert_eq!(
+        fields[0]["value"],
+        serde_json::json!({"kind":"int32","value":"-1"})
+    );
+    assert_eq!(
+        fields[1]["value"],
+        serde_json::json!({"kind":"int64","value":"42"})
+    );
+}
 fn path(path: &Path) -> &str {
     path.to_str().unwrap()
 }

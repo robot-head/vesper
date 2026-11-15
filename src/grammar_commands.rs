@@ -37,7 +37,7 @@ Protobuf schema shape (unknown and duplicate decoded JSON keys are rejected):
 {"profile":"vesper.protobuf.explicit-presence/1","root":0,"messages":[
   {"fields":[{"number":1,"kind":"u64","repeated":false}]}
 ]}
-Kinds: u32, u64, sint32, sint64, bool, fixed32, fixed64, string, bytes, message.
+Kinds: u32, u64, int32, int64, sint32, sint64, bool, fixed32, fixed64, string, bytes, message.
 The message kind requires an additional "message":N index; scalar kinds forbid it.
 "#;
 
@@ -191,6 +191,8 @@ fn message_index<'de, D: serde::Deserializer<'de>>(value: D) -> Result<Option<us
 enum ProtoKindJson {
     U32,
     U64,
+    Int32,
+    Int64,
     Sint32,
     Sint64,
     Bool,
@@ -326,6 +328,8 @@ fn proto_preview(message: &protobuf::Message<'_>, preview: &mut Preview) -> Json
         let value = match &field.value {
             V::U32(value) => json!({"kind":"u32","value":value.to_string()}),
             V::U64(value) => json!({"kind":"u64","value":value.to_string()}),
+            V::Int32(value) => json!({"kind":"int32","value":value.to_string()}),
+            V::Int64(value) => json!({"kind":"int64","value":value.to_string()}),
             V::Sint32(value) => json!({"kind":"sint32","value":value.to_string()}),
             V::Sint64(value) => json!({"kind":"sint64","value":value.to_string()}),
             V::Bool(value) => json!({"kind":"bool","value":value}),
@@ -357,6 +361,8 @@ fn protobuf_summary(input: &[u8], schema_bytes: &[u8]) -> Result<Json, String> {
             let kind = match field.kind {
                 ProtoKindJson::U32 => K::U32,
                 ProtoKindJson::U64 => K::U64,
+                ProtoKindJson::Int32 => K::Int32,
+                ProtoKindJson::Int64 => K::Int64,
                 ProtoKindJson::Sint32 => K::Sint32,
                 ProtoKindJson::Sint64 => K::Sint64,
                 ProtoKindJson::Bool => K::Bool,
