@@ -214,3 +214,10 @@ fn explicitly_public_adts_and_effects_keep_existing_interfaces() {
     );
     assert_eq!(explicit, implicit);
 }
+
+#[test]
+fn explicitly_public_fields_keep_existing_public_interface() {
+    let explicit = export("pub copy struct Pair { pub value: u64, pub: u64 }");
+    let implicit = export("copy struct Pair { value: u64, pub: u64 }");
+    assert_eq!(explicit, implicit);
+}
