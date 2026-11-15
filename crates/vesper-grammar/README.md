@@ -34,6 +34,10 @@ examples for executable usage.
 
 ## Canonical framing and remainder ownership
 
+The `u24` frame functions encode and parse a three-byte big-endian payload
+length followed by opaque bytes, with the same bounded, transactional and
+explicit-remainder conventions. They provide framing only, not TLS parsing.
+
 `framing::decode_canonical_u64_leb128` parses a prefix using at most ten bytes.
 It rejects overlong encodings and all >u64 representations, including tenth-byte
 continuations. `parse_u64_exact` additionally rejects every trailing byte.
