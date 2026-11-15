@@ -163,7 +163,7 @@ fn region_adapter_matches_external_storage() {
             runtime.optimize = false;
             runtime.fuel = u64::MAX / 2;
             assert_eq!(
-                decode(&runtime.run("parse_main", vec![]).unwrap()),
+                decode(&runtime.run("parse_tree_main", vec![]).unwrap()),
                 decode(&expected),
                 "{source}"
             );
@@ -288,6 +288,31 @@ fn dangling_modifiers_are_not_successful_declarations() {
             // The seed currently accepts this malformed input. Its preserved
             // CST still agrees, while the self-hosted outcome must be an error.
             assert_flat(source, &cells);
+        }
+    });
+}
+
+/// Stage 1 still compiles only its locked five files. Adding the structured
+/// parser must also leave the scalar entry points usable in a combined unit.
+#[test]
+fn stage1_entry_points_remain_standalone() {
+    on_big_stack(|| {
+        let legacy = FRONT_END
+            .iter()
+            .map(|path| std::fs::read_to_string(root().join(path)).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let full = read_front_end();
+        let source = "fn answer() -> i64 { 42 }";
+        for front_end in [&legacy, &full] {
+            let program = program(front_end, source.as_bytes());
+            let expected = Outcome::Digest(seed_cst(source).unwrap());
+            assert_eq!(evaluate(&program, "parse_main"), expected);
+            assert_eq!(jit(&program, "parse_main"), expected);
+            assert_eq!(
+                jit(&program, "lex_main"),
+                Outcome::Digest(seed_tokens(source).unwrap())
+            );
         }
     });
 }

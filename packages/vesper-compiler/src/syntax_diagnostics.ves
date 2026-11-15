@@ -31,7 +31,8 @@ fn syntax_diag(message: i64, start: i64, end: i64, a: i64, b: i64, legacy: i64)
         }
     }
 }
-fn syntax_issue(p: P, message: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn syntax_issue(p: ParseCursor, message: i64)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     syntax_diag(
         message,
         p.cur.start,
@@ -46,7 +47,8 @@ fn syntax_issue(p: P, message: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[Ari
     );
     p
 }
-fn syntax_expected(p: P, expected: i64) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn syntax_expected(p: ParseCursor, expected: i64)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     syntax_diag(1, p.cur.start, p.cur.end, expected, p.cur.kind, 2);
     p
 }

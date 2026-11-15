@@ -13,8 +13,8 @@ grammar, tokenization or diagnostic-message logic.
 
 `syntax_run(consume)` implements that same interface entirely in Vesper. It
 allocates a sparse radix-16 directory of region boxes inside a 256 MiB bounded
-region, calls `consume`, then releases the region. `parse_main()` uses it with
-`parse_digest`. A checker can instead supply a callback that parses and reads
+region, calls `consume`, then releases the region. `parse_tree_main()` uses it with
+`parse_build`. A checker can instead supply a callback that parses and reads
 the records before returning its own copy result. Region handles cannot escape.
 The package's original five grammar files and every `parse_*.ves` and
 `syntax_*.ves` file form one compilation unit; declaration order is immaterial.
@@ -88,3 +88,10 @@ native session backend also explicitly rejects recursive suspending call
 cycles. The corpus therefore checks every parser record on the evaluator and
 runs the lexer on the JIT for every fourth source and every large source.
 This does not establish full-parser JIT or Stage 1 native execution.
+
+The original five files and their `parse_main()`/`lex_main()` entry points
+remain byte-for-byte compatible with the separately locked Stage 1 adapter.
+They retain the earlier parser subset. The full grammar uses `ParseCursor`
+and namespaced `parse_` functions, sharing the existing lexer and pure helpers
+without changing that bootstrap path. Use `parse_tree_main()` or
+`parse_transport()` for the structured parser described here.

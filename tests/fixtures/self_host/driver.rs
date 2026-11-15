@@ -8,11 +8,10 @@
 //! and their token streams and CST shapes are compared with `vesper-syntax`,
 //! the Rust seed.
 //!
-//! The Vesper program cannot return a buffer, so each phase folds its output
-//! into a 63-bit digest that this test recomputes from the seed's tokens and
-//! rowan CST: tokens as (kind, start, end), all trivia and the EOF sentinel
-//! included; the CST as preorder events (open: kind and start offset; close:
-//! end offset). Errors come back as `-1 - (code << 32 | offset)`.
+//! The structured parser writes indexed token/node/diagnostic records through
+//! a bounded memory-only adapter. Tests compare every record with the seed.
+//! Scalar compatibility digests and the frozen five-file Stage 1 entry points
+//! are checked separately. Errors return `-1 - (code << 32 | offset)`.
 use std::path::{Path, PathBuf};
 use vesper::parser::{self as seed, SyntaxNode};
 use vesper::{check, lexer, native, parser, runtime::Runtime, runtime::Value};
@@ -255,7 +254,7 @@ pub(super) fn program(front_end: &str, bytes: &[u8]) -> Program {
 }
 
 pub(super) fn evaluate(program: &Program, entry: &str) -> Outcome {
-    if entry == "parse_main" {
+    if entry == "parse_tree_main" {
         let (value, _) = transport(program);
         return decode(&value);
     }

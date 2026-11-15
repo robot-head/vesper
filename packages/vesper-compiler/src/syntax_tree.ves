@@ -181,8 +181,8 @@ fn syntax_contains(head: i64, t: Tok) -> bool eff [SyntaxMemory, Fail[Diag], Fai
     }
 }
 
-fn syntax_heads(p: P, rows: i64, values: i64) -> P eff [SyntaxMemory] {
-    P {
+fn syntax_heads(p: ParseCursor, rows: i64, values: i64) -> ParseCursor eff [SyntaxMemory] {
+    ParseCursor {
         pos: p.pos,
         cur: p.cur,
         h: p.h,
@@ -197,7 +197,8 @@ fn syntax_heads(p: P, rows: i64, values: i64) -> P eff [SyntaxMemory] {
     }
 }
 
-fn syntax_bind(p: P, row: bool) -> P eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+fn syntax_bind(p: ParseCursor, row: bool)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
     if row {
         syntax_heads(p, syntax_name(p.cur, p.row_head), p.value_head)
     } else {

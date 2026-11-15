@@ -157,7 +157,7 @@ enum Expect {
 fn check_case(front_end: &str, source: &str, expect: Expect) {
     let program = program(front_end, source.as_bytes());
     let lexed = evaluate(&program, "lex_main");
-    let parsed = evaluate(&program, "parse_main");
+    let parsed = evaluate(&program, "parse_tree_main");
     let tokens = seed_tokens(source);
     let cst = seed_cst(source);
     match expect {

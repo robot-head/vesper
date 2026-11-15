@@ -5,7 +5,7 @@ Base: `05bc1a54841b2cc256b6379fce07d82c782f2d98`, a descendant of the required
 `37f7b8bcfa4cd409177856c8fe5deeaa7f2a88ff`. Branch:
 `codex/issue-580-self-hosted-parser`. No overlapping parser PR was open at
 preflight. No subagents were used. Integrated accepted main
-`d204923a47675a95fbc74750a0cf054ebed3975e` before final checks.
+`9b06602b` before final checks, including the Stage 1 bootstrap lane.
 
 ## Implemented
 
@@ -42,7 +42,12 @@ Rejected inputs compare seed diagnostic codes, including the macro fixtures.
 
 ## Public API and decisions
 
-`lex_main()` and `parse_main()` retain their scalar compatibility signatures.
+The original five files, including `lex_main()` and `parse_main()`, are
+byte-for-byte identical to integrated main. This preserves the independently
+locked Stage 1 bootstrap, which compiles only those files. Its parser remains
+the earlier subset. New `parse_*.ves` files implement the complete grammar
+using `ParseCursor` and namespaced functions, reusing the original lexer and
+pure helpers. `parse_tree_main()` closes the structured parser locally;
 `parse_transport()` exposes the complete parser through `SyntaxMemory` for an
 embedding or checker; `syntax_run(consume)` closes that interface using Vesper
 region storage. The callback consumes the tree before its region ends. No
@@ -63,7 +68,8 @@ The implementation checks Vesper effect rows and source ownership rules. The
 linear memory interface must be resumed once per operation; the ordinary
 entry discharges it and its region locally. The embedding entry explicitly
 requires it. No ambient I/O, zero-global-allocation, formal parser-correctness,
-Stage 1 lock, native parser, or end-to-end compiler proof claim is made.
+new Stage 1 lock, full-grammar native parser, or end-to-end compiler proof
+claim is made. The existing Stage 1 path is checked for compatibility.
 
 ## Checks
 
@@ -73,15 +79,25 @@ Rust 1.100 debug test profile, isolated `/workspace/target-issue580`. Build sett
 `CARGO_PROFILE_TEST_DEBUG=0`, `CARGO_INCREMENTAL=0`.
 
 - `cargo +1.100.0 test --locked --test self_host_front_end --test self_host_parse -- --nocapture`:
-  passed after main integration: **369/369 token streams**, **305 complete
-  CSTs**, **64 matching rejections**, **101 JIT lexer runs**. The corpus target
-  took **458.66 s**, within its existing 900 s Bazel timeout; the five focused
-  tests took 24.34 s. The final grouped-callee follow-up also passes all five
-  focused tests (34.86 s), including `(xs)[e]`, nested grouping and tuple versus
-  name disambiguation.
-- `cargo +1.100.0 test --locked --test self_host_parse -- --nocapture`:
-  **six tests pass in 35.59 s** after the review fix. Recovery, prefixes, region
-  storage, byte layout, bounds and dangling-modifier rejection are covered.
+  passed: **374/374 token streams**, **310 complete CSTs**, **64 matching
+  rejections**, **105 JIT lexer runs**, in **527.28 s**, within the existing
+  900 s Bazel timeout. This run overlapped the bootstrap and Clippy checks.
+  Sources include the new bootstrap byte-class probe and separate parser
+  files. Seven focused tests include standalone and combined-unit Stage 1
+  evaluator/JIT entry-point compatibility; all seven passed in **50.86 s**.
+- Existing `bootstrap/stage1.rs` acceptance test, run through a temporary
+  external Cargo harness with path dependencies on this checkout:
+  `VESPER_ROOT=/workspace/vesper cargo +1.100.0 test --offline --manifest-path /workspace/issue580-stage1-check/Cargo.toml --test stage1 -- --nocapture`:
+  **passed in 145.12 s**. All ten original parser corpus digests matched the
+  seed through Cranelift JIT/object generation; the byte-class probe also
+  matched the verified backend. Full-parser verified-backend unavailability
+  remains explicit. No bootstrap source or lock file was changed.
+- Earlier pre-bootstrap integration: **369/369 token streams**, **305 complete
+  CSTs**, **64 matching rejections**, **101 JIT lexer runs**, in **403.98 s**.
+  All six then-current focused tests passed in 34.59 s.
+- The first CI run exposed missing Bazel bootstrap runfiles (359 versus 370
+  sources). `//bootstrap:files` is now explicitly included; corpus coverage is
+  not relaxed to hide missing input files.
 - `cargo +1.100.0 clippy --workspace --locked --all-targets -- -D warnings`:
   passed (Cargo emits an existing unused manifest-dependency warning for
   `vesper-pact`; the Clippy command exits successfully).
@@ -100,7 +116,8 @@ Rust 1.100 debug test profile, isolated `/workspace/target-issue580`. Build sett
 ## Root patch
 
 Commit `a1e1ebc` adds four `BUILD.bazel` `extra_test_data` file groups for the
-crate `.ves` fixtures included by the expanded corpus. The existing doc crate
+crate `.ves` fixtures included by the expanded corpus. Commit `992f2c72` adds
+`//bootstrap:files` after bootstrap became its own Bazel package. The existing doc crate
 input was already present. No Cargo manifest or lockfile change by this lane. The patch
 preserves the independently held resource-oracle timeout hunk and all existing
 Bazel reservations, timeouts and platform policies.
