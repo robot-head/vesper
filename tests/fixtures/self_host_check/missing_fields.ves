@@ -1,0 +1,9 @@
+copy struct Pair {
+    a: i64,
+    b: i64
+}
+fn main() {
+    Pair {
+        a: 1
+    };
+}

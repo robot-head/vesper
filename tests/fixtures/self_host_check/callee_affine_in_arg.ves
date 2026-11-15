@@ -1,0 +1,5 @@
+fn take(x: i64) {}
+fn bad(sink f: fn() -> i64) {
+    take(f());
+    take(f());
+}

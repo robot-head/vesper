@@ -2131,7 +2131,7 @@ impl Parser<'_> {
                 }
                 K::Upper => {
                     let mut name = self.upper();
-                    if self.eat(K::ColonColon) {
+                    while self.eat(K::ColonColon) {
                         name.push_str("::");
                         name.push_str(&self.upper());
                     }

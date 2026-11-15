@@ -1,0 +1,5 @@
+fn target(inout x: bool) {}
+fn main() {
+    let x = 1;
+    target(inout x);
+}

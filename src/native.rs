@@ -517,6 +517,7 @@ fn instances_for_entry(
 enum EntryEffects {
     Handled,
     FailOnly,
+    CapabilityOrFail,
     TraceHost,
 }
 fn compile<M: Module>(
@@ -562,8 +563,10 @@ fn compile_jit(
     )
 }
 /// [`compile`]; `entry_effects` controls whether an entry may leave `Fail`
-/// (`FailOnly`, lane 27) or the built-in Beacon `Trace` effect (`TraceHost`)
-/// unhandled at the entry boundary.
+/// (`FailOnly`, lane 27), closed built-in capability effects or `Fail`
+/// (`CapabilityOrFail`, for offline verification and WCSD stack measurement),
+/// or the built-in Beacon `Trace` effect (`TraceHost`) unhandled at the entry
+/// boundary.
 #[allow(clippy::too_many_arguments)]
 fn compile_entry<M: Module>(
     m: &mut M,
@@ -594,7 +597,12 @@ fn compile_entry<M: Module>(
         .iter()
         .any(|e| !crate::ffi_lowering::is_foreign_effect(&e.name))
         || entry_fn.effects.tail.is_some())
-        && !(entry_effects == EntryEffects::FailOnly && fail_only(world, entry_fn))
+        && !((entry_effects == EntryEffects::FailOnly
+            || entry_effects == EntryEffects::CapabilityOrFail)
+            && fail_only(world, entry_fn))
+        && !(entry_effects == EntryEffects::CapabilityOrFail
+            && entry_fn.effects.tail.is_none()
+            && capability_only(entry_fn))
         && !trace_ok
     {
         return Err("native entry must handle all effects".into());
@@ -1291,6 +1299,33 @@ pub fn object_traced_with_options(
     )?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
+}
+/// Compile a standalone entry whose effects are closed built-in capabilities
+/// (or `Fail` + capabilities) and emit its finalized Cranelift functions to
+/// `observer` without linking/finishing an executable object.
+pub fn emit_capability_entry(
+    world: &World,
+    entry: &str,
+    target: Option<&str>,
+    optimize: bool,
+    observer: &mut dyn FnMut(EmittedFunction),
+) -> Result<(), String> {
+    let isa = object_isa_for(world, target)?;
+    let builder = ObjectBuilder::new(isa, "vesper", cranelift_module::default_libcall_names())
+        .map_err(|e| e.to_string())?;
+    let mut m = ObjectModule::new(builder);
+    let _ = compile_entry(
+        &mut m,
+        world,
+        entry,
+        optimize,
+        Some(observer),
+        None,
+        CodegenOptions::default(),
+        EntryEffects::CapabilityOrFail,
+        DefinitionLinkage::Object,
+    )?;
+    Ok(())
 }
 /// [`object_with_observer`] with the lane-23 [`Instrument`] hook. With
 /// `instrument: None` it is exactly `object_with_observer`.
