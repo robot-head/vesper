@@ -1,0 +1,5 @@
+@shot(title = 'overflows at run time')
+fn main() -> i64 eff [Fail[ArithOverflow]] {
+    let big = 9223372036854775807;
+    big + 1
+}

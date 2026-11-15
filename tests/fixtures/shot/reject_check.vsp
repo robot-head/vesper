@@ -1,0 +1,11 @@
+@shot(title = 'drops a linear value')
+linear struct WriteTxn {
+    wal_slot: u64
+}
+
+fn main() -> u64 {
+    let tx = WriteTxn {
+        wal_slot: 42
+    };
+    7
+}
