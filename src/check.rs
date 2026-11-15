@@ -1283,7 +1283,10 @@ impl Checker<'_> {
             ExprKind::Unary(op, v) => {
                 let t = self.expr_expected(v, env, Usage::Own, expected);
                 let t = crate::numeric::default_type(&t);
-                if op == "!" {
+                if op == "~" {
+                    self.error("E0200", "prefix '~' is not supported yet", e.span.clone());
+                    t
+                } else if op == "!" {
                     self.expect_type(&Type::named("bool"), &t, e.span.clone());
                     Type::named("bool")
                 } else {

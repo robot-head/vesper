@@ -1,0 +1,304 @@
+fn parse_at_trait_or_model(p: ParseCursor, n: i64)
+    -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    parse_at_word(p, n, 0x7472616974) || parse_at_word(p, n, 0x6d6f64656c)
+}
+
+fn parse_item(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let start = parse_nth(p, 0).start;
+    if parse_at_word(p, 0, 0x757365) && parse_at_word(p, 1, 0x6d6f64656c) {
+        parse_use_model(p)
+    } else {
+        let p = if parse_at_word(p, 0, 0x707562) && parse_at_trait_or_model(p, 1) {
+            parse_bump(p)
+        } else {
+            p
+        };
+        if parse_at_word(p, 0, 0x7472616974) {
+            parse_trait_item(p)
+        } else if parse_at_word(p, 0, 0x6d6f64656c) {
+            parse_model_item(p)
+        } else {
+            // `wire struct` (§13.2, §28.2): a padding-free copy struct.
+            let q = if parse_at_word(p, 0, 0x77697265) && parse_nth(p, 1).kind == 8 {
+                parse_bump(p)
+            } else {
+                parse_mode(p)
+            };
+            let k = parse_kind(q);
+            if k == 8 {
+                parse_fields(parse_generics(parse_upper(parse_bump(q)), false))
+            } else if k == 9 {
+                let r = parse_expect(parse_generics(parse_upper(parse_bump(q)), false), 34);
+                parse_expect(parse_variants(r), 35)
+            } else if k == 10 {
+                let r = parse_expect(parse_generics(parse_upper(parse_bump(q)), false), 34);
+                parse_expect(parse_functions(r, true), 35)
+            } else if k == 12 {
+                parse_function(q, false)
+            } else if k == 11 {
+                parse_impl_item(q)
+            } else if q.pos != p.pos && k == 70 {
+                // A consumed modifier is not a complete declaration.
+                syntax_issue(q, 6)
+            } else {
+                q
+            }
+        }
+    }
+}
+
+fn parse_variants(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 35) {
+        p
+    } else {
+        let q = parse_upper(p);
+        let r = if parse_at(q, 34) {
+            parse_fields(q)
+        } else {
+            let l = parse_eat(q, 32);
+            if parse_ate(q, l) {
+                parse_expect(parse_ty_list(l), 33)
+            } else {
+                q
+            }
+        };
+        let s = parse_eat(r, 38);
+        if parse_ate(r, s) {
+            parse_variants(s)
+        } else {
+            s
+        }
+    }
+}
+
+fn parse_functions(p: ParseCursor, op: bool)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at(p, 12) {
+        parse_functions(parse_function(p, op), op)
+    } else {
+        p
+    }
+}
+
+fn parse_impl_item(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_generics(parse_bump(p), true);
+    if parse_at(q, 44) {
+        let r = parse_conformance(parse_expect_word(parse_trait_ref(q), 0x666f72));
+        syntax_heads(parse_with_flags(r, r.nostruct, p.rows, false), p.row_head, p.value_head)
+    } else {
+        let r = parse_ty(q);
+        if parse_at_word(r, 0, 0x666f72) {
+            let s = parse_bump(r);
+            let s = if q.cur.kind == 12 || q.cur.kind == 32 {
+                syntax_issue(s, 28)
+            } else {
+                s
+            };
+            let s = parse_conformance(s);
+            syntax_heads(parse_with_flags(s, s.nostruct, p.rows, false), p.row_head, p.value_head)
+        } else if r.bounds {
+            let s = syntax_bounds(r, 21, 0);
+            let s = parse_expect(parse_functions(parse_expect(s, 34), false), 35);
+            syntax_heads(parse_with_flags(s, s.nostruct, p.rows, false), p.row_head, p.value_head)
+        } else {
+            let s = parse_expect(parse_functions(parse_expect(r, 34), false), 35);
+            syntax_heads(parse_with_flags(s, s.nostruct, p.rows, false), p.row_head, p.value_head)
+        }
+    }
+}
+
+fn parse_use_model(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    parse_expect(parse_upper(parse_bump(parse_bump(p))), 39)
+}
+
+fn parse_trait_item(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_generics(parse_upper(parse_bump(p)), true);
+    let q = syntax_bounds(q, 20, 0);
+    let q = parse_expect(parse_associated(parse_expect(q, 34), true), 35);
+    syntax_heads(parse_with_flags(q, q.nostruct, p.rows, false), p.row_head, p.value_head)
+}
+
+fn parse_model_item(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_expect(parse_generics(parse_upper(parse_bump(p)), true), 40);
+    let q = parse_trait_ref(q);
+    let q = if parse_at_word(q, 0, 0x666f72) {
+        parse_bump(q)
+    } else {
+        syntax_issue(q, 17)
+    };
+    let q = parse_conformance(q);
+    syntax_heads(parse_with_flags(q, q.nostruct, p.rows, false), p.row_head, p.value_head)
+}
+
+fn parse_conformance(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_ty(p);
+    let q = if parse_at_word(q, 0, 0x7768657265) {
+        parse_where_clauses(parse_bump(q))
+    } else {
+        q
+    };
+    parse_expect(parse_associated(parse_expect(q, 34), false), 35)
+}
+
+fn parse_associated(p: ParseCursor, declaration: bool)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 35) {
+        p
+    } else {
+        let q = if parse_at_word(p, 0, 0x74797065) {
+            let q = parse_upper(parse_bump(p));
+            let q = if declaration {
+                let c = parse_eat(q, 40);
+                if parse_ate(q, c) {
+                    parse_required_mode(parse_expect(c, 17))
+                } else {
+                    q
+                }
+            } else {
+                parse_ty(parse_expect(q, 48))
+            };
+            parse_expect(q, 39)
+        } else if parse_at(p, 12) {
+            parse_function(p, declaration)
+        } else {
+            parse_bump(
+                syntax_issue(
+                    p,
+                    if declaration {
+                        18
+                    } else {
+                        19
+                    }
+                )
+            )
+        };
+        parse_associated(q, declaration)
+    }
+}
+
+fn parse_function(p: ParseCursor, op: bool)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let g = parse_generics(parse_lower(parse_expect(p, 12)), true);
+    let q = parse_expect(
+        parse_params(parse_expect(parse_with_flags(g, g.nostruct, g.rows, false), 32), 33),
+        33
+    );
+    let q = if parse_at(q, 46) {
+        parse_ty(parse_bump(q))
+    } else {
+        q
+    };
+    let q = parse_effects(q);
+    let q = if parse_at_word(q, 0, 0x7768657265) {
+        parse_where_clauses(parse_bump(q))
+    } else {
+        q
+    };
+    let r = if op {
+        parse_expect(q, 39)
+    } else {
+        parse_block(q)
+    };
+    syntax_heads(parse_with_flags(r, r.nostruct, p.rows, r.bounds), p.row_head, p.value_head)
+}
+
+fn parse_where_clauses(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_trait_ref(parse_expect(parse_ty(p), 40));
+    let r = parse_eat(q, 38);
+    if !parse_ate(q, r) || parse_at(r, 34) || parse_at(r, 39) {
+        r
+    } else {
+        parse_where_clauses(r)
+    }
+}
+
+fn parse_params(p: ParseCursor, end: i64)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, end) {
+        p
+    } else {
+        let passed = parse_pass(p);
+        let q = parse_lower(syntax_bind(passed, false));
+        let d = parse_eat(q, 42);
+        let q = if parse_ate(q, d) {
+            parse_place_tree(d)
+        } else {
+            q
+        };
+        let c = parse_eat(q, 40);
+        let q = if parse_ate(q, c) {
+            parse_ty(c)
+        } else {
+            q
+        };
+        let r = parse_eat(q, 38);
+        if parse_ate(q, r) {
+            parse_params(r, end)
+        } else {
+            r
+        }
+    }
+}
+
+fn parse_place_tree(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    parse_leave(parse_place_inner(parse_enter(p)), p)
+}
+
+fn parse_place_inner(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_eat(p, 34);
+    if parse_ate(p, q) {
+        parse_expect(parse_place_list(q), 35)
+    } else {
+        let r = parse_lower(p);
+        let d = parse_eat(r, 42);
+        if parse_ate(r, d) {
+            parse_place_tree(d)
+        } else {
+            r
+        }
+    }
+}
+
+fn parse_place_list(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 35) {
+        p
+    } else {
+        let q = parse_place_tree(p);
+        let r = parse_eat(q, 38);
+        if parse_ate(q, r) {
+            parse_place_list(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn syntax_bounds(p: ParseCursor, message: i64, i: i64)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if i >= syntax_cell(7) {
+        p
+    } else {
+        syntax_diag(message, syntax_cell(997000 + i * 2), syntax_cell(997001 + i * 2), 0, 0, 2);
+        syntax_bounds(p, message, i + 1)
+    }
+}
+
+fn parse_field_mode(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_mode(p);
+    if parse_ate(p, q) {
+        q
+    } else {
+        syntax_issue(q, 25)
+    }
+}

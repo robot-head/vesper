@@ -1,0 +1,330 @@
+// Structured parser cursor; the original five files remain Stage 1 compatible.
+copy struct ParseCursor {
+    pos: i64,
+    cur: Tok,
+    h: i64,
+    nostruct: bool,
+    rows: bool,
+    bounds: bool,
+    depth: i64,
+    index: i64,
+    token_pos: i64,
+    row_head: i64,
+    value_head: i64
+}
+
+fn parse_max_depth() -> i64 {
+    128
+}
+
+fn parse_fail_p(d: Diag) -> ParseCursor eff [Fail[Diag]] {
+    let r: Result[ParseCursor, Diag] = Err(d);
+    r?
+}
+
+fn parse_nth(p: ParseCursor, n: i64) -> Tok eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    syntax_nth(p.index, n)
+}
+
+fn parse_kind(p: ParseCursor) -> i64 eff [SyntaxMemory] {
+    p.cur.kind
+}
+
+fn parse_at(p: ParseCursor, k: i64) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    parse_kind(p) == k
+}
+
+fn parse_at_end(p: ParseCursor, k: i64)
+    -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let c = parse_kind(p);
+    c == k || c == 70
+}
+
+fn parse_at_word(p: ParseCursor, n: i64, packed: i64)
+    -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    text_is(parse_nth(p, n), packed)
+}
+
+// Consumes the current token (and the trivia before it).
+
+fn parse_advance(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    syntax_attach(p.token_pos, p.index + 1);
+    ParseCursor {
+        pos: p.cur.end,
+        cur: syntax_tok(syntax_sig(p.index + 1)),
+        h: p.h,
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: p.depth,
+        index: syntax_sig(p.index + 1),
+        token_pos: p.index + 1,
+        row_head: p.row_head,
+        value_head: p.value_head
+    }
+}
+
+fn parse_bump(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if p.cur.kind == 70 {
+        parse_fail_p(Diag::Expected(70, p.cur.start))
+    } else {
+        parse_advance(p)
+    }
+}
+
+fn parse_eat(p: ParseCursor, k: i64)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at(p, k) {
+        parse_bump(p)
+    } else {
+        p
+    }
+}
+
+fn parse_ate(p: ParseCursor, q: ParseCursor) -> bool eff [SyntaxMemory] {
+    q.pos != p.pos
+}
+
+fn parse_expect(p: ParseCursor, k: i64)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if p.cur.kind == k {
+        parse_advance(p)
+    } else {
+        syntax_expected(p, k)
+    }
+}
+
+fn parse_open(p: ParseCursor, node: i64)
+    -> ParseCursor eff [SyntaxMemory, Fail[ArithOverflow], Fail[Diag]] {
+    syntax_open(node, p.pos);
+    ParseCursor {
+        pos: p.pos,
+        cur: p.cur,
+        h: mix(mix(p.h, node + 1000), p.pos),
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: p.depth,
+        index: p.index,
+        token_pos: p.token_pos,
+        row_head: p.row_head,
+        value_head: p.value_head
+    }
+}
+
+// Descent depth mirrors the seed's guarded `parse_enter()` calls (expr, binary
+// and each binary operator, postfix and each postfix operator, primary,
+// block, if, type, type arguments, pattern, place tree), so an input the
+// seed rejects at its 128-level descent limit is rejected here too.
+
+fn parse_enter(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if p.depth >= parse_max_depth() {
+        parse_fail_p(Diag::Limit(p.pos))
+    } else {
+        ParseCursor {
+            pos: p.pos,
+            cur: p.cur,
+            h: p.h,
+            nostruct: p.nostruct,
+            rows: p.rows,
+            bounds: p.bounds,
+            depth: p.depth + 1,
+            index: p.index,
+            token_pos: p.token_pos,
+            row_head: p.row_head,
+            value_head: p.value_head
+        }
+    }
+}
+
+// Restores the depth of `outer` after a guarded descent.
+
+fn parse_leave(p: ParseCursor, outer: ParseCursor) -> ParseCursor eff [SyntaxMemory] {
+    ParseCursor {
+        pos: p.pos,
+        cur: p.cur,
+        h: p.h,
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: outer.depth,
+        index: p.index,
+        token_pos: p.token_pos,
+        row_head: p.row_head,
+        value_head: p.value_head
+    }
+}
+
+fn parse_close(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[ArithOverflow], Fail[Diag]] {
+    syntax_close(p.pos);
+    ParseCursor {
+        pos: p.pos,
+        cur: p.cur,
+        h: mix(mix(p.h, 3000), p.pos),
+        nostruct: p.nostruct,
+        rows: p.rows,
+        bounds: p.bounds,
+        depth: p.depth,
+        index: p.index,
+        token_pos: p.token_pos,
+        row_head: p.row_head,
+        value_head: p.value_head
+    }
+}
+
+fn parse_with_flags(p: ParseCursor, nostruct: bool, rows: bool, bounds: bool)
+    -> ParseCursor eff [SyntaxMemory] {
+    ParseCursor {
+        pos: p.pos,
+        cur: p.cur,
+        h: p.h,
+        nostruct: nostruct,
+        rows: rows,
+        bounds: bounds,
+        depth: p.depth,
+        index: p.index,
+        token_pos: p.token_pos,
+        row_head: p.row_head,
+        value_head: p.value_head
+    }
+}
+
+fn parse_ident(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let k = parse_kind(p);
+    if k == 4 || k == 3 || k == 22 {
+        parse_bump(p)
+    } else {
+        let q = syntax_issue(p, 2);
+        if parse_at(q, 70) {
+            q
+        } else {
+            parse_bump(q)
+        }
+    }
+}
+
+fn parse_lower(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = if parse_kind(p) == 4 || parse_kind(p) == 22 {
+        p
+    } else {
+        syntax_issue(p, 3)
+    };
+    parse_ident(q)
+}
+
+fn parse_upper(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = if parse_at(p, 3) {
+        p
+    } else {
+        syntax_issue(p, 4)
+    };
+    parse_ident(q)
+}
+
+fn parse_mode(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let k = parse_kind(p);
+    if k == 14 || k == 15 || k == 16 {
+        parse_bump(p)
+    } else {
+        p
+    }
+}
+
+fn parse_required_mode(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_mode(p);
+    if parse_ate(p, q) {
+        q
+    } else {
+        syntax_issue(p, 5)
+    }
+}
+
+fn parse_pass(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let k = parse_kind(p);
+    if k == 19 || k == 20 || k == 21 {
+        parse_bump(p)
+    } else {
+        p
+    }
+}
+
+fn parse_unicode_unit(i: i64, end: i64, n: i64, value: i64) -> i64 eff [Fail[ArithOverflow]] {
+    if n == 0 {
+        value
+    } else {
+        let c = source_byte(i);
+        if i >= end || !is_hex(c) || c == 95 {
+            -1
+        } else {
+            parse_unicode_unit(i + 1, end, n - 1, value * 16 + hex_digit(c))
+        }
+    }
+}
+
+fn parse_check_unicode(start: i64, i: i64, end: i64) -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
+    let unit = parse_unicode_unit(i, end, 4, 0);
+    if unit < 0 || unit >= 56320 && unit <= 57343 {
+        fail_i(Diag::Invalid(start))
+    } else if unit >= 55296 && unit <= 56319 {
+        let low = parse_unicode_unit(i + 6, end, 4, 0);
+        if source_byte(i + 4) == 92 && source_byte(i + 5) == 117 && low >= 56320 && low <= 57343 {
+            parse_check_escapes(start, i + 10, end)
+        } else {
+            fail_i(Diag::Invalid(start))
+        }
+    } else {
+        parse_check_escapes(start, i + 4, end)
+    }
+}
+
+fn parse_check_escapes(start: i64, i: i64, end: i64) -> i64 eff [Fail[Diag], Fail[ArithOverflow]] {
+    if i >= end {
+        0
+    } else {
+        let c = source_byte(i);
+        if c < 32 {
+            fail_i(Diag::Invalid(start))
+        } else if c == 92 {
+            let d = source_byte(i + 1);
+            if d == 117 {
+                parse_check_unicode(start, i + 2, end)
+            } else if json_escape(d) {
+                parse_check_escapes(start, i + 2, end)
+            } else {
+                fail_i(Diag::Invalid(start))
+            }
+        } else {
+            parse_check_escapes(start, i + 1, end)
+        }
+    }
+}
+
+fn parse_at_literal(p: ParseCursor) -> bool eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let k = parse_kind(p);
+    k == 5 || k == 6 || k == 7 || k == 30 || k == 31
+}
+
+fn parse_literal(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let t = p.cur;
+    let invalid_string = if t.kind == 7 {
+        handle Fail[Diag] in {
+            parse_check_escapes(t.start, t.start + 1, t.end - 1) != 0
+        } with {
+            return value => value,
+            raise(error, resume) => true,
+        }
+    } else {
+        false
+    };
+    let q = parse_bump(p);
+    if t.kind == 6 && int_over(t) {
+        syntax_issue(q, 10)
+    } else if invalid_string {
+        syntax_issue(q, 11)
+    } else {
+        q
+    }
+}

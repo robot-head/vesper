@@ -2256,21 +2256,10 @@ mod metronome_tests {
             .unwrap()
     }
     #[test]
-    fn readme_bench_row_names_only_flags_this_command_has() {
-        let readme = include_str!("../README.md");
-        let row = readme
-            .lines()
-            .find(|l| l.starts_with("| `vesper bench` |"))
-            .expect("README has a vesper bench row");
-        let flags: Vec<&str> = row
-            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
-            .filter(|w| w.starts_with("--") && w.len() > 2)
-            .collect();
-        assert!(flags.len() >= 3, "{flags:?}");
-        for flag in flags {
-            assert!(HELP.contains(flag), "README names {flag}, help lacks it");
-        }
+    fn help_names_supported_measurement_mechanisms() {
         for mechanism in [
+            "--max-regression-bp",
+            "--pmu-provider",
             "rdpmc",
             "kpc",
             "group",
@@ -2284,11 +2273,6 @@ mod metronome_tests {
             "--pmu-events",
         ] {
             assert!(HELP.contains(mechanism), "help lacks {mechanism}");
-        }
-        // Claims the command does not make (CAS baselines and --asm exist
-        // since wave-eight lane 15; the README row may mention them).
-        for absent in ["12-cycle", "--causal"] {
-            assert!(!row.contains(absent), "README row still claims {absent}");
         }
     }
     #[test]

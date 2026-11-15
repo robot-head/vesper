@@ -148,6 +148,8 @@ pub enum TokenKind {
     // rejects macro source and does not gain macro execution.
     #[token("$")]
     Dollar,
+    #[token("~")]
+    Tilde,
     #[token("|=")]
     PipeEq,
     #[token("&=")]
