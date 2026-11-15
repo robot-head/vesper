@@ -5,7 +5,9 @@ Base: `05bc1a54841b2cc256b6379fce07d82c782f2d98`, a descendant of the required
 `37f7b8bcfa4cd409177856c8fe5deeaa7f2a88ff`. Branch:
 `codex/issue-580-self-hosted-parser`. No overlapping parser PR was open at
 preflight. No subagents were used. Integrated accepted main
-`9b06602b` before final checks, including the Stage 1 bootstrap lane.
+`9b06602b` before final parser checks, including the Stage 1 bootstrap lane.
+Then integrated `d76067cb` (Windows diagnostic capture, lockstep temporary
+directories and Pulse test tracing); it changes no parser source or corpus input.
 
 ## Implemented
 
