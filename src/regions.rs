@@ -209,7 +209,12 @@ fn effects_use(e: &Effects) -> bool {
 }
 fn type_uses(t: &Type) -> bool {
     match t {
-        Type::Named(n, args) => n == BOX_TYPE || n == WATERMARK_TYPE || args.iter().any(type_uses),
+        Type::Named(n, args) => {
+            n == BOX_TYPE
+                || n == WATERMARK_TYPE
+                || (n == crate::tiled::TILED_SEQ_TYPE && args.len() == 2)
+                || args.iter().any(type_uses)
+        }
         Type::Tuple(ts) => ts.iter().any(type_uses),
         Type::Function {
             params,
@@ -390,6 +395,17 @@ pub fn normalize(t: &Type, labels: &BTreeMap<String, String>) -> Type {
             }
             Type::Named(n.clone(), args)
         }
+        Type::Named(n, args) if n == crate::tiled::TILED_SEQ_TYPE && args.len() == 2 => {
+            let mut args: Vec<Type> = args.iter().map(|t| normalize(t, labels)).collect();
+            if let Some(cap) = args
+                .get(1)
+                .and_then(source_name)
+                .and_then(|l| labels.get(l))
+            {
+                args[1] = region_row(cap);
+            }
+            Type::Named(n.clone(), args)
+        }
         Type::Named(n, args) => Type::Named(
             n.clone(),
             args.iter().map(|t| normalize(t, labels)).collect(),
@@ -432,6 +448,23 @@ pub fn validate_type(t: &Type, span: Span) -> Option<Vec<Diagnostic>> {
     let Type::Named(n, args) = t else {
         return None;
     };
+    if n == crate::tiled::TILED_SEQ_TYPE && args.len() == 2 {
+        let mut out = vec![];
+        if row_label(&args[1]).is_none() {
+            out.push(
+                Diagnostic::new(
+                    "E0797",
+                    format!(
+                        "the second argument of {n} must name a region capability in scope, found {}",
+                        display(&args[1])
+                    ),
+                    span,
+                )
+                .with_help("bind one with `region r { ... }` or declare `eff [r: Region]`"),
+            );
+        }
+        return Some(out);
+    }
     if !is_handle_name(n) {
         return None;
     }
@@ -505,7 +538,11 @@ fn source_label(label: &str) -> String {
 pub fn mismatch(expected: &Type, actual: &Type, span: Span) -> Option<Diagnostic> {
     fn mentions(t: &Type) -> bool {
         match t {
-            Type::Named(n, args) => is_handle_name(n) || args.iter().any(mentions),
+            Type::Named(n, args) => {
+                is_handle_name(n)
+                    || (n == crate::tiled::TILED_SEQ_TYPE && args.len() == 2)
+                    || args.iter().any(mentions)
+            }
             Type::Tuple(ts) => ts.iter().any(mentions),
             _ => false,
         }
@@ -518,6 +555,12 @@ pub fn mismatch(expected: &Type, actual: &Type, span: Span) -> Option<Diagnostic
         (Some((a, _)), Some((b, _))) if a != b
     ) || matches!(
         (watermark_label(expected), watermark_label(actual)),
+        (Some(a), Some(b)) if a != b
+    ) || matches!(
+        (
+            crate::tiled::seq_region_label(expected),
+            crate::tiled::seq_region_label(actual)
+        ),
         (Some(a), Some(b)) if a != b
     );
     Some(if cross {

@@ -123,6 +123,17 @@ pub fn counts() -> (u64, u64, usize) {
     })
 }
 
+pub(crate) fn is_open(id: u64) -> bool {
+    NATIVE.with(|n| n.borrow().regions.is_open(id))
+}
+
+pub(crate) fn alloc_bytes(id: u64, bytes: usize) -> Result<(), RegionFault> {
+    NATIVE.with(|n| {
+        let mut n = n.borrow_mut();
+        n.regions.alloc(id, bytes, None).map(|_| ())
+    })
+}
+
 /// Ends a native execution on this thread: closes regions left open by an
 /// abort and returns the first recorded fault.
 pub fn finish() -> Result<(), RegionFault> {

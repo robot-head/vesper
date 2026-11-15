@@ -34,6 +34,7 @@
 
 #![allow(unsafe_code)]
 
+use crate::events::RampTile;
 use crate::kernels::{LANES, SvfVoiceTile};
 
 /// Which implementation advances a voice tile.
@@ -202,9 +203,34 @@ pub fn tick_scalar(t: &mut SvfVoiceTile, pan: &PanLanes, v0: f32, out: &mut Lane
     }
 }
 
+/// Advance all 16 parameter ramps in `t` by one sample using `path`, bit-identical
+/// to [`crate::events::ParamRamp::next_value`] on every lane.
+pub fn ramp_tick(path: SvfLanes, t: &mut RampTile) {
+    match path {
+        #[cfg(target_arch = "x86_64")]
+        // SAFETY: SSE2 is in the x86_64 baseline.
+        SvfLanes::Sse2 => unsafe { x86::ramp_sse2(t) },
+        #[cfg(target_arch = "x86_64")]
+        SvfLanes::Avx if avx_detected() => {
+            // SAFETY: AVX support was just verified at runtime.
+            unsafe { x86::ramp_avx(t) }
+        }
+        #[cfg(target_arch = "aarch64")]
+        // SAFETY: Advanced SIMD is in the AArch64 baseline.
+        SvfLanes::Neon => unsafe { arm::ramp_neon(t) },
+        _ => ramp_tick_scalar(t),
+    }
+}
+
+/// Scalar reference for advancing a 16-lane [`RampTile`].
+pub fn ramp_tick_scalar(t: &mut RampTile) {
+    t.scalar_next();
+}
+
 #[cfg(target_arch = "x86_64")]
 mod x86 {
     use super::{LaneOut, PanLanes};
+    use crate::events::RampTile;
     use crate::kernels::SvfVoiceTile;
     use std::arch::x86_64::*;
 
@@ -301,11 +327,88 @@ mod x86 {
             st8(&mut out.right, i, _mm256_mul_ps(y, ld8(&pan.right, i)));
         }
     }
+
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    fn ld_u32(a: &[u32; 16], i: usize) -> __m128i {
+        let s = &a[i..i + 4];
+        // SAFETY: `s` is exactly 4 initialized u32s; `loadu` has no alignment requirement.
+        unsafe { _mm_loadu_si128(s.as_ptr().cast::<__m128i>()) }
+    }
+
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    fn st_u32(a: &mut [u32; 16], i: usize, v: __m128i) {
+        let s = &mut a[i..i + 4];
+        // SAFETY: `s` is exactly 4 writable u32s; `storeu` has no alignment requirement.
+        unsafe { _mm_storeu_si128(s.as_mut_ptr().cast::<__m128i>(), v) }
+    }
+
+    #[target_feature(enable = "sse2")]
+    #[inline]
+    fn ramp_masks_4(rem: __m128i) -> (__m128i, __m128i, __m128i, __m128i) {
+        let zero = _mm_setzero_si128();
+        let minus_one = _mm_set1_epi32(-1);
+        let was_zero = _mm_cmpeq_epi32(rem, zero);
+        let active = _mm_andnot_si128(was_zero, minus_one);
+        let new_rem = _mm_add_epi32(rem, active);
+        let now_zero = _mm_cmpeq_epi32(new_rem, zero);
+        let hit_target = _mm_and_si128(active, now_zero);
+        let stepping = _mm_andnot_si128(now_zero, active);
+        (new_rem, was_zero, hit_target, stepping)
+    }
+
+    /// SSE2 4-lane-at-a-time ramp stepper (baseline on every x86_64 CPU).
+    #[target_feature(enable = "sse2")]
+    pub fn ramp_sse2(t: &mut RampTile) {
+        for i in (0..16).step_by(4) {
+            let cur = ld(&t.current, i);
+            let tgt = ld(&t.target, i);
+            let stp = ld(&t.step, i);
+            let rem = ld_u32(&t.remaining, i);
+            let (new_rem, was_zero, hit_target, stepping) = ramp_masks_4(rem);
+            let sum = _mm_add_ps(cur, stp);
+            let keep = _mm_and_ps(_mm_castsi128_ps(was_zero), cur);
+            let land = _mm_and_ps(_mm_castsi128_ps(hit_target), tgt);
+            let adv = _mm_and_ps(_mm_castsi128_ps(stepping), sum);
+            let next_cur = _mm_or_ps(keep, _mm_or_ps(land, adv));
+            st(&mut t.current, i, next_cur);
+            st_u32(&mut t.remaining, i, new_rem);
+        }
+    }
+
+    /// AVX 8-lane float add + branchless mask select (uses SSE2 128-bit integer ops
+    /// so AVX1 CPUs without AVX2 execute it cleanly).
+    #[target_feature(enable = "avx")]
+    pub fn ramp_avx(t: &mut RampTile) {
+        for i in [0, 8] {
+            let cur = ld8(&t.current, i);
+            let tgt = ld8(&t.target, i);
+            let stp = ld8(&t.step, i);
+            let sum = _mm256_add_ps(cur, stp);
+
+            let (nrem_lo, wz_lo, ht_lo, st_lo) = ramp_masks_4(ld_u32(&t.remaining, i));
+            let (nrem_hi, wz_hi, ht_hi, st_hi) = ramp_masks_4(ld_u32(&t.remaining, i + 4));
+            st_u32(&mut t.remaining, i, nrem_lo);
+            st_u32(&mut t.remaining, i + 4, nrem_hi);
+
+            let wz = _mm256_castsi256_ps(_mm256_set_m128i(wz_hi, wz_lo));
+            let ht = _mm256_castsi256_ps(_mm256_set_m128i(ht_hi, ht_lo));
+            let stp_m = _mm256_castsi256_ps(_mm256_set_m128i(st_hi, st_lo));
+
+            let keep = _mm256_and_ps(wz, cur);
+            let land = _mm256_and_ps(ht, tgt);
+            let adv = _mm256_and_ps(stp_m, sum);
+            let next_cur = _mm256_or_ps(keep, _mm256_or_ps(land, adv));
+            st8(&mut t.current, i, next_cur);
+        }
+    }
 }
 
 #[cfg(target_arch = "aarch64")]
 mod arm {
     use super::{LaneOut, PanLanes};
+    use crate::events::RampTile;
     use crate::kernels::SvfVoiceTile;
     use std::arch::aarch64::*;
 
@@ -325,6 +428,22 @@ mod arm {
         // SAFETY: `s` is exactly 4 writable f32s; `vst1q_f32` needs only
         // element alignment.
         unsafe { vst1q_f32(s.as_mut_ptr(), v) }
+    }
+
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn ld_u32(a: &[u32; 16], i: usize) -> uint32x4_t {
+        let s = &a[i..i + 4];
+        // SAFETY: `s` is exactly 4 initialized u32s.
+        unsafe { vld1q_u32(s.as_ptr()) }
+    }
+
+    #[target_feature(enable = "neon")]
+    #[inline]
+    fn st_u32(a: &mut [u32; 16], i: usize, v: uint32x4_t) {
+        let s = &mut a[i..i + 4];
+        // SAFETY: `s` is exactly 4 writable u32s.
+        unsafe { vst1q_u32(s.as_mut_ptr(), v) }
     }
 
     /// Advanced SIMD is part of the AArch64 baseline.
@@ -351,6 +470,31 @@ mod arm {
             let y = vmulq_f32(ld(&t.gain, i), v2);
             st(&mut out.left, i, vmulq_f32(y, ld(&pan.left, i)));
             st(&mut out.right, i, vmulq_f32(y, ld(&pan.right, i)));
+        }
+    }
+
+    /// Advanced SIMD 4-lane ramp stepper, bit-identical to scalar `ParamRamp::next_value`.
+    #[target_feature(enable = "neon")]
+    pub fn ramp_neon(t: &mut RampTile) {
+        let zero = vdupq_n_u32(0);
+        for i in (0..16).step_by(4) {
+            let cur = ld(&t.current, i);
+            let tgt = ld(&t.target, i);
+            let stp = ld(&t.step, i);
+            let rem = ld_u32(&t.remaining, i);
+
+            let was_zero = vceqq_u32(rem, zero);
+            let active = vmvnq_u32(was_zero);
+            let new_rem = vaddq_u32(rem, active);
+            let now_zero = vceqq_u32(new_rem, zero);
+            let hit_target = vandq_u32(active, now_zero);
+
+            let sum = vaddq_f32(cur, stp);
+            let active_val = vbslq_f32(hit_target, tgt, sum);
+            let next_cur = vbslq_f32(was_zero, cur, active_val);
+
+            st(&mut t.current, i, next_cur);
+            st_u32(&mut t.remaining, i, new_rem);
         }
     }
 }
