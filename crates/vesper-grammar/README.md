@@ -12,7 +12,8 @@ implementation, secret constant-time parser or formal proof.
 
 - `protobuf` implements `vesper.protobuf.explicit-presence/1`: borrowed strings
   and bytes, acyclic typed schemas, explicit singular presence/defaults, ordered
-  fields and one nonempty packed segment per repeated numeric field. Unknowns
+  fields and one nonempty packed segment per repeated numeric field, including
+  signed and unsigned fixed-width scalars. Unknowns
   and alternate representations are rejected. Standard protobuf itself has no
   universal canonical encoding; maps, oneofs, extensions and float types remain
   unsupported.
