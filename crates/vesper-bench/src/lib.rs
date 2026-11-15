@@ -14,6 +14,7 @@
 mod arithmetic;
 pub mod causal;
 pub mod contract;
+pub mod contract_gate;
 mod execution;
 pub mod layout;
 mod statistics;
