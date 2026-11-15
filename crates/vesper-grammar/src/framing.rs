@@ -1,4 +1,4 @@
-//! Canonical unsigned LEB128 and length-LEB128 + opaque byte payload frames.
+//! Canonical unsigned LEB128 and bounded opaque length-prefixed frames.
 //! Prefix parsing explicitly returns a recoverable nonclone remainder owner.
 //! Rust still permits dropping/forgetting it: no source linearity is claimed.
 use crate::{Error, ErrorKind, Result, add, bound, charge};
@@ -127,6 +127,19 @@ impl<'a> Remainder<'a> {
             }
         }
     }
+    /// Parse a three-byte big-endian length frame; on failure retain the tail.
+    pub fn next_u24_frame(self, limits: Limits) -> core::result::Result<Frame<'a>, TailError<'a>> {
+        match u24_frame_parts(self.remaining_bytes(), limits) {
+            Ok((payload, consumed)) => Ok(Frame {
+                payload,
+                tail: Self::at(self.input, self.offset + consumed),
+            }),
+            Err(mut error) => {
+                error.offset += self.offset;
+                Err(TailError { error, tail: self })
+            }
+        }
+    }
 }
 #[derive(Debug)]
 pub struct Frame<'a> {
@@ -157,6 +170,67 @@ pub fn parse_frame_exact(input: &[u8], limits: Limits) -> Result<&[u8]> {
     let frame = parse_frame(input, limits)?;
     frame.tail.assert_exact_eof().map_err(|e| e.error)?;
     Ok(frame.payload)
+}
+
+/// Largest payload representable in a three-byte unsigned length.
+pub const MAX_U24_PAYLOAD: usize = 0x00ff_ffff;
+
+fn u24_frame_parts(input: &[u8], limits: Limits) -> Result<(&[u8], usize)> {
+    bound(input.len(), limits.max_input_bytes, ErrorKind::InputLimit)?;
+    let mut work = limits.max_work;
+    let mut len = 0usize;
+    for i in 0..3 {
+        charge(&mut work, 1)?;
+        let byte = *input
+            .get(i)
+            .ok_or(Error::new(ErrorKind::UnexpectedEof, i))?;
+        len = (len << 8) | usize::from(byte);
+    }
+    bound(len, limits.max_payload_bytes, ErrorKind::PayloadLimit)?;
+    let end = add(3, len)?;
+    let payload = input
+        .get(3..end)
+        .ok_or(Error::new(ErrorKind::UnexpectedEof, input.len()))?;
+    charge(&mut work, len)?;
+    Ok((payload, end))
+}
+
+/// Parse one opaque frame with a three-byte big-endian payload length.
+pub fn parse_u24_frame(input: &[u8], limits: Limits) -> Result<Frame<'_>> {
+    let (payload, end) = u24_frame_parts(input, limits)?;
+    Ok(Frame {
+        payload,
+        tail: Remainder::at(input, end),
+    })
+}
+
+/// Parse one frame and require that no bytes follow it.
+pub fn parse_u24_frame_exact(input: &[u8], limits: Limits) -> Result<&[u8]> {
+    let frame = parse_u24_frame(input, limits)?;
+    frame.tail.assert_exact_eof().map_err(|e| e.error)?;
+    Ok(frame.payload)
+}
+
+/// Encode a frame transactionally, preserving the output on every error.
+pub fn encode_u24_frame_into(payload: &[u8], output: &mut [u8], limits: Limits) -> Result<usize> {
+    if payload.len() > MAX_U24_PAYLOAD {
+        return Err(Error::new(ErrorKind::Overflow, 0));
+    }
+    bound(
+        payload.len(),
+        limits.max_payload_bytes,
+        ErrorKind::PayloadLimit,
+    )?;
+    let size = add(3, payload.len())?;
+    bound(size, limits.max_output_bytes, ErrorKind::OutputLimit)?;
+    bound(size, limits.max_work, ErrorKind::WorkLimit)?;
+    if output.len() < size {
+        return Err(Error::new(ErrorKind::OutputTooSmall, 0));
+    }
+    let length = payload.len() as u32;
+    output[..3].copy_from_slice(&length.to_be_bytes()[1..]);
+    output[3..size].copy_from_slice(payload);
+    Ok(size)
 }
 pub fn parse_u64(input: &[u8], limits: Limits) -> Result<(u64, Remainder<'_>)> {
     bound(input.len(), limits.max_input_bytes, ErrorKind::InputLimit)?;

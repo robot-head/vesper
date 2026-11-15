@@ -1,0 +1,4 @@
+linear struct Ticket {}
+fn bad(ticket: Ticket) -> Ticket {
+    ticket
+}
