@@ -96,7 +96,10 @@ fn prefix(source: &str, tokens: &[Token], at: usize) -> Option<(DK, Option<Span>
     }
     if word(source, tokens, i, "pub") {
         i = next(tokens, i + 1);
-        if !word(source, tokens, i, "trait") && !word(source, tokens, i, "model") {
+        if token_kind(tokens, i) != K::Fn
+            && !word(source, tokens, i, "trait")
+            && !word(source, tokens, i, "model")
+        {
             return None;
         }
     }

@@ -622,8 +622,8 @@ impl Parser<'_> {
             self.use_model(0..self.source.len());
             return None;
         }
-        let public =
-            self.at_word(0, "pub") && (self.at_word(1, "trait") || self.at_word(1, "model"));
+        let public = self.at_word(0, "pub")
+            && (self.at_word(1, "trait") || self.at_word(1, "model") || self.nth(1) == K::Fn);
         if public {
             self.bump();
         }
@@ -725,7 +725,13 @@ impl Parser<'_> {
                     span: start..self.end(),
                 }))
             }
-            K::Fn => Some(Item::Function(Box::new(self.function(false)))),
+            K::Fn => {
+                let mut function = self.function(false);
+                if public {
+                    function.span.start = start;
+                }
+                Some(Item::Function(Box::new(function)))
+            }
             K::Impl => {
                 self.bump();
                 let generics = self.generics();
