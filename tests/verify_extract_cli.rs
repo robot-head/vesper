@@ -580,4 +580,152 @@ fn actual_lean_extract_verification_contracts_policy_and_olean_cas_roundtrip() {
         String::from_utf8_lossy(&allowed.stdout),
         String::from_utf8_lossy(&allowed.stderr)
     );
+
+    // 5. Attributed theorems with `sorry` must not be skipped by default discovery.
+    let mixed_attr_sorry = f_pure.root.join("mixed_attr_sorry.lean");
+    fs::write(
+        &mixed_attr_sorry,
+        "theorem checked : True := trivial\n@[simp] theorem unchecked : False := by sorry\n",
+    )
+    .unwrap();
+    reject_json(
+        f_pure.verify(&[
+            "--extract",
+            "--proofs",
+            mixed_attr_sorry.to_str().unwrap(),
+            "--json",
+            "--lean",
+            lean_str,
+            "--timeout",
+            "300",
+        ]),
+        Some("kernel"),
+    );
+
+    // 6. Valid attributed theorems plus anonymous `section ... end` and named `section ... end` inside `namespace` audit accurately.
+    let attr_and_section = f_pure.root.join("attr_section.lean");
+    fs::write(
+        &attr_and_section,
+        "namespace ScopeDemo\nsection\n@[simp] theorem inside_anon_sec : True := trivial\nend\nsection Named\ntheorem inside_named_sec : True := trivial\nend Named\ntheorem still_ns : True := trivial\nend ScopeDemo\ntheorem top_level : True := trivial\n",
+    )
+    .unwrap();
+    let scoped = f_pure.verify(&[
+        "--extract",
+        "--proofs",
+        attr_and_section.to_str().unwrap(),
+        "--json",
+        "--lean",
+        lean_str,
+        "--timeout",
+        "300",
+    ]);
+    assert!(
+        scoped.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&scoped.stdout),
+        String::from_utf8_lossy(&scoped.stderr)
+    );
+    let scoped_json: Value = serde_json::from_slice(&scoped.stdout).unwrap();
+    let mut scoped_names: Vec<&str> = scoped_json["audit"]["theorems"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    scoped_names.sort_unstable();
+    assert_eq!(
+        scoped_names,
+        vec![
+            "ScopeDemo.inside_anon_sec",
+            "ScopeDemo.inside_named_sec",
+            "ScopeDemo.still_ns",
+            "top_level",
+        ]
+    );
+
+    // 7. Bare --extract --olean-store (without --proofs) populates CAS on miss, hits on rerun,
+    //    and misses cleanly when the input source changes.
+    let bare_store = f_pure.root.join("bare-olean-cas");
+    let bare_miss = f_pure.verify(&[
+        "--extract",
+        "--olean-store",
+        bare_store.to_str().unwrap(),
+        "--json",
+        "--lean",
+        lean_str,
+        "--timeout",
+        "300",
+    ]);
+    assert!(
+        bare_miss.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&bare_miss.stdout),
+        String::from_utf8_lossy(&bare_miss.stderr)
+    );
+    let bare_miss_json: Value = serde_json::from_slice(&bare_miss.stdout).unwrap();
+    assert_eq!(bare_miss_json["olean_certificate"]["cache_hit"], false);
+    assert_eq!(bare_miss_json["olean_certificate"]["newly_recorded"], true);
+    let bare_oid = bare_miss_json["olean_certificate"]["object_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let bare_hit = f_pure.verify(&[
+        "--extract",
+        "--olean-store",
+        bare_store.to_str().unwrap(),
+        "--json",
+        "--lean",
+        lean_str,
+        "--timeout",
+        "300",
+    ]);
+    assert!(bare_hit.status.success());
+    let bare_hit_json: Value = serde_json::from_slice(&bare_hit.stdout).unwrap();
+    assert_eq!(bare_hit_json["olean_certificate"]["cache_hit"], true);
+    assert_eq!(bare_hit_json["olean_certificate"]["newly_recorded"], false);
+    assert_eq!(bare_hit_json["olean_certificate"]["object_id"], bare_oid);
+
+    let f_other = Fixture::new(b"fn add2(x: u64) -> u64 { x }\nfn main() -> u64 { add2(2) }\n");
+    let bare_changed = f_other.verify(&[
+        "--extract",
+        "--olean-store",
+        bare_store.to_str().unwrap(),
+        "--json",
+        "--lean",
+        lean_str,
+        "--timeout",
+        "300",
+    ]);
+    assert!(bare_changed.status.success());
+    let bare_changed_json: Value = serde_json::from_slice(&bare_changed.stdout).unwrap();
+    assert_eq!(bare_changed_json["olean_certificate"]["cache_hit"], false);
+    assert_eq!(
+        bare_changed_json["olean_certificate"]["newly_recorded"],
+        true
+    );
+    assert_ne!(
+        bare_changed_json["olean_certificate"]["object_id"],
+        bare_oid
+    );
+}
+
+#[test]
+fn extract_rejects_private_theorem_in_default_discovery() {
+    let f = Fixture::new(PURE_VES.as_bytes());
+    let priv_proofs = f.root.join("private_thm.lean");
+    fs::write(
+        &priv_proofs,
+        "theorem ok : True := trivial\nprivate theorem hidden : False := by sorry\n",
+    )
+    .unwrap();
+    reject_json(
+        f.verify(&[
+            "--extract",
+            "--proofs",
+            priv_proofs.to_str().unwrap(),
+            "--json",
+        ]),
+        Some("proofs"),
+    );
 }

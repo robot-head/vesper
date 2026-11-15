@@ -13,7 +13,7 @@ use std::{
 };
 use vesper::{check, lean, parser};
 use vesper_fmt::{Limits, ProofLimits, format_for_verification};
-use vesper_loom_cas::{DerivationInputs, Domain, Store};
+use vesper_loom_cas::{DerivationInputs, Domain, Store, blob_id};
 
 const MODEL: &str = include_str!("../lean/StylusAndLintSafety.lean");
 const SCHEMA: &str = "vesper.format-proof/1";
@@ -398,84 +398,635 @@ fn totality_label(totality: &lean::Totality) -> String {
         lean::Totality::Partial(reason) => format!("partial: {reason}"),
     }
 }
-fn discover_theorems(proofs: &str) -> Result<Vec<String>, Failure> {
-    let mut ns_stack: Vec<String> = Vec::new();
-    let mut discovered = Vec::new();
-    let mut seen = BTreeSet::new();
-    let mut block_comment_depth = 0usize;
-    for line in proofs.lines() {
-        let mut stripped = String::with_capacity(line.len());
-        let bytes = line.as_bytes();
-        let mut i = 0;
-        while i < bytes.len() {
-            if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'-' {
-                block_comment_depth += 1;
-                i += 2;
-                continue;
-            }
-            if block_comment_depth > 0
-                && i + 1 < bytes.len()
-                && bytes[i] == b'-'
-                && bytes[i + 1] == b'/'
-            {
-                block_comment_depth -= 1;
-                i += 2;
-                continue;
-            }
-            if block_comment_depth == 0 {
-                if i + 1 < bytes.len() && bytes[i] == b'-' && bytes[i + 1] == b'-' {
-                    break;
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Scope {
+    Namespace(String),
+    Section(Option<String>),
+    Mutual,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TokenKind {
+    Word(String),
+    Guillemet(String),
+    Attr,
+    Dot,
+    Open(char),
+    Close(char),
+    Other,
+}
+
+#[derive(Clone, Debug)]
+struct LeanToken {
+    kind: TokenKind,
+    line: usize,
+    dot_prefixed: bool,
+}
+
+fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+
+fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'\''
+}
+
+fn is_lean_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "theorem"
+            | "lemma"
+            | "def"
+            | "abbrev"
+            | "opaque"
+            | "axiom"
+            | "example"
+            | "inductive"
+            | "structure"
+            | "class"
+            | "instance"
+            | "namespace"
+            | "section"
+            | "end"
+            | "mutual"
+            | "open"
+            | "variable"
+            | "universe"
+            | "attribute"
+            | "private"
+            | "protected"
+            | "noncomputable"
+            | "unsafe"
+            | "partial"
+            | "scoped"
+            | "local"
+            | "where"
+            | "by"
+            | "let"
+            | "in"
+            | "if"
+            | "then"
+            | "else"
+            | "match"
+            | "with"
+            | "import"
+            | "set_option"
+    )
+}
+
+fn skip_block_comment(bytes: &[u8], i: &mut usize, line: &mut usize) -> Result<(), Failure> {
+    let mut depth = 1usize;
+    *i += 2;
+    while *i < bytes.len() && depth > 0 {
+        if bytes[*i] == b'\n' {
+            *line += 1;
+            *i += 1;
+            continue;
+        }
+        if *i + 1 < bytes.len() && bytes[*i] == b'/' && bytes[*i + 1] == b'-' {
+            depth += 1;
+            *i += 2;
+            continue;
+        }
+        if *i + 1 < bytes.len() && bytes[*i] == b'-' && bytes[*i + 1] == b'/' {
+            depth -= 1;
+            *i += 2;
+            continue;
+        }
+        *i += 1;
+    }
+    if depth != 0 {
+        return Err(Failure::new(
+            "proofs",
+            "unterminated block comment in proofs file",
+        ));
+    }
+    Ok(())
+}
+
+fn skip_string_lit(bytes: &[u8], i: &mut usize, line: &mut usize) -> Result<(), Failure> {
+    *i += 1;
+    while *i < bytes.len() {
+        match bytes[*i] {
+            b'\\' => {
+                *i += 1;
+                if *i < bytes.len() {
+                    if bytes[*i] == b'\n' {
+                        *line += 1;
+                    }
+                    *i += 1;
                 }
-                let ch = line[i..].chars().next().unwrap();
-                stripped.push(ch);
-                i += ch.len_utf8();
-            } else {
-                let ch = line[i..].chars().next().unwrap();
-                i += ch.len_utf8();
             }
+            b'"' => {
+                *i += 1;
+                return Ok(());
+            }
+            b'\n' => {
+                *line += 1;
+                *i += 1;
+            }
+            _ => *i += 1,
         }
-        let trimmed = stripped.trim();
-        if trimmed.is_empty() {
+    }
+    Err(Failure::new(
+        "proofs",
+        "unterminated string literal in proofs file",
+    ))
+}
+
+fn try_skip_char_lit(bytes: &[u8], i: &mut usize) -> bool {
+    if *i + 2 >= bytes.len() || bytes[*i] != b'\'' {
+        return false;
+    }
+    if bytes[*i + 1] == b'\\' {
+        if *i + 3 < bytes.len() && bytes[*i + 3] == b'\'' {
+            *i += 4;
+            return true;
+        }
+        return false;
+    }
+    if bytes[*i + 1] != b'\'' && bytes[*i + 1] != b'\n' && bytes[*i + 2] == b'\'' {
+        *i += 3;
+        return true;
+    }
+    false
+}
+
+fn tokenize_lean_proofs(proofs: &str) -> Result<Vec<LeanToken>, Failure> {
+    let bytes = proofs.as_bytes();
+    let mut tokens = Vec::new();
+    let mut i = 0usize;
+    let mut line = 1usize;
+    let mut dot_pending = false;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if b == b'\n' {
+            line += 1;
+            i += 1;
+            dot_pending = false;
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("namespace ") {
-            let name = rest.split_whitespace().next().unwrap_or("");
-            if proof_commands::name_valid(name) {
-                ns_stack.push(name.to_owned());
-            }
+        if b.is_ascii_whitespace() {
+            i += 1;
+            dot_pending = false;
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("end ") {
-            let name = rest.split_whitespace().next().unwrap_or("");
-            if ns_stack.last().is_some_and(|top| top == name) {
-                ns_stack.pop();
+        if i + 1 < bytes.len() && b == b'-' && bytes[i + 1] == b'-' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
             }
+            dot_pending = false;
             continue;
         }
-        if let Some(rest) = trimmed.strip_prefix("theorem ") {
-            let ident = rest
-                .split(|c: char| c.is_whitespace() || matches!(c, ':' | '(' | '{' | '['))
-                .next()
-                .unwrap_or("");
-            if !proof_commands::name_valid(ident) {
+        if i + 1 < bytes.len() && b == b'/' && bytes[i + 1] == b'-' {
+            skip_block_comment(bytes, &mut i, &mut line)?;
+            dot_pending = false;
+            continue;
+        }
+        if b == b'"' {
+            let tok_line = line;
+            skip_string_lit(bytes, &mut i, &mut line)?;
+            tokens.push(LeanToken {
+                kind: TokenKind::Other,
+                line: tok_line,
+                dot_prefixed: false,
+            });
+            dot_pending = false;
+            continue;
+        }
+        if try_skip_char_lit(bytes, &mut i) {
+            tokens.push(LeanToken {
+                kind: TokenKind::Other,
+                line,
+                dot_prefixed: false,
+            });
+            dot_pending = false;
+            continue;
+        }
+        if i + 1 < bytes.len() && b == b'@' && bytes[i + 1] == b'[' {
+            let tok_line = line;
+            i += 2;
+            let mut bracket_depth = 1usize;
+            while i < bytes.len() && bracket_depth > 0 {
+                match bytes[i] {
+                    b'\n' => {
+                        line += 1;
+                        i += 1;
+                    }
+                    b'-' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                        while i < bytes.len() && bytes[i] != b'\n' {
+                            i += 1;
+                        }
+                    }
+                    b'/' if i + 1 < bytes.len() && bytes[i + 1] == b'-' => {
+                        skip_block_comment(bytes, &mut i, &mut line)?;
+                    }
+                    b'"' => skip_string_lit(bytes, &mut i, &mut line)?,
+                    b'\'' if try_skip_char_lit(bytes, &mut i) => {}
+                    b'[' => {
+                        bracket_depth += 1;
+                        i += 1;
+                    }
+                    b']' => {
+                        bracket_depth -= 1;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            if bracket_depth != 0 {
                 return Err(Failure::new(
                     "proofs",
-                    format!("unsupported theorem identifier '{ident}' in proofs file"),
+                    "unterminated attribute block '@[' in proofs file",
                 ));
             }
-            let full = if ns_stack.is_empty() {
-                ident.to_owned()
-            } else {
-                format!("{}.{}", ns_stack.join("."), ident)
-            };
-            if seen.insert(full.clone()) {
-                discovered.push(full);
-                if discovered.len() > 128 {
+            tokens.push(LeanToken {
+                kind: TokenKind::Attr,
+                line: tok_line,
+                dot_prefixed: false,
+            });
+            dot_pending = false;
+            continue;
+        }
+        if proofs[i..].starts_with('«') {
+            let start = i;
+            let tok_line = line;
+            i += '«'.len_utf8();
+            let mut closed = false;
+            while i < bytes.len() {
+                let ch = proofs[i..].chars().next().unwrap();
+                if ch == '\n' {
+                    line += 1;
+                }
+                i += ch.len_utf8();
+                if ch == '»' {
+                    closed = true;
+                    break;
+                }
+            }
+            if !closed {
+                return Err(Failure::new(
+                    "proofs",
+                    "unterminated guillemet identifier in proofs file",
+                ));
+            }
+            tokens.push(LeanToken {
+                kind: TokenKind::Guillemet(proofs[start..i].to_owned()),
+                line: tok_line,
+                dot_prefixed: dot_pending,
+            });
+            dot_pending = false;
+            continue;
+        }
+        if is_ident_start(b) {
+            let start = i;
+            i += 1;
+            while i < bytes.len() {
+                if is_ident_continue(bytes[i])
+                    || (bytes[i] == b'.' && i + 1 < bytes.len() && is_ident_start(bytes[i + 1]))
+                {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            tokens.push(LeanToken {
+                kind: TokenKind::Word(proofs[start..i].to_owned()),
+                line,
+                dot_prefixed: dot_pending,
+            });
+            dot_pending = false;
+            continue;
+        }
+        if b == b'.' {
+            tokens.push(LeanToken {
+                kind: TokenKind::Dot,
+                line,
+                dot_prefixed: false,
+            });
+            dot_pending = true;
+            i += 1;
+            continue;
+        }
+        dot_pending = false;
+        if matches!(b, b'(' | b'[' | b'{') {
+            tokens.push(LeanToken {
+                kind: TokenKind::Open(b as char),
+                line,
+                dot_prefixed: false,
+            });
+            i += 1;
+            continue;
+        }
+        if matches!(b, b')' | b']' | b'}') {
+            tokens.push(LeanToken {
+                kind: TokenKind::Close(b as char),
+                line,
+                dot_prefixed: false,
+            });
+            i += 1;
+            continue;
+        }
+        let ch = proofs[i..].chars().next().unwrap();
+        i += ch.len_utf8();
+        tokens.push(LeanToken {
+            kind: TokenKind::Other,
+            line,
+            dot_prefixed: false,
+        });
+    }
+    Ok(tokens)
+}
+
+fn discover_theorems(proofs: &str) -> Result<Vec<String>, Failure> {
+    let tokens = tokenize_lean_proofs(proofs)?;
+    let mut scope_stack: Vec<Scope> = Vec::new();
+    let mut discovered = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut brace_depth = 0usize;
+    let mut is_private = false;
+    let mut idx = 0usize;
+
+    while idx < tokens.len() {
+        let tok = &tokens[idx];
+        match tok.kind {
+            TokenKind::Open('(') => {
+                paren_depth += 1;
+                is_private = false;
+                idx += 1;
+                continue;
+            }
+            TokenKind::Open('[') => {
+                bracket_depth += 1;
+                is_private = false;
+                idx += 1;
+                continue;
+            }
+            TokenKind::Open('{') => {
+                brace_depth += 1;
+                is_private = false;
+                idx += 1;
+                continue;
+            }
+            TokenKind::Close(')') => {
+                paren_depth = paren_depth.saturating_sub(1);
+                is_private = false;
+                idx += 1;
+                continue;
+            }
+            TokenKind::Close(']') => {
+                bracket_depth = bracket_depth.saturating_sub(1);
+                is_private = false;
+                idx += 1;
+                continue;
+            }
+            TokenKind::Close('}') => {
+                brace_depth = brace_depth.saturating_sub(1);
+                is_private = false;
+                idx += 1;
+                continue;
+            }
+            _ => {}
+        }
+
+        if paren_depth > 0 || bracket_depth > 0 || brace_depth > 0 || tok.dot_prefixed {
+            idx += 1;
+            continue;
+        }
+
+        match &tok.kind {
+            TokenKind::Attr => {
+                idx += 1;
+            }
+            TokenKind::Word(w)
+                if matches!(
+                    w.as_str(),
+                    "protected" | "noncomputable" | "unsafe" | "partial" | "scoped" | "local"
+                ) =>
+            {
+                idx += 1;
+            }
+            TokenKind::Word(w) if w == "private" => {
+                is_private = true;
+                idx += 1;
+            }
+            TokenKind::Word(w) if w == "namespace" => {
+                is_private = false;
+                let Some(next) = tokens.get(idx + 1) else {
                     return Err(Failure::new(
                         "proofs",
-                        "proofs file declares more than 128 theorems",
+                        "expected namespace name in proofs file",
+                    ));
+                };
+                if next.line != tok.line {
+                    return Err(Failure::new(
+                        "proofs",
+                        "expected namespace name on same line in proofs file",
                     ));
                 }
+                match &next.kind {
+                    TokenKind::Word(name)
+                        if !next.dot_prefixed
+                            && !is_lean_keyword(name)
+                            && proof_commands::name_valid(name) =>
+                    {
+                        for part in name.split('.') {
+                            scope_stack.push(Scope::Namespace(part.to_owned()));
+                        }
+                        idx += 2;
+                    }
+                    TokenKind::Word(name) => {
+                        return Err(Failure::new(
+                            "proofs",
+                            format!("unsupported namespace identifier '{name}' in proofs file"),
+                        ));
+                    }
+                    TokenKind::Guillemet(raw) => {
+                        return Err(Failure::new(
+                            "proofs",
+                            format!("unsupported namespace identifier '{raw}' in proofs file"),
+                        ));
+                    }
+                    _ => {
+                        return Err(Failure::new(
+                            "proofs",
+                            "expected namespace name in proofs file",
+                        ));
+                    }
+                }
+            }
+            TokenKind::Word(w) if w == "section" => {
+                is_private = false;
+                if let Some(next) = tokens.get(idx + 1)
+                    && next.line == tok.line
+                    && !next.dot_prefixed
+                {
+                    match &next.kind {
+                        TokenKind::Word(name) if !is_lean_keyword(name) => {
+                            if !proof_commands::name_valid(name) {
+                                return Err(Failure::new(
+                                    "proofs",
+                                    format!(
+                                        "unsupported section identifier '{name}' in proofs file"
+                                    ),
+                                ));
+                            }
+                            for part in name.split('.') {
+                                scope_stack.push(Scope::Section(Some(part.to_owned())));
+                            }
+                            idx += 2;
+                            continue;
+                        }
+                        TokenKind::Guillemet(raw) => {
+                            return Err(Failure::new(
+                                "proofs",
+                                format!("unsupported section identifier '{raw}' in proofs file"),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                scope_stack.push(Scope::Section(None));
+                idx += 1;
+            }
+            TokenKind::Word(w) if w == "mutual" => {
+                is_private = false;
+                scope_stack.push(Scope::Mutual);
+                idx += 1;
+            }
+            TokenKind::Word(w) if w == "end" => {
+                is_private = false;
+                if let Some(next) = tokens.get(idx + 1)
+                    && next.line == tok.line
+                    && !next.dot_prefixed
+                {
+                    match &next.kind {
+                        TokenKind::Word(name) if !is_lean_keyword(name) => {
+                            if !proof_commands::name_valid(name) {
+                                return Err(Failure::new(
+                                    "proofs",
+                                    format!("unsupported 'end {name}' identifier in proofs file"),
+                                ));
+                            }
+                            for part in name.split('.').rev() {
+                                match scope_stack.pop() {
+                                    Some(Scope::Namespace(n)) if n == part => {}
+                                    Some(Scope::Section(Some(n))) if n == part => {}
+                                    _ => {
+                                        return Err(Failure::new(
+                                            "proofs",
+                                            format!("mismatched 'end {name}' in proofs file"),
+                                        ));
+                                    }
+                                }
+                            }
+                            idx += 2;
+                            continue;
+                        }
+                        TokenKind::Guillemet(raw) => {
+                            return Err(Failure::new(
+                                "proofs",
+                                format!("unsupported 'end {raw}' identifier in proofs file"),
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                if scope_stack.pop().is_none() {
+                    return Err(Failure::new(
+                        "proofs",
+                        "unexpected 'end' with no open namespace or section",
+                    ));
+                }
+                idx += 1;
+            }
+            TokenKind::Word(w) if w == "example" => {
+                return Err(Failure::new(
+                    "proofs",
+                    "anonymous 'example' declarations in proofs file cannot be audited; use a named theorem",
+                ));
+            }
+            TokenKind::Word(w) if matches!(w.as_str(), "theorem" | "lemma") => {
+                let decl_kind = w.as_str();
+                if is_private {
+                    return Err(Failure::new(
+                        "proofs",
+                        format!(
+                            "private {decl_kind} declarations in proofs file cannot be audited by name"
+                        ),
+                    ));
+                }
+                let Some(next) = tokens.get(idx + 1) else {
+                    return Err(Failure::new(
+                        "proofs",
+                        format!("expected {decl_kind} identifier in proofs file"),
+                    ));
+                };
+                let raw_name = match &next.kind {
+                    TokenKind::Word(name) if !next.dot_prefixed && !is_lean_keyword(name) => {
+                        name.as_str()
+                    }
+                    TokenKind::Word(name) => {
+                        return Err(Failure::new(
+                            "proofs",
+                            format!("unsupported {decl_kind} identifier '{name}' in proofs file"),
+                        ));
+                    }
+                    TokenKind::Guillemet(raw) => {
+                        return Err(Failure::new(
+                            "proofs",
+                            format!("unsupported {decl_kind} identifier '{raw}' in proofs file"),
+                        ));
+                    }
+                    _ => {
+                        return Err(Failure::new(
+                            "proofs",
+                            format!("expected {decl_kind} identifier in proofs file"),
+                        ));
+                    }
+                };
+                let (is_root, ident) = match raw_name.strip_prefix("_root_.") {
+                    Some(rest) => (true, rest),
+                    None => (false, raw_name),
+                };
+                if !proof_commands::name_valid(ident) {
+                    return Err(Failure::new(
+                        "proofs",
+                        format!("unsupported {decl_kind} identifier '{raw_name}' in proofs file"),
+                    ));
+                }
+                let full = if is_root {
+                    ident.to_owned()
+                } else {
+                    let ns_parts: Vec<&str> = scope_stack
+                        .iter()
+                        .filter_map(|scope| match scope {
+                            Scope::Namespace(n) => Some(n.as_str()),
+                            Scope::Section(_) | Scope::Mutual => None,
+                        })
+                        .collect();
+                    if ns_parts.is_empty() {
+                        ident.to_owned()
+                    } else {
+                        format!("{}.{}", ns_parts.join("."), ident)
+                    }
+                };
+                if seen.insert(full.clone()) {
+                    discovered.push(full);
+                    if discovered.len() > 128 {
+                        return Err(Failure::new(
+                            "proofs",
+                            "proofs file declares more than 128 theorems",
+                        ));
+                    }
+                }
+                idx += 2;
+            }
+            _ => {
+                is_private = false;
+                idx += 1;
             }
         }
     }
@@ -570,8 +1121,10 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
         .map(Store::open)
         .transpose()
         .map_err(|e| Failure::new("store", e))?;
+    let bundle_id = blob_id(Domain::Source, bundle_text.as_bytes());
     let deriv_inputs = opened_store.as_ref().map(|_| {
         DerivationInputs::new(Domain::Artifact, EXTRACT_BUILDER, EXTRACT_BUILDER_VERSION)
+            .with_input("lean_bundle", bundle_id)
             .with_option("source_blake3", source_blake3.clone())
             .with_option("lean_model_blake3", lean_model_blake3.clone())
             .with_option("proofs_blake3", proofs_blake3.as_deref().unwrap_or(""))
@@ -628,6 +1181,9 @@ fn execute_extract(options: &Options) -> Result<Vec<u8>, Failure> {
             return Err(Failure::new("resource", ".olean exceeds size limit"));
         }
         let olean_bytes = fs::read(&olean_path).map_err(|e| Failure::new("io", e))?;
+        store
+            .put_blob(Domain::Source, bundle_text.as_bytes())
+            .map_err(|e| Failure::new("store", e))?;
         let blob = store
             .put_blob(Domain::Artifact, &olean_bytes)
             .map_err(|e| Failure::new("store", e))?;
@@ -783,5 +1339,128 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
             };
             Err(format!("{prefix}: {}", error.message))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::discover_theorems;
+
+    #[test]
+    fn discovers_attributed_and_modified_theorems_and_lemmas() {
+        let src = r#"
+theorem plain : True := trivial
+
+@[simp] theorem simp_one : True := trivial
+
+@[simp,
+  aesop safe [constructors]]
+protected theorem prot_thm (x : Nat) : x = x := rfl
+
+noncomputable lemma helper' : True := trivial
+
+namespace Outer.Inner
+@[simp] theorem scoped_thm : True := trivial
+theorem _root_.root_override : True := trivial
+end Outer.Inner
+
+theorem after_ns.{u} : True := trivial
+"#;
+        let found = discover_theorems(src).unwrap();
+        assert_eq!(
+            found,
+            vec![
+                "plain",
+                "simp_one",
+                "prot_thm",
+                "helper'",
+                "Outer.Inner.scoped_thm",
+                "root_override",
+                "after_ns",
+            ]
+        );
+    }
+
+    #[test]
+    fn tracks_sections_and_unnamed_end_without_confusing_namespaces() {
+        let src = r#"
+namespace A
+theorem first : True := trivial
+section S
+theorem in_section : True := trivial
+end
+theorem still_in_a : True := trivial
+end
+theorem second : True := trivial
+
+namespace B
+section
+theorem in_anon_section : True := trivial
+end
+theorem still_in_b : True := trivial
+end B
+theorem third : True := trivial
+"#;
+        let found = discover_theorems(src).unwrap();
+        assert_eq!(
+            found,
+            vec![
+                "A.first",
+                "A.in_section",
+                "A.still_in_a",
+                "second",
+                "B.in_anon_section",
+                "B.still_in_b",
+                "third",
+            ]
+        );
+    }
+
+    #[test]
+    fn field_projection_end_and_lemma_variable_do_not_corrupt_discovery() {
+        let src = r#"
+namespace VesperProofs.Structs
+theorem move_start_frame (s : Segment) (lemma : Nat) :
+    (move_start s 1).2.end = s.end := by
+  simp [move_start]
+theorem next_one : True := trivial
+end VesperProofs.Structs
+theorem top_after : True := trivial
+"#;
+        let found = discover_theorems(src).unwrap();
+        assert_eq!(
+            found,
+            vec![
+                "VesperProofs.Structs.move_start_frame",
+                "VesperProofs.Structs.next_one",
+                "top_after",
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_private_theorems_and_unsupported_identifiers() {
+        let priv_err =
+            discover_theorems("private theorem hidden : False := by sorry\n").unwrap_err();
+        assert_eq!(priv_err.stage, "proofs");
+        assert!(priv_err.message.contains("private theorem"));
+
+        let attr_priv_err =
+            discover_theorems("@[simp] private lemma hidden : False := by sorry\n").unwrap_err();
+        assert_eq!(attr_priv_err.stage, "proofs");
+        assert!(attr_priv_err.message.contains("private lemma"));
+
+        let guillemet_err =
+            discover_theorems("theorem «weird name» : True := trivial\n").unwrap_err();
+        assert_eq!(guillemet_err.stage, "proofs");
+        assert!(
+            guillemet_err
+                .message
+                .contains("unsupported theorem identifier")
+        );
+
+        let example_err = discover_theorems("example : False := by sorry\n").unwrap_err();
+        assert_eq!(example_err.stage, "proofs");
+        assert!(example_err.message.contains("example"));
     }
 }
