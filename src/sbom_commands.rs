@@ -79,7 +79,7 @@ fn property(name: &str, value: impl Serialize) -> Result<Value, String> {
     Ok(json!({"name":name,"value":serde_json::to_string(&value).map_err(|e|e.to_string())?}))
 }
 
-fn build(solution: &Solution) -> Result<Value, String> {
+pub(crate) fn build(solution: &Solution) -> Result<Value, String> {
     let validation = validate_solution(solution);
     if !validation.diagnostics.is_empty() {
         return Err(format!(
