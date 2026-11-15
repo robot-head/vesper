@@ -1,5 +1,9 @@
 # Checked editor navigation (#83)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented pure providers in `src/lsp/navigation.rs` over the private-constructed
 `tooling::frontend::CheckedSource` and `vesper_span::LineIndex`. Every query first
 validates configured limits and exact snapshot/index text equality. No URI is

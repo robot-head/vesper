@@ -1,5 +1,9 @@
 # Actual source-checker causes (#88)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 The source checker now adds ordered related labels/help to existing ownership,
 alias and abort-frame diagnostics. Primary codes, messages, spans and the existing
 primary deduplication key remain unchanged. This delivery changes only

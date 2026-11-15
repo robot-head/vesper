@@ -428,8 +428,7 @@ fn the_large_simulation_programs_get_diagnostics_hovers_and_lens_views() {
         );
         assert_eq!(published["vesper"]["profile"], profile, "{uri}");
         assert_eq!(published["diagnostics"], json!([]), "{uri}");
-        // Generous: this runs unoptimized next to other tests. The release
-        // figures are in docs/parallel-results/lens-large-fixtures.md.
+        // Allow for unoptimized builds running next to other tests.
         assert!(elapsed < Duration::from_secs(10), "{uri}: {elapsed:?}");
         let (line, column) = position_of(text, needle);
         let hover = client.at("textDocument/hover", uri, line, column + 1);

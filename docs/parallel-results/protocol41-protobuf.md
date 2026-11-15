@@ -1,5 +1,9 @@
 # Canonical schema-driven Protobuf — issue #72
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue: <https://github.com/robot-head/vesper/issues/72>. Dedicated worktree
 `/workspace/vesper-worktrees/protocol41-protobuf`, branch `protocol41/protobuf`,
 base contract `9eeaecf`. Read the issue, protocol41 contracts and §38. Source

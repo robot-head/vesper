@@ -1,5 +1,9 @@
 # Lean4Lean fixed machine replay (#299)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Both exact bundled models passed actual native inventory followed by fresh
 eligible-closure replay with pinned Lean 4.24.0 and the patched Lean4Lean
 executable. Every required root was covered; remaining, pending constructor

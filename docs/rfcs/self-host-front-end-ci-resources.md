@@ -1,5 +1,9 @@
 # Scheduler resources for compiler and endpoint tests
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #615 corrects the local scheduler accounting for two root test wrappers. The complete self-hosted frontend differential test starts four real workers, while Bazel 9.3.1's default medium test books one CPU and 100 MB. The endpoint test serializes its genuine sessions, compiling the fixed Lean modules with `-j1 -M4096`, but also inherits the medium reservation. The existing `vesper_crate.test_tags` map forwards resource tags to the executable test wrappers.
 
 `test/self_host_front_end` now declares `resources:cpu:4` and `resources:memory:5120`. `test/resource_oracle42` declares `resources:cpu:1` and `resources:memory:5120`. The memory values are scheduler estimates following the existing 4096-plus-1024 overhead policy; they are not measured peaks, hard RSS limits or cgroup enforcement. Four 512 MiB worker stacks reserve virtual address space and do not by themselves establish resident memory use.

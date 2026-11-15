@@ -1,7 +1,11 @@
 # Section status at the start of wave five
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Baseline `af03122ea74d403f203170926945f9d35786b289` (2026-11-12), against the
-design snapshot in [specification.txt](../specification.txt), which matches
+design snapshot in the pre-manuscript design, which matches
 the Google Doc revision modified 2026-11-12 09:18 UTC. Status comes from the
 integration reports in `docs/parallel-results/` and the crates on `main`; it is
 a planning summary, not a new audit.

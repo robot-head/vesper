@@ -1,5 +1,9 @@
 # Wave eight lane 20: Bridge in the compiler
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Design coverage: §13.3 (`.vsys` bindings, `ForeignVal[T]`, `Ffi[Lib]`
 confinement) and §13.4 (handler tiers, `isolated(mpk)`). Claim issue #469.
 

@@ -1,5 +1,9 @@
 # Bounded lossless source lexing/parsing — issue #70
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue: <https://github.com/robot-head/vesper/issues/70>. Worktree
 `/workspace/vesper-worktrees/tooling41-parser`, branch `tooling41/parser`, base
 `a1a8d938dd8103803219a05c8364cb7a198be8d9`. The coordinator checked open issue/PR

@@ -1,6 +1,10 @@
 # Parallel integration contracts: proposed v1 boundaries
 
-Status: audit and proposals, not implemented interfaces or new soundness theorems. Evidence is the expanded `docs/specification.txt` at checkpoint `c5328d0`. Line references below address that snapshot. Source references use checkpoint paths; the completed workspace extraction moves AST/numeric to `vesper-core`, syntax to `vesper-syntax`, and frames/driver/scheduler to `vesper-pulse` without changing their semantics.
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
+Status: audit and proposals, not implemented interfaces or new soundness theorems. Evidence is the pre-manuscript design at checkpoint `c5328d0`, available in Git history. Line references below address that historical snapshot. Source references use checkpoint paths; the completed workspace extraction moves AST/numeric to `vesper-core`, syntax to `vesper-syntax`, and frames/driver/scheduler to `vesper-pulse` without changing their semantics.
 
 The checkpoint has a working compiler, finite native specialization, executable Lean extraction, relative-address data frames, and a reference-evaluator I/O bridge. It does not have a machine-stack suspension ABI, allocation/region typing, public `.vhir` format, package confinement, traits/macros, or the expanded platform libraries. Independent libraries can proceed now; shared semantic changes require the owner decisions below.
 

@@ -1,5 +1,9 @@
 # Independent external replay acceptance (#302)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This lane follows frozen base `43b1d40696b890d9a9918f25ab4e7332e4fdb031`
 and the published stored-metadata/test-seam amendments `859429c` and
 `e38f4b5`. Exclusive writes are `tests/lean4lean42_acceptance.rs`,

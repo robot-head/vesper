@@ -1,20 +1,20 @@
 # Ninth parallel implementation wave: Vesper Chroma, self-hosting Stage 1 and the remaining depth
 
-Status: **ready to assign**. One thread per lane; do not launch duplicate writers.
-Each linked file is a complete standalone prompt. Start from a fresh
-`origin/main` containing **`37f7b8bcfa4cd409177856c8fe5deeaa7f2a88ff`** or later. Ownership and shared rules are in
-the [wave-nine contracts](../../rfcs/wave-nine-contracts.md); the
-[section status review](../../rfcs/wave-nine-review.md) shows what each lane
-covers and what is left after this wave.
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../../manuscript/README.md) is the sole specification; use the
+> [section map](../../section-map.md) for earlier numbering. Confirm live ownership before acting.
 
-Source: the "Remaining gaps" sections of the wave-eight (and still-open
-wave-seven) reports under `docs/parallel-results/`, the "Proposed wave nine"
-list in [wave-eight-review.md](../../rfcs/wave-eight-review.md), the open issue
-and PR board on 2026-11-15, and the design snapshot in
-[specification.txt](../../specification.txt), refreshed in this plan to the
-Google Doc revision modified 2026-11-14 22:25 UTC. That revision adds
-**§43 Vesper Chroma** (semantic highlighting, OKLCH themes, `vesper highlight`,
-`vesper shot` and the `vesper-chroma.wasm` module); lanes 1 and 2 start it.
+These assignments are retained for open claims and branch context. Check each
+claim on the live board before starting or assigning a lane; an existing prompt
+does not imply that its issue is unclaimed or unstarted.
+
+Each linked file is a complete standalone prompt. Keep its baseline, ownership,
+dependencies, and acceptance requirements. The
+[wave-nine contracts](../../rfcs/wave-nine-contracts.md) record shared boundaries,
+and the [status review](../../rfcs/wave-nine-review.md) describes the planned gaps.
+The [manuscript](../../manuscript/README.md) is the sole specification; earlier
+section identifiers in the assignments are mapped in the
+[section map](../../section-map.md).
 
 Lanes 3-7 continue §42 and the metatheory (self-hosted parser and checker,
 the Stage 1 lock, verified codegen breadth, generative handler labels).

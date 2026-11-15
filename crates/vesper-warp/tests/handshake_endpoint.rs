@@ -857,8 +857,7 @@ fn handshake_seed_sweep() {
             transfer(&mut net, seed, 4_000, 4_000, 5_000);
         }
         // 40% loss with 20% reordering, data phase included: the seed-246
-        // stall (wave six, `docs/parallel-results/warp-lifecycle.md`) was
-        // BBRv3's pacing schedule running tens of seconds ahead.
+        // stall was BBRv3's pacing schedule running tens of seconds ahead.
         let mut net = Net::new(seed, 400_000, 200_000);
         net.handshake(5_000);
         assert_established(&net);

@@ -17,8 +17,7 @@ use wasmtime::{Engine, Instance, Memory, Module, Store, TypedFunc};
 
 /// The design's size target for the module.
 const TARGET_BYTES: usize = 26 * 1024;
-/// Regression ceiling for the measured module (the target is not met; see
-/// docs/parallel-results/chroma-highlight-core.md).
+/// Regression ceiling for the measured module; the size target is not met.
 const CEILING_BYTES: usize = 96 * 1024;
 
 fn root() -> PathBuf {

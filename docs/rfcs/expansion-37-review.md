@@ -1,7 +1,11 @@
 # Review of the expanded design through section 37
 
-The [recorded source revision](../specification-source.json) contains all 37
-sections and is preserved without rewriting its proposals. Six independent
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
+The pre-manuscript revision reviewed here contained all 37 sections; its original
+text and metadata remain in Git history. Six independent
 readers covered sections 1–7/20, 8–11/21–23, 12–19/24–25, 26–29, 30–34 and
 35–37 respectively. The coordinator reread the active new foundations and
 combined their findings here. This is implementation review, not a new proof or

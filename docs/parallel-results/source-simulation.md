@@ -1,5 +1,9 @@
 # Source simulation under SimPulse
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Lane 6 of the [next-wave prompts](../agent-prompts/next-wave/06-source-simulation.md). New crate: `crates/vesper-sim-session`. Base: `origin/main` at `c2ba0b1`. Branch: `claude/project-thread-cqe9su`. The commit and PR are recorded in the PR description.
 
 This crate runs checked Vesper source on the **reference CEK evaluator** under deterministic simulated effects. It is not native execution, kernel I/O, exhaustive scheduling or DPOR, and not a production Storage or Net implementation.

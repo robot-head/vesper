@@ -9,8 +9,7 @@
 //! `inflight_longterm`, `inflight_shortterm` and `bw_shortterm` are also
 //! exposed under their older names `inflight_hi`, `inflight_lo`, `bw_lo`.
 //!
-//! Input events use the CC-agnostic vocabulary of
-//! `docs/rfcs/wave-four-contracts.md` ([`SentPacket`], [`AckedPacket`],
+//! Input events use the CC-agnostic vocabulary ([`SentPacket`], [`AckedPacket`],
 //! [`LostPacket`], [`RttSample`], [`CongestionEvent`]). The per-packet
 //! delivery-rate snapshot ([`PacketDeliveryState`]) is returned by
 //! [`Bbrv3::on_packet_sent`] and handed back on acknowledgement or loss.

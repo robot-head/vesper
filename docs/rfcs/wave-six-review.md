@@ -1,7 +1,11 @@
 # Section status at the start of wave six
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Planning summary, 2026-11-13, against the design snapshot in
-[specification.txt](../specification.txt) (Google Doc revision modified
+the pre-manuscript design (Google Doc revision modified
 2026-11-13 04:46 UTC, 42 numbered sections plus Appendix A). It updates
 [wave-five-review.md](wave-five-review.md) from the wave-five reports in
 `docs/parallel-results/`. It is not a new audit. "Later" means not planned in

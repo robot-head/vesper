@@ -1,5 +1,9 @@
 # Quarry durable pages, WAL recovery and vectorized execution (§24)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Wave-six lane 10 ([prompt](../agent-prompts/wave-six/10-quarry-durable.md)), claim issue
 [#252](https://github.com/robot-head/vesper/issues/252). Base: `origin/main` at `07322e3`
 (a descendant of the required `cda092f`). Branch: `claude/project-thread-jrrtor`. The

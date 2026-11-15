@@ -1,13 +1,13 @@
 # Checked-source lint slice
 
-This root-free crate analyzes **trusted typed compiler facts** for §39. Its facade
+This root-free crate analyzes **trusted typed compiler facts** for [manuscript §18](../../docs/manuscript/README.md). Its facade
 adapter, `src/lint_commands.rs`, parses and checks actual Vesper source, lowers
 Place IR, and extracts resolved calls, generic substitutions, checked primitive
 failures, and selected place accesses. The leaf depends on `vesper-core` and
 Serde, with no dependency on `vesper` or another new tooling crate. DTOs are not
 proof certificates or an input format for untrusted plugins.
 
-After coordinator registration:
+Run from the repository root:
 
 ```sh
 vesper lint FILE [--json] [--fix] [--semver-safe]

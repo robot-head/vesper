@@ -1,5 +1,9 @@
 # §39 bounded lossless formatter (#64)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented claimed [issue #64](https://github.com/robot-head/vesper/issues/64)
 on `tooling41/fmt`, starting at `a1a8d938dd8103803219a05c8364cb7a198be8d9`.
 Read the issue, `docs/rfcs/tooling41-contracts.md`, full §39 and the existing lexer/

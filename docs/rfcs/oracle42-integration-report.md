@@ -1,5 +1,9 @@
 # Executable Lean arithmetic oracle integration (#269)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 The release harness completed 100000 distinct valid programs and all 15
 isolated static negatives, with agreement on every one of the 800000 actual
 evaluator/JIT outcomes. The process exited successfully with empty stderr.

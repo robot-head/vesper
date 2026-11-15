@@ -1,7 +1,46 @@
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+load("@rules_rust//rust:defs.bzl", "rust_clippy_test", "rustfmt_test")
+
 # Bootstrap corpus, expected statuses and seed lock, read by the tests of
 # //crates/vesper-codegen-verified.
 filegroup(
     name = "files",
     srcs = glob(["**"], exclude = ["BUILD.bazel"]),
     visibility = ["//visibility:public"],
+)
+
+# The compiler facade is a dependency of the adapter only, never of the auditor.
+rust_binary(
+    name = "stage1",
+    srcs = ["stage1.rs"],
+    edition = "2024",
+    deps = ["//:vesper", "//crates/vesper-codegen-verified"],
+)
+
+rust_test(
+    name = "stage1_test",
+    srcs = ["stage1.rs"],
+    edition = "2024",
+    deps = ["//:vesper", "//crates/vesper-codegen-verified"],
+    data = [":files", "//:files"],
+    size = "medium",
+    # One serial compiler worker; memory is a scheduler estimate, not a cap.
+    tags = ["resources:cpu:1", "resources:memory:1024"],
+    target_compatible_with = select({
+        "@platforms//os:linux": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
+rust_clippy_test(
+    name = "clippy",
+    targets = [":stage1"],
+    tags = ["clippy", "lint"],
+)
+
+rustfmt_test(
+    name = "rustfmt",
+    targets = [":stage1"],
+    tags = ["lint", "rustfmt"],
 )

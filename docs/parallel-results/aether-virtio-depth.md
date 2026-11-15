@@ -1,5 +1,9 @@
 # Aether: virtio queue features, VMM-thread seccomp, huge-page snapshots and stored hot sets (§37) — wave eight lane 27
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim issue #476, plan PR #477. Base `1094e649c95e4d81eef4e705d13882ab1339542d`
 (main after #477). Edited only `crates/vesper-aether/**`,
 `lean/AetherMemory.lean` and this report. No root patch: no new

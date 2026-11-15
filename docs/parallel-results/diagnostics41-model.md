@@ -1,5 +1,9 @@
 # #87 compatible causal diagnostic metadata
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Delivered on `diagnostics41/model`, fresh worktree from
 `b4d1df8846d29afac7133774d00e39362b66deff`. Read issue #87, the diagnostics41
 contract and specification §21.4. Exclusive writes are the diagnostic definitions

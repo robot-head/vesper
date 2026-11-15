@@ -1,5 +1,9 @@
 # Resource oracle planning resolutions (#309)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Historical planning checkpoint for #309. The separately claimed #317 now implements the reference-evaluator provider with its own narrower [frozen API/profile](runtime-resource-trace42-contracts.md) and [actual evidence](runtime-resource-trace42-integration.md). The model/native/generator/campaign proposals below remain future work; they are not implemented behavior or a full-harness source authorization.
 
 This records the reviewed model, runtime and independent acceptance plans at

@@ -1,5 +1,9 @@
 # Self-hosting Stage 1: a Vesper-source lexer and parser (§42.3, §38)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Wave eight, lane 3. Claim: #452. Base: `1094e64`, merged with `bbdf225` (descendant of the required
 baseline `ea1ed29`). Branch: `claude/project-thread-a203g6`.
 

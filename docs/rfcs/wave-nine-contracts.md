@@ -1,5 +1,9 @@
 # Ninth-wave integration contracts
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Baseline: the `main` commit named in the [wave-nine prompt index](../agent-prompts/wave-nine/README.md)
 (`37f7b8b`) or a descendant. This is an ownership and interface agreement so
 that thirty-four lanes can run alongside Codex's open work with as little

@@ -1,5 +1,9 @@
 # Bounded editor implementation contracts
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Baseline main `90bd8e1e86988d250a6c027eb0d9dd9f7764aa31`
 ([PR #78](https://github.com/robot-head/vesper/pull/78)). The coordinator checked
 the current issue board, unchanged external Warp PR ownership/file timestamps,

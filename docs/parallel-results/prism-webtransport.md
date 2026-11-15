@@ -1,5 +1,9 @@
 # Prism WebTransport, HTTP Datagrams and priorities (wave seven, lane 8)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #331. Base: `origin/main` at `283c8115d2203232d0e9b473cc4bb0312c3a8509`
 (a descendant of the required `c025b9a`). Branch:
 `claude/project-thread-u4yyw9` (the session's assigned branch). Design

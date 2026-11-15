@@ -1,9 +1,9 @@
 # vesper-chrono
 
-Vesper Chrono (design §31): effect-boundary flight recording, time-travel
+Vesper Chrono ([manuscript §22](../../docs/manuscript/README.md)): effect-boundary flight recording, time-travel
 queries and linear-obligation provenance, as a host library.
 
-* `wire`: the §31.2 `ChronoEventWireHeader` (32 bytes) and companion records
+* `wire`: the §22.2 `ChronoEventWireHeader` (32 bytes) and companion records
   as `vesper-ffi` wire layouts.
 * `ring::FlightRecorder`: bounded, always-on record ring with overwrite-oldest
   semantics and snapshot epochs over caller-provided state images. No heap

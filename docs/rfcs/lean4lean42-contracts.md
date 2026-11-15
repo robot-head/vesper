@@ -1,5 +1,9 @@
 # Frozen external model-replay contract (#297)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This document adopts the exact schema refinement, report types, compiler-library
 binding and streaming rules in `lean4lean42-contract-plan.md` at commit
 `45ff829`, with the normative resolutions below. The earlier plan's tentative

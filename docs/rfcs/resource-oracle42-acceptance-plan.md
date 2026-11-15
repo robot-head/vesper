@@ -1,5 +1,9 @@
 # Independent resource-oracle acceptance plan (#309)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Historical planning checkpoint for #309. The separately claimed #317 now implements the reference-evaluator provider with its own narrower [frozen API/profile](runtime-resource-trace42-contracts.md) and [actual evidence](runtime-resource-trace42-integration.md). The model/native/generator/campaign proposals below remain future work; they are not implemented behavior or a full-harness source authorization.
 
 This is a read-only feasibility and acceptance plan against main `c226ee98695135ad59e64318213e79f911ad6325`. It owns only this document. No compiler, model, test, dependency or build file was edited; no Cargo build, CLI probe, Lean compilation or replay was executed by this lane. The available compiled CLI is an older `20ee` baseline and is not evidence about this source revision. Proposed APIs and limits below are recommendations for a future published contract, not implemented interfaces.

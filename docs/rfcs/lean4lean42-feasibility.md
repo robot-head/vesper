@@ -1,5 +1,9 @@
 # Lean4Lean 4.24 feasibility evidence (#297)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 The coordinator built a temporary Lean4Lean port and completed fresh external
 replay of both fixed §42 modules. This snapshot records that experiment and its
 limits. It is not a production setup, a general artifact gate, or a claim that

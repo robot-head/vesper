@@ -1,6 +1,6 @@
 # vesper-crucible
 
-Vesper Crucible (design §29, excluding §29.3 `vesper migrate`): choice-tape
+Vesper Crucible ([manuscript §21](../../docs/manuscript/README.md), excluding §21.3 `vesper migrate`): choice-tape
 property testing, coverage-guided fuzzing with a comparison-operand solver,
 SimPulse schedule exploration, `refute`, and a termination-checked shrinker.
 

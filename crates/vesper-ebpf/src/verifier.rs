@@ -37,8 +37,7 @@
 //! must be one the kernel accepts and one that cannot fault. Where the
 //! kernel is more permissive the verifier rejects (for example variable
 //! stack offsets, pointer comparisons other than packet/`data_end` and null
-//! checks, and every unsupported helper or instruction). Those
-//! deliberate differences are listed in `docs/parallel-results/ebpf.md`.
+//! checks, and every unsupported helper or instruction).
 
 use crate::callgraph::{CallGraph, FnId, FnNode, StackError, check_stack};
 use crate::helpers as h;

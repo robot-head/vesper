@@ -1,5 +1,9 @@
 # Flux: a Kafka source and sink, and live rescaling without a stop (wave eight, lane 18, #467)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Design §34 (items 4 and 5 of §34.1), continuing the wave-seven
 [sources, recovery and offline rescaling](flux-sources-recovery.md) lane
 (PR #381, which this branch is built on and which merged as `d6696a8`).

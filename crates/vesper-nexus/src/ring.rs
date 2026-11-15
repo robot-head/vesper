@@ -10,7 +10,7 @@
 //! place: no canonical-ABI lowering, no `cabi_realloc`, no copy between host
 //! and guest memories.
 //!
-//! Boundaries, recorded in `docs/parallel-results/nexus.md`:
+//! Implementation boundaries:
 //! * The Component Model cannot import a memory, so ring plugins are core
 //!   modules (with their own exports) rather than components. Shared-
 //!   everything threads/multi-memory components are not available in

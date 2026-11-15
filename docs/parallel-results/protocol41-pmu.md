@@ -1,5 +1,9 @@
 # Protocol 41 PMU observations (#75)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented a real Linux current-thread cycles/instructions group and safe
 ABBA observer hooks. The clock-only `run_abba` API remains available and does
 not allocate observation records. Benchmark arithmetic/statistics, root CLI,

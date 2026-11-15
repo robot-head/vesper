@@ -20,6 +20,39 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Stage 1 needs neither Lean nor a second Rust seed build. Its historical
+# Stage 0 lock is a lineage anchor; the actual seed binary is bound separately.
+if [[ ${1:-seed} == stage1 ]]; then
+  shift
+  cd "$ROOT"
+  stage1_work=${WORK:-$ROOT/target/bootstrap-stage1}
+  stage1_profile=${PROFILE:-release}
+  case "$stage1_profile" in
+    release) stage1_profile_dir=release ;;
+    dev) stage1_profile_dir=debug ;;
+    *) echo "PROFILE must be release or dev" >&2; exit 2 ;;
+  esac
+  export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-2} CARGO_INCREMENTAL=0
+  export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
+  stage1_target_dir=${CARGO_TARGET_DIR:-$stage1_work/target}
+  mkdir -p "$stage1_work"
+  export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-1794650795}
+  export RUSTFLAGS="--remap-path-prefix=$ROOT=/vesper --remap-path-prefix=${CARGO_HOME:-$HOME/.cargo}=/cargo"
+  cargo build --locked --profile "$stage1_profile" --target-dir "$stage1_target_dir" \
+    --lib -p vesper -p vesper-codegen-verified
+  # Cargo 1.100 may place dependencies in build/<crate>/<hash>/out rather
+  # than deps/. Discover artifact directories instead of assuming its layout.
+  python3 "$ROOT/bootstrap/compile-stage1.py" "$stage1_target_dir/$stage1_profile_dir" \
+    "$ROOT/bootstrap/stage1.rs" "$stage1_work/stage1-runner"
+  stage1_target=$(rustc -vV | sed -n 's/^host: //p')
+  exec "$stage1_work/stage1-runner" "$ROOT" "$stage1_work" \
+    "$stage1_target" \
+    "${OUT:-$ROOT/bootstrap/stage1.lock}" "$@"
+fi
+if [[ $# -gt 0 ]]; then
+  echo "usage: bootstrap/run.sh [stage1 [--record] [--require-cross-backend]]" >&2
+  exit 2
+fi
 PROFILE=${PROFILE:-release}
 WORK=${WORK:-$ROOT/target/bootstrap}
 OUT=${OUT:-$ROOT/bootstrap/stage0_seed.lock}

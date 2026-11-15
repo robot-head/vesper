@@ -1,6 +1,4 @@
-//! Congestion-control input events, named exactly as
-//! `docs/rfcs/wave-four-contracts.md` names them, plus the per-packet
-//! delivery-rate snapshot this lane owns.
+//! Congestion-control input events and per-packet delivery-rate snapshots.
 
 /// Largest valid packet number (`2^62 - 1`, RFC 9000 §12.3).
 pub const MAX_PACKET_NUMBER: u64 = (1 << 62) - 1;

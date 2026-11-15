@@ -1,33 +1,15 @@
 # Section status at the start of wave nine
 
-Planning summary, 2026-11-15, against the design snapshot in
-[specification.txt](../specification.txt), refreshed in the wave-nine plan to
-the Google Doc revision modified 2026-11-14 22:25 UTC (Drive revision 71). It
-updates [wave-eight-review.md](wave-eight-review.md) from the "Remaining gaps"
-sections of the merged wave-eight reports in `docs/parallel-results/` and the
-open issue and PR board. "Later" means not planned in wave nine; the reason is
-given.
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
 
-## What changed in the design
-
-Drive revision 71 adds **§43 Vesper Chroma** (semantic substructural syntax
-highlighting over the rowan CST and checker facts, OKLCH themes with WCAG AAA
-and APCA gates, `vesper highlight --html`, `vesper shot` SVG and 4x PNG code
-cards, a 26 KiB `vesper-chroma.wasm`, and Lean proofs of lossless spans and the
-contrast gate), placed before Appendix A, and the title block's specification
-map now lists sections 1-43. Comparing the revision's Markdown export with the
-previous snapshot found no other changed prose in sections 1-34, 36-42 or
-Appendix A (the differences were table formatting), so their recorded digests
-are unchanged.
-
-One thing did disappear: the §35 Vesper Warp text, which the previous snapshot
-had at the very top of the document before the title, is absent from both the
-Markdown and the plain-text export of revision 71, while the specification map
-still lists Warp under "Sections 24-41, 43". That looks like an accidental
-deletion during the title-block edit. The snapshot keeps §35 as recorded from
-the 2026-11-13 revision (its digest is unchanged) so that the Warp crates keep
-their reference text; the owner should restore or confirm it in the Google Doc.
-No code for §43 existed on `main`.
+This work plan records the gaps and lane boundaries used by the retained
+wave-nine assignments. The manuscript now integrates the language, platform,
+Chroma, and refinement designs. The table keeps the earlier section identifiers
+used by those assignments; the [section map](../section-map.md) locates the
+corresponding manuscript chapters. Check the live issue and branch state before
+starting work or relying on a reservation.
 
 ## Status by section
 

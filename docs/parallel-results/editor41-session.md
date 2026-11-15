@@ -1,5 +1,9 @@
 # Bounded editor session — delegated #85 integration slice
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Branch `editor41/session`, base `bbd19af`. This lane owns only the new
 `src/lsp/session.rs` and this report. Root dispatch/framing/search, protocol/span
 crates, feature providers, compiler/database and real stdio tests remain with

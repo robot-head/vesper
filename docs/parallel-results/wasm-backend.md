@@ -1,5 +1,9 @@
 # Compiler Wasm target (§30, §7): wave-seven lane 25 report
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #348. Baseline: `283c811` (origin/main at start, a descendant of
 `c025b9a`). New backend `src/wasm_backend.rs` and `src/wasm_backend/**`, tests
 `tests/wasm_backend.rs`, `tests/wasm_backend_cli.rs` and fixtures under

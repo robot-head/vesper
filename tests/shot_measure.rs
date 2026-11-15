@@ -1,7 +1,6 @@
 //! Render time and heap use of one `vesper shot` card, measured, not asserted
 //! (debug builds are far slower than release). Run with
-//! `cargo test --release --test shot_measure -- --nocapture` for the numbers
-//! in docs/parallel-results/chroma-shot-cards.md.
+//! `cargo test --release --test shot_measure -- --nocapture` for current measurements.
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};

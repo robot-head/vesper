@@ -1,5 +1,9 @@
 # Wave nine lane 1: Vesper Chroma core (§43, claim #578)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Base: `c9f967763a0ab3752ba254d13b531b043831a3f8` (origin/main after plan PR #612,
 a descendant of the required baseline `37f7b8b`). Branch:
 `claude/project-thread-rv14nw`.

@@ -1,7 +1,7 @@
 # Prism HTTP/1.1 framing milestones
 
 This is a safe, dependency-free Rust host library for a bounded part of expanded
-specification §17. It is not the Prism server or its source-language APIs.
+[manuscript §33](../../docs/manuscript/README.md). It is not the Prism server or its source-language APIs.
 
 ```rust
 use vesper_prism::{Decoder, Limits};

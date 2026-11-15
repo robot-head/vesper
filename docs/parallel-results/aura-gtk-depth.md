@@ -1,5 +1,9 @@
 # Aura GTK 4 depth: main loop and Pulse, layouts, CSS, AT-SPI, screenshots (wave eight, lane 25)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #474. Base: `1094e64` (origin/main after plan PR #477; descendant of the
 required baseline `ea1ed29`). Branch: `claude/project-thread-lxjrf6`.
 

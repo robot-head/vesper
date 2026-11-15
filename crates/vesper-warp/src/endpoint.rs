@@ -62,7 +62,7 @@
 //! [`WarpEndpoint::open_connection`] still opens a connection from
 //! caller-supplied 1-RTT keys.
 //!
-//! Lifecycle (wave six, issue #247; `docs/parallel-results/warp-lifecycle.md`):
+//! Connection lifecycle:
 //! Retry with its integrity tag and AEAD address-validation tokens,
 //! NEW_TOKEN, Version Negotiation both ways, stateless reset (sent for
 //! unknown connection IDs, detected on undecryptable packets),
@@ -80,7 +80,7 @@
 //! addresses with [`WarpEndpoint::set_rx_source`]; the [`TxTap`] reports
 //! destinations.
 //!
-//! Wave seven (issue #330; `docs/parallel-results/warp-lifecycle-rest.md`):
+//! Datagram ordering, connection IDs, timers, and migration:
 //! 1-RTT packets (stream data, ACKs, CONNECTION_CLOSE) ride last in a
 //! datagram of long-header packets, carrying the PADDING when a client
 //! Initial needs 1200 bytes; a retired connection ID, sequence 0 included,

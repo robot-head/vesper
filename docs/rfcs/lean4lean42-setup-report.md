@@ -1,5 +1,9 @@
 # Explicit pinned setup lane (#301)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 The frozen base `43b1d406` and public claim #301 preceded implementation.
 Published amendments `2ac3337` (genuine pre-build source verification) and
 `397481c` (strict exhaustive source walk) were read before dependent changes.

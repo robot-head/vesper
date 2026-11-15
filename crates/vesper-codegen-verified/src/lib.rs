@@ -23,6 +23,7 @@ mod audit;
 mod digest;
 mod lock;
 pub mod seed;
+pub mod stage1;
 
 pub use audit::{
     AuditReport, BootstrapEvidence, BuilderEvidence, RewriteEvidence, TeeEvidence,

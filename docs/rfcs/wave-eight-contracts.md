@@ -1,7 +1,10 @@
 # Eighth-wave integration contracts
 
-Baseline: the `main` commit named in the [wave-eight prompt index](../agent-prompts/wave-eight/README.md)
-or a descendant. This is an ownership and interface agreement so that
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
+Baseline: `main` at `ea1ed2964c2583b5dc2da8e0fd7651daa39b00e2` or a descendant. This is an ownership and interface agreement so that
 twenty-seven lanes can run alongside the open wave-seven PRs with as little
 overlap as possible. It is not a soundness theorem.
 

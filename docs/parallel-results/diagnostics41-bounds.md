@@ -1,5 +1,9 @@
 # Issue #91: bounded causal diagnostic metadata
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented from `b4d1df8846d29afac7133774d00e39362b66deff` on
 `diagnostics41/bounds`, after issue #91, `docs/rfcs/diagnostics41-contracts.md`,
 specification §21.4 and current frontend/producer/host paths were read. Owned

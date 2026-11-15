@@ -1,5 +1,9 @@
 # Executable arithmetic oracle model (#273)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented against the frozen `oracle42-contracts.md` published under parent
 #269 before writing. The owned source checkpoint is `9ba6e2b`. Only
 `lean/ArithmeticOracle.lean` and this report belong to this lane.

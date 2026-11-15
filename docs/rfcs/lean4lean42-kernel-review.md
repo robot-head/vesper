@@ -1,5 +1,9 @@
 # Independent kernel-slice review (#298)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Reviewed Vesper checkpoint `0f8ebdc` (kernel source checkpoint `1364376`, report
 `6806082`) under the frozen kernel contract. No production patch, control,
 manifest, upstream Main, earlier proof-plan, or compiler source was edited.

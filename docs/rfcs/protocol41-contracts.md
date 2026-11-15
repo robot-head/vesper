@@ -1,5 +1,9 @@
 # Canonical protocol and hardware measurement contracts
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Baseline: main `965b600408d148b01559624914097477da6691ca` ([PR #71](https://github.com/robot-head/vesper/pull/71)).
 The specification snapshot remains sections 1–41 and Appendix A, modified
 2026-11-12T09:18:30.204Z. The coordinator reread §§38–39 and the current runtime

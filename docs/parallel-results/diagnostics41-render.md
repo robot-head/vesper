@@ -1,5 +1,9 @@
 # §21.4 bounded shared rendering — issue #90
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Delivered exclusively in new `crates/vesper-diagnostics/**` and this report, from
 contract b4d1df8846d29afac7133774d00e39362b66deff, branch diagnostics41/render.
 Read issue90, diagnostics41-contracts.md and applicable specification §21.4/21.5.

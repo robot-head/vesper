@@ -1,5 +1,9 @@
 # Lean4Lean 4.24 tool compatibility plan (#297)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This is a source-reviewed feasibility plan, not a working installation or an
 external-checking result. The public #297 claim precedes this document. The only
 owned repository change is this new file. This planning lane performed no

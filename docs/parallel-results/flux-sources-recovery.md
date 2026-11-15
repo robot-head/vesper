@@ -1,5 +1,9 @@
 # Flux: durable sources and sinks, partial recovery and rescaling (wave seven, lane 12, #335)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Design §34 (items 4 and 5 of §34.1, continuing the wave-six
 [durable checkpoints](flux-durable.md)). Base `283c811` (a descendant of the
 required `c025b9a`). Edited only `crates/vesper-flux/**`, `lean/FluxDbsp.lean`

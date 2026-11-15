@@ -1,5 +1,9 @@
 # SimPulse deterministic kernel checkpoint
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented in `crates/vesper-simpulse`, against design §12.6. This is a standalone deterministic scheduling/completion model, not a replacement for the native execution engine.
 
 ## Delivered API

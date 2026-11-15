@@ -87,6 +87,6 @@ Warmups are observed and explicitly identified, while clock report samples
 exclude them. Harness storage and hook counts are bounded by `RunConfig`; user
 callback/observer runtime and their internal allocations remain their own work.
 
-Run `cargo run -p vesper-bench-pmu --example probe` after workspace registration.
+Run `cargo run -p vesper-bench-pmu --example probe` from the repository root.
 It executes a real bounded workload, verifies positive counters/full scheduling
 on success, and exits **2** with an explicit unavailable reason otherwise.

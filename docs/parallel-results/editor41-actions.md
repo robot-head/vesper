@@ -1,5 +1,9 @@
 # Bounded LSP formatting and checked actions (#84)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented pure providers in `src/lsp/actions.rs`, using actual `vesper-fmt`,
 `vesper-span` and the extracted source lint/frontend APIs. No filesystem,
 subprocess, JIT, macro/proof execution, automatic client applyEdit, dispatcher,

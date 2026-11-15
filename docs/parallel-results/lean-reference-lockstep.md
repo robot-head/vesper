@@ -1,5 +1,9 @@
 # Lean reference and lockstep harness (wave eight, lane 4)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #453. Baseline: `1094e649c95e4d81eef4e705d13882ab1339542d` (a descendant
 of the required `ea1ed29`), merged with main before pushing.
 

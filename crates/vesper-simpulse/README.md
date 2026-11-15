@@ -1,6 +1,6 @@
 # SimPulse deterministic kernel
 
-This crate supplies the first execution-model-independent part of design §12.6: seeded task selection, a virtual clock, completion ownership, cancellation requests, and versioned event replay. It executes no Vesper instructions or host system calls.
+This crate supplies the first execution-model-independent part of [manuscript §14.6](../../docs/manuscript/README.md): seeded task selection, a virtual clock, completion ownership, cancellation requests, and versioned event replay. It executes no Vesper instructions or host system calls.
 
 ```rust
 use vesper_simpulse::{Simulator, WakeReason};
@@ -39,4 +39,4 @@ To replay a run, construct `Simulator::replay(journal)`, execute the same embedd
 
 The embedder must return every checked-out token. Rust can still drop a token, panic, or retain it forever; this API is not itself a proof of Vesper's linear exhaustion theorem. The language checker and eventual runtime adapter must enforce the stronger source-level protocol.
 
-The crate does not yet implement production Pulse adapters, native stack switching, the `vesper test --sim` command, DPOR/backtracking, network partitions, WAL crash consistency, or telemetry. See the integration report in `docs/parallel-results/simpulse.md`.
+The crate does not yet implement production Pulse adapters, native stack switching, the `vesper test --sim` command, DPOR/backtracking, network partitions, WAL crash consistency, or telemetry.

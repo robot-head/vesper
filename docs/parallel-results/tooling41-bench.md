@@ -1,5 +1,9 @@
 # §41 callback benchmark engine (#68)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Read [issue #68](https://github.com/robot-head/vesper/issues/68),
 `docs/rfcs/tooling41-contracts.md`, full specification §41 and
 `docs/rfcs/continuation37-review.md`. Implementation is confined to new
