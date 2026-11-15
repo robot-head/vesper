@@ -512,7 +512,7 @@ theorem dropOwn_ok_stales {T T' : Table} {t v : Nat} {h : Handle}
   obtain ⟨s, hs, -, hg, -, -, rfl⟩ := dropOwn_ok_sound hd
   have hlt : h.idx < T.slots.length := (List.getElem?_eq_some_iff.mp hs).1
   unfold release genAt
-  rw [if_pos (by omega)]
+  rw [ite_eq_left (by omega)]
   simp [List.getElem?_set_self hlt]
   omega
 

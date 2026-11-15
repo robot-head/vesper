@@ -174,7 +174,7 @@ theorem step_nonmint_minted {s s' : St} {h : Hop} (hs : step s h = some s')
     (hn : h.isMint = false) : s'.minted = s.minted := by
   unfold step at hs
   rw [hn] at hs
-  simp only [Bool.false_eq_true, if_false] at hs
+  simp only [Bool.false_eq_true, ite_false] at hs
   split at hs
   · split at hs <;> (cases hs; rfl)
   · cases hs
@@ -188,7 +188,7 @@ theorem step_minted {s s' : St} {h : Hop} (hs : step s h = some s') :
   · cases h with
     | mint a =>
       unfold step at hs
-      simp only [Hop.isMint, Hop.id, if_true] at hs
+      simp only [Hop.isMint, Hop.id, ite_true] at hs
       split at hs
       · cases hs
       · cases hs
@@ -221,7 +221,7 @@ theorem step_nonmint_requires_minted {s s' : St} {h : Hop} (hs : step s h = some
     (hn : h.isMint = false) : h.id ∈ s.minted := by
   unfold step at hs
   rw [hn] at hs
-  simp only [Bool.false_eq_true, if_false] at hs
+  simp only [Bool.false_eq_true, ite_false] at hs
   split at hs
   · rename_i hc; exact hc.1
   · cases hs
