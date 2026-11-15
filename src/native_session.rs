@@ -839,12 +839,22 @@ pub(super) fn compile_session<M: Module>(
     plan: &Plan,
     optimize: bool,
 ) -> Result<(FuncId, String), String> {
+    compile_session_with_linkage(m, world, plan, optimize, super::DefinitionLinkage::Object)
+}
+
+fn compile_session_with_linkage<M: Module>(
+    m: &mut M,
+    world: &World,
+    plan: &Plan,
+    optimize: bool,
+    linkage: super::DefinitionLinkage,
+) -> Result<(FuncId, String), String> {
     let instances: InstanceMap = super::instances(world, &plan.entry)?;
     let mut program = crate::ir::lower_world(world);
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
     }
-    let ids = super::declare_instances(m, world, &plan.entry, &instances)?;
+    let ids = super::declare_instances(m, world, &plan.entry, &instances, linkage)?;
     let mut text = super::define_instances(m, world, &instances, &ids, &program)?;
     let ptr = m.target_config().pointer_type();
     let call_conv = m.isa().default_call_conv();
@@ -1246,7 +1256,13 @@ mod host {
             );
             builder.symbol("fmod", super::super::native_float_remainder as *const u8);
             let mut module = cranelift_jit::JITModule::new(builder);
-            let (id, clif) = compile_session(&mut module, world, &plan, optimize)?;
+            let (id, clif) = compile_session_with_linkage(
+                &mut module,
+                world,
+                &plan,
+                optimize,
+                super::super::DefinitionLinkage::Jit,
+            )?;
             module.finalize_definitions().map_err(|e| e.to_string())?;
             // SAFETY: `id` was defined with `clif::entry_signature`.
             let entry = unsafe {

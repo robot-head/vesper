@@ -483,7 +483,36 @@ fn compile<M: Module>(
     options: CodegenOptions,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     compile_entry(
-        m, world, entry, optimize, observer, instrument, options, false,
+        m,
+        world,
+        entry,
+        optimize,
+        observer,
+        instrument,
+        options,
+        false,
+        DefinitionLinkage::Object,
+    )
+}
+fn compile_jit(
+    m: &mut JITModule,
+    world: &World,
+    entry: &str,
+    optimize: bool,
+    observer: Option<&mut dyn FnMut(EmittedFunction)>,
+    instrument: Option<Instrument<'_>>,
+    options: CodegenOptions,
+) -> Result<(BTreeMap<String, FuncId>, String), String> {
+    compile_entry(
+        m,
+        world,
+        entry,
+        optimize,
+        observer,
+        instrument,
+        options,
+        false,
+        DefinitionLinkage::Jit,
     )
 }
 /// [`compile`]; with `fail_entry`, an entry whose only effects are `Fail`
@@ -500,6 +529,7 @@ fn compile_entry<M: Module>(
     instrument: Option<Instrument<'_>>,
     options: CodegenOptions,
     fail_entry: bool,
+    linkage: DefinitionLinkage,
 ) -> Result<(BTreeMap<String, FuncId>, String), String> {
     let entry_fn = world.functions.get(entry).ok_or("unknown entry")?;
     if (!entry_fn.effects.instances.is_empty() || entry_fn.effects.tail.is_some())
@@ -520,7 +550,7 @@ fn compile_entry<M: Module>(
     if optimize {
         crate::ir_opt::optimize(world, &mut program)?;
     }
-    let ids = declare_instances(m, world, entry, &instances)?;
+    let ids = declare_instances(m, world, entry, &instances, linkage)?;
     let clif = define_instances_observed(
         m, world, &instances, &ids, &program, observer, instrument, options,
     )?;
@@ -594,13 +624,32 @@ impl EmittedFunction {
         source_offset(&self.function, inst)
     }
 }
-/// Declare every monomorphized ordinary function. `entry` is exported under
-/// its source name when it is itself an ordinary instance.
+#[derive(Clone, Copy)]
+enum DefinitionLinkage {
+    Object,
+    Jit,
+}
+impl DefinitionLinkage {
+    fn function(self, entry: bool) -> Linkage {
+        match self {
+            Self::Object if entry => Linkage::Export,
+            Self::Object => Linkage::Local,
+            // JIT allocations need not be within a signed 32-bit displacement
+            // of one another. A final linkage makes Cranelift assume they are
+            // colocated; Preemptible is definable without that assumption.
+            // JITModule resolves our defined functions to their compiled ptrs.
+            Self::Jit => Linkage::Preemptible,
+        }
+    }
+}
+/// Declare every monomorphized ordinary function. Object entries are exported
+/// under their source name; JIT definitions use distance-independent calls.
 fn declare_instances<M: Module>(
     m: &mut M,
     world: &World,
     entry: &str,
     instances: &InstanceMap,
+    linkage: DefinitionLinkage,
 ) -> Result<BTreeMap<String, FuncId>, String> {
     let mut ids = BTreeMap::new();
     for (i, (key, (name, vars))) in instances.iter().enumerate() {
@@ -613,11 +662,7 @@ fn declare_instances<M: Module>(
         let id = m
             .declare_function(
                 &symbol,
-                if key == entry {
-                    Linkage::Export
-                } else {
-                    Linkage::Local
-                },
+                linkage.function(key == entry),
                 &signature(m, world, &f)?,
             )
             .map_err(|e| e.to_string())?;
@@ -850,7 +895,7 @@ pub fn jit_with_options(
     builder.symbol("fmod", native_float_remainder as *const u8);
     builder.symbols(crate::regions::native_runtime::symbols());
     let mut m = JITModule::new(builder);
-    let (ids, _) = compile(
+    let (ids, _) = compile_jit(
         &mut m,
         world,
         entry,
@@ -999,6 +1044,7 @@ pub fn object_for_isa(
         None,
         CodegenOptions::default(),
         true,
+        DefinitionLinkage::Object,
     )?;
     let bytes = m.finish().emit().map_err(|e| e.to_string())?;
     Ok((bytes, clif))
@@ -1102,7 +1148,7 @@ impl InstrumentedJit {
             _single_thread: std::marker::PhantomData,
         };
         let m = owned.module.as_mut().expect("owned JIT module");
-        let (ids, _) = compile(
+        let (ids, _) = compile_jit(
             m,
             world,
             entry,
@@ -4152,3 +4198,297 @@ extern "C" fn native_float_remainder(a: f64, b: f64) -> f64 {
 
 #[path = "native_batch.rs"]
 pub mod batch;
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64"))]
+mod far_call_tests {
+    use super::*;
+    use cranelift_codegen::{Context, binemit::Reloc, control::ControlPlane, isa::OwnedTargetIsa};
+    use cranelift_jit::{BranchProtection, JITMemoryProvider};
+    use cranelift_module::{ModuleError, ModuleResult};
+    use std::{io, panic::AssertUnwindSafe};
+
+    const GAP: usize = 1 << 32;
+
+    /// Own one virtual reservation, with only its first and last pages backed.
+    /// The two functions cannot accidentally land within an x86 rel32 span.
+    struct FarPages {
+        base: *mut u8,
+        page: usize,
+        used: usize,
+        reverse: bool,
+    }
+
+    // SAFETY: this uniquely owned reservation moves with its JIT module. No
+    // pointers escape the test, and the module is never accessed concurrently.
+    unsafe impl Send for FarPages {}
+
+    impl FarPages {
+        fn new(reverse: bool) -> Self {
+            // SAFETY: sysconf does not access Rust memory.
+            let page = usize::try_from(unsafe { libc::sysconf(libc::_SC_PAGESIZE) }).unwrap();
+            assert!(page.is_power_of_two());
+            // This is virtual address space, not four GiB of committed memory.
+            // SAFETY: a fresh anonymous reservation; no existing mapping is replaced.
+            let base = unsafe {
+                libc::mmap(
+                    std::ptr::null_mut(),
+                    GAP + page,
+                    libc::PROT_NONE,
+                    libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+                    -1,
+                    0,
+                )
+            };
+            assert_ne!(base, libc::MAP_FAILED, "{}", io::Error::last_os_error());
+            Self {
+                base: base.cast(),
+                page,
+                used: 0,
+                reverse,
+            }
+        }
+
+        fn address(&self, slot: usize) -> *mut u8 {
+            assert!(slot < 2);
+            // SAFETY: both pages lie in the single reservation this provider owns.
+            unsafe { self.base.add((slot ^ usize::from(self.reverse)) * GAP) }
+        }
+
+        unsafe fn release(&mut self) {
+            if !self.base.is_null() {
+                // SAFETY: freeing exactly our reservation after every call returned.
+                assert_eq!(
+                    unsafe { libc::munmap(self.base.cast(), GAP + self.page) },
+                    0
+                );
+                self.base = std::ptr::null_mut();
+            }
+        }
+    }
+
+    impl Drop for FarPages {
+        fn drop(&mut self) {
+            // SAFETY: test-owned code pointers never outlive the JIT module/provider.
+            unsafe { self.release() };
+        }
+    }
+
+    impl JITMemoryProvider for FarPages {
+        fn allocate_readexec(&mut self, size: usize, align: u64) -> io::Result<*mut u8> {
+            if self.used == 2 || size > self.page || align > self.page as u64 {
+                return Err(io::Error::other(
+                    "far-call fixture needs two tiny functions",
+                ));
+            }
+            let at = self.address(self.used);
+            // SAFETY: committing only the owned page selected for this function.
+            if unsafe { libc::mprotect(at.cast(), self.page, libc::PROT_READ | libc::PROT_WRITE) }
+                != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            self.used += 1;
+            Ok(at)
+        }
+
+        fn allocate_readwrite(&mut self, _: usize, _: u64) -> io::Result<*mut u8> {
+            Err(io::Error::other("far-call fixture has no writable data"))
+        }
+
+        fn allocate_readonly(&mut self, _: usize, _: u64) -> io::Result<*mut u8> {
+            Err(io::Error::other("far-call fixture has no readonly data"))
+        }
+
+        unsafe fn free_memory(&mut self) {
+            // SAFETY: the caller guarantees that no retrieved code pointers remain live.
+            unsafe { self.release() };
+        }
+
+        fn finalize(&mut self, protection: BranchProtection) -> ModuleResult<()> {
+            assert_eq!(protection, BranchProtection::None);
+            assert_eq!(self.used, 2);
+            for slot in 0..2 {
+                // SAFETY: both pages are owned code allocations; x86 instruction
+                // caches are coherent. No call occurs before this finalization.
+                if unsafe {
+                    libc::mprotect(
+                        self.address(slot).cast(),
+                        self.page,
+                        libc::PROT_READ | libc::PROT_EXEC,
+                    )
+                } != 0
+                {
+                    return Err(ModuleError::Allocation {
+                        message: "protect far-call fixture",
+                        err: io::Error::last_os_error(),
+                    });
+                }
+            }
+            Ok(())
+        }
+    }
+
+    fn world() -> World {
+        let parsed = crate::parser::parse(
+            "fn aaa_target(x: i64) -> i64 { wrapping_add(x, 1) } \
+             fn main() -> i64 { aaa_target(41) }",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let checked = crate::check::check(&parsed.module);
+        assert!(checked.diagnostics.is_empty(), "{:?}", checked.diagnostics);
+        checked.world
+    }
+
+    fn module(reverse: bool) -> (JITModule, OwnedTargetIsa) {
+        let mut flags = settings::builder();
+        flags.set("is_pic", "false").unwrap();
+        flags.set("use_colocated_libcalls", "false").unwrap();
+        let isa = cranelift_native::builder()
+            .unwrap()
+            .finish(settings::Flags::new(flags))
+            .unwrap();
+        let mut builder =
+            JITBuilder::with_isa(isa.clone(), cranelift_module::default_libcall_names());
+        builder.memory_provider(Box::new(FarPages::new(reverse)));
+        (JITModule::new(builder), isa)
+    }
+
+    fn relocations(isa: &OwnedTargetIsa, function: EmittedFunction, out: &mut Vec<Reloc>) {
+        if function.source != "main" {
+            return;
+        }
+        // Inspect machine relocations from the actual production-lowered function,
+        // using the same ISA as the JIT module, rather than a handwritten CLIF call.
+        let mut context = Context::for_function(function.function);
+        context
+            .compile(isa.as_ref(), &mut ControlPlane::default())
+            .unwrap();
+        out.extend(
+            context
+                .compiled_code()
+                .unwrap()
+                .buffer
+                .relocs()
+                .iter()
+                .map(|relocation| relocation.kind),
+        );
+    }
+
+    #[test]
+    fn near_calls_fail_and_jit_far_calls_execute_across_four_gib() {
+        let world = world();
+        for reverse in [false, true] {
+            let (mut old, isa) = module(reverse);
+            let mut near = Vec::new();
+            // The unchanged object policy is exactly the old JIT's final-linkage
+            // behavior: Export/Local make direct calls assume colocation.
+            let (ids, _) = compile(
+                &mut old,
+                &world,
+                "main",
+                false,
+                Some(&mut |function| relocations(&isa, function, &mut near)),
+                None,
+                CodegenOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                old.declarations().get_function_decl(ids["main"]).linkage,
+                Linkage::Export
+            );
+            assert_eq!(
+                old.declarations()
+                    .get_function_decl(ids["aaa_target"])
+                    .linkage,
+                Linkage::Local
+            );
+            assert!(near.contains(&Reloc::X86CallPCRel4), "{near:?}");
+            let panic = std::panic::catch_unwind(AssertUnwindSafe(|| {
+                old.finalize_definitions()
+                    .map_err(|error| error.to_string())
+            }))
+            .expect_err("near relocation must fail across the forced four-GiB gap");
+            let message = panic
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| panic.downcast_ref::<&str>().copied())
+                .unwrap_or("");
+            assert!(message.contains("TryFromIntError"), "{message}");
+            eprintln!("old near relocations {near:?}, reverse={reverse}: {message}");
+            drop(old);
+
+            let (mut fixed, isa) = module(reverse);
+            let mut far = Vec::new();
+            let (ids, _) = compile_jit(
+                &mut fixed,
+                &world,
+                "main",
+                false,
+                Some(&mut |function| relocations(&isa, function, &mut far)),
+                None,
+                CodegenOptions::default(),
+            )
+            .unwrap();
+            assert_eq!(
+                fixed.declarations().get_function_decl(ids["main"]).linkage,
+                Linkage::Preemptible
+            );
+            assert_eq!(
+                fixed
+                    .declarations()
+                    .get_function_decl(ids["aaa_target"])
+                    .linkage,
+                Linkage::Preemptible
+            );
+            assert!(far.contains(&Reloc::Abs8), "{far:?}");
+            assert!(!far.contains(&Reloc::X86CallPCRel4), "{far:?}");
+            fixed.finalize_definitions().unwrap();
+            let entry = fixed.get_finalized_function(ids["main"]);
+            let target = fixed.get_finalized_function(ids["aaa_target"]);
+            assert_eq!((entry as usize).abs_diff(target as usize), GAP);
+            assert_eq!((target as usize) > (entry as usize), reverse);
+            // SAFETY: actual production compilation checked fn() -> i64; the module
+            // owns both finalized executable pages until after this call returns.
+            let call: unsafe extern "C" fn() -> i64 = unsafe { std::mem::transmute(entry) };
+            // SAFETY: the signature and code lifetime are established above.
+            assert_eq!(unsafe { call() }, 42);
+            eprintln!(
+                "fixed far relocations {far:?}: target={target:p}, entry={entry:p}, result=42"
+            );
+            // SAFETY: the only code call returned, and no function pointer escapes.
+            unsafe { fixed.free_memory() };
+        }
+    }
+
+    #[test]
+    fn ordinary_instrumented_batch_and_session_jits_call_their_helpers() {
+        let world = world();
+        for optimize in [false, true] {
+            assert_eq!(
+                jit_with_options(&world, "main", optimize)
+                    .unwrap()
+                    .to_string(),
+                "42"
+            );
+        }
+        let mut unchanged = |_: &str, _: &mut ir::Function| Ok(());
+        // SAFETY: the no-op hook inserts no memory accesses or addresses.
+        let mut instrumented =
+            unsafe { InstrumentedJit::compile(&world, "main", &mut unchanged).unwrap() };
+        assert_eq!(instrumented.run(), 42);
+        let mut batch =
+            batch::NativeBatch::compile(&world, &["main"], batch::BatchLimits::default()).unwrap();
+        assert_eq!(batch.run("main").unwrap().to_string(), "42");
+        assert_eq!(batch.stats().defined_functions, 2);
+        for optimize in [false, true] {
+            let session =
+                session::NativeSession::compile_with_options(&world, "main", &[], optimize)
+                    .unwrap();
+            let exit = session.fiber().unwrap().start().exited().unwrap();
+            assert!(matches!(
+                session.decode_exit(&world, &exit).unwrap(),
+                session::SessionResult::Returned(crate::runtime::Value::Int(42))
+            ));
+        }
+    }
+}
