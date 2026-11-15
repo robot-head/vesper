@@ -1,0 +1,28 @@
+linear struct Leaf {}
+copy struct Node0 {
+    left: Leaf,
+    right: Leaf
+}
+copy struct Node1 {
+    left: Node0,
+    right: Node0
+}
+copy struct Node2 {
+    left: Node1,
+    right: Node1
+}
+copy struct Node3 {
+    left: Node2,
+    right: Node2
+}
+copy struct Node4 {
+    left: Node3,
+    right: Node3
+}
+copy struct Node5 {
+    left: Node4,
+    right: Node4
+}
+copy struct Bad {
+    root: Node5 @@copy
+}
