@@ -34,12 +34,33 @@ measured epoch, body-call count including warmups, and whole-run elapsed time.
 equal operation counts per arm. Zero totals/operations fail. Warmups are not
 included in statistical evidence.
 
+## Paired Hodges–Lehmann estimate
+
+`hodges_lehmann_paired` accepts up to 32 caller-provided signed integer paired
+differences. It returns the median Walsh average scaled by four, plus a
+two-sided signed-rank interval with bounds scaled by two and exact nominal
+coverage when a finite interval of at least 95% is available. Smaller samples
+can return an estimate without an interval. Zeros, tied absolute differences,
+and tied Walsh averages are rejected conservatively.
+
+The interval's interpretation requires independent, identically distributed
+continuous differences symmetric about their population location. The API
+does not establish those assumptions or convert benchmark measurements into
+differences. It is separate from the ratio-based regression gate below.
+
 `mann_whitney_ranks(first, second)` separately computes exact Mann–Whitney U
 rank counts for two bounded `u64` samples. Counts are doubled to represent tied
 pairs without rounding. It returns no p-value, confidence interval or gate
 decision. Independent-sample inference requires appropriate independence and
 distribution assumptions; ABBA epoch measurements are paired and do not
 automatically satisfy those assumptions.
+
+`mann_whitney_exact(first, second)` computes the exact untied permutation
+probability for two nonempty samples of at most 32 observations each. It rejects
+repeated values anywhere in the combined samples. The returned fraction uses
+twice the smaller inclusive tail, capped at one; it is not rounded. Its null
+interpretation requires exchangeable observations, and it is not a paired ABBA
+test or a confidence interval. It does not participate in the regression gate.
 
 ## Optional population-median confidence gate
 
@@ -151,3 +172,13 @@ signed-rank report for the selected measured metric. It supports up to 32
 measured epochs, or up to 32 aggregate randomized-layout samples; it excludes
 deterministic mode. All-zero differences report unavailable. The report does
 not add a gate and explicitly states the conditional-sign assumption.
+
+## Tied Walsh point estimates
+
+`walsh_pseudomedian` returns the Hodges–Lehmann point estimate for up to 32
+caller-provided integer paired differences, retaining zeros and tied Walsh
+averages with their full multiplicity. The result is scaled by four so even
+medians and half-unit Walsh averages are exact. It uses bounded stack storage
+and returns an explicit error for empty or oversized input. It does not return a
+confidence interval or regression decision and does not establish measurement
+provenance.
