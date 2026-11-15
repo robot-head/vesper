@@ -1720,12 +1720,18 @@ struct TempDir(PathBuf);
 
 impl TempDir {
     fn new(tag: &str) -> Self {
-        let nanos = std::time::SystemTime::now()
+        Self::at_time(tag, std::time::SystemTime::now())
+    }
+
+    fn at_time(tag: &str, now: std::time::SystemTime) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let nonce = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = now
             .duration_since(std::time::UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
         let dir = std::env::temp_dir().join(format!(
-            "vesper-lockstep-{tag}-{}-{nanos}",
+            "vesper-lockstep-{tag}-{}-{nanos}-{nonce}",
             std::process::id()
         ));
         std::fs::create_dir(&dir).expect("private temporary directory");
@@ -1737,6 +1743,20 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+#[test]
+fn private_temporary_directories_are_unique_at_identical_timestamps() {
+    let now = std::time::SystemTime::now();
+    let first = TempDir::at_time("same-clock", now);
+    let second = TempDir::at_time("same-clock", now);
+    assert_ne!(first.0, second.0);
+    assert!(first.0.is_dir() && second.0.is_dir());
+    drop(first);
+    assert!(
+        second.0.is_dir(),
+        "dropping one fixture must preserve the other"
+    );
 }
 
 fn reference_source() -> PathBuf {

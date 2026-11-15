@@ -334,6 +334,25 @@ class BazelTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_legacy_console_preserves_failed_unicode_diagnostic(self):
+        def fail(records, args, summary):
+            print("failed theorem: ρ ≤ α")
+            print("error: ρ ≤ α", file=sys.stderr)
+            raise RuntimeError("original test failed")
+
+        with tempfile.TemporaryDirectory() as tmp, io.BytesIO() as out, io.BytesIO() as err:
+            stdout = io.TextIOWrapper(out, encoding="cp1252", write_through=True)
+            stderr = io.TextIOWrapper(err, encoding="cp1252", write_through=True)
+            summary = Path(tmp) / "summary.json"
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr), mock.patch.dict(os.environ, {"EXPECTED_SHA": "a" * 40}), mock.patch.object(runner, "command", return_value=result("a" * 40 + "\n")), mock.patch.object(runner, "load_policy"), mock.patch.object(runner, "deferred_targets", return_value=[]), mock.patch.object(runner, "run_cargo", side_effect=fail):
+                code = runner.main(["--backend", "cargo", "--profile", "full", "--summary", str(summary)])
+            self.assertEqual(code, 1)
+            self.assertEqual(json.loads(summary.read_text())["error"], "original test failed")
+            self.assertIn("failed theorem: ρ ≤ α", out.getvalue().decode("utf-8"))
+            self.assertIn("error: ρ ≤ α", err.getvalue().decode("utf-8"))
+            stdout.detach()
+            stderr.detach()
+
     def test_wrong_commit_fails_before_backend_and_records_actual_sha(self):
         with tempfile.TemporaryDirectory() as tmp:
             summary = Path(tmp) / "summary.json"
