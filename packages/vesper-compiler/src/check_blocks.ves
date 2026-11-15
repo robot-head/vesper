@@ -1,0 +1,210 @@
+// Lexical scopes and ownership environments are immutable bounded values.
+// No host ownership check substitutes for these source-language rules.
+fn c_block(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let start = c_token(at).start;
+    let end = c_group(at, 0);
+    let value = c_statements(c_take(at, 34), env, row, loans, depth + 1, start, end);
+    let valid = c_exhaust(value.env, env.count, value.env.count, start, end);
+    CExpr {
+        ty: value.ty,
+        next: value.next,
+        env: c_truncate(value.env, env.count),
+        start: start,
+        end: end,
+        place: -1,
+        value_start: value.value_start,
+        value_end: value.value_end
+    }
+}
+fn c_statements(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64, start: i64, end: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if depth > 48 {
+        let limit = c_limit(at);
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            at,
+            env,
+            start,
+            end,
+            -1
+        )
+    } else if c_kind(at) == 35 {
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            c_next(at),
+            env,
+            start,
+            end,
+            -1
+        )
+    } else if c_kind(at) == 13 {
+        let pat = c_next(at);
+        let next = c_pattern_end(pat);
+        let annotation = if c_kind(next) == 40 {
+            c_type(c_next(next), 0)
+        } else {
+            CTypeAt {
+                ty: CType {
+                    tag: -1,
+                    at: 0
+                },
+                next: next
+            }
+        };
+        let value = c_expr(c_take(annotation.next, 48), env, 2, row, loans, depth + 1, false);
+        let valid = if annotation.ty.tag >= 0 {
+            c_valid_type(annotation.ty, value.start, value.end, 0)
+        } else {
+            0
+        };
+        let valid = if annotation.ty.tag >= 0 {
+            c_expect_type(annotation.ty, value.ty, value.start, value.end)
+        } else {
+            0
+        };
+        let valid = if !c_irrefutable(pat, value.ty, 0) {
+            c_error(210, c_token(pat).start, c_pattern_end(pat))
+        } else {
+            0
+        };
+        let binding = c_bind_pattern(
+            pat,
+            if annotation.ty.tag >= 0 {
+                annotation.ty
+            } else {
+                value.ty
+            },
+            value.env,
+            depth + 1
+        );
+        c_statements(c_take(value.next, 39), binding.env, row, loans, depth, start, end)
+    } else {
+        let value = c_expr(at, env, 2, row, loans, depth + 1, false);
+        if c_kind(value.next) == 39 {
+            let valid = if c_mode(value.ty, 0) == 2 {
+                c_error(302, value.start, value.end)
+            } else {
+                0
+            };
+            c_statements(c_next(value.next), value.env, row, loans, depth, start, end)
+        } else {
+            let next = c_take(value.next, 35);
+            c_result(value.ty, next, value.env, value.start, value.end, -1)
+        }
+    }
+}
+fn c_if(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let start = c_token(at).start;
+    let cond = c_expr(c_next(at), env, 2, row, loans, depth + 1, true);
+    let valid = c_expect_type(
+        CType {
+            tag: 1,
+            at: 0
+        },
+        cond.ty,
+        cond.start,
+        cond.end
+    );
+    let a = c_block(cond.next, cond.env, row, loans, depth + 1);
+    let b = if c_kind(a.next) == 29 {
+        c_expr(c_next(a.next), cond.env, 2, row, loans, depth + 1, false)
+    } else {
+        c_result(
+            CType {
+                tag: 0,
+                at: 0
+            },
+            a.next,
+            cond.env,
+            start,
+            a.end,
+            -1
+        )
+    };
+    let result_ty = c_join_type(a.ty, b.ty, start, b.end);
+    c_result(result_ty, b.next, c_join(cond.env, a.env, b.env, 0, start, b.end), start, b.end, -1)
+}
+fn c_match(at: i64, env: CEnv, row: i64, loans: CEnv, depth: i64)
+    -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    let start = c_token(at).start;
+    let value = c_expr(c_next(at), env, 2, row, loans, depth + 1, true);
+    let end = c_group(value.next, 0);
+    let arms = c_take(value.next, 34);
+    let valid = if value.ty.tag != 3 {
+        c_unsupported(5, at)
+    } else {
+        0
+    };
+    let d = c_decl(c_find(c_token(value.ty.at), 0, 0));
+    let valid = if d.kind == 9 {
+        c_coverage(c_next(d.body), arms, start, end)
+    } else {
+        0
+    };
+    let result = c_match_arms(
+        arms,
+        value.ty,
+        value.env,
+        value.env,
+        CType {
+            tag: -1,
+            at: 0
+        },
+        row,
+        loans,
+        depth + 1,
+        start,
+        end
+    );
+    c_result(result.ty, result.next, result.env, start, end, -1)
+}
+fn c_match_arms(
+    at: i64,
+    ty: CType,
+    original: CEnv,
+    merged: CEnv,
+    result_ty: CType,
+    row: i64,
+    loans: CEnv,
+    depth: i64,
+    start: i64,
+    end: i64
+) -> CExpr eff [Fail[CheckError], Fail[Diag], Fail[ArithOverflow]] {
+    if c_kind(at) == 35 {
+        let valid = if result_ty.tag < 0 {
+            c_unsupported(5, at)
+        } else {
+            0
+        };
+        c_result(result_ty, c_next(at), merged, start, end, -1)
+    } else {
+        let binding = c_bind_pattern(at, ty, original, depth + 1);
+        let value = c_expr(c_take(binding.next, 47), binding.env, 2, row, loans, depth + 1, false);
+        let valid = c_exhaust(value.env, original.count, value.env.count, value.start, value.end);
+        let common_ty = if result_ty.tag < 0 {
+            value.ty
+        } else {
+            c_join_type(result_ty, value.ty, value.start, value.end)
+        };
+        let trimmed = c_truncate(value.env, original.count);
+        let joined = if result_ty.tag < 0 {
+            trimmed
+        } else {
+            c_join(original, merged, trimmed, 0, start, end)
+        };
+        let next = if c_kind(value.next) == 38 {
+            c_next(value.next)
+        } else {
+            value.next
+        };
+        c_match_arms(next, ty, original, joined, common_ty, row, loans, depth, start, end)
+    }
+}

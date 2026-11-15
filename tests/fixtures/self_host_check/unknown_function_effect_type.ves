@@ -1,0 +1,1 @@
+fn main(sink callback: fn() eff [Fail[Unknown]]) {}
