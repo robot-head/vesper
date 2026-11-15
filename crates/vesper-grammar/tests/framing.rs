@@ -399,3 +399,112 @@ fn capnp_framing_rejects_truncation_and_prepays_limits() {
         ErrorKind::PayloadLimit
     );
 }
+
+#[test]
+fn capnp_local_struct_pointer_views_signed_offsets_and_sections() {
+    use vesper_grammar::capnp::{self, PointerError};
+    assert_eq!(capnp::local_struct_pointer(&[0; 8], 0), Ok(None));
+    assert_eq!(
+        capnp::local_struct_pointer(&[0; 7], 0),
+        Err(PointerError::MisalignedSegment)
+    );
+    assert_eq!(
+        capnp::local_struct_pointer(&[0; 8], 1),
+        Err(PointerError::PointerOutOfBounds)
+    );
+    for kind in 1..=3 {
+        assert_eq!(
+            capnp::local_struct_pointer(&u64::from(kind).to_le_bytes(), 0),
+            Err(PointerError::UnsupportedKind(kind))
+        );
+    }
+
+    // One-word forward displacement, one data word, one pointer word.
+    let raw = (1u64 << 2) | (1u64 << 32) | (1u64 << 48);
+    let mut segment = [0u8; 32];
+    segment[..8].copy_from_slice(&raw.to_le_bytes());
+    segment[16..24].copy_from_slice(b"datadata");
+    segment[24..32].copy_from_slice(b"pointers");
+    let view = capnp::local_struct_pointer(&segment, 0).unwrap().unwrap();
+    assert_eq!(view.data, b"datadata");
+    assert_eq!(view.pointers, b"pointers");
+    assert_eq!(view.data.as_ptr(), segment[16..].as_ptr());
+    assert_eq!(view.pointers.as_ptr(), segment[24..].as_ptr());
+
+    // The pointer at word 2 addresses word 0 via a signed -3 displacement.
+    let negative = ((0x3fff_fffdu64) << 2) | (1u64 << 32);
+    let mut backward = [0u8; 24];
+    backward[..8].copy_from_slice(b"backward");
+    backward[16..24].copy_from_slice(&negative.to_le_bytes());
+    let view = capnp::local_struct_pointer(&backward, 2).unwrap().unwrap();
+    assert_eq!(view.data, b"backward");
+    assert!(view.pointers.is_empty());
+
+    // This root is framed as one segment; root pointer remains local.
+    let mut framed = vec![0, 0, 0, 0, 4, 0, 0, 0];
+    framed.extend_from_slice(&segment);
+    let message = capnp::parse_exact(&framed, capnp::Limits::default()).unwrap();
+    assert_eq!(message.root_struct().unwrap().unwrap().data, b"datadata");
+}
+
+#[test]
+fn capnp_local_struct_pointer_rejects_invalid_extents() {
+    use vesper_grammar::capnp::{self, PointerError};
+    let too_far_back = (0x3fff_fffdu64 << 2) | (1u64 << 32);
+    assert_eq!(
+        capnp::local_struct_pointer(&too_far_back.to_le_bytes(), 0),
+        Err(PointerError::TargetOutOfBounds)
+    );
+    let too_far_forward = (1u64 << 2) | (1u64 << 32);
+    assert_eq!(
+        capnp::local_struct_pointer(&too_far_forward.to_le_bytes(), 0),
+        Err(PointerError::TargetOutOfBounds)
+    );
+    let missing_pointer_section = (1u64 << 48).to_le_bytes();
+    assert_eq!(
+        capnp::local_struct_pointer(&missing_pointer_section, 0),
+        Err(PointerError::TargetOutOfBounds)
+    );
+    assert_eq!(
+        capnp::local_struct_pointer(&[0; 8], usize::MAX),
+        Err(PointerError::Overflow)
+    );
+    let empty_segment = [0u8; 8];
+    let message = capnp::parse_exact(&empty_segment, capnp::Limits::default()).unwrap();
+    assert_eq!(message.root_struct(), Err(PointerError::PointerOutOfBounds));
+}
+
+#[test]
+fn capnp_struct_pointer_matches_small_word_index_oracle() {
+    use vesper_grammar::capnp::{self, PointerError};
+    for at in 0..8usize {
+        for offset in -10i32..=10 {
+            for data_words in 0..=3u16 {
+                for pointer_words in 0..=3u16 {
+                    let raw = (u64::from((offset as u32) & 0x3fff_ffff) << 2)
+                        | (u64::from(data_words) << 32)
+                        | (u64::from(pointer_words) << 48);
+                    let mut segment = [0x5a; 64];
+                    segment[at * 8..at * 8 + 8].copy_from_slice(&raw.to_le_bytes());
+                    let actual = capnp::local_struct_pointer(&segment, at);
+                    if raw == 0 {
+                        assert_eq!(actual, Ok(None));
+                        continue;
+                    }
+                    let target = at as i64 + 1 + i64::from(offset);
+                    let end = target + i64::from(data_words) + i64::from(pointer_words);
+                    if target < 0 || end > 8 {
+                        assert_eq!(actual, Err(PointerError::TargetOutOfBounds));
+                    } else {
+                        let view = actual.unwrap().unwrap();
+                        let start = target as usize * 8;
+                        let middle = start + usize::from(data_words) * 8;
+                        let end = middle + usize::from(pointer_words) * 8;
+                        assert_eq!(view.data, &segment[start..middle]);
+                        assert_eq!(view.pointers, &segment[middle..end]);
+                    }
+                }
+            }
+        }
+    }
+}

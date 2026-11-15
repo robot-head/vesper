@@ -46,6 +46,85 @@ impl<'a> Message<'a> {
             count: self.count,
         }
     }
+
+    /// Decode the root pointer when it is a local struct pointer or null.
+    pub fn root_struct(self) -> core::result::Result<Option<StructView<'a>>, PointerError> {
+        // Stream framing always contains at least one segment.
+        local_struct_pointer(self.segments().next().expect("validated segment count"), 0)
+    }
+}
+
+/// A shallow view of a local struct's two word-aligned sections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StructView<'a> {
+    pub data: &'a [u8],
+    /// Raw pointer words; no pointers inside this section have been validated.
+    pub pointers: &'a [u8],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PointerError {
+    MisalignedSegment,
+    Overflow,
+    PointerOutOfBounds,
+    UnsupportedKind(u8),
+    TargetOutOfBounds,
+}
+
+/// Decode a single local struct pointer in a segment; do not follow children.
+///
+/// This checks only this pointer's type and section extents. It does not
+/// validate aliases, cycles, far pointers, schemas, or canonical encoding.
+pub fn local_struct_pointer(
+    segment: &[u8],
+    pointer_word: usize,
+) -> core::result::Result<Option<StructView<'_>>, PointerError> {
+    if !segment.len().is_multiple_of(8) {
+        return Err(PointerError::MisalignedSegment);
+    }
+    let start = pointer_word.checked_mul(8).ok_or(PointerError::Overflow)?;
+    let end = start.checked_add(8).ok_or(PointerError::Overflow)?;
+    let bytes = segment
+        .get(start..end)
+        .ok_or(PointerError::PointerOutOfBounds)?;
+    let raw = u64::from_le_bytes(bytes.try_into().expect("eight-byte pointer"));
+    if raw == 0 {
+        return Ok(None);
+    }
+    let kind = (raw & 3) as u8;
+    if kind != 0 {
+        return Err(PointerError::UnsupportedKind(kind));
+    }
+    // Sign-extend the 30-bit displacement from the word after the pointer.
+    let offset = (((raw >> 2) & 0x3fff_ffff) as i32) << 2 >> 2;
+    let base = pointer_word.checked_add(1).ok_or(PointerError::Overflow)?;
+    let distance = usize::try_from(offset.unsigned_abs()).map_err(|_| PointerError::Overflow)?;
+    let target = if offset < 0 {
+        base.checked_sub(distance)
+    } else {
+        base.checked_add(distance)
+    }
+    .ok_or(PointerError::TargetOutOfBounds)?;
+    let target_byte = target.checked_mul(8).ok_or(PointerError::Overflow)?;
+    let data_bytes = usize::from(((raw >> 32) & 0xffff) as u16)
+        .checked_mul(8)
+        .ok_or(PointerError::Overflow)?;
+    let pointer_bytes = usize::from(((raw >> 48) & 0xffff) as u16)
+        .checked_mul(8)
+        .ok_or(PointerError::Overflow)?;
+    let data_end = target_byte
+        .checked_add(data_bytes)
+        .ok_or(PointerError::Overflow)?;
+    let pointer_end = data_end
+        .checked_add(pointer_bytes)
+        .ok_or(PointerError::Overflow)?;
+    let data = segment
+        .get(target_byte..data_end)
+        .ok_or(PointerError::TargetOutOfBounds)?;
+    let pointers = segment
+        .get(data_end..pointer_end)
+        .ok_or(PointerError::TargetOutOfBounds)?;
+    Ok(Some(StructView { data, pointers }))
 }
 
 pub struct Segments<'a> {
