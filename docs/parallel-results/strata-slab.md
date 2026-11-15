@@ -1,5 +1,9 @@
 # Bounded local ShardSlab byte allocator
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Base: `1ffd0aec27dfcc24c5564585ae9068255490bf61`. Branch:
 `parallel-next/strata-slab`. Owned paths: `crates/vesper-alloc/**` and this report.
 No manifest, lockfile, compiler, scheduler, ABI or existing Region behavior changes.

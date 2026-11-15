@@ -1,5 +1,9 @@
 # Pulse work stealing, Windows AFD sockets and synchronous handles (wave eight, lane 21)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #470. Base: `1094e64` (descendant of the required baseline `ea1ed29`).
 Spec: §12 (Pulse), in particular §12.4 (work-stealing `spawn` and core-pinned
 `spawn_local`) and §12.6 (SimPulse), snapshot of 2026-11-13 04:46 UTC.

@@ -1,6 +1,6 @@
 # vesper-pact
 
-Canonical trait goals and tabled trait resolution for Vesper Pact (design §16.2–16.3).
+Canonical trait goals and tabled trait resolution for Vesper Pact ([manuscript §§6.2–6.3](../../docs/manuscript/README.md)).
 
 This crate is standalone. The compiler hands it a versioned, id-only `ProgramDto` and asks `QueryDto`s about it.
 
@@ -16,12 +16,8 @@ This crate is standalone. The compiler hands it a versioned, id-only `ProgramDto
 
 Run `check_coherence` and reject its diagnostics before accepting solver evidence for a declaration set. `Program::new` validates the DTO shape; it does not enforce coherence. In an incoherent program, overlapping impls can produce identical substitutions, which the solver treats as one answer even when their evidence differs. A checked derivation establishes that its recorded declaration applies, not that it is globally unique.
 
-See [`docs/parallel-results/pact-goals.md`](../../docs/parallel-results/pact-goals.md) for the supported fragment, the design decisions, the adapter specifications and the limitations.
-
 ```sh
 cargo fmt -- --check
 cargo test --locked
 cargo clippy --locked --all-targets -- -D warnings
 ```
-
-The `[workspace]` table and the nested `Cargo.lock` are temporary until the crate is registered in the root workspace.

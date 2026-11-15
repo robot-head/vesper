@@ -249,8 +249,7 @@ impl QuicBbr {
     }
     /// §35.3 `advance_bbrv3_edt`: departure time for `bytes` sent at `now_ns`.
     ///
-    /// Wave six (the seed-246 stall in `docs/parallel-results/warp-lifecycle.md`):
-    /// a packet scheduled while BBR's pacing rate has collapsed (a tiny
+    /// A packet scheduled while BBR's pacing rate has collapsed (a tiny
     /// bandwidth sample under heavy loss) can push BBR's schedule tens of
     /// seconds ahead. Nothing then fits the launch horizon, nothing is in
     /// flight, no ACK brings a new sample, and the connection stalls until

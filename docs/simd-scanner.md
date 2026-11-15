@@ -24,7 +24,7 @@ and checks 9,600 cases against independently computed scalar results. This cover
 offsets 0–31, lengths 0–95 and large buffers, with delimiters 0, 7 and 255.
 QEMU execution is functional validation, not Arm hardware performance evidence.
 
-This implements the delimiter/XOR example from specification §14 as a host library
+This implements the delimiter/XOR example from [manuscript §13](manuscript/README.md) as a host library
 and command. Source `Isa[P]` effects, general vector syntax, scalable vectors,
 egglog vectorization and Lean equivalence proofs remain unimplemented. No
 throughput claim is made.

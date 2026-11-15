@@ -1,0 +1,18 @@
+@shot(title = 'counter.vsp — a linear effect with handler state')
+linear effect Counter {
+    fn next() -> i64;
+}
+
+fn main() -> i64 {
+    handle Fail[ArithOverflow] in {
+        handle Counter state counter = 0 in {
+            Counter::next() + Counter::next()
+        } with {
+            return (value, counter) => value + counter,
+            next(counter, resume) => resume(counter, wrapping_add(counter, 1)), //^! one-shot resume
+        }
+    } with {
+        return value => value,
+        raise(overflow, resume) => -1,
+    }
+}

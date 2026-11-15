@@ -1,5 +1,9 @@
 # Isolated executable publication for fake Lean lens tests
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #575 follows PR #412's Linux failure in `lsp::lens_tests::proof_lens_records_proved_failed_and_stale_requests`: the proof response was `failed` with `start process: Text file busy (os error 26)` instead of `proved`. The fixture wrote executable scripts in the multithreaded test process. `fs::write` closes its own descriptor before returning, but a concurrently forked child can retain an inherited writable descriptor until it executes another program or exits. `FD_CLOEXEC` closes a descriptor at exec, not at fork. Linux refuses to execute the script while that other writable descriptor remains open.
 
 A deterministic owned Python fork experiment reproduced this mechanism in three trials. The parent closed its writer, `/proc/<child>/fd` and `fdinfo` identified the matching inode in a waiting child, and the child's descriptor remained close-on-exec. Executing the completed fake-Lean-shaped script returned OS 26. Releasing and reaping the holder made the identical script execute successfully. A separate writer-process experiment also passed three trials: its active writer was an OS-26 negative control; the test parent and an unrelated fork child held no matching descriptors; after the writer exited, the script executed while the unrelated child remained alive. This proves the descriptor mechanism, not the original hosted interleaving. The experiment did not run the actual Bazel lens target.

@@ -1,6 +1,6 @@
 //! Source trait/model frontend: static evidence elaboration (design §16.2–16.3).
 //!
-//! Accepted surface (see `docs/parallel-results/source-traits-models.md`):
+//! Accepted source surface:
 //!
 //! * `trait Name[params] { type A: mod m; fn method(in self, ...) -> T eff [r]; }`
 //! * canonical `impl[params] Trait[args] for Type where T: Trait { type A = T; fn ... }`

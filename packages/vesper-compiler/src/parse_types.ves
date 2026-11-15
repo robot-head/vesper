@@ -1,0 +1,333 @@
+fn parse_ty(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    parse_leave(parse_close(parse_ty_inner(parse_open(parse_enter(p), 204))), p)
+}
+
+fn parse_ty_inner(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let k = parse_kind(p);
+    if k == 12 {
+        let q = parse_bump(p);
+        let q = if parse_at(q, 44) {
+            parse_mode(parse_bump(q))
+        } else {
+            q
+        };
+        let q = parse_expect(parse_ty_params(parse_expect(q, 32)), 33);
+        let q = if parse_at(q, 46) {
+            parse_ty(parse_bump(q))
+        } else {
+            q
+        };
+        parse_effects(q)
+    } else if k == 32 {
+        parse_expect(parse_ty_list(parse_bump(p)), 33)
+    } else if k == 36 {
+        // A tensor shape `[M, N * K, 128]` (§28.2).
+        parse_expect(parse_dimensions(parse_bump(p)), 37)
+    } else if k == 61 {
+        let q = parse_ty(parse_bump(p));
+        let q = parse_expect_word(q, 0x6173);
+        let q = parse_type_args(parse_upper(q));
+        parse_upper(parse_expect(parse_expect(q, 63), 41))
+    } else {
+        let q = parse_ident(p);
+        if parse_at(q, 41) && parse_nth(q, 1).kind == 3 {
+            parse_upper(parse_bump(q))
+        } else {
+            parse_type_args(q)
+        }
+    }
+}
+
+fn parse_dimensions(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 37) {
+        p
+    } else {
+        let q = parse_dimension(parse_dimension_factor(p));
+        let r = parse_eat(q, 38);
+        if parse_ate(q, r) {
+            parse_dimensions(r)
+        } else {
+            r
+        }
+    }
+}
+
+// A product of decimal literals and dimension names (`QHeads * HeadDim`).
+
+fn parse_dimension(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_eat(p, 56);
+    if parse_ate(p, q) {
+        parse_dimension(parse_dimension_factor(q))
+    } else {
+        p
+    }
+}
+
+fn parse_dimension_factor(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at(p, 6) {
+        parse_close(parse_bump(parse_open(p, 204)))
+    } else {
+        parse_ty(p)
+    }
+}
+
+fn parse_ty_params(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 33) {
+        p
+    } else {
+        let q = parse_ty(parse_pass(p));
+        let r = parse_eat(q, 38);
+        if parse_ate(q, r) {
+            parse_ty_params(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn parse_ty_list(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 33) {
+        p
+    } else {
+        let q = parse_ty(p);
+        let r = parse_eat(q, 38);
+        if parse_ate(q, r) {
+            parse_ty_list(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn parse_type_args(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let d = parse_enter(p);
+    let q = parse_eat(d, 36);
+    if parse_ate(d, q) {
+        parse_leave(parse_expect(parse_type_arg_list(q), 37), p)
+    } else {
+        p
+    }
+}
+
+fn parse_type_arg_list(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 37) {
+        p
+    } else {
+        let q = parse_type_arg(p);
+        let r = parse_eat(q, 38);
+        if parse_ate(q, r) {
+            parse_type_arg_list(r)
+        } else {
+            r
+        }
+    }
+}
+
+fn parse_type_arg(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let t = parse_nth(p, 0);
+    if t.kind == 4 && !primitive(t) {
+        let q = parse_bump(p);
+        let r = parse_eat(q, 40);
+        if parse_ate(q, r) {
+            let s = parse_type_args(parse_upper(r));
+            let u = parse_eat(s, 68);
+            if parse_ate(s, u) {
+                parse_lower(u)
+            } else {
+                u
+            }
+        } else {
+            r
+        }
+    } else if t.kind == 6 {
+        // A decimal lane count, as in `Vec[u8, 16]` (§14.3): one TYPE node.
+        parse_close(parse_bump(parse_open(p, 204)))
+    } else {
+        let named = t.kind == 3 || t.kind == 4 || t.kind == 22;
+        let q = parse_ty(p);
+        let r = parse_eat(q, 68);
+        if parse_ate(q, r) {
+            if named {
+                parse_lower(r)
+            } else {
+                syntax_issue(parse_lower(r), 27)
+            }
+        } else {
+            r
+        }
+    }
+}
+
+fn parse_effects(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = parse_eat(p, 18);
+    if parse_ate(p, q) {
+        parse_expect(parse_effect_list(parse_expect(q, 36)), 37)
+    } else {
+        p
+    }
+}
+
+fn parse_effect_list(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 37) {
+        p
+    } else {
+        let q = parse_eat(p, 68);
+        if parse_ate(p, q) {
+            parse_lower(q)
+        } else if parse_at(p, 4) && parse_nth(p, 1).kind != 40 {
+            parse_lower(p)
+        } else {
+            let q = if parse_at(p, 4) {
+                parse_expect(parse_lower(p), 40)
+            } else {
+                p
+            };
+            let r = parse_type_args(parse_upper(q));
+            let s = parse_eat(r, 38);
+            if parse_ate(r, s) || parse_at(r, 68) {
+                parse_effect_list(s)
+            } else {
+                s
+            }
+        }
+    }
+}
+
+// Generics, bounds and fields.
+
+fn parse_generics(p: ParseCursor, track: bool)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    syntax_put(7, 0);
+    let q = parse_eat(p, 36);
+    if parse_ate(p, q) {
+        parse_expect(parse_generic_list(q, track), 37)
+    } else {
+        p
+    }
+}
+
+fn parse_generic_list(p: ParseCursor, track: bool)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 37) {
+        p
+    } else {
+        let row = parse_at(p, 4);
+        let q = parse_ident(
+            if row && track {
+                syntax_bind(p, true)
+            } else {
+                p
+            }
+        );
+        let q = if row && track {
+            parse_with_flags(q, q.nostruct, true, q.bounds)
+        } else {
+            q
+        };
+        let c = parse_eat(q, 40);
+        let r = if parse_ate(q, c) {
+            if row {
+                parse_expect(c, 18)
+            } else if parse_at_word(c, 0, 0x64696d) {
+                // `N: dim` (§28.2), a tensor dimension parameter.
+                parse_bump(c)
+            } else if parse_at(c, 3) {
+                let b = parse_trait_ref(c);
+                let count = syntax_cell(7);
+                if count >= 128 {
+                    let ignored = fail_i(Diag::Limit(c.cur.start));
+                } else {
+                    ()
+                };
+                syntax_put(997000 + count * 2, c.cur.start);
+                syntax_put(997001 + count * 2, b.pos);
+                syntax_put(7, count + 1);
+                parse_with_flags(b, b.nostruct, b.rows, true)
+            } else {
+                parse_required_mode(parse_expect(c, 17))
+            }
+        } else if row {
+            syntax_issue(q, 26)
+        } else {
+            q
+        };
+        let s = parse_eat(r, 38);
+        if parse_ate(r, s) {
+            parse_generic_list(s, track)
+        } else {
+            s
+        }
+    }
+}
+
+fn parse_trait_ref(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let q = if parse_at(p, 44) {
+        parse_expect(parse_package_path(parse_bump(p)), 41)
+    } else {
+        p
+    };
+    parse_type_args(parse_upper(q))
+}
+
+fn parse_package_path(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    let k = parse_kind(p);
+    if (k == 4 || k == 55 || k == 57 || k == 6) && parse_nth(p, 0).start == p.pos {
+        parse_package_path(parse_bump(p))
+    } else {
+        p
+    }
+}
+
+fn parse_expect_word(p: ParseCursor, packed: i64)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_word(p, 0, packed) {
+        parse_bump(p)
+    } else {
+        syntax_issue(
+            p,
+            if packed == 0x6173 {
+                15
+            } else {
+                16
+            }
+        )
+    }
+}
+
+fn parse_fields(p: ParseCursor) -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    parse_expect(parse_field_list(parse_expect(p, 34)), 35)
+}
+
+fn parse_field_list(p: ParseCursor)
+    -> ParseCursor eff [SyntaxMemory, Fail[Diag], Fail[ArithOverflow]] {
+    if parse_at_end(p, 35) {
+        p
+    } else {
+        let q = parse_ty(parse_expect(parse_lower(p), 40));
+        let m = parse_eat(q, 45);
+        let r = if parse_ate(q, m) {
+            parse_field_mode(m)
+        } else {
+            q
+        };
+        let s = parse_eat(r, 38);
+        if parse_ate(r, s) {
+            parse_field_list(s)
+        } else {
+            s
+        }
+    }
+}

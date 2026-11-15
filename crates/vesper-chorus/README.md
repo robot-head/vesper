@@ -1,6 +1,6 @@
 # vesper-chorus
 
-Host library for design §25 (Vesper Chorus): choreographies, endpoint
+Host library for [manuscript §34](../../docs/manuscript/README.md) (Vesper Chorus): choreographies, endpoint
 projection, linear session channels, a Raft-style replication model under
 SimPulse, and a software RDMA lease model.
 
@@ -100,5 +100,4 @@ Limits: Rust ownership plus run-time auditing stands in for the Vesper
 source typing of `Session[P]`; it is not an implementation of those rules.
 There is no `@choreography` macro, no Paxos, no real network or kernel NIC
 (Warp runs on its software NIC, with fixed per-link keys instead of its TLS
-handshake) and no real RDMA NIC. See `docs/parallel-results/chorus.md` and
-`docs/parallel-results/chorus-depth.md`.
+handshake) and no real RDMA NIC.

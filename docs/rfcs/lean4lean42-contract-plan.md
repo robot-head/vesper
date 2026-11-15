@@ -1,5 +1,9 @@
 # Lean4Lean 4.24 external replay: contract recommendation (#297)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This is a proposed implementation contract for review, not source authorization
 or an execution report. Only this new document is owned by this planning lane.
 It was prepared from the repository's tool/proof plans, the coordinator's

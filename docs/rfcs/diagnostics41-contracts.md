@@ -1,5 +1,9 @@
 # Causal diagnostic implementation contracts
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Base main `4a62f9de7ad00ba215ae3ad733edc4ffe3d23e4d` (PR #86).
 The coordinator rechecked open issues and every external PR's actual file list
 before claiming this batch. External Warp lanes remain reserved; only their

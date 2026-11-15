@@ -494,10 +494,121 @@ fn nursery_cancellation_drains_every_in_flight_request() {
     }
 }
 
+/// Observe the real default drain without changing cancellation or polling.
+struct DrainDriver {
+    inner: Option<AnyDriver<u32>>,
+    polls: u64,
+}
+
+impl CompletionDriver<u32> for DrainDriver {
+    fn kind(&self) -> DriverKind {
+        self.inner.as_ref().unwrap().kind()
+    }
+    fn pending(&self) -> usize {
+        CompletionDriver::pending(self.inner.as_ref().unwrap())
+    }
+    fn submit(
+        &mut self,
+        request: Request<u32>,
+    ) -> Result<vesper_pulse::driver::RequestId, (io::Error, Request<u32>)> {
+        let token = request.continuation;
+        let result = CompletionDriver::submit(self.inner.as_mut().unwrap(), request);
+        diagnostic(format_args!(
+            "{}: drain submit token={token} accepted={} pending={}",
+            self.kind(),
+            result.is_ok(),
+            self.pending()
+        ));
+        result
+    }
+    fn cancel(&mut self, id: vesper_pulse::driver::RequestId) -> io::Result<bool> {
+        CompletionDriver::cancel(self.inner.as_mut().unwrap(), id)
+    }
+    fn cancel_all(&mut self) -> io::Result<()> {
+        diagnostic(format_args!(
+            "{}: drain cancel_all begin pending={}",
+            self.kind(),
+            self.pending()
+        ));
+        let result = CompletionDriver::cancel_all(self.inner.as_mut().unwrap());
+        diagnostic(format_args!(
+            "{}: drain cancel_all complete result={result:?} pending={}",
+            self.kind(),
+            self.pending()
+        ));
+        result
+    }
+    fn poll(
+        &mut self,
+        wait: bool,
+    ) -> Result<Vec<vesper_pulse::driver::Completion<u32>>, vesper_pulse::driver::PollError<u32>>
+    {
+        self.polls = self.polls.saturating_add(1);
+        let trace = self.polls <= 32 || self.polls.is_power_of_two();
+        if trace {
+            diagnostic(format_args!(
+                "{}: drain poll {} begin wait={wait} pending={}",
+                self.kind(),
+                self.polls,
+                self.pending()
+            ));
+        }
+        let result = CompletionDriver::poll(self.inner.as_mut().unwrap(), wait);
+        let batch = match &result {
+            Ok(batch) => batch,
+            Err(error) => {
+                diagnostic(format_args!(
+                    "{}: drain poll error={} raw_os_error={:?}",
+                    self.kind(),
+                    error.error,
+                    error.error.raw_os_error()
+                ));
+                &error.completed
+            }
+        };
+        for completion in batch {
+            diagnostic(format_args!(
+                "{}: drain completion id={} token={} result={:?}",
+                self.kind(),
+                completion.id.get(),
+                completion.request.continuation,
+                completion.result
+            ));
+        }
+        if trace {
+            diagnostic(format_args!(
+                "{}: drain poll {} complete wait={wait} pending={} completions={}",
+                self.kind(),
+                self.polls,
+                self.pending(),
+                batch.len()
+            ));
+        }
+        result
+    }
+}
+
+impl Drop for DrainDriver {
+    fn drop(&mut self) {
+        let kind = self.kind();
+        diagnostic(format_args!(
+            "{kind}: drain driver drop begin pending={} polls={}",
+            self.pending(),
+            self.polls
+        ));
+        drop(self.inner.take());
+        diagnostic(format_args!("{kind}: drain driver drop complete"));
+    }
+}
+
 #[test]
 fn drain_returns_every_owner_exactly_once() {
-    for mut driver in drivers::<u32>() {
+    for driver in drivers::<u32>() {
         let kind = driver.kind();
+        let mut driver = DrainDriver {
+            inner: Some(driver),
+            polls: 0,
+        };
         let mut writers = vec![];
         let mut expected = BTreeSet::new();
         for k in 0..3 {
@@ -517,6 +628,10 @@ fn drain_returns_every_owner_exactly_once() {
             Ok(done) => done,
             Err(e) => panic!("{kind}: drain failed: {e:?}"),
         };
+        diagnostic(format_args!(
+            "{kind}: drain returned completions={}",
+            done.len()
+        ));
         let mut seen = BTreeSet::new();
         for c in &done {
             assert!(seen.insert(c.request.continuation), "{kind}: resumed twice");

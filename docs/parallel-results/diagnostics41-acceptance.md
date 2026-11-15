@@ -1,5 +1,9 @@
 # Actual causal diagnostic acceptance — issue #92
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Branch `diagnostics41/acceptance`, base
 `b4d1df8846d29afac7133774d00e39362b66deff`. This lane owns only
 `tests/diagnostics_cli.rs`, `scripts/test-diagnostics.sh`,

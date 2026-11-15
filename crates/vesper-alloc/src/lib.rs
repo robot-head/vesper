@@ -80,8 +80,6 @@
 //! mistakes into errors or reclamation, never into undefined behavior, but the
 //! static guarantees of [T-RegionAlloc]/[T-RegionScope] (escape freedom, exact
 //! consumption of linear payloads and watermarks) remain compiler obligations.
-//! See `docs/parallel-results/strata-regions.md` for the proposed lowering
-//! contract.
 mod backing;
 mod capability;
 mod error;
@@ -103,16 +101,14 @@ pub use region::{
     RegionStr, RegionString, RegionTiled2, RegionVec, TiledError, Watermark,
 };
 
-/// Version of the proposed Alloc/Region lowering contract described in
-/// `docs/parallel-results/strata-regions.md`. Experimental; not yet consumed
-/// by the compiler.
+/// Version of the proposed Alloc/Region lowering contract.
+/// Experimental; not yet consumed by the compiler.
 pub const REGION_LOWERING_CONTRACT_VERSION: u32 = 0;
 
 /// Version of the proposed `RegionAccess` contract (allocation origin,
 /// exclusive mutation, generation/watermark invalidation and linear payload
-/// obligations for region collections) described in
-/// `docs/parallel-results/strata-collections.md`. Experimental; not yet
-/// consumed by the compiler.
+/// obligations for region collections). Experimental; not yet consumed
+/// by the compiler.
 pub const REGION_ACCESS_CONTRACT_VERSION: u32 = 1;
 
 pub use capability::{Alloc, RawBlock};

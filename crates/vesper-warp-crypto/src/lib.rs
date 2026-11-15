@@ -62,7 +62,7 @@
 //! `subtle` before any plaintext is written, so a failed open leaves the
 //! payload bytes untouched (tested). Retry tag verification goes through the
 //! same AEAD path. No constant-time claim is made beyond those dependency
-//! guarantees; see `docs/parallel-results/warp-packet-protection.md`.
+//! guarantees.
 //!
 //! Hardware AEAD offload (kTLS, NIC inline crypto) is not implemented and is
 //! unavailable.

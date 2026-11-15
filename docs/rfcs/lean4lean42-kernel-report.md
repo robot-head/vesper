@@ -1,5 +1,9 @@
 # Lean4Lean 4.24 kernel slice (#298)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented under the published kernel contract `262b5e9`, before writing. The
 coherent source/control checkpoint is `1364376`. This lane owns the two patches,
 fixed controls, `known-fixes.json` and this report only. No Vesper compiler,

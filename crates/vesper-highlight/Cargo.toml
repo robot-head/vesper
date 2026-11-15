@@ -1,0 +1,22 @@
+[package]
+name = "vesper-highlight"
+version = "0.1.0"
+edition = "2024"
+description = "Vesper Chroma (§43): lossless CST semantic highlighting, OKLCH palettes with contrast audits, HTML/ANSI/wire output and a wasm32 C ABI"
+
+[dependencies]
+vesper-syntax = { path = "../vesper-syntax" }
+rowan = { workspace = true }
+smol_str = "=0.3.7"
+
+# `vesper shot` code cards (src/shot/). Behind a feature so the wasm32 build of
+# the highlighter does not pull in shaping, rasterisation or PNG encoding.
+base64 = { version = "=0.22.1", optional = true }
+blake3 = { version = "=1.8.7", optional = true }
+png = { version = "=0.17.16", optional = true }
+rustybuzz = { version = "=0.20.1", optional = true }
+tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "png-format"], optional = true }
+ttf-parser = { version = "=0.25.1", optional = true }
+
+[features]
+shot = ["dep:base64", "dep:blake3", "dep:png", "dep:rustybuzz", "dep:tiny-skia", "dep:ttf-parser"]

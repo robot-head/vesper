@@ -1,5 +1,9 @@
 # Bounded Loom lint severity policy — issue #76
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Branch `protocol41/lint-policy`, base `9eeaecf`. Implements actual TOML policy
 for the checked-source lint command, following §39.2 and
 `docs/rfcs/protocol41-contracts.md`. The original analyzer, compiler, source

@@ -1,5 +1,9 @@
 # Issue #74: bounded actual Arrow IPC stream reader
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented on `protocol41/ipc` from `9eeaecf` after reading issue #74,
 `docs/rfcs/protocol41-contracts.md`, refreshed specification §38, and the existing
 `arrow.rs`. Only new IPC module/tests/example/fixtures and this report are owned.

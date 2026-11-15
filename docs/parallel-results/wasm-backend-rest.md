@@ -1,5 +1,9 @@
 # Compiler Wasm target, rest (§30, §7): wave-eight lane 14 report
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #463. Builds on lane 25 (#348, PR #377, report
 `docs/parallel-results/wasm-backend.md`). Edited paths: `src/wasm_backend.rs`,
 `src/wasm_backend/**` (new `host.rs`), `tests/wasm_backend.rs`,

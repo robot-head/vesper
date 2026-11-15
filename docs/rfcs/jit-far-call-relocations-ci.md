@@ -1,5 +1,9 @@
 # JIT calls across distant allocations
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #576 records the user-supplied Linux failures of `differential_over_repository_sources` on proof PRs #442, #553 and #556. Cranelift 0.125.4 panics at `compiled_blob.rs:61` converting an x86 PC-relative displacement to `i32`; the reported failures include both negative and positive overflow. That identifies an out-of-range relocation. It does not identify the exact function edge or establish that the fixture's four 512 MiB worker stacks caused the placement.
 
 The pinned module implementation marks `Local` and `Export` functions as colocated. x86 code generation consequently emits a direct `X86CallPCRel4` relocation. The actual Bazel JIT dependency enables `selinux-fix`: its default system memory provider allocates independent anonymous mappings without a distance guarantee. A module's functions can therefore require a displacement outside the signed 32-bit range.

@@ -1,7 +1,10 @@
 # Seventh-wave integration contracts
 
-Baseline: the `main` commit named in the [wave-seven prompt index](../agent-prompts/wave-seven/README.md)
-or a descendant. This is an ownership and interface agreement so that thirty-three
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
+Baseline: `main` at `c025b9abb3f90c518b9634143c8bc712b9ea9c30` or a descendant. This is an ownership and interface agreement so that thirty-three
 lanes can run with as little overlap as possible. It is not a soundness theorem.
 
 Wave six added depth to every started section and wired the wave-five crates

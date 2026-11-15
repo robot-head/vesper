@@ -87,7 +87,7 @@ values. Tests independently compare all columns/code metadata for success,
 every error code, cancellation, every typed attribute, empty/partial batches,
 bitmap boundaries and the hard row ceiling. Descriptor tests check lengths,
 null counts, 64-byte offsets and body bounds. This is interoperability evidence,
-not a general untrusted Arrow validator or a Grammar (§38) implementation.
+not a general untrusted Arrow validator or a Grammar ([manuscript §30](../../docs/manuscript/README.md)) implementation.
 
 ## OTAP (`vesper_beacon_arrow::otap`)
 
@@ -192,7 +192,7 @@ has no compression, so a collector exporting to Beacon needs
 keeps each batch's HPACK `headers` raw and undecoded
 (`HeaderPolicy::KeepRaw`); the plain decoder rejects them by default.
 
-**PII redaction (§22.4).** `SpanAttributes::insert` (alias `Attributes`, used for resource, scope,
+**PII redaction (§31.4).** `SpanAttributes::insert` (alias `Attributes`, used for resource, scope,
 event, link, data-point and log attributes and log bodies) accepts only
 `vesper_beacon::Telemetrable` values: scalars, `&'static str` vocabulary and
 `Redacted`. `Secret<T>`, `Pii<T>` and runtime strings are not `Telemetrable`
@@ -205,7 +205,7 @@ that redacted output is byte-identical for different PII inputs.
 `lean/BeaconRedaction.lean` proves non-interference for a model of this
 boundary and of the dictionary stream (see the report).
 
-Source `Trace` effect propagation (§22.2) remains a compiler step; nothing here
+Source `Trace` effect propagation (§31.2) remains a compiler step; nothing here
 reads the evidence vector or fiber context.
 
 ```sh

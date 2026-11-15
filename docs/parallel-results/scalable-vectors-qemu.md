@@ -1,5 +1,9 @@
 # Scalable vectors under QEMU (wave eight, lane 9)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #458. Design: §14.3 (`VVec[P, T]`, `VMask[P, T]`), §20.3 (stage 1).
 Baseline: `1094e649c95e4d81eef4e705d13882ab1339542d` (plan PR #477 merge),
 a descendant of the required `ea1ed29`.

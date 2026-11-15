@@ -1,5 +1,9 @@
 # Checked-source WAL crash and network simulation
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Wave-three lane 4 ([prompt](../agent-prompts/wave-three/04-crash-wal-network-simulation.md)). Base: `origin/main` at `1ffd0ae` (a descendant of the required `02b3a1d`). Branch: `claude/project-thread-bmfybq`. The commit and PR are in the PR description.
 
 Everything is inside `crates/vesper-sim-session/**`. I did not create the optional `vesper-sim-models` crate. A new crate would need root registration and a lockfile change, and the model state is small enough to live in `vesper_sim_session::model`. It has no source or evaluator dependency, so it can move to its own crate later without API changes. The SimPulse kernel and journal, the compiler and runtime, native sessions and allocation are untouched. The root `Cargo.toml`/`Cargo.lock` and CI are unchanged, so **no coordinator patch is needed**.
@@ -182,7 +186,7 @@ The full workspace suite was not rerun, because no root, compiler or other-crate
 ## Coordinator notes
 
 - **No root patch is needed.** There are no new crates or dependencies, and `Cargo.lock` is unchanged.
-- **Suggested global-doc line** for `docs/parallel-work.md` or the wave-three README status, if wanted: "Crash/WAL/network models: integrated in `crates/vesper-sim-session` (scenario v2, recording v2, model semantics `vesper-sim-models-v1`); see `docs/parallel-results/crash-wal-network-simulation.md`."
+- **Suggested global-doc line** for `docs/README.md` or the wave-three README status, if wanted: "Crash/WAL/network models: integrated in `crates/vesper-sim-session` (scenario v2, recording v2, model semantics `vesper-sim-models-v1`); see `docs/parallel-results/crash-wal-network-simulation.md`."
 - **Public API changes in this crate:**
   - `ExecutionIdentity` gained `model_semantics`.
   - `Recording` gained `model_trace`, `durable` and `lost`.

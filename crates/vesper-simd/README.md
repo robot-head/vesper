@@ -1,6 +1,6 @@
 # Vesper SIMD scanner milestone
 
-This library implements the delimiter-count and XOR example from design §14
+This library implements the delimiter-count and XOR example from [manuscript §13](../../docs/manuscript/README.md)
 using real Cranelift machine code. Its safe Rust entry accepts `&[u8]` and
 returns `ScanResult { matches: u64, xor: u8 }`.
 
@@ -65,7 +65,7 @@ on x86_64; AArch64 native Rust execution requires a separate target runner.
 
 ## Scalable vectors (`vvec`)
 
-`vesper_simd::vvec` implements §14.3's length-agnostic strip-mined predication
+`vesper_simd::vvec` implements §13.3's length-agnostic strip-mined predication
 for `u8` lanes. A profile fixes the lanes per vector: `Scalar::new(lanes)` (any
 1..=256, the portable reference), `Sve::detect()` (AArch64 SVE, `cntb` bytes) or
 `Rvv::detect()` (RVV 1.0, `vlenb` bytes at `e8, m1`). Hardware tokens have

@@ -348,7 +348,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: windows-platform-tests-${{ needs.plan.outputs.sha }}-${{ github.run_id }}
-          path: ${{ runner.temp }}/platform-tests.json
+          path: |
+            ${{ runner.temp }}/platform-tests.json
+            ${{ runner.temp }}/platform-tests-logs/
           if-no-files-found: warn
 
   complete:

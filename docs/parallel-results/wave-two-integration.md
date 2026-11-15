@@ -1,5 +1,9 @@
 # Second parallel wave integration
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 All seven completed lanes are integrated on main: checked arithmetic (PR #17),
 native lifecycle (PR #20), cached WASI builds (PR #16), Pact compiler bridge
 (PR #15), Strata collections (branch `claude/project-thread-5ily4n`, `efc5563`),

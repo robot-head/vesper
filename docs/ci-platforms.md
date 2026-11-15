@@ -84,8 +84,7 @@ A test that cannot run on a platform is gated in source, never dropped from CI:
 - A test whose subject exists but whose environment is missing uses
   `#[cfg_attr(<platform>, ignore = "<reason>")]`, so `cargo test` lists it as
   ignored with the reason instead of passing silently.
-- Kernel- or hardware-dependent tests follow integration rule 7 in
-  [parallel-work.md](parallel-work.md): report unavailable validation explicitly.
+- Kernel- or hardware-dependent tests report unavailable validation explicitly.
 
 ## Known platform gaps (current workspace)
 
@@ -133,8 +132,7 @@ The fixed packets are `lean4lean_foundations42`, `lean4lean_construction42`,
 `lean4lean_normalization42`. Their dependent PRs add the same scheduling entry
 as each target is introduced. Only the foundation packet's macOS timeout was
 measured; the others share its platform-neutral replay design. Their internal
-300-second limits and complete checks remain unchanged. See
-[the scheduling evidence](rfcs/lean4lean-proof-packets-ci-scheduling.md).
+300-second limits and complete checks remain unchanged.
 
 Because nothing else uses it, the macOS and Windows lanes also no longer
 prepare the pinned external Logos checker (`VESPER_LOGOS42_ROOT`),

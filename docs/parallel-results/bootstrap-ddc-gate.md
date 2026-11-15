@@ -1,8 +1,12 @@
 # Verified bootstrap: Stage 2/3 fixed-point gate, DDC cross-check and the bootstrap lock (wave eight, lane 1)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #450. Base: `1094e649c95e4d81eef4e705d13882ab1339542d` (`origin/main`, a
 descendant of the required `ea1ed29`). Design: §42.2, §42.4 and §42.5 of
-`docs/specification.txt`.
+the pre-manuscript design.
 
 ## What was delivered
 

@@ -1,11 +1,18 @@
 # Vesper eBPF: pre-flight verifier and XDP programs
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../../manuscript/README.md) is the sole specification; use the
+> [section map](../../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Suggested branch: `wave5/ebpf`. Claim issue: #124.
 
 ~~~text
+Specification authority: docs/manuscript/content.typ is the sole specification.
+Resolve earlier section numbers with docs/section-map.md before implementing requirements.
+
 You are implementing one substantial milestone of the Vesper design (§27 (Vesper eBPF)) in https://github.com/robot-head/vesper.
 
-Start from a fresh origin/main in a NEW cloud checkout or dedicated git worktree. Require baseline af03122ea74d403f203170926945f9d35786b289 or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Read AGENTS.md if present, docs/parallel-work.md, docs/implementation.md, docs/rfcs/wave-five-contracts.md, docs/agent-prompts/wave-five/README.md and the whole of §27 (Vesper eBPF) in docs/specification.txt (the snapshot matches the Google Doc revision of 2026-11-12 09:18 UTC) before editing.
+Start from a fresh origin/main in a NEW cloud checkout or dedicated git worktree. Require baseline af03122ea74d403f203170926945f9d35786b289 or a descendant; record the actual SHA. Development happens on `main`; open your PR against `main`. Read AGENTS.md if present, docs/README.md, docs/rfcs/wave-five-contracts.md, docs/agent-prompts/README.md and the whole of §27 (Vesper eBPF) in docs/manuscript/content.typ before editing.
 
 Claim: this work is claimed by GitHub issue #124. Before you start, check the open issues and PRs in robot-head/vesper for overlapping work by other agents; if something overlaps, stop and report instead of duplicating it. Link #124 from your PR ("Closes #124").
 

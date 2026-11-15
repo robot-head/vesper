@@ -1,5 +1,9 @@
 # Verified direct code generator
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Wave-eight lane 2 ([prompt](../agent-prompts/wave-eight/02-verified-direct-codegen.md)), claim #451. Design §42.1 pillar 3b and §7.
 
 - Branch `claude/project-thread-oftl51`. It started from `1094e64` (a descendant of the required baseline `ea1ed29`), and `origin/main` was merged in before validation. The PR closes #451.

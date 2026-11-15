@@ -1,5 +1,9 @@
 # Executable resource reference model: feasibility plan (#309)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Historical planning checkpoint for #309. The separately claimed #317 now implements the reference-evaluator provider with its own narrower [frozen API/profile](runtime-resource-trace42-contracts.md) and [actual evidence](runtime-resource-trace42-integration.md). The model/native/generator/campaign proposals below remain future work; they are not implemented behavior or a full-harness source authorization.
 
 This is a source-review plan at repository baseline `c226ee98695135ad59e64318213e79f911ad6325`, not an implementation or execution report. No Lean/Rust source, tests, Cargo files or compiler hooks were changed, and no build, model replay or CLI probe was run. The compiled CLI is older than this baseline and was not used as current evidence. Only this new document is owned by this lane. The specification snapshot SHA256 remains `8df79941a11ca2d777d8d5c5e7f4db26ef1a57f06babe2e71f3951a1f676883d`, with Google modification metadata `2026-11-13T04:46:25.948Z`.

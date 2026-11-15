@@ -23,7 +23,6 @@ for (const file of ['transaction.ves', 'projections.ves', 'checked_math.ves']) {
 assert.equal((await readFile(resolve(dist, 'CNAME'), 'utf8')).trim(), 'vesper-lang.org');
 assert(html.includes('https://vesper-lang.org/'), 'Canonical domain missing');
 assert(!/<!-- source:|href="#"/.test(html), 'Unresolved content');
-assert(!html.includes('docs/specification.txt'), 'The design links must open the typeset PDF');
 const designActions = [...html.matchAll(/<a\b[^>]*href="([^"]+)"[^>]*>Read the design<\/a>/g)];
 assert(designActions.length > 0 && designActions.every(([, url]) => url === 'vesper-specification.pdf'), 'Every design action must open the manuscript');
 const specification = await readFile(resolve(dist, 'vesper-specification.pdf'));

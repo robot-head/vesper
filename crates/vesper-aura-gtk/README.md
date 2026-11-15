@@ -1,7 +1,7 @@
 # vesper-aura-gtk
 
 A GTK 4 implementation of the `vesper-aura` transactional `Backend` contract
-(design §18). With the `gtk` feature, `GtkBackend` creates, updates, reorders
+([manuscript §37](../../docs/manuscript/README.md)). With the `gtk` feature, `GtkBackend` creates, updates, reorders
 and tears down real GTK 4 widgets from Aura reconciliation plans and routes GTK
 signals back to the host by handler key. Without the feature the crate only
 exposes the pure mapping helpers, so workspace builds on hosts without GTK

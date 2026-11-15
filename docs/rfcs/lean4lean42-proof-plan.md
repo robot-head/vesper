@@ -1,5 +1,9 @@
 # Lean4Lean proof scope and external-checking gates (§42, #297)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 This is a source-based plan for [issue #297](https://github.com/robot-head/vesper/issues/297),
 not an implementation or execution report. No Lean/Lake/compiler builds,
 installations, external replay, or transitive axiom audits were executed by this

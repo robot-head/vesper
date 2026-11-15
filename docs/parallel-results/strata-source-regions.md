@@ -1,5 +1,9 @@
 # Source Strata: lexical regions and lifetime checking (§15)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Wave seven, lane 29. Claim: #352. Base: `283c811` (descendant of the required
 baseline `c025b9a`). Branch: `claude/project-thread-jlrqqc`.
 

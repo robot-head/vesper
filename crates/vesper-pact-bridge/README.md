@@ -16,4 +16,4 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo run --locked --example bridge
 ```
 
-Everything except `CheckedPackage` and the `SessionBuilder` wrapper now lives in the root-free [`vesper-pact-binding`](../vesper-pact-binding) crate, which the compiler itself uses; the bridge re-exports its API unchanged. See [the original lane report](../../docs/parallel-results/pact-compiler-bridge.md) and [the source traits report](../../docs/parallel-results/source-traits-models.md).
+Everything except `CheckedPackage` and the `SessionBuilder` wrapper now lives in the root-free [`vesper-pact-binding`](../vesper-pact-binding) crate, which the compiler itself uses; the bridge re-exports its API unchanged.

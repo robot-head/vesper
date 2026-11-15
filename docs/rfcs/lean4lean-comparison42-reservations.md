@@ -1,5 +1,9 @@
 # Comparison packet resource backport (#537)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 At parent `8b99003edd8aa964020471291bf81abb89cc0ce8`, reserve resources
 for exactly seven existing fixed proof packets: foundations, construction,
 order, map, pre-subsumption normalization, full normalization and comparison.

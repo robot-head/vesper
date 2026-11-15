@@ -1,5 +1,9 @@
 # Deterministic arithmetic oracle corpus (#272)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Public claim #272 and frozen contract `cae1bc5` preceded source writes. This lane
 owns only `src/bin/arithmetic_oracle42/corpus.rs`, `tests/oracle42_corpus.rs`, and
 this report. Shared DTO implementation `95dc143` was copied here as `31dd24c`;

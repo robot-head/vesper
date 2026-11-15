@@ -1,5 +1,9 @@
 # Fifth-wave integration contracts
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Baseline: `af03122ea74d403f203170926945f9d35786b289` or a descendant. This is an
 ownership and interface agreement so fourteen lanes can run at once. It is not a
 soundness theorem, and it freezes nothing new in the existing compiler.

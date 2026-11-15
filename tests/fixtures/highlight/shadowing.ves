@@ -1,0 +1,25 @@
+// Tier 1 fixture: an inner linear `tx` shadows an outer copy `tx`.
+linear struct WriteTxn {
+    slot: u64
+}
+
+impl WriteTxn {
+    fn commit(sink self) -> u64 {
+        let WriteTxn {
+            slot
+        }
+        = self;
+        slot
+    }
+}
+
+fn main() -> u64 {
+    let tx: u64 = 7;
+    let inner = {
+        let tx = WriteTxn {
+            slot: 1
+        };
+        tx.commit()
+    };
+    wrapping_add(tx, inner)
+}

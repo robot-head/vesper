@@ -1,5 +1,9 @@
 # Wave seven lane 19: Crucible preemption bounding, state caching and a Lean DPOR model (§29)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #342. Follows the wave-six report
 ([crucible-depth.md](crucible-depth.md)) and closes the gaps it listed for
 systematic exploration.

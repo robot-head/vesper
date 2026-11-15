@@ -1,7 +1,10 @@
 # Sixth-wave integration contracts
 
-Baseline: the `main` commit named in the [wave-six prompt index](../agent-prompts/wave-six/README.md)
-or a descendant. This is an ownership and interface agreement so that integration
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
+Baseline: `main` at `cda092f2f6427e23c566d7e63259000d3d6c699f` or a descendant. This is an ownership and interface agreement so that integration
 B and twenty-four lanes can run with as little overlap as possible. It freezes
 nothing new in the compiler, and it is not a soundness theorem.
 

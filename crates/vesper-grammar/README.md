@@ -1,6 +1,6 @@
 # vesper-grammar
 
-Dependency-free, safe scalar host implementations of an explicit §38 subset:
+Dependency-free, safe scalar host implementations of an explicit [manuscript §30](../../docs/manuscript/README.md) subset:
 canonical unsigned LEB128, dependent-length frames, validated primitive Arrow
 signed-i64 buffers, executable deterministic byte-FIRST grammars and canonical
 logical-value codecs, explicit
@@ -29,7 +29,7 @@ implementation, secret constant-time parser or formal proof.
 
 Each module documents its byte/depth/work/count/metadata/output budgets. Payload
 borrows do not imply allocation-free metadata. See `protobuf`, `der` and `ipc`
-examples and the matching `docs/parallel-results/protocol41-*.md` reports.
+examples for executable usage.
 
 ## Canonical framing and remainder ownership
 

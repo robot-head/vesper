@@ -1,5 +1,9 @@
 # Executable Lean arithmetic oracle (§42): frozen contract
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Parent #269 and child claims #272–#275 precede implementation. The coordinator
 reviewed this contract with independent Lean/model, corpus/compiler-probe and
 acceptance/process reviews. Source writers begin only after this frozen version

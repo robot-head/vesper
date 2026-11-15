@@ -1,5 +1,9 @@
 # Wave seven lane 17: eBPF library — every program type runs, tail calls, more kfuncs, CO-RE
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Design coverage: §27.1 items 1 and 4 (`@btf_core`), §27.4 (Lean model),
 §27.5 (pre-flight verifier). Claim issue #340.
 

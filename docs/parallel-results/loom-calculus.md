@@ -1,5 +1,9 @@
 # Loom manifest and package-calculus milestone
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented `crates/vesper-loom-calculus` against specification §8. The crate parses the supplied Loom.toml shape, validates scoped package identities and declarative configuration, expands additive features, and validates proposed exact-version package solutions. Its versioned JSON DTOs are independent of experimental compiler ASTs.
 
 The public entry points are `parse_manifest`, `validate_manifest`, and `validate_solution`; a successful `Validation` includes a deterministic `PackageGraph`. Diagnostics are structured, sorted, and deduplicated. Errors never return a graph that could be mistaken for a validated solution. Unreachable but structurally valid selections are reported and omitted from the graph. System packages occupy a separate namespace and currently require SemVer-compatible versions.

@@ -1,5 +1,9 @@
 # Quarry concurrency, secondary indexes, SSI and join order (§24)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Wave-eight lane 22 ([prompt](../agent-prompts/wave-eight/22-quarry-concurrency-indexes.md)),
 claim issue [#471](https://github.com/robot-head/vesper/issues/471). Base: `origin/main`
 at `1094e64`, with main merged in before the push. Branch: `claude/project-thread-xs6ojp`.

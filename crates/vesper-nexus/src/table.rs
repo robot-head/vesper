@@ -13,7 +13,7 @@
 //! never silently released. This is host-library discipline only; it is not
 //! an implementation of the Vesper source typing rules for `Mode::Linear`.
 //!
-//! Corrections to the §30.5 sketch, recorded in `docs/parallel-results/nexus.md`:
+//! Resource-table invariants:
 //! * a generation that would wrap retires its slot instead of reusing
 //!   generation 1 (the sketch's `wrapping_add(1).max(1)` permits ABA reuse);
 //! * `end_borrow` checks the borrowing tenant, so tenant B cannot end tenant

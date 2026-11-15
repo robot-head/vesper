@@ -135,13 +135,20 @@ fn run(args: &[String]) -> Result<bool, String> {
             println!("seed lock ok");
             Ok(true)
         }
+        Some("check-stage1-lock") if args.len() == 2 => {
+            let lock = vesper_codegen_verified::stage1::Stage1Lock::parse(&read(Path::new(&args[1]))?)
+                .map_err(|e| e.to_string())?;
+            lock.require_cross_backend().map_err(|e| e.to_string())?;
+            println!("stage1 cross-backend record ok ({} programs)", lock.programs.len());
+            Ok(true)
+        }
         Some("check-lock") if args.len() == 2 => {
             let lock = parse_lock(&read(Path::new(&args[1]))?).map_err(|e| e.to_string())?;
             println!("lock ok: fixed point {}", lock.quorum.path_a_stage3);
             Ok(true)
         }
         _ => Err(
-            "usage: vesper-bootstrap seed-lock ... | check-seed-lock FILE | check-lock FILE".into(),
+            "usage: vesper-bootstrap seed-lock ... | check-seed-lock FILE | check-stage1-lock FILE | check-lock FILE".into(),
         ),
     }
 }

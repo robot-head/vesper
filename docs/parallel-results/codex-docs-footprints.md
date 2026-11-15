@@ -1,5 +1,9 @@
 # Wave eight lane 17: Codex may-use footprints, mode-crossing tables, capability badges and a package-wide index (#466)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Base: `1094e64` (origin/main, a descendant of the required `ea1ed29`). Branch:
 `claude/project-thread-iargwt`. Claim issue: #466. Before starting, open issues
 and PRs were checked; nothing overlapped (open work: Codex's Lean4Lean PRs,

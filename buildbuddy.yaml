@@ -62,9 +62,6 @@ actions:
       # One Bazel build for every executable the scripts run, instead of a
       # build and a cquery per executable.
       - run: "scripts/ci/prebuild-acceptance.sh .ci-bazel-executables"
-      - run: |
-          python scripts/check-specification-snapshot.py
-          python -m unittest discover -s scripts/tests -p test_specification_snapshot.py
       - run: "scripts/test-aarch64.sh"
       - run: "scripts/test-simd-aarch64.sh"
       - run: "scripts/test-native-host.sh"

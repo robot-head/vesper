@@ -1,5 +1,9 @@
 # Wave five lane 4: Vesper eBPF pre-flight verifier and XDP programs
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Design coverage: §27.1 items 1, 2, 3 and 5, §27.2 wire structs, §27.3 XDP
 SYN-flood mitigator and user-space ring consumer, §27.4 firewall proof,
 §27.5 pre-flight abstract verifier. Issue #124.

@@ -1,5 +1,9 @@
 # Offline Loom resolution
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Implemented `crates/vesper-loom-solver` with a versioned serde local catalog and
 the agreed CLI-facing API:
 

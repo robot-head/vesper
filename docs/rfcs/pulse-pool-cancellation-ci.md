@@ -1,5 +1,9 @@
 # Pulse pool startup failure and cancellation coverage
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #573 follows the user-supplied timeout of `cancelling_the_pool_completes_parked_reads_on_every_worker` on PR #412 at `57498bfd27276a1549cf36d0f920d7f8df135651` (invocation `c5b10f48-8f04-44e1-bbec-1d76622eee7c`). The other two pool integration tests completed. That log does not identify the backend or prove whether the stall was in startup, cancellation, draining, or joining.
 
 The unchanged actual Bazel target passed locally, followed by 200 direct executions of its complete three-test binary and 200 cancellation-only executions. The available backend is epoll; the host denies io_uring with `EPERM`. A separate controlled resource failure exposed a production startup deadlock: a limit applied only to an owned child allowed one real worker to start, then the next OS thread creation failed with `WouldBlock` / OS 11. `spawn_scoped(...).expect(...)` panicked while the created worker waited at `Barrier(3)`, and scoped unwinding waited to join that worker. After five seconds, the child still had its main/test/worker threads waiting on futexes, an unregistered epoll descriptor and the retained pipes. Its state was captured before that child alone was terminated and reaped. Parent and global process limits were unchanged. This demonstrates the partial-startup defect; it does not establish that the hosted timeout had the same cause.

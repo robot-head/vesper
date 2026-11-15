@@ -1,5 +1,9 @@
 # Wave six lane 20: Crucible virtual arenas, SimPulse timers and I/O, and DPOR (§29)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #262. Follows the wave-five Crucible report
 ([crucible.md](crucible.md)), whose remaining gaps this lane closes in part.
 

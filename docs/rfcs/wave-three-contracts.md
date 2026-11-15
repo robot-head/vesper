@@ -1,5 +1,9 @@
 # Third-wave integration contracts
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Baseline: `02b3a1d175efb5d2561b7fa5b0aaf80121ae1bc6` or a descendant. All seven prior handoffs are merged and
 registered. Checked arithmetic is `vesper.arith.checked/1`, interface semantics
 version is 2, and fiber ABI is 2. This is an ownership/compatibility agreement,

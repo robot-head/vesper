@@ -1,0 +1,99 @@
+// vesper.syntax.flat/1: 1,048,576 addressable i64 cells in a sparse
+// radix-16 table. Directory slots and leaf cells are mutable region boxes;
+// their tuple directories never change. This avoids rebuilding a whole
+// page to update one word. All capabilities are discharged by syntax_run.
+linear effect SyntaxMemory {
+    fn read(index: i64) -> i64;
+    fn write(index: i64, value: i64);
+}
+copy struct SyntaxSlots[T: mod copy] {
+    slots: (T, T, T, T, T, T, T, T, T, T, T, T, T, T, T, T)
+}
+fn syntax_directory[T: mod copy]() -> SyntaxSlots[RegionBox[r, Option[T]]] eff [r: Region] {
+    let empty: Option[T] = Option::None;
+    SyntaxSlots {
+        slots: (
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty),
+            r.box(empty)
+        )
+    }
+}
+fn syntax_words() -> SyntaxSlots[RegionBox[r, i64]] eff [r: Region] {
+    SyntaxSlots {
+        slots: (
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0),
+            r.box(0)
+        )
+    }
+}
+fn syntax_cell(index: i64) -> i64 eff [SyntaxMemory, Fail[Diag]] {
+    if index < 0 || index >= 1048576 {
+        fail_i(Diag::Limit(0))
+    } else {
+        SyntaxMemory::read(index)
+    }
+}
+fn syntax_put(index: i64, value: i64) -> Unit eff [SyntaxMemory, Fail[Diag]] {
+    if index < 0 || index >= 1048576 || value < 0 {
+        let ignored = fail_i(Diag::Limit(0));
+        ()
+    } else {
+        SyntaxMemory::write(index, value)
+    }
+}
+fn syntax_read_0(page: SyntaxSlots[RegionBox[r, i64]], index: i64) -> i64 eff [r: Region] {
+    r.get(syntax_slot(page, index))
+}
+fn syntax_write_0(page: SyntaxSlots[RegionBox[r, i64]], index: i64, value: i64)
+    -> Unit eff [r: Region] {
+    r.set(syntax_slot(page, index), value)
+}
+
+fn syntax_slot[T: mod copy](page: SyntaxSlots[T], index: i64) -> T {
+    match index {
+        0 => page.slots[0],
+        1 => page.slots[1],
+        2 => page.slots[2],
+        3 => page.slots[3],
+        4 => page.slots[4],
+        5 => page.slots[5],
+        6 => page.slots[6],
+        7 => page.slots[7],
+        8 => page.slots[8],
+        9 => page.slots[9],
+        10 => page.slots[10],
+        11 => page.slots[11],
+        12 => page.slots[12],
+        13 => page.slots[13],
+        14 => page.slots[14],
+        _ => page.slots[15],
+    }
+}

@@ -10,4 +10,4 @@ vesper emit examples/traits/shapes.ves --emit lean
 vesper check examples/traits/overlap_rejected.ves   # E0605 (PACT0102 overlap)
 ```
 
-The accepted grammar and static fragment are described in [the lane report](../../docs/parallel-results/source-traits-models.md).
+The compiler implementation is in [`src/pact_frontend.rs`](../../src/pact_frontend.rs); language requirements are in the [manuscript](../../docs/manuscript/README.md).

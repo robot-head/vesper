@@ -1,5 +1,9 @@
 # Nursery cancellation timeout diagnostics
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Issue #577 follows the user-confirmed Linux timeout of
 `nursery_cancellation_drains_every_in_flight_request` in #407 at
 `2969db0103c3ee81e5c31ab17b9009e0ea85a42f`, invocation

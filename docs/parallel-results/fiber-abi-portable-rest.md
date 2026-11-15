@@ -1,5 +1,9 @@
 # Fiber ABI: portable Pulse tests, kernel write tracking and deep unwinding (wave eight, lane 19)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Claim: #468. Design sections §12 (native fibers, Pulse) and §31 (Chrono).
 Baseline: `1094e64` (origin/main, a descendant of the required `ea1ed29`;
 the dependency PR #441 is merged). Exclusive paths:

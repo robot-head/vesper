@@ -1,5 +1,9 @@
 # Wire/Json: wider SIMD paths, Eisel–Lemire floats and a fuller Lean model (§20)
 
+> Retained work context for open issues, unmerged branches, or their dependencies.
+> The [manuscript](../manuscript/README.md) is the sole specification; use the
+> [section map](../section-map.md) for earlier numbering. Confirm live ownership before acting.
+
 Wave-seven lane 9, claim issue #332. Branch `claude/project-thread-xpuhlp`
 (the prompt suggested `wave7/serde-json-rest`; this session may push only the
 former). Base `283c811` (origin/main, the merge of plan PR #354), a descendant
