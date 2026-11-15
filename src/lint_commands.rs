@@ -6,7 +6,7 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
 };
 #[allow(unused_imports)]
-use vesper::tooling::doc::sources::{PackageSources, SourceLimits, discover};
+use vesper::tooling::doc::sources::{PackageSources, SourceLimits, discover, package_root};
 #[allow(unused_imports)]
 pub use vesper::tooling::lint::{
     ConfigProvenance, PolicyOutcome, PolicyReport, PreparedLint, ReportedFinding, SourceReport,
@@ -14,7 +14,7 @@ pub use vesper::tooling::lint::{
 };
 use vesper_lint::policy::{Policy, PolicyLimits};
 const MAX_BYTES: usize = 262144;
-pub const HELP: &str = "Usage: vesper lint [FILE|DIR] [--json] [--fix] [--semver-safe] [--config PATH]\n\nCheck actual resolved effects and supported inout field accesses.\nUnused effects (L0102) may be removed only after complete candidate reparse/recheck.\nProjection narrowing (L0101) is diagnostic-only: caller/signature changes need review.\nWith no path (or a directory), lint every .ves source of the package: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-*\nand nested-package directories are skipped, symlinks are not followed and any failed file fails.\n--semver-safe requires --fix and validates exported supported interface compatibility.\nHandlers, closures, indirect/open-row/recursive calls remain conservative.\nInputs: regular UTF-8 files <=256 KiB; token/nesting/work budgets also apply.\n--config loads one explicit bounded Loom.toml policy; no adjacent/default discovery.\nAllow suppresses diagnostics and fixes; warn succeeds; remaining deny exits nonzero.\nFuture warn/allow lints are reported unavailable; future deny/plugins fail closed.\nNo arena escape, mode-relaxation, FIP, secret/Cancel or plugin-pack analysis.\n";
+pub const HELP: &str = "Usage: vesper lint [FILE|DIR] [--json] [--fix] [--semver-safe] [--config PATH]\n\nCheck actual resolved effects and supported inout field accesses.\nUnused effects (L0102) may be removed only after complete candidate reparse/recheck.\nProjection narrowing (L0101) is diagnostic-only: caller/signature changes need review.\nWith no path (or a directory), lint every .ves source of the package: the nearest\nLoom.toml at or above the directory (else the directory itself); hidden, target/, bazel-*\nand nested-package directories are skipped, symlinks are not followed and any failed file fails.\n--semver-safe requires --fix and validates exported supported interface compatibility.\nHandlers, closures, indirect/open-row/recursive calls remain conservative.\nInputs: regular UTF-8 files <=256 KiB; token/nesting/work budgets also apply.\nThe nearest package Loom.toml supplies policy; --config overrides discovery.\nAllow suppresses diagnostics and fixes; warn succeeds; remaining deny exits nonzero.\nFuture warn/allow lints are reported unavailable; future deny/plugins fail closed.\nNo arena escape, mode-relaxation, FIP, secret/Cancel or plugin-pack analysis.\n";
 fn read_source(path: &Path) -> Result<(String, fs::Permissions), String> {
     let metadata = fs::symlink_metadata(path).map_err(|e| format!("{}: {e}", path.display()))?;
     if !metadata.is_file() {
@@ -343,7 +343,7 @@ fn lint_package(package: &PackageSources, options: &Options, json: bool) -> Resu
 pub fn run(args: Vec<String>) -> Result<(), String> {
     let json = args.iter().any(|a| a == "--json");
     let mut config_label: Option<String> = None;
-    let options = match parse_options(args, &mut config_label) {
+    let mut options = match parse_options(args, &mut config_label) {
         Ok(Some(options)) => options,
         Ok(None) => return Ok(()),
         Err(error) => return invalid(json, error, config_label),
@@ -353,6 +353,41 @@ pub fn run(args: Vec<String>) -> Result<(), String> {
         Some(path) if fs::metadata(path).is_ok_and(|m| m.is_dir()) => Some(path.clone()),
         Some(_) => None,
     };
+    if !options.explicit_config {
+        let start = package_start.as_deref().unwrap_or_else(|| {
+            options
+                .path
+                .as_deref()
+                .and_then(Path::parent)
+                .filter(|p| !p.as_os_str().is_empty())
+                .unwrap_or(Path::new("."))
+        });
+        let manifest = match package_root(start, SourceLimits::default()) {
+            Ok((_, manifest)) => manifest,
+            Err(error) => return invalid(json, error, config_label),
+        };
+        if let Some(manifest) = manifest {
+            config_label = Some(manifest.display().to_string());
+            let (policy, provenance) = match load_policy(&manifest) {
+                Ok(value) => value,
+                Err(error) => return invalid(json, error, config_label),
+            };
+            if let ConfigProvenance::Explicit {
+                path,
+                bytes,
+                blake3,
+            } = provenance
+            {
+                options.provenance = ConfigProvenance::Discovered {
+                    path,
+                    bytes,
+                    blake3,
+                };
+            }
+            options.policy = policy;
+            options.explicit_config = true;
+        }
+    }
     if let Some(start) = package_start {
         return match discover(&start, SourceLimits::default()) {
             Ok(package) => lint_package(&package, &options, json),

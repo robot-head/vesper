@@ -36,6 +36,44 @@ fn class_of(src: &str, spans: &[HighlightSpan], token: &str, nth: usize) -> C {
 }
 
 #[test]
+fn appended_operators_keep_real_tokens_and_parser_recovery() {
+    let source = "fn f() -> u64 { ~1 }";
+    let cst = highlight_tier0(source).unwrap();
+    let tokens = highlight_tier0_tokens(source).unwrap();
+    for spans in [&cst, &tokens] {
+        verify_lossless_spans(source.len(), spans).unwrap();
+        let tilde = spans.iter().find(|s| text(source, s) == "~").unwrap();
+        assert_eq!(tilde.class, C::PunctLigature);
+        assert_eq!(tilde.flags & flags::RECOVERED, 0);
+    }
+    let source = "fn f() { x |= 1; y &= 2; }";
+    let cst = highlight_tier0(source).unwrap();
+    let tokens = highlight_tier0_tokens(source).unwrap();
+    for spans in [&cst, &tokens] {
+        verify_lossless_spans(source.len(), spans).unwrap();
+        for operator in ["|=", "&="] {
+            let span = spans.iter().find(|s| text(source, s) == operator).unwrap();
+            assert_eq!(span.class, C::PunctLigature);
+        }
+    }
+    // These lexical operators are not parser support; their tokens must not
+    // acquire a spurious lexer-error marker merely from the discriminant map.
+    for operator in ["|=", "&="] {
+        let span = cst.iter().find(|s| text(source, s) == operator).unwrap();
+        assert_eq!(span.flags & flags::RECOVERED, 0);
+    }
+    assert!(tokens.iter().all(|span| span.flags & flags::RECOVERED == 0));
+    let invalid = "fn # x";
+    for spans in [
+        highlight_tier0(invalid).unwrap(),
+        highlight_tier0_tokens(invalid).unwrap(),
+    ] {
+        let hash = spans.iter().find(|s| text(invalid, s) == "#").unwrap();
+        assert_ne!(hash.flags & flags::RECOVERED, 0);
+    }
+}
+
+#[test]
 fn tier0_is_lossless_and_classifies_the_design_snippet() {
     let spans = highlight_tier0(SAMPLE).unwrap();
     verify_lossless_spans(SAMPLE.len(), &spans).unwrap();
