@@ -126,3 +126,16 @@ inserted delay from elapsed time and reports the predicted end-to-end speedup
 in basis points per region. Unlike Coz, regions are explicit calls rather than
 sampled lines, delay accrues when a region ends, and there is no credit for
 delay accrued while a thread was blocked.
+
+## Exact paired signed-rank probability
+
+`signed_rank_exact` accepts up to 32 caller-provided paired integer differences.
+It discards zeros using the Wilcoxon convention, assigns exact doubled midranks
+to tied magnitudes, and reports a two-sided sign-randomization probability as
+an exact fraction. It also reports discarded zeros and tied magnitude groups.
+An empty input, more than 32 pairs, or an all-zero input is an explicit error.
+
+Its null interpretation requires independent, equiprobable signs conditional
+on the observed nonzero magnitudes and zero pattern. The API does not establish
+these assumptions or measurement provenance; it does not compute a confidence
+interval or operate the existing regression gate.
