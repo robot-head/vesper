@@ -919,15 +919,18 @@ fn order_definitions(definitions: Vec<(String, Definition)>, recursive: Definiti
         } else {
             declarations.extend(members.into_iter().map(|(_, d)| {
                 // CFG blocks are internal: let `simp [f]` see through them.
+                // Nullary blocks use `abbrev` instead of `@[simp] def` because
+                // Lean 4.35's equation generator WHNF-reduces 0-arity constants
+                // across large integer multipliers (exhausting `maxRecDepth`).
                 let block = d.name.components()[0].as_str().starts_with("$block_");
-                Declaration::Definition(Definition {
-                    kind: if block {
-                        DefinitionKind::SimpDef
-                    } else {
-                        DefinitionKind::Def
-                    },
-                    ..d
-                })
+                let kind = if block && d.binders.is_empty() {
+                    DefinitionKind::Abbrev
+                } else if block {
+                    DefinitionKind::SimpDef
+                } else {
+                    DefinitionKind::Def
+                };
+                Declaration::Definition(Definition { kind, ..d })
             }));
         }
     }
