@@ -1995,7 +1995,7 @@ impl Parser<'_> {
                 K::Lower | K::SelfKw => ExprKind::Name(self.bump()),
                 K::Upper => {
                     let mut name = self.bump();
-                    if self.eat(K::ColonColon) {
+                    while self.eat(K::ColonColon) {
                         name.push_str("::");
                         name.push_str(&self.ident());
                     }
