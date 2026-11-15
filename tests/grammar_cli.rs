@@ -251,6 +251,12 @@ fn der_actual_values_and_typed_set_of_require_canonical_reencoding() {
         data["result"]["projection"]["value"]["children"][0]["value"]["value_i64"],
         "42"
     );
+    fs::write(&input, b"\x0c\x03h\xc3\xa9").unwrap();
+    let data = report(&invoke(&["check", "der", path(&input), "--json"]), true);
+    assert_eq!(data["result"]["projection"]["kind"], "Utf8String");
+    assert_eq!(data["result"]["roundtrip_bytes_equal"], true);
+    fs::write(&input, b"\x0c\x02\xc0\x80").unwrap();
+    report(&invoke(&["check", "der", path(&input), "--json"]), false);
     fs::write(&input, [0x31, 6, 2, 1, 1, 2, 1, 2]).unwrap();
     report(&invoke(&["check", "der", path(&input), "--json"]), false);
     let data = report(

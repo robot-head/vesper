@@ -17,7 +17,8 @@ implementation, secret constant-time parser or formal proof.
   two's-complement varints, including ten-byte negative values. Standard protobuf
   itself has no universal canonical encoding; maps, oneofs, extensions and float types remain
   unsupported.
-- `der` validates minimal supported universal primitive encodings and sequences.
+- `der` validates minimal supported universal primitive encodings, UTF8String,
+  and sequences.
   Tag 17 requires an explicit SET OF schema; ASN.1 SET is unsupported. Typed
   encoding sorts complete child TLVs and all encoder errors preserve output.
   This is not X.509, PKCS#8 or secret-material semantic validation.
